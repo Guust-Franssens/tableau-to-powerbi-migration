@@ -45,6 +45,22 @@ TWO_WINDOWS = (
 PARTITIONED_WINDOW = (
     "MAXX(WINDOW(1, ABS, 0, REL, ORDERBY('Orders'[Order_Date], ASC), PARTITIONBY('Orders'[Region])), 1)"
 )
+# A correct window beside an as-of on a column the visual does not project: two mechanisms in one
+# measure, which the reader chain used to judge as one.
+WINDOW_PLUS_AS_OF = (
+    "MAXX(WINDOW(1, ABS, 0, REL, ORDERBY('Orders'[Order_Date], ASC)), 1) + "
+    "CALCULATE(SUM('Orders'[Sales]), FILTER(ALL('Orders'[Order_Month]), "
+    "'Orders'[Order_Month] <= MAX('Orders'[Order_Month])))"
+)
+# A safe period-to-date on the marked date table beside a defective one on the fact table.
+TWO_PERIOD_TO_DATE = (
+    "TOTALYTD(SUM('Orders'[Sales]), 'Date'[Date]) + CALCULATE(SUM('Orders'[Sales]), DATESYTD('Orders'[Order_Date]))"
+)
+# The reviewer's round-3 predicates, both orders. Semantically identical.
+START_THEN_ASOF = "'Orders'[Order_Date] >= DATE(2024,1,1) && 'Orders'[Order_Date] <= MAX('Orders'[Order_Date])"
+ASOF_THEN_START = "'Orders'[Order_Date] <= MAX('Orders'[Order_Date]) && 'Orders'[Order_Date] >= DATE(2024,1,1)"
+UNRELATED_REMOVAL = "CALCULATE(MAX('Orders'[Order_Date]), REMOVEFILTERS('Orders'[Region]))"
+WHOLE_TABLE_REMOVAL = "MAXX(ALL('Orders'), 'Orders'[Order_Date])"
 
 
 def facts() -> dg.ModelFacts:
@@ -57,7 +73,11 @@ def facts() -> dg.ModelFacts:
 
 
 def cumulative(**overrides: Any) -> dg.Cumulative:
-    """A blank `Cumulative` a classifier can fill in, or a pre-filled one for a judge."""
+    """A blank `Cumulative` a classifier can fill in, or a pre-filled one for a judge.
+
+    `ordered_by`/`partition_by`/`compared` are read-only PROPERTIES derived from the call lists, so
+    they cannot be set here - which is the point: a verdict must never be formed from a union.
+    """
     base = dg.Cumulative(table="_Measures", name="Probe", shape="unknown", tmdl="t.tmdl", line=1)
     for key, value in overrides.items():
         setattr(base, key, value)
@@ -67,6 +87,33 @@ def cumulative(**overrides: Any) -> dg.Cumulative:
 def as_of_call(cleared: list[dg.ColumnRef] | None = None) -> dg.AsOfCall:
     """One as-of restriction on `ANCHOR`, clearing whatever it is told to clear."""
     return dg.AsOfCall(compared=ANCHOR, cleared_columns=list(cleared or [ANCHOR]))
+
+
+def window_call(ordered: list[dg.ColumnRef] | None = None, reason: str = "") -> dg.WindowCall:
+    """One window call - readable with ordering keys, or unreadable when given a reason."""
+    return dg.WindowCall(func="WINDOW", ordered_by=list(ordered or []), assessable=not reason, reason=reason)
+
+
+def period_call(anchor: dg.ColumnRef | None = None) -> dg.PeriodToDateCall:
+    """One period-to-date call, anchored on `ANCHOR` unless told otherwise."""
+    return dg.PeriodToDateCall(func="TOTALYTD", anchor=anchor or ANCHOR)
+
+
+class Member:  # pylint: disable=too-few-public-methods
+    """The duck-typed TMDL member `dax_grain.classify` reads, without parsing a model."""
+
+    def __init__(self, expression: str) -> None:
+        self.table = "_Measures"
+        self.name = "Probe"
+        self.expression = expression
+        self.tmdl = Path("_Measures.tmdl")
+        self.line = 1
+        self.annotations: dict[str, str] = {}
+
+
+def member(expression: str) -> Member:
+    """One measure, ready for `classify()`."""
+    return Member(expression)
 
 
 def field_ref(entity: str, prop: str, kind: str = "Column") -> crta.FieldRef:

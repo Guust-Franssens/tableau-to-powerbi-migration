@@ -950,7 +950,7 @@ def test_a_safe_as_of_call_cannot_excuse_a_defective_one_in_the_same_measure(tmp
     terms = [SAFE_CALL, DEFECTIVE_CALL] if order == "safe first" else [DEFECTIVE_CALL, SAFE_CALL]
     report = crta.scan(_as_of_bundle(tmp_path, "Orders", "Order_Month", " + ".join(terms)))
     assert verdicts(report) == ["mismatch"], f"{order}: " + crta.render(report)
-    assert report["pairs"][0]["findings"][0]["as_of_calls"] == 2
+    assert report["pairs"][0]["findings"][0]["judged_calls"] == 2
 
 
 def _aggregated_projection(entity: str, prop: str, function: int = 3) -> dict:
@@ -1124,6 +1124,205 @@ def test_only_anchored_FAILED_lines_count_as_a_catch(label: str, output: str, ex
 
     assert harness._named_failures(output) == expected, label  # pylint: disable=protected-access
     assert any(marker in "worker gw0 crashed while running 'x'" for marker in harness._BROKEN_RUN_MARKERS)  # pylint: disable=protected-access
+
+
+# --------------------------------------------------------------------------------------------
+# Round-3 review findings: "the first match decides", for the third time
+# --------------------------------------------------------------------------------------------
+
+# The reviewer's expression, VERBATIM. `REMOVEFILTERS(Region)` cannot touch a month-axis filter, so
+# `_asOf` is still the current month's maximum date - a real running total, which then hits the
+# uncleared coarse-axis defect this gate exists to catch.
+R3_UNRELATED_REMOVAL = (
+    "VAR _asOf = CALCULATE(MAX('Orders'[Order_Date]), REMOVEFILTERS('Orders'[Region])) "
+    "RETURN CALCULATE(SUM('Orders'[Sales]), "
+    "FILTER(ALL('Orders'[Order_Date]), 'Orders'[Order_Date] <= _asOf))"
+)
+# The reviewer's second expression, VERBATIM, wrapped in the FILTER it was quoted from.
+R3_START_THEN_ASOF = (
+    "CALCULATE(SUM('Orders'[Sales]), FILTER(ALL('Orders'[Order_Date]), "
+    "'Orders'[Order_Date] >= DATE(2024,1,1) "
+    "&& 'Orders'[Order_Date] <= MAX('Orders'[Order_Date])))"
+)
+R3_ASOF_THEN_START = (
+    "CALCULATE(SUM('Orders'[Sales]), FILTER(ALL('Orders'[Order_Date]), "
+    "'Orders'[Order_Date] <= MAX('Orders'[Order_Date]) "
+    "&& 'Orders'[Order_Date] >= DATE(2024,1,1)))"
+)
+
+
+def test_an_unrelated_filter_removal_does_not_hide_a_moving_cutoff(tmp_path: Path) -> None:
+    """Finding 1, VERBATIM. Round 2 correctly made `ALL`/`REMOVEFILTERS` mean "pinned"; the missing
+    half was *pinned with respect to WHAT*. `_classify_moving_bound` took the FIRST removal it found
+    and never read its arguments, so `REMOVEFILTERS('Orders'[Region])` - which cannot touch a
+    month-axis date filter - dropped the measure entirely: `classify() -> None`, zero cumulative
+    measures, `NOT_APPLICABLE`, exit 0, with the bucket-total defect intact."""
+    report = crta.scan(_as_of_bundle(tmp_path, "Orders", "Order_Month", R3_UNRELATED_REMOVAL))
+    assert report["pairs"][0]["cumulative_measures"] == 1, crta.render(report)
+    assert verdicts(report) == ["mismatch"], crta.render(report)
+    assert codes(report) == ["axis_grain_not_cleared"]
+
+
+@pytest.mark.parametrize(
+    ("label", "removal", "expected"),
+    [
+        ("the whole table is a global maximum", "REMOVEFILTERS('Orders')", crta.STATUS_NOT_APPLICABLE),
+        ("no argument clears the whole model", "REMOVEFILTERS()", crta.STATUS_NOT_APPLICABLE),
+        ("the compared column itself is subtle", "REMOVEFILTERS('Orders'[Order_Date])", crta.STATUS_UNASSESSABLE),
+        ("an unrelated column proves nothing", "REMOVEFILTERS('Orders'[Region])", crta.STATUS_MISMATCH),
+    ],
+)
+def test_a_removal_is_only_pinning_when_it_covers_the_compared_column_or_its_table(
+    tmp_path: Path, label: str, removal: str, expected: str
+) -> None:
+    """The scope of the removal, not its presence, is what decides. All four are the SAME measure
+    with one argument changed, so nothing but the removal's reach can explain the difference."""
+    expression = (
+        f"VAR _asOf = CALCULATE(MAX('Orders'[Order_Date]), {removal}) "
+        "RETURN CALCULATE(SUM('Orders'[Sales]), FILTER(ALL('Orders'[Order_Date]), "
+        "'Orders'[Order_Date] <= _asOf))"
+    )
+    report = crta.scan(_as_of_bundle(tmp_path, "Orders", "Order_Month", expression))
+    assert report["status"] == expected, f"{label}: " + crta.render(report)
+
+
+@pytest.mark.parametrize(
+    ("order", "expression"),
+    [("start bound first", R3_START_THEN_ASOF), ("as-of bound first", R3_ASOF_THEN_START)],
+)
+def test_conjunct_order_cannot_decide_whether_a_running_total_is_detected(
+    tmp_path: Path, order: str, expression: str
+) -> None:
+    """Finding 2, VERBATIM and in BOTH orders - a test that exercised one order would prove nothing.
+    `_top_level_comparison` returned the FIRST comparison in an `&&` chain and `_as_of_predicate`
+    then rejected the whole predicate because that first one was `>=`. Measured: start-first
+    returned no as-of call at all (exit 0); reversing the two semantically equivalent conjuncts
+    returned one (exit 1). A running total from a fixed start date was invisible."""
+    report = crta.scan(_as_of_bundle(tmp_path, "Orders", "Order_Month", expression))
+    assert verdicts(report) == ["mismatch"], f"{order}: " + crta.render(report)
+    assert codes(report) == ["axis_grain_not_cleared"]
+
+
+def test_both_conjunct_orders_reach_the_identical_verdict(tmp_path: Path) -> None:
+    """The invariant behind finding 2, stated directly: two semantically equivalent spellings must
+    not disagree. This is the assertion a single-order test structurally cannot make."""
+    first = crta.scan(_as_of_bundle(tmp_path / "a", "Orders", "Order_Month", R3_START_THEN_ASOF))
+    second = crta.scan(_as_of_bundle(tmp_path / "b", "Orders", "Order_Month", R3_ASOF_THEN_START))
+    assert (first["status"], codes(first)) == (second["status"], codes(second))
+
+
+@pytest.mark.parametrize("order", ["pinned VAR declared first", "moving VAR declared first"])
+def test_a_bound_built_from_two_vars_is_read_from_both_of_them(tmp_path: Path, order: str) -> None:
+    """Audit, same shape: `_classify_bound` returned on the FIRST declared `VAR` whose name appeared
+    in the bound, so `MIN(_cut, _asOf)` was classified from whichever happened to be declared first.
+    Measured before the fix: swapping the two `VAR` lines flipped the gate between `NOT_APPLICABLE`
+    (exit 0) and `MISMATCH` (exit 1) on identical semantics. A bound built from both a pinned and a
+    moving value is genuinely ambiguous - `unassessable`, and the same either way round."""
+    declarations = (
+        "VAR _cut = DATE(2024,12,31) VAR _asOf = MAX('Orders'[Order_Date]) "
+        if order == "pinned VAR declared first"
+        else "VAR _asOf = MAX('Orders'[Order_Date]) VAR _cut = DATE(2024,12,31) "
+    )
+    expression = (
+        declarations + "RETURN CALCULATE(SUM('Orders'[Sales]), FILTER(ALL('Orders'[Order_Date]), "
+        "'Orders'[Order_Date] <= MIN(_cut, _asOf)))"
+    )
+    report = crta.scan(_as_of_bundle(tmp_path, "Orders", "Order_Month", expression))
+    assert verdicts(report) == ["unassessable"], f"{order}: " + crta.render(report)
+    assert report["mismatches"] == 0
+
+
+def test_an_unreadable_window_call_cannot_suppress_a_readable_one(tmp_path: Path) -> None:
+    """Audit, same shape. Round 2 unioned every window call's ORDERBY columns, which closed the
+    false negative but left an UNREADABLE call returning early: an explicit-relation `WINDOW`
+    beside `WINDOW(... ORDERBY('Orders'[Region]))` exited 3 where the defective call alone exits 1.
+    Never a pass, but the wrong verdict - worst must win, not first."""
+    relation_first = _measures_tmdl(
+        _measure(
+            "Mixed",
+            "MAXX(WINDOW(1, ABS, 0, REL, ALLSELECTED('Orders'), ORDERBY('Orders'[Order_Date], ASC)), 1) "
+            "+ MAXX(WINDOW(1, ABS, 0, REL, ORDERBY('Orders'[Region], ASC)), 1)",
+        )
+    )
+    bundle = build_bundle(
+        tmp_path,
+        relation_first,
+        {
+            "Category": {"projections": [_column_projection("Orders", "Order_Date")]},
+            "Y": {"projections": [_measure_projection("_Measures", "Mixed")]},
+        },
+    )
+    report = crta.scan(bundle)
+    assert verdicts(report) == ["mismatch"], crta.render(report)
+    assert "'Orders'[Region]" in report["pairs"][0]["findings"][0]["detail"]
+
+
+def test_every_period_to_date_call_is_judged_not_the_first_in_dict_order(tmp_path: Path) -> None:
+    """Audit, same shape, and a SILENT PASS. `_classify_period_to_date` returned after the first
+    match found while walking `_PERIOD_TO_DATE_FUNCTIONS` - so not even the first in the text.
+    Measured: a safe `TOTALYTD` on the marked date table beside a defective fact-table `DATESYTD`
+    exited **0** (`date_table_marked`), while the `DATESYTD` term alone exits 3."""
+    both = _measures_tmdl(
+        _measure(
+            "Two Periods",
+            "TOTALYTD(SUM('Orders'[Sales]), 'Date'[Date]) "
+            "+ CALCULATE(SUM('Orders'[Sales]), DATESYTD('Orders'[Order_Date]))",
+        )
+    )
+    bundle = build_bundle(
+        tmp_path,
+        both,
+        {
+            "Category": {"projections": [_column_projection("Date", "Month Start")]},
+            "Y": {"projections": [_measure_projection("_Measures", "Two Periods")]},
+        },
+    )
+    report = crta.scan(bundle)
+    assert verdicts(report) == ["unassessable"], crta.render(report)
+    assert codes(report) == ["period_to_date_grain_unproven"]
+
+
+def test_a_correct_window_cannot_mask_a_defective_as_of_in_the_same_measure(tmp_path: Path) -> None:
+    """Audit, the WORST of them: the first-match bug at the DISPATCHER. `classify` returned after
+    the first reader that matched, so a measure declaring two mechanisms was judged on one. Measured:
+    a correct `WINDOW(... ORDERBY('Orders'[Order_Date]))` beside an as-of comparing `Order_Month` -
+    which the visual does not project - exited **0** (`orderby_projected`), where that as-of alone
+    exits 1. Every reader now runs and every verdict is folded through `_worst`."""
+    mixed = _measures_tmdl(
+        _measure(
+            "Window Plus As Of",
+            "MAXX(WINDOW(1, ABS, 0, REL, ORDERBY('Orders'[Order_Date], ASC)), 1) "
+            "+ CALCULATE(SUM('Orders'[Sales]), FILTER(ALL('Orders'[Order_Month]), "
+            "'Orders'[Order_Month] <= MAX('Orders'[Order_Month])))",
+        )
+    )
+    bundle = build_bundle(
+        tmp_path,
+        mixed,
+        {
+            "Category": {"projections": [_column_projection("Orders", "Order_Date")]},
+            "Y": {"projections": [_measure_projection("_Measures", "Window Plus As Of")]},
+        },
+    )
+    report = crta.scan(bundle)
+    assert verdicts(report) == ["mismatch"], crta.render(report)
+    assert report["pairs"][0]["findings"][0]["shape"] == "window_orderby+as_of_filter"
+    assert report["pairs"][0]["findings"][0]["judged_calls"] == 2
+
+
+def test_worst_verdict_wins_is_one_shared_rule_not_four_copies(tmp_path: Path) -> None:
+    """The rule itself, asserted directly, because three rounds of the same bug is evidence that
+    re-deriving precedence per mechanism does not hold."""
+    assert crta._VERDICT_PRECEDENCE == ("mismatch", "unassessable", "ok")  # pylint: disable=protected-access
+    mismatch = crta._verdict("mismatch", "m", "")  # pylint: disable=protected-access
+    unassessable = crta._verdict("unassessable", "u", "")  # pylint: disable=protected-access
+    clean = crta._verdict("ok", "o", "")  # pylint: disable=protected-access
+    for order in ([clean, unassessable, mismatch], [mismatch, clean, unassessable], [unassessable, mismatch, clean]):
+        assert crta._worst(order)["verdict"] == "mismatch"  # pylint: disable=protected-access
+    assert crta._worst([clean, unassessable])["verdict"] == "unassessable"  # pylint: disable=protected-access
+    assert crta._worst([clean])["code"] == "o"  # pylint: disable=protected-access
+    assert crta._worst([])["code"] == "unreadable_grain"  # pylint: disable=protected-access
+    assert tmp_path.exists()
 
 
 # --------------------------------------------------------------------------------------------

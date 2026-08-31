@@ -265,8 +265,10 @@ assert all(g.check_id != "running-total-axis" for g in check_unit.GATES)
 _orig = dg._classify_window
 def window(expr, base):
     out = _orig(expr, base)
-    if out is not None and out.partition_by:
-        out.ordered_by = out.ordered_by + out.partition_by + [dg.ColumnRef("Nowhere", "Nothing")]
+    if out is not None:
+        for call in out.window_calls:
+            if call.partition_by:
+                call.ordered_by = call.ordered_by + call.partition_by + [dg.ColumnRef("Nowhere", "Nothing")]
     return out
 dg._classify_window = window
 assert dg._classify_window is not _orig
@@ -494,6 +496,105 @@ assert "unprobed" in harness.MUTATIONS and "unprobed" not in harness.PROBES
 """,
         "test_every_mutation_declares_a_probe_that_proves_it_executes",
     ),
+    # --- ROUND 3: "the first match decides", the third appearance of one shape -----------------
+    "r3f1-any-removal-pins-the-bound": (
+        """
+_orig = dg._removal_scope
+dg._removal_scope = lambda text, compared: [dg.REMOVAL_TABLE for _ in _orig(text, compared)]
+assert dg._removal_scope is not _orig
+""",
+        "test_an_unrelated_filter_removal_does_not_hide_a_moving_cutoff",
+    ),
+    "r3f1-every-removal-reads-as-unrelated": (
+        """
+_orig = dg._removal_scope
+dg._removal_scope = lambda text, compared: [dg.REMOVAL_UNRELATED for _ in _orig(text, compared)]
+assert dg._removal_scope is not _orig
+""",
+        "test_a_removal_is_only_pinning_when_it_covers_the_compared_column_or_its_table",
+    ),
+    "r3f2-only-the-first-conjunct": (
+        """
+_orig = dg._upper_bound_comparisons
+def first_only(text):
+    bounds, disjunction = _orig(text)
+    head = dg._top_level_comparison(dg._split_top_level(text, dg._LOGICAL_OPERATORS)[0][0])
+    keep = [(head[0], head[2])] if head is not None and head[1] in ("<", "<=") else []
+    return keep, disjunction
+dg._upper_bound_comparisons = first_only
+assert dg._upper_bound_comparisons is not _orig
+""",
+        "test_conjunct_order_cannot_decide_whether_a_running_total_is_detected",
+    ),
+    "r3f2-only-the-last-conjunct": (
+        """
+_orig = dg._upper_bound_comparisons
+def last_only(text):
+    bounds, disjunction = _orig(text)
+    tail = dg._top_level_comparison(dg._split_top_level(text, dg._LOGICAL_OPERATORS)[-1][0])
+    keep = [(tail[0], tail[2])] if tail is not None and tail[1] in ("<", "<=") else []
+    return keep, disjunction
+dg._upper_bound_comparisons = last_only
+assert dg._upper_bound_comparisons is not _orig
+""",
+        "test_both_conjunct_orders_reach_the_identical_verdict",
+    ),
+    "r3-audit-first-reader-wins": (
+        """
+_orig = crta.classify
+def classify(member):
+    out = _orig(member)
+    if out is not None and out.window_calls:
+        out.as_of_calls = []
+        out.period_calls = []
+    return out
+crta.classify = classify
+assert crta.classify is not _orig
+""",
+        "test_a_correct_window_cannot_mask_a_defective_as_of_in_the_same_measure",
+    ),
+    "r3-audit-unreadable-window-suppresses-a-readable-one": (
+        """
+_orig = crta._judge_window
+def judge(cumulative, visual):
+    for call in cumulative.window_calls:
+        if not call.assessable:
+            return crta._verdict("unassessable", "window_orderby", call.reason)
+    return _orig(cumulative, visual)
+crta._judge_window = judge
+assert crta._judge_window is not _orig
+""",
+        "test_an_unreadable_window_call_cannot_suppress_a_readable_one",
+    ),
+    "r3-audit-first-period-to-date-only": (
+        """
+_orig = dg._classify_period_to_date
+def period(expr, base):
+    out = _orig(expr, base)
+    if out is not None and out.period_calls:
+        out.period_calls = out.period_calls[:1]
+    return out
+dg._classify_period_to_date = period
+assert dg._classify_period_to_date is not _orig
+""",
+        "test_every_period_to_date_call_is_judged_not_the_first_in_dict_order",
+    ),
+    "r3-audit-first-var-decides-the-bound": (
+        """
+_orig = dg._combine_bound_kinds
+dg._combine_bound_kinds = lambda kinds: sorted(kinds)[0]
+assert dg._combine_bound_kinds is not _orig
+""",
+        "test_a_bound_built_from_two_vars_is_read_from_both_of_them",
+    ),
+    "r3-worst-verdict-becomes-first-verdict": (
+        """
+_orig = crta._worst
+crta._worst = lambda verdicts: verdicts[0] if verdicts else _orig(verdicts)
+assert crta._worst is not _orig
+""",
+        "test_worst_verdict_wins_is_one_shared_rule_not_four_copies",
+    ),
 }
 
 # name -> a snippet that CALLS the patched object and asserts a result the unmutated code does not
@@ -503,7 +604,8 @@ assert "unprobed" in harness.MUTATIONS and "unprobed" not in harness.PROBES
 # any verdict was written. Probes run at plugin import, after the patch, in the child interpreter.
 PROBES: dict[str, str] = {
     "orderby-never-checked": """
-assert crta._judge_window(kit.cumulative(ordered_by=[kit.ANCHOR]), kit.visual())["code"] == "orderby_projected"
+ordered = kit.cumulative(window_calls=[kit.window_call(ordered=[kit.ANCHOR])])
+assert crta._judge_window(ordered, kit.visual())["code"] == "orderby_projected"
 """,
     "explicit-relation-not-detected": """
 assert dg._is_positional("'Orders'") is True
@@ -535,13 +637,13 @@ assert out is not None and out.reason == "mutated" and out.assessable is False
 assert dg._classify_stub(object(), kit.cumulative()) is None
 """,
     "period-to-date-judgement-skipped": """
-verdict = crta._judge_period_to_date(kit.cumulative(compared=kit.ANCHOR), kit.visual(), kit.facts())
+verdict = crta._judge_period_to_date(kit.cumulative(period_calls=[kit.period_call()]), kit.visual(), kit.facts())
 assert verdict["verdict"] == "ok" and verdict["code"] == "period_to_date"
 """,
     "fixed-window-datesbetween-classified-as-accumulation": """
 expr = "CALCULATE(SUM('Orders'[Sales]), DATESBETWEEN('Date'[Date], MIN('Date'[Date]), MAX('Date'[Date])))"
 out = dg._classify_period_to_date(expr, kit.cumulative())
-assert out is not None and out.shape == "period_to_date"
+assert out is not None and [c.func for c in out.period_calls] == ["DATESBETWEEN"]
 """,
     "unassessed-pair-masked-by-a-clean-one": """
 pairs = [
@@ -683,6 +785,45 @@ import mutation_harness_running_total_axis as harness
 assert "unprobed" in harness.MUTATIONS and "unprobed" not in harness.PROBES
 assert sorted(set(harness.MUTATIONS) - set(harness.PROBES)) == ["unprobed"]
 """,
+    "r3f1-any-removal-pins-the-bound": """
+assert dg._removal_scope(kit.UNRELATED_REMOVAL, kit.ANCHOR) == [dg.REMOVAL_TABLE]
+assert dg._classify_bound(kit.UNRELATED_REMOVAL, kit.ANCHOR, {}) == dg.BOUND_CONSTANT
+""",
+    "r3f1-every-removal-reads-as-unrelated": """
+assert dg._removal_scope(kit.WHOLE_TABLE_REMOVAL, kit.ANCHOR) == [dg.REMOVAL_UNRELATED]
+assert dg._classify_bound(kit.WHOLE_TABLE_REMOVAL, kit.ANCHOR, {}) == dg.BOUND_CONTEXT
+""",
+    "r3f2-only-the-first-conjunct": """
+assert dg._upper_bound_comparisons(kit.START_THEN_ASOF)[0] == []
+assert len(dg._upper_bound_comparisons(kit.ASOF_THEN_START)[0]) == 1
+""",
+    "r3f2-only-the-last-conjunct": """
+assert dg._upper_bound_comparisons(kit.ASOF_THEN_START)[0] == []
+assert len(dg._upper_bound_comparisons(kit.START_THEN_ASOF)[0]) == 1
+""",
+    "r3-audit-first-reader-wins": """
+out = crta.classify(kit.member(kit.WINDOW_PLUS_AS_OF))
+assert out is not None and out.window_calls and not out.as_of_calls
+""",
+    "r3-audit-unreadable-window-suppresses-a-readable-one": """
+unreadable = kit.window_call(reason="mutated: an explicit relation")
+defective = kit.window_call(ordered=[dg.ColumnRef("Orders", "Region")])
+bound = kit.visual(grouping={"Category": [kit.field_ref("Orders", "Order_Date")]})
+verdict = crta._judge_window(kit.cumulative(window_calls=[unreadable, defective]), bound)
+assert verdict["verdict"] == "unassessable" and verdict["code"] == "window_orderby"
+""",
+    "r3-audit-first-period-to-date-only": """
+out = dg._classify_period_to_date(kit.TWO_PERIOD_TO_DATE, kit.cumulative())
+assert out is not None and len(out.period_calls) == 1
+""",
+    "r3-audit-first-var-decides-the-bound": """
+assert dg._combine_bound_kinds({dg.BOUND_CONSTANT, dg.BOUND_CONTEXT}) == dg.BOUND_CONSTANT
+""",
+    "r3-worst-verdict-becomes-first-verdict": """
+clean = crta._verdict("ok", "o", "")
+mismatch = crta._verdict("mismatch", "m", "")
+assert crta._worst([clean, mismatch])["verdict"] == "ok"
+""",
 }
 
 # Patches that change NO observable behaviour. They must SURVIVE; if one is reported as caught, the
@@ -704,7 +845,8 @@ assert crta._judge_window is not _orig
 # "SURVIVED as required", which is the same vacuity as a mutation crashing and reading as CAUGHT.
 CONTROL_PROBES: dict[str, str] = {
     name: """
-assert crta._judge_window(kit.cumulative(ordered_by=[kit.ANCHOR]), kit.visual())["code"] == "no_grouping_column"
+ordered = kit.cumulative(window_calls=[kit.window_call(ordered=[kit.ANCHOR])])
+assert crta._judge_window(ordered, kit.visual())["code"] == "no_grouping_column"
 """
     for name in CONTROLS
 }

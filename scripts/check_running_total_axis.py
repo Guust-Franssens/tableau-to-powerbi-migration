@@ -32,7 +32,7 @@ The two mechanisms, and the ONE invariant each
 1. **Window family** - `WINDOW`/`OFFSET`/`INDEX`/`RANK`/`ROWNUMBER` with `ORDERBY(<col>)` and no
    explicit relation argument. Their relation defaults to the visual's own shaped table, so
    `ORDERBY(<col>)` can only order what the visual actually projects.
-   **Invariant: every ORDERBY column must appear among the visual's projections.**
+   **Invariant: every ORDERBY column must appear among the visual's own grouping columns.**
    This reproduces the measured table above exactly: axis `'Orders'[Order_Date]` projects the
    ordered column (correct); axis `'Date'[Date]` or `'Date'[Month Start]` does not (both wrong).
 
@@ -43,17 +43,41 @@ The two mechanisms, and the ONE invariant each
    compared column's table must be cleared, or be the compared column itself.** Independently is
    load-bearing: a term clearing both `Order_Date` and `Order Date (Month)` must not supply the
    month clearance for a second term that clears neither, so the cleared sets are never unioned.
-   The bound must be PROVEN to move with the visual - a `MAX`-like call reading the compared column
-   with no `ALL`/`REMOVEFILTERS` around it, or a `VAR` resolving to one. A pinned `<= DATE(2024,12,31)`
-   and a `MAXX(ALL(t), t[c])` that discards every visual filter are both ordinary "through cutoff"
-   measures whose per-bucket totals are the point, and are not classified at all; a foreign-date
-   bound is `unassessable`.
+   The bound must be PROVEN to move with the visual - a `MAX`-like call reading the compared column,
+   or a `VAR` resolving to one. A pinned `<= DATE(2024,12,31)` and a `MAXX(ALL(t), t[c])` whose
+   removal covers the compared column's whole table are ordinary "through cutoff" measures whose
+   per-bucket totals are the point; a foreign-date bound, or a removal naming only the compared
+   column, is `unassessable`.
 
 3. **Period-to-date** - `TOTALYTD`/`DATESYTD`/`DATESMTD`/`DATESQTD` and friends. Time intelligence
    auto-removes filters from the other columns of a table marked `dataCategory: Time`, which is what
    makes a month axis correct. Nothing removes a date grain on an **unmarked** table.
-   **Invariant: every date grain projected by the visual must sit on the marked date table that owns
-   the `<dates>` argument** - otherwise `unassessable`, never a pass.
+   **Invariant: for EVERY such call, every date grain projected by the visual must sit on the marked
+   date table that owns ITS `<dates>` argument** - otherwise `unassessable`, never a pass.
+
+THE rule: a classifier never stops at the first match
+-----------------------------------------------------
+Three review rounds found the same bug at seven sites, and it is the reason this module reads the
+way it does. Each site picked one candidate out of several and judged the measure from it:
+
+    round 1  the first WINDOW call decided the measure
+    round 2  the first qualifying FILTER decided the measure
+    round 3  the first comparison in an `&&` chain decided the predicate
+    round 3  the first `ALL`/`REMOVEFILTERS` decided the bound was pinned
+    audit    the first reader in the dispatch chain decided the measure       <- SILENT PASS
+    audit    the first `VAR` a bound references decided the bound             <- SILENT PASS
+    audit    the first period-to-date function in DICT order decided it       <- SILENT PASS
+    audit    an unreadable window call suppressed a readable one's mismatch
+
+Three of the eight were silent passes (exit 0 on a real defect), and two were order-dependent -
+`VAR` declaration order, and `&&` conjunct order - so two semantically identical spellings of one
+measure got opposite verdicts. So: every mechanism is a LIST of independent calls, `classify()` runs
+EVERY reader, and every list is folded through `_worst()`, where **mismatch > unassessable > ok**.
+One place to get the precedence right, instead of four copies of it.
+
+The single audited exception, stated so it is not mistaken for an oversight: `_clause` returns the
+first `ORDERBY`/`PARTITIONBY` in a window call, because DAX permits at most one of each per call -
+there is no second match to lose.
 
 Two words this module refuses to conflate: PROXY and PROPERTY
 -------------------------------------------------------------
@@ -68,8 +92,6 @@ correlated with safety. Each is now decided from the property itself, and the pr
   the anchor**. The engine writes its coarse bins as `Month = FORMAT('Date'[Date], "MMM")` and
   `Quarter = "Q" & QUARTER(...)`, with no `dataType` at all - 95 such columns in the 2026-08-29
   estate - and their filters survive exactly like a `dateTime` bin's.
-* **the FIRST window call** -> every window call in the measure. Round 2 found the same hole in the
-  as-of reader and closed it the same way: **every as-of call**, judged on its own cleared set.
 * **period-to-date => "by design" => not assessed** -> judged against the date-table marking;
   anything unproven is `unassessable`.
 
@@ -82,7 +104,11 @@ what gets a gate switched off:
   group; measured across the estate + `examples/`, 377 projections are exactly that, so an
   aggregated `MAX(Orders[Ship_Date])` tooltip was blocking a report grouped only by `Region`.
 * **`MAX(` in the bound => the bound moves with the visual** -> the bound must reference **the
-  compared column**, with no context removal around it.
+  compared column**.
+* **`ALL(` in the bound => the bound is pinned** -> pinned *with respect to what*. Only a removal
+  covering the compared column's whole table (or the whole model) proves it; measured,
+  `REMOVEFILTERS('Orders'[Region])` cannot touch a month-axis date filter, and treating it as
+  pinning dropped a genuine defect at exit 0.
 * **any `<` => an upper-bound predicate** -> the operator is parsed at depth 0 and outside strings,
   so DAX's `<>` is no longer read as the `<` it begins with.
 * **an uncleared same-table date grain => the bucket's own total** -> only when the addressed date
@@ -101,18 +127,24 @@ and never counted as clean:
   not by the visual's grain, so there is nothing for an axis to disagree with. This is the only
   class dropped in silence, and deliberately: it is not a running total, so listing it would be the
   same noise as listing every other non-cumulative measure in the model.
-* **An unresolvable as-of bound** - a measure, a what-if parameter, a foreign date column, or an
-  `ALLEXCEPT` that may or may not keep the axis filter. It may well be an as-of date; nothing proves
-  it either way -> `unassessable`.
-* **An as-of bound that removes filter context** - `MAXX(ALL(t), t[c])`, `REMOVEFILTERS`,
-  `ALLSELECTED`. It evaluates to one value the axis cannot change, so it is a pinned cutoff wearing
-  a `MAX` and is dropped with the fixed-window class above.
+* **An unresolvable as-of bound** - a measure, a what-if parameter, a foreign date column, an
+  `ALLEXCEPT`, a removal naming exactly the compared column, or a bound built from both a pinned and
+  a moving `VAR`. Any of them may be an as-of date; nothing proves it either way -> `unassessable`.
+* **An as-of bound whose removal covers the compared column's whole table** - `MAXX(ALL(t), t[c])`,
+  `REMOVEFILTERS(t)`, `ALLSELECTED(t)`, or a bare `REMOVEFILTERS()`. It evaluates to one global
+  value on any axis, so it is a pinned cutoff wearing a `MAX` and is dropped with the fixed-window
+  class above. A removal naming something else - `REMOVEFILTERS(t[Region])` - is NOT proof of
+  pinning and does not drop the measure.
+* **Two or more upper bounds on the same predicate, or a top-level `||`.** Which one the
+  accumulation runs to cannot be read statically -> `unassessable`, never a silent drop.
 * **A `<>`, `>=` or nested comparison.** Only a top-level `<`/`<=` is an as-of predicate. An
-  exclusion filter is not an accumulation, and reading `<>` as `<` blocked one (measured).
+  exclusion filter is not an accumulation, and reading `<>` as `<` blocked one (measured). Its
+  POSITION in an `&&` chain decides nothing.
 * **An aggregated projection.** `MAX(t[c])` in a tooltip or a value slot does not group the query,
   so it is not an axis and cannot survive an `ALL`.
 * **An explicit relation argument** to a window function. The relation then decides the ordering
-  domain, not the visual, and a table expression cannot be resolved statically -> `unassessable`.
+  domain, not the visual, and a table expression cannot be resolved statically -> `unassessable`
+  **for that call only**; a sibling call's mismatch still wins.
 * **A cross-table as-of filter.** Whether a `'Date'[Month Start]` axis reaches the fact table
   depends on the relationship graph and cross-filter direction -> `unassessable`.
 * **A period-partitioned running total** - the addressed date is grouping AND an uncleared coarser
@@ -181,6 +213,8 @@ from dax_grain import (
     ColumnRef,
     Cumulative,
     ModelFacts,
+    PeriodToDateCall,
+    WindowCall,
     classify,
     read_model_facts,
 )
@@ -353,10 +387,19 @@ def _axis_text(visual: VisualBinding) -> str:
 
 
 def _judge_window(cumulative: Cumulative, visual: VisualBinding) -> dict[str, Any]:
-    """Window family: every ORDERBY column must be among the visual's own projections."""
+    """Window family: judge EVERY window call independently, worst verdict wins."""
+    return _worst([_judge_one_window(call, visual) for call in cumulative.window_calls])
+
+
+def _judge_one_window(call: WindowCall, visual: VisualBinding) -> dict[str, Any]:
+    """One window call: every ORDERBY column must be among the visual's own grouping columns."""
+    if not call.assessable:
+        return _verdict("unassessable", "window_orderby", call.reason)
+    if not call.ordered_by:
+        return _verdict("ok", "orders_by_visual_grain", call.reason)
     grouping, blocked = _grouping_or_reason(visual)
     projected = {ColumnRef(ref.entity, ref.prop).key() for ref in grouping}
-    absent = [ref for ref in cumulative.ordered_by if ref.key() not in projected]
+    absent = [ref for ref in call.ordered_by if ref.key() not in projected]
     if not absent:
         return _verdict("ok", "orderby_projected", "every ORDERBY column is projected by this visual")
     if blocked is not None:
@@ -372,7 +415,7 @@ def _judge_window(cumulative: Cumulative, visual: VisualBinding) -> dict[str, An
         + ", which this visual does not project; the window degenerates to each bucket's own value. "
         + "Axis is "
         + _axis_text(visual),
-        ordered_by=[ref.qualified() for ref in cumulative.ordered_by],
+        ordered_by=[ref.qualified() for ref in call.ordered_by],
         projected=[f"'{r.entity}'[{r.prop}]" for r in grouping],
     )
 
@@ -449,7 +492,25 @@ def _judge_same_table_survivors(  # pylint: disable=too-many-arguments,too-many-
     return None
 
 
-_AS_OF_PRECEDENCE = ("mismatch", "unassessable", "ok")
+_VERDICT_PRECEDENCE = ("mismatch", "unassessable", "ok")
+
+
+def _worst(verdicts: list[dict[str, Any]]) -> dict[str, Any]:
+    """The single rule this module was rewritten around: **worst verdict wins, never the first.**
+
+    Three review rounds produced the same bug at seven different sites - the first window call, the
+    first qualifying `FILTER`, the first period-to-date function, the first reader in the dispatch
+    chain, the first `VAR` a bound references, the first comparison in an `&&` chain, the first
+    `ALL(...)` in a bound. Three of the seven were SILENT PASSES. Every mechanism is now a list of
+    independent calls and every list is folded here, so there is one place to get this right.
+    """
+    if not verdicts:
+        return _verdict("unassessable", "unreadable_grain", "the accumulation grain could not be read from the DAX")
+    for kind in _VERDICT_PRECEDENCE:
+        for verdict in verdicts:
+            if verdict["verdict"] == kind:
+                return {**verdict, "judged_calls": len(verdicts)} if len(verdicts) > 1 else verdict
+    return _verdict("unassessable", "unreadable_grain", "the accumulation grain could not be read from the DAX")
 
 
 def _judge_as_of(cumulative: Cumulative, visual: VisualBinding, facts: ModelFacts) -> dict[str, Any]:
@@ -458,17 +519,12 @@ def _judge_as_of(cumulative: Cumulative, visual: VisualBinding, facts: ModelFact
     Independently is the load-bearing word. Reading only the first call - or, equivalently, judging
     a UNION of every call's cleared columns - lets a term that clears `Order_Date` AND
     `Order Date (Month)` supply the month clearance for a second term that clears neither, and the
-    second term is the one that degenerates (review finding 3).
+    second term is the one that degenerates (round 2 finding 3).
     """
     grouping, blocked = _grouping_or_reason(visual)
     if blocked is not None:
         return blocked
-    verdicts = [_judge_one_as_of(call, grouping, visual, facts) for call in cumulative.as_of_calls]
-    for kind in _AS_OF_PRECEDENCE:
-        for verdict in verdicts:
-            if verdict["verdict"] == kind:
-                return {**verdict, "as_of_calls": len(verdicts)} if len(verdicts) > 1 else verdict
-    return _verdict("unassessable", "unreadable_grain", "the accumulation grain could not be read from the DAX")
+    return _worst([_judge_one_as_of(call, grouping, visual, facts) for call in cumulative.as_of_calls])
 
 
 def _judge_one_as_of(
@@ -519,7 +575,13 @@ def _judge_one_as_of(
 
 
 def _judge_period_to_date(cumulative: Cumulative, visual: VisualBinding, facts: ModelFacts) -> dict[str, Any]:
-    """Period-to-date: safe ONLY when every date grain on the visual sits on the marked date table.
+    """Period-to-date: judge EVERY `TOTALYTD`/`DATESYTD` call independently, worst verdict wins."""
+    return _worst([_judge_one_period_to_date(call, visual, facts) for call in cumulative.period_calls])
+
+
+def _judge_one_period_to_date(call: PeriodToDateCall, visual: VisualBinding, facts: ModelFacts) -> dict[str, Any]:
+    """One period-to-date call: safe ONLY when every date grain on the visual sits on ITS marked
+    date table.
 
     Time intelligence auto-removes filters from the OTHER columns of a table marked
     `dataCategory: Time`, which is what makes `TOTALYTD` correct on a month axis. Nothing removes a
@@ -527,8 +589,9 @@ def _judge_period_to_date(cumulative: Cumulative, visual: VisualBinding, facts: 
     the trap. It is reported `unassessable` rather than `mismatch` because the auto-removal rules
     have more inputs than this gate reads; what is NOT acceptable is calling it a pass.
     """
-    anchor = cumulative.compared
-    assert anchor is not None  # guarded by classify()
+    if not call.assessable or call.anchor is None:
+        return _verdict("unassessable", "period_to_date", call.reason or "the period-to-date anchor is unreadable")
+    anchor = call.anchor
     grouping, blocked = _grouping_or_reason(visual)
     if blocked is not None:
         return blocked
@@ -660,18 +723,23 @@ def _grade_visuals(
 
 
 def _judge(cumulative: Cumulative, visual: VisualBinding, facts: ModelFacts) -> dict[str, Any]:
-    """Route one pair to the invariant its DAX shape actually declares."""
+    """Grade one pair against EVERY invariant its DAX declares, and let the worst verdict win.
+
+    This used to route to a single invariant, because `classify` used to return after the first
+    reader that matched. A measure can genuinely declare more than one mechanism, and when it did,
+    the unread half was invisible - measured, a correct `WINDOW(... ORDERBY(...))` beside a
+    defective as-of on another date column exited **0** where that as-of alone exits 1.
+    """
     if not cumulative.assessable:
         return _verdict("unassessable", cumulative.shape, cumulative.reason)
-    if cumulative.ordered_by:
-        return _judge_window(cumulative, visual)
-    if cumulative.shape.endswith("_orderby"):
-        return _verdict("ok", "orders_by_visual_grain", cumulative.reason)
-    if cumulative.shape == "period_to_date" and cumulative.compared is not None:
-        return _judge_period_to_date(cumulative, visual, facts)
+    verdicts = []
+    if cumulative.window_calls:
+        verdicts.append(_judge_window(cumulative, visual))
     if cumulative.as_of_calls:
-        return _judge_as_of(cumulative, visual, facts)
-    return _verdict("unassessable", "unreadable_grain", "the accumulation grain could not be read from the DAX")
+        verdicts.append(_judge_as_of(cumulative, visual, facts))
+    if cumulative.period_calls:
+        verdicts.append(_judge_period_to_date(cumulative, visual, facts))
+    return _worst(verdicts)
 
 
 def _pair_status(
