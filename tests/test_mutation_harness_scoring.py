@@ -37,13 +37,21 @@ from mutation_harness import is_harness_error, read_outcomes  # noqa: E402
 
 
 def record(**kwargs) -> dict:
-    """A lifecycle record with the given fields set and the rest empty."""
+    """A record for a COMPLETE session that ran at least one test, with the rest empty.
+
+    The defaults matter: `recorded=True` alone proves only that the plugin imported, so a
+    valid-looking record must also show a finished session, a real test report, and a
+    verdict-bearing exit status before any verdict is issued.
+    """
     base = {
         "call_failed": [],
         "setup_failed": [],
         "collect_error": [],
         "internal_error": False,
         "node_down": False,
+        "session_finished": True,
+        "exitstatus": 0,
+        "saw_report": True,
         "recorded": True,
     }
     base.update(kwargs)
@@ -111,3 +119,27 @@ def test_a_clean_run_is_neither_caught_nor_a_harness_error() -> None:
     assert is_harness_error(outcomes) is False
     assert not outcomes["call_failed"]
     assert not outcomes["setup_failed"]
+
+
+def test_a_session_that_exits_before_running_anything_is_a_harness_error() -> None:
+    """Reviewer's reproduction: ``pytest.exit(returncode=0)`` from ``pytest_sessionstart``.
+
+    Exit 0, a valid record written at plugin import, and **no test ever ran** -- which the
+    previous version reported as SURVIVED, i.e. as a hole in the suite rather than as a run
+    that never happened.
+    """
+    assert is_harness_error(record(saw_report=False, session_finished=True, exitstatus=0)) is True
+
+
+def test_an_interrupt_after_a_failure_is_a_harness_error() -> None:
+    """Reviewer's reproduction: a call failure, then KeyboardInterrupt during teardown.
+
+    pytest exits **2** with ``call_failed`` populated. The failure is real but the session is
+    not, so it cannot be credited -- the previous ordering reported CAUGHT and returned 0.
+    """
+    assert is_harness_error(record(call_failed=["test_x"], exitstatus=2)) is True
+
+
+def test_an_unfinished_session_is_a_harness_error() -> None:
+    """No ``pytest_sessionfinish`` means the process died mid-run; the record is a snapshot."""
+    assert is_harness_error(record(call_failed=["test_x"], session_finished=False)) is True

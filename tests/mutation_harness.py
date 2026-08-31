@@ -196,12 +196,27 @@ OUTCOME_HOOKS = """
 # run". A collection error on a CLASS emits `ERROR path::TestName`, and a dying xdist
 # worker emits `FAILED path::test_name` for a test that never executed - both parse as a
 # named outcome. So record the real lifecycle instead of scraping the summary.
+#
+# The record must answer "did a COMPLETE session observe this", not merely "did the plugin
+# load". An empty record written at import time is evidence of nothing: measured,
+# `pytest.exit(returncode=0)` from `pytest_sessionstart` produced exit 0 with a valid empty
+# record and no tests at all, and that scored SURVIVED.
 import json as _json
 from pathlib import Path as _Path
 
+import pytest as _pytest
+
 _OUTCOMES = _Path(r"{outcome_path}")
-_RECORD = {{"call_failed": [], "setup_failed": [], "collect_error": [], "internal_error": False,
-            "node_down": False}}
+_RECORD = {{
+    "call_failed": [],
+    "setup_failed": [],
+    "collect_error": [],
+    "internal_error": False,
+    "node_down": False,
+    "session_finished": False,
+    "exitstatus": None,
+    "saw_report": False,
+}}
 
 
 def _flush():
@@ -209,12 +224,11 @@ def _flush():
 
 
 def pytest_runtest_logreport(report):
-    if report.outcome != "failed":
-        return
-    name = report.nodeid.split("::")[-1]
-    # `when` is the discriminator terminal text throws away.
-    ("call_failed" if report.when == "call" else "setup_failed")
-    _RECORD["call_failed" if report.when == "call" else "setup_failed"].append(name)
+    _RECORD["saw_report"] = True
+    if report.outcome == "failed":
+        # `when` is the discriminator terminal text throws away.
+        name = report.nodeid.split("::")[-1]
+        _RECORD["call_failed" if report.when == "call" else "setup_failed"].append(name)
     _flush()
 
 
@@ -229,14 +243,31 @@ def pytest_internalerror(excrepr, excinfo):
     _flush()
 
 
+@_pytest.hookimpl(optionalhook=True)
 def pytest_testnodedown(node, error):
+    # xdist-only, and it MUST be declared optional: without xdist installed pytest rejects
+    # the whole plugin with `PluginValidationError: unknown hook 'pytest_testnodedown'`,
+    # which made every serial mutation unusable in that environment.
     if error is not None:
         _RECORD["node_down"] = True
         _flush()
 
 
+def pytest_sessionfinish(session, exitstatus):
+    _RECORD["session_finished"] = True
+    _RECORD["exitstatus"] = int(exitstatus)
+    _flush()
+
+
 _flush()
 """
+
+# pytest returns 0 (all passed) or 1 (tests failed) when a session ran to a verdict. Every
+# other code means something happened TO the run: 2 interrupted, 3 internal error, 4 usage
+# error, 5 nothing collected. An outcome recorded alongside one of those is not a verdict --
+# measured, a call failure followed by KeyboardInterrupt in teardown exits 2 with
+# `call_failed` populated, and the previous ordering reported CAUGHT.
+VERDICT_BEARING_EXITS = frozenset({0, 1})
 
 
 def run(name: str, code: str, target: str) -> tuple[str, int, str, dict]:
@@ -297,6 +328,9 @@ def read_outcomes(path: Path) -> dict:
         "collect_error": [],
         "internal_error": False,
         "node_down": False,
+        "session_finished": False,
+        "exitstatus": None,
+        "saw_report": False,
         "recorded": False,
     }
     try:
@@ -308,9 +342,18 @@ def read_outcomes(path: Path) -> dict:
 
 
 def is_harness_error(outcomes: dict) -> bool:
-    """True when pytest failed to run rather than a test observing anything."""
+    """True when pytest failed to run rather than a test observing anything.
+
+    ``recorded`` alone is not enough: the plugin flushes an empty record at **import**, so it
+    proves the plugin loaded, not that a session ran. Measured, ``pytest.exit(returncode=0)``
+    from ``pytest_sessionstart`` produced exit 0, ``recorded=True`` and no tests at all --
+    which the previous version reported as SURVIVED.
+    """
     return (
         not outcomes.get("recorded")
+        or not outcomes.get("session_finished")
+        or not outcomes.get("saw_report")
+        or outcomes.get("exitstatus") not in VERDICT_BEARING_EXITS
         or bool(outcomes.get("collect_error"))
         or outcomes.get("internal_error", False)
         or outcomes.get("node_down", False)
