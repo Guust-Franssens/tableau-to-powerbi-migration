@@ -297,24 +297,164 @@ def test_free_text_credential_marker_without_a_verdict_line_still_stops() -> Non
     assert verdict == "NO_CREDENTIAL"
 
 
-def test_blocked_by_dialog_does_not_clear_gate(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A generic Desktop dialog is a human-blocked source, not reachable data."""
+def test_a_dialog_finding_keeps_the_gate_shut_without_claiming_a_credential_wall(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#376: the child's dialog verdicts must keep the gate shut, but must NOT read as a sign-in wall.
+
+    Master emitted ``BLOCKED_BY_DIALOG`` at exit 1 from a SIZE-ONLY test, and this matcher maps that
+    token to ``NO_CREDENTIAL`` - whose directive is "you may NOT build; a human must sign in;
+    TERMINATE THE RUN NOW". A Power BI Refresh progress dialog trips that, so a working refresh could
+    halt a migration and send someone to a screen showing nothing of the sort.
+
+    The child line is HARVESTED from the real emitter with a real classification, never hand-written:
+    that is the #152/#153 discipline, and it is the only way this test can notice if the emitted
+    wording drifts back into the classifier's free-text credential markers.
+    """
+    probe_live_source = _import_probe_live_source()
+    refresh_pbip_model, _, credential_modal = _import_skill_modules()
+
+    for texts in ((), ("Save changes?", "Discard"), ("Refresh",), ("Refresh", "Evaluating...")):
+        finding = credential_modal.classify_dialog(
+            credential_modal.DesktopWindow("Refresh" if "Refresh" in texts else "", "Cls", 702, 355, texts)
+        )
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            refresh_pbip_model._emit_dialog_finding(111, finding)
+        stdout = buffer.getvalue()
+        monkeypatch.setattr(
+            probe_live_source.subprocess,
+            "run",
+            lambda *_args, _out=stdout, **_kwargs: subprocess.CompletedProcess(
+                args=["refresh"], returncode=3, stdout=_out, stderr=""
+            ),
+        )
+
+        rc, verdict = probe_live_source._refresh_and_classify(  # noqa: SLF001
+            123, "Orders", 1, network_fault_observed=False
+        )
+
+        assert rc == 1, f"{finding.verdict} must keep the gate shut"
+        assert verdict != "DATA_OK"
+        assert verdict != "NO_CREDENTIAL", (
+            f"{finding.verdict} asserted a credential wall we never observed; emitted line: {stdout!r}"
+        )
+        assert not probe_live_source._has_credential_stop_verdict(stdout)
+
+
+def test_every_dialog_guidance_string_is_marker_free() -> None:
+    """#376 x #153: the guidance printed under a dialog verdict must not fabricate a credential stop.
+
+    The kinds are DISCOVERED from the detector's own table rather than listed here, so a kind added
+    later is covered without anyone editing this test - the same "catches a newly-added X" discipline
+    as ``_detector_unknown_reasons``. This matters because ``_classify_failure`` scans a failing
+    child's WHOLE transcript as free text: one stray "credential"/"sign in"/"authentication" in the
+    reassuring half of the message would relabel "we could not probe" as the hard stop it exists to
+    avoid, exactly as the #153 banner did.
+    """
+    probe_live_source = _import_probe_live_source()
+    _, _, credential_modal = _import_skill_modules()
+
+    guidance = credential_modal.DIALOG_KIND_GUIDANCE
+    assert len(guidance) >= 5, f"expected the detector's full guidance table; got {sorted(guidance)}"
+
+    offenders = {
+        kind: [marker for marker in probe_live_source.CREDENTIAL_MARKERS if marker in text.lower()]
+        for kind, text in guidance.items()
+        if any(marker in text.lower() for marker in probe_live_source.CREDENTIAL_MARKERS)
+    }
+
+    assert not offenders, f"guidance prose carries free-text credential markers: {offenders}"
+
+
+def test_a_dialog_verdict_is_recognised_structurally_and_is_not_a_credential_stop() -> None:
+    """#400 review, finding 2 (HIGH): the parent overrode the child's explicit non-credential verdict.
+
+    ``probe_live_source`` did not recognise the dialog tokens, so it fell through to
+    ``CREDENTIAL_MARKERS`` - an unanchored scan of the WHOLE transcript. ``DIALOG_NEEDS_HUMAN``
+    carrying its own evidence excerpt ``Authentication required`` (an alternative that genuinely lives
+    in ``blocking_prompt_signature.regex``) was therefore relabelled ``NO_CREDENTIAL``, firing "a human
+    must sign in; terminate the run" over a child that had just said the opposite. Measured on the
+    PR-#400 build.
+
+    Every line here is harvested from the real emitter with a real classification, so a reworded
+    verdict or a new token is caught here rather than in production.
+    """
+    probe_live_source = _import_probe_live_source()
+    refresh_pbip_model, _, credential_modal = _import_skill_modules()
+
+    windows = {
+        "DIALOG_NEEDS_HUMAN": ("Authentication required",),
+        "DIALOG_NEEDS_HUMAN/native": ("Permission is required to run this native database query",),
+        "DIALOG_UNREADABLE": (),
+        "DIALOG_UNRECOGNIZED": ("Save changes?", "Discard"),
+        "REFRESH_IN_PROGRESS": ("Refresh", "Evaluating..."),
+    }
+    for label, texts in windows.items():
+        window = credential_modal.DesktopWindow("Refresh" if "Refresh" in texts else "", "Cls", 702, 355, texts)
+        finding = credential_modal.classify_dialog(window)
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            refresh_pbip_model._emit_dialog_finding(111, finding)
+        text = buffer.getvalue()
+
+        verdict, _ = probe_live_source._classify_failure(text, network_fault_observed=False)
+
+        assert probe_live_source._has_dialog_verdict(text), f"{label}: not recognised structurally"
+        assert verdict == "ERROR", f"{label}: classified {verdict}, not the honest 'could not probe'"
+        assert verdict != "NO_CREDENTIAL", f"{label}: asserted a credential wall the child denied"
+        assert not probe_live_source._has_credential_stop_verdict(text), (
+            f"{label}: a dialog verdict must never JOIN the credential-stop family - that family's "
+            "name is consumed elsewhere, and the child has explicitly said this is not one"
+        )
+
+
+def test_the_parent_knows_every_dialog_token_the_detector_can_emit() -> None:
+    """Anti-drift: a token added to the detector must not stay unknown to the parent classifier.
+
+    Without this the two halves of finding 2's fix can separate silently - a new verdict would fall
+    straight back through to the free-text scan that caused the defect. The list is DISCOVERED from
+    the detector's own table rather than restated here.
+    """
+    probe_live_source = _import_probe_live_source()
+    _, _, credential_modal = _import_skill_modules()
+
+    tokens = {
+        verdict
+        for kind, verdict in credential_modal.DIALOG_KIND_VERDICTS.items()
+        if kind != credential_modal.DIALOG_KIND_CREDENTIAL
+    }
+    assert len(tokens) >= 4, f"expected the detector's dialog tokens; got {sorted(tokens)}"
+
+    unknown = [
+        token for token in sorted(tokens) if not probe_live_source._has_dialog_verdict(f"REFRESH: {token} pid=1; x")
+    ]
+
+    assert not unknown, f"probe_live_source does not recognise these dialog verdicts: {unknown}"
+
+
+def test_a_dialog_verdict_cannot_clear_the_live_source_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Defence in depth for finding 2: a dialog verdict blocks success even on a zero exit code.
+
+    The exit code alone already blocks it, but the child's success gate lists every authoritative
+    non-success verdict explicitly, and this one belongs there with its siblings.
+    """
     probe_live_source = _import_probe_live_source()
     monkeypatch.setattr(
         probe_live_source.subprocess,
         "run",
         lambda *_args, **_kwargs: subprocess.CompletedProcess(
             args=["refresh"],
-            returncode=1,
-            stdout="REFRESH: BLOCKED_BY_DIALOG pid=111; window title='(empty title)'\n",
+            returncode=0,
+            stdout="REFRESH: DIALOG_UNREADABLE pid=111; kind=unreadable\nREFRESH: TABLES_OK 'Orders'\n",
             stderr="",
         ),
     )
 
-    assert probe_live_source._refresh_and_classify(123, "Orders", 1, network_fault_observed=False) == (  # noqa: SLF001
-        1,
-        "NO_CREDENTIAL",
-    )
+    rc, verdict = probe_live_source._refresh_and_classify(123, "Orders", 1, network_fault_observed=False)
+
+    assert (rc, verdict) != (0, "DATA_OK"), "a dialog verdict must veto a stale-looking success line"
+    assert verdict == "ERROR"
 
 
 def _harvest_minimized_reason(credential_modal) -> str:
