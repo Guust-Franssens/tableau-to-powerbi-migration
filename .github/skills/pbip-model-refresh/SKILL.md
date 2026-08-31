@@ -169,7 +169,27 @@ stay byte-identical.
 > during the poll loop and reported at the deadline, so it can neither halt a healthy run nor be
 > erased by a quiet timeout.
 >
-> Two supporting mechanisms:
+> ⚠️ **Two supporting mechanisms — and the class/size filters are GONE (issue #406 review, finding 2).**
+> `Select-DialogCandidate` kept a `WindowsForms10.Window.8*` class-prefix exclusion and a 100x100 size
+> floor long after #400 deleted both from the Python detector. Measured on **identical input**, one real
+> owned **empty 80x60** modal: the arbiter produced **no candidate at all and exit 0**, while the Python
+> detector produced `DIALOG_UNREADABLE` at exit 3. The arbiter turned an indeterminate state into a
+> clean one — the worst outcome available here — and the two detectors disagreed. It now ports
+> `main_frame` / `renders_nothing`: `OwnerHwnd` is harvested from Win32, ownership is walked
+> **transitively** to the unowned root, possible roots are **enumerated**, exactly one identifies the
+> frame, and anything else yields `$null`, which **excludes nothing**. The only exclusions left are the
+> identified frame and *unowned AND zero-area*. Nothing is excluded for its size, class or name. The
+> credential prepass also excludes the identified frame, so a report titled `Account Key` can no longer
+> fabricate a hard stop.
+>
+> ⚠️ **Captions may ACCUSE, never EXONERATE (issue #406 review, finding 1).** `Content` drops text equal
+> to the caption so a reassuring caption cannot AUTHORISE suppression — round 1's defect. That
+> exclusion was one-directional and the other half went unclosed for four review rounds: a **hostile**
+> caption was simply discarded. Measured — a window titled **`Password:`** whose body read only
+> `Refresh` + `Cancel` classified `benign` and was **suppressed to nothing** under `-RefreshInFlight`,
+> **exit 0**. An unaccounted title now vetoes (`mixed-content` → `DIALOG_UNRECOGNIZED`, exit 3), while
+> still being unable to set `benignHit` — so `benign-title-only` is unchanged.
+>
 > - **Modality is used ONE WAY.** `IsWindowEnabled(GetWindow(hwnd, GW_OWNER))` returning true proves a
 >   window blocks nothing, and exonerates it. The converse is not used: Power BI's refresh dialog also
 >   disables its owner, so a disabled owner would convict the innocent. No owner at all reports `null`
@@ -536,15 +556,28 @@ stay byte-identical.
 > | `Refresh`, `Evaluating`, `Cancel`, `OK`, `Close` | `benign` | `$null`, exit 0 | **unchanged** — the benign path stays reachable |
 > | `Refresh`, `Evaluating`, `Orders` | `benign` | `$null`, exit 0 | `mixed-content` / `DIALOG_UNRECOGNIZED`, exit 3 |
 >
-> **Port vs share, decided:** the vocabulary is SHARED, the control flow is PORTED. The arbiter now
-> reads `benign_chrome_signature.regex` — the *same file* the Python detector reads — so the one list
-> that can excuse an unexplained element is single-sourced. It does **not** call the Python detector:
-> the two are documented as deliberately divergent (the arbiter has a prose join, a `benign-unverified`
-> kind and `HarvestComplete`; Python has none of those), it is printed as a *recovery* instruction when
-> a refresh is already in trouble and so must not acquire an interpreter-discovery failure mode, its
-> `-LoadDetectorsOnly` seam exists precisely to be dependency-free, and its poll loop classifies every
-> 2 s for up to 75 s — ~37 interpreter spawns inside a loop whose job is to bound time.
-> `test_the_arbiter_and_the_python_detector_share_one_vocabulary` fails if either half leaves that seam.
+> **Port vs share, decided — and re-decided under challenge.** The vocabulary is SHARED, the control
+> flow is PORTED, and the *decision model* (frame identity, candidate selection, classification) is now
+> ported **faithfully** rather than approximately. Blind review was right that the first attempt drifted:
+> the class and size proxies survived underneath the shared classifier (finding 2), and the anti-drift
+> test could not detect a hard-coded regex (finding 3). Both are fixed, and the fix for finding 3 is the
+> answer to "prove it rather than assert it": `test_the_arbiter_and_the_python_detector_share_one_vocabulary`
+> **mutates `benign_chrome_signature.regex` in a scratch copy of the bundle** and requires BOTH real
+> detector paths to flip. A detector holding a private copy cannot flip, so it fails — the reviewer's own
+> mutation (hard-code the regex, leave the filename in a dead comment) now fails it.
+>
+> ⛔ **Why not make PowerShell call the Python detector outright?** Because the divergence that mattered
+> was **upstream of the classifier** — in candidate selection — so sharing `classify_dialog` would not
+> have prevented it; only porting the whole decision model did. What cannot be shared is the *input*:
+> the arbiter exists because it reads **UI Automation** text that the Python detector structurally
+> cannot (Win32 child-HWND only, and a WPF dialog renders its whole tree into one HWND). Beyond that,
+> the arbiter is printed as a **recovery** instruction when a refresh is already in trouble, so it must
+> not acquire an interpreter-discovery failure mode; `-LoadDetectorsOnly` exists to be dependency-free;
+> and the poll loop classifies every 2 s for up to 75 s. ⚠️ **This remains a defended alternative, not a
+> proof of impossibility.** A genuine sharing seam does exist — PowerShell owns *collection* (Win32 +
+> UIA), Python owns *decision* via `inspect_credential_modal`'s injectable enumerator — and it would
+> make drift structurally impossible rather than merely detectable. It is a larger change than this
+> issue, and the mutation test above is what makes the ported version honest in the meantime.
 >
 > **Does harvest completeness change that verdict? No — it sharpens it.** A fair challenge: two
 > detectors that disagreed about whether a harvest was complete would be worse than either alone, so if
