@@ -407,8 +407,8 @@ def _unverified_default_note(source: PublishSource) -> list[str]:
     ]
 
 
-def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-locals,too-many-return-statements
-    """Sync the installed bundles from the merged ref, or report drift under --check."""
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI surface, kept out of `main` so the flow below reads as one decision sequence."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--check", action="store_true", help="report drift and exit 1; change nothing")
     parser.add_argument("--json", action="store_true", help="emit a machine-readable verdict for preflight.ps1")
@@ -430,7 +430,12 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
         type=Path,
         help="override the ~/.copilot/installed-plugins tree that is scanned for the bundles",
     )
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-locals,too-many-return-statements
+    """Sync the installed bundles from the merged ref, or report drift under --check."""
+    args = build_parser().parse_args(argv)
 
     # The fetch happens before anything else, so its outcome survives into the failure payload too -
     # and so its human line can be suppressed under --json, which preflight PARSES: a single stray
