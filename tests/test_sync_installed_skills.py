@@ -19,7 +19,9 @@ touched at all.
 
 from __future__ import annotations
 
+import base64
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -447,11 +449,14 @@ def test_preflight_asks_the_script_rather_than_hashing_the_working_tree() -> Non
     """preflight carried the SAME defect independently, comparing `$repoRoot\\.github\\skills` itself.
 
     Two notions of "which version is authoritative" is the bug, not a redundancy, so the gate must
-    consume this script's verdict instead of computing a second one.
+    consume this script's verdict instead of computing a second one - including the bundle INVENTORY
+    and the destination, which review found were still branch-derived via `skill_plugin_source.py`.
     """
     source = _preflight_source()
     assert "sync_installed_skills.py') --check --json" in source
     assert ".github\\skills\\$name\\SKILL.md" not in source, "preflight must not re-derive authority from the worktree"
+    assert "shipped_skills" not in source, "the inventory must come from the merged ref, not the worktree"
+    assert "skill_plugin_source.py')" not in source, "one authority: the sync verdict already discovers the plugin"
 
 
 def test_preflight_keeps_the_stale_bundle_check_critical() -> None:
@@ -472,8 +477,147 @@ def test_preflight_surfaces_unmerged_local_edits_without_failing() -> None:
 def test_preflight_separates_an_unresolvable_ref_from_being_in_sync() -> None:
     """No merged ref means UNVERIFIED, not stale; reporting "in sync with <blank>" while failing is worse."""
     source = _preflight_source()
-    assert "$sync.status -eq 'no_ref'" in source
+    assert "$Sync.status -eq 'no_ref'" in source
     assert "cannot resolve the merged ref" in source
+
+
+# --------------------------------------------------------------------------------------------
+# ... and EXECUTED, because a source string cannot show which way a comparison points. Review
+# mutated the inline `($syncCode -eq 0)` to `-ne` and it survived the whole file: nothing proved
+# that stale blocks and in-sync passes, which is the entire purpose of the gate.
+# --------------------------------------------------------------------------------------------
+
+_PS = shutil.which("pwsh") or shutil.which("powershell")
+
+# Dot-source ONLY the verdict function, by AST, so running these never executes preflight itself
+# (which probes npm, Power BI Desktop and the plugin cache).
+_EXTRACT = """
+$ErrorActionPreference = 'Stop'
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($env:PREFLIGHT_PS1, [ref]$null, [ref]$null)
+$fn = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) |
+      Where-Object { $_.Name -eq 'Get-SkillBundleVerdict' } | Select-Object -First 1
+if (-not $fn) { Write-Output 'FUNCTION-NOT-FOUND'; exit 3 }
+. ([scriptblock]::Create($fn.Extent.Text))
+$sync = if ($env:SYNC_JSON) { $env:SYNC_JSON | ConvertFrom-Json } else { $null }
+$v = Get-SkillBundleVerdict $sync
+"""
+
+
+def _skill_verdict(sync_json: str | None, expression: str) -> str:
+    """Evaluate `expression` against a real sync verdict inside preflight's own function."""
+    if not _PS:
+        pytest.skip("no PowerShell on PATH")
+    script = _EXTRACT + f"Write-Output ('<<' + ({expression}) + '>>')\n"
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode()
+    done = subprocess.run(
+        [_PS, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "PREFLIGHT_PS1": str(PREFLIGHT), "SYNC_JSON": sync_json or ""},
+    )
+    assert "FUNCTION-NOT-FOUND" not in done.stdout, "Get-SkillBundleVerdict must exist to be tested"
+    match = re.search(r"<<(.*?)>>", done.stdout, re.DOTALL)
+    assert match, f"no value emitted; stdout={done.stdout!r} stderr={done.stderr!r}"
+    return match.group(1).strip()
+
+
+def _sync_json(estate: Estate, capsys: pytest.CaptureFixture) -> str:
+    _run(estate, "--check", "--json")
+    return capsys.readouterr().out
+
+
+def test_preflight_passes_an_in_sync_install(estate: Estate, capsys: pytest.CaptureFixture) -> None:
+    """The executed half of the gate: a correct install must not be reported as a critical miss."""
+    _run(estate)
+    capsys.readouterr()
+    verdict = _sync_json(estate, capsys)
+
+    assert json.loads(verdict)["status"] == "in_sync"
+    assert _skill_verdict(verdict, "$v.Mode") == "compared"
+    assert _skill_verdict(verdict, "$v.Merged.Ok") == "True"
+    assert _skill_verdict(verdict, "$v.Installed.Ok") == "True"
+
+
+def test_preflight_fails_a_stale_install(estate: Estate, capsys: pytest.CaptureFixture) -> None:
+    """Change one published byte and the critical row must go red - the whole point of the gate."""
+    _run(estate)
+    capsys.readouterr()
+    stale = estate.plugin / "skills" / FIRST_BUNDLE / "SKILL.md"
+    stale.write_text("# tampered\n", encoding="utf-8")
+    verdict = _sync_json(estate, capsys)
+
+    assert json.loads(verdict)["status"] == "drift"
+    assert _skill_verdict(verdict, "$v.Merged.Ok") == "False"
+    assert FIRST_BUNDLE in _skill_verdict(verdict, "$v.Merged.Detail")
+
+
+def test_preflight_fails_a_partially_installed_plugin(estate: Estate, capsys: pytest.CaptureFixture) -> None:
+    """A bundle absent from the install is a separate critical row, driven by the MERGED inventory."""
+    _run(estate)
+    capsys.readouterr()
+    shutil.rmtree(estate.plugin / "skills" / FIRST_BUNDLE)
+    verdict = _sync_json(estate, capsys)
+
+    assert _skill_verdict(verdict, "$v.Installed.Ok") == "False"
+    assert FIRST_BUNDLE in _skill_verdict(verdict, "$v.Installed.Detail")
+
+
+def test_preflight_keeps_local_edits_non_blocking_when_executed(estate: Estate, capsys: pytest.CaptureFixture) -> None:
+    """Executed proof of the decision the issue turns on: divergence is reported, never a blocker."""
+    _run(estate)
+    capsys.readouterr()
+    _write_bundles(estate.clone, "dirty working tree")
+    verdict = _sync_json(estate, capsys)
+
+    assert _skill_verdict(verdict, "$v.Merged.Ok") == "True", "an unmerged edit must not fail the critical row"
+    assert _skill_verdict(verdict, "$v.LocalEdits.Ok") == "False", "...but it must be reported"
+
+
+def test_preflight_treats_an_unreported_verdict_as_unverified(estate: Estate) -> None:
+    """No JSON at all is not "fine" - the shadowing bundles are simply unchecked."""
+    assert _skill_verdict(None, "$v.Mode") == "unreported"
+    assert _skill_verdict(None, "$v.Merged.Ok") == "False"
+
+
+def test_preflight_treats_an_unresolvable_ref_as_unverified(estate: Estate, capsys: pytest.CaptureFixture) -> None:
+    """Executed counterpart to the source contract above."""
+    _git(estate.clone, "remote", "remove", "origin")
+    verdict = _sync_json(estate, capsys)
+
+    assert json.loads(verdict)["status"] == "no_ref"
+    assert _skill_verdict(verdict, "$v.Mode") == "noref"
+    assert _skill_verdict(verdict, "$v.Merged.Ok") == "False"
+
+
+def test_preflight_keeps_a_missing_plugin_non_blocking(estate: Estate, capsys: pytest.CaptureFixture) -> None:
+    """With no installed copy nothing shadows .github/skills, so this stays a warning, not a blocker."""
+    empty = estate.plugin.parent / "no-such-plugin"
+    sync.main(["--plugin-root", str(empty), "--check", "--json"])
+    verdict = capsys.readouterr().out
+
+    assert json.loads(verdict)["status"] == "no_plugin"
+    assert _skill_verdict(verdict, "$v.Mode") == "missing"
+
+
+def test_preflight_emits_the_missing_plugin_row_as_recommended() -> None:
+    """The tier lives at the call site so this stays assertable; `missing` must not become critical."""
+    source = _preflight_source()
+    assert "elseif ($skills.Mode -eq 'missing') {" in source
+    assert "Add-Check \"plugin: $($skills.Identity)\" 'recommended' $skills.Plugin.Ok" in source
+
+
+def test_preflight_wires_the_function_verdict_into_every_skill_row() -> None:
+    """A perfect function is worthless if the rows are computed from something else."""
+    source = _preflight_source()
+    assert "$skills = Get-SkillBundleVerdict $sync" in source
+    for row, field in (
+        ("skill bundles installed", "$skills.Installed.Ok"),
+        ("skill bundles match published plugin", "$skills.Merged.Ok"),
+        ("skill bundles: local edits vs merged", "$skills.LocalEdits.Ok"),
+    ):
+        assert f"Add-Check '{row}' " in source
+        assert field in source, f"{row} must take its verdict from {field}"
 
 
 # --------------------------------------------------------------------------------------------
