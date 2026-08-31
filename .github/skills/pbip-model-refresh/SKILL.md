@@ -365,7 +365,7 @@ stay byte-identical.
 >
 > | exclusion | the claim it makes |
 > |---|---|
-> | `main_frame(...)` | it is the application, and the thing dialogs block. Identified by **transitive ownership** — every owned window is walked to its **unowned root** — falling back to the `MainWindowHandle` convention only when *nothing* is owned. **Ambiguity fails closed**: two or more roots, an unresolvable chain, or several candidate unowned windows all return `None`, which excludes nothing. |
+> | `main_frame(...)` | it is the application, and the thing dialogs block. Identity is **enumerated, not inferred**: every rendering unowned window is a possible root, as is the **unowned root of any ownership chain** (walked transitively). **Ambiguity fails closed**: two or more possible roots, or a chain that cannot be resolved, returns `None`, which excludes nothing. |
 > | `is_proven_non_blocking(...)` | an **enabled owner** proves this window blocks nothing. One-way: a *disabled* owner never convicts (Power BI's own refresh dialog disables it too) and `None` — no owner — means the test **did not apply**, which is not the same as passing it. |
 > | `renders_nothing(...)` | **unowned AND zero-area**: no owner to disable *and* no pixels to display. Both conjuncts are required; either alone is one of the dead proxies. |
 >
@@ -383,9 +383,47 @@ stay byte-identical.
 >
 > **Two rules came out of it, and both are load-bearing.** Follow ownership *transitively*; and where
 > identity is **ambiguous, fail closed** — return `None` and exclude nothing. The cost of failing
-> closed is a loud exit 3; the cost of guessing is a real modal disappearing. That is why the unowned
-> fallback requires **exactly one** rendering unowned window, and why it is not reached at all once any
-> window is owned (its premise is that there are no dialogs).
+> closed is a loud exit 3; the cost of guessing is a real modal disappearing.
+>
+> ⚠️ **Round 5: transitive ownership was still an INFERENCE, and the fourth topology defeated it.**
+> Round 4's traversal collected only the roots reachable *through ownership chains*, so an **unowned**
+> credential host that happened to own one **enabled tooltip** became the sole collected root — and was
+> crowned the application. Measured, with our own refresh in flight:
+>
+> | window | what it exposed |
+> |---|---|
+> | real unowned frame | `Refresh`, `Evaluating...` — suppressed as our own progress, in flight |
+> | unowned `Internet Explorer_Hidden` | `Enter your credentials` — **excluded as "the frame"** |
+> | enabled tooltip owned by that host | the only owned window, so the only ownership root was its owner |
+>
+> → `modal=None dialog=None unknown_reason=None desktop_unready=None process_gone=None`. A false clean
+> on the gate of record. **So identity is now ENUMERATED**: every rendering unowned window is a
+> possible root *alongside* every ownership root, and an ownership-derived root gets no priority —
+> a root reached through a tooltip is not better evidence than a window sitting there rendering pixels.
+> Exactly one possible root identifies the frame; anything else returns `None` and excludes nothing.
+>
+> ⚠️ **There is no authority to ask — MEASURED, not assumed.** `Process.MainWindowHandle` looks like
+> independent evidence and is not: .NET's `ProcessManager.MainWindowFinder` runs `EnumWindows` and
+> stops at the **first visible, unowned window** of the pid — `main_frame`'s own fallback convention,
+> in another process, *without* the `renders_nothing` guard. Measured natively against real
+> `CreateWindowExW` windows:
+>
+> | experiment | what the authority returned |
+> |---|---|
+> | round 5's topology, 6 runs | the **credential host** in 5, the real frame in 1 — wrong *and* unstable |
+> | an unowned **0×0** window created last | the **0×0 window**, which can show a human nothing |
+> | raise either window to `HWND_TOPMOST` in turn | the answer **follows Z-order** — same window set, two answers |
+> | the classic shape: a genuinely **owned** modal | the real frame ✅ — but the ownership walk already agrees there, so it adds nothing |
+>
+> It is therefore never consulted: as primary evidence it re-crowns the credential host, and as a
+> tie-breaker it lets a hidden 0×0 helper unseat the real frame on a healthy Desktop.
+> `test_the_process_main_window_handle_is_a_z_order_answer_not_an_identity` pins the measurement so a
+> future .NET change is noticed rather than assumed.
+>
+> **What excluding nothing costs, stated plainly:** a spurious `DIALOG_UNRECOGNIZED` (exit 3) on the
+> real frame — or, for a report titled like a prompt, a spurious `CREDENTIAL_MISSING` (exit 1). Both
+> are loud: somebody looks at the screen and sees no dialog. Excluding the *wrong* window is silent,
+> and produces a finished model for a source nobody reached.
 >
 > The arbiter's one-way enabled-owner exoneration is therefore **ported**, not skipped — that
 > divergence note in the module docstring is gone.

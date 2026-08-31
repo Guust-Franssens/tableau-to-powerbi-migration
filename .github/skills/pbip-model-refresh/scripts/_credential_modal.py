@@ -43,6 +43,13 @@ time by collapsing a real blocker into the healthy state. Win32 answers the ques
 disables its owner. So :func:`main_frame`, :func:`is_proven_non_blocking` and :func:`renders_nothing`
 decide from ``GetWindow(GW_OWNER)`` and ``IsWindowEnabled(owner)``, and the arbiter's one-way
 enabled-owner exoneration is now ported here rather than skipped.
+
+⚠️ **Frame identity is ENUMERATED, and ambiguity excludes nothing (#400 review round 5).** The one
+thing this module does with the frame is EXCLUDE it, so a wrong identity is a silently missed prompt.
+:func:`main_frame` therefore counts every rendering unowned window as a possible root - not only those
+reachable through ownership chains, which is how an unowned credential host owning one enabled tooltip
+was crowned the application - and returns ``None`` for anything else. ``Process.MainWindowHandle`` is
+no authority either: measured, it is a Z-ORDER answer (see :func:`main_frame`).
 """
 
 from __future__ import annotations
@@ -463,9 +470,9 @@ def _ownership_root(window: DesktopWindow, by_hwnd: dict[int, DesktopWindow]) ->
     """Walk ``window``'s owner links to the UNOWNED root, or ``None`` if the chain cannot be resolved.
 
     Returns ``None`` when a link points at a window this enumeration did not see (an owner in another
-    process, or one that is not top-level) or when the links form a cycle. Both mean the root is
-    unknown from here, and an unknown root must not be guessed: whatever :func:`main_frame` picks is
-    excluded from the credential prepass AND from classification.
+    process, or one that is not top-level) or when the links form a cycle. Both mean the root is unknown
+    from here, and an unknown root must not be guessed: whatever :func:`main_frame` picks is excluded
+    from the credential prepass AND from classification.
     """
     seen = {id(window)}
     current = window
@@ -479,51 +486,54 @@ def _ownership_root(window: DesktopWindow, by_hwnd: dict[int, DesktopWindow]) ->
 
 
 def main_frame(windows: Iterable[DesktopWindow]) -> DesktopWindow | None:
-    """The application FRAME - the window dialogs block - by ownership evidence, never by class.
+    """The application FRAME - the window dialogs block - or ``None`` when its identity is AMBIGUOUS.
 
-    ⚠️ **Ownership is followed TRANSITIVELY, to the unowned root (#400 review round 4).** It used to
-    stop at the first owner it found, and "first owner" is itself a proxy for "the root": an owned
-    window can own another popup, so a Z-order of ``tooltip -> credential dialog -> frame`` made the
-    CREDENTIAL DIALOG the frame - and the frame is excluded from both the prepass and classification,
-    so the modal vanished. Three native reproductions, all missing the modal.
+    Four review rounds have defeated four ways of *inferring* which window is the application: its SIZE
+    (round 1), a CLASS prefix plus a helper-name allowlist (round 2), the FIRST ownership edge (round
+    3), and transitive ownership that collected only the roots reachable from OWNED windows (round 4's
+    fix, broken in round 5 - an UNOWNED credential host owning one enabled tooltip was the only root
+    anybody collected, so it was crowned the frame and excluded from the prepass AND from
+    classification, while the real frame's progress text was suppressed in flight). Measured:
+    ``modal=None dialog=None unknown_reason=None`` - a false clean on the gate of record.
 
-    ⚠️ **A class prefix is not an identity either (#400 review round 3, finding 2).**
-    ``WindowsForms10.Window.8`` names a WinForms *family*, not one HWND: an owner and its owned
-    ``FixedDialog`` both reported the exact class ``WindowsForms10.Window.8.app.0.2b2196a_r3_ad1``.
+    So this stops inferring and ENUMERATES. A window is a possible root in exactly two ways: it is
+    UNOWNED and renders something (:func:`renders_nothing` is the only filter, and it is the modality
+    rule rather than a size test); or it is the unowned root of some owned window's chain, walked
+    TRANSITIVELY - an owned window can own another popup, so "first owner" was itself a proxy for "the
+    root". An ownership-derived root gets NO priority over the rest; that is the round-5 fix, because a
+    root reached through a tooltip is not better evidence than a window rendering pixels.
 
-    Evidence, in order, and **ambiguity fails closed** - returning ``None`` excludes nothing, which
-    costs a loud exit 3 at worst; guessing excludes a window, which is how a real modal disappears:
+    Exactly one possible root identifies the frame. **Everything else returns ``None``, and ``None``
+    excludes NOTHING.** Excluding nothing costs a spurious ``DIALOG_UNRECOGNIZED`` (exit 3) - or, for a
+    report titled like a prompt, a spurious ``CREDENTIAL_MISSING`` (exit 1); both are LOUD. Excluding
+    the WRONG window is silent, and finishes a model for a source nobody reached.
 
-    1. **Transitive ownership.** Every owned window is walked to its unowned root. Exactly one root
-       across the whole enumeration identifies the frame; two or more, or a chain that cannot be
-       resolved, is ambiguous.
-    2. **The process main-handle convention**, reached only when nothing is owned - i.e. when there are
-       no dialogs at all. Even here it must be UNAMBIGUOUS: one unowned window that actually renders.
-       Several is ambiguous, because "first in Z-order" would let a topmost unowned dialog present
-       itself as the application (round 4's second reproduction: an unowned ``Internet Explorer_Hidden``
-       ahead of the real frame, reading ``Enter your credentials``).
+    ⚠️ **There is no authority to ask, and that was MEASURED (#400 review round 5).** .NET's
+    ``Process.MainWindowHandle`` is ``EnumWindows`` stopping at the first VISIBLE, UNOWNED window of the
+    pid - this function's own former fallback, in another process, minus the :func:`renders_nothing`
+    guard. Pinned by ``test_the_process_main_window_handle_is_a_z_order_answer_not_an_identity``: on
+    round 5's topology it named the CREDENTIAL HOST in 5 of 6 runs, it named an unowned **0x0** window
+    created last, and raising either of two windows to ``HWND_TOPMOST`` moved the answer - it reports
+    Z-ORDER. Only a genuinely OWNED modal gets a right answer out of it, where the ownership walk
+    already agrees, so it is not consulted. Full evidence: ``SKILL.md``, "Round 5".
     """
     windows = list(windows)
     by_hwnd = {window.hwnd: window for window in windows if window.hwnd}
     roots: list[DesktopWindow] = []
-    resolved_all = True
-    owned_present = False
     for window in windows:
-        if not window.owner_hwnd:
+        if window.owner_hwnd:
+            root = _ownership_root(window, by_hwnd)
+            if root is None:
+                # Chain leaves this enumeration, or loops: the root is UNKNOWN, and an unknown root must
+                # not be guessed at - the failure mode is excluding the wrong window.
+                return None
+        elif renders_nothing(window):
             continue
-        owned_present = True
-        root = _ownership_root(window, by_hwnd)
-        if root is None:
-            resolved_all = False
-            continue
+        else:
+            root = window
         if not any(root is known for known in roots):
             roots.append(root)
-    if owned_present:
-        # A dialog IS present, so the convention below does not apply - its premise is that nothing is
-        # owned. An unresolved chain here means the root is unknown, and unknown must not be guessed.
-        return roots[0] if len(roots) == 1 and resolved_all else None
-    candidates = [window for window in windows if not window.owner_hwnd and not renders_nothing(window)]
-    return candidates[0] if len(candidates) == 1 else None
+    return roots[0] if len(roots) == 1 else None
 
 
 def is_proven_non_blocking(window: DesktopWindow) -> bool:
@@ -573,7 +583,10 @@ def dialog_candidates(
     Win32 answers the question directly, so ask it directly. The three exclusions below are the only
     ones, and each is a POSITIVE claim rather than a correlate:
 
-    * the identified :func:`main_frame` - it is the application, and the thing dialogs block;
+    * the identified :func:`main_frame` - it is the application, and the thing dialogs block. When
+      identity is AMBIGUOUS that function returns ``None`` and this exclusion simply does not happen
+      (#400 review round 5): a spurious finding on the real frame is loud and recoverable, whereas
+      excluding the wrong window is how a credential prompt disappears;
     * :func:`is_proven_non_blocking` - an enabled owner proves this window blocks nothing;
     * :func:`renders_nothing` - unowned AND zero-area: no owner to disable and no pixels to show.
 

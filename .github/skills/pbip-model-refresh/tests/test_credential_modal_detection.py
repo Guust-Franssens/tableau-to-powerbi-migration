@@ -1658,35 +1658,76 @@ def test_no_proxy_for_blocking_survives_in_the_candidate_rule() -> None:
 
     Three review rounds killed three correlates. This asserts the module has no surface for a fourth,
     and that the only exclusions left are the modality ones.
+
+    ⚠️ **Asserted BEHAVIOURALLY, not by reading the source (#400 review round 5).** This used to grep
+    ``inspect.getsource(dialog_candidates)`` for the tokens ``class_name`` and ``width``. That caught
+    an inline mutation and nothing else: a helper called from that function could consult either
+    without those tokens appearing in it, and the test would still pass. So instead the matrix below
+    feeds windows that differ ONLY in class and size and requires candidacy to be identical - which no
+    proxy anywhere behind :func:`dialog_candidates` can satisfy.
     """
     for gone in ("MIN_DIALOG_WIDTH", "MIN_DIALOG_HEIGHT", "HELPER_WINDOW_CLASSES", "is_desktop_main_window"):
         assert not hasattr(_credential_modal, gone), f"{gone} is a proxy for blocking and must stay deleted"
 
-    source = inspect.getsource(_credential_modal.dialog_candidates)
-    assert "class_name" not in source, "candidacy must not consult a window's class"
-    assert "width" not in source, "candidacy must not consult a window's size"
+    classes = (
+        DESKTOP_MAIN_CLASS_PREFIX + ".app.0.33c0d9d",  # the frame's own WinForms family (round 2)
+        "Internet Explorer_Hidden",  # the AAD sign-in host's class (round 3)
+        "#32770",
+        "tooltips_class32",
+    )
+    # Every size is > 0 in both axes: `renders_nothing` is a MODALITY rule (unowned AND no pixels), not
+    # a size test, so a genuinely zero-area unowned window is excluded on purpose and does not belong
+    # in a matrix asserting that size is never consulted.
+    sizes = ((2011, 1298), (900, 700), (80, 60), (1, 1))
+    frame = main_window()
+
+    verdicts: dict[tuple[bool, str, tuple[int, int]], bool] = {}
+    for owned in (True, False):
+        for class_name in classes:
+            for width, height in sizes:
+                window = DesktopWindow(
+                    "",
+                    class_name,
+                    width,
+                    height,
+                    ("Enter your credentials",),
+                    hwnd=0x80008,
+                    owner_hwnd=MAIN_HWND if owned else 0,
+                    owner_enabled=False if owned else None,
+                )
+                kept = _credential_modal.dialog_candidates([frame, window], frame=frame)
+                verdicts[(owned, class_name, (width, height))] = window in kept
+
+    assert all(verdicts.values()), (
+        "candidacy must not vary with class or size; these combinations were dropped: "
+        f"{sorted(key for key, kept in verdicts.items() if not kept)}"
+    )
 
 
 def test_the_frame_is_identified_by_ownership_before_any_convention() -> None:
-    """`main_frame` prefers DIRECT ownership evidence, and only then the main-handle convention.
+    """`main_frame` names the frame from ownership evidence - and only when it is UNAMBIGUOUS.
 
     Ownership names the frame outright when a dialog is up, which is the case where getting it wrong
-    removes a real blocker. The first-visible-unowned convention is a fallback reached only when no
-    window is owned - i.e. when there are no dialogs to hide.
+    removes a real blocker: the credential dialog's chain roots at the frame no matter where Z-order
+    puts it in the enumeration.
 
-    The decoy matters: with another UNOWNED window enumerated ahead of the frame, the convention alone
-    picks the decoy and the real frame is then classified as a dialog on every healthy poll. Only the
-    ownership branch gets this right, so the decoy is what makes this test able to fail.
+    ⚠️ The decoy assertion INVERTED in round 5, and that is the fix rather than a regression. A second
+    unowned window that renders pixels is itself a possible frame - a "decoy" and an unowned credential
+    host are structurally the same window - so identity is AMBIGUOUS and nothing is excluded. Believing
+    the ownership-derived root instead is exactly what crowned an unowned credential host that owned
+    one tooltip.
     """
     frame = main_window()
     dialog = owned_dialog(("Enter your credentials",))
     decoy = DesktopWindow("decoy", "Cls", 300, 200, ("decoy",), hwnd=0x60006)
 
-    # Ownership evidence wins even when the dialog is enumerated FIRST (Z-order puts a modal on top)
-    # and even when an unrelated unowned window precedes the frame.
-    assert _credential_modal.main_frame([dialog, decoy, frame]) is frame
-    assert _credential_modal.main_frame([decoy, frame, dialog]) is frame
-    # With nothing owned, the convention applies: the first visible unowned window.
+    # Ownership evidence wins even when the dialog is enumerated FIRST (Z-order puts a modal on top).
+    assert _credential_modal.main_frame([dialog, frame]) is frame
+    assert _credential_modal.main_frame([frame, dialog]) is frame
+    # A second rendering unowned window is a second possible frame, so identity fails closed.
+    assert _credential_modal.main_frame([dialog, decoy, frame]) is None
+    assert _credential_modal.main_frame([decoy, frame, dialog]) is None
+    # With nothing owned, one rendering unowned window is still unambiguous.
     lone = DesktopWindow("only", "Cls", 800, 600, ("only",), hwnd=0x50005)
     assert _credential_modal.main_frame([lone]) is lone
     assert _credential_modal.main_frame([]) is None
@@ -1780,8 +1821,73 @@ def test_a_topmost_unowned_dialog_cannot_present_itself_as_the_application() -> 
     assert state.modal.window is aad
 
 
+def test_an_unowned_credential_host_owning_a_tooltip_is_never_crowned_the_frame() -> None:
+    """Round 5: collecting roots ONLY through ownership chains made a credential host the application.
+
+    The reviewer's construction, and the fourth distinct topology to defeat frame identity. A real
+    unowned frame shows ``Refresh`` / ``Evaluating...``; an unowned host shows
+    ``Enter your credentials``; an ENABLED tooltip is owned by that host. The tooltip is the only owned
+    window, so the only ownership-derived root is the CREDENTIAL HOST - which was then excluded from
+    the prepass and from classification, while the real frame's progress text was suppressed in flight.
+
+    Measured on the round-4 build, exactly the shape this module exists to prevent::
+
+        main_frame selected: the credential host
+        inspect_credential_modal -> modal=None dialog=None unknown_reason=None
+                                    desktop_unready=None process_gone=None
+    """
+    frame_hwnd, cred_hwnd, tip_hwnd = 0xF001, 0x9001, 0x7003
+    frame = DesktopWindow(
+        "", "WindowsForms10.Window.8.app.0.x", 2011, 1298, ("Refresh", "Evaluating..."), hwnd=frame_hwnd
+    )
+    cred = DesktopWindow("", "Internet Explorer_Hidden", 900, 700, ("Enter your credentials",), hwnd=cred_hwnd)
+    tip = DesktopWindow(
+        "", "tooltips_class32", 120, 24, ("hint",), hwnd=tip_hwnd, owner_hwnd=cred_hwnd, owner_enabled=True
+    )
+
+    assert _credential_modal.main_frame([tip, cred, frame]) is None, "two rendering unowned windows are ambiguous"
+    kept = _credential_modal.dialog_candidates([tip, cred, frame])
+    assert cred in kept and frame in kept, "an ambiguous frame must exclude neither of them"
+
+    for in_flight in (False, True):
+        state = inspect_credential_modal(111, lambda _pid: [tip, cred, frame], operation_in_flight=in_flight)
+        assert state.modal is not None, f"the prompt vanished with operation_in_flight={in_flight}"
+        assert state.modal.window is cred
+
+
+def test_an_unowned_host_with_unrecognised_text_still_surfaces_beside_our_own_refresh() -> None:
+    """The same topology without a signature hit must be LOUD, not clean.
+
+    Round 5's danger is not only the missed signature: with the credential host crowned as the frame,
+    the only window left to classify was the real frame, whose benign progress text is suppressed while
+    our own operation is in flight. Every unrecognised window in that shape therefore collapsed into
+    the healthy state. This is the same construction with text nobody can account for.
+    """
+    frame_hwnd, host_hwnd, tip_hwnd = 0xF001, 0x9001, 0x7003
+    frame = DesktopWindow(
+        "", "WindowsForms10.Window.8.app.0.x", 2011, 1298, ("Refresh", "Evaluating..."), hwnd=frame_hwnd
+    )
+    host = DesktopWindow("", "Internet Explorer_Hidden", 900, 700, ("Something nobody enumerated",), hwnd=host_hwnd)
+    tip = DesktopWindow(
+        "", "tooltips_class32", 120, 24, ("hint",), hwnd=tip_hwnd, owner_hwnd=host_hwnd, owner_enabled=True
+    )
+
+    state = inspect_credential_modal(111, lambda _pid: [tip, host, frame], operation_in_flight=True)
+
+    assert state.modal is None
+    assert state.dialog is not None, "an unaccounted window must never collapse into the healthy state"
+    assert state.dialog.verdict == "DIALOG_UNRECOGNIZED"
+    assert state.dialog.window is host
+
+
 def test_ambiguous_frame_identity_excludes_nothing() -> None:
-    """Failing closed means EXCLUDING NOTHING - the cost is a loud exit 3, never a silent clear."""
+    """Failing closed means EXCLUDING NOTHING - the cost is a loud exit 3, never a silent clear.
+
+    Both halves matter, and the second is round 5's: ambiguity has to survive the PRESENCE of owned
+    windows too. An ownership-derived root is not better evidence than a window sitting there rendering
+    pixels - believing it was the whole defect - so a tooltip owned by either candidate must not
+    promote its owner into the application.
+    """
     frame = DesktopWindow("sample", "WindowsForms10.Window.8.app.0.x", 2011, 1298, ("sample",), hwnd=0xF001)
     other = DesktopWindow("second", "Cls", 800, 600, ("second",), hwnd=0x9001)
 
@@ -1789,6 +1895,13 @@ def test_ambiguous_frame_identity_excludes_nothing() -> None:
     kept = _credential_modal.dialog_candidates([frame, other])
 
     assert frame in kept and other in kept, "an ambiguous frame must not exclude a window"
+
+    for owner_hwnd in (0xF001, 0x9001):
+        tip = DesktopWindow("", "tooltips_class32", 120, 24, (), hwnd=0x7003, owner_hwnd=owner_hwnd, owner_enabled=True)
+        windows = [tip, frame, other]
+        assert _credential_modal.main_frame(windows) is None, f"an owned tooltip must not crown hwnd {owner_hwnd:#x}"
+        kept = _credential_modal.dialog_candidates(windows)
+        assert frame in kept and other in kept, "neither possible frame may be excluded"
 
 
 def test_an_unresolvable_owner_chain_fails_closed() -> None:
@@ -1893,6 +2006,245 @@ def test_the_win32_harvest_reads_real_ownership_and_owner_enabled_state() -> Non
         user32.DestroyWindow(owned_hwnd)
         user32.DestroyWindow(frame_hwnd)
         user32.UnregisterClassW(klass.lpszClassName, klass.hInstance)
+
+
+class _NativeWindowProbe:
+    """A disposable set of REAL Win32 windows, for the topology tests that synthesised data cannot gate.
+
+    Every signature is set explicitly, for the reason measured in round 3: a default ctypes ``restype``
+    is a 32-bit ``c_int``, so an untyped ``GetModuleHandleW`` TRUNCATES the 64-bit ``HINSTANCE`` and
+    ``RegisterClassW`` then faults on the garbage - an access violation that showed up as a
+    ``faulthandler`` dump while the test still reported a pass.
+
+    ``DefWindowProcW`` is used DIRECTLY as the window procedure, cast to the callback type rather than
+    wrapped in a Python callable: Windows calls a wndproc synchronously from inside ``CreateWindowExW``
+    and ``DestroyWindow``, so keeping Python off the message path removes both the marshalling risk and
+    the need for a message pump.
+
+    Nothing Windows-only runs at import time. ``ctypes.WINFUNCTYPE`` does not EXIST off Windows, and
+    this module is imported (and mostly run) on the ubuntu CI leg as well, so the callback type and the
+    ``WNDCLASSW`` structure are both built inside ``__init__``, behind the callers' ``skipif``.
+    """
+
+    WS_OVERLAPPEDWINDOW, WS_VISIBLE, WS_POPUP, WS_CHILD = 0x00CF0000, 0x10000000, 0x80000000, 0x40000000
+    HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE = -1, 0x0002, 0x0001, 0x0010
+
+    def __init__(self, tag: str) -> None:
+        self.user32 = ctypes.WinDLL("user32", use_last_error=True)
+        self.kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        self.wndproc_type = ctypes.WINFUNCTYPE(
+            ctypes.c_longlong, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM
+        )
+
+        class WndClass(ctypes.Structure):
+            """Minimal ``WNDCLASSW``."""
+
+            _fields_ = [
+                ("style", wintypes.UINT),
+                ("lpfnWndProc", self.wndproc_type),
+                ("cbClsExtra", ctypes.c_int),
+                ("cbWndExtra", ctypes.c_int),
+                ("hInstance", wintypes.HINSTANCE),
+                ("hIcon", wintypes.HICON),
+                ("hCursor", wintypes.HANDLE),
+                ("hbrBackground", wintypes.HBRUSH),
+                ("lpszMenuName", wintypes.LPCWSTR),
+                ("lpszClassName", wintypes.LPCWSTR),
+            ]
+
+        self.wndclass_type = WndClass
+        self._configure()
+        self.klass = WndClass()
+        self.klass.lpfnWndProc = ctypes.cast(self.user32.DefWindowProcW, self.wndproc_type)
+        self.klass.hInstance = self.kernel32.GetModuleHandleW(None)
+        self.klass.lpszClassName = f"T2P{tag}{os.getpid()}"
+        assert self.user32.RegisterClassW(ctypes.byref(self.klass)), f"RegisterClassW: {ctypes.get_last_error()}"
+        self.created: list[int] = []
+
+    def _configure(self) -> None:
+        """Type every call this probe makes."""
+        self.user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        self.user32.DefWindowProcW.restype = ctypes.c_longlong
+        self.user32.CreateWindowExW.restype = wintypes.HWND
+        self.user32.CreateWindowExW.argtypes = [
+            wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID,
+        ]  # fmt: skip
+        self.kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+        self.kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+        self.user32.RegisterClassW.argtypes = [ctypes.POINTER(self.wndclass_type)]
+        self.user32.RegisterClassW.restype = wintypes.ATOM
+        self.user32.UnregisterClassW.argtypes = [wintypes.LPCWSTR, wintypes.HINSTANCE]
+        self.user32.UnregisterClassW.restype = wintypes.BOOL
+        self.user32.DestroyWindow.argtypes = [wintypes.HWND]
+        self.user32.DestroyWindow.restype = wintypes.BOOL
+        self.user32.SetWindowPos.argtypes = [
+            wintypes.HWND,
+            wintypes.HWND,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            wintypes.UINT,
+        ]
+        self.user32.SetWindowPos.restype = wintypes.BOOL
+
+    def top(self, style: int, x: int, y: int, width: int, height: int, owner: int | None = None) -> int:
+        """Create a visible top-level window, optionally OWNED by ``owner``."""
+        hwnd = self.user32.CreateWindowExW(
+            0, self.klass.lpszClassName, "", style | self.WS_VISIBLE, x, y, width, height,
+            owner, None, self.klass.hInstance, None,
+        )  # fmt: skip
+        assert hwnd, f"CreateWindowExW: {ctypes.get_last_error()}"
+        self.created.append(hwnd)
+        return hwnd
+
+    def label(self, parent: int, text: str, y: int) -> int:
+        """Create a real STATIC child, so the harvest reads ``text`` as CONTENT rather than a caption."""
+        hwnd = self.user32.CreateWindowExW(
+            0, "STATIC", text, self.WS_CHILD | self.WS_VISIBLE, 5, y, 260, 20,
+            parent, None, self.klass.hInstance, None,
+        )  # fmt: skip
+        assert hwnd, f"CreateWindowExW(STATIC): {ctypes.get_last_error()}"
+        return hwnd
+
+    def raise_topmost(self, hwnd: int) -> None:
+        """Put ``hwnd`` at the top of the TOPMOST band, which is where EnumWindows starts."""
+        flags = self.SWP_NOMOVE | self.SWP_NOSIZE | self.SWP_NOACTIVATE
+        assert self.user32.SetWindowPos(hwnd, self.HWND_TOPMOST, 0, 0, 0, 0, flags), (
+            f"SetWindowPos: {ctypes.get_last_error()}"
+        )
+        time.sleep(0.2)
+
+    def close(self) -> None:
+        """Destroy every window this probe created, then unregister its class."""
+        for hwnd in reversed(self.created):
+            self.user32.DestroyWindow(hwnd)
+        self.created.clear()
+        self.user32.UnregisterClassW(self.klass.lpszClassName, self.klass.hInstance)
+
+
+def _dotnet_main_window_handle(pid: int) -> int:
+    """.NET ``System.Diagnostics.Process.MainWindowHandle`` for ``pid``, read from ANOTHER process.
+
+    Deliberately out-of-process: reading it in-process through pythonnet would add a dependency this
+    detector does not have, and the question being asked is what the AUTHORITY says, not what a
+    convenient reimplementation of it says.
+    """
+    proc = subprocess.run(
+        [_powershell(), "-NoProfile", "-Command", f"[int64](Get-Process -Id {pid}).MainWindowHandle"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, f"Get-Process failed: {proc.stderr.strip()}"
+    return int((proc.stdout or "0").strip() or 0)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="creates real Win32 windows")
+def test_a_native_unowned_credential_host_owning_a_tooltip_is_not_the_application() -> None:
+    """Round 5's reproduction, built natively - the fourth topology to defeat frame identity.
+
+    The synthesised twin of this test proves the RULE; this one proves the rule is applied to what
+    Win32 actually reports. Three real windows: an unowned frame whose only content is progress status,
+    an unowned host reading ``Enter your credentials``, and an ENABLED tooltip owned by that host. The
+    tooltip is the only owned window, so ownership alone yields exactly one root - the credential host -
+    and believing it returned ``modal=None dialog=None unknown_reason=None`` while our own refresh was
+    in flight.
+    """
+    probe = _NativeWindowProbe("Round5Probe")
+    try:
+        frame_hwnd = probe.top(probe.WS_OVERLAPPEDWINDOW, 10, 10, 400, 300)
+        probe.label(frame_hwnd, "Refresh", 10)
+        probe.label(frame_hwnd, "Evaluating...", 40)
+        cred_hwnd = probe.top(probe.WS_POPUP, 500, 10, 900, 700)
+        probe.label(cred_hwnd, "Enter your credentials", 10)
+        tip_hwnd = probe.top(probe.WS_POPUP, 520, 40, 120, 24, owner=cred_hwnd)
+        time.sleep(0.2)
+
+        harvested, _visited = _enumerate_pid_windows_with_count(os.getpid())
+        ours = [window for window in harvested if window.hwnd in {frame_hwnd, cred_hwnd, tip_hwnd}]
+        by_hwnd = {window.hwnd: window for window in ours}
+
+        assert set(by_hwnd) == {frame_hwnd, cred_hwnd, tip_hwnd}, "the harvest missed a native probe window"
+        assert by_hwnd[frame_hwnd].owner_hwnd == 0, "the real frame is unowned"
+        assert by_hwnd[cred_hwnd].owner_hwnd == 0, "the credential host is unowned - that is the whole shape"
+        assert by_hwnd[tip_hwnd].owner_hwnd == cred_hwnd, "the tooltip is owned BY the credential host"
+        assert by_hwnd[tip_hwnd].owner_enabled is True, "an enabled owner exonerates the tooltip itself"
+        assert by_hwnd[frame_hwnd].texts == ("Refresh", "Evaluating..."), "the frame reads as pure progress status"
+
+        assert _credential_modal.main_frame(ours) is None, "two rendering unowned windows cannot name one frame"
+        kept = _credential_modal.dialog_candidates(ours)
+        assert by_hwnd[cred_hwnd] in kept and by_hwnd[frame_hwnd] in kept, "ambiguity must exclude neither"
+
+        state = inspect_credential_modal(os.getpid(), lambda _pid: ours, operation_in_flight=True)
+
+        assert state.modal is not None, "the credential prompt vanished from a real three-window harvest"
+        assert state.modal.window.hwnd == cred_hwnd
+    finally:
+        probe.close()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="creates real Win32 windows and shells out to PowerShell")
+def test_the_process_main_window_handle_is_a_z_order_answer_not_an_identity() -> None:
+    """MEASURED, because "ask the authority" was the obvious fix and it does not work (#400 round 5).
+
+    .NET's ``Process.MainWindowHandle`` looks like independent evidence about which window is the
+    application. It is not: ``ProcessManager.MainWindowFinder`` runs ``EnumWindows`` and stops at the
+    first VISIBLE, UNOWNED window of the pid - :func:`main_frame`'s own fallback convention, evaluated
+    in another process, minus the :func:`renders_nothing` guard. This test pins that with the two
+    experiments that decide it:
+
+    * **it follows Z-order.** The same two windows are raised in turn to ``HWND_TOPMOST``, and the
+      answer follows whichever was raised last. An identity does not change when a human clicks a
+      window;
+    * **it will name a window that renders nothing.** An unowned **0x0** window created last is
+      returned as the "main window" - a window that cannot show a human anything, and one this
+      module's own :func:`renders_nothing` refuses as a possible frame.
+
+    Measured across six runs of the round-5 topology while writing this: the authority named the
+    CREDENTIAL HOST in five of them and the real frame in one - so it is not merely wrong, it is
+    unstable. That is why nothing in this module consults it, as primary evidence or as a tie-breaker.
+    """
+    probe = _NativeWindowProbe("AuthorityProbe")
+    try:
+        frame_hwnd = probe.top(probe.WS_OVERLAPPEDWINDOW, 10, 10, 400, 300)
+        cred_hwnd = probe.top(probe.WS_POPUP, 500, 10, 900, 700)
+        time.sleep(0.2)
+
+        probe.raise_topmost(frame_hwnd)
+        frame_on_top = _dotnet_main_window_handle(os.getpid())
+        probe.raise_topmost(cred_hwnd)
+        cred_on_top = _dotnet_main_window_handle(os.getpid())
+
+        assert {frame_on_top, cred_on_top} <= {frame_hwnd, cred_hwnd}, (
+            f"expected the authority to name one of our two unowned windows, got {frame_on_top}/{cred_on_top}"
+        )
+        assert frame_on_top != cred_on_top, (
+            "the same two windows produced one answer, so this run cannot show Z-order dependence; "
+            f"both reads returned {frame_on_top}"
+        )
+        assert frame_on_top == frame_hwnd and cred_on_top == cred_hwnd, (
+            "the authority is expected to name whichever window was raised last"
+        )
+
+        ghost_hwnd = probe.top(probe.WS_POPUP, 0, 0, 0, 0)
+        probe.raise_topmost(ghost_hwnd)
+        harvested, _visited = _enumerate_pid_windows_with_count(os.getpid())
+        ghost = next(window for window in harvested if window.hwnd == ghost_hwnd)
+
+        assert (ghost.width, ghost.height) == (0, 0), "the ghost really is 0x0"
+        assert _credential_modal.renders_nothing(ghost), "this module refuses a 0x0 unowned window as a frame"
+        assert _dotnet_main_window_handle(os.getpid()) == ghost_hwnd, (
+            "the authority names a window that can show a human nothing"
+        )
+
+        # The load-bearing consequence: whatever the authority says, identity here stays ambiguous.
+        ours = [window for window in harvested if window.hwnd in {frame_hwnd, cred_hwnd}]
+        assert _credential_modal.main_frame(ours) is None
+    finally:
+        probe.close()
 
 
 @pytest.mark.parametrize(
