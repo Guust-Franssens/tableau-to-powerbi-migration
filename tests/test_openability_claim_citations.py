@@ -125,6 +125,48 @@ stdlib-only test tier, and answers a question this pin no longer asks: we do not
 renders, only that it is exactly the text somebody reviewed. Keeping the normalizer and fixing tabs
 and blank lines would have been round three of the same shape.
 
+ROUND 7: A "LOSSLESS" PROPERTY THAT COMPARED THE LOSS AGAINST ITSELF
+--------------------------------------------------------------------
+Round 6's whole argument rests on ``test_segmentation_is_lossless``, and that assertion was vacuous
+for the one transformation it most needed to rule out. Both halves of the pipeline used the SAME
+line splitter, and the assertion compared one against the other:
+
+* ``segment`` split with ``str.splitlines()``, which is **not** "split on ``\\n``". It also splits --
+  and *removes* -- a bare ``\\r``, ``\\v``, ``\\f``, ``\\x1c``, ``\\x1d``, ``\\x1e``, ``\\x85``, ``U+2028``
+  and ``U+2029``.
+* the assertion compared ``reconstruct(text)`` against ``"\\n".join(text.splitlines())`` -- the same
+  normalization -- so no amount of separator rewriting could ever make it fail.
+
+Measured at ``30753dc``, on the committed validator persona: replacing the line terminator between
+``| class | meaning | who acts |`` and its delimiter row with **U+2028** left the 95-block SHA
+sequence bit-identical (whole-sequence fingerprint ``6a8a70c7...`` before and after), and returned
+**100 passed, exit 0** with ``sync_agent_conventions.py --check`` also **0**. A bare ``\\r`` did the
+same. CommonMark ends a line only on ``\\n``/``\\r``, so U+2028 leaves the header and the delimiter on
+one logical line and the ``<table>`` stops being a table -- a visible edit to a reviewed document
+that the pin could not see. Worse, ``reconstruct`` turned U+2028 back into ``\\n``: the "rebuild"
+silently rewrote the artifact it claimed to reproduce.
+
+Reading was the other half of it. ``Path.read_text`` opens in **universal-newline** mode, so a bare
+``\\r`` had already become ``\\n`` before ``segment`` was reached -- fixing the splitter alone would
+have closed nothing. So the canonicalization moved to the read, where it is now singular, explicit
+and named:
+
+    **THE SOURCE CONTRACT.** Sources are read as BYTES, decoded UTF-8, and exactly one substitution
+    is applied: ``\\r\\n`` -> ``\\n``. Nothing else is normalized. Every other character -- a bare
+    ``\\r``, U+2028, a form feed -- is *content*, is hashed as content, and therefore FAILS the pin
+    rather than being silently rewritten.
+
+CRLF folding is required rather than preferred: ``core.autocrlf`` is true on Windows here and CI
+checks out LF, so hashing raw bytes would make the pin platform-dependent. It is also the only
+transformation that is *invertible*, which is what ``test_the_only_normalization_is_crlf_to_lf``
+asserts -- re-applying the file's own line ending must reproduce the bytes on disk exactly, which
+additionally rejects a file with mixed endings, the one place CRLF folding would destroy content.
+
+``_lines`` replaces ``str.splitlines()`` everywhere in this module, and ``reconstruct`` is now an
+exact inverse of it, trailing newline included. The losslessness assertion no longer compares
+against anything this module produced: it compares against the on-disk **bytes**, decoded and
+CRLF-folded inline in the test.
+
 The generated skill-index tables are **not** collapsed: they are small, per-persona, and their rows
 are headings that do reach an agent as instruction text.
 
@@ -189,6 +231,63 @@ EXCERPT_CHARS = 60
 
 
 # ---------------------------------------------------------------------------------------------
+# THE SOURCE CONTRACT. Read bytes; canonicalize exactly ONE thing, and say which.
+# ---------------------------------------------------------------------------------------------
+NEWLINE = "\n"
+CRLF = "\r\n"
+
+# Every character ``str.splitlines()`` treats as a line boundary that this module does NOT. Round 7:
+# using ``splitlines`` made each of these an invisible substitute for a real line break, and the
+# losslessness assertion compared ``splitlines`` output against itself, so it could never say so.
+NOT_LINE_BREAKS = (
+    ("CR", "\r"),
+    ("VT", "\v"),
+    ("FF", "\f"),
+    ("FS", "\x1c"),
+    ("GS", "\x1d"),
+    ("RS", "\x1e"),
+    ("NEL", "\x85"),
+    ("LS", "\u2028"),
+    ("PS", "\u2029"),
+)
+
+
+def read_source(path: Path) -> str:
+    """Read a pinned document under the source contract: bytes, UTF-8, ``\\r\\n`` -> ``\\n``, nothing else.
+
+    Deliberately **not** ``Path.read_text``. Text mode is universal-newline mode, which also folds a
+    bare ``\\r`` into ``\\n`` -- an undeclared rewrite that ``segment`` could never have seen, so
+    fixing the splitter alone would have closed nothing (round 7).
+
+    CRLF folding is not a preference: ``core.autocrlf`` is true on Windows here and CI checks out LF.
+    It is also the only *invertible* transformation available, which is the property
+    ``test_the_only_normalization_is_crlf_to_lf`` checks against the bytes on disk.
+    """
+    return path.read_bytes().decode("utf-8").replace(CRLF, NEWLINE)
+
+
+def _lines(text: str) -> list[str]:
+    """Split on ``\\n`` and ONLY ``\\n``, dropping the empty tail a final newline would produce.
+
+    A strict narrowing of ``str.splitlines()``: identical for every input that contains none of
+    ``NOT_LINE_BREAKS``, and -- unlike ``splitlines`` -- it leaves those characters inside the line
+    they sit in, so they reach ``digest`` as the content they are.
+
+    ``"".split("\\n")`` is ``[""]`` rather than ``[]``, so an empty document is special-cased to keep
+    the narrowing exact.
+    """
+    if not text:
+        return []
+    body = text[: -len(NEWLINE)] if text.endswith(NEWLINE) else text
+    return body.split(NEWLINE)
+
+
+def _final_newline(text: str) -> str:
+    """The newline ``_lines`` set aside, so ``reconstruct`` can be an exact inverse."""
+    return NEWLINE if text.endswith(NEWLINE) else ""
+
+
+# ---------------------------------------------------------------------------------------------
 # Blocks: total, ordered segmentation. No step here reads the MEANING of a block.
 # ---------------------------------------------------------------------------------------------
 @dataclass(frozen=True)
@@ -216,7 +315,7 @@ class Block:
 
     @property
     def lines_covered(self) -> range:
-        return range(self.line, self.line + (self.span or len(self.text.splitlines())))
+        return range(self.line, self.line + (self.span or self.text.count(NEWLINE) + 1))
 
 
 @dataclass(frozen=True)
@@ -249,11 +348,14 @@ def digest(block: str) -> str:
     Two transformations remain, both declared rather than assumed, and neither a judgement about
     Markdown:
 
-    * **Line endings.** Sources are read in text mode, so ``\\r\\n`` arrives as ``\\n``. Required, not
+    * **Line endings.** ``read_source`` folds ``\\r\\n`` -> ``\\n`` and nothing else. Required, not
       preferred: ``core.autocrlf`` is true on Windows here and CI checks out LF, so hashing raw bytes
-      would make the pin platform-dependent. Verified by rebuilding the pin file as CRLF and re-running.
-    * **The final newline.** ``splitlines`` cannot tell ``"a"`` from ``"a\\n"``. Closed by a test that
-      every persona ends with exactly one newline, so the ambiguity cannot carry content.
+      would make the pin platform-dependent. Round 7 narrowed this from an *implicit* universal-newline
+      read, which also folded a bare ``\\r``; anything that is not ``\\r\\n`` is now content and is
+      hashed as content.
+    * **The final newline.** ``_lines`` sets it aside so it cannot masquerade as an empty last line.
+      Closed twice over: ``reconstruct`` puts it back exactly, and a test asserts every persona ends
+      with exactly one, so the ambiguity cannot carry content.
 
     The cost is that a cosmetic re-wrap now needs ``--update`` like any other edit. Measured, that is
     the whole cost: the corpus has **0** lines with trailing whitespace and **0** tabs today.
@@ -264,7 +366,7 @@ def digest(block: str) -> str:
 def excerpt(block: str) -> str:
     """A short ASCII label for a pin entry. Never compared -- only printed, so it stays readable."""
     if not block.strip():
-        count = len(block.splitlines()) or 1
+        count = block.count(NEWLINE) or 1
         return f"({count} blank line{'s' if count > 1 else ''})"
     text = " ".join(block.split())
     return "".join(char if 32 <= ord(char) < 127 else "~" for char in text)[:EXCERPT_CHARS]
@@ -324,8 +426,13 @@ def segment(text: str, *, collapse_generated: bool = False) -> list[Block]:
     all four personas and is pinned once at ``SHARED_KEY``. It collapses only a well formed pair of
     marker-only lines; anything else falls through to ordinary segmentation, so a malformed or
     polluted marker is pinned as the text it is rather than skipped.
+
+    Lines come from ``_lines``, never ``str.splitlines()``: round 7 measured a U+2028 substituted for
+    the terminator between a table header and its delimiter row leaving the whole SHA sequence
+    bit-identical, because ``splitlines`` treats nine further characters as line boundaries and
+    *removes* them.
     """
-    lines = text.splitlines()
+    lines = _lines(text)
     blocks: list[Block] = []
     index = 0
     total = len(lines)
@@ -375,10 +482,14 @@ def reconstruct(text: str, *, collapse: bool = False) -> str:
 
     This is the property that replaced guessing at Markdown semantics: if the blocks rebuild the file
     exactly, nothing has been dropped, so nothing can escape by being dropped.
+
+    Exact means exact, trailing newline included. Round 7: the previous version dropped the final
+    newline and the assertion made up the difference by comparing against ``"\\n".join(splitlines())``,
+    which also silently absorbed every separator ``splitlines`` had rewritten.
     """
     region = shared_region(text) or ""
     parts = [region if block.text == COLLAPSED else block.text for block in segment(text, collapse_generated=collapse)]
-    return "\n".join(parts)
+    return NEWLINE.join(parts) + _final_newline(text)
 
 
 def personas() -> list[Path]:
@@ -392,16 +503,16 @@ def shared_region(text: str) -> str | None:
     Including the marker lines is what closes round 5's seam: every source line of the region is
     inside something that gets hashed, rather than resting on a separate exactness check.
     """
-    lines = text.splitlines()
+    lines = _lines(text)
     region = generated_span(lines)
     if region is None:
         return None
-    return "\n".join(lines[region[0] : region[1] + 1])
+    return NEWLINE.join(lines[region[0] : region[1] + 1])
 
 
 def observed() -> dict[str, list[Block]]:
     """Every pinned key on disk: one per persona, plus the generated region pinned once."""
-    sources = {path.name: path.read_text(encoding="utf-8") for path in personas()}
+    sources = {path.name: read_source(path) for path in personas()}
     surface = {name: segment(text, collapse_generated=True) for name, text in sources.items()}
     regions = {region for text in sources.values() if (region := shared_region(text)) is not None}
     if len(regions) == 1:
@@ -437,7 +548,7 @@ def parse_pins(text: str) -> dict[str, list[tuple[str, str]]]:
     """``{key: [(sha, label), ...]}`` from the pin file, preserving order."""
     pins: dict[str, list[tuple[str, str]]] = {}
     current: list[tuple[str, str]] | None = None
-    for raw in text.splitlines():
+    for raw in _lines(text):
         line = raw.rstrip()
         if not line or line.startswith("#"):
             continue
@@ -454,7 +565,7 @@ def parse_pins(text: str) -> dict[str, list[tuple[str, str]]]:
 def load_pins() -> dict[str, list[tuple[str, str]]]:
     if not PIN_FILE.exists():
         raise AssertionError(f"{PIN_FILE} is missing. Regenerate it with:\n    {UPDATE_COMMAND}")
-    return parse_pins(PIN_FILE.read_text(encoding="utf-8"))
+    return parse_pins(read_source(PIN_FILE))
 
 
 def findings(key: str, blocks: list[Block], pins: dict[str, list[tuple[str, str]]] | None = None) -> list[Finding]:
@@ -508,7 +619,7 @@ REQUIRED: tuple[tuple[str, str, str], ...] = (
 
 def _marker_hint(text: str) -> str:
     """Name a malformed region marker, which is why an unrelated-looking 30 blocks are listed."""
-    lines = text.splitlines()
+    lines = _lines(text)
     if not lines or generated_span(lines) is not None:
         return ""
     shared = [
@@ -579,7 +690,7 @@ def test_every_block_of_every_persona_is_pinned(key: str) -> None:
     """The whole instruction surface, not a subset of it that something had to recognise first."""
     found = findings(key, observed()[key])
     path = AGENTS_DIR / key
-    assert not found, _report(key, found, path.read_text(encoding="utf-8") if path.exists() else "")
+    assert not found, _report(key, found, read_source(path) if path.exists() else "")
 
 
 def test_the_pin_covers_every_persona_on_disk() -> None:
@@ -595,7 +706,7 @@ def test_the_pin_covers_every_persona_on_disk() -> None:
 
 def test_the_pin_is_exactly_what_regenerating_would_write() -> None:
     """``--update`` is idempotent against a clean tree, so the committed file is the current one."""
-    assert PIN_FILE.read_text(encoding="utf-8") == render_pins(observed()), (
+    assert read_source(PIN_FILE) == render_pins(observed()), (
         f"{PIN_PATH} is stale or hand-edited. Regenerate it with:\n    {UPDATE_COMMAND}"
     )
 
@@ -610,17 +721,81 @@ def test_segmentation_is_lossless(persona: Path, collapse: bool) -> None:
     narrowed an approximation the next round out-ran. This assertion closes the class instead of
     extending the list: if the blocks rebuild the file, nothing was dropped, so nothing can escape by
     being dropped.
+
+    Round 7: it only closes that class while the comparison is against something this module did NOT
+    produce. It used to read ``== "\\n".join(text.splitlines())`` -- the same splitter ``segment``
+    used, so a U+2028 rewritten into ``\\n`` on both sides could never fail it. The expected value is
+    now derived here, inline, from the **bytes on disk**, applying the one declared substitution.
     """
-    text = persona.read_text(encoding="utf-8")
-    assert reconstruct(text, collapse=collapse) == "\n".join(text.splitlines()), (
+    expected = persona.read_bytes().decode("utf-8").replace(CRLF, NEWLINE)
+    assert reconstruct(read_source(persona), collapse=collapse) == expected, (
         f"{persona.name} ({'collapsed' if collapse else 'raw'}): the pinned blocks do not rebuild the file"
     )
 
 
+@pytest.mark.parametrize("source", [*personas(), REPO / GOTCHAS_SKILL, PIN_FILE], ids=lambda p: p.name)
+def test_the_only_normalization_is_crlf_to_lf(source: Path) -> None:
+    """The read half of losslessness, asserted as an INVERSE against the bytes on disk.
+
+    ``reconstruct`` can only prove that ``segment`` drops nothing; it is blind to anything the read
+    already rewrote. Round 7 measured that gap: ``Path.read_text`` is universal-newline mode, so a
+    bare ``\\r`` became ``\\n`` before ``segment`` was ever reached.
+
+    Re-applying the file's own line ending must reproduce the bytes exactly. That is a real inverse
+    rather than a restatement, and it fails on a MIXED-ending file -- the one case where folding
+    ``\\r\\n`` would destroy content instead of normalizing it.
+    """
+    raw = source.read_bytes()
+    text = read_source(source)
+    assert "\r" not in text, (
+        f"{source.name} contains a bare CR, which is NOT a declared line ending here. Only "
+        "`\\r\\n` -> `\\n` is canonicalized; every other character is content and is hashed as "
+        "content. Convert the file to a single, uniform line ending."
+    )
+    ending = CRLF if CRLF.encode() in raw else NEWLINE
+    assert text.replace(NEWLINE, ending).encode("utf-8") == raw, (
+        f"{source.name}: reading it changed more than `\\r\\n` -> `\\n`, or its line endings are "
+        "mixed. Either way the canonicalization is not invertible, so the pinned bytes are not the "
+        "bytes on disk."
+    )
+
+
+def test_read_source_keeps_everything_that_is_not_crlf(tmp_path: Path) -> None:
+    """The reader is where round 7 actually had to be fixed, so it is tested on written BYTES.
+
+    No assertion against the committed corpus can distinguish ``read_source`` from ``Path.read_text``
+    -- the personas contain none of these characters -- so a revert to text mode would pass every
+    other test in this file. This writes the bytes deliberately, and asserts BOTH halves: what the
+    contract keeps, and what universal-newline mode would have destroyed.
+    """
+    probe = tmp_path / "probe.md"
+    probe.write_bytes("crlf\r\nlf\nbare-cr\rls\u2028ff\f\n".encode())
+    assert read_source(probe) == "crlf\nlf\nbare-cr\rls\u2028ff\f\n", (
+        "read_source must fold `\\r\\n` -> `\\n` and leave every other character alone"
+    )
+    assert probe.read_text(encoding="utf-8") == "crlf\nlf\nbare-cr\nls\u2028ff\f\n", (
+        "fixture is stale: text mode no longer folds a bare CR, which was the whole reason to stop using it"
+    )
+
+
+@pytest.mark.parametrize(("name", "char"), NOT_LINE_BREAKS, ids=str)
+def test_the_line_splitter_splits_on_lf_and_nothing_else(name: str, char: str) -> None:
+    """``_lines`` is a strict narrowing of ``splitlines``, and the difference is the whole fix.
+
+    Asserted in both directions on purpose: that ``_lines`` keeps the character inside its line, and
+    that ``splitlines`` would have thrown it away. The second half is what makes this a regression
+    test rather than a restatement of the implementation.
+    """
+    probe = f"header{char}delimiter"
+    assert _lines(probe) == [probe], f"{name}: _lines treated {char!r} as a line break"
+    assert len(probe.splitlines()) == 2, f"{name}: fixture is stale -- splitlines no longer splits {char!r}"
+    assert digest(probe) != digest(probe.replace(char, NEWLINE)), f"{name}: it hashes as a newline"
+
+
 @pytest.mark.parametrize("persona", personas(), ids=lambda p: p.name)
 def test_every_persona_ends_with_exactly_one_newline(persona: Path) -> None:
-    """``splitlines`` cannot tell "a" from "a\\n"; this stops that ambiguity carrying content."""
-    text = persona.read_text(encoding="utf-8")
+    """``_lines`` sets the final newline aside; this stops that ambiguity carrying content."""
+    text = read_source(persona)
     assert text.endswith("\n") and not text.endswith("\n\n"), f"{persona.name}: {text[-3:]!r} at EOF"
 
 
@@ -632,8 +807,8 @@ def test_segmentation_covers_every_line_exactly_once(persona: Path, collapse: bo
     Every line, blank ones included, and with **no exemption**: round 5's version excused the whole
     ``BEGIN``/``END`` range and round 6's still excluded blanks. ``Block.span`` answers both.
     """
-    text = persona.read_text(encoding="utf-8")
-    every = list(range(1, len(text.splitlines()) + 1))
+    text = read_source(persona)
+    every = list(range(1, len(_lines(text)) + 1))
     covered = sorted(number for block in segment(text, collapse_generated=collapse) for number in block.lines_covered)
     assert covered == every, (
         f"{persona.name} ({'collapsed' if collapse else 'raw'}): "
@@ -648,7 +823,7 @@ def test_the_generated_region_is_identical_in_every_persona() -> None:
     Compared as whole lines including both markers, so two copies differing ONLY on a boundary line
     are different regions rather than the same one.
     """
-    regions = {persona.name: shared_region(persona.read_text(encoding="utf-8")) for persona in personas()}
+    regions = {persona.name: shared_region(read_source(persona)) for persona in personas()}
     assert None not in regions.values(), (
         f"{[name for name, region in regions.items() if region is None]} do not carry a well formed "
         f"`{SYNC_BEGIN}` / `{SYNC_END}` pair of marker-only lines."
@@ -662,7 +837,7 @@ def test_the_generated_region_is_identical_in_every_persona() -> None:
 @pytest.mark.parametrize("persona", personas(), ids=lambda p: p.name)
 def test_each_persona_declares_exactly_one_generated_region(persona: Path) -> None:
     """Marker-only lines, exactly one pair. Anything else and the collapse is not sound."""
-    lines = persona.read_text(encoding="utf-8").splitlines()
+    lines = _lines(read_source(persona))
     for marker in (SYNC_BEGIN, SYNC_END):
         exact = [number for number, line in enumerate(lines, start=1) if line.strip() == marker]
         anywhere = [number for number, line in enumerate(lines, start=1) if marker in line]
@@ -696,7 +871,7 @@ def test_a_block_this_pin_exists_for_is_still_present(name: str, sha: str, label
 
 def test_the_gotchas_skill_owns_the_full_breakdown() -> None:
     """The uncapped bundle, not a near-cap persona, is where the measured detail lives."""
-    text = (REPO / GOTCHAS_SKILL).read_text(encoding="utf-8")
+    text = read_source(REPO / GOTCHAS_SKILL)
     assert GOTCHAS_HEADING in text, (
         f"{GOTCHAS_SKILL} no longer carries the section heading pinned by issue #312:\n"
         f"  {GOTCHAS_HEADING}\n"
@@ -738,7 +913,7 @@ BYPASSES = DEFEATED_BY_SYNONYM + DEFEATED_BY_MARKDOWN
 
 
 def _validator_text() -> str:
-    return (AGENTS_DIR / VALIDATOR).read_text(encoding="utf-8")
+    return read_source(AGENTS_DIR / VALIDATOR)
 
 
 def _rule_block(text: str) -> Block:
@@ -805,7 +980,7 @@ def test_text_beside_a_region_marker_is_not_invisible(label: str, marker: str, r
 def test_text_beside_a_region_marker_is_also_covered(label: str, marker: str, replacement: str) -> None:
     """...and the coverage assertion must SEE the line, rather than exempting the whole range."""
     spliced = _validator_text().replace(marker, replacement, 1)
-    lines = spliced.splitlines()
+    lines = _lines(spliced)
     non_blank = {number for number, line in enumerate(lines, start=1) if line.strip()}
     covered = {number for block in segment(spliced, collapse_generated=True) for number in block.lines_covered}
     boundary = next(number for number, line in enumerate(lines, start=1) if replacement in line)
@@ -828,7 +1003,7 @@ def test_the_failure_message_explains_a_malformed_marker() -> None:
     found = findings(VALIDATOR, segment(polluted, collapse_generated=True))
     message = _report(VALIDATOR, found, polluted)
     assert "did not collapse" in message and "ONLY thing on its line" in message
-    line = polluted.splitlines().index(f"{CLAIM} {SYNC_BEGIN}") + 1
+    line = _lines(polluted).index(f"{CLAIM} {SYNC_BEGIN}") + 1
     assert f"({line}," in message, "the hint must name the offending line"
     assert _marker_hint(_validator_text()) == "", "and stay silent when the markers are well formed"
 
@@ -844,7 +1019,7 @@ def test_a_marker_that_is_not_alone_on_its_line_does_not_collapse() -> None:
 def test_a_second_marker_pair_does_not_collapse() -> None:
     """Two pairs are ambiguous, and collapsing one would leave the other pinned by nothing."""
     text = _validator_text() + f"\n{SYNC_BEGIN}\n- a second region nobody reviewed\n{SYNC_END}\n"
-    assert generated_span(text.splitlines()) is None
+    assert generated_span(_lines(text)) is None
     blocks = segment(text, collapse_generated=True)
     assert COLLAPSED not in [block.text for block in blocks]
     assert any("a second region nobody reviewed" in block.text for block in blocks)
@@ -860,10 +1035,10 @@ def test_every_source_line_is_inside_something_hashed(persona: Path) -> None:
     stands in for the region, so the region's own text is part of the haystack; the two marker lines
     are inside it because ``shared_region`` slices whole lines INCLUSIVE of both.
     """
-    text = persona.read_text(encoding="utf-8")
-    haystack = "\n".join(block.text for block in segment(text, collapse_generated=True))
-    haystack += "\n" + (shared_region(text) or "")
-    for number, line in enumerate(text.splitlines(), start=1):
+    text = read_source(persona)
+    haystack = NEWLINE.join(block.text for block in segment(text, collapse_generated=True))
+    haystack += NEWLINE + (shared_region(text) or "")
+    for number, line in enumerate(_lines(text), start=1):
         assert not line.strip() or line.strip() in haystack, (
             f"{persona.name} line {number} is in no hashed representation: {line.strip()[:70]!r}"
         )
@@ -874,7 +1049,7 @@ def test_every_source_line_is_inside_something_hashed(persona: Path) -> None:
 # words do not move, so a whitespace-collapsing hash saw nothing.
 # ------------------------------------------------------------------------------------------
 def _indent_block(text: str, block: Block, columns: int = 4) -> str:
-    padded = "\n".join(" " * columns + line for line in block.text.splitlines())
+    padded = NEWLINE.join(" " * columns + line for line in _lines(block.text))
     spliced = text.replace(block.text, padded, 1)
     assert spliced != text, "fixture did not splice"
     return spliced
@@ -932,12 +1107,12 @@ def test_indenting_only_the_continuation_lines_fails() -> None:
     """
     text = _validator_text()
     block = _rule_block(text)
-    lines = block.text.splitlines()
+    lines = _lines(block.text)
     assert len(lines) > 1, "fixture needs a block with continuation lines"
     spliced = text.replace(block.text, "\n".join([lines[0], *("    " + line for line in lines[1:])]), 1)
     assert spliced != text, "fixture did not splice"
     assert " ".join(spliced.split()) == " ".join(text.split()), "only whitespace may differ"
-    assert _indent(spliced.splitlines()[block.line - 1]) == _indent(lines[0]), "the first line must not move"
+    assert _indent(_lines(spliced)[block.line - 1]) == _indent(lines[0]), "the first line must not move"
     assert _identity_moved(text, spliced), "BYPASS: only the continuation indent changed, and it was erased"
     assert findings(VALIDATOR, segment(spliced, collapse_generated=True))
     text = _validator_text()
@@ -951,7 +1126,7 @@ def test_a_blank_line_inside_a_block_fails() -> None:
     """Blank-line boundaries need no normalization rule: they re-segment, so the sequence changes."""
     text = _validator_text()
     block = _rule_block(text)
-    lines = block.text.splitlines()
+    lines = _lines(block.text)
     spliced = text.replace(block.text, "\n".join([lines[0], "", *lines[1:]]), 1)
     assert spliced != text, "fixture did not splice"
     assert _identity_moved(text, spliced), "BYPASS: the split was invisible"
@@ -961,7 +1136,7 @@ def test_a_blank_line_inside_a_block_fails() -> None:
 def test_a_hard_line_break_is_part_of_the_identity() -> None:
     """Two trailing spaces are a <br>, and with raw hashing they are simply different bytes."""
     block = _rule_block(_validator_text())
-    lines = block.text.splitlines()
+    lines = _lines(block.text)
     assert digest(block.text) != digest("\n".join([lines[0] + "  ", *lines[1:]]))
 
 
@@ -987,7 +1162,7 @@ def test_a_blank_line_between_a_table_header_and_its_delimiter_fails() -> None:
     the artifact rather than an approximation of how it renders.
     """
     text = _validator_text()
-    lines = text.splitlines()
+    lines = _lines(text)
     header = _table_header_line(lines)
     assert lines[header + 1].strip().startswith("|---"), "fixture expects the delimiter row next"
     spliced = "\n".join([*lines[: header + 1], "", *lines[header + 1 :]]) + "\n"
@@ -999,7 +1174,7 @@ def test_a_blank_line_between_a_table_header_and_its_delimiter_fails() -> None:
 def test_a_blank_line_between_shared_list_items_fails() -> None:
     """Tight list to loose list, reached through AGENTS.md and regenerated into all four personas."""
     region = shared_region(_validator_text())
-    lines = region.splitlines()
+    lines = _lines(region)
     item = next(index for index, line in enumerate(lines) if line.startswith("- **Use confidence markers**"))
     spliced = "\n".join([*lines[:item], "", *lines[item:]])
     assert spliced != region, "fixture did not splice"
@@ -1014,7 +1189,7 @@ def test_tabs_are_not_spaces() -> None:
     while a tab-indented row opens a ``<pre><code>`` block and detaches the header from its rows.
     """
     text = _validator_text()
-    lines = text.splitlines()
+    lines = _lines(text)
     header = _table_header_line(lines)
     assert lines[header].startswith("   |") and "\t" not in lines[header], "fixture expects three spaces"
     tabbed = "\t\t\t" + lines[header].lstrip()
@@ -1022,6 +1197,55 @@ def test_tabs_are_not_spaces() -> None:
     spliced = "\n".join([*lines[:header], tabbed, *lines[header + 1 :]]) + "\n"
     assert _identity_moved(text, spliced)
     assert findings(VALIDATOR, segment(spliced, collapse_generated=True))
+
+
+# ------------------------------------------------------------------------------------------
+# Round 7: the reviewer's reproduction. A line break that is not `\n`. Measured at 30753dc on the
+# real validator persona: the 95-block SHA sequence was BIT-IDENTICAL and both gates returned 0.
+# ------------------------------------------------------------------------------------------
+@pytest.mark.parametrize(("name", "char"), NOT_LINE_BREAKS, ids=str)
+def test_an_exotic_line_separator_is_not_a_free_line_break(name: str, char: str) -> None:
+    """Substitute one of ``splitlines``' nine extra boundaries for the real terminator; the pin fails.
+
+    The reviewer's exact payload is the ``LS`` case: U+2028 between ``| class | meaning | who acts |``
+    and its delimiter row. CommonMark ends a line only on ``\\n``/``\\r``, so the header and the
+    delimiter become ONE logical line and the ``<table>`` stops being a table -- a visible edit to a
+    reviewed document. At 30753dc it returned **100 passed, exit 0**, and ``reconstruct`` handed back
+    a file with U+2028 rewritten to ``\\n``: the "rebuild" was editing the artifact it claimed to
+    reproduce.
+
+    The middle assertion is the point of the test and not decoration: it proves the old
+    representation was blind here, so a mutation that routes ``segment`` back through ``splitlines``
+    kills this test rather than merely changing its wording.
+    """
+    text = _validator_text()
+    lines = _lines(text)
+    header = _table_header_line(lines)
+    assert lines[header + 1].strip().startswith("|---"), "fixture expects the delimiter row next"
+    spliced = "\n".join(lines[: header + 1]) + char + "\n".join(lines[header + 1 :]) + "\n"
+
+    assert spliced != text, f"{name}: fixture did not splice"
+    assert len(spliced.splitlines()) == len(lines), f"{name}: fixture is stale -- splitlines no longer hides {char!r}"
+    assert _identity_moved(text, spliced), f"BYPASS ({name}): {char!r} passed as a line break, identity unchanged"
+    assert findings(VALIDATOR, segment(spliced, collapse_generated=True)), f"BYPASS ({name}): the gate must fail"
+
+
+@pytest.mark.parametrize(("name", "char"), NOT_LINE_BREAKS, ids=str)
+def test_reconstruction_does_not_rewrite_an_exotic_separator(name: str, char: str) -> None:
+    """The other half of the round-7 finding: the rebuild must return the document, not repair it.
+
+    ``reconstruct`` used to hand back ``\\n`` wherever the source held one of these, and the
+    losslessness assertion compared that against ``"\\n".join(text.splitlines())`` -- the same
+    rewrite -- so it agreed with itself. Here the expected value is the spliced text itself, which
+    ``reconstruct`` did not produce.
+    """
+    text = _validator_text()
+    lines = _lines(text)
+    header = _table_header_line(lines)
+    spliced = "\n".join(lines[: header + 1]) + char + "\n".join(lines[header + 1 :]) + "\n"
+    assert reconstruct(spliced, collapse=True) == spliced, (
+        f"{name}: reconstruct rewrote {char!r} instead of reproducing the document"
+    )
 
 
 def test_the_wording_on_disk_is_accepted() -> None:
@@ -1036,7 +1260,7 @@ def test_the_wording_on_disk_is_accepted() -> None:
 
 def _reflow(block_text: str, width: int) -> str:
     """Re-wrap a block at a different width, keeping its first-line and continuation indents."""
-    lines = block_text.splitlines()
+    lines = _lines(block_text)
     first = " " * _indent(lines[0])
     cont = " " * (_indent(lines[1]) if len(lines) > 1 else _indent(lines[0]))
     out: list[str] = []
@@ -1067,10 +1291,10 @@ def test_reflowing_a_block_now_costs_a_pin_update() -> None:
     idempotent are used here instead, and the assertion is checked rather than assumed.
     """
     block = _rule_block(_validator_text())
-    assert len(block.text.splitlines()) > 1, "fixture needs a multi-line block"
+    assert len(_lines(block.text)) > 1, "fixture needs a multi-line block"
     narrow, wide = _reflow(block.text, 40), _reflow(block.text, 10_000)
-    assert len(narrow.splitlines()) > len(block.text.splitlines()), "width 40 did not add lines"
-    assert len(wide.splitlines()) == 1, "width 10000 did not collapse to one line"
+    assert len(_lines(narrow)) > len(_lines(block.text)), "width 40 did not add lines"
+    assert len(_lines(wide)) == 1, "width 10000 did not collapse to one line"
     assert " ".join(narrow.split()) == " ".join(block.text.split()), "reflow must not change the words"
     assert digest(block.text) != digest(narrow)
     assert digest(block.text) != digest(wide)
@@ -1110,7 +1334,7 @@ def test_moving_a_pinned_block_fails() -> None:
     aimed at it went MISSED.
     """
     text = _validator_text()
-    lines = text.splitlines()
+    lines = _lines(text)
     first = next(index for index, line in enumerate(lines) if line.strip().startswith("| `fixable`"))
     assert lines[first + 1].strip().startswith("| `accepted-limitation`"), "fixture expects sibling rows"
     swapped_lines = [*lines[:first], lines[first + 1], lines[first], *lines[first + 2 :]]
@@ -1141,13 +1365,13 @@ def test_a_table_row_is_its_own_block() -> None:
 def test_a_bullet_is_its_own_block() -> None:
     """A bullet list is one block per item, so a pin covers one rule rather than a whole section."""
     bullets = "- **`viz_fidelity`** is the engine's account.\n- **`openability_selfcheck`** is fine.\n"
-    assert [block.text for block in segment(bullets)] == bullets.splitlines()
+    assert [block.text for block in segment(bullets)] == _lines(bullets)
 
 
 def test_a_heading_is_its_own_block() -> None:
     """Prose under a heading must not absorb it, or every retitle becomes a pin update on the prose."""
     text = "## Reading the handover\n`openability_selfcheck` is one field of it.\n"
-    assert [block.text for block in segment(text)] == text.splitlines()
+    assert [block.text for block in segment(text)] == _lines(text)
 
 
 def test_a_fenced_block_is_atomic() -> None:
@@ -1161,7 +1385,7 @@ def test_a_fenced_block_is_atomic() -> None:
 def test_adjacent_footnotes_do_not_merge() -> None:
     """Two adjacent footnote definitions merged once, and one inherited the neighbour's pin."""
     footnotes = "[^a]: `viz_fidelity` is the engine's account.\n[^b]: `openability_selfcheck` is fine.\n"
-    assert [block.text for block in segment(footnotes)] == footnotes.splitlines()
+    assert [block.text for block in segment(footnotes)] == _lines(footnotes)
 
 
 def test_a_paragraph_keeps_its_continuation_lines() -> None:
@@ -1173,7 +1397,7 @@ def test_a_paragraph_keeps_its_continuation_lines() -> None:
 def _update() -> int:
     """Write the pin file from what is on disk. The deliberate approval step, made one command."""
     rendered = render_pins(observed())
-    before = PIN_FILE.read_text(encoding="utf-8") if PIN_FILE.exists() else ""
+    before = read_source(PIN_FILE) if PIN_FILE.exists() else ""
     PIN_FILE.write_text(rendered, encoding="utf-8", newline="\n")
     if before == rendered:
         print(f"{PIN_PATH} already current ({sum(len(v) for v in observed().values())} blocks).")
@@ -1186,7 +1410,7 @@ def _update() -> int:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(description=_lines(__doc__)[0])
     parser.add_argument("--update", action="store_true", help="rewrite the pin file from disk")
     if not parser.parse_args().update:
         parser.error("nothing to do: pass --update (the checks themselves run under pytest)")
