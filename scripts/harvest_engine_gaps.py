@@ -48,14 +48,16 @@ Two policy divergences from the tamper gate, both stricter, both deliberate:
 Axis 2 - SHAPE lives in `harvest_gap_shapes.py`: a structural JSON-pointer diff plus a TMDL line
 diff. Buckets were chosen by measuring the corpus first; `UNCLASSIFIED` is retained and reported.
 
-Axis 0, beneath both - **ONE STATE OF THE BUNDLE.** Provenance is adjudicated before the trees are
-walked, so a bundle that moves in between is described by two reads at once and the difference lands
-on the ENGINE (blind review rounds 6-7; see `_observed_race`). Round 6 compared two inventory reads
-and round 7 defeated that with an ABA edit - restore the original bytes and both endpoints agree
-while the scan consumed the changed ones. Provenance is therefore tied to the digests the tree
-comparison ACTUALLY READ: there is no window between the observation and the evidence, because the
-observation *is* the evidence. Anything that disagrees forces `incomplete` and has its authorship
-claim withdrawn, and it costs no extra I/O.
+Axis 0, beneath both - **the bundle is assumed to hold still, and that is NOT verified.** Provenance
+is adjudicated from one read of the bundle and evidence is taken from others, so a bundle edited
+while the harvest runs can have a TIER edit attributed to the ENGINE, with `status: complete` and no
+warning. Four review rounds of PR #399 tried to close this and each fix was defeated by a read the
+previous enumeration had not modelled - most tellingly a directory MEMBERSHIP read, which carries no
+bytes to digest at all. The guarantee is withdrawn rather than half-made: `concurrency.verified` is
+`false` in every report, the markdown says so beside its own conclusion, and issue #418 carries all
+the reproductions plus what a real fix would need (a guarantee about the INPUT - an OS snapshot, a
+copy, or an exclusivity assertion - never one that depends on having enumerated every read).
+**Harvest a bundle nothing else is writing to.**
 
 This module does NOT use git, and that is a correctness fix. Measured: of 44 pairs, the mandated
 `git diff --no-index --stat` produced NO stat line for 3 (worst path 261/285/287 vs 259 for the 41 it
@@ -114,19 +116,6 @@ from harvest_gap_shapes import (
     bound_model_tables,
     shapes_for_change,
 )
-from harvest_gap_races import (
-    PROV_ENGINE,
-    PROV_TAMPERED,
-    PROV_TIER,
-    PROV_UNATTRIBUTED,
-    PROVENANCES,
-    artifact_key,
-    consumed_race,
-    dedupe_races,
-    observed_race,
-    race_reasons,
-    withdraw_raced,
-)
 from harvest_gap_trees import TreeDelta, compare_trees, safe_text
 from migration_bundle import ENGINE_RECEIPT
 
@@ -139,6 +128,12 @@ EXIT_INCOMPLETE = 3
 # STATUS_* are DEFINED in `harvest_gap_report` and re-exported here. They live there because that
 # module depends on nothing, so the pair stays one-way - and because the renderer must be able to ask
 # "is this run complete?" from the authoritative constant rather than a duplicated string literal.
+
+PROV_ENGINE = "engine_internal"
+PROV_TIER = "tier_edit"
+PROV_TAMPERED = "baseline_tampered"
+PROV_UNATTRIBUTED = "unattributed"
+PROVENANCES = (PROV_ENGINE, PROV_TIER, PROV_TAMPERED, PROV_UNATTRIBUTED)
 
 PAIR_IDENTICAL = "identical"
 PAIR_DIFFERS = "differs"
@@ -466,14 +461,13 @@ def _changed_records(
     delta: TreeDelta,
     roots: tuple[str, str],
     evidence: Evidence,
-    consumed: dict[Path, str],
 ) -> list[dict[str, Any]]:
     """One record per file present on both sides with different content."""
-    tables = bound_model_tables(pair.working, consumed) if pair.layer == LAYER_REPORT else None
+    tables = bound_model_tables(pair.working) if pair.layer == LAYER_REPORT else None
     base_root, work_root = roots
     records = []
     for relative in delta.changed:
-        shapes, count = shapes_for_change(pair.baseline / relative, pair.working / relative, tables, consumed)
+        shapes, count = shapes_for_change(pair.baseline / relative, pair.working / relative, tables)
         base_rel, work_rel = f"{base_root}/{relative}", f"{work_root}/{relative}"
         records.append(
             _base_record(pair, relative, "changed", shapes, count)
@@ -578,6 +572,16 @@ def _post_engine_records(
     return records
 
 
+def artifact_key(target: str) -> tuple[str, str, str] | None:
+    """(artifact, layer, artifact-relative path) for a bundle path, from EITHER side of the bundle."""
+    parts = target.split("/")
+    for index, part in enumerate(parts):
+        for suffix, layer in ((".Report", LAYER_REPORT), (".SemanticModel", LAYER_MODEL)):
+            if part.endswith(suffix):
+                return part[: -len(suffix)], layer, "/".join(parts[index + 1 :])
+    return None
+
+
 def _unpaired_pair(target: str) -> tuple[Pair, str]:
     """Describe an adjudicated `pbip/` path that belongs to no discovered pair.
 
@@ -643,7 +647,6 @@ def _difference_records(
     pair: Pair,
     delta: TreeDelta,
     evidence: Evidence,
-    consumed: dict[Path, str],
 ) -> list[dict[str, Any]]:
     """One record per differing file: its shape, its provenance, and who declared it (if anyone)."""
     if pair.baseline is None or pair.working is None:
@@ -654,7 +657,7 @@ def _difference_records(
         return []
     roots = (pair.baseline.relative_to(bundle).as_posix(), pair.working.relative_to(bundle).as_posix())
     return (
-        _changed_records(pair, delta, roots, evidence, consumed)
+        _changed_records(pair, delta, roots, evidence)
         + _added_removed_records(pair, delta, roots, evidence)
         + _post_engine_records(pair, delta, roots[1], evidence)
     )
@@ -672,11 +675,11 @@ def _pair_status(pair: Pair, delta: TreeDelta | None, records: list[dict[str, An
     return PAIR_IDENTICAL
 
 
-def _reference_resolves(pair: Pair, consumed: dict[Path, str]) -> bool | None:
+def _reference_resolves(pair: Pair) -> bool | None:
     """Whether the BASELINE report's dataset reference resolves. None when there is nothing to ask."""
     if pair.layer != LAYER_REPORT or pair.baseline is None:
         return None
-    return bound_model_tables(pair.baseline, consumed) is not None
+    return bound_model_tables(pair.baseline) is not None
 
 
 def _engine_metadata(bundle: Path) -> dict[str, Any]:
@@ -857,8 +860,6 @@ class Scan(NamedTuple):
     records: list[dict[str, Any]]
     unassessable: list[dict[str, str]]
     git_blind: list[dict[str, Any]]
-    raced: list[dict[str, Any]]
-    consumed: dict[Path, str]
 
 
 def _scan_pairs(bundle: Path, evidence: Evidence) -> Scan:
@@ -870,7 +871,7 @@ def _scan_pairs(bundle: Path, evidence: Evidence) -> Scan:
     taken later would be, by construction, a read nobody validated.
     """
     pairs, discovery_failures = discover_pairs(bundle)
-    scan = Scan([], [], list(discovery_failures), [], [], {})
+    scan = Scan([], [], list(discovery_failures), [])
     for pair in pairs:
         delta = compare_trees(pair.baseline, pair.working) if pair.baseline and pair.working else None
         if delta is not None:
@@ -884,14 +885,13 @@ def _scan_pairs(bundle: Path, evidence: Evidence) -> Scan:
                         "longest_path": delta.longest_path,
                     }
                 )
-            scan.raced.extend(observed_race(pair, delta, evidence, bundle))
-        records = _difference_records(bundle, pair, delta, evidence, scan.consumed) if delta is not None else []
+        records = _difference_records(bundle, pair, delta, evidence) if delta is not None else []
         scan.records.extend(records)
-        scan.scanned.append(ScannedPair(pair, delta, records, _reference_resolves(pair, scan.consumed)))
+        scan.scanned.append(ScannedPair(pair, delta, records, _reference_resolves(pair)))
     return scan
 
 
-def _finalize(scan: Scan, raced: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def _finalize(scan: Scan) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Withdraw ONCE, then derive both views from the result so they cannot disagree.
 
     ⚠️ Blind review rounds 7 and 8 both reported a pair row that kept an attribution the top-level
@@ -902,7 +902,7 @@ def _finalize(scan: Scan, raced: list[dict[str, Any]]) -> tuple[list[dict[str, A
     entries: list[dict[str, Any]] = []
     records: list[dict[str, Any]] = []
     for scanned in scan.scanned:
-        kept = withdraw_raced(scanned.records, raced)
+        kept = scanned.records
         records.extend(kept)
         status = _pair_status(scanned.pair, scanned.delta, kept)
         entries.append(_pair_entry(scanned.pair, scanned.delta, status, kept, scanned.reference_resolves))
@@ -921,10 +921,6 @@ def harvest(bundle: Path) -> dict[str, Any]:
     baseline_drift = evidence.side_drift(BASELINE_ROOTS)
 
     scan = _scan_pairs(bundle, evidence)
-    # Every claim-feeding read has now happened, and each one carries the digest of what it used.
-    # Validate them ALL against the adjudication snapshot before any of it becomes evidence.
-    raced = dedupe_races(scan.raced + consumed_race(scan.consumed, evidence, bundle))
-
     # The reconciliation that makes "no adjudicated path silently disappears" structural rather than
     # aspirational: every path the gate found must be named by a record, by `baseline_drift`, or by
     # `unreconciled_drift` - and the last of those forces a non-clean status.
@@ -932,13 +928,13 @@ def harvest(bundle: Path) -> dict[str, Any]:
 
     # ONE withdrawal pass, and BOTH views are derived from its output - the top-level counters and
     # the per-pair rows are literally the same objects, so they cannot disagree for any trigger.
-    entries, records = _finalize(scan, raced)
-    records += withdraw_raced(unpaired, raced)
+    entries, records = _finalize(scan)
+    records += unpaired
 
     provenance = Counter(record["provenance"] for record in records)
     tampered = [r for r in records if r["provenance"] == PROV_TAMPERED]
     coverage = _coverage(records)
-    reasons = _incomplete_reasons(entries, scan, evidence, coverage, unreconciled) + race_reasons(raced)
+    reasons = _incomplete_reasons(entries, scan, evidence, coverage, unreconciled)
     status = _overall_status(tampered or baseline_drift, reasons)
 
     return {
@@ -966,15 +962,15 @@ def harvest(bundle: Path) -> dict[str, Any]:
         "baseline_roots": list(BASELINE_ROOTS),
         "unpaired_drift_records": len(unpaired),
         "unreconciled_drift": unreconciled,
-        "snapshot_race": {
-            "count": len(raced),
-            "moved": raced,
+        "concurrency": {
+            "verified": False,
             "note": (
-                "paths where the digests the tree comparison actually READ disagree with the"
-                " inventory snapshot provenance was ADJUDICATED from. Non-empty means this report"
-                " reasons about two states of the bundle: it is `incomplete`, and every authorship"
-                " claim touching these paths - all of them, when a race is unscoped - is withdrawn"
-                " to `unattributed`."
+                "⚠️ Attribution assumes the bundle was NOT modified while this harvest ran. That is"
+                " NOT verified. Four review rounds of PR #399 tried and the guarantee was withdrawn:"
+                " a mid-harvest change can make the report attribute a tier edit to the engine, with"
+                " `status: complete` and no warning. Reproductions, the 17-read enumeration and the"
+                " two read categories it did not model are in issue #418. Harvest a bundle nothing"
+                " else is writing to."
             ),
         },
         "pairs": entries,

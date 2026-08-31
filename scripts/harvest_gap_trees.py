@@ -8,15 +8,11 @@ answers an independent question - "how do these two directories differ?" - needi
 engine's hash baseline nor any notion of provenance, and the seam buys both modules headroom under
 pylint's `max-module-lines`.
 
-⚠️ **`TreeDelta` carries `baseline_digests` / `working_digests`, and they are load-bearing, not
-diagnostics.** Blind review round 7 of PR #399: the harvest adjudicated provenance from one read of
-the bundle and then compared trees in a second, so an ABA edit - change a working visual before the
-scan, let the scan read it, restore the original bytes before any later check - left both endpoint
-reads identical while the comparison had consumed the CHANGED bytes. The run reported
-`status=complete`, `snapshot_race.count=0` and `engine_internal=1` for a real tier edit. Comparing
-two independent re-reads cannot see that; comparing what adjudication ASSUMED against what the scan
-ACTUALLY READ can, because there is no window between the observation and the evidence - the
-observation *is* the evidence. So the digests leave this module rather than dying inside it.
+⚠️ It deliberately does NOT try to prove the two trees held still while it read them. That guarantee
+was attempted over four review rounds of PR #399 and withdrawn: see issue #418, which carries every
+reproduction, the 17-read enumeration, and the two read categories that enumeration did not model
+(directory MEMBERSHIP reads, which carry no bytes to digest, and REPEATED/FAILED reads). Attribution
+built on this delta assumes the bundle was not modified during the harvest, and says so.
 """
 
 from __future__ import annotations
@@ -33,12 +29,7 @@ TREE_ROOT = "."
 
 
 class TreeDelta(NamedTuple):
-    """The raw content comparison of two trees, with unreadable entries kept apart.
-
-    `baseline_digests` / `working_digests` are every digest `hash_tree` produced, keyed by
-    tree-relative POSIX path - the exact bytes this delta was computed from, so a caller can prove
-    its own earlier assumptions describe the same read (see the module header).
-    """
+    """The raw content comparison of two trees, with unreadable entries kept apart."""
 
     added: list[str]
     removed: list[str]
@@ -48,9 +39,6 @@ class TreeDelta(NamedTuple):
     working_files: int
     longest_path: int
     scoped: bool = True
-    baseline_digests: dict[str, str] = {}
-    working_digests: dict[str, str] = {}
-    blocked: frozenset[str] = frozenset()
 
 
 def safe_text(text: str) -> str:
@@ -142,7 +130,4 @@ def compare_trees(baseline: Path, working: Path) -> TreeDelta:
         working_files=len(b),
         longest_path=max(a_longest, b_longest),
         scoped=scoped,
-        baseline_digests=a,
-        working_digests=b,
-        blocked=blocked,
     )

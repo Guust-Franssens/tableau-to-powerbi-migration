@@ -78,7 +78,6 @@ must appear below unless the script docstring marks it `internal: true` with an 
 | `scripts/group_oracle_by_workbook.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/harvest_engine_gaps.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/harvest_gap_report.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/harvest_gap_races.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/harvest_gap_shapes.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/harvest_gap_trees.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/harvest_estate_assets.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |

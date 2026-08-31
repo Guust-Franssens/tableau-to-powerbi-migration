@@ -351,65 +351,40 @@ attributed/unattributed counts, and lists `incomplete_reasons` verbatim.
 > every differing byte matched the engine on a bundle whose status was `untrustworthy`. Same class,
 > one layer down: **an empty count reading as a clean result.**
 
-### The status itself was assembled from two filesystem snapshots
+### ⚠️ Attribution is NOT race-safe, and that limitation is shipped rather than hidden
 
-⚠️ Four review rounds fixed *"the report re-derived trust wrongly"*, and the answer each time was to
-stop re-deriving and ask the harvest's authoritative `status`. That fix stands — and it does nothing
-here, because **the authority itself was computed across a race.** Provenance is adjudicated before
-the trees are walked, so an artifact edited between the two operations is described by *both* reads:
-the comparison sees the new bytes while the stale adjudication still calls that path pristine, and
-the difference is therefore attributed to the **engine**.
+The harvest adjudicates provenance from one read of the bundle and takes evidence from others. If the
+bundle changes **while the harvest runs**, the report can attribute a tier edit to the engine, with
+`status: complete` and no warning — the exact opposite of what this tool exists to establish.
 
-Measured (blind review round 6), one working-visual edit injected immediately after
-`adjudicate_generated_drift()` returned pristine and before the tree scan began:
+Four review rounds of PR #399 tried to close it, and each fix was defeated by a read the previous
+enumeration had not modelled:
 
-| | round 5 | round 7 |
+| round | window closed | how the next round defeated it |
 |---|---|---|
-| CLI exit | 0, stdout `complete` | **3** |
-| `status` | `complete`, no reasons | `incomplete`, race named |
-| `differing_files` | 1 | 1 |
-| `engine_internal` | **1** (a tier edit, on the engine) | **0** |
-| `unattributed` | 0 | 1 |
-| markdown | clean claim emitted | *Undetermined* |
-| `tamper_check()` on the same bundle | `DRIFT` | `DRIFT` |
+| 6 | adjudicate-before-scan | ABA: restore the bytes and both endpoint reads agree |
+| 7 | endpoint snapshot equality | `shapes_for_change()` re-reads the same files afterwards |
+| 8 | every **content** read carries its consumed digest | `glob("*.tmdl")` is a **membership** read — no bytes to digest |
+| 9 | — | the digest ledger is lossy: repeated reads overwrite, failed reads vanish |
 
-### ⚠️ And comparing two reads of the inventory does not detect it — ABA defeats that
+Round 8 demanded an enumeration on the theory that a small closed list makes the class fixable in one
+move. It produced **17 reads** (6 authority, 1 discovery, 9 evidence, 1 metadata) — and the way it was
+wrong matters more than the count: it classified **content** reads, while round 9's findings were a
+**membership** read and **repeated/failed** reads. The taxonomy is open, so the criterion decided
+against the guarantee and **race detection was descoped.**
 
-Round 6's fix re-read the inventory after the comparison and diffed the endpoints. Blind review
-round 7 broke it in one move: **change a working visual before the scan, let the scan consume the
-changed bytes, restore the original before the closing read.** Both endpoints matched, so the run
-reported `snapshot_race.count = 0`, `status = complete`, `engine_internal = 1` for a real tier edit,
-and emitted the clean claim. Endpoint equality proves that two reads agreed — never that nothing
-happened between them.
+What ships instead is an honest report. `concurrency.verified` is `false` in every JSON payload, and
+the markdown prints the caveat beside its own conclusion — clean or not:
 
-The fix is a different question. Do not ask *"did the bundle change?"*; ask **"are the bytes the
-comparison read the bytes provenance was decided from?"** `hash_tree` already hashes every file the
-delta is computed from, so `TreeDelta` now carries those digests and each is checked against the
-adjudication snapshot. There is no window, because the observation *is* the evidence — the same
-"ask the authority that already has the answer" move that closed rounds 5 and 6.
+> ⚠️ **Attribution assumes the bundle was not modified during the harvest. This is NOT verified.**
 
-Consequences, all measured:
+Descoping the detector *without* descoping the claim would have shipped the false confidence with
+none of the partial protection, which is strictly worse than either shipping or not shipping.
 
-* **Cost falls to zero.** Round 6's closing re-read cost +4.2 s (+35 %) on the estate bundle; the
-  digests are a by-product of a read already paid for. The estate harvest is back to its round-5
-  wall clock.
-* **The withdrawal moved into `_scan_pairs`.** Doing it afterwards corrected `records` and left the
-  already-built `pairs[]` rows stale — one report said `unattributed=1, engine_internal=0` at the top
-  and `{"engine_internal": 1}` in the pair row. Withdrawing where the records are made keeps them
-  consistent by construction, and a test asserts the two tallies agree on both a raced and a still
-  bundle.
-* **A race that cannot name its paths withdraws everything.** Round 6 reported a failed closing read
-  as a race targeting the bundle *root*, which matched no record: exit 3, and a body still claiming
-  `engine_internal=2, coverage.complete=true`. There is no closing read any more, and the one
-  remaining unnameable case — a traversal failure `os.walk` cannot locate — is emitted as
-  `scoped: false` and withdraws every non-tamper claim.
-* **Boundary, stated rather than glossed:** a file *created* mid-scan that the engine never recorded
-  has no snapshot assumption to contradict, so it is not a race by this mechanism. It remains
-  fail-safe by a different one — `unrecorded` is never attributed to the engine, so it is
-  `unattributed` and the run is `incomplete`. Round 6 named it; round 7 trades that diagnostic for
-  closing ABA. A file *restored* mid-scan after being deleted **is** caught, because the snapshot
-  does have an opinion about it.
-* Every estate figure in §3 is unchanged, and `snapshot_race.count` is **0** on that bundle.
+Every reproduction, the full enumeration, and what a real fix would need — a guarantee about the
+**input** (an OS-level snapshot, a copy, or an asserted exclusivity) rather than one that depends on
+having enumerated every read — are in
+[issue #418](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/418).
 
 ---
 

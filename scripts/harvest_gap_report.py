@@ -28,6 +28,23 @@ STATUS_COMPLETE = "complete"
 STATUS_INCOMPLETE = "incomplete"
 STATUS_UNTRUSTWORTHY = "untrustworthy"
 
+# ⚠️ Printed beside EVERY conclusion this report reaches, clean or not.
+#
+# The harvest attributes provenance from one read of the bundle and takes evidence from others, so
+# a bundle edited WHILE it runs can have a tier edit attributed to the engine, with `status:
+# complete` and nothing to show for it. Four review rounds of PR #399 tried to detect that; each fix
+# was defeated by a read the previous enumeration had not modelled, and the guarantee was withdrawn.
+#
+# Descoping the detector WITHOUT descoping the claim would have shipped the false confidence with
+# none of the partial protection - strictly worse than either shipping or not shipping. So the
+# limitation is stated where the conclusion is read, not only in the JSON a human may never open.
+CONCURRENCY_CAVEAT = (
+    "> ⚠️ **Attribution assumes the bundle was not modified during the harvest. This is NOT"
+    " verified.** A concurrent write can make this report attribute a tier edit to the engine"
+    " without any warning - see issue #418 for the reproductions and what a real fix needs. Harvest"
+    " a bundle nothing else is writing to."
+)
+
 
 def _provenance_names(report: dict[str, Any]) -> list[str]:
     """The provenance vocabulary, in the order the harvest wrote it."""
@@ -217,13 +234,14 @@ def _tier_edit_section(report: dict[str, Any], top: int) -> list[str]:
                 f"| {record['unit']} | {record['layer']} | `{record['path']}` |"
                 f" {', '.join(record['shapes'])} | {record['declared_by'] or '**undeclared**'} |"
             )
-        return lines
+        return lines + ["", CONCURRENCY_CAVEAT]
     if _tier_edits_determined(report):
         lines.append(
             "**None.** Every differing byte in this bundle is still hash-identical to what the engine"
             " itself recorded, so nothing here shows work a human or agent had to do. A bundle with no"
             " fix pass cannot answer issue #274's question, and this report does not pretend it can."
         )
+        lines += ["", CONCURRENCY_CAVEAT]
         return lines
     provenance = report["provenance"]
     lines.append(
