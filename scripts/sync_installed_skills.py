@@ -425,6 +425,11 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
         type=Path,
         help=f"explicit installed plugin root; also supported via {PLUGIN_ROOT_ENV}",
     )
+    parser.add_argument(
+        "--installed-plugins-root",
+        type=Path,
+        help="override the ~/.copilot/installed-plugins tree that is scanned for the bundles",
+    )
     args = parser.parse_args(argv)
 
     # The fetch happens before anything else, so its outcome survives into the failure payload too -
@@ -473,7 +478,11 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
         # unmerged bundle name made discovery select an unrelated second plugin, and a plain sync
         # exited 0 while overwriting it and deleting its own bundle.
         bundles = sorted(p.name for p in src.iterdir() if p.is_dir())
-        discovery = discover_skill_plugin(plugin_root_override=args.plugin_root, bundles=bundles)
+        discovery = discover_skill_plugin(
+            installed_plugins_root=args.installed_plugins_root,
+            plugin_root_override=args.plugin_root,
+            bundles=bundles,
+        )
         base = {
             "source": source.kind,
             "ref": source.ref,

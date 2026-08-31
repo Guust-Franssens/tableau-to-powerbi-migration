@@ -791,6 +791,35 @@ def test_discovery_is_handed_the_merged_inventory_not_the_branch_one(
     assert "branch-only-bundle" not in (seen.get("bundles") or [])
 
 
+def test_a_branch_added_bundle_cannot_hijack_and_wipe_an_unrelated_plugin(
+    estate: Estate, tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """End-to-end repro of review finding 2, including the data loss it caused.
+
+    Two installed plugins under one scan root: ours, and a stranger's carrying only a bundle this
+    branch has invented. Review measured that the branch-derived inventory made discovery select the
+    STRANGER, after which a plain sync exited 0, copied our bundles into it and deleted its own.
+    """
+    root = tmp_path / "installed-plugins"
+    ours = root / "mkt-a" / "plug-a" / "skills"
+    stranger = root / "mkt-b" / "plug-b" / "skills" / "branch-only-bundle"
+    (ours / FIRST_BUNDLE).mkdir(parents=True)
+    # Discovery is by CONTENT, so our plugin must already carry a merged bundle to be findable at
+    # all - which is the realistic state: installed, and slightly out of date.
+    (ours / FIRST_BUNDLE / "SKILL.md").write_text("# stale\nold\n", encoding="utf-8")
+    stranger.mkdir(parents=True)
+    (stranger / "SKILL.md").write_text("a different project's bundle\n", encoding="utf-8")
+
+    _add_branch_only_bundle(estate)
+    code = sync.main(["--installed-plugins-root", str(root)])
+    capsys.readouterr()
+
+    assert code == sync.EXIT_OK
+    assert _read_installed(ours.parent) == f"# {FIRST_BUNDLE}\nmerged\n", "the merged bundles land in OUR plugin"
+    assert (stranger / "SKILL.md").read_text(encoding="utf-8") == "a different project's bundle\n"
+    assert not (stranger.parent / FIRST_BUNDLE).exists(), "nothing may be written into the stranger's plugin"
+
+
 def test_a_branch_added_bundle_is_reported_as_an_unmerged_edit(estate: Estate, capsys: pytest.CaptureFixture) -> None:
     """It must not be invisible either - review measured `local_unmerged=[]` while preflight went red."""
     _run(estate)
