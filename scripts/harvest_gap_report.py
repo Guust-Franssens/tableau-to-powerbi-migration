@@ -21,6 +21,13 @@ from typing import Any
 # the dependency one-way and lets these renderers be exercised on a literal dict.
 DEFAULT_TOP = 12
 
+# The harvest's three verdicts. Defined HERE, in the module with no dependencies, so the renderer can
+# ask "is this run complete?" from the authoritative constant instead of a duplicated string literal;
+# `harvest_engine_gaps` imports and re-exports them.
+STATUS_COMPLETE = "complete"
+STATUS_INCOMPLETE = "incomplete"
+STATUS_UNTRUSTWORTHY = "untrustworthy"
+
 
 def _provenance_names(report: dict[str, Any]) -> list[str]:
     """The provenance vocabulary, in the order the harvest wrote it."""

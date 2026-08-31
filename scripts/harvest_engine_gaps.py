@@ -89,7 +89,14 @@ from check_migration_progress import (
     adjudicate_generated_drift,
     load_generated_artifact_baseline,
 )
-from harvest_gap_report import DEFAULT_TOP, render, render_markdown
+from harvest_gap_report import (
+    DEFAULT_TOP,
+    STATUS_COMPLETE,
+    STATUS_INCOMPLETE,
+    STATUS_UNTRUSTWORTHY,
+    render,
+    render_markdown,
+)
 from harvest_gap_shapes import (
     SHAPE_POST_ENGINE_CHANGE,
     SHAPE_REVERTED,
@@ -105,9 +112,9 @@ EXIT_UNTRUSTWORTHY = 1
 EXIT_USAGE = 2
 EXIT_INCOMPLETE = 3
 
-STATUS_COMPLETE = "complete"
-STATUS_INCOMPLETE = "incomplete"
-STATUS_UNTRUSTWORTHY = "untrustworthy"
+# STATUS_* are DEFINED in `harvest_gap_report` and re-exported here. They live there because that
+# module depends on nothing, so the pair stays one-way - and because the renderer must be able to ask
+# "is this run complete?" from the authoritative constant rather than a duplicated string literal.
 
 PROV_ENGINE = "engine_internal"
 PROV_TIER = "tier_edit"
