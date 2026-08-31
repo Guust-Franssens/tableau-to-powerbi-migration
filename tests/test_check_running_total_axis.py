@@ -862,6 +862,271 @@ def test_usage_errors_exit_two(tmp_path: Path, capsys: pytest.CaptureFixture) ->
 
 
 # --------------------------------------------------------------------------------------------
+# Round-2 review findings: four of the six were the gate being too AGGRESSIVE
+# --------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("label", "bound"),
+    [
+        ("foreign date column", "MAX('Date'[Date])"),
+        ("foreign end-of-period", "ENDOFMONTH('Date'[Date])"),
+        ("ALLEXCEPT keeps some filters", "MAXX(ALLEXCEPT('Orders', 'Orders'[Region]), 'Orders'[Order_Date])"),
+    ],
+)
+def test_an_as_of_bound_that_is_not_proven_to_move_is_unassessable(tmp_path: Path, label: str, bound: str) -> None:
+    """Finding 1, a FALSE POSITIVE. `_classify_bound` called ANY MAX-like call containing ANY column
+    reference context-dependent - it never consulted the compared column. A bound on a foreign date
+    may well be an as-of date reached through a relationship, and may equally be something else, so
+    the honest answer is `unassessable`. `ALLEXCEPT` keeps the filters on the columns it names, so
+    the bound may still move: also unresolved, never a verdict."""
+    expression = f"CALCULATE(SUM('Orders'[Sales]), FILTER(ALL('Orders'[Order_Date]), 'Orders'[Order_Date] <= {bound}))"
+    report = crta.scan(_as_of_bundle(tmp_path, "Orders", "Order_Month", expression))
+    assert verdicts(report) == ["unassessable"], f"{label}: " + crta.render(report)
+    assert report["mismatches"] == 0
+
+
+@pytest.mark.parametrize(
+    ("label", "bound"),
+    [
+        ("ALL removes every visual filter", "MAXX(ALL('Orders'), 'Orders'[Order_Date])"),
+        ("REMOVEFILTERS is ALL by another name", "CALCULATE(MAX('Orders'[Order_Date]), REMOVEFILTERS('Orders'))"),
+        ("ALLSELECTED ignores the visual's own row", "MAXX(ALLSELECTED('Orders'), 'Orders'[Order_Date])"),
+    ],
+)
+def test_an_as_of_bound_that_removes_context_is_not_an_accumulation(tmp_path: Path, label: str, bound: str) -> None:
+    """Finding 1, second half. `MAXX(ALL('Orders'), 'Orders'[Order_Date])` explicitly discards every
+    visual filter, so it evaluates to ONE global constant and cannot move with the axis. It is a
+    pinned cutoff wearing a `MAX`, and per-bucket totals are its point - not a running total at all."""
+    expression = (
+        f"VAR _asOf = {bound} RETURN CALCULATE(SUM('Orders'[Sales]), FILTER(ALL('Orders'[Order_Date]), "
+        "'Orders'[Order_Date] <= _asOf))"
+    )
+    report = crta.scan(_as_of_bundle(tmp_path, "Orders", "Order_Month", expression))
+    assert report["status"] == crta.STATUS_NOT_APPLICABLE, f"{label}: " + crta.render(report)
+
+
+@pytest.mark.parametrize(
+    ("label", "predicate"),
+    [
+        ("<> is not <", "'Orders'[Order_Date] <> MAX('Orders'[Order_Date])"),
+        (">= is not an upper bound", "'Orders'[Order_Date] >= MAX('Orders'[Order_Date])"),
+        (
+            "a nested < is not the predicate",
+            "'Orders'[Region] = IF('Orders'[Order_Date] < MAX('Orders'[Order_Date]), \"a\", \"b\")",
+        ),
+        ("a < inside a string is text", "'Orders'[Region] = \"a < b\""),
+        ("a < inside a quoted table name is a name", "'Orders'[Region] = 'a<b'[X]"),
+    ],
+)
+def test_only_a_top_level_less_than_is_an_as_of_predicate(tmp_path: Path, label: str, predicate: str) -> None:
+    """Finding 2, a FALSE POSITIVE. The comparison regex excluded only a following `=`, so it matched
+    the `<` inside DAX's `<>` operator and every ordinary exclusion filter became a running total.
+    Measured: `FILTER(ALL('Date'[Date]), 'Date'[Date] <> MAX('Date'[Date]))` on a month axis exited
+    1. The operator is now parsed at depth 0, outside string literals, longest form first."""
+    expression = f"CALCULATE(SUM('Orders'[Sales]), FILTER(ALL('Orders'[Order_Date]), {predicate}))"
+    report = crta.scan(_as_of_bundle(tmp_path, "Orders", "Order_Month", expression))
+    assert report["status"] == crta.STATUS_NOT_APPLICABLE, f"{label}: " + crta.render(report)
+    assert report["mismatches"] == 0
+
+
+SAFE_CALL = (
+    "CALCULATE(SUM('Orders'[Sales]), FILTER(ALL('Orders'[Order_Date], 'Orders'[Order_Month]), "
+    "'Orders'[Order_Date] <= MAX('Orders'[Order_Date])))"
+)
+DEFECTIVE_CALL = (
+    "CALCULATE(SUM('Orders'[Sales]), FILTER(ALL('Orders'[Order_Date]), "
+    "'Orders'[Order_Date] <= MAX('Orders'[Order_Date])))"
+)
+
+
+@pytest.mark.parametrize("order", ["safe first", "defective first"])
+def test_a_safe_as_of_call_cannot_excuse_a_defective_one_in_the_same_measure(tmp_path: Path, order: str) -> None:
+    """Finding 3. `_classify_as_of` returned after the FIRST qualifying `FILTER`, recreating exactly
+    the order-dependent hole round 1 fixed for multiple `WINDOW` calls: a measure whose first term
+    clears both `Order_Date` and `Order_Month` printed OK while its second term, clearing only
+    `Order_Date`, degenerated to monthly totals on the same axis. Both orders must fail, because the
+    defect is the second call's own - the cleared sets must NOT be unioned."""
+    terms = [SAFE_CALL, DEFECTIVE_CALL] if order == "safe first" else [DEFECTIVE_CALL, SAFE_CALL]
+    report = crta.scan(_as_of_bundle(tmp_path, "Orders", "Order_Month", " + ".join(terms)))
+    assert verdicts(report) == ["mismatch"], f"{order}: " + crta.render(report)
+    assert report["pairs"][0]["findings"][0]["as_of_calls"] == 2
+
+
+def _aggregated_projection(entity: str, prop: str, function: int = 3) -> dict:
+    """A PBIR projection whose `field` IS an `Aggregation` - the shape 377 estate projections use."""
+    return {
+        "field": {
+            "Aggregation": {
+                "Expression": {"Column": {"Expression": {"SourceRef": {"Entity": entity}}, "Property": prop}},
+                "Function": function,
+            }
+        },
+        "queryRef": f"Max({entity}.{prop})",
+    }
+
+
+def test_an_aggregated_projection_does_not_group_the_query(tmp_path: Path) -> None:
+    """Finding 4, a FALSE POSITIVE. The reused generic `_walk` extracts the source `Column` nested
+    inside an `Aggregation`, and `VisualBinding.columns()` then treated it as a grouping column - so
+    a visual grouped only by `Region`, with `MAX(Orders[Order_Month])` as an aggregated TOOLTIP,
+    exited 1. An aggregated value collapses; it does not add a GROUP BY. Measured across the estate
+    and `examples/`: 709 visuals, 1248 role bodies, 377 top-level `Aggregation` nodes, EVERY one of
+    them wrapping a `Column`."""
+    bundle = build_bundle(
+        tmp_path,
+        _measures_tmdl(_measure("Running Sales", AS_OF)),
+        {
+            "Category": {"projections": [_column_projection("Orders", "Region")]},
+            "Tooltips": {"projections": [_aggregated_projection("Orders", "Order_Month")]},
+            "Y": {"projections": [_measure_projection("_Measures", "Running Sales")]},
+        },
+    )
+    report = crta.scan(bundle)
+    assert verdicts(report) == ["ok"], crta.render(report)
+    assert codes(report) == ["axis_not_a_date_grain"]
+    assert report["pairs"][0]["findings"][0]["not_flagged"] == ["'Orders'[Region]"]
+
+
+def test_a_visual_whose_only_column_is_aggregated_has_no_grouping_column(tmp_path: Path) -> None:
+    """The conservative half of finding 4: removing a column from the grouping set must not turn an
+    unassessable visual into a clean one. With nothing left to group by, the honest verdict is the
+    same `no_grouping_column` a card gets - exit 3, never exit 0."""
+    bundle = build_bundle(
+        tmp_path,
+        _measures_tmdl(_measure("Running Sales", AS_OF)),
+        {
+            "Tooltips": {"projections": [_aggregated_projection("Orders", "Order_Month")]},
+            "Y": {"projections": [_measure_projection("_Measures", "Running Sales")]},
+        },
+    )
+    report = crta.scan(bundle)
+    assert codes(report) == ["no_grouping_column"]
+    assert report["status"] == crta.STATUS_UNASSESSABLE
+
+
+@pytest.mark.parametrize("partition", ["Order_Month", "Order Quarter", "Order Month Label"])
+def test_a_partition_beside_the_addressed_date_is_unassessable_not_a_mismatch(tmp_path: Path, partition: str) -> None:
+    """Finding 5, a FALSE POSITIVE. Every same-table date-derived survivor was called a mismatch,
+    even when the addressed date ITSELF is projected. Measured on the estate's unmarked fact model:
+    the canonical as-of on `Orders.csv[Order_Date]` with `Order Date (Year)` as the series
+    accumulates `10 -> 30`, resets, then `100 -> 300` - it does NOT become each bucket's own total,
+    so `mismatch` states something false. It is not provably RIGHT either (a year-restarting running
+    total is a deliberate Tableau shape and an accidental legend produces identical bytes), so the
+    verdict is `unassessable`: exit 3, never a pass."""
+    bundle = build_bundle(
+        tmp_path,
+        _measures_tmdl(_measure("Running Sales", AS_OF)),
+        {
+            "Category": {"projections": [_column_projection("Orders", "Order_Date")]},
+            "Series": {"projections": [_column_projection("Orders", partition)]},
+            "Y": {"projections": [_measure_projection("_Measures", "Running Sales")]},
+        },
+    )
+    report = crta.scan(bundle)
+    assert verdicts(report) == ["unassessable"], crta.render(report)
+    assert codes(report) == ["axis_partitions_accumulation"]
+    assert report["mismatches"] == 0
+
+
+def test_the_addressed_date_must_actually_GROUP_to_earn_the_partition_reading(tmp_path: Path) -> None:
+    """The seam between findings 4 and 5, and the one way finding 5's fix could reopen a false
+    negative: an AGGREGATED `Order_Date` is projected but does not group, so the axis is still
+    coarser-only and the accumulation really does collapse to the bucket's own total. Mismatch."""
+    bundle = build_bundle(
+        tmp_path,
+        _measures_tmdl(_measure("Running Sales", AS_OF)),
+        {
+            "Category": {"projections": [_column_projection("Orders", "Order_Month")]},
+            "Tooltips": {"projections": [_aggregated_projection("Orders", "Order_Date")]},
+            "Y": {"projections": [_measure_projection("_Measures", "Running Sales")]},
+        },
+    )
+    report = crta.scan(bundle)
+    assert verdicts(report) == ["mismatch"], crta.render(report)
+    assert codes(report) == ["axis_grain_not_cleared"]
+
+
+def test_every_mutation_in_the_harness_names_a_symbol_that_still_exists() -> None:
+    """Finding 6, and the reason it is a test rather than a comment. After the module split the
+    finding-2 mutation still referenced `crta._DATE_TYPES`, which had moved to `dax_grain`. The
+    patched function raised `AttributeError`, pytest reported the expected test as FAILED, and the
+    harness scored CAUGHT - a named test failure indistinguishable from a genuine catch, without
+    the intended mutation ever running. A stale symbol is now a build failure here."""
+    import ast  # pylint: disable=import-outside-toplevel
+    import check_unit  # pylint: disable=import-outside-toplevel
+
+    import _mutation_probe_kit as kit  # pylint: disable=import-outside-toplevel
+    import mutation_harness_running_total_axis as harness  # pylint: disable=import-outside-toplevel
+
+    modules = {"crta": crta, "dg": dg, "check_unit": check_unit, "kit": kit, "harness": harness}
+    snippets = {name: code for name, (code, _) in harness.MUTATIONS.items()}
+    snippets.update(harness.CONTROLS)
+    snippets.update({f"{name}:probe": probe for name, probe in harness.PROBES.items()})
+    stale: list[str] = []
+    for name, code in snippets.items():
+        tree = ast.parse(code)
+        # An attribute a snippet CREATES is legitimate; only a READ of a symbol that never existed
+        # is the finding-6 defect.
+        created = {
+            f"{target.value.id}.{target.attr}"
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            for target in node.targets
+            if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name)
+        }
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Attribute) or not isinstance(node.value, ast.Name):
+                continue
+            module = modules.get(node.value.id)
+            reference = f"{node.value.id}.{node.attr}"
+            if module is not None and reference not in created and not hasattr(module, node.attr):
+                stale.append(f"{name}: {reference}")
+    assert not stale, "mutation snippets reference symbols that no longer exist: " + "; ".join(sorted(set(stale)))
+
+
+def test_every_mutation_declares_a_probe_that_proves_it_executes() -> None:
+    """The other half of finding 6: an identity assertion proves a patch was APPLIED, never that the
+    patched code RUNS or does what the table claims. Every mutation must ship a plugin-time probe,
+    and that probe must at least CALL something and ASSERT something.
+
+    Measured why the second half matters: replacing the stale-symbol mutation's probe with a bare
+    `pass` made the harness score it CAUGHT again - one line reinstated the whole finding."""
+    import mutation_harness_running_total_axis as harness  # pylint: disable=import-outside-toplevel
+
+    missing = sorted(set(harness.MUTATIONS) - set(harness.PROBES))
+    assert not missing, "mutations with no intended-behaviour probe: " + ", ".join(missing)
+    trivial = sorted(
+        f"{name}: {why}" for name, probe in harness.PROBES.items() if (why := harness.probe_is_trivial(probe))
+    )
+    assert not trivial, "probes that prove nothing: " + "; ".join(trivial)
+    for name, probe in harness.CONTROL_PROBES.items():
+        assert harness.probe_is_trivial(probe) is None, f"control probe {name} proves nothing"
+
+
+@pytest.mark.parametrize(
+    ("label", "output", "expected"),
+    [
+        ("a real failure", "FAILED tests/t.py::test_a - AssertionError", ["test_a"]),
+        ("a parametrised failure", "FAILED tests/t.py::test_a[Order Quarter] - X", ["test_a"]),
+        ("a COLLECTION error is not a catch", "ERROR tests/t.py::TestThing", []),
+        ("an error line plus a summary", "ERROR tests/t.py\n2 errors in 0.1s", []),
+        ("a non-anchored mention is not a catch", "  see FAILED tests/t.py::test_a", []),
+    ],
+)
+def test_only_anchored_FAILED_lines_count_as_a_catch(label: str, output: str, expected: list[str]) -> None:
+    """`ERROR path::TestName` is a COLLECTION failure - no test ran - and scoring it as a catch is
+    the exact bug blind review found in `tests/mutation_harness.py`, which credited any non-zero
+    pytest exit. Its mirror image, a dying `xdist` worker printing `FAILED path::test_name` for a
+    test that never ran, is refused a level up by the harness's broken-run markers instead, because
+    at this line it is genuinely indistinguishable from a real failure."""
+    import mutation_harness_running_total_axis as harness  # pylint: disable=import-outside-toplevel
+
+    assert harness._named_failures(output) == expected, label  # pylint: disable=protected-access
+    assert any(marker in "worker gw0 crashed while running 'x'" for marker in harness._BROKEN_RUN_MARKERS)  # pylint: disable=protected-access
+
+
+# --------------------------------------------------------------------------------------------
 # The false-positive net: committed, shipping evidence
 # --------------------------------------------------------------------------------------------
 

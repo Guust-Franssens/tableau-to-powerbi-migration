@@ -39,10 +39,15 @@ The two mechanisms, and the ONE invariant each
 2. **As-of filter** - `CALCULATE(<agg>, FILTER(ALL(t[c], ...), t[c] <= MAX(t[c])))`. `ALL` clears
    only the columns it names; a coarser same-table date grain left on the visual survives, so the
    rows are restricted to that bucket and the "running total" becomes the bucket's own total.
-   **Invariant: a projected column on the compared column's table must be cleared, or be the
-   compared column itself.** The bound must MOVE with the visual (a `MAX` of the compared column, or
-   a `VAR` resolving to one); a pinned `<= DATE(2024,12,31)` is an ordinary "through cutoff" measure
-   whose per-bucket totals are the point, and is not classified at all.
+   **Invariant: for EVERY as-of call in the measure, independently, a grouping column on the
+   compared column's table must be cleared, or be the compared column itself.** Independently is
+   load-bearing: a term clearing both `Order_Date` and `Order Date (Month)` must not supply the
+   month clearance for a second term that clears neither, so the cleared sets are never unioned.
+   The bound must be PROVEN to move with the visual - a `MAX`-like call reading the compared column
+   with no `ALL`/`REMOVEFILTERS` around it, or a `VAR` resolving to one. A pinned `<= DATE(2024,12,31)`
+   and a `MAXX(ALL(t), t[c])` that discards every visual filter are both ordinary "through cutoff"
+   measures whose per-bucket totals are the point, and are not classified at all; a foreign-date
+   bound is `unassessable`.
 
 3. **Period-to-date** - `TOTALYTD`/`DATESYTD`/`DATESMTD`/`DATESQTD` and friends. Time intelligence
    auto-removes filters from the other columns of a table marked `dataCategory: Time`, which is what
@@ -55,17 +60,35 @@ Two words this module refuses to conflate: PROXY and PROPERTY
 Blind review found four defects that were all one mistake - deciding "safe" from something merely
 correlated with safety. Each is now decided from the property itself, and the proxies are gone:
 
-* **a curated axis-role list; empty => "axis cleared"** -> EVERY projected column groups the query,
-  so all of them are examined, and an empty projection is `unassessable`, not clean. `AXIS_ROLES`
-  survives as presentation only. Measured on the estate's Section 12 pivot: a `dateTime` bin under
-  the real `Columns` role exited 0 while the identical bin under `Rows` exited 1.
+* **a curated axis-role list; empty => "axis cleared"** -> EVERY column that GROUPS the query is
+  examined, and an empty grouping set is `unassessable`, not clean. `AXIS_ROLES` survives as
+  presentation only. Measured on the estate's Section 12 pivot: a `dateTime` bin under the real
+  `Columns` role exited 0 while the identical bin under `Rows` exited 1.
 * **declared `dataType` is not date => safe grain** -> declared type **or calculated lineage back to
   the anchor**. The engine writes its coarse bins as `Month = FORMAT('Date'[Date], "MMM")` and
   `Quarter = "Q" & QUARTER(...)`, with no `dataType` at all - 95 such columns in the 2026-08-29
   estate - and their filters survive exactly like a `dateTime` bin's.
-* **the FIRST window call** -> every window call in the measure.
+* **the FIRST window call** -> every window call in the measure. Round 2 found the same hole in the
+  as-of reader and closed it the same way: **every as-of call**, judged on its own cleared set.
 * **period-to-date => "by design" => not assessed** -> judged against the date-table marking;
   anything unproven is `unassessable`.
+
+And the mirror-image mistake, which round 2 found four times: deciding "UNSAFE" from something
+merely correlated with a defect. A false positive is the more dangerous direction, because it is
+what gets a gate switched off:
+
+* **a projected column => a grouping column** -> only a projection whose `field` IS a `Column` or a
+  `HierarchyLevel` groups the query. An `Aggregation` wrapping a column is a value computed per
+  group; measured across the estate + `examples/`, 377 projections are exactly that, so an
+  aggregated `MAX(Orders[Ship_Date])` tooltip was blocking a report grouped only by `Region`.
+* **`MAX(` in the bound => the bound moves with the visual** -> the bound must reference **the
+  compared column**, with no context removal around it.
+* **any `<` => an upper-bound predicate** -> the operator is parsed at depth 0 and outside strings,
+  so DAX's `<>` is no longer read as the `<` it begins with.
+* **an uncleared same-table date grain => the bucket's own total** -> only when the addressed date
+  is NOT itself grouping. When it IS, the accumulation runs along it and RESTARTS per bucket, which
+  is a legitimate period-partitioned running total or an accidental legend - identical bytes either
+  way, so `unassessable`, never `mismatch` and never a pass.
 
 What it DELIBERATELY does not flag
 ----------------------------------
@@ -78,15 +101,26 @@ and never counted as clean:
   not by the visual's grain, so there is nothing for an axis to disagree with. This is the only
   class dropped in silence, and deliberately: it is not a running total, so listing it would be the
   same noise as listing every other non-cumulative measure in the model.
-* **An unresolvable as-of bound** - a measure, a what-if parameter, a foreign column. It may well be
-  an as-of date; nothing proves it either way -> `unassessable`.
+* **An unresolvable as-of bound** - a measure, a what-if parameter, a foreign date column, or an
+  `ALLEXCEPT` that may or may not keep the axis filter. It may well be an as-of date; nothing proves
+  it either way -> `unassessable`.
+* **An as-of bound that removes filter context** - `MAXX(ALL(t), t[c])`, `REMOVEFILTERS`,
+  `ALLSELECTED`. It evaluates to one value the axis cannot change, so it is a pinned cutoff wearing
+  a `MAX` and is dropped with the fixed-window class above.
+* **A `<>`, `>=` or nested comparison.** Only a top-level `<`/`<=` is an as-of predicate. An
+  exclusion filter is not an accumulation, and reading `<>` as `<` blocked one (measured).
+* **An aggregated projection.** `MAX(t[c])` in a tooltip or a value slot does not group the query,
+  so it is not an axis and cannot survive an `ALL`.
 * **An explicit relation argument** to a window function. The relation then decides the ordering
   domain, not the visual, and a table expression cannot be resolved statically -> `unassessable`.
 * **A cross-table as-of filter.** Whether a `'Date'[Month Start]` axis reaches the fact table
   depends on the relationship graph and cross-filter direction -> `unassessable`.
-* **A visual that projects no grouping column at all** (a card, a KPI) -> `unassessable`, for every
-  shape. "The ordered column is not projected" is true there but says nothing about whether the
-  single-row result is wrong.
+* **A period-partitioned running total** - the addressed date is grouping AND an uncleared coarser
+  same-table grain is too. The accumulation runs and restarts per bucket; whether the restart was
+  asked for is not in the artifacts -> `unassessable`.
+* **A visual that projects no grouping column at all** (a card, a KPI, or one whose only column is
+  aggregated) -> `unassessable`, for every shape. "The ordered column is not projected" is true
+  there but says nothing about whether the single-row result is wrong.
 * **A grouping column named like a date part but proven to be neither** (no date type, no lineage to
   the anchor) -> `unassessable`. A name is not evidence enough to fail a build, but it is too much
   to wave through.
@@ -124,6 +158,7 @@ import argparse
 import json
 import sys
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import Any
 
@@ -142,6 +177,7 @@ from dax_grain import (
     GRAIN_DERIVED,
     GRAIN_SUSPECT,
     GRAIN_UNRELATED,
+    AsOfCall,
     ColumnRef,
     Cumulative,
     ModelFacts,
@@ -174,63 +210,107 @@ AXIS_ROLES = ("Category", "Rows", "Columns", "X", "Series", "Group", "Details")
 
 @dataclass
 class VisualBinding:
-    """One `visual.json` reduced to what this gate compares: its roles and their references."""
+    """One `visual.json` reduced to what this gate compares: its roles and their references.
+
+    Two reference sets, deliberately, because they answer different questions:
+
+    * `roles` - EVERY reference anywhere in the role, however deeply nested. "Does this visual bind
+      the measure?" is a reachability question, so it must see a reference wrapped in an
+      `Aggregation`, a `FillRule` or a `Subquery`.
+    * `grouping` - only the references that GROUP the generated query: a projection whose `field`
+      IS a `Column` or a `HierarchyLevel`. An aggregated projection does not group. Measured across
+      the estate + `examples/`: 709 visuals, 1248 role bodies, **377** top-level `Aggregation`
+      nodes, every one of them wrapping a `Column` - so reusing the generic walk here counted 377
+      aggregated values as grouping columns and blocked correct reports (review finding 4).
+    """
 
     file: Path
     visual: str
     visual_type: str
     roles: dict[str, list[FieldRef]]
+    grouping: dict[str, list[FieldRef]] = dataclass_field(default_factory=dict)
 
     def columns(self) -> list[FieldRef]:
-        """Every projected COLUMN, in any role - the window relation's candidate ordering keys."""
-        return [ref for refs in self.roles.values() for ref in refs if ref.kind == "Column"]
+        """Every GROUPING column, in any role - the window relation's candidate ordering keys."""
+        return [ref for refs in self.grouping.values() for ref in refs if ref.kind == "Column"]
 
     def axis_columns(self) -> list[FieldRef]:
-        """Projected columns in a role that puts them on the accumulation axis."""
-        return [ref for role in AXIS_ROLES for ref in self.roles.get(role, []) if ref.kind == "Column"]
+        """Grouping columns in a role that puts them on the accumulation axis."""
+        return [ref for role in AXIS_ROLES for ref in self.grouping.get(role, []) if ref.kind == "Column"]
 
     def measures(self) -> list[FieldRef]:
-        """Every measure this visual binds, in any role."""
+        """Every measure this visual binds, in any role and at any nesting depth."""
         return [ref for refs in self.roles.values() for ref in refs if ref.kind == "Measure"]
 
     def has_hierarchy(self) -> bool:
-        """Whether any role projects a hierarchy level, which may expand to an unnamed column."""
-        return any(ref.kind == "HierarchyLevel" for refs in self.roles.values() for ref in refs)
+        """Whether any role GROUPS by a hierarchy level, which may expand to an unnamed column."""
+        return any(ref.kind == "HierarchyLevel" for refs in self.grouping.values() for ref in refs)
+
+
+# The only two `field` nodes that put a column in the query's GROUP BY. Everything else at the top
+# of a projection - `Aggregation`, `Measure`, `NativeVisualCalculation`, `Arithmetic` - is a value
+# computed per group. Measured shape of the corpus: `Column` 740, `Aggregation` 377, `Measure` 372,
+# `NativeVisualCalculation` 6, and NO role body without a `projections` list, so nothing real is
+# lost by reading projections rather than walking the role wholesale.
+_GROUPING_NODES = ("Column", "HierarchyLevel")
+
+
+def _grouping_refs(body: Any, scope: dict[str, str], path: Path) -> list[FieldRef]:
+    """The references a role's projections put in the query's GROUP BY, and nothing else."""
+    refs: list[FieldRef] = []
+    projections = body.get("projections") if isinstance(body, dict) else None
+    if not isinstance(projections, list):
+        return refs
+    for projection in projections:
+        field = projection.get("field") if isinstance(projection, dict) else None
+        if not isinstance(field, dict):
+            continue
+        for kind in _GROUPING_NODES:
+            if isinstance(field.get(kind), dict):
+                _walk({kind: field[kind]}, scope, path, refs)
+                break
+    return refs
+
+
+def _read_visual(path: Path) -> VisualBinding | None:
+    """One `visual.json` as a binding, or None when it declares no query to compare against."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    visual = payload.get("visual") if isinstance(payload, dict) else None
+    if not isinstance(visual, dict):
+        return None
+    query = visual.get("query")
+    state = query.get("queryState") if isinstance(query, dict) else None
+    if not isinstance(state, dict):
+        return None
+    scope = _source_scope(query, {})
+    roles: dict[str, list[FieldRef]] = {}
+    grouping: dict[str, list[FieldRef]] = {}
+    for role, body in state.items():
+        refs: list[FieldRef] = []
+        _walk(body, scope, path, refs)
+        roles[role] = refs
+        grouping[role] = _grouping_refs(body, scope, path)
+    if not any(roles.values()):
+        return None
+    name = payload.get("name") if isinstance(payload.get("name"), str) else path.parent.name
+    kind = visual.get("visualType") if isinstance(visual.get("visualType"), str) else "unknown"
+    return VisualBinding(file=path, visual=name, visual_type=kind, roles=roles, grouping=grouping)
 
 
 def iter_visuals(report_dir: Path) -> list[VisualBinding]:
-    """Every `visual.json`'s query projections, kept PER ROLE.
+    """Every `visual.json`'s query projections, kept PER ROLE and split by whether they group.
 
     `check_field_bindings.iter_visual_queries` flattens roles away because it only asks whether a
     reference resolves. Here the role is the finding: `Category` is the accumulation axis and
     `Y`/`Tooltips` are not, so the two cannot share a reader.
     """
-    visuals: list[VisualBinding] = []
     definition = report_dir / "definition"
     root = definition if definition.is_dir() else report_dir
-    for path in sorted(root.rglob("visual.json")):
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            continue
-        visual = payload.get("visual") if isinstance(payload, dict) else None
-        if not isinstance(visual, dict):
-            continue
-        query = visual.get("query")
-        state = query.get("queryState") if isinstance(query, dict) else None
-        if not isinstance(state, dict):
-            continue
-        roles: dict[str, list[FieldRef]] = {}
-        for role, body in state.items():
-            refs: list[FieldRef] = []
-            _walk(body, _source_scope(query, {}), path, refs)
-            roles[role] = refs
-        if not any(roles.values()):
-            continue
-        name = payload.get("name") if isinstance(payload.get("name"), str) else path.parent.name
-        visual_type = visual.get("visualType") if isinstance(visual.get("visualType"), str) else "unknown"
-        visuals.append(VisualBinding(file=path, visual=name, visual_type=visual_type, roles=roles))
-    return visuals
+    found = (_read_visual(path) for path in sorted(root.rglob("visual.json")))
+    return [visual for visual in found if visual is not None]
 
 
 def _verdict(kind: str, code: str, detail: str, **extra: Any) -> dict[str, Any]:
@@ -297,10 +377,29 @@ def _judge_window(cumulative: Cumulative, visual: VisualBinding) -> dict[str, An
     )
 
 
-def _judge_same_table_survivors(
-    survivors: list[FieldRef], compared: ColumnRef, cumulative: Cumulative, facts: ModelFacts, axis: str
+def _judge_same_table_survivors(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    survivors: list[FieldRef],
+    compared: ColumnRef,
+    call: AsOfCall,
+    facts: ModelFacts,
+    axis: str,
+    anchor_projected: bool,
 ) -> dict[str, Any] | None:
-    """Grade the survivors that sit on the anchor's own table, or None when none of them decide it."""
+    """Grade the survivors that sit on the anchor's own table, or None when none of them decide it.
+
+    The verdict turns on ONE further question that used to be skipped: **is the addressed date
+    itself on the visual?**
+
+    * It is NOT -> a coarser-only axis. `MAX(t[c])` then evaluates to the end of the bucket, the
+      accumulation spans the whole bucket, and the "running total" is that bucket's own total.
+      Mismatch - this is the measured S14 defect.
+    * It IS -> the survivor PARTITIONS the accumulation instead of collapsing it. Measured on the
+      estate's unmarked fact model: the canonical as-of on `Orders.csv[Order_Date]` with
+      `Order Date (Year)` as the series accumulates `10 -> 30`, resets, `100 -> 300`. Calling that
+      "each bucket's own total" is simply false, and it blocked a correct report (review finding 5).
+      It is also not provably RIGHT - a year-restarting running total is a deliberate Tableau shape,
+      and an accidental legend produces identical bytes - so it is `unassessable`, never a pass.
+    """
     same_table = [ref for ref in survivors if ref.entity.casefold() == (compared.table or "").casefold()]
     # Keyed by the casefolded (table, column) tuple, NOT by the FieldRef: `check_field_bindings`'
     # dataclass is mutable and therefore unhashable, and using it as a dict key raised TypeError at
@@ -312,15 +411,28 @@ def _judge_same_table_survivors(
     }
     proven = [r for r in same_table if graded[ColumnRef(r.entity, r.prop).key()] in (GRAIN_DATE, GRAIN_DERIVED)]
     if proven:
+        named = ", ".join(f"'{r.entity}'[{r.prop}] ({graded[ColumnRef(r.entity, r.prop).key()]})" for r in proven)
+        if anchor_projected:
+            return _verdict(
+                "unassessable",
+                "axis_partitions_accumulation",
+                f"grouping column(s) {named} sit on {compared.qualified()}'s table and are NOT cleared, "
+                f"but {compared.qualified()} is itself projected, so the accumulation still runs along it "
+                "and RESTARTS at each bucket boundary. That is a legitimate period-partitioned running "
+                "total when it was asked for and a defect when it was not, and nothing in the artifacts "
+                "says which - compare the values against Tableau, or probe with EVALUATE",
+                compared=compared.qualified(),
+                cleared=[ref.qualified() for ref in call.cleared_columns],
+                axis=axis,
+            )
         return _verdict(
             "mismatch",
             "axis_grain_not_cleared",
-            "grouping column(s) "
-            + ", ".join(f"'{r.entity}'[{r.prop}] ({graded[ColumnRef(r.entity, r.prop).key()]})" for r in proven)
-            + f" sit on {compared.qualified()}'s table and are NOT cleared, so the surviving filter "
-            "restricts the rows to that bucket and the running total becomes the bucket's own total",
+            f"grouping column(s) {named} sit on {compared.qualified()}'s table and are NOT cleared, and "
+            f"{compared.qualified()} is not projected either, so the surviving filter restricts the rows "
+            "to that bucket and the running total becomes the bucket's own total",
             compared=compared.qualified(),
-            cleared=[ref.qualified() for ref in cumulative.cleared_columns],
+            cleared=[ref.qualified() for ref in call.cleared_columns],
             axis=axis,
         )
     suspect = [r for r in same_table if graded[ColumnRef(r.entity, r.prop).key()] == GRAIN_SUSPECT]
@@ -337,20 +449,42 @@ def _judge_same_table_survivors(
     return None
 
 
-def _judge_as_of(cumulative: Cumulative, visual: VisualBinding, facts: ModelFacts) -> dict[str, Any]:
-    """As-of filter: a surviving grouping column on the anchor's table truncates the accumulation.
+_AS_OF_PRECEDENCE = ("mismatch", "unassessable", "ok")
 
-    "Surviving" is decided from EVERY projected column, not from a curated axis-role list, and
-    "is it a date grain" is decided from lineage as well as declared type. Both of those used to be
-    proxies, and both let real defects through - see `AXIS_ROLES` and `dax_grain.ModelFacts`.
+
+def _judge_as_of(cumulative: Cumulative, visual: VisualBinding, facts: ModelFacts) -> dict[str, Any]:
+    """As-of filter: judge EVERY as-of call in the measure independently, worst verdict wins.
+
+    Independently is the load-bearing word. Reading only the first call - or, equivalently, judging
+    a UNION of every call's cleared columns - lets a term that clears `Order_Date` AND
+    `Order Date (Month)` supply the month clearance for a second term that clears neither, and the
+    second term is the one that degenerates (review finding 3).
     """
-    compared = cumulative.compared
-    assert compared is not None  # guarded by classify(); an unqualified compare is unassessable
     grouping, blocked = _grouping_or_reason(visual)
     if blocked is not None:
         return blocked
-    cleared = {ref.key() for ref in cumulative.cleared_columns} | {compared.key()}
-    cleared_tables = {name.casefold() for name in cumulative.cleared_tables}
+    verdicts = [_judge_one_as_of(call, grouping, visual, facts) for call in cumulative.as_of_calls]
+    for kind in _AS_OF_PRECEDENCE:
+        for verdict in verdicts:
+            if verdict["verdict"] == kind:
+                return {**verdict, "as_of_calls": len(verdicts)} if len(verdicts) > 1 else verdict
+    return _verdict("unassessable", "unreadable_grain", "the accumulation grain could not be read from the DAX")
+
+
+def _judge_one_as_of(
+    call: AsOfCall, grouping: list[FieldRef], visual: VisualBinding, facts: ModelFacts
+) -> dict[str, Any]:
+    """One as-of restriction against one visual: does a grouping column survive its `ALL(...)`?
+
+    "Surviving" is decided from EVERY grouping column, not from a curated axis-role list, and
+    "is it a date grain" is decided from lineage as well as declared type. Both of those used to be
+    proxies, and both let real defects through - see `AXIS_ROLES` and `dax_grain.ModelFacts`.
+    """
+    if not call.assessable:
+        return _verdict("unassessable", "as_of_filter", call.reason)
+    compared = call.compared
+    cleared = {ref.key() for ref in call.cleared_columns} | {compared.key()}
+    cleared_tables = {name.casefold() for name in call.cleared_tables}
     survivors = [
         ref
         for ref in grouping
@@ -359,9 +493,10 @@ def _judge_as_of(cumulative: Cumulative, visual: VisualBinding, facts: ModelFact
     caveat = _hierarchy_caveat(visual)
     if not survivors:
         return caveat or _verdict(
-            "ok", "axis_cleared", "every projected column is cleared by the as-of filter or is the compared column"
+            "ok", "axis_cleared", "every grouping column is cleared by the as-of filter or is the compared column"
         )
-    decided = _judge_same_table_survivors(survivors, compared, cumulative, facts, _axis_text(visual))
+    anchor_projected = any(ColumnRef(ref.entity, ref.prop).key() == compared.key() for ref in grouping)
+    decided = _judge_same_table_survivors(survivors, compared, call, facts, _axis_text(visual), anchor_projected)
     if decided is not None:
         return decided
     cross_table = [ref for ref in survivors if ref.entity.casefold() != (compared.table or "").casefold()]
@@ -534,7 +669,7 @@ def _judge(cumulative: Cumulative, visual: VisualBinding, facts: ModelFacts) -> 
         return _verdict("ok", "orders_by_visual_grain", cumulative.reason)
     if cumulative.shape == "period_to_date" and cumulative.compared is not None:
         return _judge_period_to_date(cumulative, visual, facts)
-    if cumulative.compared is not None:
+    if cumulative.as_of_calls:
         return _judge_as_of(cumulative, visual, facts)
     return _verdict("unassessable", "unreadable_grain", "the accumulation grain could not be read from the DAX")
 

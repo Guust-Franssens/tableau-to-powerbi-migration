@@ -82,13 +82,32 @@ _ALL_FUNCTION_RE = re.compile(r"^ALL(SELECTED|NOBLANKROW|CROSSFILTERED|EXCEPT)?$
 
 # An as-of bound that moves with the visual's current date. `MAX` is the canonical one; the
 # end-of-period family behaves identically because each is evaluated in the current filter context.
+# Matching one of these is NECESSARY and not sufficient - see `_classify_moving_bound`.
 _CONTEXT_BOUND_RE = re.compile(
     r"\b(MAX|MAXX|LASTDATE|LASTNONBLANK|ENDOFMONTH|ENDOFQUARTER|ENDOFYEAR|SELECTEDVALUE)\s*\(",
     re.IGNORECASE,
 )
+
+# Context REMOVAL inside the bound itself. `MAXX(ALL('Orders'), 'Orders'[Order_Date])` reads the
+# whole table with every visual filter discarded, so it evaluates to one global constant and cannot
+# move with the axis - it is a pinned cutoff wearing a `MAX`. Longest alternatives first so
+# `ALLSELECTED(` is never read as `ALL` + junk.
+_CONTEXT_REMOVAL_RE = re.compile(
+    r"\b(ALLEXCEPT|ALLSELECTED|ALLNOBLANKROW|ALLCROSSFILTERED|REMOVEFILTERS|ALL)\s*\(",
+    re.IGNORECASE,
+)
+
+# Every comparison DAX spells with `<`, `>` or `=`, longest first so `<>` and `<=` are recognised
+# BEFORE the `<` they both start with. Ordering is the whole fix for review finding 2: a regex that
+# excluded only a following `=` matched the `<` inside `<>`, and every ordinary exclusion filter
+# became a running total.
+_COMPARISON_OPERATORS = ("<=", ">=", "<>", "==", "=", "<", ">")
+_LOGICAL_OPERATORS = ("&&", "||")
 _VAR_RE = re.compile(
     r"\bVAR\s+(?P<name>[A-Za-z_]\w*)\s*=\s*(?P<body>.*?)(?=\bVAR\b|\bRETURN\b)", re.IGNORECASE | re.DOTALL
 )
+# How many `VAR` hops an as-of bound may be hoisted through before the chase is abandoned.
+_VAR_DEPTH = 4
 
 # Names that SUGGEST a date grain without proving one. Used only to route an otherwise-undecidable
 # grouping column to `unassessable`, never to a mismatch: a guess must not fail a build.
@@ -128,12 +147,31 @@ class ColumnRef:
 
 
 @dataclass
+class AsOfCall:
+    """ONE `FILTER(ALL(...), <col> <= <moving bound>)` restriction, judged entirely on its own.
+
+    A measure may carry several, and they are NOT interchangeable: each names its own compared
+    column and its own cleared set. Folding them into the `Cumulative` - a single `compared` plus a
+    UNION of every cleared column - is what let a safe first call excuse a defective later one
+    (review finding 3, and the same order-dependent hole round 1 fixed for multiple `WINDOW` calls).
+    The union is the specific trap: call A clearing `Order_Date` AND `Order Date (Month)` would
+    supply the month clearance that call B, which clears only `Order_Date`, does not have.
+    """
+
+    compared: ColumnRef
+    cleared_columns: list[ColumnRef] = field(default_factory=list)
+    cleared_tables: list[str] = field(default_factory=list)
+    assessable: bool = True
+    reason: str = ""
+
+
+@dataclass
 class Cumulative:  # pylint: disable=too-many-instance-attributes
     """One measure whose DAX declares an accumulation grain, plus how confidently we read it.
 
     Wide on purpose: the two mechanisms address a grain in structurally different ways (an ORDERBY
-    list versus a cleared-column set plus a compared column), and collapsing them into a shared
-    field would force every reader to remember which shape reused which slot.
+    list versus a list of independent as-of calls), and collapsing them into a shared field would
+    force every reader to remember which shape reused which slot.
     """
 
     table: str
@@ -143,8 +181,7 @@ class Cumulative:  # pylint: disable=too-many-instance-attributes
     line: int
     ordered_by: list[ColumnRef] = field(default_factory=list)
     partition_by: list[ColumnRef] = field(default_factory=list)
-    cleared_columns: list[ColumnRef] = field(default_factory=list)
-    cleared_tables: list[str] = field(default_factory=list)
+    as_of_calls: list[AsOfCall] = field(default_factory=list)
     compared: ColumnRef | None = None
     assessable: bool = True
     reason: str = ""
@@ -412,6 +449,40 @@ def _resolve_vars(expr: str) -> dict[str, str]:
     return {match.group("name").casefold(): match.group("body").strip() for match in _VAR_RE.finditer(expr)}
 
 
+def _same_column(ref: ColumnRef, compared: ColumnRef) -> bool:
+    """Whether two references name the same column, tolerating one of them being unqualified."""
+    if ref.column.casefold() != compared.column.casefold():
+        return False
+    if ref.table is None or compared.table is None:
+        return True
+    return ref.table.casefold() == compared.table.casefold()
+
+
+def _classify_moving_bound(text: str, compared: ColumnRef) -> str:
+    """Does a MAX-like bound PROVE it reads the compared column under the visual's filter context?
+
+    Matching `MAX(` is necessary and nowhere near sufficient, and reading it as sufficient blocked
+    correct reports (review finding 1). Two distinct ways a MAX-like bound does not move with the
+    visual, both measured on copied estate output:
+
+    * **context removal** - `MAXX(ALL('Orders.csv'), 'Orders.csv'[Order_Date])` discards every
+      visual filter by construction, so it is one global constant. `ALLEXCEPT` is the exception to
+      the exception: it KEEPS the filters on the columns it names, so the bound may still move and
+      the honest answer is `unresolved`.
+    * **a foreign column** - `MAX('Date'[Date])` bounding `'Orders'[Order_Date]` may well be an
+      as-of date reached through a relationship, and may equally be something else. Nothing here
+      proves it either way -> `unresolved`, never a verdict.
+    """
+    removal = _CONTEXT_REMOVAL_RE.search(text)
+    if removal is not None:
+        return BOUND_UNRESOLVED if removal.group(1).upper() == "ALLEXCEPT" else BOUND_CONSTANT
+    for match in _CONTEXT_BOUND_RE.finditer(text):
+        bodies = _call_bodies(text[match.start() :], match.group(1))
+        if bodies and any(_same_column(ref, compared) for ref in _column_refs(bodies[0])):
+            return BOUND_CONTEXT
+    return BOUND_UNRESOLVED
+
+
 def _classify_bound(bound: str, compared: ColumnRef, variables: dict[str, str], depth: int = 0) -> str:
     """Does this upper bound MOVE with the visual's current date, or is it pinned?
 
@@ -419,11 +490,13 @@ def _classify_bound(bound: str, compared: ColumnRef, variables: dict[str, str], 
     cutoff" measure, whose per-bucket totals are INTENDED. Reading only the `<=` operator classified
     `'Orders'[Order_Date] <= DATE(2024, 12, 31)` as a running total and blocked it - a false positive
     on a perfectly ordinary measure, which is the one failure mode that gets a gate switched off.
+    Reading only `MAX(` did the same thing to a foreign-date bound and to a bound that explicitly
+    removes every visual filter; see `_classify_moving_bound`.
     """
     text = bound.strip()
-    if _CONTEXT_BOUND_RE.search(text) and _column_refs(text):
-        return BOUND_CONTEXT
-    if depth < 4:
+    if _CONTEXT_BOUND_RE.search(text):
+        return _classify_moving_bound(text, compared)
+    if depth < _VAR_DEPTH:
         for name, body in variables.items():
             if re.search(rf"\b{re.escape(name)}\b", text, re.IGNORECASE):
                 return _classify_bound(body, compared, variables, depth + 1)
@@ -434,63 +507,142 @@ def _classify_bound(bound: str, compared: ColumnRef, variables: dict[str, str], 
     return BOUND_CONSTANT
 
 
+def _split_top_level(text: str, operators: tuple[str, ...]) -> list[tuple[str, str]]:
+    """Cut `text` at every depth-0 occurrence of one of `operators`, outside string literals.
+
+    Returns `(fragment, operator-that-ended-it)` pairs, the last operator being "". Written as a
+    scanner rather than a regex because DAX nests: `IF('T'[A] <= MAX('T'[A]), 1, 0)` contains a
+    comparison that is NOT the predicate's own, and a table name may contain any of these
+    characters inside its quotes.
+    """
+    parts: list[tuple[str, str]] = []
+    depth = 0
+    in_string = False
+    in_name = False
+    start = 0
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if in_string:
+            in_string = char != '"'
+            index += 1
+            continue
+        if in_name:
+            # A doubled `''` inside a quoted table name toggles out and straight back in, which is
+            # the same as skipping it - so no special case is needed.
+            in_name = char != "'"
+            index += 1
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "'":
+            in_name = True
+        elif char in "([":
+            depth += 1
+        elif char in ")]":
+            depth -= 1
+        elif depth == 0:
+            found = next((op for op in operators if text.startswith(op, index)), None)
+            if found is not None:
+                parts.append((text[start:index], found))
+                index += len(found)
+                start = index
+                continue
+        index += 1
+    parts.append((text[start:], ""))
+    return parts
+
+
+def _top_level_comparison(text: str) -> tuple[str, str, str] | None:
+    """The predicate's OUTERMOST comparison, as `(left, operator, right)`, or None.
+
+    Three things this refuses to do, each of them a measured false positive or a latent one:
+    a `<>` is never read as `<`; a comparison nested inside a call, a string literal or a quoted
+    table name is never read as the predicate's own; and a top-level `||` makes the whole predicate
+    unreadable, because a disjunction does not restrict rows the way an as-of filter does.
+    """
+    conjuncts = _split_top_level(text, _LOGICAL_OPERATORS)
+    if any(op == "||" for _, op in conjuncts):
+        return None
+    for fragment, _ in conjuncts:
+        parts = _split_top_level(fragment, _COMPARISON_OPERATORS)
+        if len(parts) < 2:
+            continue
+        return parts[0][0], parts[0][1], "".join(part for part, _ in parts[1:])
+    return None
+
+
 def _as_of_predicate(args: list[str], variables: dict[str, str]) -> tuple[ColumnRef, str] | None:
     """The compared column and the KIND of upper bound in an `<col> <= <bound>` as-of predicate."""
     if len(args) < 2:
         return None
-    match = re.search(r"(.+?)(<=|<)(?!=)(.*)", args[1], re.DOTALL)
-    if not match:
+    parsed = _top_level_comparison(args[1])
+    if parsed is None or parsed[1] not in ("<", "<="):
         return None
-    left = _column_refs(match.group(1))
+    left = _column_refs(parsed[0])
     if not left:
         return None
     compared = left[-1]
-    return compared, _classify_bound(match.group(3), compared, variables)
+    return compared, _classify_bound(parsed[2], compared, variables)
+
+
+def _read_as_of_call(body: str, variables: dict[str, str]) -> AsOfCall | None:
+    """Read ONE `FILTER(ALL(...), ...)` body as an as-of restriction, or None when it is not one."""
+    args = _split_arguments(body)
+    if not args:
+        return None
+    head = re.match(r"^([A-Za-z]+)\s*\(", args[0].strip())
+    if not head or not _ALL_FUNCTION_RE.match(head.group(1)):
+        return None
+    predicate = _as_of_predicate(args, variables)
+    if predicate is None:
+        return None
+    compared, bound = predicate
+    if bound == BOUND_CONSTANT:
+        # A pinned cutoff is NOT an accumulation - its per-bucket totals are the point.
+        return None
+    call = AsOfCall(compared=compared)
+    if head.group(1).upper() == "ALLEXCEPT":
+        call.assessable = False
+        call.reason = "ALLEXCEPT clears every column except the ones it names, which this gate does not model"
+        return call
+    cleared_body = _call_bodies(args[0], head.group(1))
+    cleared_text = cleared_body[0] if cleared_body else ""
+    call.cleared_columns = _column_refs(cleared_text)
+    call.cleared_tables = [
+        arg.strip().strip("'").replace("''", "'")
+        for arg in _split_arguments(cleared_text)
+        if arg.strip() and "[" not in arg
+    ]
+    if compared.table is None:
+        call.assessable = False
+        call.reason = "the as-of comparison uses an unqualified column, so its table is ambiguous"
+    elif bound == BOUND_UNRESOLVED:
+        call.assessable = False
+        call.reason = (
+            f"the as-of bound on {compared.qualified()} is a measure, parameter, foreign column or a "
+            "context-removing expression, so whether it moves with the visual's current date cannot "
+            "be read statically"
+        )
+    return call
 
 
 def _classify_as_of(expr: str, base: Cumulative) -> Cumulative | None:
-    """Read a `FILTER(ALL(...), t[c] <= ...)` running total, or record why it cannot be read."""
+    """Read EVERY `FILTER(ALL(...), t[c] <= ...)` running total in the measure, independently.
+
+    Returning after the first qualifying call judged a multi-term measure solely from its first
+    term (review finding 3): a term clearing both `Order_Date` and `Order Date (Month)` printed OK
+    while a second term clearing only `Order_Date` degenerated to monthly totals on the same axis.
+    """
     variables = _resolve_vars(expr)
-    for body in _call_bodies(expr, "FILTER"):
-        args = _split_arguments(body)
-        if not args:
-            continue
-        head = re.match(r"^([A-Za-z]+)\s*\(", args[0].strip())
-        if not head or not _ALL_FUNCTION_RE.match(head.group(1)):
-            continue
-        predicate = _as_of_predicate(args, variables)
-        if predicate is None:
-            continue
-        compared, bound = predicate
-        if bound == BOUND_CONSTANT:
-            # A pinned cutoff is NOT an accumulation - its per-bucket totals are the point. Keep
-            # looking: a later FILTER in the same measure may still be a real as-of.
-            continue
-        base.shape = "as_of_filter"
-        base.compared = compared
-        if head.group(1).upper() == "ALLEXCEPT":
-            base.assessable = False
-            base.reason = "ALLEXCEPT clears every column except the ones it names, which this gate does not model"
-            return base
-        cleared_body = _call_bodies(args[0], head.group(1))
-        cleared_text = cleared_body[0] if cleared_body else ""
-        base.cleared_columns = _column_refs(cleared_text)
-        base.cleared_tables = [
-            arg.strip().strip("'").replace("''", "'")
-            for arg in _split_arguments(cleared_text)
-            if arg.strip() and "[" not in arg
-        ]
-        if compared.table is None:
-            base.assessable = False
-            base.reason = "the as-of comparison uses an unqualified column, so its table is ambiguous"
-        elif bound == BOUND_UNRESOLVED:
-            base.assessable = False
-            base.reason = (
-                f"the as-of bound on {compared.qualified()} is a measure, parameter or foreign column, "
-                "so whether it moves with the visual's current date cannot be read statically"
-            )
-        return base
-    return None
+    calls = [call for body in _call_bodies(expr, "FILTER") if (call := _read_as_of_call(body, variables)) is not None]
+    if not calls:
+        return None
+    base.shape = "as_of_filter"
+    base.as_of_calls = calls
+    # Presentation and routing only. Every VERDICT is formed per call, from `as_of_calls`.
+    base.compared = calls[0].compared
+    return base
 
 
 def _classify_period_to_date(expr: str, base: Cumulative) -> Cumulative | None:
