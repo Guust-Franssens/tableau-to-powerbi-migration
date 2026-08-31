@@ -52,7 +52,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 # `redacted_note` is the chokepoint every attacker-influenced diagnostic in this module goes through,
 # so it is a hard module-level dependency rather than one of the lazy imports below.
-from tableau_env import redacted_note  # noqa: E402  # pylint: disable=wrong-import-position
+from tableau_env import redact, redacted_note  # noqa: E402  # pylint: disable=wrong-import-position
 
 LOG = logging.getLogger("tableau-render-capability")
 
@@ -668,9 +668,38 @@ def sign_in(base: str, site: str, pat_name: str, pat_secret_value: str, api: str
     req = urllib.request.Request(f"{base.rstrip('/')}/api/{api}/auth/signin", data=body, method="POST")
     req.add_header("Content-Type", "application/json")
     req.add_header("Accept", "application/json")
-    with urllib.request.urlopen(req, timeout=SIGNIN_TIMEOUT_SEC) as resp:
-        creds = json.loads(resp.read())["credentials"]
+    try:
+        with urllib.request.urlopen(req, timeout=SIGNIN_TIMEOUT_SEC) as resp:
+            creds = json.loads(resp.read())["credentials"]
+    except urllib.error.HTTPError as exc:
+        # ⚠️ THE REQUEST WE JUST SENT CONTAINS THE PAT, and `HTTPError`'s own message carries the
+        # server-controlled HTTP **reason phrase** -- a surface distinct from the response body, and
+        # one a reflecting proxy or WAF can fill with whatever it saw. Letting it escape prints the
+        # secret in an uncaught CLI traceback, and CI keeps its logs.
+        #
+        # `capture_tableau_oracle` has always caught this inside `_request`; this standalone sign-in,
+        # added for the #403 probe, did not -- the one leak in this PR that master does not have.
+        # Both the reason phrase and the body go through the chokepoint, which redacts each whole
+        # value before anything truncates it.
+        redactor = lambda text: redact(text, pat_secret_value, pat_name)  # noqa: E731
+        raise RuntimeError(
+            f"Tableau sign-in failed: HTTP {exc.code} "
+            f"{redacted_note(exc.reason, redactor, limit=120)} "
+            f"{redacted_note(_read_error_body(exc), redactor, limit=200)}"
+        ) from None
     return creds["token"], creds["site"]["id"]
+
+
+def _read_error_body(exc: urllib.error.HTTPError) -> bytes:
+    """The error body, or a description of why it could not be read. Never raises.
+
+    Reading it is itself a socket read and can time out or arrive truncated; an exception raised
+    inside the handler above would escape *unredacted*, which is the defect being fixed.
+    """
+    try:
+        return exc.read()
+    except OSError as read_exc:
+        return f"<error body unreadable: {type(read_exc).__name__}>".encode()
 
 
 def _cli_fetch(base: str, api: str, site_id: str, view_luid: str, token: str):

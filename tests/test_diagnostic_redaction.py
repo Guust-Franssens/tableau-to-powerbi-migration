@@ -40,6 +40,8 @@ import json
 import logging
 import re
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -506,25 +508,28 @@ MODULES = (
 )
 
 # Where response bytes ENTER, declared per function rather than inferred from a parameter's spelling.
-# Small on purpose: everything else is reached by propagation, and a new entry point has to be added
-# here deliberately. `test_the_declared_seeds_all_exist` fails if one goes stale.
+# ⚠️ Deliberately SMALL, and it shrank in round 7 rather than growing. `capture_view`'s `view` and
+# `log_progress`'s `record` were hand-seeded when the gate was found blind to the round-6 path defect;
+# both are now DERIVED, because taint propagates through return values -- `list_views` returns what
+# `get_json` gave it, `select_views` returns what `list_views` gave it, `main` loops over that, and the
+# value arrives at `capture_view` inter-procedurally. Round 7's lesson is that a hand-maintained list
+# nobody is forced to update is the shape that keeps generating findings, so the answer was to need
+# fewer entries, not to remember more. What remains is genuinely irreducible: the HTTP origin, the two
+# redactors, and the cross-module entry points, which propagation cannot see across a module boundary.
 TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
     ("scripts/capture_tableau_oracle.py", "_request"): set(),  # the origin: its RETURN is tainted
     ("scripts/capture_tableau_oracle.py", "classify_export_error"): {"text"},
     ("scripts/capture_tableau_oracle.py", "reflected_credential"): {"payload"},
     ("scripts/capture_tableau_oracle.py", "redact_text"): {"text"},
     ("scripts/capture_tableau_oracle.py", "_redact_response"): {"text"},
-    # ⚠️ `view` is a dict straight off `list_views()` -> `get_json`, so every string in it is response
-    # data: the name, the url name, the content url, the project. Seeded because WITHOUT it the gate
-    # was measurably blind to the round-6 defect itself -- reintroducing
-    # `safe_slug(view["name"])` as the filename produced ZERO findings, and only the runtime battery
-    # caught it. A static gate that cannot see the escape it was written for is worth saying out loud.
-    ("scripts/capture_tableau_oracle.py", "capture_view"): {"view"},
-    ("scripts/capture_tableau_oracle.py", "log_progress"): {"record"},
     ("scripts/tableau_render_capability.py", "format_matches"): {"body", "content_type"},
     ("scripts/tableau_render_capability.py", "classify_probe"): {"body", "content_type"},
     ("scripts/tableau_render_capability.py", "looks_like_svg"): {"body"},
     ("scripts/tableau_render_capability.py", "_identify"): {"head"},
+    # Cross-module entry points, flagged by `test_every_cross_module_call_carrying_tainted_data_...`.
+    # Propagation cannot see across a module boundary, so these are irreducible.
+    ("scripts/tableau_render_capability.py", "probe_render_capability"): {"views"},
+    ("scripts/tableau_render_capability.py", "apply_selected_tier"): {"report"},
     ("scripts/tableau_payload_facts.py", "detect_format"): {"values"},
     ("scripts/tableau_payload_facts.py", "summarise_csv"): {"payload"},
     ("scripts/tableau_payload_facts.py", "png_dimensions"): {"payload"},
@@ -551,6 +556,21 @@ CATEGORIES = (
     "SCRUBBED-AT-SINK:",
     "OUTBOUND:",  # our own request, travelling to Tableau -- not a response coming back
     "SHAPE-VERIFIED:",  # response-derived, but constrained to a shape that cannot carry a credential
+    "UNAUTHENTICATED-SOURCE:",  # came from a request that never carried a credential, so cannot reflect one
+)
+
+_SERVERINFO = (
+    "UNAUTHENTICATED-SOURCE: from `/serverinfo`, which `server_info` calls with no auth header and no "
+    "PAT in the body -- it never received a credential, so it cannot reflect one. It still reaches the "
+    "manifest, where `scrub_tree` covers it anyway"
+)
+_INTO_THE_MANIFEST_AGGREGATE = (
+    "SCRUBBED-AT-SINK: an aggregate on its way to the manifest; `scrub_tree` walks it whole, values "
+    "and keys, immediately before serialisation, and reports anything it had to redact"
+)
+_PROBE_VERDICT = (
+    "FIXED-VOCABULARY: one of classify_probe's three verdict literals, a ladder tier name, or an "
+    "api-version string this module itself chose"
 )
 
 _LUID_OK = (
@@ -597,6 +617,8 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "len(view_luid or '')": "NOT-A-STRING: a character count, reported instead of the rejected identifier",
     },
     ("scripts/capture_tableau_oracle.py", "log_progress"): {
+        "index": "NOT-A-STRING: an integer position in the loop",
+        "total": "NOT-A-STRING: an integer view count",
         "status": "FIXED-VOCABULARY: one of classify_export_error's status literals",
         "data.get('detail')": "REDACTED-UPSTREAM: classify_export_error builds every detail from `safe`",
         "data['row_count']": "NOT-A-STRING: an integer row count",
@@ -638,6 +660,7 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
     },
     ("scripts/capture_tableau_oracle.py", "sign_in"): {
         "status": "NOT-A-STRING: an HTTP status integer",
+        "delay": "NOT-A-STRING: a float backoff delay",
     },
     ("scripts/capture_tableau_oracle.py", "get_json"): {
         "status": "NOT-A-STRING: an HTTP status integer",
@@ -660,6 +683,7 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
     },
     ("scripts/tableau_render_capability.py", "classify_probe"): {
         "why": "REDACTED-UPSTREAM: `format_matches` builds it entirely from `redacted_note` output",
+        "status": "NOT-A-STRING: an HTTP status integer",
     },
     ("scripts/tableau_payload_facts.py", "summarise_csv"): {
         "header": (
@@ -679,6 +703,81 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "fmt": "FIXED-VOCABULARY: one of 'percent', 'currency', 'thousands_separated' or None",
         "len(body)": "NOT-A-STRING: an integer row count",
     },
+    ("scripts/tableau_render_capability.py", "_walk_one_tier"): {
+        "verdict": _PROBE_VERDICT,
+        "floor_verdict": _PROBE_VERDICT,
+        "detail": "REDACTED-UPSTREAM: classify_probe builds every detail through `redacted_note`",
+        "floor_detail": "REDACTED-UPSTREAM: classify_probe builds every detail through `redacted_note`",
+        "None if verdict == 'available' else None": "NOT-A-STRING: both arms are literally None",
+        "{'api': tier.min_api, 'verdict': floor_verdict, 'detail': floor_detail}": _INTO_THE_MANIFEST_AGGREGATE,
+    },
+    ("scripts/tableau_render_capability.py", "_walk_ladder"): {
+        "entry": _INTO_THE_MANIFEST_AGGREGATE,
+    },
+    ("scripts/tableau_render_capability.py", "detect"): {
+        "view_luid": _LUID_OK,
+        "verdicts": _INTO_THE_MANIFEST_AGGREGATE,
+        "chosen": _PROBE_VERDICT,
+        "chosen_api": _PROBE_VERDICT,
+        "', '.join(blocked)": _PROBE_VERDICT,
+        "versions.configured": "OUTBOUND: the api-version WE send, read from .env, never from a response",
+        "versions.advertised": _SERVERINFO,
+        "bool(chosen and unknown_above)": "NOT-A-STRING: a boolean provisional flag",
+        "bool(chosen and (not unknown_above)) or definite_no": "NOT-A-STRING: a boolean completeness flag",
+    },
+    ("scripts/tableau_render_capability.py", "_add_pin_warnings"): {
+        "reprobe['verdict']": _PROBE_VERDICT,
+        "reprobe['detail'][:80]": "REDACTED-UPSTREAM: a classify_probe detail; the slice runs after redaction",
+        "versions.configured": "OUTBOUND: the api-version WE send, read from .env, never from a response",
+        "versions.advertised": _SERVERINFO,
+    },
+    ("scripts/tableau_render_capability.py", "release_for"): {"api_version": _SERVERINFO},
+    ("scripts/tableau_render_capability.py", "_log_versions"): {
+        "info.get('product_version')": _SERVERINFO,
+        "info.get('build')": _SERVERINFO,
+        "info.get('rest_api_version')": _SERVERINFO,
+        "release_for(info.get('rest_api_version') or '')": _SERVERINFO,
+    },
+    ("scripts/tableau_render_capability.py", "_build_report"): {"info": _SERVERINFO},
+    ("scripts/tableau_render_capability.py", "fetcher"): {"view_luid": _LUID_OK},
+    ("scripts/tableau_render_capability.py", "apply_selected_tier"): {
+        "kind": "FIXED-VOCABULARY: one of the three ladder tier names, mapped through a literal dict",
+        "api_overrides[kind]": _PROBE_VERDICT,
+        "report['selected_api_version']": _PROBE_VERDICT,
+    },
+    ("scripts/tableau_render_capability.py", "probe_render_capability"): {
+        "view['id']": _LUID_OK,
+        "view.get('name')": _INTO_THE_MANIFEST,
+        "info": _SERVERINFO,
+        "info.get('product_version')": _SERVERINFO,
+        "info.get('build')": _SERVERINFO,
+        "advertised": _SERVERINFO,
+        "best.get('selected_tier') or 'UNDETERMINED'": _PROBE_VERDICT,
+        "' (PROVISIONAL)' if best.get('provisional') else ''": "FIXED-VOCABULARY: one of two literals",
+    },
+    ("scripts/tableau_render_capability.py", "main"): {
+        "report": _INTO_THE_MANIFEST_AGGREGATE,
+        "json.dumps(report, indent=2)": _INTO_THE_MANIFEST_AGGREGATE,
+        "warning": _PROBE_VERDICT,
+    },
+    ("scripts/capture_tableau_oracle.py", "main"): {
+        "record": _INTO_THE_MANIFEST_AGGREGATE,
+        "len(views)": "NOT-A-STRING: an integer view count",
+        "workbook_names.get(record['workbook_luid'])": _INTO_THE_MANIFEST,
+    },
+    ("scripts/capture_tableau_oracle.py", "write_manifest"): {
+        "manifest": _INTO_THE_MANIFEST_AGGREGATE,
+        "capability_report": _INTO_THE_MANIFEST_AGGREGATE,
+        "json.dumps(manifest, indent=2)": (
+            "SCRUBBED-AT-SINK: `manifest` is the ALREADY-scrubbed tree -- `scrub_tree` runs on the line "
+            "above this one, so the serialisation sees only redacted values and keys"
+        ),
+        "json.dumps(manifest, indent=2) + '\\n'": (
+            "SCRUBBED-AT-SINK: `manifest` is the ALREADY-scrubbed tree; the concatenation is a newline"
+        ),
+        "manifest['elapsed_sec']": "NOT-A-STRING: a float duration in seconds",
+    },
+    ("scripts/capture_tableau_oracle.py", "_log_blocked_and_stale"): {"warning": _PROBE_VERDICT},
     ("scripts/tableau_payload_facts.py", "png_dimensions"): {
         "int.from_bytes(payload[16:20], 'big')": "NOT-A-STRING: an integer read from the IHDR",
         "int.from_bytes(payload[20:24], 'big')": "NOT-A-STRING: an integer read from the IHDR",
@@ -758,9 +857,14 @@ def taint_module(source: str, module: str) -> dict[str, set[str]]:
     tree = ast.parse(source)
     functions = {f.name: f for f in _functions(tree)}
     tainted = {name: set(TAINT_SEEDS.get((module, name), set())) for name in functions}
-    returns_taint = {name for name in functions if (module, name) in TAINT_SEEDS and name == "_request"}
+    # Functions whose RETURN value is response-derived. Discovered, not declared: `list_views` returns
+    # what `get_json` gave it, `select_views` returns what `list_views` gave it, and `main` then loops
+    # over the result. Without this the chain died at the first hop and `capture_view`'s `view`
+    # parameter had to be hand-seeded -- which is the hand-maintained list round 7 identified as the
+    # shape that keeps generating findings. `_request` is the origin and is seeded here.
+    returns_taint = {"_request"}
     for _ in range(12):
-        before = {k: set(v) for k, v in tainted.items()}
+        before = ({k: set(v) for k, v in tainted.items()}, set(returns_taint))
         for name, func in functions.items():
             local = tainted[name]
             for targets, value in _assignments(func):
@@ -768,6 +872,14 @@ def taint_module(source: str, module: str) -> dict[str, set[str]]:
                     continue
                 if _roots(value) & local or _called(value) in TAINTING_CALLS or _called(value) in returns_taint:
                     _bind(targets, local)
+            for node in ast.walk(func):
+                if (
+                    isinstance(node, ast.Return)
+                    and node.value is not None
+                    and _called(node.value) not in UNTAINTING
+                    and (_roots(node.value) & local or _called(node.value) in TAINTING_CALLS)
+                ):
+                    returns_taint.add(name)
             # Inter-procedural: a call passing a tainted argument taints the callee's parameter.
             for node in ast.walk(func):
                 if not isinstance(node, ast.Call):
@@ -790,7 +902,7 @@ def taint_module(source: str, module: str) -> dict[str, set[str]]:
                 for keyword in node.keywords:
                     if keyword.arg and _roots(keyword.value) & local:
                         tainted[callee.name].add(keyword.arg)
-        if tainted == before:
+        if (tainted, returns_taint) == before:
             break
     return tainted
 
@@ -912,6 +1024,83 @@ def test_the_chokepoint_is_the_only_thing_that_clears_taint():
     assert uncertified_sinks(clean, "scripts/tableau_payload_facts.py") == []
     laundered = 'def summarise_csv(payload):\n    note = str(payload)\n    return f"{note}"\n'
     assert uncertified_sinks(laundered, "scripts/tableau_payload_facts.py") == ["summarise_csv() f-string: note"]
+
+
+def test_taint_reaches_capture_view_without_a_hand_written_seed():
+    """Round 7's structural half: the seed list must SHRINK, not grow.
+
+    `capture_view`'s `view` was hand-seeded in round 6 after the gate was found blind to the path
+    defect. It is now derived -- `get_json` -> `list_views` -> `select_views` -> `main`'s loop ->
+    `capture_view` -- because taint propagates through RETURN values. This test fails if that chain
+    breaks, which is what would silently push the burden back onto the hand-written table.
+    """
+    module = "scripts/capture_tableau_oracle.py"
+    assert (module, "capture_view") not in TAINT_SEEDS, "re-seeding by hand would hide a broken chain"
+    tainted = taint_module((REPO / module).read_text(encoding="utf-8"), module)
+    assert "view" in tainted["capture_view"]
+    assert "record" in tainted["log_progress"]
+
+
+# ---- module coverage: a credential-handling module may not sit OUTSIDE the gate ------------------
+#
+# ⚠️ Round 5 disclosed this gap in prose -- "a diagnostic added in a third file is outside it" -- and
+# round 7 is that third file: the standalone `sign_in()` in `tableau_render_capability.py` let an
+# `HTTPError` escape with the PAT in its reason phrase. A gap that was documented and then fired is
+# worth closing structurally. This fails CLOSED: a new credential-handling script is a hard failure
+# until someone either brings it under the gate or waives it with a stated reason.
+
+_HTTP_MARKERS = ("urlopen(", "http.client", "requests.")
+_CREDENTIAL_MARKERS = ("pat_secret", "X-Tableau-Auth", "TABLEAU_PAT", "personalAccessTokenSecret")
+
+# Scripts that touch a credentialed request but are deliberately NOT under the taint gate, each with
+# the reason. A waiver is a decision on the record; absence from both lists is a test failure.
+GATE_WAIVERS: dict[str, str] = {
+    "scripts/tableau_env.py": "IS the redactor and the chokepoint; gating it against itself is circular",
+    "scripts/assess_estate.py": "reads Tableau metadata but persists no response text -- counts and IDs only",
+    "scripts/harvest_estate_assets.py": "downloads assets to disk by LUID and already redacts engine stderr",
+    "scripts/tableau_lineage.py": "GraphQL lineage to a fixed schema; no response text reaches a path or a log",
+    "scripts/provision_tableau_estate.py": "publishes TO Tableau; its credentials are outbound, not reflected",
+    "scripts/capture_tableau_reference.py": "no Tableau REST call is wired -- its server provider is a stub (#194)",
+    "scripts/capture_tableau_oracle.py": "under the gate as a MODULE entry, listed here only for completeness",
+    "scripts/tableau_render_capability.py": "under the gate as a MODULE entry, listed here only for completeness",
+    "scripts/run_engine_survey.py": "hands credentials to an engine child process; persists nothing itself",
+    "scripts/stamp_tableau_provenance.py": "stamps provenance from a local spec; no live response text",
+}
+
+
+def _credential_handling_scripts() -> list[str]:
+    """Scripts that make an HTTP call AND reference a Tableau credential."""
+    found = []
+    for path in sorted((REPO / "scripts").glob("*.py")):
+        source = path.read_text(encoding="utf-8", errors="replace")
+        if any(h in source for h in _HTTP_MARKERS) and any(c in source for c in _CREDENTIAL_MARKERS):
+            found.append(f"scripts/{path.name}")
+    return found
+
+
+def test_the_credential_handling_detector_actually_detects():
+    """Positive control: an assertion that cannot fire is not coverage (round 6's lesson)."""
+    scripts = _credential_handling_scripts()
+    assert "scripts/tableau_render_capability.py" in scripts, scripts
+    assert "scripts/capture_tableau_oracle.py" in scripts, scripts
+    assert "scripts/check_unit.py" not in scripts, "the detector is matching modules it should not"
+
+
+def test_no_credential_handling_script_sits_outside_the_gate_unwaived():
+    """The class round 7 identified: a fourth module could be added tomorrow and be silently outside."""
+    covered = set(MODULES) | set(GATE_WAIVERS)
+    orphans = sorted(set(_credential_handling_scripts()) - covered)
+    assert not orphans, (
+        f"{orphans} make a credentialed HTTP request but are neither under the taint gate (MODULES) "
+        "nor waived. Add them to MODULES and certify their findings, or add a GATE_WAIVERS entry "
+        "saying why response text cannot reach a path, a log line or a persisted artifact from there."
+    )
+
+
+def test_every_waiver_names_a_reason_and_a_file_that_exists():
+    for script, reason in GATE_WAIVERS.items():
+        assert (REPO / script).is_file(), f"waiver for a script that no longer exists: {script}"
+        assert len(reason) > 25, f"{script} is waived with no real reason: {reason!r}"
 
 
 @pytest.mark.parametrize("module", MODULES)
@@ -1204,6 +1393,70 @@ def test_the_pat_name_is_KNOWN_to_survive_in_the_csv_on_disk(tmp_path):
     planted = "SYNTHETIC_PAT_NAME_42"
     _manifest, csv_text = _pat_name_capture(planted, tmp_path)
     assert planted in csv_text
+
+
+# ---------------------------------------------------------- round 7: the HTTP REASON PHRASE
+#
+# ⚠️ A surface distinct from a reflecting BODY, which the battery above already covers, and the ONE
+# leak in this PR that master does not have: `capture_tableau_oracle` has always caught `HTTPError`
+# inside `_request`, but the standalone `sign_in()` added for the #403 probe let it escape. Its
+# message carries the server-controlled reason phrase, and that request contains the PAT.
+
+
+def _one_request_server(status: int, reason: str, body: bytes):
+    """A local server that answers exactly one POST. No live site, no .env, no credential on disk."""
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            self.send_response(status, reason)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if body:
+                self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+@pytest.mark.parametrize("shape", sorted(SHAPES))
+@pytest.mark.parametrize("planted", ["pat_secret", "pat_name"])
+def test_the_signin_reason_phrase_never_carries_a_credential(shape, planted):
+    """Measured before the fix: `HTTPError: HTTP Error 403: SYNTHETIC_PAT_SECRET_REASON_42`."""
+    secret = SHAPES[shape].replace("\n", " ").strip() or "SYNTHETIC_SECRET_42"
+    # An HTTP reason phrase is a single header line; CR/LF and non-latin-1 cannot travel in one.
+    reason = "".join(ch for ch in secret if ch.isprintable() and ord(ch) < 256) or "SYNTHETIC_SECRET_42"
+    pat_secret_value = reason if planted == "pat_secret" else "an-unrelated-long-pat-secret"
+    pat_name = reason if planted == "pat_name" else "an-unrelated-long-pat-name"
+    server = _one_request_server(403, reason, b"")
+    try:
+        with pytest.raises(RuntimeError) as excinfo:
+            cap.sign_in(f"http://127.0.0.1:{server.server_port}", "site", pat_name, pat_secret_value, "3.29")
+    finally:
+        server.shutdown()
+        server.server_close()
+    message = str(excinfo.value)
+    assert longest_surviving_run(reason, message) == "", message
+    assert "403" in message, "the status must survive; redaction that destroys the diagnostic is not a fix"
+
+
+def test_the_signin_error_BODY_is_redacted_too_and_the_reason_still_reads():
+    """Both surfaces, and the non-secret half of each must still be legible."""
+    secret = "SYNTHETIC_PAT_SECRET_REASON_42"
+    server = _one_request_server(403, "Forbidden", secret.encode())
+    try:
+        with pytest.raises(RuntimeError) as excinfo:
+            cap.sign_in(f"http://127.0.0.1:{server.server_port}", "site", "a-long-pat-name", secret, "3.29")
+    finally:
+        server.shutdown()
+        server.server_close()
+    message = str(excinfo.value)
+    assert secret not in message
+    assert "Forbidden" in message and "403" in message
+    assert "[REDACTED]" in message
 
 
 # ------------------------------------------------- the reviewer's two round-4 reproductions, named
