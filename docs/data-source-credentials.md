@@ -109,10 +109,38 @@ watches for the connector modal:
 returned `BLOCKED_BY_DIALOG` at **exit 1** for *any* visible non-main window >= 100x100 — a Power BI
 Refresh progress dialog trips that trivially, and a field report on 2026-08-28 caught it doing so under
 three concurrent refreshes against a cold Snowflake warehouse. The probe now classifies a dialog by its
-text and reports what it actually saw; the size test only decides which windows are worth reading. The
-**Python** fast check (`probe_desktop_query.py` / `refresh_pbip_model.py`) still emits
-`BLOCKED_BY_DIALOG` from a size-only rule, so treat that token — wherever it comes from — as
-"something is on screen", not as "sign-in required".
+text and reports what it actually saw; the size test only decides which windows are worth reading.
+
+✅ **The Python fast check (`probe_desktop_query.py` / `refresh_pbip_model.py`) was fixed the same way
+in issue #376, and `BLOCKED_BY_DIALOG` is retired from it.** It carried the identical size-only rule on
+a worse path — it feeds the one-row data probe, the *gate of record* — so a progress dialog produced
+`BLOCKED_BY_DIALOG` at exit 1, which this repo's own classifier maps to `NO_CREDENTIAL`. It now speaks
+the same verdicts as the arbiter, with only `CREDENTIAL_MISSING` at exit 1 and every dialog verdict at
+exit 3. Two consequences worth knowing:
+
+- The same fix closed a **silent false negative** nobody had noticed: the 100x100 filter was gating the
+  credential scan too, so a credential prompt in a *smaller* window produced **no finding at all**. No
+  geometry, class or name test decides anything any more — see the next bullet.
+- **Blocking is decided from MODALITY: a modal disables its owner.** `GetWindow(GW_OWNER)` and
+  `IsWindowEnabled(owner)` are harvested, and only three things are excluded from classification: the
+  frame (identified by following ownership **transitively to the unowned root**, falling back to the
+  `MainWindowHandle` convention only when nothing is owned), a window whose **owner is enabled**
+  (positive one-way proof it blocks nothing), and one that is **unowned AND zero-area**. Where frame
+  identity is ambiguous the rule **fails closed** and excludes nothing. Native Win32 experiments
+  defeated every shortcut this replaced — a class prefix (an owner and its owned `FixedDialog` share
+  the exact class), a name allowlist (the AAD host), zero area alone (a real `WS_VISIBLE` owned 0x0
+  window with a disabled owner), and "first owner" (a `tooltip → credential dialog → frame` chain made
+  the credential dialog the frame).
+- Dismissal needs a **positive** claim. A dialog is only dismissed when every content element is
+  recognised progress status or enumerated chrome (`benign_chrome_signature.regex`). There is **no
+  length amnesty**: blind review measured `Refresh` + `Evaluating...` + *"Please enter your password"*
+  classifying `benign` and being suppressed outright under the old five-word rule.
+  ⚠️ `probe_desktop_credential.ps1` still carries that rule (`$MinPromptWords = 5`) and reproduces the
+  same suppression — measured, filed as #406 rather than fixed in passing.
+- `probe_live_source` recognises the dialog tokens **structurally** and maps them to **`ERROR`** —
+  "the probe itself could not run". The gate stays armed; nothing asserts a sign-in wall that was never
+  observed. Without that structural step the transcript fell through to an unanchored keyword scan, and
+  `DIALOG_NEEDS_HUMAN` quoting `Authentication required` came back out as `NO_CREDENTIAL`.
 
 Two gotchas learned building it: (a) use a **generous timeout (>=60s)** because a serverless warehouse
 (Databricks) can **cold-start** before the modal appears, so a short wait yields a false PRESENT; and

@@ -52,6 +52,25 @@ DESKTOP_GONE_VERDICT_RE = re.compile(r"^\s*(?:REFRESH|PREFLIGHT|PROBE):\s+DESKTO
 # be read. Also a LOCAL failure the classifier maps to ERROR - deliberately outside the credential-stop
 # family, because no human sign-in makes a window-less process produce a window.
 DESKTOP_UNREADY_VERDICT_RE = re.compile(r"^\s*(?:REFRESH|PREFLIGHT|PROBE):\s+DESKTOP_UNREADY\b")
+# Dialog family (issue #376), from `refresh_pbip_model._emit_dialog_finding` /
+# `probe_desktop_query._emit_dialog_finding`. The child looked at a visible Desktop dialog and is
+# saying, authoritatively, "this is NOT a sign-in wall and I could not probe".
+#
+# It MUST be matched structurally and BEFORE the free-text scans (#400 review, finding 2). Without
+# this, the parent fell through to `CREDENTIAL_MARKERS`, which scans the whole transcript - so
+# `DIALOG_NEEDS_HUMAN` carrying the evidence excerpt `Authentication required` was relabelled
+# `NO_CREDENTIAL` on the word "authentication", overriding the child's explicit statement to the
+# contrary and firing the "a human must sign in; terminate the run" directive. Measured in review.
+#
+# Adding the tokens to CREDENTIAL_STOP_VERDICT_RE instead would have been the other wrong answer: it
+# would assert the very credential wall the child says it did not see. These map to ERROR - "the probe
+# itself could not run" - which keeps the gate armed and claims nothing about the source.
+# `tests/test_probe_live_source_verdict.py` gates this list against the detector's own verdict table,
+# so a token added there cannot stay unknown here.
+DIALOG_VERDICT_RE = re.compile(
+    r"^\s*(?:REFRESH|PREFLIGHT|PROBE):\s+"
+    r"(?P<token>REFRESH_IN_PROGRESS|DIALOG_NEEDS_HUMAN|DIALOG_UNRECOGNIZED|DIALOG_UNREADABLE)\b"
+)
 
 
 def _has_credential_stop_verdict(text: str) -> bool:
@@ -86,6 +105,96 @@ def _has_desktop_unready_verdict(text: str) -> bool:
     verdict itself (issue #153).
     """
     return any(DESKTOP_UNREADY_VERDICT_RE.match(line) for line in text.splitlines())
+
+
+def _dialog_verdict_token(text: str) -> str | None:
+    """The dialog verdict token on a machine-readable verdict LINE, or ``None`` (issue #376).
+
+    Matched on the verdict LINE, never a substring, for the same reason as every other family here -
+    but this one is load-bearing in the opposite direction: it exists so the parent STOPS free-text
+    scanning once the child has authoritatively said "a dialog is up, and it is not a sign-in wall".
+    The child's own evidence excerpt can legitimately contain a credential keyword (the blocking
+    signature includes `Authentication required`), and the unanchored scan then contradicted the
+    verdict it was quoting.
+    """
+    for line in text.splitlines():
+        match = DIALOG_VERDICT_RE.match(line)
+        if match is not None:
+            return match.group("token")
+    return None
+
+
+def _has_dialog_verdict(text: str) -> bool:
+    """True when a line is a machine-readable dialog verdict (issue #376)."""
+    return _dialog_verdict_token(text) is not None
+
+
+# Every authoritative non-success verdict the child can emit. A run that carries ANY of them did not
+# earn a clear, whatever else its transcript says. Kept as one list so a new verdict family is wired
+# into the success gate by adding it here, not by lengthening a boolean chain someone has to read.
+NON_SUCCESS_VERDICT_CHECKS = (
+    _has_credential_stop_verdict,
+    _has_desktop_gone_verdict,
+    _has_desktop_unready_verdict,
+    _has_dialog_verdict,
+)
+
+
+def _is_earned_success(text: str, table: str, *, returncode: int) -> bool:
+    """Did this child run earn a clear for ``table``?
+
+    Both channels must agree (issue #152): a zero exit code AND a machine-readable success verdict for
+    the very table we asked about - and no authoritative non-success verdict anywhere in the
+    transcript. The child prints its reassuring no-dialog banner on failure paths too, so the text can
+    look fine while the run failed; and a non-zero exit must never read as success even beside a stale
+    OK line.
+    """
+    if returncode != 0:
+        return False
+    if any(check(text) for check in NON_SUCCESS_VERDICT_CHECKS):
+        return False
+    return _has_data_ok_verdict(text, table)
+
+
+def classify_child_verdict(text: str, raw: str) -> tuple[str, str] | None:
+    """Map an AUTHORITATIVE child verdict line to ``(verdict, detail)``, or ``None``.
+
+    These are checked before any free-text scan, because the child looked at the machine and is
+    telling us what it saw; a substring scan of the transcript can only contradict it. All three map
+    to ``ERROR`` - "the probe itself could not run" - which keeps the gate armed and claims nothing
+    about the data source.
+
+    Extracted from ``probe_live_source._classify_failure`` when the #376 dialog family pushed that
+    module past pylint's ``max-module-lines``. The seam is real rather than convenient: everything
+    here is decided by a verdict LINE, and everything left there is decided by free text.
+    """
+    if _has_desktop_gone_verdict(text):
+        return (
+            "ERROR",
+            "Power BI Desktop exited or crashed before the probe could query the source: it "
+            "enumerated no windows and its process was no longer running, so nothing was learned "
+            "about the data source. This is a LOCAL tooling failure - do not report it as "
+            "UNREACHABLE or a connection/credential problem. Re-open the model in Power BI Desktop, "
+            "confirm it is running, and re-run the probe. Raw: " + raw,
+        )
+    if _has_desktop_unready_verdict(text):
+        return (
+            "ERROR",
+            "Power BI Desktop was running without any window, so the probe could not inspect its "
+            "local state or query the source. Wait for Desktop to finish starting, or restart it if "
+            "it is wedged, then re-run the probe. Raw: " + raw,
+        )
+    token = _dialog_verdict_token(text)
+    if token is not None:
+        return (
+            "ERROR",
+            f"Power BI Desktop has a dialog up that the probe could not account for ({token}), so the "
+            "refresh never established anything about the data source. The child classified the "
+            "window and reports that it is NOT a sign-in prompt - do not send anyone to "
+            "re-authenticate on the strength of this. Look at the Desktop screen, settle whatever it "
+            "is showing, and re-run the probe. Raw: " + raw,
+        )
+    return None
 
 
 def _has_data_ok_verdict(text: str, table: str) -> bool:
