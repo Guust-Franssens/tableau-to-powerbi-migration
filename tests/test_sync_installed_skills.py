@@ -600,15 +600,23 @@ def test_preflight_keeps_a_missing_plugin_non_blocking(estate: Estate, capsys: p
     assert _skill_verdict(verdict, "$v.Mode") == "missing"
 
 
-def test_preflight_emits_the_missing_plugin_row_as_recommended() -> None:
-    """The tier lives at the call site so this stays assertable; `missing` must not become critical."""
+def test_preflight_emits_every_skill_plugin_row_as_recommended() -> None:
+    """EVERY emission, not one of them: a sibling branch's identical string hid a downgrade.
+
+    Measured here - mutating the `missing` branch's tier to `critical` SURVIVED an assertion that
+    merely looked for the `'recommended'` string, because the `compared` branch emits the same row
+    with the same tier. That is the trap `test_preflight_contract.py::_assert_add_check_tier`
+    documents, reproduced in a test written the same afternoon.
+    """
     source = _preflight_source()
+    tiers = re.findall(r'Add-Check\s+"plugin: \$\(\$skills\.Identity\)"\s+\'(\w+)\'', source)
+    assert len(tiers) >= 2, f"expected the plugin row from both the missing and compared paths: {tiers}"
+    assert all(tier == "recommended" for tier in tiers), tiers
     assert "elseif ($skills.Mode -eq 'missing') {" in source
-    assert "Add-Check \"plugin: $($skills.Identity)\" 'recommended' $skills.Plugin.Ok" in source
 
 
 def test_preflight_wires_the_function_verdict_into_every_skill_row() -> None:
-    """A perfect function is worthless if the rows are computed from something else."""
+    """A perfect function is worthless if ANY row is computed from something else."""
     source = _preflight_source()
     assert "$skills = Get-SkillBundleVerdict $sync" in source
     for row, field in (
@@ -616,8 +624,9 @@ def test_preflight_wires_the_function_verdict_into_every_skill_row() -> None:
         ("skill bundles match published plugin", "$skills.Merged.Ok"),
         ("skill bundles: local edits vs merged", "$skills.LocalEdits.Ok"),
     ):
-        assert f"Add-Check '{row}' " in source
-        assert field in source, f"{row} must take its verdict from {field}"
+        emitted = re.findall(rf"Add-Check '{re.escape(row)}'\s+'\w+'\s+(\S+)", source)
+        assert emitted, f"{row} must be emitted"
+        assert all(arg == field for arg in emitted), f"{row} must take EVERY verdict from {field}, saw {emitted}"
 
 
 # --------------------------------------------------------------------------------------------

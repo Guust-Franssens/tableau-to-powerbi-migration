@@ -150,6 +150,21 @@ Keep only the judgement the gate cannot carry:
   because a measurement taken against unmerged guidance is reproducible from no commit at all. To
   test unmerged guidance with a subagent on purpose, `--from-worktree` says loudly what it is doing;
   a plain sync restores the merged copy.
+- **"From the merged tree" has to cover the DESTINATION and the FILE LIST, not just the content.**
+  Review of that fix found the original bug surviving one step earlier: plugin *discovery* imported
+  the current worktree's `SHIPPED_SKILLS`, and the inventory is what selects which installed plugin
+  to write into — a branch-added bundle name steered it onto an unrelated plugin, which a plain sync
+  then overwrote, deleting that plugin's own bundle. The inventory now comes from the merged commit
+  and is passed into discovery; deletions are bounded to the merged bundle directories; and
+  `preflight.ps1` reads one verdict (`--check --json`) instead of computing a second, branch-derived
+  one of its own.
+- ⚠️ **`git fetch` does NOT refresh `refs/remotes/origin/HEAD`.** It is a *local* symbolic marker, so
+  after a remote renames its default branch, a fetched clone still points at the old one — reproduced
+  in review, publishing `master` content as if it were the default. `--fetch` therefore asks the
+  remote directly (`git ls-remote --symref origin HEAD`) and pins that commit; offline, the verdict
+  reports `default_verified: false` and names any default-branch ref pointing elsewhere rather than
+  staying silent. Everything downstream keys on the **commit**, never the ref name, because a ref can
+  move between resolution and export — `origin/master` did exactly that during the review.
 - **PBIR theme-version location is report-authoring knowledge, not setup.** The rule
   (`reportVersionAtImport` required inside each `themeCollection` entry and forbidden at the top
   level of `report.json`) lives in `powerbi-report-gotchas` so the report owner sees it when authoring
