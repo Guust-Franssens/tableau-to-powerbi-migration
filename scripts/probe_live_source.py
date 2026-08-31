@@ -83,11 +83,18 @@ from _probe_pbip import (  # noqa: F401  # pylint: disable=unused-import
     _tmdl_ident,
 )
 from _gate_lift import lift_gate as _lift_gate  # noqa: F401  # pylint: disable=unused-import
-from _verdict_lines import (
+from _verdict_lines import (  # noqa: F401  # pylint: disable=unused-import
+    # Several of these are no longer CALLED from this module - `_is_earned_success` and
+    # `classify_child_verdict` own them now - but they are load-bearing RE-EXPORTS: the seam tests
+    # reach them through `probe_live_source`, and `ruff --fix` deletes them without this waiver.
+    _dialog_verdict_token,
     _has_credential_stop_verdict,
     _has_data_ok_verdict,
     _has_desktop_gone_verdict,
     _has_desktop_unready_verdict,
+    _has_dialog_verdict,
+    _is_earned_success,
+    classify_child_verdict,
 )
 from check_desktop_orphans import record_desktop_event
 from connection_target import LIVE_SOURCE, powerbi_target
@@ -339,28 +346,17 @@ def _classify_failure(text: str, network_fault_observed: bool) -> tuple[str, str
     # pylint: disable=too-many-return-statements
     low = text.lower()
     raw = _error_excerpt(text)
-    # A machine-readable DESKTOP_GONE verdict line (issue #158), checked FIRST because it is the most
-    # definitive signal: Power BI Desktop enumerated zero windows AND its process was gone, so the
-    # probe never reached the source. Like "identity unverified" this is a LOCAL failure - the data
-    # source was never contacted - so it is ERROR, never UNREACHABLE (which would send someone to fix
-    # a server that was never queried) and never NO_CREDENTIAL (no sign-in revives a dead process).
-    # Matched structurally on the verdict line; the detector's reason prose is deliberately marker-free.
-    if _has_desktop_gone_verdict(text):
-        return (
-            "ERROR",
-            "Power BI Desktop exited or crashed before the probe could query the source: it "
-            "enumerated no windows and its process was no longer running, so nothing was learned "
-            "about the data source. This is a LOCAL tooling failure - do not report it as "
-            "UNREACHABLE or a connection/credential problem. Re-open the model in Power BI Desktop, "
-            "confirm it is running, and re-run the probe. Raw: " + raw,
-        )
-    if _has_desktop_unready_verdict(text):
-        return (
-            "ERROR",
-            "Power BI Desktop was running without any window, so the probe could not inspect its "
-            "local state or query the source. Wait for Desktop to finish starting, or restart it if "
-            "it is wedged, then re-run the probe. Raw: " + raw,
-        )
+    # The AUTHORITATIVE child verdicts first (`_verdict_lines.classify_child_verdict`): DESKTOP_GONE
+    # and DESKTOP_UNREADY (issue #158) and the DIALOG family (issue #376). Each is a verdict LINE the
+    # child emitted after looking at the machine, so no free-text scan below may override it.
+    #
+    # #400 review, finding 2, is why the DIALOG family had to join them: without it the transcript fell
+    # through to CREDENTIAL_MARKERS - an unanchored substring scan - and `DIALOG_NEEDS_HUMAN` quoting
+    # its own evidence `Authentication required` was relabelled NO_CREDENTIAL, the parent contradicting
+    # the child on a single word and firing "a human must sign in; terminate the run".
+    child_verdict = classify_child_verdict(text, raw)
+    if child_verdict is not None:
+        return child_verdict
     # Deliberately "identity unverified" alone, NOT "model identity unverified". Measured
     # 2026-08-03 (gpt-5.6-sol, live happy-path run): the real producer text is
     # "model  : identity unverified (no model folder resolved for this pid)" - note the extra
@@ -743,18 +739,10 @@ def _refresh_and_classify(pid: int, table: str, timeout_sec: int, network_fault_
 
     log.info("refresh finished in %.0fs", time.monotonic() - started)
     text = (refresh.stdout + refresh.stderr).strip()
-    # Honour BOTH channels the child speaks in: a zero exit code AND a machine-readable success verdict
-    # for the very table we asked to refresh. Either alone is insufficient - the child prints its
-    # reassuring no-dialog banner on stdout even on failure paths (so the text can look OK while the run
-    # failed), and a non-zero exit must never be read as success even if a stale OK line is present
-    # (issue #152: this used to classify on stdout prose alone and ignore the exit code entirely).
-    if (
-        refresh.returncode == 0
-        and not _has_credential_stop_verdict(text)
-        and not _has_desktop_gone_verdict(text)
-        and not _has_desktop_unready_verdict(text)
-        and _has_data_ok_verdict(text, table)
-    ):
+    # Both channels must agree, and no authoritative non-success verdict may be present. The whole
+    # rule - and the list of what counts as authoritative - lives in `_verdict_lines._is_earned_success`
+    # so a new verdict family joins the gate by being added to one list (issues #152, #158, #376).
+    if _is_earned_success(text, table, returncode=refresh.returncode):
         log.info("PROBE: DATA_OK 1 row(s) from %s - the source is genuinely reachable", table)
         return 0, "DATA_OK"
     verdict, detail = _classify_failure(text, network_fault_observed=network_fault_observed)

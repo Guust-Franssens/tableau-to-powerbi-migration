@@ -56,8 +56,12 @@ def pytest_configure(config: pytest.Config) -> None:
 from _credential_modal import CredentialDetection  # noqa: E402
 
 
-def _healthy_desktop(_pid: int) -> CredentialDetection:
-    """The baseline every CLI test implicitly assumes: a Desktop that is up, windowed and unblocked."""
+def _healthy_desktop(_pid: int, **_kwargs) -> CredentialDetection:
+    """The baseline every CLI test implicitly assumes: a Desktop that is up, windowed and unblocked.
+
+    ``**_kwargs`` swallows ``probe_desktop_query._credential_state``'s keyword-only ``in_flight``
+    (issue #376) so ONE stub still stands in for both entry points' signatures.
+    """
     return CredentialDetection()
 
 

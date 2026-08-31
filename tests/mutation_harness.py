@@ -16,6 +16,7 @@ running a single test and a naive harness scores that as CAUGHT. The first run o
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -188,43 +189,385 @@ me._FAKE_ENGINE = me._FAKE_ENGINE.replace('"pageOrder": pages or []', '"pageOrde
 }
 
 
-def run(name: str, code: str, target: str) -> tuple[str, int, str]:
+OUTCOME_HOOKS = """
+
+# --- appended by mutation_harness: structured lifecycle recording ------------------
+# Terminal text cannot distinguish "a test observed the mutation" from "pytest failed to
+# run". A collection error on a CLASS emits `ERROR path::TestName`, and a dying xdist
+# worker emits `FAILED path::test_name` for a test that never executed - both parse as a
+# named outcome. So record the real lifecycle instead of scraping the summary.
+#
+# The record must answer "did a COMPLETE session observe this", not merely "did the plugin
+# load". An empty record written at import time is evidence of nothing: measured,
+# `pytest.exit(returncode=0)` from `pytest_sessionstart` produced exit 0 with a valid empty
+# record and no tests at all, and that scored SURVIVED.
+import json as _json
+from pathlib import Path as _Path
+
+import pytest as _pytest
+
+_OUTCOMES = _Path(r"{outcome_path}")
+_RECORD = {{
+    "call_failed": [],
+    "setup_failed": [],
+    "collect_error": [],
+    "internal_error": False,
+    "node_down": False,
+    "session_finished": False,
+    "exitstatus": None,
+    "saw_call_phase": False,
+    "runtest_loop_completed": False,
+    "runtest_loop_exception": None,
+    "synthetic_failed": [],
+}}
+
+
+def _flush():
+    _OUTCOMES.write_text(_json.dumps(_RECORD), encoding="utf-8")
+
+
+def pytest_runtest_logreport(report):
+    # `saw_call_phase` and not merely "a report happened": a setup-phase report is emitted
+    # even when no test BODY runs, so `pytest.exit()` from `pytest_runtest_call` produced a
+    # finished session with a report and exit 0 while stdout said `no tests ran`.
+    if report.when == "call":
+        _RECORD["saw_call_phase"] = True
+    if report.outcome != "failed":
+        _flush()
+        return
+    # ONLY real lifecycle phases count as an observation. xdist synthesises a crash report
+    # for a dead worker with `when="???"`, and that names a test which never executed --
+    # filtering here is what lets a genuine failure from a LIVING worker stay durable
+    # instead of being erased wholesale by a `node_down` flag.
+    if report.when in ("call", "setup", "teardown"):
+        name = report.nodeid.split("::")[-1]
+        _RECORD["call_failed" if report.when == "call" else "setup_failed"].append(name)
+    else:
+        _RECORD["synthetic_failed"].append(f"{{report.nodeid}}::{{report.when}}")
+    _flush()
+
+
+@_pytest.hookimpl(hookwrapper=True)
+def pytest_runtestloop(session):
+    # The ONLY evidence the selected suite ran to the end. `pytest_sessionfinish` fires even
+    # after `pytest.exit()`, and one completed call phase proves one test body ran, not that
+    # the run finished: measured, `pytest.exit()` from teardown after the first passing test
+    # gave session_finished, saw_call_phase and exit 0 -- and scored SURVIVED.
+    #
+    # The exception TYPE is recorded, not just the fact of one: `Interrupted` is what `-x`
+    # raises the moment a mutation is caught and is entirely expected, while `Exit` means
+    # somebody called `pytest.exit()` and the run was cut short for a reason of its own.
+    outcome = yield
+    if outcome.excinfo is None:
+        _RECORD["runtest_loop_completed"] = True
+    else:
+        _RECORD["runtest_loop_exception"] = outcome.excinfo[0].__name__
+    _flush()
+
+
+def pytest_collectreport(report):
+    if report.outcome == "failed":
+        _RECORD["collect_error"].append(report.nodeid or "<root>")
+        _flush()
+
+
+def pytest_internalerror(excrepr, excinfo):
+    _RECORD["internal_error"] = True
+    _flush()
+
+
+@_pytest.hookimpl(optionalhook=True)
+def pytest_testnodedown(node, error):
+    # xdist-only, and it MUST be declared optional: without xdist installed pytest rejects
+    # the whole plugin with `PluginValidationError: unknown hook 'pytest_testnodedown'`,
+    # which made every serial mutation unusable in that environment.
+    if error is not None:
+        _RECORD["node_down"] = True
+        _flush()
+
+
+def pytest_sessionfinish(session, exitstatus):
+    _RECORD["session_finished"] = True
+    _RECORD["exitstatus"] = int(exitstatus)
+    _flush()
+
+
+_flush()
+"""
+
+# pytest returns 0 (all passed) or 1 (tests failed) when a session ran to a verdict. Every
+# other code means something happened TO the run: 2 interrupted, 3 internal error, 4 usage
+# error, 5 nothing collected. An outcome recorded alongside one of those is not a verdict --
+# measured, a call failure followed by KeyboardInterrupt in teardown exits 2 with
+# `call_failed` populated, and the previous ordering reported CAUGHT.
+VERDICT_BEARING_EXITS = frozenset({0, 1})
+
+# Runtest-loop exceptions that mean "the run stopped because we told it to". `-x` sets
+# `--maxfail=1`, which raises `Failed`; `Interrupted` is the collection-side equivalent.
+# Anything else -- notably `Exit` from an explicit `pytest.exit()` -- is reported.
+EXPECTED_LOOP_STOPS = frozenset({"Failed", "Interrupted"})
+
+
+def sanitized_env() -> dict:
+    """The ONE environment both baseline and mutation runs use.
+
+    They must be identical or the comparison is meaningless. Measured: baselines inherited
+    ``PYTEST_ADDOPTS`` while mutation runs stripped it, so ``PYTEST_ADDOPTS=--collect-only``
+    made the baseline exit 0 having executed **no test at all** (``18 tests collected``),
+    after which every mutation ran the real suite and could be credited with a pre-existing
+    failure.
+
+    ``PY_COLORS`` is stripped for a different reason: ANSI prefixes on the summary tokens
+    silently turned real detections into harness errors while the verdict was text-based.
+    """
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join([str(ROOT / "tests"), str(ROOT / "scripts")]),
+    }
+    env.pop("PYTEST_ADDOPTS", None)
+    env.pop("PY_COLORS", None)
+    return env
+
+
+def run(name: str, code: str, target: str) -> tuple[str, int, str, dict]:
+    """Apply one mutation and report ``(name, exit_code, detail, outcomes)``.
+
+    ``outcomes`` is the load-bearing return value, and it comes from pytest's own lifecycle
+    hooks rather than its terminal output. Three measured reasons text parsing is not enough:
+
+    * a non-zero exit alone means nothing -- ``pytest tests/does_not_exist.py`` exits 4 having
+      run no test, and the pre-fix verdict scored it CAUGHT;
+    * a **collection** failure on a class emits ``ERROR path::TestName``, which looks exactly
+      like a named test error;
+    * a dying **xdist** worker emits ``FAILED path::test_name`` for a test that never executed.
+
+    ``--color=no`` and a scrubbed ``PYTEST_ADDOPTS`` are belt-and-braces: with ``PY_COLORS=1``
+    the summary tokens carry ANSI prefixes, which silently turned real detections into
+    harness errors.
+    """
     plugin = ROOT / "tests" / "_mutation_plugin.py"
+    outcomes_file = ROOT / "tests" / "_mutation_outcomes.json"
+    outcomes_file.unlink(missing_ok=True)
     plugin.write_text(
         "import sys\nfrom pathlib import Path\n"
-        f"sys.path.insert(0, r'{ROOT / 'scripts'}')\nsys.path.insert(0, r'{ROOT / 'tests'}')\n" + code,
+        f"sys.path.insert(0, r'{ROOT / 'scripts'}')\nsys.path.insert(0, r'{ROOT / 'tests'}')\n"
+        + code
+        + OUTCOME_HOOKS.format(outcome_path=str(outcomes_file)),
         encoding="utf-8",
     )
+    env = sanitized_env()
     proc = subprocess.run(
-        [PY, "-m", "pytest", target, "-q", "-p", "_mutation_plugin", "--no-header", "-x", "--tb=no"],
+        [PY, "-m", "pytest", target, "-q", "-p", "_mutation_plugin", "--no-header", "-x", "--tb=no", "--color=no"],
         cwd=ROOT,
         capture_output=True,
         text=True,
         check=False,
-        env={
-            **os.environ,
-            "PYTHONPATH": os.pathsep.join([str(ROOT / "tests"), str(ROOT / "scripts")]),
-        },
+        env=env,
     )
     plugin.unlink(missing_ok=True)
     if "Error importing plugin" in proc.stdout + proc.stderr:
+        outcomes_file.unlink(missing_ok=True)
         raise SystemExit(f"{name}: the mutation never applied - the harness would report a FALSE 'CAUGHT'")
-    caught = [line.split("::")[-1].split(" ")[0] for line in proc.stdout.splitlines() if line.startswith("FAILED")]
-    if caught:
-        return name, proc.returncode, caught[0]
+    outcomes = read_outcomes(outcomes_file)
+    # The record is the view from INSIDE the session; the return code is the view from
+    # outside. A trylast sessionfinish hook or an atexit os._exit() can make them disagree,
+    # so both are carried and both must agree before anything is called SURVIVED.
+    outcomes["process_returncode"] = proc.returncode
+    outcomes_file.unlink(missing_ok=True)
+    detail = describe(proc, outcomes)
+    return name, proc.returncode, detail, outcomes
+
+
+def read_outcomes(path: Path) -> dict:
+    """Load the plugin's record. A missing or unreadable file is itself a harness error."""
+    empty = {
+        "call_failed": [],
+        "setup_failed": [],
+        "collect_error": [],
+        "internal_error": False,
+        "node_down": False,
+        "session_finished": False,
+        "exitstatus": None,
+        "saw_call_phase": False,
+        "runtest_loop_completed": False,
+        "runtest_loop_exception": None,
+        "synthetic_failed": [],
+        "recorded": False,
+    }
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return empty
+    loaded["recorded"] = True
+    return loaded
+
+
+def observed_mutation(outcomes: dict) -> bool:
+    """True when a NAMED test genuinely observed the mutation.
+
+    Detection evidence is **durable**: a test that failed in its ``call`` phase noticed the
+    mutation, and nothing that happens afterwards un-notices it. Round-3 review measured the
+    cost of the opposite rule -- a real assertion failure followed by ``KeyboardInterrupt`` in
+    teardown exits 2, and erasing the detection turned a genuine CAUGHT into a HARNESS-ERROR.
+
+    ``node_down`` is deliberately **not** consulted here. Round-4 review showed a global flag
+    is too blunt: a genuine call failure emitted by a LIVING worker, or by the dying worker
+    before it died, is still real evidence. The synthetic crash report xdist fabricates
+    carries ``when="???"`` and is filtered at record time instead, so only actual
+    ``call``/``setup``/``teardown`` failures ever reach these lists.
+    """
+    return bool(outcomes.get("call_failed") or outcomes.get("setup_failed"))
+
+
+def session_is_trustworthy(outcomes: dict) -> bool:
+    """True when a COMPLETE, coherent session ran the whole selected suite to a clean verdict.
+
+    Required before concluding SURVIVED, because absence of evidence is only evidence of
+    absence when the run actually finished. Measured shapes that pass a naive check:
+
+    * ``pytest.exit(returncode=0)`` from ``pytest_sessionstart`` -- exit 0, a record written at
+      plugin import, no tests at all;
+    * the same from ``pytest_runtest_call`` -- ``session_finished``, ``exitstatus=0`` and a
+      setup report, while stdout says ``no tests ran``;
+    * the same from **teardown after the first passing test** -- ``session_finished``,
+      ``saw_call_phase`` and exit 0, having run 1 of 14. Hence ``runtest_loop_completed``;
+    * a ``trylast=True`` session-finish hook that sets ``session.exitstatus = 1`` **after**
+      this recorder ran, and an ``atexit`` handler calling ``os._exit(1)`` after a clean
+      session -- both leave ``exitstatus=0`` in the record while the PROCESS returns 1.
+
+    That last pair is why the recorded status is not sufficient on its own: the record is a
+    snapshot taken from inside, and the process is the outside view. Both must agree.
+    """
+    return (
+        bool(outcomes.get("recorded"))
+        and bool(outcomes.get("session_finished"))
+        and bool(outcomes.get("runtest_loop_completed"))
+        and bool(outcomes.get("saw_call_phase"))
+        and outcomes.get("exitstatus") == 0
+        and outcomes.get("process_returncode") == 0
+        and not outcomes.get("collect_error")
+        and not outcomes.get("internal_error", False)
+        and not outcomes.get("node_down", False)
+    )
+
+
+def session_ended_abnormally(outcomes: dict) -> bool:
+    """True when something happened TO the run, as opposed to the run reaching a verdict.
+
+    Deliberately narrower than ``not session_is_trustworthy``, and the narrowing is now by
+    **cause** rather than by dropping the term:
+
+    * a session where every test errored in **setup** has no call phase, so it cannot prove
+      SURVIVED -- but nothing went wrong with it;
+    * mutations run under ``-x``, so pytest raises ``Interrupted`` from the runtest loop the
+      moment one is caught. That is expected and stays unannotated -- but an explicit ``Exit``
+      means somebody cut the run short, and that IS reported.
+
+    Recording the exception type is what lets those two be told apart; an earlier version
+    dropped ``runtest_loop_completed`` from this predicate entirely and so reported neither.
+    """
+    # `Failed` is what `--maxfail` (which `-x` sets) raises when the limit is reached, and
+    # `Interrupted` covers the collection-side stop. Both are the run doing exactly what we
+    # asked; an explicit `Exit` from `pytest.exit()` is not. MEASURED: a caught mutation under
+    # `-x` records `runtest_loop_exception='Failed'` -- an earlier version guessed
+    # `Interrupted` and so annotated every legitimate CAUGHT.
+    loop_error = outcomes.get("runtest_loop_exception")
+    return (
+        not outcomes.get("recorded")
+        or not outcomes.get("session_finished")
+        or outcomes.get("exitstatus") not in VERDICT_BEARING_EXITS
+        or outcomes.get("process_returncode") != outcomes.get("exitstatus")
+        or (loop_error is not None and loop_error not in EXPECTED_LOOP_STOPS)
+        or bool(outcomes.get("collect_error"))
+        or outcomes.get("internal_error", False)
+        or outcomes.get("node_down", False)
+        or bool(outcomes.get("synthetic_failed"))
+    )
+
+
+def is_harness_error(outcomes: dict) -> bool:
+    """True when there is neither a detection nor a trustworthy session.
+
+    The asymmetry is deliberate: **detection is durable, absence is not.** A partial run can
+    prove a mutation was caught; only a complete one can prove it survived.
+    """
+    return not observed_mutation(outcomes) and not session_is_trustworthy(outcomes)
+
+
+def describe(proc: subprocess.CompletedProcess, outcomes: dict) -> str:
+    """One-line detail for the report, preferring the structured record."""
+    if outcomes.get("call_failed"):
+        return outcomes["call_failed"][0]
+    if outcomes.get("setup_failed"):
+        return f"{outcomes['setup_failed'][0]} (errored, did not assert)"
+    if outcomes.get("collect_error"):
+        return f"collection error: {outcomes['collect_error'][0]}"
+    if outcomes.get("internal_error"):
+        return "pytest internal error"
+    if outcomes.get("node_down"):
+        return "xdist worker died"
+    if not outcomes.get("recorded"):
+        return "no lifecycle record written - pytest never started"
+    return last_line(proc)
+
+
+def last_line(proc: subprocess.CompletedProcess) -> str:
+    """Diagnostic text from wherever pytest actually wrote it.
+
+    Indexing stdout unconditionally raised IndexError when a usage/plugin error left stdout
+    empty, so the baseline precondition crashed instead of reporting a harness error.
+    """
     lines = (proc.stdout.strip() or proc.stderr.strip() or "(no output)").splitlines()
-    return name, proc.returncode, lines[-1][:120]
+    return lines[-1][:120] if lines else "(no output)"
+
+
+def named_outcomes(stdout: str) -> tuple[list[str], list[str]]:
+    """Parse pytest's terminal summary. RETAINED FOR DIAGNOSTICS ONLY -- not a verdict source.
+
+    Blind review of PR #409 established that this cannot decide anything: a **collection**
+    failure on a class emits ``ERROR path::TestName`` and a dying **xdist** worker emits
+    ``FAILED path::test_name`` for a test that never ran, so both shapes are indistinguishable
+    here from a real observation. ANSI colouring also defeats the ``startswith`` entirely.
+    The verdict comes from ``read_outcomes`` / ``is_harness_error`` instead.
+    """
+    failed, errored = [], []
+    for line in stdout.splitlines():
+        if line.startswith("FAILED"):
+            failed.append(line.split("::")[-1].split(" ")[0])
+        elif line.startswith("ERROR ") and "::" in line:
+            errored.append(line.split("::")[-1].split(" ")[0])
+    return failed, errored
+
+
+def named_failures(stdout: str) -> list[str]:
+    """Test names pytest reported as FAILED. Kept for callers that only want assertions."""
+    return named_outcomes(stdout)[0]
 
 
 def main() -> int:
     targets = ["tests/test_e2e_offline.py", "tests/test_mock_fabric.py", "tests/test_mock_tableau.py"]
+    dirty = []
     for target in targets:
         baseline = subprocess.run(
-            [PY, "-m", "pytest", target, "-q", "--no-header"], cwd=ROOT, capture_output=True, text=True, check=False
+            [PY, "-m", "pytest", target, "-q", "--no-header", "--color=no"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=sanitized_env(),
         )
-        print(f"BASELINE {target:32s} exit={baseline.returncode}  {baseline.stdout.strip().splitlines()[-1]}")
+        print(f"BASELINE {target:32s} exit={baseline.returncode}  {last_line(baseline)}")
+        if baseline.returncode != 0:
+            dirty.append(f"{target} (exit {baseline.returncode})")
+    if dirty:
+        # A mutation is only evidence against a clean baseline: an already-failing test would be
+        # credited to every mutation that follows it.
+        print("\nHARNESS ERROR: baseline is not clean, so no mutation verdict is trustworthy:")
+        for item in dirty:
+            print(f"  {item}")
+        return 2
     print()
-    survivors = []
+    survivors, harness_errors = [], []
     for name, code in MUTATIONS.items():
         if name.startswith("mock-"):
             target = "tests/test_mock_fabric.py"
@@ -232,13 +575,29 @@ def main() -> int:
             target = "tests/test_mock_tableau.py"
         else:
             target = "tests/test_e2e_offline.py"
-        label, rc, detail = run(name, code, target)
-        verdict = "CAUGHT " if rc != 0 else "SURVIVED"
-        if rc == 0:
+        label, rc, detail, outcomes = run(name, code, target)
+        if observed_mutation(outcomes):
+            # Detection is durable. A real call-phase failure noticed the mutation even if the
+            # session later fell over; only a synthetic `node_down` record is excluded.
+            verdict = "CAUGHT  " if outcomes["call_failed"] else "CAUGHT* "
+            if session_ended_abnormally(outcomes):
+                detail = f"{detail} [session ended abnormally: exit {rc}]"
+        elif session_is_trustworthy(outcomes):
+            verdict = "SURVIVED"
             survivors.append(label)
+        else:
+            # Neither a detection nor a complete session: pytest never reached a verdict.
+            verdict = "HARNESS-ERROR"
+            harness_errors.append(f"{label} (exit {rc}, {detail})")
         print(f"{verdict}  {label:52s} -> {detail}")
     print()
     print("survivors (holes in the suite):", survivors or "none")
+    print("CAUGHT* = a named test ERRORED rather than asserting; weaker coverage, still observed")
+    if harness_errors:
+        print("HARNESS ERRORS (no verdict - pytest never ran the tests):")
+        for item in harness_errors:
+            print(f"  {item}")
+        return 2
     return 0
 
 

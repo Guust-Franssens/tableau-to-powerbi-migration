@@ -604,7 +604,11 @@ for an already-open data-source dialog are `status` reporting **"Host is not rea
 operations"** and `screenshot` reporting **"Print metadata is not available"**. That combination is
 not enough evidence for a bridge regression; run the bundled refresh/query probes, which check for
 visible non-main dialogs at t=0 and keep polling while the source wakes up. Text-readable credential
-prompts report `CREDENTIAL_MISSING`; unreadable/non-credential dialogs report `BLOCKED_BY_DIALOG`.
+prompts report `CREDENTIAL_MISSING` (exit 1, the only hard stop); a dialog whose content did not
+positively read as harmless reports `REFRESH_IN_PROGRESS` / `DIALOG_NEEDS_HUMAN` /
+`DIALOG_UNRECOGNIZED` / `DIALOG_UNREADABLE`, all **exit 3** — "could not probe", never "sign in".
+(`BLOCKED_BY_DIALOG` was retired in issues #367/#376: it came from a size-only test, so a Power BI
+Refresh progress dialog produced it.)
 
 **Independent confirmation is available and worth taking.** For a serverless warehouse, `STOPPED` with
 `num_active_sessions = 0` proves no query ever arrived, regardless of what any log claims. Prefer
@@ -1136,6 +1140,85 @@ counts engine handover requests; `check_stub_measures.py` scans shipped TMDL pla
 splits measures from calculated columns. The real `_bundle-208` shape that read as
 `Admin_Insights_Starter 27/51 -> actionable 60` was not arithmetic drift: the extra actionable
 items were stubbed calculated columns, outside the measure-only denominator.
+
+### `openability_selfcheck.ok` is the engine's CLAIM, not a verified open
+
+The handover slice and `report.json` both carry `workbook.openability_selfcheck`. Its name promises a
+verdict on whether the model opens. It is not one, and the gap is wide enough to convert a defect
+into a sign-off — which is the only reason this subsection exists. **Adjudicate it like any other
+engine claim; never cite it as evidence that something opens.**
+
+**What it actually is** (engine 2.339.0, `skills/tableau-migration/scripts/openability_gate.py`,
+`check_model_openability`): a **static scan of the model's TMDL text**. Its inputs are the
+`{relative_path: tmdl_text}` map the assembler produced plus two optional counts; the module imports
+`re` and `os` and nothing else, touches no filesystem and loads no AMO. `ok` is computed as
+`not issues` — nothing more.
+
+**What it therefore cannot see**, by construction rather than by omission:
+
+| out of scope | why |
+|---|---|
+| the whole report layer — visual bindings, dropped filters, empty pages | PBIR is never passed to it |
+| data — row counts, a locale-corrupted `.xls`, a zero-row refresh | it never connects to anything |
+| whether the model actually opens | regexes over text; no AMO, no Desktop |
+| the filesystem | deliberate — it judges whether an M path is *foreign*, never whether it *exists* |
+
+**Measured on the 2.339.0 estate run** (`_runs/estate-2.339.0-20260829/report.json`, 45 workbooks, 44
+carrying the field):
+
+| measurement | value |
+|---|---|
+| `ok: true` while the same `report.json` records defects for that workbook | **30 of 44** |
+| `issues[]` empty | 43 of 44 |
+| `ok` distribution | `true` 43 · `false` 1 · key absent 1 |
+
+Worked example: `Meridian Calc Gauntlet` ships `ok: true` and `issues: []` beside
+`viz_dangling_bindings.count = 1`, three `pbip_ref_drops`, seven `pbip_warnings` and a
+`pbip_entity_binding_mismatch`. Every one of those is a real defect the engine itself reported, in
+the same file, one key over.
+
+**`checks` is not exhaustive: an absent key means NOT EVALUATED, never passed.** Five checks are
+conditional, and `not_evaluated` names only one of them — so it reads like a manifest of skips and is
+not one. Cross-reference both keys; never `checks.get(name)` and treat `None` as fine.
+
+⚠️ **But absent is not automatically alarming, and the first reading of this got it backwards.** Two
+of the conditional checks are absent exactly when the hazard they guard cannot exist. Measured across
+44 models × 2 checks against the shipped TMDL: **88 agreements, 0 disagreements.**
+
+| check | present iff | so absent means |
+|---|---|---|
+| `eager_calc_refs_resolve` | the model contains a stub (placeholder) partition | no stub table, nothing to dangle onto — **vacuous** (absent 36/44) |
+| `relationship_columns_exist` | `definition/relationships.tmdl` exists | no relationships, nothing to check — **vacuous** (absent 18/44). A model with *no* relationships is a separate, real concern |
+| `typed_columns_in_header` | the caller supplied flat-file headers | headers not supplied — **genuinely unevaluated, and the hazard remains** (absent 34/44) |
+| `endpoints_distinct` | the source declares more than one upstream | explained in `not_evaluated` on 42 of its 43 absences |
+| `compatibility_level_current` | a `database.tmdl` part exists | present 44/44 at 2.339.0 — an older corpus (2.126–2.208) saw it absent 23×, so **re-measure, do not remember** |
+
+**The post-wrap re-check silently DROPS `not_evaluated` and `reference_case_mismatches`.** When
+`migrate_estate._recheck_openability_after_wrap` merges its second pass it rebuilds the payload with
+only `ok` / `checks` / `issues` / `rechecked_after_row_predicate_wrap`. Measured: exactly 1 of 44
+workbooks is missing both keys, and it is precisely the payload carrying
+`rechecked_after_row_predicate_wrap: true`. So the tri-state discipline above fails on the one
+payload whose check set was recomputed — and the gate's own source comment claims the opposite
+("present and empty on a healthy build, so its absence is never mistaken for *not evaluated*").
+Filed upstream as [`tableau-fabric-skills#183`](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/183):
+it is a regression from the fix for upstream #177, which silently retracts the disclosure #141 added.
+
+**No static gate settles openability, and the TMDL oracle is not the exception.** The strongest
+offline signal is the parser Desktop itself uses — `TmdlSerializer.DeserializeDatabaseFromFolder`,
+wired here as `scripts/tmdl_oracle.py` and reached through `python scripts/check_datamodel.py` or
+`check_unit.py --scope data-model`. Treat it as the **mandatory parser-level structural gate**, and
+note what it does better than the selfcheck: it exits **3 (`UNASSESSABLE`)** rather than `0` when it
+cannot run, which is the discipline `openability_selfcheck` does not apply to its own skipped checks.
+
+⚠️ **But "deserializes" is not "opens", and §4 of this file is the committed counterexample.** A model
+with **model-wide duplicate measure names** deserializes *cleanly* through
+`DeserializeDatabaseFromFolder` and Power BI Desktop then **refuses to open the `.pbip`** — *"Could not
+add Measure with the name X because a Measure with the same name already exists"*. That shipped once
+and broke a Desktop open. A measure name equal to a column name in the same table fails the same way,
+at commit. `tools/tmdl_oracle/Program.cs` calls `DeserializeDatabaseFromFolder` and nothing else — no
+open, no commit — and says so in its own header. So the oracle is **necessary, not sufficient**;
+**only a cold Desktop open** settles openability, and even that proves nothing about rows: see this
+file's header, and §6 for a model that passed every structural gate with every decimal inflated 493×.
 
 ### RETRACTED: "the queue is unreachable and fails silently"
 
