@@ -228,8 +228,8 @@ Run these passes **in order** — cheap structural checks first, expensive judgm
    - **Some deferrals must NOT be reversed**, and only you can tell. A `LAST` table-calc filter runs
      *after* aggregation and HIDES marks; re-adding it as an ordinary filter silently re-scopes the 6
      other table calcs sharing that view and changes **other visuals' numbers**. A builder acting on
-     the raw list would do exactly that; your classification is what prevents it. The verbatim
-     handover entry and the mechanism live in the `powerbi-report-gotchas` skill.
+     the raw list would do exactly that; your classification is what prevents it. Verbatim entry and
+     mechanism: invoke the `powerbi-report-gotchas` skill **by name** — it is not in *Skills you use*.
 1. **Inventory/completeness pass** (cheap, mechanical). Scope each dashboard to **its own**
    worksheets: from that `dashboards[]` entry's zone tree, derive the worksheets *it actually
    references*, and confirm a corresponding PBI page exists with a visual for each of them. **Do NOT
