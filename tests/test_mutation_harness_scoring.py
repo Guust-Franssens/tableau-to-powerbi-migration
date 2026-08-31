@@ -61,7 +61,9 @@ def record(**kwargs) -> dict:
         "exitstatus": 0,
         "saw_call_phase": True,
         "runtest_loop_completed": True,
+        "runtest_loop_exception": None,
         "synthetic_failed": [],
+        "process_returncode": 0,
         "recorded": True,
     }
     base.update(kwargs)
@@ -249,14 +251,48 @@ def test_one_completed_call_phase_does_not_prove_the_suite_ran() -> None:
 def test_an_interrupted_loop_after_a_catch_is_not_annotated_as_abnormal() -> None:
     """Mutations run under ``-x``, so a CAUGHT always interrupts the loop.
 
-    ``runtest_loop_completed`` is therefore False for every legitimate detection. Including it
-    in the abnormal-session predicate annotated all of them, which is a warning nobody reads.
+    ``Interrupted`` is expected here and stays quiet; the narrowing is by **cause**, not by
+    dropping the term, so an explicit ``Exit`` is still reported (next test).
     """
-    caught_under_x = record(call_failed=["test_x"], runtest_loop_completed=False, exitstatus=1)
+    caught_under_x = record(
+        call_failed=["test_x"],
+        runtest_loop_completed=False,
+        runtest_loop_exception="Failed",
+        exitstatus=1,
+        process_returncode=1,
+    )
 
     assert observed_mutation(caught_under_x) is True
     assert session_ended_abnormally(caught_under_x) is False
     assert is_harness_error(caught_under_x) is False
+
+
+def test_an_explicit_pytest_exit_IS_annotated_even_when_the_mutation_was_caught() -> None:
+    """``Exit`` means somebody cut the run short -- distinguishable from ``-x``'s Interrupted."""
+    outcomes = record(
+        call_failed=["test_x"],
+        runtest_loop_completed=False,
+        runtest_loop_exception="Exit",
+        exitstatus=1,
+        process_returncode=1,
+    )
+
+    assert observed_mutation(outcomes) is True
+    assert session_ended_abnormally(outcomes) is True
+
+
+def test_the_record_and_the_process_must_agree() -> None:
+    """Round-5 finding: the record is the view from inside, the return code from outside.
+
+    Measured: a ``trylast=True`` session-finish hook set ``session.exitstatus = 1`` AFTER the
+    recorder ran, and an ``atexit`` handler called ``os._exit(1)`` after a clean session. Both
+    left ``exitstatus=0`` recorded while the process returned 1, and both scored SURVIVED.
+    """
+    disagreeing = record(exitstatus=0, process_returncode=1)
+
+    assert session_is_trustworthy(disagreeing) is False
+    assert session_ended_abnormally(disagreeing) is True
+    assert is_harness_error(disagreeing) is True
 
 
 def test_exit_one_without_a_recorded_detection_cannot_prove_survival() -> None:

@@ -217,6 +217,7 @@ _RECORD = {{
     "exitstatus": None,
     "saw_call_phase": False,
     "runtest_loop_completed": False,
+    "runtest_loop_exception": None,
     "synthetic_failed": [],
 }}
 
@@ -252,10 +253,16 @@ def pytest_runtestloop(session):
     # after `pytest.exit()`, and one completed call phase proves one test body ran, not that
     # the run finished: measured, `pytest.exit()` from teardown after the first passing test
     # gave session_finished, saw_call_phase and exit 0 -- and scored SURVIVED.
+    #
+    # The exception TYPE is recorded, not just the fact of one: `Interrupted` is what `-x`
+    # raises the moment a mutation is caught and is entirely expected, while `Exit` means
+    # somebody called `pytest.exit()` and the run was cut short for a reason of its own.
     outcome = yield
     if outcome.excinfo is None:
         _RECORD["runtest_loop_completed"] = True
-        _flush()
+    else:
+        _RECORD["runtest_loop_exception"] = outcome.excinfo[0].__name__
+    _flush()
 
 
 def pytest_collectreport(report):
@@ -294,6 +301,11 @@ _flush()
 # measured, a call failure followed by KeyboardInterrupt in teardown exits 2 with
 # `call_failed` populated, and the previous ordering reported CAUGHT.
 VERDICT_BEARING_EXITS = frozenset({0, 1})
+
+# Runtest-loop exceptions that mean "the run stopped because we told it to". `-x` sets
+# `--maxfail=1`, which raises `Failed`; `Interrupted` is the collection-side equivalent.
+# Anything else -- notably `Exit` from an explicit `pytest.exit()` -- is reported.
+EXPECTED_LOOP_STOPS = frozenset({"Failed", "Interrupted"})
 
 
 def sanitized_env() -> dict:
@@ -357,6 +369,10 @@ def run(name: str, code: str, target: str) -> tuple[str, int, str, dict]:
         outcomes_file.unlink(missing_ok=True)
         raise SystemExit(f"{name}: the mutation never applied - the harness would report a FALSE 'CAUGHT'")
     outcomes = read_outcomes(outcomes_file)
+    # The record is the view from INSIDE the session; the return code is the view from
+    # outside. A trylast sessionfinish hook or an atexit os._exit() can make them disagree,
+    # so both are carried and both must agree before anything is called SURVIVED.
+    outcomes["process_returncode"] = proc.returncode
     outcomes_file.unlink(missing_ok=True)
     detail = describe(proc, outcomes)
     return name, proc.returncode, detail, outcomes
@@ -374,6 +390,7 @@ def read_outcomes(path: Path) -> dict:
         "exitstatus": None,
         "saw_call_phase": False,
         "runtest_loop_completed": False,
+        "runtest_loop_exception": None,
         "synthetic_failed": [],
         "recorded": False,
     }
@@ -406,19 +423,20 @@ def session_is_trustworthy(outcomes: dict) -> bool:
     """True when a COMPLETE, coherent session ran the whole selected suite to a clean verdict.
 
     Required before concluding SURVIVED, because absence of evidence is only evidence of
-    absence when the run actually finished. Four measured shapes that pass a naive check:
+    absence when the run actually finished. Measured shapes that pass a naive check:
 
-    * ``pytest.exit(returncode=0)`` from ``pytest_sessionstart`` -- exit 0, a valid record
-      written at plugin import, no tests at all;
+    * ``pytest.exit(returncode=0)`` from ``pytest_sessionstart`` -- exit 0, a record written at
+      plugin import, no tests at all;
     * the same from ``pytest_runtest_call`` -- ``session_finished``, ``exitstatus=0`` and a
-      setup-phase report, while stdout says ``no tests ran``;
+      setup report, while stdout says ``no tests ran``;
     * the same from **teardown after the first passing test** -- ``session_finished``,
-      ``saw_call_phase`` and exit 0, having run 1 of 14 tests. Hence
-      ``runtest_loop_completed``, which is the only evidence the suite ran to the end;
-    * a call failure then ``KeyboardInterrupt`` -- exit 2, session incoherent.
+      ``saw_call_phase`` and exit 0, having run 1 of 14. Hence ``runtest_loop_completed``;
+    * a ``trylast=True`` session-finish hook that sets ``session.exitstatus = 1`` **after**
+      this recorder ran, and an ``atexit`` handler calling ``os._exit(1)`` after a clean
+      session -- both leave ``exitstatus=0`` in the record while the PROCESS returns 1.
 
-    ``exitstatus == 0`` specifically: exit 1 means tests failed, and a failure we did not
-    record as an observation cannot prove anything survived.
+    That last pair is why the recorded status is not sufficient on its own: the record is a
+    snapshot taken from inside, and the process is the outside view. Both must agree.
     """
     return (
         bool(outcomes.get("recorded"))
@@ -426,6 +444,7 @@ def session_is_trustworthy(outcomes: dict) -> bool:
         and bool(outcomes.get("runtest_loop_completed"))
         and bool(outcomes.get("saw_call_phase"))
         and outcomes.get("exitstatus") == 0
+        and outcomes.get("process_returncode") == 0
         and not outcomes.get("collect_error")
         and not outcomes.get("internal_error", False)
         and not outcomes.get("node_down", False)
@@ -435,22 +454,30 @@ def session_is_trustworthy(outcomes: dict) -> bool:
 def session_ended_abnormally(outcomes: dict) -> bool:
     """True when something happened TO the run, as opposed to the run reaching a verdict.
 
-    Deliberately narrower than ``not session_is_trustworthy``, twice over:
+    Deliberately narrower than ``not session_is_trustworthy``, and the narrowing is now by
+    **cause** rather than by dropping the term:
 
-    * a session in which every test errored in **setup** has no call phase, so it cannot prove
+    * a session where every test errored in **setup** has no call phase, so it cannot prove
       SURVIVED -- but nothing went wrong with it;
     * mutations run under ``-x``, so pytest raises ``Interrupted`` from the runtest loop the
-      moment one is caught. ``runtest_loop_completed`` is therefore ``False`` for **every**
-      legitimate CAUGHT, and including it here annotated all of them.
+      moment one is caught. That is expected and stays unannotated -- but an explicit ``Exit``
+      means somebody cut the run short, and that IS reported.
 
-    Both would fire on every valid case, and a warning that always fires is one nobody reads.
-    ``runtest_loop_completed`` still gates ``session_is_trustworthy``, where it is the only
-    evidence the selected suite ran to the end.
+    Recording the exception type is what lets those two be told apart; an earlier version
+    dropped ``runtest_loop_completed`` from this predicate entirely and so reported neither.
     """
+    # `Failed` is what `--maxfail` (which `-x` sets) raises when the limit is reached, and
+    # `Interrupted` covers the collection-side stop. Both are the run doing exactly what we
+    # asked; an explicit `Exit` from `pytest.exit()` is not. MEASURED: a caught mutation under
+    # `-x` records `runtest_loop_exception='Failed'` -- an earlier version guessed
+    # `Interrupted` and so annotated every legitimate CAUGHT.
+    loop_error = outcomes.get("runtest_loop_exception")
     return (
         not outcomes.get("recorded")
         or not outcomes.get("session_finished")
         or outcomes.get("exitstatus") not in VERDICT_BEARING_EXITS
+        or outcomes.get("process_returncode") != outcomes.get("exitstatus")
+        or (loop_error is not None and loop_error not in EXPECTED_LOOP_STOPS)
         or bool(outcomes.get("collect_error"))
         or outcomes.get("internal_error", False)
         or outcomes.get("node_down", False)
