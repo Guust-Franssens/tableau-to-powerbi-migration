@@ -30,32 +30,43 @@ mistake -- somewhere in the pipeline a step had to *decide* whether a piece of p
                                                      identifier split across two source lines all
                                                      passed unexamined
  4   pin EVERY block, in order                       nothing, as a classifier -- but "every block"
-                                                     was not every line: see ROUND 5 below
+                                                     was not every line: two collapse-boundary lines
+                                                     belonged to no representation at all (round 5),
+                                                     and blank lines were discarded outright
+                                                     (round 6)
+ 5   ...plus a normalizer taught more Markdown       tabs counted as spaces, and a blank line between
+                                                     a table header and its delimiter row split one
+                                                     table into two paragraphs -- both silent
+ 6   hash the BYTES; prove the blocks rebuild        -- the current mechanism --
+     the file
 ===  ==============================================  ==============================================
 
 Round 3 was meant to stop classifying prose; it moved the classifier one step earlier instead.
 Markdown renderings and English paraphrases are both unbounded, so **any** step that first decides
 "is this block about the field?" is a false-negative surface by construction.
 
-So round 4 deletes the question. **Every Markdown block of every ``.github/agents/*.agent.md`` is
-pinned by the SHA-256 of its normalized text, in order, with total coverage** -- every non-blank line
-belongs to exactly one pinned block, and every line's content is inside something that gets hashed.
-There is nothing to recognise, therefore nothing to bypass: an added or reworded instruction fails
-here whatever it says and however it is spelled.
+So round 4 deletes the question. **Every block of every ``.github/agents/*.agent.md`` is pinned by the
+SHA-256 of its text, in order, losslessly** -- the pinned blocks rebuild the file exactly. There is
+nothing to recognise, therefore nothing to bypass: an added or reworded instruction fails here
+whatever it says and however it is spelled.
 
 WHAT THIS COSTS, HONESTLY
 -------------------------
-Every deliberate persona edit now needs ``--update`` and a pin diff in the same commit. Measured on
-this branch: 331 pinned blocks across four personas plus the shared region. A typo fix churns one
-line of ``persona_pins.txt``; adding a paragraph adds one line; a one-word ``AGENTS.md`` edit,
-regenerated into all four personas, churns exactly one. That is the intended friction -- the pin diff
-is the record that *someone looked*, and the persona diff beside it is what they looked at.
+Every deliberate persona edit needs ``--update`` and a pin diff in the same commit -- **including a
+purely cosmetic re-wrap**, since round 6. Measured on this branch: 452 pinned blocks across four
+personas plus the shared region. A typo fix churns one line of ``persona_pins.txt``; adding a
+paragraph adds one line; a one-word ``AGENTS.md`` edit, regenerated into all four personas, churns
+exactly one. That is the intended friction -- the pin diff is the record that *someone looked*, and
+the persona diff beside it is what they looked at.
+
+The honest downside of hashing raw text: in the pin file a cosmetic re-wrap and a reworded
+instruction look the same, one changed hash. The persona diff sitting beside it is what tells them
+apart, which is why the failure message insists the two land in one commit.
 
 Two design choices keep the friction proportional rather than punitive:
 
-* **Normalization erases only what a renderer erases** -- line endings, trailing spaces, and width
-  reflow. It does **not** erase indentation, hard line breaks, or the line structure inside a fence.
-  See ``normalize``.
+* **Blocks are small** -- one table row, one list item, one paragraph -- so an edit folds only its
+  own hash, never a neighbour's.
 * **The generated ``<!-- BEGIN:shared-conventions -->`` region is collapsed to ONE synthetic block
   per persona and pinned ONCE**, under the ``<generated:shared-conventions>`` key, from its own
   (verified identical) content. ``scripts/sync_agent_conventions.py`` copies that region verbatim
@@ -81,11 +92,38 @@ Round 4's mechanism survived review -- no classifier, all eleven earlier bypasse
    rule, preceded by a blank line and indented four spaces, kept its words, its digest, its
    ``REQUIRED`` entry and **61 passed** -- while rendering as ``<pre><code>``. Worse, indenting the
    shared-conventions heading in ``AGENTS.md`` *and every generated copy* passed the pin **and**
-   ``sync_agent_conventions.py --check``. Fixed in ``normalize``.
+   ``sync_agent_conventions.py --check``.
 
-The lesson is the one the rounds keep repeating one level down: **the thing that escapes is whatever
-the representation quietly drops.** Rounds 1-3 dropped prose it had not classified; round 4 dropped
-two boundary lines and every leading space.
+ROUND 6: STOP APPROXIMATING MARKDOWN. PIN THE ARTIFACT.
+-------------------------------------------------------
+Round 5 answered (2) by teaching the normalizer more Markdown. Round 6 found three more gaps, two of
+them HIGH, all measured passing **both** gates at ``fd65ce8``:
+
+* a blank line between a **table header and its delimiter row** -- one ``<table>`` becomes two
+  paragraphs -- **85 passed, exit 0**;
+* a blank line between shared **list items**, propagated through ``AGENTS.md`` to all four personas --
+  tight list becomes loose -- both gates green;
+* three leading **tabs** in place of three spaces on a committed table row -- ``_indent`` counted
+  characters while claiming columns -- **same digest, zero findings, 85 passed, exit 0**.
+
+The pattern is not "the normalizer needs another rule". It is that **every HIGH in rounds 5 and 6 came
+from the representation silently dropping part of the artifact** -- two boundary lines, then leading
+spaces, then tabs, then blank lines. Note that the blank-line loss was in ``segment``, not in the
+hash: no normalization rule could have caught it. Narrowing the approximation is an open-ended bet
+that the next reviewer will not find the next gap.
+
+So the approximation is gone. ``digest`` hashes the block's **bytes**, and the property that replaces
+the guesswork is ``test_segmentation_is_lossless``: the pinned blocks rebuild the file exactly. That
+is a *closed* claim -- nothing dropped means nothing can escape by being dropped -- rather than
+another entry on a list. Free reflow, the one thing normalization bought, was the compromise that
+produced every one of these findings; it now costs one ``--update``.
+
+Two alternatives were weighed and rejected. Hashing a real CommonMark/GFM parse tree would be exact
+about *rendering*, but it makes a third-party parser's version part of the contract (the table
+finding above is conditional on the GFM table extension being enabled at all), adds a dependency to a
+stdlib-only test tier, and answers a question this pin no longer asks: we do not care how the text
+renders, only that it is exactly the text somebody reviewed. Keeping the normalizer and fixing tabs
+and blank lines would have been round three of the same shape.
 
 The generated skill-index tables are **not** collapsed: they are small, per-persona, and their rows
 are headings that do reach an agent as instruction text.
@@ -191,59 +229,43 @@ class Finding:
 
 
 def _indent(line: str) -> int:
-    """Columns of leading whitespace. Four of them turn an instruction into a code block."""
+    """Whitespace CHARACTERS before the first non-space. Used by fixtures, never by the hash."""
     return len(line) - len(line.lstrip())
 
 
-def _is_verbatim(lines: list[str]) -> bool:
-    """Blocks whose line structure IS their content: fenced code, and YAML frontmatter."""
-    if not lines:
-        return False
-    if FENCE.match(lines[0]):
-        return True
-    return len(lines) > 1 and lines[0].strip() == "---" and lines[-1].strip() == "---"
-
-
-def normalize(block: str) -> str:
-    """Erase what a renderer erases, and nothing a renderer READS.
-
-    Cosmetic, and therefore normalized away: line endings, trailing spaces, and re-wrapping a
-    paragraph to a different width. That boundary is the one round 4 documented and the reviewer
-    confirmed as sound, so it is kept.
-
-    Structural, and therefore part of the identity:
-
-    * **Leading indentation.** Round 5 measured the real `openability_selfcheck.ok` rule preceded by
-      a blank line and indented four spaces: identical words, identical digest, ``REQUIRED`` still
-      satisfied, 61 passed, and ``sync_agent_conventions.py --check`` also exit 0 -- while the
-      renderer turned a list instruction into ``<pre><code>``. Indentation is captured as the first
-      line's indent plus the SET of continuation indents, which is stable under width reflow (the
-      continuation column does not move when lines re-wrap) and changes the moment anything is
-      indented or nested differently.
-    * **Hard line breaks** (two or more trailing spaces), counted. Reflow neither adds nor removes
-      them; an author does.
-    * **Line structure inside a fence or the frontmatter**, kept verbatim including internal blank
-      lines, because there a line break is content rather than layout.
-
-    A blank line inserted *between* blocks needs nothing here: it splits or merges blocks, so the
-    ordered sequence of hashes changes on its own.
-    """
-    lines = block.splitlines()
-    if _is_verbatim(lines):
-        return "verbatim\n" + "\n".join(line.rstrip() for line in lines)
-    first = _indent(lines[0]) if lines else 0
-    continuations = sorted({_indent(line) for line in lines[1:] if line.strip()})
-    breaks = sum(1 for line in lines if line.strip() and line.endswith("  "))
-    return f"i{first} c{continuations} b{breaks}\n{' '.join(block.split())}"
-
-
 def digest(block: str) -> str:
-    """The pinned identity of a block."""
-    return hashlib.sha256(normalize(block).encode("utf-8")).hexdigest()
+    """The pinned identity of a block: its bytes. Nothing is normalized, nothing is approximated.
+
+    Round 6 retired the normalizer. Rounds 5 and 6 each produced HIGH findings of one shape -- the
+    representation quietly dropped part of the artifact -- and each fix narrowed an approximation of
+    Markdown semantics that the next round then out-ran: two boundary lines, then leading spaces,
+    then tabs-versus-spaces, then blank lines. That list was never going to close.
+
+    So the identity is now the text itself, and the property that replaces the guesswork is
+    **losslessness**: ``reconstruct`` rebuilds the file exactly from the pinned blocks, and a test
+    asserts it. Once that holds there is nothing left to approximate, so no further Markdown subtlety
+    can escape -- which is a closed property rather than another entry on an open list.
+
+    Two transformations remain, both declared rather than assumed, and neither a judgement about
+    Markdown:
+
+    * **Line endings.** Sources are read in text mode, so ``\\r\\n`` arrives as ``\\n``. Required, not
+      preferred: ``core.autocrlf`` is true on Windows here and CI checks out LF, so hashing raw bytes
+      would make the pin platform-dependent. Verified by rebuilding the pin file as CRLF and re-running.
+    * **The final newline.** ``splitlines`` cannot tell ``"a"`` from ``"a\\n"``. Closed by a test that
+      every persona ends with exactly one newline, so the ambiguity cannot carry content.
+
+    The cost is that a cosmetic re-wrap now needs ``--update`` like any other edit. Measured, that is
+    the whole cost: the corpus has **0** lines with trailing whitespace and **0** tabs today.
+    """
+    return hashlib.sha256(block.encode("utf-8")).hexdigest()
 
 
 def excerpt(block: str) -> str:
     """A short ASCII label for a pin entry. Never compared -- only printed, so it stays readable."""
+    if not block.strip():
+        count = len(block.splitlines()) or 1
+        return f"({count} blank line{'s' if count > 1 else ''})"
     text = " ".join(block.split())
     return "".join(char if 32 <= ord(char) < 127 else "~" for char in text)[:EXCERPT_CHARS]
 
@@ -285,17 +307,23 @@ def generated_span(lines: list[str]) -> tuple[int, int] | None:
 
 
 def segment(text: str, *, collapse_generated: bool = False) -> list[Block]:
-    """Split ``text`` into every Markdown block, in order, covering every non-blank line exactly once.
+    """Split ``text`` into blocks, in order, consuming EVERY line exactly once -- blanks included.
 
-    A block is the YAML frontmatter, one fenced code block, one heading, one table row, one HTML
-    comment, one list item, one footnote definition, or one plain paragraph -- never more. Isolation
-    keeps the pin diff proportional: an edit folds only its own block's hash, never a neighbour's.
+    A block is the YAML frontmatter, one run of blank lines, one fenced code block, one heading, one
+    table row, one HTML comment, one list item, one footnote definition, or one plain paragraph --
+    never more. Isolation keeps the pin diff proportional: an edit folds only its own block's hash.
 
-    ``collapse_generated`` replaces the ``shared-conventions`` region -- **both marker lines
-    included** -- with a single marker block spanning the whole range, because that region is a
-    verbatim copy in all four personas and is pinned once at ``SHARED_KEY``. It collapses only a well
-    formed pair of marker-only lines; anything else falls through to ordinary segmentation, so a
-    malformed or polluted marker is pinned as the text it is rather than skipped.
+    **Blank runs are blocks.** Round 6 measured why: a blank line between a table header and its
+    delimiter row splits one ``<table>`` into two paragraphs, and a blank line between shared list
+    items turns a tight list loose -- yet neither re-segments the surrounding content, so with blanks
+    discarded the pinned sequence was identical and both passed every gate. No normalization rule
+    would have caught that, because the loss was here rather than in the hash.
+
+    ``collapse_generated`` replaces the ``shared-conventions`` region -- both marker lines included --
+    with a single marker block spanning the whole range, because that region is a verbatim copy in
+    all four personas and is pinned once at ``SHARED_KEY``. It collapses only a well formed pair of
+    marker-only lines; anything else falls through to ordinary segmentation, so a malformed or
+    polluted marker is pinned as the text it is rather than skipped.
     """
     lines = text.splitlines()
     blocks: list[Block] = []
@@ -303,39 +331,54 @@ def segment(text: str, *, collapse_generated: bool = False) -> list[Block]:
     total = len(lines)
     region = generated_span(lines) if collapse_generated else None
 
+    def take(start: int, stop: int) -> int:
+        """Emit ``lines[start:stop]`` as one block and return the next index."""
+        blocks.append(Block(start + 1, "\n".join(lines[start:stop]), span=stop - start))
+        return stop
+
     if lines and lines[0].strip() == "---":
         for close in range(1, total):
             if lines[close].strip() == "---":
-                blocks.append(Block(1, "\n".join(lines[: close + 1])))
-                index = close + 1
+                index = take(0, close + 1)
                 break
 
     while index < total:
         line = lines[index]
-        if not line.strip():
-            index += 1
-            continue
         if region is not None and index == region[0]:
             blocks.append(Block(index + 1, COLLAPSED, span=region[1] - region[0] + 1))
             index = region[1] + 1
+            continue
+        if not line.strip():
+            end = index
+            while end + 1 < total and not lines[end + 1].strip():
+                end += 1
+            index = take(index, end + 1)
             continue
         if FENCE.match(line):
             end = index + 1
             while end < total and not FENCE.match(lines[end]):
                 end += 1
-            blocks.append(Block(index + 1, "\n".join(lines[index : min(end + 1, total)])))
-            index = end + 1
+            index = take(index, min(end + 1, total))
             continue
         if _standalone(line):
-            blocks.append(Block(index + 1, line))
-            index += 1
+            index = take(index, index + 1)
             continue
         end = index
         while end + 1 < total and not _ends_paragraph(lines[end + 1]):
             end += 1
-        blocks.append(Block(index + 1, "\n".join(lines[index : end + 1])))
-        index = end + 1
+        index = take(index, end + 1)
     return blocks
+
+
+def reconstruct(text: str, *, collapse: bool = False) -> str:
+    """Rebuild ``text`` from its pinned blocks, expanding the collapsed marker back to its region.
+
+    This is the property that replaced guessing at Markdown semantics: if the blocks rebuild the file
+    exactly, nothing has been dropped, so nothing can escape by being dropped.
+    """
+    region = shared_region(text) or ""
+    parts = [region if block.text == COLLAPSED else block.text for block in segment(text, collapse_generated=collapse)]
+    return "\n".join(parts)
 
 
 def personas() -> list[Path]:
@@ -373,8 +416,8 @@ PIN_HEADER = (
     "# GENERATED by tests/test_openability_claim_citations.py -- do not hand-edit.\n"
     f"# Regenerate with:  {UPDATE_COMMAND}\n"
     "#\n"
-    "# One line per Markdown block of every .github/agents/*.agent.md, in file order:\n"
-    "#     <sha256 of the whitespace-normalized block>  <ASCII excerpt, a LABEL only, never compared>\n"
+    "# One line per block of every .github/agents/*.agent.md, in file order (blank runs included):\n"
+    "#     <sha256 of the block's exact bytes>  <ASCII excerpt, a LABEL only, never compared>\n"
     "#\n"
     "# Issue #312: nothing here is classified as being 'about' anything. Every block is pinned, so an\n"
     "# added or reworded instruction requires deliberate approval whatever it says.\n"
@@ -442,22 +485,22 @@ def findings(key: str, blocks: list[Block], pins: dict[str, list[tuple[str, str]
 REQUIRED: tuple[tuple[str, str, str], ...] = (
     (
         "pbi-migration-validator.agent.md",
-        "54a7fac55b4f7e603a3b692e16453b4df4b6022ab64596ae81f017b2f3c62249",
+        "2e63d62bf8d58b3f9dc5c6c405828e6efb9e75ddff5463c524c2a1654628226d",
         "the validator's input list, which calls the handover the engine's claims and never verification",
     ),
     (
         "pbi-migration-validator.agent.md",
-        "a7fca5dd91e67d088376d6aa0c4eb3746f30e75732887afdf8a59527b0ce4cb9",
+        "9275947d74939026a2a95868d1ee05efa3c732fd290d0ee2577baba0272d8b3f",
         "the validator's rule that `openability_selfcheck.ok` is adjudicated, never cited",
     ),
     (
         "pbi-semantic-builder.agent.md",
-        "ee299b5a230bd3b9e1779d7f58580749b68e26bba63fc9e712fa257682b9d98e",
+        "31717b00b8d91479b4cc7f9ca14e35cbd6a979195a1d0632bace46dfb4b90db1",
         "the semantic builder's handover-table row describing the field as one narrow input",
     ),
     (
         "pbi-semantic-builder.agent.md",
-        "28b1a1c45a0eda9be42c28b8a7460e8d706c5f34e6684608761d6bd4168b76bb",
+        "c51b41e87515c03b8c765fc5c34209f3e33b760cddc2f3c227b01252506232dc",
         "the semantic builder's step 1, which routes the detail to the gotchas skill section 8",
     ),
 )
@@ -491,16 +534,17 @@ def _fix_instructions(key: str) -> str:
         else ""
     )
     return (
-        "\n\nWHY THIS FAILS: every Markdown block of every persona is pinned by the SHA-256 of its "
-        "normalized text -- and normalization erases only what a renderer erases (line endings, "
-        "trailing spaces, width reflow), never indentation, hard breaks or the line structure inside "
-        "a fence. Nothing is classified as being 'about' anything -- three earlier versions of this "
-        "test tried that and each lost to a rendering or a synonym it had not listed (see this file's "
-        f"docstring, and {GOTCHAS_SKILL} section 8). So an added or reworded instruction fails here by "
-        "construction, and clearing it is a deliberate act.\n\n"
+        "\n\nWHY THIS FAILS: every block of every persona is pinned by the SHA-256 of its exact "
+        "bytes, and the pinned blocks are proven to rebuild the file, so nothing -- indentation, a "
+        "tab, a blank line, a re-wrap -- is normalized away. Nothing is classified as being 'about' "
+        "anything either: three earlier versions of this test tried that and each lost to a rendering "
+        f"or a synonym it had not listed (see this file's docstring, and {GOTCHAS_SKILL} section 8). "
+        "So an added or reworded instruction fails here by construction, and clearing it is a "
+        "deliberate act.\n\n"
         f"TO FIX -- if you changed this on purpose:\n\n    {UPDATE_COMMAND}\n\n"
         f"...then commit {PIN_PATH} IN THE SAME COMMIT as the persona diff, so a reviewer reads "
-        "the two side by side. If you did not mean to change it, revert the persona instead."
+        "the two side by side -- in the pin a re-wrap and a rewrite look alike, and the persona diff "
+        "is what tells them apart. If you did not mean to change it, revert the persona instead."
         f"{generated}"
     )
 
@@ -558,22 +602,43 @@ def test_the_pin_is_exactly_what_regenerating_would_write() -> None:
 
 @pytest.mark.parametrize("persona", personas(), ids=lambda p: p.name)
 @pytest.mark.parametrize("collapse", [False, True], ids=["raw", "collapsed"])
-def test_segmentation_covers_every_non_blank_line_exactly_once(persona: Path, collapse: bool) -> None:
-    """Totality is what makes 'no classifier' true: an uncovered line is an unpinned crevice.
+def test_segmentation_is_lossless(persona: Path, collapse: bool) -> None:
+    """THE invariant. Rebuild the file from its pinned blocks; anything dropped shows up here.
 
-    Both paths, and with **no exemption**. The earlier version excused the whole ``BEGIN``/``END``
-    line range because it could not say which lines the collapsed marker stood for -- which is
-    precisely how round 5's boundary text escaped. ``Block.span`` now answers that, so the assertion
-    can be an exact multiset equality.
+    Rounds 5 and 6 each shipped a HIGH of exactly one shape -- the representation silently dropped
+    part of the artifact (two boundary lines, leading spaces, tabs, blank lines) -- and each fix
+    narrowed an approximation the next round out-ran. This assertion closes the class instead of
+    extending the list: if the blocks rebuild the file, nothing was dropped, so nothing can escape by
+    being dropped.
     """
     text = persona.read_text(encoding="utf-8")
-    non_blank = {number for number, line in enumerate(text.splitlines(), start=1) if line.strip()}
-    covered = [number for block in segment(text, collapse_generated=collapse) for number in block.lines_covered]
-    accounted = sorted(number for number in covered if number in non_blank)
-    assert accounted == sorted(non_blank), (
+    assert reconstruct(text, collapse=collapse) == "\n".join(text.splitlines()), (
+        f"{persona.name} ({'collapsed' if collapse else 'raw'}): the pinned blocks do not rebuild the file"
+    )
+
+
+@pytest.mark.parametrize("persona", personas(), ids=lambda p: p.name)
+def test_every_persona_ends_with_exactly_one_newline(persona: Path) -> None:
+    """``splitlines`` cannot tell "a" from "a\\n"; this stops that ambiguity carrying content."""
+    text = persona.read_text(encoding="utf-8")
+    assert text.endswith("\n") and not text.endswith("\n\n"), f"{persona.name}: {text[-3:]!r} at EOF"
+
+
+@pytest.mark.parametrize("persona", personas(), ids=lambda p: p.name)
+@pytest.mark.parametrize("collapse", [False, True], ids=["raw", "collapsed"])
+def test_segmentation_covers_every_line_exactly_once(persona: Path, collapse: bool) -> None:
+    """The line-number half of losslessness, so a failure says WHERE as well as that.
+
+    Every line, blank ones included, and with **no exemption**: round 5's version excused the whole
+    ``BEGIN``/``END`` range and round 6's still excluded blanks. ``Block.span`` answers both.
+    """
+    text = persona.read_text(encoding="utf-8")
+    every = list(range(1, len(text.splitlines()) + 1))
+    covered = sorted(number for block in segment(text, collapse_generated=collapse) for number in block.lines_covered)
+    assert covered == every, (
         f"{persona.name} ({'collapsed' if collapse else 'raw'}): "
-        f"uncovered {sorted(non_blank - set(covered))[:5]}, "
-        f"double-counted {sorted({n for n in accounted if accounted.count(n) > 1})[:5]}"
+        f"uncovered {sorted(set(every) - set(covered))[:5]}, "
+        f"double-counted {sorted({n for n in covered if covered.count(n) > 1})[:5]}"
     )
 
 
@@ -894,16 +959,69 @@ def test_a_blank_line_inside_a_block_fails() -> None:
 
 
 def test_a_hard_line_break_is_part_of_the_identity() -> None:
-    """Two trailing spaces are a <br>. Reflow never adds one; an author does."""
+    """Two trailing spaces are a <br>, and with raw hashing they are simply different bytes."""
     block = _rule_block(_validator_text())
     lines = block.text.splitlines()
     assert digest(block.text) != digest("\n".join([lines[0] + "  ", *lines[1:]]))
 
 
 def test_a_blank_line_inside_a_fence_is_part_of_the_identity() -> None:
-    """Inside a fence a line break is content, so the verbatim path keeps the line structure."""
+    """Inside a fence a line break is content, and raw hashing keeps every one of them."""
     assert digest("```text\nA\n\nB\n```") != digest("```text\nA\nB\n```")
     assert digest("```text\nA\n    B\n```") != digest("```text\nA\nB\n```")
+
+
+# ------------------------------------------------------------------------------------------
+# Round 6, all three reviewer reproductions. Each was measured passing BOTH gates at fd65ce8.
+# ------------------------------------------------------------------------------------------
+def _table_header_line(lines: list[str]) -> int:
+    """0-based index of the committed table header whose delimiter row follows it."""
+    return next(index for index, line in enumerate(lines) if line.strip() == "| class | meaning | who acts |")
+
+
+def test_a_blank_line_between_a_table_header_and_its_delimiter_fails() -> None:
+    """One ``<table>`` becomes two paragraphs, and nothing around it re-segments.
+
+    Measured at fd65ce8: 85 passed, exit 0, `sync --check` 0. The loss was in ``segment`` discarding
+    blank lines, so no normalization rule could have caught it -- which is the evidence for pinning
+    the artifact rather than an approximation of how it renders.
+    """
+    text = _validator_text()
+    lines = text.splitlines()
+    header = _table_header_line(lines)
+    assert lines[header + 1].strip().startswith("|---"), "fixture expects the delimiter row next"
+    spliced = "\n".join([*lines[: header + 1], "", *lines[header + 1 :]]) + "\n"
+    assert spliced != text, "fixture did not splice"
+    assert _identity_moved(text, spliced), "BYPASS: the blank line was discarded"
+    assert findings(VALIDATOR, segment(spliced, collapse_generated=True))
+
+
+def test_a_blank_line_between_shared_list_items_fails() -> None:
+    """Tight list to loose list, reached through AGENTS.md and regenerated into all four personas."""
+    region = shared_region(_validator_text())
+    lines = region.splitlines()
+    item = next(index for index, line in enumerate(lines) if line.startswith("- **Use confidence markers**"))
+    spliced = "\n".join([*lines[:item], "", *lines[item:]])
+    assert spliced != region, "fixture did not splice"
+    assert _identity_moved(region, spliced, collapse=False), "BYPASS: the blank line was discarded"
+    assert findings(SHARED_KEY, segment(spliced))
+
+
+def test_tabs_are_not_spaces() -> None:
+    """``_indent`` counts characters, not columns, so three tabs used to hash as three spaces.
+
+    Measured at fd65ce8 on this exact committed line: same digest, zero findings, 85 passed, exit 0 --
+    while a tab-indented row opens a ``<pre><code>`` block and detaches the header from its rows.
+    """
+    text = _validator_text()
+    lines = text.splitlines()
+    header = _table_header_line(lines)
+    assert lines[header].startswith("   |") and "\t" not in lines[header], "fixture expects three spaces"
+    tabbed = "\t\t\t" + lines[header].lstrip()
+    assert digest(lines[header]) != digest(tabbed), "BYPASS: tabs and spaces hash alike"
+    spliced = "\n".join([*lines[:header], tabbed, *lines[header + 1 :]]) + "\n"
+    assert _identity_moved(text, spliced)
+    assert findings(VALIDATOR, segment(spliced, collapse_generated=True))
 
 
 def test_the_wording_on_disk_is_accepted() -> None:
@@ -934,22 +1052,36 @@ def _reflow(block_text: str, width: int) -> str:
     return "\n".join(out)
 
 
-def test_reflowing_a_block_does_not_break_the_pin() -> None:
-    """Width reflow stays free: the continuation column does not move when lines re-wrap."""
+def test_reflowing_a_block_now_costs_a_pin_update() -> None:
+    """The round-6 decision, asserted rather than described.
+
+    Free reflow was the one place this pin approximated instead of pinning, and it is what
+    ``normalize`` existed for. Every HIGH in rounds 5 and 6 came out of that approximation, so the
+    trade is settled the other way: a re-wrap is an edit like any other, costing one ``--update`` and
+    one pin line. Measured cost of the switch on this corpus: **0** lines with trailing whitespace and
+    **0** tabs, so nothing legitimate churns today.
+
+    This also dissolves the round-6 finding 3. The old control demanded that a generated reflow
+    *differ* from the block, which is false once a block has been reformatted to that width -- reflow
+    is idempotent, so the fixture failed on its own approved output. Widths that cannot be
+    idempotent are used here instead, and the assertion is checked rather than assumed.
+    """
     block = _rule_block(_validator_text())
-    assert len(block.text.splitlines()) > 1, "fixture needs a multi-line block to reflow"
-    for width in (72, 88, 110):
-        reflowed = _reflow(block.text, width)
-        assert reflowed != block.text, f"width {width} produced no re-wrap"
-        assert digest(block.text) == digest(reflowed), f"width {width} broke the pin"
+    assert len(block.text.splitlines()) > 1, "fixture needs a multi-line block"
+    narrow, wide = _reflow(block.text, 40), _reflow(block.text, 10_000)
+    assert len(narrow.splitlines()) > len(block.text.splitlines()), "width 40 did not add lines"
+    assert len(wide.splitlines()) == 1, "width 10000 did not collapse to one line"
+    assert " ".join(narrow.split()) == " ".join(block.text.split()), "reflow must not change the words"
+    assert digest(block.text) != digest(narrow)
+    assert digest(block.text) != digest(wide)
 
 
-def test_reflow_and_indentation_are_different_things() -> None:
-    """The boundary this pin draws: same words at a new width is free, at a new indent is not."""
+def test_the_reflow_helper_is_idempotent() -> None:
+    """Round 6 finding 3, pinned as a property so the old fixture's premise cannot come back."""
     block = _rule_block(_validator_text())
-    indented = "\n".join("    " + line for line in block.text.splitlines())
-    assert " ".join(indented.split()) == " ".join(block.text.split()), "the words must be identical"
-    assert digest(block.text) != digest(indented)
+    for width in (40, 72, 10_000):
+        once = _reflow(block.text, width)
+        assert _reflow(once, width) == once, f"width {width}: reflow is not idempotent"
 
 
 def test_changing_one_word_of_a_block_breaks_the_pin() -> None:
@@ -969,12 +1101,26 @@ def test_duplicating_a_pinned_block_fails() -> None:
 
 
 def test_moving_a_pinned_block_fails() -> None:
-    """Position carries meaning: a rule relocated under a different heading instructs differently."""
+    """Position carries meaning: a rule relocated instructs differently.
+
+    A PURE swap of two sibling table rows, so the multiset of hashes is provably identical and only
+    the ORDER differs -- asserted, not assumed. The previous fixture moved a block to the end of the
+    file, which also merged two blank runs once blank lines became blocks (round 6); a multiset
+    comparison caught that, so the fixture stopped proving order-sensitivity at all and the mutation
+    aimed at it went MISSED.
+    """
     text = _validator_text()
-    block = _rule_block(text)
-    moved = text.replace(block.text + "\n", "", 1) + "\n" + block.text + "\n"
-    assert moved != text, "fixture did not splice"
-    assert findings(VALIDATOR, segment(moved, collapse_generated=True))
+    lines = text.splitlines()
+    first = next(index for index, line in enumerate(lines) if line.strip().startswith("| `fixable`"))
+    assert lines[first + 1].strip().startswith("| `accepted-limitation`"), "fixture expects sibling rows"
+    swapped_lines = [*lines[:first], lines[first + 1], lines[first], *lines[first + 2 :]]
+    swapped = "\n".join(swapped_lines) + "\n"
+    assert swapped != text, "fixture did not swap"
+    before = [block.sha for block in segment(text, collapse_generated=True)]
+    after = [block.sha for block in segment(swapped, collapse_generated=True)]
+    assert sorted(before) == sorted(after), "the swap must change ORDER ONLY, or this proves nothing"
+    assert before != after, "BYPASS: the order change was invisible"
+    assert findings(VALIDATOR, segment(swapped, collapse_generated=True))
 
 
 def test_deleting_a_block_is_reported_as_removed() -> None:
