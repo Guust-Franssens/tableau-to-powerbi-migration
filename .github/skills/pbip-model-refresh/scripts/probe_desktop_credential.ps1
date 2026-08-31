@@ -235,9 +235,19 @@ function Test-HarvestComplete {
 }
 
 function Test-CredentialModal {
-  <# First matching credential-signature text across EVERY window, any class, any size. #>
+  <# First matching credential-signature text across every window EXCEPT the identified main frame.
+
+  Every class, every size - the prepass is deliberately unfiltered, so an unusual modal class or a
+  tiny window is still convicted. The ONE exclusion is the identified `Get-MainFrame`, ported from the
+  Python detector (#400 review): the prepass reads the Desktop MAIN window's caption and children too,
+  so a report legitimately named `Account Key` / `Personal Access Token` produced `CREDENTIAL_MISSING`
+  at exit 1 - a fabricated hard stop. When the frame's identity is AMBIGUOUS, `Get-MainFrame` returns
+  `$null` and nothing is excluded, so the failure direction stays loud.
+  #>
   param([object[]]$Windows)
+  $frame = Get-MainFrame -Windows $Windows
   foreach ($w in $Windows) {
+    if ($null -ne $frame -and [object]::ReferenceEquals($w, $frame)) { continue }
     foreach ($n in (Get-DialogTextSet -Window $w).Search) {
       if ($n -match $sig) { return $n }
     }
@@ -245,18 +255,117 @@ function Test-CredentialModal {
   return $null
 }
 
-function Select-DialogCandidate {
-  <# Windows big enough, and of the right class, to be worth CLASSIFYING.
+function Test-RendersNothing {
+  <# Can this window show a human NOTHING, on TWO independent grounds?
 
-  Size selects what to look at; it is not itself evidence of anything (issue #367). The old
-  `Test-BlockingDialog` returned the first window past this filter as a blocking dialog, which is why
-  a Refresh progress dialog read as a credential wall.
+  Zero area ALONE is not sufficient and must never be used alone: #400's review built a real
+  `WS_VISIBLE` OWNED 0x0 window and disabled its owner, which is a genuinely blocking shape. So both
+  must hold - no owner to disable, AND no pixels to display. Mirrors `_credential_modal.renders_nothing`.
+  #>
+  param([object]$Window)
+  $owner = Get-OwnerHandle -Window $Window
+  return ((-not $owner) -and (([int]$Window.Width -le 0) -or ([int]$Window.Height -le 0)))
+}
+
+function Get-OwnerHandle {
+  <# `OwnerHwnd` as a plain [long], 0 when absent. JSON round-trips it as int; Win32 gives an IntPtr. #>
+  param([object]$Window)
+  $raw = $Window.OwnerHwnd
+  if ($null -eq $raw) { return 0 }
+  if ($raw -is [IntPtr]) { return $raw.ToInt64() }
+  try { return [long]$raw } catch { return 0 }
+}
+
+function Get-WindowHandle {
+  <# `Hwnd` as a plain [long], 0 when absent. #>
+  param([object]$Window)
+  $raw = $Window.Hwnd
+  if ($null -eq $raw) { return 0 }
+  if ($raw -is [IntPtr]) { return $raw.ToInt64() }
+  try { return [long]$raw } catch { return 0 }
+}
+
+function Get-MainFrame {
+  <# The application FRAME - the window dialogs block - or `$null` when its identity is AMBIGUOUS.
+
+  Ported from `_credential_modal.main_frame`, which four review rounds arrived at by defeating four
+  ways of INFERRING it: window SIZE, a CLASS prefix, the FIRST ownership edge, and transitive ownership
+  that collected only the roots reachable from OWNED windows.
+
+  So this ENUMERATES rather than infers. A window is a possible root in exactly two ways: it is UNOWNED
+  and renders something; or it is the unowned root of some owned window's chain, walked TRANSITIVELY.
+  An ownership-derived root gets NO priority over the rest.
+
+  Exactly one possible root identifies the frame. **Everything else returns `$null`, and `$null`
+  excludes NOTHING** - a spurious finding on the real frame is loud and recoverable, whereas excluding
+  the wrong window is how a credential prompt disappears silently.
   #>
   param([object[]]$Windows)
+
+  $byHwnd = @{}
+  foreach ($w in $Windows) {
+    $h = Get-WindowHandle -Window $w
+    if ($h) { $byHwnd[$h] = $w }
+  }
+  $roots = @()
+  foreach ($w in $Windows) {
+    $root = $null
+    if (Get-OwnerHandle -Window $w) {
+      # Walk to the UNOWNED root. A chain that leaves this enumeration or loops means the root is
+      # UNKNOWN, and an unknown root must not be guessed at.
+      $current = $w
+      $seen = @{}
+      while ($true) {
+        $ch = Get-WindowHandle -Window $current
+        if ($ch -and $seen.ContainsKey($ch)) { return $null }
+        if ($ch) { $seen[$ch] = $true }
+        $ownerHandle = Get-OwnerHandle -Window $current
+        if (-not $ownerHandle) { $root = $current; break }
+        if (-not $byHwnd.ContainsKey($ownerHandle)) { return $null }
+        $current = $byHwnd[$ownerHandle]
+      }
+    }
+    elseif (Test-RendersNothing -Window $w) { continue }
+    else { $root = $w }
+    if ($null -eq $root) { continue }
+    $known = $false
+    foreach ($r in $roots) { if ([object]::ReferenceEquals($r, $root)) { $known = $true; break } }
+    if (-not $known) { $roots += $root }
+  }
+  if ($roots.Count -eq 1) { return $roots[0] }
+  return $null
+}
+
+function Select-DialogCandidate {
+  <# Windows worth CLASSIFYING. Two exclusions, each a POSITIVE claim - never a correlate.
+
+  ⚠️ **The size and class filters that used to live here are GONE (issue #406 review, finding 2).**
+  They excluded anything under 100x100 and any `WindowsForms10.Window.8*` class, which are two of the
+  proxies #400 deleted from the Python detector *because they were measured to misclassify*. Measured
+  here on identical input before the fix:
+
+      a real owned, EMPTY 80x60 modal ->  arbiter: exit 0 (no candidate at all)
+                                          python : DIALOG_UNREADABLE, exit 3
+
+  The arbiter turned an indeterminate state into a CLEAN one, which is the single worst outcome
+  available here. A class prefix is no better: an owner and its owned `FixedDialog` share the exact
+  class string, so `WindowsForms10.Window.8*` excluded real owned dialogs too.
+
+  What remains:
+    * the identified `Get-MainFrame` - it is the application, the thing dialogs block. When identity is
+      AMBIGUOUS that returns `$null` and this exclusion simply does not happen.
+    * `Test-RendersNothing` - unowned AND zero-area: no owner to disable and no pixels to show.
+
+  `is_proven_non_blocking` (an ENABLED owner) is not applied here because the arbiter applies it inside
+  `Get-DialogClassification` as the `non-blocking` kind, AFTER `needs-human`, so a known blocking
+  prompt still outranks the exoneration. Same rule, one step later.
+  #>
+  param([object[]]$Windows)
+  $frame = Get-MainFrame -Windows $Windows
   $candidates = @()
   foreach ($w in $Windows) {
-    if ($w.ClassName -and $w.ClassName.StartsWith('WindowsForms10.Window.8')) { continue }
-    if ($w.Width -lt 100 -or $w.Height -lt 100) { continue }
+    if ($null -ne $frame -and [object]::ReferenceEquals($w, $frame)) { continue }
+    if (Test-RendersNothing -Window $w) { continue }
     $candidates += $w
   }
   return $candidates
@@ -335,6 +444,20 @@ function Get-DialogClassification {
     }
     if ($t -match $chromeSig) { continue }
     if ($null -eq $unaccounted) { $unaccounted = $t }
+  }
+  # ⚠️ THE TITLE MUST BE ACCOUNTED FOR TOO (issue #406 review, finding 1). `Content` deliberately drops
+  # any text equal to the caption, because a benign-looking caption must never AUTHORISE suppression.
+  # That exclusion was one-directional and the other direction was never closed: a HOSTILE caption was
+  # simply dropped. Measured on the pre-fix build - a window titled `Password:` whose body read only
+  # `Refresh` + `Cancel` classified `benign` and was suppressed to NOTHING under -RefreshInFlight,
+  # exit 0. The body rule this bundle just tightened identifies `Password:` as a prompt that must veto;
+  # it was only ever looked for in the body.
+  # A caption still cannot authorise anything - it is not allowed to set `$benignHit` - it can only
+  # VETO. That asymmetry is the whole rule: captions may accuse, never exonerate.
+  if ($null -eq $unaccounted -and $sets.Title) {
+    if (($sets.Title -notmatch $benignSig) -and ($sets.Title -notmatch $chromeSig)) {
+      $unaccounted = $sets.Title
+    }
   }
   if ($benignHit) {
     if ($unaccounted) { return [pscustomobject]@{ Kind = 'mixed-content'; Evidence = $unaccounted } }
@@ -568,6 +691,11 @@ public static class Win32CredentialWindows {
     public int Height;
     public bool Minimized;
     public bool? OwnerEnabled;
+    // `GetWindow(hwnd, GW_OWNER)`. Needed as well as `OwnerEnabled` so ownership can be walked
+    // TRANSITIVELY to the unowned root, which is how the frame is identified (issue #406 review,
+    // finding 2). Without the handle the arbiter could only ask "does it have an owner", which is not
+    // enough to tell an application frame from a dialog.
+    public IntPtr OwnerHwnd;
     public List<string> Texts = new List<string>();
   }
 
@@ -613,6 +741,7 @@ public static class Win32CredentialWindows {
       IntPtr owner = GetWindow(hWnd, GW_OWNER);
       var info = new WindowInfo {
         Hwnd = hWnd,
+        OwnerHwnd = owner,
         Title = Text(hWnd),
         ClassName = ClassNameOf(hWnd),
         Width = Math.Max(0, rect.Right - rect.Left),

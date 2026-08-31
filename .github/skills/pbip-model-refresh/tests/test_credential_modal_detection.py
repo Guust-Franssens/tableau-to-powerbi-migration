@@ -2555,25 +2555,77 @@ def _window(**overrides) -> dict:
         # WHY a harvest was not complete. ⚠️ DIAGNOSTIC ONLY - no verdict may branch on it, which is
         # pinned by `test_the_harvest_reason_is_diagnostic_and_cannot_change_a_verdict`.
         "HarvestReason": "complete",
+        # Ownership, as `GetWindow(GW_OWNER)` reports it. 0/absent = unowned. These drive frame
+        # identification and `Test-RendersNothing`, which replaced the size and class proxies
+        # (#406 review, finding 2). Defaults make a synthesised window an unowned, rendering window.
+        "Hwnd": 0,
+        "OwnerHwnd": 0,
     }
     window.update(overrides)
     return window
 
 
-def classify(tmp_path: Path, windows: list[dict], *, refresh_in_flight: bool = False) -> dict:
+SYNTHESISED_FRAME_HWND = 0xF001
+
+
+def _owned_by_a_synthesised_frame(windows: list[dict]) -> list[dict]:
+    """Return ``windows`` as owned children of one synthesised Desktop main frame.
+
+    Mirrors the topology every real probe sees: one unowned application frame, plus the dialogs it
+    owns. Windows that already declare an ``OwnerHwnd`` are left alone, so a test can still build an
+    ambiguous or broken chain deliberately.
+    """
+    adopted: list[dict] = []
+    for index, window in enumerate(windows, start=1):
+        clone = dict(window)
+        if not clone.get("OwnerHwnd"):
+            clone["OwnerHwnd"] = SYNTHESISED_FRAME_HWND
+        if not clone.get("Hwnd"):
+            clone["Hwnd"] = SYNTHESISED_FRAME_HWND + index
+        adopted.append(clone)
+    frame = _window(
+        Title="MyReport - Power BI Desktop",
+        ClassName="WindowsForms10.Window.8.app.0.141b42a_r6_ad1",
+        Width=1920,
+        Height=1080,
+        Texts=["MyReport - Power BI Desktop"],
+        Hwnd=SYNTHESISED_FRAME_HWND,
+        OwnerHwnd=0,
+    )
+    return adopted + [frame]
+
+
+def classify(
+    tmp_path: Path,
+    windows: list[dict],
+    *,
+    refresh_in_flight: bool = False,
+    frame: bool = True,
+    probe: Path | None = None,
+) -> dict:
     """Run the SHIPPED classifiers over ``windows`` and return their verdict as a dict.
 
     Deliberately routed through files and `-File` rather than `-Command`: a quoting slip in an inline
     command is how a mutation run in this repo scored a false pass. A non-zero exit (a renamed or
     deleted function, a parse error) raises here rather than degrading to an empty result, so a
     mutation cannot pass by breaking the harness.
+
+    ⚠️ **``frame=True`` synthesises the Desktop MAIN WINDOW and adopts every ownerless window as its
+    owned child.** Since #406's review the arbiter identifies the application frame by ENUMERATING
+    ownership roots rather than by size or class, so a list containing one lone window means "Desktop
+    has exactly one window", that window IS the frame, and it is excluded from classification - which
+    is correct in production and useless in a fixture. The Python detector's tests have always paired a
+    dialog with ``main_window()`` for the same reason; this makes the two suites model the same world.
+    Pass ``frame=False`` to control the topology yourself (frame identity, ambiguity, chains).
     """
     exe = _powershell()
+    if frame:
+        windows = _owned_by_a_synthesised_frame(windows)
     harness = tmp_path / "classify.ps1"
     harness.write_text(_HARNESS, encoding="utf-8")
     payload = tmp_path / "windows.json"
     payload.write_text(json.dumps(windows), encoding="utf-8")
-    argv = [exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness), "-Probe", str(PROBE_PS1)]
+    argv = [exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness), "-Probe", str(probe or PROBE_PS1)]
     argv += ["-WindowsJson", str(payload)]
     if refresh_in_flight:
         argv.append("-RefreshInFlight")
@@ -2792,21 +2844,64 @@ def test_an_enabled_owner_window_exonerates_a_dialog(tmp_path: Path) -> None:
     assert no_owner["verdict"] == "DIALOG_UNRECOGNIZED", "no owner means the test did not apply, not that it passed"
 
 
-def test_the_main_window_and_tiny_helper_windows_are_still_not_candidates(tmp_path: Path) -> None:
-    """The class and size pre-filters survive; they were never the defect, only their promotion to a verdict."""
-    main_window = _window(
+def test_size_and_class_are_no_longer_exclusions_at_all(tmp_path: Path) -> None:
+    """#406 review, finding 2. The two proxies #400 deleted from Python had SURVIVED here.
+
+    `Select-DialogCandidate` used to drop any `WindowsForms10.Window.8*` class and anything under
+    100x100. Measured on the pre-fix build, on identical input::
+
+        a real owned, EMPTY 80x60 modal ->  arbiter: exit 0, candidates 0   (clean bucket)
+                                            python : DIALOG_UNREADABLE, exit 3
+
+    The arbiter converted an indeterminate state into a CLEAN one - the worst outcome available here -
+    and the two detectors disagreed on the same window. A class prefix is no better than the size: an
+    owner and its owned `FixedDialog` share the exact class string.
+
+    Both windows below are owned by the synthesised frame, so neither can be mistaken for the
+    application; each must be classified on what it SAYS, not on its geometry or its class.
+    """
+    tiny = _window(Title="", Texts=[], Width=80, Height=60, OwnerEnabled=False)
+    winforms = _window(Title="", Texts=[], ClassName="WindowsForms10.Window.8.app.0.x", OwnerEnabled=False)
+
+    for window in (tiny, winforms):
+        result = classify(tmp_path, [window])
+
+        assert result["candidates"] == 1, f"a real owned dialog must be classified: {window}"
+        assert result["kind"] == "unreadable"
+        assert result["verdict"] == "DIALOG_UNREADABLE"
+        assert result["exit_code"] == 3
+
+
+def test_the_identified_main_frame_is_the_only_window_excluded(tmp_path: Path) -> None:
+    """The positive control: exclusion still happens, but it is now a POSITIVE claim about identity.
+
+    Exactly one ownership root identifies the frame, and only that window is excluded. Ambiguity
+    excludes nothing - a spurious finding on the real frame is loud and recoverable, whereas excluding
+    the wrong window is how a credential prompt disappears silently.
+    """
+    frame = _window(
         Title="MyReport - Power BI Desktop",
-        ClassName="WindowsForms10.Window.8.app.0.141b42a_r6_ad1",
+        ClassName="WindowsForms10.Window.8.app.0.x",
         Width=1920,
         Height=1080,
-        Texts=["MyReport - Power BI Desktop", "Refresh"],
+        Texts=["MyReport - Power BI Desktop"],
+        Hwnd=0xF001,
+        OwnerHwnd=0,
     )
-    tiny = _window(Width=10, Height=10)
+    dialog = _window(Title="", Texts=[], Hwnd=0xD001, OwnerHwnd=0xF001, OwnerEnabled=False)
+    unowned_zero_area = _window(Title="", Texts=[], Width=0, Height=0, Hwnd=0xD002, OwnerHwnd=0)
 
-    result = classify(tmp_path, [main_window, tiny])
+    identified = classify(tmp_path, [frame, dialog], frame=False)
+    assert identified["candidates"] == 1, "the frame is excluded, the dialog it owns is not"
+    assert identified["verdict"] == "DIALOG_UNREADABLE"
 
-    assert result["candidates"] == 0
-    assert result["verdict"] is None
+    # A second unowned rendering window makes the root AMBIGUOUS, so nothing is excluded.
+    second_root = _window(Title="Other", Texts=["Other"], Hwnd=0xE001, OwnerHwnd=0)
+    ambiguous = classify(tmp_path, [frame, dialog, second_root], frame=False)
+    assert ambiguous["candidates"] == 3, "an ambiguous frame identity must exclude NOTHING"
+
+    # Unowned AND zero-area: no owner to disable and no pixels to show, on two independent grounds.
+    assert classify(tmp_path, [frame, unowned_zero_area], frame=False)["candidates"] == 0
 
 
 def test_the_arbiter_no_longer_derives_a_blocking_verdict_from_size_alone() -> None:
@@ -3878,27 +3973,105 @@ def test_a_table_name_beside_progress_text_now_vetoes_suppression(tmp_path: Path
     assert in_flight["exit_code"] == 3
 
 
-def test_the_arbiter_and_the_python_detector_share_one_vocabulary(tmp_path: Path) -> None:
-    """The structural fix for #406's real cause: two detectors answering one question, unchecked.
+@pytest.mark.parametrize("title", ["Password:", "Sign in", "Enter your PIN", "Something nobody recognises"])
+def test_a_hostile_TITLE_vetoes_suppression_even_when_the_body_is_all_allowlisted(tmp_path: Path, title: str) -> None:
+    """#406 review, finding 1 (HIGH): captions may ACCUSE, they may never EXONERATE.
 
-    Issue #376 was fixed in ``_credential_modal.py`` and the arbiter kept the hole for a week, because
-    nothing compared them. The chosen seam is SHARED RESOURCES, PORTED CONTROL FLOW - both read the
-    same four ``*_signature.regex`` files, and this test fails if either stops doing so or if their
-    verdicts diverge on the corpus that matters.
+    `Get-DialogTextSet` drops any text equal to the caption from `Content`, because a benign-looking
+    caption must not AUTHORISE suppression - that was round 1's defect. The exclusion was
+    one-directional and the other direction was never closed: a HOSTILE caption was simply discarded.
+    Measured on the pre-fix build, a window titled `Password:` whose body read only `Refresh` and
+    `Cancel`::
 
-    It is deliberately NOT a whole-classifier equivalence test: the two are documented as divergent
-    (the arbiter has a prose join, a ``benign-unverified`` kind and ``HarvestComplete``; the Python
-    detector has none of those and has strictly less evidence). Only the benign/chrome decision - the
-    one that authorises a dismissal - has to agree.
+        t=0                -> benign / REFRESH_IN_PROGRESS
+        -RefreshInFlight   -> verdict None, exit 0        # SUPPRESSED
+
+    That is the worst outcome in this domain: suppressing a sign-in modal does not supply the
+    credential, it converts a recoverable stop-and-ask into a silent empty refresh. The irony is that
+    this bundle's own body rule already names `Password:` as a prompt that must veto - nobody had
+    looked in the title.
     """
-    assert CHROME_SIGNATURE.read_text(encoding="utf-8").strip(), "the arbiter's chrome allowlist must exist"
-    assert _credential_modal.BENIGN_CHROME_SIGNATURE_PATH == CHROME_SIGNATURE, (
-        "the Python detector must read the arbiter's own chrome allowlist, not a copy"
-    )
-    assert _credential_modal.BENIGN_SIGNATURE_PATH == BENIGN_SIGNATURE
-    assert _credential_modal.SIGNATURE_PATH == CREDENTIAL_SIGNATURE
-    assert _credential_modal.BLOCKING_SIGNATURE_PATH == BLOCKING_SIGNATURE
+    window = _window(Title=title, Texts=[title, "Refresh", "Cancel"], InteractiveTexts=["Cancel"], OwnerEnabled=False)
 
+    at_t0 = classify(tmp_path, [window])
+    in_flight = classify(tmp_path, [window], refresh_in_flight=True)
+
+    assert at_t0["kind"] == "mixed-content", f"an unaccounted title must veto: {title!r}"
+    assert at_t0["evidence"] == title, "the verdict must carry the title it could not explain"
+    assert in_flight["verdict"] == "DIALOG_UNRECOGNIZED", f"title {title!r} was SUPPRESSED in flight"
+    assert in_flight["exit_code"] == 3
+
+
+def test_a_recognised_title_still_cannot_authorise_suppression(tmp_path: Path) -> None:
+    """The other half of the asymmetry, and the guard against over-correcting finding 1.
+
+    A caption matching the progress signature is ACCOUNTED FOR, so it does not veto - otherwise every
+    real refresh dialog (captioned `Refresh`) would be unsuppressible and the benign path would be
+    dead. But it still cannot make a window benign on its own: with no benign CONTENT the window is
+    `benign-title-only`, which is in the unreadable band, exactly as before.
+    """
+    with_content = _window(Title="Refresh", Texts=["Refresh", "Evaluating", "Cancel"], OwnerEnabled=False)
+    title_only = _window(Title="Refresh", Texts=["Refresh"], OwnerEnabled=False)
+
+    assert classify(tmp_path, [with_content])["kind"] == "benign", "the benign path must stay reachable"
+    assert classify(tmp_path, [with_content], refresh_in_flight=True)["verdict"] is None
+    assert classify(tmp_path, [title_only])["kind"] == "benign-title-only"
+    assert classify(tmp_path, [title_only])["verdict"] == "DIALOG_UNREADABLE"
+
+
+def test_the_arbiter_and_the_python_detector_share_one_vocabulary(tmp_path: Path, monkeypatch) -> None:
+    """BEHAVIOURAL proof that both detectors READ the shared resource - not that they agree today.
+
+    ⚠️ **The first version of this test was VACUOUS and blind review proved it.** It compared Python's
+    path constants with the arbiter's, then compared classifications on a corpus. A reviewer hard-coded
+    the chrome regex inside `probe_desktop_credential.ps1` and left `benign_chrome_signature.regex`
+    only in a dead comment: **all six new tests passed, exit 0.** Agreement on today's corpus is not
+    evidence of sharing, because a copy agrees too - and a copy is exactly what drifts.
+
+    So this MUTATES the resource in a scratch copy of the bundle and requires BOTH real detector paths
+    to change together. With chrome = ``^Orders$`` instead of ``Cancel|OK|Close``:
+
+        [Refresh, Evaluating, Cancel]  benign          -> mixed-content  (Cancel now vetoes)
+        [Refresh, Evaluating, Orders]  mixed-content   -> benign         (Orders now excused)
+
+    Both windows flip, in both detectors. A detector holding a private copy cannot flip, so it fails.
+    """
+    scripts = tmp_path / "scripts"
+    shutil.copytree(PROBE_PS1.parent, scripts)
+    sentinel = scripts / "benign_chrome_signature.regex"
+    probe = scripts / PROBE_PS1.name
+
+    chrome_only = _window(Title="Refresh", Texts=["Refresh", "Evaluating", "Cancel"], OwnerEnabled=False)
+    table_only = _window(Title="Refresh", Texts=["Refresh", "Evaluating", "Orders"], OwnerEnabled=False)
+    py_chrome = DesktopWindow("Refresh", "Cls", 702, 355, ("Refresh", "Evaluating", "Cancel"))
+    py_table = DesktopWindow("Refresh", "Cls", 702, 355, ("Refresh", "Evaluating", "Orders"))
+
+    # Baseline, against the UNMUTATED copy: the shipped meanings.
+    assert classify(tmp_path, [chrome_only], probe=probe)["kind"] == "benign"
+    assert classify(tmp_path, [table_only], probe=probe)["kind"] == "mixed-content"
+    assert classify_dialog(py_chrome).kind == "benign"
+    assert classify_dialog(py_table).kind == "mixed-content"
+
+    sentinel.write_text("^Orders$", encoding="utf-8")
+    monkeypatch.setattr(_credential_modal, "BENIGN_CHROME_SIGNATURE_PATH", sentinel)
+
+    assert classify(tmp_path, [chrome_only], probe=probe)["kind"] == "mixed-content", (
+        "the ARBITER did not read the shared chrome allowlist - it is holding a private copy"
+    )
+    assert classify(tmp_path, [table_only], probe=probe)["kind"] == "benign", (
+        "the ARBITER did not read the shared chrome allowlist - it is holding a private copy"
+    )
+    assert classify_dialog(py_chrome).kind == "mixed-content", "the PYTHON detector holds a private copy"
+    assert classify_dialog(py_table).kind == "benign", "the PYTHON detector holds a private copy"
+
+
+def test_the_two_detectors_agree_on_the_corpus_that_matters(tmp_path: Path) -> None:
+    """Necessary but NOT sufficient - see the mutation test above for why agreement proves nothing.
+
+    Deliberately not a whole-classifier equivalence test: the two are documented as divergent (the
+    arbiter has a prose join, a `benign-unverified` kind and `HarvestComplete`; the Python detector has
+    none of those). Only the benign/chrome decision - the one that authorises a dismissal - must agree.
+    """
     corpus = [
         ["Refresh", "Evaluating", "Password:"],
         ["Refresh", "Evaluating", "Please enter your password"],
