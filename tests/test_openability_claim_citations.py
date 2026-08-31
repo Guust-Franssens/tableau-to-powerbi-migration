@@ -299,11 +299,16 @@ class Block:
     ``BEGIN``..``END`` range -- including both marker lines. Round 5 measured what happens when a
     representation forgets a source line: text sharing a line with ``BEGIN`` belonged to neither the
     collapsed block nor the region hash, and the coverage test exempted the line rather than failing.
+
+    It is required, with no default and no fallback. Round 7 measured the previous
+    ``self.span or <recount the text>`` form surviving a mutation untouched, because ``segment``
+    always sets ``span`` and nothing else builds a ``Block`` -- so the fallback was unreachable code
+    that could be quietly wrong.
     """
 
     line: int
     text: str
-    span: int = 0
+    span: int
 
     @property
     def sha(self) -> str:
@@ -315,7 +320,7 @@ class Block:
 
     @property
     def lines_covered(self) -> range:
-        return range(self.line, self.line + (self.span or self.text.count(NEWLINE) + 1))
+        return range(self.line, self.line + self.span)
 
 
 @dataclass(frozen=True)
@@ -806,9 +811,20 @@ def test_segmentation_covers_every_line_exactly_once(persona: Path, collapse: bo
 
     Every line, blank ones included, and with **no exemption**: round 5's version excused the whole
     ``BEGIN``/``END`` range and round 6's still excluded blanks. ``Block.span`` answers both.
+
+    The expected COUNT is taken from the bytes, not from ``_lines``. Measured under mutation: with
+    ``every`` derived from ``len(_lines(text))``, a change to the splitter moved both sides of the
+    comparison together and this assertion could not see it -- the same shape as the round-7 finding
+    itself, one level down.
     """
     text = read_source(persona)
-    every = list(range(1, len(_lines(text)) + 1))
+    on_disk = persona.read_bytes().decode("utf-8").replace(CRLF, NEWLINE)
+    assert len(_lines(text)) == on_disk.count(NEWLINE), (
+        f"{persona.name}: {len(_lines(text))} lines from a file holding {on_disk.count(NEWLINE)} "
+        "newlines. Every persona ends with exactly one newline and contains no other line "
+        "separator, so those two numbers are the same number."
+    )
+    every = list(range(1, on_disk.count(NEWLINE) + 1))
     covered = sorted(number for block in segment(text, collapse_generated=collapse) for number in block.lines_covered)
     assert covered == every, (
         f"{persona.name} ({'collapsed' if collapse else 'raw'}): "
