@@ -215,7 +215,7 @@ _RECORD = {{
     "node_down": False,
     "session_finished": False,
     "exitstatus": None,
-    "saw_report": False,
+    "saw_call_phase": False,
 }}
 
 
@@ -224,7 +224,11 @@ def _flush():
 
 
 def pytest_runtest_logreport(report):
-    _RECORD["saw_report"] = True
+    # `saw_call_phase` and not merely "a report happened": a setup-phase report is emitted
+    # even when no test BODY runs, so `pytest.exit()` from `pytest_runtest_call` produced a
+    # finished session with a report and exit 0 while stdout said `no tests ran`.
+    if report.when == "call":
+        _RECORD["saw_call_phase"] = True
     if report.outcome == "failed":
         # `when` is the discriminator terminal text throws away.
         name = report.nodeid.split("::")[-1]
@@ -270,6 +274,27 @@ _flush()
 VERDICT_BEARING_EXITS = frozenset({0, 1})
 
 
+def sanitized_env() -> dict:
+    """The ONE environment both baseline and mutation runs use.
+
+    They must be identical or the comparison is meaningless. Measured: baselines inherited
+    ``PYTEST_ADDOPTS`` while mutation runs stripped it, so ``PYTEST_ADDOPTS=--collect-only``
+    made the baseline exit 0 having executed **no test at all** (``18 tests collected``),
+    after which every mutation ran the real suite and could be credited with a pre-existing
+    failure.
+
+    ``PY_COLORS`` is stripped for a different reason: ANSI prefixes on the summary tokens
+    silently turned real detections into harness errors while the verdict was text-based.
+    """
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join([str(ROOT / "tests"), str(ROOT / "scripts")]),
+    }
+    env.pop("PYTEST_ADDOPTS", None)
+    env.pop("PY_COLORS", None)
+    return env
+
+
 def run(name: str, code: str, target: str) -> tuple[str, int, str, dict]:
     """Apply one mutation and report ``(name, exit_code, detail, outcomes)``.
 
@@ -296,12 +321,7 @@ def run(name: str, code: str, target: str) -> tuple[str, int, str, dict]:
         + OUTCOME_HOOKS.format(outcome_path=str(outcomes_file)),
         encoding="utf-8",
     )
-    env = {
-        **os.environ,
-        "PYTHONPATH": os.pathsep.join([str(ROOT / "tests"), str(ROOT / "scripts")]),
-    }
-    env.pop("PYTEST_ADDOPTS", None)
-    env.pop("PY_COLORS", None)
+    env = sanitized_env()
     proc = subprocess.run(
         [PY, "-m", "pytest", target, "-q", "-p", "_mutation_plugin", "--no-header", "-x", "--tb=no", "--color=no"],
         cwd=ROOT,
@@ -341,23 +361,73 @@ def read_outcomes(path: Path) -> dict:
     return loaded
 
 
-def is_harness_error(outcomes: dict) -> bool:
-    """True when pytest failed to run rather than a test observing anything.
+def observed_mutation(outcomes: dict) -> bool:
+    """True when a NAMED test genuinely observed the mutation.
 
-    ``recorded`` alone is not enough: the plugin flushes an empty record at **import**, so it
-    proves the plugin loaded, not that a session ran. Measured, ``pytest.exit(returncode=0)``
-    from ``pytest_sessionstart`` produced exit 0, ``recorded=True`` and no tests at all --
-    which the previous version reported as SURVIVED.
+    Detection evidence is **durable**: a test that failed in its ``call`` phase noticed the
+    mutation, and nothing that happens afterwards un-notices it. Round-3 review measured the
+    cost of the opposite rule -- a real assertion failure followed by ``KeyboardInterrupt`` in
+    teardown exits 2, and erasing the detection turned a genuine CAUGHT into a HARNESS-ERROR.
+
+    ``node_down`` is the exception and not an inconsistency: a dying xdist worker emits
+    ``FAILED path::test_name`` for a test that **never executed**, so that record is synthetic
+    rather than observed.
+    """
+    if outcomes.get("node_down"):
+        return False
+    return bool(outcomes.get("call_failed") or outcomes.get("setup_failed"))
+
+
+def session_is_trustworthy(outcomes: dict) -> bool:
+    """True when a COMPLETE, coherent session ran to a verdict.
+
+    Required before concluding SURVIVED, because absence of evidence is only evidence of
+    absence when the run actually finished. Three measured shapes that pass a naive check:
+
+    * ``pytest.exit(returncode=0)`` from ``pytest_sessionstart`` -- exit 0, a valid record
+      written at plugin import, no tests at all;
+    * the same from ``pytest_runtest_call`` -- ``session_finished``, ``exitstatus=0`` and a
+      setup-phase report present, while stdout says ``no tests ran``;
+    * a call failure then ``KeyboardInterrupt`` -- exit 2, session incoherent.
+
+    Hence ``saw_call_phase``: a test BODY must have run, not merely a setup report.
+    """
+    return (
+        bool(outcomes.get("recorded"))
+        and bool(outcomes.get("session_finished"))
+        and bool(outcomes.get("saw_call_phase"))
+        and outcomes.get("exitstatus") in VERDICT_BEARING_EXITS
+        and not outcomes.get("collect_error")
+        and not outcomes.get("internal_error", False)
+        and not outcomes.get("node_down", False)
+    )
+
+
+def session_ended_abnormally(outcomes: dict) -> bool:
+    """True when something happened TO the run, as opposed to the run reaching a verdict.
+
+    Deliberately narrower than ``not session_is_trustworthy``: a session in which every test
+    errored in **setup** has no call phase and is therefore not "trustworthy" for concluding
+    SURVIVED -- but nothing went wrong with it, and annotating that as abnormal would fire on
+    every legitimate ``CAUGHT*`` and train the reader to ignore the warning.
     """
     return (
         not outcomes.get("recorded")
         or not outcomes.get("session_finished")
-        or not outcomes.get("saw_report")
         or outcomes.get("exitstatus") not in VERDICT_BEARING_EXITS
         or bool(outcomes.get("collect_error"))
         or outcomes.get("internal_error", False)
         or outcomes.get("node_down", False)
     )
+
+
+def is_harness_error(outcomes: dict) -> bool:
+    """True when there is neither a detection nor a trustworthy session.
+
+    The asymmetry is deliberate: **detection is durable, absence is not.** A partial run can
+    prove a mutation was caught; only a complete one can prove it survived.
+    """
+    return not observed_mutation(outcomes) and not session_is_trustworthy(outcomes)
 
 
 def describe(proc: subprocess.CompletedProcess, outcomes: dict) -> str:
@@ -415,7 +485,12 @@ def main() -> int:
     dirty = []
     for target in targets:
         baseline = subprocess.run(
-            [PY, "-m", "pytest", target, "-q", "--no-header"], cwd=ROOT, capture_output=True, text=True, check=False
+            [PY, "-m", "pytest", target, "-q", "--no-header", "--color=no"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=sanitized_env(),
         )
         print(f"BASELINE {target:32s} exit={baseline.returncode}  {last_line(baseline)}")
         if baseline.returncode != 0:
@@ -437,23 +512,19 @@ def main() -> int:
         else:
             target = "tests/test_e2e_offline.py"
         label, rc, detail, outcomes = run(name, code, target)
-        if is_harness_error(outcomes):
-            # Collection error, internal error, dead xdist worker, or no record at all.
-            # pytest never ran the tests, so there is no verdict to give.
-            verdict = "HARNESS-ERROR"
-            harness_errors.append(f"{label} (exit {rc}, {detail})")
-        elif outcomes["call_failed"]:
-            verdict = "CAUGHT  "
-        elif outcomes["setup_failed"]:
-            # Observed, but by a setup/teardown crash rather than an assertion. Credited and
-            # marked, because a test that only errors is weaker coverage than one that asserts.
-            verdict = "CAUGHT* "
-        elif rc == 0:
+        if observed_mutation(outcomes):
+            # Detection is durable. A real call-phase failure noticed the mutation even if the
+            # session later fell over; only a synthetic `node_down` record is excluded.
+            verdict = "CAUGHT  " if outcomes["call_failed"] else "CAUGHT* "
+            if session_ended_abnormally(outcomes):
+                detail = f"{detail} [session ended abnormally: exit {rc}]"
+        elif session_is_trustworthy(outcomes):
             verdict = "SURVIVED"
             survivors.append(label)
         else:
+            # Neither a detection nor a complete session: pytest never reached a verdict.
             verdict = "HARNESS-ERROR"
-            harness_errors.append(f"{label} (exit {rc}, no test outcome recorded)")
+            harness_errors.append(f"{label} (exit {rc}, {detail})")
         print(f"{verdict}  {label:52s} -> {detail}")
     print()
     print("survivors (holes in the suite):", survivors or "none")

@@ -33,7 +33,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from mutation_harness import is_harness_error, read_outcomes  # noqa: E402
+from mutation_harness import (  # noqa: E402
+    is_harness_error,
+    observed_mutation,
+    read_outcomes,
+    session_is_trustworthy,
+)
 
 
 def record(**kwargs) -> dict:
@@ -51,7 +56,7 @@ def record(**kwargs) -> dict:
         "node_down": False,
         "session_finished": True,
         "exitstatus": 0,
-        "saw_report": True,
+        "saw_call_phase": True,
         "recorded": True,
     }
     base.update(kwargs)
@@ -128,18 +133,57 @@ def test_a_session_that_exits_before_running_anything_is_a_harness_error() -> No
     previous version reported as SURVIVED, i.e. as a hole in the suite rather than as a run
     that never happened.
     """
-    assert is_harness_error(record(saw_report=False, session_finished=True, exitstatus=0)) is True
+    assert is_harness_error(record(saw_call_phase=False, session_finished=True, exitstatus=0)) is True
 
 
-def test_an_interrupt_after_a_failure_is_a_harness_error() -> None:
-    """Reviewer's reproduction: a call failure, then KeyboardInterrupt during teardown.
+def test_an_interrupt_after_a_genuine_failure_still_counts_as_caught() -> None:
+    """Detection is DURABLE - round 3 overturned round 2 on exactly this case.
 
-    pytest exits **2** with ``call_failed`` populated. The failure is real but the session is
-    not, so it cannot be credited -- the previous ordering reported CAUGHT and returned 0.
+    A call failure followed by ``KeyboardInterrupt`` in teardown exits **2**. Round 2 said
+    treat an unexpected exit as a harness error "even when an earlier outcome was recorded";
+    round 3 measured the cost -- a real assertion failure erased into a HARNESS-ERROR.
+
+    A test that failed in its ``call`` phase noticed the mutation. Nothing later un-notices it.
     """
-    assert is_harness_error(record(call_failed=["test_x"], exitstatus=2)) is True
+    outcomes = record(call_failed=["test_x"], exitstatus=2)
+
+    assert observed_mutation(outcomes) is True
+    assert is_harness_error(outcomes) is False
+    # ...but the session is still not trustworthy, which is what SURVIVED would need.
+    assert session_is_trustworthy(outcomes) is False
 
 
-def test_an_unfinished_session_is_a_harness_error() -> None:
-    """No ``pytest_sessionfinish`` means the process died mid-run; the record is a snapshot."""
-    assert is_harness_error(record(call_failed=["test_x"], session_finished=False)) is True
+def test_an_unfinished_session_cannot_prove_survival_but_keeps_its_detection() -> None:
+    """The asymmetry, stated directly: a partial run can prove CAUGHT, never SURVIVED."""
+    partial = record(call_failed=["test_x"], session_finished=False)
+    assert observed_mutation(partial) is True
+    assert session_is_trustworthy(partial) is False
+    assert is_harness_error(partial) is False
+
+    silent = record(session_finished=False)
+    assert observed_mutation(silent) is False
+    assert is_harness_error(silent) is True
+
+
+def test_a_dead_worker_failure_is_synthetic_and_never_counts() -> None:
+    """The one exception, and it is not an inconsistency.
+
+    A dying xdist worker emits ``FAILED path::test_name`` for a test that **never executed**,
+    so that ``call_failed`` entry is fabricated rather than observed.
+    """
+    outcomes = record(node_down=True, call_failed=["test_never_ran"])
+
+    assert observed_mutation(outcomes) is False
+    assert is_harness_error(outcomes) is True
+
+
+def test_a_setup_report_alone_does_not_prove_a_test_body_ran() -> None:
+    """Reviewer's reproduction: ``pytest.exit(returncode=0)`` from ``pytest_runtest_call``.
+
+    That yields ``session_finished``, ``exitstatus=0`` and a setup-phase report, while pytest's
+    own stdout says ``no tests ran``. Hence ``saw_call_phase`` rather than "a report happened".
+    """
+    outcomes = record(saw_call_phase=False)
+
+    assert session_is_trustworthy(outcomes) is False
+    assert is_harness_error(outcomes) is True
