@@ -406,26 +406,42 @@ truncate first, because truncation lives inside the function, after the redactor
 | 3 | `format_matches` Content-Type | `.lower()` |
 | 4 | `format_matches` body head | `.lstrip()`, a 256-byte window, `[:8]` |
 | 4 | `classify_probe`'s `<detail>` extraction | the capture group was pulled from the **raw** body |
-| **5** | **`data.columns`, and `data/<view>.csv` itself** | **nothing — it was never a diagnostic** |
+| 5 | `data.columns`, and `data/<view>.csv` itself | **nothing — it was never a diagnostic** |
+| 6 | the artifact **filename**, from a view name | `safe_slug()` — slugged and truncated |
+| 6 | a `format_hints` dict **KEY** | key construction; the sink walked values only |
 
-⚠️ **Round 5 is why the guarantee is stated about the ARTIFACT, not about diagnostics.** A successful
-`/data` response is a CSV: `summarise_csv()` copies its first row into `data.columns`, and
-`_capture_data` writes the bytes to `data/<view>.csv`. Neither is a diagnostic, so four rounds of
-diagnostic rules could not see it, and 334 tests passed. The invariant is therefore:
+⚠️ **Seven transformations across six rounds, and the rate did not decay.** That falsifies the premise
+these fixes were built on — that the set of transformations is small and fixed — so the architecture
+changed rather than growing an eighth screen. Three mechanisms, differing in *kind*:
 
-> **Nothing reaches a persisted artifact unredacted, regardless of how it got there.**
-
-Two mechanisms enforce it, and they are **not** redundant — they cover disjoint artifacts:
-
-1. **Refuse at the seam.** `TableauSession.export()` screens every **successful** body and raises
+1. **Allowlist at the path boundary.** `artifact_stem()` is the only way a filename is built, and its
+   sole input is a **LUID whose UUID shape is verified in full**. `safe_slug()` is deleted, not fixed:
+   redacting before slugging would have closed round 6 and left round 7 open. A response-derived
+   string cannot reach a path because no code puts one there. The cost is real — `_oracle/data/` now
+   lists LUIDs — and the manifest still maps `view_name` → `path`, so the readable index moved one file
+   over rather than disappearing.
+2. **Refuse at the seam.** `export()` screens every **successful** body and raises
    `credential_reflected` if it echoes the PAT **secret** or the live **session token**. Nothing is
-   written: no `.csv`, no `.svg`, no derived field. This is the only mechanism that can protect a file
-   — the bytes hit disk before any manifest exists, so no manifest-side scrub could ever reach them.
-   A `/data` response carrying our own credential is not evidence worth keeping.
-2. **Scrub at the sink.** `write_manifest()` walks the whole manifest through the session redactor
-   immediately before serialising, and **records which fields it had to scrub** in
-   `credential_scrubbed_at_sink`. A sink that cleans up silently is indistinguishable from one that
-   had nothing to clean, which is precisely how a source defect survives.
+   written. This is the only mechanism that can protect a file: the bytes hit disk before any manifest
+   exists, so no manifest-side scrub could ever reach them.
+3. **Scrub at the sink, keys included.** `write_manifest()` walks the whole manifest — **values and
+   dict keys** — through the session redactor immediately before serialising, disambiguates a
+   redaction-induced key collision rather than letting a field vanish, records what it scrubbed in
+   `credential_scrubbed_at_sink`, and builds those recorded paths from the **scrubbed** key so the
+   report cannot re-emit what the scrub just caught. The console is the third artifact: `log_progress`
+   and the blocked-view list both go through the chokepoint, because CI keeps its logs.
+
+**Why a `RedactedText` type is still not the answer**, on the same evidence: rounds 3–4 are
+*mis-orderings* of a value already inside a redaction-aware path, and a type would prevent them — but
+so does the chokepoint, provably. Rounds 5–6 are *omissions*: the value never entered such a path at
+all, because nobody perceived a CSV column or a filename as a diagnostic. **A type cannot fix an
+omission** — you must choose to construct one, and `safe_slug(view["name"])` would have been written
+identically either way. The allowlist removes the call instead of asking anyone to remember.
+
+**Why round 8 should differ from rounds 2–7:** every gate so far enumerated **sources**, an open set
+whose next member is by definition the one nobody enumerated. The gate now enumerates **exits** —
+`write_bytes`/`write_text` (content *and* the path written to), `LOG.*`, `print`, `raise`, and the
+constructions that carry a value into one. Python closes that set; our imagination does not.
 
 ⚠️ **The PAT *name* is redacted, never refused — a deliberate asymmetry.** The secret and token are
 machine-generated, so a match is a reflection and their exposure is unrecoverable: refusing costs one
