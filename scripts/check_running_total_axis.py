@@ -420,7 +420,7 @@ def _judge_one_window(call: WindowCall, visual: VisualBinding) -> dict[str, Any]
     )
 
 
-def _judge_same_table_survivors(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+def _judge_same_table_survivors(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
     survivors: list[FieldRef],
     compared: ColumnRef,
     call: AsOfCall,
@@ -430,8 +430,9 @@ def _judge_same_table_survivors(  # pylint: disable=too-many-arguments,too-many-
 ) -> dict[str, Any] | None:
     """Grade the survivors that sit on the anchor's own table, or None when none of them decide it.
 
-    The verdict turns on ONE further question that used to be skipped: **is the addressed date
-    itself on the visual?**
+    The verdict turns on TWO further questions, both of which used to be skipped.
+
+    **Is the addressed date itself on the visual?**
 
     * It is NOT -> a coarser-only axis. `MAX(t[c])` then evaluates to the end of the bucket, the
       accumulation spans the whole bucket, and the "running total" is that bucket's own total.
@@ -442,6 +443,12 @@ def _judge_same_table_survivors(  # pylint: disable=too-many-arguments,too-many-
       "each bucket's own total" is simply false, and it blocked a correct report (review finding 5).
       It is also not provably RIGHT - a year-restarting running total is a deliberate Tableau shape,
       and an accidental legend produces identical bytes - so it is `unassessable`, never a pass.
+
+    **Does the BOUND ITSELF clear this grouping column?** (round 4 finding 1) If it does, the cutoff
+    cannot move from one of that column's buckets to the next, so the measure is an ordinary
+    fixed-cutoff bucket measure and this gate has no standing over it - exactly as it has none over
+    `<= DATE(2024,12,31)`. Whether the bound moves is therefore NOT a property of the DAX alone; it
+    is decided here, against the visual, which is why `AsOfCall` carries the removed references.
     """
     same_table = [ref for ref in survivors if ref.entity.casefold() == (compared.table or "").casefold()]
     # Keyed by the casefolded (table, column) tuple, NOT by the FieldRef: `check_field_bindings`'
@@ -453,8 +460,10 @@ def _judge_same_table_survivors(  # pylint: disable=too-many-arguments,too-many-
         for ref in same_table
     }
     proven = [r for r in same_table if graded[ColumnRef(r.entity, r.prop).key()] in (GRAIN_DATE, GRAIN_DERIVED)]
-    if proven:
-        named = ", ".join(f"'{r.entity}'[{r.prop}] ({graded[ColumnRef(r.entity, r.prop).key()]})" for r in proven)
+    pinned = [r for r in proven if call.pins(r.entity, r.prop)]
+    moving = [r for r in proven if not call.pins(r.entity, r.prop)]
+    if moving:
+        named = ", ".join(f"'{r.entity}'[{r.prop}] ({graded[ColumnRef(r.entity, r.prop).key()]})" for r in moving)
         if anchor_projected:
             return _verdict(
                 "unassessable",
@@ -488,6 +497,18 @@ def _judge_same_table_survivors(  # pylint: disable=too-many-arguments,too-many-
             + f" sit on {compared.qualified()}'s table and are named like a date grain, but nothing in "
             "the model proves it - no declared date type and no calculated lineage back to the anchor. "
             "Probe it with EVALUATE",
+        )
+    if pinned:
+        return _verdict(
+            "ok",
+            "bound_pinned_across_axis",
+            "the as-of bound removes the filter from grouping column(s) "
+            + ", ".join(f"'{r.entity}'[{r.prop}]" for r in pinned)
+            + ", so the cutoff cannot move from one of their buckets to the next; this is an ordinary "
+            "fixed-cutoff measure whose per-bucket totals are its point, not a collapsed accumulation",
+            compared=compared.qualified(),
+            bound_removes=[ref.qualified() for ref in call.bound_removed_columns],
+            axis=axis,
         )
     return None
 
@@ -539,6 +560,8 @@ def _judge_one_as_of(
     if not call.assessable:
         return _verdict("unassessable", "as_of_filter", call.reason)
     compared = call.compared
+    if compared is None:
+        return _verdict("unassessable", "as_of_filter", "the as-of restriction names no compared column")
     cleared = {ref.key() for ref in call.cleared_columns} | {compared.key()}
     cleared_tables = {name.casefold() for name in call.cleared_tables}
     survivors = [

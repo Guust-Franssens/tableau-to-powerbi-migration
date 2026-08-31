@@ -340,9 +340,9 @@ assert dg.ModelFacts.grain_of is not _orig
     ),
     "f3-any-less-than-is-a-running-total": (
         """
-_orig = dg._classify_bound
-dg._classify_bound = lambda bound, compared, variables, depth=0: dg.BOUND_CONTEXT
-assert dg._classify_bound is not _orig
+_orig = dg._read_bound
+dg._read_bound = lambda bound, compared, variables, depth=0: dg.BoundReading(kind=dg.BOUND_CONTEXT)
+assert dg._read_bound is not _orig
 """,
         "test_a_pinned_cutoff_is_not_a_running_total",
     ),
@@ -392,9 +392,9 @@ assert crta._judge_as_of is not _orig
     # --- mutations that reinstate each of the six ROUND-2 review findings ----------------------
     "r1-any-max-bound-moves-with-the-visual": (
         """
-_orig = dg._classify_moving_bound
-dg._classify_moving_bound = lambda text, compared: dg.BOUND_CONTEXT
-assert dg._classify_moving_bound is not _orig
+_orig = dg._own_bound_kinds
+dg._own_bound_kinds = lambda text, compared: [dg.BOUND_CONTEXT]
+assert dg._own_bound_kinds is not _orig
 """,
         "test_an_as_of_bound_that_is_not_proven_to_move_is_unassessable",
     ),
@@ -515,27 +515,25 @@ assert dg._removal_scope is not _orig
     ),
     "r3f2-only-the-first-conjunct": (
         """
-_orig = dg._upper_bound_comparisons
+_orig = dg._read_predicate
 def first_only(text):
-    bounds, disjunction = _orig(text)
-    head = dg._top_level_comparison(dg._split_top_level(text, dg._LOGICAL_OPERATORS)[0][0])
-    keep = [(head[0], head[2])] if head is not None and head[1] in ("<", "<=") else []
-    return keep, disjunction
-dg._upper_bound_comparisons = first_only
-assert dg._upper_bound_comparisons is not _orig
+    bounds, disjunction, residue = _orig(text)
+    head, _unread = dg._read_conjunct(dg._split_top_level(text, dg._LOGICAL_OPERATORS)[0][0])
+    return ([head] if head is not None else []), disjunction, residue
+dg._read_predicate = first_only
+assert dg._read_predicate is not _orig
 """,
         "test_conjunct_order_cannot_decide_whether_a_running_total_is_detected",
     ),
     "r3f2-only-the-last-conjunct": (
         """
-_orig = dg._upper_bound_comparisons
+_orig = dg._read_predicate
 def last_only(text):
-    bounds, disjunction = _orig(text)
-    tail = dg._top_level_comparison(dg._split_top_level(text, dg._LOGICAL_OPERATORS)[-1][0])
-    keep = [(tail[0], tail[2])] if tail is not None and tail[1] in ("<", "<=") else []
-    return keep, disjunction
-dg._upper_bound_comparisons = last_only
-assert dg._upper_bound_comparisons is not _orig
+    bounds, disjunction, residue = _orig(text)
+    tail, _unread = dg._read_conjunct(dg._split_top_level(text, dg._LOGICAL_OPERATORS)[-1][0])
+    return ([tail] if tail is not None else []), disjunction, residue
+dg._read_predicate = last_only
+assert dg._read_predicate is not _orig
 """,
         "test_both_conjunct_orders_reach_the_identical_verdict",
     ),
@@ -581,9 +579,9 @@ assert dg._classify_period_to_date is not _orig
     ),
     "r3-audit-first-var-decides-the-bound": (
         """
-_orig = dg._combine_bound_kinds
-dg._combine_bound_kinds = lambda kinds: sorted(kinds)[0]
-assert dg._combine_bound_kinds is not _orig
+_orig = dg._fold_bound_kinds
+dg._fold_bound_kinds = lambda kinds: sorted(kinds)[0]
+assert dg._fold_bound_kinds is not _orig
 """,
         "test_a_bound_built_from_two_vars_is_read_from_both_of_them",
     ),
@@ -719,7 +717,7 @@ assert kit.facts().derives_from(kit.DERIVED, kit.ANCHOR) is True
 assert kit.facts().grain_of(dg.ColumnRef("Orders", "Fiscal Period"), kit.ANCHOR) == dg.GRAIN_UNRELATED
 """,
     "f3-any-less-than-is-a-running-total": """
-assert dg._classify_bound("DATE(2024, 12, 31)", kit.ANCHOR, {}) == dg.BOUND_CONTEXT
+assert dg._read_bound("DATE(2024, 12, 31)", kit.ANCHOR, {}).kind == dg.BOUND_CONTEXT
 """,
     "f3-var-bound-never-followed": """
 assert dg._resolve_vars("VAR _asOf = MAX('Orders'[Order_Date]) RETURN 1") == {}
@@ -743,11 +741,11 @@ else:
     raise AssertionError("the unhashable-key mutation did not raise TypeError")
 """,
     "r1-any-max-bound-moves-with-the-visual": """
-assert dg._classify_bound("MAX('Date'[Date])", kit.ANCHOR, {}) == dg.BOUND_CONTEXT
-assert dg._classify_bound("MAXX(ALL('Orders'), 'Orders'[Order_Date])", kit.ANCHOR, {}) == dg.BOUND_CONTEXT
+assert dg._read_bound("MAX('Date'[Date])", kit.ANCHOR, {}).kind == dg.BOUND_CONTEXT
+assert dg._read_bound("MAXX(ALL('Orders'), 'Orders'[Order_Date])", kit.ANCHOR, {}).kind == dg.BOUND_CONTEXT
 """,
     "r1-context-removal-in-the-bound-ignored": """
-assert dg._classify_bound("MAXX(ALL('Orders'), 'Orders'[Order_Date])", kit.ANCHOR, {}) == dg.BOUND_CONTEXT
+assert dg._read_bound("MAXX(ALL('Orders'), 'Orders'[Order_Date])", kit.ANCHOR, {}).kind == dg.BOUND_CONTEXT
 """,
     "r2-not-equal-parsed-as-less-than": """
 assert dg._top_level_comparison("'Orders'[Order_Date] <> MAX('Orders'[Order_Date])")[1] == "<"
@@ -787,19 +785,19 @@ assert sorted(set(harness.MUTATIONS) - set(harness.PROBES)) == ["unprobed"]
 """,
     "r3f1-any-removal-pins-the-bound": """
 assert dg._removal_scope(kit.UNRELATED_REMOVAL, kit.ANCHOR) == [dg.REMOVAL_TABLE]
-assert dg._classify_bound(kit.UNRELATED_REMOVAL, kit.ANCHOR, {}) == dg.BOUND_CONSTANT
+assert dg._read_bound(kit.UNRELATED_REMOVAL, kit.ANCHOR, {}).kind == dg.BOUND_CONSTANT
 """,
     "r3f1-every-removal-reads-as-unrelated": """
 assert dg._removal_scope(kit.WHOLE_TABLE_REMOVAL, kit.ANCHOR) == [dg.REMOVAL_UNRELATED]
-assert dg._classify_bound(kit.WHOLE_TABLE_REMOVAL, kit.ANCHOR, {}) == dg.BOUND_CONTEXT
+assert dg._read_bound(kit.WHOLE_TABLE_REMOVAL, kit.ANCHOR, {}).kind == dg.BOUND_CONTEXT
 """,
     "r3f2-only-the-first-conjunct": """
-assert dg._upper_bound_comparisons(kit.START_THEN_ASOF)[0] == []
-assert len(dg._upper_bound_comparisons(kit.ASOF_THEN_START)[0]) == 1
+assert dg._read_predicate(kit.START_THEN_ASOF)[0] == []
+assert len(dg._read_predicate(kit.ASOF_THEN_START)[0]) == 1
 """,
     "r3f2-only-the-last-conjunct": """
-assert dg._upper_bound_comparisons(kit.ASOF_THEN_START)[0] == []
-assert len(dg._upper_bound_comparisons(kit.START_THEN_ASOF)[0]) == 1
+assert dg._read_predicate(kit.ASOF_THEN_START)[0] == []
+assert len(dg._read_predicate(kit.START_THEN_ASOF)[0]) == 1
 """,
     "r3-audit-first-reader-wins": """
 out = crta.classify(kit.member(kit.WINDOW_PLUS_AS_OF))
@@ -817,7 +815,7 @@ out = dg._classify_period_to_date(kit.TWO_PERIOD_TO_DATE, kit.cumulative())
 assert out is not None and len(out.period_calls) == 1
 """,
     "r3-audit-first-var-decides-the-bound": """
-assert dg._combine_bound_kinds({dg.BOUND_CONSTANT, dg.BOUND_CONTEXT}) == dg.BOUND_CONSTANT
+assert dg._fold_bound_kinds({dg.BOUND_CONSTANT, dg.BOUND_CONTEXT}) == dg.BOUND_CONSTANT
 """,
     "r3-worst-verdict-becomes-first-verdict": """
 clean = crta._verdict("ok", "o", "")
