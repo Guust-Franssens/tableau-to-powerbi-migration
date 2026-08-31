@@ -99,14 +99,22 @@ def group_views(manifest: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     return buckets
 
 
+RENDER_LEGS: tuple[tuple[str, str], ...] = (("data", "data"), ("image", "images"), ("svg", "images"), ("pdf", "images"))
+
+
 def copy_view_files(view: dict[str, Any], oracle_dir: Path, destination: Path, *, dry_run: bool) -> list[str]:
     """Copy one view's captured artifacts. Returns the relative paths written.
 
     A view whose capture failed has no `path` key, so nothing is copied and nothing is invented --
     the per-workbook manifest still records its failure status, which is the honest evidence grade.
+
+    ⚠️ Every render leg the oracle can write MUST appear in ``RENDER_LEGS``. `--reference-best` now
+    normally yields **SVG** on Cloud, and while this handled only `data` and `image` the grouped
+    manifest asserted `svg.path`/`pdf.path` for files that were never copied -- a manifest pointing at
+    absent evidence, which is worse than omitting it.
     """
     written: list[str] = []
-    for kind, sub in (("data", "data"), ("image", "images")):
+    for kind, sub in RENDER_LEGS:
         entry = view.get(kind) or {}
         relative = entry.get("path")
         if entry.get("status") != "ok" or not relative:
@@ -127,22 +135,30 @@ def subset_manifest(manifest: dict[str, Any], workbook: str, views: list[dict[st
     """A per-workbook manifest carrying the SAME evidence grade as the capture-wide one.
 
     Counts are recomputed over this workbook's views rather than copied, so a folder that holds
-    three good captures and one credential-blocked view says exactly that.
+    three good captures and one credential-blocked view says exactly that. The capture-wide GRADE
+    fields are carried across verbatim: a consumer that reads only this file must still be able to
+    see which render tier was obtained and whether a required reference went missing (#403), rather
+    than inferring it from which files happen to exist.
     """
 
     def status_of(view: dict[str, Any], kind: str, default: str | None = None) -> str | None:
         return (view.get(kind) or ({"status": default} if default else {})).get("status")
 
+    render_kinds = [kind for kind, _ in RENDER_LEGS if kind != "data"]
+
+    def render_statuses(view: dict[str, Any], default: str | None = None) -> list[str | None]:
+        return [status_of(view, kind, default) for kind in render_kinds]
+
     ok = [v for v in views if status_of(v, "data") == "ok"]
-    blocked = [v for v in views if "source_credential" in {status_of(v, "data"), status_of(v, "image")}]
+    blocked = [v for v in views if "source_credential" in {status_of(v, "data"), *render_statuses(v)}]
     failed = [
         v
         for v in views
         if any(
-            status not in {"ok", "source_credential"} for status in (status_of(v, "data"), status_of(v, "image", "ok"))
+            status not in {"ok", "source_credential"} for status in (status_of(v, "data"), *render_statuses(v, "ok"))
         )
     ]
-    return {
+    subset = {
         "schema": "tableau-oracle-workbook/1",
         "grouped_from": manifest.get("schema"),
         "captured_at": manifest.get("captured_at"),
@@ -158,6 +174,13 @@ def subset_manifest(manifest: dict[str, Any], workbook: str, views: list[dict[st
         "failed": len(failed),
         "views": views,
     }
+    for kind in render_kinds:
+        subset[f"{'image' if kind == 'image' else kind}_ok"] = sum(1 for v in views if status_of(v, kind) == "ok")
+    # Carried, not recomputed: these describe the CAPTURE RUN, not this workbook's slice of it.
+    for field in ("render_capability", "requested_renders", "reference_required", "reference_missing"):
+        if field in manifest:
+            subset[field] = manifest[field]
+    return subset
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -131,7 +131,10 @@ def test_png_bytes_are_rejected_for_an_svg_request():
     """The on-prem trap: an old server ignores `format=svg` and returns its default PNG."""
     ok, why = cap.format_matches("svg", PNG_BODY, None)
     assert ok is False
-    assert "expected svg payload, got png" in why
+    # The message names the ROOT ELEMENT rule deliberately: a leading `<?xml` cannot settle
+    # SVG, because Tableau's own error bodies start with the same declaration.
+    assert "expected an <svg> root" in why
+    assert "got png" in why
 
 
 def test_a_mismatched_content_type_is_rejected_even_when_bytes_look_right():

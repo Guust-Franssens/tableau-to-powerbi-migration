@@ -124,27 +124,54 @@ UNRENDERABLE_MARKER = "data sources not connected"
 # return its default PNG, which is exactly the on-prem case this ladder exists to protect. The
 # signature is authoritative (a server cannot fake magic bytes); the content type corroborates.
 FORMAT_SIGNATURES: dict[str, tuple[bytes, ...]] = {
-    "svg": (b"<?xml", b"<svg"),
     "pdf": (b"%PDF-",),
     "png": (b"\x89PNG\r\n\x1a\n",),
 }
 CONTENT_TYPES: dict[str, str] = {"svg": "image/svg+xml", "pdf": "application/pdf", "png": "image/png"}
 
+# SVG cannot be settled by a leading signature the way a binary format can: it is XML, so Tableau's
+# own error bodies begin with the very same `<?xml` declaration as a valid drawing. Accepting that
+# declaration let `<?xml version="1.0"?><error/>` classify as a usable SVG -- the original
+# wrong-format defect surviving in a narrower form. The ROOT ELEMENT is what settles it.
+_XML_PROLOGUE = re.compile(
+    rb"^(?:\xef\xbb\xbf)?\s*(?:<\?xml[^>]*\?>\s*|<!--.*?-->\s*|<!DOCTYPE[^>\[]*(?:\[[^\]]*\])?>\s*)*", re.S
+)
+
+
+def looks_like_svg(body: bytes) -> bool:
+    """Is the ROOT element ``<svg>``, once any BOM, XML declaration, comments and DOCTYPE are skipped?"""
+    head = _XML_PROLOGUE.sub(b"", body[:4096], count=1).lstrip()
+    return head.startswith(b"<svg") and (len(head) == 4 or head[4:5] in b" \t\r\n/>")
+
+
+def _identify(head: bytes) -> str:
+    """Best-effort name for whatever actually arrived, so the diagnostic is actionable."""
+    for other, sigs in FORMAT_SIGNATURES.items():
+        if any(head.startswith(sig) for sig in sigs):
+            return other
+    if head.startswith((b"<?xml", b"<")):
+        return "xml/html (not an <svg> root)"
+    return "unrecognised bytes"
+
 
 def format_matches(kind: str, body: bytes, content_type: str | None) -> tuple[bool, str]:
     """Does this payload really carry ``kind``? Returns ``(ok, why_not)``.
 
-    Checked in this order on purpose: a **signature** mismatch is decisive, because bytes cannot lie
-    about what they are. A content-type mismatch alone is only reported when the signature could not
-    settle it, since proxies rewrite headers and some servers omit the charset.
+    Checked in this order on purpose: the **payload** is decisive, because bytes cannot lie about what
+    they are. A content-type mismatch alone is only reported when the payload could not settle it,
+    since proxies rewrite headers and some servers omit the charset.
+
+    ⚠️ ``why_not`` can quote the received ``Content-Type``, which is attacker-influenced text. Callers
+    MUST pass it through a redactor before reporting it -- see ``classify_probe``.
     """
-    signatures = FORMAT_SIGNATURES.get(kind, ())
     head = body.lstrip()[:16]
-    if signatures and not any(head.startswith(sig) for sig in signatures):
-        actual = next(
-            (other for other, sigs in FORMAT_SIGNATURES.items() if any(head.startswith(s) for s in sigs)), None
-        )
-        return False, f"expected {kind} payload, got {actual or 'unrecognised bytes'} ({head[:8]!r})"
+    if kind == "svg":
+        if not looks_like_svg(body):
+            return False, f"expected an <svg> root, got {_identify(head)} ({head[:8]!r})"
+    else:
+        signatures = FORMAT_SIGNATURES.get(kind, ())
+        if signatures and not any(head.startswith(sig) for sig in signatures):
+            return False, f"expected {kind} payload, got {_identify(head)} ({head[:8]!r})"
     mime = (content_type or "").split(";")[0].strip().lower()
     expected = CONTENT_TYPES.get(kind)
     if mime and expected and mime != expected:
@@ -266,7 +293,16 @@ def classify_probe(
     the redacted copy, never the reverse: redaction is handed the human-chosen PAT *name*, and a short
     one rewrites Tableau's own error codes, so a ``401002`` mangled mid-string stops being recognisable.
     Redaction must never mutate syntax that control flow depends on.
+
+    **Every** returned ``detail`` passes through ``_scrub`` -- including the HTTP 200 wrong-format
+    diagnostic, which quotes the received ``Content-Type``. That header is attacker-influenced and a
+    reflecting proxy can put a live token in it; the first version of this check returned that string
+    before any redaction ran.
     """
+
+    def _scrub(text: str) -> str:
+        return redactor(text) if redactor else text
+
     if status == 200:
         if kind:
             ok, why = format_matches(kind, body, content_type)
@@ -274,12 +310,11 @@ def classify_probe(
                 # A 200 with the wrong payload is the on-prem trap: an older server ignores an unknown
                 # `format=svg` and hands back its default PNG. Selecting this rung would persist PNG
                 # bytes in a `.svg` and call them vector.
-                return "indeterminate", f"HTTP 200 but {why}"
+                return "indeterminate", _scrub(f"HTTP 200 but {why}")[:180]
         return "available", ""
     text = body.decode("utf-8", "replace")
     raw_detail = (re.findall(r"<detail>(.*?)</detail>", text, re.S) or [text])[0]
-    safe = redactor(raw_detail) if redactor else raw_detail
-    detail = safe[:180].strip()
+    detail = _scrub(raw_detail)[:180].strip()
     if VERSION_GATE_MARKER in text:
         return "unsupported", detail
     if UNRENDERABLE_MARKER in text:
@@ -329,27 +364,17 @@ def detect(
     Returns the chosen tier, the per-tier verdicts, and the **three-way version reconciliation**.
     """
     versions = versions or ApiVersions()
-    configured_api, advertised_api = versions.configured, versions.advertised
-    verdicts: list[dict[str, Any]] = []
-    chosen: str | None = None
-    unknown_above = False
-    for tier in tiers:
-        if chosen is not None:
-            verdicts.append({"tier": tier.name, "verdict": "not_probed", "detail": "a better tier already answered"})
-            continue
-        entry = _walk_one_tier(fetch, tier, redactor, versions)
-        if entry["verdict"] == "available":
-            chosen = tier.name
-        elif entry["verdict"] == "indeterminate":
-            unknown_above = True
-        verdicts.append(entry)
+    verdicts, chosen, chosen_api, unknown_above = _walk_ladder(fetch, tiers, redactor, versions)
 
     definite_no = all(v["verdict"] == "unsupported" for v in verdicts)
     report: dict[str, Any] = {
         "probe_view_luid": view_luid,
-        "configured_api_version": configured_api,
-        "advertised_api_version": advertised_api,
+        "configured_api_version": versions.configured,
+        "advertised_api_version": versions.advertised,
         "selected_tier": chosen,
+        # The api-version the SELECTED tier answered at. `None` = the configured one. A caller that
+        # captures the selected tier MUST honour this, or it fetches at a version that refuses it.
+        "selected_api_version": chosen_api,
         # PROVISIONAL: a rung answered, but a better one could not be measured on this view.
         "provisional": bool(chosen and unknown_above),
         # False whenever any rung's capability is still unknown -- the honest "we do not know yet".
@@ -380,6 +405,25 @@ def detect(
     return report
 
 
+def _walk_ladder(fetch, tiers, redactor, versions: ApiVersions):
+    """Probe rungs in order until one answers. Returns ``(verdicts, chosen, chosen_api, unknown_above)``."""
+    verdicts: list[dict[str, Any]] = []
+    chosen: str | None = None
+    chosen_api: str | None = None
+    unknown_above = False
+    for tier in tiers:
+        if chosen is not None:
+            verdicts.append({"tier": tier.name, "verdict": "not_probed", "detail": "a better tier already answered"})
+            continue
+        entry = _walk_one_tier(fetch, tier, redactor, versions)
+        if entry["verdict"] == "available":
+            chosen, chosen_api = tier.name, entry.get("answered_api")
+        elif entry["verdict"] == "indeterminate":
+            unknown_above = True
+        verdicts.append(entry)
+    return verdicts, chosen, chosen_api, unknown_above
+
+
 def _walk_one_tier(fetch, tier: RenderTier, redactor, versions: ApiVersions) -> dict[str, Any]:
     """Probe one rung, re-probing at the tier's documented floor when OUR pin may be the cause."""
     verdict, detail = _probe_tier(fetch, tier, redactor)
@@ -389,6 +433,9 @@ def _walk_one_tier(fetch, tier: RenderTier, redactor, versions: ApiVersions) -> 
         "detail": detail,
         "min_api": tier.min_api,
         "min_release": tier.min_release,
+        # The api-version this rung actually ANSWERED at. `None` means the configured one. A capture
+        # that ignores this fetches at the configured version and fails on a tier the report promised.
+        "answered_api": None if verdict == "available" else None,
     }
     # A version gate is the ONE case where the client's own pin may be the cause. Re-probe at the
     # tier's floor rather than inferring support from the advertised number: "the server advertises
@@ -402,6 +449,10 @@ def _walk_one_tier(fetch, tier: RenderTier, redactor, versions: ApiVersions) -> 
         floor_verdict, floor_detail = _probe_tier(fetch, tier, redactor, api=tier.min_api)
         entry["floor_reprobe"] = {"api": tier.min_api, "verdict": floor_verdict, "detail": floor_detail}
         entry["verdict"] = floor_verdict
+        if floor_verdict == "available":
+            # Promote the FLOOR version with the tier. Without this the run is told 'svg is available'
+            # and then captures at the configured version, where the same request is still refused.
+            entry["answered_api"] = tier.min_api
     return entry
 
 

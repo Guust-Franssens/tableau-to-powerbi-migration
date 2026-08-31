@@ -376,8 +376,14 @@ class TableauSession:
 
     # One recovery ladder, and it now holds the raw body and its redacted copy side by side so
     # classification and reporting cannot be confused for each other.
-    def export(self, path: str) -> tuple[bytes, float, dict[str, Any]]:  # pylint: disable=too-many-locals
+    def export(self, path: str, *, api: str | None = None) -> tuple[bytes, float, dict[str, Any]]:  # pylint: disable=too-many-locals
         """GET a content-export endpoint, recovering from session loss and transient failures.
+
+        ``api`` overrides the client api-version for this export. It exists because the capability
+        probe can RECOVER a tier by re-probing at its documented floor: without honouring the version
+        that actually answered, the run is told "svg is available" and then fetches at the configured
+        version, where the same request is still refused (measured: floor 3.29 ``available``, the same
+        request at the configured 3.21 ``unsupported``).
 
         Returns ``(body, elapsed_sec, stats)`` where ``stats`` records how much recovery was needed --
         ``reauths``, ``retries`` and the reasons. Recovery is deliberately **recorded, not silent**:
@@ -392,7 +398,7 @@ class TableauSession:
         deadline = time.monotonic() + self.retry.budget_sec
         for attempt in range(1, self.retry.max_attempts + 1):
             started = time.perf_counter()
-            status, payload, headers = self._request("GET", path)
+            status, payload, headers = self._request("GET", path, api=api)
             elapsed = time.perf_counter() - started
             if status == 200:
                 return payload, elapsed, {"reauths": reauths, "retries": len(retries), "retry_reasons": retries}
@@ -540,12 +546,17 @@ def capture_view(
     view: dict[str, Any],
     out_dir: Path,
     wants: frozenset[str] = frozenset(),
+    api_overrides: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Capture one view's data plus every requested render, keyed by view LUID.
 
     ``wants`` is a set drawn from ``_RENDER_ROUTES`` ("png", "svg", "pdf") rather than a boolean per
     format: three parallel booleans made the call site unreadable at the third one, and every new
     route would have added another positional flag that some caller forgets to pass.
+
+    ``api_overrides`` maps a kind to the api-version that tier was PROVED to answer at. The capability
+    probe can recover a tier by re-probing at its documented floor, and a capture that ignores that
+    version fetches at the configured one and fails on a tier the manifest already promised.
     """
     view_luid = view["id"]
     workbook = view.get("workbook", {}) or {}
@@ -561,31 +572,40 @@ def capture_view(
         "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
 
-    data_path = out_dir / "data" / f"{stem}.csv"
-    data_path.parent.mkdir(parents=True, exist_ok=True)
+    record["data"] = _capture_data(session, view_luid, out_dir / "data" / f"{stem}.csv", out_dir)
+    if record["data"]["status"] != "ok":
+        return record
+
+    for kind in ("png", "svg", "pdf"):
+        if kind in wants:
+            leg = "image" if kind == "png" else kind
+            record[leg] = _capture_render(
+                session,
+                view_luid,
+                out_dir / "images" / f"{stem}.{_RENDER_EXTENSIONS[kind]}",
+                kind,
+                api=(api_overrides or {}).get(kind),
+            )
+    return record
+
+
+def _capture_data(session: TableauSession, view_luid: str, path: Path, out_dir: Path) -> dict[str, Any]:
+    """The numeric oracle for one view: Tableau's own aggregated, display-formatted values."""
+    path.parent.mkdir(parents=True, exist_ok=True)
     try:
         payload, elapsed, stats = session.export(f"/sites/{session.site_id}/views/{view_luid}/data")
     except ExportFailed as exc:
-        record["data"] = {"status": exc.kind, "error": str(exc), "detail": exc.detail}
-        return record
-    data_path.write_bytes(payload)
-    record["data"] = {
+        return {"status": exc.kind, "error": str(exc), "detail": exc.detail}
+    path.write_bytes(payload)
+    return {
         "status": "ok",
-        "path": str(data_path.relative_to(out_dir)).replace("\\", "/"),
+        "path": str(path.relative_to(out_dir)).replace("\\", "/"),
         "bytes": len(payload),
         "sha256": hashlib.sha256(payload).hexdigest(),
         "elapsed_sec": round(elapsed, 2),
         **stats,
         **summarise_csv(payload),
     }
-
-    for kind in ("png", "svg", "pdf"):
-        if kind in wants:
-            leg = "image" if kind == "png" else kind
-            record[leg] = _capture_render(
-                session, view_luid, out_dir / "images" / f"{stem}.{_RENDER_EXTENSIONS[kind]}", kind
-            )
-    return record
 
 
 # Route per tier. `pdf` uses `type=Unspecified`, which sizes the page to the viz instead of a paper
@@ -626,7 +646,9 @@ def pdf_facts(payload: bytes) -> dict[str, Any]:
     return facts
 
 
-def _capture_render(session: TableauSession, view_luid: str, path: Path, kind: str) -> dict[str, Any]:
+def _capture_render(
+    session: TableauSession, view_luid: str, path: Path, kind: str, api: str | None = None
+) -> dict[str, Any]:
     """Fetch one rendered form of a view and describe what was actually obtained.
 
     All three rungs come from the same VizQL render, so none survives a workbook whose data sources
@@ -634,11 +656,15 @@ def _capture_render(session: TableauSession, view_luid: str, path: Path, kind: s
     same HTTP 400 ``ExportViewException: Error: data sources not connected``. What differs is the
     CEILING and the REACH: PNG is capped at 2x a dashboard's declared size but works back to API 2.5;
     SVG is resolution-independent but needs 3.29; PDF is vector with embedded fonts from API 2.8.
+
+    ``api`` is the version this tier was PROVED to answer at, when a floor re-probe recovered it.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     endpoint, query = _RENDER_ROUTES[kind]
     try:
-        payload, elapsed, stats = session.export(f"/sites/{session.site_id}/views/{view_luid}/{endpoint}{query}")
+        payload, elapsed, stats = session.export(
+            f"/sites/{session.site_id}/views/{view_luid}/{endpoint}{query}", api=api
+        )
     except ExportFailed as exc:
         record = {"status": exc.kind, "error": str(exc), "detail": exc.detail}
         if kind == "svg" and SVG_VERSION_MARKER in exc.detail:
@@ -1052,6 +1078,33 @@ def _capability_rank(report: dict[str, Any]) -> tuple[int, int]:
     return (1 if report.get("selected_tier") else 0, 1 if report.get("capability_complete") else 0)
 
 
+def _apply_selected_tier(
+    report: dict[str, Any], wants: set[str], api_overrides: dict[str, str], env: dict[str, str]
+) -> None:
+    """Turn a probe verdict into what the run will actually fetch, INCLUDING the api version.
+
+    Without the version half, a floor re-probe that recovered a tier leaves the run claiming
+    ``selected_tier='svg'`` and then capturing at the configured version, where the very same request
+    is still refused -- measured: floor 3.29 ``available``, configured 3.21 ``unsupported``. The
+    report would promise a tier the capture cannot fetch.
+    """
+    tier = report.get("selected_tier")
+    if not tier:
+        return
+    # The ladder names the PNG rung `png_high` (it is `?resolution=high`, not the plain render); the
+    # capture kinds are keyed by file format. One mapping, stated once.
+    kind = {"png_high": "png"}.get(tier, tier)
+    wants.add(kind)
+    if report.get("selected_api_version"):
+        api_overrides[kind] = report["selected_api_version"]
+        LOG.info(
+            "  capturing '%s' at API %s (recovered by floor re-probe; configured is %s)",
+            kind,
+            api_overrides[kind],
+            env.get("TABLEAU_REST_API_VERSION", "3.21"),
+        )
+
+
 def main() -> int:
     """Capture the oracle for every selected view.
 
@@ -1085,17 +1138,14 @@ def main() -> int:
 
     capability_report = None
     wants = {kind for kind, on in (("png", args.images), ("svg", args.svg), ("pdf", args.pdf)) if on}
+    api_overrides: dict[str, str] = {}
     if args.reference_best and views:
         capability_report = probe_render_capability(session, env, views)
-        tier = capability_report.get("selected_tier")
-        if tier:
-            # The ladder names the PNG rung `png_high` (it is `?resolution=high`, not the plain
-            # render); the capture kinds are keyed by file format. One mapping, stated once.
-            wants.add({"png_high": "png"}.get(tier, tier))
+        _apply_selected_tier(capability_report, wants, api_overrides, env)
 
     records, started = [], time.perf_counter()
     for index, view in enumerate(views, 1):
-        record = capture_view(session, view, out_dir, frozenset(wants))
+        record = capture_view(session, view, out_dir, frozenset(wants), api_overrides)
         record["workbook_name"] = workbook_names.get(record["workbook_luid"])
         records.append(record)
         log_progress(index, len(views), record)
