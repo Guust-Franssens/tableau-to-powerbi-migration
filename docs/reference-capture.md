@@ -301,9 +301,13 @@ toolkit to migrate real customer dashboards**:
 
 ## Implementation status
 
-- ✅ Governance gitignore; the public Playwright capture technique (documented in
-  `pbi-migration-validator.agent.md` Gotchas: `domcontentloaded` + explicit timeouts, dismiss OneTrust,
-  fixed viewport, full-page).
+- ✅ Governance gitignore; the public Playwright capture technique — `waitUntil: "domcontentloaded"`
+  plus explicit `waitForTimeout` calls (Tableau Public never reaches `networkidle`, because of
+  continuous background telemetry), dismiss the OneTrust cookie overlay
+  (`#onetrust-reject-all-handler, #onetrust-accept-btn-handler`), fixed known viewport, full-page,
+  and click by pixel coordinate rather than by text. Implemented in
+  [`scripts/capture_tableau_reference.py`](../scripts/capture_tableau_reference.py) (`_CAPTURE_JS`),
+  which is the authority; `pbi-migration-validator.agent.md` now points here rather than restating it.
 - ⚠️ `scripts/capture_tableau_reference.py`: public-Playwright + embedded-thumbnail + manual providers,
   manifest writing, fail-closed default, `structural-only` flag. The Server-REST and
   authenticated-browser providers are **not wired here** and raise a clear error — but note the
