@@ -55,29 +55,34 @@ The two mechanisms, and the ONE invariant each
    **Invariant: for EVERY such call, every date grain projected by the visual must sit on the marked
    date table that owns ITS `<dates>` argument** - otherwise `unassessable`, never a pass.
 
-THE rule: a classifier never stops at the first match
------------------------------------------------------
-Three review rounds found the same bug at seven sites, and it is the reason this module reads the
-way it does. Each site picked one candidate out of several and judged the measure from it:
+THE rule that replaced "a classifier never stops at the first match"
+--------------------------------------------------------------------
+Rounds 1-4 found the same bug at eight sites - the first `WINDOW` call, the first qualifying
+`FILTER`, the first `&&` conjunct, the first `ALL`/`REMOVEFILTERS`, the first reader in the dispatch
+chain, the first `VAR`, the first period-to-date function in DICT order, and an unreadable window
+call suppressing a readable one - three of them SILENT PASSES. Every mechanism became a LIST folded
+through `_worst()`, where **mismatch > unassessable > ok**.
 
-    round 1  the first WINDOW call decided the measure
-    round 2  the first qualifying FILTER decided the measure
-    round 3  the first comparison in an `&&` chain decided the predicate
-    round 3  the first `ALL`/`REMOVEFILTERS` decided the bound was pinned
-    audit    the first reader in the dispatch chain decided the measure       <- SILENT PASS
-    audit    the first `VAR` a bound references decided the bound             <- SILENT PASS
-    audit    the first period-to-date function in DICT order decided it       <- SILENT PASS
-    audit    an unreadable window call suppressed a readable one's mismatch
+**Round 5 found that this was treating the symptom.** Every one of its findings was a regex
+mis-reading DAX syntax rather than a fold picking the wrong candidate: a redundant paren around a
+column made a measure vanish (exit 0); a `REMOVEFILTERS` in an UNREACHABLE `IF` branch acquitted a
+broken running total (exit 0 / OK); and a legitimate TEXT measure whose string literal contained
+DAX was reported MISMATCH (exit 1) - **wrong in both directions at once**. Semantic analysis of
+arbitrary DAX with regexes does not terminate, so the grammar was cut to what the ENGINE emits:
 
-Three of the eight were silent passes (exit 0 on a real defect), and two were order-dependent -
-`VAR` declaration order, and `&&` conjunct order - so two semantically identical spellings of one
-measure got opposite verdicts. So: every mechanism is a LIST of independent calls, `classify()` runs
-EVERY reader, and every list is folded through `_worst()`, where **mismatch > unassessable > ok**.
-One place to get the precedence right, instead of four copies of it.
+* the **window family** and **period-to-date** are judged. Both are structural reads - "which
+  columns does this call name?" - and the window family is exactly what `calc_to_dax.py:3548`
+  emits for every cumulative measure the deterministic tier produces.
+* the **as-of `FILTER(... <= ...)` family is DETECTED, never classified**: always `unassessable`,
+  with the measure named and "probe it with EVALUATE". It never emits a mismatch, so it cannot be
+  wrong in the direction that gets a gate switched off; it never emits `ok`, so it cannot grant
+  false confidence. Measured: 0 of the 526 measures in the 16 committed `examples/` models carry
+  an ordering comparison inside a `FILTER`, so this costs nothing on shipped bytes.
+* `dax_grain.mask_noncode` blanks string literals and comments **before any regex sees the text**.
 
-The single audited exception, stated so it is not mistaken for an oversight: `_clause` returns the
-first `ORDERBY`/`PARTITIONBY` in a window call, because DAX permits at most one of each per call -
-there is no second match to lose.
+`_worst()` still exists and still folds, because the window family genuinely has several calls; the
+list of things it folds is simply much shorter now. `_clause_bodies` reads EVERY `ORDERBY` in a
+window call and refuses a second one rather than assuming there cannot be one.
 
 Two words this module refuses to conflate: PROXY and PROPERTY
 -------------------------------------------------------------
@@ -420,13 +425,17 @@ _VERDICT_PRECEDENCE = ("mismatch", "unassessable", "ok")
 
 
 def _worst(verdicts: list[dict[str, Any]]) -> dict[str, Any]:
-    """The single rule this module was rewritten around: **worst verdict wins, never the first.**
+    """**Worst verdict wins, never the first.**
 
-    Three review rounds produced the same bug at seven different sites - the first window call, the
-    first qualifying `FILTER`, the first period-to-date function, the first reader in the dispatch
-    chain, the first `VAR` a bound references, the first comparison in an `&&` chain, the first
-    `ALL(...)` in a bound. Three of the seven were SILENT PASSES. Every mechanism is now a list of
-    independent calls and every list is folded here, so there is one place to get this right.
+    Rounds 1-4 produced the same bug at eight sites - the first window call, the first qualifying
+    `FILTER`, the first period-to-date function, the first reader in the dispatch chain, the first
+    `VAR` a bound references, the first comparison in an `&&` chain, the first `ALL(...)` in a
+    bound, and an unreadable window call suppressing a readable one. Three were SILENT PASSES.
+    Every mechanism is a list of independent calls and every list is folded here.
+
+    Round 5 shortened the list of things there are to fold - the as-of bound classifier is gone -
+    without weakening the rule: a measure may still carry several window calls, several
+    period-to-date calls, and several disclosed as-of restrictions at once.
     """
     if not verdicts:
         return _verdict("unassessable", "unreadable_grain", "the accumulation grain could not be read from the DAX")
