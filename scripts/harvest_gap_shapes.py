@@ -25,6 +25,7 @@ is the direction that over-reports rather than the direction that excuses.
 from __future__ import annotations
 
 import difflib
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -150,7 +151,27 @@ def _leaf(pointer: str) -> str:
     return pointer.rstrip("[]").rsplit("/", 1)[-1].rstrip("[]")
 
 
-def bound_model_tables(report_dir: Path) -> set[str] | None:
+def _consume(path: Path, consumed: dict[Path, str] | None) -> str:
+    """Read one file and RECORD the digest of the exact bytes used, for the caller to validate.
+
+    ⚠️ The single mechanism behind rounds 6-8 of PR #399: the harvest reads the bundle at several
+    stages and assigned provenance from one read while taking evidence from another. Round 8's
+    instance was here - `_observed_race` validated the tree-scan digests and then THIS module
+    re-read the same files through `shapes_for_change`, so an edit landing in between was observed,
+    classified, and reported as the engine's byte (`exit 0`, `complete`, `engine_internal=2`).
+
+    Closing windows one at a time cannot terminate while any claim-feeding read is unaccounted for,
+    so every one of them now carries the digest of what it consumed. `read_bytes` + decode rather
+    than `read_text`, because the digest has to be of the bytes this call actually used - hashing the
+    file again afterwards would just be another read, and another window.
+    """
+    data = path.read_bytes()
+    if consumed is not None:
+        consumed[path] = hashlib.sha256(data).hexdigest()
+    return data.decode("utf-8")
+
+
+def bound_model_tables(report_dir: Path, consumed: dict[Path, str] | None = None) -> set[str] | None:
     """Table names of the semantic model a report actually binds, or None when unresolvable.
 
     None is a real answer and must stay distinguishable from the empty set: it means the refinement
@@ -158,7 +179,7 @@ def bound_model_tables(report_dir: Path) -> set[str] | None:
     """
     pbir = report_dir / "definition.pbir"
     try:
-        reference = json.loads(pbir.read_text(encoding="utf-8")).get("datasetReference") or {}
+        reference = json.loads(_consume(pbir, consumed)).get("datasetReference") or {}
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, AttributeError):
         return None
     relative = (reference.get("byPath") or {}).get("path")
@@ -170,7 +191,7 @@ def bound_model_tables(report_dir: Path) -> set[str] | None:
     names: set[str] = set()
     for tmdl in tables_dir.glob("*.tmdl"):
         try:
-            match = _TABLE_DECL.search(tmdl.read_text(encoding="utf-8"))
+            match = _TABLE_DECL.search(_consume(tmdl, consumed))
         except (OSError, UnicodeDecodeError):
             continue
         if match:
@@ -260,15 +281,15 @@ def _tmdl_line_shape(line: str) -> str:
     return SHAPE_TMDL_OTHER
 
 
-def _text_shapes(baseline_file: Path, working_file: Path) -> tuple[list[str], int]:
+def _text_shapes(baseline_file: Path, working_file: Path, consumed: dict[Path, str] | None) -> tuple[list[str], int]:
     """Shapes for a changed TMDL/plain-text file, from the lines that differ.
 
     A blank line carries no meaning, so it is counted as a difference but never given a shape - it
     would otherwise dominate `TMDL_OTHER` and make the residue bucket look alarming.
     """
     try:
-        before = baseline_file.read_text(encoding="utf-8").splitlines()
-        after = working_file.read_text(encoding="utf-8").splitlines()
+        before = _consume(baseline_file, consumed).splitlines()
+        after = _consume(working_file, consumed).splitlines()
     except (OSError, UnicodeDecodeError):
         return [SHAPE_UNREADABLE_TEXT], 1
     matcher = difflib.SequenceMatcher(a=before, b=after, autojunk=False)
@@ -288,16 +309,17 @@ def shapes_for_change(
     baseline_file: Path,
     working_file: Path,
     tables: set[str] | None,
+    consumed: dict[Path, str] | None = None,
 ) -> tuple[list[str], int]:
     """Shapes describing one changed file, plus the number of structural differences found."""
     suffix = baseline_file.suffix.lower()
     if suffix in _TEXT_SUFFIXES:
-        return _text_shapes(baseline_file, working_file)
+        return _text_shapes(baseline_file, working_file, consumed)
     if suffix not in _JSON_SUFFIXES:
         return [SHAPE_BINARY], 1
     try:
-        before = json.loads(baseline_file.read_text(encoding="utf-8"))
-        after = json.loads(working_file.read_text(encoding="utf-8"))
+        before = json.loads(_consume(baseline_file, consumed))
+        after = json.loads(_consume(working_file, consumed))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return [SHAPE_UNREADABLE_JSON], 1
     differences = json_pointer_diff(before, after)

@@ -36,6 +36,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 import check_migration_progress as cmp_mod  # noqa: E402  # pylint: disable=wrong-import-position
 import harvest_engine_gaps as heg  # noqa: E402  # pylint: disable=wrong-import-position
 import harvest_gap_report as hgr  # noqa: E402  # pylint: disable=wrong-import-position
+import harvest_gap_races as hgr_races  # noqa: E402  # pylint: disable=wrong-import-position
 import harvest_gap_shapes as hgs  # noqa: E402  # pylint: disable=wrong-import-position
 import harvest_gap_trees as hgt  # noqa: E402  # pylint: disable=wrong-import-position
 
@@ -1883,7 +1884,7 @@ def test_a_race_whose_scope_is_unknown_withdraws_every_authorship_claim():
     ]
     unscoped = [{"target": "pbip/WB/WB.Report", "kind": "unlocatable_read_failure", "scoped": False}]
 
-    withdrawn = heg._withdraw_raced(records, unscoped)
+    withdrawn = hgr_races.withdraw_raced(records, unscoped)
 
     assert [r["provenance"] for r in withdrawn] == [
         heg.PROV_UNATTRIBUTED,
@@ -1893,7 +1894,7 @@ def test_a_race_whose_scope_is_unknown_withdraws_every_authorship_claim():
     assert all(r["snapshot_race"] for r in withdrawn)
     # A SCOPED race naming none of them leaves every claim standing - or the rule is just "withdraw".
     scoped = [{"target": "pbip/Other/Other.Report/z.json", "kind": heg.DRIFT_CHANGED}]
-    assert [r["provenance"] for r in heg._withdraw_raced(records, scoped)] == [
+    assert [r["provenance"] for r in hgr_races.withdraw_raced(records, scoped)] == [
         heg.PROV_ENGINE,
         heg.PROV_TIER,
         heg.PROV_TAMPERED,
@@ -1979,3 +1980,116 @@ def test_a_desktop_sidecar_the_snapshot_never_recorded_is_not_a_race(tmp_path):
 
     assert report["snapshot_race"]["count"] == 0
     assert report["provenance"][heg.PROV_UNATTRIBUTED] == 1
+
+
+# ---------------------------------------------------------------------------------------------
+# Round-8 review: the CLASS, not another window.
+#
+# Rounds 6, 7 and 8 each reported a different filesystem read with one shape - provenance assigned
+# from one read, evidence taken from another. Enumerated: 17 reads feed a claim, 9 of them are
+# EVIDENCE reads, and 7 of those sit behind `shapes_for_change()` / `bound_model_tables()`. Those
+# seven now record the digest of the bytes they used and `_consumed_race` checks every one, so a
+# mismatch ANYWHERE is a race and no individual window matters.
+# ---------------------------------------------------------------------------------------------
+
+
+def _harvest_with_an_edit_after_the_digest_check(monkeypatch, bundle: Path) -> dict:
+    """Inject between `_observed_race()` and `_difference_records()` - round 8's exact window.
+
+    ⚠️ The edit fires on EVERY report pair, not once. A one-shot injection makes a second `harvest()`
+    (as `main()` performs) run clean over an already-edited bundle and report exit 0 - which is
+    correct behaviour being mistaken for the defect. Round 7's first draft of this fixture had
+    exactly that bug.
+    """
+    real = heg._difference_records
+    fired = []
+
+    def difference_records_after_the_edit(bundle_arg, pair, delta, evidence, consumed):
+        if pair.layer == heg.LAYER_REPORT:
+            fired.append(pair)
+            _write(bundle_arg / WORKING_VISUAL, _visual("Orders", position=70 + len(fired)))
+        return real(bundle_arg, pair, delta, evidence, consumed)
+
+    monkeypatch.setattr(heg, "_difference_records", difference_records_after_the_edit)
+    report = heg.harvest(bundle)
+    assert fired, "the injection never fired - this fixture no longer reproduces the window"
+    return report
+
+
+def test_an_edit_the_classifier_read_after_the_digest_check_is_not_the_engines_byte(tmp_path, monkeypatch):
+    """Measured on af2dfaf, BEFORE this fix: exit 0, `complete`, race 0, `engine_internal=2`, clean claim.
+
+    `_observed_race` validated the tree-scan digests and `shapes_for_change` then RE-READ the same
+    files, so the later read observed the edit, classified it into `LAYOUT`, and shipped it as the
+    engine's own byte while `tamper_check()` on the same bundle said `DRIFT`.
+    """
+    bundle = _differing_bundle(tmp_path)
+
+    report = _harvest_with_an_edit_after_the_digest_check(monkeypatch, bundle)
+
+    assert cmp_mod.tamper_check(bundle)[0] == "DRIFT", "the fixture must leave the bundle visibly drifted"
+    moved = report["snapshot_race"]["moved"]
+    assert [m["target"] for m in moved] == [WORKING_VISUAL]
+    assert moved[0]["read_by"] == "classifier", "the tree scan cannot see this one - only the later read can"
+    assert report["provenance"][heg.PROV_UNATTRIBUTED] == 1
+    assert report["status"] == heg.STATUS_INCOMPLETE
+    assert CLEAN_CLAIM not in hgr.render_markdown(report)
+    assert heg.main([str(bundle), "--quiet"]) == heg.EXIT_INCOMPLETE, "the CLI must not exit 0 on a racing run"
+    # ...and the bundle itself is fine: stop writing to it and the very next run is clean again. The
+    # finding is about THIS RUN's evidence being mixed, not about the bundle being suspect forever.
+    monkeypatch.undo()
+    assert heg.main([str(bundle), "--quiet"]) == heg.EXIT_OK
+
+
+def test_the_classifier_records_the_digest_of_the_bytes_it_actually_used(tmp_path):
+    """The mechanism, asserted directly: a reader that does not report cannot be validated."""
+    bundle = _identical_bundle(tmp_path)
+    report_dir = bundle / "pbip" / "WB" / "WB.Report"
+    consumed: dict[Path, str] = {}
+
+    hgs.bound_model_tables(report_dir, consumed)
+    hgs.shapes_for_change(bundle / "reports" / "WB.Report" / VISUAL, report_dir / VISUAL, {"Orders"}, consumed)
+
+    assert consumed, "nothing was recorded - every classifier read is invisible to validation"
+    for path, digest in consumed.items():
+        assert digest == _sha(path), f"{path} recorded a digest that is not the bytes on disk"
+    assert report_dir / "definition.pbir" in consumed
+    assert report_dir / VISUAL in consumed
+
+
+def _reconciles(report: dict) -> bool:
+    """Top-level provenance == the pair rows PLUS the records that legitimately belong to no pair."""
+    rows = sum(sum(e["provenance"].values()) for e in report["pairs"])
+    return rows + report["unpaired_drift_records"] == sum(report["provenance"][n] for n in heg.PROVENANCES)
+
+
+def test_an_unscoped_race_leaves_no_pair_row_attributed(tmp_path, monkeypatch):
+    """⚠️ Round 7's finding 2 again, with the OTHER trigger - which its fix could not see.
+
+    Round 7 withdrew per pair inside `_scan_pairs`, which fixes a race scoped to that pair and leaves
+    an UNSCOPED one - withdrawn globally afterwards - to diverge: top level `engine_internal=0`
+    while a model pair row still said `{"engine_internal": 1}`. Rows are now DERIVED from the single
+    globally withdrawn record set, so there is no second place to keep in step, and no third trigger.
+    """
+    bundle = _bundle_with_blocked_dir(tmp_path)
+    _write(bundle / "pbip/WB/WB.Report/definition/pages/p2/page.json", {"name": "p2"})
+    _block_directory(monkeypatch, "blocked", "reports", locatable=False)
+
+    report = heg.harvest(bundle)
+
+    assert any(not m.get("scoped", True) for m in report["snapshot_race"]["moved"]), "unscoped branch not reached"
+    assert report["provenance"][heg.PROV_ENGINE] == 0
+    assert not any(e["provenance"].get(heg.PROV_ENGINE, 0) for e in report["pairs"])
+    assert not any(e["provenance"].get(heg.PROV_TIER, 0) for e in report["pairs"])
+    assert _reconciles(report)
+    assert report["status"] == heg.STATUS_INCOMPLETE
+
+
+def test_the_pair_rows_reconcile_with_the_top_level_on_an_ordinary_run(tmp_path):
+    """The same invariant with no race at all, so the assertion above is not vacuous."""
+    report = heg.harvest(_differing_bundle(tmp_path))
+
+    assert report["provenance"]["differing_files"] > 0
+    assert _reconciles(report)
+    for name in heg.PROVENANCES:
+        assert sum(e["provenance"].get(name, 0) for e in report["pairs"]) == report["provenance"][name], name

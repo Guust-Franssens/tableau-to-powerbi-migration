@@ -114,7 +114,20 @@ from harvest_gap_shapes import (
     bound_model_tables,
     shapes_for_change,
 )
-from harvest_gap_trees import TreeDelta, compare_trees, safe_text, withdraw
+from harvest_gap_races import (
+    PROV_ENGINE,
+    PROV_TAMPERED,
+    PROV_TIER,
+    PROV_UNATTRIBUTED,
+    PROVENANCES,
+    artifact_key,
+    consumed_race,
+    dedupe_races,
+    observed_race,
+    race_reasons,
+    withdraw_raced,
+)
+from harvest_gap_trees import TreeDelta, compare_trees, safe_text
 from migration_bundle import ENGINE_RECEIPT
 
 REPORT_VERSION = 1
@@ -126,12 +139,6 @@ EXIT_INCOMPLETE = 3
 # STATUS_* are DEFINED in `harvest_gap_report` and re-exported here. They live there because that
 # module depends on nothing, so the pair stays one-way - and because the renderer must be able to ask
 # "is this run complete?" from the authoritative constant rather than a duplicated string literal.
-
-PROV_ENGINE = "engine_internal"
-PROV_TIER = "tier_edit"
-PROV_TAMPERED = "baseline_tampered"
-PROV_UNATTRIBUTED = "unattributed"
-PROVENANCES = (PROV_ENGINE, PROV_TIER, PROV_TAMPERED, PROV_UNATTRIBUTED)
 
 PAIR_IDENTICAL = "identical"
 PAIR_DIFFERS = "differs"
@@ -162,9 +169,6 @@ DRIFT_ADDED = "added"
 # Layer for an adjudicated working path that belongs to no `.Report`/`.SemanticModel` pair at all -
 # a `.pbip` project file, or anything under a unit the pairing could not reach.
 LAYER_BUNDLE = "bundle"
-
-# Raced paths named inline in the incomplete reason. The full list is always in `snapshot_race.moved`.
-RACE_PATHS_NAMED = 3
 
 
 class Pair(NamedTuple):
@@ -462,13 +466,14 @@ def _changed_records(
     delta: TreeDelta,
     roots: tuple[str, str],
     evidence: Evidence,
+    consumed: dict[Path, str],
 ) -> list[dict[str, Any]]:
     """One record per file present on both sides with different content."""
-    tables = bound_model_tables(pair.working) if pair.layer == LAYER_REPORT else None
+    tables = bound_model_tables(pair.working, consumed) if pair.layer == LAYER_REPORT else None
     base_root, work_root = roots
     records = []
     for relative in delta.changed:
-        shapes, count = shapes_for_change(pair.baseline / relative, pair.working / relative, tables)
+        shapes, count = shapes_for_change(pair.baseline / relative, pair.working / relative, tables, consumed)
         base_rel, work_rel = f"{base_root}/{relative}", f"{work_root}/{relative}"
         records.append(
             _base_record(pair, relative, "changed", shapes, count)
@@ -573,16 +578,6 @@ def _post_engine_records(
     return records
 
 
-def _artifact_key(target: str) -> tuple[str, str, str] | None:
-    """(artifact, layer, artifact-relative path) for a bundle path, from EITHER side of the bundle."""
-    parts = target.split("/")
-    for index, part in enumerate(parts):
-        for suffix, layer in ((".Report", LAYER_REPORT), (".SemanticModel", LAYER_MODEL)):
-            if part.endswith(suffix):
-                return part[: -len(suffix)], layer, "/".join(parts[index + 1 :])
-    return None
-
-
 def _unpaired_pair(target: str) -> tuple[Pair, str]:
     """Describe an adjudicated `pbip/` path that belongs to no discovered pair.
 
@@ -592,7 +587,7 @@ def _unpaired_pair(target: str) -> tuple[Pair, str]:
     """
     parts = target.split("/")
     unit = parts[1] if len(parts) > 2 else ""
-    key = _artifact_key(target)
+    key = artifact_key(target)
     if key is not None:
         artifact, layer, relative = key
         return Pair(artifact, unit, layer, None, None), relative
@@ -648,6 +643,7 @@ def _difference_records(
     pair: Pair,
     delta: TreeDelta,
     evidence: Evidence,
+    consumed: dict[Path, str],
 ) -> list[dict[str, Any]]:
     """One record per differing file: its shape, its provenance, and who declared it (if anyone)."""
     if pair.baseline is None or pair.working is None:
@@ -658,7 +654,7 @@ def _difference_records(
         return []
     roots = (pair.baseline.relative_to(bundle).as_posix(), pair.working.relative_to(bundle).as_posix())
     return (
-        _changed_records(pair, delta, roots, evidence)
+        _changed_records(pair, delta, roots, evidence, consumed)
         + _added_removed_records(pair, delta, roots, evidence)
         + _post_engine_records(pair, delta, roots[1], evidence)
     )
@@ -676,11 +672,11 @@ def _pair_status(pair: Pair, delta: TreeDelta | None, records: list[dict[str, An
     return PAIR_IDENTICAL
 
 
-def _reference_resolves(pair: Pair) -> bool | None:
+def _reference_resolves(pair: Pair, consumed: dict[Path, str]) -> bool | None:
     """Whether the BASELINE report's dataset reference resolves. None when there is nothing to ask."""
     if pair.layer != LAYER_REPORT or pair.baseline is None:
         return None
-    return bound_model_tables(pair.baseline) is not None
+    return bound_model_tables(pair.baseline, consumed) is not None
 
 
 def _engine_metadata(bundle: Path) -> dict[str, Any]:
@@ -739,7 +735,13 @@ def _shape_rows(records: list[dict[str, Any]], denominator: int) -> list[dict[st
     ]
 
 
-def _pair_entry(pair: Pair, delta: TreeDelta | None, status: str, pair_records: list[dict[str, Any]]) -> dict[str, Any]:
+def _pair_entry(
+    pair: Pair,
+    delta: TreeDelta | None,
+    status: str,
+    pair_records: list[dict[str, Any]],
+    reference_resolves: bool | None,
+) -> dict[str, Any]:
     """The per-pair row of the report."""
     return {
         "artifact": pair.artifact,
@@ -760,7 +762,7 @@ def _pair_entry(pair: Pair, delta: TreeDelta | None, status: str, pair_records: 
         "unassessable": len(delta.unassessable) if delta else 0,
         "provenance": dict(Counter(r["provenance"] for r in pair_records)),
         "shapes": sorted({s for r in pair_records for s in r["shapes"]}),
-        "baseline_reference_resolves": _reference_resolves(pair),
+        "baseline_reference_resolves": reference_resolves,
     }
 
 
@@ -782,137 +784,12 @@ def _coverage(records: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-class Scan(NamedTuple):
-    """Everything the per-pair loop produced, kept together so `harvest` stays readable."""
-
-    entries: list[dict[str, Any]]
-    records: list[dict[str, Any]]
-    unassessable: list[dict[str, str]]
-    git_blind: list[dict[str, Any]]
-    raced: list[dict[str, Any]]
-
-
-def _observed_race(pair: Pair, delta: TreeDelta, evidence: Evidence, bundle: Path) -> list[dict[str, Any]]:
-    """Every path where what the SCAN READ disagrees with what ADJUDICATION ASSUMED.
-
-    ⚠️ **Equality of two independent re-reads does not prove the bundle held still, and round 6
-    shipped exactly that mistake.** Blind review round 7 defeated it with an ABA edit: change a
-    working visual before `_scan_pairs`, let the scan consume the changed bytes, restore the original
-    before the closing read. Both endpoints matched, so the run reported `snapshot_race.count=0`,
-    `status=complete` and `engine_internal=1` for a real tier edit, and emitted the clean claim.
-
-    So provenance is tied to the digests the comparison ACTUALLY CONSUMED rather than to a separate
-    opinion about them. There is no window between the observation and the evidence, because the
-    observation *is* the evidence: `hash_tree` already hashed every file this delta was computed
-    from, and each is checked against the snapshot adjudication was decided on. ABA cannot hide -
-    the scan's own read of B is the thing being compared.
-
-    Three exclusions, each deliberate:
-    * a path the snapshot has NO opinion about (a `.pbi` sidecar, a file created before the harvest
-      but after the engine) is skipped - it is `unrecorded`, hence already `unattributed`, and
-      flagging it would make every bundle with a Desktop sidecar look like a race;
-    * a BLOCKED path (unreadable on either side) is skipped - `hash_tree` gives it no digest, and
-      "could not read" is not "changed"; it is already withdrawn from both sides and reported as
-      unassessable;
-    * a snapshot entry of `None` (recorded but absent) matching a scan that also did not see it is
-      agreement, not a race.
-
-    Cost: **zero extra I/O.** The digests are a by-product of a read the harvest already paid for,
-    which is why this replaced the closing re-observation rather than joining it (that read cost a
-    measured +4.2s / +35% on the estate bundle, and could not see ABA anyway).
-    """
-    if not evidence.usable or evidence.snapshot is None or pair.baseline is None or pair.working is None:
-        return []
-    if not delta.scoped:
-        # `hash_tree` could not even locate its own failure, so `delta.blocked` cannot scope this
-        # comparison: every recorded path under the unread subtree would read as "missing" and a real
-        # disagreement could hide behind one. Withhold rather than fabricate - `scoped: False` tells
-        # `_withdraw_raced` that the affected paths are unknown, so no claim may stand.
-        return [
-            {
-                "target": pair.working.relative_to(bundle).as_posix(),
-                "kind": "unlocatable_read_failure",
-                "scoped": False,
-            }
-        ]
-    raced = []
-    for root, digests in (
-        (pair.baseline.relative_to(bundle).as_posix(), delta.baseline_digests),
-        (pair.working.relative_to(bundle).as_posix(), delta.working_digests),
-    ):
-        prefix = f"{root}/"
-        opinions = {rel[len(prefix) :] for rel in evidence.snapshot.hashes if rel.startswith(prefix)}
-        for relative in sorted(opinions | set(digests)):
-            if relative not in opinions or not withdraw({relative}, delta.blocked):
-                continue
-            assumed, observed = evidence.snapshot.hashes.get(f"{prefix}{relative}"), digests.get(relative)
-            if assumed == observed:
-                continue
-            kind = DRIFT_ADDED if assumed is None else DRIFT_MISSING if observed is None else DRIFT_CHANGED
-            raced.append(
-                {
-                    "target": f"{prefix}{relative}",
-                    "kind": kind,
-                    "adjudicated_sha256": assumed,
-                    "scanned_sha256": observed,
-                }
-            )
-    return raced
-
-
-def _withdraw_raced(records: list[dict[str, Any]], raced: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Withdraw every AUTHORSHIP claim about a path whose two reads disagree.
-
-    `incomplete` alone is not enough: the defect is not a missing caveat but a positively wrong
-    attribution, so the claim itself is withdrawn to `unattributed` - the standing idiom, "the delta
-    is real; authorship is withheld, not guessed".
-
-    Matched on the artifact-relative triple as well as the literal paths, because a working file
-    DELETED mid-scan is recorded with `working_path=None` (read as the engine's own reference-only
-    emission) and would otherwise keep an `engine_internal` label the raced set cannot see. A shared
-    model copied into several units matches in all of them; over-withdrawal is the safe direction.
-    `baseline_tampered` is deliberately NOT withdrawn: it rests on a positive observation that a
-    baseline path had ALREADY drifted, and withdrawing it would drop the run from `untrustworthy` to
-    the weaker `incomplete`.
-
-    ⚠️ **A race entry that cannot name its paths withdraws EVERYTHING.** Blind review round 7: the
-    round-6 detector reported a failed closing read as a race whose `target` was the bundle root,
-    which matched no record at all - exit 3 was correct, and the body still said
-    `engine_internal=2, coverage.complete=true`. Exit code and body must agree. Entries carry
-    `scoped`; anything false means "something moved and I cannot say what", and the only honest
-    response is to withhold every authorship claim rather than the empty set of them.
-
-    Idempotent, because it runs per pair (so `pairs[]` and `records` cannot diverge) and again over
-    the combined record list (so an unpaired record touching a raced path is covered too).
-    """
-    if not raced:
-        return records
-    unscoped = any(not item.get("scoped", True) for item in raced)
-    targets = {item["target"] for item in raced}
-    keys = {key for key in (_artifact_key(target) for target in targets) if key is not None}
-    withdrawn = []
-    for record in records:
-        paths = {p for p in (record.get("baseline_path"), record.get("working_path")) if p}
-        touched = unscoped or (record["artifact"], record["layer"], record["path"]) in keys or bool(paths & targets)
-        if touched and record["provenance"] in {PROV_ENGINE, PROV_TIER}:
-            record = record | {
-                "provenance": PROV_UNATTRIBUTED,
-                "post_engine": None,
-                "declared_by": None,
-                "snapshot_race": True,
-            }
-        elif touched:
-            record = record | {"snapshot_race": True}
-        withdrawn.append(record)
-    return withdrawn
-
-
 def _incomplete_reasons(
+    entries: list[dict[str, Any]],
     scan: Scan,
     evidence: Evidence,
     coverage: dict[str, Any],
     unreconciled: list[dict[str, Any]],
-    raced: list[dict[str, Any]],
 ) -> list[str]:
     """Every reason this harvest does not cover the estate - NAMED, not collapsed into a boolean.
 
@@ -920,29 +797,18 @@ def _incomplete_reasons(
     consumer reading `incomplete` had to re-derive the cause from the rest of the payload.
     """
     reasons = []
-    if not scan.entries:
+    if not entries:
         reasons.append("no baseline/working pair was discovered at all")
     if scan.unassessable:
         reasons.append(f"{len(scan.unassessable)} path(s) could not be read or enumerated")
     if unreconciled:
         reasons.append(f"{len(unreconciled)} adjudicated path(s) could not be placed")
-    if raced:
-        named = ", ".join(f"{item['target']} ({item['kind']})" for item in raced[:RACE_PATHS_NAMED])
-        scope = (
-            " Their scope is UNKNOWN, so every authorship claim in this run is withdrawn."
-            if any(not item.get("scoped", True) for item in raced)
-            else " Every authorship claim touching them is withdrawn; re-run against a still bundle."
-        )
-        reasons.append(
-            f"the bundle MOVED during this harvest: for {len(raced)} path(s) the bytes the comparison"
-            f" READ are not the bytes provenance was ADJUDICATED from - {named}.{scope}"
-        )
     if not evidence.usable:
         reasons.append(f"attribution unavailable ({evidence.unavailable_reason})")
     if not coverage["complete"]:
         reasons.append(f"{coverage['paths_unattributed']} compared path(s) are unattributed")
     partial = sorted(
-        {e["status"] for e in scan.entries if e["status"] in {PAIR_NO_BASELINE, PAIR_NO_WORKING, PAIR_UNASSESSABLE}}
+        {e["status"] for e in entries if e["status"] in {PAIR_NO_BASELINE, PAIR_NO_WORKING, PAIR_UNASSESSABLE}}
     )
     if partial:
         reasons.append(f"partial pairing: {', '.join(partial)}")
@@ -968,18 +834,43 @@ def _represented(records: list[dict[str, Any]], baseline_drift: list[dict[str, A
     return named
 
 
-def _scan_pairs(bundle: Path, evidence: Evidence) -> Scan:
-    """Compare every discovered pair, collecting entries, records, access failures and races.
+class ScannedPair(NamedTuple):
+    """One pair's finished READ: everything gathered before any provenance claim is final."""
 
-    ⚠️ **The withdrawal happens HERE, before `_pair_entry` builds its row.** Blind review round 7:
-    doing it afterwards in `harvest()` corrected `records` and left the already-constructed `pairs[]`
-    entries carrying the stale attribution, so one report said `unattributed=1, engine_internal=0` at
-    the top and `{"engine_internal": 1}` in the pair row - while `snapshot_race.note` claimed every
-    touching claim had been withdrawn. Withdrawing at the point the records are made keeps the two
-    consistent by CONSTRUCTION rather than by remembering to update a second place.
+    pair: Pair
+    delta: TreeDelta | None
+    records: list[dict[str, Any]]
+    reference_resolves: bool | None
+
+
+class Scan(NamedTuple):
+    """Everything the per-pair loop produced, kept together so `harvest` stays readable.
+
+    ⚠️ `entries` is NOT built here. Blind review rounds 7-8 both landed on the same shape: a pair row
+    frozen from that pair's own records diverges the moment a LATER withdrawal changes them - round 7
+    for a scoped race, round 8 again for an unscoped one, which the round-7 fix could not see because
+    it withdrew per pair. Rows are now derived in `harvest()` from the single, final, globally
+    withdrawn record set, so there is no second place to keep in step and no third trigger to find.
+    """
+
+    scanned: list[ScannedPair]
+    records: list[dict[str, Any]]
+    unassessable: list[dict[str, str]]
+    git_blind: list[dict[str, Any]]
+    raced: list[dict[str, Any]]
+    consumed: dict[Path, str]
+
+
+def _scan_pairs(bundle: Path, evidence: Evidence) -> Scan:
+    """Compare every discovered pair. **The only stage that reads bundle content.**
+
+    Every read here either carries its own digest (`hash_tree`) or records one (`consumed`), so the
+    validation that follows covers all of them. Keeping the reads in one stage is what makes the
+    enumeration in `_consumed_race` checkable rather than aspirational: a claim built from a read
+    taken later would be, by construction, a read nobody validated.
     """
     pairs, discovery_failures = discover_pairs(bundle)
-    scan = Scan([], [], list(discovery_failures), [], [])
+    scan = Scan([], [], list(discovery_failures), [], [], {})
     for pair in pairs:
         delta = compare_trees(pair.baseline, pair.working) if pair.baseline and pair.working else None
         if delta is not None:
@@ -993,13 +884,29 @@ def _scan_pairs(bundle: Path, evidence: Evidence) -> Scan:
                         "longest_path": delta.longest_path,
                     }
                 )
-        raced = _observed_race(pair, delta, evidence, bundle) if delta is not None else []
-        scan.raced.extend(raced)
-        pair_records = _difference_records(bundle, pair, delta, evidence) if delta is not None else []
-        pair_records = _withdraw_raced(pair_records, raced)
-        scan.records.extend(pair_records)
-        scan.entries.append(_pair_entry(pair, delta, _pair_status(pair, delta, pair_records), pair_records))
+            scan.raced.extend(observed_race(pair, delta, evidence, bundle))
+        records = _difference_records(bundle, pair, delta, evidence, scan.consumed) if delta is not None else []
+        scan.records.extend(records)
+        scan.scanned.append(ScannedPair(pair, delta, records, _reference_resolves(pair, scan.consumed)))
     return scan
+
+
+def _finalize(scan: Scan, raced: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Withdraw ONCE, then derive both views from the result so they cannot disagree.
+
+    ⚠️ Blind review rounds 7 and 8 both reported a pair row that kept an attribution the top-level
+    counters had withdrawn - round 7 for a scoped race, round 8 again for an unscoped one, which
+    round 7's per-pair withdrawal structurally could not see. The rows are no longer built during the
+    scan and patched afterwards: they are DERIVED here, from the same objects the counters count.
+    """
+    entries: list[dict[str, Any]] = []
+    records: list[dict[str, Any]] = []
+    for scanned in scan.scanned:
+        kept = withdraw_raced(scanned.records, raced)
+        records.extend(kept)
+        status = _pair_status(scanned.pair, scanned.delta, kept)
+        entries.append(_pair_entry(scanned.pair, scanned.delta, status, kept, scanned.reference_resolves))
+    return entries, records
 
 
 def harvest(bundle: Path) -> dict[str, Any]:
@@ -1014,19 +921,24 @@ def harvest(bundle: Path) -> dict[str, Any]:
     baseline_drift = evidence.side_drift(BASELINE_ROOTS)
 
     scan = _scan_pairs(bundle, evidence)
+    # Every claim-feeding read has now happened, and each one carries the digest of what it used.
+    # Validate them ALL against the adjudication snapshot before any of it becomes evidence.
+    raced = dedupe_races(scan.raced + consumed_race(scan.consumed, evidence, bundle))
 
     # The reconciliation that makes "no adjudicated path silently disappears" structural rather than
     # aspirational: every path the gate found must be named by a record, by `baseline_drift`, or by
     # `unreconciled_drift` - and the last of those forces a non-clean status.
     unpaired, unreconciled = _unmatched_drift_records(evidence, _represented(scan.records, baseline_drift))
-    # Idempotent over the pair-level withdrawal `_scan_pairs` already applied; this pass exists for
-    # the UNPAIRED records, which no pair loop ever saw, and for an unscoped race.
-    records = _withdraw_raced(scan.records + unpaired, scan.raced)
+
+    # ONE withdrawal pass, and BOTH views are derived from its output - the top-level counters and
+    # the per-pair rows are literally the same objects, so they cannot disagree for any trigger.
+    entries, records = _finalize(scan, raced)
+    records += withdraw_raced(unpaired, raced)
 
     provenance = Counter(record["provenance"] for record in records)
     tampered = [r for r in records if r["provenance"] == PROV_TAMPERED]
     coverage = _coverage(records)
-    reasons = _incomplete_reasons(scan, evidence, coverage, unreconciled, scan.raced)
+    reasons = _incomplete_reasons(entries, scan, evidence, coverage, unreconciled) + race_reasons(raced)
     status = _overall_status(tampered or baseline_drift, reasons)
 
     return {
@@ -1044,8 +956,7 @@ def harvest(bundle: Path) -> dict[str, Any]:
             "notes": evidence.notes,
         },
         "layers": {
-            layer: _layer_summary([e for e in scan.entries if e["layer"] == layer])
-            for layer in (LAYER_REPORT, LAYER_MODEL)
+            layer: _layer_summary([e for e in entries if e["layer"] == layer]) for layer in (LAYER_REPORT, LAYER_MODEL)
         },
         "provenance": {name: provenance.get(name, 0) for name in PROVENANCES} | {"differing_files": len(records)},
         "shapes": _shape_rows(records, len(records)),
@@ -1056,8 +967,8 @@ def harvest(bundle: Path) -> dict[str, Any]:
         "unpaired_drift_records": len(unpaired),
         "unreconciled_drift": unreconciled,
         "snapshot_race": {
-            "count": len(scan.raced),
-            "moved": scan.raced,
+            "count": len(raced),
+            "moved": raced,
             "note": (
                 "paths where the digests the tree comparison actually READ disagree with the"
                 " inventory snapshot provenance was ADJUDICATED from. Non-empty means this report"
@@ -1066,7 +977,7 @@ def harvest(bundle: Path) -> dict[str, Any]:
                 " to `unattributed`."
             ),
         },
-        "pairs": scan.entries,
+        "pairs": entries,
         "unassessable": scan.unassessable,
         "git_blind_spot": {
             "count": len(scan.git_blind),
