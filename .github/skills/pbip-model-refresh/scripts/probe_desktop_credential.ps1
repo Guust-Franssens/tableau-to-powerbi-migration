@@ -73,10 +73,10 @@
                                  the remedy is an approval, not a sign-in. Never suppressed, and it
                                  outranks any progress text in the same window.
     exit 3  DIALOG_UNRECOGNIZED  a dialog is up whose text matched NO signature, or which shows
-                                 progress text ALONGSIDE prose that is not progress status. We read it
-                                 and it is not a credential prompt - so it is not a credential wall -
-                                 but we cannot account for all of it. A human should look at the
-                                 screen.
+                                 progress text ALONGSIDE content that is neither progress status nor
+                                 enumerated chrome. We read it and it is not a credential prompt - so
+                                 it is not a credential wall - but we cannot account for all of it. A
+                                 human should look at the screen.
     exit 3  DIALOG_UNREADABLE    a dialog is up that could not be shown to be harmless: no text at
                                  all, or only a reassuring CAPTION, or benign-looking content read
                                  from an INCOMPLETE harvest. "We could not establish it" is a weaker
@@ -102,6 +102,21 @@
                itself was missed - via `TextPattern`-only content, past the element cap, or split by an
                interposed element. Three separate exploits, one root cause: `ContentRead` was a PROXY
                for "we read the credential-bearing content", and no proxy can carry that weight.
+    attempt 3  benign by "everything left over is SHORT" (`$MinPromptWords = 5`, issue #406). A window
+               reading `Refresh` + `Evaluating` + `Please enter your password` classified `benign` and
+               was suppressed to NOTHING under -RefreshInFlight; `Password:` too. Size was the proxy
+               this time, and it failed for the same reason the other two did.
+
+  ⚠️ **CREDENTIAL_PRESENT IS NARROWER BECAUSE OF THAT THIRD FIX, AND THAT IS THE INTENDED TRADE.**
+  Closing #406 means any content element that is neither recognised progress status nor enumerated
+  chrome VETOES suppression. If Power BI's own refresh dialog exposes bare table names (`Orders`,
+  `Customers`), this probe now latches DIALOG_UNRECOGNIZED (exit 3) where it used to reach
+  CREDENTIAL_PRESENT (exit 0). That capability is worth less than it looks: `CREDENTIAL_PRESENT` is
+  documented here and in docs/data-source-credentials.md as NOT the gate of record - the one-row data
+  probe is - and it is already untrustworthy on its own against a serverless source. Losing it costs
+  an extra loud exit 3; keeping the amnesty cost a SILENT suppressed password prompt. ⚠️ Whether the
+  real dialog lists table names is INFERRED, never measured here (no Desktop in this corpus), so the
+  cost may be zero in practice - but it is written down rather than assumed away either way.
 
   There is no reliable way to prove a UIA harvest saw everything - `LegacyIAccessiblePattern` is not
   even exposed by the managed `System.Windows.Automation` API (verified 2026-08-29: the type is
@@ -150,12 +165,18 @@ $benignSig = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'benign_dialog_s
 # benign, so one progress element in the same window cannot erase it (review round 3).
 $blockingSig = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'blocking_prompt_signature.regex') -Raw).Trim()
 
-# A content element with at least this many words is PROSE - something written to be read by a human.
-# If it is not itself a recognised progress status, it is unaccounted for, and a window with
-# unaccounted prose is not provably a progress dialog however much progress text sits beside it.
-# This is the backstop for prompts that are in NEITHER signature; the cost of it firing wrongly is one
-# more exit 3, which is loud and recoverable.
-$MinPromptWords = 5
+# Window chrome that cannot be a prompt: an ENUMERATED whole-element allowlist (`Cancel`/`OK`/`Close`),
+# shared byte-for-byte with the Python detector so the two cannot drift on the one question that
+# authorises a dismissal.
+# ⚠️ This file and `benign_dialog_signature.regex` are the ONLY two that can cause a dialog to be
+# ignored. Keep this one TINY: every alternative added here is a string that can never again veto a
+# suppression.
+# It replaced `$MinPromptWords = 5` (issue #406), which excused every unmatched content element under
+# five words - so `Refresh` + `Evaluating` + `Please enter your password` classified `benign` and was
+# SUPPRESSED under -RefreshInFlight, and `Password:` (two words) with it. Neither matches
+# `credential_modal_signature.regex`, so nothing rescued them. Length is not evidence; a positive claim
+# about specific strings is.
+$chromeSig = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'benign_chrome_signature.regex') -Raw).Trim()
 
 function Get-NormalizedText {
   <# Whitespace-normalised, de-duplicated, order-preserving text. #>
@@ -245,14 +266,14 @@ function Get-DialogClassification {
     needs-human       a KNOWN human-blocking prompt that is not a credential prompt - the native
                       database query approval modal. Exit 3, not 1: a human must act, but the remedy
                       is an approval, not a sign-in.
-    mixed-content     progress text AND unaccounted prose in the same window. Round 3's defect: the
-                      FIRST content element matching the benign regex used to classify the whole
-                      window, so `Evaluating` beside
+    mixed-content     progress text AND content nobody could account for, in the same window. Round 3's
+                      defect: the FIRST content element matching the benign regex used to classify the
+                      whole window, so `Evaluating` beside
                       `Permission is required to run this native database query` cleared it at exit 0.
                       The entire content is now scanned before benign can be concluded.
-    benign            every content element is either recognised progress status or too short to be a
-                      human-directed prompt, at least one IS progress status, AND the harvest
-                      completed -> Power BI is working. The one suppressible kind.
+    benign            every content element is either recognised progress status or ENUMERATED chrome,
+                      and at least one IS progress status, AND the harvest completed -> Power BI is
+                      working. The one suppressible kind.
     benign-unverified as `benign`, but the harvest was truncated, timed out, or hit a pattern it could
                       not read. Benign-LOOKING is not benign.
     non-blocking      the owner window is ENABLED. Modality is a ONE-WAY test: a modal dialog disables
@@ -268,6 +289,25 @@ function Get-DialogClassification {
 
   Everything except `credential` and `benign` lands in the exit-3 band, so the failure mode of every
   uncertainty here is a LOUD stop-and-look, never a silent clear.
+
+  ⚠️ **There is no length amnesty, and there must never be one again (issue #406).** This used to
+  excuse any unmatched content element of fewer than `$MinPromptWords` (5) words, which meant `benign`
+  did not mean *positively* benign: `Please enter your password` (4 words) and `Password:` (2) both
+  classified `benign` beside `Evaluating`, and `Get-DialogVerdict` then SUPPRESSED them entirely under
+  `-RefreshInFlight`. Measured 2026-08-30 through this script's own `-LoadDetectorsOnly` harness. That
+  is the defect class this probe exists to remove, reintroduced on the code path added to remove it -
+  and in that shape worse than the bug, because the repo's standing rule is that a credential modal is
+  never worked around.
+
+  ⚠️ **A control-type amnesty would be worse still, not better.** This script harvests
+  `InteractiveTexts`, which the Python detector cannot, so "excuse anything interactive" looks like a
+  free upgrade. It is not: Databricks renders its authentication-kind chooser as selectable items
+  labelled `Personal Access Token` / `Databricks Client Credentials` - two alternatives that are IN
+  `credential_modal_signature.regex` precisely because they identify a credential dialog. An amnesty
+  keyed on role would excuse that whole family of selector labels the moment one of them is not in the
+  signature, which is the same failure as the word count with a better disguise. Role is not evidence
+  of harmlessness either; the enumerated chrome list covers the safe labels (`Cancel`/`OK`/`Close` are
+  interactive too) without covering the dangerous ones.
   #>
   param([Parameter(Mandatory = $true)][object]$Window)
 
@@ -280,6 +320,8 @@ function Get-DialogClassification {
   }
 
   # Scan ALL of the content. A first-match-wins loop let one benign element erase everything after it.
+  # Anything that is neither recognised progress status nor ENUMERATED chrome is UNACCOUNTED FOR and
+  # vetoes suppression - there is no length amnesty here, and there must never be one again (#406).
   $benignHit = $null
   $unaccounted = $null
   foreach ($t in $sets.Content) {
@@ -287,10 +329,8 @@ function Get-DialogClassification {
       if ($null -eq $benignHit) { $benignHit = $t }
       continue
     }
-    if ($null -eq $unaccounted) {
-      $words = @($t -split '\s+' | Where-Object { $_ })
-      if ($words.Count -ge $MinPromptWords) { $unaccounted = $t }
-    }
+    if ($t -match $chromeSig) { continue }
+    if ($null -eq $unaccounted) { $unaccounted = $t }
   }
   if ($benignHit) {
     if ($unaccounted) { return [pscustomobject]@{ Kind = 'mixed-content'; Evidence = $unaccounted } }

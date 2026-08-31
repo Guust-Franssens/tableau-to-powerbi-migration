@@ -100,8 +100,8 @@ watches for the connector modal:
 - A dialog is up that is *not* a credential prompt -> one of `REFRESH_IN_PROGRESS` (another refresh
   already owns this instance — wait for it or cancel the stale one), `DIALOG_NEEDS_HUMAN` (a **known**
   human-blocking prompt that is not a credential prompt — the native-database-query approval modal;
-  approve it, no sign-in implied), `DIALOG_UNRECOGNIZED` (no signature matched, or progress text
-  alongside prose that is not progress status) or `DIALOG_UNREADABLE` (its **content** could not be
+  approve it, no sign-in implied),   `DIALOG_UNRECOGNIZED` (no signature matched, or progress text alongside content that is neither
+  recognised progress status nor enumerated chrome) or `DIALOG_UNREADABLE` (its **content** could not be
   shown to be harmless), each **exit 3**. All four mean *"could not probe"*, never *"a human must sign
   in"*.
 

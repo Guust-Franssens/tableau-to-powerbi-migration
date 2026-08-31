@@ -2479,6 +2479,7 @@ def test_the_production_refresh_path_polls_with_the_in_flight_detector(monkeypat
 PROBE_PS1 = Path(__file__).resolve().parents[1] / "scripts" / "probe_desktop_credential.ps1"
 CREDENTIAL_SIGNATURE = PROBE_PS1.parent / "credential_modal_signature.regex"
 BENIGN_SIGNATURE = PROBE_PS1.parent / "benign_dialog_signature.regex"
+CHROME_SIGNATURE = PROBE_PS1.parent / "benign_chrome_signature.regex"
 BLOCKING_SIGNATURE = PROBE_PS1.parent / "blocking_prompt_signature.regex"
 
 _HARNESS = r"""
@@ -2597,10 +2598,22 @@ def harvest_result(tmp_path: Path, payload, *, exit_code: int = 0) -> dict:
 REFRESH_PROGRESS = _window(
     Title="Refresh",
     ClassName="HwndWrapper[PBIDesktop.exe;;refresh]",
-    Texts=["Refresh", "Orders", "1,204 rows loaded", "Cancel"],
+    # Every element here is ACCOUNTED FOR: `1,204 rows loaded` is recognised progress status and
+    # `Cancel` is enumerated chrome. It used to carry a bare `Orders` too, which issue #406 turned into
+    # a veto - see REFRESH_PROGRESS_WITH_TABLE_NAMES, which pins that reversal as its own named cost
+    # rather than letting it silently rewrite what these precedence tests are about.
+    Texts=["Refresh", "1,204 rows loaded", "Cancel"],
     InteractiveTexts=["Cancel"],
     # A Power BI refresh dialog DOES disable its owner, so modality alone cannot tell it from a
     # credential modal. Pinned false on purpose: the fix must not lean on the owner test.
+    OwnerEnabled=False,
+)
+# The same dialog with a bare table name in it - the shape the removed length amnesty used to excuse.
+REFRESH_PROGRESS_WITH_TABLE_NAMES = _window(
+    Title="Refresh",
+    ClassName="HwndWrapper[PBIDesktop.exe;;refresh]",
+    Texts=["Refresh", "Orders", "1,204 rows loaded", "Cancel"],
+    InteractiveTexts=["Cancel"],
     OwnerEnabled=False,
 )
 CREDENTIAL_MODAL = _window(
@@ -3518,9 +3531,9 @@ def test_authentication_required_alongside_loading_data_is_not_suppressed(tmp_pa
 def test_unaccounted_prose_beside_progress_text_is_not_suppressed(tmp_path: Path) -> None:
     """The backstop for a blocking prompt in NEITHER signature.
 
-    A window is a progress dialog only when its content is ACCOUNTED FOR: recognised status text, or
-    short enough that it cannot be a human-directed prompt. A sentence nobody can explain sitting
-    beside `Evaluating` means the progress dialog does not explain this window.
+    A window is a progress dialog only when its content is ACCOUNTED FOR: recognised status text, or an
+    element of the enumerated chrome allowlist. A sentence nobody can explain sitting beside
+    `Evaluating` means the progress dialog does not explain this window.
     """
     window = _window(
         Title="Refresh",
@@ -3535,22 +3548,175 @@ def test_unaccounted_prose_beside_progress_text_is_not_suppressed(tmp_path: Path
     assert result["exit_code"] == 3
 
 
-def test_short_data_labels_beside_progress_text_do_not_block_suppression(tmp_path: Path) -> None:
-    """Positive control. Without this, "scan everything" could degenerate into "never suppress".
+def test_short_prompts_beside_progress_text_are_never_suppressed_by_the_arbiter(tmp_path: Path) -> None:
+    """Issue #406, AC1+AC2. The arbiter's half of the length-amnesty hole PR #400 closed in Python.
 
-    A real refresh dialog lists table names and row counts next to its status text. Those are short
-    data labels, not prose, and they must not veto - otherwise the benign path is unreachable and the
-    probe can never return CREDENTIAL_PRESENT while Desktop shows its own refresh dialog.
+    Measured on the pre-fix build through this same harness (``$MinPromptWords = 5``)::
+
+        Refresh + Evaluating + "Please enter your password"  -> benign / REFRESH_IN_PROGRESS
+                                                             -> in flight: verdict None, exit 0
+        Refresh + Evaluating + "Password:"                   -> identical
+        Refresh + Evaluating + "Please enter your password now"  (5 words) -> DIALOG_UNRECOGNIZED
+
+    Only the word count separated row 1 from row 3, and none of these strings matches
+    ``credential_modal_signature.regex`` - so ``Test-CredentialModal`` did not rescue them either. A
+    real prompt was swallowed in silence, on the code path issue #367 added to stop exactly that.
+
+    Both columns are asserted deliberately. The t=0 column alone cannot see the defect that mattered:
+    at t=0 ``benign`` still reports ``REFRESH_IN_PROGRESS`` at exit 3, which looks loud enough. It is
+    ``-RefreshInFlight`` that turns ``benign`` into NOTHING AT ALL, and that is where the prompt
+    vanished.
     """
-    window = _window(
+    for prompt in ["Please enter your password", "Password:", "Sign in", "Enter password"]:
+        window = _window(Title="Refresh", Texts=["Refresh", "Evaluating", prompt], OwnerEnabled=False)
+
+        at_t0 = classify(tmp_path, [window])
+        in_flight = classify(tmp_path, [window], refresh_in_flight=True)
+
+        assert at_t0["kind"] == "mixed-content", f"{prompt!r} is accounted for by nothing and must veto"
+        assert at_t0["verdict"] == "DIALOG_UNRECOGNIZED"
+        assert at_t0["evidence"] == prompt, "the verdict must carry the element it could not explain"
+        assert in_flight["verdict"] == "DIALOG_UNRECOGNIZED", (
+            f"{prompt!r} was SUPPRESSED in flight - a prompt swallowed in silence"
+        )
+        assert in_flight["exit_code"] == 3
+
+
+def test_only_enumerated_chrome_is_excused_by_the_arbiter(tmp_path: Path) -> None:
+    """Issue #406, the positive half: dismissal needs a POSITIVE claim, not a short string.
+
+    Without this the fix could degenerate into "never suppress", which would make the arbiter answer
+    exit 3 for every model and destroy the only reason it exists. ``Cancel``/``OK``/``Close`` are
+    whole-element, anchored control labels that carry no prompt, so a window whose only unexplained
+    content is one of them still shows a human nothing to act on. A table name gets no such excuse - it
+    is short, but shortness was never the property that mattered.
+    """
+    chrome = _window(
         Title="Refresh",
-        Texts=["Refresh", "Orders", "Customers", "1,204 rows loaded", "Evaluating", "Cancel"],
-        InteractiveTexts=["Cancel"],
+        Texts=["Refresh", "Evaluating", "Cancel", "OK", "Close"],
+        InteractiveTexts=["Cancel", "OK", "Close"],
         OwnerEnabled=False,
     )
+    table_name = _window(Title="Refresh", Texts=["Refresh", "Evaluating", "Orders"], OwnerEnabled=False)
 
-    assert classify(tmp_path, [window], refresh_in_flight=True)["verdict"] is None
-    assert classify(tmp_path, [window])["verdict"] == "REFRESH_IN_PROGRESS"
+    assert classify(tmp_path, [chrome])["kind"] == "benign", "the benign path must stay reachable"
+    assert classify(tmp_path, [chrome], refresh_in_flight=True)["verdict"] is None
+    assert classify(tmp_path, [table_name])["kind"] == "mixed-content"
+    assert classify(tmp_path, [table_name])["verdict"] == "DIALOG_UNRECOGNIZED"
+
+
+def test_a_table_name_beside_progress_text_now_vetoes_suppression(tmp_path: Path) -> None:
+    """Issue #406, AC3. THE REVERSED DECISION, pinned as a cost rather than deleted quietly.
+
+    This test replaces ``test_short_data_labels_beside_progress_text_do_not_block_suppression``, which
+    asserted the OPPOSITE: that ``Orders``/``Customers`` beside ``Evaluating`` still suppressed, so that
+    ``CREDENTIAL_PRESENT`` stayed reachable while Desktop showed its own refresh dialog. That decision
+    was reviewed and deliberate, and removing it is the substance of #406 rather than a side effect.
+
+    Why reversing it is right, in order of weight:
+
+    * **The capability it protected is secondary and already untrusted.** ``SKILL.md`` and
+      ``docs/data-source-credentials.md`` both say the one-row data probe (``probe_desktop_query.py``)
+      is the gate of record and that ``CREDENTIAL_PRESENT`` must not be trusted alone against a
+      serverless source - it returned a false ``CREDENTIAL_PRESENT`` three times in the field.
+    * **The costs are asymmetric.** Losing it costs an extra exit 3: loud, recoverable, a human looks at
+      the screen. Keeping the amnesty cost a silently suppressed password prompt, in direct breach of
+      the standing rule that a credential modal is never worked around.
+    * **The capability rests on an INFERENCE; the defect was MEASURED.** No Desktop in this corpus has
+      ever confirmed that Power BI's refresh dialog exposes bare table names -
+      ``benign_dialog_signature.regex`` says its own provenance is inferred, and ``SKILL.md`` records
+      the same gap. ``Password:`` being suppressed was measured through this harness. An inferred
+      capability does not outrank a measured hole.
+
+    The one thing that must NOT happen is the benign path becoming unreachable altogether; that is
+    ``test_only_enumerated_chrome_is_excused_by_the_arbiter``, and it is why this cost is bounded.
+    """
+    at_t0 = classify(tmp_path, [REFRESH_PROGRESS_WITH_TABLE_NAMES])
+    in_flight = classify(tmp_path, [REFRESH_PROGRESS_WITH_TABLE_NAMES], refresh_in_flight=True)
+
+    assert at_t0["kind"] == "mixed-content"
+    assert at_t0["verdict"] == "DIALOG_UNRECOGNIZED"
+    assert at_t0["evidence"] == "Orders"
+    assert in_flight["verdict"] == "DIALOG_UNRECOGNIZED", "the reachability cost is exit 3, and it is intended"
+    assert in_flight["exit_code"] == 3
+
+
+def test_the_arbiter_and_the_python_detector_share_one_vocabulary(tmp_path: Path) -> None:
+    """The structural fix for #406's real cause: two detectors answering one question, unchecked.
+
+    Issue #376 was fixed in ``_credential_modal.py`` and the arbiter kept the hole for a week, because
+    nothing compared them. The chosen seam is SHARED RESOURCES, PORTED CONTROL FLOW - both read the
+    same four ``*_signature.regex`` files, and this test fails if either stops doing so or if their
+    verdicts diverge on the corpus that matters.
+
+    It is deliberately NOT a whole-classifier equivalence test: the two are documented as divergent
+    (the arbiter has a prose join, a ``benign-unverified`` kind and ``HarvestComplete``; the Python
+    detector has none of those and has strictly less evidence). Only the benign/chrome decision - the
+    one that authorises a dismissal - has to agree.
+    """
+    assert CHROME_SIGNATURE.read_text(encoding="utf-8").strip(), "the arbiter's chrome allowlist must exist"
+    assert _credential_modal.BENIGN_CHROME_SIGNATURE_PATH == CHROME_SIGNATURE, (
+        "the Python detector must read the arbiter's own chrome allowlist, not a copy"
+    )
+    assert _credential_modal.BENIGN_SIGNATURE_PATH == BENIGN_SIGNATURE
+    assert _credential_modal.SIGNATURE_PATH == CREDENTIAL_SIGNATURE
+    assert _credential_modal.BLOCKING_SIGNATURE_PATH == BLOCKING_SIGNATURE
+
+    corpus = [
+        ["Refresh", "Evaluating", "Password:"],
+        ["Refresh", "Evaluating", "Please enter your password"],
+        ["Refresh", "Evaluating", "Orders"],
+        ["Refresh", "Evaluating", "Cancel"],
+        ["Refresh", "Evaluating", NATIVE_QUERY_PROMPT],
+        ["Refresh", "1,204 rows loaded", "Cancel"],
+    ]
+    for texts in corpus:
+        arbiter = classify(tmp_path, [_window(Title="Refresh", Texts=texts, OwnerEnabled=False)])
+        detector = classify_dialog(DesktopWindow("Refresh", "Cls", 702, 355, tuple(texts)))
+
+        assert arbiter["kind"] == detector.kind, f"the two detectors disagree on {texts!r}"
+        assert arbiter["verdict"] == detector.verdict
+
+
+def test_the_arbiter_has_no_length_amnesty_left_on_disk() -> None:
+    """A resource-level gate: the amnesty must be GONE, not lowered by one word.
+
+    #406's acceptance says the fix must not be another threshold, and a behavioural test cannot tell a
+    deleted rule from one whose constant moved - every prompt shorter than the new number would still
+    pass. So this greps the shipped script for the MECHANISM rather than the number: a statement-level
+    word-count constant, and the ``-split '\\s+'`` that counted words.
+
+    Anchored at statement level on purpose. A first draft matched the bare string and failed on the
+    script's own comment explaining the removed constant - a gate that cannot tell code from prose
+    would be silenced by rewording the comment.
+    """
+    source = PROBE_PS1.read_text(encoding="utf-8")
+
+    assert not re.search(r"(?m)^\s*\$\w*(?:Words|Length|MinPrompt)\w*\s*=", source), (
+        "a length amnesty is back at statement level - it must be deleted, not tuned"
+    )
+    assert "-split '\\s+'" not in source, "word-splitting is the amnesty's mechanism; nothing here needs it"
+    assert "benign_chrome_signature.regex" in source, "the arbiter must read the shared chrome allowlist"
+
+
+def test_the_chrome_allowlist_stays_an_enumeration_not_a_catch_all() -> None:
+    """The one file that can now excuse an unexplained element - so it has to stay tiny and anchored.
+
+    Every alternative added here is a string that can never again veto a dismissal.
+    """
+    chrome = re.compile(CHROME_SIGNATURE.read_text(encoding="utf-8").strip(), re.IGNORECASE)
+
+    for label in ["Cancel", "OK", "Close", "&Cancel"]:
+        assert chrome.search(label), f"a known chrome label must still be excused: {label!r}"
+    for prompt in [
+        "Password:",
+        "Please enter your password",
+        "Orders",
+        "Sign in",
+        "Cancel the sign-in",
+        "OK to sign in",
+    ]:
+        assert not chrome.search(prompt), f"the chrome allowlist must not excuse: {prompt!r}"
 
 
 def test_the_benign_signature_matches_whole_elements_not_substrings() -> None:

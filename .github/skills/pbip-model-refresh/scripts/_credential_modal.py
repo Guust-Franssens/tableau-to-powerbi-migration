@@ -1,8 +1,8 @@
 """Credential modal detection shared by the PBIP refresh/query scripts.
 
-All three regexes in ``*_signature.regex`` beside this file are the same signatures used by
-``probe_desktop_credential.ps1``. Keep the detector's matching rules here and the signatures in those
-resources so the fast Python checks and the PowerShell arbiter cannot drift.
+All FOUR ``*_signature.regex`` files beside this one are the same signatures ``probe_desktop_credential.ps1``
+reads - it adopted ``benign_chrome_signature.regex`` when #406 removed its length amnesty. The seam is SHARED
+RESOURCES, PORTED CONTROL FLOW, gated by ``test_the_arbiter_and_the_python_detector_share_one_vocabulary``.
 
 ⚠️ **A big window is NOT evidence of anything (issue #376).** Until this module was fixed,
 ``inspect_credential_modal`` returned the FIRST visible non-main window >= 100x100 as a

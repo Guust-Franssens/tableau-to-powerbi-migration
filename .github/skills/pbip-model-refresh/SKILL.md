@@ -156,7 +156,7 @@ stay byte-identical.
 > | `CREDENTIAL_PRESENT` | 0 | a refresh was invoked and ran to the deadline with nothing unclassifiable up. Still not the gate of record for a serverless source — confirm with the one-row data probe. |
 > | `REFRESH_IN_PROGRESS` | 3 | a dialog whose **whole content** positively reads as refresh progress was already up **at t=0**: another refresh owns this instance. Wait for it or cancel the stale one; do not stack a second refresh. |
 > | `DIALOG_NEEDS_HUMAN` | 3 | a **known** human-blocking prompt that is not a credential prompt — the **native-database-query approval modal** above all. Not exit 1, because the remedy is an approval, not a sign-in. Never suppressed, and it outranks any progress text in the same window. |
-> | `DIALOG_UNRECOGNIZED` | 3 | a dialog is up whose text matched **no** signature, **or** which shows progress text *alongside* prose that is not progress status. We read it, and it is **not** a credential prompt — but we cannot account for all of it. |
+> | `DIALOG_UNRECOGNIZED` | 3 | a dialog is up whose text matched **no** signature, **or** which shows progress text *alongside* content that is neither recognised progress status nor enumerated chrome (`benign_chrome_signature.regex`). We read it, and it is **not** a credential prompt — but we cannot account for all of it. |
 > | `DIALOG_UNREADABLE` | 3 | a dialog is up that could not be **shown to be harmless**: no text at all, or only a reassuring **caption**, or benign-looking content read from an **incomplete** harvest (truncated, timed out, or a pattern that threw). Deliberately distinct from `DIALOG_UNRECOGNIZED`: *absent is not empty*, and "we could not establish it" is a weaker state of knowledge than "we read it and it did not match". |
 > | `UNKNOWN` | 3 | no window for the pid, a minimized owner, or no Refresh control was ever invoked. |
 >
@@ -175,11 +175,15 @@ stay byte-identical.
 >   disables its owner, so a disabled owner would convict the innocent. No owner at all reports `null`
 >   — the test did not apply, which is not the same as passing it.
 > - **`scripts/benign_dialog_signature.regex`** is the progress vocabulary ("Evaluating", "N rows
->   loaded", "Waiting for other queries"). ⚠️ It is **inferred** from Power BI's refresh UI, not
+>   loaded", "Waiting for other queries"), and **`scripts/benign_chrome_signature.regex`** the
+>   enumerated control labels that carry no prompt (`Cancel`/`OK`/`Close`). Both are read by the
+>   arbiter *and* the Python detector, and they are the only two files that can cause a dialog to be
+>   dismissed. ⚠️ The progress vocabulary is **inferred** from Power BI's refresh UI, not
 >   captured from a live dialog, and it is deliberately not load-bearing: a miss only downgrades
->   `REFRESH_IN_PROGRESS` to `DIALOG_UNRECOGNIZED` — both exit 3, neither a credential wall. Keep its
->   alternatives narrow and anchored; a broad pattern here is the one way this file could hide a real
->   modal, and `test_the_benign_signature_can_never_shadow_a_credential_prompt` gates exactly that. If
+>   `REFRESH_IN_PROGRESS` to `DIALOG_UNRECOGNIZED` — both exit 3, neither a credential wall. Keep both
+>   files' alternatives narrow and anchored; a broad pattern is the one way they could hide a real
+>   modal, and `test_the_benign_signature_can_never_shadow_a_credential_prompt` /
+>   `test_the_chrome_allowlist_stays_an_enumeration_not_a_catch_all` gate exactly that. If
 >   you ever have a real progress dialog on screen, capture its exact text and tighten this file.
 
 > ⚠️ **Win32 child-HWND text does NOT see inside a WPF dialog — and the burden of proof runs ONE WAY.**
@@ -251,12 +255,14 @@ stay byte-identical.
 >    and **before** the enabled-owner exoneration, and reported as **`DIALOG_NEEDS_HUMAN`, exit 3** —
 >    a human must act, but the remedy is an approval, not a sign-in, so it must not enter the band
 >    whose documented meaning is *"sign in once"*.
-> 2. **The whole content is scanned before benign is concluded.** Progress text plus prose that is not
->    progress status is `mixed-content` → `DIALOG_UNRECOGNIZED`. The backstop for prompts in *neither*
->    signature is a word count: a content element of **5+ words** that is not itself recognised status
->    is prose written for a human, and it vetoes suppression. Short data labels (`Orders`,
->    `1,204 rows loaded`, `Cancel`) do not — otherwise the benign path is unreachable and the probe
->    could never return `CREDENTIAL_PRESENT` while Desktop shows its own refresh dialog.
+> 2. **The whole content is scanned before benign is concluded.** Progress text plus content that is
+>    neither progress status nor enumerated chrome is `mixed-content` → `DIALOG_UNRECOGNIZED`. The
+>    backstop for prompts in *neither* signature used to be a word count — a content element of **5+
+>    words** vetoed, and everything shorter was excused. ⚠️ **That amnesty is gone (issue #406):** it
+>    excused `Password:` and `Please enter your password`, which is the whole of #406. Its replacement
+>    is `scripts/benign_chrome_signature.regex`, the same enumerated allowlist the Python detector uses
+>    — `Cancel`/`OK`/`Close`, a positive claim about specific strings rather than about their size.
+>    Short data labels (`Orders`) now **do** veto; see the reachability note at the end of this section.
 > 3. **The benign expressions are whole-element status patterns**, not substrings. `\bLoading data\b`
 >    matched inside *"Loading data requires authentication"*. Every alternative is now anchored, so a
 >    status word buried in a sentence is not a status.
@@ -437,20 +443,55 @@ stay byte-identical.
 > `RegisterClassW` then faults — a `faulthandler` access-violation dump on a test that still reported
 > a pass. That is the same rule `_configure_user32` states in production.
 
-> ⚠️ **The PowerShell arbiter still has the length-amnesty hole — measured, filed as #406, deliberately
-> NOT fixed here.** `probe_desktop_credential.ps1` keeps `$MinPromptWords = 5`, and driving its shipped
-> classifiers through the test harness shows the identical result: `Refresh` + `Evaluating` +
+> ✅ **The PowerShell arbiter's length-amnesty hole is CLOSED (issue #406).** It kept
+> `$MinPromptWords = 5` for a week after PR #400 fixed the identical hole in Python, and driving its
+> shipped classifiers through the test harness measured the identical result: `Refresh` + `Evaluating` +
 > `Please enter your password` → `benign` → `REFRESH_IN_PROGRESS`, and **suppressed to `$null`** under
-> `-RefreshInFlight`; `Password:` likewise. It was left alone on purpose, following the precedent that
-> created issue #376 itself: #367's author found this defect in the Python half, declared it out of
-> scope, and filed it rather than silently widening the diff. Removing the amnesty there also reverses
-> a reviewed decision — `test_short_data_labels_beside_progress_text_do_not_block_suppression` exists
-> to keep `CREDENTIAL_PRESENT` reachable while Desktop shows its own refresh dialog — so it needs its
-> own issue and its own review, not a drive-by.
+> `-RefreshInFlight`; `Password:` (two words) likewise. Measured before/after through
+> `-LoadDetectorsOnly`, `Title="Refresh"`, `OwnerEnabled=$false`:
 >
-> **Reachability, stated rather than hidden.** Removing the amnesty costs the Python detector its
-> `benign` path whenever a dialog exposes a table name as child text (`Orders` is not progress status
-> and not chrome, so it vetoes). That is the sanctioned trade: `benign` is used only to avoid aborting
+> | window content | before, t=0 | before, `-RefreshInFlight` | after (both) |
+> |---|---|---|---|
+> | `Refresh`, `Evaluating`, `Please enter your password` | `benign` / `REFRESH_IN_PROGRESS` | **`$null`, exit 0** | `mixed-content` / `DIALOG_UNRECOGNIZED`, exit 3 |
+> | `Refresh`, `Evaluating`, `Password:` | `benign` / `REFRESH_IN_PROGRESS` | **`$null`, exit 0** | `mixed-content` / `DIALOG_UNRECOGNIZED`, exit 3 |
+> | `Refresh`, `Evaluating`, `Cancel`, `OK`, `Close` | `benign` | `$null`, exit 0 | **unchanged** — the benign path stays reachable |
+> | `Refresh`, `Evaluating`, `Orders` | `benign` | `$null`, exit 0 | `mixed-content` / `DIALOG_UNRECOGNIZED`, exit 3 |
+>
+> **Port vs share, decided:** the vocabulary is SHARED, the control flow is PORTED. The arbiter now
+> reads `benign_chrome_signature.regex` — the *same file* the Python detector reads — so the one list
+> that can excuse an unexplained element is single-sourced. It does **not** call the Python detector:
+> the two are documented as deliberately divergent (the arbiter has a prose join, a `benign-unverified`
+> kind and `HarvestComplete`; Python has none of those), it is printed as a *recovery* instruction when
+> a refresh is already in trouble and so must not acquire an interpreter-discovery failure mode, its
+> `-LoadDetectorsOnly` seam exists precisely to be dependency-free, and its poll loop classifies every
+> 2 s for up to 75 s — ~37 interpreter spawns inside a loop whose job is to bound time.
+> `test_the_arbiter_and_the_python_detector_share_one_vocabulary` fails if either half leaves that seam.
+>
+> ⚠️ **The reachability cost, stated rather than hidden — this reverses a reviewed decision.**
+> `test_short_data_labels_beside_progress_text_do_not_block_suppression` existed to keep
+> `CREDENTIAL_PRESENT` reachable while Desktop shows its own refresh dialog, on the grounds that a real
+> refresh dialog lists table names. It is now
+> `test_a_table_name_beside_progress_text_now_vetoes_suppression` and asserts the opposite. Three
+> reasons, in order of weight: **(1)** the capability is secondary and already untrusted — the one-row
+> data probe is the gate of record, and `CREDENTIAL_PRESENT` returned a false positive three times
+> against a serverless warehouse; **(2)** the costs are asymmetric — losing it costs a loud, recoverable
+> exit 3, keeping the amnesty cost a *silently* suppressed password prompt, against the standing rule
+> that a credential modal is never worked around; **(3)** the capability rests on an **inference** and
+> the defect was **measured** — no Desktop in this corpus has confirmed that Power BI's refresh dialog
+> exposes bare table names (`benign_dialog_signature.regex` records its own provenance as inferred), so
+> the practical cost may be zero. An inferred capability does not outrank a measured hole.
+>
+> ⛔ **A control-type amnesty is not the way to buy it back.** The arbiter harvests `InteractiveTexts`,
+> which Python cannot, so "excuse anything interactive" looks like a free upgrade that keeps `Cancel`
+> harmless without excusing `Please enter your password`. It is the word count wearing a better
+> disguise: Databricks renders its authentication-kind chooser as selectable items labelled
+> `Personal Access Token` / `Databricks Client Credentials` — two alternatives that are in
+> `credential_modal_signature.regex` *because* they identify a credential dialog. A role-keyed amnesty
+> would excuse that whole family the moment one member is not in the signature. It also would not have
+> rescued the table names it was proposed for; they are Text elements too.
+>
+> **Reachability in the Python detector, same trade.** Removing the amnesty there costs its `benign`
+> path whenever a dialog exposes a table name as child text. `benign` is used only to avoid aborting
 > **our own** in-flight operation, so losing it costs extra **exit 3**s, never a silent clear.
 > ⚠️ Unobserved in this corpus whether Power BI's real refresh dialog exposes table names as child
 > HWNDs — no Desktop was available. If it does, expect `DIALOG_UNRECOGNIZED` where you hoped for
