@@ -1439,6 +1439,57 @@ def test_markdown_does_not_claim_cleanliness_when_attribution_is_unavailable(tmp
         assert reason in markdown
 
 
+def test_the_clean_claim_asks_the_harvest_rather_than_re_deriving_trust(tmp_path):
+    """⚠️ FOUR rounds of review found four ways to re-derive this wrongly. Blind review round 5:
+
+    `unreconciled_drift` and a `pbip/` discovery failure both leave `status=incomplete` with ZERO
+    compared paths - so `engine_internal == differing_files` is **vacuously true** and all three of
+    the previous round's conditions passed. Each round added a clause that rebuilt "is this
+    trustworthy?" from parts and missed a different one.
+
+    The harvest already computes `status` and `incomplete_reasons`. A re-derivation can only ever
+    enumerate the reasons known on the day it was written, so this asks the authoritative field and
+    every future incompleteness reason flows through automatically.
+    """
+    complete = {
+        "provenance": {"engine_internal": 0, "differing_files": 0},
+        "attribution": {"usable": True},
+        "baseline_drift": [],
+        "baseline_tampered": [],
+        "tier_edits": [],
+        "status": "complete",
+        "incomplete_reasons": [],
+    }
+    assert hgr._tier_edits_determined(complete) is True
+
+    for reason in ("unreconciled drift: pbip/WB/WB.pbip", "access failure enumerating pbip/"):
+        incomplete = {**complete, "status": "incomplete", "incomplete_reasons": [reason]}
+
+        assert hgr._tier_edits_determined(incomplete) is False, reason
+
+
+def test_an_empty_comparison_can_never_be_the_only_thing_permitting_the_claim(tmp_path):
+    """The vacuity itself, stated as a requirement rather than left implicit.
+
+    `engine_internal == differing_files` is TRUE over an empty set, and that is what produced two of
+    the four instances. It survives as belt-and-braces beneath the status check; it must never again
+    be the load-bearing clause.
+    """
+    vacuous = {
+        "provenance": {"engine_internal": 0, "differing_files": 0},
+        "attribution": {"usable": True},
+        "baseline_drift": [],
+        "baseline_tampered": [],
+        "tier_edits": [],
+        "status": "incomplete",
+        "incomplete_reasons": ["anything at all"],
+    }
+
+    # The equality passes; the status does not. The status must win.
+    assert vacuous["provenance"]["engine_internal"] == vacuous["provenance"]["differing_files"]
+    assert hgr._tier_edits_determined(vacuous) is False
+
+
 def test_markdown_is_undetermined_when_only_some_paths_are_unattributed(tmp_path):
     """Attribution can be USABLE and still not cover every compared path (a `.pbi` sidecar)."""
     bundle = _identical_bundle(tmp_path)

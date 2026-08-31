@@ -188,10 +188,22 @@ def _tier_edits_determined(report: dict[str, Any]) -> bool:
     is 0, and the first two clauses both pass - the markdown happily asserted that every differing
     byte matched the engine on a bundle whose status was `untrustworthy`. Same class again, one layer
     down: an empty count reading as a clean result.
+
+    ⚠️ And that was still not enough - blind review round 5 found a FOURTH instance, which is why this
+    now asks the harvest instead of re-deriving. `unreconciled_drift` and a `pbip/` discovery failure
+    both leave `status=incomplete` with ZERO compared paths, so `engine_internal == differing_files`
+    is **vacuously true** and all three clauses passed. Each round added a condition that rebuilt
+    "is this trustworthy?" from parts and missed a different one; the harvest already computes
+    `status` and `incomplete_reasons`, and a re-derivation can only ever enumerate the reasons known
+    on the day it was written.
     """
+    if report.get("status") != "complete" or report.get("incomplete_reasons"):
+        return False
     provenance = report["provenance"]
     if report["baseline_drift"] or report["baseline_tampered"]:
         return False
+    # Belt and braces beneath the authoritative status: an empty set makes this equality
+    # vacuously true, so it can never be the ONLY thing standing between a reader and the claim.
     return bool(report["attribution"]["usable"]) and provenance["engine_internal"] == provenance["differing_files"]
 
 
