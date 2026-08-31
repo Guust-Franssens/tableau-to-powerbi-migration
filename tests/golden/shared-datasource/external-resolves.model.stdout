@@ -1,5 +1,5 @@
 UNIT CHECK (model scope): NOT_CHECKED - <UNIT>
-  scoped automated checks only; omitted checks: desktop-orphans, engine-receipt, finalized, occlusion, oracle-coverage, page-parity, pbir-layout, pbir-valid, visual-comparison-done, visual-layer-done
+  scoped automated checks only; omitted checks: desktop-orphans, engine-receipt, finalized, occlusion, oracle-coverage, page-parity, path-ceiling, pbir-layout, pbir-valid, visual-comparison-done, visual-layer-done
   scoped PASS is not unit completion or cross-layer sign-off
   model-reference: NOT_CHECKED - model is EXTERNAL (shared datasource) at tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds/fabric/Sales.SemanticModel - check it with: python scripts/check_unit.py tests/fixtures/shared-datasource/external-resolves/datasources/sales-ds --scope model
       suspected owner: integration (report -> semantic model reference)

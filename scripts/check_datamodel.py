@@ -42,7 +42,19 @@ Scope stays deliberately narrow because a false positive is worse than a miss:
   * legacy BIFF8 `.xls` partitions with a resolvable local source: their navigation key and type
     conversion culture, which otherwise fail or silently corrupt rows at refresh
 
-A clean result does NOT prove the model opens; it only excludes these structural classes.
+On top of those text checks it runs the TMDL ORACLE (`scripts/tmdl_oracle.py`, needs the .NET SDK),
+which hands each model to `TmdlSerializer` - the parser Power BI Desktop itself uses - and reports
+`TMDL_PARSER_REJECTED` when it refuses, with AMO's own document and line. That is the failure issue
+#254 reported: Desktop names no file and no line, and the model does not open at all.
+
+The oracle is MANDATORY. If it cannot run, this exits `EXIT_UNASSESSABLE` (3) rather than 0: "we
+could not check" must never look like "clean". `--no-oracle` is the explicit opt-out.
+
+It deliberately does NOT detect silent absorption (a property swallowed into an expression while the
+document still parses). That is measurably undecidable from the parse - see scripts/tmdl_oracle.py
+and issue #404.
+
+A clean result does NOT prove the model refreshes; it only excludes these structural classes.
 """
 
 from __future__ import annotations
@@ -56,9 +68,34 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from check_empty_model import eval_m_path, model_parameters
+from tmdl_checks import (
+    TmdlFinding,
+    check_tmdl_model,
+    check_tmdl_text,
+    find_compact_filters,
+)
+from tmdl_oracle import OracleUnavailable, check_models
+
+# Re-exported so `from check_datamodel import ...` keeps working for callers and tests that
+# predate the split of the TMDL half into tmdl_checks.
+__all__ = [
+    "TmdlFinding",
+    "check_datamodel",
+    "check_model",
+    "check_model_counted",
+    "check_tmdl_model",
+    "check_tmdl_text",
+    "find_compact_filters",
+    "main",
+]
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TREES = ("examples", "migrations/workbooks", "migrations/datasources")
+
+# A DISTINCT exit code for "the gate could not assess this", kept apart from 0 (clean) and 1
+# (findings). `check_unit.py` has no fail-open fallthrough, so an exit code it does not recognise
+# is recorded as NOT_CHECKED rather than PASS - which is exactly the meaning here.
+EXIT_UNASSESSABLE = 3
 
 log = logging.getLogger("check_datamodel")
 
@@ -133,24 +170,6 @@ class Token:
     text: str
     line: int
     col: int
-
-
-@dataclass
-class TmdlFinding:
-    """One TMDL/data-model problem, located precisely enough to fix without hunting."""
-
-    code: str
-    message: str
-    file: Path
-    line: int
-
-    def render(self, root: Path) -> str:
-        """Format as `path:line CODE`, matching the M finding output style."""
-        try:
-            shown = self.file.relative_to(root)
-        except ValueError:
-            shown = self.file
-        return f"  {shown}:{self.line}  {self.code}\n      {self.message}"
 
 
 class _Scanner:
@@ -579,217 +598,6 @@ def _iter_m_blocks(path: Path) -> list[tuple[str, int, int]]:  # pylint: disable
     return blocks
 
 
-_OBJECT_RE = re.compile(
-    r"^(?P<indent>\s*)(?P<kind>table|measure|column|partition|hierarchy|level|role|"
-    r"relationship|culture|expression|calculationGroup|calculationItem|perspective|model|database)\b"
-    r"(?P<rest>.*)$"
-)
-_PROPERTY_RE = re.compile(r"^(?P<indent>\s*)(?P<name>[A-Za-z][A-Za-z0-9_]*)\s*:\s*(?P<value>.*)$")
-_REPEATABLE_PROPERTIES = {"annotation", "extendedProperty", "changedProperty", "ref", "variation", "levels"}
-_COLUMN_EQ_MEASURE_RE = re.compile(r"^'?[^'\[\]]+'?\s*\[[^\]]+\]\s*(?:=|<>|<=|>=|<|>)\s*\[[^\]]+\]$")
-_CALCULATE_RE = re.compile(r"\bCALCULATE(?:TABLE)?\s*\(", re.IGNORECASE)
-
-
-def _split_top_level_args(text: str) -> list[str]:
-    """Split a function argument list on commas that are not nested inside another expression."""
-    args: list[str] = []
-    depth = 0
-    start = 0
-    in_string = False
-    idx = 0
-    while idx < len(text):
-        ch = text[idx]
-        if ch == '"':
-            if in_string and idx + 1 < len(text) and text[idx + 1] == '"':
-                idx += 2
-                continue
-            in_string = not in_string
-        elif not in_string:
-            if ch in "([{":
-                depth += 1
-            elif ch in ")]}":
-                depth = max(0, depth - 1)
-            elif ch == "," and depth == 0:
-                args.append(text[start:idx])
-                start = idx + 1
-        idx += 1
-    args.append(text[start:])
-    return args
-
-
-def find_compact_filters(expression: str) -> bool:
-    """Return True for direct CALCULATE filters like `'T'[Col] = [Measure]`.
-
-    The same predicate is legal inside FILTER(...), so the check only inspects direct filter
-    arguments after the first CALCULATE/CALCULATETABLE expression argument.
-    """
-    for match in _CALCULATE_RE.finditer(expression):
-        depth = 1
-        end: int | None = None
-        in_string = False
-        idx = match.end()
-        while idx < len(expression):
-            ch = expression[idx]
-            if ch == '"':
-                if in_string and idx + 1 < len(expression) and expression[idx + 1] == '"':
-                    idx += 2
-                    continue
-                in_string = not in_string
-            elif not in_string:
-                if ch == "(":
-                    depth += 1
-                elif ch == ")":
-                    depth -= 1
-                    if depth == 0:
-                        end = idx
-                        break
-            idx += 1
-        if end is None:
-            continue
-        for arg in _split_top_level_args(expression[match.end() : end])[1:]:
-            if _COLUMN_EQ_MEASURE_RE.match(arg.strip()):
-                return True
-    return False
-
-
-def _strip_tmdl_comment(line: str) -> str:
-    """Remove a TMDL description/comment line so prose cannot be mistaken for a property."""
-    return "" if line.lstrip().startswith("///") else line
-
-
-def _object_name(rest: str) -> str | None:
-    """Extract a TMDL object's name from the remainder of its header line."""
-    head = rest.split("=", 1)[0].strip()
-    if head.startswith("'"):
-        end = head.find("'", 1)
-        return head[1:end] if end > 0 else None
-    parts = head.split()
-    return parts[0] if parts else None
-
-
-def _expression_on_measure_header(rest: str) -> bool:
-    """Whether a measure header carries a non-empty expression after `=`."""
-    return "=" in rest and bool(rest.split("=", 1)[1].strip())
-
-
-def _nearest_context(seen: dict[int, dict[str, int]], indent: int) -> int | None:
-    """Return the nearest open TMDL object context for a property indent."""
-    candidates = [depth for depth in seen if depth <= indent]
-    return min(candidates, key=lambda depth: indent - depth) if candidates else None
-
-
-def _empty_measure_finding(path: Path, pending_measure: tuple[str, int]) -> TmdlFinding:
-    """Build the repeated empty-measure finding once so narrowing stays simple."""
-    name, line = pending_measure
-    return TmdlFinding("EMPTY_EXPRESSION", f"measure '{name}' has no expression after '='.", path, line)
-
-
-def _append_name_collisions(
-    findings: list[TmdlFinding], path: Path, table_name: str, measures: dict[str, int], columns: dict[str, int]
-) -> None:
-    """Report measure/column collisions for one table scope."""
-    for name, line in measures.items():
-        if name in columns:
-            findings.append(
-                TmdlFinding(
-                    "NAME_COLLISION",
-                    f"measure '{name}' in table '{table_name}' has the same name as a column in "
-                    f"that table; Tabular names must be unique within a table. Column first seen "
-                    f"at line {columns[name]}.",
-                    path,
-                    line,
-                )
-            )
-
-
-def check_tmdl_text(path: Path, text: str) -> list[TmdlFinding]:  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
-    """Structurally check one TMDL document."""
-    findings: list[TmdlFinding] = []
-    seen: dict[int, dict[str, int]] = {}
-    context_line: dict[int, int] = {}
-    current_table = ""
-    measures: dict[str, int] = {}
-    columns: dict[str, int] = {}
-    pending_measure: tuple[str, int] | None = None
-
-    for number, raw in enumerate(text.splitlines(), start=1):
-        line = _strip_tmdl_comment(raw)
-        if not line.strip():
-            continue
-
-        if pending_measure and _OBJECT_RE.match(line):
-            findings.append(_empty_measure_finding(path, pending_measure))
-            pending_measure = None
-
-        if find_compact_filters(line):
-            findings.append(
-                TmdlFinding(
-                    "COMPACT_FILTER",
-                    "direct CALCULATE filter compares a column to a measure; DAX requires a constant "
-                    "on the right of a compact predicate. Hoist the measure into a VAR or wrap the "
-                    "predicate in FILTER(...).",
-                    path,
-                    number,
-                )
-            )
-
-        obj = _OBJECT_RE.match(line)
-        if obj:
-            indent = len(obj.group("indent").expandtabs(4))
-            for depth in [depth for depth in seen if depth > indent]:
-                del seen[depth]
-            seen[indent + 1] = {}
-            context_line[indent + 1] = number
-            kind = obj.group("kind")
-            rest = obj.group("rest")
-            name = _object_name(rest)
-            if kind == "table" and name:
-                _append_name_collisions(findings, path, current_table, measures, columns)
-                current_table = name
-                measures = {}
-                columns = {}
-            elif kind == "measure" and name and current_table:
-                measures.setdefault(name, number)
-                pending_measure = None if _expression_on_measure_header(rest) else (name, number)
-            elif kind == "column" and name and current_table:
-                columns.setdefault(name, number)
-            continue
-
-        prop = _PROPERTY_RE.match(line)
-        if prop:
-            indent = len(prop.group("indent").expandtabs(4))
-            name = prop.group("name")
-            if name not in _REPEATABLE_PROPERTIES:
-                bucket = _nearest_context(seen, indent)
-                if bucket is not None:
-                    if name in seen[bucket]:
-                        findings.append(
-                            TmdlFinding(
-                                "DUPLICATE_PROPERTY",
-                                f"'{name}' appears more than once in the object opened at line "
-                                f"{context_line[bucket]}; TMDL rejects duplicated scalar properties. "
-                                f"First seen at line {seen[bucket][name]}.",
-                                path,
-                                number,
-                            )
-                        )
-                    else:
-                        seen[bucket][name] = number
-            if pending_measure:
-                findings.append(_empty_measure_finding(path, pending_measure))
-                pending_measure = None
-            continue
-
-        if pending_measure and line.strip():
-            pending_measure = None
-
-    if pending_measure:
-        findings.append(_empty_measure_finding(path, pending_measure))
-
-    _append_name_collisions(findings, path, current_table, measures, columns)
-    return findings
-
-
 def _model_dirs(target: Path) -> list[Path]:
     if target.name.endswith(".SemanticModel"):
         return [target]
@@ -994,22 +802,45 @@ def check_model_counted(model_dir: Path) -> tuple[list[Finding], int]:
     return findings, scanned
 
 
-def check_tmdl_model(model_dir: Path) -> tuple[list[TmdlFinding], int]:
-    """Every TMDL document in one .SemanticModel."""
-    findings: list[TmdlFinding] = []
-    definition = model_dir / "definition"
-    files = sorted(definition.rglob("*.tmdl")) if definition.exists() else []
-    for tmdl in files:
-        text = tmdl.read_text(encoding="utf-8", errors="replace").lstrip("\ufeff")
-        findings.extend(check_tmdl_text(tmdl, text))
-    return findings, len(files)
-
-
 def check_datamodel(model_dir: Path) -> tuple[list[Finding], int, list[TmdlFinding], int]:
     """Run the complete dependency-free model gate over one .SemanticModel."""
     m_findings, m_scanned = check_model_counted(model_dir)
     tmdl_findings, tmdl_scanned = check_tmdl_model(model_dir)
     return m_findings, m_scanned, tmdl_findings, tmdl_scanned
+
+
+class Unassessable(RuntimeError):
+    """The TMDL oracle could not run, so the model's loadability is UNKNOWN - never 'clean'."""
+
+
+def _run_oracle(targets: list[Path], skip: bool) -> tuple[int, bool]:
+    """Run the TMDL oracle over every target; returns (problems reported, ran to completion).
+
+    The oracle is MANDATORY by default. "Could not run" raises Unassessable, which `main` turns
+    into EXIT_UNASSESSABLE - never 0. That is deliberate and it is the one behaviour here with a
+    field history: while it was merely a warning, `check_datamodel.py <model>` exited 0 on
+    parser-fatal TMDL whenever `dotnet` was missing, and `check_unit.py` recorded a PASS for a model
+    Desktop cannot open. Unassessable collapsing into clean is the exact defect class this whole
+    repo keeps finding; a gate of record must not contain it.
+    """
+    if skip:
+        log.warning(
+            "TMDL ORACLE SKIPPED (--no-oracle) - whether these models LOAD was NOT checked. "
+            "This is an explicit opt-out, not a clean result."
+        )
+        return 0, False
+    findings, inspected = check_models(targets)
+    by_model: dict[Path, list[TmdlFinding]] = {}
+    for finding in findings:
+        by_model.setdefault(finding.file, []).append(finding)
+    for _, group in sorted(by_model.items()):
+        log.error("TMDL PARSER ERRORS")
+        for finding in group:
+            log.error("%s", finding.render(REPO_ROOT))
+    if inspected == 0:
+        raise Unassessable("no definition/ folder in any target, so no model was handed to the parser")
+    log.info("TMDL oracle: %d model(s) handed to TmdlSerializer (AMO), %d problem(s).", inspected, len(findings))
+    return len(findings), True
 
 
 def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-locals,too-many-branches
@@ -1018,6 +849,11 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("paths", nargs="*", type=Path, help="a .SemanticModel, or a folder containing some")
     parser.add_argument("--all", action="store_true", help="check every model in every migration tree")
+    parser.add_argument(
+        "--no-oracle",
+        action="store_true",
+        help="skip the TMDL oracle - whether the models LOAD is then not checked at all",
+    )
     args = parser.parse_args(argv)
 
     targets: list[Path] = []
@@ -1069,10 +905,22 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
         for model in empty_tmdl:
             log.warning("  %s", model)
 
+    try:
+        oracle_problems, oracle_ran = _run_oracle(targets, args.no_oracle)
+    except (OracleUnavailable, Unassessable) as exc:
+        log.error(
+            "TMDL ORACLE COULD NOT RUN, so whether these models LOAD is UNKNOWN. This is NOT a "
+            "pass and NOT a finding - it is unassessable (exit %d).\n  %s\n  Fix the oracle, or pass "
+            "--no-oracle to state explicitly that you are skipping it.",
+            EXIT_UNASSESSABLE,
+            exc,
+        )
+        return EXIT_UNASSESSABLE
+    total += oracle_problems
     if total:
         log.error(
-            "\n%d problem(s) across %d model(s).\nThese are dependency-free structural checks for "
-            "defects that otherwise surface later as opaque Power BI Desktop model-load failures.",
+            "\n%d problem(s) across %d model(s).\nThese are structural checks for defects that "
+            "otherwise surface later as opaque Power BI Desktop model-load failures.",
             total,
             len(targets),
         )
@@ -1087,10 +935,12 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
         return 1
     log.info(
         "Data model OK - %d M expression(s) and %d TMDL document(s) across %d model(s), no structural "
-        "problems found.\n  NOTE: structural checks only; a clean result does not prove the model opens.",
+        "problems found.\n  NOTE: structural checks only%s; a clean result does not prove the model "
+        "refreshes.",
         m_scanned_total,
         tmdl_scanned_total,
         len(targets),
+        "" if oracle_ran else ", and the TMDL oracle did NOT run",
     )
     return 0
 

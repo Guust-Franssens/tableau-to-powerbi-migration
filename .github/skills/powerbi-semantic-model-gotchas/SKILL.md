@@ -59,10 +59,132 @@ Desktop on open** — they only surface when the PBIP is actually opened, not fr
 - **`database.tmdl` must be exactly**: `database` (no name after it) on its own line, then a
   tab-indented `compatibilityLevel: <n>` on the next line. A name after `database` or an unindented
   `compatibilityLevel` causes a TMDL indentation parse error.
-- **Prefer single-line DAX over multi-line expressions for `column`/`measure`.** Multi-line
-  expression continuation has a subtle, easy-to-get-wrong indentation contract; single-line
-  `column X = <full DAX expression>` (DAX has no newline requirement) followed by properties at
-  declaration+1 tab is the proven-safe pattern.
+- ⚠️ **The fatal TMDL expression mistake is NOT a newline, and NOT a blank line — it is starting the
+  expression on the `=` line and then CONTINUING it onto the next line.** A customer field report
+  (issue #254) had an agent write a measure with blank lines between fragments; Desktop answered
+  `TMDL Format Error: Unexpected line type: Other!` and **refused to open the model at all**. The
+  obvious lesson ("never use newlines in DAX") is the wrong one, and it is a costly wrong one,
+  because it forces every long measure onto one unreviewable line.
+
+  ✅ **Measured 2026-08-29** against `TmdlSerializer.DeserializeDatabaseFromFolder` (AMO 19.84.1 —
+  the same parser Desktop uses), 34 synthetic variants injected into a real committed model:
+
+  | layout | verdict |
+  |---|---|
+  | `measure 'M' = IF(1=1,"a","b")` — single line | ✅ opens |
+  | expression starts on the line **after** `=`, indented deeper than the properties | ✅ opens; newlines preserved in the expression |
+  | …**with empty lines between fragments** | ✅ opens — blank lines are part of the expression |
+  | …with whitespace-only lines, or a blank line right after `=`, or a blank line before the properties | ✅ opens |
+  | ` ``` `-enclosed block, blank lines and all | ✅ opens (verbatim) |
+  | **`measure 'M' = IF(` then a continuation line** | ❌ `Unexpected line type: Other!` — model does not open |
+  | same, with blank lines between the fragments (the reported crash) | ❌ identical failure; the blank line is **not** the trigger |
+  | inline start whose continuation is `VAR x = 1` / `RETURN x` | ❌ `UnsupportedObjectType — VAR is not a supported property in the current context` |
+  | multi-line whose continuation **dedents to the object's own indent** | ❌ `Invalid indentation was detected!` |
+  | multi-line indented to the **same level as the properties** | ⚠️ **opens, silently corrupt** — the properties are swallowed *into the DAX* and never set |
+
+  **The rule, stated positively:** an expression is either **entirely on the `=` line**, or it
+  **starts on the line after `=`** and every one of its lines is indented **strictly deeper than the
+  object's properties** (properties at declaration+1 tab ⇒ expression at declaration+2). Inside that
+  block, blank lines are legal and preserved. Mixing the two — text after `=` *and* continuation
+  lines — is what kills the model, because TMDL commits to single-line mode the moment it sees text
+  after `=`, and then every following line must be a property or a child object.
+
+  Microsoft documents exactly this: *"If multi-line, they must be located in the line immediately
+  following the property or object declaration… Multi-line expressions must be indented one level
+  deeper to the parent object properties… Vertical whitespaces (blank lines without whitespaces) are
+  allowed and are considered part of the expression."*
+  ([TMDL overview → Expressions](https://learn.microsoft.com/en-us/analysis-services/tmdl/tmdl-overview))
+
+  **Which to write.** Both are safe, so choose on reviewability: single-line for anything that fits,
+  multi-line (starting *after* the `=`) for a `VAR`/`RETURN` measure that is genuinely unreadable on
+  one line. The committed corpus in this repo is 100 % single-line (167 TMDL documents, zero
+  multi-line expressions, zero backtick blocks) — so single-line remains the **house default**, but
+  it is a style choice now, not a format constraint.
+
+  **The under-indented case deserves its own fear, and it is broader than it looks.** It is the only
+  one that *passes* the parser. The contract is that a multi-line expression must be indented **one
+  level deeper than the object's properties** — so if it starts at the *property* level instead,
+  **every** property the object declares after it is read as DAX and silently never set. Measured:
+  `formatString`, a bare `isHidden` (shortcut syntax, no colon), a documented `isKey: true`, an
+  `annotation` — all absorbed, `IsHidden`/`IsKey` come back `False`, and AMO reports nothing.
+  Do not think of this as "watch out for `formatString`"; think of it as "the indent decides".
+
+  ✅ **Gated offline by the real parser, not by a re-implementation of it:**
+  `python scripts/check_datamodel.py <model>` runs the **TMDL oracle**
+  (`scripts/tmdl_oracle.py` + `tools/tmdl_oracle/`, needs the .NET SDK), which hands the model to
+  `TmdlSerializer.DeserializeDatabaseFromFolder` — the parser Desktop itself uses — and reports
+  `TMDL_PARSER_REJECTED` with AMO's own document and line number, exiting **1**. Whatever AMO
+  accepts is accepted, by construction, so a false positive is structurally impossible.
+  `TMDL_BOM` and `TMDL_UNREADABLE` remain text checks, deliberately *stricter* than AMO (see the
+  BOM entry below).
+
+  **Why an oracle:** issue #254's gate was hand-written three times — a property-name allowlist,
+  then the documented INDENTATION contract, then an AMO-plus-reflection readback — and blind review
+  broke all three, each time with false negatives *and* **false positives on valid TMDL**: a
+  case-different `IsHidden`, a second `tablePermission` in one role, an M query returning a variable
+  named `isRemoved`. Re-implementing someone else's grammar is a completeness claim, and a
+  completeness claim over a parser you do not own cannot be finished by patching. Asking the parser
+  can.
+
+  ⚠️ **The gate needs `dotnet`, and it FAILS CLOSED.** If the oracle cannot run,
+  `check_datamodel.py` exits **3 — unassessable** — never 0, and `check_unit.py` records
+  `NOT_CHECKED` rather than PASS. `--no-oracle` is the explicit opt-out. Never read "could not run"
+  as a clean model: while that was a mere warning, a machine without the .NET SDK exited **0** on
+  TMDL that Desktop cannot open.
+
+  ❌ **The under-indented case is NOT gated, and cannot be by readback.** ✅ Measured 2026-08-30:
+  the two documents below differ only in the expression body's indent — on the left `isHidden` is a
+  swallowed property, on the right it is ordinary expression content — and AMO returns
+  `Expression='1\nisHidden'`, `IsHidden=False` for **both**, byte for byte.
+
+  ```tmdl
+  	measure Probe =        |  	measure Probe =
+  		1                  |  			1
+  		isHidden           |  			isHidden
+  ```
+
+  The parser strips the common indent, and that indent is the only carrier of the distinction, so no
+  readback can separate them. Treat this as an **authoring rule you must follow by hand**, not
+  something a gate will catch for you: indent a multi-line expression one level deeper than the
+  object's properties. Issue #404 tracks the search for a mechanism.
+
+- ❌ **`ref table X` in `model.tmdl` must quote the name EXACTLY as the table's own declaration does
+  — and a mismatch fails with a message that tells you nothing.** ✅ Measured 2026-08-30 (AMO
+  19.84.1), a clean 2×2 on a synthetic model:
+
+  | `tables/Foo.tmdl` declares | `model.tmdl` refs | verdict |
+  |---|---|---|
+  | `table Foo` | `ref table Foo` | ✅ opens |
+  | `table 'Foo'` | `ref table 'Foo'` | ✅ opens |
+  | `table Foo` | `ref table 'Foo'` | ❌ `TomInternalException: An internal error has occured.` |
+  | `table 'Foo'` | `ref table Foo` | ❌ same |
+
+  Quoting a name that needs no quotes is legal — what is fatal is quoting it in **one** of the two
+  places. The exception carries **no document, no line and no object name**; the stack (`TmdlObject.
+  AddContentOf` → `TmdlSerializationHelper.MergeAndGroupChildObject`) is the only clue, so bisecting
+  by table is the practical way to localise it. This is not hypothetical: the oracle found it in a
+  **committed, shipped example** in this repo (`examples/airline-alliance-activity`, whose
+  `model.tmdl` said `ref table 'Date'` against `table Date`), where three rounds of text-based
+  gating had never looked. The gate reports it as `TMDL_PARSER_REJECTED`.
+
+- ⚠️ **A UTF-8 BOM on a `.tmdl` file is invisible to every parser except the one that matters.**
+  `TmdlSerializer` accepts it happily; Power BI Desktop's *project reader* does not
+  (`UTF8EncodingThrowOnBOM.CheckBom` → *"Only text with UTF8 encoding without BOM is supported"*)
+  and the project simply does not open — see
+  [`pbip-model-refresh`](../pbip-model-refresh/SKILL.md). So an AMO round-trip is **not** sufficient
+  evidence that a file you wrote is loadable. Always write with `encoding="utf-8"` in Python or
+  `-Encoding utf8NoBOM` in PowerShell; `check_datamodel.py` now reports `TMDL_BOM` rather than
+  quietly stripping it, because normalising it in memory made a broken deliverable pass the gate.
+
+- ❌ **Known gap — TMDL also enforces an ORDERING rule inside an object, and nothing gates it.**
+  Measured alongside the above: `source =` followed by `mode: import` is rejected (*"Invalid
+  indentation was detected!"*) while `source =` followed by `annotation Foo = Bar` is accepted, and
+  a nested multi-line `formatStringDefinition =` followed by `isHidden` is rejected (*"The keyword
+  'isHidden' is neither a property nor an object in the current context"*). This is the same family
+  as the documented "every property must precede every annotation" rule above. Consequence in
+  practice: **put every scalar property BEFORE any expression-valued property** (`source`,
+  `formatStringDefinition`, `detailRowsDefinition`), and annotations last. `check_datamodel.py`
+  does **not** detect violations of this — treat a clean gate as silent on ordering.
 - **A measure's suffix-qualified name must never collide with any column name in the same table**
   (e.g. `measure 'X'` next to `column 'X'`, even if one is hidden). Tabular's naming rule shares one
   namespace between columns and measures per table — a bare-named "value" measure over a same-named
@@ -439,7 +561,11 @@ for an already-open data-source dialog are `status` reporting **"Host is not rea
 operations"** and `screenshot` reporting **"Print metadata is not available"**. That combination is
 not enough evidence for a bridge regression; run the bundled refresh/query probes, which check for
 visible non-main dialogs at t=0 and keep polling while the source wakes up. Text-readable credential
-prompts report `CREDENTIAL_MISSING`; unreadable/non-credential dialogs report `BLOCKED_BY_DIALOG`.
+prompts report `CREDENTIAL_MISSING` (exit 1, the only hard stop); a dialog whose content did not
+positively read as harmless reports `REFRESH_IN_PROGRESS` / `DIALOG_NEEDS_HUMAN` /
+`DIALOG_UNRECOGNIZED` / `DIALOG_UNREADABLE`, all **exit 3** — "could not probe", never "sign in".
+(`BLOCKED_BY_DIALOG` was retired in issues #367/#376: it came from a size-only test, so a Power BI
+Refresh progress dialog produced it.)
 
 **Independent confirmation is available and worth taking.** For a serverless warehouse, `STOPPED` with
 `num_active_sessions = 0` proves no query ever arrived, regardless of what any log claims. Prefer
@@ -971,6 +1097,85 @@ counts engine handover requests; `check_stub_measures.py` scans shipped TMDL pla
 splits measures from calculated columns. The real `_bundle-208` shape that read as
 `Admin_Insights_Starter 27/51 -> actionable 60` was not arithmetic drift: the extra actionable
 items were stubbed calculated columns, outside the measure-only denominator.
+
+### `openability_selfcheck.ok` is the engine's CLAIM, not a verified open
+
+The handover slice and `report.json` both carry `workbook.openability_selfcheck`. Its name promises a
+verdict on whether the model opens. It is not one, and the gap is wide enough to convert a defect
+into a sign-off — which is the only reason this subsection exists. **Adjudicate it like any other
+engine claim; never cite it as evidence that something opens.**
+
+**What it actually is** (engine 2.339.0, `skills/tableau-migration/scripts/openability_gate.py`,
+`check_model_openability`): a **static scan of the model's TMDL text**. Its inputs are the
+`{relative_path: tmdl_text}` map the assembler produced plus two optional counts; the module imports
+`re` and `os` and nothing else, touches no filesystem and loads no AMO. `ok` is computed as
+`not issues` — nothing more.
+
+**What it therefore cannot see**, by construction rather than by omission:
+
+| out of scope | why |
+|---|---|
+| the whole report layer — visual bindings, dropped filters, empty pages | PBIR is never passed to it |
+| data — row counts, a locale-corrupted `.xls`, a zero-row refresh | it never connects to anything |
+| whether the model actually opens | regexes over text; no AMO, no Desktop |
+| the filesystem | deliberate — it judges whether an M path is *foreign*, never whether it *exists* |
+
+**Measured on the 2.339.0 estate run** (`_runs/estate-2.339.0-20260829/report.json`, 45 workbooks, 44
+carrying the field):
+
+| measurement | value |
+|---|---|
+| `ok: true` while the same `report.json` records defects for that workbook | **30 of 44** |
+| `issues[]` empty | 43 of 44 |
+| `ok` distribution | `true` 43 · `false` 1 · key absent 1 |
+
+Worked example: `Meridian Calc Gauntlet` ships `ok: true` and `issues: []` beside
+`viz_dangling_bindings.count = 1`, three `pbip_ref_drops`, seven `pbip_warnings` and a
+`pbip_entity_binding_mismatch`. Every one of those is a real defect the engine itself reported, in
+the same file, one key over.
+
+**`checks` is not exhaustive: an absent key means NOT EVALUATED, never passed.** Five checks are
+conditional, and `not_evaluated` names only one of them — so it reads like a manifest of skips and is
+not one. Cross-reference both keys; never `checks.get(name)` and treat `None` as fine.
+
+⚠️ **But absent is not automatically alarming, and the first reading of this got it backwards.** Two
+of the conditional checks are absent exactly when the hazard they guard cannot exist. Measured across
+44 models × 2 checks against the shipped TMDL: **88 agreements, 0 disagreements.**
+
+| check | present iff | so absent means |
+|---|---|---|
+| `eager_calc_refs_resolve` | the model contains a stub (placeholder) partition | no stub table, nothing to dangle onto — **vacuous** (absent 36/44) |
+| `relationship_columns_exist` | `definition/relationships.tmdl` exists | no relationships, nothing to check — **vacuous** (absent 18/44). A model with *no* relationships is a separate, real concern |
+| `typed_columns_in_header` | the caller supplied flat-file headers | headers not supplied — **genuinely unevaluated, and the hazard remains** (absent 34/44) |
+| `endpoints_distinct` | the source declares more than one upstream | explained in `not_evaluated` on 42 of its 43 absences |
+| `compatibility_level_current` | a `database.tmdl` part exists | present 44/44 at 2.339.0 — an older corpus (2.126–2.208) saw it absent 23×, so **re-measure, do not remember** |
+
+**The post-wrap re-check silently DROPS `not_evaluated` and `reference_case_mismatches`.** When
+`migrate_estate._recheck_openability_after_wrap` merges its second pass it rebuilds the payload with
+only `ok` / `checks` / `issues` / `rechecked_after_row_predicate_wrap`. Measured: exactly 1 of 44
+workbooks is missing both keys, and it is precisely the payload carrying
+`rechecked_after_row_predicate_wrap: true`. So the tri-state discipline above fails on the one
+payload whose check set was recomputed — and the gate's own source comment claims the opposite
+("present and empty on a healthy build, so its absence is never mistaken for *not evaluated*").
+Filed upstream as [`tableau-fabric-skills#183`](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/183):
+it is a regression from the fix for upstream #177, which silently retracts the disclosure #141 added.
+
+**No static gate settles openability, and the TMDL oracle is not the exception.** The strongest
+offline signal is the parser Desktop itself uses — `TmdlSerializer.DeserializeDatabaseFromFolder`,
+wired here as `scripts/tmdl_oracle.py` and reached through `python scripts/check_datamodel.py` or
+`check_unit.py --scope data-model`. Treat it as the **mandatory parser-level structural gate**, and
+note what it does better than the selfcheck: it exits **3 (`UNASSESSABLE`)** rather than `0` when it
+cannot run, which is the discipline `openability_selfcheck` does not apply to its own skipped checks.
+
+⚠️ **But "deserializes" is not "opens", and §4 of this file is the committed counterexample.** A model
+with **model-wide duplicate measure names** deserializes *cleanly* through
+`DeserializeDatabaseFromFolder` and Power BI Desktop then **refuses to open the `.pbip`** — *"Could not
+add Measure with the name X because a Measure with the same name already exists"*. That shipped once
+and broke a Desktop open. A measure name equal to a column name in the same table fails the same way,
+at commit. `tools/tmdl_oracle/Program.cs` calls `DeserializeDatabaseFromFolder` and nothing else — no
+open, no commit — and says so in its own header. So the oracle is **necessary, not sufficient**;
+**only a cold Desktop open** settles openability, and even that proves nothing about rows: see this
+file's header, and §6 for a model that passed every structural gate with every decimal inflated 493×.
 
 ### RETRACTED: "the queue is unreachable and fails silently"
 

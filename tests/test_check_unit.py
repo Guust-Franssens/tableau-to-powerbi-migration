@@ -12,6 +12,7 @@ import importlib.util
 import json
 import os
 import time
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -1158,3 +1159,448 @@ def test_external_resolves_scope_model_matches_golden() -> None:
 
     assert result.returncode == cu.EXIT_NOT_CHECKED, result.stdout + result.stderr
     assert _normalize_unit_stdout(result.stdout, target) == golden.read_text(encoding="utf-8")
+
+
+# --- path-ceiling: whole-unit shippability, wired into the facade (refs #235) -------------------
+#
+# The gate answers "would this unit survive on a stock Windows machine", which is a property of the
+# whole target tree, so it is registered ALL-scope only and owned by the orchestrator. These tests
+# pin the two decisions that are easy to reverse by accident: that an over-ceiling unit is a FINDING
+# (not a quiet pass, and not demoted to advisory), and that anything unmeasurable is NOT_CHECKED.
+
+
+def _path_ceiling_gate() -> cu.Gate:
+    return _gate_by_id("path-ceiling")
+
+
+def _path_ceiling_gate_thresholds() -> tuple[object, ...]:
+    """The registered gate's status/exit sets, reused so a real-scanner test cannot drift from it."""
+    gate = _path_ceiling_gate()
+    return (
+        gate.pass_statuses,
+        gate.pass_exit_codes,
+        gate.finding_statuses,
+        gate.finding_exit_codes,
+        gate.not_checked_statuses,
+        gate.not_checked_exit_codes,
+    )
+
+
+def _deep_tree(root: Path) -> Path:
+    """A small real tree, so the native scanner has something to measure."""
+    leaf = root / "fabric" / "Book.Report" / "definition" / "pages" / "51c062066e7c504dcbb5"
+    leaf.mkdir(parents=True, exist_ok=True)
+    (leaf / "page.json").write_text("{}", encoding="utf-8")
+    return root
+
+
+def test_path_ceiling_is_registered_all_scope_only() -> None:
+    """Whole-unit shippability cannot be attributed to a layer, so it runs only under --scope all."""
+    gate = _path_ceiling_gate()
+
+    assert gate.script == "check_path_ceiling.py"
+    assert "path-ceiling" in cu.ALL_ONLY_CHECK_IDS
+    assert cu._in_scope("path-ceiling", cu.SCOPE_ALL)  # pylint: disable=protected-access
+    for scope in (cu.SCOPE_MODEL, cu.SCOPE_REPORT, cu.SCOPE_INTEGRATION):
+        assert not cu._in_scope("path-ceiling", scope)  # pylint: disable=protected-access
+        assert "path-ceiling" in cu._omitted_checks(scope)  # pylint: disable=protected-access
+
+
+def test_path_ceiling_owner_is_the_orchestrator_not_a_builder() -> None:
+    """A breach is driven by install-root length and engine-side naming; no builder persona can fix it."""
+    hint = cu.OWNER_HINTS["path-ceiling"]
+
+    assert hint.startswith("orchestrator")
+    assert hint not in {"model", "report"}
+
+
+def test_path_ceiling_gate_names_the_native_skip_statuses() -> None:
+    """Pinned as a contract, because exit 3 alone would mask a renamed status behind the same verdict."""
+    gate = _path_ceiling_gate()
+
+    assert {"unknown_paths", "no_paths"} <= gate.not_checked_statuses
+    assert gate.pass_statuses == frozenset({"ok"})
+    assert gate.finding_statuses == frozenset({"over_ceiling"})
+
+
+def test_path_ceiling_over_ceiling_is_a_finding_not_a_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The facade must never be the one place a bundle Desktop cannot open reads as done."""
+    gate = _path_ceiling_gate()
+    (tmp_path / "path-ceiling.json").write_text(
+        json.dumps({"status": "over_ceiling", "counted": {"over_ceiling": 183, "measured": 12043}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cu, "_run_simple", lambda argv: _completed(argv, 1))
+
+    check = cu._run_cli_gate(gate, tmp_path, tmp_path)  # pylint: disable=protected-access
+
+    assert check["status"] == cu.STATUS_FINDINGS
+    assert check["native_status"] == "over_ceiling"
+    assert check["native_exit"] == 1
+
+
+def test_path_ceiling_clean_scan_is_a_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A measured, in-budget tree passes - the gate must not be permanently red."""
+    gate = _path_ceiling_gate()
+    (tmp_path / "path-ceiling.json").write_text(json.dumps({"status": "ok"}), encoding="utf-8")
+    monkeypatch.setattr(cu, "_run_simple", lambda argv: _completed(argv, 0))
+
+    check = cu._run_cli_gate(gate, tmp_path, tmp_path)  # pylint: disable=protected-access
+
+    assert check["status"] == cu.STATUS_PASS
+
+
+@pytest.mark.parametrize("native_status", ["unknown_paths", "no_paths"])
+def test_path_ceiling_unmeasured_tree_is_not_checked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_status: str
+) -> None:
+    """Unmeasurable and unmeasured are both 'no opinion', never clean."""
+    gate = _path_ceiling_gate()
+    (tmp_path / "path-ceiling.json").write_text(json.dumps({"status": native_status}), encoding="utf-8")
+    monkeypatch.setattr(cu, "_run_simple", lambda argv: _completed(argv, 3))
+
+    check = cu._run_cli_gate(gate, tmp_path, tmp_path)  # pylint: disable=protected-access
+
+    assert check["status"] == cu.STATUS_NOT_CHECKED
+    assert check["native_status"] == native_status
+
+
+def test_path_ceiling_gate_accepts_the_native_scripts_real_over_ceiling_contract(tmp_path: Path) -> None:
+    """Run the REAL scanner and feed it through the REGISTERED gate, so a renamed status is caught.
+
+    The ceiling is tightened rather than building a genuinely 260-character path: the status strings
+    and exit codes under test are the contract, and they are identical either way.
+    """
+    target = _deep_tree(tmp_path / "unit")
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    gate = cu.Gate(
+        "path-ceiling",
+        "check_path_ceiling.py",
+        ("--ceiling", "40", "--dir-ceiling", "40"),
+        *_path_ceiling_gate_thresholds(),
+    )
+
+    check = cu._run_cli_gate(gate, target, output_dir)  # pylint: disable=protected-access
+
+    assert check["native_status"] == "over_ceiling", check
+    assert check["native_exit"] == 1
+    assert check["status"] == cu.STATUS_FINDINGS
+
+
+def test_path_ceiling_gate_accepts_the_native_scripts_real_ok_contract(tmp_path: Path) -> None:
+    """The same real scanner, in budget: 'ok'/0 must satisfy the registered pass sets."""
+    target = _deep_tree(tmp_path / "unit")
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    gate = cu.Gate(
+        "path-ceiling",
+        "check_path_ceiling.py",
+        ("--ceiling", "4000", "--dir-ceiling", "4000", "--warn-at", "3999"),
+        *_path_ceiling_gate_thresholds(),
+    )
+
+    check = cu._run_cli_gate(gate, target, output_dir)  # pylint: disable=protected-access
+
+    assert check["native_status"] == "ok", check
+    assert check["native_exit"] == 0
+    assert check["status"] == cu.STATUS_PASS
+
+
+def test_path_ceiling_detail_carries_root_budget_and_says_it_is_host_relative() -> None:
+    """--quiet hides the numbers, so the facade row must state what makes the verdict judgeable."""
+    check = cu._annotate_path_ceiling(  # pylint: disable=protected-access
+        {
+            "detail": None,
+            "payload": {
+                "status": "over_ceiling",
+                "root_length": 74,
+                "root_budget": 62,
+                "longest": {"length": 287},
+                "counted": {"measured": 12043, "over_ceiling": 183, "unknown": 0},
+            },
+        }
+    )
+
+    assert "root budget 62" in check["detail"]
+    assert "root length 74" in check["detail"]
+    assert "183 of 12043 paths over ceiling" in check["detail"]
+    assert "longest 287" in check["detail"]
+    assert "shorter installation root may pass" in check["detail"]
+    assert check["root_budget"] == 62
+
+
+def test_path_ceiling_detail_preserves_an_existing_diagnostic() -> None:
+    """The annotation adds numbers; it must not overwrite why the facade could not form an opinion."""
+    check = cu._annotate_path_ceiling(  # pylint: disable=protected-access
+        {"detail": "native JSON output missing", "payload": {"counted": {"unknown": 4}}}
+    )
+
+    assert check["detail"].startswith("native JSON output missing; ")
+    assert "4 unmeasurable" in check["detail"]
+
+
+def test_path_ceiling_annotation_invents_no_census_when_the_scan_never_ran() -> None:
+    """A failed scan must not be dressed up as '0 of 0 paths over ceiling'."""
+    check = cu._annotate_path_ceiling(  # pylint: disable=protected-access
+        {"detail": "native JSON output missing", "payload": {"status": "ERROR"}}
+    )
+
+    assert check["detail"] == "native JSON output missing"
+    assert "over ceiling" not in check["detail"]
+    assert "root_budget" not in check
+
+
+def test_path_ceiling_finding_names_the_offending_paths() -> None:
+    """A breach the reader cannot locate is not actionable; worst_offenders must reach the render."""
+    payload = {
+        "status": "over_ceiling",
+        "worst_offenders": [
+            {"path": "C:/x/pbip/NAME/NAME.Report/definition/pages/aaa/visuals/bbb", "kind": "directory", "length": 287}
+        ],
+    }
+
+    findings = cu._payload_findings(payload)  # pylint: disable=protected-access
+
+    assert findings, "over-ceiling paths must render as findings"
+    assert "NAME.Report" in findings[0]
+
+
+def test_path_ceiling_runs_end_to_end_on_a_real_unit(tmp_path: Path) -> None:
+    """The wiring must survive the real CLI: registered, run under --scope all, and annotated.
+
+    The JSON assertion is what pins the ``_annotate_path_ceiling`` hook - on a PASS row the console
+    never renders ``detail``, so a stdout-only test would not notice the hook being dropped.
+    """
+    target = REPO_ROOT / "examples" / "shipping-kpis"
+    report_json = tmp_path / "unit.json"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "check_unit.py"),
+            str(target),
+            "--scope",
+            "all",
+            "--json",
+            str(report_json),
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert "path-ceiling: PASS (native ok exit 0; root budget " in result.stdout, result.stdout
+    payload = json.loads(report_json.read_text(encoding="utf-8"))
+    row = next(check for check in payload["checks"] if check["id"] == "path-ceiling")
+    assert row["status"] == cu.STATUS_PASS
+    assert isinstance(row["root_budget"], int)
+    assert "root budget" in row["detail"]
+
+
+# --- the PASS row must carry the relocation risk (PR #398 review) ------------------------------
+#
+# `_render_actionable_detail` renders `detail` for non-clean rows ONLY, so the annotation above is
+# invisible on exactly the row nobody reads twice. Measured on a byte-identical tree: root length 65
+# passes with root_budget 79; root length 94 breaches. The headline clause is therefore rendered at
+# every status, and unconditionally rather than only when `root_budget_is_tight` - which was False
+# (79 >= the advisory 40) for that very reproduction.
+
+
+def _pass_row(budget: int, *, tight: bool = False) -> dict[str, object]:
+    return cu._annotate_path_ceiling(  # pylint: disable=protected-access
+        {
+            "detail": None,
+            "payload": {
+                "status": "ok",
+                "root_length": 65,
+                "root_budget": budget,
+                "root_budget_is_tight": tight,
+                "shipping_root_budget_advisory": 40,
+                "longest": {"length": 243},
+                "counted": {"measured": 58, "over_ceiling": 0, "unknown": 0},
+            },
+        }
+    )
+
+
+def test_path_ceiling_pass_row_headline_carries_the_root_budget() -> None:
+    """A clean row that says only PASS hides the whole result of this particular scan."""
+    note = cu._path_ceiling_budget_note(_pass_row(79))  # pylint: disable=protected-access
+
+    assert "root budget 79" in note
+    assert "breaches above a 79-char installation root" in note
+
+
+def test_path_ceiling_budget_is_shown_even_when_not_tight() -> None:
+    """The tight flag would have stayed silent on the exact tree that motivated this finding."""
+    check = _pass_row(79, tight=False)
+
+    assert check["root_budget_is_tight"] is False
+    assert cu._path_ceiling_budget_note(check)  # pylint: disable=protected-access
+    assert "TIGHT" not in cu._path_ceiling_budget_note(check)  # pylint: disable=protected-access
+
+
+def test_path_ceiling_tight_budget_is_escalated_in_the_headline() -> None:
+    """Always showing the number does not cost the advisory its teeth."""
+    note = cu._path_ceiling_budget_note(_pass_row(30, tight=True))  # pylint: disable=protected-access
+
+    assert "root budget 30 TIGHT" in note
+
+
+def test_path_ceiling_headline_is_silent_when_there_is_no_budget() -> None:
+    """A scan that never ran has no budget to report, and must not invent one."""
+    assert cu._path_ceiling_budget_note({"id": "path-ceiling"}) == ""  # pylint: disable=protected-access
+
+
+def _render_one(check: dict[str, object]) -> str:
+    """Render a single-check report, so renderer behaviour is testable without a real unit."""
+    return cu.render(
+        {
+            "version": 1,
+            "target": "unit",
+            "scope": cu.SCOPE_ALL,
+            "omitted_checks": [],
+            "status": cu.STATUS_AUTOMATED_PASS,
+            "exit_code": 0,
+            "stopped_after": None,
+            "exemptions": {"path": None, "accepted": 0, "invalid": 0},
+            "checks": [check],
+            "brownfield": {},
+        }
+    )
+
+
+def test_path_ceiling_render_shows_the_budget_on_a_passing_row() -> None:
+    """The whole point of the fix: a PASS row must not hide the relocation risk.
+
+    ``_render_actionable_detail`` returns nothing for a clean row, so before this the console printed
+    only 'path-ceiling: PASS (native ok exit 0)' for a bundle that breaks on relocation.
+    """
+    row = _pass_row(79)
+    row.update({"id": "path-ceiling", "status": cu.STATUS_PASS, "native_status": "ok", "native_exit": 0})
+
+    out = _render_one(row)
+
+    assert "path-ceiling: PASS (native ok exit 0; root budget 79" in out, out
+    assert "breaches above a 79-char installation root" in out
+
+
+def test_path_ceiling_render_shows_the_budget_even_when_not_tight() -> None:
+    """Gating the line on root_budget_is_tight would have stayed silent on the motivating tree."""
+    row = _pass_row(79, tight=False)
+    row.update({"id": "path-ceiling", "status": cu.STATUS_PASS, "native_status": "ok", "native_exit": 0})
+    assert row["root_budget_is_tight"] is False
+
+    assert "root budget 79" in _render_one(row)
+
+
+def test_path_ceiling_impossible_budget_says_no_root_can_hold_it() -> None:
+    """A negative budget is not 'relocate somewhere shorter' - nothing anywhere would open."""
+    check = cu._annotate_path_ceiling(  # pylint: disable=protected-access
+        {
+            "detail": None,
+            "payload": {
+                "status": "over_ceiling",
+                "root_length": 65,
+                "root_budget": -5,
+                "longest": {"length": 320},
+                "counted": {"measured": 58, "over_ceiling": 2, "unknown": 0},
+            },
+        }
+    )
+
+    assert "NO installation root can hold this tree" in check["detail"]
+    assert "NO installation root can hold this tree" in cu._path_ceiling_budget_note(check)  # pylint: disable=protected-access
+
+
+def test_path_ceiling_wording_is_status_aware() -> None:
+    """A pass and a breach need opposite sentences; 'a shorter root may pass' is vacuous on a pass."""
+    passing = _pass_row(79)["detail"]
+    breaching = cu._annotate_path_ceiling(  # pylint: disable=protected-access
+        {
+            "detail": None,
+            "payload": {
+                "status": "over_ceiling",
+                "root_length": 94,
+                "root_budget": 79,
+                "longest": {"length": 272},
+                "counted": {"measured": 58, "over_ceiling": 2, "unknown": 0},
+            },
+        }
+    )["detail"]
+
+    assert "LONGER than 79 characters WILL breach" in passing
+    assert "may pass" not in passing
+    assert "at most 79 characters and this one is 94" in breaching
+    assert "shorter installation root may pass" in breaching
+
+
+def test_path_ceiling_pass_then_relocate_breaches_and_the_pass_said_so(tmp_path: Path) -> None:
+    """The reviewer's reproduction, committed: one tree, two roots, and the PASS row warned about it.
+
+    Both the tree depth and the relocation distance are DERIVED from a calibration scan rather than
+    hard-coded, so the test holds at any temp-directory depth (measured: 107 characters on this
+    Windows runner, ~50 on Linux) without encoding the scanner's ceiling arithmetic. Overshooting the
+    budget by one keeps the binding path one unit over its OWN ceiling, so nothing created here needs
+    Windows long-path support.
+    """
+    short_root = tmp_path / "s"
+    pad = _pad_for_headroom(short_root, tmp_path, headroom=12)
+    if pad is None:
+        pytest.skip("temp directory too deep to build a tree with controlled headroom")
+
+    short = _scan_paths(_deep_tree_with_pad(short_root, pad), tmp_path / "short.json")
+    assert short["status"] == "ok", short
+    budget, root_length = short["root_budget"], short["root_length"]
+    assert budget >= root_length
+
+    long_root = tmp_path / ("s" + "x" * (budget - root_length + 1))
+    after = _scan_paths(_deep_tree_with_pad(long_root, pad), tmp_path / "long.json")
+
+    assert after["status"] == "over_ceiling", after
+    note = cu._path_ceiling_budget_note(  # pylint: disable=protected-access
+        cu._annotate_path_ceiling({"detail": None, "payload": short})  # pylint: disable=protected-access
+    )
+    assert f"breaches above a {budget}-char installation root" in note
+
+
+def _deep_tree_with_pad(root: Path, pad: int) -> Path:
+    """A PBIR-shaped unit whose deepest path is driven by one padded page-id component."""
+    unit = root / "u"
+    leaf = unit / "fabric" / "Book.Report" / "definition" / "pages" / ("p" * pad)
+    leaf.mkdir(parents=True, exist_ok=True)
+    (leaf / "page.json").write_text("{}", encoding="utf-8")
+    return unit
+
+
+def _pad_for_headroom(root: Path, scratch: Path, headroom: int) -> int | None:
+    """Calibrate the padding that leaves exactly ``headroom`` characters of root budget.
+
+    ``root_budget`` falls one-for-one with the padded component, so one measured probe fixes the
+    constant without this test knowing the scanner's ceilings or path layout.
+    """
+    probe = _scan_paths(_deep_tree_with_pad(root, 1), scratch / "probe.json")
+    pad = probe["root_budget"] + 1 - probe["root_length"] - headroom
+    shutil.rmtree(root, ignore_errors=True)
+    return pad if 1 <= pad <= 200 else None
+
+
+def _scan_paths(unit: Path, json_path: Path) -> dict:
+    """Run the real scanner and return its machine-readable report."""
+    subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "check_path_ceiling.py"),
+            str(unit),
+            "--json",
+            str(json_path),
+            "--quiet",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return json.loads(json_path.read_text(encoding="utf-8"))

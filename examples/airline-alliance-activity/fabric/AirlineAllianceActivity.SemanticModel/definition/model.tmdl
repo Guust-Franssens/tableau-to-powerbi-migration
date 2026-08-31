@@ -11,7 +11,7 @@ annotation PBI_QueryOrder = ["Flight Activity", "Date", "Year Parameter", "Month
 annotation __PBI_TimeIntelligenceEnabled = 0
 
 ref table 'Flight Activity'
-ref table 'Date'
+ref table Date
 ref table 'Year Parameter'
 ref table 'Month Parameter'
 ref table 'Region Parameter'
