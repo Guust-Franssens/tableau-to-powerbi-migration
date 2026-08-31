@@ -459,34 +459,71 @@ def _finding(kind: str, window: DesktopWindow, evidence: str) -> DialogFinding:
     return DialogFinding(kind=kind, verdict=DIALOG_KIND_VERDICTS[kind], window=window, evidence=evidence)
 
 
+def _ownership_root(window: DesktopWindow, by_hwnd: dict[int, DesktopWindow]) -> DesktopWindow | None:
+    """Walk ``window``'s owner links to the UNOWNED root, or ``None`` if the chain cannot be resolved.
+
+    Returns ``None`` when a link points at a window this enumeration did not see (an owner in another
+    process, or one that is not top-level) or when the links form a cycle. Both mean the root is
+    unknown from here, and an unknown root must not be guessed: whatever :func:`main_frame` picks is
+    excluded from the credential prepass AND from classification.
+    """
+    seen = {id(window)}
+    current = window
+    while current.owner_hwnd:
+        owner = by_hwnd.get(current.owner_hwnd)
+        if owner is None or id(owner) in seen:
+            return None
+        seen.add(id(owner))
+        current = owner
+    return current
+
+
 def main_frame(windows: Iterable[DesktopWindow]) -> DesktopWindow | None:
     """The application FRAME - the window dialogs block - by ownership evidence, never by class.
 
-    ⚠️ **A class prefix is not an identity (#400 review round 3, finding 2).**
-    ``WindowsForms10.Window.8`` names a WinForms *family*, not one HWND: a native experiment showed an
-    owner **and its owned `FixedDialog`** both reporting the exact class
-    ``WindowsForms10.Window.8.app.0.2b2196a_r3_ad1``. Treating that prefix as "the main window" removed
-    a real credential dialog from both the prepass and classification - the detector returned nothing
-    at all for an owned dialog reading ``Enter your credentials``.
+    ⚠️ **Ownership is followed TRANSITIVELY, to the unowned root (#400 review round 4).** It used to
+    stop at the first owner it found, and "first owner" is itself a proxy for "the root": an owned
+    window can own another popup, so a Z-order of ``tooltip -> credential dialog -> frame`` made the
+    CREDENTIAL DIALOG the frame - and the frame is excluded from both the prepass and classification,
+    so the modal vanished. Three native reproductions, all missing the modal.
 
-    Two sources of evidence, in order:
+    ⚠️ **A class prefix is not an identity either (#400 review round 3, finding 2).**
+    ``WindowsForms10.Window.8`` names a WinForms *family*, not one HWND: an owner and its owned
+    ``FixedDialog`` both reported the exact class ``WindowsForms10.Window.8.app.0.2b2196a_r3_ad1``.
 
-    1. **Direct ownership.** If an enumerated window names another enumerated window as its owner, the
-       owner is the frame. This is the strongest signal available and it is exactly the relationship
-       that matters: the frame is the thing a modal disables.
-    2. **The process main-handle convention.** Otherwise the first VISIBLE UNOWNED window, which is how
-       Win32/.NET derive ``Process.MainWindowHandle``. Reached only when no window is owned - i.e. when
-       there are no dialogs at all - so the choice cannot hide one.
+    Evidence, in order, and **ambiguity fails closed** - returning ``None`` excludes nothing, which
+    costs a loud exit 3 at worst; guessing excludes a window, which is how a real modal disappears:
+
+    1. **Transitive ownership.** Every owned window is walked to its unowned root. Exactly one root
+       across the whole enumeration identifies the frame; two or more, or a chain that cannot be
+       resolved, is ambiguous.
+    2. **The process main-handle convention**, reached only when nothing is owned - i.e. when there are
+       no dialogs at all. Even here it must be UNAMBIGUOUS: one unowned window that actually renders.
+       Several is ambiguous, because "first in Z-order" would let a topmost unowned dialog present
+       itself as the application (round 4's second reproduction: an unowned ``Internet Explorer_Hidden``
+       ahead of the real frame, reading ``Enter your credentials``).
     """
+    windows = list(windows)
     by_hwnd = {window.hwnd: window for window in windows if window.hwnd}
-    for window in windows:
-        owner = by_hwnd.get(window.owner_hwnd) if window.owner_hwnd else None
-        if owner is not None:
-            return owner
+    roots: list[DesktopWindow] = []
+    resolved_all = True
+    owned_present = False
     for window in windows:
         if not window.owner_hwnd:
-            return window
-    return None
+            continue
+        owned_present = True
+        root = _ownership_root(window, by_hwnd)
+        if root is None:
+            resolved_all = False
+            continue
+        if not any(root is known for known in roots):
+            roots.append(root)
+    if owned_present:
+        # A dialog IS present, so the convention below does not apply - its premise is that nothing is
+        # owned. An unresolved chain here means the root is unknown, and unknown must not be guessed.
+        return roots[0] if len(roots) == 1 and resolved_all else None
+    candidates = [window for window in windows if not window.owner_hwnd and not renders_nothing(window)]
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def is_proven_non_blocking(window: DesktopWindow) -> bool:

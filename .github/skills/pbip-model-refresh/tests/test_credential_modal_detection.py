@@ -1695,19 +1695,111 @@ def test_the_frame_is_identified_by_ownership_before_any_convention() -> None:
 def test_an_unowned_window_that_renders_pixels_is_still_classified() -> None:
     """`renders_nothing` needs BOTH conjuncts: no owner AND no pixels. Neither alone suppresses.
 
-    An unowned 900x700 window displays something to a human even though it disables nobody, so it is
-    accounted for like any other window. Dropping the area conjunct would silently exclude every
-    unowned window - including the AAD host in its unowned form.
+    An unowned 900x700 window displays something to a human even though it disables nobody. Dropping
+    the area conjunct would silently exclude every unowned window - including the AAD host in its
+    unowned form - and would also empty ``main_frame``'s fallback candidate set.
     """
     frame = main_window()
     unowned_visible = DesktopWindow("", "Internet Explorer_Hidden", 900, 700, ("Password:",), hwnd=0x70007)
 
     assert not _credential_modal.renders_nothing(unowned_visible)
 
+    kept = _credential_modal.dialog_candidates([frame, unowned_visible], frame=frame)
+    assert unowned_visible in kept, "an unowned window with pixels must not vanish into healthy"
+
     state = inspect_credential_modal(111, lambda _pid: [frame, unowned_visible])
 
-    assert state.dialog is not None, "an unowned window with pixels must not vanish into healthy"
+    assert state.dialog is not None
     assert state.dialog.verdict == "DIALOG_UNRECOGNIZED"
+
+
+def test_ownership_is_followed_transitively_to_the_unowned_root() -> None:
+    """Round 4: "first owner" is itself a proxy for "the root", and it hid a credential modal.
+
+    An owned window can own another popup. With a Z-order of ``tooltip -> credential dialog -> frame``
+    the first owner reached is the CREDENTIAL DIALOG, and whatever ``main_frame`` picks is excluded
+    from the prepass AND from classification - so the modal disappeared. Measured on the round-3 build:
+    the frame came back as the ``#32770`` credential dialog and no modal was reported.
+    """
+    frame_hwnd, cred_hwnd, tip_hwnd = 0xF001, 0xC002, 0x7003
+    frame = DesktopWindow("sample", "WindowsForms10.Window.8.app.0.x", 2011, 1298, ("sample",), hwnd=frame_hwnd)
+    cred = DesktopWindow(
+        "", "#32770", 702, 355, ("Enter your credentials",), hwnd=cred_hwnd, owner_hwnd=frame_hwnd, owner_enabled=False
+    )
+    tip = DesktopWindow(
+        "", "tooltips_class32", 120, 24, ("hint",), hwnd=tip_hwnd, owner_hwnd=cred_hwnd, owner_enabled=True
+    )
+
+    # Z-order puts the tooltip first, so a one-edge walk lands on the credential dialog.
+    assert _credential_modal.main_frame([tip, cred, frame]) is frame
+    state = inspect_credential_modal(111, lambda _pid: [tip, cred, frame])
+
+    assert state.modal is not None, "a nested owner chain must not hide the credential dialog"
+    assert state.modal.window is cred
+
+
+def test_a_nested_chain_still_finds_the_modal_while_our_own_refresh_is_in_flight() -> None:
+    """Round 4's third reproduction: the frame is busy with a benign refresh, so nothing else reports.
+
+    With the frame misidentified this returned no modal, no dialog finding and no unknown state - the
+    exact "unassessable input in the clean bucket" shape, at depth two.
+    """
+    frame_hwnd, cred_hwnd, tip_hwnd = 0xF001, 0xC002, 0x7003
+    frame = DesktopWindow(
+        "sample", "WindowsForms10.Window.8.app.0.x", 2011, 1298, ("sample", "Refresh", "Evaluating..."), hwnd=frame_hwnd
+    )
+    cred = DesktopWindow(
+        "", "#32770", 702, 355, ("Enter your credentials",), hwnd=cred_hwnd, owner_hwnd=frame_hwnd, owner_enabled=False
+    )
+    tip = DesktopWindow(
+        "", "tooltips_class32", 120, 24, ("hint",), hwnd=tip_hwnd, owner_hwnd=cred_hwnd, owner_enabled=True
+    )
+
+    state = inspect_credential_modal(111, lambda _pid: [tip, cred, frame], operation_in_flight=True)
+
+    assert state.modal is not None
+    assert state.modal.window is cred
+
+
+def test_a_topmost_unowned_dialog_cannot_present_itself_as_the_application() -> None:
+    """Round 4's second reproduction: the fallback must not crown the FIRST of several unowned windows.
+
+    An unowned ``Internet Explorer_Hidden`` enumerated ahead of the real frame, reading
+    ``Enter your credentials``, was selected as the frame and therefore skipped by the prepass. With no
+    ownership evidence to settle it, identity is AMBIGUOUS and the rule fails closed: ``main_frame``
+    returns ``None``, nothing is excluded, and the prompt is found.
+    """
+    frame = DesktopWindow("sample", "WindowsForms10.Window.8.app.0.x", 2011, 1298, ("sample",), hwnd=0xF001)
+    aad = DesktopWindow("", "Internet Explorer_Hidden", 900, 700, ("Enter your credentials",), hwnd=0x9001)
+
+    assert _credential_modal.main_frame([aad, frame]) is None, "ambiguous identity must fail closed"
+
+    state = inspect_credential_modal(111, lambda _pid: [aad, frame])
+
+    assert state.modal is not None, "a topmost unowned dialog must not skip the prepass"
+    assert state.modal.window is aad
+
+
+def test_ambiguous_frame_identity_excludes_nothing() -> None:
+    """Failing closed means EXCLUDING NOTHING - the cost is a loud exit 3, never a silent clear."""
+    frame = DesktopWindow("sample", "WindowsForms10.Window.8.app.0.x", 2011, 1298, ("sample",), hwnd=0xF001)
+    other = DesktopWindow("second", "Cls", 800, 600, ("second",), hwnd=0x9001)
+
+    assert _credential_modal.main_frame([frame, other]) is None
+    kept = _credential_modal.dialog_candidates([frame, other])
+
+    assert frame in kept and other in kept, "an ambiguous frame must not exclude a window"
+
+
+def test_an_unresolvable_owner_chain_fails_closed() -> None:
+    """An owner this enumeration never saw, or a cycle, leaves the root UNKNOWN - so guess nothing."""
+    frame = DesktopWindow("sample", "WindowsForms10.Window.8.app.0.x", 2011, 1298, ("sample",), hwnd=0xF001)
+    orphan = DesktopWindow("", "#32770", 702, 355, (), hwnd=0xC002, owner_hwnd=0xDEAD, owner_enabled=False)
+    left = DesktopWindow("", "Cls", 400, 300, (), hwnd=0xA001, owner_hwnd=0xA002, owner_enabled=False)
+    right = DesktopWindow("", "Cls", 400, 300, (), hwnd=0xA002, owner_hwnd=0xA001, owner_enabled=False)
+
+    assert _credential_modal.main_frame([frame, orphan]) is None, "an unseen owner leaves the root unknown"
+    assert _credential_modal.main_frame([left, right]) is None, "a cycle leaves the root unknown"
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="creates real Win32 windows")

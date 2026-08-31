@@ -365,9 +365,27 @@ stay byte-identical.
 >
 > | exclusion | the claim it makes |
 > |---|---|
-> | `main_frame(...)` | it is the application, and the thing dialogs block. Identified by **direct ownership** first (an owned window names its owner), falling back to the `MainWindowHandle` convention — first visible unowned window — only when nothing is owned, i.e. when there are no dialogs to hide. |
+> | `main_frame(...)` | it is the application, and the thing dialogs block. Identified by **transitive ownership** — every owned window is walked to its **unowned root** — falling back to the `MainWindowHandle` convention only when *nothing* is owned. **Ambiguity fails closed**: two or more roots, an unresolvable chain, or several candidate unowned windows all return `None`, which excludes nothing. |
 > | `is_proven_non_blocking(...)` | an **enabled owner** proves this window blocks nothing. One-way: a *disabled* owner never convicts (Power BI's own refresh dialog disables it too) and `None` — no owner — means the test **did not apply**, which is not the same as passing it. |
 > | `renders_nothing(...)` | **unowned AND zero-area**: no owner to disable *and* no pixels to display. Both conjuncts are required; either alone is one of the dead proxies. |
+>
+> ⚠️ **Round 4: "first owner" was itself a proxy for "the root", and it hid a credential modal.** The
+> traversal originally stopped at the first ownership edge. An owned window can own another popup, so a
+> Z-order of **`tooltip → credential dialog → frame`** made the *credential dialog* the frame — and the
+> frame is excluded from the prepass **and** from classification, so the modal vanished. Three native
+> reproductions, all missing it:
+>
+> | construction | before |
+> |---|---|
+> | nested chain `tooltip → credential dialog → frame` | frame = the `#32770` credential dialog; **no modal** |
+> | unowned `Internet Explorer_Hidden` ahead of the real frame, reading `Enter your credentials` | selected as the frame; prepass skipped it; **no modal** |
+> | that misidentified dialog owning an *enabled* tooltip, frame busy with benign refresh content, `operation_in_flight=True` | **no modal, no dialog finding, no unknown state** |
+>
+> **Two rules came out of it, and both are load-bearing.** Follow ownership *transitively*; and where
+> identity is **ambiguous, fail closed** — return `None` and exclude nothing. The cost of failing
+> closed is a loud exit 3; the cost of guessing is a real modal disappearing. That is why the unowned
+> fallback requires **exactly one** rendering unowned window, and why it is not reached at all once any
+> window is owned (its premise is that there are no dialogs).
 >
 > The arbiter's one-way enabled-owner exoneration is therefore **ported**, not skipped — that
 > divergence note in the module docstring is gone.
