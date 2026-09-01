@@ -1,0 +1,359 @@
+"""
+purpose: render one engine-gap harvest report - the console view and the upstream-fileable markdown.
+usage:   imported by scripts/harvest_engine_gaps.py; not a user-facing CLI
+
+Split out because rendering consumes only the finished report dict: it needs no bundle, no hashes and
+no filesystem, so it can be exercised on a literal payload. The seam also keeps `harvest_engine_gaps`
+under pylint's `max-module-lines` after the round-3 review added reconciliation and named
+incompleteness reasons.
+
+Every table here carries its DENOMINATOR, and every non-claim is printed rather than implied - the
+report is meant to be pasted into an upstream issue, where an unqualified count is worse than none.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+# ⚠️ This module imports NOTHING from `harvest_engine_gaps`, deliberately. It reads the vocabulary
+# out of the payload instead - the provenance names from `report["provenance"]` (whose insertion
+# order IS the canonical order) and the baseline roots from `report["baseline_roots"]`. That keeps
+# the dependency one-way and lets these renderers be exercised on a literal dict.
+DEFAULT_TOP = 12
+
+# The harvest's three verdicts. Defined HERE, in the module with no dependencies, so the renderer can
+# ask "is this run complete?" from the authoritative constant instead of a duplicated string literal;
+# `harvest_engine_gaps` imports and re-exports them.
+STATUS_COMPLETE = "complete"
+STATUS_INCOMPLETE = "incomplete"
+STATUS_UNTRUSTWORTHY = "untrustworthy"
+
+# ⚠️ Printed beside EVERY conclusion this report reaches, clean or not.
+#
+# The harvest attributes provenance from one read of the bundle and takes evidence from others, so
+# a bundle edited WHILE it runs can have a tier edit attributed to the engine, with `status:
+# complete` and nothing to show for it. Four review rounds of PR #399 tried to detect that; each fix
+# was defeated by a read the previous enumeration had not modelled, and the guarantee was withdrawn.
+#
+# Descoping the detector WITHOUT descoping the claim would have shipped the false confidence with
+# none of the partial protection - strictly worse than either shipping or not shipping. So the
+# limitation is stated where the conclusion is read, not only in the JSON a human may never open.
+CONCURRENCY_CAVEAT = (
+    "> ⚠️ **Attribution assumes the bundle was not modified during the harvest. This is NOT"
+    " verified.** A concurrent write can make this report attribute a tier edit to the engine"
+    " without any warning - see issue #418 for the reproductions and what a real fix needs. Harvest"
+    " a bundle nothing else is writing to."
+)
+
+
+def _provenance_names(report: dict[str, Any]) -> list[str]:
+    """The provenance vocabulary, in the order the harvest wrote it."""
+    return [name for name in report["provenance"] if name != "differing_files"]
+
+
+def _pct(part: int, whole: int) -> str:
+    return f"{part}/{whole} ({round(100 * part / whole):d}%)" if whole else f"{part}/0 (n/a)"
+
+
+def _layer_lines(report: dict[str, Any]) -> list[str]:
+    lines = []
+    for layer, summary in report["layers"].items():
+        if not summary["artifacts"]:
+            continue
+        lines.append(
+            f"  {layer + ' layer':<14}: {_pct(summary['pairs_assessed'], summary['artifacts'])} assessed"
+            f" | identical {summary['identical']}, differs {summary['differs']}"
+            f" | no baseline {summary['unpaired_no_baseline']},"
+            f" no working copy {summary['unpaired_no_working']},"
+            f" unassessable {summary['unassessable']}"
+        )
+        lines.append(
+            f"  {'':<14}  files: {summary['files_changed']} changed,"
+            f" {summary['files_added']} added, {summary['files_removed']} removed,"
+            f" {summary['files_post_engine_only']} post-engine only"
+        )
+        if summary["baseline_reference_checked"]:
+            lines.append(
+                f"  {'':<14}  baseline dataset reference resolves:"
+                f" {_pct(summary['baseline_reference_resolves'], summary['baseline_reference_checked'])}"
+            )
+    return lines
+
+
+def _finding_lines(report: dict[str, Any], top: int) -> list[str]:
+    """The sections that only appear when there is something to say."""
+    return _evidence_lines(report, top) + _integrity_lines(report, top) + _coverage_lines(report, top)
+
+
+def _evidence_lines(report: dict[str, Any], top: int) -> list[str]:
+    """What changed, and who changed it."""
+    lines: list[str] = []
+    if report["shapes"]:
+        lines.append(f"  shapes (top {top})       :")
+        for row in report["shapes"][:top]:
+            share = f"{100 * row['share_of_differing_files']:.0f}%" if row["share_of_differing_files"] else "n/a"
+            lines.append(f"      {row['files']:>5} files / {row['artifacts']:>3} artifacts  {share:>5}  {row['shape']}")
+    if report["tier_edits"]:
+        lines.append(f"  TIER EDITS            : {len(report['tier_edits'])} file(s) changed after the engine ran")
+        for record in report["tier_edits"][:top]:
+            declared = record["declared_by"] or "UNDECLARED"
+            lines.append(
+                f"      [{record['unit'] or record['artifact']}] {record['path']} {record['shapes']} <- {declared}"
+            )
+    if report["unpaired_drift_records"]:
+        lines.append(
+            f"  UNPAIRED TIER EDITS   : {report['unpaired_drift_records']} adjudicated path(s) belong to no"
+            " reports/-vs-pbip/ pair (e.g. a `.pbip` project file) and are reported from the inventory alone"
+        )
+    return lines
+
+
+def _integrity_lines(report: dict[str, Any], top: int) -> list[str]:
+    """Why the delta might not be readable as engine behaviour at all."""
+    lines: list[str] = []
+    if report["baseline_drift"]:
+        lines.append(
+            f"  BASELINE DRIFT        : {len(report['baseline_drift'])} engine-baseline path(s) under"
+            f" {'/'.join(r.rstrip('/') for r in report['baseline_roots'])} moved after the engine ran."
+            " Those trees are never edited by anyone, so this delta cannot be read as engine behaviour."
+        )
+        for entry in report["baseline_drift"][:top]:
+            lines.append(f"      {entry['kind']:<8} {entry['target']}  ({entry['declared_by'] or 'undeclared'})")
+    if report["baseline_tampered"]:
+        lines.append(
+            f"  BASELINE TAMPERED     : {len(report['baseline_tampered'])} compared file(s) whose baseline side drifted"
+        )
+        for record in report["baseline_tampered"][:top]:
+            lines.append(f"      [{record['unit'] or record['artifact']}] {record['path']}")
+    return lines
+
+
+def _coverage_lines(report: dict[str, Any], top: int) -> list[str]:
+    """What this run could not see - never folded into the counts above."""
+    lines: list[str] = []
+    if report["incomplete_reasons"]:
+        lines.append("  NOT COMPLETE because  :")
+        for reason in report["incomplete_reasons"]:
+            lines.append(f"      - {reason}")
+    if report["unassessable"]:
+        lines.append(f"  UNASSESSABLE (not passed): {len(report['unassessable'])} path(s) could not be read")
+        for record in report["unassessable"][:top]:
+            lines.append(f"      [{record.get('scope', 'content')}] {record['reason']}  {record['path']}")
+    if report["unreconciled_drift"]:
+        lines.append(
+            f"  UNRECONCILED DRIFT    : {len(report['unreconciled_drift'])} adjudicated path(s) this module"
+            " could not place - reported rather than dropped, and the run cannot be `complete`"
+        )
+        for entry in report["unreconciled_drift"][:top]:
+            lines.append(f"      {entry['kind']:<8} {entry['target']}")
+    blind = report["git_blind_spot"]
+    if blind["count"]:
+        lines.append(
+            f"  git blind spot        : {blind['count']} pair(s) exceed {blind['path_max']} characters -"
+            " the AGENTS.md `git diff --no-index` form returns exit 1 with NO stat line for these."
+            " Assessed here anyway."
+        )
+        for record in blind["pairs"][:top]:
+            lines.append(f"      {record['longest_path']:>4}  [{record['layer']}] {record['unit']}")
+    return lines
+
+
+def render(report: dict[str, Any], top: int = DEFAULT_TOP) -> str:
+    """Human-readable console report."""
+    provenance = report["provenance"]
+    total = provenance["differing_files"]
+    coverage = report["attribution"]["coverage"]
+    lines = [
+        f"{report['status'].upper()}: {report['bundle']}",
+        f"  engine                : {report['engine'].get('version') or 'unknown'}"
+        f" (canonical={report['engine'].get('canonical')})",
+        f"  attribution           : {'hash-attributed' if report['attribution']['usable'] else 'NOT AVAILABLE'}"
+        f" from {report['attribution']['files_recorded']} recorded artifacts",
+    ]
+    lines += [f"      note              : {note}" for note in report["attribution"]["notes"]]
+    lines.append(
+        f"  attribution coverage  : {_pct(coverage['paths_attributed'], coverage['paths_compared'])}"
+        f" of compared paths{'' if coverage['complete'] else '  <- NOT complete; status cannot be `complete`'}"
+    )
+    lines.extend(_layer_lines(report))
+    lines.append(f"  differing files       : {total}")
+    lines += [f"      {name:<18}: {_pct(provenance[name], total)}" for name in _provenance_names(report)]
+    lines.append(
+        "      -> only `tier_edit` answers 'what did the engine get wrong?'."
+        " `engine_internal` is the engine's own reference-vs-bound difference."
+    )
+    lines.extend(_finding_lines(report, top))
+    return "\n".join(lines)
+
+
+def _tier_edits_determined(report: dict[str, Any]) -> bool:
+    """Whether "no tier edits" is a FINDING rather than an absence of evidence.
+
+    ⚠️ An empty `tier_edits` list has two completely different meanings and the markdown used to
+    print the reassuring one for both. Measured (blind review round 4 of PR #399): deleting
+    `input_manifest.json` from a differing fixture gave `status=incomplete`,
+    `attribution.usable=false` and **two unattributed differences** - and the report still said
+    *"Every differing byte in this bundle is still hash-identical to what the engine itself
+    recorded."* The JSON said `incomplete`; the prose a human actually reads said the opposite, which
+    is the same defect class as findings 1-4 of the previous round, moved into the human-facing view.
+
+    So the claim is made only when attribution is usable, every differing path was positively
+    attributed to the engine, AND the engine's own baseline is intact. Anything else is undetermined.
+
+    ⚠️ That last clause was NOT in the review; it came out of writing the test for the first two. A
+    rewritten `reports/` tree makes the two sides agree, so `differing_files` is 0, `engine_internal`
+    is 0, and the first two clauses both pass - the markdown happily asserted that every differing
+    byte matched the engine on a bundle whose status was `untrustworthy`. Same class again, one layer
+    down: an empty count reading as a clean result.
+
+    ⚠️ And that was still not enough - blind review round 5 found a FOURTH instance, which is why this
+    now asks the harvest instead of re-deriving. `unreconciled_drift` and a `pbip/` discovery failure
+    both leave `status=incomplete` with ZERO compared paths, so `engine_internal == differing_files`
+    is **vacuously true** and all three clauses passed. Each round added a condition that rebuilt
+    "is this trustworthy?" from parts and missed a different one; the harvest already computes
+    `status` and `incomplete_reasons`, and a re-derivation can only ever enumerate the reasons known
+    on the day it was written.
+    """
+    if report.get("status") != "complete" or report.get("incomplete_reasons"):
+        return False
+    provenance = report["provenance"]
+    if report["baseline_drift"] or report["baseline_tampered"]:
+        return False
+    # Belt and braces beneath the authoritative status: an empty set makes this equality
+    # vacuously true, so it can never be the ONLY thing standing between a reader and the claim.
+    return bool(report["attribution"]["usable"]) and provenance["engine_internal"] == provenance["differing_files"]
+
+
+def _tier_edit_section(report: dict[str, Any], top: int) -> list[str]:
+    """The section that answers issue #274 - or explains why this run cannot.
+
+    ⚠️ ONE exit, and the caveat is appended there. It used to be appended per branch, and the
+    `Undetermined` branch returned without it - so the caveat was missing from exactly the reports
+    that deserved it most, while the clean ones carried it. Adding it to the third branch would have
+    left the fourth branch open to whoever writes it next; a single exit cannot be forgotten.
+    """
+    lines = ["", "## Tier edits (the engine-gap evidence)", ""]
+    lines += _tier_edit_conclusion(report, top)
+    return lines + ["", CONCURRENCY_CAVEAT]
+
+
+def _tier_edit_conclusion(report: dict[str, Any], top: int) -> list[str]:
+    """The branch-specific body only. Never append the concurrency caveat here."""
+    if report["tier_edits"]:
+        lines = ["| unit | layer | file | shapes | declared by |", "|---|---|---|---|---|"]
+        for record in report["tier_edits"][:top]:
+            lines.append(
+                f"| {record['unit']} | {record['layer']} | `{record['path']}` |"
+                f" {', '.join(record['shapes'])} | {record['declared_by'] or '**undeclared**'} |"
+            )
+        return lines
+    if _tier_edits_determined(report):
+        return [
+            "**None.** Every differing byte in this bundle is still hash-identical to what the engine"
+            " itself recorded, so nothing here shows work a human or agent had to do. A bundle with no"
+            " fix pass cannot answer issue #274's question, and this report does not pretend it can."
+        ]
+    provenance = report["provenance"]
+    lines = [
+        "**Undetermined - this is NOT a clean result.** No tier edit is listed, but that is an absence"
+        " of evidence rather than evidence of absence: this run could not attribute"
+        f" {provenance['unattributed']} of {provenance['differing_files']} differing path(s), so"
+        " nothing here supports the claim that the engine wrote every byte."
+    ]
+    if report["baseline_drift"] or report["baseline_tampered"]:
+        lines.append(
+            "\nThe engine's own baseline drifted, so the comparison this section rests on is not a"
+            " comparison against what the engine emitted. See the baseline-drift section below."
+        )
+    lines += ["", "Why this run is not complete:", ""]
+    lines += [f"- {reason}" for reason in report["incomplete_reasons"] or ["the engine baseline itself drifted"]]
+    return lines
+
+
+def _markdown_shape_table(report: dict[str, Any], top: int) -> list[str]:
+    lines = ["| shape | files | artifacts | share of differing files |", "|---|---:|---:|---:|"]
+    for row in report["shapes"][:top]:
+        share = f"{100 * row['share_of_differing_files']:.0f}%" if row["share_of_differing_files"] else "n/a"
+        lines.append(f"| `{row['shape']}` | {row['files']} | {row['artifacts']} | {share} |")
+    return lines
+
+
+def render_markdown(report: dict[str, Any], top: int = DEFAULT_TOP) -> str:
+    """An upstream-fileable summary: frequencies with denominators, and explicit non-claims."""
+    provenance = report["provenance"]
+    total = provenance["differing_files"]
+    lines = [
+        "# Engine-gap harvest",
+        "",
+        f"- bundle: `{report['bundle']}`",
+        f"- engine: **{report['engine'].get('version') or 'unknown'}**"
+        f" (canonical: {report['engine'].get('canonical')})",
+        f"- harvested: {report['generated_at']}",
+        f"- status: **{report['status']}**",
+        f"- attribution: {'hash-attributed' if report['attribution']['usable'] else '**unavailable**'}"
+        f" from {report['attribution']['files_recorded']} recorded artifacts, adjudicated by"
+        " `check_migration_progress.adjudicate_generated_drift` (the `--tamper` gate's own machinery)",
+        f"- attribution coverage: {report['attribution']['coverage']['paths_attributed']}"
+        f"/{report['attribution']['coverage']['paths_compared']} compared paths"
+        f"{'' if report['attribution']['coverage']['complete'] else ' - **not complete**'}",
+        "",
+        "## Coverage, per layer",
+        "",
+        "| layer | artifacts | assessed | identical | differs | no baseline | no working copy | unassessable |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for layer, summary in report["layers"].items():
+        lines.append(
+            f"| {layer} | {summary['artifacts']} | {summary['pairs_assessed']} | {summary['identical']} |"
+            f" {summary['differs']} | {summary['unpaired_no_baseline']} |"
+            f" {summary['unpaired_no_working']} | {summary['unassessable']} |"
+        )
+    lines += [
+        "",
+        "## Who wrote the difference",
+        "",
+        "| provenance | files | share |",
+        "|---|---:|---:|",
+    ]
+    for name in _provenance_names(report):
+        share = f"{round(100 * provenance[name] / total)}%" if total else "n/a"
+        lines.append(f"| `{name}` | {provenance[name]} | {share} |")
+    lines += [
+        "",
+        "> `engine_internal` means the engine wrote **both** sides - its reference-only emission and"
+        " its bound working copy. That is a by-design difference and is **not** evidence of an engine"
+        ' defect. Only `tier_edit` answers *"what did a human or agent have to change?"*.',
+        "",
+        "## What changed",
+        "",
+    ]
+    lines += _markdown_shape_table(report, top)
+    lines += _tier_edit_section(report, top)
+    if report["baseline_drift"]:
+        lines += ["", "## Engine baseline drift (why this report is untrustworthy)", ""]
+        lines += ["| kind | path | declared by |", "|---|---|---|"]
+        for entry in report["baseline_drift"][:top]:
+            lines.append(f"| {entry['kind']} | `{entry['target']}` | {entry['declared_by'] or '**undeclared**'} |")
+        lines += [
+            "",
+            "> `reports/` and `semantic_models/` are the engine's pristine reference emission and are"
+            " **never edited, by anyone** (AGENTS.md). A declaration makes such an edit visible, not"
+            " legitimate, so drift here is refused whether declared or not.",
+        ]
+    lines += ["", "## What this does not say", ""]
+    lines += [
+        "- **Not effort.** File and line counts are not hours; a reformat and a fidelity fix count the same.",
+        "- **Not why.** Provenance says who, shape says what; the reason lives in the handover and"
+        " `limitations_encountered`.",
+        "- **Not a defect list.** `engine_internal` differences are by construction not defect evidence.",
+    ]
+    if report["unreconciled_drift"]:
+        lines.append(
+            f"- **{len(report['unreconciled_drift'])} adjudicated path(s) could not be placed** by this module and"
+            " are listed in `unreconciled_drift`; the run is not `complete` while any remain."
+        )
+    if report["unassessable"]:
+        lines.append(
+            f"- **{len(report['unassessable'])} path(s) could not be read** and are excluded from every count above."
+        )
+    return "\n".join(lines) + "\n"
