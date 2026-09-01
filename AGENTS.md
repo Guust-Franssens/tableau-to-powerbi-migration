@@ -337,7 +337,10 @@ Three things about the oracle bite, all verified in `scripts/capture_tableau_ora
   never reaches the exit code, and zero selected views also exits 0 — so `--images` can return 0
   having produced no image. Confirm the capture in `_oracle/oracle-manifest.json` (a non-zero
   `view_count`, plus each view's image status) before believing it happened. It writes renders to
-  `_oracle/images/<view>__<luid8>.png`, numbers to `_oracle/data/`, and that manifest.
+  `_oracle/images/<full-view-luid>.png`, numbers to `_oracle/data/`, and that manifest. ⚠️ The stem is
+  the **full validated LUID and nothing else** (`artifact_stem`): a view NAME is response data, and a
+  reflected session token arriving as one was once slugged and truncated into the filename, where no
+  downstream scrub could recognise it. Do not expect a readable name in the path.
 
 Credentials for either tool come from `.env` **or exported environment variables** (the latter take
 precedence), never CLI arguments.

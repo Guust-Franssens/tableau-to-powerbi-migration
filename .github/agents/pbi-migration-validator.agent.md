@@ -214,8 +214,9 @@ Run these passes **in order** — cheap structural checks first, expensive judgm
      cite it.** It is a static scan of the *model's* TMDL text: blind to the report, blind to data,
      and blind to every check its `checks` map omits (absent = **not evaluated**, never passed). It
      shipped `ok: true` on **30 of 44** workbooks the same `report.json` recorded defects for
-     (2.339.0). No static gate settles openability: the TMDL oracle (`check_unit.py --scope
-     data-model`) is the mandatory parser-level gate and is itself necessary, not sufficient — only a
+     (2.339.0). No static gate settles openability: the TMDL oracle (`check_unit.py --scope model`,
+     which runs the `data-model` check) is the mandatory parser-level gate and is itself necessary,
+     not sufficient — only a
      cold Desktop open does.
    - **Adjudicate each engine claim against the Tableau source/reference, never against the shipped
      visual alone.** The shipped visual was built from the claim, so agreement only proves the claim

@@ -1163,7 +1163,9 @@ it is a regression from the fix for upstream #177, which silently retracts the d
 **No static gate settles openability, and the TMDL oracle is not the exception.** The strongest
 offline signal is the parser Desktop itself uses — `TmdlSerializer.DeserializeDatabaseFromFolder`,
 wired here as `scripts/tmdl_oracle.py` and reached through `python scripts/check_datamodel.py` or
-`check_unit.py --scope data-model`. Treat it as the **mandatory parser-level structural gate**, and
+`check_unit.py --scope model` (which runs the check whose id is `data-model` — `data-model` is a
+check id, **not** a `--scope` value; passing it as a scope exits 2). Treat it as the **mandatory
+parser-level structural gate**, and
 note what it does better than the selfcheck: it exits **3 (`UNASSESSABLE`)** rather than `0` when it
 cannot run, which is the discipline `openability_selfcheck` does not apply to its own skipped checks.
 
