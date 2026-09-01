@@ -35,12 +35,35 @@ returns true only for a `*-Trunc` derivation, and its docstring states the belie
 *"a discrete date PART (Year / Month, derivation in `_DATE_PARTS`) is NOT continuous. Under an
 Automatic mark Tableau renders a continuous date + a measure as a LINE (a discrete date -> bars)."*
 The parenthetical is what Tableau's docs contradict. The predicate is consumed at
-`twb_to_pbir.py:2505-2508`; every derivation in `_DATE_PARTS` (`twb_to_pbir.py:394`) falls through to
-`VT_COLUMN`.
+`twb_to_pbir.py:2505-2508`, and it is `endswith("-Trunc")` — so **by construction** nothing in
+`_DATE_PARTS` (`:394`) or `_DATE_EXACT_DERIVATIONS` (`:410`) can satisfy it, and all of them fall
+through to `VT_COLUMN`. 🟢 Three representatives measured at 2.339.0, same harness:
+
+| derivation | family | emitted |
+|---|---|---|
+| `Year` | `_DATE_PARTS` | `columnChart` ❌ |
+| `MonthYear` | `_DATE_PARTS` | `columnChart` ❌ |
+| **`MDY`** | `_DATE_EXACT_DERIVATIONS` | `columnChart` ❌ |
+
+`MDY` is the sharpest case: not a numeric part at all, but the date value at day grain, which the
+engine's own comment at `:404` calls *"an ORDINARY date column — the same underlying date as a
+continuous exact-date pill, only rendered as discrete members"*.
+
+⚠️ **The "Tableau renders" column is doc-derived, not render-verified.** No Tableau install was used;
+the claim rests on the product doc quoted above. The engine-side column *is* measured.
 
 **The engine emits no warning.** Measured on variant A: `viz_fidelity` = `tier: rebuilt,
 status: rebuilt`, empty `reason`, and a `remediation_worklist` with **0** items — stacking is
 structurally valid, so nothing downstream flags it either.
+
+## When the same `columnChart` is CORRECT
+
+An explicit `<mark class='Bar'/>` over the same shelves is faithfully a `columnChart`: Tableau's own
+doc says of the Bar mark that *"Marks are automatically stacked"*, so a colour dimension stacks there
+too and the meaningless total exists in the **source**. Only the `Automatic` (and `Line`) cases are
+defects. Read the worksheet's `<mark class=…>` before changing any `visualType` — for a workbook with
+no live server, `scripts/extract_twb_thumbnails.py` recovers Tableau's own per-worksheet render from
+inside the `.twb`/`.twbx`.
 
 ## What this fixture also disproves
 

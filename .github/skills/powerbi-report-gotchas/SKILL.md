@@ -624,10 +624,11 @@ shelves, tooltips and manual sorts.
     `_has_continuous_date` is true only for a `*-Trunc` derivation, and its own docstring states the
     belief the docs contradict — *"a discrete date PART … is NOT continuous. Under an Automatic mark
     Tableau renders a continuous date + a measure as a LINE (a discrete date -> bars)"*. Consumed at
-    `twb_to_pbir.py:2505-2508`, so everything in `_DATE_PARTS` (`:394`) and every discrete **exact
-    date** in `_DATE_EXACT_DERIVATIONS` falls through to `VT_COLUMN`. 🟢 Measured on engine 2.339.0:
-    `Year`, `MonthYear` **and `MDY`** (the literal date value at day grain — unambiguously a date
-    dimension) all emit `columnChart`; `Month-Trunc` and an explicit `Line` mark emit `lineChart`.
+    `twb_to_pbir.py:2505-2508`, and the predicate is `endswith("-Trunc")` — so by construction nothing
+    in `_DATE_PARTS` (`:394`) or `_DATE_EXACT_DERIVATIONS` (`:410`) satisfies it. 🟢 Measured on engine
+    2.339.0: `Year`, `MonthYear` **and `MDY`** (the literal date value at day grain — unambiguously a
+    date dimension) all emit `columnChart`; `Month-Trunc` and an explicit `Line` mark emit `lineChart`.
+    ⚠️ The Tableau half is doc-derived, not render-verified — no Tableau install was used.
   - **Reproduction:** `fixtures/upstream-repros/issue-424-automatic-mark-discrete-date/` — an A/B/C
     triple identical but for one thing each — pinned by `tests/test_issue_424_chart_type_pin.py`.
   - ⚠️ **A shared visual id across two workbooks is NOT evidence of an engine inconsistency**, and
