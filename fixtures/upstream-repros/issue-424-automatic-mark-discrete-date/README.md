@@ -17,6 +17,9 @@ shape this came from) five airlines at 95/92/88/97/90 % stack into one ~462 % ba
 
 ## Why this is an engine defect and not a judgement call
 
+Filed upstream as
+[`Yarbrdab000/tableau-fabric-skills#184`](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/184).
+
 Tableau's own documentation, *[Change the Type of Marks in the
 View](https://help.tableau.com/current/pro/desktop/en-us/viewparts_marks_marktypes.htm)* (fetched
 2026-09-01), states the rule twice and neither statement mentions continuity:

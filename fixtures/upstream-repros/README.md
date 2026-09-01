@@ -21,7 +21,7 @@ $json = & $py scripts\engine_source.py --json | ConvertFrom-Json
 | #166 / #164 | [`issue-166-custom-sql-disambiguation`](issue-166-custom-sql-disambiguation/README.md) | Meaningful negative: model tables disambiguate, but report fails closed/skips fields; no wrong PBIR binding emitted. |
 | #168 | [`issue-168-case-one-bad-branch`](issue-168-case-one-bad-branch/README.md) | Reproduces: one unresolved CASE branch stubs the whole dispatcher measure to `BLANK()`. |
 | #171 | [`issue-171-measure-names-parameter`](issue-171-measure-names-parameter/README.md) | Partial: parameter calc translates, but virtual Measure Names remains unresolved/deferred and no field parameter is emitted. |
-| #424 | [`issue-424-automatic-mark-discrete-date`](issue-424-automatic-mark-discrete-date/README.md) | Reproduces **at 2.339.0**: an `Automatic` mark over a *discrete* date part emits a stacked `columnChart` where Tableau draws a line — silently (`tier: rebuilt`, no warning, empty worklist). Two controls emit `lineChart`. |
+| #424 | [`issue-424-automatic-mark-discrete-date`](issue-424-automatic-mark-discrete-date/README.md) | Reproduces **at 2.339.0** (upstream [#184](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/184)): an `Automatic` mark over a *discrete* date part emits a stacked `columnChart` where Tableau draws a line — silently (`tier: rebuilt`, no warning, empty worklist). Two controls emit `lineChart`. |
 
 ⚠️ The #424 fixture is pinned by its own module, **`tests/test_issue_424_chart_type_pin.py`**, not by
 `tests/test_upstream_repro_pins.py`. The shared harness asserts `PINNED_ENGINE_VERSION` before it
