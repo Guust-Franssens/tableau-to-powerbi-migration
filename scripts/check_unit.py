@@ -758,7 +758,8 @@ def page_drop_explanations(target: Path) -> dict[str, Any]:
     unexplained. Measured cost of that strictness on the real estate: 21 of 23 absent candidates are
     still explained; the 2 that are not are engine sites :14529 (dashboard-scope) and :14562, whose
     rows carry ``tier: "degraded"`` because the engine's tier vocabulary describes VISUAL fidelity
-    and has no way to say "this candidate produced no PAGE" (filed upstream).
+    and has no way to say "this candidate produced no PAGE"
+    (upstream Yarbrdab000/tableau-fabric-skills#188).
     """
     keys = _unit_workbook_keys(target)
     workbooks, _unreadable = _handover_workbooks(target)
