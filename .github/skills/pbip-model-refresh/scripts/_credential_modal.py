@@ -52,6 +52,9 @@ was crowned the application - and returns ``None`` for anything else. ``Process.
 no authority either: measured, it is a Z-ORDER answer (see :func:`main_frame`).
 """
 
+# pylint: disable=too-many-lines
+#   #417 folded the PowerShell arbiter's decision logic into this module ON PURPOSE - one decision
+#   implementation is the whole fix, so the growth is the design, not drift.
 from __future__ import annotations
 
 import ctypes
@@ -108,6 +111,15 @@ class DesktopWindow:
     hwnd: int = 0
     owner_hwnd: int = 0
     owner_enabled: bool | None = None
+    # Supplied ONLY by the PowerShell collector, which has UI Automation control types (issue #417).
+    # `interactive_texts` enables the prose join - the join was previously refused here for the
+    # documented reason that Win32 gives no control-type signal, so an interposed `Cancel` could not be
+    # excluded. When the collector supplies the signal, the reason not to join is gone.
+    interactive_texts: tuple[str, ...] = ()
+    # Three-valued. `None` = the question does not apply (this module's own Win32 enumeration either
+    # reads a window fully or raises), `False` = the UIA harvest was truncated/killed/unreadable.
+    harvest_complete: bool | None = None
+    harvest_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -254,6 +266,10 @@ DIALOG_KIND_NEEDS_HUMAN = "needs-human"
 DIALOG_KIND_MIXED_CONTENT = "mixed-content"
 DIALOG_KIND_BENIGN = "benign"
 DIALOG_KIND_BENIGN_TITLE_ONLY = "benign-title-only"
+# Benign-LOOKING content read from an INCOMPLETE UIA harvest. Only the PowerShell collector can
+# produce it (this module's own Win32 read either completes or raises), but it is decided HERE
+# because there is now exactly one decision implementation (issue #417).
+DIALOG_KIND_BENIGN_UNVERIFIED = "benign-unverified"
 DIALOG_KIND_UNREADABLE = "unreadable"
 DIALOG_KIND_UNRECOGNIZED = "unrecognized"
 
@@ -274,6 +290,7 @@ DIALOG_KIND_VERDICTS = {
     DIALOG_KIND_NEEDS_HUMAN: VERDICT_DIALOG_NEEDS_HUMAN,
     DIALOG_KIND_UNREADABLE: VERDICT_DIALOG_UNREADABLE,
     DIALOG_KIND_BENIGN_TITLE_ONLY: VERDICT_DIALOG_UNREADABLE,
+    DIALOG_KIND_BENIGN_UNVERIFIED: VERDICT_DIALOG_UNREADABLE,
     DIALOG_KIND_MIXED_CONTENT: VERDICT_DIALOG_UNRECOGNIZED,
     DIALOG_KIND_UNRECOGNIZED: VERDICT_DIALOG_UNRECOGNIZED,
     DIALOG_KIND_BENIGN: VERDICT_REFRESH_IN_PROGRESS,
@@ -287,6 +304,7 @@ DIALOG_KIND_VERDICTS = {
 DIALOG_KIND_PRECEDENCE = (
     DIALOG_KIND_NEEDS_HUMAN,
     DIALOG_KIND_UNREADABLE,
+    DIALOG_KIND_BENIGN_UNVERIFIED,
     DIALOG_KIND_BENIGN_TITLE_ONLY,
     DIALOG_KIND_MIXED_CONTENT,
     DIALOG_KIND_UNRECOGNIZED,
@@ -390,6 +408,15 @@ def _match_dialog_signatures(window: DesktopWindow, texts: Iterable[str]) -> Dia
     Order is load-bearing: a window can carry both, and the credential signature is the only one that
     earns a hard stop. ``needs-human`` is tested BEFORE any benign scan so one progress element in the
     same window cannot erase a known human-blocking prompt (the round-3 defect in #390).
+
+    ⚠️ **``texts`` is CONTENT plus the prose join - never the bare caption (#417 review, finding 2).**
+    The credential signature is a set of unanchored *body* phrases, and applying it to a caption
+    fabricated a hard stop: an owned dialog titled ``Personal Access Token documentation`` with benign
+    ``Refresh``/``Cancel`` content returned ``CREDENTIAL_MISSING`` at **exit 1** in both detectors, with
+    no credential request present. A caption may ACCUSE - an unaccounted title vetoes suppression and
+    lands at ``DIALOG_UNRECOGNIZED``, exit 3 - but "accuse" must not mean "any substring convicts".
+    Convicting still needs CONTENT, which is where a real prompt's text lives, so this costs no recall
+    on any window whose body is readable at all.
     """
     all_texts = tuple(texts)
     signature = credential_signature()
@@ -403,37 +430,58 @@ def _match_dialog_signatures(window: DesktopWindow, texts: Iterable[str]) -> Dia
     return None
 
 
-def classify_dialog(window: DesktopWindow) -> DialogFinding:
+def prose_join(window: DesktopWindow, content: tuple[str, ...]) -> tuple[str, ...]:
+    """``content`` plus the non-interactive elements joined in tree order, when that is SAFE.
+
+    WPF splits one sentence across visual elements, so ``Enter your`` + ``credentials`` matches nothing
+    on its own. The join is applied ONLY to the credential search, never to the benign scan: joining can
+    MANUFACTURE a phrase (two adjacent labels ``Account`` + ``Key`` join to the signature
+    ``Account Key``), and on the credential path that error is a LOUD false stop, whereas on the benign
+    path it would be a SILENT false clear.
+
+    It requires ``interactive_texts``, which only the PowerShell collector can supply: without a
+    control-type signal an interposed ``Cancel`` button breaks the sentence, and a naive whole-window
+    join was discarded in review for exactly that. No signal, no join.
+    """
+    if not window.interactive_texts:
+        return content
+    interactive = set(normalize_texts(window.interactive_texts))
+    prose = [text for text in content if text not in interactive]
+    if len(prose) > 1:
+        return content + (" ".join(prose),)
+    return content
+
+
+def classify_dialog(window: DesktopWindow) -> DialogFinding:  # pylint: disable=too-many-return-statements
     """Classify ONE candidate window. Only ``benign`` is dismissible, and only it needs positive proof.
 
-    Kinds, in the order they are tested (see the module docstring for the divergences from
-    ``probe_desktop_credential.ps1``):
+    THE SINGLE DECISION IMPLEMENTATION (issue #417). ``probe_desktop_credential.ps1`` collects windows
+    and forwards them here; it no longer classifies anything. Two independent divergences survived a
+    round aimed specifically at eliminating divergence - a title veto applied to one detector only, and
+    case-sensitivity differing at the LANGUAGE level (PowerShell's ``-ne``/``-notcontains`` are
+    case-insensitive, Python's are not) - and a language-level difference cannot be fixed once. Hence
+    one implementation rather than two agreeing ones.
 
-    ``credential``        the credential signature matched a text element -> hard stop.
-    ``needs-human``       a KNOWN human-blocking prompt that is not a sign-in prompt. Tested BEFORE
-                          benign so a progress element in the same window cannot erase it.
-    ``mixed-content``     progress text AND content nobody could account for, in the same window. A
-                          first-match-wins loop would let one benign element erase everything after
-                          it, which is how ``Evaluating`` beside *"Permission is required to run this
-                          native database query"* cleared the arbiter at exit 0.
-    ``benign``            EVERY content element is either recognised progress status or enumerated
-                          chrome, and at least one IS progress status. The one dismissible kind.
-    ``benign-title-only`` the CAPTION matched the benign signature and no content did. A caption is not
-                          content, so this joins the unreadable band.
+    Kinds, in the order they are tested:
+
+    ``credential``        the credential signature matched CONTENT or the prose join -> hard stop.
+    ``needs-human``       a KNOWN human-blocking prompt that is not a sign-in prompt.
+    ``mixed-content``     progress text AND content nobody could account for - INCLUDING an unaccounted
+                          CAPTION (#406 review, finding 1).
+    ``benign``            EVERY content element is recognised progress status or enumerated chrome, at
+                          least one IS progress status, the caption is accounted for, and the harvest
+                          did not report itself incomplete. The one dismissible kind.
+    ``benign-unverified`` as ``benign``, but ``harvest_complete is False``: benign-LOOKING is not benign.
+    ``benign-title-only`` the CAPTION matched the benign signature and no content did.
     ``unreadable``        no readable text at all.
-    ``unrecognized``      readable text that matched no signature: we looked, and it is not a sign-in
-                          prompt. Distinct from ``unreadable`` on purpose - absent is not empty.
+    ``unrecognized``      readable text that matched no signature.
 
-    ⚠️ **There is no length amnesty, and there must never be one again (#376 review, finding 5).**
-    This used to accept any unmatched element of fewer than ``MIN_PROMPT_WORDS`` words, which meant
-    ``benign`` did not mean *positively benign*: ``Please enter your password`` (4 words) and
-    ``Password:`` (2) both classified ``benign`` beside ``Evaluating...``, and ``dialog_verdict`` then
-    SUPPRESSED them in flight. That is the same defect class this module was written to remove,
-    reintroduced on the new code path - and in that shape strictly worse than the bug it replaced,
-    because the repo's rule is that a credential modal is never worked around.
+    ⚠️ **There is no length amnesty, and there must never be one again (#376/#406).**
+    ⚠️ **Captions may ACCUSE, never EXONERATE** - a title can veto suppression but can never set
+    ``benign_hit``, and it can never on its own convict (see :func:`_match_dialog_signatures`).
     """
     title, all_texts, content = dialog_text_set(window)
-    signature_hit = _match_dialog_signatures(window, all_texts)
+    signature_hit = _match_dialog_signatures(window, prose_join(window, content))
     if signature_hit is not None:
         return signature_hit
 
@@ -450,9 +498,13 @@ def classify_dialog(window: DesktopWindow) -> DialogFinding:
             continue
         if unaccounted is None:
             unaccounted = text
+    if unaccounted is None and title and not benign.search(title) and not chrome.search(title):
+        unaccounted = title
     if benign_hit is not None:
         if unaccounted is not None:
             return _finding(DIALOG_KIND_MIXED_CONTENT, window, unaccounted)
+        if window.harvest_complete is False:
+            return _finding(DIALOG_KIND_BENIGN_UNVERIFIED, window, benign_hit)
         return _finding(DIALOG_KIND_BENIGN, window, benign_hit)
     if title and benign.search(title):
         return _finding(DIALOG_KIND_BENIGN_TITLE_ONLY, window, title)
@@ -655,7 +707,14 @@ def match_credential_modal(
     for window in windows:
         if window is frame:
             continue
-        for text in normalize_texts(window.texts):
+        # ⚠️ CONTENT only - never the bare caption (#417 review, finding 2). The credential signature is
+        # a set of unanchored BODY phrases, so applying it to a title fabricated a hard stop: an owned
+        # dialog titled `Personal Access Token documentation`, with benign `Refresh`/`Cancel` content
+        # and no credential request anywhere, returned CREDENTIAL_MISSING at exit 1 in BOTH detectors.
+        # A caption may ACCUSE - an unaccounted title vetoes suppression and lands at
+        # DIALOG_UNRECOGNIZED, exit 3 - but "accuse" must never mean "any substring convicts".
+        _, _, content = dialog_text_set(window)
+        for text in prose_join(window, content):
             if signature.search(text):
                 return CredentialModal(matched_text=text, window=window)
     return None

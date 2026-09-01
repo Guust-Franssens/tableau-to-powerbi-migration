@@ -2509,16 +2509,15 @@ if ($PayloadJson) {
 }
 $parsed = ConvertFrom-Json (Get-Content -LiteralPath $WindowsJson -Raw)
 $windows = @($parsed)
-$verdict = Get-DialogVerdict -Windows $windows -RefreshInFlight:$RefreshInFlight
-$credential = Test-CredentialModal -Windows $windows
+$decision = Invoke-DialogDecision -Windows $windows -RefreshInFlight:$RefreshInFlight
 $payload = [ordered]@{
-  credential = $credential
-  verdict    = $(if ($null -eq $verdict) { $null } else { [string]$verdict.Verdict })
-  kind       = $(if ($null -eq $verdict) { $null } else { [string]$verdict.Kind })
-  exit_code  = $(if ($null -eq $verdict) { 0 } else { [int]$verdict.ExitCode })
-  evidence   = $(if ($null -eq $verdict) { $null } else { [string]$verdict.Evidence })
-  candidates = @(Select-DialogCandidate -Windows $windows).Count
-  line       = $(if ($null -eq $verdict) { $null } else { [string](Format-DialogEvidence -Window $verdict.Window) })
+  credential = $decision.Credential
+  verdict    = $decision.Verdict
+  kind       = $decision.Kind
+  exit_code  = [int]$decision.ExitCode
+  evidence   = $decision.Evidence
+  candidates = [int]$decision.Candidates
+  line       = $(if ($decision.Verdict) { [string](Format-DialogEvidence -Window $decision.Window) } else { $null })
 }
 Write-Output ('<<<PROBE-JSON>>>' + (ConvertTo-Json $payload -Compress -Depth 4))
 """

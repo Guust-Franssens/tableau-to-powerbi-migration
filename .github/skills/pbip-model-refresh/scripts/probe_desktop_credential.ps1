@@ -234,248 +234,90 @@ function Test-HarvestComplete {
   return (($Value -is [bool]) -and $Value)
 }
 
-function Test-CredentialModal {
-  <# First matching credential-signature text across every window EXCEPT the identified main frame.
+# --------------------------------------------------------------------------------------------------
+# ⚠️ THE DECISION LIVES IN PYTHON NOW (issue #417). `Test-CredentialModal`, `Select-DialogCandidate`,
+# `Get-MainFrame`, `Test-RendersNothing` and `Get-DialogClassification` USED to be here, re-implementing
+# `_credential_modal.py`. Two independent divergences survived a review round aimed specifically at
+# removing divergence:
+#
+#   * a title veto applied to THIS half only - an owned dialog titled `Password:` with benign body
+#     content gave DIALOG_UNRECOGNIZED (exit 3) here and CREDENTIAL_PRESENT (exit 0) in Python, i.e.
+#     the gate of record silently clearing a sign-in modal;
+#   * case-sensitivity differing at the LANGUAGE level: PowerShell's `-ne`/`-notcontains` are
+#     case-INSENSITIVE, Python's `==`/`in` are not, so title `Refresh` + body `REFRESH` gave
+#     DIALOG_UNREADABLE (exit 3) here and CREDENTIAL_PRESENT (exit 0) there.
+#
+# The second is the reason this is a seam and not a third alignment pass: a language-level difference
+# cannot be fixed once, so every future string comparison would be a fresh chance to reintroduce it.
+# This script now COLLECTS - Win32 attributes plus UI Automation text, which Python cannot read - and
+# forwards them to `decide_dialog.py`, which JUDGES. There is one implementation, so there is no drift.
+# --------------------------------------------------------------------------------------------------
 
-  Every class, every size - the prepass is deliberately unfiltered, so an unusual modal class or a
-  tiny window is still convicted. The ONE exclusion is the identified `Get-MainFrame`, ported from the
-  Python detector (#400 review): the prepass reads the Desktop MAIN window's caption and children too,
-  so a report legitimately named `Account Key` / `Personal Access Token` produced `CREDENTIAL_MISSING`
-  at exit 1 - a fabricated hard stop. When the frame's identity is AMBIGUOUS, `Get-MainFrame` returns
-  `$null` and nothing is excluded, so the failure direction stays loud.
-  #>
-  param([object[]]$Windows)
-  $frame = Get-MainFrame -Windows $Windows
-  foreach ($w in $Windows) {
-    if ($null -ne $frame -and [object]::ReferenceEquals($w, $frame)) { continue }
-    foreach ($n in (Get-DialogTextSet -Window $w).Search) {
-      if ($n -match $sig) { return $n }
-    }
+function Resolve-PythonExe {
+  <# The interpreter that runs the decider. Fails CLOSED - a missing Python is an INDETERMINATE probe,
+  never a clean one, so callers must treat $null as "could not decide". #>
+  if ($script:PythonExe) { return $script:PythonExe }
+  foreach ($candidate in @($env:PBIP_REFRESH_PYTHON, 'python', 'python3', 'py')) {
+    if (-not $candidate) { continue }
+    $found = Get-Command $candidate -ErrorAction SilentlyContinue
+    if ($found) { $script:PythonExe = $found.Source; return $script:PythonExe }
   }
   return $null
 }
 
-function Test-RendersNothing {
-  <# Can this window show a human NOTHING, on TWO independent grounds?
+function Invoke-DialogDecision {
+  <# Forward collected windows to `decide_dialog.py` and return its verdict record.
 
-  Zero area ALONE is not sufficient and must never be used alone: #400's review built a real
-  `WS_VISIBLE` OWNED 0x0 window and disabled its owner, which is a genuinely blocking shape. So both
-  must hold - no owner to disable, AND no pixels to display. Mirrors `_credential_modal.renders_nothing`.
+  THE ONLY decision path (issue #417). Fails CLOSED: any failure to reach or parse the decider yields
+  the indeterminate band, never a clear. "We could not decide" must never read as "no modal appeared".
   #>
-  param([object]$Window)
-  $owner = Get-OwnerHandle -Window $Window
-  return ((-not $owner) -and (([int]$Window.Width -le 0) -or ([int]$Window.Height -le 0)))
-}
+  param([object[]]$Windows, [switch]$RefreshInFlight, [switch]$CandidatesOnly)
 
-function Get-OwnerHandle {
-  <# `OwnerHwnd` as a plain [long], 0 when absent. JSON round-trips it as int; Win32 gives an IntPtr. #>
-  param([object]$Window)
-  $raw = $Window.OwnerHwnd
-  if ($null -eq $raw) { return 0 }
-  if ($raw -is [IntPtr]) { return $raw.ToInt64() }
-  try { return [long]$raw } catch { return 0 }
-}
-
-function Get-WindowHandle {
-  <# `Hwnd` as a plain [long], 0 when absent. #>
-  param([object]$Window)
-  $raw = $Window.Hwnd
-  if ($null -eq $raw) { return 0 }
-  if ($raw -is [IntPtr]) { return $raw.ToInt64() }
-  try { return [long]$raw } catch { return 0 }
-}
-
-function Get-MainFrame {
-  <# The application FRAME - the window dialogs block - or `$null` when its identity is AMBIGUOUS.
-
-  Ported from `_credential_modal.main_frame`, which four review rounds arrived at by defeating four
-  ways of INFERRING it: window SIZE, a CLASS prefix, the FIRST ownership edge, and transitive ownership
-  that collected only the roots reachable from OWNED windows.
-
-  So this ENUMERATES rather than infers. A window is a possible root in exactly two ways: it is UNOWNED
-  and renders something; or it is the unowned root of some owned window's chain, walked TRANSITIVELY.
-  An ownership-derived root gets NO priority over the rest.
-
-  Exactly one possible root identifies the frame. **Everything else returns `$null`, and `$null`
-  excludes NOTHING** - a spurious finding on the real frame is loud and recoverable, whereas excluding
-  the wrong window is how a credential prompt disappears silently.
-  #>
-  param([object[]]$Windows)
-
-  $byHwnd = @{}
-  foreach ($w in $Windows) {
-    $h = Get-WindowHandle -Window $w
-    if ($h) { $byHwnd[$h] = $w }
+  $exe = Resolve-PythonExe
+  if (-not $exe) {
+    return [pscustomobject]@{
+      Verdict = 'DIALOG_UNREADABLE'; Kind = 'unreadable'; ExitCode = 3
+      Evidence = 'no Python interpreter found to run decide_dialog.py (set PBIP_REFRESH_PYTHON)'
+      Candidates = 0; Credential = $null; Window = $null; CandidateHwnds = @()
+    }
   }
-  $roots = @()
-  foreach ($w in $Windows) {
-    $root = $null
-    if (Get-OwnerHandle -Window $w) {
-      # Walk to the UNOWNED root. A chain that leaves this enumeration or loops means the root is
-      # UNKNOWN, and an unknown root must not be guessed at.
-      $current = $w
-      $seen = @{}
-      while ($true) {
-        $ch = Get-WindowHandle -Window $current
-        if ($ch -and $seen.ContainsKey($ch)) { return $null }
-        if ($ch) { $seen[$ch] = $true }
-        $ownerHandle = Get-OwnerHandle -Window $current
-        if (-not $ownerHandle) { $root = $current; break }
-        if (-not $byHwnd.ContainsKey($ownerHandle)) { return $null }
-        $current = $byHwnd[$ownerHandle]
+  $payload = [System.IO.Path]::GetTempFileName()
+  try {
+    # NOT `-AsArray` - that is PowerShell 7+, and this ships against Windows PowerShell 5.1 where it
+    # is a parameter-binding error that silently degraded every decision to DIALOG_UNREADABLE.
+    # A single-element array serialises as a bare object here; the decider normalises that.
+    (ConvertTo-Json -InputObject @($Windows) -Depth 6) | Set-Content -LiteralPath $payload -Encoding UTF8
+    $decider = Join-Path $PSScriptRoot 'decide_dialog.py'
+    $argv = @($decider, '--windows', $payload)
+    if ($RefreshInFlight) { $argv += '--in-flight' }
+    if ($CandidatesOnly) { $argv += '--candidates-only' }
+    $raw = & $exe @argv 2>&1
+    $line = @($raw | Where-Object { "$_" -like 'DECISION:*' })
+    if ($line.Count -eq 0) {
+      return [pscustomobject]@{
+        Verdict = 'DIALOG_UNREADABLE'; Kind = 'unreadable'; ExitCode = 3
+        Evidence = "decider produced no verdict: $raw"; Candidates = 0; Credential = $null; Window = $null; CandidateHwnds = @()
       }
     }
-    elseif (Test-RendersNothing -Window $w) { continue }
-    else { $root = $w }
-    if ($null -eq $root) { continue }
-    $known = $false
-    foreach ($r in $roots) { if ([object]::ReferenceEquals($r, $root)) { $known = $true; break } }
-    if (-not $known) { $roots += $root }
-  }
-  if ($roots.Count -eq 1) { return $roots[0] }
-  return $null
-}
-
-function Select-DialogCandidate {
-  <# Windows worth CLASSIFYING. Two exclusions, each a POSITIVE claim - never a correlate.
-
-  ⚠️ **The size and class filters that used to live here are GONE (issue #406 review, finding 2).**
-  They excluded anything under 100x100 and any `WindowsForms10.Window.8*` class, which are two of the
-  proxies #400 deleted from the Python detector *because they were measured to misclassify*. Measured
-  here on identical input before the fix:
-
-      a real owned, EMPTY 80x60 modal ->  arbiter: exit 0 (no candidate at all)
-                                          python : DIALOG_UNREADABLE, exit 3
-
-  The arbiter turned an indeterminate state into a CLEAN one, which is the single worst outcome
-  available here. A class prefix is no better: an owner and its owned `FixedDialog` share the exact
-  class string, so `WindowsForms10.Window.8*` excluded real owned dialogs too.
-
-  What remains:
-    * the identified `Get-MainFrame` - it is the application, the thing dialogs block. When identity is
-      AMBIGUOUS that returns `$null` and this exclusion simply does not happen.
-    * `Test-RendersNothing` - unowned AND zero-area: no owner to disable and no pixels to show.
-
-  `is_proven_non_blocking` (an ENABLED owner) is not applied here because the arbiter applies it inside
-  `Get-DialogClassification` as the `non-blocking` kind, AFTER `needs-human`, so a known blocking
-  prompt still outranks the exoneration. Same rule, one step later.
-  #>
-  param([object[]]$Windows)
-  $frame = Get-MainFrame -Windows $Windows
-  $candidates = @()
-  foreach ($w in $Windows) {
-    if ($null -ne $frame -and [object]::ReferenceEquals($w, $frame)) { continue }
-    if (Test-RendersNothing -Window $w) { continue }
-    $candidates += $w
-  }
-  return $candidates
-}
-
-function Get-DialogClassification {
-  <# Classify ONE candidate window. Only `benign` is suppressible, and only it needs positive proof.
-
-  Kinds, in the order they are tested:
-    credential        the credential signature matched a text element or the prose join -> hard stop.
-    needs-human       a KNOWN human-blocking prompt that is not a credential prompt - the native
-                      database query approval modal. Exit 3, not 1: a human must act, but the remedy
-                      is an approval, not a sign-in.
-    mixed-content     progress text AND content nobody could account for, in the same window. Round 3's
-                      defect: the FIRST content element matching the benign regex used to classify the
-                      whole window, so `Evaluating` beside
-                      `Permission is required to run this native database query` cleared it at exit 0.
-                      The entire content is now scanned before benign can be concluded.
-    benign            every content element is either recognised progress status or ENUMERATED chrome,
-                      and at least one IS progress status, AND the harvest completed -> Power BI is
-                      working. The one suppressible kind.
-    benign-unverified as `benign`, but the harvest was truncated, timed out, or hit a pattern it could
-                      not read. Benign-LOOKING is not benign.
-    non-blocking      the owner window is ENABLED. Modality is a ONE-WAY test: a modal dialog disables
-                      its owner, so an enabled owner PROVES this window blocks nothing. The converse
-                      does not hold - Power BI's refresh dialog also disables the owner - so a disabled
-                      owner never convicts. `$null` (no owner) proves nothing either way. It is tested
-                      AFTER `needs-human` on purpose: a known blocking prompt outranks the exoneration.
-    benign-title-only the CAPTION matched the benign signature and no content did. A caption is not
-                      content.
-    unreadable        no readable text at all.
-    unrecognized      readable text that matched no signature: we looked, and it is not a credential
-                      prompt. Distinct from `unreadable` on purpose - absent is not empty.
-
-  Everything except `credential` and `benign` lands in the exit-3 band, so the failure mode of every
-  uncertainty here is a LOUD stop-and-look, never a silent clear.
-
-  ⚠️ **There is no length amnesty, and there must never be one again (issue #406).** This used to
-  excuse any unmatched content element of fewer than `$MinPromptWords` (5) words, which meant `benign`
-  did not mean *positively* benign: `Please enter your password` (4 words) and `Password:` (2) both
-  classified `benign` beside `Evaluating`, and `Get-DialogVerdict` then SUPPRESSED them entirely under
-  `-RefreshInFlight`. Measured 2026-08-30 through this script's own `-LoadDetectorsOnly` harness. That
-  is the defect class this probe exists to remove, reintroduced on the code path added to remove it -
-  and in that shape worse than the bug, because the repo's standing rule is that a credential modal is
-  never worked around.
-
-  ⚠️ **A control-type amnesty would be worse still, not better.** This script harvests
-  `InteractiveTexts`, which the Python detector cannot, so "excuse anything interactive" looks like a
-  free upgrade. It is not: Databricks renders its authentication-kind chooser as selectable items
-  labelled `Personal Access Token` / `Databricks Client Credentials` - two alternatives that are IN
-  `credential_modal_signature.regex` precisely because they identify a credential dialog. An amnesty
-  keyed on role would excuse that whole family of selector labels the moment one of them is not in the
-  signature, which is the same failure as the word count with a better disguise. Role is not evidence
-  of harmlessness either; the enumerated chrome list covers the safe labels (`Cancel`/`OK`/`Close` are
-  interactive too) without covering the dangerous ones.
-  #>
-  param([Parameter(Mandatory = $true)][object]$Window)
-
-  $sets = Get-DialogTextSet -Window $Window
-  foreach ($t in $sets.Search) {
-    if ($t -match $sig) { return [pscustomobject]@{ Kind = 'credential'; Evidence = $t } }
-  }
-  foreach ($t in $sets.Search) {
-    if ($t -match $blockingSig) { return [pscustomobject]@{ Kind = 'needs-human'; Evidence = $t } }
-  }
-
-  # Scan ALL of the content. A first-match-wins loop let one benign element erase everything after it.
-  # Anything that is neither recognised progress status nor ENUMERATED chrome is UNACCOUNTED FOR and
-  # vetoes suppression - there is no length amnesty here, and there must never be one again (#406).
-  $benignHit = $null
-  $unaccounted = $null
-  foreach ($t in $sets.Content) {
-    if ($t -match $benignSig) {
-      if ($null -eq $benignHit) { $benignHit = $t }
-      continue
-    }
-    if ($t -match $chromeSig) { continue }
-    if ($null -eq $unaccounted) { $unaccounted = $t }
-  }
-  # ⚠️ THE TITLE MUST BE ACCOUNTED FOR TOO (issue #406 review, finding 1). `Content` deliberately drops
-  # any text equal to the caption, because a benign-looking caption must never AUTHORISE suppression.
-  # That exclusion was one-directional and the other direction was never closed: a HOSTILE caption was
-  # simply dropped. Measured on the pre-fix build - a window titled `Password:` whose body read only
-  # `Refresh` + `Cancel` classified `benign` and was suppressed to NOTHING under -RefreshInFlight,
-  # exit 0. The body rule this bundle just tightened identifies `Password:` as a prompt that must veto;
-  # it was only ever looked for in the body.
-  # A caption still cannot authorise anything - it is not allowed to set `$benignHit` - it can only
-  # VETO. That asymmetry is the whole rule: captions may accuse, never exonerate.
-  if ($null -eq $unaccounted -and $sets.Title) {
-    if (($sets.Title -notmatch $benignSig) -and ($sets.Title -notmatch $chromeSig)) {
-      $unaccounted = $sets.Title
+    $parsed = ConvertFrom-Json ("$($line[0])".Substring(9))
+    return [pscustomobject]@{
+      Verdict    = $parsed.verdict
+      Kind       = $parsed.kind
+      ExitCode   = [int]$parsed.exit_code
+      Evidence   = $parsed.evidence
+      Candidates = [int]$parsed.candidates
+      Credential = $parsed.credential
+      Window     = $parsed.window
+      CandidateHwnds = @($parsed.candidate_hwnds)
     }
   }
-  if ($benignHit) {
-    if ($unaccounted) { return [pscustomobject]@{ Kind = 'mixed-content'; Evidence = $unaccounted } }
-    if (Test-HarvestComplete -Value $Window.HarvestComplete) {
-      return [pscustomobject]@{ Kind = 'benign'; Evidence = $benignHit }
+  catch {
+    return [pscustomobject]@{
+      Verdict = 'DIALOG_UNREADABLE'; Kind = 'unreadable'; ExitCode = 3
+      Evidence = "decider failed: $_"; Candidates = 0; Credential = $null; Window = $null; CandidateHwnds = @()
     }
-    return [pscustomobject]@{ Kind = 'benign-unverified'; Evidence = $benignHit }
   }
-  if ($Window.OwnerEnabled -eq $true) {
-    return [pscustomobject]@{ Kind = 'non-blocking'; Evidence = 'owner window is enabled' }
-  }
-  if ($sets.Title -and $sets.Title -match $benignSig) {
-    return [pscustomobject]@{ Kind = 'benign-title-only'; Evidence = $sets.Title }
-  }
-  if ($sets.All.Count -eq 0) {
-    return [pscustomobject]@{ Kind = 'unreadable'; Evidence = '' }
-  }
-  return [pscustomobject]@{ Kind = 'unrecognized'; Evidence = $sets.All[0] }
+  finally { Remove-Item -LiteralPath $payload -Force -ErrorAction SilentlyContinue }
 }
 
 function ConvertTo-HarvestResult {
@@ -527,72 +369,22 @@ function ConvertTo-HarvestResult {
 }
 
 function Format-DialogEvidence {
-  <# One-line window description for a verdict line.
+  <# One-line description of the window the DECIDER reported on.
 
-  `harvest=` carries the REASON, not just the fact, and `items=` the count actually read. Measured
-  2026-08-31: with only `complete|INCOMPLETE`, a cap truncation and a contention-killed provider were
-  indistinguishable in this line, and both are real runtime states on a loaded machine. An operator
-  reading `harvest=no-payload items=0` knows the UIA provider never answered; `harvest=truncated
-  items=400` says it answered and was cut off. Diagnostic only - see `ConvertTo-HarvestResult`.
+  `harvest=` carries the REASON, not just the fact, and `items=` the count actually read. Measured:
+  with only `complete|INCOMPLETE`, a cap truncation and a contention-killed provider were
+  indistinguishable, and they need opposite responses.
   #>
   param([object]$Window)
+  if ($null -eq $Window) { return '(no window reported)' }
   $title = if ($Window.Title) { $Window.Title } else { '(empty title)' }
-  $harvest = if (Test-HarvestComplete -Value $Window.HarvestComplete) {
+  $harvest = if ($Window.HarvestComplete -is [bool] -and $Window.HarvestComplete) {
     'complete'
   }
   elseif ($Window.HarvestReason) { [string]$Window.HarvestReason }
   else { 'INCOMPLETE' }
   return ("class={0} title='{1}' size={2}x{3} harvest={4} items={5}" -f
-    $Window.ClassName, $title, $Window.Width, $Window.Height, $harvest, @($Window.Texts).Count)
-}
-
-function Get-DialogVerdict {
-  <# Fold per-window classifications into ONE verdict, or `$null` when nothing needs reporting.
-
-  Precedence: credential > (unreadable band) > unrecognized > benign. It is not arbitrary:
-
-    * credential is the only terminal finding, so it short-circuits.
-    * `benign` is the only kind carrying POSITIVE evidence of harmlessness, so it must never outrank a
-      window we could not account for - otherwise one progress dialog masks a real modal.
-    * the unreadable band (`unreadable`, `benign-unverified`, `benign-title-only`) outranks
-      `unrecognized` because it is the weaker state of knowledge, and the weaker state is what must
-      stay visible.
-
-  `-RefreshInFlight` is set only inside the poll loop, i.e. after THIS script invoked the refresh.
-  There, a proven-benign progress dialog is our own and is ignored - and nothing else is. At t=0 it is
-  somebody else's, and stacking a second refresh on it is exactly what the 2026-08-28 field report had
-  to unpick by hand.
-  #>
-  param([object[]]$Windows, [switch]$RefreshInFlight)
-
-  $needsHuman = $null
-  $unreadable = $null
-  $unrecognized = $null
-  $benign = $null
-  foreach ($w in @(Select-DialogCandidate -Windows $Windows)) {
-    $c = Get-DialogClassification -Window $w
-    $found = [pscustomobject]@{ Kind = $c.Kind; Verdict = ''; ExitCode = 3; Window = $w; Evidence = $c.Evidence }
-    switch ($c.Kind) {
-      'credential' {
-        $found.Verdict = 'CREDENTIAL_MISSING'
-        $found.ExitCode = 1
-        return $found
-      }
-      'needs-human' { if ($null -eq $needsHuman) { $found.Verdict = 'DIALOG_NEEDS_HUMAN'; $needsHuman = $found } }
-      'unreadable' { if ($null -eq $unreadable) { $found.Verdict = 'DIALOG_UNREADABLE'; $unreadable = $found } }
-      'benign-unverified' { if ($null -eq $unreadable) { $found.Verdict = 'DIALOG_UNREADABLE'; $unreadable = $found } }
-      'benign-title-only' { if ($null -eq $unreadable) { $found.Verdict = 'DIALOG_UNREADABLE'; $unreadable = $found } }
-      'mixed-content' { if ($null -eq $unrecognized) { $found.Verdict = 'DIALOG_UNRECOGNIZED'; $unrecognized = $found } }
-      'unrecognized' { if ($null -eq $unrecognized) { $found.Verdict = 'DIALOG_UNRECOGNIZED'; $unrecognized = $found } }
-      'benign' { if ($null -eq $benign) { $found.Verdict = 'REFRESH_IN_PROGRESS'; $benign = $found } }
-      default { }
-    }
-  }
-  if ($null -ne $needsHuman) { return $needsHuman }
-  if ($null -ne $unreadable) { return $unreadable }
-  if ($null -ne $unrecognized) { return $unrecognized }
-  if ($null -ne $benign -and -not $RefreshInFlight) { return $benign }
-  return $null
+    $Window.ClassName, $title, $Window.Width, $Window.Height, $harvest, $Window.Texts)
 }
 
 if ($LoadDetectorsOnly) { return }
@@ -860,9 +652,19 @@ function Get-PidWindows {
   #
   # The UIA harvest is applied to CANDIDATE windows only. Walking the main Power BI window's visual
   # tree would cost seconds per poll for text the classifiers never read (it is excluded by class).
+  $bare = @()
+  foreach ($w in [Win32CredentialWindows]::GetPidWindows($DesktopPid)) {
+    $bare += (ConvertTo-ProbeWindow -Window $w)
+  }
+  # Ask the DECIDER which windows are worth a UIA harvest. Enriching everything would walk the main
+  # Desktop window's visual tree every poll (seconds); deciding here would re-create the divergence
+  # issue #417 removed. So the judgement stays in one place and this only acts on the answer.
+  $wanted = @{}
+  foreach ($h in @((Invoke-DialogDecision -Windows $bare -CandidatesOnly).CandidateHwnds)) { $wanted[[long]$h] = $true }
   $enriched = @()
   foreach ($w in [Win32CredentialWindows]::GetPidWindows($DesktopPid)) {
-    $isCandidate = @(Select-DialogCandidate -Windows @($w)).Count -eq 1
+    $hw = if ($w.Hwnd -is [IntPtr]) { $w.Hwnd.ToInt64() } else { [long]$w.Hwnd }
+    $isCandidate = $wanted.ContainsKey($hw)
     $enriched += (ConvertTo-ProbeWindow -Window $w -Enrich:$isCandidate `
         -TimeoutSec $harvestBudget -MaxElements $HarvestMaxElements)
   }
@@ -873,7 +675,8 @@ $windows = Get-PidWindows
 if (-not $windows -or $windows.Count -eq 0) { Write-Output "no window for pid $DesktopPid found"; Write-Output "VERDICT: UNKNOWN"; exit 3 }
 
 # 1. If a credential modal is ALREADY open, the credential is missing - report immediately.
-$hit = Test-CredentialModal -Windows $windows
+$decision = Invoke-DialogDecision -Windows $windows
+$hit = $decision.Credential
 if ($hit) {
   Write-Output ("credential modal already open: '{0}'" -f $hit.Substring(0, [Math]::Min(80, $hit.Length)))
   Write-Output "VERDICT: CREDENTIAL_MISSING"
@@ -883,7 +686,7 @@ if ($hit) {
 # 1b. A dialog is up that is not a credential prompt. It is NOT a credential wall - say what it is and
 # exit 3 (cannot probe), never exit 1 (human needed). Invoking a Refresh on top of an unclassified
 # dialog is how the 2026-08-28 field report ended up with a stale duplicate refresh to cancel.
-$blocker = Get-DialogVerdict -Windows $windows
+$blocker = if ($decision.Verdict) { $decision } else { $null }
 if ($blocker) {
   Write-Output ("dialog already open: {0}" -f (Format-DialogEvidence -Window $blocker.Window))
   if ($blocker.Evidence) {
@@ -942,13 +745,14 @@ $latched = $null
 while ((Get-Date) -lt $deadline) {
   Start-Sleep -Milliseconds 2000
   $windows = Get-PidWindows
-  $hit = Test-CredentialModal -Windows $windows
+  $decision = Invoke-DialogDecision -Windows $windows -RefreshInFlight
+  $hit = $decision.Credential
   if ($hit) {
     Write-Output ("credential modal detected: '{0}'" -f $hit.Substring(0, [Math]::Min(80, $hit.Length)))
     Write-Output "VERDICT: CREDENTIAL_MISSING"
     exit 1
   }
-  $observed = Get-DialogVerdict -Windows $windows -RefreshInFlight
+  $observed = if ($decision.Verdict) { $decision } else { $null }
   if ($observed -and $null -eq $latched) { $latched = $observed }
 }
 if ($latched) {
