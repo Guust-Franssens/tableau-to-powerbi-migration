@@ -609,11 +609,16 @@ def test_a_healthy_body_still_produces_a_census_measurement(monkeypatch, capsys,
     assert json.loads(out.read_text(encoding="utf-8"))["assessable"] == 1
 
 
-def test_the_census_makes_exactly_one_request():
+def test_the_census_makes_exactly_one_request(monkeypatch, capsys):
     """⚠️ Sharing the transport hop must not have turned one round trip into two.
 
-    The script's safety argument is "read-only, ONE query"; a shared seam that the census called in
-    addition to its own would double a credentialed, site-wide request without anyone noticing.
+    The script's safety argument is "read-only, ONE query" against a credentialed, site-wide
+    endpoint; a shared seam called IN ADDITION to a leftover private one would double that silently.
+
+    ⚠️ It drives `census.main()`, not `fetch_payload` directly. Calling the seam by hand counts only
+    the requests the SEAM makes -- an extra request added anywhere else in `main()` would be
+    invisible to it. That is the same scope error that made the transport mutation move both arms of
+    the parity differential: measuring one level below the thing whose behaviour is in question.
     """
     calls = []
 
@@ -622,7 +627,7 @@ def test_the_census_makes_exactly_one_request():
             calls.append(path)
             return super()._request(method, path, body=body, accept=accept, authed=authed, api=api)
 
-    session = _Counting(body=HEALTHY_BODY)
-    payload, refusal = view_types_mod.fetch_payload(session)
-    assert refusal is None and payload
-    assert calls == ["/graphql"]
+    monkeypatch.setattr(census_mod, "_session", lambda _path: _Counting(body=HEALTHY_BODY))
+    assert census_mod.main(["--env", "unused"]) == census_mod.EXIT_OK
+    assert "VERDICT: NOT-PRESENT" in capsys.readouterr().out
+    assert calls == ["/graphql"], f"the census must make exactly one request, made {calls}"

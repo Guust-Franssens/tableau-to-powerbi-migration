@@ -71,6 +71,20 @@ CENSUS_MUTATIONS: set[str] = set()
 
 #: ⚠️ mutation -> the single test node it must be caught by.
 #:
+#: ⚠️ AND FOR A DIFFERENTIAL ASSERTION, THE MUTATION MUST MOVE EXACTLY ONE ARM.
+#:
+#: A parity test says "A refuses, B does not". Any mutation that moves A and B TOGETHER defeats it --
+#: and still goes red, on the arm that was supposed to be the control, so it LOOKS caught. That risk
+#: is intrinsic to every differential test, and this campaign has one as its central correctness
+#: property (`test_the_census_and_the_shipped_parser_agree_on_the_same_bytes`). It is the seventh
+#: distinct vacuity mode found on this PR, and the only one an anchor map cannot catch: the anchor
+#: was right, the verdict was CAUGHT, and the evidence was still about something else.
+#:
+#: The other six, for the record: an assertion against its own constant; a branch the fixture never
+#: enters; a clause implied by its siblings; a rule that made a test pass for two reasons; a broad
+#: "it refused" satisfiable by any guard; and a fixture short-circuiting on an earlier guard than the
+#: one it names.
+#:
 #: `mutation_harness.run` passes `-x`, so a CAUGHT verdict names whichever test failed FIRST -- not
 #: necessarily the one the mutation was written for. That is not pedantry: crediting the wrong test
 #: inverted three verdicts on a sibling PR the same day. Where a mutation declares an anchor here it
@@ -320,7 +334,15 @@ MUTATIONS.update(
     {
         "guard-column-is-load-bearing-transport": '\nimport tableau_view_types as vt\n_orig = vt.fetch_payload\ndef fetch_payload(session):\n    payload, reason = _orig(session)\n    return payload, ("metadata api response refused" if reason else None)\nvt.fetch_payload = fetch_payload\n',
         "census-ignores-the-transport-refusal": '\nimport tableau_luid_census as census\n_src = open(census.__file__, encoding="utf-8").read()\n_old = \'    if refusal:\'\n_new = \'    if False:\'\nassert _old in _src, "mutation anchor not found - the snippet is stale, not the code"\nexec(compile(_src.replace(_old, _new, 1), census.__file__, "exec"), census.__dict__)\n',
-        "census-does-its-own-transport-again": '\nimport tableau_view_types as vt\ndef fetch_payload(session):\n    import json as _json\n    status, body, _ = session._request(\n        "POST", "/graphql", body={"query": vt.VIEW_TYPE_QUERY}, api="metadata"\n    )\n    return _json.loads(body.decode("utf-8", "replace")), None\nvt.fetch_payload = fetch_payload\n',
+        # ⚠️ CENSUS-ONLY, and the scope IS the point. The first version replaced
+        # `tableau_view_types.fetch_payload`, which is the transport for BOTH arms -- so it did
+        # not recreate the divergence (shipped correct, census weaker), it degraded both
+        # equally. Measured: the shipped parser then typed one view from the oversized body and
+        # refused nothing, so the parity test went red on its FIRST assertion (`the shipped
+        # parser must refuse this`) rather than on census drift -- red for a real reason, but
+        # not its own. This edits the census's CALL SITE and leaves `fetch_payload` untouched:
+        # measured, the shipped arm still refuses while the census reports NOT-PRESENT, exit 0.
+        "census-does-its-own-transport-again": '\nimport tableau_luid_census as census\n_src = open(census.__file__, encoding="utf-8").read()\n_old = \'        payload, refusal = tableau_view_types.fetch_payload(session)\'\n_new = (\n    \'        _s, _b, _h = session._request("POST", "/graphql",\'\n    \' body={"query": tableau_view_types.VIEW_TYPE_QUERY}, api="metadata")\\n\'\n    \'        payload, refusal = json.loads(_b.decode("utf-8", "replace")), None\'\n)\nassert _old in _src, "mutation anchor not found - the snippet is stale, not the code"\nexec(compile(_src.replace(_old, _new, 1), census.__file__, "exec"), census.__dict__)\n',
     }
 )
 CENSUS_MUTATIONS.update(
@@ -330,6 +352,18 @@ CENSUS_MUTATIONS.update(
         "census-does-its-own-transport-again",
     }
 )
+# ⚠️ Proves the request-count test can fail. It is the ONLY guard on the script's
+# 'read-only, ONE query' claim against a credentialed site-wide endpoint, and until it drove
+# `main()` it measured only the requests the SEAM made -- a second call anywhere else in `main`
+# was invisible to it. This mutation adds exactly that.
+MUTATIONS["census-makes-a-second-request"] = (
+    "\nimport tableau_luid_census as census\n_src = open(census.__file__, encoding=\"utf-8\").read()\n_old = '        payload, refusal = tableau_view_types.fetch_payload(session)'\n_new = (\n    '        tableau_view_types.fetch_payload(session)\\n'\n    '        payload, refusal = tableau_view_types.fetch_payload(session)'\n)\nassert _old in _src, \"mutation anchor not found - the snippet is stale, not the code\"\nexec(compile(_src.replace(_old, _new, 1), census.__file__, \"exec\"), census.__dict__)\n"
+)
+CENSUS_MUTATIONS.add("census-makes-a-second-request")
+INTENDED["census-makes-a-second-request"] = (
+    "tests/test_tableau_luid_census.py::test_the_census_makes_exactly_one_request"
+)
+
 INTENDED.update(
     {
         "guard-column-is-load-bearing-transport": "tests/test_tableau_luid_census.py::test_the_census_and_the_shipped_parser_agree_on_the_same_bytes",
