@@ -38,6 +38,7 @@ from __future__ import annotations
 import ast
 import contextlib
 import http.client
+import importlib
 import itertools
 import json
 import logging
@@ -50,6 +51,7 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -2027,6 +2029,101 @@ def test_the_error_body_read_failure_is_redacted_not_merely_caught(monkeypatch):
     assert status == 503, (status, text)
     assert longest_surviving_run(ROUND9_SECRET, text) == "", text
     assert "[REDACTED]" in text, text
+
+
+def test_header_value_is_case_insensitive_like_the_HTTPMessage_it_replaced():
+    """⚠️ A silent regression the shared primitive could have introduced, not a nicety.
+
+    `http.client`'s own `HTTPMessage` is case-insensitive; `dict(resp.headers)` is not. Callers used
+    to hold the message and now hold the dict, so a server answering `content-type: image/svg+xml`
+    would have returned `None` from `headers.get("Content-Type")` -- and `format_matches` would have
+    lost its Content-Type evidence for a rung that answered perfectly well.
+    """
+    headers = {"content-type": "image/svg+xml", "Retry-After": "30"}
+    assert tableau_http.header_value(headers, "Content-Type") == "image/svg+xml"
+    assert tableau_http.header_value(headers, "retry-after") == "30"
+    assert tableau_http.header_value(headers, "Retry-After") == "30"
+    assert tableau_http.header_value(headers, "X-Absent") is None
+
+
+# ------------------------------------------ round 9: the KNOWN_GAPS classification, as MEASURED
+#
+# ⚠️ `provision_tableau_estate.py` sat in GATE_WAIVERS for nine rounds claiming it "publishes TO
+# Tableau -- its credentials are outbound; the manifest it writes is covered by `redact`". Both
+# halves are false, and the gate could not contradict either: `_HTTP_MARKERS` was stdlib-only, so the
+# detector could not see a module that reaches HTTP through `tableauserverclient` at all.
+#
+# The detector now sees it, and it is recorded as a KNOWN GAP. These two tests pin the gap as a
+# MEASURED fact rather than a prose claim, which is what makes the classification falsifiable in the
+# right direction: the day either sink is protected, the corresponding test fails and says so, and
+# the entry should move out of KNOWN_GAPS. Reproduced with in-process fakes -- no network, no .env.
+
+PROVISION_SECRET = "SYNTHETIC_PROVISION_PAT_42"
+PROVISION_ENV = {
+    "TABLEAU_SERVER_URL": "https://example.invalid",
+    "TABLEAU_SITE": "s",
+    "TABLEAU_PAT_NAME": "an-unrelated-long-pat-name",
+    "TABLEAU_PAT_SECRET": PROVISION_SECRET,
+}
+
+
+def test_provision_is_classified_as_a_known_gap_not_as_safe():
+    """The classification itself, so a move back into GATE_WAIVERS is a test failure."""
+    assert "scripts/provision_tableau_estate.py" in KNOWN_GAPS
+    assert "scripts/provision_tableau_estate.py" not in GATE_WAIVERS
+    assert "scripts/provision_tableau_estate.py" not in NON_HTTP_CREDENTIAL_SCRIPTS
+
+
+def test_the_provision_signin_gap_is_still_real_and_still_uncaught(tmp_path):
+    """`with server.auth.sign_in(auth):` at provision_tableau_estate.py:282 has no handler at all.
+
+    A TSC `ServerResponseError` carries the response text, and that response answered a request whose
+    body contained the PAT -- so a reflecting proxy puts the credential on an uncaught traceback.
+    Measured against a local server echoing a synthetic PAT in an XML error: exit 1, credential
+    visible. Reproduced here without a socket by raising from the sign-in context manager.
+    """
+    prov = importlib.import_module("provision_tableau_estate")
+
+    class _Refusing:
+        def sign_in(self, _auth):
+            raise RuntimeError(f"401001: Signin Error\n\t\techo {PROVISION_SECRET}")
+
+    server = SimpleNamespace(auth=_Refusing())
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(prov, "_sign_in", lambda _env: (server, object()))
+        with pytest.raises(RuntimeError) as caught:
+            prov.capture(tmp_path, PROVISION_ENV, include_extract=False, download=False)
+    assert PROVISION_SECRET in str(caught.value), (
+        "the provision sign-in no longer leaks -- if it is now guarded, move "
+        "scripts/provision_tableau_estate.py out of KNOWN_GAPS and re-classify it"
+    )
+
+
+def test_the_provision_manifest_gap_is_still_real_and_still_unscrubbed(tmp_path):
+    """`:721` serialises response-derived project, group and content fields with no whole-manifest
+    scrub -- only `ContentRecord.notes` is redacted, via `_describe`. So a project or group NAMED
+    after a credential, or a reflected one, is written to `manifest.json` in clear.
+
+    Measured: `manifest_project_name='Proj SYNTHETIC_PROVISION_PAT_42'`, exit 0, on this branch and
+    byte-identically on `origin/master`. A pre-existing leak, recorded rather than claimed away.
+    """
+    prov = importlib.import_module("provision_tableau_estate")
+    fakes = importlib.import_module("test_provision_tableau_estate")
+    server = fakes.FakeServer(
+        projects_in=(fakes.FakeProject(id="p1", name=f"Proj {PROVISION_SECRET}"),),
+        groups_in=(f"Group {PROVISION_SECRET}",),
+        datasources_in=(fakes.FakeContent(id="d1", name=f"DS {PROVISION_SECRET}", project_id="p1"),),
+    )
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(prov, "tsc", SimpleNamespace(Pager=fakes.FakePager))
+        patch.setattr(prov, "_sign_in", lambda _env: (server, object()))
+        manifest = prov.capture(tmp_path, PROVISION_ENV, include_extract=False, download=False)
+    target = tmp_path / "manifest.json"
+    target.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf8")
+    assert PROVISION_SECRET in target.read_text(encoding="utf8"), (
+        "the provision manifest no longer leaks -- if a whole-manifest scrub was added, move "
+        "scripts/provision_tableau_estate.py out of KNOWN_GAPS and re-classify it"
+    )
 
 
 # ------------------------------------------------- the reviewer's two round-4 reproductions, named
