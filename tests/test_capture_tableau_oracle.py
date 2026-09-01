@@ -30,6 +30,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import capture_tableau_oracle as oracle  # noqa: E402  # pylint: disable=wrong-import-position
+import tableau_view_types as view_types_mod  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_payload_facts as payload_facts  # noqa: E402  # pylint: disable=wrong-import-position
 
 FEDERATED_401 = (
@@ -469,3 +470,90 @@ def test_manifest_records_recovery_counts(tmp_path):
     assert "total_reauths" in manifest
     assert "total_retries" in manifest
     assert manifest["credential_blocked"] == 0
+
+
+# --- #402: dashboard vs worksheet -------------------------------------------------------------
+#
+# Tableau REST returns both under `/views` with nothing to tell them apart, so a captured render
+# could be a whole dashboard or a single chart and no consumer could say which. These pin the
+# discriminator AND -- more importantly -- that every failure of it lands on `unknown` rather than
+# on a guess. A wrong type would be believed; an absent one cannot be.
+
+
+def _wb(dashboards=(), sheets=()):
+    return {"dashboards": [{"luid": x} for x in dashboards], "sheets": [{"luid": x} for x in sheets]}
+
+
+def _graphql(payload):
+    return FakeSession([(200, json.dumps(payload), {})])
+
+
+def test_view_types_joins_dashboards_and_worksheets_by_luid():
+    """The join is on LUID, not on name -- a dashboard and its principal sheet often share one."""
+    session = _graphql({"data": {"workbooks": [_wb(dashboards=["D-1"], sheets=["W-1", "W-2"])]}})
+    mapping, unavailable = view_types_mod.view_types(session)
+    assert unavailable is None
+    assert mapping == {"d-1": "dashboard", "w-1": "worksheet", "w-2": "worksheet"}
+
+
+def test_view_types_asks_the_metadata_api_through_the_hardened_path():
+    """`api='metadata'` + `/graphql` composes the unversioned endpoint via the ONE HTTP round trip.
+
+    If this ever regresses to a second HTTP client, the credential-reflection rounds that produced
+    `tableau_http` start again from scratch on a new surface.
+    """
+    session = _graphql({"data": {"workbooks": []}})
+    view_types_mod.view_types(session)
+    assert session.calls == ["/graphql"]
+
+
+@pytest.mark.parametrize(
+    "responses, why",
+    [
+        # ⚠️ This case carries BOTH `errors` AND usable `data`. A GraphQL 200 can return partial data
+        # beside an error, and with an empty `data` the mapping would end up empty regardless -- so
+        # the errors branch would be redundant and its mutation would survive. Measured: it did.
+        (
+            [
+                (
+                    200,
+                    json.dumps(
+                        {
+                            "errors": [{"message": "Cannot query field 'luid' on type 'Dashboard'"}],
+                            "data": {"workbooks": [_wb(dashboards=["D-1"], sheets=["W-1"])]},
+                        }
+                    ),
+                    {},
+                )
+            ],
+            "FieldUndefined beside partial data",
+        ),
+        ([(403, "forbidden", {})], "metadata api disabled"),
+        ([(200, "not json at all", {})], "unparseable"),
+        ([(200, json.dumps({"data": {"workbooks": []}}), {})], "no luids at all"),
+    ],
+)
+def test_view_types_fails_closed_and_never_guesses(responses, why):
+    """⚠️ The load-bearing property. EVERY failure yields an empty map plus a stated reason.
+
+    There is deliberately no name-based fallback: matching on the view NAME is the exact join this
+    replaces, and it is what let a worksheet stand in as evidence for a dashboard page.
+    """
+    mapping, unavailable = view_types_mod.view_types(FakeSession(responses))
+    assert mapping == {}, f"{why} must not produce a mapping"
+    assert unavailable, f"{why} must state why the type is unknown"
+
+
+def test_an_unmapped_view_records_unknown_not_a_default_type(tmp_path):
+    """`unknown` is a real value a consumer must handle, not a synonym for worksheet."""
+    view = {"id": "11111111-2222-3333-4444-555555555555", "name": "Revenue"}
+    view_types_mod.stamp([view], {"99999999-9999-9999-9999-999999999999": "dashboard"})
+    record = oracle.capture_view(FakeSession([(200, "", {})]), view, tmp_path, frozenset(), None)
+    assert record["view_type"] == "unknown"
+
+
+def test_the_manifest_censuses_view_types_so_a_consumer_reads_it_once(tmp_path):
+    """A zero here must be legible as 'none of that kind', distinct from 'we could not tell'."""
+    _write(tmp_path, [dict(_record("ok"), view_type="dashboard"), dict(_record("ok"), view_type="unknown")])
+    manifest = json.loads((tmp_path / "oracle-manifest.json").read_text(encoding="utf-8"))
+    assert manifest["view_types"] == {"dashboard": 1, "worksheet": 0, "unknown": 1}

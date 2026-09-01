@@ -628,6 +628,15 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
     },
     ("scripts/capture_tableau_oracle.py", "capture_view"): {
         "view_luid": _LUID_OK,
+        "view.get(tableau_view_types.VIEW_TYPE_KEY, tableau_view_types.UNKNOWN)": (
+            "FIXED-VOCABULARY: exactly one of tableau_view_types' three module constants - "
+            "'dashboard', 'worksheet' or 'unknown'. The `view` dict IS response-derived, so the gate "
+            "is right to stop here; but this key is not a Tableau field. `tableau_view_types.stamp` "
+            "writes it, and writes only `mapping.get(luid, UNKNOWN)`, whose values are those same "
+            "constants - never a name, never any response text. A hostile Metadata API can at worst "
+            "cause a wrong CHOICE among the three, which is a correctness question (#402), not a "
+            "disclosure one."
+        ),
         "view.get('name')": _INTO_THE_MANIFEST,
         "view.get('viewUrlName')": _INTO_THE_MANIFEST,
         "view.get('contentUrl')": _INTO_THE_MANIFEST,

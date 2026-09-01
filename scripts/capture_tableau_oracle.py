@@ -87,6 +87,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tableau_render_capability as capability  # noqa: E402  # pylint: disable=wrong-import-position
+import tableau_view_types  # noqa: E402  # pylint: disable=wrong-import-position
 from tableau_payload_facts import (  # noqa: E402  # pylint: disable=wrong-import-position
     pdf_facts,
     png_dimensions,
@@ -559,6 +560,11 @@ def capture_view(
         "workbook_luid": workbook.get("id"),
         "project": (view.get("project") or {}).get("name"),
         "updated_at": view.get("updatedAt"),
+        # `dashboard` / `worksheet` / `unknown` (#402). REST cannot tell these apart, so this is
+        # joined from the Metadata API BY LUID and stamped onto the view upstream. `unknown` is a
+        # real, expected value - an older server or a disabled Metadata API produces it - and a
+        # consumer must treat it as "cannot establish", never as either type.
+        "view_type": view.get(tableau_view_types.VIEW_TYPE_KEY, tableau_view_types.UNKNOWN),
         "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     try:
@@ -930,6 +936,11 @@ def write_manifest(
         "site": run.env["TABLEAU_SITE"],
         "rest_api_version": run.env.get("TABLEAU_REST_API_VERSION"),
         "view_count": len(records),
+        # #402: a per-run census of what the capture could DISCRIMINATE, so a consumer reads it once
+        # instead of tallying `view_type` itself and guessing what a zero means. `unknown` is the
+        # honest state when the Metadata API cannot be reached or does not expose `luid`; it is not
+        # a synonym for worksheet.
+        "view_types": tableau_view_types.census(records),
         "captured_complete": len(complete),
         "data_ok": len(sets["ok"]),
         "data_empty": len(sets["empty"]),
@@ -1126,6 +1137,11 @@ def main() -> int:
         capability.apply_selected_tier(capability_report, wants, api_overrides, env)
 
     records, started = [], time.perf_counter()
+    # Resolved ONCE for the whole run - one Metadata API call for the site, not one per view - and
+    # stamped onto each view so `capture_view` needs no extra argument. A failure is not fatal: every
+    # record then reads `unknown`, and the reason is warned at the seam rather than carried as a
+    # variable somebody has to remember to check (#402).
+    tableau_view_types.resolve_and_stamp(session, views, LOG)
     for index, view in enumerate(views, 1):
         record = capture_view(session, view, out_dir, frozenset(wants), api_overrides)
         record["workbook_name"] = workbook_names.get(record["workbook_luid"])
