@@ -595,7 +595,7 @@ TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
     # and the scrubber we hand it -- but they arrive from functions the analyser has already tainted,
     # and declaring them keeps the boundary honest rather than silently permeable. `headers` really is
     # response-derived.
-    ("scripts/tableau_http.py", "_request"): {"req", "redactor"},
+    ("scripts/tableau_http.py", "_request"): {"req", "redactor", "timeout"},
     ("scripts/tableau_http.py", "header_value"): {"headers"},
     ("scripts/tableau_payload_facts.py", "detect_format"): {"values"},
     ("scripts/tableau_payload_facts.py", "summarise_csv"): {"payload"},
@@ -860,9 +860,19 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
             "SCRUBBED-AT-SINK: the returned leg record, whose own fields are certified in _capture_data; "
             "the PATH argument is built from `stem`, which comes only from `artifact_stem`"
         ),
-        "_capture_render(session, view_luid, out_dir / 'images' / f'{stem}.{_RENDER_EXTENSIONS[kind]}', kind, api=(api_overrides or {}).get(kind))": (
+    },
+    ("scripts/capture_tableau_oracle.py", "_capture_renders"): {
+        "data_status": _A_STATUS_LITERAL,
+        "{'status': data_status, 'attempted': False, 'reason': 'the data leg was blocked at the source, and every "
+        "render route comes from the same VizQL render, so no render could have succeeded'}": (
+            "FIXED-VOCABULARY: a status literal, a bool, and a sentence this module authors -- nothing "
+            "in it came off the wire, so the credential-inheriting skip carries no response text"
+        ),
+        "_capture_render(session, record['view_luid'], targets.out_dir / 'images' / "
+        "f'{targets.stem}.{_RENDER_EXTENSIONS[kind]}', kind, _RenderOptions(targets.api_overrides.get(kind), "
+        "SALVAGE_RETRY if salvage else None))": (
             "SCRUBBED-AT-SINK: the returned leg record, whose own fields are certified in _capture_render; "
-            "the PATH argument is built from `stem`, which comes only from `artifact_stem`"
+            "the PATH argument is built from `targets.stem`, which comes only from `artifact_stem`"
         ),
     },
     ("scripts/capture_tableau_oracle.py", "artifact_stem"): {
@@ -921,6 +931,9 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "path": "OUTBOUND: the REST path we are requesting, built from the site id and a verified LUID",
         "status": "NOT-A-STRING: an HTTP status integer",
         "delay": "NOT-A-STRING: a float backoff delay",
+        "attempt": "NOT-A-STRING: an integer loop counter",
+        "policy.max_attempts": "NOT-A-STRING: an integer bound on a frozen RetryPolicy",
+        "policy.budget_sec": "NOT-A-STRING: a float deadline on a frozen RetryPolicy",
         "kind": "FIXED-VOCABULARY: one of classify_export_error's five status literals",
         "reflected": "FIXED-VOCABULARY: one of the two literal labels reflected_credential returns",
         "detail": "REDACTED-UPSTREAM: classify_export_error builds it from `safe`",
@@ -1057,6 +1070,8 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         ),
         "manifest['elapsed_sec']": "NOT-A-STRING: a float duration in seconds",
         "tableau_view_types.census(records)": _CENSUS_COUNTS,
+        "len(unestablished)": _A_COUNT,
+        "unestablished": _INTO_THE_MANIFEST_AGGREGATE,
         "len(records)": _A_COUNT,
         "len(blocked)": _A_COUNT,
         "len(complete)": _A_COUNT,
@@ -1081,6 +1096,27 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "*_render_statuses(r, requested)}]": _INTO_THE_MANIFEST_AGGREGATE,
         "[r for r in records if any((status not in {'ok', 'source_credential'} for status in "
         "(r.get('data', {}).get('status'), *_render_statuses(r, requested))))]": _INTO_THE_MANIFEST_AGGREGATE,
+    },
+    ("scripts/tableau_oracle_manifest.py", "render_unestablished"): {
+        "record.get('view_luid')": _INTO_THE_MANIFEST,
+        "record.get('view_name')": _INTO_THE_MANIFEST,
+        "legs": _A_STATUS_LITERAL,
+        "{'view_luid': record.get('view_luid'), 'view_name': record.get('view_name'), 'renders': legs}": (
+            _INTO_THE_MANIFEST_AGGREGATE
+        ),
+    },
+    ("scripts/tableau_oracle_manifest.py", "_log_unestablished"): {
+        "len(unestablished)": _A_COUNT,
+        "kind": (
+            "FIXED-VOCABULARY: a render TIER name -- `render_unestablished` builds these keys from "
+            "`sorted(requested)`, the set this repo authors ('png', 'svg', 'pdf'), never from a response"
+        ),
+        "status or 'absent'": _A_STATUS_LITERAL,
+        "', '.join((f\"{kind}={status or 'absent'}\" for kind, status in (entry.get('renders') or {}).items()))": (
+            "FIXED-VOCABULARY: a join of tier names this repo authors and leg-status literals; the view "
+            "NAME on the same line goes through `redacted_note`, which is the only response-derived "
+            "value in this warning"
+        ),
     },
     ("scripts/tableau_oracle_manifest.py", "_log_blocked_and_stale"): {
         "warning": _PROBE_VERDICT,

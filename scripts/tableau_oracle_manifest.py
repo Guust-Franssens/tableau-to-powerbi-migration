@@ -39,6 +39,16 @@ LOG = logging.getLogger("tableau-oracle")
 SVG_MIN_API_VERSION = "3.29"
 SVG_VERSION_MARKER = "SVG export requires API version"
 
+# A render leg that was REQUESTED and deliberately not asked for, because a sibling leg drawn from the
+# same VizQL render had just failed. Distinct from every failure status: nothing was learned about
+# this tier, so it must not read as "this tier is broken" -- and distinct from an ABSENT key, which
+# now means one thing only, "not requested".
+NOT_ATTEMPTED = "not_attempted"
+
+# Tier -> the record key it is written under. `png` is spelled `image` for historical reasons: it was
+# the only render there was, and renaming the key now would orphan every manifest already captured.
+_LEG_KEY = {"png": "image", "svg": "svg", "pdf": "pdf"}
+
 
 def log_progress(index: int, total: int, record: dict[str, Any], redactor=None) -> None:
     """One line per view: proof of rows captured, or a loud, classified failure.
@@ -79,13 +89,17 @@ def _render_statuses(record: dict[str, Any], requested: frozenset[str] = frozens
     the others.
 
     ⚠️ A render leg is absent for TWO different reasons and they must not collapse into one.
-    ``capture_view`` returns before attempting any render once the **data** leg has failed -- all four
-    routes come from the same VizQL render, so being refused three more times costs metered calls to
-    learn nothing. Those renders are absent *because of their prerequisite*, and inventing an
-    independent ``not_captured`` failure for each put a purely credential-blocked view into
-    ``blocked`` **and** ``failed`` at once, where ``failed`` wins and the run exits 3 instead of the
-    human-actionable 2. The prerequisite's own status is propagated instead, so one root cause is
-    counted once -- and a genuinely broken data leg still yields failing renders.
+    Since #423 a NEW capture never leaves a requested leg absent: ``_capture_renders`` writes a record
+    for every requested tier whichever branch it takes, so absent means "not requested" and nothing
+    else. The fallback below is what reads an OLDER manifest correctly, where ``capture_view`` did
+    return before attempting any render once the **data** leg had failed. Those renders are absent
+    *because of their prerequisite*, and inventing an independent ``not_captured`` failure for each
+    put a purely credential-blocked view into ``blocked`` **and** ``failed`` at once, where ``failed``
+    wins and the run exits 3 instead of the human-actionable 2. The prerequisite's own status is
+    propagated instead, so one root cause is counted once -- and a genuinely broken data leg still
+    yields failing renders. New captures reach the same verdicts through the recorded statuses,
+    because a credential-blocked leg is stamped ``source_credential`` at capture time for exactly
+    this reason.
     """
     data_status = (record.get("data") or {}).get("status")
     absent = "not_captured" if data_status in (None, "ok") else data_status
@@ -131,6 +145,33 @@ def _partition(
             )
         ],
     }
+
+
+def render_unestablished(records: list[dict[str, Any]], requested: frozenset[str]) -> list[dict[str, Any]]:
+    """Views for which a render WAS requested and not one requested tier came back ``ok``.
+
+    ⚠️ The defect class this exists for is a collapse, not a miscount: an absent ``image`` key used to
+    read exactly like "no image was asked for", so a view whose render could never be established
+    landed in the clean bucket and stayed there. Field evidence (#423): "Availability Summary by
+    Tail" failed its data leg three times across two days with ``HTTP 0 / TimeoutError: read
+    operation timed out``, and because the render legs were skipped it has no ``image`` key in ANY
+    record. Nothing downstream could tell that from a data-only capture, so an equivalent
+    visual-fidelity defect on that page was not merely unverified but **unfalsifiable**.
+
+    UNESTABLISHED is deliberately NOT the same claim as FAILED. A credential-blocked tier, a
+    version-gated tier and a never-attempted tier are three different remedies; what they share is
+    that no reference image exists for this view, which is the one fact a fidelity review needs
+    before it can start. Each entry therefore carries the per-tier statuses, not a verdict.
+    """
+    if not requested:
+        return []
+    out = []
+    for record in records:
+        legs = {kind: (record.get(_LEG_KEY[kind]) or {}).get("status") for kind in sorted(requested)}
+        if any(status == "ok" for status in legs.values()):
+            continue
+        out.append({"view_luid": record.get("view_luid"), "view_name": record.get("view_name"), "renders": legs})
+    return out
 
 
 @dataclass(frozen=True)
@@ -189,6 +230,7 @@ def write_manifest(
     # reference is code 2's problem rather than code 5's.
     credential_only = rendered == 0 and bool(blocked) and len(blocked) == len(records)
     reference_missing = run.reference_required and rendered == 0 and not credential_only
+    unestablished = render_unestablished(records, run.requested_renders)
     manifest = {
         "schema": "tableau-oracle/1",
         "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -210,6 +252,13 @@ def write_manifest(
         "requested_renders": sorted(run.requested_renders),
         "reference_required": run.reference_required,
         "reference_missing": reference_missing,
+        # #423: views for which a render was REQUESTED and none was obtained. Counted AND named,
+        # because the count answers "is my reference set complete" and the list answers "for which
+        # pages is a visual-fidelity finding currently impossible to make". An absent `image` key can
+        # no longer mean this -- every requested leg is now recorded -- but the manifest must still
+        # SAY it, or a consumer has to re-derive it from three per-tier statuses and will not.
+        "render_unestablished": len(unestablished),
+        "render_unestablished_views": unestablished,
         # #403's surviving half: the manifest must STATE the grade of evidence it holds, so a
         # downstream validator reads it instead of inferring it from the fact that a file exists.
         "render_capability": capability_report,
@@ -257,6 +306,7 @@ def write_manifest(
         manifest_path,
     )
     _log_blocked_and_stale(records, blocked, capability_report, run.session.redact_text)
+    _log_unestablished(unestablished, run.session.redact_text)
     if reference_missing:
         LOG.error(
             "\nA reference render was REQUIRED (--reference-best) but NONE was captured across %d "
@@ -282,6 +332,31 @@ def write_manifest(
     if failed:
         return 1 if complete else 3
     return 2 if blocked else 0
+
+
+def _log_unestablished(unestablished: list[dict[str, Any]], redactor) -> None:
+    """Name every view whose reference render could not be established, and say what that costs.
+
+    Not folded into ``_log_blocked_and_stale``: those two classes each have ONE remedy (reauthorize a
+    source; raise the API version). This class does not -- its members got there by different routes
+    and some of them are simply "the view is too slow to export" -- so the actionable statement is
+    about the CONSEQUENCE, which an operator will otherwise not connect to a line of per-tier statuses.
+    """
+    if not unestablished:
+        return
+    LOG.warning(
+        "\n%d view(s) have NO reference render, so a visual-fidelity finding on those pages cannot "
+        "currently be made or refuted. This is not the same as 'no render was requested' -- one was. "
+        "Re-run just these views (a later batch often succeeds where an earlier one timed out), and "
+        "raise --rest-timeout if the failures read as a read timeout:",
+        len(unestablished),
+    )
+    for entry in unestablished:
+        LOG.warning(
+            "  - %s: %s",
+            redacted_note(entry.get("view_name"), redactor, limit=60),
+            ", ".join(f"{kind}={status or 'absent'}" for kind, status in (entry.get("renders") or {}).items()),
+        )
 
 
 def _log_blocked_and_stale(
