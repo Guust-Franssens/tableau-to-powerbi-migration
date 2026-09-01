@@ -102,11 +102,25 @@ D's `<mark class='Bar'/>` passed the entire suite, including the permanent-invar
 purpose is guarding that mark. The set would go on claiming five-way discrimination having lost the
 controls that provide it.
 
-So each fixture's `(mark_class, axis field, derivation, datatype, is_calc)` is pinned by parsing the
-`.twb` **source** against a hand-written specification, plus a distinctness assertion (eight
-fixtures, eight distinct inputs) and the shared ingredients (`Detail` dashboard, the `AIRLINE_CODE`
-colour dimension, the `Sum(AVAILABILITY_PCT)` value pill). That half uses no engine, so — unlike
-every other test in the module — **it also runs in CI**, where the conversion plugin is absent.
+So each fixture's mark class and its fully-resolved Columns pill are pinned by parsing the `.twb`
+**source** against a hand-written specification, plus a distinctness assertion (eight fixtures, eight
+distinct inputs) and the shared ingredients (`Detail` dashboard, the zone that references the
+worksheet, the colour pill, the value pill). That half uses no engine, so — unlike every other test
+in the module — **it also runs in CI**, where the conversion plugin is absent
+([#435](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/435)).
+
+⚠️ **Pills are RESOLVED, not name-matched, and that distinction is the whole point.** An earlier
+version compared the pill tokens (`none:AIRLINE_CODE:nk`). Measured: flipping `AIRLINE_CODE` from
+`role='dimension'` to `role='measure'` leaves that token byte-identical, removes the `Series` well,
+and the fixture stops reproducing a stacked percentage — while **all 18 offline tests stayed green**.
+Every pill is now followed through its `column-instance` to the declaring `column`, and its
+`(field, derivation, role, datatype, is_calc)` pinned:
+
+| shelf | pinned as |
+|---|---|
+| Columns (the axis) | per fixture — `DATES`/`Calculation_424`/`TECHNOLOGY_SET`, its derivation, `role=dimension`, its datatype, its calc flag |
+| Colour | `AIRLINE_CODE`, `derivation=None`, **`role=dimension`**, `datatype=string` |
+| Rows (the value) | `AVAILABILITY_PCT`, **`derivation=Sum`**, **`role=measure`**, `datatype=real` |
 
 Attribution, measured by collapsing each fixture's input onto A's:
 

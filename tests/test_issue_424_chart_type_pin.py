@@ -98,14 +98,27 @@ EXPECTED_A_BINDING = {
 }
 
 
+class PillFacts(NamedTuple):
+    """A shelf pill RESOLVED through its ``column-instance`` to the ``column`` that declares it.
+
+    ⚠️ Round-3 review: pinning the pill's *name* is not the same as pinning what the name means.
+    Changing ``AIRLINE_CODE`` from ``role='dimension'`` to ``role='measure'`` leaves the token
+    ``none:AIRLINE_CODE:nk`` untouched — and with it the Series well vanishes and the fixture stops
+    reproducing a stacked percentage. Measured: all 18 offline tests stayed green.
+    """
+
+    field: str
+    derivation: str
+    role: str
+    datatype: str
+    is_calc: bool
+
+
 class FixtureInput(NamedTuple):
     """The distinguishing INPUT of one fixture, read from its `.twb` source."""
 
     mark_class: str
-    axis_field: str
-    derivation: str
-    datatype: str
-    is_calc: bool
+    axis: PillFacts
 
 
 # ⚠️ THE SPECIFICATION, hand-written, never derived from a parse. Round-2 review found that the
@@ -117,23 +130,25 @@ class FixtureInput(NamedTuple):
 # So the input side is pinned separately, against the parsed source, and WITHOUT the engine - which
 # also means this is the one part of the file that actually runs in CI, where the plugin is absent.
 EXPECTED_INPUTS = {
-    A_AUTO_YEAR: FixtureInput("Automatic", "DATES", "Year", "date", False),
-    B_AUTO_TRUNC: FixtureInput("Automatic", "DATES", "Month-Trunc", "date", False),
-    C_LINE_YEAR: FixtureInput("Line", "DATES", "Year", "date", False),
-    D_BAR_YEAR: FixtureInput("Bar", "DATES", "Year", "date", False),
-    E_AUTO_MDY: FixtureInput("Automatic", "DATES", "MDY", "date", False),
-    F_AUTO_DATETIME: FixtureInput("Automatic", "DATES", "Year", "datetime", False),
-    G_AUTO_CALCDATE: FixtureInput("Automatic", "Calculation_424", "Year", "date", True),
-    H_AUTO_STRING: FixtureInput("Automatic", "TECHNOLOGY_SET", "None", "string", False),
+    A_AUTO_YEAR: FixtureInput("Automatic", PillFacts("DATES", "Year", "dimension", "date", False)),
+    B_AUTO_TRUNC: FixtureInput("Automatic", PillFacts("DATES", "Month-Trunc", "dimension", "date", False)),
+    C_LINE_YEAR: FixtureInput("Line", PillFacts("DATES", "Year", "dimension", "date", False)),
+    D_BAR_YEAR: FixtureInput("Bar", PillFacts("DATES", "Year", "dimension", "date", False)),
+    E_AUTO_MDY: FixtureInput("Automatic", PillFacts("DATES", "MDY", "dimension", "date", False)),
+    F_AUTO_DATETIME: FixtureInput("Automatic", PillFacts("DATES", "Year", "dimension", "datetime", False)),
+    G_AUTO_CALCDATE: FixtureInput("Automatic", PillFacts("Calculation_424", "Year", "dimension", "date", True)),
+    H_AUTO_STRING: FixtureInput("Automatic", PillFacts("TECHNOLOGY_SET", "None", "dimension", "string", False)),
 }
 
-# Shared by all eight. The stacking consequence needs a colour DIMENSION and a measure on the value
-# shelf; without them a fixture stops demonstrating anything even if its axis pill is intact.
+# Shared by all eight, and RESOLVED rather than name-matched. The stacking consequence needs a colour
+# DIMENSION and an aggregated numeric MEASURE on the value shelf; either one silently demoted and the
+# fixture stops demonstrating a stacked ratio while its axis pill is still perfectly correct.
 EXPECTED_COMMON = {
     "dashboard": "Detail",
     "worksheet": "SLA Availability by Airline",
-    "colour_pill": "none:AIRLINE_CODE:nk",
-    "value_pill": "sum:AVAILABILITY_PCT:qk",
+    "zone_worksheet": "SLA Availability by Airline",
+    "colour": PillFacts("AIRLINE_CODE", "None", "dimension", "string", False),
+    "value": PillFacts("AVAILABILITY_PCT", "Sum", "measure", "real", False),
 }
 
 _ENGINE_RUN: dict[str, Any] | None = None
@@ -158,49 +173,69 @@ def _pill_instance(ref: str | None) -> str:
     return (ref or "").strip().split("].[")[-1].strip("[]")
 
 
-def _axis_shape(worksheet: ET.Element, slug: str) -> FixtureInput:
-    """Resolve the Columns pill back through its ``column-instance`` to the declaring ``column``."""
-    marks = worksheet.findall("./table/panes/pane/mark")
-    assert len(marks) == 1, f"{slug}: expected exactly one mark card, found {len(marks)}"
+def _resolve_pill(deps: ET.Element, pill_ref: str | None, what: str, slug: str) -> PillFacts:
+    """Resolve a shelf pill through its ``column-instance`` to the ``column`` that declares it.
 
-    deps = worksheet.find("./table/view/datasource-dependencies")
-    assert deps is not None, f"{slug}: worksheet declares no datasource-dependencies"
+    ⚠️ This is the whole point of round-3's finding: the pill TOKEN (``none:AIRLINE_CODE:nk``) is
+    inert text. What decides whether the fixture still reproduces a stacked ratio is the declared
+    ``role`` / ``datatype`` behind it, which only shows up after this resolution.
+    """
     instances = {inst.get("name", "").strip("[]"): inst for inst in deps.findall("./column-instance")}
     columns = {col.get("name", "").strip("[]"): col for col in deps.findall("./column")}
 
-    axis_instance = _pill_instance(worksheet.findtext("./table/cols"))
-    assert axis_instance in instances, f"{slug}: the cols pill {axis_instance!r} has no column-instance"
-    instance = instances[axis_instance]
+    instance_id = _pill_instance(pill_ref)
+    assert instance_id in instances, f"{slug}: the {what} pill {instance_id!r} has no column-instance"
+    instance = instances[instance_id]
 
-    axis_field = (instance.get("column") or "").strip("[]")
-    assert axis_field in columns, f"{slug}: the axis pill resolves to {axis_field!r}, which is not declared"
-    column = columns[axis_field]
+    field = (instance.get("column") or "").strip("[]")
+    assert field in columns, f"{slug}: the {what} pill resolves to {field!r}, which is not declared"
+    column = columns[field]
 
-    return FixtureInput(
-        mark_class=marks[0].get("class") or "",
-        axis_field=axis_field,
+    return PillFacts(
+        field=field,
         derivation=instance.get("derivation") or "",
+        role=column.get("role") or "",
         datatype=column.get("datatype") or "",
         is_calc=column.find("./calculation") is not None,
     )
 
 
-def _common_facts(root: ET.Element, worksheet: ET.Element, slug: str) -> dict[str, str]:
-    """The reproduction ingredients every variant shares: the colour dimension and the value pill."""
+def _deps_of(worksheet: ET.Element, slug: str) -> ET.Element:
+    deps = worksheet.find("./table/view/datasource-dependencies")
+    assert deps is not None, f"{slug}: worksheet declares no datasource-dependencies"
+    return deps
+
+
+def _axis_shape(worksheet: ET.Element, slug: str) -> FixtureInput:
+    """The mark class plus the fully-resolved Columns pill."""
+    marks = worksheet.findall("./table/panes/pane/mark")
+    assert len(marks) == 1, f"{slug}: expected exactly one mark card, found {len(marks)}"
+    axis = _resolve_pill(_deps_of(worksheet, slug), worksheet.findtext("./table/cols"), "cols", slug)
+    return FixtureInput(mark_class=marks[0].get("class") or "", axis=axis)
+
+
+def _common_facts(root: ET.Element, worksheet: ET.Element, slug: str) -> dict[str, Any]:
+    """The reproduction ingredients every variant shares, RESOLVED rather than name-matched."""
     dashboards = root.findall("./dashboards/dashboard")
     assert len(dashboards) == 1, f"{slug}: expected exactly one dashboard, found {len(dashboards)}"
+    zones = dashboards[0].findall("./zones/zone")
+    worksheet_zones = [z.get("name") for z in zones if z.get("name")]
+    assert len(worksheet_zones) == 1, f"{slug}: expected exactly one worksheet zone, found {worksheet_zones}"
+
     colour = worksheet.findall("./table/panes/pane/encodings/color")
+    assert len(colour) == 1, f"{slug}: expected exactly one colour encoding, found {len(colour)}"
+
+    deps = _deps_of(worksheet, slug)
     return {
         "dashboard": dashboards[0].get("name") or "",
         "worksheet": worksheet.get("name") or "",
-        "colour_pill": _pill_instance(colour[0].get("column"))
-        if len(colour) == 1
-        else f"<{len(colour)} colour encodings>",
-        "value_pill": _pill_instance(worksheet.findtext("./table/rows")),
+        "zone_worksheet": worksheet_zones[0],
+        "colour": _resolve_pill(deps, colour[0].get("column"), "colour", slug),
+        "value": _resolve_pill(deps, worksheet.findtext("./table/rows"), "rows", slug),
     }
 
 
-def _parse_fixture_source(slug: str) -> tuple[FixtureInput, dict[str, str]]:
+def _parse_fixture_source(slug: str) -> tuple[FixtureInput, dict[str, Any]]:
     """Read one fixture's `.twb` and return its distinguishing input plus the shared facts.
 
     ⚠️ Deliberately parses the XML directly rather than reading a constant, a filename or the
@@ -258,10 +293,16 @@ def test_no_two_fixtures_share_an_input_shape() -> None:
 
 @pytest.mark.parametrize("slug", sorted(EXPECTED_INPUTS))
 def test_every_fixture_keeps_the_shared_stacking_ingredients(slug: str) -> None:
-    """A colour DIMENSION and a measure on the value shelf are what make the defect arithmetic.
+    """A colour DIMENSION and an aggregated numeric MEASURE are what make the defect arithmetic.
 
     An axis pill can be perfectly correct while the fixture has quietly stopped demonstrating a
     stacked ratio, so the parts every variant shares are pinned too.
+
+    ⚠️ Round-3 review: an earlier version compared the pill TOKENS (``none:AIRLINE_CODE:nk``) and was
+    blind to what they resolve to. Measured — flipping ``AIRLINE_CODE`` from ``role='dimension'`` to
+    ``role='measure'`` leaves the token identical, removes the Series well, and the fixture stops
+    reproducing a stacked percentage; all 18 offline tests stayed green. Both pills are now resolved
+    through their ``column-instance`` exactly as the axis pill is, and their role/datatype pinned.
     """
     common = _parse_fixture_source(slug)[1]
     assert common == EXPECTED_COMMON, (
