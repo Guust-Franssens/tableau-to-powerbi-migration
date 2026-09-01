@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from parse_tableau import parse_workbook  # noqa: E402  (path insert must precede this import)
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "issue-185-set-filter.twb"
+BAR_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "issue-185-bar-shelf-layout.twb"
 SET_NAME = "[Technology Set]"
 IO_INSTANCE = "[io:Technology Set:nk]"
 
@@ -95,3 +96,62 @@ def test_our_parser_records_the_filter_even_though_the_set_field_is_unresolved()
     assert only["field_id"].startswith("UNRESOLVED:"), only["field_id"]
     assert IO_INSTANCE in only["field_id"], only["field_id"]
     assert only["members"] == ['"In"'], only["members"]
+
+
+# --- the CAPABILITY-GAP half of #185: mark class 'Bar' + an unsupported shelf layout -------------
+
+
+def _worksheet(root, name):
+    for ws in root.iter("worksheet"):
+        if ws.get("name") == name:
+            return ws
+    raise AssertionError(f"worksheet {name!r} not found")
+
+
+def _shelf_signature(ws):
+    """The (mark, rows, cols, encodings) tuple that decides the emitted visual type."""
+    pane = ws.find(".//pane")
+    mark = pane.find("mark").get("class")
+    encodings = sorted((child.tag, child.get("column")) for child in pane.find("encodings"))
+    rows = (ws.find(".//rows").text or "").strip()
+    cols = (ws.find(".//cols").text or "").strip()
+    return mark, rows, cols, encodings
+
+
+def test_bar_fixture_exists():
+    """The A/B control for the Bar capability gap."""
+    assert BAR_FIXTURE.is_file(), f"reproduction fixture missing: {BAR_FIXTURE}"
+
+
+def test_bar_fixture_is_a_controlled_experiment():
+    """Both worksheets must differ ONLY in the mark class.
+
+    A raw count of `mark class='Bar'` in a corpus establishes nothing, because Bar marks are
+    common and work. The defect is that an explicit `bar` mark is strictly LESS supported than
+    `automatic` over the SAME shelves, so the fixture is only evidence while the shelves,
+    encodings and axes stay byte-identical between the two worksheets.
+    """
+    root = ET.parse(BAR_FIXTURE).getroot()
+    auto_mark, auto_rows, auto_cols, auto_enc = _shelf_signature(_worksheet(root, "Auto Two Measures"))
+    bar_mark, bar_rows, bar_cols, bar_enc = _shelf_signature(_worksheet(root, "Bar Two Measures"))
+
+    assert auto_mark == "Automatic", auto_mark
+    assert bar_mark == "Bar", bar_mark
+    assert auto_rows == bar_rows, f"rows differ: {auto_rows!r} vs {bar_rows!r}"
+    assert auto_cols == bar_cols, f"cols differ: {auto_cols!r} vs {bar_cols!r}"
+    assert auto_enc == bar_enc, f"encodings differ: {auto_enc} vs {bar_enc}"
+
+
+def test_bar_fixture_layout_is_measure_on_both_axes_with_a_dimension_on_detail():
+    """The specific unsupported layout, pinned.
+
+    `_visual_type` accepts an explicit `bar` mark for exactly two layouts (dimension-on-cols with
+    measure-on-rows, or dimension-on-rows with measure-on-cols). A measure on BOTH axes with the
+    dimension on the Detail encoding satisfies neither, so `bar` falls through to UNSUPPORTED
+    while `automatic` reaches the scatter fallback.
+    """
+    root = ET.parse(BAR_FIXTURE).getroot()
+    _, rows, cols, enc = _shelf_signature(_worksheet(root, "Bar Two Measures"))
+    assert "sum:" in rows, f"rows must carry a measure, got {rows!r}"
+    assert "sum:" in cols, f"cols must carry a measure, got {cols!r}"
+    assert enc == [("lod", "[federated.bards].[none:Tail:nk]")], enc
