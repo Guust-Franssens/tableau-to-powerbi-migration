@@ -61,15 +61,58 @@ import argparse
 import hashlib
 import json
 import re
-import struct
 import sys
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
-
 from bundle_corpus import shipping_reports
+from reference_evidence import (
+    AMBIGUOUS,
+    CAP_VALIDATION,
+    GRADE_ORACLE,
+    GRADE_UNKNOWN,
+    GRADE_VALIDATION,
+    KIND_ASSERTED,
+    KIND_DASHBOARD,
+    KIND_UNKNOWN,
+    KIND_WORKSHEET,
+    MIN_RENDER_EDGE,
+    PROVIDER_CEILING,
+    Evidence,
+    RejectedEvidence,
+    UnitIdentity,
+    json_object,
+    norm_name,
+    oracle_evidence,
+    reference_evidence,
+    sha256_of,
+)
+
+# Re-exported so this module stays the single vocabulary surface a consumer imports: a caller should
+# never have to know which half of the split owns a constant. `__all__` keeps the linters honest
+# about the ones this file does not itself reference.
+__all__ = [
+    "AMBIGUOUS",
+    "CAP_VALIDATION",
+    "GRADE_ORACLE",
+    "GRADE_UNKNOWN",
+    "GRADE_VALIDATION",
+    "KIND_ASSERTED",
+    "KIND_DASHBOARD",
+    "KIND_UNKNOWN",
+    "KIND_WORKSHEET",
+    "MIN_RENDER_EDGE",
+    "PROVIDER_CEILING",
+    "Evidence",
+    "RejectedEvidence",
+    "UnitIdentity",
+    "main",
+    "render",
+    "scan",
+]
+
 
 REPORT_NAME = "reference-readiness-check.json"
 
@@ -83,9 +126,6 @@ EXIT_FINDINGS = 1
 EXIT_USAGE = 2
 EXIT_CANNOT_ESTABLISH = 3
 
-KIND_DASHBOARD = "dashboard"
-KIND_WORKSHEET = "worksheet"
-KIND_UNKNOWN = "unknown"
 
 PAGE_EMITTED = "emitted"
 PAGE_DROPPED_EXPLAINED = "dropped_explained"
@@ -95,40 +135,6 @@ READY = "ready"
 BLIND = "blind"
 UNVERIFIABLE = "unverifiable"
 INSUFFICIENT_GRADE = "insufficient-grade"
-
-# Grade strings are `check_unit.py:868,906`'s, reused verbatim so one vocabulary describes evidence
-# everywhere. Inventing a second spelling would make two gates disagree about the same artifact.
-GRADE_VALIDATION = "validation-grade"
-GRADE_ORACLE = "layout/text only (oracle capture, default view state)"
-GRADE_UNKNOWN = "unknown"
-
-CAP_VALIDATION = "validation_grade"
-
-# `capture_tableau_reference.py:44-48`. Closed on purpose: an unrecognised capability means the
-# manifest was written by something this gate does not understand, which is a rejection rather than
-# an unknown grade.
-ALLOWED_CAPABILITIES = frozenset(
-    {"layout_grade", "text_readable", "state_reproducible", "revision_bound", CAP_VALIDATION}
-)
-
-# A reference must be legible, not merely present. 64px sits well below the 192x192 embedded Tableau
-# thumbnail (`extract_twb_thumbnails.py`), the smallest render this toolkit treats as real evidence,
-# so the floor rejects placeholders without rejecting the genuine low-fidelity route.
-MIN_RENDER_EDGE = 64
-MIN_PDF_BYTES = 1024
-
-# What object a reference provider's output can possibly be a render OF. This is the scope join that
-# replaces the name slug, and each entry is a structural fact about the provider, not a guess -
-# `embedded_thumbnail` is per-WORKSHEET ("dashboards are not thumbnailed per se",
-# `extract_twb_thumbnails.py`), `public_playwright` is driven from the spec's dashboard list
-# (`capture_tableau_reference.py:135`), and `manual` cannot know "even that it is a screenshot of
-# this dashboard" (`:261-266`) so it satisfies nothing on its own. Table: docs/reference-readiness.md.
-PROVIDER_SCOPE = {
-    "embedded_thumbnail": KIND_WORKSHEET,
-    "public_playwright": KIND_DASHBOARD,
-    "server_rest": KIND_DASHBOARD,
-    "manual": KIND_UNKNOWN,
-}
 
 # Engine `viz_fidelity[]` reasons that mean "this page was dropped ON PURPOSE". Matched as substrings
 # of the recorded reason, which carries the engine's "manual attention required: " prefix
@@ -152,113 +158,6 @@ class SourceObject:
         """The exact PBIR page id the engine would emit for this object."""
         prefix = "page-ws-" if self.kind == KIND_WORKSHEET else "page-"
         return engine_page_id(prefix + self.name)
-
-
-@dataclass(frozen=True)
-class UnitIdentity:
-    """Who a unit is, for attributing evidence to it."""
-
-    name: str
-    source_path: Path
-    source_sha256: str
-    workbook_luid: str | None = None
-
-
-@dataclass(frozen=True)
-class RejectedEvidence:
-    """A candidate render that failed a construction precondition, kept so it can be REPORTED.
-
-    Rejections are printed rather than dropped: an operator who captured a picture that does not
-    count needs to be told why, or they will conclude the gate is broken and route around it.
-    """
-
-    name: str
-    origin: str
-    path: str | None
-    reason: str
-
-
-@dataclass(frozen=True)
-class Evidence:  # pylint: disable=too-many-instance-attributes
-    """A render proven usable AND attributable. Construct only via :meth:`build`.
-
-    Every field is a precondition, not a hint - which is why there are ten of them. Round-1 review of
-    PR #428 found three fail-open paths (zero-byte render, empty capabilities, wrong-workbook
-    attribution) that all existed because validity was checked at call sites instead of at
-    construction, so folding these into a smaller object would recreate the defect.
-    """
-
-    name: str
-    kind: str
-    grade: str
-    origin: str
-    provider: str | None
-    path: str
-    width: int | None
-    height: int | None
-    workbook_key: str
-    workbook_kind: str
-
-    @classmethod
-    def build(  # pylint: disable=too-many-arguments,too-many-positional-arguments
-        cls,
-        *,
-        name: str,
-        kind: str,
-        grade: str,
-        origin: str,
-        provider: str | None,
-        render_path: Path,
-        workbook_key: str | None,
-        workbook_kind: str,
-    ) -> Evidence | RejectedEvidence:
-        """Return verified evidence, or a rejection naming the precondition that failed."""
-        display = str(render_path)
-        if not name.strip():
-            return RejectedEvidence(name=name, origin=origin, path=display, reason="record has no view name")
-        if not workbook_key:
-            return RejectedEvidence(
-                name=name,
-                origin=origin,
-                path=display,
-                reason=(
-                    "no workbook identity recorded, so this render cannot be attributed to any unit "
-                    "(a reference manifest must carry source_workbook_sha256; an oracle record must "
-                    "carry workbook_luid or workbook_name)"
-                ),
-            )
-        if grade == GRADE_UNKNOWN:
-            return RejectedEvidence(name=name, origin=origin, path=display, reason="no usable capability grade")
-        facts = render_facts(render_path)
-        if isinstance(facts, str):
-            return RejectedEvidence(name=name, origin=origin, path=display, reason=facts)
-        width, height = facts
-        return cls(
-            name=name,
-            kind=kind,
-            grade=grade,
-            origin=origin,
-            provider=provider,
-            path=display,
-            width=width,
-            height=height,
-            workbook_key=workbook_key,
-            workbook_kind=workbook_kind,
-        )
-
-    def is_for(self, unit: UnitIdentity) -> bool:
-        """Whether this render is provably evidence for ``unit``.
-
-        Reference evidence is keyed by the SOURCE SHA, so a capture taken against an older revision
-        of the workbook does not silently remain valid - a stale picture is worse than a missing one
-        because it looks like evidence. Oracle evidence is keyed by workbook LUID where the bundle
-        recorded one, falling back to the published workbook name.
-        """
-        if self.workbook_kind == "sha256":
-            return self.workbook_key.casefold() == unit.source_sha256.casefold()
-        if self.workbook_kind == "luid":
-            return bool(unit.workbook_luid) and self.workbook_key.casefold() == (unit.workbook_luid or "").casefold()
-        return _norm(self.workbook_key) == _norm(unit.name)
 
 
 @dataclass
@@ -286,91 +185,6 @@ def engine_page_id(text: str) -> str:
     digest = hashlib.md5((text or "").encode("utf-8")).hexdigest()[:8]  # noqa: S324
     name = (base[:16] + digest) if base else ("v" + digest)
     return name[:24]
-
-
-def _norm(text: str | None) -> str:
-    """Whitespace/case-normalized name, for comparing two spellings of the same object."""
-    return re.sub(r"\s+", " ", (text or "")).strip().casefold()
-
-
-def _sha256(path: Path) -> str | None:
-    try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
-    except OSError:
-        return None
-
-
-def _json_object(path: Path) -> dict[str, Any] | None:
-    """Read a JSON object, or None when it is absent, unreadable or not an object."""
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
-def _png_size(blob: bytes) -> tuple[int, int] | None:
-    if len(blob) < 24 or blob[:8] != b"\x89PNG\r\n\x1a\n" or blob[12:16] != b"IHDR":
-        return None
-    width, height = struct.unpack(">II", blob[16:24])
-    return int(width), int(height)
-
-
-def _svg_size(blob: bytes) -> tuple[int, int] | None:
-    try:
-        root = ElementTree.fromstring(blob.decode("utf-8", "ignore"))  # noqa: S314
-    except ElementTree.ParseError:
-        return None
-    numbers: list[float | None] = []
-    for attr in ("width", "height"):
-        match = re.match(r"\s*([0-9.]+)", str(root.get(attr) or ""))
-        numbers.append(float(match.group(1)) if match else None)
-    if numbers[0] is not None and numbers[1] is not None:
-        return int(numbers[0]), int(numbers[1])
-    box = re.findall(r"[-0-9.]+", str(root.get("viewBox") or ""))
-    return (int(float(box[2])), int(float(box[3]))) if len(box) == 4 else None
-
-
-def _render_size(blob: bytes, suffix: str) -> tuple[int, int] | None | str:
-    """`(w, h)` for a parsed raster/vector render, `None` for PDF (accepted on header+size), or a reason."""
-    if suffix == ".pdf":
-        if not blob.startswith(b"%PDF-"):
-            return "render is not a PDF despite its .pdf extension"
-        if len(blob) < MIN_PDF_BYTES:
-            return f"PDF render is only {len(blob)} bytes, below the {MIN_PDF_BYTES}-byte floor"
-        return None
-    size = _png_size(blob) if suffix == ".png" else _svg_size(blob) if suffix == ".svg" else None
-    if size is None:
-        return f"render did not parse as {suffix.lstrip('.') or 'an image'} (truncated, empty or mislabelled)"
-    return size
-
-
-def render_facts(path: Path) -> tuple[int | None, int | None] | str:
-    """`(width, height)` for a render that genuinely parses, else a rejection reason.
-
-    This is the check `Path.is_file()` was standing in for. Round-1 review measured a **zero-byte**
-    file reaching `READY`, so existence is not evidence: the bytes must decode as the format their
-    extension claims, and the result must be big enough to read.
-
-    A PDF has no cheap dimension read (the MediaBox may sit behind an object stream), so it is
-    accepted on a `%PDF-` header plus a size floor. That is a deliberately weaker check, and it is
-    stated rather than hidden.
-    """
-    try:
-        blob = path.read_bytes()
-    except OSError as exc:
-        return f"render could not be read: {exc}"
-    if not blob:
-        return "render is zero bytes"
-    size = _render_size(blob, path.suffix.lower())
-    if isinstance(size, str):
-        return size
-    if size is None:
-        return (None, None)
-    width, height = size
-    if min(width, height) < MIN_RENDER_EDGE:
-        return f"render is {width}x{height}, below the {MIN_RENDER_EDGE}px legibility floor"
-    return width, height
 
 
 def _workbook_xml(path: Path) -> str | None:
@@ -427,8 +241,13 @@ def page_map(report_dir: Path) -> tuple[dict[str, str], list[str]]:
     A page whose `page.json` cannot be read is a PROBLEM, not a page. The previous version fell back
     to the containing directory's name, so round-1 review measured forcing every read to fail and
     still getting three pages and a `READY` verdict - completeness passed with no readable mapping at
-    all. `pages.json.pageOrder` is cross-checked for the same reason: it is the report's own
-    statement of which pages exist, and a disagreement means the join cannot be trusted.
+    all.
+
+    WARNING: `pages.json` is REQUIRED and must declare a list `pageOrder`. Round-2 finding 4: the
+    cross-check ran only when `pageOrder` happened to be a list, so an absent, unreadable,
+    wrong-shaped or non-list `pages.json` reported no problem and every discovered `page.json` was
+    trusted - measured, failing ONLY the `pages.json` reads still produced `READY 3/3`. It is the
+    report's own statement of which pages exist; without it there is no mapping to check against.
     """
     pages_root = report_dir / "definition" / "pages"
     found: dict[str, str] = {}
@@ -436,7 +255,7 @@ def page_map(report_dir: Path) -> tuple[dict[str, str], list[str]]:
     if not pages_root.is_dir():
         return found, ["no definition/pages folder"]
     for page_json in sorted(pages_root.rglob("page.json")):
-        payload = _json_object(page_json)
+        payload = json_object(page_json)
         name = (payload or {}).get("name")
         if not isinstance(name, str) or not name.strip():
             problems.append(f"unreadable or nameless page definition: {page_json.parent.name}/page.json")
@@ -444,33 +263,40 @@ def page_map(report_dir: Path) -> tuple[dict[str, str], list[str]]:
         if name in found:
             problems.append(f"two page definitions both declare the id {name!r}")
         found[name] = str((payload or {}).get("displayName") or name)
-    order = (_json_object(pages_root / "pages.json") or {}).get("pageOrder")
-    if isinstance(order, list):
-        declared = {str(item) for item in order}
-        problems.extend(
-            f"pages.json lists {missing!r} but no readable page definition exists for it"
-            for missing in sorted(declared - set(found))
+    order = (json_object(pages_root / "pages.json") or {}).get("pageOrder")
+    if not isinstance(order, list):
+        problems.append(
+            "pages.json is missing, unreadable, or declares no list pageOrder, so the report states "
+            "no page set to check the page definitions against"
         )
-        problems.extend(
-            f"page {extra!r} exists but pages.json does not list it" for extra in sorted(set(found) - declared)
-        )
+        return found, problems
+    declared = {str(item) for item in order}
+    problems.extend(
+        f"pages.json lists {missing!r} but no readable page definition exists for it"
+        for missing in sorted(declared - set(found))
+    )
+    problems.extend(f"page {extra!r} exists but pages.json does not list it" for extra in sorted(set(found) - declared))
     return found, problems
 
 
 def drop_explanations(handover: dict[str, Any] | None) -> dict[tuple[str, str], str]:
-    """`{(kind, normalized name): engine reason}` for pages the engine dropped ON PURPOSE.
+    """`{(kind, EXACT name): engine reason}` for pages the engine dropped ON PURPOSE.
 
     Read from the handover's `workbook.viz_fidelity[]`, the engine's structured per-object disclosure
     channel, which covers BOTH scopes: worksheet rows carry the worksheet name, while dashboard-scope
     warnings are appended as rows whose `worksheet` holds the dashboard name and whose `visual_type`
     holds the scope string (`migrate_estate.py:1201-1204`).
 
-    WARNING: Keyed by KIND as well as name. Keying on name alone is the same defect that made
-    `pbip_warnings[]` unusable - one object's excuse covering another's drop - and round-1 review
-    measured it: a worksheet warning for `Ops` made a genuinely missing DASHBOARD named `Ops` read as
-    accounted-for, and the unit went READY. A real worksheet row's `visual_type` is a visual type
-    (`column`, `line`, `unsupported`, or absent), never the literal `"dashboard"`, so the scope is
-    recoverable without guessing.
+    WARNING: keyed by kind AND by the EXACT name, and that pair is the third and final form of one
+    recurring defect - one object's excuse covering another's drop. It was fixed at the ROUTING level
+    (`viz_fidelity[]` over `pbip_warnings[]`), then at the MATCHING level (`name` -> `(kind, name)`),
+    and round-2 review found it again at the NORMALIZATION level: `_norm` collapses case and repeated
+    whitespace, so `Ops  Summary` and `Ops Summary` - which the engine gives DIFFERENT page ids -
+    shared a key, and one drop warning marked the other page accounted-for.
+
+    Both sides of this join are engine/source artifacts and are byte-exact: `viz_fidelity[].worksheet`
+    is the IR's own object name and `SourceObject.name` comes from the same workbook XML. So there is
+    no normalization to do here, and adding a third key component would just move the boundary again.
     """
     explained: dict[tuple[str, str], str] = {}
     workbook = (handover or {}).get("workbook")
@@ -478,169 +304,46 @@ def drop_explanations(handover: dict[str, Any] | None) -> dict[tuple[str, str], 
     for row in rows if isinstance(rows, list) else []:
         if not isinstance(row, dict) or row.get("status") != "warned":
             continue
+        name = row.get("worksheet")
+        if not isinstance(name, str):
+            continue
         kind = KIND_DASHBOARD if row.get("visual_type") == KIND_DASHBOARD else KIND_WORKSHEET
         for reason in [row.get("reason"), *(row.get("additional_reasons") or [])]:
             if isinstance(reason, str) and any(marker in reason for marker in DELIBERATE_DROP_MARKERS):
-                explained.setdefault((kind, _norm(row.get("worksheet"))), reason)
+                explained.setdefault((kind, name), reason)
                 break
     return explained
 
 
-def _entry_scope(entry: dict[str, Any], provider: str | None) -> str:
-    """What kind of object a reference entry is a render of.
+def match_evidence(obj: SourceObject, evidence: list[Evidence]) -> tuple[Evidence | str | None, list[Evidence]]:
+    """`(match, name_only)` for one object, against evidence ALREADY scoped to its unit.
 
-    An explicit `view_type`/`object_type` on the entry wins, so a manifest enriched with the oracle's
-    view-type join (PR #422) is honoured without a code change here. Otherwise the provider decides.
-    Anything unrecognised is UNKNOWN, which satisfies nothing - never a guess at either type.
+    A match requires BOTH the name and the scope to agree - the rule that stops a worksheet render
+    satisfying a dashboard page. `name_only` carries entries sharing the name whose scope does not
+    match or could not be established; they are reported as UNVERIFIABLE rather than dropped, because
+    "a picture exists but I cannot prove what it is of" is a different operator action from "no
+    picture exists".
+
+    WARNING: names are compared EXACTLY first. Round-2 finding 5 measured the normalization defect -
+    `_norm` collapses case and repeated whitespace, so `Ops  Summary` and `Ops Summary`, which get
+    DIFFERENT engine page ids, shared one key and a single record marked both pages ready.
+
+    A normalized fallback survives only for evidence NAMES, which come from external providers whose
+    spelling this repo does not control. It fires only when it is unambiguous: exactly one record may
+    normalize to the key. More than one is `AMBIGUOUS`, which is a refusal, not a resolution - a
+    match picked from several candidates is a guess, and a guess is what this gate exists to refuse.
     """
-    declared = entry.get("view_type") or entry.get("object_type")
-    if isinstance(declared, str) and declared.strip().casefold() in (KIND_DASHBOARD, KIND_WORKSHEET):
-        return declared.strip().casefold()
-    return PROVIDER_SCOPE.get(str(provider or ""), KIND_UNKNOWN)
-
-
-def reference_grade(capabilities: Any) -> str:
-    """Grade for a `reference/manifest.json` state, in `check_unit.py:868`'s vocabulary.
-
-    An empty list, a non-list, or any capability outside `ALLOWED_CAPABILITIES` yields
-    `GRADE_UNKNOWN`, which `Evidence.build` refuses. Round-1 review measured `capabilities: []`
-    reaching `ready [unknown]`.
-    """
-    if not isinstance(capabilities, list) or not capabilities:
-        return GRADE_UNKNOWN
-    caps = {cap for cap in capabilities if isinstance(cap, str)}
-    if not caps or not caps <= ALLOWED_CAPABILITIES:
-        return GRADE_UNKNOWN
-    return GRADE_VALIDATION if CAP_VALIDATION in caps else "/".join(sorted(caps))
-
-
-def _reference_states(directory: Path, entry: dict[str, Any], workbook_sha: Any) -> list[Evidence | RejectedEvidence]:
-    """Build every state of one `reference/manifest.json` entry."""
-    name = str(entry.get("name") or "")
-    built: list[Evidence | RejectedEvidence] = []
-    for state in entry.get("states") or []:
-        if not isinstance(state, dict):
-            continue
-        image = state.get("image")
-        if not isinstance(image, str) or not image:
-            built.append(RejectedEvidence(name, "reference", None, "state declares no image"))
-            continue
-        built.append(
-            Evidence.build(
-                name=name,
-                kind=_entry_scope({**entry, **state}, state.get("provider")),
-                grade=reference_grade(state.get("capabilities")),
-                origin="reference",
-                provider=str(state.get("provider")) if state.get("provider") else None,
-                render_path=directory / image,
-                workbook_key=str(workbook_sha) if isinstance(workbook_sha, str) and workbook_sha else None,
-                workbook_kind="sha256",
-            )
-        )
-    return built
-
-
-def _split(built: list[Evidence | RejectedEvidence]) -> tuple[list[Evidence], list[RejectedEvidence]]:
-    """Partition build results, so no call site can accidentally treat a rejection as evidence."""
-    usable = [item for item in built if isinstance(item, Evidence)]
-    return usable, [item for item in built if isinstance(item, RejectedEvidence)]
-
-
-def reference_evidence(reference_dirs: list[Path]) -> tuple[list[Evidence], list[RejectedEvidence]]:
-    """Evidence declared by `reference/manifest.json` files, split into usable and rejected.
-
-    Note the manifest's top-level key is `dashboards`, but `capture_tableau_reference.py:199` files
-    WORKSHEET thumbnails there too. The key is therefore not evidence of scope; the provider is.
-    """
-    built: list[Evidence | RejectedEvidence] = []
-    for directory in reference_dirs:
-        payload = _json_object(directory / "manifest.json")
-        entries = (payload or {}).get("dashboards")
-        for entry in entries if isinstance(entries, list) else []:
-            if isinstance(entry, dict):
-                built.extend(_reference_states(directory, entry, (payload or {}).get("source_workbook_sha256")))
-    return _split(built)
-
-
-def _oracle_render(directory: Path, record: dict[str, Any]) -> Path | None:
-    """The first render leg the record claims succeeded. Validity is decided by `Evidence.build`."""
-    for leg in ("image", "svg", "pdf"):
-        payload = record.get(leg)
-        if isinstance(payload, dict) and payload.get("status") == "ok" and isinstance(payload.get("path"), str):
-            return directory / payload["path"]
-    return None
-
-
-def _oracle_workbook_key(record: dict[str, Any]) -> tuple[str | None, str]:
-    """`(key, kind)` identifying which workbook an oracle record belongs to."""
-    luid = record.get("workbook_luid")
-    if isinstance(luid, str) and luid:
-        return luid, "luid"
-    name = record.get("workbook_name")
-    return (name if isinstance(name, str) and name else None), "name"
-
-
-def _oracle_view_kind(record: dict[str, Any]) -> str:
-    """PR #422's `view_type`, or UNKNOWN. Absent and `unknown` both mean "cannot establish"."""
-    declared = record.get("view_type")
-    if isinstance(declared, str) and declared.strip().casefold() in (KIND_DASHBOARD, KIND_WORKSHEET):
-        return declared.strip().casefold()
-    return KIND_UNKNOWN
-
-
-def _oracle_record(directory: Path, record: dict[str, Any]) -> Evidence | RejectedEvidence:
-    """Build one oracle view record."""
-    render_path = _oracle_render(directory, record)
-    name = str(record.get("view_name") or record.get("view_url_name") or "")
-    if render_path is None:
-        return RejectedEvidence(name, "oracle", None, "no render leg reported status ok")
-    key, key_kind = _oracle_workbook_key(record)
-    return Evidence.build(
-        name=name,
-        kind=_oracle_view_kind(record),
-        grade=GRADE_ORACLE,
-        origin="oracle",
-        provider="oracle_capture",
-        render_path=render_path,
-        workbook_key=key,
-        workbook_kind=key_kind,
-    )
-
-
-def oracle_evidence(oracle_dirs: list[Path]) -> tuple[list[Evidence], list[RejectedEvidence]]:
-    """Evidence declared by `_oracle/oracle-manifest.json` files, split into usable and rejected.
-
-    `view_type` comes from PR #422's Metadata-API join and is consumed if present. It fails closed by
-    design there (a disabled Metadata API yields `unknown` for everything), and it fails closed here
-    too: absent or `unknown` means this record cannot satisfy any page, rather than being allowed to
-    satisfy either kind. An oracle capture is default-view-state with no `?vf_` pinning, so its grade
-    is layout/text only regardless of render leg.
-    """
-    built: list[Evidence | RejectedEvidence] = []
-    for directory in oracle_dirs:
-        payload = _json_object(directory / "oracle-manifest.json")
-        built.extend(
-            _oracle_record(directory, record)
-            for record in (payload or {}).get("views") or []
-            if isinstance(record, dict)
-        )
-    return _split(built)
-
-
-def match_evidence(obj: SourceObject, evidence: list[Evidence]) -> tuple[Evidence | None, list[Evidence]]:
-    """Return `(match, name_only)` for one source object, against evidence ALREADY scoped to its unit.
-
-    A match requires BOTH the normalized name and the scope to agree - this is the rule that stops a
-    worksheet render satisfying a dashboard page. `name_only` carries entries that share the name but
-    whose scope does not match or could not be established; they are reported as UNVERIFIABLE rather
-    than silently ignored, because "a picture exists but I cannot prove what it is of" is a different
-    operator action from "no picture exists".
-    """
-    named = [item for item in evidence if _norm(item.name) == _norm(obj.name)]
-    matched = [item for item in named if item.kind == obj.kind]
+    forms = [(item, item.match_names()) for item in evidence]
+    exact = [item for item, names in forms if obj.name in names]
+    if not exact:
+        loose = [item for item, names in forms if any(norm_name(n) == norm_name(obj.name) for n in names)]
+        if len({item.path for item in loose}) > 1:
+            return AMBIGUOUS, loose
+        exact = loose
+    matched = [item for item in exact if item.kind in (obj.kind, KIND_ASSERTED)]
     if matched:
         return next((item for item in matched if item.grade == GRADE_VALIDATION), matched[0]), []
-    return None, named
+    return None, exact
 
 
 def _page_row(  # pylint: disable=too-many-arguments,too-many-positional-arguments
@@ -668,7 +371,20 @@ def _page_row(  # pylint: disable=too-many-arguments,too-many-positional-argumen
         row["readiness"] = READY if page_status == PAGE_DROPPED_EXPLAINED else BLIND
         return row
     match, name_only = match_evidence(obj, evidence)
-    if match is not None:
+    if match is AMBIGUOUS:
+        row.update(
+            {
+                "evidence": "unverifiable",
+                "matched_by": (
+                    f"{len(name_only)} records share this name once normalized "
+                    f"({', '.join(sorted({item.name for item in name_only}))}) - "
+                    "picking one would be a guess"
+                ),
+                "readiness": UNVERIFIABLE,
+            }
+        )
+        return row
+    if isinstance(match, Evidence):
         insufficient = require_validation_grade and match.grade != GRADE_VALIDATION
         row.update(
             {
@@ -696,7 +412,7 @@ def _page_row(  # pylint: disable=too-many-arguments,too-many-positional-argumen
 
 def _engine_report(root: Path) -> dict[str, Any] | None:
     """The engine's own `report.json`, which is what classifies a unit as workbook vs datasource."""
-    payload = _json_object(root / "report.json")
+    payload = json_object(root / "report.json")
     return payload if isinstance((payload or {}).get("workbooks"), list) else None
 
 
@@ -704,10 +420,12 @@ def _unit_names(engine_report: dict[str, Any] | None) -> tuple[set[str], set[str
     """`(workbook names, datasource names)` the engine says this bundle produced."""
     report = engine_report or {}
     workbooks = {
-        _norm(item.get("name")) for item in report.get("workbooks") or [] if isinstance(item, dict) and item.get("name")
+        norm_name(item.get("name"))
+        for item in report.get("workbooks") or []
+        if isinstance(item, dict) and item.get("name")
     }
     datasources = {
-        _norm(item.get("name"))
+        norm_name(item.get("name"))
         for item in report.get("datasources") or []
         if isinstance(item, dict) and item.get("name")
     }
@@ -715,20 +433,34 @@ def _unit_names(engine_report: dict[str, Any] | None) -> tuple[set[str], set[str
 
 
 def _handover(root: Path, unit: str) -> dict[str, Any] | None:
-    return _json_object(root / "handover" / f"{unit}.json")
+    return json_object(root / "handover" / f"{unit}.json")
 
 
-def _provenance_luid(root: Path, source: Path, source_sha: str) -> str | None:
-    """The published workbook LUID for this source, from `source-provenance.json` when stamped."""
-    payload = _json_object(root / "source-provenance.json")
+def _provenance_luid(root: Path, source_sha: str) -> str | None:
+    """The published workbook LUID for this source - ONLY when provenance is byte-confirmed.
+
+    Round-2 finding 3: this returned a LUID without consulting `origin.match`.
+    `stamp_tableau_provenance.py:191-192` records `"sha256"` when local and server bytes agree and
+    `"name_only"` when they DIFFER, and its own docstring says figures will not reproduce in that
+    case - yet that LUID was making server oracle evidence ready. The repo's provenance is 26
+    `sha256` / 15 `name_only` / 6 unmatched, so trusting it blindly is the common case.
+
+    Both halves are required: the stamped input hash must be THIS file, and the server comparison
+    must have agreed. Anything else leaves the name as the only usable identity, which `is_for`
+    falls back to.
+    """
+    payload = json_object(root / "source-provenance.json")
     for record in (payload or {}).get("inputs") or []:
         if not isinstance(record, dict):
             continue
         stamped = record.get("input") if isinstance(record.get("input"), dict) else {}
         origin = record.get("origin") if isinstance(record.get("origin"), dict) else {}
-        if stamped.get("sha256") == source_sha or _norm(stamped.get("file")) == _norm(source.name):
-            luid = origin.get("workbook_luid")
-            return str(luid) if isinstance(luid, str) and luid else None
+        if stamped.get("sha256") != source_sha:
+            continue
+        if origin.get("match") != "sha256":
+            return None
+        luid = origin.get("workbook_luid")
+        return str(luid) if isinstance(luid, str) and luid else None
     return None
 
 
@@ -753,12 +485,12 @@ def resolve_source(root: Path, unit: str, handover: dict[str, Any] | None, expli
         for candidate in candidates:
             if candidate.is_file():
                 return candidate
-    manifest = _json_object(root / "input_manifest.json")
+    manifest = json_object(root / "input_manifest.json")
     for asset in (manifest or {}).get("assets") or []:
         if not isinstance(asset, dict):
             continue
         name = str(asset.get("name") or "")
-        if Path(name).stem and _norm(Path(name).stem) == _norm(unit):
+        if Path(name).stem and norm_name(Path(name).stem) == norm_name(unit):
             staged = asset.get("staged_input_path")
             for candidate in (Path(str(staged)) if staged else None, root.parent / "assets" / name):
                 if candidate is not None and candidate.is_file():
@@ -788,11 +520,11 @@ def _cannot(unit: str, detail: str, report_dir: Path | None = None, source: Path
 
 def _identify(root: Path, unit: str, source: Path) -> UnitIdentity | None:
     """Unit identity, or None when the source cannot be hashed (so evidence cannot be attributed)."""
-    digest = _sha256(source)
+    digest = sha256_of(source)
     if digest is None:
         return None
     return UnitIdentity(
-        name=unit, source_path=source, source_sha256=digest, workbook_luid=_provenance_luid(root, source, digest)
+        name=unit, source_path=source, source_sha256=digest, workbook_luid=_provenance_luid(root, digest)
     )
 
 
@@ -806,7 +538,7 @@ def _page_rows(
     """One readiness row per expected page, splitting explained from unexplained drops."""
     rows = []
     for obj in objects:
-        key = (obj.kind, _norm(obj.name))
+        key = (obj.kind, obj.name)
         if obj.page_id in emitted:
             status, reason = PAGE_EMITTED, None
         elif key in explained:
@@ -841,6 +573,25 @@ def _expectation(unit: str, report_dir: Path, source: Path) -> list[SourceObject
             report_dir,
             source,
         )
+    # Round-2 finding 5: `Ops  Summary` and `Ops Summary` get DIFFERENT page ids but collapse to one
+    # normalized key, so a single evidence record marked both ready. External providers spell names
+    # in ways this repo does not control, so a normalized fallback is unavoidable there - which makes
+    # a collision among the EXPECTED objects unresolvable by construction. Refuse the unit rather
+    # than resolve it.
+    keys: dict[str, list[str]] = {}
+    for obj in objects:
+        keys.setdefault(f"{obj.kind}\0{norm_name(obj.name)}", []).append(obj.name)
+    collisions = {key: names for key, names in keys.items() if len(set(names)) > 1}
+    if collisions:
+        shown = "; ".join(", ".join(repr(n) for n in sorted(set(names))) for names in collisions.values())
+        return _cannot(
+            unit,
+            f"{len(collisions)} source object name(s) differ only by case or repeated whitespace "
+            f"({shown}) - they take different page ids but one evidence record would match both, so "
+            "no capture could be attributed to either",
+            report_dir,
+            source,
+        )
     return objects
 
 
@@ -852,7 +603,7 @@ def _datasource_only(unit: str, report_dir: Path, engine_report: dict[str, Any] 
     clean exit 0 to a workbook whose report generation had FAILED.
     """
     workbooks, datasources = _unit_names(engine_report)
-    if engine_report is None or _norm(unit) not in datasources or _norm(unit) in workbooks:
+    if engine_report is None or norm_name(unit) not in datasources or norm_name(unit) in workbooks:
         return None
     return UnitResult(
         unit=unit,
@@ -935,7 +686,7 @@ def _units_without_reports(engine_report: dict[str, Any] | None, reports: list[P
     reference-free. `NOT_APPLICABLE` must be earned from the datasource classification, never from
     the mere absence of a report.
     """
-    shipped = {_norm(path.name[: -len(".Report")]) for path in reports}
+    shipped = {norm_name(path.name[: -len(".Report")]) for path in reports}
     workbooks, _ = _unit_names(engine_report)
     return [
         UnitResult(
@@ -1054,10 +805,12 @@ def _merge(
 
 GRADE_CEILING_NOTE = (
     "  GRADE CEILING: not every page's evidence carries `validation_grade`. In practice that is the "
-    "normal state - it is reachable only via `capture_tableau_reference.py --manual-validation-grade`, "
-    "and both an oracle capture and a reference capture record the DEFAULT view state (no `?vf_` "
-    "filter pinning). Treat READY as 'a legible picture of the source exists', not as signed-off "
-    "fidelity."
+    "normal state, and it is a PROVIDER limit rather than an oversight - the capture routes in this "
+    "toolkit top out at: embedded_thumbnail=layout only, public_playwright/oracle_capture=layout+text "
+    "(default view state, no `?vf_` filter pinning). The ONLY route to validation grade is a render "
+    "you captured yourself, dropped in `reference/` as `tableau-<object>.png`, and recorded with "
+    "`capture_tableau_reference.py --manual-validation-grade` - which is your assertion, logged as "
+    "such. Treat READY as 'a legible picture of the source exists', not as signed-off fidelity."
 )
 
 

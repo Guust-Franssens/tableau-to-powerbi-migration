@@ -142,15 +142,21 @@ def write_handover(
     )
 
 
-def write_reference(
+def write_reference(  # pylint: disable=too-many-arguments,too-many-locals
     root: Path,
     entries: list[tuple[str, str, list[str]]],
     *,
     source_sha: str | None = None,
     size: tuple[int, int] = (320, 240),
     render_bytes: bytes | None = None,
+    record_integrity: bool = True,
 ) -> Path:
     """A `reference/manifest.json`. Each entry is ``(name, provider, capabilities)``.
+
+    Mirrors the real producer, which records `sha256` and `dimensions` per state
+    (`capture_tableau_reference.py:246-257`). Round-2 review measured the gate ignoring both, so a
+    captured image could be swapped wholesale and readiness survived; a fixture that omitted them
+    could not have caught it. `record_integrity=False` exists to test that omission is a rejection.
 
     Note the manifest's top-level key is `dashboards`, but `capture_tableau_reference.py:199` files
     WORKSHEET thumbnails there too - which is why the key cannot be evidence of scope.
@@ -160,39 +166,57 @@ def write_reference(
     dashboards = []
     for index, (name, provider, capabilities) in enumerate(entries):
         image = f"shot-{index}.png"
+        target = reference / image
         if render_bytes is None:
-            write_png(reference / image, *size)
+            write_png(target, *size)
         else:
-            (reference / image).write_bytes(render_bytes)
-        dashboards.append(
-            {
-                "name": name,
-                "states": [
-                    {
-                        "state_slug": "default",
-                        "image": image,
-                        "provider": provider,
-                        "capabilities": capabilities,
-                        "numeric_oracle": None,
-                    }
-                ],
+            target.write_bytes(render_bytes)
+        blob = target.read_bytes()
+        state = {
+            "state_slug": "default",
+            "image": image,
+            "provider": provider,
+            "capabilities": capabilities,
+            "numeric_oracle": None,
+        }
+        if record_integrity:
+            state |= {
+                "sha256": hashlib.sha256(blob).hexdigest(),
+                "bytes": len(blob),
+                "dimensions": {"w": size[0], "h": size[1], "dpr": 2},
             }
-        )
+        dashboards.append({"name": name, "states": [state]})
     (reference / "manifest.json").write_text(
         json.dumps({"source_workbook_sha256": source_sha, "dashboards": dashboards}), encoding="utf-8"
     )
     return reference
 
 
-def write_oracle(root: Path, views: list[dict]) -> Path:
-    """An `_oracle/oracle-manifest.json`. Each view dict may carry `view_type` (PR #422)."""
+def write_oracle(root: Path, views: list[dict], *, size: tuple[int, int] = (320, 240)) -> Path:
+    """An `_oracle/oracle-manifest.json`. Each view dict may carry `view_type` (PR #422).
+
+    Records `sha256`, `bytes` and `dimensions_px` per leg, as the real producer does
+    (`capture_tableau_oracle.py:687-705`).
+    """
     oracle = root / "_oracle"
     (oracle / "images").mkdir(parents=True, exist_ok=True)
     records = []
     for index, view in enumerate(views):
         image = f"images/view-{index}.png"
-        write_png(oracle / image)
-        records.append({**view, "image": {"status": "ok", "path": image}})
+        write_png(oracle / image, *size)
+        blob = (oracle / image).read_bytes()
+        records.append(
+            {
+                **view,
+                "image": {
+                    "status": "ok",
+                    "path": image,
+                    "sha256": hashlib.sha256(blob).hexdigest(),
+                    "bytes": len(blob),
+                    "dimensions_px": {"w": size[0], "h": size[1]},
+                },
+            }
+        )
     (oracle / "oracle-manifest.json").write_text(
         json.dumps({"view_count": len(records), "views": records}), encoding="utf-8"
     )
@@ -261,6 +285,16 @@ def test_the_status_and_exit_vocabulary_is_pinned_to_its_literal_values() -> Non
     assert crr.GRADE_ORACLE == "layout/text only (oracle capture, default view state)"
     assert crr.GRADE_UNKNOWN == "unknown"
     assert crr.GRADE_ORACLE != crr.GRADE_VALIDATION
+    assert crr.KIND_ASSERTED == "operator-asserted"
+    assert crr.AMBIGUOUS == "__ambiguous__"
+    # Round-2 finding 2: the ceiling is what stops a producer grading itself above what it can
+    # capture, so the ceilings themselves are pinned. `manual` is the ONLY route to validation grade.
+    assert crr.PROVIDER_CEILING["embedded_thumbnail"] == frozenset({"layout_grade"})
+    assert crr.PROVIDER_CEILING["public_playwright"] == frozenset({"layout_grade", "text_readable"})
+    assert crr.PROVIDER_CEILING["oracle_capture"] == frozenset({"layout_grade", "text_readable"})
+    assert crr.CAP_VALIDATION in crr.PROVIDER_CEILING["manual"]
+    assert {p for p, caps in crr.PROVIDER_CEILING.items() if crr.CAP_VALIDATION in caps} == {"manual"}
+    assert crr.MIN_RENDER_EDGE == 64
 
 
 def test_there_is_no_flag_that_can_soften_the_verdict(tmp_path: Path) -> None:
@@ -629,8 +663,9 @@ def test_a_worksheet_scope_can_never_satisfy_a_dashboard_page() -> None:
         path="x.png",
         width=320,
         height=240,
-        workbook_key="abc",
-        workbook_kind="sha256",
+        workbook_sha="abc",
+        workbook_luid=None,
+        workbook_name=None,
     )
     match, name_only = crr.match_evidence(dashboard, [worksheet_render])
     assert match is None
@@ -706,16 +741,55 @@ def test_a_page_with_no_evidence_at_all_is_blind_not_unverifiable(bundle: Path) 
 
 
 def test_validation_grade_is_reported_when_present(bundle: Path) -> None:
-    """The one route to `validation_grade` today: an operator-asserted manual capture."""
+    """The one route to `validation_grade`, exercised as the producer actually shapes it.
+
+    WARNING: round-2 finding 2 - the previous version of this test used `embedded_thumbnail` +
+    `validation_grade`, an impossible producer combination, so it ENCODED the self-promotion bug as
+    expected behaviour. The real route is `capture_tableau_reference.py --manual-validation-grade`,
+    whose records carry `provider: "manual"` and are named from the dropped file's stem
+    (`tableau-<object>`).
+    """
     sha = build_unit(bundle, "WB", worksheets=["Revenue Trend"])
     write_reference(
-        bundle, [("Revenue Trend", "embedded_thumbnail", ["layout_grade", "validation_grade"])], source_sha=sha
+        bundle,
+        [("tableau-Revenue Trend", "manual", ["layout_grade", "text_readable", "validation_grade"])],
+        source_sha=sha,
     )
 
     report = crr.scan(bundle)
     assert report["units"][0]["pages"][0]["grade"] == "validation-grade"
     assert report["all_evidence_validation_grade"] is True
     assert crr.GRADE_CEILING_NOTE not in crr.render(report)
+    assert crr.main([str(bundle), "--quiet", "--require-validation-grade"]) == 0
+
+
+def test_a_low_grade_provider_cannot_promote_itself(bundle: Path) -> None:
+    """Round-2 finding 2: grade came from the self-reported list, with no provider ceiling.
+
+    An `embedded_thumbnail` record is a 192x192 worksheet render by construction. Claiming
+    `validation_grade` made it READY under `--require-validation-grade` AND suppressed the ceiling
+    warning - the weakest-provenance producer outranking every honest one.
+    """
+    sha = build_unit(bundle, "WB", worksheets=["Revenue Trend"])
+    write_reference(
+        bundle, [("Revenue Trend", "embedded_thumbnail", ["layout_grade", "validation_grade"])], source_sha=sha
+    )
+
+    report = crr.scan(bundle)
+    assert report["units"][0]["pages"][0]["readiness"] == "blind"
+    assert any("can only produce" in item["reason"] for item in report["evidence_rejected"])
+    assert report["all_evidence_validation_grade"] is False
+    assert crr.main([str(bundle), "--quiet"]) == 1
+
+
+def test_an_unrecognised_provider_can_claim_nothing(bundle: Path) -> None:
+    """An unknown producer has no ceiling, so nothing bounds what it may claim."""
+    sha = build_unit(bundle, "WB", worksheets=["Revenue Trend"])
+    write_reference(bundle, [("Revenue Trend", "some_new_tool", ["layout_grade"])], source_sha=sha)
+
+    report = crr.scan(bundle)
+    assert report["units"][0]["pages"][0]["readiness"] == "blind"
+    assert any("unrecognised capture provider" in item["reason"] for item in report["evidence_rejected"])
 
 
 def test_one_validation_grade_page_does_not_silence_the_ceiling_for_the_rest(bundle: Path) -> None:
@@ -724,7 +798,7 @@ def test_one_validation_grade_page_does_not_silence_the_ceiling_for_the_rest(bun
     write_reference(
         bundle,
         [
-            ("Good", "embedded_thumbnail", ["layout_grade", "validation_grade"]),
+            ("tableau-Good", "manual", ["layout_grade", "text_readable", "validation_grade"]),
             ("Weak", "embedded_thumbnail", ["layout_grade"]),
         ],
         source_sha=sha,
@@ -862,3 +936,260 @@ def test_the_json_verdict_always_carries_the_true_status(bundle: Path, tmp_path:
 
     assert crr.main([str(bundle), "--quiet", "--json", str(out)]) == 1
     assert json.loads(out.read_text(encoding="utf-8"))["status"] == "FINDINGS"
+
+
+# --------------------------------------------------------------------------------------------
+# Round-2 finding 1: a render must be COMPLETE and must be the file the producer captured
+# --------------------------------------------------------------------------------------------
+
+
+def test_a_24_byte_blob_is_not_a_png(bundle: Path) -> None:
+    """The previous parse read only the signature, `IHDR` marker and 8 dimension bytes.
+
+    Measured: a 24-byte blob produced valid `Evidence` while Pillow rejected the same bytes with
+    `Truncated File Read`. The whole chunk stream is walked now - lengths, CRCs, a 13-byte IHDR, and
+    both IDAT and IEND required.
+    """
+    blob = b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\x0dIHDR" + struct.pack(">II", 320, 240)
+    assert len(blob) == 24
+    sha = build_unit(bundle, "WB", worksheets=["Solo"])
+    write_reference(bundle, [("Solo", "embedded_thumbnail", ["layout_grade"])], source_sha=sha, render_bytes=blob)
+
+    report = crr.scan(bundle)
+    assert report["units"][0]["pages"][0]["readiness"] == "blind"
+    assert crr.main([str(bundle), "--quiet"]) == 1
+
+
+def test_a_png_with_a_corrupted_crc_is_rejected(bundle: Path) -> None:
+    """A real PNG whose bytes were tampered with no longer passes the chunk walk."""
+    sha = build_unit(bundle, "WB", worksheets=["Solo"])
+    reference = write_reference(bundle, [("Solo", "embedded_thumbnail", ["layout_grade"])], source_sha=sha)
+    shot = reference / "shot-0.png"
+    blob = bytearray(shot.read_bytes())
+    blob[20] ^= 0xFF  # inside IHDR, so its CRC no longer agrees
+    shot.write_bytes(bytes(blob))
+
+    assert crr.scan(bundle)["units"][0]["pages"][0]["readiness"] == "blind"
+
+
+def test_a_swapped_image_no_longer_counts(bundle: Path) -> None:
+    """Round-2 finding 1: the recorded `sha256` was never read, so any image could be substituted.
+
+    Measured on the real bundle: zeroing every manifest hash and setting dimensions to 1x1 still
+    returned `READY 3/3` with zero rejections. Here the manifest is honest and the FILE is swapped
+    for a different, perfectly valid render - which must stop counting.
+    """
+    sha = build_unit(bundle, "WB", worksheets=["Solo"])
+    reference = write_reference(bundle, [("Solo", "embedded_thumbnail", ["layout_grade"])], source_sha=sha)
+    assert crr.scan(bundle)["status"] == "READY"
+
+    write_png(reference / "shot-0.png", 400, 300)
+
+    report = crr.scan(bundle)
+    assert report["units"][0]["pages"][0]["readiness"] == "blind"
+    assert any("recorded sha256" in item["reason"] for item in report["evidence_rejected"])
+    assert crr.main([str(bundle), "--quiet"]) == 1
+
+
+def test_a_manifest_with_no_recorded_hash_cannot_be_trusted(bundle: Path) -> None:
+    """Both producers always write a sha256, so its absence means integrity nothing can confirm."""
+    sha = build_unit(bundle, "WB", worksheets=["Solo"])
+    write_reference(bundle, [("Solo", "embedded_thumbnail", ["layout_grade"])], source_sha=sha, record_integrity=False)
+
+    report = crr.scan(bundle)
+    assert report["units"][0]["pages"][0]["readiness"] == "blind"
+    assert any("records no sha256" in item["reason"] for item in report["evidence_rejected"])
+
+
+def test_oracle_evidence_is_integrity_checked_too(bundle: Path) -> None:
+    """The oracle route records `sha256`/`bytes`/`dimensions_px` and they are checked identically."""
+    build_unit(bundle, "WB", worksheets=["Revenue Trend"])
+    oracle = write_oracle(bundle, [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_name": "WB"}])
+    assert crr.scan(bundle)["status"] == "READY"
+
+    write_png(oracle / "images" / "view-0.png", 400, 300)
+    assert crr.scan(bundle)["units"][0]["pages"][0]["readiness"] == "blind"
+
+
+# --------------------------------------------------------------------------------------------
+# Round-2 finding 3: provenance explicitly marked non-reproducible must not be trusted
+# --------------------------------------------------------------------------------------------
+
+
+def write_provenance(root: Path, source: Path, *, luid: str, match: str) -> None:
+    """A `source-provenance.json` as `stamp_tableau_provenance.py` writes it."""
+    (root / "source-provenance.json").write_text(
+        json.dumps(
+            {
+                "inputs": [
+                    {
+                        "input": {"file": source.name, "sha256": hashlib.sha256(source.read_bytes()).hexdigest()},
+                        "origin": {"workbook_luid": luid, "workbook_name": "Published Name", "match": match},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_a_name_only_provenance_luid_is_not_trusted(bundle: Path) -> None:
+    """`match: "name_only"` means local and server bytes DIFFER and figures will not reproduce.
+
+    `stamp_tableau_provenance.py:191-192` says so outright, yet that LUID was making server oracle
+    evidence ready. The repo's own provenance is 26 `sha256` / 15 `name_only` / 6 unmatched.
+    """
+    build_unit(bundle, "WB", worksheets=["Revenue Trend"])
+    write_provenance(bundle, bundle.parent / "assets" / "WB.twb", luid="luid-1", match="name_only")
+    write_oracle(bundle, [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_luid": "luid-1"}])
+
+    assert crr.scan(bundle)["units"][0]["pages"][0]["readiness"] == "blind"
+    assert crr.main([str(bundle), "--quiet"]) == 1
+
+
+def test_a_sha256_confirmed_provenance_luid_is_trusted(bundle: Path) -> None:
+    """Discriminating twin: a byte-confirmed LUID must still work, or the route is dead."""
+    build_unit(bundle, "WB", worksheets=["Revenue Trend"])
+    write_provenance(bundle, bundle.parent / "assets" / "WB.twb", luid="luid-1", match="sha256")
+    write_oracle(bundle, [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_luid": "luid-1"}])
+
+    assert crr.scan(bundle)["units"][0]["pages"][0]["readiness"] == "ready"
+
+
+def test_a_record_carrying_both_luid_and_name_can_still_fall_back_to_the_name(bundle: Path) -> None:
+    """Round-2 finding 3, mirror image: carrying a LUID used to DISCARD the name.
+
+    Removing source provenance then made correctly-named records return `0/3 blind`, so the
+    documented name fallback could not be reached by any record a real capture produces.
+    """
+    build_unit(bundle, "WB", worksheets=["Revenue Trend"])
+    write_oracle(
+        bundle,
+        [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_luid": "luid-1", "workbook_name": "WB"}],
+    )
+
+    assert crr.scan(bundle)["units"][0]["pages"][0]["readiness"] == "ready"
+
+
+# --------------------------------------------------------------------------------------------
+# Round-2 finding 4: pages.json is required, not optional
+# --------------------------------------------------------------------------------------------
+
+
+def test_an_unreadable_pages_json_is_not_a_valid_mapping(bundle: Path) -> None:
+    """Measured: failing ONLY the `pages.json` reads still produced `READY 3/3`."""
+    sha = build_unit(bundle, "WB", worksheets=list(MERIDIAN_PAGE_IDS))
+    write_reference(bundle, [(n, "embedded_thumbnail", ["layout_grade"]) for n in MERIDIAN_PAGE_IDS], source_sha=sha)
+    assert crr.scan(bundle)["status"] == "READY"
+
+    pages = bundle / "pbip" / "WB" / "WB.Report" / "definition" / "pages"
+    (pages / "pages.json").write_text("{ not json", encoding="utf-8")
+
+    assert crr.scan(bundle)["status"] == "CANNOT_ESTABLISH"
+    assert crr.main([str(bundle), "--quiet"]) == 3
+
+
+def test_a_missing_pages_json_is_not_a_valid_mapping(bundle: Path) -> None:
+    """Absent is the same as unreadable: the report states no page set to check against."""
+    build_unit(bundle, "WB", worksheets=["Solo"])
+    (bundle / "pbip" / "WB" / "WB.Report" / "definition" / "pages" / "pages.json").unlink()
+
+    assert crr.scan(bundle)["status"] == "CANNOT_ESTABLISH"
+
+
+def test_a_non_list_page_order_is_not_a_valid_mapping(bundle: Path) -> None:
+    """A wrong-shaped `pageOrder` used to skip the cross-check entirely."""
+    build_unit(bundle, "WB", worksheets=["Solo"])
+    pages = bundle / "pbip" / "WB" / "WB.Report" / "definition" / "pages"
+    (pages / "pages.json").write_text(json.dumps({"pageOrder": "page1"}), encoding="utf-8")
+
+    assert crr.scan(bundle)["status"] == "CANNOT_ESTABLISH"
+
+
+# --------------------------------------------------------------------------------------------
+# Round-2 finding 5: normalization collapse - the third layer of one recurring defect
+# --------------------------------------------------------------------------------------------
+
+
+def test_names_differing_only_by_whitespace_cannot_be_attributed(bundle: Path) -> None:
+    """`Ops  Summary` and `Ops Summary` take DIFFERENT page ids but collapsed to one key.
+
+    One evidence record marked both ready, and one deliberate-drop warning classified the other as
+    `dropped_explained`. This is the same "one object's excuse covering another" defect that was
+    fixed at the routing level, then the matching level; ambiguity is now a refusal.
+    """
+    doubled, single = "Ops  Summary", "Ops Summary"
+    assert crr.engine_page_id(f"page-ws-{doubled}") != crr.engine_page_id(f"page-ws-{single}")
+    build_unit(bundle, "WB", worksheets=[doubled, single])
+
+    report = crr.scan(bundle)
+    assert report["status"] == "CANNOT_ESTABLISH"
+    assert "differ only by case or repeated whitespace" in report["units"][0]["detail"]
+    assert crr.main([str(bundle), "--quiet"]) == 3
+
+
+def test_a_drop_warning_matches_the_exact_object_name_only(bundle: Path) -> None:
+    """Both sides of the drop join are engine artifacts and byte-exact, so no normalization runs."""
+    build_unit(
+        bundle,
+        "WB",
+        worksheets=["Ops Summary"],
+        page_ids=[],
+        viz_fidelity=[
+            {
+                "worksheet": "ops summary",
+                "visual_type": "unsupported",
+                "status": "warned",
+                "reason": "manual attention required: unsupported visual type",
+            }
+        ],
+    )
+    rows = {page["source_object"]: page for page in crr.scan(bundle)["units"][0]["pages"]}
+    assert rows["Ops Summary"]["page_status"] == "dropped_unexplained"
+
+
+def test_an_exact_drop_warning_still_explains_its_own_object(bundle: Path) -> None:
+    """Discriminating twin: exact matching must not break the legitimate case."""
+    build_unit(
+        bundle,
+        "WB",
+        worksheets=["Ops Summary"],
+        page_ids=[],
+        viz_fidelity=[
+            {
+                "worksheet": "Ops Summary",
+                "visual_type": "unsupported",
+                "status": "warned",
+                "reason": "manual attention required: unsupported visual type",
+            }
+        ],
+    )
+    rows = {page["source_object"]: page for page in crr.scan(bundle)["units"][0]["pages"]}
+    assert rows["Ops Summary"]["page_status"] == "dropped_explained"
+
+
+def test_two_evidence_records_sharing_a_normalized_name_are_ambiguous(bundle: Path) -> None:
+    """Evidence names come from external providers, so a normalized fallback survives - but only
+    when it is unambiguous. Two candidates is a refusal, because picking one would be a guess."""
+    sha = build_unit(bundle, "WB", worksheets=["Ops Summary"])
+    write_reference(
+        bundle,
+        [
+            ("ops summary", "embedded_thumbnail", ["layout_grade"]),
+            ("OPS  SUMMARY", "embedded_thumbnail", ["layout_grade"]),
+        ],
+        source_sha=sha,
+    )
+
+    page = crr.scan(bundle)["units"][0]["pages"][0]
+    assert page["readiness"] == "unverifiable"
+    assert "picking one would be a guess" in page["matched_by"]
+    assert crr.main([str(bundle), "--quiet"]) == 1
+
+
+def test_a_single_differently_spelled_evidence_record_still_matches(bundle: Path) -> None:
+    """Discriminating twin: an unambiguous normalized fallback must still work for one record."""
+    sha = build_unit(bundle, "WB", worksheets=["Ops Summary"])
+    write_reference(bundle, [("ops summary", "embedded_thumbnail", ["layout_grade"])], source_sha=sha)
+
+    assert crr.scan(bundle)["units"][0]["pages"][0]["readiness"] == "ready"
