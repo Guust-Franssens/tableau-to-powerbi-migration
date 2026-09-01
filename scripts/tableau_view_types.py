@@ -98,16 +98,22 @@ def view_types(session: Any) -> tuple[dict[str, str], str | None]:
     return _mapping_from(payload)
 
 
-# Nine returns, and every one is a DIFFERENT refusal reason -- which is the function's whole output.
-# Folding them into one exit means accumulating a reason in a variable, and then "which refusal won"
-# becomes a question the reader has to answer by tracing, rather than by reading the line that
-# refused. Waived deliberately rather than restructured, as `_request`'s too-many-arguments is.
-def _mapping_from(payload: dict[str, Any]) -> tuple[dict[str, str], str | None]:  # pylint: disable=too-many-return-statements
+def _mapping_from(payload: dict[str, Any]) -> tuple[dict[str, str], str | None]:
     """Build the LUID -> kind mapping, refusing the WHOLE answer on any malformed part.
 
     Every ``return {}, reason`` here is a refusal of the entire response, never of one node. Skipping
     a bad node and keeping its siblings is the failure this function is shaped to prevent: it yields
     a confident mapping built from an answer we already know is not intact.
+
+    ⚠️ **The refused return is a fresh ``{}``, never ``mapping``.** By the time a workbook part is
+    found malformed, earlier workbooks have already folded real entries in -- and returning those
+    would be precisely the partial answer this whole function exists to refuse, just arrived at from
+    the other direction. Pinned by the fixtures that poison one node BESIDE a valid sibling.
+
+    Split from :func:`_fold_workbook` on a real seam -- the response ENVELOPE here, ONE workbook
+    there -- rather than to satisfy a linter. `R0911` fired at nine returns, and the honest reading is
+    that one function was carrying two levels of validation; suppressing it, or hiding the same nine
+    exits behind an internal exception, would have left that unchanged.
     """
     data = payload.get("data")
     if not isinstance(data, dict):
@@ -117,31 +123,48 @@ def _mapping_from(payload: dict[str, Any]) -> tuple[dict[str, str], str | None]:
         return {}, f"metadata api `workbooks` was {type(workbooks).__name__}, not a list"
     mapping: dict[str, str] = {}
     for workbook in workbooks:
-        if not isinstance(workbook, dict):
-            return {}, f"a workbook node was {type(workbook).__name__}, not an object; response refused"
-        for key, kind in (("dashboards", DASHBOARD), ("sheets", WORKSHEET)):
-            nodes = workbook.get(key)
-            if nodes is None:
-                continue
-            if not isinstance(nodes, list):
-                return {}, f"`{key}` was {type(nodes).__name__}, not a list; response refused"
-            for node in nodes:
-                if not isinstance(node, dict):
-                    return {}, f"a `{key}` node was {type(node).__name__}, not an object; response refused"
-                luid = node.get("luid")
-                if not isinstance(luid, str) or not _LUID_RE.match(luid.strip()):
-                    # Shape-verified, not merely non-empty: a proved UUID cannot carry a credential,
-                    # which is what lets the mapping's keys travel without redaction.
-                    return {}, f"a `{key}` node carried a {type(luid).__name__} that is not a luid; response refused"
-                key_luid = luid.strip().lower()
-                # ⚠️ A LUID naming BOTH a dashboard and a sheet is contradictory, not a last-wins
-                # tiebreak. Overwriting would have silently picked whichever the server listed second.
-                if mapping.get(key_luid, kind) != kind:
-                    return {}, "the same luid was reported as both a dashboard and a worksheet; response refused"
-                mapping[key_luid] = kind
+        refused = _fold_workbook(workbook, mapping)
+        if refused:
+            return {}, refused
     if not mapping:
         return {}, "metadata api returned no dashboards or sheets carrying a luid"
     return mapping, None
+
+
+def _fold_workbook(workbook: Any, mapping: dict[str, str]) -> str | None:
+    """Fold ONE workbook's dashboards and sheets into ``mapping``. Returns a refusal reason, or None.
+
+    ⚠️ It accumulates IN PLACE, and that is load-bearing rather than convenient: the contradiction
+    check needs the mapping built so far across ALL workbooks, because a LUID can be reported as a
+    dashboard in one workbook and a sheet in another. Returning a per-workbook dict and merging would
+    push that check to the merge site, where the two kinds have already been separated.
+
+    A partially-filled ``mapping`` on refusal is harmless because the caller discards it -- see
+    :func:`_mapping_from`, which returns a fresh ``{}``.
+    """
+    if not isinstance(workbook, dict):
+        return f"a workbook node was {type(workbook).__name__}, not an object; response refused"
+    for key, kind in (("dashboards", DASHBOARD), ("sheets", WORKSHEET)):
+        nodes = workbook.get(key)
+        if nodes is None:
+            continue
+        if not isinstance(nodes, list):
+            return f"`{key}` was {type(nodes).__name__}, not a list; response refused"
+        for node in nodes:
+            if not isinstance(node, dict):
+                return f"a `{key}` node was {type(node).__name__}, not an object; response refused"
+            luid = node.get("luid")
+            if not isinstance(luid, str) or not _LUID_RE.match(luid.strip()):
+                # Shape-verified, not merely non-empty: a proved UUID cannot carry a credential,
+                # which is what lets the mapping's keys travel without redaction.
+                return f"a `{key}` node carried a {type(luid).__name__} that is not a luid; response refused"
+            key_luid = luid.strip().lower()
+            # ⚠️ A LUID naming BOTH a dashboard and a sheet is contradictory, not a last-wins
+            # tiebreak. Overwriting would have silently picked whichever the server listed second.
+            if mapping.get(key_luid, kind) != kind:
+                return "the same luid was reported as both a dashboard and a worksheet; response refused"
+            mapping[key_luid] = kind
+    return None
 
 
 def stamp(views: list[dict[str, Any]], mapping: dict[str, str]) -> None:

@@ -661,9 +661,14 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
             "inbound X-Tableau-Auth header into errors[0].message put a live session token here."
         ),
     },
+    # The response ENVELOPE. Only the two container shapes are decided here; everything below a
+    # workbook moved to `_fold_workbook` when R0911 was resolved by splitting rather than
+    # suppressing, and the gate tracked all five expressions across the seam by itself.
     ("scripts/tableau_view_types.py", "_mapping_from"): {
         "type(data).__name__": _PY_TYPE_NAME,
         "type(workbooks).__name__": _PY_TYPE_NAME,
+    },
+    ("scripts/tableau_view_types.py", "_fold_workbook"): {
         "type(workbook).__name__": _PY_TYPE_NAME,
         "type(nodes).__name__": _PY_TYPE_NAME,
         "type(node).__name__": _PY_TYPE_NAME,
