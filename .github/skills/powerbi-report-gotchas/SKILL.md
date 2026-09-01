@@ -309,10 +309,16 @@ idioms see `.github/pbi.kb/visuals/table-cond-format.md`.
   - **So a `columnChart` → `lineChart` flip is never just `visualType`.** The minimum swap:
     `dataPoint.fillTransparency` → `dataPoint.transparency`; drop `labels.labelOverflow` (columnChart
     only) and use `labels.maximumOffset` / `minimumOffset` instead (lineChart only, see §1); and if a
-    flat mark colour was set, add **`lineStyles.strokeColor`** beside `dataPoint.defaultColor` —
-    `dataPoint` alone governs the marker and can leave the stroke on the theme colour, which on a line
-    chart is the whole visual. ⚠️ `validate` catches the *leftover*, so it cannot catch the *omission*:
-    a flipped chart missing `lineStyles.strokeColor` validates clean and renders theme-blue.
+    flat mark colour was set, add **`lineStyles.strokeColor`** beside `dataPoint.defaultColor`.
+    🟢 The *validation* half is measured: all three of `defaultColor` alone, `strokeColor` alone, and
+    both together return **exit 0** on a lineChart — so `validate` catches the leftover from the old
+    type but is structurally blind to the **omission** of the new type's property.
+    ⚠️ The *rendering* half is **inferred, not verified** — no Desktop render was possible. The claim
+    that `dataPoint` alone leaves the stroke on the theme colour ("which on a line chart is the whole
+    visual") is the deterministic engine's own, in `_constant_mark_color_objects`
+    (`twb_to_pbir.py`), where it is described as verified against an adjudicated corpus rebuild.
+    Second-hand. Treat "add both" as cheap insurance rather than a measured necessity, and upgrade
+    this line on the first render that shows it either way.
 - **Normalise JSON key order when you write PBIR back.** Two scripts that *insert* different formatting
   cards into `visual.objects` produce byte-different-but-semantically-identical files depending on run
   order, which makes a genuine order-independence proof impossible to distinguish from a real defect.
@@ -645,6 +651,16 @@ shelves, tooltips and manual sorts.
     the mark is `Automatic` or `Line`. Read the worksheet's `<mark class=…>` and the date pill's
     `derivation` before "fixing" anything; a `.twb`/`.twbx` thumbnail settles it (see the entry
     above).
+  - ⚠️ **The over-broad "fix" is a real hazard, not a hypothetical — do not flip every date chart to
+    a line.** 🟢 Measured by injecting five candidate remedies into 2.339.0 over eight one-variable
+    fixtures: a **mark-agnostic** remedy (every date-on-Columns chart becomes a line) breaks the
+    explicit-`Bar` case that is currently correct, and an **any-discrete** remedy also breaks a plain
+    string dimension. Each wrong remedy was separated by exactly one fixture — `Year`-only by a
+    discrete *exact date*, a `datatype=='date'` remedy by a **`datetime`** column, a
+    base-columns-only remedy by a date-valued **calculated field**, mark-agnostic by the `Bar` mark,
+    any-discrete by the string dimension — and a three-fixture set covering only the obvious cases
+    **passed all five**. If you repair one of these by hand, keep an explicit-`Bar` chart and a
+    non-date bar chart in front of you as controls.
 - **`columnChart` + `Series` STACKS. Never use it for a ranking/index measure.** Stacking is only
   meaningful for additive quantities; ranks, indices, percentages and averages are not additive, so a
   stacked encoding of them is always wrong and never raises a validation error.

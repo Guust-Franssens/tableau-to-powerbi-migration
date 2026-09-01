@@ -14,7 +14,7 @@
       <column caption='Airline Code' datatype='string' name='[AIRLINE_CODE]' role='dimension' type='nominal' />
       <column caption='Technology Set' datatype='string' name='[TECHNOLOGY_SET]' role='dimension' type='nominal' />
       <column caption='Availability Pct' datatype='real' name='[AVAILABILITY_PCT]' role='measure' type='quantitative' />
-      <column-instance column='[DATES]' derivation='Month-Trunc' name='[tmn:DATES:qk]' pivot='key' type='quantitative' />
+      <column-instance column='[DATES]' derivation='Year' name='[yr:DATES:ok]' pivot='key' type='ordinal' />
       <column-instance column='[AIRLINE_CODE]' derivation='None' name='[none:AIRLINE_CODE:nk]' pivot='key' type='nominal' />
       <column-instance column='[AVAILABILITY_PCT]' derivation='Sum' name='[sum:AVAILABILITY_PCT:qk]' pivot='key' type='quantitative' />
       <metadata-records>
@@ -37,23 +37,23 @@
       <column caption='Airline Code' datatype='string' name='[AIRLINE_CODE]' role='dimension' type='nominal' />
       <column caption='Technology Set' datatype='string' name='[TECHNOLOGY_SET]' role='dimension' type='nominal' />
       <column caption='Availability Pct' datatype='real' name='[AVAILABILITY_PCT]' role='measure' type='quantitative' />
-      <column-instance column='[DATES]' derivation='Month-Trunc' name='[tmn:DATES:qk]' pivot='key' type='quantitative' />
+      <column-instance column='[DATES]' derivation='Year' name='[yr:DATES:ok]' pivot='key' type='ordinal' />
       <column-instance column='[AIRLINE_CODE]' derivation='None' name='[none:AIRLINE_CODE:nk]' pivot='key' type='nominal' />
       <column-instance column='[AVAILABILITY_PCT]' derivation='Sum' name='[sum:AVAILABILITY_PCT:qk]' pivot='key' type='quantitative' />
           </datasource-dependencies>
         </view>
         <panes>
           <pane>
-            <mark class='Automatic' />
+            <mark class='Bar' />
             <encodings>
               <color column='[federated.sla].[none:AIRLINE_CODE:nk]' />
             </encodings>
           </pane>
         </panes>
         <rows>[federated.sla].[sum:AVAILABILITY_PCT:qk]</rows>
-        <cols>[federated.sla].[tmn:DATES:qk]</cols>
+        <cols>[federated.sla].[yr:DATES:ok]</cols>
       </table>
-      <simple-id uuid='{42400000-0000-0000-0000-000000000002}' />
+      <simple-id uuid='{42400000-0000-0000-0000-000000000004}' />
     </worksheet>
   </worksheets>
   <dashboards>
