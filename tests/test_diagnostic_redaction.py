@@ -583,8 +583,12 @@ TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
     ("scripts/tableau_payload_facts.py", "pdf_facts"): {"payload"},
 }
 
-# Calls whose RESULT is response data wherever they appear.
-TAINTING_CALLS = {"_request", "export", "raw_get", "get_json", "read", "decode", "loads"}
+# Calls whose RESULT is response data.
+# ⚠️ `fetch_payload` is the shared TRANSPORT hop, and it is here for the same reason `_request`
+# is: its return IS the response. It became load-bearing when `tableau_luid_census` stopped
+# making its own request -- taint propagation is intra-module, so a cross-module call's result
+# is invisible without this, and the gate went inert on a module that still looked gated.
+TAINTING_CALLS = {"_request", "fetch_payload", "export", "raw_get", "get_json", "read", "decode", "loads"}
 # The ONE thing that clears taint. Not "any helper" -- see test_the_chokepoint_is_the_only_...
 UNTAINTING = {"redacted_note", "scrub_tree", "artifact_stem"}
 LOG_AND_RAISE = {"info", "warning", "error", "debug", "exception", "ExportFailed", "RuntimeError", "ValueError"}
@@ -675,7 +679,7 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
     # through an ExceptHandler rather than an Assign and so is never a tainted root.
     #
     # The transport hop. `body` and `status` arrive from `_request`, the analyser's taint origin.
-    ("scripts/tableau_view_types.py", "_fetch_payload"): {
+    ("scripts/tableau_view_types.py", "fetch_payload"): {
         # ⚠️ `type(payload).__name__` is no longer certified HERE, and its absence is the round-4
         # fix rather than an omission: the top-level shape check MOVED into `parse_payload`, the
         # shared seam every caller passes through. Keeping a copy here as well would have been a

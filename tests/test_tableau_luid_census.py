@@ -500,3 +500,129 @@ def test_an_unreadable_envelope_always_makes_the_parser_refuse(payload):
     assert census_mod.census(payload)["envelope_readable"] == 0
     _mapping, unavailable = view_types_mod.parse_payload(payload)
     assert unavailable, "an envelope the census cannot read must also be one the parser refuses"
+
+
+# --------------------------------------------------------------------------- round 5: PARITY
+#
+# ⚠️ The census's whole claim is "this is what the shipped parser sees on this site". It did its own
+# request and decode, so it skipped the byte ceiling, the status check and the request-exception
+# handling -- and then reported "the shipped parser did not refuse" on a response the shipped parser
+# refuses, publishing an authoritative NOT-PRESENT off it. Same false-clean already fixed at the
+# verdict and envelope layers, reappearing at the transport layer above both.
+#
+# ⚠️ THE PARITY TEST IS THE DURABLE FIX, NOT THE SHARED SEAM. A shared function is a fact about
+# today's code and can be un-shared by one well-meaning refactor; a test that forces both entry
+# points to agree on the same bytes cannot. Parity IS the correctness property here.
+
+DASH_LUID = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"
+HEALTHY_BODY = b'{"data": {"workbooks": [{"dashboards": [{"luid": "' + DASH_LUID.encode() + b'"}], "sheets": []}]}}'
+
+
+def _oversized_body():
+    """A body the shipped parser ACCEPTS in every respect except its size.
+
+    ⚠️ The padding sits beside a REAL dashboard on purpose. An earlier version padded
+    `{"workbooks": []}`, which `parse_payload` refuses via "no dashboards or sheets carrying a luid"
+    long before anything looks at the byte ceiling -- so the fixture could not reach the guard it
+    targets. Sixth time that has happened on this PR.
+    """
+    return (
+        b'{"data": {"workbooks": [{"dashboards": [{"luid": "'
+        + DASH_LUID.encode()
+        + b'"}], "sheets": []}]}, "pad": "'
+        + b"x" * (33 * 1024 * 1024)
+        + b'"}'
+    )
+
+
+class _TransportStub:
+    """One scripted answer, or an exception raised from `_request`. Rebuilt per entry point."""
+
+    def __init__(self, status=200, body=b"{}", raises=None):
+        self.status, self.body, self.raises = status, body, raises
+
+    def sign_in(self):
+        return None
+
+    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None):  # noqa: ARG002
+        if self.raises is not None:
+            raise self.raises
+        return self.status, self.body, {}
+
+
+TRANSPORT_REFUSALS = [
+    ({"status": 200, "body": None}, "a valid body just over the 32 MiB ceiling", "byte ceiling"),
+    ({"status": 403, "body": b"forbidden"}, "HTTP 403", "returned HTTP 403"),
+    ({"status": 0, "body": HEALTHY_BODY}, "a network-error status", "returned HTTP 0"),
+    ({"status": 200, "body": b"not json at all"}, "an unparseable body", "not usable JSON"),
+    ({"status": 200, "body": b'{"a": \xff}'}, "a body that is not valid utf-8", "not usable JSON"),
+    ({"raises": RuntimeError("connect failed")}, "a request that RAISES", "call failed"),
+]
+
+
+@pytest.mark.parametrize("spec, why, guard", TRANSPORT_REFUSALS)
+def test_the_census_and_the_shipped_parser_agree_on_the_same_bytes(spec, why, guard, monkeypatch, capsys, tmp_path):
+    """⚠️ Identical bytes through BOTH entry points; any shipped refusal must reach the census.
+
+    `guard` is asserted for the same reason as everywhere else on this PR: several fail-closed
+    guards satisfy a bare "it refused", so without naming one the case need never reach its own
+    subject. Six new transport guards is six fresh chances.
+    """
+    spec = dict(spec)
+    if spec.get("body") is None and "raises" not in spec:
+        spec["body"] = _oversized_body()
+
+    # The shipped path, on its own stub (the scripted answer is consumed).
+    mapping, unavailable = view_types_mod.view_types(_TransportStub(**spec))
+    assert mapping == {} and unavailable, f"{why}: the shipped parser must refuse this"
+    assert guard in unavailable, f"{why}: expected the shipped refusal to mention {guard!r}, got {unavailable!r}"
+
+    # The census, on an identical stub.
+    monkeypatch.setattr(census_mod, "_session", lambda _path: _TransportStub(**spec))
+    out = tmp_path / "census.json"
+    code = census_mod.main(["--env", "unused", "--json", str(out)])
+    printed = capsys.readouterr().out
+
+    assert code == census_mod.EXIT_CANNOT_TELL, f"{why}: a shipped refusal must not exit as a measurement"
+    assert "VERDICT: CANNOT-TELL" in printed, why
+    assert json.loads(out.read_text(encoding="utf-8"))["assessable"] == 0, why
+    assert guard in printed, f"{why}: the census must report the SAME refusal, mentioning {guard!r}"
+    # ⚠️ The line that inverted the script's purpose: it said False on a response the parser refuses.
+    assert "shipped parser refused the response          True" in printed, why
+
+
+def test_a_healthy_body_stays_authoritative_through_both_entry_points():
+    """⚠️ The discriminating control. Refusing everything would satisfy parity and destroy the tool."""
+    mapping, unavailable = view_types_mod.view_types(_TransportStub(body=HEALTHY_BODY))
+    assert unavailable is None
+    assert mapping == {DASH_LUID: "dashboard"}
+
+
+def test_a_healthy_body_still_produces_a_census_measurement(monkeypatch, capsys, tmp_path):
+    """The other half of the control, through the census entry point."""
+    monkeypatch.setattr(census_mod, "_session", lambda _path: _TransportStub(body=HEALTHY_BODY))
+    out = tmp_path / "census.json"
+    code = census_mod.main(["--env", "unused", "--json", str(out)])
+    printed = capsys.readouterr().out
+    assert code == census_mod.EXIT_OK
+    assert "VERDICT: NOT-PRESENT" in printed
+    assert json.loads(out.read_text(encoding="utf-8"))["assessable"] == 1
+
+
+def test_the_census_makes_exactly_one_request():
+    """⚠️ Sharing the transport hop must not have turned one round trip into two.
+
+    The script's safety argument is "read-only, ONE query"; a shared seam that the census called in
+    addition to its own would double a credentialed, site-wide request without anyone noticing.
+    """
+    calls = []
+
+    class _Counting(_TransportStub):
+        def _request(self, method, path, *, body=None, accept=None, authed=True, api=None):  # noqa: ARG002
+            calls.append(path)
+            return super()._request(method, path, body=body, accept=accept, authed=authed, api=api)
+
+    session = _Counting(body=HEALTHY_BODY)
+    payload, refusal = view_types_mod.fetch_payload(session)
+    assert refusal is None and payload
+    assert calls == ["/graphql"]

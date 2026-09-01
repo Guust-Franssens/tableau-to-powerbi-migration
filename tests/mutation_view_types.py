@@ -313,6 +313,31 @@ MUTATIONS.update(
     }
 )
 CENSUS_MUTATIONS.add("guard-column-is-load-bearing-census")
+# ⚠️ Round 5: the transport layer, and the meta-mutation extended to it. `census-does-its-own-
+# transport-again` is the original defect reproduced -- a `fetch_payload` that skips the ceiling,
+# the status check and the request-exception handling, exactly as the census's own copy did.
+MUTATIONS.update(
+    {
+        "guard-column-is-load-bearing-transport": '\nimport tableau_view_types as vt\n_orig = vt.fetch_payload\ndef fetch_payload(session):\n    payload, reason = _orig(session)\n    return payload, ("metadata api response refused" if reason else None)\nvt.fetch_payload = fetch_payload\n',
+        "census-ignores-the-transport-refusal": '\nimport tableau_luid_census as census\n_src = open(census.__file__, encoding="utf-8").read()\n_old = \'    if refusal:\'\n_new = \'    if False:\'\nassert _old in _src, "mutation anchor not found - the snippet is stale, not the code"\nexec(compile(_src.replace(_old, _new, 1), census.__file__, "exec"), census.__dict__)\n',
+        "census-does-its-own-transport-again": '\nimport tableau_view_types as vt\ndef fetch_payload(session):\n    import json as _json\n    status, body, _ = session._request(\n        "POST", "/graphql", body={"query": vt.VIEW_TYPE_QUERY}, api="metadata"\n    )\n    return _json.loads(body.decode("utf-8", "replace")), None\nvt.fetch_payload = fetch_payload\n',
+    }
+)
+CENSUS_MUTATIONS.update(
+    {
+        "guard-column-is-load-bearing-transport",
+        "census-ignores-the-transport-refusal",
+        "census-does-its-own-transport-again",
+    }
+)
+INTENDED.update(
+    {
+        "guard-column-is-load-bearing-transport": "tests/test_tableau_luid_census.py::test_the_census_and_the_shipped_parser_agree_on_the_same_bytes",
+        "census-ignores-the-transport-refusal": "tests/test_tableau_luid_census.py::test_the_census_and_the_shipped_parser_agree_on_the_same_bytes",
+        "census-does-its-own-transport-again": "tests/test_tableau_luid_census.py::test_the_census_and_the_shipped_parser_agree_on_the_same_bytes",
+    }
+)
+
 INTENDED.update(
     {
         "guard-column-is-load-bearing-seam": "tests/test_capture_tableau_oracle.py::test_parse_payload_accepts_arbitrary_decoded_json",

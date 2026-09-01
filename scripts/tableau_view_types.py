@@ -109,7 +109,7 @@ def view_types(session: Any) -> tuple[dict[str, str], str | None]:
     their valid siblings, which produced a mapping that typed some views and silently left others
     ``unknown`` -- indistinguishable, downstream, from a run where those views genuinely had no type.
     """
-    payload, refused = _fetch_payload(session)
+    payload, refused = fetch_payload(session)
     if refused:
         return {}, refused
     return parse_payload(payload)
@@ -139,8 +139,20 @@ def parse_payload(payload: Any) -> tuple[dict[str, str], str | None]:
     return _mapping_from(payload)
 
 
-def _fetch_payload(session: Any) -> tuple[Any, str | None]:
-    """One round trip, decoded and shape-checked. Returns ``(payload, refusal_reason)``.
+def fetch_payload(session: Any) -> tuple[Any, str | None]:
+    """One round trip, decoded. Returns ``(payload, refusal_reason)``.
+
+    ⚠️ **Public because a second caller needs exactly this, and re-implementing it is the defect.**
+    ``tableau_luid_census`` holds the decoded payload for its counts, so it cannot simply call
+    :func:`view_types` -- and when it did its own request and decode instead, it skipped the byte
+    ceiling, the status check and the request-exception handling, then reported "the shipped parser
+    did not refuse" on a response the shipped parser refuses. Measured: a valid 33 MB body gave the
+    census ``NOT-PRESENT``, exit 0, ``assessable: 1`` while ``view_types`` refused it outright.
+
+    A census whose whole claim is "this is what the shipped parser sees" must travel the shipped
+    parser's own path. ``test_the_census_and_the_shipped_parser_agree_on_the_same_bytes`` is what
+    keeps them from drifting apart again -- sharing a function is a fact about today's code, parity
+    is the property.
 
     ⚠️ **The parse catch is deliberately broad, and that is the safer choice here.** An enumerated
     catch is how this repository has repeatedly been bitten -- ``tableau_http``'s round-9 finding was

@@ -22,9 +22,21 @@ against any site and the census answers, in counts, whether that site would exer
 
 Safety
 ------
-⚠️ **Read-only, and one query.** Sign-in, then exactly one GraphQL request through the session's own
-``_request`` -- the ONE hardened ``tableau_http`` round trip -- with no loop and no concurrency. The
-response body is never written to disk and never printed.
+⚠️ **Read-only, and one query.** Sign-in, then exactly one GraphQL request -- made by
+``tableau_view_types.fetch_payload``, the SAME transport hop the shipped parser uses, over the ONE
+hardened ``tableau_http`` round trip -- with no loop and no concurrency. The response body is never
+written to disk and never printed.
+
+⚠️ **It shares the shipped parser's seams rather than re-implementing them, and that is a correctness
+property, not tidiness.** This script's entire claim is "here is what the shipped parser sees on this
+site". While it did its own request and decode it skipped the byte ceiling, the status check and the
+request-exception handling -- so on a valid 33 MB body it reported ``NOT-PRESENT``, exit 0,
+``assessable: 1`` and "the shipped parser did not refuse", about a response ``view_types`` refuses
+outright. A census that contradicts the parser it reports on is worse than no census.
+
+Sharing a function is a fact about today's code; **parity is the property**, and
+``test_the_census_and_the_shipped_parser_agree_on_the_same_bytes`` is what stops the two drifting
+apart again.
 
 ⚠️ **Counts and flags only, enforced rather than promised.** :func:`_emit` refuses to print anything
 that is not an ``int``, ``bool`` or ``None``, so a careless edit fails loudly instead of leaking a
@@ -63,8 +75,10 @@ SITE_BUCKETS = (
 )
 
 #: The handful of labels that are not census keys.
+# ⚠️ `http status` is deliberately NOT here any more. The status is the transport hop's, and the
+# census no longer performs its own request -- the refusal reason names it ("metadata api returned
+# HTTP 403"), so nothing is lost and one duplicated code path is gone.
 FIXED_LABELS = (
-    "http status",
     "views typed by the shipped parser",
     "shipped parser refused the response",
 )
@@ -239,33 +253,25 @@ def main(argv: list[str] | None = None) -> int:
 
     session = _session(Path(args.env))
     print("=== blank-luid census (read-only, one query) ===")
+    # ⚠️ ONE path for every outcome. Sign-in, the transport hop, the protocol check and the mapping
+    # all land on the same `(payload, unavailable)`, so there is no early return that can skip the
+    # assessability flag, the JSON, or the exit code. Three such early returns used to exist, and
+    # each produced a DIFFERENT output shape from the one the guarantees were written for.
     try:
         session.sign_in()
+        payload, refusal = tableau_view_types.fetch_payload(session)
     except Exception as exc:  # pylint: disable=broad-exception-caught
-        print(f"  sign-in failed: {type(exc).__name__}")
-        print("\nVERDICT: CANNOT-TELL (could not authenticate)")
-        return EXIT_CANNOT_TELL
+        payload, refusal = None, f"sign-in failed: {type(exc).__name__}"
 
-    status, body, _ = session._request(  # pylint: disable=protected-access
-        "POST", "/graphql", body={"query": tableau_view_types.VIEW_TYPE_QUERY}, api="metadata"
-    )
-    _emit("http status", status)
-    if status != 200:
-        print("\nVERDICT: CANNOT-TELL (metadata api did not answer 200)")
-        return EXIT_CANNOT_TELL
-
-    try:
-        payload = json.loads(body.decode("utf-8"))
-    except Exception as exc:  # pylint: disable=broad-exception-caught
-        print(f"  response was not usable JSON: {type(exc).__name__}")
-        print("\nVERDICT: CANNOT-TELL (unreadable response)")
-        return EXIT_CANNOT_TELL
-    del body  # ⚠️ never persisted, never printed
-
-    # ⚠️ The SHARED seam, not a re-implementation: `parse_payload` applies the exact protocol and
-    # mapping rules `view_types` would, to a payload we already hold, at no extra request. A second
-    # implementation of "what does this response mean" is how the two would drift apart.
-    mapping, unavailable = tableau_view_types.parse_payload(payload)
+    # ⚠️ The SHARED seams, not re-implementations. `fetch_payload` is the transport hop `view_types`
+    # itself uses -- byte ceiling, status check, strict decode, request-exception handling -- and
+    # `parse_payload` applies the exact protocol and mapping rules, to a payload we already hold, at
+    # no extra request. A second implementation of either is how the two entry points would drift,
+    # and drifting is precisely what made the census contradict the parser it reports on.
+    if refusal:
+        mapping, unavailable = {}, refusal
+    else:
+        mapping, unavailable = tableau_view_types.parse_payload(payload)
     totals = census(payload)
     # ⚠️ Rides WITH the counts, into stdout and into --json, so a consumer cannot read `blank_luids:
     # 0` without also seeing whether that zero is a measurement of the site or of our own blindness.
