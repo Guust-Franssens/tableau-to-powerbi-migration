@@ -179,6 +179,31 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
         ["test_a_blank_page_alone_fails_the_gate_even_when_the_counts_balance"],
     ),
     (
+        "attribution: a shortfall is attributed by position, so exemptions excuse the wrong page",
+        '    missing = [page for page in effective_expected if _slug(page["name"]) not in rendered_slugs] '
+        "if shortfall else []",
+        "    missing = effective_expected[-shortfall:] if shortfall else []",
+        ["test_a_missing_page_is_named_by_content_not_by_position"],
+    ),
+    (
+        "attribution: an exemption applies even to a page that is present",
+        '        [page for page in signed if _slug(page["name"]) not in rendered_slugs],',
+        "        list(signed),",
+        ["test_an_exemption_excuses_the_page_it_names_and_no_other"],
+    ),
+    (
+        "attribution: a surplus is attributed by position, so an extra page is misnamed",
+        '    unmatched = [page for page in rendered if _slug(page["name"]) not in expected_slugs] if surplus else []',
+        "    unmatched = rendered[-surplus:] if surplus else []",
+        ["test_an_extra_page_is_named_by_content_not_by_position"],
+    ),
+    (
+        "attribution: name matching replaces the count, so a renamed page fails",
+        "    shortfall = max(0, len(effective_expected) - len(rendered))",
+        "    shortfall = 1",
+        ["test_a_placeholder_id_holding_real_visuals_is_a_rebuilt_page"],
+    ),
+    (
         "oracle discovery: canonical oracle/ name removed",
         'ORACLE_DIR_NAMES = ("_oracle", "oracle")',
         'ORACLE_DIR_NAMES = ("_oracle",)',

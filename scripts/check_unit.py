@@ -1123,13 +1123,12 @@ def check_page_parity(target: Path, exemptions: dict[str, Any]) -> dict[str, Any
             "exemptions": [],
         }
     expected = expectation["candidates"]
-    entries = exemptions["entries"]
-    dropped = [page for page in expected if _exempted(entries, "page-parity", page["name"], {page["id"]})]
+    dropped, stale = _page_exemptions(expected, expectation["rendered"], exemptions["entries"])
     explained = [page for page in expectation["explained_drops"] if page not in dropped]
     effective_expected = [page for page in expected if page not in dropped and page not in explained]
     placeholders, blank = _zero_visual_pages(actual, expectation["rendered"])
     unexempted_missing, unexempted_extra, exempted_extra = _parity_deltas(
-        effective_expected, expectation["rendered"], entries
+        effective_expected, expectation["rendered"], exemptions["entries"]
     )
     status = (
         STATUS_PASS if not unexempted_missing and not unexempted_extra and not blank else STATUS_PRECONDITION_FAILED
@@ -1147,6 +1146,7 @@ def check_page_parity(target: Path, exemptions: dict[str, Any]) -> dict[str, Any
         "blank_pages": blank,
         "engine_placeholder_pages": placeholders,
         "exemptions": dropped + exempted_extra,
+        "stale_exemptions": stale,
         "unexempted_missing": unexempted_missing,
         "unexempted_extra": unexempted_extra,
         "dropped_explained": [
@@ -1156,6 +1156,24 @@ def check_page_parity(target: Path, exemptions: dict[str, Any]) -> dict[str, Any
         "dropped_unexplained": [page for page in expectation["unexplained_drops"] if page not in dropped],
         "drop_explanations": expectation["explanations"],
     }
+
+
+def _page_exemptions(
+    expected: list[dict[str, str]], rendered: list[dict[str, Any]], entries: list[dict[str, str]]
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    """``(applicable, stale)`` page-parity exemptions.
+
+    An exemption only excuses a page that is genuinely ABSENT. Applying it unconditionally shrank the
+    expected COUNT, so signing "C was merged away" while C is still present silently absorbed the
+    absence of some other page - a borrowed excuse at the exemption layer, invisible in every field
+    the gate reported. A stale exemption is now surfaced instead of being load-bearing.
+    """
+    rendered_slugs = {_slug(page["name"]) for page in rendered}
+    signed = [page for page in expected if _exempted(entries, "page-parity", page["name"], {page["id"]})]
+    return (
+        [page for page in signed if _slug(page["name"]) not in rendered_slugs],
+        [page for page in signed if _slug(page["name"]) in rendered_slugs],
+    )
 
 
 def _zero_visual_pages(
@@ -1191,18 +1209,28 @@ def _is_engine_placeholder_page(page: dict[str, Any]) -> bool:
 
 
 def _parity_deltas(
-    effective_expected: list[dict[str, str]], actual: list[dict[str, Any]], entries: list[dict[str, str]]
+    effective_expected: list[dict[str, str]], rendered: list[dict[str, Any]], entries: list[dict[str, str]]
 ) -> tuple[list[dict[str, str]], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Count-based missing/extra split, with signed exemptions subtracted from each side."""
-    extra = max(0, len(actual) - len(effective_expected))
-    extra_pages = actual[-extra:] if extra else []
-    exempted_extra = [page for page in extra_pages if _exempted(entries, "page-parity", f"extra:{page['name']}")]
-    missing_count = max(0, len(effective_expected) - len(actual))
-    missing_pages = effective_expected[-missing_count:] if missing_count else []
-    unexempted_missing = [
-        page for page in missing_pages if not _exempted(entries, "page-parity", page["name"], {page["id"]})
-    ]
-    return unexempted_missing, [page for page in extra_pages if page not in exempted_extra], exempted_extra
+    """Which pages are missing/extra, decided by COUNT and attributed by NAME.
+
+    The count decides IF something is wrong - renaming a PBIR page is legitimate, so a name-matched
+    verdict would fail every hand-finished unit. Names decide WHICH pages are reported, and therefore
+    which signed exemptions apply.
+
+    That second half used to be a positional tail slice (``effective_expected[-missing_count:]``),
+    which is the same borrowed-excuse defect one layer along: with candidates ``[A, B, C]`` and only
+    ``A`` genuinely absent, the slice named ``C``, so an exemption signed for ``C`` excused the
+    absence of ``A`` and an exemption signed for ``A`` did nothing. Nothing anywhere said so.
+    """
+    rendered_slugs = {_slug(page["name"]) for page in rendered}
+    expected_slugs = {_slug(page["name"]) for page in effective_expected}
+    shortfall = max(0, len(effective_expected) - len(rendered))
+    surplus = max(0, len(rendered) - len(effective_expected))
+    missing = [page for page in effective_expected if _slug(page["name"]) not in rendered_slugs] if shortfall else []
+    unmatched = [page for page in rendered if _slug(page["name"]) not in expected_slugs] if surplus else []
+    exempted_extra = [page for page in unmatched if _exempted(entries, "page-parity", f"extra:{page['name']}")]
+    unexempted_missing = [page for page in missing if not _exempted(entries, "page-parity", page["name"], {page["id"]})]
+    return unexempted_missing, [page for page in unmatched if page not in exempted_extra], exempted_extra
 
 
 def _page_parity_detail(  # pylint: disable=too-many-arguments,too-many-positional-arguments

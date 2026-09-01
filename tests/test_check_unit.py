@@ -765,6 +765,71 @@ def test_a_blank_page_that_is_not_the_engine_placeholder_is_reported(tmp_path: P
     assert parity["status"] == cu.STATUS_PRECONDITION_FAILED
 
 
+def test_a_missing_page_is_named_by_content_not_by_position(tmp_path: Path) -> None:
+    """Kills: naming a shortfall by slicing the tail of the expected list.
+
+    'A' is absent and 'C' is present. A positional tail slice names 'C' - so every downstream
+    consumer, including exemption matching, is pointed at the wrong page. No exemption is involved
+    here, so this pins the attribution rule on its own.
+    """
+    _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A"), ("ws.b", "B"), ("ws.c", "C")])
+    _write_report(tmp_path, ["B", "C"])
+
+    parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
+
+    assert [page["name"] for page in parity["unexempted_missing"]] == ["A"]
+    assert parity["status"] == cu.STATUS_PRECONDITION_FAILED
+
+
+def test_an_exemption_excuses_the_page_it_names_and_no_other(tmp_path: Path) -> None:
+    """Kills: a signed exemption absorbing a DIFFERENT page's absence.
+
+    Only 'A' is genuinely absent; 'C' is present. Applying the exemption unconditionally shrank the
+    expected count by one, which balanced the books and hid A entirely. The exemption is now recorded
+    as stale instead of being load-bearing, and A is named.
+    """
+    _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A"), ("ws.b", "B"), ("ws.c", "C")])
+    _write_report(tmp_path, ["B", "C"])
+    (tmp_path / cu.EXEMPTIONS_FILE).write_text(
+        json.dumps({"exemptions": [{"check": "page-parity", "item": "C", "reason": "merged", "decided_by": "review"}]}),
+        encoding="utf-8",
+    )
+
+    parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
+
+    assert [page["name"] for page in parity["unexempted_missing"]] == ["A"], "C is present; it cannot be missing"
+    assert [page["name"] for page in parity["stale_exemptions"]] == ["C"]
+    assert parity["status"] == cu.STATUS_PRECONDITION_FAILED
+
+
+def test_an_exemption_naming_the_actually_missing_page_is_honoured(tmp_path: Path) -> None:
+    """The other half: signing for the page that IS absent clears the gate."""
+    _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A"), ("ws.b", "B"), ("ws.c", "C")])
+    _write_report(tmp_path, ["B", "C"])
+    (tmp_path / cu.EXEMPTIONS_FILE).write_text(
+        json.dumps(
+            {"exemptions": [{"check": "page-parity", "item": "A", "reason": "merged into B", "decided_by": "review"}]}
+        ),
+        encoding="utf-8",
+    )
+
+    parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
+
+    assert parity["unexempted_missing"] == []
+    assert parity["status"] == cu.STATUS_PASS
+
+
+def test_an_extra_page_is_named_by_content_not_by_position(tmp_path: Path) -> None:
+    """An emitted page with no Tableau counterpart is identified by NAME, so its exemption can match."""
+    _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A")])
+    _write_report(tmp_path, ["Bonus Page", "A"])
+
+    parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
+
+    assert [page["name"] for page in parity["unexempted_extra"]] == ["Bonus Page"], "'A' has a counterpart"
+    assert parity["status"] == cu.STATUS_PRECONDITION_FAILED
+
+
 def test_page_count_mismatch_is_a_precondition_and_stops_before_oracle(tmp_path: Path) -> None:
     """Kills: treating missing pages as just another row and continuing into noisy page checks."""
     _write_spec(tmp_path, ["A", "B"])
