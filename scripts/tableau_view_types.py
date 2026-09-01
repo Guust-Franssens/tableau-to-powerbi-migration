@@ -17,6 +17,16 @@ the capture path specifically rather than a hard problem:
 * the deterministic engine's ``twb_to_pbir.py`` keeps a ``placed`` set, so a worksheet already laid
   onto a dashboard never becomes its own page; every other worksheet gets ``page-ws-<name>``.
 
+⚠️ **Failing closed has a second edge, and it cuts.** The query scans EVERY workbook on the site,
+and a refusal refuses the whole response -- so an over-strict rule does not degrade one view, it turns
+typing off for every captured view on the site. Measured: one hidden sheet, in one unrelated workbook,
+was enough, because Tableau documents ``Sheet.luid`` as blank for a hidden worksheet. A gate that is
+inert in the estate it was built for is not safer than one that is wrong; it is just useless in a way
+nobody notices. The rule that resolves it is in :func:`_fold_nodes`: **refuse what cannot be
+interpreted, skip what is documented as non-joinable.** A blank luid names no capturable view (REST
+``/views`` omits hidden sheets), so skipping it can lose nothing; a NON-EMPTY malformed luid may name
+a real view, so it still refuses the whole answer.
+
 ⚠️ **This module fails closed and never guesses.** Every failure path -- Metadata API disabled, an
 older schema with no ``luid``, a transport error, a GraphQL ``errors`` block -- returns an EMPTY
 mapping plus a stated reason, so every view records ``unknown``. There is deliberately **no
@@ -41,10 +51,19 @@ from typing import Any
 _LUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
 # `luid` is not queried anywhere else in this repo, so an older server that does not expose it is a
-# capability question rather than a bug. The GraphQL error it raises is reported verbatim.
+# capability question rather than a bug. Only the SHAPE of the resulting GraphQL error is reported --
+# never its message, which is server-controlled (see `view_types`).
 VIEW_TYPE_QUERY = """
 { workbooks { dashboards { luid } sheets { luid } } }
 """
+
+# An upper bound on the body we will decode and parse, not a statement about Tableau. The query asks
+# for `luid` and nothing else, so a node costs ~30 bytes on the wire: a 100,000-view site lands
+# around 6 MB. 32 MiB is ~5x the largest plausible estate and still small enough that decoding it
+# cannot cost the process. ⚠️ It is a memory/time bound ONLY -- it does not stop a *small* hostile
+# body (200k nested brackets is 400 kB and raises RecursionError), which is why the parse is also
+# wrapped rather than merely bounded.
+_MAX_BODY_BYTES = 32 * 1024 * 1024
 
 DASHBOARD = "dashboard"
 WORKSHEET = "worksheet"
@@ -75,6 +94,42 @@ def view_types(session: Any) -> tuple[dict[str, str], str | None]:
     their valid siblings, which produced a mapping that typed some views and silently left others
     ``unknown`` -- indistinguishable, downstream, from a run where those views genuinely had no type.
     """
+    payload, refused = _fetch_payload(session)
+    if refused:
+        return {}, refused
+    refused = _errors_refusal(payload)
+    if refused:
+        return {}, refused
+    return _mapping_from(payload)
+
+
+def _fetch_payload(session: Any) -> tuple[dict[str, Any], str | None]:
+    """One round trip, decoded and shape-checked. Returns ``(payload, refusal_reason)``.
+
+    ⚠️ **The parse catch is deliberately broad, and that is the safer choice here.** An enumerated
+    catch is how this repository has repeatedly been bitten -- ``tableau_http``'s round-9 finding was
+    ``http.client.HTTPException``, an exception type nobody had thought of, slipping through
+    ``except (OSError, urllib.error.URLError)``. ``json.loads`` on a server-controlled body raises at
+    least four unrelated types, and only two were caught before:
+
+    ===========================================  ==================================================
+    body a server can send                       what escaped
+    ===========================================  ==================================================
+    an ordinary response + a 5000-digit integer  ``ValueError`` (CPython's 4300-digit int limit) --
+                                                 **not** a ``JSONDecodeError``
+    ~200k nested brackets (only 400 kB)          ``RecursionError`` -- not a ``ValueError`` at all
+    a body that is not ``bytes``                 ``AttributeError`` from ``.decode``
+    ===========================================  ==================================================
+
+    Both measured, 2026-09-01, and each aborted the whole capture before the view loop. Enumerating
+    would close today's three and leave tomorrow's fourth; the module's contract is that it never
+    raises, so the catch is written to that contract. Only the exception's TYPE NAME is reported, and
+    a Python type name is not server-controlled.
+
+    ⚠️ **Decoding is STRICT.** ``decode("utf-8", "replace")`` silently rewrote an invalid byte to
+    U+FFFD and carried on, so a body that was not valid UTF-8 still produced a trusted mapping --
+    measured as a fail-open. A response we cannot read exactly is a response we do not have.
+    """
     try:
         status, body, _ = session._request(  # pylint: disable=protected-access
             "POST", "/graphql", body={"query": VIEW_TYPE_QUERY}, api="metadata"
@@ -83,19 +138,45 @@ def view_types(session: Any) -> tuple[dict[str, str], str | None]:
         return {}, f"metadata api call failed: {type(exc).__name__}"
     if status != 200:
         return {}, f"metadata api returned HTTP {status}"
+    if len(body) > _MAX_BODY_BYTES:
+        return {}, f"metadata api response exceeded the {_MAX_BODY_BYTES} byte ceiling; response refused"
     try:
-        payload = json.loads(body.decode("utf-8", "replace"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        return {}, f"metadata api response was not JSON: {type(exc).__name__}"
+        payload = json.loads(body.decode("utf-8"))
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        return {}, f"metadata api response was not usable JSON: {type(exc).__name__}"
     if not isinstance(payload, dict):
         return {}, f"metadata api response was {type(payload).__name__}, not an object"
-    if payload.get("errors"):
-        # A GraphQL 200 can carry `errors` BESIDE usable `data` -- notably FieldUndefined when `luid`
-        # is absent from this server's schema. The count is ours; the message is the server's and is
-        # deliberately not reported (see the docstring).
-        count = len(payload["errors"]) if isinstance(payload["errors"], list) else 1
-        return {}, f"metadata api returned {count} graphql error(s); response refused"
-    return _mapping_from(payload)
+    return payload, None
+
+
+def _errors_refusal(payload: dict[str, Any]) -> str | None:
+    """Refuse on a GraphQL ``errors`` block. Returns a reason, or None to proceed.
+
+    A GraphQL 200 can carry ``errors`` BESIDE usable ``data`` -- notably ``FieldUndefined`` when
+    ``luid`` is absent from this server's schema -- so the partial ``data`` must not be believed.
+
+    ⚠️ The old test was ``payload.get("errors")``, a TRUTHINESS check, so ``"errors": 0`` passed
+    straight through and its ``data`` was trusted. Measured fail-open. Presence is now what is
+    tested, and the value's shape decides.
+
+    ⚠️ **``null`` and ``[]`` are accepted as "no errors", deliberately, against the strict reading.**
+    The GraphQL spec forbids both spellings, so "present means malformed" is defensible on paper --
+    but neither is AMBIGUOUS: there is no server for which ``"errors": []`` means errors occurred. A
+    strict rule would buy nothing on the safety axis (no real error signal is ever ignored) and would
+    cost on the inertness axis -- one non-conformant server spelling, and typing is off for that whole
+    site. That is the same failure mode as the hidden-sheet refusal in :func:`_fold_nodes`, and it is
+    worth being consistent about: refuse what cannot be interpreted, not what merely offends a spec.
+    ``0``, ``""``, ``{}`` and a string all still refuse, because none of them can be interpreted.
+    """
+    if "errors" not in payload:
+        return None
+    errors = payload["errors"]
+    if errors is None or (isinstance(errors, list) and not errors):
+        return None
+    if isinstance(errors, list):
+        # The count is ours; the message is the server's and is deliberately never reported.
+        return f"metadata api returned {len(errors)} graphql error(s); response refused"
+    return f"metadata api `errors` was {type(errors).__name__}, not a list; response refused"
 
 
 def _mapping_from(payload: dict[str, Any]) -> tuple[dict[str, str], str | None]:
@@ -145,25 +226,61 @@ def _fold_workbook(workbook: Any, mapping: dict[str, str]) -> str | None:
     if not isinstance(workbook, dict):
         return f"a workbook node was {type(workbook).__name__}, not an object; response refused"
     for key, kind in (("dashboards", DASHBOARD), ("sheets", WORKSHEET)):
-        nodes = workbook.get(key)
-        if nodes is None:
-            continue
+        # ⚠️ ABSENT is malformed, not empty. The schema declares `dashboards`/`sheets` as non-null
+        # lists, so a workbook that omits one, or sends `null`, is not a workbook with no sheets --
+        # it is an answer we cannot read. Skipping it (`nodes is None: continue`) trusted the rest of
+        # a response already known to be wrong, and was measured producing a confident mapping.
+        if key not in workbook:
+            return f"a workbook had no `{key}` field, which the schema declares non-null; response refused"
+        nodes = workbook[key]
         if not isinstance(nodes, list):
             return f"`{key}` was {type(nodes).__name__}, not a list; response refused"
-        for node in nodes:
-            if not isinstance(node, dict):
-                return f"a `{key}` node was {type(node).__name__}, not an object; response refused"
-            luid = node.get("luid")
-            if not isinstance(luid, str) or not _LUID_RE.match(luid.strip()):
-                # Shape-verified, not merely non-empty: a proved UUID cannot carry a credential,
-                # which is what lets the mapping's keys travel without redaction.
-                return f"a `{key}` node carried a {type(luid).__name__} that is not a luid; response refused"
-            key_luid = luid.strip().lower()
-            # ⚠️ A LUID naming BOTH a dashboard and a sheet is contradictory, not a last-wins
-            # tiebreak. Overwriting would have silently picked whichever the server listed second.
-            if mapping.get(key_luid, kind) != kind:
-                return "the same luid was reported as both a dashboard and a worksheet; response refused"
-            mapping[key_luid] = kind
+        refused = _fold_nodes(key, kind, nodes, mapping)
+        if refused:
+            return refused
+    return None
+
+
+def _fold_nodes(key: str, kind: str, nodes: list[Any], mapping: dict[str, str]) -> str | None:
+    """Fold ONE node list into ``mapping``. Returns a refusal reason, or None.
+
+    ⚠️ **A BLANK luid is skipped; a non-empty malformed one refuses the whole response.** That
+    distinction is the entire rule here, and getting it wrong in either direction breaks the feature:
+
+    * Tableau documents ``Sheet.luid: String!`` as *"Blank if worksheet is hidden in Workbook"*, and
+      REST ``/views`` omits hidden sheets entirely. So a blank luid names **no capturable view** --
+      skipping it cannot leave any view mistyped, or ``unknown`` when it could have been typed. There
+      is nothing to lose.
+    * A NON-EMPTY value that is not a UUID is the opposite: it may well be a real, visible view whose
+      identity we failed to read, and typing the rest of the site while silently dropping it is the
+      partial answer this module exists to refuse.
+
+    Refusing the blank case too was measured to make the feature inert exactly where it is needed:
+    ONE hidden sheet, in ONE unrelated workbook, turned typing off for **every captured view on the
+    site**, because the query scans the whole site and any refusal refuses all of it. Hidden sheets
+    are ordinary in a real estate, so that is the common case, not an edge case.
+
+    ``_LUID_RE`` is still a closed allowlist for everything that DOES enter the mapping -- the same
+    one ``capture_tableau_oracle.artifact_stem`` uses -- so a proved UUID needs no redaction
+    downstream.
+    """
+    for node in nodes:
+        if not isinstance(node, dict):
+            return f"a `{key}` node was {type(node).__name__}, not an object; response refused"
+        luid = node.get("luid")
+        if not isinstance(luid, str):
+            return f"a `{key}` node carried a {type(luid).__name__} where the schema declares String!; response refused"
+        stripped = luid.strip()
+        if not stripped:
+            continue
+        if not _LUID_RE.match(stripped):
+            return f"a `{key}` node carried a non-empty value that is not a luid; response refused"
+        key_luid = stripped.lower()
+        # ⚠️ A LUID naming BOTH a dashboard and a sheet is contradictory, not a last-wins tiebreak.
+        # Overwriting would have silently picked whichever the server listed second.
+        if mapping.get(key_luid, kind) != kind:
+            return "the same luid was reported as both a dashboard and a worksheet; response refused"
+        mapping[key_luid] = kind
     return None
 
 

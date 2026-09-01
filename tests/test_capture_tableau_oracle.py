@@ -517,11 +517,11 @@ def test_view_types_asks_the_metadata_api_through_the_hardened_path():
 
 
 @pytest.mark.parametrize(
-    "responses, why",
+    "responses, why, guard",
     [
-        # ⚠️ This case carries BOTH `errors` AND usable `data`. A GraphQL 200 can return partial data
-        # beside an error, and with an empty `data` the mapping would end up empty regardless -- so
-        # the errors branch would be redundant and its mutation would survive. Measured: it did.
+        # ⚠️ Carries BOTH `errors` AND usable `data`. A GraphQL 200 can return partial data beside an
+        # error, and with an empty `data` the mapping would end up empty regardless -- so the errors
+        # branch would be redundant and its mutation would survive. Measured: it did.
         (
             [
                 (
@@ -536,6 +536,7 @@ def test_view_types_asks_the_metadata_api_through_the_hardened_path():
                 )
             ],
             "FieldUndefined beside partial data",
+            "graphql error(s); response refused",
         ),
         # ⚠️ The body here is a PERFECTLY VALID mapping payload, so the HTTP status is the only reason
         # to refuse. The earlier fixture sent `403, "forbidden"` -- unparseable, so the JSON guard
@@ -543,30 +544,64 @@ def test_view_types_asks_the_metadata_api_through_the_hardened_path():
         (
             [(403, json.dumps({"data": {"workbooks": [_wb(dashboards=[DASH_LUID])]}}), {})],
             "metadata api disabled, but answering with a well-formed body",
+            "returned HTTP 403",
         ),
         (
             [(0, json.dumps({"data": {"workbooks": [_wb(dashboards=[DASH_LUID])]}}), {})],
             "network error status, with a body that would otherwise parse",
+            "returned HTTP 0",
         ),
-        ([(200, "not json at all", {})], "unparseable"),
-        ([(200, json.dumps({"data": {"workbooks": []}}), {})], "no luids at all"),
-        # --- one poisoned part BESIDE a valid one. Each of these WOULD yield a non-empty mapping if
-        # its guard were removed, which is what makes the guard the single reason for the refusal.
+        ([(200, "not json at all", {})], "unparseable", "not usable JSON"),
         (
-            [(200, json.dumps({"data": {"workbooks": [{"dashboards": [{"luid": DASH_LUID}, {"luid": 7}]}]}}), {})],
+            [(200, json.dumps({"data": {"workbooks": []}}), {})],
+            "no luids at all",
+            "no dashboards or sheets carrying a luid",
+        ),
+        # --- one poisoned part BESIDE a valid one. Each WOULD yield a non-empty mapping if its guard
+        # were removed, which is what makes the guard the single reason for the refusal. Both node
+        # collections are present in every one of them, because the presence guard added in round 2
+        # would otherwise refuse three of these before they reached their own subject.
+        (
+            [
+                (
+                    200,
+                    json.dumps(
+                        {"data": {"workbooks": [{"dashboards": [{"luid": DASH_LUID}, {"luid": 7}], "sheets": []}]}}
+                    ),
+                    {},
+                )
+            ],
             "a non-string luid beside a valid one",
+            "where the schema declares String!",
         ),
         (
-            [(200, json.dumps({"data": {"workbooks": [{"dashboards": [{"luid": DASH_LUID}, {"luid": "D-1"}]}]}}), {})],
+            [
+                (
+                    200,
+                    json.dumps(
+                        {"data": {"workbooks": [{"dashboards": [{"luid": DASH_LUID}, {"luid": "D-1"}], "sheets": []}]}}
+                    ),
+                    {},
+                )
+            ],
             "a non-uuid string luid beside a valid one",
+            "non-empty value that is not a luid",
         ),
         (
-            [(200, json.dumps({"data": {"workbooks": [{"dashboards": [{"luid": DASH_LUID}, "nope"]}]}}), {})],
+            [
+                (
+                    200,
+                    json.dumps({"data": {"workbooks": [{"dashboards": [{"luid": DASH_LUID}, "nope"], "sheets": []}]}}),
+                    {},
+                )
+            ],
             "a non-dict node beside a valid one",
+            "not an object; response refused",
         ),
         (
             [(200, json.dumps({"data": {"workbooks": [_wb(dashboards=[DASH_LUID]), ["not", "a", "dict"]]}}), {})],
             "a non-dict workbook beside a valid one",
+            "a workbook node was list, not an object",
         ),
         (
             [
@@ -577,19 +612,32 @@ def test_view_types_asks_the_metadata_api_through_the_hardened_path():
                 )
             ],
             "a non-list `dashboards` beside a valid `sheets`",
+            "`dashboards` was str, not a list",
         ),
-        # --- shapes that used to raise rather than refuse. `pytest.raises` is not used: an escaping
-        # AttributeError/KeyError would fail the call outright, which is the point.
-        ([(200, "null", {})], "a top-level null"),
-        ([(200, json.dumps([{"data": {"workbooks": []}}]), {})], "a top-level list"),
-        ([(200, json.dumps("nope"), {})], "a top-level string"),
-        ([(200, json.dumps({"data": None}), {})], "`data` is null"),
-        ([(200, json.dumps({"data": []}), {})], "`data` is a list"),
-        ([(200, json.dumps({"data": {"workbooks": {"dashboards": []}}}), {})], "`workbooks` is a dict"),
-        ([(200, json.dumps({"errors": "boom", "data": {"workbooks": []}}), {})], "`errors` is not a list"),
-        ([(200, json.dumps({"errors": {"message": "boom"}, "data": {"workbooks": []}}), {})], "`errors` is a dict"),
-        ([(200, "", {})], "an empty body"),
-        ([(200, b"\xff\xfe\x00bad", {})], "a body that is not valid utf-8"),
+        # --- shapes that used to RAISE rather than refuse. `pytest.raises` is deliberately not used:
+        # an escaping exception fails the call outright, which is the point.
+        ([(200, "null", {})], "a top-level null", "was NoneType, not an object"),
+        ([(200, json.dumps([{"data": {"workbooks": []}}]), {})], "a top-level list", "was list, not an object"),
+        ([(200, json.dumps("nope"), {})], "a top-level string", "was str, not an object"),
+        ([(200, json.dumps({"data": None}), {})], "`data` is null", "`data` was NoneType, not an object"),
+        ([(200, json.dumps({"data": []}), {})], "`data` is a list", "`data` was list, not an object"),
+        (
+            [(200, json.dumps({"data": {"workbooks": {"dashboards": []}}}), {})],
+            "`workbooks` is a dict",
+            "`workbooks` was dict, not a list",
+        ),
+        (
+            [(200, json.dumps({"errors": "boom", "data": {"workbooks": []}}), {})],
+            "`errors` is not a list",
+            "`errors` was str, not a list",
+        ),
+        (
+            [(200, json.dumps({"errors": {"message": "boom"}, "data": {"workbooks": []}}), {})],
+            "`errors` is a dict",
+            "`errors` was dict, not a list",
+        ),
+        ([(200, "", {})], "an empty body", "not usable JSON"),
+        ([(200, b"\xff\xfe\x00bad", {})], "a body that is not valid utf-8", "not usable JSON"),
         # A LUID that names BOTH kinds is contradictory, not a last-wins tiebreak: overwriting would
         # silently take whichever the server happened to list second.
         (
@@ -607,6 +655,7 @@ def test_view_types_asks_the_metadata_api_through_the_hardened_path():
                 )
             ],
             "one luid reported as both a dashboard and a worksheet",
+            "both a dashboard and a worksheet",
         ),
         (
             [
@@ -617,24 +666,220 @@ def test_view_types_asks_the_metadata_api_through_the_hardened_path():
                 )
             ],
             "the same contradiction split across two workbooks",
+            "both a dashboard and a worksheet",
+        ),
+        # --- round 2: four measured FAIL-OPEN paths, each of which produced a NON-EMPTY mapping with
+        # `unavailable=None`. Every fixture keeps a valid sibling that WOULD still be mapped if the
+        # guard were removed -- otherwise the later "no luids" branch does the refusing and the
+        # guard's mutation survives.
+        (
+            [(200, json.dumps({"errors": 0, "data": {"workbooks": [_wb(dashboards=[DASH_LUID])]}}), {})],
+            "a FALSY-but-present `errors` beside usable data",
+            "`errors` was int, not a list",
+        ),
+        (
+            [
+                (
+                    200,
+                    json.dumps({"data": {"workbooks": [{"dashboards": [{"luid": DASH_LUID}], "sheets": None}]}}),
+                    {},
+                )
+            ],
+            "`sheets` is null beside a valid dashboard",
+            "`sheets` was NoneType, not a list",
+        ),
+        (
+            [(200, json.dumps({"data": {"workbooks": [{"dashboards": [{"luid": DASH_LUID}]}]}}), {})],
+            "`sheets` is absent entirely, beside a valid dashboard",
+            "had no `sheets` field",
+        ),
+        (
+            [(200, json.dumps({"data": {"workbooks": [{"sheets": [{"luid": SHEET_LUID}]}]}}), {})],
+            "`dashboards` is absent entirely, beside a valid sheet",
+            "had no `dashboards` field",
+        ),
+        (
+            [
+                (
+                    200,
+                    b'{"data": {"workbooks": [{"dashboards": [{"luid": "'
+                    + DASH_LUID.encode()
+                    + b'"}], "sheets": []}]},'
+                    b' "n": "\xff\xfe"}',
+                    {},
+                )
+            ],
+            "invalid utf-8 INSIDE an otherwise valid body",
+            "not usable JSON",
+        ),
+        (
+            [
+                (
+                    200,
+                    json.dumps(
+                        {"data": {"workbooks": [{"dashboards": [{"luid": DASH_LUID}, {"luid": None}], "sheets": []}]}}
+                    ),
+                    {},
+                )
+            ],
+            "`luid` is null, which the schema declares String!",
+            "where the schema declares String!",
+        ),
+        # Bodies a server can send that made `json.loads` RAISE, aborting the whole capture before the
+        # view loop. Neither is a `JSONDecodeError`, which is why an enumerated catch missed both.
+        (
+            [(200, '{"data": {"workbooks": []}, "pad": ' + "9" * 5000 + "}", {})],
+            "a 5000-digit integer (CPython's int-conversion limit)",
+            "not usable JSON: ValueError",
+        ),
+        (
+            [(200, '{"data": ' + "[" * 200_000 + "]" * 200_000 + "}", {})],
+            "deeply nested JSON, only 400 kB so no size ceiling catches it",
+            "not usable JSON: RecursionError",
         ),
     ],
 )
-def test_view_types_fails_closed_and_never_guesses(responses, why):
+def test_view_types_fails_closed_and_never_guesses(responses, why, guard):
     """⚠️ The load-bearing property. EVERY failure yields an empty map plus a stated reason.
 
     There is deliberately no name-based fallback: matching on the view NAME is the exact join this
     replaces, and it is what let a worksheet stand in as evidence for a dashboard page.
 
-    ⚠️ Two properties, not one. A malformed answer must be refused **whole** -- an earlier revision
+    ⚠️ Three properties, not one. A malformed answer must be refused **whole** -- an earlier revision
     skipped bad nodes and trusted their valid siblings, producing a mapping that typed some views and
     left others `unknown`, which downstream is indistinguishable from a run where those views
-    genuinely had no type. And it must never RAISE: a top-level `null`, list or string each escaped
-    as an uncaught `AttributeError`, and `errors` as a dict escaped as a `KeyError`.
+    genuinely had no type. It must never RAISE: a top-level `null`, list or string each escaped as an
+    uncaught `AttributeError`, `errors` as a dict escaped as a `KeyError`, and a 5000-digit integer
+    escaped as a `ValueError` from CPython's int-conversion limit.
+
+    ⚠️ And it must refuse for **the reason this fixture was written to provoke**. That third
+    assertion is not decoration -- it is the structural fix for a vacuity that has now occurred TWICE
+    on this file. Adding `_LUID_RE` made every fails-closed fixture refuse on luid SHAPE before
+    reaching its own branch; adding the `dashboards`/`sheets` presence guard did it again to three
+    more. Both times the suite stayed green while covering strictly less, because "it refused" was
+    the whole assertion. `guard` makes a fixture that stops reaching its subject fail loudly.
     """
     mapping, unavailable = view_types_mod.view_types(FakeSession(responses))
     assert mapping == {}, f"{why} must not produce a mapping"
     assert unavailable, f"{why} must state why the type is unknown"
+    assert guard in unavailable, (
+        f"{why} refused, but for the WRONG reason: expected a refusal mentioning {guard!r}, got "
+        f"{unavailable!r}. The fixture no longer reaches the guard it was written to cover."
+    )
+
+
+# --- #402 round 2: an EXPECTED non-joinable node must not disable the whole site ----------------
+#
+# ⚠️ The mirror of everything above, and the likelier failure in practice. This query scans EVERY
+# workbook on the site and a refusal refuses the WHOLE response, so an over-strict rule does not
+# degrade one view -- it turns typing off for every captured view on the site.
+#
+# Tableau documents `Sheet.luid: String!` as "Blank if worksheet is hidden in Workbook", and REST
+# `/views` omits hidden sheets entirely. So a blank luid names NO capturable view: skipping it cannot
+# leave any view mistyped, or `unknown` when it could have been typed. A NON-EMPTY malformed luid is
+# the opposite -- it may be a real visible view whose identity we failed to read -- and still refuses.
+
+
+@pytest.mark.parametrize(
+    "workbooks, expected, why",
+    [
+        (
+            [{"dashboards": [{"luid": DASH_LUID}], "sheets": [{"luid": ""}]}],
+            {DASH_LUID: "dashboard"},
+            "a hidden sheet beside the dashboard it belongs to",
+        ),
+        (
+            [
+                {"dashboards": [{"luid": DASH_LUID}], "sheets": [{"luid": SHEET_LUID}]},
+                {"dashboards": [], "sheets": [{"luid": ""}]},
+            ],
+            {DASH_LUID: "dashboard", SHEET_LUID: "worksheet"},
+            "a hidden sheet in a COMPLETELY UNRELATED workbook",
+        ),
+        (
+            [{"dashboards": [{"luid": DASH_LUID}], "sheets": [{"luid": "   "}]}],
+            {DASH_LUID: "dashboard"},
+            "a blank luid spelled as whitespace",
+        ),
+        (
+            [{"dashboards": [{"luid": ""}], "sheets": [{"luid": SHEET_LUID}]}],
+            {SHEET_LUID: "worksheet"},
+            "a blank DASHBOARD luid, not only a sheet",
+        ),
+    ],
+)
+def test_a_hidden_sheet_does_not_switch_typing_off_for_the_whole_site(workbooks, expected, why):
+    """⚠️ Measured: before this, ONE hidden sheet made every captured view on the site `unknown`.
+
+    Hidden sheets are ordinary in a real estate, so the feature would have been inert exactly where
+    it was built to be used -- and inert SILENTLY, reported as a clean fail-closed run.
+    """
+    mapping, unavailable = view_types_mod.view_types(_graphql({"data": {"workbooks": workbooks}}))
+    assert unavailable is None, f"{why} must not refuse the response"
+    assert mapping == expected, f"{why} must leave every OTHER view typed"
+
+
+def test_a_blank_luid_is_skipped_but_a_garbage_one_still_refuses_everything():
+    """⚠️ The distinction IS the rule, so it is asserted as one fact rather than as two tests.
+
+    Same workbook, same position, one character different: `""` is documented and non-joinable, and
+    `"x"` is an identity we could not read. If these two ever collapse onto the same behaviour the
+    feature is either inert (both refuse) or fail-open (both skip).
+    """
+    blank = _graphql({"data": {"workbooks": [{"dashboards": [{"luid": DASH_LUID}], "sheets": [{"luid": ""}]}]}})
+    garbage = _graphql({"data": {"workbooks": [{"dashboards": [{"luid": DASH_LUID}], "sheets": [{"luid": "x"}]}]}})
+
+    blank_mapping, blank_reason = view_types_mod.view_types(blank)
+    garbage_mapping, garbage_reason = view_types_mod.view_types(garbage)
+
+    assert (blank_mapping, blank_reason) == ({DASH_LUID: "dashboard"}, None)
+    assert garbage_mapping == {}
+    assert "non-empty value that is not a luid" in garbage_reason
+
+
+def test_a_site_of_only_hidden_sheets_reports_that_it_typed_nothing():
+    """Skipping every node must not read as a successful run that happened to type nothing."""
+    session = _graphql({"data": {"workbooks": [{"dashboards": [], "sheets": [{"luid": ""}, {"luid": ""}]}]}})
+    mapping, unavailable = view_types_mod.view_types(session)
+    assert mapping == {}
+    assert "no dashboards or sheets carrying a luid" in unavailable
+
+
+@pytest.mark.parametrize("errors", [None, []])
+def test_the_two_UNAMBIGUOUS_spellings_of_no_errors_are_accepted(errors):
+    """⚠️ A deliberate deviation from "validate `errors` by presence and exact shape".
+
+    The GraphQL spec forbids both spellings, so refusing them is defensible on paper. But neither is
+    AMBIGUOUS -- there is no server for which `"errors": []` means errors occurred -- so refusing
+    buys nothing on the safety axis and costs on the inertness axis, which is the very failure mode
+    the hidden-sheet finding was about. `0`, `""`, `{}` and a string all still refuse, because none
+    of those can be interpreted at all; `errors: 0` is in the fails-closed table above.
+    """
+    session = _graphql({"errors": errors, "data": {"workbooks": [_wb(dashboards=[DASH_LUID])]}})
+    mapping, unavailable = view_types_mod.view_types(session)
+    assert unavailable is None
+    assert mapping == {DASH_LUID: "dashboard"}
+
+
+def test_an_oversized_body_is_refused_before_it_is_decoded(monkeypatch):
+    """The ceiling is the SOLE reason here: the body is a perfectly valid mapping payload.
+
+    Patched down rather than sending 32 MiB, because a fixture that costs seconds gets deleted. What
+    is pinned is that the check exists and fires before `decode`, not the constant's value.
+    """
+    monkeypatch.setattr(view_types_mod, "_MAX_BODY_BYTES", 10)
+    session = _graphql({"data": {"workbooks": [_wb(dashboards=[DASH_LUID])]}})
+    mapping, unavailable = view_types_mod.view_types(session)
+    assert mapping == {}
+    assert "byte ceiling" in unavailable
+
+
+def test_the_body_ceiling_is_large_enough_for_a_real_estate():
+    """A ceiling below a plausible site would be the inertness failure wearing a different hat.
+
+    The query asks for `luid` and nothing else, so a node costs ~30 bytes on the wire.
+    """
+    assert view_types_mod._MAX_BODY_BYTES >= 100_000 * 30 * 2  # pylint: disable=protected-access
 
 
 def test_a_repeated_luid_of_the_SAME_kind_is_tolerated_deliberately():
@@ -645,7 +890,9 @@ def test_a_repeated_luid_of_the_SAME_kind_is_tolerated_deliberately():
     over a duplicate that changes nothing. The CONTRADICTORY case -- one luid under both kinds -- is
     refused, and is covered above.
     """
-    session = _graphql({"data": {"workbooks": [{"dashboards": [{"luid": DASH_LUID}, {"luid": DASH_LUID}]}]}})
+    session = _graphql(
+        {"data": {"workbooks": [{"dashboards": [{"luid": DASH_LUID}, {"luid": DASH_LUID}], "sheets": []}]}}
+    )
     mapping, unavailable = view_types_mod.view_types(session)
     assert unavailable is None
     assert mapping == {DASH_LUID: "dashboard"}
@@ -755,7 +1002,7 @@ def test_a_reflected_session_token_never_reaches_the_view_type_warning():
         [(200, json.dumps({"errors": [{"message": "x"}, {"message": TAINT}]}), {})],
         [(200, f"{TAINT} not json", {})],
         [(418, TAINT, {})],
-        [(200, json.dumps({"data": {"workbooks": [{"dashboards": [{"luid": TAINT}]}]}}), {})],
+        [(200, json.dumps({"data": {"workbooks": [{"dashboards": [{"luid": TAINT}], "sheets": []}]}}), {})],
         [(200, json.dumps({"data": {"workbooks": [TAINT]}}), {})],
         [(200, json.dumps({"data": {"workbooks": [{"dashboards": TAINT}]}}), {})],
         [(200, json.dumps({"data": TAINT}), {})],

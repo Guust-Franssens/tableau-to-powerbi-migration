@@ -647,36 +647,48 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
             "builds; the value itself never came back from Tableau"
         ),
     },
-    ("scripts/tableau_view_types.py", "view_types"): {
-        # ⚠️ `type(exc).__name__` was certified here and certified NOTHING: the analyser taints
-        # ASSIGNMENTS, and `except ... as exc` is an ExceptHandler, so `exc` is never a tainted root
-        # and the expression is not a live sink. `test_the_certification_list_has_no_stale_entries`
-        # rejects it -- a claim about nothing is the same silent no-op as the duplicate-key entry the
-        # first round of this PR hit. The expression is still safe; it just needs no certificate.
+    # ⚠️ `view_types` itself has NO certified expressions and that is correct, not an omission: after
+    # the round-2 split it only routes between three helpers, so no response-derived value reaches an
+    # exit inside it. `test_the_certification_list_has_no_stale_entries` would reject a leftover entry
+    # -- a claim about nothing is the same silent no-op as the duplicate CERTIFIED key this PR hit in
+    # round 1, and as `type(exc).__name__`, which certified nothing because `except ... as exc` binds
+    # through an ExceptHandler rather than an Assign and so is never a tainted root.
+    #
+    # The transport hop. `body` and `status` arrive from `_request`, the analyser's taint origin.
+    ("scripts/tableau_view_types.py", "_fetch_payload"): {
         "type(payload).__name__": _PY_TYPE_NAME,
         "status": "NOT-A-STRING: an HTTP status integer from the hardened transport",
-        "count": (
+    },
+    # The GraphQL protocol hop.
+    ("scripts/tableau_view_types.py", "_errors_refusal"): {
+        "len(errors)": (
             "NOT-A-STRING: len() of the GraphQL errors list, an integer. The error MESSAGE is "
             "deliberately not reported at all -- measured, a one-request server reflecting the "
             "inbound X-Tableau-Auth header into errors[0].message put a live session token here."
         ),
+        "type(errors).__name__": _PY_TYPE_NAME,
     },
-    # The response ENVELOPE. Only the two container shapes are decided here; everything below a
-    # workbook moved to `_fold_workbook` when R0911 was resolved by splitting rather than
-    # suppressing, and the gate tracked all five expressions across the seam by itself.
+    # The response ENVELOPE: only the two container shapes are decided here.
     ("scripts/tableau_view_types.py", "_mapping_from"): {
         "type(data).__name__": _PY_TYPE_NAME,
         "type(workbooks).__name__": _PY_TYPE_NAME,
     },
+    # ONE workbook: its own shape and the presence/shape of its two node collections.
     ("scripts/tableau_view_types.py", "_fold_workbook"): {
         "type(workbook).__name__": _PY_TYPE_NAME,
         "type(nodes).__name__": _PY_TYPE_NAME,
+    },
+    # ONE node list. The gate followed every expression across each new seam unprompted, which is the
+    # property that makes splitting a module under it cheap rather than risky.
+    ("scripts/tableau_view_types.py", "_fold_nodes"): {
         "type(node).__name__": _PY_TYPE_NAME,
         "type(luid).__name__": _PY_TYPE_NAME,
         "key_luid": (
             "SHAPE-VERIFIED: `_LUID_RE.match` has proved this is a UUID before it is used as a key - "
             "the same closed allowlist artifact_stem uses for filenames. A proved UUID cannot carry a "
-            "credential, and a node whose luid fails the shape refuses the WHOLE response."
+            "credential. A node whose luid is NON-EMPTY and fails the shape refuses the whole "
+            "response; a BLANK one is skipped (Tableau documents a blank luid for a hidden sheet) and "
+            "never becomes a key, so nothing unverified reaches this expression either way."
         ),
     },
     ("scripts/tableau_view_types.py", "stamp"): {
