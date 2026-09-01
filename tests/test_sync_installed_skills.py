@@ -1579,3 +1579,39 @@ def test_a_marker_that_UNDER_claims_is_reconciled_too(estate: Estate, capsys: py
     assert _run(estate) == sync.EXIT_OK
     capsys.readouterr()
     assert not (estate.plugin / "skills" / forgotten).exists()
+
+
+def test_preflight_blocks_an_unsafe_marker(estate: Estate, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    """A refusal whose payload has no inventory must not read GREEN off the absent evidence.
+
+    `unsafe_marker` carries only status/detail, so the generic `compared` rows would report
+    `Installed.Ok = True` ("0 missing") and `Plugin.Ok = True` (an empty plugin_root) from a run
+    that measured nothing at all - the unassessable-input-lands-in-the-clean-bucket shape. It gets
+    its own branch, and this test EXECUTES preflight's own function to prove it.
+    """
+    assert _run(estate) == sync.EXIT_OK
+    capsys.readouterr()
+    _stamp(estate, [str(tmp_path / "stranger-data")])
+    _make_stale(estate)
+
+    assert _run(estate, "--check", "--json") == sync.EXIT_UNSAFE_MARKER
+    verdict = capsys.readouterr().out
+
+    assert json.loads(verdict)["status"] == "unsafe_marker"
+    assert _skill_verdict(verdict, "$v.Mode") == "unsafe_marker"
+    assert _skill_verdict(verdict, "$v.Plugin.Ok") == "False"
+    assert _skill_verdict(verdict, "$v.Installed.Ok") == "", "no Installed row may be invented from an empty payload"
+
+
+def test_preflight_blocks_unreconciled_ownership_and_says_so(estate: Estate, capsys: pytest.CaptureFixture) -> None:
+    """`ownership_drift` must not print "in sync with ..." while failing the row."""
+    assert _run(estate) == sync.EXIT_OK
+    capsys.readouterr()
+    _stamp(estate, [name for name in BUNDLES if name != BUNDLES[-1]])
+
+    assert _run(estate, "--check", "--json") == sync.EXIT_DRIFT
+    verdict = capsys.readouterr().out
+
+    assert json.loads(verdict)["status"] == "ownership_drift"
+    assert _skill_verdict(verdict, "$v.Merged.Ok") == "False"
+    assert "RECORD does not match" in _skill_verdict(verdict, "$v.Merged.Detail")

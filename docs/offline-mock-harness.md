@@ -16,7 +16,7 @@ python -m pytest tests/test_mock_fabric.py tests/test_mock_tableau.py tests/test
 | [`tests/test_mock_fabric.py`](../tests/test_mock_fabric.py) | 51 fidelity self-tests for the Fabric fake |
 | [`tests/test_mock_tableau.py`](../tests/test_mock_tableau.py) | 21 fidelity self-tests for the Tableau fake |
 | [`tests/test_e2e_offline.py`](../tests/test_e2e_offline.py) | 18 joined end-to-end tests (marked `slow`) |
-| [`tests/mutation_harness.py`](../tests/mutation_harness.py) | 44 deliberate mutations that prove those tests can fail — **22** attack this offline-mock suite (tabled below); the other **22** attack the skill-plugin sync (`skillsync-` / `skillsource-`, issue #410), which shares this harness rather than growing a second scorer |
+| [`tests/mutation_harness.py`](../tests/mutation_harness.py) | 46 deliberate mutations that prove those tests can fail — **22** attack this offline-mock suite (tabled below); the other **24** attack the skill-plugin sync (`skillsync-` / `skillsource-`, issue #410), which shares this harness rather than growing a second scorer |
 
 ---
 
@@ -183,7 +183,7 @@ mutations (`tests/mutation_harness.py` — run it with
 `python tests/mutation_harness.py`). Each patches the real deployer or the mock in a subprocess and
 re-runs the suite. **All 22 were caught; there were no survivors.**
 
-> The harness is **shared**, not offline-mock-specific: it also carries 22 mutations against the
+> The harness is **shared**, not offline-mock-specific: it also carries 24 mutations against the
 > skill-plugin sync (`skillsync-` and `skillsource-`, routed to `tests/test_sync_installed_skills.py`
 > and `tests/test_skill_plugin_source.py`), each restoring one defect issue #410's review reproduced
 > by exit code. They are not tabled here — the tests they attack document them — but they run in the

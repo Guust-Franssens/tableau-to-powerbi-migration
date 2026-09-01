@@ -330,6 +330,17 @@ function Get-SkillBundleVerdict($Sync) {
                               Hint = $Sync.install_hint } }
     }
 
+    if ($Sync.status -eq 'unsafe_marker') {
+        # Round-3 finding 2: the ownership marker's recorded inventory is fed to shutil.rmtree, and
+        # an entry that is not a single filename component escapes the plugin entirely. The sync
+        # refuses (exit 8) having written nothing. This needs its own branch, not the fall-through:
+        # that payload carries no `missing`/`changed`/`bundles`, so the generic rows below would
+        # read GREEN off absent evidence - the "unassessable input lands in the clean bucket" shape.
+        return @{ Mode = 'unsafe_marker'
+                  Plugin = @{ Ok = $false; Detail = "ownership marker REFUSED, nothing was written: $($Sync.detail)"
+                              Hint = 'Every bundle the marker records must be a single directory name inside the plugin''s skills/ folder, because `installed / <name>` is passed to shutil.rmtree. Delete or repair .skill-sync-owner.json in the plugin root, then re-run python scripts\sync_installed_skills.py --check.' } }
+    }
+
     $missing = @($Sync.missing) | Where-Object { $_ }
     $stale = @($Sync.changed) + @($Sync.extra) | Where-Object { $_ }
     $localEdits = @($Sync.local_unmerged) | Where-Object { $_ }
@@ -349,7 +360,7 @@ function Get-SkillBundleVerdict($Sync) {
         # as an "alternative" nobody read. In sync with the WRONG branch is not in sync.
         Merged = @{
             Ok = (($Sync.status -eq 'in_sync') -and ($Sync.default_verified -eq $true))
-            Detail = if ($stale.Count) { "STALE in plugin vs $($Sync.described): $($stale -join ', ')" } elseif ($Sync.default_verified -ne $true) { "UNVERIFIED default branch, so `"$($Sync.described)`" may not be the merged one" } else { "in sync with $($Sync.described)" }
+            Detail = if ($stale.Count) { "STALE in plugin vs $($Sync.described): $($stale -join ', ')" } elseif ($Sync.status -eq 'ownership_drift') { "ownership RECORD does not match $($Sync.described), though no file differs" } elseif ($Sync.default_verified -ne $true) { "UNVERIFIED default branch, so `"$($Sync.described)`" may not be the merged one" } else { "in sync with $($Sync.described)" }
             Hint = 'The plugin copy SHADOWS .github/skills, so agents run bytes that differ from the MERGED repo. FIX IT NOW, mid-session: python scripts/sync_installed_skills.py (the lock behind "os error 5" only blocks renaming the plugin dir - files inside stay writable). Then publish so other machines get it: python scripts/build_plugin.py --out <clone of the marketplace repo>, commit+push. Do not trust a measurement taken against a stale bundle.'
         }
         # Informational, deliberately NOT a failure. Your unmerged skill edits are not what a subagent

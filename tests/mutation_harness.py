@@ -12,6 +12,13 @@ Read ``docs/offline-mock-harness.md`` for the result table and for the two holes
 One trap is guarded explicitly: if the injected plugin fails to import, pytest exits non-zero before
 running a single test and a naive harness scores that as CAUGHT. The first run of this file reported
 22/22 caught for exactly that reason. ``run()`` raises rather than reporting a false green.
+
+⚠️ **Do not run two harness drivers at once.** Every run writes the same two paths --
+``tests/_mutation_plugin.py`` and ``tests/_mutation_outcomes.json`` -- so a second concurrent driver
+deletes the first one's record and its verdict degrades to ``HARNESS-ERROR``. Measured while a
+background sweep was running: a mutation that pytest had genuinely caught (the right assertion
+failed, visible in the terminal) was scored ``HARNESS-ERROR`` because its outcomes file had been
+removed by the other process. Re-running it serially reported ``CAUGHT``.
 """
 
 from __future__ import annotations
@@ -398,6 +405,32 @@ def plan(args, source, workdir, fetch_note):
     built.inventory_stale = bool(built.formerly_owned)
     return built
 sync._plan = plan
+""",
+    "skillsync-preflight-passes-an-unsafe-marker": """
+from pathlib import Path
+import test_sync_installed_skills as suite
+_src = suite.PREFLIGHT.read_text(encoding="utf-8")
+_old = "if ($Sync.status -eq 'unsafe_marker') {"
+assert _old in _src, "mutation anchor missing - refusing to report a FALSE 'CAUGHT'"
+_out = Path(suite.REPO_ROOT) / "_build" / "preflight-mutation-unsafe-marker.ps1"
+_out.parent.mkdir(parents=True, exist_ok=True)
+# Fall through to the generic rows, which read Installed/Plugin GREEN off a payload that
+# carries no inventory at all.
+_out.write_text(_src.replace(_old, "if ($false -and $Sync.status -eq 'unsafe_marker') {"), encoding="utf-8")
+suite.PREFLIGHT = _out
+""",
+    "skillsync-preflight-calls-unreconciled-ownership-in-sync": """
+from pathlib import Path
+import test_sync_installed_skills as suite
+_src = suite.PREFLIGHT.read_text(encoding="utf-8")
+_old = "elseif ($Sync.status -eq 'ownership_drift') { \\"ownership RECORD does not match"
+assert _old in _src, "mutation anchor missing - refusing to report a FALSE 'CAUGHT'"
+_out = Path(suite.REPO_ROOT) / "_build" / "preflight-mutation-ownership-drift.ps1"
+_out.parent.mkdir(parents=True, exist_ok=True)
+_out.write_text(
+    _src.replace(_old, "elseif ($false) { \\"ownership RECORD does not match"), encoding="utf-8"
+)
+suite.PREFLIGHT = _out
 """,
 }
 
