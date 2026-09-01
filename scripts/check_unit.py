@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 import check_desktop_orphans as check_desktop_orphans_module
+import object_identity as oid
 import read_handover
 from bundle_corpus import shipping_models, shipping_reports
 from check_field_bindings import model_for_report
@@ -83,12 +84,33 @@ ENGINE_PLACEHOLDER_PAGE_ID_PREFIX = "page-empty"
 # prefixed strings with no scope/name, so a warning there cannot be attributed to a page.
 DROP_EXPLANATION_SOURCE = "handover viz_fidelity[]"
 
-# The ONLY structured statement that a candidate produced no page. migrate_estate._fidelity_tier
-# defines `empty` as "no faithful visual emitted"; `degraded` is "a rendered visual whose warning is
-# a genuine degradation" and therefore asserts the OPPOSITE. `status: "warned"` spans both and
-# `evidence: "emitted+linted"` appears on 45 empty-tier rows in one estate run, so neither can decide
-# this. Anything that is not this tier leaves the drop UNEXPLAINED.
+# The ONLY structured statement that a candidate produced no page, and it DIAGNOSES the omission -
+# it never approves it. migrate_estate._fidelity_tier defines `empty` as "no faithful visual emitted";
+# `degraded` is "a rendered visual whose warning is a genuine degradation" and therefore asserts the
+# OPPOSITE. `status: "warned"` spans both and `evidence: "emitted+linted"` appears on 45 empty-tier
+# rows in one estate run, so neither can decide this.
 DROP_EVIDENCE_TIER = "empty"
+
+# ...and an empty-tier row can only ever be a WORKSHEET. `_fidelity_tier` returns `empty` iff
+# `visual_type in (None, "unsupported")`, and `_viz_fidelity` gives `visual_type` a real visual type
+# only for rows it built from `ir["worksheets"]`; a DASHBOARD-scope row gets `visual_type:
+# "dashboard"` and is never `empty`. Measured across a 2.339.0 estate run: all 46 empty-tier rows
+# carry `visual_type: "unsupported"`, and no dashboard/filter/workbook-scope row ever does. Requiring
+# BOTH is what stops a worksheet's evidence settling a same-named dashboard's absence.
+DROP_EVIDENCE_VISUAL_TYPE = "unsupported"
+
+# How an omission was accounted for. Only ACCEPTED_SIGNED lets the gate pass: engine evidence explains
+# an omission, a human accepts one.
+OMISSION_SIGNED = "accepted-signed"
+OMISSION_DECLARED = "declared-by-engine-unsigned"
+OMISSION_UNEXPLAINED = "unexplained"
+OMISSION_AMBIGUOUS = "cannot-establish"
+
+# Exemption dispositions. Only APPLIED is an accepted compromise; the other two did nothing and must
+# not be counted as one.
+EXEMPTION_APPLIED = "applied"
+EXEMPTION_STALE = "stale"
+EXEMPTION_AMBIGUOUS = "ambiguous"
 
 # Oracle capture directory names, both of them documented and both real on disk: the tool's own
 # `--out _oracle` convention (AGENTS.md "capture_tableau_oracle.py --out _oracle";
@@ -610,14 +632,17 @@ def _zone_worksheet_ids(zone: Any, found: set[str]) -> None:
             _zone_worksheet_ids(child, found)
 
 
-def _named_spec_pages(items: Any, collection: str) -> tuple[list[dict[str, str]] | None, str | None]:
-    """Normalize a required migration-spec collection to ``{id, name}`` rows, or refuse it.
+def _named_spec_pages(items: Any, collection: str, kind: str) -> tuple[list[dict[str, str]] | None, str | None]:
+    """Normalize a required migration-spec collection to identified page rows, or refuse it.
 
     ``docs/migration-spec.schema.json`` requires ``dashboards`` and ``worksheets`` as ARRAYS whose
     entries each carry ``id`` and ``name``. A malformed shape is refused rather than skipped: quietly
     narrowing a required collection produces a SMALLER expected set that the rest of the gate then
     trusts, which is the circular-denominator defect one layer earlier (a spec whose ``worksheets``
     was an object graded PASS with ``grade=validation-grade``).
+
+    Each row carries its KIND, because a dashboard and a worksheet can share a name and evidence for
+    one must never settle the other.
     """
     if not isinstance(items, list):
         return None, (
@@ -629,9 +654,10 @@ def _named_spec_pages(items: Any, collection: str) -> tuple[list[dict[str, str]]
         if not isinstance(item, dict):
             return None, f"migration-spec.json '{collection}' entry #{index} is not an object"
         name = item.get("name") or item.get("title") or item.get("id")
-        if not isinstance(name, str) or not name.strip():
+        identity = oid.ObjectIdentity.from_engine(kind, name if isinstance(name, str) else None)
+        if identity is None:
             return None, f"migration-spec.json '{collection}' entry #{index} has no usable name"
-        pages.append({"id": str(item.get("id") or name), "name": name.strip()})
+        pages.append({"id": str(item.get("id") or identity.name), "name": identity.name, "kind": kind})
     return pages, None
 
 
@@ -681,8 +707,8 @@ def _spec_pages(target: Path) -> tuple[list[dict[str, str]] | None, str | None]:
     payload, error = _spec_payload(target)
     if payload is None:
         return None, error
-    dashboards, error = _named_spec_pages(payload["dashboards"], "dashboards")
-    worksheets, worksheet_error = _named_spec_pages(payload["worksheets"], "worksheets")
+    dashboards, error = _named_spec_pages(payload["dashboards"], "dashboards", oid.KIND_DASHBOARD)
+    worksheets, worksheet_error = _named_spec_pages(payload["worksheets"], "worksheets", oid.KIND_WORKSHEET)
     error = error or worksheet_error
     if error is not None:
         return None, error
@@ -736,35 +762,37 @@ def _unit_workbook_keys(target: Path) -> set[str]:
 
 
 def page_drop_explanations(target: Path) -> dict[str, Any]:
-    """Engine statements that a candidate produced NO page, bound to this unit's own workbook.
+    """Engine statements that a specific object of a specific KIND produced no page.
 
-    Two independent guards, because a page-drop excuse is exactly the kind of evidence that must not
-    be borrowed:
+    Three independent guards, because a page-drop excuse is exactly the kind of evidence that gets
+    borrowed. Each closed a measured fail-open on this PR:
 
-    **Workbook identity.** A handover slice only explains pages for a workbook whose artifacts this
-    unit actually ships (see :func:`_unit_workbook_keys`). Without this, a `viz_fidelity` row from
-    ``"Different Workbook"`` excused a page missing from *this* one - the same "one object's excuse
-    covers another" defect this repo has now found three times.
+    **Workbook identity.** A handover slice explains pages only for a workbook whose artifacts this
+    unit ships (:func:`_unit_workbook_keys`). Without it, a row from ``"Different Workbook"`` excused
+    a page missing from *this* one.
 
-    **Structured non-emission evidence, never ``status`` and never reason text.** Only
-    ``tier == "empty"`` counts. ``migrate_estate._fidelity_tier`` defines that tier as *"no faithful
-    visual emitted"*, whereas ``degraded`` is *"a rendered visual whose warning is a genuine
-    degradation"* - it asserts the OPPOSITE of non-emission, yet a realistic
-    ``tier: "degraded", evidence: "emitted+linted"`` row used to excuse a missing page. ``status:
-    "warned"`` covers both, so it cannot decide this; ``evidence: "emitted+linted"`` appears on 45
-    ``empty``-tier rows in the same estate run, so it cannot either.
+    **Object identity, kind included.** Evidence is indexed as an :class:`object_identity
+    .ObjectIdentity`, so a WORKSHEET row can never settle a same-named DASHBOARD candidate - measured:
+    a workbook with dashboard ``Sales`` and worksheet ``Sales`` had the worksheet's row excuse the
+    dashboard's absence. The index is built ``normalized=False``: this is an engine-to-engine join,
+    so there is deliberately no lossy key table for it to fall back into.
 
-    Anything that is not ``tier == "empty"`` is recorded as AMBIGUOUS and leaves the drop
-    unexplained. Measured cost of that strictness on the real estate: 21 of 23 absent candidates are
-    still explained; the 2 that are not are engine sites :14529 (dashboard-scope) and :14562, whose
-    rows carry ``tier: "degraded"`` because the engine's tier vocabulary describes VISUAL fidelity
-    and has no way to say "this candidate produced no PAGE"
-    (upstream Yarbrdab000/tableau-fabric-skills#188).
+    **Structured non-emission evidence: ``tier == "empty"`` AND ``visual_type == "unsupported"``.**
+    ``migrate_estate._fidelity_tier`` returns ``empty`` only for ``visual_type in (None,
+    "unsupported")``, and ``_viz_fidelity`` gives a real visual type only to rows built from
+    ``ir["worksheets"]`` - a dashboard-scope row carries ``visual_type: "dashboard"`` and is never
+    ``empty``. Measured on a 2.339.0 estate run: all 46 empty-tier rows carry ``unsupported`` and no
+    dashboard/filter/workbook-scope row ever does. So an empty-tier row identifies a WORKSHEET, and
+    requiring both fields is what stops a forged or mis-scoped row claiming otherwise. Neither
+    ``status: "warned"`` (it spans both outcomes) nor ``evidence: "emitted+linted"`` (present on all
+    45 of those empty rows) nor reason text may decide this.
+
+    ⚠️ This function DIAGNOSES an omission. It never approves one - see :func:`check_page_parity`.
     """
     keys = _unit_workbook_keys(target)
     workbooks, _unreadable = _handover_workbooks(target)
-    reasons: dict[str, list[str]] = {}
-    ambiguous: dict[str, list[str]] = {}
+    index: oid.IdentityIndex[str] = oid.IdentityIndex(normalized=False)
+    described: dict[str, list[str]] = {}
     bound: list[str] = []
     unbound: list[str] = []
     for _source, slice_name, workbook in workbooks:
@@ -773,10 +801,10 @@ def page_drop_explanations(target: Path) -> dict[str, Any]:
             unbound.append(str(name))
             continue
         bound.append(str(name))
-        _collect_drop_rows(workbook.get("viz_fidelity"), reasons, ambiguous)
+        _collect_drop_rows(workbook.get("viz_fidelity"), index, described)
     return {
-        "reasons": reasons,
-        "ambiguous": ambiguous,
+        "index": index,
+        "described": described,
         "bound_workbooks": sorted(set(bound)),
         "unbound_workbooks": sorted(set(unbound)),
         "available": bool(bound),
@@ -784,47 +812,81 @@ def page_drop_explanations(target: Path) -> dict[str, Any]:
     }
 
 
-def _collect_drop_rows(rows: Any, reasons: dict[str, list[str]], ambiguous: dict[str, list[str]]) -> None:
-    """Split one workbook's ``viz_fidelity`` rows into non-emission proof and ambiguity."""
+def _collect_drop_rows(rows: Any, index: oid.IdentityIndex[str], described: dict[str, list[str]]) -> None:
+    """Index one workbook's proof-of-non-emission rows; record every other row for reporting only."""
     for row in rows if isinstance(rows, list) else []:
         if not isinstance(row, dict):
             continue
         name = row.get("worksheet")
         if not isinstance(name, str) or not name.strip():
             continue
-        tier = row.get("tier")
         reason = row.get("reason")
         text = reason.strip() if isinstance(reason, str) and reason.strip() else "(no reason recorded)"
-        if tier == DROP_EVIDENCE_TIER:
-            reasons.setdefault(_slug(name), []).append(text)
-        else:
-            ambiguous.setdefault(_slug(name), []).append(f"tier={tier!r}: {text}")
+        identity = _drop_evidence_identity(row)
+        if identity is None:
+            described.setdefault(_slug(name), []).append(f"tier={row.get('tier')!r}, type={row.get('visual_type')!r}")
+            continue
+        index.add_identity(identity, text)
+
+
+def _drop_evidence_identity(row: dict[str, Any]) -> oid.ObjectIdentity | None:
+    """The object a row PROVES produced no page, or None when it proves nothing.
+
+    Built only through ``ObjectIdentity.from_engine``, never the dataclass constructor, so a row can
+    never inject a kind the type refuses.
+    """
+    if row.get("tier") != DROP_EVIDENCE_TIER or row.get("visual_type") != DROP_EVIDENCE_VISUAL_TYPE:
+        return None
+    name = row.get("worksheet")
+    return oid.ObjectIdentity.from_engine(oid.KIND_WORKSHEET, name if isinstance(name, str) else None)
+
+
+def _candidate_identity(page: dict[str, str]) -> oid.ObjectIdentity | None:
+    """A candidate page's identity, again only via ``from_engine``."""
+    return oid.ObjectIdentity.from_engine(str(page.get("kind") or ""), page.get("name"))
+
+
+def _declared_omission(page: dict[str, str], explanations: dict[str, Any]) -> str | None:
+    """The engine's proof that this exact object produced no page, or None.
+
+    Reads the resolution through ``.value()`` inside ``try``: the outcome check and the raise are
+    two independent refusals of a non-unique match, and neither reads the object's truthiness -
+    ``Resolution`` has no ``__bool__``, so ``if resolution:`` would be True for ABSENT as well.
+    """
+    identity = _candidate_identity(page)
+    if identity is None:
+        return None
+    resolution = explanations["index"].resolve(identity)
+    if resolution.outcome != oid.UNIQUE:
+        return None
+    try:
+        return resolution.value()
+    except oid.AmbiguousIdentity:
+        return None
 
 
 def page_expectation(target: Path) -> dict[str, Any]:
-    """The page buckets both page checks need, computed once.
+    """Every expected page, classified as SATISFIED or as an OMISSION with a disposition.
 
-    ``candidates`` = dashboards + orphan worksheets. A candidate counts as EMITTED only when it
-    matches a page that actually carries at least one visual: a zero-visual page renders nothing, so
-    renaming the engine's empty crash-guard page to an expected page's title must not certify that
-    page as rebuilt (it did, with ``grade=validation-grade``).
+    ``candidates`` = dashboards + orphan worksheets, each carrying its KIND. A candidate is satisfied
+    only by a rendered page - one carrying at least one visual - bearing its exact name; a zero-visual
+    page renders nothing, so renaming the engine's empty crash-guard page to an expected title must
+    not certify that page as rebuilt (it did, at ``grade=validation-grade``).
 
-    ``explained_drops`` = absent candidates the bound handover proves produced no page
-    (:func:`page_drop_explanations`); ``unexplained_drops`` = every other absent candidate, each
-    annotated with WHY it could not be explained.
+    ``attribution_ambiguous`` is the rename guard. A rendered page matching no candidate might BE a
+    renamed candidate, so while any such page is unaccounted for, no absent candidate can be said to
+    be genuinely absent - and a name-only exemption must not be applied. Declaring the page with an
+    ``extra:<name>`` exemption resolves the ambiguity explicitly, which is the "rename map" the
+    review asked for.
 
     ``assessable`` is False when the expected set cannot be established at all. It never degrades
     into the emitted pages: grading an artifact against itself reports a perfect score regardless of
-    what is missing, which is the fail-open shape this repo keeps re-shipping.
-
-    ⚠️ Drop attribution is matched BY NAME, so a PBIR page renamed during hand-finishing (measured:
-    5 of 16 committed example units rename at least one page) shows up as an unexplained drop even
-    though its page exists. Callers therefore use these lists for ATTRIBUTION and keep the pass/fail
-    verdict on the rename-robust count.
+    what is missing.
     """
     actual = actual_pages(target)
     rendered = [page for page in actual if page.get("visuals", 0) > 0]
     candidates, refusal = _spec_pages(target)
+    explanations = page_drop_explanations(target)
     if candidates is None:
         return {
             "assessable": False,
@@ -832,40 +894,36 @@ def page_expectation(target: Path) -> dict[str, Any]:
             "candidates": None,
             "actual": actual,
             "rendered": rendered,
-            "explained_drops": [],
-            "unexplained_drops": [],
-            "drop_reasons": {},
-            "explanations": page_drop_explanations(target),
+            "omissions": [],
+            "unmatched_rendered": [],
+            "attribution_ambiguous": False,
+            "explanations": explanations,
         }
-    explanations = page_drop_explanations(target)
-    reasons = explanations["reasons"]
-    rendered_slugs = {_slug(page["name"]) for page in rendered}
-    absent = [page for page in candidates if _slug(page["name"]) not in rendered_slugs]
-    explained = [page for page in absent if _slug(page["name"]) in reasons]
+    rendered_names = [page["name"] for page in rendered]
+    candidate_names = {page["name"] for page in candidates}
+    absent = [page for page in candidates if rendered_names.count(page["name"]) != 1]
+    unmatched = [page for page in rendered if page["name"] not in candidate_names]
     return {
         "assessable": True,
         "reason": None,
         "candidates": candidates,
         "actual": actual,
         "rendered": rendered,
-        "explained_drops": explained,
-        "unexplained_drops": [
-            {**page, "why_unexplained": _why_unexplained(page, explanations)}
-            for page in absent
-            if _slug(page["name"]) not in reasons
-        ],
-        "drop_reasons": {page["name"]: reasons[_slug(page["name"])] for page in explained},
+        "omissions": [{**page, "declared_reason": _declared_omission(page, explanations)} for page in absent],
+        "unmatched_rendered": unmatched,
+        "attribution_ambiguous": bool(unmatched),
         "explanations": explanations,
     }
 
 
-def _why_unexplained(page: dict[str, str], explanations: dict[str, Any]) -> str:
+def _why_unexplained(page: dict[str, Any], explanations: dict[str, Any]) -> str:
     """Name the specific gap, so an operator knows whether to fetch evidence or sign an exemption."""
-    ambiguous = explanations["ambiguous"].get(_slug(page["name"]))
-    if ambiguous:
+    described = explanations["described"].get(_slug(page["name"]))
+    if described:
         return (
-            f"the bound handover describes this page but does not assert non-emission "
-            f"(needs tier={DROP_EVIDENCE_TIER!r}; got {'; '.join(ambiguous[:2])})"
+            f"the bound handover mentions this name but proves nothing about a {page.get('kind')} "
+            f"(needs tier={DROP_EVIDENCE_TIER!r} + visual_type={DROP_EVIDENCE_VISUAL_TYPE!r}; "
+            f"got {'; '.join(described[:2])})"
         )
     if not explanations["available"]:
         if explanations["unbound_workbooks"]:
@@ -1095,21 +1153,23 @@ def check_scaffold_partitions(target: Path, exemptions: dict[str, Any]) -> dict[
 
 
 def check_page_parity(target: Path, exemptions: dict[str, Any]) -> dict[str, Any]:
-    """Page-count parity precondition: expected Tableau pages vs emitted PBIR pages.
+    """Page precondition: every expected Tableau page is either rebuilt or SIGNED OFF as omitted.
 
-    "Expected" is the CANDIDATE set (dashboards + orphan worksheets, see :func:`expected_pages`)
-    minus the candidates a bound handover PROVES produced no page (see
-    :func:`page_drop_explanations`). Only a shortfall that nothing accounts for fails.
+    The rule this gate got wrong twice, stated plainly: **evidence of an absence is not acceptance of
+    an absence.** ``tier: "empty"`` proves the ENGINE emitted no faithful visual for an object; it
+    says nothing about whether a human accepted shipping without that page. So an engine-declared
+    omission is reported with its proof and still fails the gate until an
+    ``unit-check-exemptions.json`` entry names it. Only that signature makes it an accepted
+    compromise; measured before this, a unit missing a page returned PASS from parity AND
+    validation-grade oracle coverage with ``compromises=0``.
 
-    "Emitted" counts only pages that carry at least one visual. A zero-visual page renders nothing,
-    so it is not evidence that anything was rebuilt; the engine's crash-guard placeholder is the one
-    zero-visual page that is EXPECTED, and every other one is reported as a blank page.
+    "Rebuilt" means a rendered page - one carrying at least one visual - bearing the candidate's
+    exact name. Zero-visual pages are split: the engine's crash-guard placeholder is expected; any
+    other is reported as a blank page and fails.
 
-    The verdict stays on the COUNT rather than on name matching, deliberately: renaming a PBIR page
-    during hand-finishing is legitimate and common (measured: 5 of 16 committed example units do
-    it), and a name-matched verdict would fail every one of them. ``dropped_unexplained`` is the
-    best-effort *attribution* of a shortfall and is rename-sensitive; when it is non-empty while the
-    count balances, a page was renamed rather than lost.
+    Exemptions are dispositioned rather than applied blindly. One naming a page that is present is
+    ``stale``; one naming an omission while a rendered page is unaccounted for - so the "omission"
+    may be a rename - is ``ambiguous`` and is NOT applied. Only ``applied`` counts as a compromise.
     """
     expectation = page_expectation(target)
     actual = expectation["actual"]
@@ -1121,59 +1181,102 @@ def check_page_parity(target: Path, exemptions: dict[str, Any]) -> dict[str, Any
             "expected_pages": None,
             "actual_pages": actual,
             "exemptions": [],
+            "applied_exemptions": [],
+            "unapplied_exemptions": [],
         }
-    expected = expectation["candidates"]
-    dropped, stale = _page_exemptions(expected, expectation["rendered"], exemptions["entries"])
-    explained = [page for page in expectation["explained_drops"] if page not in dropped]
-    effective_expected = [page for page in expected if page not in dropped and page not in explained]
+    entries = exemptions["entries"]
     placeholders, blank = _zero_visual_pages(actual, expectation["rendered"])
-    unexempted_missing, unexempted_extra, exempted_extra = _parity_deltas(
-        effective_expected, expectation["rendered"], exemptions["entries"]
-    )
-    status = (
-        STATUS_PASS if not unexempted_missing and not unexempted_extra and not blank else STATUS_PRECONDITION_FAILED
-    )
+    unaccounted_extra = [
+        page
+        for page in expectation["unmatched_rendered"]
+        if not _exempted(entries, "page-parity", f"extra:{page['name']}")
+    ]
+    omissions = _disposition_omissions(expectation, entries, bool(unaccounted_extra))
+    applied = [row for row in omissions if row["disposition"] == OMISSION_SIGNED]
+    unsigned = [row for row in omissions if row["disposition"] != OMISSION_SIGNED]
+    unapplied = _unapplied_exemptions(expectation, entries, bool(unaccounted_extra))
+    status = STATUS_PASS if not unsigned and not unaccounted_extra and not blank else STATUS_PRECONDITION_FAILED
     return {
         "id": "page-parity",
         "status": status,
-        "detail": _page_parity_detail(status, unexempted_missing, unexempted_extra, blank, expectation),
-        "expected_count": len(expected),
-        "effective_expected_count": len(effective_expected),
-        "actual_count": len(actual),
+        "detail": _page_parity_detail(status, unsigned, unaccounted_extra, blank, expectation),
+        "expected_count": len(expectation["candidates"]),
         "emitted_count": len(expectation["rendered"]),
-        "expected_pages": expected,
+        "actual_count": len(actual),
+        "expected_pages": expectation["candidates"],
         "actual_pages": actual,
+        "omissions": omissions,
+        "unsigned_omissions": unsigned,
         "blank_pages": blank,
         "engine_placeholder_pages": placeholders,
-        "exemptions": dropped + exempted_extra,
-        "stale_exemptions": stale,
-        "unexempted_missing": unexempted_missing,
-        "unexempted_extra": unexempted_extra,
-        "dropped_explained": [
-            {**page, "evidence_tier": DROP_EVIDENCE_TIER, "reasons": expectation["drop_reasons"][page["name"]]}
-            for page in explained
-        ],
-        "dropped_unexplained": [page for page in expectation["unexplained_drops"] if page not in dropped],
-        "drop_explanations": expectation["explanations"],
+        "unaccounted_extra_pages": unaccounted_extra,
+        "attribution_ambiguous": bool(unaccounted_extra),
+        "exemptions": applied,
+        "applied_exemptions": applied,
+        "unapplied_exemptions": unapplied,
+        "drop_explanations": {key: value for key, value in expectation["explanations"].items() if key not in {"index"}},
     }
 
 
-def _page_exemptions(
-    expected: list[dict[str, str]], rendered: list[dict[str, Any]], entries: list[dict[str, str]]
-) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-    """``(applicable, stale)`` page-parity exemptions.
+def _disposition_omissions(
+    expectation: dict[str, Any], entries: list[dict[str, str]], ambiguous: bool
+) -> list[dict[str, Any]]:
+    """Classify every omission. Only a signature that can be attributed accepts one."""
+    rows = []
+    for page in expectation["omissions"]:
+        signed = _exempted(entries, "page-parity", page["name"], {page["id"]})
+        if signed and not ambiguous:
+            disposition = OMISSION_SIGNED
+        elif ambiguous:
+            disposition = OMISSION_AMBIGUOUS
+        elif page["declared_reason"]:
+            disposition = OMISSION_DECLARED
+        else:
+            disposition = OMISSION_UNEXPLAINED
+        rows.append({**page, "disposition": disposition, "why": _omission_why(page, disposition, expectation)})
+    return rows
 
-    An exemption only excuses a page that is genuinely ABSENT. Applying it unconditionally shrank the
-    expected COUNT, so signing "C was merged away" while C is still present silently absorbed the
-    absence of some other page - a borrowed excuse at the exemption layer, invisible in every field
-    the gate reported. A stale exemption is now surfaced instead of being load-bearing.
+
+def _omission_why(page: dict[str, Any], disposition: str, expectation: dict[str, Any]) -> str:
+    """One actionable sentence per omission - what it is, and what would resolve it."""
+    if disposition == OMISSION_SIGNED:
+        return "accepted by a signed page-parity exemption"
+    if disposition == OMISSION_AMBIGUOUS:
+        names = ", ".join(page["name"] for page in expectation["unmatched_rendered"][:3])
+        return (
+            "cannot establish whether this page was dropped or renamed while emitted page(s) "
+            f"{names} match no expected page; sign 'extra:<page>' to account for them first"
+        )
+    if disposition == OMISSION_DECLARED:
+        return (
+            f"the engine declared it produced no visual ({page['declared_reason']}) - that explains "
+            "the omission but does not accept it; rebuild the page or sign a page-parity exemption"
+        )
+    return _why_unexplained(page, expectation["explanations"])
+
+
+def _unapplied_exemptions(
+    expectation: dict[str, Any], entries: list[dict[str, str]], ambiguous: bool
+) -> list[dict[str, Any]]:
+    """Page-parity signatures that accepted NOTHING, each carrying why.
+
+    A signature naming a page that is present accepted nothing (``stale``); one that could not be
+    attributed accepted nothing either (``ambiguous``). Neither may count as a compromise, and both
+    are reported so a reader can see the file promised more than it delivered.
     """
-    rendered_slugs = {_slug(page["name"]) for page in rendered}
-    signed = [page for page in expected if _exempted(entries, "page-parity", page["name"], {page["id"]})]
-    return (
-        [page for page in signed if _slug(page["name"]) not in rendered_slugs],
-        [page for page in signed if _slug(page["name"]) in rendered_slugs],
-    )
+    omitted = {page["name"] for page in expectation["omissions"]}
+    rows = [
+        {**page, "disposition": EXEMPTION_STALE}
+        for page in expectation["candidates"]
+        if page["name"] not in omitted and _exempted(entries, "page-parity", page["name"], {page["id"]})
+    ]
+    if ambiguous:
+        rows += [
+            {**page, "disposition": EXEMPTION_AMBIGUOUS}
+            for page in expectation["omissions"]
+            if _exempted(entries, "page-parity", page["name"], {page["id"]})
+        ]
+    return rows
 
 
 def _zero_visual_pages(
@@ -1184,75 +1287,51 @@ def _zero_visual_pages(
     A zero-visual page is never evidence that a candidate was rebuilt. Exactly one such page is
     EXPECTED - the crash-guard placeholder - and every other one is a page that ships and renders
     nothing, which is a finding in its own right.
+
+    Only zero-visual pages are asked about at all: a page carrying visuals is a rebuilt page by the
+    ``rendered`` split and can never be a placeholder. Enforcing that HERE rather than as a third
+    clause inside :func:`_is_engine_placeholder_page` keeps every clause observable - as a predicate
+    clause it changed no verdict, because a page with visuals is neither blank nor an extra.
     """
-    placeholders = [page for page in actual if _is_engine_placeholder_page(page)]
-    return placeholders, [page for page in actual if page not in emitted and page not in placeholders]
+    blankish = [page for page in actual if page not in emitted]
+    placeholders = [page for page in blankish if _is_engine_placeholder_page(page)]
+    return placeholders, [page for page in blankish if page not in placeholders]
 
 
 def _is_engine_placeholder_page(page: dict[str, Any]) -> bool:
-    """Whether a page is the engine's zero-page crash-guard placeholder.
+    """Whether a zero-visual page is the engine's crash-guard placeholder rather than a blank page.
 
-    All three clauses are load-bearing and each has its own reproduction:
-
-    * ``visuals == 0`` - the placeholder is emitted with NO visuals by design (twb_to_pbir.py:14721
-      passes an empty visual list). Without it, an empty ``page-empty*`` page renamed to an expected
-      page's title certified that page as rebuilt, ``grade=validation-grade``.
-    * the display name and the id prefix - both engine constants (:13091, :14720). Either alone lets
-      a hand-authored page be swallowed: a real page can be titled "No visuals rebuilt", and a report
-      can carry a ``page-empty*`` id whose author later gave it a different title.
+    Both engine constants are required (:13091, :14720) and each has its own reproduction: a real
+    page can be titled "No visuals rebuilt", and a report can carry a ``page-empty*`` id whose author
+    later gave it a different title. Either alone hides a page that ships and renders nothing.
     """
-    return (
-        page.get("visuals", 0) == 0
-        and page.get("name") == ENGINE_PLACEHOLDER_PAGE_NAME
-        and str(page.get("id", "")).startswith(ENGINE_PLACEHOLDER_PAGE_ID_PREFIX)
+    return page.get("name") == ENGINE_PLACEHOLDER_PAGE_NAME and str(page.get("id", "")).startswith(
+        ENGINE_PLACEHOLDER_PAGE_ID_PREFIX
     )
-
-
-def _parity_deltas(
-    effective_expected: list[dict[str, str]], rendered: list[dict[str, Any]], entries: list[dict[str, str]]
-) -> tuple[list[dict[str, str]], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Which pages are missing/extra, decided by COUNT and attributed by NAME.
-
-    The count decides IF something is wrong - renaming a PBIR page is legitimate, so a name-matched
-    verdict would fail every hand-finished unit. Names decide WHICH pages are reported, and therefore
-    which signed exemptions apply.
-
-    That second half used to be a positional tail slice (``effective_expected[-missing_count:]``),
-    which is the same borrowed-excuse defect one layer along: with candidates ``[A, B, C]`` and only
-    ``A`` genuinely absent, the slice named ``C``, so an exemption signed for ``C`` excused the
-    absence of ``A`` and an exemption signed for ``A`` did nothing. Nothing anywhere said so.
-    """
-    rendered_slugs = {_slug(page["name"]) for page in rendered}
-    expected_slugs = {_slug(page["name"]) for page in effective_expected}
-    shortfall = max(0, len(effective_expected) - len(rendered))
-    surplus = max(0, len(rendered) - len(effective_expected))
-    missing = [page for page in effective_expected if _slug(page["name"]) not in rendered_slugs] if shortfall else []
-    unmatched = [page for page in rendered if _slug(page["name"]) not in expected_slugs] if surplus else []
-    exempted_extra = [page for page in unmatched if _exempted(entries, "page-parity", f"extra:{page['name']}")]
-    unexempted_missing = [page for page in missing if not _exempted(entries, "page-parity", page["name"], {page["id"]})]
-    return unexempted_missing, [page for page in unmatched if page not in exempted_extra], exempted_extra
 
 
 def _page_parity_detail(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     status: str,
-    unexempted_missing: list[dict[str, str]],
-    unexempted_extra: list[dict[str, Any]],
+    unsigned: list[dict[str, Any]],
+    unaccounted_extra: list[dict[str, Any]],
     blank: list[dict[str, Any]],
     expectation: dict[str, Any],
 ) -> str | None:
-    """Name what failed and, for a missing page, exactly why nothing accounted for it."""
+    """Name what failed, and for each omission exactly what would resolve it."""
     if status == STATUS_PASS:
         return None
     parts = []
-    if unexempted_missing:
-        parts.append(f"{len(unexempted_missing)} expected page(s) not emitted and not accounted for")
-    if unexempted_extra:
-        parts.append(f"{len(unexempted_extra)} emitted page(s) with no Tableau counterpart")
+    if unsigned:
+        parts.append(f"{len(unsigned)} expected page(s) omitted without a signed exemption")
+    if unaccounted_extra:
+        names = ", ".join(page["name"] for page in unaccounted_extra[:3])
+        parts.append(f"{len(unaccounted_extra)} emitted page(s) match no expected page: {names}")
     if blank:
         names = ", ".join(page["name"] for page in blank[:3])
         parts.append(f"{len(blank)} page(s) carry no visuals and so render nothing: {names}")
-    for page in expectation["unexplained_drops"][:3]:
-        parts.append(f"{page['name']!r} unexplained - {page['why_unexplained']}")
+    for page in unsigned[:3]:
+        parts.append(f"{page['kind']} {page['name']!r} [{page['disposition']}] - {page['why']}")
+    _ = expectation
     return "; ".join(parts) or None
 
 
@@ -1380,21 +1459,23 @@ def check_oracle_coverage(target: Path, reference_dir: Path | None, oracle_dir: 
     There is no fallback now: an expected set that cannot be established is a blocking
     ``NOT_CHECKED``, never a PASS.
 
-    Candidates the engine dropped for a DECLARED reason are excluded from the denominator: they have
-    no emitted page to validate, so demanding an oracle for them would be a permanently unfixable
-    row. They stay visible in ``excluded_explained_drops``, and page-parity owns the drop itself.
+    Only a page whose omission a HUMAN accepted is removed from the denominator. An engine-declared
+    omission is not: ``tier: "empty"`` reports what the engine did, and letting it shrink this
+    denominator too meant a unit missing a page reported validation-grade coverage of everything it
+    still had. A signed page-parity exemption is the only thing that takes a page out.
     """
     expectation = page_expectation(target)
     reference, reference_grades = _reference_oracles(target, reference_dir)
     oracle, oracle_grades = _oracle_capture_oracles(target, oracle_dir)
     if not expectation["assessable"]:
         return _oracle_not_assessable(f"cannot assess oracle coverage: {expectation['reason']}")
-    explained = {_slug(page["name"]) for page in expectation["explained_drops"]}
-    pages = [page for page in expectation["candidates"] if _slug(page["name"]) not in explained]
+    accepted = _signed_omissions(expectation, load_exemptions(target)["entries"])
+    accepted_names = {page["name"] for page in accepted}
+    pages = [page for page in expectation["candidates"] if page["name"] not in accepted_names]
     if not pages:
         return _oracle_not_assessable(
-            "cannot assess oracle coverage: every expected Tableau page was dropped by the engine, "
-            "so there is no page left to hold against a reference"
+            "cannot assess oracle coverage: every expected Tableau page is a signed omission, so "
+            "there is no page left to hold against a reference"
         )
     combined = _merge_oracle_maps(reference, oracle)
     rows = [{"page": page, **combined.get(_slug(page["name"]), {"visual": False, "numeric": False})} for page in pages]
@@ -1408,10 +1489,22 @@ def check_oracle_coverage(target: Path, reference_dir: Path | None, oracle_dir: 
         "numeric_present": len(rows) - len(numeric_missing),
         "visual_missing": visual_missing,
         "numeric_missing": numeric_missing,
-        "excluded_explained_drops": expectation["explained_drops"],
+        "excluded_signed_omissions": accepted,
         "grade": ", ".join(sorted(reference_grades | oracle_grades)) or "not checked (no oracle manifest found)",
         "rows": rows,
     }
+
+
+def _signed_omissions(expectation: dict[str, Any], entries: list[dict[str, str]]) -> list[dict[str, Any]]:
+    """Omissions a human accepted, and only those.
+
+    An engine-declared omission is deliberately NOT here: ``tier: "empty"`` reports what the engine
+    did, not what anyone agreed to ship. An ambiguous attribution is not here either - while a
+    rendered page is unaccounted for, a signature cannot be tied to the page it names.
+    """
+    if expectation["attribution_ambiguous"]:
+        return []
+    return [page for page in expectation["omissions"] if _exempted(entries, "page-parity", page["name"], {page["id"]})]
 
 
 def _oracle_not_assessable(detail: str) -> dict[str, Any]:
@@ -1425,7 +1518,7 @@ def _oracle_not_assessable(detail: str) -> dict[str, Any]:
         "numeric_present": 0,
         "visual_missing": [],
         "numeric_missing": [],
-        "excluded_explained_drops": [],
+        "excluded_signed_omissions": [],
         "grade": "not checked (expected page set could not be established)",
         "rows": [],
     }
@@ -2160,9 +2253,17 @@ def _compromise_not_evaluated_count(report: dict[str, Any]) -> int:
 
 
 def _compromise_count(report: dict[str, Any]) -> int:
-    """Human-accepted deviations that should stay visible even when they do not fail the run."""
+    """Human-accepted deviations that should stay visible even when they do not fail the run.
+
+    A signature that accepted NOTHING is not a compromise. Page-parity dispositions its exemptions
+    (``stale`` names a page that is present, ``ambiguous`` cannot be attributed while a rendered page
+    is unaccounted for), and neither is applied - so both are subtracted here. Measured before this:
+    a stale exemption was correctly not applied and the CLI still printed ``compromises=1``.
+    """
     declared = sum(_declared_downgrade_count(check) for check in report["checks"])
-    return int(report.get("exemptions", {}).get("accepted", 0)) + declared
+    unapplied = sum(len(check.get("unapplied_exemptions") or []) for check in report["checks"])
+    accepted = int(report.get("exemptions", {}).get("accepted", 0))
+    return max(0, accepted - unapplied) + declared
 
 
 def _blocking_count(report: dict[str, Any]) -> int:
@@ -2269,11 +2370,15 @@ def _render_check_headline(check: dict[str, Any]) -> list[str]:  # pylint: disab
         ]
     if check_id == "page-parity" and "expected_count" in check:
         lines = [
-            f"  page-count parity: {check['actual_count']} PBIR page(s) for "
-            f"{check['effective_expected_count']} expected Tableau dashboard(s)  [{status}]"
+            f"  page pairing:      {check['emitted_count']} rebuilt PBIR page(s) for "
+            f"{check['expected_count']} expected Tableau page(s)  [{status}]"
         ]
-        if check.get("exemptions"):
-            lines.append(f"                    exemptions accepted: {len(check['exemptions'])}")
+        for row in check.get("unsigned_omissions", [])[:5]:
+            lines.append(f"                    OMITTED {row['kind']} {row['name']!r} [{row['disposition']}]")
+        if check.get("applied_exemptions"):
+            lines.append(f"                    signed omissions accepted: {len(check['applied_exemptions'])}")
+        for row in check.get("unapplied_exemptions", [])[:3]:
+            lines.append(f"                    exemption for {row['name']!r} accepted nothing [{row['disposition']}]")
         return lines
     native = f"native {check.get('native_status')} exit {check.get('native_exit')}"
     if check_id == "stub-measures" and "stub_exemptions" in check:
