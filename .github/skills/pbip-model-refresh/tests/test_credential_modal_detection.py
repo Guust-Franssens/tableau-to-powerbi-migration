@@ -4394,6 +4394,11 @@ def test_a_window_record_the_decider_cannot_trust_is_never_a_clean_verdict(tmp_p
     )
     malformed = [
         ({"TotallyUnknown": "nope"}, "unknown field"),
+        # ⚠️ Separate from the row above, and the mutation harness is why. `{"TotallyUnknown": ...}`
+        # alone is ALSO missing every required field, so it is rejected by the `missing` check and the
+        # unknown-field rule was never exercised - measured, a mutation neutering `unknown` SURVIVED.
+        # An otherwise-complete record plus one stray field is the only shape that isolates it.
+        ({**progress, "SomethingNew": 1}, "an unknown field on an otherwise complete record"),
         ({**progress, "Texts": {"Refresh": 1, "1,204 rows loaded": 2}}, "Texts as an object"),
         ({"Title": "Refresh", "Texts": ["Refresh"]}, "missing geometry and ownership"),
         ({**progress, "Width": True}, "a Boolean where a width belongs"),

@@ -77,13 +77,13 @@ MUTATIONS: dict[str, tuple[Path, str, str, str, str]] = {
     # --- #417 review finding 2: a caption substring must not convict ------------------------------
     "the-join-reads-the-caption-too": (
         DETECTOR,
-        "    body = tuple(text for text in content if text not in interactive)\n"
+        "    body = tuple(text for text in content if canonical_text(text) not in interactive)\n"
         "    if len(body) > 1:\n"
-        "        prose = tuple(text for text in all_texts if text not in interactive)\n"
+        "        prose = tuple(text for text in all_texts if canonical_text(text) not in interactive)\n"
         '        pairs.append((" ".join(body), " ".join(prose)))',
-        "    body = tuple(text for text in content if text not in interactive)\n"
+        "    body = tuple(text for text in content if canonical_text(text) not in interactive)\n"
         "    if len(body) > 1:\n"
-        "        prose = tuple(text for text in all_texts if text not in interactive)\n"
+        "        prose = tuple(text for text in all_texts if canonical_text(text) not in interactive)\n"
         '        pairs.append((" ".join(prose), " ".join(prose)))',
         # ⚠️ NOT `test_a_harmless_caption_substring_does_not_fabricate_a_credential_wall`. Measured
         # here on the first run: that test's fixture leaves ONE non-interactive body element, so
@@ -96,7 +96,7 @@ MUTATIONS: dict[str, tuple[Path, str, str, str, str]] = {
     ),
     "the-join-swallows-interactive-elements": (
         DETECTOR,
-        "    body = tuple(text for text in content if text not in interactive)",
+        "    body = tuple(text for text in content if canonical_text(text) not in interactive)",
         "    body = tuple(content)",
         "test_an_interposed_button_does_not_break_the_split_signature",
         "CAUGHT",
@@ -182,6 +182,107 @@ MUTATIONS: dict[str, tuple[Path, str, str, str, str]] = {
         '        Evidence = "decider produced no verdict: $raw"',
         '        Verdict = $null; Kind = $null; ExitCode = 0\n        Evidence = "decider produced no verdict: $raw"',
         "test_a_decider_that_answers_nothing_is_indeterminate_never_clean",
+        "CAUGHT",
+    ),
+    # --- blind review 2026-09-01, HIGH 2: canonical caption identity ------------------------------
+    "caption-identity-is-case-sensitive-again": (
+        DETECTOR,
+        "    content = tuple(text for text in all_texts if canonical_text(text) != canonical_title)",
+        "    content = tuple(text for text in all_texts if text != title)",
+        # The anchor is the ORACLE case, because that is the only test that asserts the CORRECT answer
+        # rather than agreement between the two arms - the differential passed this defect with zero
+        # mismatches, both paths agreeing on exit 0.
+        "test_the_seam_answers_a_known_oracle_CORRECTLY_not_merely_consistently",
+        "CAUGHT",
+    ),
+    "caption-identity-folds-case-but-not-normalisation": (
+        DETECTOR,
+        '    return unicodedata.normalize("NFC", unicodedata.normalize("NFC", text).casefold())',
+        "    return text.casefold()",
+        "test_the_seam_answers_a_known_oracle_CORRECTLY_not_merely_consistently",
+        "CAUGHT",
+    ),
+    "the-join-matches-interactive-labels-case-sensitively": (
+        DETECTOR,
+        "    interactive = {canonical_text(text) for text in normalize_texts(window.interactive_texts)}",
+        "    interactive = set(normalize_texts(window.interactive_texts))",
+        "test_the_seam_answers_a_known_oracle_CORRECTLY_not_merely_consistently",
+        "CAUGHT",
+    ),
+    # --- blind review 2026-09-01, HIGH 1: the window schema ---------------------------------------
+    "no-schema-validation-at-all": (
+        DECIDER,
+        "    validate_window(raw)\n",
+        "",
+        "test_a_window_record_the_decider_cannot_trust_is_never_a_clean_verdict",
+        "CAUGHT",
+    ),
+    "unknown-fields-are-ignored-not-rejected": (
+        DECIDER,
+        "    unknown = sorted(set(raw) - set(WINDOW_FIELDS) - TOLERATED_FIELDS)\n    if unknown:",
+        "    unknown = []\n    if unknown:",
+        "test_a_window_record_the_decider_cannot_trust_is_never_a_clean_verdict",
+        "CAUGHT",
+    ),
+    "missing-fields-are-ignored-not-rejected": (
+        DECIDER,
+        "    missing = sorted(set(WINDOW_FIELDS) - set(raw))\n    if missing:",
+        "    missing = []\n    if missing:",
+        "test_a_window_record_the_decider_cannot_trust_is_never_a_clean_verdict",
+        "CAUGHT",
+    ),
+    "type-checks-use-isinstance-so-a-bool-is-a-width": (
+        DECIDER,
+        "    return any(type(value) is expected for expected in allowed)  # pylint: disable=unidiomatic-typecheck",
+        "    return isinstance(value, allowed)",
+        "test_a_window_record_the_decider_cannot_trust_is_never_a_clean_verdict",
+        "CAUGHT",
+    ),
+    "text-elements-are-not-checked": (
+        DECIDER,
+        '    for name in ("Texts", "InteractiveTexts"):',
+        "    for name in ():",
+        "test_a_window_record_the_decider_cannot_trust_is_never_a_clean_verdict",
+        "CAUGHT",
+    ),
+    "validation-runs-after-the-candidates-branch": (
+        DECIDER,
+        "        windows = [_window_from(item) for item in raw]",
+        "        windows = (\n"
+        "            [\n"
+        "                DesktopWindow(\n"
+        '                    title=str(item.get("Title") or ""),\n'
+        '                    class_name=str(item.get("ClassName") or ""),\n'
+        '                    width=int(item.get("Width") or 0),\n'
+        '                    height=int(item.get("Height") or 0),\n'
+        '                    texts=tuple(str(t) for t in (item.get("Texts") or []) if t),\n'
+        '                    hwnd=int(item.get("Hwnd") or 0),\n'
+        '                    owner_hwnd=int(item.get("OwnerHwnd") or 0),\n'
+        "                )\n"
+        "                for item in raw\n"
+        "            ]\n"
+        "            if args.candidates_only\n"
+        "            else [_window_from(item) for item in raw]\n"
+        "        )",
+        # A faithful reconstruction of the measured pre-fix behaviour on that branch, rather than
+        # "delete the validate call" - which was the first attempt and SURVIVED, because `_window_from`
+        # then raised KeyError on the same record and produced the identical exit-3 answer. Defence in
+        # depth is real here; expressing the mutation as the ORIGINAL defect is what makes it visible.
+        "test_the_candidates_only_pass_fails_closed_too",
+        "CAUGHT",
+    ),
+    "the-schema-carve-out-grows-to-swallow-a-real-field": (
+        DECIDER,
+        'TOLERATED_FIELDS = frozenset({"HarvestComplete"})',
+        'TOLERATED_FIELDS = frozenset({"HarvestComplete", "Width"})',
+        "test_a_malformed_self_report_is_unverified_not_unreadable",
+        "CAUGHT",
+    ),
+    "the-collector-stops-sending-OwnerHwnd": (
+        COLLECTOR,
+        "    OwnerHwnd        = $Window.OwnerHwnd\n",
+        "",
+        "test_the_collector_emits_exactly_the_fields_the_decider_requires",
         "CAUGHT",
     ),
     # --- discriminating controls ------------------------------------------------------------------
