@@ -44,7 +44,6 @@ import json
 import logging
 import re
 import sys
-import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,12 +52,26 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 # `redacted_note` is the chokepoint every attacker-influenced diagnostic in this module goes through,
 # so it is a hard module-level dependency rather than one of the lazy imports below.
-from tableau_env import redact, redacted_note  # noqa: E402  # pylint: disable=wrong-import-position
+from tableau_env import env_redactor, redact, redacted_note  # noqa: E402  # pylint: disable=wrong-import-position
+
+# ⚠️ Imported as a plain NAME on purpose, twice over. `tableau_http._request(...)` is
+# `protected-access` to pylint (W0212, measured), and any alias would rename the call away from
+# `TAINTING_CALLS` in `tests/test_diagnostic_redaction.py`, silently un-tainting every call site while
+# the gate still reports green. This module makes **no** other HTTP call: rounds 7, 8 and 9 each found
+# a different hole in a hand-rolled copy, so there is now one implementation and no second `try`.
+from tableau_http import (  # noqa: E402  # pylint: disable=wrong-import-position
+    NETWORK_ERROR_STATUS,
+    _request,
+    header_value,
+)
 
 LOG = logging.getLogger("tableau-render-capability")
 
 SERVERINFO_TIMEOUT_SEC = 30
 SIGNIN_TIMEOUT_SEC = 60
+# The standalone report path's own export timeout. A render can take a while on a large dashboard,
+# and unlike the oracle's capture loop there is no retry here to absorb an over-tight cut.
+CLI_FETCH_TIMEOUT_SEC = 120
 # `serverinfo` is version-agnostic in practice, but a number still has to go in the URI. 3.4 is old
 # enough that any server in support answers it, which is the point: this call must not itself need
 # the capability it is being used to discover.
@@ -279,22 +292,29 @@ def supports(available: str | None, required: str) -> bool | None:
     return api_tuple(available) >= api_tuple(required)
 
 
-def server_info(base: str, *, timeout: int = SERVERINFO_TIMEOUT_SEC) -> dict[str, Any]:
+def server_info(base: str, *, timeout: int = SERVERINFO_TIMEOUT_SEC, redactor=redact) -> dict[str, Any]:
     """The server's own account of itself. **Unauthenticated** -- callable before any sign-in.
 
     Deliberately fails soft: a site that will not answer ``serverinfo`` is not a reason to abandon a
     capture, because the endpoint probe below is the authoritative check anyway. This only supplies
     the *advertised* number, whose whole value is being compared against what actually happens.
+
+    ⚠️ Failing soft was a *claim* until this went through the shared primitive. A malformed status
+    line raises ``http.client.BadStatusLine``, which is not an ``OSError``, so the previous
+    ``except (OSError, urllib.error.URLError)`` let it escape as an uncaught traceback -- the opposite
+    of failing soft, measured at exit 1.
+
+    ``redactor`` defaults to bare :func:`tableau_env.redact`, which still applies the
+    ``X-Tableau-Auth`` header rule with no secrets configured. This request carries no credential, so
+    nothing of ours *can* be reflected here -- but every caller in this module has an env in hand and
+    passes :func:`tableau_env.env_redactor` anyway, because "it cannot leak" is an argument that has
+    to be re-made every time the call site moves, and passing the redactor is one line.
     """
     url = f"{base.rstrip('/')}/api/{SERVERINFO_PROBE_VERSION}/serverinfo"
-    try:
-        with urllib.request.urlopen(urllib.request.Request(url), timeout=timeout) as resp:
-            body = resp.read().decode("utf-8", "replace")
-            status = resp.status
-    except urllib.error.HTTPError as exc:
-        body, status = exc.read().decode("utf-8", "replace"), exc.code
-    except (OSError, urllib.error.URLError) as exc:
-        return {"status": 0, "error": f"{type(exc).__name__}: {exc}"}
+    status, payload, _headers = _request(urllib.request.Request(url), timeout=timeout, redactor=redactor)
+    if status == NETWORK_ERROR_STATUS:
+        return {"status": 0, "error": payload.decode("utf-8", "replace")}
+    body = payload.decode("utf-8", "replace")
 
     def grab(pattern: str) -> str | None:
         match = re.search(pattern, body)
@@ -546,7 +566,7 @@ def probe_render_capability(session, env: dict[str, str], views: list[dict[str, 
     -- so try successive views until one gives a determinate answer, capped at
     ``MAX_CAPABILITY_PROBE_VIEWS`` because each attempt costs metered export calls.
     """
-    info = server_info(env["TABLEAU_SERVER_URL"])
+    info = server_info(env["TABLEAU_SERVER_URL"], redactor=env_redactor(env, getattr(session, "token", "") or ""))
     configured = env.get("TABLEAU_REST_API_VERSION", "3.21")
     advertised = info.get("rest_api_version")
     LOG.info(
@@ -652,11 +672,16 @@ def apply_selected_tier(
 def sign_in(base: str, site: str, pat_name: str, pat_secret_value: str, api: str) -> tuple[str, str]:
     """Minimal PAT sign-in returning ``(token, site_id)``.
 
-    Deliberately duplicated rather than imported from ``capture_tableau_oracle``: that module imports
-    THIS one, and reaching back would make the pair cyclic. It is also what keeps this module usable
-    on its own -- the capability question is asked before, and independently of, any capture.
-    Twelve lines is a fair price for a module that a different caller can lift wholesale.
+    Deliberately not imported from ``capture_tableau_oracle``: that module imports THIS one, and
+    reaching back would make the pair cyclic. It is also what keeps this module usable on its own --
+    the capability question is asked before, and independently of, any capture. What is **no longer**
+    duplicated is the HTTP round trip itself: it comes from ``tableau_http``, the one hardened path,
+    because three review rounds each found a different hole in this function's hand-rolled copy.
     """
+
+    def redactor(text: str) -> str:
+        return redact(text, pat_secret_value, pat_name)
+
     body = json.dumps(
         {
             "credentials": {
@@ -669,34 +694,34 @@ def sign_in(base: str, site: str, pat_name: str, pat_secret_value: str, api: str
     req = urllib.request.Request(f"{base.rstrip('/')}/api/{api}/auth/signin", data=body, method="POST")
     req.add_header("Content-Type", "application/json")
     req.add_header("Accept", "application/json")
-    try:
-        with urllib.request.urlopen(req, timeout=SIGNIN_TIMEOUT_SEC) as resp:
-            creds = json.loads(resp.read())["credentials"]
-    except urllib.error.HTTPError as exc:
-        # ⚠️ THE REQUEST WE JUST SENT CONTAINS THE PAT, so everything the server hands back here is
-        # attacker-influenceable. The REASON PHRASE is **not reported at all**, and that is a deletion
-        # rather than a stricter redactor, because full-literal redaction cannot survive a SPLIT:
-        # a proxy that puts half a credential in the reason and half in the body defeats two
-        # independent redactors -- neither surface holds the whole literal, both fragments survive,
-        # and they are printed side by side. Measured:
-        #     HTTP 403 SYNTHETIC_PAT_SECR ET_REASON_SPLIT_42     reconstructs=True
-        # Detecting a fragment is not solvable -- a short fragment is indistinguishable from ordinary
-        # text -- so the only defence is to emit fewer server-controlled strings. The phrase below is
-        # derived from the numeric status by OUR OWN table, carries the same information, and cannot
-        # be influenced. `origin/master` reaches the same place by discarding the reason entirely.
-        #
-        # The BODY is still reported, redacted: it is the one surface that carries Tableau's own
-        # actionable error text, and it is now the ONLY attacker-influenced string here, so there is
-        # no second surface to split across.
-        def redactor(text: str) -> str:
-            return redact(text, pat_secret_value, pat_name)
-
-        raise RuntimeError(
-            f"Tableau sign-in failed: HTTP {exc.code} {_canonical_phrase(exc.code)}. "
-            f"Check the PAT NAME and SECRET (two values). "
-            f"{redacted_note(_read_error_body(exc), redactor, limit=200)}"
-        ) from None
-    return creds["token"], creds["site"]["id"]
+    # ⚠️ THE REQUEST WE JUST SENT CONTAINS THE PAT, so everything the server hands back is
+    # attacker-influenceable -- the status line and the redirect headers included, which is why this
+    # goes through `_request` rather than a local `try`. `_request` never raises for anything the
+    # network or the server can do, so the only failure that leaves here is the RuntimeError below.
+    status, payload, _headers = _request(req, timeout=SIGNIN_TIMEOUT_SEC, redactor=redactor)
+    if status == 200:
+        creds = json.loads(payload)["credentials"]
+        return creds["token"], creds["site"]["id"]
+    # The REASON PHRASE is **not reported at all**, and that is a deletion rather than a stricter
+    # redactor, because full-literal redaction cannot survive a SPLIT: a proxy that puts half a
+    # credential in the reason and half in the body defeats two independent redactors -- neither
+    # surface holds the whole literal, both fragments survive, and they are printed side by side.
+    # Measured:
+    #     HTTP 403 SYNTHETIC_PAT_SECR ET_REASON_SPLIT_42     reconstructs=True
+    # Detecting a fragment is not solvable -- a short fragment is indistinguishable from ordinary
+    # text -- so the only defence is to emit fewer server-controlled strings. The phrase below is
+    # derived from the numeric status by OUR OWN table, carries the same information, and cannot be
+    # influenced. `origin/master` reaches the same place by discarding the reason entirely.
+    #
+    # The BODY is still reported, redacted: it is the one surface that carries Tableau's own
+    # actionable error text, and it is now the ONLY attacker-influenced string here, so there is no
+    # second surface to split across.
+    where = "a network error" if status == NETWORK_ERROR_STATUS else f"HTTP {status} {_canonical_phrase(status)}"
+    raise RuntimeError(
+        f"Tableau sign-in failed: {where}. "
+        f"Check the PAT NAME and SECRET (two values). "
+        f"{redacted_note(payload, redactor, limit=200)}"
+    ) from None
 
 
 def _canonical_phrase(code: int) -> str:
@@ -711,33 +736,31 @@ def _canonical_phrase(code: int) -> str:
         return "Unknown Status"
 
 
-def _read_error_body(exc: urllib.error.HTTPError) -> bytes:
-    """The error body, or a description of why it could not be read. Never raises.
+# Six parameters that map 1:1 to distinct concerns -- four URL components, the auth header, and the
+# scrubber for this call's diagnostics. Grouping any two would be arbitrary, and the sixth exists
+# precisely because hand-picking a subset of the live credentials is the round-9 defect. Waived
+# deliberately, in the same spirit as `capture_tableau_oracle.TableauSession._request`.
+def _cli_fetch(  # pylint: disable=too-many-arguments
+    base: str, api: str, site_id: str, view_luid: str, token: str, *, redactor=None
+):
+    """Fetcher for the standalone report path. Returns ``(status, body, content_type)``.
 
-    Reading it is itself a socket read and can time out or arrive truncated; an exception raised
-    inside the handler above would escape *unredacted*, which is the defect being fixed.
+    ``redactor`` should cover **every** credential live at this point, not just ``token``: the PAT
+    secret went to this same host at sign-in, so a reflecting proxy can echo it into any later
+    response. It defaults to a token-only redactor so the function stays usable standalone, and
+    ``_build_report`` passes the full one.
     """
-    try:
-        return exc.read()
-    except OSError as read_exc:
-        return f"<error body unreadable: {type(read_exc).__name__}>".encode()
-
-
-def _cli_fetch(base: str, api: str, site_id: str, view_luid: str, token: str):
-    """Fetcher for the standalone report path. Returns ``(status, body, content_type)``."""
+    scrub = redactor or (lambda text: redact(text, token))
 
     def fetch(endpoint: str, query: str, api_override: str | None = None) -> tuple[int, bytes, str | None]:
         version = api_override or api
         url = f"{base.rstrip('/')}/api/{version}/sites/{site_id}/views/{view_luid}/{endpoint}{query}"
         req = urllib.request.Request(url)
         req.add_header("X-Tableau-Auth", token)
-        try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                return resp.status, resp.read(), resp.headers.get("Content-Type")
-        except urllib.error.HTTPError as exc:
-            return exc.code, exc.read(), exc.headers.get("Content-Type") if exc.headers else None
-        except (OSError, urllib.error.URLError) as exc:
-            return 0, f"{type(exc).__name__}: {exc}".encode(), None
+        # The session token rides in a header a reflecting proxy can echo into a status line or a
+        # redirect, so this uses the one hardened path too -- the round-9 finding was that it did not.
+        status, body, headers = _request(req, timeout=CLI_FETCH_TIMEOUT_SEC, redactor=scrub)
+        return status, body, header_value(headers, "Content-Type")
 
     return fetch
 
@@ -764,13 +787,15 @@ def _build_report(env, args, info) -> dict[str, Any]:
     configured = env.get("TABLEAU_REST_API_VERSION", "3.21")
     token, site_id = sign_in(base, env["TABLEAU_SITE"], env["TABLEAU_PAT_NAME"], pat_secret(env), configured)
     # Everything printed or serialised from here is scrubbed. A proxy or WAF that echoes request
-    # headers puts a LIVE session token in an error body, and this report is written to disk.
-    secrets = (pat_secret(env), env["TABLEAU_PAT_NAME"], token)
+    # headers puts a LIVE session token in an error body, and this report is written to disk. The same
+    # redactor goes down into the fetcher, so the HTTP layer's own diagnostics are covered by the
+    # identical secret list rather than by whichever subset that call site happened to hold.
+    redactor = env_redactor(env, token)
     report = detect(
-        _cli_fetch(base, configured, site_id, args.view, token),
+        _cli_fetch(base, configured, site_id, args.view, token, redactor=redactor),
         args.view,
         ApiVersions(configured=configured, advertised=info.get("rest_api_version")),
-        redactor=lambda text: redact(text, *secrets),
+        redactor=redactor,
     )
     report["server"] = info
     return report
@@ -789,7 +814,7 @@ def main(argv: list[str] | None = None) -> int:
 
     env = resolve_env(args.env)
     require(env)
-    info = server_info(env["TABLEAU_SERVER_URL"])
+    info = server_info(env["TABLEAU_SERVER_URL"], redactor=env_redactor(env))
     _log_versions(info, env.get("TABLEAU_REST_API_VERSION", "3.21"))
     report = _build_report(env, args, info)
     print(json.dumps(report, indent=2))

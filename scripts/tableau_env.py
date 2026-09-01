@@ -391,6 +391,26 @@ def secret_forms(secret: str) -> list[str]:
     return _wire_forms(secret)
 
 
+def env_redactor(env: dict[str, str], *extra: str):
+    """A redactor over EVERY credential this env holds, plus any live session token in ``extra``.
+
+    "Every credential known at that point" is the rule, and a call site that hand-picks one of them is
+    how it gets broken: ``tableau_render_capability._cli_fetch`` redacted the session token alone,
+    so a proxy reflecting the PAT *secret* -- sent minutes earlier to the same host, at sign-in -- into
+    a later response wrote it out in clear. Composing the list once, from the env, removes the choice.
+
+    ``pat_secret`` returns ``""`` for an unset value and :func:`redact` skips empty secrets, so this
+    is safe on a partially-populated env: it degrades to the ``X-Tableau-Auth`` header rule rather
+    than raising.
+    """
+    secrets = (pat_secret(env), env.get("TABLEAU_PAT_NAME", ""), *extra)
+
+    def redactor(text: str) -> str:
+        return redact(text, *secrets)
+
+    return redactor
+
+
 def redacted_note(value: str | bytes | None, redactor=None, *, limit: int, quote: bool = False) -> str:
     """THE ONE WAY attacker-influenced text may enter a diagnostic that is printed, raised or persisted.
 

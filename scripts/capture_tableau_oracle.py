@@ -74,14 +74,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import http.client
 import json
 import logging
 import random
 import re
 import sys
 import time
-import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -103,6 +101,17 @@ from tableau_env import (  # noqa: E402  # pylint: disable=wrong-import-position
     resolve_env,
     scrub_tree,
     secret_forms,
+)
+
+# ⚠️ Imported as plain NAMES, not reached through the module. `tableau_http._request(...)` is
+# `protected-access` to pylint (W0212, measured), and any alias would rename the call away from
+# `TAINTING_CALLS` in `tests/test_diagnostic_redaction.py`, silently un-tainting every call site.
+# The module-level `_request` and this class's `_request` method are deliberately the same name: the
+# method is now a thin adapter that builds the Request and delegates to the one hardened round trip.
+from tableau_http import (  # noqa: E402  # pylint: disable=wrong-import-position
+    NETWORK_ERROR_STATUS,
+    _request,
+    header_value,
 )
 
 LOG = logging.getLogger("tableau-oracle")
@@ -135,7 +144,8 @@ DEFAULT_RETRY_BUDGET_SEC = 2.0 * REST_TIMEOUT_SEC
 
 # Status 0 is our own marker for a network-level failure (reset, DNS, gateway timeout) that never
 # produced an HTTP status at all. Tableau Cloud sits behind a gateway that intermittently 502/504s.
-NETWORK_ERROR_STATUS = 0
+# Defined once, in `tableau_http`, beside the code that returns it; re-exported here because callers
+# and tests read it off this module.
 TRANSIENT_STATUSES = frozenset({NETWORK_ERROR_STATUS, 429, 500, 502, 503, 504})
 
 
@@ -280,7 +290,14 @@ class TableauSession:
         read error is reported in the payload -- either way, this method does not raise.
 
         ``api`` overrides the client api-version for this one call. Only the capability probe uses it,
-        to re-measure a version-gated feature at its documented floor rather than inferring support."""
+        to re-measure a version-gated feature at its documented floor rather than inferring support.
+
+        This is now a **thin adapter**: it shapes the outbound request and hands it to
+        ``tableau_http._request``, the one hardened round trip in the repository. The exception
+        handling that used to live here moved there wholesale -- unchanged, and now shared with
+        ``tableau_render_capability``, whose three hand-rolled copies of it each leaked a reflected
+        credential in a different review round. The bare ``_request`` below is that module-level
+        import, not recursion into this method."""
         req = urllib.request.Request(
             f"{self._creds.base.rstrip('/')}/api/{api or self._creds.version}{path}",
             data=json.dumps(body).encode() if body else None,
@@ -292,27 +309,7 @@ class TableauSession:
             req.add_header("Content-Type", "application/json")
         if authed and self.token:
             req.add_header("X-Tableau-Auth", self.token)
-        try:
-            with urllib.request.urlopen(req, timeout=REST_TIMEOUT_SEC) as resp:
-                return resp.status, resp.read(), dict(resp.headers)
-        except urllib.error.HTTPError as exc:
-            # Reading the error body is itself a socket read: on a 5xx it can time out (TimeoutError
-            # is a subclass of OSError) or arrive truncated (http.client.IncompleteRead). That
-            # failure is raised INSIDE this handler, and Python does NOT route an exception raised in
-            # one except clause to a sibling except of the same try -- so without this guard it would
-            # escape _request uncaught, breaking the documented "never raises for a network failure"
-            # contract and denying the retry loop its turn. Keep the authoritative HTTP status (a 503
-            # whose body read timed out is still usefully a 503, and stays retry-eligible via
-            # TRANSIENT_STATUSES) and substitute a describing body instead of raising.
-            try:
-                body = exc.read()
-            except (OSError, http.client.HTTPException) as read_exc:
-                body = f"{type(read_exc).__name__}: {read_exc}".encode()
-            return exc.code, body, dict(exc.headers or {})
-        except (OSError, http.client.HTTPException) as exc:
-            # URLError (a subclass of OSError) covers DNS/refused/timeout; HTTPException covers
-            # RemoteDisconnected and IncompleteRead, which urlopen does not always wrap.
-            return NETWORK_ERROR_STATUS, f"{type(exc).__name__}: {exc}".encode(), {}
+        return _request(req, timeout=REST_TIMEOUT_SEC, redactor=self._redact_response)
 
     def sign_in(self) -> None:
         """Exchange the PAT for a session token, retrying transient failures.
@@ -375,7 +372,7 @@ class TableauSession:
         ``classify_export_error``).
         """
         status, payload, headers = self._request("GET", path, api=api)
-        return status, payload, headers.get("Content-Type")
+        return status, payload, header_value(headers, "Content-Type")
 
     def redact_text(self, text: str) -> str:
         """Public scrubber for anything derived from a response body that will be persisted."""
@@ -484,7 +481,7 @@ class TableauSession:
                 continue
 
             if kind == "transient" and attempt < self.retry.max_attempts and time.monotonic() < deadline:
-                delay = backoff_delay(attempt, headers.get("Retry-After"))
+                delay = backoff_delay(attempt, header_value(headers, "Retry-After"))
                 if time.monotonic() + delay > deadline:
                     raise ExportFailed(f"GET {path} -> retry budget exhausted", "transient", detail)
                 self.retry_count += 1
