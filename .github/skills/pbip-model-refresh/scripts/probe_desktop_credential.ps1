@@ -40,10 +40,10 @@
   a distinct outcome from "read it all and found nothing" - see -LoadDetectorsOnly's note on proof.
 
 .PARAMETER LoadDetectorsOnly
-  Dot-source seam for the test suite: define the pure window classifiers, then return WITHOUT loading
-  UI Automation, compiling the Win32 shim, or touching any process. The classifiers are the part that
-  decides a hard stop, so they must be exercisable against synthesised windows on a machine with no
-  Power BI Desktop. Not for interactive use.
+  Dot-source seam for the test suite: define the collector helpers and the decision seam, then return
+  WITHOUT loading UI Automation, compiling the Win32 shim, or touching any process. `Invoke-DialogDecision`
+  is the part that reaches the verdict, so it must be exercisable against synthesised windows on a
+  machine with no Power BI Desktop. Not for interactive use.
 
 .PARAMETER HarvestHwnd
   Internal. Re-invokes THIS script as a short-lived child process that harvests one window's UI
@@ -145,100 +145,52 @@ param(
 )
 
 # --------------------------------------------------------------------------------------------------
-# Pure detectors. No Win32, no UI Automation, no process access - they take window objects and return
-# a classification, so `-LoadDetectorsOnly` can dot-source this far and the suite can drive them with
-# synthesised windows. Everything below the `if ($LoadDetectorsOnly) { return }` line needs a live
-# Desktop and is therefore only reachable in a real probe run.
+# COLLECTOR-ONLY SECTION. No Win32, no UI Automation, no process access - so `-LoadDetectorsOnly` can
+# dot-source this far and the suite can drive the real decision seam with synthesised windows.
+# Everything below the `if ($LoadDetectorsOnly) { return }` line needs a live Desktop and is therefore
+# only reachable in a real probe run.
 # --------------------------------------------------------------------------------------------------
 
-# Connector credential-dialog signature text (covers Databricks / SQL / Snowflake / generic OAuth).
-# Shared with the Python t=0/poll detector so the fast path and this arbiter cannot drift.
-$sig = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'credential_modal_signature.regex') -Raw).Trim()
-
-# Progress-dialog text. Matching this means "Power BI is working", NOT "a human is needed" - but only
-# when it matches CONTENT, never the caption alone.
-# ⚠️ Provenance: INFERRED from Power BI Desktop's refresh UI, not measured against a live capture -
-# see SKILL.md. Keep the alternatives narrow and anchored: this is the only file that can cause a
-# dialog to be ignored, so a broad pattern here is the one way to hide a genuine blocker.
-$benignSig = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'benign_dialog_signature.regex') -Raw).Trim()
-
-# Prompts that are KNOWN to need a human but are NOT credential prompts - the native-database-query
-# approval modal above all. Migrated custom-SQL sources emit exactly the shape that triggers it, and
-# SKILL.md's standing instruction is to check for it before concluding anything about credentials; a
-# probe that suppressed it would make this bundle contradict its own documentation. Matched BEFORE
-# benign, so one progress element in the same window cannot erase it (review round 3).
-$blockingSig = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'blocking_prompt_signature.regex') -Raw).Trim()
-
-# Window chrome that cannot be a prompt: an ENUMERATED whole-element allowlist (`Cancel`/`OK`/`Close`),
-# shared byte-for-byte with the Python detector so the two cannot drift on the one question that
-# authorises a dismissal.
-# ⚠️ This file and `benign_dialog_signature.regex` are the ONLY two that can cause a dialog to be
-# ignored. Keep this one TINY: every alternative added here is a string that can never again veto a
-# suppression.
-# It replaced `$MinPromptWords = 5` (issue #406), which excused every unmatched content element under
-# five words - so `Refresh` + `Evaluating` + `Please enter your password` classified `benign` and was
-# SUPPRESSED under -RefreshInFlight, and `Password:` (two words) with it. Neither matches
-# `credential_modal_signature.regex`, so nothing rescued them. Length is not evidence; a positive claim
-# about specific strings is.
-$chromeSig = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'benign_chrome_signature.regex') -Raw).Trim()
-
-function Get-NormalizedText {
-  <# Whitespace-normalised, de-duplicated, order-preserving text. #>
-  param([object[]]$Texts)
-  $clean = @()
-  foreach ($t in $Texts) {
-    if ($null -eq $t) { continue }
-    $normalized = (([string]$t) -replace '\s+', ' ').Trim()
-    if ($normalized -and ($clean -notcontains $normalized)) { $clean += $normalized }
+# The four shared signature resources.
+#
+# ⚠️ **This script no longer READS any of them for judgement** - `decide_dialog.py` does, and that is
+# the whole of issue #417. What it still does is fail CLOSED when one is missing: a collector shipped
+# without the vocabulary its decider needs cannot produce a verdict at all, and naming the missing file
+# here is far cheaper to diagnose than the `DIALOG_UNREADABLE` it would otherwise degrade to. The list
+# is also the contract - `test_the_arbiter_and_the_python_detector_share_one_vocabulary` mutates
+# `benign_chrome_signature.regex` in a scratch copy of this folder and requires BOTH entry paths to
+# flip together, which is only possible because there is exactly one reader.
+#
+#   credential_modal_signature.regex  connector sign-in prompt text (Databricks / SQL / Snowflake / OAuth)
+#   benign_dialog_signature.regex     refresh PROGRESS text: "Power BI is working", never "a human is
+#                                     needed", and only when it matches CONTENT, never the caption alone
+#   blocking_prompt_signature.regex   prompts KNOWN to need a human but NOT a sign-in - the native
+#                                     database query approval modal above all
+#   benign_chrome_signature.regex     an ENUMERATED whole-element allowlist (`Cancel`/`OK`/`Close`)
+#
+# ⚠️ The last two files are the ONLY things that can cause a dialog to be ignored. Keep them TINY and
+# anchored: every alternative added is a string that can never again veto a suppression. The chrome
+# allowlist replaced `$MinPromptWords = 5` (issue #406), which excused every unmatched content element
+# under five words - so `Refresh` + `Evaluating` + `Please enter your password` classified `benign` and
+# was SUPPRESSED under -RefreshInFlight, and `Password:` (two words) with it. Length is not evidence; a
+# positive claim about specific strings is.
+foreach ($resource in @(
+    'credential_modal_signature.regex',
+    'benign_dialog_signature.regex',
+    'blocking_prompt_signature.regex',
+    'benign_chrome_signature.regex'
+  )) {
+  $resourcePath = Join-Path $PSScriptRoot $resource
+  if (-not (Test-Path -LiteralPath $resourcePath)) {
+    throw "missing shared signature resource: $resourcePath - the decider cannot classify without it"
   }
-  return $clean
-}
-
-function Get-DialogTextSet {
-  <# The three views of a window's text that a classification needs.
-
-  `All`      every text, caption included. Evidence, and the per-element credential scan.
-  `Content`  everything that is NOT the caption. The ONLY view the benign signature may read - a
-             caption cannot establish that a dialog is harmless (review 2026-08-29).
-  `Search`   `All` plus the PROSE JOIN: non-interactive texts joined in tree order. WPF splits one
-             sentence across visual elements, so `Enter your` + `credentials` matches nothing on its
-             own; and interactive elements are excluded because an interposed `Cancel` button between
-             those two fragments defeated a naive whole-window join.
-
-  The join is applied to `Search` ONLY, and `Search` is read ONLY by the credential signature. That
-  asymmetry is a safety property, not an accident: joining can manufacture a phrase (two adjacent
-  table names `Account` `Key` join to the signature `Account Key`), and on the credential path that
-  error is a LOUD false stop a human resolves by looking at the screen, whereas on the benign path it
-  would be a SILENT false clear. Never let the benign signature read a join.
-  #>
-  param([Parameter(Mandatory = $true)][object]$Window)
-
-  $title = (([string]$Window.Title) -replace '\s+', ' ').Trim()
-  $all = Get-NormalizedText -Texts $Window.Texts
-  $interactive = Get-NormalizedText -Texts $Window.InteractiveTexts
-  $content = @($all | Where-Object { $_ -ne $title })
-  $prose = @($all | Where-Object { $interactive -notcontains $_ })
-  $search = @($all)
-  if ($prose.Count -gt 1) { $search += ($prose -join ' ') }
-  return [pscustomobject]@{ Title = $title; All = $all; Content = $content; Prose = $prose; Search = $search }
-}
-
-function Test-HarvestComplete {
-  <# A REAL Boolean `$true`, nothing coercible to one.
-
-  `-eq $true` is coercive: integer `1` and the string `"true"` both pass it, and both produced a clear
-  in review. Anything that is not a Boolean is an unknown window shape, and an unknown shape must not
-  be able to authorise suppression.
-  #>
-  param([object]$Value)
-  return (($Value -is [bool]) -and $Value)
 }
 
 # --------------------------------------------------------------------------------------------------
 # ⚠️ THE DECISION LIVES IN PYTHON NOW (issue #417). `Test-CredentialModal`, `Select-DialogCandidate`,
-# `Get-MainFrame`, `Test-RendersNothing` and `Get-DialogClassification` USED to be here, re-implementing
-# `_credential_modal.py`. Two independent divergences survived a review round aimed specifically at
-# removing divergence:
+# `Get-MainFrame`, `Test-RendersNothing`, `Get-DialogClassification`, `Get-DialogTextSet`,
+# `Get-NormalizedText` and `Test-HarvestComplete` USED to be here, re-implementing `_credential_modal.py`.
+# Two independent divergences survived a review round aimed specifically at removing divergence:
 #
 #   * a title veto applied to THIS half only - an owned dialog titled `Password:` with benign body
 #     content gave DIALOG_UNRECOGNIZED (exit 3) here and CREDENTIAL_PRESENT (exit 0) in Python, i.e.
@@ -278,6 +230,7 @@ function Invoke-DialogDecision {
     return [pscustomobject]@{
       Verdict = 'DIALOG_UNREADABLE'; Kind = 'unreadable'; ExitCode = 3
       Evidence = 'no Python interpreter found to run decide_dialog.py (set PBIP_REFRESH_PYTHON)'
+      Guidance = 'the dialog state could not be established at all - look at the Desktop screen'
       Candidates = 0; Credential = $null; Window = $null; CandidateHwnds = @()
     }
   }
@@ -296,7 +249,9 @@ function Invoke-DialogDecision {
     if ($line.Count -eq 0) {
       return [pscustomobject]@{
         Verdict = 'DIALOG_UNREADABLE'; Kind = 'unreadable'; ExitCode = 3
-        Evidence = "decider produced no verdict: $raw"; Candidates = 0; Credential = $null; Window = $null; CandidateHwnds = @()
+        Evidence = "decider produced no verdict: $raw"
+        Guidance = 'the dialog state could not be established at all - look at the Desktop screen'
+        Candidates = 0; Credential = $null; Window = $null; CandidateHwnds = @()
       }
     }
     $parsed = ConvertFrom-Json ("$($line[0])".Substring(9))
@@ -305,6 +260,9 @@ function Invoke-DialogDecision {
       Kind       = $parsed.kind
       ExitCode   = [int]$parsed.exit_code
       Evidence   = $parsed.evidence
+      # The operator's next step is decided WITH the verdict, never re-derived here: a `switch` over
+      # the same kinds in this file is precisely the divergence surface issue #417 closed.
+      Guidance   = $parsed.guidance
       Candidates = [int]$parsed.candidates
       Credential = $parsed.credential
       Window     = $parsed.window
@@ -314,7 +272,9 @@ function Invoke-DialogDecision {
   catch {
     return [pscustomobject]@{
       Verdict = 'DIALOG_UNREADABLE'; Kind = 'unreadable'; ExitCode = 3
-      Evidence = "decider failed: $_"; Candidates = 0; Credential = $null; Window = $null; CandidateHwnds = @()
+      Evidence = "decider failed: $_"
+      Guidance = 'the dialog state could not be established at all - look at the Desktop screen'
+      Candidates = 0; Credential = $null; Window = $null; CandidateHwnds = @()
     }
   }
   finally { Remove-Item -LiteralPath $payload -Force -ErrorAction SilentlyContinue }
@@ -327,8 +287,8 @@ function ConvertTo-HarvestResult {
   the parent checked only that the payload was valid JSON, then computed
   `(-not $p.Truncated) -and (-not $p.PatternsIncomplete)`. A missing property is `$null`, and
   `-not $null` is `$true`, so a well-formed-but-schema-incomplete payload became
-  `HarvestComplete = $true` - a real Boolean, which then sailed through the strict
-  `Test-HarvestComplete` guard because the coercion had already happened upstream of it.
+  `HarvestComplete = $true` - a real Boolean, which then sailed through the strict Boolean guard
+  downstream because the coercion had already happened upstream of it.
 
   Both flags must EXIST and be actual Booleans, and the child must have exited 0. Items are still
   merged when they are present and the flags are not - unread text lowers credential recall, so
@@ -344,9 +304,11 @@ function ConvertTo-HarvestResult {
   own subject.
 
   ⚠️ `Reason` is DIAGNOSTIC ONLY. Nothing may branch a verdict on it: `Complete` remains the single
-  strict Boolean that governs suppression, and `Test-HarvestComplete` remains its only reader. A
-  reason that could grant the right to suppress would be the fourth instance of the proxy mistake this
-  script has already made three times.
+  strict Boolean that governs suppression, and since issue #417 its ONLY reader is
+  `decide_dialog._window_from`, which accepts a real `$true` and collapses every other shape - absent,
+  `$null`, `0`, `1`, `'true'`, `''` - to "the read did not report itself finished". A reason that could
+  grant the right to suppress would be the fourth instance of the proxy mistake this script has already
+  made three times.
   #>
   param([object]$Payload, [int]$ExitCode)
 
@@ -604,7 +566,7 @@ function Get-BoundedAutomationHarvest {
 }
 
 function ConvertTo-ProbeWindow {
-  <# Win32 `WindowInfo` (+ optional UIA harvest) -> the plain object the pure classifiers consume. #>
+  <# Win32 `WindowInfo` (+ optional UIA harvest) -> the plain object `decide_dialog.py` consumes. #>
   param([object]$Window, [switch]$Enrich, [int]$TimeoutSec = 8, [int]$MaxElements = 2000)
 
   $title = [string]$Window.Title
@@ -692,15 +654,9 @@ if ($blocker) {
   if ($blocker.Evidence) {
     Write-Output ("  matched text: '{0}'" -f $blocker.Evidence.Substring(0, [Math]::Min(80, $blocker.Evidence.Length)))
   }
-  switch ($blocker.Kind) {
-    'benign' { Write-Output "  a refresh is already running on this pid - wait for it, or cancel the stale one; do not stack a second refresh on it" }
-    'needs-human' { Write-Output "  this is a known human-blocking prompt (e.g. native database query approval), NOT a credential prompt - approve it at the Desktop screen; no sign-in is implied" }
-    'mixed-content' { Write-Output "  it shows refresh progress AND prose that is not progress status - a progress dialog does not explain the rest of this window; look at the Desktop screen" }
-    'benign-unverified' { Write-Output "  its content LOOKS like refresh progress, but the read was truncated or incomplete - benign-looking is not benign; look at the Desktop screen" }
-    'benign-title-only' { Write-Output "  its CAPTION looks like a progress dialog, but no content confirmed it - a caption is not content; look at the Desktop screen" }
-    'unreadable' { Write-Output "  this window exposes no readable text, so it could not be classified at all - look at the Desktop screen" }
-    default { Write-Output "  its text matches no credential-prompt signature, so this is not a credential wall - look at the Desktop screen" }
-  }
+  # The next step travels WITH the verdict from `decide_dialog.py`. A `switch` over the same kinds
+  # here would be a second implementation of the same judgement - the divergence issue #417 closed.
+  if ($blocker.Guidance) { Write-Output ("  {0}" -f $blocker.Guidance) }
   Write-Output ("VERDICT: {0}" -f $blocker.Verdict)
   exit $blocker.ExitCode
 }

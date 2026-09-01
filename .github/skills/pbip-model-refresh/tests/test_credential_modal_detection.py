@@ -3325,6 +3325,99 @@ def test_the_benign_signature_is_never_matched_against_joined_text(tmp_path: Pat
     assert result["kind"] == "unrecognized", "benign must read individual elements only, never the join"
 
 
+# --------------------------------------------------------------------------------------------------
+# #417 review, finding 2: a harmless CAPTION SUBSTRING fabricated a credential wall
+# --------------------------------------------------------------------------------------------------
+#
+# Measured on the pre-fix build, in BOTH detectors: an owned dialog captioned
+# `Personal Access Token documentation`, whose whole body read `Refresh` + `Cancel` and which asked for
+# nothing at all, returned `CREDENTIAL_MISSING` at **exit 1** - the band whose documented meaning is
+# "a human must sign in once". The credential signature is a set of UNANCHORED BODY phrases, and the
+# caption was being fed to it.
+#
+# "Captions may ACCUSE" was already the rule (#406 review, finding 1) and it is still right - an
+# unaccounted caption vetoes suppression. It must simply never mean "any substring convicts": the
+# accusation lands at `DIALOG_UNRECOGNIZED`, exit 3, which is loud without claiming a sign-in wall that
+# is not there.
+
+PAT_DOCUMENTATION_CAPTION = "Personal Access Token documentation"
+
+
+def test_a_harmless_caption_substring_does_not_fabricate_a_credential_wall(tmp_path: Path) -> None:
+    """Exit 1 means "a human must sign in once". This window asks for nothing, so it must not say that.
+
+    Both entry paths are asserted, because the defect was in both: the arbiter through its harness, and
+    the Python detector directly. Exit 3 rather than exit 0 is the point - the caption is still
+    unaccounted for, so it still vetoes suppression; what it may no longer do is convict.
+    """
+    window = _window(
+        Title=PAT_DOCUMENTATION_CAPTION,
+        Texts=[PAT_DOCUMENTATION_CAPTION, "Refresh", "Cancel"],
+        InteractiveTexts=["Cancel"],
+        OwnerEnabled=False,
+    )
+
+    result = classify(tmp_path, [window])
+
+    assert result["verdict"] != "CREDENTIAL_MISSING", "a caption substring is not a request for account details"
+    assert result["exit_code"] == 3, "the unaccounted caption must still veto suppression"
+    assert result["kind"] == "mixed-content"
+
+    detector = classify_dialog(
+        DesktopWindow(
+            PAT_DOCUMENTATION_CAPTION,
+            "Cls",
+            702,
+            355,
+            (PAT_DOCUMENTATION_CAPTION, "Refresh", "Cancel"),
+            interactive_texts=("Cancel",),
+        )
+    )
+    assert detector.kind == "mixed-content", "the Python detector fabricated the same wall"
+
+
+def test_the_same_caption_still_convicts_when_the_BODY_carries_the_signature(tmp_path: Path) -> None:
+    """The discriminating control: this must not have been fixed by blinding the detector.
+
+    Identical caption, one body element changed. Recall on the hard-stop path is the thing this module
+    never trades away, so the fix has to distinguish *where* the text was, not *whether* the phrase
+    appeared. Without this, deleting the credential scan outright would pass the test above.
+    """
+    window = _window(
+        Title=PAT_DOCUMENTATION_CAPTION,
+        Texts=[PAT_DOCUMENTATION_CAPTION, "Personal Access Token", "Cancel"],
+        InteractiveTexts=["Cancel"],
+        OwnerEnabled=False,
+    )
+
+    result = classify(tmp_path, [window])
+
+    assert result["verdict"] == "CREDENTIAL_MISSING"
+    assert result["exit_code"] == 1
+
+
+def test_a_join_the_body_cannot_carry_on_its_own_never_convicts(tmp_path: Path) -> None:
+    """The join is the one place a caption could sneak back into a conviction, so it is corroborated.
+
+    `Personal Access Token documentation` + a body element joins to a string that matches the
+    signature, which would re-open finding 2 through the back door. What is MATCHED is the BODY-only
+    join; what is REPORTED is the full prose join including the caption, because that is the sentence a
+    human reads off the screen. Here the body alone says only `Refresh` and `Waiting for other
+    queries`, so nothing convicts - and the caption still vetoes suppression at exit 3.
+    """
+    window = _window(
+        Title=PAT_DOCUMENTATION_CAPTION,
+        Texts=[PAT_DOCUMENTATION_CAPTION, "Refresh", "Waiting for other queries"],
+        OwnerEnabled=False,
+    )
+
+    result = classify(tmp_path, [window])
+
+    assert result["verdict"] != "CREDENTIAL_MISSING", "the caption carried the join on its own"
+    assert result["exit_code"] == 3
+    assert result["kind"] == "mixed-content"
+
+
 @pytest.mark.parametrize("phrase", CREDENTIAL_ALTERNATIVES)
 def test_every_credential_signature_alternative_is_still_a_hard_stop(tmp_path: Path, phrase: str) -> None:
     """The full true-positive set, re-proved after the text pipeline was rewritten.

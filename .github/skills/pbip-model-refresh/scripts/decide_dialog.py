@@ -38,6 +38,7 @@ from _credential_modal import (  # noqa: E402
     VERDICT_CREDENTIAL_MISSING,
     VERDICT_DIALOG_UNREADABLE,
     dialog_candidates,
+    dialog_guidance,
     dialog_verdict,
     main_frame,
     match_credential_modal,
@@ -45,6 +46,9 @@ from _credential_modal import (  # noqa: E402
 
 EXIT_CREDENTIAL_MISSING = 1
 EXIT_INDETERMINATE = 3
+# The one guidance line the decider emits for itself. Everything else comes from
+# `_credential_modal.DIALOG_KIND_GUIDANCE`, so the collector never has to hold a second copy.
+UNREADABLE_GUIDANCE = "the dialog state could not be established at all - look at the Desktop screen"
 
 
 def _window_from(raw: dict) -> DesktopWindow:
@@ -53,6 +57,20 @@ def _window_from(raw: dict) -> DesktopWindow:
     Every field is read defensively: the collector is a different language and a different process, so
     a missing or mistyped field is a real possibility and must degrade toward "we know less", never
     toward "this window is fine".
+
+    ⚠️ **``HarvestComplete`` is the field that authorises a dismissal, so ONLY a real Boolean ``True``
+    survives here.** JSON round-trips widen types, a caller can predate the field, and a future
+    collector can rename it - and PowerShell's own ``-eq $true`` is COERCIVE, which review proved by
+    clearing a window with integer ``1`` and with the string ``"true"``. Absent, ``null``, ``0``,
+    ``1``, ``"true"``, ``"false"``, ``""`` and ``[]`` are every one of them an UNKNOWN window shape,
+    and an unknown shape collapses to ``False`` - "the read did not report itself finished" - which
+    :func:`_credential_modal.classify_dialog` turns into ``benign-unverified``, exit 3.
+
+    Note the asymmetry with the dataclass default, which is ``None``: in-process Win32 enumeration
+    either reads a window fully or raises, so there the question does not apply. It applies to
+    everything that arrives over this boundary, which is why the coercion lives HERE and not in the
+    classifier - a classifier that treated ``None`` as incomplete would make every Python-native
+    progress dialog unverifiable.
     """
 
     def _texts(key: str) -> tuple[str, ...]:
@@ -64,9 +82,6 @@ def _window_from(raw: dict) -> DesktopWindow:
     owner_enabled = raw.get("OwnerEnabled")
     if not isinstance(owner_enabled, bool):
         owner_enabled = None
-    harvest_complete = raw.get("HarvestComplete")
-    if not isinstance(harvest_complete, bool):
-        harvest_complete = None
     return DesktopWindow(
         title=str(raw.get("Title") or ""),
         class_name=str(raw.get("ClassName") or ""),
@@ -78,7 +93,7 @@ def _window_from(raw: dict) -> DesktopWindow:
         owner_hwnd=int(raw.get("OwnerHwnd") or 0),
         owner_enabled=owner_enabled,
         interactive_texts=_texts("InteractiveTexts"),
-        harvest_complete=harvest_complete,
+        harvest_complete=raw.get("HarvestComplete") is True,
         harvest_reason=str(raw.get("HarvestReason") or ""),
     )
 
@@ -97,8 +112,11 @@ def decide(windows: list[DesktopWindow], *, in_flight: bool) -> dict:
             "kind": "credential",
             "exit_code": EXIT_CREDENTIAL_MISSING,
             "evidence": hit.matched_text,
+            "guidance": None,
             "candidates": len(dialog_candidates(windows, frame=frame)),
             "credential": hit.matched_text,
+            "window": None,
+            "candidate_hwnds": [],
         }
     finding = dialog_verdict(windows, operation_in_flight=in_flight, frame=frame)
     return {
@@ -106,6 +124,9 @@ def decide(windows: list[DesktopWindow], *, in_flight: bool) -> dict:
         "kind": None if finding is None else finding.kind,
         "exit_code": 0 if finding is None else EXIT_INDETERMINATE,
         "evidence": None if finding is None else finding.evidence,
+        # The operator's next step travels WITH the verdict. The collector used to hold a `switch` of
+        # its own over the same kinds, which is the divergence surface #417 exists to close.
+        "guidance": None if finding is None else dialog_guidance(finding),
         "candidates": len(dialog_candidates(windows, frame=frame)),
         "credential": None,
         "window": None
@@ -151,6 +172,7 @@ def main(argv: list[str] | None = None) -> int:
                 "kind": None,
                 "exit_code": 0,
                 "evidence": None,
+                "guidance": None,
                 "candidates": len(picked),
                 "credential": None,
                 "window": None,
@@ -164,6 +186,7 @@ def main(argv: list[str] | None = None) -> int:
             "kind": "unreadable",
             "exit_code": EXIT_INDETERMINATE,
             "evidence": f"decision failed: {type(exc).__name__}: {exc}",
+            "guidance": UNREADABLE_GUIDANCE,
             "candidates": 0,
             "credential": None,
             "window": None,

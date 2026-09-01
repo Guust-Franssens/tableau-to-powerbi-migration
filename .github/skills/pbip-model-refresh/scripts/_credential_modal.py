@@ -402,54 +402,82 @@ def dialog_text_set(window: DesktopWindow) -> tuple[str, tuple[str, ...], tuple[
     return title, all_texts, content
 
 
-def _match_dialog_signatures(window: DesktopWindow, texts: Iterable[str]) -> DialogFinding | None:
-    """First ``credential`` then ``needs-human`` signature hit across ``texts``, or ``None``.
+def credential_search_texts(window: DesktopWindow) -> tuple[tuple[str, str], ...]:
+    """``(text the signature READS, text REPORTED as evidence)`` pairs, in precedence order.
+
+    Two rules, and both are review findings rather than taste.
+
+    ⚠️ **The caption may ACCUSE, never CONVICT (#417 review, finding 2).** The credential signature is
+    a set of unanchored *body* phrases, so applying it to a caption fabricated a hard stop: an owned
+    dialog titled ``Personal Access Token documentation`` with benign ``Refresh``/``Cancel`` content
+    returned ``CREDENTIAL_MISSING`` at **exit 1** in both detectors, with no credential request present.
+    So only CONTENT is read (:func:`dialog_text_set` drops any element equal to the caption), and an
+    unaccounted caption still vetoes suppression in :func:`classify_dialog` - it lands at
+    ``DIALOG_UNRECOGNIZED``, exit 3, which is loud without claiming a sign-in wall that is not there.
+
+    ⚠️ **The PROSE JOIN must be CORROBORATED BY THE BODY.** WPF splits one sentence across visual
+    elements, so ``Enter your`` + ``credentials`` matches nothing element-by-element and the join is
+    what recovers it. Interactive elements are dropped from the join because an interposed ``Cancel``
+    button between those two fragments defeated a naive whole-window join. But the join is also the
+    one place a caption could sneak back into a conviction (``Personal Access Token documentation``
+    + ``Refresh`` joins to a signature hit), so what is MATCHED is the BODY-only join and what is
+    REPORTED is the full prose join including the caption - the sentence a human would read off the
+    screen. A phrase the body cannot carry on its own never convicts.
+
+    The join is offered to the credential/blocking search only, never to the benign scan: joining can
+    MANUFACTURE a phrase (adjacent labels ``Account`` + ``Key`` join to the signature ``Account Key``),
+    and on this path that error is a LOUD false stop, whereas on the benign path it would be a SILENT
+    false clear.
+    """
+    _, all_texts, content = dialog_text_set(window)
+    interactive = set(normalize_texts(window.interactive_texts))
+    pairs = [(text, text) for text in content]
+    body = tuple(text for text in content if text not in interactive)
+    if len(body) > 1:
+        prose = tuple(text for text in all_texts if text not in interactive)
+        pairs.append((" ".join(body), " ".join(prose)))
+    return tuple(pairs)
+
+
+def _match_dialog_signatures(window: DesktopWindow) -> DialogFinding | None:
+    """First ``credential`` then ``needs-human`` signature hit in ``window``, or ``None``.
 
     Order is load-bearing: a window can carry both, and the credential signature is the only one that
     earns a hard stop. ``needs-human`` is tested BEFORE any benign scan so one progress element in the
     same window cannot erase a known human-blocking prompt (the round-3 defect in #390).
 
-    ⚠️ **``texts`` is CONTENT plus the prose join - never the bare caption (#417 review, finding 2).**
-    The credential signature is a set of unanchored *body* phrases, and applying it to a caption
-    fabricated a hard stop: an owned dialog titled ``Personal Access Token documentation`` with benign
-    ``Refresh``/``Cancel`` content returned ``CREDENTIAL_MISSING`` at **exit 1** in both detectors, with
-    no credential request present. A caption may ACCUSE - an unaccounted title vetoes suppression and
-    lands at ``DIALOG_UNRECOGNIZED``, exit 3 - but "accuse" must not mean "any substring convicts".
-    Convicting still needs CONTENT, which is where a real prompt's text lives, so this costs no recall
-    on any window whose body is readable at all.
+    The texts it reads - and the asymmetry between what is matched and what is reported - are
+    :func:`credential_search_texts`.
     """
-    all_texts = tuple(texts)
+    pairs = credential_search_texts(window)
     signature = credential_signature()
-    for text in all_texts:
-        if signature.search(text):
-            return _finding(DIALOG_KIND_CREDENTIAL, window, text)
+    for matched, evidence in pairs:
+        if signature.search(matched):
+            return _finding(DIALOG_KIND_CREDENTIAL, window, evidence)
     blocking = blocking_prompt_signature()
-    for text in all_texts:
-        if blocking.search(text):
-            return _finding(DIALOG_KIND_NEEDS_HUMAN, window, text)
+    for matched, evidence in pairs:
+        if blocking.search(matched):
+            return _finding(DIALOG_KIND_NEEDS_HUMAN, window, evidence)
     return None
 
 
-def prose_join(window: DesktopWindow, content: tuple[str, ...]) -> tuple[str, ...]:
-    """``content`` plus the non-interactive elements joined in tree order, when that is SAFE.
+def is_identified_human_blocker(window: DesktopWindow) -> bool:
+    """Did the KNOWN human-blocking prompt signature match this window's readable text?
 
-    WPF splits one sentence across visual elements, so ``Enter your`` + ``credentials`` matches nothing
-    on its own. The join is applied ONLY to the credential search, never to the benign scan: joining can
-    MANUFACTURE a phrase (two adjacent labels ``Account`` + ``Key`` join to the signature
-    ``Account Key``), and on the credential path that error is a LOUD false stop, whereas on the benign
-    path it would be a SILENT false clear.
+    Used by :func:`dialog_candidates` to withhold the modality exoneration. Modality answers *"does
+    this window block the application?"*; a signature hit answers *"do we already know a human is
+    needed here?"*, and the second is the stronger claim. Measured: an owned dialog reading
+    ``Permission is required to run this native database query`` with an ENABLED owner was dropped
+    before classification and reported as nothing at all - the one prompt ``SKILL.md`` tells the
+    reader to check for, silently absent.
 
-    It requires ``interactive_texts``, which only the PowerShell collector can supply: without a
-    control-type signal an interposed ``Cancel`` button breaks the sentence, and a naive whole-window
-    join was discarded in review for exactly that. No signal, no join.
+    ⚠️ **Deliberately NOT the credential signature.** That one is already read on every window by
+    :func:`match_credential_modal`, which does not consult :func:`dialog_candidates` at all (#376),
+    so an exonerated sign-in prompt is still a hard stop; adding it here would only duplicate the
+    prepass. The blocking-prompt signature has no such second reader, and that gap is the defect.
     """
-    if not window.interactive_texts:
-        return content
-    interactive = set(normalize_texts(window.interactive_texts))
-    prose = [text for text in content if text not in interactive]
-    if len(prose) > 1:
-        return content + (" ".join(prose),)
-    return content
+    blocking = blocking_prompt_signature()
+    return any(blocking.search(matched) for matched, _ in credential_search_texts(window))
 
 
 def classify_dialog(window: DesktopWindow) -> DialogFinding:  # pylint: disable=too-many-return-statements
@@ -464,24 +492,30 @@ def classify_dialog(window: DesktopWindow) -> DialogFinding:  # pylint: disable=
 
     Kinds, in the order they are tested:
 
-    ``credential``        the credential signature matched CONTENT or the prose join -> hard stop.
+    ``credential``        the credential signature matched CONTENT or the corroborated prose join.
     ``needs-human``       a KNOWN human-blocking prompt that is not a sign-in prompt.
     ``mixed-content``     progress text AND content nobody could account for - INCLUDING an unaccounted
                           CAPTION (#406 review, finding 1).
     ``benign``            EVERY content element is recognised progress status or enumerated chrome, at
                           least one IS progress status, the caption is accounted for, and the harvest
                           did not report itself incomplete. The one dismissible kind.
-    ``benign-unverified`` as ``benign``, but ``harvest_complete is False``: benign-LOOKING is not benign.
+    ``benign-unverified`` as ``benign``, but the harvest did not report itself COMPLETE: benign-LOOKING
+                          is not benign. ``harvest_complete`` is three-valued - ``None`` means this
+                          module's own Win32 enumeration read the window (it either completes or
+                          raises), ``False`` means a foreign collector said, or failed to say, that its
+                          read finished. Only a real ``True``/``None`` authorises suppression, and
+                          :func:`decide_dialog._window_from` is where every non-Boolean from the
+                          collector collapses to ``False``.
     ``benign-title-only`` the CAPTION matched the benign signature and no content did.
     ``unreadable``        no readable text at all.
     ``unrecognized``      readable text that matched no signature.
 
     ⚠️ **There is no length amnesty, and there must never be one again (#376/#406).**
     ⚠️ **Captions may ACCUSE, never EXONERATE** - a title can veto suppression but can never set
-    ``benign_hit``, and it can never on its own convict (see :func:`_match_dialog_signatures`).
+    ``benign_hit``, and it can never on its own convict (see :func:`credential_search_texts`).
     """
     title, all_texts, content = dialog_text_set(window)
-    signature_hit = _match_dialog_signatures(window, prose_join(window, content))
+    signature_hit = _match_dialog_signatures(window)
     if signature_hit is not None:
         return signature_hit
 
@@ -639,8 +673,16 @@ def dialog_candidates(
       identity is AMBIGUOUS that function returns ``None`` and this exclusion simply does not happen
       (#400 review round 5): a spurious finding on the real frame is loud and recoverable, whereas
       excluding the wrong window is how a credential prompt disappears;
-    * :func:`is_proven_non_blocking` - an enabled owner proves this window blocks nothing;
+    * :func:`is_proven_non_blocking` - an enabled owner proves this window blocks nothing - UNLESS
+      :func:`is_identified_human_blocker` already recognised its text. Modality exonerates a window we
+      know NOTHING about; it cannot exonerate one we have positively identified as needing a human.
+      Measured: the native-database-query approval modal with an enabled owner produced no finding at
+      all, so the one prompt ``SKILL.md`` tells the reader to check for was reported as nothing. The
+      CREDENTIAL signature is not part of that override on purpose - :func:`match_credential_modal`
+      reads every window regardless of this list, so an exonerated sign-in prompt is still exit 1;
     * :func:`renders_nothing` - unowned AND zero-area: no owner to disable and no pixels to show.
+      Deliberately NOT overridden by identification: a window that can display nothing to a human is
+      one no human can act on, and the credential prepass reads it anyway, so no hard stop is lost.
 
     Nothing is excluded for its size, its class, or its name.
     """
@@ -649,7 +691,9 @@ def dialog_candidates(
     return [
         window
         for window in windows
-        if window is not frame and not is_proven_non_blocking(window) and not renders_nothing(window)
+        if window is not frame
+        and not renders_nothing(window)
+        and (not is_proven_non_blocking(window) or is_identified_human_blocker(window))
     ]
 
 
@@ -707,16 +751,16 @@ def match_credential_modal(
     for window in windows:
         if window is frame:
             continue
-        # ⚠️ CONTENT only - never the bare caption (#417 review, finding 2). The credential signature is
-        # a set of unanchored BODY phrases, so applying it to a title fabricated a hard stop: an owned
-        # dialog titled `Personal Access Token documentation`, with benign `Refresh`/`Cancel` content
-        # and no credential request anywhere, returned CREDENTIAL_MISSING at exit 1 in BOTH detectors.
-        # A caption may ACCUSE - an unaccounted title vetoes suppression and lands at
-        # DIALOG_UNRECOGNIZED, exit 3 - but "accuse" must never mean "any substring convicts".
-        _, _, content = dialog_text_set(window)
-        for text in prose_join(window, content):
-            if signature.search(text):
-                return CredentialModal(matched_text=text, window=window)
+        # ⚠️ CONTENT only, and a join the BODY corroborates - never the bare caption (#417 review,
+        # finding 2). The credential signature is a set of unanchored BODY phrases, so applying it to a
+        # title fabricated a hard stop: an owned dialog titled `Personal Access Token documentation`,
+        # with benign `Refresh`/`Cancel` content and no credential request anywhere, returned
+        # CREDENTIAL_MISSING at exit 1 in BOTH detectors. A caption may ACCUSE - an unaccounted title
+        # vetoes suppression and lands at DIALOG_UNRECOGNIZED, exit 3 - but "accuse" must never mean
+        # "any substring convicts". See :func:`credential_search_texts`.
+        for matched, evidence in credential_search_texts(window):
+            if signature.search(matched):
+                return CredentialModal(matched_text=evidence, window=window)
     return None
 
 
@@ -955,6 +999,10 @@ DIALOG_KIND_GUIDANCE = {
     DIALOG_KIND_BENIGN_TITLE_ONLY: (
         "its CAPTION looks like a progress dialog, but no content confirmed it - a caption is not "
         "content; look at the Desktop screen"
+    ),
+    DIALOG_KIND_BENIGN_UNVERIFIED: (
+        "its content reads as refresh progress, but the read of that window did not finish - "
+        "benign-LOOKING is not benign, and what was missed is unknown; look at the Desktop screen"
     ),
     DIALOG_KIND_UNREADABLE: (
         "this window exposes no readable text, so it could not be classified at all - look at the Desktop screen"
