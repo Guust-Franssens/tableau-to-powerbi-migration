@@ -699,15 +699,42 @@ def _write_placeholder_page(unit: Path, *, visuals: int, display: str = "No visu
 
 
 def test_a_real_page_titled_like_the_placeholder_is_still_a_page(tmp_path: Path) -> None:
-    """The placeholder identity needs BOTH engine constants, so a hand-authored page is not eaten."""
+    """The id prefix is load-bearing on its own: a zero-visual page with an ORDINARY id is a blank page.
+
+    The zero-visual clause cannot mask this one - the page here has no visuals, so only the id
+    distinguishes "the engine's declared crash-guard page" from "a page that ships and renders
+    nothing". Getting it wrong hides the blank page instead of reporting it.
+    """
     _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A")])
-    _write_report(tmp_path, ["A", "No visuals rebuilt"])
+    _write_report(tmp_path, ["No visuals rebuilt"], visuals=0)
 
     parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
 
-    assert parity["engine_placeholder_pages"] == [], "p2 is an ordinary page id, not page-empty*"
+    assert parity["engine_placeholder_pages"] == [], "p1 is an ordinary page id, not page-empty*"
+    assert [page["name"] for page in parity["blank_pages"]] == ["No visuals rebuilt"]
     assert parity["status"] == cu.STATUS_PRECONDITION_FAILED
-    assert [page["name"] for page in parity["unexempted_extra"]] == ["No visuals rebuilt"]
+
+
+def test_a_blank_page_alone_fails_the_gate_even_when_the_counts_balance(tmp_path: Path) -> None:
+    """Kills: reporting a page that renders nothing without letting it fail anything.
+
+    Deliberately constructed so a blank page is the ONLY problem: one candidate, one rendered page
+    matching it, and one extra zero-visual page that keeps the missing/extra counts at zero.
+    """
+    _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A")])
+    pages = tmp_path / "fabric" / "Book.Report" / "definition" / "pages"
+    _write_report(tmp_path, ["A"])
+    blank = pages / "p2"
+    blank.mkdir()
+    (blank / "page.json").write_text(json.dumps({"name": "p2", "displayName": "Extra"}), encoding="utf-8")
+    (pages / "pages.json").write_text(json.dumps({"pageOrder": ["p1", "p2"]}), encoding="utf-8")
+
+    parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
+
+    assert parity["unexempted_missing"] == [], "the counts balance; only the blank page is wrong"
+    assert parity["unexempted_extra"] == []
+    assert [page["name"] for page in parity["blank_pages"]] == ["Extra"]
+    assert parity["status"] == cu.STATUS_PRECONDITION_FAILED
 
 
 def test_a_placeholder_id_holding_real_visuals_is_a_rebuilt_page(tmp_path: Path) -> None:
@@ -1296,8 +1323,14 @@ def test_actual_pages_falls_back_to_page_directories_when_order_is_missing(tmp_p
 
 
 def test_actual_pages_counts_zero_visuals_for_a_page_with_none(tmp_path: Path) -> None:
-    """The visual count is real evidence, not a constant: an empty page must report 0."""
+    """The visual count is measured, not assumed.
+
+    The ``visuals/`` folder EXISTS here but holds no ``visual.json``. A fixture with no folder at all
+    is answered by the ``is_dir()`` guard and never reaches the counting line, so it cannot kill a
+    mutation that hard-codes a count.
+    """
     _write_report(tmp_path, ["Executive"], visuals=0)
+    (tmp_path / "fabric" / "Book.Report" / "definition" / "pages" / "p1" / "visuals").mkdir()
 
     assert [page["visuals"] for page in cu.actual_pages(tmp_path)] == [0]
 
