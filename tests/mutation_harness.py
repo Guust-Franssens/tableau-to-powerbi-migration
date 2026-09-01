@@ -187,6 +187,76 @@ mt.TableauSite._page = page
 import mocks.estate as me
 me._FAKE_ENGINE = me._FAKE_ENGINE.replace('"pageOrder": pages or []', '"pageOrder": []')
 """,
+    # --- issue #410 round-2 review: the skill-plugin sync ------------------------------------
+    # Each of these RESTORES a defect that was reproduced by exit code in a throw-away plugin
+    # root, so a SURVIVED verdict means the regression test for it cannot fail.
+    "skillsync-ownership-inferred-from-content": """
+import skill_plugin_source as sps
+# Finding 1: "any plugin carrying any bundle from the inventory is ours".
+sps.prove_ownership = lambda plugin_root, **kwargs: "identity"
+""",
+    "skillsync-from-worktree-picks-its-own-destination": """
+import sync_installed_skills as sync
+# Finding 1, second half: unmerged content choosing where it lands.
+sync._worktree_needs_explicit_root = lambda args, env=None: False
+""",
+    "skillsync-guess-the-default-branch": """
+import sync_installed_skills as sync
+_orig = sync._advertised_default
+def guess(repo):
+    try:
+        return _orig(repo)
+    except sync.UnverifiedDefaultError:
+        # Finding 2: the ordered fallback to likely branch names.
+        return "refs/remotes/origin/master", "recorded", "guessed"
+sync._advertised_default = guess
+""",
+    "skillsync-never-ask-the-remote": """
+import sync_installed_skills as sync
+# Finding 2: trust the LOCAL origin/HEAD marker `git fetch` never refreshes.
+sync.remote_default_ref = lambda repo=None: None
+""",
+    "skillsync-owned-scope-is-the-current-inventory": """
+import sync_installed_skills as sync
+_orig = sync._plan
+def plan(args, source, workdir, fetch_note):
+    built = _orig(args, source, workdir, fetch_note)
+    # Finding 3: a retired bundle stops being owned, so nothing ever reports it.
+    built.owned = list(built.bundles)
+    built.formerly_owned = []
+    built.base["formerly_owned"] = []
+    return built
+sync._plan = plan
+""",
+    "skillsync-never-record-what-was-installed": """
+import sync_installed_skills as sync
+# Finding 3's mechanism: with no provenance record there is no previously-owned inventory.
+sync.write_owner_marker = lambda plugin_root, **fields: plugin_root
+""",
+    "skillsync-preflight-ignores-the-verified-default": """
+from pathlib import Path
+import test_sync_installed_skills as suite
+_src = suite.PREFLIGHT.read_text(encoding="utf-8")
+_old = "Ok = (($Sync.status -eq 'in_sync') -and ($Sync.default_verified -eq $true))"
+assert _old in _src, "mutation anchor missing - refusing to report a FALSE 'CAUGHT'"
+_out = Path(suite.REPO_ROOT) / "_build" / "preflight-mutation-default.ps1"
+_out.parent.mkdir(parents=True, exist_ok=True)
+_out.write_text(_src.replace(_old, "Ok = ($Sync.status -eq 'in_sync')"), encoding="utf-8")
+suite.PREFLIGHT = _out
+""",
+    "skillsync-preflight-passes-an-unproven-destination": """
+from pathlib import Path
+import test_sync_installed_skills as suite
+_src = suite.PREFLIGHT.read_text(encoding="utf-8")
+_old = "Plugin = @{ Ok = $false; Detail = \\"ownership UNPROVEN"
+assert _old in _src, "mutation anchor missing - refusing to report a FALSE 'CAUGHT'"
+_out = Path(suite.REPO_ROOT) / "_build" / "preflight-mutation-unproven.ps1"
+_out.parent.mkdir(parents=True, exist_ok=True)
+_out.write_text(
+    _src.replace(_old, "Plugin = @{ Ok = $true; Detail = \\"ownership UNPROVEN"), encoding="utf-8"
+)
+suite.PREFLIGHT = _out
+""",
 }
 
 
@@ -562,7 +632,12 @@ def named_failures(stdout: str) -> list[str]:
 
 
 def main() -> int:
-    targets = ["tests/test_e2e_offline.py", "tests/test_mock_fabric.py", "tests/test_mock_tableau.py"]
+    targets = [
+        "tests/test_e2e_offline.py",
+        "tests/test_mock_fabric.py",
+        "tests/test_mock_tableau.py",
+        "tests/test_sync_installed_skills.py",
+    ]
     dirty = []
     for target in targets:
         baseline = subprocess.run(
@@ -590,6 +665,8 @@ def main() -> int:
             target = "tests/test_mock_fabric.py"
         elif name.startswith("tableau-mock-"):
             target = "tests/test_mock_tableau.py"
+        elif name.startswith("skillsync-"):
+            target = "tests/test_sync_installed_skills.py"
         else:
             target = "tests/test_e2e_offline.py"
         label, rc, detail, outcomes = run(name, code, target)

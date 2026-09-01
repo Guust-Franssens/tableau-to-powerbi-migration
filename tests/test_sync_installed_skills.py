@@ -1072,14 +1072,33 @@ def test_from_worktree_refuses_without_an_explicit_destination(
     (stranger / "private.txt").write_text("their data\n", encoding="utf-8")
     _add_branch_only_bundle(estate)
 
-    code = sync.main(["--installed-plugins-root", str(root), "--from-worktree"])
-    out = capsys.readouterr().out
+    code = sync.main(["--installed-plugins-root", str(root), "--from-worktree", "--json"])
+    verdict = json.loads(capsys.readouterr().out)
 
     assert code == sync.EXIT_UNPROVEN_PLUGIN
-    assert "--plugin-root" in out
+    assert verdict["status"] == "worktree_needs_explicit_root", (
+        "it must be refused for NAMING no destination, not merely because this one happened to be "
+        "unprovable - otherwise a run against a provable plugin would still be hijackable"
+    )
     assert (stranger / "SKILL.md").read_text(encoding="utf-8") == "their bundle\n"
     assert (stranger / "private.txt").exists(), "a refused run must delete nothing"
     assert sorted(p.name for p in stranger.parent.iterdir()) == ["branch-only-bundle"]
+
+
+def test_from_worktree_refuses_even_when_the_destination_would_be_provable(
+    estate: Estate, tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """The gate is "did the OPERATOR name it", never "could something be proved"."""
+    root = tmp_path / "installed-plugins"
+    _install(root, *OURS, FIRST_BUNDLE, "ours\n")
+    _add_branch_only_bundle(estate)
+
+    code = sync.main(["--installed-plugins-root", str(root), "--from-worktree", "--json"])
+    verdict = json.loads(capsys.readouterr().out)
+
+    assert code == sync.EXIT_UNPROVEN_PLUGIN
+    assert verdict["status"] == "worktree_needs_explicit_root"
+    assert not (root / OURS[0] / OURS[1] / "skills" / "branch-only-bundle").exists()
 
 
 def test_from_worktree_with_an_explicit_root_publishes_and_is_reversible(

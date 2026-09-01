@@ -140,31 +140,51 @@ Keep only the judgement the gate cannot carry:
   refreshed files. A real `copilot plugin update` still belongs between sessions because the plugin
   directory is file-locked for rename/swap while Copilot is running.
 - **The authoritative bundle is the MERGED one, never your worktree (issue #410).**
-  `sync_installed_skills.py` compares and publishes from `origin/HEAD` → `origin/master` →
-  `origin/main` (local refs; no network unless you pass `--fetch`), so the verdict is the same from
-  every worktree, including a detached HEAD, and **an unmerged skill edit on your branch does not
-  fail preflight** — it is reported as an `optional` note instead. It used to publish whichever
-  working tree ran it: measured 2026-08-30, four versions of one shipped file existed at once and the
-  installed copy — what every newly spawned subagent reads — was `master + 79 lines`, content on no
-  merged branch. A *stale* bundle silently invalidates a measurement; a *too-new* one is worse,
-  because a measurement taken against unmerged guidance is reproducible from no commit at all. To
-  test unmerged guidance with a subagent on purpose, `--from-worktree` says loudly what it is doing;
-  a plain sync restores the merged copy.
-- **"From the merged tree" has to cover the DESTINATION and the FILE LIST, not just the content.**
-  Review of that fix found the original bug surviving one step earlier: plugin *discovery* imported
-  the current worktree's `SHIPPED_SKILLS`, and the inventory is what selects which installed plugin
-  to write into — a branch-added bundle name steered it onto an unrelated plugin, which a plain sync
-  then overwrote, deleting that plugin's own bundle. The inventory now comes from the merged commit
-  and is passed into discovery; deletions are bounded to the merged bundle directories; and
-  `preflight.ps1` reads one verdict (`--check --json`) instead of computing a second, branch-derived
-  one of its own.
-- ⚠️ **`git fetch` does NOT refresh `refs/remotes/origin/HEAD`.** It is a *local* symbolic marker, so
-  after a remote renames its default branch, a fetched clone still points at the old one — reproduced
-  in review, publishing `master` content as if it were the default. `--fetch` therefore asks the
-  remote directly (`git ls-remote --symref origin HEAD`) and pins that commit; offline, the verdict
-  reports `default_verified: false` and names any default-branch ref pointing elsewhere rather than
-  staying silent. Everything downstream keys on the **commit**, never the ref name, because a ref can
-  move between resolution and export — `origin/master` did exactly that during the review.
+  `sync_installed_skills.py` compares and publishes from the remote's **advertised default branch**,
+  so the verdict is the same from every worktree, including a detached HEAD, and **an unmerged skill
+  edit on your branch does not fail preflight** — it is reported as an `optional` note instead. It
+  used to publish whichever working tree ran it: measured 2026-08-30, four versions of one shipped
+  file existed at once and the installed copy — what every newly spawned subagent reads — was
+  `master + 79 lines`, content on no merged branch. A *stale* bundle silently invalidates a
+  measurement; a *too-new* one is worse, because a measurement taken against unmerged guidance is
+  reproducible from no commit at all. To test unmerged guidance with a subagent on purpose,
+  `--from-worktree --plugin-root <path>` says loudly what it is doing; a plain sync restores the
+  merged copy, **including removing whatever the branch added**.
+- **The DESTINATION must be PROVED, and a bundle name is not proof.** Round 1 pinned the *inventory*
+  to the merged commit and handed it to discovery — but discovery still selected "any plugin carrying
+  any bundle from that inventory", which is still inference from CONTENT, and content is exactly what
+  a feature branch or anyone who can drop a directory into `~/.copilot/installed-plugins` controls.
+  Round 2 reproduced the consequence in throw-away plugin roots, by exit code: a **plain** sync
+  overwrote a foreign plugin's `SKILL.md` merely because it shared one current bundle name (and on
+  `origin/master`, whose deletion set was unbounded, deleted a private file inside it); and
+  `--from-worktree` with a bundle invented on the branch selected an unrelated plugin outright,
+  overwrote it, deleted a file inside it, and left the intended plugin untouched. So the foreign-
+  plugin corruption predates the fix — it is `origin/master` behaviour, not a regression — while the
+  `--from-worktree` hijack was new, because the flag was. A destination now needs one of three proofs
+  that content cannot fake: the operator naming it (`--plugin-root`), the `.skill-sync-owner.json`
+  marker a previous publish wrote, or an identity in `build_plugin.KNOWN_PLUGIN_IDENTITIES` matched
+  against the Copilot CLI's own install record — all read from the **pinned merged tree**. With no
+  proof it exits non-zero having written nothing, and `--from-worktree` **requires** `--plugin-root`,
+  which is stronger than pinning its discovery: a branch cannot choose a destination at all.
+- ⚠️ **`git fetch` does NOT refresh `refs/remotes/origin/HEAD`,** and a list of likely branch names is
+  a guess. It is a *local* symbolic marker, so after a remote renames its default branch a fetched
+  clone still points at the old one — reproduced by exit code: plain sync exit 0 having installed
+  `master`, `--check` reporting `in_sync`, and a single-branch clone reporting a *successful* fetch
+  while never fetching the advertised ref at all. Every run therefore asks the remote directly (`git
+  ls-remote --symref origin HEAD`, bounded, one round trip), fetches that exact refspec, and
+  **refuses rather than falling back**. Offline it uses the branch an earlier run recorded in
+  `<git-common-dir>/skill-sync-default.json`; with no record it reports `unverified_default`, which
+  preflight reads as critical — `Merged.Ok` is `in_sync` **and** `default_verified`, because in sync
+  with the wrong branch is not in sync. Everything downstream keys on the **commit**, never the ref
+  name, because a ref can move between resolution and export — `origin/master` did exactly that
+  during the review.
+- **A bundle you RETIRE has to be visible, or it is served forever.** Extra-file detection was scoped
+  to the *current* inventory, so a bundle removed from `SHIPPED_SKILLS` stopped being "owned", stayed
+  installed, and `--check` still said `in_sync` (measured: exit 0, `extra: []`, the file still on
+  disk). The real machine-wide install carries exactly this — `pbip-model-refresh`, held back at
+  v0.3.0. The ownership marker records the inventory each publish installed, so a formerly-owned
+  bundle is reported as drift and removed; a bundle this tool never installed is **still never
+  touched**, which is the same distinction the destination proof above exists to keep.
 - **PBIR theme-version location is report-authoring knowledge, not setup.** The rule
   (`reportVersionAtImport` required inside each `themeCollection` entry and forbidden at the top
   level of `report.json`) lives in `powerbi-report-gotchas` so the report owner sees it when authoring
