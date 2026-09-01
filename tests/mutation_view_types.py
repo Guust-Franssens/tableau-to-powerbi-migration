@@ -364,6 +364,27 @@ INTENDED["census-makes-a-second-request"] = (
     "tests/test_tableau_luid_census.py::test_the_census_makes_exactly_one_request"
 )
 
+# ⚠️ Round 7: the console, and a mutation that has to reach a SUBPROCESS.
+#
+# `census-prints-a-glyph-again` puts the CP1252-fatal marker back on the unassessable path ONLY,
+# so the measurable-run control still passes and just the unassessable subprocess test can catch
+# it -- round 6's rule about moving exactly one arm, applied to a new differential.
+#
+# ⚠️ Its first version exec'd into THIS process's module object and SURVIVED: the test spawns
+# a fresh interpreter that re-imports from disk, so the subprocess ran unmutated code. That is
+# the eighth vacuity mode on this PR, and the same environment gap that let the defect itself
+# survive seven rounds -- the thing doing the observing was not the thing being observed. It now
+# writes a mutated COPY to a temp dir and redirects `census.__file__` at it, which the test's
+# driver puts first on `sys.path`. No tracked file is written, so a crashed run cannot leave the
+# repository modified.
+MUTATIONS["census-prints-a-glyph-again"] = (
+    "\nimport pathlib, tempfile\nimport tableau_luid_census as census\n_src = pathlib.Path(census.__file__).read_text(encoding='utf-8')\n_old = '[WARN] Do not record this as evidence.'\n_new = '\\u26a0\\ufe0f Do not record this as evidence.'\nassert _old in _src, \"mutation anchor not found - the snippet is stale, not the code\"\n_copy = pathlib.Path(tempfile.mkdtemp()) / 'tableau_luid_census.py'\n_copy.write_text(_src.replace(_old, _new, 1), encoding='utf-8')\nexec(compile(_copy.read_text(encoding='utf-8'), str(_copy), 'exec'), census.__dict__)\ncensus.__file__ = str(_copy)\n"
+)
+CENSUS_MUTATIONS.add("census-prints-a-glyph-again")
+INTENDED["census-prints-a-glyph-again"] = (
+    "tests/test_tableau_luid_census.py::test_an_unassessable_run_survives_a_cp1252_console"
+)
+
 INTENDED.update(
     {
         "guard-column-is-load-bearing-transport": "tests/test_tableau_luid_census.py::test_the_census_and_the_shipped_parser_agree_on_the_same_bytes",

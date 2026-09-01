@@ -11,8 +11,12 @@ re-measurable at any time by running the script.
 
 from __future__ import annotations
 
+import ast
 import json
+import os
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -631,3 +635,164 @@ def test_the_census_makes_exactly_one_request(monkeypatch, capsys):
     assert census_mod.main(["--env", "unused"]) == census_mod.EXIT_OK
     assert "VERDICT: NOT-PRESENT" in capsys.readouterr().out
     assert calls == ["/graphql"], f"the census must make exactly one request, made {calls}"
+
+
+# --------------------------------------------------------------------------- round 7: the console
+#
+# ⚠️ A defect the entire test infrastructure was structurally incapable of observing. `capsys` and CI
+# both write to Unicode-capable streams, so every mutation, anchor and parity check on this PR ran
+# through a stream that CANNOT fail this way. Seven rounds of review did not see it because the TEST
+# environment differed from the RUNTIME environment -- not because a fixture was wrong.
+#
+# Measured at 53a55dd on a CP1252 console: the unassessable path printed its counts, printed
+# `VERDICT: CANNOT-TELL`, and then raised UnicodeEncodeError and exited 1. A caller trying to
+# distinguish "unassessable" from "clean" got neither -- it got a crash, and the exit-2 guarantee
+# every round since round 3 was built to establish was destroyed at the last line.
+
+_CP1252_DRIVER = """
+import sys
+# ⚠️ Two paths, and the order matters. `{scripts}` is where the module under test lives, which a
+# mutation may redirect to a temp copy; `{support}` is the real scripts directory, so that copy's own
+# imports still resolve. With no mutation the two are identical and this is a no-op.
+sys.path.insert(0, r"{support}")
+sys.path.insert(0, r"{scripts}")
+import tableau_luid_census as census
+
+class _Stub:
+    def sign_in(self):
+        return None
+    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None):
+        return {status}, {body!r}, {{}}
+
+census._session = lambda _p: _Stub()
+raise SystemExit(census.main(["--env", "unused"]))
+"""
+
+
+@pytest.mark.parametrize(
+    "status, body, why",
+    [
+        (403, b"forbidden", "a transport refusal"),
+        (0, b"", "a network-error status"),
+        (200, b"not json at all", "an unparseable body"),
+        (200, b'{"data": null}', "a malformed envelope"),
+        (200, b'{"data": {"workbooks": []}}', "a valid response with nothing to assess"),
+    ],
+)
+def test_an_unassessable_run_survives_a_cp1252_console(status, body, why, tmp_path):
+    """⚠️ MUST be a subprocess. An in-process `capsys` test writes to a Unicode-capable stream and
+    cannot reproduce this at all, which is exactly why it survived seven rounds.
+
+    The requirement is not "it prints something sensible" -- it is that the EXIT CODE still arrives.
+    A run that reaches CANNOT-TELL and then dies delivering it is worse than one that never ran.
+    """
+    driver = tmp_path / "drive.py"
+    driver.write_text(
+        _CP1252_DRIVER.format(
+            scripts=str(Path(census_mod.__file__).parent),
+            support=str(Path(view_types_mod.__file__).parent),
+            status=status,
+            body=body,
+        ),
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [sys.executable, str(driver)],
+        capture_output=True,
+        check=False,
+        env={**os.environ, "PYTHONIOENCODING": "cp1252"},
+    )
+    stderr = proc.stderr.decode("cp1252", "replace")
+    assert "UnicodeEncodeError" not in stderr, f"{why} crashed while delivering its verdict:\n{stderr}"
+    assert "Traceback" not in stderr, f"{why} raised on a cp1252 console:\n{stderr}"
+    assert proc.returncode == census_mod.EXIT_CANNOT_TELL, f"{why} must still exit 2, got {proc.returncode}"
+
+
+def test_a_measurable_run_also_survives_a_cp1252_console(tmp_path):
+    """The discriminating control: exit 0 must arrive intact too, not merely exit 2."""
+    driver = tmp_path / "drive.py"
+    driver.write_text(
+        _CP1252_DRIVER.format(
+            scripts=str(Path(census_mod.__file__).parent),
+            support=str(Path(view_types_mod.__file__).parent),
+            status=200,
+            body=b'{"data": {"workbooks": [{"dashboards": [{"luid": "'
+            + LUID.encode()
+            + b'"}], "sheets": [{"luid": ""}]}]}}',
+        ),
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [sys.executable, str(driver)],
+        capture_output=True,
+        check=False,
+        env={**os.environ, "PYTHONIOENCODING": "cp1252"},
+    )
+    assert b"Traceback" not in proc.stderr
+    assert proc.returncode == census_mod.EXIT_OK
+
+
+#: Where a string can reach a console at RUNTIME. Comments and never-printed docstrings are
+#: deliberately excluded -- they are not written to a stream, and banning glyphs there would cost
+#: real readability for no safety.
+_RUNTIME_WRITES = {"print", "SystemExit"}
+_LOG_METHODS = {"debug", "info", "warning", "error", "exception", "critical"}
+_ARGPARSE_TEXT = {"description", "help", "epilog"}
+
+#: ⚠️ Scoped to the two modules this PR owns, not repo-wide, because sibling agents are mid-flight in
+#: other scripts and one of them is fixing this very class of bug in `--help`. Widening it is the
+#: obvious follow-up; the scoping is an ownership decision, not a judgement that the rest is clean.
+_GATED = ("tableau_luid_census.py", "tableau_view_types.py")
+
+
+def _runtime_non_ascii(path: Path) -> list[str]:
+    findings: list[str] = []
+
+    def scan(node, where: str) -> None:
+        for part in ast.walk(node):
+            if isinstance(part, ast.Constant) and isinstance(part.value, str) and not part.value.isascii():
+                findings.append(f"{path.name}:{part.lineno} via {where}: {part.value[:60]!r}")
+
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if not isinstance(node, ast.Call):
+            continue
+        name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+        if name in _RUNTIME_WRITES or name in _LOG_METHODS:
+            for arg in node.args:
+                scan(arg, name)
+        for keyword in node.keywords:
+            if keyword.arg in _ARGPARSE_TEXT:
+                scan(keyword.value, f"argparse {keyword.arg}")
+    return findings
+
+
+@pytest.mark.parametrize("module", _GATED)
+def test_no_runtime_string_can_break_a_cp1252_console(module):
+    """⚠️ The durable form of the fix. Repairing line 301 alone would have left the NEXT ``⚠️`` on
+    another refusal path as the same bug with a different line number.
+
+    This is the second CP1252 crash on this board in one day -- a sibling PR hit it when glyphs in a
+    module docstring became argparse's `description` and crashed `--help`. Two independent
+    occurrences makes it a repo-level trap, so the rule is enforced rather than written down:
+    **non-ASCII is fine in comments, in docstrings that are never printed, and in test names; it is
+    not safe in anything written to a console at runtime.**
+    """
+    found = _runtime_non_ascii(Path(census_mod.__file__).parent / module)
+    assert not found, (
+        "non-ASCII can reach a console at runtime, and a default Windows console is CP1252:\n  "
+        + "\n  ".join(found)
+        + "\nUse an ASCII marker such as [WARN]."
+    )
+
+
+def test_the_console_gate_can_actually_fire():
+    """⚠️ Positive control. A gate that cannot fail is not a gate -- round 6's lesson, applied here
+    before anyone has to learn it again on this file.
+    """
+    probe = Path(census_mod.__file__).parent / "tableau_luid_census.py"
+    source = probe.read_text(encoding="utf-8")
+    planted = source.replace('print("=== blank-luid census', 'print("=== \u26a0 blank-luid census', 1)
+    assert planted != source, "the plant anchor is stale"
+    scratch = Path(tempfile.mkdtemp()) / "tableau_luid_census.py"
+    scratch.write_text(planted, encoding="utf-8")
+    assert _runtime_non_ascii(scratch), "the gate did not notice a planted non-ASCII print"

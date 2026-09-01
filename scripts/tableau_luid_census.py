@@ -38,6 +38,14 @@ Sharing a function is a fact about today's code; **parity is the property**, and
 ``test_the_census_and_the_shipped_parser_agree_on_the_same_bytes`` is what stops the two drifting
 apart again.
 
+⚠️ **Nothing this script PRINTS may contain non-ASCII**, and the marker is spelled ``[WARN]``
+rather than a glyph for that reason. A default Windows console is CP1252: the unassessable path
+reached the right verdict and then died delivering it -- ``UnicodeEncodeError``, **exit 1**, after
+having already printed ``VERDICT: CANNOT-TELL``. So a caller trying to tell "unassessable" from
+"clean" got neither; it got a crash, and the exit-2 guarantee this script exists to provide was
+destroyed at the last line. ``test_no_runtime_string_can_break_a_cp1252_console`` is the gate; the
+docstrings and comments here are free to use glyphs because nothing writes them to a stream.
+
 ⚠️ **Counts and flags only, enforced rather than promised.** :func:`_emit` refuses to print anything
 that is not an ``int``, ``bool`` or ``None``, so a careless edit fails loudly instead of leaking a
 workbook name, a sheet name or a LUID. The census is built from SHAPES -- type, emptiness, regex
@@ -298,7 +306,7 @@ def main(argv: list[str] | None = None) -> int:
         print("would not have exercised it -- do not cite this run as evidence that it cannot occur.")
     elif not totals["assessable"]:
         print("The response was refused, unreadable, or only partly readable, so these counts")
-        print("describe what we could read, NOT the site. ⚠️ Do not record this as evidence.")
+        print("describe what we could read, NOT the site. [WARN] Do not record this as evidence.")
     else:
         print("No sheet or dashboard nodes came back, so nothing here exercises the case either way.")
     # ⚠️ The exit code FOLLOWS the verdict. It did not: a run that printed CANNOT-TELL still exited
