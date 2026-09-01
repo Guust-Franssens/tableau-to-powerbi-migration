@@ -377,7 +377,7 @@ Desktop on open** — they only surface when the PBIP is actually opened, not fr
     printing "no running-total measure in this model". Measured on the final build: `RUNNINGSUM(...)`,
     `MOVINGAVERAGE(...)` and `CALCULATE(SUM(x), t[d] <= MAX(t[d]))` — a comparison not wrapped in a
     literal `FILTER(` — all exited 0. Rounds 1–7 produced 5-6-2-0-3-4-3 findings and every round
-    closed the spellings the previous one found. See issue #427 for all reproductions.
+    closed the spellings the previous one found. See issue #425 for all reproductions.
   - ⚠️ **`RUNNINGSUM`/`MOVINGAVERAGE` are the strongest case for such a check, not an exclusion.**
     The deleted gate excluded them believing their relation argument was *required*. It is not:
     [`RUNNINGSUM`](https://learn.microsoft.com/en-us/dax/runningsum-function-dax) is
