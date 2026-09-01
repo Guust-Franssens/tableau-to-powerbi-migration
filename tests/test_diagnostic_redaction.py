@@ -863,6 +863,17 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
     },
     ("scripts/capture_tableau_oracle.py", "_capture_renders"): {
         "data_status": _A_STATUS_LITERAL,
+        "refusal": (
+            "FIXED-VOCABULARY: one of exactly two sentences this module authors -- the short-circuit "
+            "note, whose only variable is a leg name read out of the `_LEG_OF` constant, and "
+            "`_salvage_exhausted`'s budget note, whose only variables are two floats. Tainted only "
+            "because it is selected by `salvage`, which is derived from the data leg's status; no "
+            "branch of it interpolates anything that came off the wire"
+        ),
+        "{'status': NOT_ATTEMPTED, 'attempted': False, 'reason': refusal}": (
+            "FIXED-VOCABULARY: a module constant, a bool, and `refusal` -- certified immediately "
+            "above as one of two self-authored sentences"
+        ),
         "{'status': data_status, 'attempted': False, 'reason': 'the data leg was blocked at the source, and every "
         "render route comes from the same VizQL render, so no render could have succeeded'}": (
             "FIXED-VOCABULARY: a status literal, a bool, and a sentence this module authors -- nothing "

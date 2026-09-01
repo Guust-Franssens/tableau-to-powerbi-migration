@@ -8,6 +8,19 @@ the terminal summary: a non-zero exit alone means nothing (``pytest tests/nope.p
 run nothing), a collection error looks exactly like a named test error, and a dying xdist worker
 emits ``FAILED`` for a test that never executed.
 
+⚠️ **Every mutation names the TEST NODE IDs that must observe it, and is run and baselined against
+only those.** That is review round 1's finding 6, and it was not a theoretical risk: mutations run
+under ``-x``, so a whole-file target credits a mutation to whichever test in the file fails first.
+``merge-reads-only-the-last-batch`` was reported CAUGHT by a neighbour while its own documented
+anchor SURVIVED -- ``1 passed`` -- because that anchor's fixture already contained the whole answer
+in its final batch. The advertised proof did not exist. Three changes make that unrepeatable:
+
+* the mutation table maps name -> node IDs, so the claim is data rather than prose;
+* :func:`verify_anchors` refuses to run if any anchor names a test pytest does not collect -- an
+  anchor that selects nothing would be WORSE than a file, because pytest exits 4 for an unmatched
+  node ID and an exit-code scorer would read that as a detection;
+* the baseline is per-anchor, not per-file, so a green file cannot vouch for a test that never ran.
+
 Two discriminating controls run alongside the real mutations, because a harness that reports
 everything CAUGHT is indistinguishable from one that is not working:
 
@@ -18,12 +31,19 @@ everything CAUGHT is indistinguishable from one that is not working:
   harness reported 22/22 caught for exactly this reason: an import error exits non-zero, and a naive
   scorer reads that as a detection.
 
-The vacuity modes this file was written against, both measured in this repository:
+The vacuity modes this file was written against, all measured in this repository:
 
 * an assertion inside a branch the fixture never enters -- so several mutations here target the
   BRANCH SELECTOR (``_SHARED_ROOT_CAUSE``, ``_VIEW_HEALTH_FAILURES``) rather than the branch body;
 * a test that passes because the mutation broke something else -- which is why every mutation below
-  is a *plausible alternative implementation*, not a crash.
+  is a *plausible alternative implementation*, not a crash;
+* a fixture that already contains the answer, so no amount of reading less could change it -- the
+  finding-6 shape, now covered by the anchor's own docstring and by a partial-retry fixture.
+
+Several behaviours carry an OVER-correction mutation as well as the defect one
+(``a-tie-is-reported-even-when-it-decided-nothing``, ``default-budget-collapses-to-the-floor``,
+``salvage-deadline-applied-to-a-healthy-view``), because a rule that fires on everything is as
+useless as one that never fires, and only a second mutation can tell the two apart.
 """
 
 from __future__ import annotations
@@ -48,11 +68,23 @@ from mutation_harness import (  # noqa: E402  # pylint: disable=wrong-import-pos
 LEGS = "tests/test_capture_tableau_oracle_leg_decoupling.py"
 BATCH = "tests/test_group_oracle_multi_batch.py"
 
-# name -> (target suite, the patch injected as a pytest plugin at interpreter start)
-MUTATIONS: dict[str, tuple[str, str]] = {
+# name -> (the test NODE IDs that must observe it, the patch injected as a pytest plugin at startup)
+#
+# ⚠️ Node IDs, not files, and that is review round 1's finding 6. Mutations run under ``-x``, so a
+# whole-file target credits a mutation to whichever test fails FIRST -- and the failing test may have
+# nothing to do with the behaviour under test. Measured on this very file:
+# ``merge-reads-only-the-last-batch`` was reported CAUGHT by
+# ``test_the_two_legs_may_come_from_DIFFERENT_batches`` while its own documented anchor,
+# ``test_a_later_batch_that_finally_succeeded_is_promoted``, SURVIVED -- 1 passed. The advertised
+# proof did not exist. Anchoring makes the mutation-to-test mapping a checkable fact, and
+# ``verify_anchors`` fails the run if any anchor names a test that is not collected.
+MUTATIONS: dict[str, tuple[tuple[str, ...], str]] = {
     # ---------------------------------------------------------------- the defect itself
     "restore-the-early-return": (
-        LEGS,
+        (
+            "tests/test_capture_tableau_oracle_leg_decoupling.py::test_a_failed_data_leg_no_longer_skips_the_render",
+            "tests/test_capture_tableau_oracle_leg_decoupling.py::test_the_salvaged_render_is_a_real_status_not_a_placeholder",
+        ),
         """
 import capture_tableau_oracle as o
 _orig = o._capture_renders
@@ -65,7 +97,9 @@ o._capture_renders = renders
 """,
     ),
     "salvage-uses-the-full-retry-policy": (
-        LEGS,
+        (
+            "tests/test_capture_tableau_oracle_leg_decoupling.py::test_a_salvage_render_gets_one_attempt_and_no_retry_budget",
+        ),
         """
 import capture_tableau_oracle as o
 # Decoupling without a cost guard: the salvage render re-asks a view that has just spent a full
@@ -74,7 +108,9 @@ o.SALVAGE_RETRY = o.RetryPolicy(max_attempts=5, budget_sec=1e6)
 """,
     ),
     "cap-every-render-at-one-attempt": (
-        LEGS,
+        (
+            "tests/test_capture_tableau_oracle_leg_decoupling.py::test_a_render_after_a_SUCCESSFUL_data_leg_keeps_the_full_session_policy",
+        ),
         """
 import capture_tableau_oracle as o
 # The plausible-but-wrong cost guard: cap ALL renders, not just salvage ones. Cheap, and it silently
@@ -86,7 +122,9 @@ o._capture_render = render
 """,
     ),
     "never-short-circuit-the-remaining-salvage-legs": (
-        LEGS,
+        (
+            "tests/test_capture_tableau_oracle_leg_decoupling.py::test_the_first_failed_salvage_render_stops_the_rest_and_records_them",
+        ),
         """
 import capture_tableau_oracle as o
 # Every requested tier is asked even after a sibling drawn from the same VizQL render failed --
@@ -95,7 +133,9 @@ o._VIEW_HEALTH_FAILURES = frozenset()
 """,
     ),
     "short-circuit-on-a-version-gate-too": (
-        LEGS,
+        (
+            "tests/test_capture_tableau_oracle_leg_decoupling.py::test_a_version_gate_does_not_stop_the_remaining_salvage_legs",
+        ),
         """
 import capture_tableau_oracle as o
 # Treats a CONFIGURATION fault as evidence the view is unwell, which loses the PNG on every
@@ -104,7 +144,9 @@ o._VIEW_HEALTH_FAILURES = o._VIEW_HEALTH_FAILURES | {"unsupported_api_version", 
 """,
     ),
     "attempt-renders-after-a-credential-block": (
-        LEGS,
+        (
+            "tests/test_capture_tableau_oracle_leg_decoupling.py::test_a_credential_block_still_skips_the_renders_and_they_inherit_its_status",
+        ),
         """
 import capture_tableau_oracle as o
 # Drops the carve-out: a credential-blocked view now spends render calls that cannot succeed, and
@@ -113,7 +155,9 @@ o._SHARED_ROOT_CAUSE = frozenset()
 """,
     ),
     "stamp-skipped-credential-legs-as-failed": (
-        LEGS,
+        (
+            "tests/test_capture_tableau_oracle_leg_decoupling.py::test_a_credential_only_run_still_exits_2_after_decoupling",
+        ),
         """
 import capture_tableau_oracle as o
 _orig = o._capture_renders
@@ -128,7 +172,9 @@ o._capture_renders = renders
 """,
     ),
     "omit-the-not-attempted-record": (
-        LEGS,
+        (
+            "tests/test_capture_tableau_oracle_leg_decoupling.py::test_a_requested_leg_is_never_absent_so_absent_means_not_requested",
+        ),
         """
 import capture_tableau_oracle as o
 _orig = o._capture_renders
@@ -144,7 +190,9 @@ o._capture_renders = renders
     ),
     # ------------------------------------------------------------- the UNESTABLISHED census
     "census-counts-every-view": (
-        LEGS,
+        (
+            "tests/test_capture_tableau_oracle_leg_decoupling.py::test_a_view_whose_render_SUCCEEDED_is_not_unestablished",
+        ),
         """
 import tableau_oracle_manifest as m
 m.render_unestablished = lambda records, requested: [
@@ -153,7 +201,7 @@ m.render_unestablished = lambda records, requested: [
 """,
     ),
     "census-ignores-a-successful-tier": (
-        LEGS,
+        ("tests/test_capture_tableau_oracle_leg_decoupling.py::test_one_ok_tier_is_enough_to_establish_a_reference",),
         """
 import tableau_oracle_manifest as m
 _orig = m.render_unestablished
@@ -173,7 +221,9 @@ m.render_unestablished = census
 """,
     ),
     "census-fires-when-no-render-was-requested": (
-        LEGS,
+        (
+            "tests/test_capture_tableau_oracle_leg_decoupling.py::test_no_render_requested_means_nothing_is_unestablished",
+        ),
         """
 import tableau_oracle_manifest as m
 _orig = m.render_unestablished
@@ -182,7 +232,7 @@ m.render_unestablished = lambda records, requested: _orig(records, requested or 
     ),
     # --------------------------------------------------------------------- --rest-timeout
     "ignore-the-rest-timeout": (
-        LEGS,
+        ("tests/test_capture_tableau_oracle_leg_decoupling.py::test_the_request_timeout_reaches_the_transport",),
         """
 import capture_tableau_oracle as o
 _orig = o.TableauSession.__init__
@@ -193,7 +243,9 @@ o.TableauSession.__init__ = init
 """,
     ),
     "freeze-the-default-budget": (
-        LEGS,
+        (
+            "tests/test_capture_tableau_oracle_leg_decoupling.py::test_the_cli_accepts_a_raised_timeout_and_the_budget_follows_it",
+        ),
         """
 import capture_tableau_oracle as o
 # The budget stops tracking the timeout: raise --rest-timeout past 360s and the deadline is already
@@ -202,7 +254,9 @@ o.default_retry_budget = lambda timeout_sec: o.DEFAULT_RETRY_BUDGET_SEC
 """,
     ),
     "clamp-an-explicit-budget": (
-        LEGS,
+        (
+            "tests/test_capture_tableau_oracle_leg_decoupling.py::test_an_explicit_budget_is_honoured_even_when_the_timeout_moves",
+        ),
         """
 import capture_tableau_oracle as o
 _orig = o.build_retry_policy
@@ -216,7 +270,9 @@ o.build_retry_policy = build
 """,
     ),
     "warn-against-the-module-constant": (
-        LEGS,
+        (
+            "tests/test_capture_tableau_oracle_leg_decoupling.py::test_the_floor_warning_names_the_timeout_actually_in_force",
+        ),
         """
 import capture_tableau_oracle as o
 def build(max_attempts, budget_sec, timeout_sec=o.REST_TIMEOUT_SEC):
@@ -236,7 +292,7 @@ o.build_retry_policy = build
     ),
     # ------------------------------------------------------------------- multi-batch promotion
     "merge-reads-only-the-last-batch": (
-        BATCH,
+        ("tests/test_group_oracle_multi_batch.py::test_a_later_batch_that_finally_succeeded_is_promoted",),
         """
 import group_oracle_by_workbook as g
 _orig = g.load_batches
@@ -244,7 +300,9 @@ g.load_batches = lambda dirs: _orig(dirs)[-1:]
 """,
     ),
     "merge-ignores-the-on-disk-check": (
-        BATCH,
+        (
+            "tests/test_group_oracle_multi_batch.py::test_a_newer_batch_whose_file_is_GONE_does_not_displace_an_older_one_that_has_it",
+        ),
         """
 import group_oracle_by_workbook as g
 # A manifest entry is treated as evidence: a newer `ok` whose bytes are gone displaces an older
@@ -253,7 +311,7 @@ g._leg_is_promotable = lambda entry, root: entry.get("status") == "ok" and bool(
 """,
     ),
     "merge-uses-argv-order-not-captured-at": (
-        BATCH,
+        ("tests/test_group_oracle_multi_batch.py::test_argument_order_does_not_decide_the_winner_when_timestamps_do",),
         """
 import group_oracle_by_workbook as g
 _orig = g._merge_one_view
@@ -265,7 +323,7 @@ g._merge_one_view = merge_one
 """,
     ),
     "merge-ignores-the-per-view-timestamp": (
-        BATCH,
+        ("tests/test_group_oracle_multi_batch.py::test_a_per_view_timestamp_outranks_the_batch_manifest_timestamp",),
         """
 import group_oracle_by_workbook as g
 _orig = g._merge_one_view
@@ -276,7 +334,7 @@ g._merge_one_view = merge_one
 """,
     ),
     "merge-drops-a-leg-no-batch-established": (
-        BATCH,
+        ("tests/test_group_oracle_multi_batch.py::test_a_view_no_batch_could_render_stays_visibly_unestablished",),
         """
 import group_oracle_by_workbook as g
 _orig = g._merge_one_view
@@ -290,7 +348,7 @@ g._merge_one_view = merge_one
 """,
     ),
     "merge-never-reports-the-basis": (
-        BATCH,
+        ("tests/test_group_oracle_multi_batch.py::test_an_undated_batch_is_reported_rather_than_dated_by_argv",),
         """
 import group_oracle_by_workbook as g
 _orig = g.merge_batches
@@ -302,7 +360,7 @@ g.merge_batches = merge
 """,
     ),
     "source-batch-is-never-recorded": (
-        BATCH,
+        ("tests/test_group_oracle_multi_batch.py::test_every_promoted_artifact_names_the_batch_it_came_from",),
         """
 import group_oracle_by_workbook as g
 _orig = g._merge_one_view
@@ -317,7 +375,9 @@ g._merge_one_view = merge_one
 """,
     ),
     "workbook-census-omitted": (
-        BATCH,
+        (
+            "tests/test_group_oracle_multi_batch.py::test_the_workbook_manifest_says_which_views_have_no_establishable_render",
+        ),
         """
 import group_oracle_by_workbook as g
 _orig = g.subset_manifest
@@ -331,7 +391,9 @@ g.subset_manifest = subset
 """,
     ),
     "workbook-census-reads-the-capture-not-the-grouping": (
-        BATCH,
+        (
+            "tests/test_group_oracle_multi_batch.py::test_an_artifact_the_grouping_could_not_place_counts_as_unestablished",
+        ),
         """
 import group_oracle_by_workbook as g
 _orig = g.subset_manifest
@@ -347,9 +409,176 @@ def subset(manifest, workbook, views):
 g.subset_manifest = subset
 """,
     ),
+    # ------------------------------------------------- review round 1: render intent, ties, salvage
+    "intent-copied-from-the-newest-batch-only": (
+        ("tests/test_group_oracle_multi_batch.py::test_a_later_DATA_ONLY_batch_does_not_erase_a_known_render_gap",),
+        """
+import group_oracle_by_workbook as g
+_orig = g._merge_render_intent
+def intent(batches, views):
+    out = _orig(batches, views)
+    # The round-1 finding-2 defect: intent taken from the newest batch, so a later data-only run
+    # rewrites `requested_renders` to [] and every known render gap reads as "never requested".
+    newest = max(batches, key=lambda b: (b.captured_at, b.order))
+    out["requested_renders"] = sorted(newest.manifest.get("requested_renders") or [])
+    return out
+g._merge_render_intent = intent
+""",
+    ),
+    "leg-fallback-takes-the-newest-VIEW-not-the-newest-record": (
+        ("tests/test_group_oracle_multi_batch.py::test_a_later_DATA_ONLY_batch_does_not_erase_a_known_render_gap",),
+        """
+import group_oracle_by_workbook as g
+_orig = g._resolve_leg
+def resolve(candidates, kind, roots):
+    winner, ties = _orig(candidates, kind, roots)
+    # The other half of finding 2: when nothing is promotable, fall back to the newest VIEW rather
+    # than the newest view that HAS a record for this leg -- so a data-only batch erases the older
+    # batch's failed image instead of preserving it.
+    if winner is not None and not g._leg_is_promotable(winner[1].get(kind) or {}, roots[winner[0].label]):
+        newest = candidates[0]
+        return (newest if isinstance(newest[1].get(kind), dict) else None), ties
+    return winner, ties
+g._resolve_leg = resolve
+""",
+    ),
+    "reference_required-taken-from-the-newest-batch": (
+        (
+            "tests/test_group_oracle_multi_batch.py"
+            "::test_a_batch_that_required_a_reference_is_not_overruled_by_one_that_did_not",
+        ),
+        """
+import group_oracle_by_workbook as g
+_orig = g._merge_render_intent
+def intent(batches, views):
+    out = _orig(batches, views)
+    newest = max(batches, key=lambda b: (b.captured_at, b.order))
+    out["reference_required"] = bool(newest.manifest.get("reference_required"))
+    out["reference_missing"] = bool(out["reference_required"] and not out.get("reference_missing") is False)
+    return out
+g._merge_render_intent = intent
+""",
+    ),
+    "ties-reported-as-captured_at": (
+        ("tests/test_group_oracle_multi_batch.py::test_equal_timestamps_are_reported_as_a_tie_not_as_captured_at",),
+        """
+import group_oracle_by_workbook as g
+_orig = g._resolve_leg
+def resolve(candidates, kind, roots):
+    winner, _ties = _orig(candidates, kind, roots)
+    # Finding 5: equal timestamps decide nothing, but the basis still claimed `captured_at`.
+    return winner, []
+g._resolve_leg = resolve
+""",
+    ),
+    "a-tie-is-reported-even-when-it-decided-nothing": (
+        ("tests/test_group_oracle_multi_batch.py::test_a_tie_that_decides_NOTHING_is_not_reported",),
+        """
+import group_oracle_by_workbook as g
+_orig = g._resolve_leg
+def resolve(candidates, kind, roots):
+    winner, _ties = _orig(candidates, kind, roots)
+    # The opposite over-reaction: flag every shared timestamp, including ones evidence separated,
+    # until the field fires on ordinary runs and nobody reads it.
+    if winner is None:
+        return winner, []
+    same = [b.label for b, v in candidates if g._stamp(b, v) == g._stamp(*winner)]
+    return winner, (same if len(same) > 1 else [])
+g._resolve_leg = resolve
+""",
+    ),
+    "reauthenticate-on-the-final-attempt": (
+        (
+            "tests/test_capture_tableau_oracle_leg_decoupling.py"
+            "::test_a_lost_session_on_the_final_attempt_does_not_reauthenticate",
+        ),
+        """
+import capture_tableau_oracle as o
+_orig_sign_in = o.TableauSession.sign_in
+_orig_export = o.TableauSession.export
+def export(self, path, *, api=None, retry=None):
+    # Finding 3a: re-authenticate whenever the session is lost, even on the policy's final attempt,
+    # where the new token cannot be used by this export. Modelled by signing in on the way out of a
+    # session_lost failure, which is what the un-guarded branch effectively did.
+    try:
+        return _orig_export(self, path, api=api, retry=retry)
+    except o.ExportFailed as exc:
+        if exc.kind == "session_lost":
+            self.sign_in()
+        raise
+o.TableauSession.export = export
+""",
+    ),
+    "no-shared-salvage-deadline": (
+        ("tests/test_capture_tableau_oracle_leg_decoupling.py::test_three_slow_salvage_legs_share_ONE_deadline",),
+        """
+import capture_tableau_oracle as o
+# Finding 3b: attempts are bounded per leg but the SEQUENCE is not, so three legs that each fail
+# after a full request timeout cost three timeouts against a stated one-timeout bound.
+o._salvage_exhausted = lambda deadline, timeout: ""
+""",
+    ),
+    "salvage-deadline-admits-a-leg-that-cannot-finish": (
+        ("tests/test_capture_tableau_oracle_leg_decoupling.py::test_three_slow_salvage_legs_share_ONE_deadline",),
+        """
+import capture_tableau_oracle as o
+_orig = o._salvage_exhausted
+def exhausted(deadline, timeout):
+    # The subtler version: admit while the deadline has not PASSED, rather than while a whole
+    # request still fits. A leg starting at deadline-epsilon then blocks for a full timeout, so the
+    # real ceiling is budget + timeout and creeps with every tier.
+    return "" if o.time.monotonic() < deadline else _orig(deadline, timeout)
+o._salvage_exhausted = exhausted
+""",
+    ),
+    "salvage-deadline-applied-to-a-healthy-view": (
+        (
+            "tests/test_capture_tableau_oracle_leg_decoupling.py"
+            "::test_the_salvage_deadline_does_not_apply_when_the_data_leg_SUCCEEDED",
+        ),
+        """
+import capture_tableau_oracle as o
+_orig = o._capture_renders
+def renders(session, record, wants, targets):
+    # Over-reach: apply the salvage ceiling to every view, so a healthy slow render loses its tiers.
+    record = dict(record) if False else record
+    saved = record["data"]["status"]
+    record["data"]["status"] = "transient"
+    try:
+        return _orig(session, record, wants, targets)
+    finally:
+        record["data"]["status"] = saved
+o._capture_renders = renders
+""",
+    ),
+    "default-budget-is-a-flat-2x": (
+        (
+            "tests/test_capture_tableau_oracle_leg_decoupling.py"
+            "::test_the_default_budget_is_never_below_the_admission_floor",
+            "tests/test_capture_tableau_oracle_leg_decoupling.py"
+            "::test_a_sub_second_timeout_actually_retries_a_full_timeout_failure",
+        ),
+        """
+import capture_tableau_oracle as o
+# Finding 4: 2x is below the admission floor for any sub-second timeout, so a full-timeout failure
+# gets ZERO retries at the DEFAULT budget -- the footgun the default exists to prevent.
+o.default_retry_budget = lambda timeout_sec: 2.0 * timeout_sec
+""",
+    ),
+    "default-budget-collapses-to-the-floor": (
+        ("tests/test_capture_tableau_oracle_leg_decoupling.py::test_the_ratio_still_dominates_at_realistic_timeouts",),
+        """
+import capture_tableau_oracle as o
+# The opposite over-correction: taking the floor everywhere shrinks every real budget from 360s to
+# 181s while still clearing the floor, so the arithmetic test alone cannot see it.
+o.default_retry_budget = o.retry_admission_floor
+""",
+    ),
     # -------------------------------------------------------------- discriminating controls
     "control-cosmetic-log-wording": (
-        LEGS,
+        (
+            "tests/test_capture_tableau_oracle_leg_decoupling.py::test_the_manifest_counts_and_names_the_views_with_no_establishable_render",
+        ),
         """
 import tableau_oracle_manifest as m
 _orig = m._log_unestablished
@@ -360,7 +589,7 @@ m._log_unestablished = log
 """,
     ),
     "control-cosmetic-batch-report-key": (
-        BATCH,
+        ("tests/test_group_oracle_multi_batch.py::test_the_grouping_report_names_every_batch_it_merged",),
         """
 import group_oracle_by_workbook as g
 _orig = g._write_grouping_report
@@ -372,14 +601,14 @@ g._write_grouping_report = report
 """,
     ),
     "control-absent-anchor-legs": (
-        LEGS,
+        ("tests/test_capture_tableau_oracle_leg_decoupling.py::test_a_failed_data_leg_no_longer_skips_the_render",),
         """
 import capture_tableau_oracle as o
 o._this_symbol_does_not_exist.attribute = 1
 """,
     ),
     "control-absent-anchor-batch": (
-        BATCH,
+        ("tests/test_group_oracle_multi_batch.py::test_a_later_batch_that_finally_succeeded_is_promoted",),
         """
 import group_oracle_by_workbook as g
 g._also_not_a_real_symbol.attribute = 1
@@ -396,21 +625,60 @@ EXPECTED = {
 }
 
 
-def baseline(target: str) -> int:
-    """A mutation is only evidence against a clean baseline."""
+def verify_anchors() -> list[str]:
+    """Every declared anchor must name a test pytest actually collects.
+
+    ⚠️ The whole point of anchoring is that the mutation-to-test mapping is CHECKABLE. An anchor that
+    silently names nothing would be worse than a file target: pytest exits 4 for an unmatched node ID,
+    and a scorer that reads a non-zero exit as a detection would report the mutation CAUGHT by a test
+    that never ran. This is the same false-green shape the shared harness's own docstring records.
+    """
+    collected: set[str] = set()
+    for suite in (LEGS, BATCH):
+        proc = subprocess.run(
+            [PY, "-m", "pytest", suite, "--collect-only", "-q", "--no-header", "--color=no"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=sanitized_env(),
+        )
+        collected.update(line.strip() for line in proc.stdout.splitlines() if "::" in line)
+
+    def selects(anchor: str) -> bool:
+        # A PARAMETRIZED test collects as `path::name[param]`, and `path::name` is the node ID that
+        # selects every one of them -- which is what an anchor for a parametrized behaviour should
+        # say. Caught on this file's first anchored run, and it is the reason this check exists: the
+        # bare name looked wrong to an exact-match verifier while being exactly right to pytest.
+        return anchor in collected or any(node.startswith(f"{anchor}[") for node in collected)
+
+    return sorted(
+        f"{name} -> {anchor}"
+        for name, (anchors, _code) in MUTATIONS.items()
+        for anchor in anchors
+        if not selects(anchor)
+    )
+
+
+def baseline(anchors: tuple[str, ...]) -> tuple[int, str]:
+    """A mutation is only evidence against a clean baseline -- of ITS OWN anchors, not of a file.
+
+    Baselining the whole file would readmit exactly what anchoring removes: a green file says nothing
+    about whether the anchors were even collected, and under ``-x`` a mutation could be credited to a
+    neighbour the baseline had covered.
+    """
     proc = subprocess.run(
-        [PY, "-m", "pytest", target, "-q", "--no-header", "--color=no"],
+        [PY, "-m", "pytest", *anchors, "-q", "--no-header", "--color=no"],
         cwd=ROOT,
         capture_output=True,
         text=True,
         check=False,
         env=sanitized_env(),
     )
-    print(f"BASELINE {target:56s} exit={proc.returncode}  {last_line(proc)}")
-    return proc.returncode
+    return proc.returncode, last_line(proc)
 
 
-def classify(name: str, code: str, target: str) -> tuple[str, str]:
+def classify(name: str, code: str, target: tuple[str, ...]) -> tuple[str, str]:
     """Score one mutation as CAUGHT / SURVIVED / INVALID / HARNESS-ERROR, with a detail line."""
     try:
         _label, returncode, detail, outcomes = run(name, code, target)
@@ -439,18 +707,31 @@ def classify(name: str, code: str, target: str) -> tuple[str, str]:
 
 
 def main() -> int:
-    """Run every mutation and fail unless each scored what it was declared to score."""
-    dirty = [target for target in (LEGS, BATCH) if baseline(target) != 0]
-    if dirty:
-        print("\nHARNESS ERROR: baseline is not clean, so no mutation verdict is trustworthy:", dirty)
+    """Run every mutation against its own anchors, and fail unless each scored what it declared."""
+    missing = verify_anchors()
+    if missing:
+        print("HARNESS ERROR: an anchor names a test pytest does not collect, so it proves nothing:")
+        for item in missing:
+            print(f"  {item}")
         return 2
+
+    dirty = []
+    for anchors in sorted({anchors for anchors, _code in MUTATIONS.values()}):
+        code, summary = baseline(anchors)
+        print(f"BASELINE exit={code}  {summary:34s} {' + '.join(a.split('::')[-1] for a in anchors)}")
+        if code != 0:
+            dirty.append(anchors)
+    if dirty:
+        print("\nHARNESS ERROR: an anchor baseline is not clean, so no verdict on it is trustworthy:", dirty)
+        return 2
+
     print()
     wrong = []
-    for name, (target, code) in MUTATIONS.items():
-        verdict, detail = classify(name, code, target)
+    for name, (anchors, code) in MUTATIONS.items():
+        verdict, detail = classify(name, code, anchors)
         expected = EXPECTED[name]
         ok = verdict.rstrip("*") == expected
-        print(f"{verdict:13s} {'' if ok else f'(EXPECTED {expected}) '}{name:48s} -> {detail}")
+        print(f"{verdict:13s} {'' if ok else f'(EXPECTED {expected}) '}{name:50s} -> {detail}")
         if not ok:
             wrong.append(f"{name}: expected {expected}, got {verdict}")
     print()
@@ -460,7 +741,7 @@ def main() -> int:
             print(f"  {item}")
         return 1
     print(
-        f"all {len(MUTATIONS)} mutations scored as declared "
+        f"all {len(MUTATIONS)} mutations scored as declared, each against its OWN anchor(s) "
         f"({sum(1 for v in EXPECTED.values() if v == 'CAUGHT')} caught, "
         f"{sum(1 for v in EXPECTED.values() if v == 'SURVIVED')} cosmetic controls survived, "
         f"{sum(1 for v in EXPECTED.values() if v == 'INVALID')} absent-anchor controls invalid)"

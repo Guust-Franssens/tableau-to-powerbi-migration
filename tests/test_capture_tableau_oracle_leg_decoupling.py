@@ -45,6 +45,9 @@ FEDERATED_CREDENTIAL = (
     "FederatedDataSourceException: one or more connections need attention</detail></error>"
 )
 SVG_GATE = f"<error code='400'><detail>{oracle.SVG_VERSION_MARKER} 3.29 or later</detail></error>"
+SESSION_LOST = (
+    "<?xml version='1.0'?><tsResponse><error code='401002'><summary>Unauthorized Access</summary></error></tsResponse>"
+)
 PNG = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + (800).to_bytes(4, "big") + (600).to_bytes(4, "big") + b"\x08\x02"
 SVG = b'<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"></svg>'
 PDF = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n%%EOF\n"
@@ -72,6 +75,7 @@ class FakeSession(oracle.TableauSession):
         super().__init__(_creds(), retry)
         self.routes = {key: list(value) for key, value in routes.items()}
         self.calls: list[str] = []
+        self.signin_count = 0
         self.token, self.site_id = "tok", "sid"
 
     def _request(self, method, path, *, body=None, accept=None, authed=True, api=None):  # noqa: ARG002
@@ -87,6 +91,7 @@ class FakeSession(oracle.TableauSession):
         return sum(1 for call in self.calls if marker in call)
 
     def sign_in(self):
+        self.signin_count += 1
         self.token, self.site_id = "tok", "sid"
 
 
@@ -94,6 +99,57 @@ class FakeSession(oracle.TableauSession):
 def _no_real_sleep(monkeypatch):
     """Backoff must not actually sleep, but the delay is still computed."""
     monkeypatch.setattr(oracle.time, "sleep", lambda _seconds: None)
+
+
+class _VirtualClock:
+    """A ``monotonic`` / ``perf_counter`` / ``sleep`` stand-in whose time moves only when we say so.
+
+    The same shape as ``test_capture_tableau_oracle_retry_budget.VirtualClock``, and duplicated on
+    purpose rather than imported: these suites run under ``xdist --dist loadfile`` and a cross-file
+    import would couple two files that are otherwise independent. It exists here because the salvage
+    bound is a WALL-CLOCK claim -- review round 1's finding 3 was hiding precisely because the
+    original tests proved it by attempt COUNT, which a clock-free double cannot contradict.
+    """
+
+    def __init__(self) -> None:
+        self.t = 0.0
+
+    def monotonic(self) -> float:
+        return self.t
+
+    def perf_counter(self) -> float:
+        return self.t
+
+    def sleep(self, seconds: float) -> None:
+        self.t += seconds
+
+    def strftime(self, fmt: str, *args) -> str:  # noqa: ARG002
+        """`capture_view` stamps `captured_at`; the clock must answer that too or it cannot stand in."""
+        return "2026-08-18T14:46:00Z"
+
+    def gmtime(self, *args):  # noqa: ARG002
+        return None
+
+
+class _TimedSession(FakeSession):
+    """A path-routed session whose responses also CONSUME virtual wall-clock.
+
+    Each scripted entry is ``(duration_sec, status, body, headers)``. ``duration_sec`` is how long the
+    request blocks before returning -- a socket timeout blocks for the whole request timeout -- so a
+    sequence of legs can be measured against a shared budget without a socket or a real wait.
+    """
+
+    def __init__(self, clock: _VirtualClock, routes: dict[str, list], retry=None):
+        super().__init__({key: [entry[1:] for entry in value] for key, value in routes.items()}, retry)
+        self._clock = clock
+        self._durations = {key: [entry[0] for entry in value] for key, value in routes.items()}
+
+    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None):
+        for key, durations in self._durations.items():
+            if key in path:
+                self._clock.t += durations[0] if len(durations) == 1 else durations.pop(0)
+                break
+        return super()._request(method, path, body=body, accept=accept, authed=authed, api=api)
 
 
 def _view() -> dict:
@@ -389,3 +445,155 @@ def test_the_floor_and_default_still_track_the_module_constant():
     prose in the module header stops describing the code."""
     assert oracle.RETRY_ADMISSION_FLOOR_SEC == oracle.retry_admission_floor(oracle.REST_TIMEOUT_SEC)
     assert oracle.DEFAULT_RETRY_BUDGET_SEC == oracle.default_retry_budget(oracle.REST_TIMEOUT_SEC)
+
+
+# ---------------------------------------- the DEFAULT budget must clear its own admission floor
+
+
+@pytest.mark.parametrize("timeout", [0.25, 0.5, 0.9, 1.0, 2.0, 30.0, 180.0, 600.0])
+def test_the_default_budget_is_never_below_the_admission_floor(timeout):
+    """⚠️ Review round 1, finding 4 -- reproduced across the range, then fixed.
+
+    The default was a flat `2 x timeout`, but admitting a retry needs `timeout + first backoff`, and
+    the backoff is an ABSOLUTE 1.0s. So for any sub-second timeout the DEFAULT was under its own
+    floor: measured `0.25s -> budget 0.5s vs floor 1.25s`, which grants ZERO retries to a
+    full-timeout failure -- the exact footgun the default exists to prevent. `--rest-timeout` takes a
+    float with no minimum, so the CLI reaches it.
+    """
+    assert oracle.default_retry_budget(timeout) >= oracle.retry_admission_floor(timeout)
+
+
+def test_the_ratio_still_dominates_at_realistic_timeouts():
+    """Discriminating control: `max(2x, floor)` must not quietly become `floor` everywhere, which
+    would shrink every real budget from 360s to 181s while still passing the test above."""
+    assert oracle.default_retry_budget(180.0) == 360.0
+    assert oracle.default_retry_budget(600.0) == 1200.0
+    assert oracle.default_retry_budget(0.25) == oracle.retry_admission_floor(0.25)
+
+
+def test_a_sub_second_timeout_actually_retries_a_full_timeout_failure(monkeypatch):
+    """The behaviour behind the arithmetic: a failure that blocks for the WHOLE request timeout must
+    still be retried at the default budget, at any timeout the CLI accepts. Asserted by request
+    COUNT through the real `export` loop, because the arithmetic above cannot see the loop."""
+    timeout = 0.25
+    clock = _VirtualClock()
+    monkeypatch.setattr(oracle, "time", clock)
+    session = _TimedSession(
+        clock,
+        {"/data": [(timeout, 0, TIMEOUT_BODY, {}), (0.01, 200, "a,b\n1,2\n", {})]},
+        retry=oracle.build_retry_policy(oracle.DEFAULT_MAX_ATTEMPTS, None, timeout),
+    )
+    payload, _elapsed, stats = session.export("/views/x/data")
+
+    assert payload == b"a,b\n1,2\n"
+    assert stats["retries"] == 1, "the full-timeout failure must be retried, not abandoned"
+
+
+# ------------------------------------------------ the salvage bound is SHARED and actually enforced
+
+
+def test_a_lost_session_on_the_final_attempt_does_not_reauthenticate(tmp_path):
+    """⚠️ Review round 1, finding 3a -- reproduced, then fixed.
+
+    A one-attempt salvage leg returning `401002` performed one render request AND a full `sign_in`,
+    which runs on the SESSION policy and can consume several more request timeouts. The re-auth was
+    then WASTED: the loop `continue`s into an attempt the range does not contain, so the export
+    failed anyway. Unbounded work in service of nothing.
+    """
+    session = FakeSession(
+        {"/data": [(0, TIMEOUT_BODY, {})], "/image": [(401, SESSION_LOST, {})]},
+        retry=oracle.RetryPolicy(max_attempts=1, budget_sec=1e6),
+    )
+    record = _capture(session, tmp_path)
+
+    assert record["image"]["status"] == "session_lost"
+    assert session.signin_count == 0, "re-authenticating on the final attempt cannot help this export"
+    assert "final attempt" in record["image"]["detail"] or "the last this policy allows" in record["image"]["detail"]
+
+
+def test_a_lost_session_with_attempts_remaining_still_reauthenticates(tmp_path):
+    """The discriminating control. The guard is 'no attempt left', NOT 'never re-authenticate' --
+    session loss mid-capture is recoverable and abandoning it would throw away estate progress."""
+    session = FakeSession(
+        {"/data": [(401, SESSION_LOST, {}), (200, "a,b\n1,2\n", {})]},
+        retry=oracle.RetryPolicy(max_attempts=3, budget_sec=1e6),
+    )
+    record = oracle.capture_view(session, _view(), tmp_path, frozenset(), None)
+
+    assert record["data"]["status"] == "ok"
+    assert session.signin_count == 1
+
+
+def test_three_slow_salvage_legs_share_ONE_deadline(monkeypatch, tmp_path):
+    """⚠️ Review round 1, finding 3b -- reproduced with a virtual clock, then fixed.
+
+    `format_mismatch` deliberately does NOT short-circuit the remaining tiers (it is a configuration
+    fault, not evidence the view is unwell), so three such legs were each attempted with no cross-leg
+    limit: 3 x 179.9s = **539.7s against a stated 180s bound**. The legs now share one deadline, and
+    a leg is admitted only while a WHOLE request timeout still fits inside it.
+    """
+    clock = _VirtualClock()
+    monkeypatch.setattr(oracle, "time", clock)
+    slow = 179.9
+    session = _TimedSession(
+        clock,
+        {
+            "/data": [(slow, 0, TIMEOUT_BODY, {})],
+            "?resolution=high": [(slow, 200, SVG, {"Content-Type": "image/svg+xml"})],
+            "?format=svg": [(slow, 200, PNG, {"Content-Type": "image/png"})],
+            "/pdf": [(slow, 200, PNG, {"Content-Type": "image/png"})],
+        },
+        retry=oracle.RetryPolicy(max_attempts=1, budget_sec=1e6),
+    )
+    started = clock.t
+    record = oracle.capture_view(session, _view(), tmp_path, frozenset({"png", "svg", "pdf"}), None)
+    salvage_elapsed = clock.t - started - slow  # the data leg's own cost is not the salvage budget
+
+    ceiling = oracle.SALVAGE_BUDGET_MULTIPLIER * oracle.REST_TIMEOUT_SEC
+    assert salvage_elapsed <= ceiling, f"{salvage_elapsed}s of salvage against a {ceiling}s ceiling"
+    attempted = [leg for leg in ("image", "svg", "pdf") if record[leg].get("attempted") is not False]
+    assert len(attempted) == 2, "two whole timeouts fit in a 2x budget; the third must be refused"
+    refused = [leg for leg in ("image", "svg", "pdf") if record[leg]["status"] == verdict.NOT_ATTEMPTED]
+    assert len(refused) == 1
+    assert "salvage budget" in record[refused[0]]["reason"]
+
+
+def test_fast_failing_salvage_legs_all_still_get_attempted(monkeypatch, tmp_path):
+    """The discriminating control for the deadline. A version gate is answered in milliseconds, so
+    every tier must still be reached -- a budget that refused them would lose the PNG on every
+    pre-3.29 site, which is the regression the `format_mismatch` carve-out exists to prevent."""
+    clock = _VirtualClock()
+    monkeypatch.setattr(oracle, "time", clock)
+    session = _TimedSession(
+        clock,
+        {
+            "/data": [(179.9, 0, TIMEOUT_BODY, {})],
+            "?format=svg": [(0.05, 400, SVG_GATE, {})],
+            "/pdf": [(0.05, 200, PDF, {})],
+        },
+        retry=oracle.RetryPolicy(max_attempts=1, budget_sec=1e6),
+    )
+    record = oracle.capture_view(session, _view(), tmp_path, frozenset({"svg", "pdf"}), None)
+
+    assert record["svg"]["status"] == "unsupported_api_version"
+    assert record["pdf"]["status"] == "ok", "a fast failure leaves the budget intact for the next tier"
+
+
+def test_the_salvage_deadline_does_not_apply_when_the_data_leg_SUCCEEDED(monkeypatch, tmp_path):
+    """The bound is about salvaging a view that has already proved it is slow. A healthy view whose
+    data leg succeeded keeps every tier and every retry it always had."""
+    clock = _VirtualClock()
+    monkeypatch.setattr(oracle, "time", clock)
+    session = _TimedSession(
+        clock,
+        {
+            "/data": [(1.0, 200, "a,b\n1,2\n", {})],
+            "?resolution=high": [(179.9, 200, PNG, {})],
+            "?format=svg": [(179.9, 200, SVG, {})],
+            "/pdf": [(179.9, 200, PDF, {})],
+        },
+        retry=oracle.RetryPolicy(max_attempts=1, budget_sec=1e6),
+    )
+    record = oracle.capture_view(session, _view(), tmp_path, frozenset({"png", "svg", "pdf"}), None)
+
+    assert [record[leg]["status"] for leg in ("image", "svg", "pdf")] == ["ok", "ok", "ok"]

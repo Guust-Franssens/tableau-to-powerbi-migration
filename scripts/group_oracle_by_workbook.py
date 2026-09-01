@@ -45,15 +45,27 @@ So every batch is read and merged per view and PER LEG, newest-successful-wins:
 
 * a leg is a candidate only if its status is `ok` AND the artifact it names is on disk -- a manifest
   entry alone is a claim, and this script already refuses to promote claims it cannot back;
-* if no batch has a successful leg, the NEWEST batch's record for that leg is kept, so the failure
-  (or `not_attempted`, or `source_credential`) stays visible. A view with no establishable render
-  must not quietly vanish from the merged manifest -- that collapse is the whole of #423;
+* if no batch has a successful leg, the newest batch **that has a record for THAT leg** is kept, so
+  the failure (or `not_attempted`, or `source_credential`) stays visible. Not the newest batch
+  overall: a later data-only batch has no `image` record at all, and taking its view wholesale threw
+  an older batch's `image: transient` away -- a known render gap silently reclassified as "never
+  requested", which is the collapse this whole change exists to prevent;
+* render INTENT is UNIONED across batches (`requested_renders`, `reference_required`), never taken
+  from the newest alone, for the same reason: a batch that asked for nothing cannot retract another
+  batch's request. `requested_renders_by_batch` records who asked for what, so the disagreement is
+  visible and not merely resolved;
 * every promoted leg records `source_batch`, and the merged manifest lists `batches`, so "which
   capture did this image come from" is answerable from the artifact rather than from memory.
 
-WARNING: "Newest" is the view record's `captured_at`, falling back to the batch manifest's. When a batch
-carries NEITHER, the order is undetermined and this script says so (`merge_order_basis:
-"argument order"`, plus a warning) rather than pretending the argv order is a timestamp.
+WARNING: "Newest" is the view record's `captured_at`, falling back to the batch manifest's, and
+`merge_order_basis` has THREE values because two of them are not "the timestamps decided it":
+
+* `captured_at` -- every batch dated, and no tie decided a leg;
+* `captured_at, ties broken by argument order` -- dated, but two candidates for some leg shared a
+  timestamp, so the last `--oracle` won it. Measured: identical stamps produced DIFFERENT winners
+  when the arguments were reversed while the manifest still claimed time had decided it. The tied
+  legs are named in `merge_order_ties`;
+* `argument order` -- a batch carries no timestamp anywhere, so nothing can be dated.
 """
 
 from __future__ import annotations
@@ -167,34 +179,108 @@ def _leg_is_promotable(entry: dict[str, Any], root: Path) -> bool:
     return bool(entry.get("status") == "ok" and relative and (root / relative).is_file())
 
 
-def _merge_one_view(candidates: list[tuple[_Batch, dict[str, Any]]], roots: dict[str, Path]) -> dict[str, Any]:
+def _stamp(batch: _Batch, view: dict[str, Any]) -> str:
+    """When this VIEW was captured: its own ``captured_at``, else its batch manifest's, else ``""``.
+
+    Per-view first because a batch can span time -- a long capture's views are not simultaneous.
+    """
+    return view.get("captured_at") or batch.captured_at or ""
+
+
+def _freshness(pair: tuple[_Batch, dict[str, Any]]) -> tuple[str, int]:
+    """Sort key: capture time, then ARGUMENT ORDER as the last-resort tiebreak.
+
+    ⚠️ The second element is not evidence. When two candidates share a timestamp it is the only thing
+    separating them, and it is an operator's typing habit -- which is why :func:`_merge_one_view`
+    reports every leg a tie actually decided instead of letting the manifest imply otherwise.
+    """
+    batch, view = pair
+    return (_stamp(batch, view), batch.order)
+
+
+def _resolve_leg(
+    candidates: list[tuple[_Batch, dict[str, Any]]], kind: str, roots: dict[str, Path]
+) -> tuple[tuple[_Batch, dict[str, Any]] | None, list[str]]:
+    """Pick one leg's winner from newest-first ``candidates``, and report a deciding TIE.
+
+    Two passes, and the second is finding #2 from review round 1. The first pass takes the newest
+    PROMOTABLE record. The second -- reached only when no batch established the leg -- takes the
+    newest batch that has a record for it AT ALL, which is not the same as the newest batch overall:
+    a later **data-only** batch has no ``image`` record, and taking the newest view wholesale threw
+    an older batch's ``image: transient`` away. Measured before the fix: an older `png` batch with
+    `image.status="transient"` followed by a data-only batch produced no merged `image` key and
+    ``render_unestablished == 0`` -- a known render gap silently reclassified as "never requested",
+    which is precisely the collapse this PR exists to prevent.
+
+    The returned tie list names the batches that could not be separated by time. A tie is reported
+    only when it was DECIDING -- another candidate of equal standing shares the winner's timestamp --
+    because a tie between a winner and a candidate that was never eligible changes nothing.
+    """
+    promotable = [pair for pair in candidates if _leg_is_promotable(pair[1].get(kind) or {}, roots[pair[0].label])]
+    present = [pair for pair in candidates if isinstance(pair[1].get(kind), dict)]
+    pool = promotable or present
+    if not pool:
+        return None, []
+    winner = pool[0]
+    tied = [batch.label for batch, view in pool[1:] if _stamp(batch, view) == _stamp(*winner)]
+    return winner, ([winner[0].label, *tied] if tied else [])
+
+
+def _merge_one_view(
+    candidates: list[tuple[_Batch, dict[str, Any]]], roots: dict[str, Path]
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Merge one view across batches, newest-successful-wins PER LEG.
 
     ``candidates`` is already ordered newest-first. The view's identity fields come from the newest
     batch that saw it at all; each leg is then resolved independently, because the field case that
     started this is precisely a view whose data and image succeeded in DIFFERENT batches.
+
+    Returns ``(merged view, ties)``, where each tie names a leg whose winner was chosen by argument
+    order because two candidates shared a timestamp.
     """
     newest_batch, newest_view = candidates[0]
     merged = dict(newest_view)
     merged["source_batch"] = newest_batch.label
+    ties: list[dict[str, Any]] = []
     for kind, _sub in RENDER_LEGS:
-        winner = next(
-            (
-                (batch, view[kind])
-                for batch, view in candidates
-                if _leg_is_promotable(view.get(kind) or {}, roots[batch.label])
-            ),
-            None,
-        )
+        winner, tied = _resolve_leg(candidates, kind, roots)
+        if tied:
+            ties.append({"view_luid": merged.get("view_luid"), "leg": kind, "batches": tied})
         if winner is None:
-            # No batch established this leg. Keep the NEWEST record so the failure -- or the absence
-            # of any record at all -- stays exactly as visible as it was, and mark where it came from.
-            if kind in merged:
-                merged[kind] = {**merged[kind], "source_batch": newest_batch.label}
+            # No batch anywhere has a record for this leg. Leave it absent rather than inventing one.
+            merged.pop(kind, None)
             continue
-        batch, entry = winner
-        merged[kind] = {**entry, "source_batch": batch.label}
-    return merged
+        batch, view = winner
+        merged[kind] = {**view[kind], "source_batch": batch.label}
+    return merged, ties
+
+
+def _merge_render_intent(batches: list[_Batch], views: list[dict[str, Any]]) -> dict[str, Any]:
+    """What the batches TOGETHER asked for -- unioned, never taken from the newest alone (#2).
+
+    ⚠️ Render intent is the thing that makes an absent leg readable. Copying ``requested_renders``
+    from the newest batch let a later **data-only** run rewrite it to ``[]``, after which a view with
+    a failed image reads as one for which no image was ever wanted -- and both the capture-wide and
+    per-workbook UNESTABLIHED counts drop to zero. Intent is therefore a UNION across batches, and
+    ``reference_required`` an ``any``: a batch that did not ask for a render cannot retract another
+    batch's request.
+
+    ``reference_missing`` is RECOMPUTED rather than carried, because it is a verdict about the merged
+    evidence, and the newest batch's own verdict is about a different (possibly smaller) set of views.
+
+    ``requested_renders_by_batch`` is kept so a reader can see the disagreement instead of only its
+    resolution -- a data-only batch mixed into a render capture is worth noticing.
+    """
+    per_batch = {batch.label: sorted(batch.manifest.get("requested_renders") or []) for batch in batches}
+    requested = sorted({kind for kinds in per_batch.values() for kind in kinds})
+    required = any(batch.manifest.get("reference_required") for batch in batches)
+    rendered = any((view.get(leg) or {}).get("status") == "ok" for view in views for leg in ("image", "svg", "pdf"))
+    return {
+        "requested_renders": requested,
+        "requested_renders_by_batch": per_batch,
+        "reference_required": required,
+        "reference_missing": bool(required and not rendered),
+    }
 
 
 def merge_batches(batches: list[_Batch]) -> tuple[dict[str, Any], dict[str, Path], str]:
@@ -206,33 +292,44 @@ def merge_batches(batches: list[_Batch]) -> tuple[dict[str, Any], dict[str, Path
     `#403` capability block), because those describe the run that produced the winning artifacts more
     often than any older one does. `batches` records every input in newest-first order, so a reader
     can see what was merged rather than infer it from one `source_batch` at a time.
+
+    ⚠️ Render INTENT is the exception and is unioned instead -- see :func:`_merge_render_intent`.
+
+    ⚠️ ``merge_order_basis`` has THREE values, not two (finding #5 from review round 1). Reporting
+    ``captured_at`` whenever timestamps merely EXIST was false: two batches with identical stamps
+    produced different winners when the arguments were reversed -- one keeping ``image: failed``, the
+    other ``image: transient`` -- while both claimed the timestamps had decided it. A tie is now
+    detected, named in ``merge_order_ties``, and said out loud in the basis.
     """
     roots = {batch.label: batch.directory for batch in batches}
-    dated = [
-        batch
-        for batch in batches
-        if batch.captured_at or any(v.get("captured_at") for v in batch.manifest.get("views", []))
-    ]
-    basis = "captured_at" if len(dated) == len(batches) else "argument order"
-
-    def freshness(batch: _Batch, view: dict[str, Any]) -> tuple[str, int]:
-        return (view.get("captured_at") or batch.captured_at or "", batch.order)
+    dated = [batch for batch in batches if all(_stamp(batch, view) for view in batch.manifest.get("views", []) or [{}])]
 
     by_view: dict[str, list[tuple[_Batch, dict[str, Any]]]] = {}
     for batch in batches:
         for view in batch.manifest.get("views", []):
             by_view.setdefault(view.get("view_luid") or "", []).append((batch, view))
 
-    views = []
+    views, ties = [], []
     for candidates in by_view.values():
-        candidates.sort(key=lambda pair: freshness(pair[0], pair[1]), reverse=True)
-        views.append(_merge_one_view(candidates, roots))
+        candidates.sort(key=_freshness, reverse=True)
+        merged_view, view_ties = _merge_one_view(candidates, roots)
+        views.append(merged_view)
+        ties.extend(view_ties)
+
+    if len(dated) != len(batches):
+        basis = "argument order"
+    elif ties:
+        basis = "captured_at, ties broken by argument order"
+    else:
+        basis = "captured_at"
 
     newest = max(batches, key=lambda b: (b.captured_at, b.order))
     merged = {key: value for key, value in newest.manifest.items() if key != "views"}
     merged["views"] = views
     merged["batches"] = [b.label for b in sorted(batches, key=lambda b: (b.captured_at, b.order), reverse=True)]
     merged["merge_order_basis"] = basis
+    merged["merge_order_ties"] = ties
+    merged.update(_merge_render_intent(batches, views))
     return merged, roots, basis
 
 
@@ -370,10 +467,12 @@ def subset_manifest(manifest: dict[str, Any], workbook: str, views: list[dict[st
     for field in (
         "render_capability",
         "requested_renders",
+        "requested_renders_by_batch",
         "reference_required",
         "reference_missing",
         "batches",
         "merge_order_basis",
+        "merge_order_ties",
     ):
         if field in manifest:
             subset[field] = manifest[field]
@@ -529,7 +628,7 @@ def run(oracle: Path | list[Path], migrations_root: Path, *, dry_run: bool) -> i
         migrations_root,
         " [DRY RUN]" if dry_run else "",
     )
-    if len(batches) > 1 and basis != "captured_at":
+    if len(batches) > 1 and basis == "argument order":
         # Not a detail. Merging is "newest wins", so an undated batch means the WINNER is decided by
         # the order somebody happened to type -- which is a habit, not evidence. Say so rather than
         # letting a merged manifest imply a provenance it does not have.
@@ -538,6 +637,31 @@ def run(oracle: Path | list[Path], migrations_root: Path, *, dry_run: bool) -> i
             "(last --oracle wins). The merged manifests record merge_order_basis='%s'; pass the "
             "batches oldest-first, or re-capture with a manifest that carries a timestamp.",
             basis,
+        )
+    elif manifest.get("merge_order_ties"):
+        # The subtler half (finding #5, review round 1). Timestamps EXIST, so the old code reported
+        # `captured_at` -- but equal timestamps separate nothing, and reversing the arguments picked a
+        # different winner while the manifest still claimed time had decided it.
+        ties = manifest["merge_order_ties"]
+        LOG.warning(
+            "%d leg(s) had two or more captures with the SAME captured_at, so ARGUMENT ORDER (last "
+            "--oracle wins) decided them -- reversing the arguments would pick differently. Recorded "
+            "as merge_order_basis='%s' with the tied batches in merge_order_ties: %s",
+            len(ties),
+            basis,
+            "; ".join(f"{t['leg']} <- {'/'.join(t['batches'])}" for t in ties[:4]),
+        )
+    if len(batches) > 1 and len({tuple(v) for v in (manifest.get("requested_renders_by_batch") or {}).values()}) > 1:
+        # Mixing a data-only batch into a render capture is legitimate -- and it used to REWRITE the
+        # merged intent to that batch's, erasing every known render gap. Intent is unioned now; this
+        # says the disagreement existed, because a data-only retry is worth noticing.
+        LOG.warning(
+            "the captures do not agree on what to render (%s). Intent is UNIONED, so a batch that "
+            "asked for nothing cannot retract another batch's request; requested_renders_by_batch "
+            "records who asked for what.",
+            ", ".join(
+                f"{label}={kinds or 'data only'}" for label, kinds in manifest["requested_renders_by_batch"].items()
+            ),
         )
 
     ctx = _Context(manifest=manifest, destinations=destinations, roots=roots, dry_run=dry_run)

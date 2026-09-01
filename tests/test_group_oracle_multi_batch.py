@@ -22,6 +22,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import group_oracle_by_workbook as grp  # noqa: E402  # pylint: disable=wrong-import-position
+import tableau_oracle_manifest as verdict  # noqa: E402  # pylint: disable=wrong-import-position
 
 LUID = "0979a4f9-1111-2222-3333-444444444444"
 OTHER = "0979a4f9-5555-6666-7777-888888888888"
@@ -50,8 +51,19 @@ def _view(luid: str, name: str, *, data: str, image: str | None, captured_at: st
     return view
 
 
-def _batch(root: Path, name: str, views: list[dict], *, captured_at: str | None = "2026-08-18T14:46:00Z") -> Path:
-    """Write one `_oracle/<batch>/` directory, materialising only the artifacts its views claim."""
+def _batch(
+    root: Path,
+    name: str,
+    views: list[dict],
+    *,
+    captured_at: str | None = "2026-08-18T14:46:00Z",
+    requested_renders: list[str] | None = None,
+) -> Path:
+    """Write one `_oracle/<batch>/` directory, materialising only the artifacts its views claim.
+
+    ``requested_renders`` defaults to ``["png"]`` and is settable to ``[]`` so a **data-only** batch
+    can be built -- the shape that erased another batch's render intent (review round 1, finding 2).
+    """
     directory = root / name
     (directory / "data").mkdir(parents=True, exist_ok=True)
     (directory / "images").mkdir(parents=True, exist_ok=True)
@@ -60,7 +72,8 @@ def _batch(root: Path, name: str, views: list[dict], *, captured_at: str | None 
             (directory / "data" / f"{view['view_luid']}.csv").write_text(CSV, encoding="utf-8")
         if (view.get("image") or {}).get("status") == "ok":
             (directory / "images" / f"{view['view_luid']}.png").write_bytes(PNG)
-    manifest: dict = {"schema": "tableau-oracle/1", "requested_renders": ["png"], "views": views}
+    renders = ["png"] if requested_renders is None else requested_renders
+    manifest: dict = {"schema": "tableau-oracle/1", "requested_renders": renders, "views": views}
     if captured_at is not None:
         manifest["captured_at"] = captured_at
     (directory / grp.MANIFEST_NAME).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
@@ -79,13 +92,30 @@ def _grouped(migrations: Path) -> dict:
 
 
 def _three_batches(tmp_path: Path) -> list[Path]:
-    """The customer's actual sequence: two failures, then a batch where both legs succeeded."""
+    """The customer's actual sequence, and the retries are PARTIAL because real retries are.
+
+    Batch 1 is the full sweep: *Daily Monitoring* failed both legs, *Availability Summary by Tail*
+    succeeded at both. Batches 2 and 3 re-run only the view that failed, and batch 3 is where it
+    finally produced 905,098 bytes of PNG.
+
+    ⚠️ The partial shape is load-bearing, not decoration (review round 1, finding 6). With all three
+    batches carrying every view and the last one carrying both successful legs, reading ONLY the last
+    batch produced an identical answer -- so the `merge-reads-only-the-last-batch` mutation SURVIVED
+    against this file's advertised anchor. A fixture whose final batch already contains the whole
+    answer cannot demonstrate that more than the last batch was read.
+    """
     oracle = tmp_path / "_oracle"
+    sibling = _view(OTHER, "Availability Summary by Tail", data="ok", image="ok", captured_at="2026-08-17T20:17:00Z")
     return [
         _batch(
             oracle,
             "airborne-services",
-            [_view(LUID, "Daily Monitoring", data="transient", image="transient", captured_at="2026-08-17T20:17:00Z")],
+            [
+                _view(
+                    LUID, "Daily Monitoring", data="transient", image="transient", captured_at="2026-08-17T20:17:00Z"
+                ),
+                sibling,
+            ],
             captured_at="2026-08-17T20:17:00Z",
         ),
         _batch(
@@ -103,21 +133,34 @@ def _three_batches(tmp_path: Path) -> list[Path]:
     ]
 
 
+def _by_luid(grouped: dict) -> dict[str, dict]:
+    return {view["view_luid"]: view for view in grouped["views"]}
+
+
 # --------------------------------------------------------------------- the stranded artifact
 
 
 def test_a_later_batch_that_finally_succeeded_is_promoted(tmp_path):
-    """⚠️ THE anchor of this file. Reverting the merge to read only one batch must fail it."""
+    """⚠️ THE anchor of this file, and it now requires reading MORE than one batch to satisfy.
+
+    Two assertions, deliberately: the view that finally succeeded on batch 3 is promoted, AND the
+    sibling that only ever appeared in batch 1 -- because the retries were partial, as real retries
+    are -- is still there. Reading only the last batch satisfies the first and fails the second,
+    which is what makes `merge-reads-only-the-last-batch` fail here rather than SURVIVE.
+    """
     batches = _three_batches(tmp_path)
     migrations = _migrations(tmp_path)
 
     assert grp.run(batches, migrations, dry_run=False) == 0
 
-    grouped = _grouped(migrations)
-    view = grouped["views"][0]
-    assert view["image"]["status"] == "ok"
-    assert view["data"]["status"] == "ok"
+    views = _by_luid(_grouped(migrations))
+    assert set(views) == {LUID, OTHER}, "a partial retry must not drop the views it did not cover"
+    assert views[LUID]["image"]["status"] == "ok"
+    assert views[LUID]["data"]["status"] == "ok"
+    assert views[LUID]["image"]["source_batch"] == "airborne-services-retry2"
+    assert views[OTHER]["image"]["source_batch"] == "airborne-services", "only batch 1 ever saw it"
     assert (migrations / "airborne-services" / "reference" / "images" / f"{LUID}.png").read_bytes() == PNG
+    assert (migrations / "airborne-services" / "reference" / "images" / f"{OTHER}.png").read_bytes() == PNG
 
 
 def test_every_promoted_artifact_names_the_batch_it_came_from(tmp_path):
@@ -191,6 +234,129 @@ def test_a_partial_re_run_cannot_overwrite_a_view_it_never_captured(tmp_path):
 
 
 # ------------------------------------------------- a claim is not evidence, and a gap stays visible
+
+
+def test_a_later_DATA_ONLY_batch_does_not_erase_a_known_render_gap(tmp_path):
+    """⚠️ Review round 1, finding 2 -- reproduced exactly, then fixed.
+
+    An older batch that asked for `png` and got `image: transient`, followed by a newer **data-only**
+    batch, used to produce `requested_renders=[]`, NO merged `image` key, and
+    `render_unestablished == 0`. A known render gap silently became "nothing was ever requested" --
+    which is the `UNESTABLISHED != absent` regression this whole PR exists to prevent, re-created by
+    the merge one level up.
+
+    Two independent causes, both fixed and both asserted here: intent was copied from the newest
+    batch alone, and the per-leg fallback took the newest VIEW rather than the newest view that has
+    a record for that leg.
+    """
+    oracle_dir = tmp_path / "_oracle"
+    asked_and_failed = _batch(
+        oracle_dir,
+        "png-batch",
+        [_view(LUID, "Daily Monitoring", data="transient", image="transient", captured_at="2026-08-17T20:17:00Z")],
+        captured_at="2026-08-17T20:17:00Z",
+        requested_renders=["png"],
+    )
+    data_only = _batch(
+        oracle_dir,
+        "data-only-retry",
+        [_view(LUID, "Daily Monitoring", data="ok", image=None, captured_at="2026-08-18T14:46:00Z")],
+        captured_at="2026-08-18T14:46:00Z",
+        requested_renders=[],
+    )
+    migrations = _migrations(tmp_path)
+    grp.run([asked_and_failed, data_only], migrations, dry_run=False)
+
+    grouped = _grouped(migrations)
+    assert grouped["requested_renders"] == ["png"], "intent is UNIONED; a data-only batch cannot retract it"
+    view = grouped["views"][0]
+    assert view["data"]["status"] == "ok", "the newer batch still wins the leg it did capture"
+    assert view["data"]["source_batch"] == "data-only-retry"
+    assert view["image"]["status"] == "transient", "the older batch's known gap must survive"
+    assert view["image"]["source_batch"] == "png-batch"
+    assert grouped["render_unestablished"] == 1
+    assert grouped["render_unestablished_views"][0]["renders"] == {"png": "transient"}
+
+
+def test_the_capture_wide_merge_also_keeps_the_render_intent(tmp_path):
+    """The same erasure at the merged-manifest level, which is what `capture_unestablished` reads.
+    Asserted on `merge_batches` directly so a grouping-layer fix cannot mask a merge-layer one."""
+    oracle_dir = tmp_path / "_oracle"
+    batches = grp.load_batches(
+        [
+            _batch(
+                oracle_dir,
+                "png-batch",
+                [
+                    _view(
+                        LUID,
+                        "Daily Monitoring",
+                        data="transient",
+                        image="transient",
+                        captured_at="2026-08-17T20:17:00Z",
+                    )
+                ],
+                captured_at="2026-08-17T20:17:00Z",
+                requested_renders=["png"],
+            ),
+            _batch(
+                oracle_dir,
+                "data-only-retry",
+                [_view(LUID, "Daily Monitoring", data="ok", image=None, captured_at="2026-08-18T14:46:00Z")],
+                captured_at="2026-08-18T14:46:00Z",
+                requested_renders=[],
+            ),
+        ]
+    )
+    manifest, _roots, _basis = grp.merge_batches(batches)
+
+    assert manifest["requested_renders"] == ["png"]
+    assert manifest["requested_renders_by_batch"] == {"png-batch": ["png"], "data-only-retry": []}
+    assert manifest["views"][0]["image"]["status"] == "transient"
+    census = verdict.render_unestablished(manifest["views"], frozenset(manifest["requested_renders"]))
+    assert len(census) == 1
+
+
+def test_a_batch_that_required_a_reference_is_not_overruled_by_one_that_did_not(tmp_path):
+    """`reference_required` is intent too, so it is an `any` for the same reason -- and
+    `reference_missing` is RECOMPUTED, because the newest batch's verdict is about a different set of
+    views than the merged one."""
+    oracle_dir = tmp_path / "_oracle"
+    required = _batch(
+        oracle_dir,
+        "wanted-a-reference",
+        [_view(LUID, "Daily Monitoring", data="ok", image="transient", captured_at="2026-08-17T20:17:00Z")],
+        captured_at="2026-08-17T20:17:00Z",
+    )
+    (required / grp.MANIFEST_NAME).write_text(
+        json.dumps(
+            {**json.loads((required / grp.MANIFEST_NAME).read_text(encoding="utf-8")), "reference_required": True}
+        ),
+        encoding="utf-8",
+    )
+    later = _batch(
+        oracle_dir,
+        "did-not-ask",
+        [_view(LUID, "Daily Monitoring", data="ok", image=None, captured_at="2026-08-18T14:46:00Z")],
+        captured_at="2026-08-18T14:46:00Z",
+        requested_renders=[],
+    )
+    manifest, _roots, _basis = grp.merge_batches(grp.load_batches([required, later]))
+
+    assert manifest["reference_required"] is True
+    assert manifest["reference_missing"] is True, "no view has an ok render, and one was required"
+
+
+def test_reference_missing_is_false_once_any_render_landed(tmp_path):
+    """Positive control for the recompute above: it must be able to be False, or it is a constant."""
+    oracle_dir = tmp_path / "_oracle"
+    batch = _batch(
+        oracle_dir,
+        "only",
+        [_view(LUID, "Daily Monitoring", data="ok", image="ok", captured_at="2026-08-18T14:46:00Z")],
+    )
+    manifest, _roots, _basis = grp.merge_batches(grp.load_batches([batch]))
+    assert manifest["reference_missing"] is False
 
 
 def test_a_newer_batch_whose_file_is_GONE_does_not_displace_an_older_one_that_has_it(tmp_path):
@@ -349,6 +515,99 @@ def test_a_single_dated_capture_reports_captured_at_as_the_basis(tmp_path):
     migrations = _migrations(tmp_path)
     grp.run(batches, migrations, dry_run=False)
     assert _grouped(migrations)["merge_order_basis"] == "captured_at"
+    assert _grouped(migrations)["merge_order_ties"] == []
+
+
+# ---------------------------------------------- equal timestamps decide NOTHING, and must say so
+
+
+def _tied_pair(tmp_path: Path, stamp: str = "2026-08-18T14:46:00Z") -> tuple[Path, Path]:
+    """Two batches with IDENTICAL timestamps, each holding a different failed image status.
+
+    Both fail, so neither is promotable and the winner comes from the per-leg fallback -- which is
+    where argument order silently takes over.
+    """
+    oracle_dir = tmp_path / "_oracle"
+    first = _batch(
+        oracle_dir,
+        "alpha",
+        [_view(LUID, "Daily Monitoring", data="ok", image="failed", captured_at=stamp)],
+        captured_at=stamp,
+    )
+    second = _batch(
+        oracle_dir,
+        "beta",
+        [_view(LUID, "Daily Monitoring", data="ok", image="transient", captured_at=stamp)],
+        captured_at=stamp,
+    )
+    return first, second
+
+
+def test_equal_timestamps_are_reported_as_a_tie_not_as_captured_at(tmp_path):
+    """⚠️ Review round 1, finding 5 -- reproduced exactly, then fixed.
+
+    Two batches with identical stamps produced DIFFERENT winners when the arguments were reversed --
+    one keeping `image: failed`, the other `image: transient` -- while both claimed
+    `merge_order_basis == "captured_at"`. Timestamps that are equal separate nothing; saying they
+    decided it is the same class of false confidence as an absent leg reading as "not requested".
+    """
+    first, second = _tied_pair(tmp_path)
+    forwards = _migrations(tmp_path / "a")
+    backwards = _migrations(tmp_path / "b")
+
+    grp.run([first, second], forwards, dry_run=False)
+    grp.run([second, first], backwards, dry_run=False)
+
+    one, other = _grouped(forwards), _grouped(backwards)
+    assert one["views"][0]["image"]["status"] != other["views"][0]["image"]["status"], (
+        "the fixture must actually be order-sensitive, or this test proves nothing"
+    )
+    for grouped in (one, other):
+        assert grouped["merge_order_basis"] == "captured_at, ties broken by argument order"
+        image_ties = [tie for tie in grouped["merge_order_ties"] if tie["leg"] == "image"]
+        assert len(image_ties) == 1, grouped["merge_order_ties"]
+        assert set(image_ties[0]["batches"]) == {"alpha", "beta"}
+        assert image_ties[0]["view_luid"] == LUID
+
+
+def test_the_tie_warning_names_the_batches_that_could_not_be_separated(tmp_path, caplog):
+    """A basis string in a JSON file is not an alert. The operator has to be told at the console."""
+    import logging  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+
+    first, second = _tied_pair(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="group-oracle"):
+        grp.run([first, second], _migrations(tmp_path), dry_run=False)
+
+    assert "SAME captured_at" in caplog.text
+    assert "ARGUMENT ORDER" in caplog.text
+    assert "alpha" in caplog.text and "beta" in caplog.text
+
+
+def test_a_tie_that_decides_NOTHING_is_not_reported(tmp_path):
+    """The discriminating half. A tie is only worth reporting when it picked the winner: two batches
+    sharing a timestamp where only ONE has a promotable leg are separated by evidence, not by argv,
+    and flagging that would make the field fire on ordinary runs until nobody reads it."""
+    oracle_dir = tmp_path / "_oracle"
+    stamp = "2026-08-18T14:46:00Z"
+    good = _batch(
+        oracle_dir,
+        "good",
+        [_view(LUID, "Daily Monitoring", data="ok", image="ok", captured_at=stamp)],
+        captured_at=stamp,
+    )
+    bad = _batch(
+        oracle_dir,
+        "bad",
+        [_view(LUID, "Daily Monitoring", data="ok", image="transient", captured_at=stamp)],
+        captured_at=stamp,
+    )
+    migrations = _migrations(tmp_path)
+    grp.run([bad, good], migrations, dry_run=False)
+
+    grouped = _grouped(migrations)
+    assert grouped["views"][0]["image"]["source_batch"] == "good", "promotability, not order, decided it"
+    ties = [t for t in grouped["merge_order_ties"] if t["leg"] == "image"]
+    assert ties == [], "only a DECIDING tie is worth reporting"
 
 
 def test_the_workbook_manifest_says_which_views_have_no_establishable_render(tmp_path):

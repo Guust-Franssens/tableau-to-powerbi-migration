@@ -200,8 +200,16 @@ def default_retry_budget(timeout_sec: float) -> float:
     drift, and pinning the budget at 360s while the operator raises the timeout to 600s would leave a
     budget BELOW one timeout -- which admits zero retries after the slow failure they raised the
     timeout to survive. That is the second of the two surprises #423 names.
+
+    ⚠️ But 2x is NOT always above the admission floor, and review round 1 measured where it stops
+    being: the floor is ``timeout + first backoff``, and the backoff is an ABSOLUTE 1.0s, so for any
+    timeout below one second ``2 x timeout`` is under it -- ``0.25s -> budget 0.5s vs floor 1.25s``
+    admits exactly one attempt, i.e. ZERO retries, which is the very footgun the default exists to
+    avoid. ``--rest-timeout`` takes a float with no minimum, so this is reachable from the CLI.
+    Taking the max of the two rules keeps the ratio where it dominates (every realistic timeout) and
+    the floor where it does not, without forbidding a small timeout an operator may genuinely want.
     """
-    return 2.0 * timeout_sec
+    return max(2.0 * timeout_sec, retry_admission_floor(timeout_sec))
 
 
 RETRY_ADMISSION_FLOOR_SEC = retry_admission_floor(REST_TIMEOUT_SEC)
@@ -495,9 +503,17 @@ class TableauSession:
         ``retry`` overrides the session policy for THIS export only. The budget is therefore per-leg,
         never a pool the legs draw down: a salvage render after a failed data leg gets one attempt and
         no budget (:data:`SALVAGE_RETRY`), while the data leg that preceded it kept the full session
-        policy. Re-authentication is deliberately NOT scoped by it -- session loss is bounded by
-        ``MAX_REAUTH_PER_VIEW`` and by ``sign_in``'s own attempts, because losing a session mid-capture
-        is not the view's fault and abandoning estate progress over it buys nothing.
+        policy.
+
+        ⚠️ Re-authentication is bounded by ``MAX_REAUTH_PER_VIEW`` and by ``sign_in``'s own attempts
+        rather than by the admission deadline -- deliberately, because abandoning a view mid-re-auth
+        after a *recoverable* session loss throws away estate progress for no gain. But it is now ALSO
+        refused on the policy's FINAL attempt, and that is a fix, not a tightening (review round 1,
+        finding 3): the loop ``continue``s into an attempt that does not exist, so the re-auth could
+        not possibly be used. Measured on a one-attempt salvage leg: one render request, one full
+        ``sign_in`` -- which runs on the SESSION policy and can consume several more request timeouts
+        -- and then the export failed anyway. That is unbounded work in service of nothing, and it is
+        what made the stated "at most one timeout" salvage bound false.
 
         Returns ``(body, elapsed_sec, stats)`` where ``stats`` records how much recovery was needed --
         ``reauths``, ``retries`` and the reasons. Recovery is deliberately **recorded, not silent**:
@@ -542,7 +558,7 @@ class TableauSession:
             # shape called it twice and threw away the raw call's detail, which was safe only by
             # convention: one keystroke (`kind, detail = classify(status, raw)`) reinstated the leak.
             kind, detail = classify_export_error(status, raw, redactor=self._redact_response)
-            if kind == "session_lost" and reauths < MAX_REAUTH_PER_VIEW:
+            if kind == "session_lost" and reauths < MAX_REAUTH_PER_VIEW and attempt < policy.max_attempts:
                 # Re-auth is a SEPARATE recovery path from transient retry, and is deliberately NOT
                 # gated by the admission deadline. It is bounded instead by MAX_REAUTH_PER_VIEW (and
                 # sign_in's own max_attempts), because abandoning a view mid-re-auth after a
@@ -551,12 +567,28 @@ class TableauSession:
                 # a sign_in that blocks can push this view past the deadline -- consistent, not a
                 # violation. The very next iteration's transient check charges any elapsed re-auth
                 # time against the deadline, so a slow re-auth still curtails FURTHER transient retries.
+                #
+                # ⚠️ `attempt < policy.max_attempts` is the round-1 finding-3 fix, and it is a fix
+                # rather than a tightening: re-authenticating on the FINAL attempt `continue`s into an
+                # iteration the range does not contain, so the new token is never used by this export.
+                # Measured on a one-attempt salvage leg -- one render request plus a full `sign_in`
+                # (which runs on the SESSION policy, so several more request timeouts) and then the
+                # export failed anyway. Unbounded work in service of nothing, and the reason the
+                # "at most one timeout" salvage bound did not hold.
                 reauths += 1
                 self.reauth_count += 1
                 retries.append("session_lost")
                 LOG.debug("session lost (401002); re-authenticating (%d)", self.reauth_count)
                 self.sign_in()
                 continue
+            if kind == "session_lost" and attempt >= policy.max_attempts:
+                raise ExportFailed(
+                    f"GET {path} -> HTTP {status}",
+                    kind,
+                    f"the session was lost on attempt {attempt} of {policy.max_attempts}, the last this "
+                    f"policy allows, so re-authenticating could not have been used by this export and "
+                    f"was skipped. The next export re-authenticates on its own first attempt.",
+                )
 
             if kind == "transient" and attempt < policy.max_attempts and time.monotonic() < deadline:
                 delay = backoff_delay(attempt, header_value(headers, "Retry-After"))
@@ -694,7 +726,7 @@ def _capture_renders(
     at all. That is the expensive half: with no reference render, an equivalent visual-fidelity defect
     on that page is not merely unverified, it is **unfalsifiable**.
 
-    Two things bound the cost, because a view whose ``/data`` is slow may well be slow to render too:
+    Three things bound the cost, because a view whose ``/data`` is slow may well be slow to render too:
 
     * a salvage render gets **one attempt and no retry budget** (``RetryPolicy(max_attempts=1,
       budget_sec=0)``). Its job is to establish whether an image EXISTS, and re-asking a view that
@@ -707,9 +739,20 @@ def _capture_renders(
       identically on ``data sources not connected``), so a second and third ask cost a metered call to
       learn the same thing. A ``unsupported_api_version`` or ``format_mismatch`` failure does NOT
       stop them: both are configuration faults answered instantly, not evidence the view is unwell.
+    * ⚠️ **one deadline SHARED by every salvage leg** (:data:`SALVAGE_BUDGET_MULTIPLIER`). The two
+      rules above bound *attempts*, not wall clock, and review round 1 measured the gap: three legs
+      failing ``format_mismatch`` -- a status that deliberately does NOT short-circuit -- were each
+      attempted with no cross-leg limit, **539.7 s against a stated 180 s bound**. A leg is now
+      admitted only while at least one whole request timeout remains in the shared budget, so no
+      salvage sequence can exceed ``SALVAGE_BUDGET_MULTIPLIER x`` the request timeout **whatever the
+      tier count**, and a leg that consumes a full timeout leaves too little for a second.
 
-    So the worst case a decoupled capture adds to a doomed view is **one** ``REST_TIMEOUT_SEC``,
-    however many tiers were requested -- not one per tier, and not a second full retry budget.
+    So the worst case a decoupled capture adds to a doomed view is ``2 x REST_TIMEOUT_SEC``, HARD,
+    however many tiers were requested -- and one timeout in practice, because the only way to reach
+    the second is for the first leg to fail almost instantly. The earlier claim of a flat "one
+    timeout" was wrong twice over: nothing capped the legs collectively, and a ``session_lost`` on a
+    one-attempt leg additionally triggered a full ``sign_in`` on the SESSION policy (see
+    :meth:`TableauSession.export`, where that is now refused on the final attempt).
 
     ⚠️ ``source_credential`` and ``credential_reflected`` skip the renders ENTIRELY, and the skipped
     legs inherit the data leg's status rather than a failure of their own. A credential block is a
@@ -739,20 +782,16 @@ def _capture_renders(
                 }
         return
     salvage = data_status != "ok"
+    timeout = float(getattr(session, "timeout_sec", REST_TIMEOUT_SEC))
+    deadline = time.monotonic() + SALVAGE_BUDGET_MULTIPLIER * timeout
     blocked_by = ""
     for kind in _RENDER_ROUTES:
         if kind not in wants:
             continue
         leg = _LEG_OF[kind]
-        if blocked_by:
-            record[leg] = {
-                "status": NOT_ATTEMPTED,
-                "attempted": False,
-                "reason": (
-                    f"the {blocked_by} render came from the same VizQL render and failed, so this "
-                    f"tier was not asked for as well"
-                ),
-            }
+        refusal = blocked_by or (_salvage_exhausted(deadline, timeout) if salvage else "")
+        if refusal:
+            record[leg] = {"status": NOT_ATTEMPTED, "attempted": False, "reason": refusal}
             continue
         record[leg] = _capture_render(
             session,
@@ -762,7 +801,35 @@ def _capture_renders(
             _RenderOptions(targets.api_overrides.get(kind), SALVAGE_RETRY if salvage else None),
         )
         if salvage and record[leg]["status"] in _VIEW_HEALTH_FAILURES:
-            blocked_by = leg
+            blocked_by = (
+                f"the {leg} render came from the same VizQL render and failed, so this tier was not asked for as well"
+            )
+
+
+def _salvage_exhausted(deadline: float, timeout: float) -> str:
+    """``""`` while a whole request timeout still fits inside the shared salvage budget, else why not.
+
+    ⚠️ The admission test is ``remaining >= timeout``, not ``now < deadline``, and that difference is
+    what makes the bound HARD rather than advisory. Admitting a leg merely because the deadline has
+    not passed lets a request start at ``deadline - epsilon`` and then block for a whole timeout, so
+    the real ceiling would be budget + timeout and would creep with every tier added. Requiring a
+    whole timeout to remain means the budget is never exceeded by more than the rounding on one
+    ``monotonic()`` read.
+
+    This is the OPPOSITE choice from ``RetryPolicy.budget_sec``, which is documented as an *admission*
+    deadline that an in-flight attempt may legitimately overrun. That is right for retries of one
+    request, where abandoning a nearly-finished recovery wastes what it already spent; it is wrong
+    here, because the whole point of the salvage budget is a ceiling a caller can state.
+    """
+    remaining = deadline - time.monotonic()
+    if remaining >= timeout:
+        return ""
+    return (
+        f"the shared salvage budget ({SALVAGE_BUDGET_MULTIPLIER:.0f}x the {timeout:.0f}s request "
+        f"timeout) has {max(remaining, 0.0):.0f}s left, which cannot fit another whole request. The "
+        f"data leg already failed, so this tier was not attempted rather than letting one slow view "
+        f"cost a timeout per tier."
+    )
 
 
 def _capture_data(session: TableauSession, view_luid: str, path: Path, out_dir: Path) -> dict[str, Any]:
@@ -813,9 +880,20 @@ _VIEW_HEALTH_FAILURES = frozenset({"transient", "failed", "session_lost", "sourc
 
 # One attempt, no retry budget. A salvage render runs only AFTER the data leg has already spent its
 # full budget failing, and its job is to establish whether an image exists at all -- not to out-wait
-# a view that has just demonstrated it cannot answer. Bounds the wall clock a decoupled capture can
-# add to a doomed view at one REST_TIMEOUT_SEC.
+# a view that has just demonstrated it cannot answer.
 SALVAGE_RETRY = RetryPolicy(max_attempts=1, budget_sec=0.0)
+
+# The SHARED wall-clock ceiling for all salvage legs of one view, as a multiple of the request
+# timeout. `SALVAGE_RETRY` bounds attempts per leg; this bounds the sequence, which is the half review
+# round 1 measured missing: three `format_mismatch` legs (a status that deliberately does not
+# short-circuit) were attempted with no cross-leg limit -- 539.7s against a stated 180s bound.
+#
+# 2x rather than 1x, and the reason is the admission rule in `_salvage_exhausted`: a leg is admitted
+# only while a WHOLE timeout still fits, so at 1x only the very first leg could ever run and a
+# fast-failing tier (a version gate answered in milliseconds) could not be followed by another. At 2x
+# a sequence of fast failures still reaches every tier, while any leg that actually consumes a full
+# timeout leaves too little for a second. The ceiling is hard and independent of tier count.
+SALVAGE_BUDGET_MULTIPLIER = 2.0
 
 
 @dataclass(frozen=True)

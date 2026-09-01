@@ -20,6 +20,7 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -329,8 +330,23 @@ def sanitized_env() -> dict:
     return env
 
 
-def run(name: str, code: str, target: str) -> tuple[str, int, str, dict]:
+def pytest_targets(target: str | Sequence[str]) -> list[str]:
+    """Normalise a target into argv items, so a caller can name TEST NODE IDs, not just a file.
+
+    ⚠️ A whole file is the wrong unit for a mutation verdict, and review round 1 of #423 measured why:
+    mutations run under ``-x``, so a mutation aimed at one behaviour is credited to whichever test in
+    the file fails first. One mutation was recorded CAUGHT by a neighbour while its own documented
+    anchor SURVIVED -- i.e. the advertised proof did not exist. Passing explicit node IDs
+    (``path::test_name``) makes the mapping between a mutation and the test that must observe it a
+    checkable fact instead of a claim.
+    """
+    return [target] if isinstance(target, str) else list(target)
+
+
+def run(name: str, code: str, target: str | Sequence[str]) -> tuple[str, int, str, dict]:
     """Apply one mutation and report ``(name, exit_code, detail, outcomes)``.
+
+    ``target`` is a file, or a sequence of pytest node IDs -- see :func:`pytest_targets`.
 
     ``outcomes`` is the load-bearing return value, and it comes from pytest's own lifecycle
     hooks rather than its terminal output. Three measured reasons text parsing is not enough:
@@ -357,7 +373,8 @@ def run(name: str, code: str, target: str) -> tuple[str, int, str, dict]:
     )
     env = sanitized_env()
     proc = subprocess.run(
-        [PY, "-m", "pytest", target, "-q", "-p", "_mutation_plugin", "--no-header", "-x", "--tb=no", "--color=no"],
+        [PY, "-m", "pytest", *pytest_targets(target)]
+        + ["-q", "-p", "_mutation_plugin", "--no-header", "-x", "--tb=no", "--color=no"],
         cwd=ROOT,
         capture_output=True,
         text=True,
