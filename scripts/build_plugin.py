@@ -31,6 +31,21 @@ PLUGIN_NAME = "powerbi-playbook"
 VERSION = "0.3.0"
 PUBLISH_REPO = "https://github.com/Guust-Franssens/powerbi-playbook"
 
+# Every `plugin@marketplace` identity this repo's bundles have ever been INSTALLED under. It is the
+# provenance allowlist `skill_plugin_source.discover_skill_plugin()` proves a destination against, so
+# that ownership is never inferred from a plugin's CONTENT - content is exactly what a feature branch
+# or an attacker controls, and inferring from it let a plain sync overwrite an unrelated plugin and
+# delete a file inside it (#410 round-2 finding 1).
+#
+# It is a LIST because the plugin was renamed once: `copilot plugin install` records the name it was
+# installed under, and a rename must not orphan the existing install. Add the new identity here in
+# the same commit that renames the plugin - and keep the old one, because machines keep the old
+# directory until they reinstall.
+KNOWN_PLUGIN_IDENTITIES = (
+    f"{PLUGIN_NAME}@{MARKETPLACE_NAME}",
+    "powerbi-migration-skills@powerbi-migration-collection",
+)
+
 # Only source-tool-agnostic bundles ship. `sentinel-probe` is a diagnostic, and anything
 # Tableau-specific belongs in the migration repo's personas, not in a reusable plugin.
 #

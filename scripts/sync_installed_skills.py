@@ -24,8 +24,6 @@ bundles can be brought up to date mid-session; only the plugin's own version met
 
 This matters because the plugin copy SHADOWS `.github/skills/`: until the installed copy is current,
 subagents execute the OLD code no matter what the repo says, and nothing surfaces the mismatch.
-Being stuck behind a session restart made that likely to be deferred, which is how a stale bundle
-once silently invalidated a measurement.
 
 Why the MERGED commit and not this working tree (issue #410)
 ------------------------------------------------------------
@@ -33,69 +31,85 @@ This script used to publish whatever the working tree that ran it happened to co
 worktrees carrying unmerged edits to the same bundle, "in sync" became branch-dependent, unstable,
 and a race. Measured 2026-08-30, four versions of one shipped file existed at once, and the INSTALLED
 one - the copy every newly spawned subagent reads - was `master + 79 lines`: content on no merged
-branch. It thrashed three times in one day, each sync overwriting the last and turning every other
-worktree's `--check` red. Nobody was wrong; the tool had no notion of WHICH version was authoritative.
+branch. So the authoritative version is the merged one, and both the comparison and the publish read
+it from a ref, never from the current checkout.
 
-A stale bundle silently invalidates a measurement. A too-new one has the same property with the
-opposite sign, and it is worse: a measurement taken against unmerged guidance is reproducible from
-NO commit at all. So the authoritative version is the merged one, and both the comparison and the
-publish read it from a ref (`origin/HEAD` -> `origin/master` -> `origin/main`, or `--ref`), never
-from the current checkout. Consequences, all deliberate:
+Three round-2 review findings, and what each one changed
+--------------------------------------------------------
+**1. The DESTINATION is now proved, never inferred.** Discovery used to select any installed plugin
+carrying any bundle from the inventory, and this script then wrote into it. Reproduced in throw-away
+plugin roots: a plain sync overwrote a foreign plugin's `SKILL.md` merely because it shared one
+current bundle name (and on `origin/master`, deleted a private file inside it); `--from-worktree`
+with a branch-invented bundle name selected an unrelated plugin outright, overwrote it, deleted a
+file inside it, and left the intended plugin untouched. Ownership now needs a PROOF that content
+cannot fake - see `skill_plugin_source.py` - and where it cannot be proved this exits non-zero
+having written nothing. `--from-worktree` additionally REQUIRES an explicit `--plugin-root`, so a
+branch can no longer choose a destination at all.
 
-* a feature branch with unmerged skill edits does NOT fail `--check`; it prints a NOTE, because the
-  installed copy is correctly the merged one and the operator needs to know their edits are not what
-  a subagent reads;
-* the verdict is identical from every worktree, including a detached HEAD, because HEAD is not read;
-* publishing is a post-merge action, not a per-branch one.
+**2. The remote's ADVERTISED default branch is asked for, and never guessed.** `origin/HEAD` is a
+local marker `git fetch` does not refresh, so after a default-branch rename this published the old
+branch and reported `in_sync`. Resolution now asks `ls-remote --symref`, fetches that exact ref (a
+single-branch clone never had it), and REFUSES rather than falling back to `origin/master` ->
+`origin/main`. Offline it uses the branch a previous online run recorded; with no record and no
+remote it reports `unverified_default`, which preflight must never read as green.
 
-`--from-worktree` is the deliberate, loud opt-in for testing unmerged skill content with a subagent.
+**3. A RETIRED bundle is now visible.** Extra-file detection was scoped to the CURRENT inventory, so
+a bundle removed from `SHIPPED_SKILLS` stopped being "owned", stayed installed forever, and `--check`
+still said `in_sync`. The ownership marker records the inventory each publish installed, so a bundle
+that has since left it is reported as drift and removed. Bundles that were never ours stay untouched.
 
-Deliberately OFFLINE by default. `preflight.ps1` runs this check on every migration start, and
-`AGENTS.md` already settled that a mandatory network round trip there is a tax on every run; being
-behind is not an error. The two failure modes are also asymmetric: a stale local `origin/master`
-publishes content that is still on a real merged commit, so a measurement against it stays
-reproducible from a commit - the property this whole design exists to protect. `--fetch` refreshes
-the ref when you want it, and never fails the run if the network is unavailable.
+Network cost, deliberately re-decided: the default run now makes ONE `ls-remote --symref` call
+(bounded, ~1s) because there is no offline way to detect a default-branch rename, and a false
+`in_sync` is the failure this whole design exists to prevent. It still never runs a full `git fetch`
+unless `--fetch` is passed, and offline it falls back to the RECORDED verified default rather than
+failing, so only a machine that has never once reached the remote is blocked.
 
 Scope, deliberately: this syncs bundle CONTENT only. It is not a substitute for a real
 `copilot plugin update` when the plugin's manifest, version or MCP/agent wiring changes - run that
-between sessions. For the common case (a skill's prose or scripts changed) this is the whole job.
+between sessions.
 """
 
 from __future__ import annotations
 
 import argparse
 import filecmp
+import importlib.util
 import io
 import json
+import os
 import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
-from skill_plugin_source import DEFAULT_INSTALL_HINT, PLUGIN_ROOT_ENV, discover_skill_plugin
+from skill_plugin_source import (
+    DEFAULT_INSTALL_HINT,
+    PLUGIN_ROOT_ENV,
+    discover_skill_plugin,
+    read_owner_marker,
+    write_owner_marker,
+)
 
 REPO = Path(__file__).resolve().parent.parent
 
-# Ordered candidates for "the merged commit". `origin/HEAD` is the remote's own declared default
-# branch, so it stays right when the default branch is renamed; the two explicit names are the
-# fallback for clones that never got a symbolic `origin/HEAD`, which plenty of workflows never set.
-PUBLISH_REF_CANDIDATES = (
-    "refs/remotes/origin/HEAD",
-    "refs/remotes/origin/master",
-    "refs/remotes/origin/main",
-)
-
 # Exported from the ref so the MERGED tree defines the WHOLE publish, not merely its content: which
-# bundles ship, and the layout they ship in, are `build_plugin.py`'s decisions. Taking those from the
-# working tree while taking content from the ref would invent a third, hybrid notion of "what ships"
-# - which is the ambiguity issue #410 is about. `scripts` rather than just `build_plugin.py`, so a
-# future sibling import inside the generator cannot break this silently.
+# bundles ship, the layout they ship in, and which plugin identities this repo owns are all
+# `build_plugin.py`'s decisions. Taking any of them from the working tree while taking content from
+# the ref would invent a third, hybrid notion of "what ships" - the ambiguity issue #410 is about.
 EXPORT_PATHS = (".github/skills", "scripts")
+
+# Where a verified default branch is remembered, so an offline run is not forced to guess. The git
+# COMMON dir, not the working tree: it is shared by every worktree, is never committed, and already
+# holds exactly this kind of remote-derived state (FETCH_HEAD, packed-refs).
+DEFAULT_RECORD_NAME = "skill-sync-default.json"
+
+LS_REMOTE_TIMEOUT_SECONDS = 8
+FETCH_TIMEOUT_SECONDS = 60
 
 EXIT_OK = 0
 EXIT_DRIFT = 1
@@ -103,14 +117,20 @@ EXIT_NO_PLUGIN = 2
 EXIT_COPY_FAILED = 3
 EXIT_MULTIPLE_PLUGINS = 4
 EXIT_NO_REF = 5
+EXIT_UNPROVEN_PLUGIN = 6
+EXIT_UNVERIFIED_DEFAULT = 7
 
 
 class PublishRefError(RuntimeError):
     """No merged ref could be resolved, and guessing one is not allowed."""
 
 
+class UnverifiedDefaultError(RuntimeError):
+    """The remote's advertised default branch could not be established, so nothing is authoritative."""
+
+
 @dataclass(frozen=True)
-class PublishSource:
+class PublishSource:  # pylint: disable=too-many-instance-attributes
     """Where the authoritative bundle content is being read from."""
 
     kind: str  # "ref" | "worktree"
@@ -118,6 +138,8 @@ class PublishSource:
     commit: str | None
     described: str
     default_verified: bool = False
+    default_proof: str = "none"  # "explicit" | "remote" | "recorded" | "worktree"
+    default_verified_at: str | None = None
     alternatives: tuple[str, ...] = ()
 
     @property
@@ -126,15 +148,54 @@ class PublishSource:
         return self.kind == "worktree"
 
 
-def _git(args: list[str], *, repo: Path | None = None, binary: bool = False) -> subprocess.CompletedProcess:
+@dataclass(frozen=True)
+class PublishIdentity:
+    """The ownership evidence, read from the PINNED tree rather than from this checkout."""
+
+    publish_repo: str
+    identities: tuple[str, ...]
+
+
+@dataclass
+class SyncPlan:  # pylint: disable=too-many-instance-attributes
+    """Everything the publish/report step needs, assembled once so no step re-derives it."""
+
+    source: PublishSource
+    src: Path
+    bundles: list[str]
+    owned: list[str]
+    formerly_owned: list[str]
+    discovery: object
+    identity: PublishIdentity
+    marker_present: bool
+    workdir: Path
+    base: dict = field(default_factory=dict)
+
+
+def _git(args: list[str], *, repo: Path | None = None, binary: bool = False, timeout: float | None = None):
     """Run git in `repo` (default: this checkout) and return the completed process, never raising."""
-    return subprocess.run(  # pylint: disable=subprocess-run-check
-        ["git", *args],
-        cwd=str(repo or REPO),
-        capture_output=True,
-        check=False,
-        **({} if binary else {"text": True}),
-    )
+    try:
+        return subprocess.run(  # pylint: disable=subprocess-run-check
+            ["git", *args],
+            cwd=str(repo or REPO),
+            capture_output=True,
+            check=False,
+            timeout=timeout,
+            **({} if binary else {"text": True}),
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return subprocess.CompletedProcess(args, 1, b"" if binary else "", b"" if binary else "")
+
+
+def _rev_parse(ref: str, repo: Path | None = None) -> str | None:
+    probe = _git(["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], repo=repo)
+    commit = probe.stdout.strip()
+    return commit if probe.returncode == 0 and commit else None
+
+
+def has_origin(repo: Path | None = None) -> bool:
+    """Whether an `origin` remote exists at all - a different failure from "it did not answer"."""
+    return _git(["remote", "get-url", "origin"], repo=repo).returncode == 0
 
 
 def remote_default_ref(repo: Path | None = None) -> str | None:
@@ -147,7 +208,7 @@ def remote_default_ref(repo: Path | None = None) -> str | None:
     is the one question that cannot go stale - and unlike `git remote set-head --auto` it writes
     nothing into the repository.
     """
-    listed = _git(["ls-remote", "--symref", "origin", "HEAD"], repo=repo)
+    listed = _git(["ls-remote", "--symref", "origin", "HEAD"], repo=repo, timeout=LS_REMOTE_TIMEOUT_SECONDS)
     if listed.returncode != 0:
         return None
     for line in listed.stdout.splitlines():
@@ -159,77 +220,149 @@ def remote_default_ref(repo: Path | None = None) -> str | None:
     return None
 
 
-def _default_alternatives(commit: str, repo: Path | None = None) -> tuple[str, ...]:
-    """Local default-branch refs whose commit DIFFERS from the chosen one - i.e. a possible rename.
+def _record_path(repo: Path | None = None) -> Path | None:
+    common = _git(["rev-parse", "--git-common-dir"], repo=repo)
+    if common.returncode != 0 or not common.stdout.strip():
+        return None
+    raw = Path(common.stdout.strip())
+    return (raw if raw.is_absolute() else (repo or REPO) / raw) / DEFAULT_RECORD_NAME
 
-    Only differing refs count: on a normal clone `origin/HEAD` and `origin/master` are the same
-    commit, so this stays silent. It speaks up in exactly the shape review reproduced - a stale
-    `origin/HEAD` beside a fresher `origin/main`.
+
+def read_default_record(repo: Path | None = None) -> dict | None:
+    """The last default branch a run actually confirmed with the remote, or None."""
+    path = _record_path(repo)
+    if path is None:
+        return None
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return loaded if isinstance(loaded, dict) and loaded.get("ref") else None
+
+
+def write_default_record(ref: str, repo: Path | None = None) -> None:
+    """Remember a default branch the remote itself just advertised.
+
+    This is what keeps the offline path honest without a guess: an offline run reports the branch
+    some earlier run VERIFIED, with the timestamp, rather than whichever local ref happens to exist.
     """
+    path = _record_path(repo)
+    if path is None:
+        return
+    payload = {
+        "schema": 1,
+        "ref": ref,
+        "verified_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    try:
+        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    except OSError:  # pragma: no cover - a read-only .git is not worth failing a publish over
+        pass
+
+
+def _default_alternatives(commit: str, repo: Path | None = None) -> tuple[str, ...]:
+    """Local default-branch refs whose commit DIFFERS from the chosen one - i.e. a possible rename."""
     found = []
     for name in ("refs/remotes/origin/master", "refs/remotes/origin/main"):
-        probe = _git(["rev-parse", "--verify", "--quiet", f"{name}^{{commit}}"], repo=repo)
-        other = probe.stdout.strip()
-        if probe.returncode == 0 and other and other != commit:
+        other = _rev_parse(name, repo)
+        if other and other != commit:
             found.append(name)
     return tuple(found)
+
+
+def fetch_origin(repo: Path | None = None) -> tuple[bool, str]:
+    """Refresh remote refs. Advisory: a failure is reported, never fatal."""
+    done = _git(["fetch", "--quiet", "origin"], repo=repo, timeout=FETCH_TIMEOUT_SECONDS)
+    if done.returncode != 0:
+        detail = (done.stderr or done.stdout or "git fetch failed").strip().splitlines()
+        return False, detail[-1] if detail else "git fetch failed"
+    return True, "ok"
+
+
+def fetch_exact_ref(ref: str, repo: Path | None = None) -> bool:
+    """Fetch the ADVERTISED branch by explicit refspec.
+
+    A single-branch clone's configured refspec covers only the branch it was cloned with, so a plain
+    `git fetch origin` reports success and silently never brings down the branch the remote actually
+    advertises. Measured in review: `--fetch` printed "ok", published `origin/master`, and emitted no
+    warning at all while the remote's default was `main`.
+    """
+    branch = ref.rsplit("/", 1)[-1]
+    done = _git(
+        ["fetch", "--quiet", "origin", f"+refs/heads/{branch}:refs/remotes/origin/{branch}"],
+        repo=repo,
+        timeout=FETCH_TIMEOUT_SECONDS,
+    )
+    return done.returncode == 0
+
+
+def _explicit_source(explicit: str, repo: Path | None) -> PublishSource:
+    commit = _rev_parse(explicit, repo)
+    if not commit:
+        raise PublishRefError(f"--ref {explicit} does not resolve to a commit")
+    return PublishSource(
+        kind="ref",
+        ref=explicit,
+        commit=commit,
+        described=f"{explicit} @ {commit[:12]}",
+        default_verified=True,
+        default_proof="explicit",
+    )
+
+
+def _advertised_default(repo: Path | None) -> tuple[str, str, str | None]:
+    """(ref, proof, verified_at) for the remote's default branch, or raise rather than guess."""
+    advertised = remote_default_ref(repo)
+    if advertised:
+        write_default_record(advertised, repo)
+        return advertised, "remote", datetime.now(timezone.utc).isoformat(timespec="seconds")
+    record = read_default_record(repo)
+    if record:
+        return str(record["ref"]), "recorded", record.get("verified_at")
+    raise UnverifiedDefaultError(
+        "origin did not answer `ls-remote --symref`, and no earlier run recorded a verified default "
+        "branch, so which branch is authoritative is UNKNOWN"
+    )
 
 
 def resolve_publish_ref(
     explicit: str | None = None,
     *,
     repo: Path | None = None,
-    verify_remote_default: bool = False,
+    fetch: bool = False,
 ) -> PublishSource:
     """Resolve the merged COMMIT whose bundles are authoritative, or raise.
 
-    Refusing to fall back to the working tree is the point. A silent fallback is the exact shape of
-    the bug being replaced: it would publish unmerged content on precisely the machines whose git
-    layout is unusual, and say nothing about it.
-
-    The commit is what everything downstream uses; the ref name is only a display label. A ref
-    moves - `origin/master` advanced during this PR's own review - so resolving by name and then
-    exporting by name reads two different trees while reporting the first (review finding 3).
+    Refusing to fall back is the point, twice over. Falling back to the working tree would publish
+    unmerged content on precisely the machines whose git layout is unusual; falling back to a list of
+    likely branch names would publish the OLD default after a rename - both silently. The commit is
+    what everything downstream uses; the ref name is only a display label, because a ref moves.
     """
-    advertised = remote_default_ref(repo) if (verify_remote_default and not explicit) else None
-    order: list[str] = [explicit] if explicit else [*([advertised] if advertised else []), *PUBLISH_REF_CANDIDATES]
-    for candidate in order:
-        probe = _git(["rev-parse", "--verify", "--quiet", f"{candidate}^{{commit}}"], repo=repo)
-        commit = probe.stdout.strip()
-        if probe.returncode == 0 and commit:
-            verified = bool(explicit) or candidate == advertised
-            return PublishSource(
-                kind="ref",
-                ref=candidate,
-                commit=commit,
-                described=f"{candidate} @ {commit[:12]}",
-                default_verified=verified,
-                alternatives=() if verified else _default_alternatives(commit, repo),
-            )
-    raise PublishRefError("cannot resolve the merged publish ref (tried: " + ", ".join(map(str, order)) + ")")
+    if explicit:
+        return _explicit_source(explicit, repo)
+    if not has_origin(repo):
+        raise PublishRefError("this repository has no `origin` remote, so no merged ref can be resolved")
 
-
-def fetch_origin(repo: Path | None = None) -> tuple[bool, str]:
-    """Refresh remote refs. Advisory: a failure is reported, never fatal.
-
-    Offline must not block the gate. A stale local `origin/master` still names a real merged commit,
-    so what it publishes stays reproducible from a commit; that is a far smaller problem than a
-    preflight that fails on a train.
-    """
-    try:
-        done = subprocess.run(  # pylint: disable=subprocess-run-check
-            ["git", "fetch", "--quiet", "origin"],
-            cwd=str(repo or REPO),
-            capture_output=True,
-            text=True,
-            timeout=60,
+    ref, proof, verified_at = _advertised_default(repo)
+    commit = _rev_parse(ref, repo)
+    if (commit is None or fetch) and proof == "remote":
+        fetch_exact_ref(ref, repo)
+        commit = _rev_parse(ref, repo)
+    if commit is None:
+        raise UnverifiedDefaultError(
+            f"{ref} is the default branch to publish ({proof}), but it could not be fetched or "
+            "resolved locally, and falling back to another branch would publish the wrong one"
         )
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        return False, f"{type(exc).__name__}: {exc}"
-    if done.returncode != 0:
-        detail = (done.stderr or done.stdout or "git fetch failed").strip().splitlines()
-        return False, detail[-1] if detail else "git fetch failed"
-    return True, "ok"
+    return PublishSource(
+        kind="ref",
+        ref=ref,
+        commit=commit,
+        described=f"{ref} @ {commit[:12]}",
+        default_verified=True,
+        default_proof=proof,
+        default_verified_at=verified_at,
+        alternatives=_default_alternatives(commit, repo),
+    )
 
 
 def export_ref_tree(ref: str, dest: Path, *, repo: Path | None = None) -> Path:
@@ -237,12 +370,8 @@ def export_ref_tree(ref: str, dest: Path, *, repo: Path | None = None) -> Path:
 
     Git does the export, so nothing here reimplements git's checkout conversion. That matters more
     than it looks: measured 2026-08-31 on this repo (`core.autocrlf=true`, no `.gitattributes`),
-    `git archive` DOES apply the CRLF conversion - the exported `powerbi-ai-readiness/SKILL.md` is
-    19335 bytes and byte-identical to the checked-out one, while the raw blob from `git cat-file` is
-    19064 bytes and LF. So switching the source from the working tree to a ref changes WHICH commit
-    is published without changing the line endings, and costs no one-off rewrite of every installed
-    file. (It also means the published bytes still follow the publishing machine's `core.autocrlf`.
-    That is harmless here: an installed plugin copy is per-machine and never shared.)
+    `git archive` DOES apply the CRLF conversion, so switching the source from the working tree to a
+    ref changes WHICH commit is published without changing the line endings.
     """
     archived = _git(["archive", "--format=tar", ref, "--", *EXPORT_PATHS], repo=repo, binary=True)
     if archived.returncode != 0:
@@ -259,13 +388,39 @@ def export_ref_tree(ref: str, dest: Path, *, repo: Path | None = None) -> Path:
     return dest
 
 
+def pinned_identity(source_root: Path) -> PublishIdentity:
+    """Read the OWNERSHIP evidence from `source_root`'s build_plugin.py, not from this checkout.
+
+    Which plugin identities this repo owns is a merged decision exactly like which bundles ship. Read
+    from the working tree it would be branch-controlled, which is the defect being removed: a branch
+    could name someone else's installed plugin and have this script write into it.
+    """
+    path = source_root / "scripts" / "build_plugin.py"
+    if not path.is_file():
+        raise SystemExit(f"no build_plugin.py at {path}")
+    spec = importlib.util.spec_from_file_location("_pinned_build_plugin", path)
+    if spec is None or spec.loader is None:  # pragma: no cover - only on an unreadable file
+        raise SystemExit(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+        derived = f"{module.PLUGIN_NAME}@{module.MARKETPLACE_NAME}"
+        known = tuple(getattr(module, "KNOWN_PLUGIN_IDENTITIES", ()))
+        return PublishIdentity(
+            publish_repo=str(getattr(module, "PUBLISH_REPO", "")),
+            identities=tuple(dict.fromkeys((*known, derived))),
+        )
+    finally:
+        sys.modules.pop(spec.name, None)
+
+
 def build_reference_copy(workdir: Path, source_root: Path) -> Path:
     """Generate the canonical bundles with `source_root`'s build_plugin.py.
 
     Reusing the generator is the point: if it ever changes what ships (a new bundle, a renamed
     file), this script follows automatically instead of drifting into a second, subtly different
-    definition of "what the plugin contains". It is taken from `source_root` for the same reason the
-    content is, so a branch that adds a bundle cannot publish it before the branch merges.
+    definition of "what the plugin contains".
     """
     generator = source_root / "scripts" / "build_plugin.py"
     if not generator.is_file():
@@ -286,10 +441,9 @@ def diff_tree(src: Path, dst: Path, scope: Sequence[str] | None = None) -> tuple
     """Return (files needing copy, files present in dst but not src), as paths relative to src.
 
     `scope` bounds the DELETION set to the named top-level bundle directories. Without it, `extra`
-    swept the whole destination, so if discovery ever selected a plugin that also carries bundles of
-    its own, a plain sync would delete them - the data-loss half of review finding 2. Deleting a file
-    the merged tree never owned is never this script's job, so the bound is unconditional rather than
-    a safety net wrapped around discovery.
+    swept the whole destination, so a plugin carrying bundles of its own lost them. `scope` is the
+    OWNED inventory - what the merged tree ships plus what this tool's own marker records having
+    installed before - so a retired bundle is cleaned up while a stranger's is never touched.
     """
     changed: list[Path] = []
     for path in sorted(p for p in src.rglob("*") if p.is_file()):
@@ -316,17 +470,9 @@ def diff_tree(src: Path, dst: Path, scope: Sequence[str] | None = None) -> tuple
 def local_divergence(merged_src: Path, workdir: Path) -> tuple[list[str], str | None]:
     """Paths where a build from THIS working tree would differ from the merged build.
 
-    This is the NOTE, not the verdict. It answers the question an operator editing a skill actually
-    has - "is what I am looking at what a subagent reads?" - which the drift check deliberately no
-    longer conflates with "is the published copy correct?".
-
-    Comparing two BUILDS rather than running `git diff` over the merged bundle directories is what
-    makes it complete. Review measured the narrow version reporting `local_unmerged=[]` for a branch
-    that had added a whole bundle, because a path that does not exist at the merged commit is in no
-    merged bundle's pathspec. Building both sides catches every shape at once - edited content, an
-    added or removed bundle, untracked files, and a change to the generator that decides what ships -
-    and it stays silent about the repo-local bundles this plugin does not publish, which a broad
-    `.github/skills` pathspec would have flagged on every unrelated branch.
+    This is the NOTE, not the verdict. Comparing two BUILDS rather than running `git diff` over the
+    merged bundle directories is what makes it complete: a path that does not exist at the merged
+    commit is in no merged bundle's pathspec, so a branch-added bundle was invisible.
     """
     try:
         mine = build_reference_copy(workdir / "worktree", REPO)
@@ -346,13 +492,6 @@ def worktree_banner() -> list[str]:
     ]
 
 
-def _resolve_source(args: argparse.Namespace) -> PublishSource:
-    """Pick the authoritative content source, honouring --from-worktree / --ref."""
-    if args.from_worktree:
-        return PublishSource(kind="worktree", ref=None, commit=None, described=f"working tree at {REPO}")
-    return resolve_publish_ref(args.ref, verify_remote_default=args.fetch)
-
-
 def _emit(args: argparse.Namespace, payload: dict, lines: list[str], exit_code: int) -> int:
     """Emit either the JSON verdict (preflight's input) or the human lines, and return `exit_code`."""
     if args.json:
@@ -364,17 +503,36 @@ def _emit(args: argparse.Namespace, payload: dict, lines: list[str], exit_code: 
 
 
 def _discovery_failure(args: argparse.Namespace, discovery, base: dict) -> int | None:
-    """Return an exit code when the installed plugin cannot be used, else None."""
+    """Return an exit code when the installed plugin cannot be written to, else None."""
     if discovery.status == "multiple":
         return _emit(
             args,
             {**base, "status": "multiple_plugins", "candidates": [str(c) for c in discovery.candidates]},
             [
-                "SYNC: ERROR - multiple installed plugins carry these skill bundles",
+                "SYNC: ERROR - multiple installed plugins are owned by this repo",
                 *(f"      {candidate}" for candidate in discovery.candidates),
                 "      Remove the duplicate; otherwise one copy can silently shadow another.",
             ],
             EXIT_MULTIPLE_PLUGINS,
+        )
+    if discovery.status == "unproven":
+        return _emit(
+            args,
+            {
+                **base,
+                "status": "unproven_plugin",
+                "detail": discovery.detail,
+                "candidates": [str(c) for c in discovery.candidates],
+                "install_hint": discovery.install_hint,
+            },
+            [
+                "SYNC: ERROR - ownership could not be PROVED, so nothing was written",
+                *(f"      candidate: {candidate}" for candidate in discovery.candidates),
+                "      A bundle name is not proof of ownership: a foreign plugin that merely shares",
+                "      one was overwritten, and a file inside it deleted (#410 review finding 1).",
+                f"      {discovery.install_hint}",
+            ],
+            EXIT_UNPROVEN_PLUGIN,
         )
     if not discovery.ok or not discovery.skills_dir:
         return _emit(
@@ -394,31 +552,19 @@ def _discovery_failure(args: argparse.Namespace, discovery, base: dict) -> int |
     return None
 
 
-def _unverified_default_note(source: PublishSource) -> list[str]:
-    """Warn when the local `origin/HEAD` marker may name a branch the remote no longer defaults to."""
-    if source.default_verified or not source.alternatives:
-        return []
-    return [
-        f"SYNC: NOTE - {source.ref} is a LOCAL marker that `git fetch` does not refresh, and these",
-        "      default-branch refs point somewhere else:",
-        *(f"        {name}" for name in source.alternatives),
-        "      If the remote's default branch was renamed, this is publishing the OLD one. Ask the",
-        "      remote directly with --fetch, or pin it with --ref <ref>.",
-    ]
-
-
 def build_parser() -> argparse.ArgumentParser:
     """The CLI surface, kept out of `main` so the flow below reads as one decision sequence."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--check", action="store_true", help="report drift and exit 1; change nothing")
     parser.add_argument("--json", action="store_true", help="emit a machine-readable verdict for preflight.ps1")
     parser.add_argument("--verbose", action="store_true", help="list every file the reference build contains")
-    parser.add_argument("--ref", help=f"merged ref to publish (default: first of {', '.join(PUBLISH_REF_CANDIDATES)})")
+    parser.add_argument("--ref", help="merged ref to publish (default: the remote's advertised default branch)")
     parser.add_argument("--fetch", action="store_true", help="refresh remote refs first; never fatal if offline")
     parser.add_argument(
         "--from-worktree",
         action="store_true",
-        help="publish THIS working tree instead of the merged ref - deliberately serves unreviewed guidance",
+        help="publish THIS working tree instead of the merged ref - serves unreviewed guidance, and "
+        "REQUIRES --plugin-root so a branch can never choose the destination",
     )
     parser.add_argument(
         "--plugin-root",
@@ -433,14 +579,262 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-locals,too-many-return-statements
+def _worktree_needs_explicit_root(args: argparse.Namespace, env: dict | None = None) -> bool:
+    """`--from-worktree` may only write where the OPERATOR pointed it.
+
+    Review reproduced the whole finding through this flag: a bundle added on a branch entered the
+    inventory, the inventory chose the destination, and an unrelated plugin was selected, overwritten
+    and partially deleted. Requiring an explicit destination removes the branch's influence entirely,
+    which is stronger than pinning discovery to the merged identity would have been.
+    """
+    environment = os.environ if env is None else env
+    return args.from_worktree and not (args.plugin_root or environment.get(PLUGIN_ROOT_ENV))
+
+
+def _resolve_source(args: argparse.Namespace) -> PublishSource:
+    """Pick the authoritative content source, honouring --from-worktree / --ref."""
+    if args.from_worktree:
+        return PublishSource(
+            kind="worktree",
+            ref=None,
+            commit=None,
+            described=f"working tree at {REPO}",
+            default_proof="worktree",
+        )
+    return resolve_publish_ref(args.ref, fetch=args.fetch)
+
+
+def _source_failure(args: argparse.Namespace, exc: Exception, fetch_note: dict | None) -> int:
+    """Turn a refusal to guess into a verdict preflight can read - never into a silent fallback."""
+    if isinstance(exc, UnverifiedDefaultError):
+        return _emit(
+            args,
+            {"status": "unverified_default", "detail": str(exc), "fetch": fetch_note, "default_verified": False},
+            [
+                f"SYNC: ERROR - {exc}",
+                "      Publishing the wrong default branch is silent and reports `in_sync`, so this",
+                "      refuses instead (issue #410 review finding 2).",
+                "      Reconnect and re-run, or pin it: --ref refs/remotes/origin/<branch>.",
+            ],
+            EXIT_UNVERIFIED_DEFAULT,
+        )
+    return _emit(
+        args,
+        {"status": "no_ref", "detail": str(exc), "fetch": fetch_note, "default_verified": False},
+        [
+            f"SYNC: ERROR - {exc}",
+            "      The installed copy must be what is MERGED, so this refuses to guess (issue #410).",
+            "      Add the remote and fetch, pass --ref <ref>, or publish this checkout deliberately",
+            "      with --from-worktree --plugin-root <path>, which serves UNREVIEWED guidance.",
+        ],
+        EXIT_NO_REF,
+    )
+
+
+def _plan(args: argparse.Namespace, source: PublishSource, workdir: Path, fetch_note: dict | None) -> SyncPlan:
+    """Export the pinned tree, build it, and prove which installed plugin may be written to."""
+    pinned = str(source.commit) if source.commit else ""
+    source_root = REPO if source.from_worktree else export_ref_tree(pinned, workdir / "ref-src")
+    src = build_reference_copy(workdir / "reference", source_root)
+    identity = pinned_identity(source_root)
+
+    bundles = sorted(p.name for p in src.iterdir() if p.is_dir())
+    discovery = discover_skill_plugin(
+        installed_plugins_root=args.installed_plugins_root,
+        plugin_root_override=args.plugin_root,
+        bundles=bundles,
+        identities=identity.identities,
+        publish_repo=identity.publish_repo,
+    )
+    marker = read_owner_marker(discovery.plugin_root)
+    recorded = [str(name) for name in (marker or {}).get("bundles", []) if isinstance(name, str)]
+    formerly = sorted(name for name in set(recorded) - set(bundles))
+    plan = SyncPlan(
+        source=source,
+        src=src,
+        bundles=bundles,
+        owned=sorted({*bundles, *formerly}),
+        formerly_owned=formerly,
+        discovery=discovery,
+        identity=identity,
+        marker_present=marker is not None,
+        workdir=workdir,
+    )
+    plan.base = {
+        "source": source.kind,
+        "ref": source.ref,
+        "commit": source.commit,
+        "described": source.described,
+        "bundles": bundles,
+        "owned": plan.owned,
+        "formerly_owned": formerly,
+        "owner_marker": "present" if marker else "absent",
+        "proof": discovery.proof,
+        "default_verified": source.default_verified,
+        "default_proof": source.default_proof,
+        "default_verified_at": source.default_verified_at,
+        "default_alternatives": list(source.alternatives),
+        "fetch": fetch_note,
+    }
+    return plan
+
+
+def _notes(plan: SyncPlan, unmerged: list[str], unmerged_error: str | None) -> list[str]:
+    """The informational lines: unmerged local edits, and any bundle this tool must now retire."""
+    lines: list[str] = []
+    if plan.formerly_owned:
+        lines += [
+            f"SYNC: NOTE - {len(plan.formerly_owned)} bundle(s) this tool installed are no longer shipped "
+            f"by {plan.source.described}:",
+            *(f"        {name}" for name in plan.formerly_owned),
+            "      They are removed, because the marker records that we put them there. Bundles this",
+            "      tool never installed are left alone.",
+        ]
+    if unmerged:
+        lines += [
+            f"SYNC: NOTE - a build from this working tree would differ from {plan.source.described} in "
+            f"{len(unmerged)} shipped file(s):",
+            *(f"        {path}" for path in unmerged),
+            "      Subagents read the MERGED copy, not these edits - deliberately (issue #410).",
+            "      To test them: python scripts/sync_installed_skills.py --from-worktree --plugin-root <path>",
+        ]
+    elif unmerged_error:
+        lines.append(f"SYNC: NOTE - {unmerged_error}")
+    return lines
+
+
+def _record_ownership(plan: SyncPlan) -> None:
+    """Stamp the plugin with what was just installed, so a later retirement is visible."""
+    write_owner_marker(
+        plan.discovery.plugin_root,
+        publish_repo=plan.identity.publish_repo,
+        identity=plan.discovery.identity,
+        bundles=plan.bundles,
+        source=plan.source.kind,
+        ref=plan.source.ref,
+        commit=plan.source.commit,
+    )
+
+
+def _apply(plan: SyncPlan, changed: list[Path], extra: list[Path]) -> list[Path]:
+    """Copy the reference files in, remove the OWNED files that are no longer shipped, and re-verify."""
+    installed = plan.discovery.skills_dir
+    for rel in changed:
+        target = installed / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(plan.src / rel, target)
+    for rel in extra:
+        (installed / rel).unlink()
+    for name in plan.formerly_owned:
+        shutil.rmtree(installed / name, ignore_errors=True)
+    # Re-diff rather than trusting the copies. The whole reason this script exists is a lock that
+    # makes some filesystem operations fail, so "it did not raise" is not evidence.
+    still, _ = diff_tree(plan.src, installed, scope=plan.owned)
+    return still
+
+
+def _report(args: argparse.Namespace, plan: SyncPlan) -> int:  # pylint: disable=too-many-locals
+    """Compare, then either report drift (`--check`) or publish and verify."""
+    installed = plan.discovery.skills_dir
+    changed, extra = diff_tree(plan.src, installed, scope=plan.owned)
+    missing = [name for name in plan.bundles if not (installed / name / "SKILL.md").is_file()]
+    unmerged, unmerged_error = ([], None) if plan.source.from_worktree else local_divergence(plan.src, plan.workdir)
+    note = _notes(plan, unmerged, unmerged_error)
+    inventory = (
+        [f"  in build: {p.relative_to(plan.src).as_posix()}" for p in sorted(plan.src.rglob("*")) if p.is_file()]
+        if args.verbose
+        else []
+    )
+    payload = {
+        **plan.base,
+        "status": "in_sync",
+        "skills_dir": str(installed),
+        "identity": plan.discovery.identity,
+        "plugin_root": str(plan.discovery.plugin_root) if plan.discovery.plugin_root else None,
+        "changed": [rel.as_posix() for rel in changed],
+        "extra": [rel.as_posix() for rel in extra],
+        "missing": missing,
+        "local_unmerged": unmerged,
+        "local_unmerged_error": unmerged_error,
+    }
+
+    if not changed and not extra:
+        if not args.check and not plan.marker_present:
+            _record_ownership(plan)
+        return _emit(
+            args,
+            payload,
+            [
+                *inventory,
+                f"SYNC: IN_SYNC - {installed} ({plan.discovery.identity}, proof: {plan.discovery.proof}) "
+                f"from {plan.source.described}",
+                *note,
+            ],
+            EXIT_OK,
+        )
+
+    drift_lines = [
+        *inventory,
+        *(f"  differs: {rel.as_posix()}" for rel in changed),
+        *(f"  stale (not in build): {rel.as_posix()}" for rel in extra),
+    ]
+    if args.check:
+        return _emit(
+            args,
+            {**payload, "status": "drift"},
+            [
+                *drift_lines,
+                f"SYNC: DRIFT - {len(changed)} file(s) differ, {len(extra)} stale, vs {plan.source.described}",
+                "      Publish the merged copy: python scripts/sync_installed_skills.py",
+                "      (If you published with --from-worktree, that same command restores it.)",
+                *note,
+            ],
+            EXIT_DRIFT,
+        )
+
+    still = _apply(plan, changed, extra)
+    if still:
+        return _emit(
+            args,
+            {**payload, "status": "copy_failed", "still_differ": [r.as_posix() for r in still]},
+            [f"SYNC: ERROR - {len(still)} file(s) still differ after copying"],
+            EXIT_COPY_FAILED,
+        )
+    _record_ownership(plan)
+    return _emit(
+        args,
+        {**payload, "status": "updated"},
+        [
+            *drift_lines,
+            f"SYNC: UPDATED - {len(changed)} file(s) copied, {len(extra)} removed at {installed} "
+            f"({plan.discovery.identity}, proof: {plan.discovery.proof}) from {plan.source.described}",
+            "      Skills are snapshotted at session start, so a RUNNING session keeps the old",
+            "      copy in memory. New sessions (and subagents they spawn) get this one.",
+            *note,
+        ],
+        EXIT_OK,
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
     """Sync the installed bundles from the merged ref, or report drift under --check."""
     args = build_parser().parse_args(argv)
+    if _worktree_needs_explicit_root(args):
+        return _emit(
+            args,
+            {"status": "worktree_needs_explicit_root", "default_verified": False},
+            [
+                "SYNC: ERROR - --from-worktree requires --plugin-root (or " + PLUGIN_ROOT_ENV + ")",
+                "      Unmerged content must never also choose its own destination: review measured",
+                "      a branch-invented bundle name selecting an UNRELATED plugin, overwriting it",
+                "      and deleting a file inside it (#410 review finding 1).",
+            ],
+            EXIT_UNPROVEN_PLUGIN,
+        )
 
     # The fetch happens before anything else, so its outcome survives into the failure payload too -
     # and so its human line can be suppressed under --json, which preflight PARSES: a single stray
-    # line ahead of the JSON reads to preflight as "did not report", i.e. an unverified bundle, which
-    # is the false green the whole check exists to prevent.
+    # line ahead of the JSON reads to preflight as "did not report", i.e. an unverified bundle.
     fetch_note: dict | None = None
     if args.fetch and not args.from_worktree:
         ok, detail = fetch_origin()
@@ -450,155 +844,20 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
 
     try:
         source = _resolve_source(args)
-    except PublishRefError as exc:
-        return _emit(
-            args,
-            {"status": "no_ref", "detail": str(exc), "fetch": fetch_note},
-            [
-                f"SYNC: ERROR - {exc}",
-                "      The installed copy must be what is MERGED, so this refuses to guess (issue #410).",
-                "      Add the remote and fetch, pass --ref <ref>, or publish this checkout deliberately",
-                "      with --from-worktree, which serves UNREVIEWED guidance to every new subagent.",
-            ],
-            EXIT_NO_REF,
-        )
+    except (PublishRefError, UnverifiedDefaultError) as exc:
+        return _source_failure(args, exc, fetch_note)
 
-    if not args.json:
-        for line in [*(worktree_banner() if source.from_worktree else []), *_unverified_default_note(source)]:
+    if not args.json and source.from_worktree:
+        for line in worktree_banner():
             print(line)
 
     build_dir = REPO / "_build"
     build_dir.mkdir(parents=True, exist_ok=True)
     workdir = Path(tempfile.mkdtemp(prefix="skill-plugin-", dir=build_dir))
     try:
-        # Everything below keys on source.COMMIT, never on the ref name (review finding 3).
-        pinned = str(source.commit) if source.commit else ""
-        source_root = REPO if source.from_worktree else export_ref_tree(pinned, workdir / "ref-src")
-        src = build_reference_copy(workdir / "reference", source_root)
-
-        # The bundle inventory comes from the PINNED build and is then handed to discovery. Without
-        # it, `discover_skill_plugin()` imported the CURRENT WORKING TREE's
-        # `build_plugin.SHIPPED_SKILLS`, so the branch still chose both the destination plugin and
-        # the file list - the same defect one step earlier (review finding 2). Reproduced: an
-        # unmerged bundle name made discovery select an unrelated second plugin, and a plain sync
-        # exited 0 while overwriting it and deleting its own bundle.
-        bundles = sorted(p.name for p in src.iterdir() if p.is_dir())
-        discovery = discover_skill_plugin(
-            installed_plugins_root=args.installed_plugins_root,
-            plugin_root_override=args.plugin_root,
-            bundles=bundles,
-        )
-        base = {
-            "source": source.kind,
-            "ref": source.ref,
-            "commit": source.commit,
-            "described": source.described,
-            "bundles": bundles,
-            "default_verified": source.default_verified,
-            "default_alternatives": list(source.alternatives),
-            "fetch": fetch_note,
-        }
-        failed = _discovery_failure(args, discovery, base)
-        if failed is not None:
-            return failed
-        installed = discovery.skills_dir
-
-        changed, extra = diff_tree(src, installed, scope=bundles)
-        missing = [name for name in bundles if not (installed / name / "SKILL.md").is_file()]
-        unmerged, unmerged_error = ([], None) if source.from_worktree else local_divergence(src, workdir)
-
-        note = (
-            [
-                f"SYNC: NOTE - a build from this working tree would differ from {source.described} in "
-                f"{len(unmerged)} shipped file(s):",
-                *(f"        {path}" for path in unmerged),
-                "      Subagents read the MERGED copy, not these edits - deliberately (issue #410).",
-                "      To test them with a subagent: python scripts/sync_installed_skills.py --from-worktree",
-            ]
-            if unmerged
-            else ([f"SYNC: NOTE - {unmerged_error}"] if unmerged_error else [])
-        )
-        inventory = (
-            [f"  in build: {p.relative_to(src).as_posix()}" for p in sorted(src.rglob("*")) if p.is_file()]
-            if args.verbose
-            else []
-        )
-        payload = {
-            **base,
-            "status": "in_sync",
-            "skills_dir": str(installed),
-            "identity": discovery.identity,
-            "plugin_root": str(discovery.plugin_root) if discovery.plugin_root else None,
-            "changed": [rel.as_posix() for rel in changed],
-            "extra": [rel.as_posix() for rel in extra],
-            "missing": missing,
-            "local_unmerged": unmerged,
-            "local_unmerged_error": unmerged_error,
-        }
-
-        if not changed and not extra:
-            return _emit(
-                args,
-                payload,
-                [
-                    *inventory,
-                    f"SYNC: IN_SYNC - {installed} ({discovery.identity}) from {source.described}",
-                    *note,
-                ],
-                EXIT_OK,
-            )
-
-        drift_lines = [
-            *inventory,
-            *(f"  differs: {rel.as_posix()}" for rel in changed),
-            *(f"  stale (not in build): {rel.as_posix()}" for rel in extra),
-        ]
-
-        if args.check:
-            return _emit(
-                args,
-                {**payload, "status": "drift"},
-                [
-                    *drift_lines,
-                    f"SYNC: DRIFT - {len(changed)} file(s) differ, {len(extra)} stale, vs {source.described}",
-                    "      Publish the merged copy: python scripts/sync_installed_skills.py",
-                    "      (If you published with --from-worktree, that same command restores it.)",
-                    *note,
-                ],
-                EXIT_DRIFT,
-            )
-
-        for rel in changed:
-            target = installed / rel
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src / rel, target)
-        for rel in extra:
-            (installed / rel).unlink()
-
-        # Re-diff rather than trusting the copies. The whole reason this script exists is a lock
-        # that makes some filesystem operations fail, so "it did not raise" is not evidence.
-        still, _ = diff_tree(src, installed, scope=bundles)
-        if still:
-            return _emit(
-                args,
-                {**payload, "status": "copy_failed", "still_differ": [r.as_posix() for r in still]},
-                [f"SYNC: ERROR - {len(still)} file(s) still differ after copying"],
-                EXIT_COPY_FAILED,
-            )
-
-        return _emit(
-            args,
-            {**payload, "status": "updated"},
-            [
-                *drift_lines,
-                f"SYNC: UPDATED - {len(changed)} file(s) copied, {len(extra)} removed at {installed} "
-                f"({discovery.identity}) from {source.described}",
-                "      Skills are snapshotted at session start, so a RUNNING session keeps the old",
-                "      copy in memory. New sessions (and subagents they spawn) get this one.",
-                *note,
-            ],
-            EXIT_OK,
-        )
+        plan = _plan(args, source, workdir, fetch_note)
+        failed = _discovery_failure(args, plan.discovery, plan.base)
+        return failed if failed is not None else _report(args, plan)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 

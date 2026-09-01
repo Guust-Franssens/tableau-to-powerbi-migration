@@ -311,6 +311,24 @@ function Get-SkillBundleVerdict($Sync) {
                   Merged = @{ Ok = $false; Detail = "cannot resolve the merged ref: $($Sync.detail)"
                               Hint = 'The installed bundles SHADOW .github/skills and could not be checked against what is merged. Add the origin remote and fetch, or pass --ref <ref> to python scripts\sync_installed_skills.py --check.' } }
     }
+    if ($Sync.status -eq 'unverified_default') {
+        # Review finding 2: the remote renamed its default branch, `git fetch` left the local
+        # `origin/HEAD` marker pointing at the old one, and the sync published the OLD branch while
+        # reporting in_sync. The sync now refuses instead of guessing - and preflight must carry that
+        # through as UNVERIFIED, because a green row here is exactly the false green being removed.
+        return @{ Mode = 'unverified'
+                  Merged = @{ Ok = $false; Detail = "merged default branch UNVERIFIED: $($Sync.detail)"
+                              Hint = 'Which branch is authoritative could not be established, so the installed bundles that SHADOW .github/skills are unverified. Reconnect and re-run python scripts\sync_installed_skills.py --check, or pin it with --ref refs/remotes/origin/<branch>.' } }
+    }
+    if ($Sync.status -eq 'unproven_plugin') {
+        # Review finding 1: destination ownership used to be inferred from CONTENT, so a foreign
+        # plugin that merely carried one bundle name was selected, overwritten, and had a file inside
+        # it deleted. The sync now writes nothing it cannot prove it owns; naming it once is a
+        # deliberate operator action, so this blocks rather than silently skipping the check.
+        return @{ Mode = 'unproven'
+                  Plugin = @{ Ok = $false; Detail = "ownership UNPROVEN, nothing was written: $($Sync.detail)"
+                              Hint = $Sync.install_hint } }
+    }
 
     $missing = @($Sync.missing) | Where-Object { $_ }
     $stale = @($Sync.changed) + @($Sync.extra) | Where-Object { $_ }
@@ -319,15 +337,19 @@ function Get-SkillBundleVerdict($Sync) {
         Mode = 'compared'
         Identity = $Sync.identity
         Plugin = @{ Ok = $true; Detail = $Sync.plugin_root
-                    Hint = 'Discovered by scanning installed-plugins for the bundle names the MERGED commit ships.' }
+                    Hint = "Ownership was PROVED ($($Sync.proof)), not inferred from the bundles a directory happens to carry." }
         Installed = @{
             Ok = ($missing.Count -eq 0)
             Detail = if ($missing.Count) { "NOT INSTALLED in discovered plugin: $($missing -join ', ')" } else { "$(@($Sync.bundles).Count) bundle(s) present" }
             Hint = 'Refresh the installed copy in place: python scripts\sync_installed_skills.py. If the bundle is new, install/update the plugin BETWEEN sessions.'
         }
+        # `default_verified` is part of the DECISION, not decoration. Review measured a run that was
+        # genuinely byte-identical to `origin/master` while the remote's default branch had been
+        # renamed to `main` with different content: status `in_sync`, and the mismatch reported only
+        # as an "alternative" nobody read. In sync with the WRONG branch is not in sync.
         Merged = @{
-            Ok = ($Sync.status -eq 'in_sync')
-            Detail = if ($stale.Count) { "STALE in plugin vs $($Sync.described): $($stale -join ', ')" } else { "in sync with $($Sync.described)" }
+            Ok = (($Sync.status -eq 'in_sync') -and ($Sync.default_verified -eq $true))
+            Detail = if ($stale.Count) { "STALE in plugin vs $($Sync.described): $($stale -join ', ')" } elseif ($Sync.default_verified -ne $true) { "UNVERIFIED default branch, so `"$($Sync.described)`" may not be the merged one" } else { "in sync with $($Sync.described)" }
             Hint = 'The plugin copy SHADOWS .github/skills, so agents run bytes that differ from the MERGED repo. FIX IT NOW, mid-session: python scripts/sync_installed_skills.py (the lock behind "os error 5" only blocks renaming the plugin dir - files inside stay writable). Then publish so other machines get it: python scripts/build_plugin.py --out <clone of the marketplace repo>, commit+push. Do not trust a measurement taken against a stale bundle.'
         }
         # Informational, deliberately NOT a failure. Your unmerged skill edits are not what a subagent
@@ -336,7 +358,7 @@ function Get-SkillBundleVerdict($Sync) {
         LocalEdits = @{
             Ok = ($localEdits.Count -eq 0)
             Detail = if ($localEdits.Count) { "$($localEdits.Count) unmerged local change(s): $($localEdits -join ', ')" } elseif ($Sync.local_unmerged_error) { $Sync.local_unmerged_error } else { 'none' }
-            Hint = 'Subagents read the MERGED copy, so these edits are NOT live. To test them deliberately: python scripts/sync_installed_skills.py --from-worktree (it serves unreviewed guidance, and says so). Restore with a plain sync.'
+            Hint = 'Subagents read the MERGED copy, so these edits are NOT live. To test them deliberately: python scripts/sync_installed_skills.py --from-worktree --plugin-root <path> (it serves unreviewed guidance, and says so). Restore with a plain sync.'
         }
     }
 }
@@ -348,10 +370,10 @@ if ($py) {
 }
 $skills = Get-SkillBundleVerdict $sync
 
-if ($skills.Mode -eq 'unreported' -or $skills.Mode -eq 'noref') {
+if ($skills.Mode -eq 'unreported' -or $skills.Mode -eq 'noref' -or $skills.Mode -eq 'unverified') {
     Add-Check 'skill bundles match published plugin' 'critical' $skills.Merged.Ok $skills.Merged.Detail $skills.Merged.Hint
 }
-elseif ($skills.Mode -eq 'multiple') {
+elseif ($skills.Mode -eq 'multiple' -or $skills.Mode -eq 'unproven') {
     Add-Check 'plugin: reusable Power BI skill bundles' 'critical' $skills.Plugin.Ok $skills.Plugin.Detail $skills.Plugin.Hint
 }
 elseif ($skills.Mode -eq 'missing') {
