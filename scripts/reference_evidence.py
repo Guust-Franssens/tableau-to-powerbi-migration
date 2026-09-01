@@ -26,9 +26,12 @@ from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
 
-KIND_DASHBOARD = "dashboard"
-KIND_WORKSHEET = "worksheet"
-KIND_UNKNOWN = "unknown"
+from object_identity import (
+    KIND_DASHBOARD,
+    KIND_UNKNOWN,
+    KIND_WORKSHEET,
+    Candidate,
+)
 
 
 # Grade strings are `check_unit.py:868,906`'s, reused verbatim so one vocabulary describes evidence
@@ -90,9 +93,18 @@ PROVIDER_SCOPE = {
     "manual": KIND_UNKNOWN,
 }
 
-# A `manual` record the operator explicitly graded `validation_grade` carries an asserted identity,
-# so it may satisfy a page of either kind. Nothing else may.
-KIND_ASSERTED = "operator-asserted"
+# A `manual` record's kind comes from what the MANIFEST declares, never from its grade.
+# Round-3 finding 1: `validation_grade` used to promote a manual record to a kind that matched both
+# dashboards and worksheets, so one image made a dashboard `Ops` AND a worksheet `Ops` ready - the
+# founding "one worksheet render satisfies a dashboard" defect, re-created one domain over. The
+# `--manual-validation-grade` flag asserts GRADE; `capture_tableau_reference.py:264-266` says
+# outright the tool cannot know "even that it is a screenshot of this dashboard". Grade and kind are
+# independent axes and one may never widen the other.
+MANUAL_KIND_HINT = (
+    "a `manual` record carries no object type, so it cannot satisfy any page. Declare it in the "
+    "manifest entry as `view_type`/`object_type` (`dashboard` or `worksheet`) - the grade flag "
+    "asserts how good the picture is, never what it is of."
+)
 
 
 @dataclass(frozen=True)
@@ -204,7 +216,7 @@ class Evidence:  # pylint: disable=too-many-instance-attributes
         width, height = facts
         return cls(
             name=name,
-            kind=KIND_ASSERTED if provider == "manual" and grade == GRADE_VALIDATION else kind,
+            kind=kind,
             grade=grade,
             origin=origin,
             provider=provider,
@@ -216,17 +228,24 @@ class Evidence:  # pylint: disable=too-many-instance-attributes
             workbook_name=workbook_name,
         )
 
-    def match_names(self) -> list[str]:
-        """Every spelling of the source-object name this record could legitimately be filed under.
+    def candidate(self) -> Candidate:
+        """This record as an external-producer CANDIDATE - never as an identity.
 
-        A `manual` record is named from its FILE STEM (`img.stem`), and `collect_manual` only ever
-        picks up `tableau-*.png`, so the documented drop convention puts a `tableau-` prefix on every
-        such name. Round-2 review measured a manifest shaped like the real `--manual-validation-grade`
-        output matching nothing at all because of it.
+        A capture manifest names a file; it does not establish what the file depicts. So the kind
+        here is whatever the producer DECLARED, and `KIND_UNKNOWN` otherwise, which can never resolve
+        against a real page (`object_identity.IdentityIndex.resolve`).
+
+        A `manual` record is named from its file stem, and `collect_manual`
+        (`capture_tableau_reference.py:105`) only globs `tableau-*.png`, so the prefix is imposed by
+        the glob rather than chosen by the operator - stripping it recovers the name they typed.
+        Both spellings are offered as candidate names, and the index refuses if they turn out to
+        match more than one object: round-3 finding 1 measured one image making two distinct
+        worksheets ready because the alias had no uniqueness check.
         """
+        names = [self.name]
         if self.provider == "manual" and self.name.casefold().startswith(MANUAL_NAME_PREFIX):
-            return [self.name, self.name[len(MANUAL_NAME_PREFIX) :]]
-        return [self.name]
+            names.append(self.name[len(MANUAL_NAME_PREFIX) :])
+        return Candidate(names=tuple(names), kind=self.kind)
 
     def is_for(self, unit: UnitIdentity) -> bool:
         """Whether this render is provably evidence for ``unit``.

@@ -68,13 +68,14 @@ from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
 from bundle_corpus import shipping_reports
+import object_identity as oid
+from object_identity import AMBIGUOUS
 from reference_evidence import (
-    AMBIGUOUS,
+    MANUAL_KIND_HINT,
     CAP_VALIDATION,
     GRADE_ORACLE,
     GRADE_UNKNOWN,
     GRADE_VALIDATION,
-    KIND_ASSERTED,
     KIND_DASHBOARD,
     KIND_UNKNOWN,
     KIND_WORKSHEET,
@@ -84,7 +85,6 @@ from reference_evidence import (
     RejectedEvidence,
     UnitIdentity,
     json_object,
-    norm_name,
     oracle_evidence,
     reference_evidence,
     sha256_of,
@@ -99,7 +99,6 @@ __all__ = [
     "GRADE_ORACLE",
     "GRADE_UNKNOWN",
     "GRADE_VALIDATION",
-    "KIND_ASSERTED",
     "KIND_DASHBOARD",
     "KIND_UNKNOWN",
     "KIND_WORKSHEET",
@@ -318,32 +317,51 @@ def drop_explanations(handover: dict[str, Any] | None) -> dict[tuple[str, str], 
 def match_evidence(obj: SourceObject, evidence: list[Evidence]) -> tuple[Evidence | str | None, list[Evidence]]:
     """`(match, name_only)` for one object, against evidence ALREADY scoped to its unit.
 
-    A match requires BOTH the name and the scope to agree - the rule that stops a worksheet render
-    satisfying a dashboard page. `name_only` carries entries sharing the name whose scope does not
-    match or could not be established; they are reported as UNVERIFIABLE rather than dropped, because
-    "a picture exists but I cannot prove what it is of" is a different operator action from "no
-    picture exists".
+    The join now runs through `object_oid.IdentityIndex`, which is what makes ambiguity
+    unrepresentable rather than checked here: `Resolution` has no `.first()`, no indexing and no
+    truthiness, and `Resolution.value()` RAISES for anything but a single match. A future author
+    cannot write "take the first candidate" against this type.
 
-    WARNING: names are compared EXACTLY first. Round-2 finding 5 measured the normalization defect -
-    `_norm` collapses case and repeated whitespace, so `Ops  Summary` and `Ops Summary`, which get
-    DIFFERENT engine page ids, shared one key and a single record marked both pages ready.
+    Two indexes, on purpose. The EXACT one is authoritative. The normalized one exists only because
+    external providers spell names in ways this repo does not control - it is built with
+    `normalized=True`, and an engine-to-engine index (`normalized=False`) has no lossy table at all,
+    so there is no fourth layer for the recurring collapse defect to slip into.
 
-    A normalized fallback survives only for evidence NAMES, which come from external providers whose
-    spelling this repo does not control. It fires only when it is unambiguous: exactly one record may
-    normalize to the key. More than one is `AMBIGUOUS`, which is a refusal, not a resolution - a
-    match picked from several candidates is a guess, and a guess is what this gate exists to refuse.
+    A record whose producer did not declare an object type is indexed under `KIND_UNKNOWN` and so
+    resolves against nothing: "I cannot tell what this depicts" must not satisfy a page of either
+    kind (round-3 finding 1).
     """
-    forms = [(item, item.match_names()) for item in evidence]
-    exact = [item for item, names in forms if obj.name in names]
-    if not exact:
-        loose = [item for item, names in forms if any(norm_name(n) == norm_name(obj.name) for n in names)]
-        if len({item.path for item in loose}) > 1:
-            return AMBIGUOUS, loose
-        exact = loose
-    matched = [item for item in exact if item.kind in (obj.kind, KIND_ASSERTED)]
-    if matched:
-        return next((item for item in matched if item.grade == GRADE_VALIDATION), matched[0]), []
-    return None, exact
+    exact: oid.IdentityIndex[Evidence] = oid.IdentityIndex(normalized=False)
+    loose: oid.IdentityIndex[Evidence] = oid.IdentityIndex(normalized=True)
+    for item in evidence:
+        exact.add(item.candidate(), item)
+        loose.add(item.candidate(), item)
+    key = oid.ObjectIdentity.from_engine(obj.kind, obj.name)
+    if key is None:
+        return None, []
+    resolution = exact.resolve(key)
+    if resolution.outcome == oid.ABSENT:
+        resolution = loose.resolve(key)
+    if resolution.outcome == oid.UNIQUE:
+        return resolution.value(), []
+    if resolution.outcome == oid.AMBIGUOUS:
+        return AMBIGUOUS, list(resolution.matches)
+    named = [
+        item for item in evidence if any(oid.normalize(n) == oid.normalize(obj.name) for n in item.candidate().names)
+    ]
+    return None, named
+
+
+def _exclusivity_conflicts(rows: list[dict[str, Any]]) -> set[str]:
+    """Render paths credited to more than one page.
+
+    Round-3 finding 1 measured one genuine manual image making TWO distinct worksheets ready, because
+    its prefix-stripped alias created a second name with no uniqueness check. Identity is not enough
+    on its own: evidence must also be EXCLUSIVE, so a record claimed twice invalidates both claims
+    rather than satisfying both.
+    """
+    used = [row["evidence_path"] for row in rows if row.get("evidence_path")]
+    return {path for path in used if used.count(path) > 1}
 
 
 def _page_row(  # pylint: disable=too-many-arguments,too-many-positional-arguments
@@ -416,19 +434,25 @@ def _engine_report(root: Path) -> dict[str, Any] | None:
     return payload if isinstance((payload or {}).get("workbooks"), list) else None
 
 
-def _unit_names(engine_report: dict[str, Any] | None) -> tuple[set[str], set[str]]:
-    """`(workbook names, datasource names)` the engine says this bundle produced."""
+def _unit_names(engine_report: dict[str, Any] | None) -> tuple[list[str], list[str]]:
+    """`(workbook names, datasource names)` the engine says this bundle produced - EXACT, as LISTS.
+
+    Round-3 finding 2: these were normalized `set`s, so two genuinely distinct workbooks
+    (`Ops  Summary` and `Ops Summary`) collapsed to one key and the collision was permanently
+    discarded. `_units_without_reports` then reported no missing workbook, and a bundle that shipped
+    NOTHING for the second one read READY.
+
+    Both sides of every join built on this are engine artifacts written by the same run - the names
+    in `report.json` and the `<name>.Report` folder names - so they are byte-exact and there is
+    nothing to normalize. Lists rather than sets because multiplicity is itself a finding.
+    """
     report = engine_report or {}
-    workbooks = {
-        norm_name(item.get("name"))
-        for item in report.get("workbooks") or []
-        if isinstance(item, dict) and item.get("name")
-    }
-    datasources = {
-        norm_name(item.get("name"))
-        for item in report.get("datasources") or []
-        if isinstance(item, dict) and item.get("name")
-    }
+    workbooks = [
+        str(item["name"]) for item in report.get("workbooks") or [] if isinstance(item, dict) and item.get("name")
+    ]
+    datasources = [
+        str(item["name"]) for item in report.get("datasources") or [] if isinstance(item, dict) and item.get("name")
+    ]
     return workbooks, datasources
 
 
@@ -490,7 +514,7 @@ def resolve_source(root: Path, unit: str, handover: dict[str, Any] | None, expli
         if not isinstance(asset, dict):
             continue
         name = str(asset.get("name") or "")
-        if Path(name).stem and norm_name(Path(name).stem) == norm_name(unit):
+        if Path(name).stem == unit:
             staged = asset.get("staged_input_path")
             for candidate in (Path(str(staged)) if staged else None, root.parent / "assets" / name):
                 if candidate is not None and candidate.is_file():
@@ -546,6 +570,19 @@ def _page_rows(
         else:
             status, reason = PAGE_DROPPED_UNEXPLAINED, None
         rows.append(_page_row(obj, status, scoped, reason, require_validation_grade))
+    # Identity alone is not enough: evidence must also be EXCLUSIVE. One render credited to two pages
+    # invalidates both claims rather than satisfying both (round-3 finding 1).
+    for path in _exclusivity_conflicts(rows):
+        for row in rows:
+            if row.get("evidence_path") == path:
+                row.update(
+                    {
+                        "evidence": "unverifiable",
+                        "readiness": UNVERIFIABLE,
+                        "grade": GRADE_UNKNOWN,
+                        "matched_by": f"one render ({path}) is claimed by more than one page, so neither can own it",
+                    }
+                )
     return rows
 
 
@@ -577,16 +614,16 @@ def _expectation(unit: str, report_dir: Path, source: Path) -> list[SourceObject
     # normalized key, so a single evidence record marked both ready. External providers spell names
     # in ways this repo does not control, so a normalized fallback is unavoidable there - which makes
     # a collision among the EXPECTED objects unresolvable by construction. Refuse the unit rather
-    # than resolve it.
-    keys: dict[str, list[str]] = {}
-    for obj in objects:
-        keys.setdefault(f"{obj.kind}\0{norm_name(obj.name)}", []).append(obj.name)
-    collisions = {key: names for key, names in keys.items() if len(set(names)) > 1}
-    if collisions:
-        shown = "; ".join(", ".join(repr(n) for n in sorted(set(names))) for names in collisions.values())
+    # than resolve it. `object_oid.collisions` preserves multiplicity throughout.
+    identities = [oid.ObjectIdentity.from_engine(obj.kind, obj.name) for obj in objects]
+    if any(key is None for key in identities):
+        return _cannot(unit, "a source object has no usable identity, so no page can be attributed", report_dir, source)
+    merged = oid.collisions([key for key in identities if key is not None])
+    if merged:
+        shown = "; ".join(", ".join(repr(name) for name in group) for group in merged)
         return _cannot(
             unit,
-            f"{len(collisions)} source object name(s) differ only by case or repeated whitespace "
+            f"{len(merged)} source object name(s) differ only by case or repeated whitespace "
             f"({shown}) - they take different page ids but one evidence record would match both, so "
             "no capture could be attributed to either",
             report_dir,
@@ -603,7 +640,7 @@ def _datasource_only(unit: str, report_dir: Path, engine_report: dict[str, Any] 
     clean exit 0 to a workbook whose report generation had FAILED.
     """
     workbooks, datasources = _unit_names(engine_report)
-    if engine_report is None or norm_name(unit) not in datasources or norm_name(unit) in workbooks:
+    if engine_report is None or unit not in datasources or unit in workbooks:
         return None
     return UnitResult(
         unit=unit,
@@ -685,10 +722,15 @@ def _units_without_reports(engine_report: dict[str, Any] | None, reports: list[P
     `NOT_APPLICABLE` and exit 0, so a workbook whose report generation FAILED read as legitimately
     reference-free. `NOT_APPLICABLE` must be earned from the datasource classification, never from
     the mere absence of a report.
+
+    Round-3 finding 2: the comparison was normalized and set-based, so `Ops  Summary` and
+    `Ops Summary` collapsed to one key and one shipping report covered both - the second workbook
+    shipped nothing and the bundle read READY. Exact names, and a duplicate in the engine's own list
+    is reported rather than deduplicated away.
     """
-    shipped = {norm_name(path.name[: -len(".Report")]) for path in reports}
+    shipped = [path.name[: -len(".Report")] for path in reports]
     workbooks, _ = _unit_names(engine_report)
-    return [
+    missing = [
         UnitResult(
             unit=name,
             status=STATUS_FINDINGS,
@@ -697,8 +739,17 @@ def _units_without_reports(engine_report: dict[str, Any] | None, reports: list[P
                 "produce a report, so there is nothing to reference and nothing to build on"
             ),
         )
-        for name in sorted(workbooks - shipped)
+        for name in sorted(set(workbooks) - set(shipped))
     ]
+    missing.extend(
+        _cannot(
+            name,
+            f"the engine's report.json lists the workbook name {name!r} more than once, so a "
+            "shipping report cannot be attributed to either entry",
+        )
+        for name in oid.duplicates(workbooks)
+    )
+    return missing
 
 
 def _empty_bundle_unit(root: Path, engine_report: dict[str, Any] | None) -> UnitResult:
@@ -782,6 +833,8 @@ def _merge(
         "pages_dropped_explained": sum(1 for page in pages if page["page_status"] == PAGE_DROPPED_EXPLAINED),
         "pages_dropped_unexplained": sum(1 for page in pages if page["page_status"] == PAGE_DROPPED_UNEXPLAINED),
         "evidence_records": len(evidence),
+        "evidence_untyped": sum(1 for item in evidence if item.kind == KIND_UNKNOWN),
+        "evidence_untyped_names": sorted({item.name for item in evidence if item.kind == KIND_UNKNOWN}),
         "evidence_rejected": [
             {"name": item.name, "origin": item.origin, "path": item.path, "reason": item.reason} for item in rejected
         ],
@@ -831,6 +884,14 @@ def render(report: dict[str, Any], *, verbose: bool = False) -> str:
         f"  [REJECTED EVIDENCE] {item['name']!r} ({item['origin']}): {item['reason']}"
         for item in report["evidence_rejected"]
     )
+    if report["evidence_untyped"]:
+        # Round-3 finding 1: rather than let a grade flag stand in for an object type, say plainly
+        # that these records were read and why they cannot count. A route that works by guessing is
+        # worse than one that is honestly unavailable and says how to make it available.
+        lines.append(
+            f"  [UNTYPED EVIDENCE] {report['evidence_untyped']} render(s) carry no object type "
+            f"({', '.join(report['evidence_untyped_names'][:4])}) - {MANUAL_KIND_HINT}"
+        )
     if report["status"] == STATUS_CANNOT_ESTABLISH:
         lines.append(
             "  CANNOT_ESTABLISH is NOT a pass: this gate formed no opinion, so an agent starting "
@@ -914,6 +975,7 @@ def _merge_scans(reports: list[dict[str, Any]]) -> dict[str, Any]:
     merged["target"] = ", ".join(report["target"] for report in reports)
     merged["units"] = [unit for report in reports for unit in report["units"]]
     merged["evidence_rejected"] = [item for report in reports for item in report["evidence_rejected"]]
+    merged["evidence_untyped_names"] = sorted({n for r in reports for n in r["evidence_untyped_names"]})
     for key in (
         "units_scanned",
         "units_ready",
@@ -928,6 +990,7 @@ def _merge_scans(reports: list[dict[str, Any]]) -> dict[str, Any]:
         "pages_dropped_explained",
         "pages_dropped_unexplained",
         "evidence_records",
+        "evidence_untyped",
     ):
         merged[key] = sum(report[key] for report in reports)
     merged["grades_present"] = sorted({grade for report in reports for grade in report["grades_present"]})
