@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 import _credential_modal
+import decide_dialog
 import probe_desktop_query
 import refresh_pbip_model
 from _credential_modal import (
@@ -1482,6 +1483,21 @@ def test_every_finding_kind_has_operator_guidance() -> None:
     assert reportable <= documented, f"kinds with no guidance: {sorted(reportable - documented)}"
 
 
+def test_the_guidance_is_marker_free_so_it_cannot_be_relabelled_as_a_sign_on_problem() -> None:
+    """Issue #153, re-checked for the kind #417 added.
+
+    `probe_live_source` classifies a failing child by scanning its WHOLE transcript as free text, so a
+    guidance line containing any of its markers relabels "we could not probe" as the one hard stop
+    these verdicts exist to avoid. `tests/test_probe_live_source_verdict.py` drives the real emitters
+    through the real classifier; this is the cheap local pin that names the offending word.
+    """
+    markers = ("credential", "sign in", "signed in", "authentication", "login", "oauth", "access token")
+
+    for kind, guidance in _credential_modal.DIALOG_KIND_GUIDANCE.items():
+        hits = [marker for marker in markers if marker in guidance.lower()]
+        assert not hits, f"{kind} guidance contains {hits} and would be reclassified: {guidance!r}"
+
+
 # --------------------------------------------------------------------------------------------------
 # Blind-review findings on PR #400. Each one is a case where "we could not establish it" was still
 # collapsing into the clean bucket - the same defect class issue #376 exists to remove, found again on
@@ -2516,6 +2532,7 @@ $payload = [ordered]@{
   kind       = $decision.Kind
   exit_code  = [int]$decision.ExitCode
   evidence   = $decision.Evidence
+  guidance   = $decision.Guidance
   candidates = [int]$decision.Candidates
   line       = $(if ($decision.Verdict) { [string](Format-DialogEvidence -Window $decision.Window) } else { $null })
 }
@@ -3416,6 +3433,76 @@ def test_a_join_the_body_cannot_carry_on_its_own_never_convicts(tmp_path: Path) 
     assert result["verdict"] != "CREDENTIAL_MISSING", "the caption carried the join on its own"
     assert result["exit_code"] == 3
     assert result["kind"] == "mixed-content"
+
+
+def test_an_interposed_button_does_not_break_the_split_signature(tmp_path: Path) -> None:
+    """Exploit 3, offline. The join must skip INTERACTIVE elements or `Cancel` breaks the sentence.
+
+    Its only other coverage is `test_a_signature_split_by_an_interposed_button_is_a_hard_stop`, which
+    is `serial`, drives a real GUI process and skips itself when the harvest never lands - so on a
+    routine `-m "not serial"` run nothing was watching this rule at all. Here the same shape is
+    synthesised: `Enter your` / `Cancel` / `credentials`, with `Cancel` declared interactive.
+    """
+    window = _window(
+        Title="Refresh",
+        Texts=["Refresh", "Enter your", "Cancel", "credentials"],
+        InteractiveTexts=["Cancel"],
+        OwnerEnabled=False,
+    )
+
+    result = classify(tmp_path, [window], refresh_in_flight=True)
+
+    assert result["verdict"] == "CREDENTIAL_MISSING", "an interposed button broke the sentence"
+    assert result["exit_code"] == 1
+
+
+def test_a_decider_that_answers_nothing_is_indeterminate_never_clean(tmp_path: Path, monkeypatch) -> None:
+    """The seam's fail-CLOSED promise, exercised rather than asserted in prose.
+
+    Making the decision one implementation bought a new failure mode the old arbiter did not have: the
+    collector now depends on finding an interpreter and getting a parseable answer back. `SKILL.md`
+    says that failure lands in the indeterminate band and never at exit 0 - this is the test that can
+    tell whether that is true, by pointing `PBIP_REFRESH_PYTHON` at a stub that exits 0 having printed
+    nothing at all.
+
+    ⚠️ Not a hypothetical: a machine with no `python` on PATH, a `py` launcher with no installed
+    version, or a decider that crashes after the collector's own `-Depth 6` truncation all produce
+    exactly this shape. `CREDENTIAL_PRESENT` becomes unreachable there, which is the price of one
+    decision implementation - and it is strictly the safe direction.
+    """
+    stub = tmp_path / "silent_decider.cmd"
+    stub.write_text("@echo off\r\nexit /b 0\r\n", encoding="ascii")
+    monkeypatch.setenv("PBIP_REFRESH_PYTHON", str(stub))
+
+    result = classify(tmp_path, [REFRESH_PROGRESS], refresh_in_flight=True)
+
+    assert result["exit_code"] == 3, f"a silent decider must not produce a clean bill of health: {result}"
+    assert result["verdict"] == "DIALOG_UNREADABLE"
+    assert result["kind"] == "unreadable"
+    assert "no verdict" in (result["evidence"] or ""), result
+
+
+def test_the_operator_guidance_crosses_the_seam_with_the_verdict(tmp_path: Path) -> None:
+    """The collector must not hold a second copy of the next step, and this is what proves it does not.
+
+    ⚠️ **The differential sweep is structurally blind to this**, so it needs its own test: the sweep
+    compares the collector path against the decider path, and a guidance change moves both together.
+    What matters here is that the string the operator reads is the one `DIALOG_KIND_GUIDANCE` defines -
+    a `switch` in `probe_desktop_credential.ps1` over the same kinds would agree today and drift
+    tomorrow, which is the whole shape of issue #417.
+    """
+    for window, kind in (
+        (_window(Title="Refresh", Texts=["Refresh", "Evaluating", "Orders"], OwnerEnabled=False), "mixed-content"),
+        (_window(Title="Refresh", Texts=["Refresh"], OwnerEnabled=False), "benign-title-only"),
+        (WPF_CREDENTIAL_MODAL_SEEN_AS_CAPTION_ONLY, "benign-title-only"),
+        (_window(Title="", Texts=[], OwnerEnabled=False), "unreadable"),
+    ):
+        result = classify(tmp_path, [window])
+
+        assert result["kind"] == kind, result
+        assert result["guidance"] == _credential_modal.DIALOG_KIND_GUIDANCE[kind], (
+            f"the collector did not receive the decider's guidance for {kind}: {result['guidance']!r}"
+        )
 
 
 @pytest.mark.parametrize("phrase", CREDENTIAL_ALTERNATIVES)
@@ -4363,3 +4450,173 @@ def test_a_native_query_prompt_beside_progress_text_is_live_reported(tmp_path: P
     assert done.returncode == 3, f"a native-query approval must never clear or be a credential stop:\n{done.stdout}"
     assert "CREDENTIAL_PRESENT" not in done.stdout
     assert "REFRESH_IN_PROGRESS" not in done.stdout, "one progress element must not suppress the whole window"
+
+
+# --------------------------------------------------------------------------------------------------
+# #417 acceptance: the SEAM DIFFERENTIAL. Zero verdict mismatches between the two entry paths.
+# --------------------------------------------------------------------------------------------------
+#
+# History, and why a structural argument is not accepted here. Round N-1 of this work removed the
+# arbiter's private classifier by ALIGNING it with the Python one, and it LOOKED aligned. A blind
+# review then ran a 1,536-case differential and measured **48 title-related verdict mismatches** -
+# including **24 where PowerShell exited 3 and Python exited 0**, i.e. the gate of record silently
+# clearing a sign-in modal. Two independent causes, one of them a LANGUAGE-level difference
+# (`-ne`/`-notcontains` are case-insensitive; `==`/`in` are not), which is why the fix is a seam and
+# not a third alignment pass.
+#
+# So the claim "there is only one implementation now" has to be MEASURED, not argued. This sweeps a
+# deterministic cartesian corpus through BOTH entry paths and compares the whole decision record:
+#
+#   collector path  probe_desktop_credential.ps1 -LoadDetectorsOnly -> Invoke-DialogDecision
+#                   -> ConvertTo-Json -> decide_dialog.py -> DECISION: line -> ConvertFrom-Json
+#   decider path    decide_dialog.decide(...) in-process, on the same JSON
+#
+# What that can and cannot see is worth being exact about. It can see everything PowerShell still
+# contributes: JSON serialisation (5.1 has no `-AsArray`, and a single-element array serialises as a
+# bare object), the `Set-Content -Encoding UTF8` BOM, `[int]`/`[bool]` coercions on the way back, and
+# the `_window_from` field mapping. It CANNOT see a divergence in something both paths share, because
+# they share it - that is the point of the seam, and it is why the mutation harness, not this sweep,
+# is what proves the individual rules.
+
+_SWEEP_HARNESS = r"""
+param(
+  [Parameter(Mandatory = $true)][string]$Probe,
+  [Parameter(Mandatory = $true)][string]$CasesJson,
+  [Parameter(Mandatory = $true)][string]$OutFile
+)
+$ErrorActionPreference = 'Stop'
+. $Probe -LoadDetectorsOnly
+# Assign FIRST, then wrap. `@(ConvertFrom-Json ...)` is a Windows PowerShell 5.1 trap: the cmdlet
+# writes the whole array as ONE pipeline object, so `@()` yields a 1-element array containing the
+# array, `foreach` runs once, and `$case.id` silently member-enumerates into every id at once.
+$parsedCases = ConvertFrom-Json (Get-Content -LiteralPath $CasesJson -Raw)
+$cases = @($parsedCases)
+$results = @()
+foreach ($case in $cases) {
+  $decision = Invoke-DialogDecision -Windows @($case.windows) -RefreshInFlight:([bool]$case.in_flight)
+  $results += [ordered]@{
+    id         = [string]$case.id
+    verdict    = $decision.Verdict
+    kind       = $decision.Kind
+    exit_code  = [int]$decision.ExitCode
+    evidence   = $decision.Evidence
+    guidance   = $decision.Guidance
+    candidates = [int]$decision.Candidates
+    credential = $decision.Credential
+  }
+}
+Set-Content -LiteralPath $OutFile -Value (ConvertTo-Json @($results) -Depth 6) -Encoding UTF8
+"""
+
+# Titles carry the two shapes that produced the original 48: a caption whose case differs from the
+# body it accompanies, and a caption that CONTAINS a credential-signature phrase while asking for
+# nothing.
+_SWEEP_TITLES = ("", "Refresh", "REFRESH", "Loading", PAT_DOCUMENTATION_CAPTION, "Password:", "Whoops")
+# One body per classification branch, plus an all-uppercase progress dialog.
+_SWEEP_BODIES = (
+    [],
+    ["Refresh"],
+    ["Refresh", "1,204 rows loaded", "Cancel"],
+    ["REFRESH", "1,204 ROWS LOADED"],
+    ["Refresh", "Evaluating", "Orders"],
+    ["Refresh", "Enter your", "credentials"],
+    ["Refresh", "Enter your credentials", "OK"],
+    ["Refresh", "Evaluating", NATIVE_QUERY_PROMPT],
+)
+# `1` and `"true"` are the two values PowerShell's coercive `-eq $true` cleared in review.
+_SWEEP_HARVEST = (True, False, "__absent__", "true")
+_SWEEP_OWNERS = (None, True, False)
+
+
+def _seam_corpus() -> list[dict]:
+    """The full deterministic product - 2,688 cases. Order is stable, so `id` is a stable name."""
+    cases: list[dict] = []
+    for title in _SWEEP_TITLES:
+        for body in _SWEEP_BODIES:
+            for interactive in ([], ["Cancel", "OK"]):
+                for harvest in _SWEEP_HARVEST:
+                    for owner in _SWEEP_OWNERS:
+                        for in_flight in (False, True):
+                            window = _window(
+                                Title=title,
+                                Texts=list(body),
+                                InteractiveTexts=list(interactive),
+                                OwnerEnabled=owner,
+                            )
+                            if harvest == "__absent__":
+                                del window["HarvestComplete"]
+                            else:
+                                window["HarvestComplete"] = harvest
+                            cases.append(
+                                {
+                                    "id": f"{len(cases):04d}",
+                                    "in_flight": in_flight,
+                                    "windows": _owned_by_a_synthesised_frame([window]),
+                                }
+                            )
+    return cases
+
+
+# Every 28th case by default: 96 of the 2,688, spread deterministically across the whole product and
+# costing ~30s. The full sweep is the same generator with `PBIP_SEAM_SWEEP_STRIDE=1` - see the test.
+SEAM_SWEEP_STRIDE = max(1, int(os.environ.get("PBIP_SEAM_SWEEP_STRIDE", "28")))
+
+
+def test_the_seam_leaves_no_verdict_mismatch_between_the_two_entry_paths(tmp_path: Path) -> None:
+    """The measured version of "there is only one decision implementation".
+
+    ⚠️ **Measured on this build, 2026-09-01: `PBIP_SEAM_SWEEP_STRIDE=1`, 2,688 cases, 0 mismatches.**
+    Against the same corpus the committed suite walks every 28th case, because 2,688 collector round
+    trips cost ~12 minutes (~273 ms each, measured) and that does not belong in a routine run. Set the
+    variable to 1 to reproduce the full sweep.
+
+    The comparison is the WHOLE record - verdict, kind, exit code, evidence, guidance, candidate count
+    and the credential excerpt - not just the exit code. The 24 worst cases in the original 1,536-case
+    differential differed in the exit code, but a divergence that reaches only the evidence line is
+    still a divergence, and it is the one that would come back first.
+    """
+    corpus = _seam_corpus()
+    assert len(corpus) == 2688, "the corpus generator changed shape - the measured claim above is stale"
+    cases = corpus[::SEAM_SWEEP_STRIDE]
+
+    exe = _powershell()
+    harness = tmp_path / "sweep.ps1"
+    harness.write_text(_SWEEP_HARNESS, encoding="utf-8")
+    cases_json = tmp_path / "cases.json"
+    cases_json.write_text(json.dumps(cases), encoding="utf-8")
+    out_file = tmp_path / "collector.json"
+    done = subprocess.run(
+        [exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness)]
+        + ["-Probe", str(PROBE_PS1), "-CasesJson", str(cases_json), "-OutFile", str(out_file)],
+        capture_output=True,
+        text=True,
+        timeout=3600,
+        check=False,
+    )
+    assert done.returncode == 0, f"the collector sweep failed:\n{done.stdout}\n{done.stderr}"
+    collected = json.loads(out_file.read_text(encoding="utf-8-sig"))
+    if isinstance(collected, dict):
+        collected = [collected]
+    assert len(collected) == len(cases), f"the collector answered {len(collected)} of {len(cases)} cases"
+
+    keys = ("verdict", "kind", "exit_code", "evidence", "guidance", "candidates", "credential")
+    mismatches = []
+    for case, collector in zip(cases, collected, strict=True):
+        decider = decide_dialog.decide(
+            [decide_dialog._window_from(raw) for raw in case["windows"]],
+            in_flight=case["in_flight"],
+        )
+        for key in keys:
+            if collector.get(key) != decider.get(key):
+                mismatches.append(
+                    f"case {case['id']} {key}: collector={collector.get(key)!r} decider={decider.get(key)!r}"
+                )
+
+    assert not mismatches, f"{len(mismatches)} verdict mismatches across {len(cases)} cases:\n" + "\n".join(
+        mismatches[:20]
+    )
+    # Discriminating control: a sweep that reached no interesting state would agree trivially.
+    kinds = {entry["kind"] for entry in collected}
+    assert {"credential", "benign", "benign-unverified"} <= kinds, (
+        f"the sampled corpus never reached the states that matter, so agreement proves nothing: {sorted(kinds)}"
+    )

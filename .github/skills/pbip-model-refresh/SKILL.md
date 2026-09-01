@@ -28,11 +28,18 @@ so `dotnet add` cannot silently no-op on a net10 default:
   imports from this file and from nothing else.
 - [**`scripts/probe_desktop_credential.ps1`**](scripts/probe_desktop_credential.ps1) - the arbiter a
   refresh TIMEOUT names: a UI-Automation check for a data-source sign-in modal, so "slow" and
-  "blocked" are told apart by evidence, not guessed. Ships **inside** the bundle, so the instruction
-  the script prints at runtime resolves to a file that is actually here. **Only `CREDENTIAL_MISSING`
-  (exit 1) is a hard stop**; everything it cannot positively identify as a credential prompt lands in
-  the exit-3 "could not probe" band (`REFRESH_IN_PROGRESS` / `DIALOG_UNRECOGNIZED` /
-  `DIALOG_UNREADABLE` / `UNKNOWN`) rather than escalating to a human — see the verdict table below.
+  "blocked" are told apart by evidence, not guessed. It **collects** (Win32 attributes plus the UIA
+  harvest) and forwards to `decide_dialog.py`; since issue #417 it classifies nothing itself. Ships
+  **inside** the bundle, so the instruction the script prints at runtime resolves to a file that is
+  actually here. **Only `CREDENTIAL_MISSING` (exit 1) is a hard stop**; everything it cannot positively
+  identify as a credential prompt lands in the exit-3 "could not probe" band
+  (`REFRESH_IN_PROGRESS` / `DIALOG_UNRECOGNIZED` / `DIALOG_UNREADABLE` / `UNKNOWN`) rather than
+  escalating to a human — see the verdict table below.
+- [**`scripts/decide_dialog.py`**](scripts/decide_dialog.py) - **the one decision implementation**
+  (issue #417). Reads the collector's window JSON, runs `_credential_modal`'s credential prepass and
+  dialog classification, and prints one `DECISION:` line whose `exit_code` the collector adopts. Fails
+  **closed**: malformed input, an unknown field or an internal error is `DIALOG_UNREADABLE` at exit 3,
+  never exit 0.
 - [**`tests/`**](tests) - the regression suite for both, runnable from this folder
   (`pytest tests`). It is what makes the portability claim below checkable rather than aspirational.
 
@@ -174,35 +181,56 @@ stay byte-identical.
 > floor long after #400 deleted both from the Python detector. Measured on **identical input**, one real
 > owned **empty 80x60** modal: the arbiter produced **no candidate at all and exit 0**, while the Python
 > detector produced `DIALOG_UNREADABLE` at exit 3. The arbiter turned an indeterminate state into a
-> clean one — the worst outcome available here — and the two detectors disagreed. It now ports
-> `main_frame` / `renders_nothing`: `OwnerHwnd` is harvested from Win32, ownership is walked
-> **transitively** to the unowned root, possible roots are **enumerated**, exactly one identifies the
-> frame, and anything else yields `$null`, which **excludes nothing**. The only exclusions left are the
-> identified frame and *unowned AND zero-area*. Nothing is excluded for its size, class or name. The
-> credential prepass also excludes the identified frame, so a report titled `Account Key` can no longer
-> fabricate a hard stop.
+> clean one — the worst outcome available here — and the two detectors disagreed. `Select-DialogCandidate`
+> no longer exists: since issue #417 candidate selection is `_credential_modal.dialog_candidates`, called
+> once, in Python. `OwnerHwnd` is harvested from Win32, ownership is walked **transitively** to the
+> unowned root, possible roots are **enumerated**, exactly one identifies the frame, and anything else
+> yields `None`, which **excludes nothing**. The only exclusions left are the identified frame, *unowned
+> AND zero-area*, and an **enabled owner that no blocking signature contradicts**. Nothing is excluded
+> for its size, class or name. The credential prepass also excludes the identified frame, so a report
+> titled `Account Key` can no longer fabricate a hard stop.
 >
-> ⚠️ **Captions may ACCUSE, never EXONERATE (issue #406 review, finding 1).** `Content` drops text equal
-> to the caption so a reassuring caption cannot AUTHORISE suppression — round 1's defect. That
-> exclusion was one-directional and the other half went unclosed for four review rounds: a **hostile**
-> caption was simply discarded. Measured — a window titled **`Password:`** whose body read only
-> `Refresh` + `Cancel` classified `benign` and was **suppressed to nothing** under `-RefreshInFlight`,
-> **exit 0**. An unaccounted title now vetoes (`mixed-content` → `DIALOG_UNRECOGNIZED`, exit 3), while
-> still being unable to set `benignHit` — so `benign-title-only` is unchanged.
+> ⚠️ **Captions may ACCUSE, never EXONERATE — and never CONVICT (issue #406 review finding 1; issue #417
+> review finding 2).** `Content` drops text equal to the caption so a reassuring caption cannot AUTHORISE
+> suppression — round 1's defect. That exclusion was one-directional and the other half went unclosed for
+> four review rounds: a **hostile** caption was simply discarded. Measured — a window titled
+> **`Password:`** whose body read only `Refresh` + `Cancel` classified `benign` and was **suppressed to
+> nothing** under `-RefreshInFlight`, **exit 0**. An unaccounted title now vetoes (`mixed-content` →
+> `DIALOG_UNRECOGNIZED`, exit 3), while still being unable to set `benign_hit` — so `benign-title-only`
+> is unchanged.
 >
-> - **Modality is used ONE WAY.** `IsWindowEnabled(GetWindow(hwnd, GW_OWNER))` returning true proves a
->   window blocks nothing, and exonerates it. The converse is not used: Power BI's refresh dialog also
->   disables its owner, so a disabled owner would convict the innocent. No owner at all reports `null`
->   — the test did not apply, which is not the same as passing it.
+> ⛔ **"Accuse" must not mean "any substring convicts", and for a while it did.** The credential
+> signature is a set of **unanchored body phrases**, so feeding it a caption fabricated a hard stop:
+> measured in BOTH detectors, an owned dialog titled `Personal Access Token documentation` whose whole
+> body read `Refresh` + `Cancel` — asking for nothing — returned **`CREDENTIAL_MISSING`, exit 1**, the
+> band whose documented meaning is *"a human must sign in once"*. Convicting now needs CONTENT
+> (`credential_search_texts`), and the WPF **prose join** that recovers a sentence split across visual
+> elements must be **corroborated by the body**: what is matched is the body-only join, what is reported
+> is the full prose join including the caption. A phrase the body cannot carry alone lands at
+> `DIALOG_UNRECOGNIZED`, exit 3 — loud, without claiming a wall that is not there. Gated by
+> `test_a_harmless_caption_substring_does_not_fabricate_a_credential_wall`, with
+> `test_the_same_caption_still_convicts_when_the_BODY_carries_the_signature` as the discriminating
+> control so the fix cannot be "blind the detector".
+>
+> - **Modality is used ONE WAY, and it cannot outrank an identification.**
+>   `IsWindowEnabled(GetWindow(hwnd, GW_OWNER))` returning true proves a window blocks nothing, and
+>   exonerates it. The converse is not used: Power BI's refresh dialog also disables its owner, so a
+>   disabled owner would convict the innocent. No owner at all reports `null` — the test did not apply,
+>   which is not the same as passing it. ⚠️ The exoneration is **withheld** from a window whose text
+>   matches `blocking_prompt_signature.regex` (`is_identified_human_blocker`): measured, the
+>   native-database-query approval modal with an enabled owner was dropped before classification and
+>   reported as **nothing at all** — the one prompt this file tells you to check for. The **credential**
+>   signature is deliberately not part of that override, because `match_credential_modal` reads every
+>   window regardless of candidate selection, so an exonerated sign-in prompt is still exit 1.
 > - **`scripts/benign_dialog_signature.regex`** is the progress vocabulary ("Evaluating", "N rows
 >   loaded", "Waiting for other queries"), and **`scripts/benign_chrome_signature.regex`** the
->   enumerated control labels that carry no prompt (`Cancel`/`OK`/`Close`). Both are read by the
->   arbiter *and* the Python detector, and they are the only two files that can cause a dialog to be
->   dismissed. ⚠️ The progress vocabulary is **inferred** from Power BI's refresh UI, not
->   captured from a live dialog, and it is deliberately not load-bearing: a miss only downgrades
->   `REFRESH_IN_PROGRESS` to `DIALOG_UNRECOGNIZED` — both exit 3, neither a credential wall. Keep both
->   files' alternatives narrow and anchored; a broad pattern is the one way they could hide a real
->   modal, and `test_the_benign_signature_can_never_shadow_a_credential_prompt` /
+>   enumerated control labels that carry no prompt (`Cancel`/`OK`/`Close`). There is now exactly one
+>   reader — `_credential_modal`, reached from both entry paths — and they are the only two files that
+>   can cause a dialog to be dismissed. ⚠️ The progress vocabulary is **inferred** from Power BI's
+>   refresh UI, not captured from a live dialog, and it is deliberately not load-bearing: a miss only
+>   downgrades `REFRESH_IN_PROGRESS` to `DIALOG_UNRECOGNIZED` — both exit 3, neither a credential wall.
+>   Keep both files' alternatives narrow and anchored; a broad pattern is the one way they could hide a
+>   real modal, and `test_the_benign_signature_can_never_shadow_a_credential_prompt` /
 >   `test_the_chrome_allowlist_stays_an_enumeration_not_a_catch_all` gate exactly that. If
 >   you ever have a real progress dialog on screen, capture its exact text and tighten this file.
 
@@ -290,8 +318,8 @@ stay byte-identical.
 > ⚠️ **And validate the harvest child's payload, not just its JSON.** The parent computed
 > `(-not $p.Truncated) -and (-not $p.PatternsIncomplete)`. A missing property is `$null`, and
 > `-not $null` is `$true`, so a well-formed-but-schema-incomplete payload became `HarvestComplete`
-> **`$true`** — a *real Boolean*, which then sailed straight through the strict
-> `Test-HarvestComplete` guard because the coercion had already happened upstream of it. The child must
+> **`$true`** — a *real Boolean*, which then sailed straight through the strict Boolean guard
+> downstream because the coercion had already happened upstream of it. The child must
 > now exit 0, and both flags must **exist** and be actual Booleans. Items are still merged when they
 > parse (unread text only lowers credential recall), but `Complete` stays false.
 >
@@ -328,10 +356,22 @@ stay byte-identical.
 > | `harvest=no-payload items=1` | the child never delivered; only the Win32 caption survived — could not reach the subject, retry then skip |
 > | `harvest=patterns-incomplete` / `bad-schema` | it answered but not trustworthily |
 >
-> ⚠️ **The reason is DIAGNOSTIC ONLY.** `HarvestComplete` — a strict Boolean, read only by
-> `Test-HarvestComplete` — remains the sole authority over suppression, gated by
+> ⚠️ **The reason is DIAGNOSTIC ONLY.** `HarvestComplete` — a strict Boolean whose ONLY reader since
+> issue #417 is `decide_dialog._window_from` — remains the sole authority over suppression, gated by
 > `test_the_harvest_reason_is_diagnostic_and_cannot_change_a_verdict`. A reason that could grant the
 > right to suppress would be the fourth instance of the proxy mistake above.
+>
+> ⚠️ **Only a real Boolean `true` authorises suppression, and the strictness lives at the JSON
+> boundary.** PowerShell's `-eq $true` is **coercive** — review cleared a window with integer `1` and
+> with the string `"true"` — and a JSON round trip between two languages is exactly where a type
+> widens. `_window_from` therefore accepts `True` and collapses **everything else** (absent, `null`,
+> `0`, `1`, `"true"`, `"false"`, `""`, `[]`) to "the read did not report itself finished", which
+> `classify_dialog` turns into `benign-unverified` → `DIALOG_UNREADABLE`, exit 3. Note the asymmetry
+> with the dataclass default, which is `None`: an in-process Win32 enumeration either reads a window
+> fully or raises, so *there* the question does not apply — putting the coercion in the classifier
+> instead would make every Python-native progress dialog unverifiable. Gated by
+> `test_only_a_real_boolean_true_can_authorise_suppression` (nine shapes) with
+> `test_a_real_boolean_true_does_authorise_suppression` as its positive control.
 >
 > ⚠️ **The margin is thin even on an idle machine, so this is not purely a load story.** The same
 > command against the same 451-element fixture produced both `no-payload` (child killed) and a complete
@@ -404,17 +444,18 @@ stay byte-identical.
 > That last row is the half nobody had noticed: the 100x100 filter gated the **hard stop** as well as
 > the classification, because `match_credential_modal` was fed only the size-filtered candidates. A
 > credential prompt in a smaller window produced **no finding at all** — a silent false negative on the
-> one verdict that matters most. It now scans **every window, any class, any size**, exactly as
-> `Test-CredentialModal` always has.
+> one verdict that matters most. It now scans **every window, any class, any size**, exactly as the
+> now-deleted `Test-CredentialModal` always did.
 >
-> **Three deliberate divergences from the arbiter**, each because Win32 child-HWND text is strictly less
-> evidence than a UIA harvest. Do not "fix" them by copying the arbiter:
+> **Two structural divergences remain, and they are about EVIDENCE, not about code (issue #417).**
+> Since the seam, both entry paths run the same `_credential_modal` functions in the same process, so
+> there is no "port" to keep aligned. What still differs is what each one can COLLECT, and the shared
+> classifier degrades safely on the weaker input:
 >
-> | arbiter mechanism | Python | why |
+> | mechanism | in-process Win32 path | why |
 > |---|---|---|
-> | prose **join** before the credential match | **not ported** | the join needs a control-type signal to skip an interposed `Cancel`; Win32 has none, so the only join available is the naive whole-window one the arbiter discarded — and a join can *manufacture* a phrase (`Account` + `Key` → `Account Key`). That error lands on the one verdict #376 says to err away from. Recall lost this way routes to `unrecognized`/`unreadable` (exit 3, loud), and the arbiter is the escalation path. |
-> | enabled-owner **exoneration** | **not ported** | it is a *suppression* path needing owner/enabled state this module does not harvest, and unverifiable here without a live Desktop. Omitting it costs one more exit 3. |
-> | `benign-unverified` (truncated harvest) | **not needed** | a text read that throws fails the whole enumeration (`Win32EnumerationError` → `unknown_reason`), so a partial read never reaches the classifier. |
+> | prose **join** before the credential match | shared, but weaker in practice | the join skips elements listed in `interactive_texts`, which only the UIA harvest can supply. With none, an interposed `Cancel` sits inside the join and can break the sentence — a recall loss that routes to `unrecognized`/`unreadable` (exit 3, loud), never to a silent clear. The join is also body-corroborated, so it cannot manufacture a conviction out of a caption. |
+> | `benign-unverified` (incomplete harvest) | unreachable, by construction | `harvest_complete` defaults to `None` — "the question does not apply" — because a text read that throws fails the WHOLE enumeration (`Win32EnumerationError` → `unknown_reason`), so a partial read never reaches the classifier. Only a collected window can carry `False`. |
 >
 > **One asymmetry, and it is deliberate:** a proven-benign progress dialog is reported at **t=0**
 > (`REFRESH_IN_PROGRESS` — it is somebody else's refresh; do not stack a second on it) and **ignored**
@@ -530,8 +571,8 @@ stay byte-identical.
 > are loud: somebody looks at the screen and sees no dialog. Excluding the *wrong* window is silent,
 > and produces a finished model for a source nobody reached.
 >
-> The arbiter's one-way enabled-owner exoneration is therefore **ported**, not skipped — that
-> divergence note in the module docstring is gone.
+> The one-way enabled-owner exoneration is applied **once**, in `dialog_candidates`, which both entry
+> paths reach — that divergence note in the module docstring is gone.
 >
 > ✅ **Proven against real windows, not just dataclasses.**
 > `test_the_win32_harvest_reads_real_ownership_and_owner_enabled_state` builds the reviewer's own
@@ -556,45 +597,74 @@ stay byte-identical.
 > | `Refresh`, `Evaluating`, `Cancel`, `OK`, `Close` | `benign` | `$null`, exit 0 | **unchanged** — the benign path stays reachable |
 > | `Refresh`, `Evaluating`, `Orders` | `benign` | `$null`, exit 0 | `mixed-content` / `DIALOG_UNRECOGNIZED`, exit 3 |
 >
-> **Port vs share, decided — and re-decided under challenge.** The vocabulary is SHARED, the control
-> flow is PORTED, and the *decision model* (frame identity, candidate selection, classification) is now
-> ported **faithfully** rather than approximately. Blind review was right that the first attempt drifted:
-> the class and size proxies survived underneath the shared classifier (finding 2), and the anti-drift
-> test could not detect a hard-coded regex (finding 3). Both are fixed, and the fix for finding 3 is the
-> answer to "prove it rather than assert it": `test_the_arbiter_and_the_python_detector_share_one_vocabulary`
-> **mutates `benign_chrome_signature.regex` in a scratch copy of the bundle** and requires BOTH real
-> detector paths to flip. A detector holding a private copy cannot flip, so it fails — the reviewer's own
-> mutation (hard-code the regex, leave the filename in a dead comment) now fails it.
+> ✅ **Port vs share is SETTLED, and sharing won (issue #417).** This section used to record the
+> opposite decision — vocabulary SHARED, control flow PORTED — and defend it. That defence did not
+> survive measurement. A blind review ran a **1,536-case differential** across both detectors and found
+> **48 title-related verdict mismatches**, including **24 where PowerShell exited 3 and Python exited
+> 0**: the gate of record silently clearing a sign-in modal. Two independent causes, and the second is
+> the one that ended the argument:
 >
-> ⛔ **Why not make PowerShell call the Python detector outright?** Because the divergence that mattered
-> was **upstream of the classifier** — in candidate selection — so sharing `classify_dialog` would not
-> have prevented it; only porting the whole decision model did. What cannot be shared is the *input*:
-> the arbiter exists because it reads **UI Automation** text that the Python detector structurally
-> cannot (Win32 child-HWND only, and a WPF dialog renders its whole tree into one HWND). Beyond that,
-> the arbiter is printed as a **recovery** instruction when a refresh is already in trouble, so it must
-> not acquire an interpreter-discovery failure mode; `-LoadDetectorsOnly` exists to be dependency-free;
-> and the poll loop classifies every 2 s for up to 75 s. ⚠️ **This remains a defended alternative, not a
-> proof of impossibility.** A genuine sharing seam does exist — PowerShell owns *collection* (Win32 +
-> UIA), Python owns *decision* via `inspect_credential_modal`'s injectable enumerator — and it would
-> make drift structurally impossible rather than merely detectable. It is a larger change than this
-> issue, and the mutation test above is what makes the ported version honest in the meantime.
+> | cause | measured |
+> |---|---|
+> | a title veto applied to the PowerShell half only | owned dialog titled `Password:` with benign body → `DIALOG_UNRECOGNIZED` (exit 3) there, `CREDENTIAL_PRESENT` (**exit 0**) in Python |
+> | **case sensitivity differing at the LANGUAGE level** — PowerShell's `-ne`/`-notcontains` are case-INsensitive, Python's `==`/`in` are not | title `Refresh` with body `REFRESH` → exit 3 vs **exit 0** |
 >
-> **Does harvest completeness change that verdict? No — it sharpens it.** A fair challenge: two
-> detectors that disagreed about whether a harvest was complete would be worse than either alone, so if
-> both had a completeness notion with different rules, that would argue for sharing. They do not.
-> Completeness exists **only** in the arbiter, by construction: `classify_dialog` takes no completeness
-> input at all, and on the Python side a text read that throws fails the WHOLE enumeration
-> (`Win32EnumerationError` → `unknown_reason`), so a partial read cannot reach its classifier in the
-> first place. There is nothing to keep aligned; sharing would mean *adding* a concept to Python that
-> only PowerShell can produce, and inventing a second place for it to be wrong.
+> A language-level difference **cannot be fixed once**. Every future string comparison in either
+> implementation is a fresh chance to reintroduce it, so a third alignment round would have bought
+> nothing but a longer interval before the next divergence. Hence a seam, not another port:
 >
-> What must be identical is weaker, and it is testable on both sides: **an unestablished read never
-> reaches the clean state.** Arbiter — `test_only_a_real_boolean_true_can_authorise_suppression` (nine
-> coercion shapes, asserted under `-RefreshInFlight` where suppression actually happens) plus, at the
-> process level, `test_a_partial_harvest_is_never_reported_as_no_modal_appeared` (a real wedged UIA
-> provider, exit 3, never exit 0). Python — the raise-the-whole-enumeration path above, routed to
-> `unknown_reason`, also exit 3. Same invariant, different mechanism, neither able to produce a silent
-> clear.
+> - **`probe_desktop_credential.ps1` COLLECTS** — Win32 attributes plus the UI Automation harvest,
+>   which Python structurally cannot read (a WPF dialog renders its whole visual tree into one HWND).
+> - **`decide_dialog.py` JUDGES** — candidate selection *and* classification, once, in one language.
+>   `Select-DialogCandidate`, `Get-DialogClassification`, `Test-CredentialModal`, `Get-MainFrame`,
+>   `Test-RendersNothing`, `Get-DialogTextSet`, `Get-NormalizedText` and `Test-HarvestComplete` are all
+>   **deleted**, including the ones that were merely dead: a second implementation lying around is an
+>   invitation to rewire it.
+>
+> ⚠️ **The interpreter-discovery failure mode the old defence worried about is REAL, and it fails
+> closed.** `Resolve-PythonExe` tries `$env:PBIP_REFRESH_PYTHON`, then `python`, `python3`, `py`; with
+> none of them present the probe returns `DIALOG_UNREADABLE` at exit 3 — "we could not decide" — never
+> exit 0. The same is true of a decider that produces no `DECISION:` line or unparseable output. That is
+> a real capability loss on a machine with no Python (the probe can no longer reach
+> `CREDENTIAL_PRESENT`), and it is the price of having one decision implementation; it is written down
+> here rather than assumed away.
+>
+> ⚠️ **Cost, measured:** one decider round trip is **~273 ms**, and the poll loop decides every 2 s for
+> up to `-TimeoutSec` seconds — so a 75 s probe spends ~10 s in interpreter startup. `Get-PidWindows`
+> also asks the decider which windows deserve a UIA harvest (`--candidates-only`), because deciding
+> *that* in PowerShell would re-create exactly the divergence this removed.
+>
+> ✅ **"There is one implementation" is MEASURED, not argued.**
+> `test_the_seam_leaves_no_verdict_mismatch_between_the_two_entry_paths` sweeps a deterministic
+> **2,688-case** corpus — 7 captions × 8 bodies × 2 interactive sets × 4 `HarvestComplete` shapes × 3
+> owner states × in-flight — through the collector path *and* the decider path and compares the whole
+> record (verdict, kind, exit code, evidence, guidance, candidate count, credential excerpt).
+> **Measured 2026-09-01: 0 mismatches, 12 m 27 s.** The committed suite walks every 28th case (~30 s);
+> `PBIP_SEAM_SWEEP_STRIDE=1` reproduces the full sweep. Its own vacuity control asserts the sampled
+> corpus actually reached `credential`, `benign` and `benign-unverified`, because a sweep that reached
+> no interesting state would agree trivially.
+>
+> ⚠️ **What the sweep CANNOT see, stated plainly:** anything both paths share, because they share it —
+> that is the point of the seam. It sees what PowerShell still contributes (JSON serialisation, the 5.1
+> single-element-array and BOM traps, `[int]`/`[bool]` coercions, the `_window_from` field mapping) and
+> nothing else. The individual rules are proved by mutation testing, not by this.
+>
+> The anti-drift test survives and still earns its place:
+> `test_the_arbiter_and_the_python_detector_share_one_vocabulary` **mutates
+> `benign_chrome_signature.regex` in a scratch copy of the bundle** and requires BOTH entry paths to
+> flip. It now proves the *collector* reaches the decider inside its own folder rather than some other
+> checkout's.
+>
+> **Completeness is no longer PowerShell-only.** The old text said `classify_dialog` "takes no
+> completeness input at all" — that is now false. `DesktopWindow.harvest_complete` is three-valued:
+> `None` (in-process Win32 read — either it completes or it raises, so the question does not apply),
+> `True`, and `False` (a collector said, or failed to say, that its read finished). Only a collected
+> window can carry `False`, and only `_window_from` can produce it. The invariant both paths share is
+> the weaker, testable one: **an unestablished read never reaches the clean state.** Collector —
+> `test_only_a_real_boolean_true_can_authorise_suppression` (nine coercion shapes, under
+> `-RefreshInFlight` where suppression actually happens) plus `test_a_partial_harvest_is_never_reported_as_no_modal_appeared`
+> (a real wedged UIA provider, exit 3, never exit 0). In-process — the raise-the-whole-enumeration path
+> above, routed to `unknown_reason`, also exit 3.
 >
 > ⚠️ **The reachability cost, stated rather than hidden — this reverses a reviewed decision.**
 > `test_short_data_labels_beside_progress_text_do_not_block_suppression` existed to keep
