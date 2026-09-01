@@ -601,7 +601,7 @@ ev.Evidence.candidate = candidate
 import check_reference_readiness as crr
 # The alias created a second name with no uniqueness check, so one image made two distinct
 # worksheets ready. Identity is not enough on its own - evidence must be EXCLUSIVE.
-crr._exclusivity_conflicts = lambda rows: set()
+crr._enforce_exclusivity = lambda rows: None
 """,
         anchor="test_one_render_cannot_make_two_pages_ready",
         controls=("test_a_worksheet_render_does_satisfy_a_worksheet_page",),
@@ -697,41 +697,24 @@ oid.Resolution.value = lambda self: self.matches[0] if self.matches else None
         anchor="test_reading_an_ambiguous_resolution_raises_rather_than_picking",
         controls=("test_collisions_and_duplicates_preserve_multiplicity",),
     ),
-    "an-engine-index-gains-a-normalized-fallback": Mutation(
-        code="""
-import object_identity as oid
-_orig = oid.IdentityIndex.resolve
-def resolve(self, identity):
-    found = _orig(self, identity)
-    if found.outcome != oid.ABSENT:
-        return found
-    hits = [v for (kind, key), values in self._by_key.items()
-            if kind == identity.kind and oid.normalize(key) == oid.normalize(identity.name)
-            for v in values]
-    return oid.Resolution(identity=identity, matches=tuple(hits))
-oid.IdentityIndex.resolve = resolve
-""",
-        anchor="test_an_engine_index_has_no_normalized_layer_to_fall_back_to",
-        controls=("test_a_normalized_index_resolves_a_spelling_difference_but_refuses_a_collision",),
-    ),
     "an-unknown-kind-can-become-an-identity": Mutation(
         code="""
 import object_identity as oid
+oid.ObjectIdentity.__post_init__ = lambda self: None
 oid.ObjectIdentity.from_engine = classmethod(
     lambda cls, kind, name: cls(kind=kind, name=name) if isinstance(name, str) and name.strip() else None
 )
 """,
-        anchor="test_an_identity_cannot_be_built_from_an_unknown_kind",
+        anchor="test_from_engine_returns_none_where_the_constructor_raises",
         controls=("test_collisions_and_duplicates_preserve_multiplicity",),
     ),
     "an-index-overwrites-instead-of-appending": Mutation(
         code="""
 import object_identity as oid
-def add(self, candidate, value):
-    self._kinds[id(value)] = candidate.kind
-    for key in candidate.keys(normalized=self.normalized):
-        self._by_key[(candidate.kind, key)] = [value]
-oid.IdentityIndex.add = add
+# Multiplicity is what makes a collision visible; overwriting deletes it silently.
+def _store(self, key, candidate, value):
+    self._by_key[key] = [(candidate, value)]
+oid._Index._store = _store
 """,
         anchor="test_reading_an_ambiguous_resolution_raises_rather_than_picking",
         controls=("test_an_engine_index_has_no_normalized_layer_to_fall_back_to",),
@@ -838,6 +821,112 @@ ev.Evidence.is_for = is_for
 """,
         anchor="test_evidence_attribution_uses_the_exact_workbook_name",
         controls=("test_oracle_evidence_for_this_workbook_does_count",),
+    ),
+    # --- round 4: absence is not prohibition - every "cannot" must RAISE -------------------------
+    "the-identity-constructor-does-not-validate": Mutation(
+        code="""
+import object_identity as oid
+# Measured: a frozen dataclass has a PUBLIC constructor, so ObjectIdentity(KIND_UNKNOWN, "Ops") built
+# fine while from_engine refused it. Removing __post_init__ restores exactly that.
+oid.ObjectIdentity.__post_init__ = lambda self: None
+""",
+        anchor="test_the_public_constructor_refuses_an_unidentifiable_kind",
+        controls=("test_collisions_and_duplicates_preserve_multiplicity",),
+    ),
+    "a-resolution-is-truthy-instead-of-raising": Mutation(
+        code="""
+import object_identity as oid
+# The reasoning error round 4 corrected: OMITTING __bool__ does not prevent truth-testing, it makes
+# the object truthy. Deleting it is therefore the real regression, not an equivalent.
+del oid.Resolution.__bool__
+""",
+        anchor="test_truth_testing_a_resolution_raises",
+        controls=("test_reading_an_ambiguous_resolution_raises_rather_than_picking",),
+    ),
+    "the-matches-are-public-again": Mutation(
+        code="""
+import object_identity as oid
+# Re-expose the raw collection, which is all `resolution.matches[0]` ever needed.
+oid.Resolution.matches = property(lambda self: tuple(value for _c, value in self._matches))
+""",
+        anchor="test_the_matches_are_not_reachable_as_a_public_collection",
+        controls=("test_reading_an_ambiguous_resolution_raises_rather_than_picking",),
+    ),
+    "a-candidate-index-accepts-an-engine-identity": Mutation(
+        code="""
+import object_identity as oid
+# Measured: a normalized index accepted an ObjectIdentity and then uniquely resolved a DIFFERENT
+# engine name through the lossy key.
+_orig = oid.CandidateIndex.add
+def add(self, candidate, value):
+    if isinstance(candidate, oid.ObjectIdentity):
+        candidate = oid.Candidate(names=(candidate.name,), kind=candidate.kind)
+    return _orig(self, candidate, value)
+oid.CandidateIndex.add = add
+""",
+        anchor="test_a_candidate_index_refuses_an_object_identity_by_type",
+        controls=("test_a_candidate_index_resolves_a_spelling_difference_but_refuses_a_collision",),
+    ),
+    "an-engine-index-gains-a-normalized-key": Mutation(
+        code="""
+import object_identity as oid
+_orig = oid.EngineIndex.resolve
+def resolve(self, identity):
+    found = _orig(self, identity)
+    if found.outcome != oid.ABSENT:
+        return found
+    hits = [entry for (kind, key), entries in self._by_key.items()
+            if kind == identity.kind and oid.normalize(key) == oid.normalize(identity.name)
+            for entry in entries]
+    return oid.Resolution(identity=identity, _matches=tuple(hits))
+oid.EngineIndex.resolve = resolve
+""",
+        anchor="test_an_engine_index_has_no_normalized_layer_to_fall_back_to",
+        controls=("test_a_candidate_index_resolves_a_spelling_difference_but_refuses_a_collision",),
+    ),
+    "a-lookalike-carries-the-evidence-again": Mutation(
+        code="""
+import object_identity as oid
+# The previous helper returned a bool and so worked as a resolution predicate. Giving Lookalike a
+# `.value` is the same bypass, one field along.
+_orig = oid.name_lookalikes
+def name_lookalikes(identity, candidates):
+    found = _orig(identity, candidates)
+    for item in found:
+        object.__setattr__(item, "value", candidates[0])
+    return found
+oid.name_lookalikes = name_lookalikes
+""",
+        anchor="test_name_lookalikes_cannot_be_used_to_select_evidence",
+        controls=("test_collisions_and_duplicates_preserve_multiplicity",),
+    ),
+    # --- round 4: exclusivity by FILE identity, across all units -----------------------------------
+    "exclusivity-compares-path-text": Mutation(
+        code="""
+import check_reference_readiness as crr
+# Measured: comparing `evidence_path` strings left both pages ready when the same physical PNG was
+# referenced under two spellings that `Path.samefile()` calls identical.
+crr._render_key = lambda path: path
+""",
+        anchor="test_the_same_file_under_two_spellings_is_still_one_render",
+        controls=("test_one_render_cannot_make_two_pages_ready",),
+    ),
+    "exclusivity-runs-inside-each-unit": Mutation(
+        code="""
+import check_reference_readiness as crr
+# Measured: run per unit, the same render satisfied one page in EACH of two units and the bundle
+# reported READY 2/2. This restores exactly that scoping - each unit folds its own rows, and the
+# bundle-wide pass is a no-op.
+_enforce = crr._enforce_exclusivity
+_result = crr._readiness_result
+def _readiness_result(unit, report_dir, source, rows):
+    _enforce(rows)
+    return _result(unit, report_dir, source, rows)
+crr._readiness_result = _readiness_result
+crr._enforce_exclusivity = lambda rows: None
+""",
+        anchor="test_one_render_cannot_satisfy_a_page_in_each_of_two_units",
+        controls=("test_one_render_cannot_make_two_pages_ready",),
     ),
     # --- whole-suite discriminating controls ------------------------------------------------------
     "control-cosmetic-reword-of-a-rendered-line": Mutation(

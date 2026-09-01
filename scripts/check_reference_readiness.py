@@ -314,55 +314,76 @@ def drop_explanations(handover: dict[str, Any] | None) -> dict[tuple[str, str], 
     return explained
 
 
-def match_evidence(obj: SourceObject, evidence: list[Evidence]) -> tuple[Evidence | str | None, list[Evidence]]:
-    """`(match, name_only)` for one object, against evidence ALREADY scoped to its unit.
+def match_evidence(obj: SourceObject, evidence: list[Evidence]) -> tuple[Evidence | str | None, list[Any]]:
+    """(match, lookalikes) for one object, against evidence ALREADY scoped to its unit.
 
-    The join now runs through `object_oid.IdentityIndex`, which is what makes ambiguity
-    unrepresentable rather than checked here: `Resolution` has no `.first()`, no indexing and no
-    truthiness, and `Resolution.value()` RAISES for anything but a single match. A future author
-    cannot write "take the first candidate" against this type.
+    The join runs through object_identity.CandidateIndex, which is what makes ambiguity
+    unrepresentable rather than checked here: Resolution.value() RAISES unless exactly one match
+    exists, ool(resolution) ALWAYS raises so a resolution can never be used as a condition, and
+    the matches are private so "take the first candidate" has nothing to index. Round 4 measured why
+    each of those has to RAISE rather than merely be absent - an object with no __bool__ is truthy,
+    and a public tuple is indexable.
 
-    Two indexes, on purpose. The EXACT one is authoritative. The normalized one exists only because
-    external providers spell names in ways this repo does not control - it is built with
-    `normalized=True`, and an engine-to-engine index (`normalized=False`) has no lossy table at all,
-    so there is no fourth layer for the recurring collapse defect to slip into.
+    Evidence names come from external producers whose spelling this repo does not control, so they go
+    in a CandidateIndex, which refuses an ObjectIdentity BY TYPE - keeping engine names out of
+    the lossy key table.
 
-    A record whose producer did not declare an object type is indexed under `KIND_UNKNOWN` and so
-    resolves against nothing: "I cannot tell what this depicts" must not satisfy a page of either
-    kind (round-3 finding 1).
+    A record whose producer declared no object type is indexed under KIND_UNKNOWN and resolves
+    against nothing: "I cannot tell what this depicts" must not satisfy a page of either kind. The
+    returned lookalikes carry descriptions only, never evidence objects, so a caller cannot quietly
+    promote one into a match.
     """
-    exact: oid.IdentityIndex[Evidence] = oid.IdentityIndex(normalized=False)
-    loose: oid.IdentityIndex[Evidence] = oid.IdentityIndex(normalized=True)
-    for item in evidence:
-        exact.add(item.candidate(), item)
-        loose.add(item.candidate(), item)
     key = oid.ObjectIdentity.from_engine(obj.kind, obj.name)
     if key is None:
         return None, []
-    resolution = exact.resolve(key)
-    if resolution.outcome == oid.ABSENT:
-        resolution = loose.resolve(key)
+    index: oid.CandidateIndex[Evidence] = oid.CandidateIndex()
+    for item in evidence:
+        index.add(item.candidate(), item)
+    resolution = index.resolve(key)
     if resolution.outcome == oid.UNIQUE:
         return resolution.value(), []
-    if resolution.outcome == oid.AMBIGUOUS:
-        return AMBIGUOUS, list(resolution.matches)
-    # Reporting only: a record that NAMES this object but could not resolve against it is
-    # `unverifiable`, not `blind` - a different operator action. The lossy comparison lives inside
-    # `object_identity` so it cannot drift back out here (`check_identity_normalization.py`).
-    named = [item for item in evidence if oid.shares_name(key, item.candidate())]
-    return None, named
+    lookalikes = oid.name_lookalikes(key, [item.candidate() for item in evidence])
+    return (AMBIGUOUS if resolution.outcome == oid.AMBIGUOUS else None), lookalikes
 
 
-def _exclusivity_conflicts(rows: list[dict[str, Any]]) -> set[str]:
-    """Render paths credited to more than one page.
+def _render_key(path: str) -> str:
+    """A canonical identity for a render file, so exclusivity compares FILES and not strings.
 
-    Round-3 finding 1 measured one genuine manual image making TWO distinct worksheets ready, because
-    its prefix-stripped alias created a second name with no uniqueness check. Identity is not enough
-    on its own: evidence must also be EXCLUSIVE, so a record claimed twice invalidates both claims
-    rather than satisfying both.
+    Round-4 finding: exclusivity compared vidence_path text, so the same physical PNG referenced
+    as 	ableau-dashboard.png and TABLEAU-DASHBOARD.PNG - Path.samefile() True on Windows - left
+    both pages ready. Filesystem identity (st_dev/st_ino) is the real answer; the resolved,
+    case-folded path is the fallback when the file cannot be stat-ed.
     """
-    used = [row["evidence_path"] for row in rows if row.get("evidence_path")]
-    return {path for path in used if used.count(path) > 1}
+    resolved = Path(path).resolve()
+    try:
+        stat = resolved.stat()
+    except OSError:
+        return str(resolved).casefold()
+    return f"{stat.st_dev}:{stat.st_ino}" if stat.st_ino else str(resolved).casefold()
+
+
+def _enforce_exclusivity(rows: list[dict[str, Any]]) -> None:
+    """Invalidate every claim on a render credited to more than one page, ACROSS ALL UNITS.
+
+    Identity is not enough on its own - evidence must also be EXCLUSIVE. Round 3 measured one image
+    making two worksheets ready; round 4 measured the same render satisfying one page in EACH of two
+    units, because the check ran independently inside each. It is applied once, over every row.
+    """
+    keys = [row["render_key"] for row in rows if row.get("render_key")]
+    contested = {key for key in keys if keys.count(key) > 1}
+    for row in rows:
+        if row.get("render_key") in contested:
+            row.update(
+                {
+                    "evidence": "unverifiable",
+                    "readiness": UNVERIFIABLE,
+                    "grade": GRADE_UNKNOWN,
+                    "matched_by": (
+                        f"one render ({row.get('evidence_path')}) is claimed by more than one page, "
+                        "so no page can own it"
+                    ),
+                }
+            )
 
 
 def _page_row(  # pylint: disable=too-many-arguments,too-many-positional-arguments
@@ -411,6 +432,7 @@ def _page_row(  # pylint: disable=too-many-arguments,too-many-positional-argumen
                 "grade": match.grade,
                 "matched_by": f"{match.origin}:{match.provider or 'unknown'} (scope={match.kind})",
                 "evidence_path": match.path,
+                "render_key": _render_key(match.path),
                 "readiness": INSUFFICIENT_GRADE if insufficient else READY,
             }
         )
@@ -571,19 +593,6 @@ def _page_rows(
         else:
             status, reason = PAGE_DROPPED_UNEXPLAINED, None
         rows.append(_page_row(obj, status, scoped, reason, require_validation_grade))
-    # Identity alone is not enough: evidence must also be EXCLUSIVE. One render credited to two pages
-    # invalidates both claims rather than satisfying both (round-3 finding 1).
-    for path in _exclusivity_conflicts(rows):
-        for row in rows:
-            if row.get("evidence_path") == path:
-                row.update(
-                    {
-                        "evidence": "unverifiable",
-                        "readiness": UNVERIFIABLE,
-                        "grade": GRADE_UNKNOWN,
-                        "matched_by": f"one render ({path}) is claimed by more than one page, so neither can own it",
-                    }
-                )
     return rows
 
 
@@ -798,6 +807,14 @@ def scan(
         for report in reports
     ]
     units.extend(_units_without_reports(engine_report, reports))
+    # Exclusivity is enforced ONCE, across every unit's rows. Round-4 finding: running it inside each
+    # unit let the same render satisfy one page in each of two units and report READY 2/2.
+    _enforce_exclusivity([row for unit in units for row in unit.pages])
+    for unit in units:
+        if unit.status == STATUS_READY and any(row["readiness"] != READY for row in unit.pages):
+            unit.status = STATUS_FINDINGS
+            ready = sum(1 for row in unit.pages if row["readiness"] == READY)
+            unit.detail = f"{ready}/{len(unit.pages)} expected page(s) ready"
     return _merge(root, units or [_empty_bundle_unit(root, engine_report)], evidence, rejected)
 
 

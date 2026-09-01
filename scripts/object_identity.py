@@ -1,48 +1,41 @@
 """
-purpose: the identity abstraction the reference-readiness gate joins on - make an AMBIGUOUS or
-         normalized-away identity structurally unrepresentable rather than checked at each call site.
-usage:   import object_identity as oid; index = oid.IdentityIndex(normalized=False)
+purpose: the identity abstraction every reference-readiness join runs through - make an AMBIGUOUS or
+         normalized-away identity structurally unrepresentable, ENFORCED BY RAISING.
+usage:   import object_identity as oid; index = oid.EngineIndex()
 
 Why this module exists
 ----------------------
 One defect recurred at FIVE layers of PR #428 - routing, matching, normalization, manual-kind and the
-unit join - always as "one object's excuse/evidence covering another". Each round closed the layer
-that was found and left the shape available one level along. Round 2 stated the bound in advance:
+unit join - always as "one object's evidence or excuse covering another". Each round closed the layer
+found and left the shape available one level along, so round 2 set a bound: if it appeared again,
+stop patching the key and make ambiguity structurally unrepresentable. This is that abstraction.
 
-    if round 3 finds this same defect at a fourth layer, we stop patching the key and make ambiguity
-    structurally unrepresentable - the way `Evidence.build()` made unverified evidence
-    unrepresentable, which was the right instinct and worked.
+ABSENCE IS NOT PROHIBITION - the correction that shaped this file
+------------------------------------------------------------------
+Round 4 measured the first attempt and found that **every operation its contract called impossible
+was still available**, because the contract was written as a list of things the code did not define:
 
-Round 3 found it at a fourth AND a fifth layer, so this is that abstraction. The test of success is
-NOT that the next review finds nothing at layer six. It is that a **new join written by a future
-author cannot express the ambiguous case**, because the types will not hold it.
+* a frozen dataclass has a PUBLIC constructor, so ``ObjectIdentity(KIND_UNKNOWN, "Ops")`` built fine
+  even though ``from_engine`` refused it;
+* an object with no ``__bool__`` is **truthy**, so ``bool(resolution)`` returned ``True`` on an
+  ambiguous resolution - and the test asserting "no ``__bool__`` means no truthiness" was asserting a
+  language property that is the exact opposite of Python's default;
+* a public tuple is indexable, so ``resolution.matches[0]`` picked a winner;
+* a normalized index happily accepted an engine identity, and uniquely resolved a DIFFERENT engine
+  name through the lossy key.
 
-The four rules, and how each is enforced by construction
---------------------------------------------------------
-1. **One identity type.** :class:`ObjectIdentity` is ``(kind, exact_name)`` and is built only from an
-   engine/source artifact via :meth:`ObjectIdentity.from_engine`. A producer that supplies only a
-   name yields a :class:`Candidate`, which is not an identity and cannot be used as a key.
-2. **Resolution always returns a multimap.** :meth:`IdentityIndex.resolve` returns a
-   :class:`Resolution` whose only reader is :meth:`Resolution.value`, and that RAISES unless exactly
-   one match exists. There is deliberately no ``.first()``, no indexing, and no truthiness: taking
-   "the first candidate" is not expressible, so ambiguity cannot be silently resolved.
-3. **Multiplicity survives.** :meth:`IdentityIndex.add` appends and never overwrites, and no ``set()``
-   is used anywhere identity is derived. Round-3 finding 2 measured the alternative: ``_unit_names``
-   turned engine workbook names into a ``set`` keyed on a normalized string, so two genuinely
-   distinct workbooks collapsed to one and a bundle that shipped nothing for the second read READY.
-4. **Normalization is a property of the INDEX, not of a call site.** An index built with
-   ``normalized=False`` has no normalized table at all, so an engine-to-engine join cannot fall back
-   to a lossy key even by accident. Only indexes over EXTERNAL producer names - whose spelling this
-   repo does not control - are built with ``normalized=True``, and there a collision is
-   ``AMBIGUOUS``, never a pick.
+So every "cannot" here is a mechanism that **raises**, not a method that is merely missing:
 
-Grade and kind are independent axes
------------------------------------
-Nothing here derives an object's KIND from a grade, a capability or any other quality claim.
-Round-3 finding 1 measured what happens when they are coupled: a validation-grade `manual` record was
-promoted to a kind that matched both dashboards and worksheets, so one image made a dashboard `Ops`
-AND a worksheet `Ops` ready - re-creating the founding defect one domain over. A quality claim says
-how good a picture is; it can never say what the picture is OF.
+| the claim | the mechanism |
+|---|---|
+| an unidentifiable object has no identity | :meth:`ObjectIdentity.__post_init__` raises :class:`IdentityError` |
+| a resolution is never a condition | :meth:`Resolution.__bool__` **always** raises |
+| a pick is not expressible | matches are private; the only value reader raises unless unique |
+| an engine identity is never stored lossily | :class:`CandidateIndex` raises if handed an :class:`ObjectIdentity` |
+| a lookalike may not select evidence | :func:`name_lookalikes` returns descriptions, never the values |
+
+Every one is mutation-proved by calling the forbidden operation and asserting it raises. A test that
+a method is *missing* proves nothing - that is the ninth vacuity mode this repo has recorded.
 """
 
 from __future__ import annotations
@@ -66,19 +59,24 @@ AMBIGUOUS = "ambiguous"
 T = TypeVar("T")
 
 
-class AmbiguousIdentity(LookupError):
-    """Raised by :meth:`Resolution.value` when a caller reads a non-unique resolution.
+class IdentityError(TypeError):
+    """Raised when something that is not an identity is used as one."""
 
-    Loud on purpose. The previous shapes of this code returned ``matched[0]`` or fell through to a
-    normalized key, and both silently picked a winner among candidates that were not distinguishable.
+
+class AmbiguousIdentity(LookupError):
+    """Raised when a caller reads or truth-tests a resolution that is not uniquely resolved.
+
+    Loud on purpose. Earlier shapes returned ``matched[0]`` or fell through to a normalized key, and
+    both silently picked a winner among candidates that were not distinguishable.
     """
 
 
 def normalize(text: str | None) -> str:
     """Lossy key for EXTERNAL producer names only. Never for an engine-to-engine join.
 
-    Kept in this module rather than at a call site so there is exactly one lossy function in the
-    codebase and it is visibly quarantined behind ``IdentityIndex(normalized=True)``.
+    The single lossy function in this toolkit, quarantined here by
+    ``scripts/check_identity_normalization.py`` - which fails the build if anything outside this
+    module calls it.
     """
     return re.sub(r"\s+", " ", (text or "")).strip().casefold()
 
@@ -87,20 +85,33 @@ def normalize(text: str | None) -> str:
 class ObjectIdentity:
     """A source object's exact identity: ``(kind, exact_name)``.
 
-    Constructible only through :meth:`from_engine`, so a normalized or provider-supplied string can
-    never become a key. Equality and hashing are exact - two names differing by case or repeated
-    whitespace are different objects, because the engine gives them different page ids.
+    The PUBLIC constructor validates, so there is no way to build an unidentifiable identity - round
+    4 measured the alternative, where ``from_engine`` refused ``KIND_UNKNOWN`` while
+    ``ObjectIdentity(KIND_UNKNOWN, "Ops")`` sailed straight through it.
+
+    Equality and hashing are exact: two names differing by case or repeated whitespace are different
+    objects, because the engine gives them different page ids.
     """
 
     kind: str
     name: str
 
+    def __post_init__(self) -> None:
+        if self.kind not in IDENTIFIABLE_KINDS:
+            raise IdentityError(
+                f"{self.kind!r} is not an identifiable kind ({sorted(IDENTIFIABLE_KINDS)}) - an object "
+                "whose kind is unknown has no identity and must not be used as a key"
+            )
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise IdentityError(f"an identity needs a non-blank exact name, got {self.name!r}")
+
     @classmethod
     def from_engine(cls, kind: str, name: str | None) -> ObjectIdentity | None:
-        """Build an identity from an engine/source artifact, or None when it is not identifiable."""
-        if kind not in IDENTIFIABLE_KINDS or not isinstance(name, str) or not name.strip():
+        """Build from an engine/source artifact, or None when it is not identifiable."""
+        try:
+            return cls(kind=kind, name=name)  # type: ignore[arg-type]
+        except IdentityError:
             return None
-        return cls(kind=kind, name=name)
 
     def __str__(self) -> str:
         return f"{self.kind} {self.name!r}"
@@ -112,102 +123,165 @@ class Candidate:
 
     Deliberately not an :class:`ObjectIdentity`. A capture manifest names a file; it does not
     establish what the file depicts. ``kind`` is ``KIND_UNKNOWN`` unless the producer said otherwise,
-    and a candidate with an unknown kind can never resolve - see :meth:`IdentityIndex.resolve`.
+    and such a candidate can never resolve.
     """
 
     names: tuple[str, ...]
     kind: str = KIND_UNKNOWN
 
-    def keys(self, *, normalized: bool) -> tuple[str, ...]:
-        """Index keys for this candidate's spellings."""
-        return tuple(normalize(name) if normalized else name for name in self.names)
+
+@dataclass(frozen=True)
+class Lookalike:
+    """A candidate whose NAME resembles an identity. Carries no value, by design.
+
+    :func:`name_lookalikes` returns these so a caller can report "a picture exists but I cannot prove
+    what it is of" without being handed anything selectable. Round 4: the previous helper returned a
+    bool and so worked perfectly well as a resolution predicate, bypassing the whole boundary.
+    """
+
+    name: str
+    kind: str
 
 
 @dataclass(frozen=True)
 class Resolution(Generic[T]):
-    """The result of one identity lookup. A LIST, always - never an implicit winner.
-
-    The only reader is :meth:`value`, and it raises unless the outcome is ``UNIQUE``. There is no
-    ``__bool__``, no ``__iter__`` and no ``__getitem__``, so `if resolution:` and `resolution[0]` are
-    both syntax a future author simply cannot write against this type.
-    """
+    """The result of one identity lookup. Never an implicit winner, and never a condition."""
 
     identity: ObjectIdentity
-    matches: tuple[T, ...]
+    _matches: tuple[tuple[Candidate, T], ...] = field(repr=False)
 
     @property
     def outcome(self) -> str:
-        """``ABSENT``, ``UNIQUE`` or ``AMBIGUOUS``."""
-        if not self.matches:
+        """``ABSENT``, ``UNIQUE`` or ``AMBIGUOUS``. Branch on this - it is the only safe reader."""
+        if not self._matches:
             return ABSENT
-        return UNIQUE if len(self.matches) == 1 else AMBIGUOUS
+        return UNIQUE if len(self._matches) == 1 else AMBIGUOUS
+
+    @property
+    def count(self) -> int:
+        """How many candidates matched, for reporting."""
+        return len(self._matches)
 
     def value(self) -> T:
         """The single match. Raises :class:`AmbiguousIdentity` for zero or many."""
         if self.outcome != UNIQUE:
-            raise AmbiguousIdentity(f"{self.identity} resolved to {len(self.matches)} candidate(s), not one")
-        return self.matches[0]
+            raise AmbiguousIdentity(f"{self.identity} resolved to {self.count} candidate(s), not one")
+        return self._matches[0][1]
+
+    def contender_names(self) -> tuple[str, ...]:
+        """The NAMES that matched - descriptions for a report, never the values themselves."""
+        return tuple(sorted({name for candidate, _ in self._matches for name in candidate.names}))
+
+    def __bool__(self) -> bool:
+        """ALWAYS raises. A resolution is not a condition; branch on :attr:`outcome`.
+
+        Round 4: omitting ``__bool__`` does not prevent truth-testing, it makes the object truthy -
+        so ``if resolution:`` silently treated an AMBIGUOUS result as success.
+        """
+        raise AmbiguousIdentity(
+            f"a Resolution is not a condition - branch on .outcome ({ABSENT}/{UNIQUE}/{AMBIGUOUS}); "
+            f"this one is {self.outcome}"
+        )
 
 
 @dataclass
-class IdentityIndex(Generic[T]):
-    """A name -> values multimap that cannot lose a collision, and cannot normalize unless told to.
+class _Index(Generic[T]):
+    """Shared storage. Multiplicity survives: entries are appended, never overwritten."""
 
-    ``normalized`` is fixed at construction and decides whether a lossy key table exists AT ALL. An
-    engine-to-engine index is built with ``normalized=False``, so there is no lossy layer for a
-    future join to slip into - which is the structural answer to a defect that moved down one layer
-    per review round.
+    _by_key: dict[tuple[str, str], list[tuple[Candidate, T]]] = field(default_factory=dict, repr=False)
+
+    def _store(self, key: tuple[str, str], candidate: Candidate, value: T) -> None:
+        self._by_key.setdefault(key, []).append((candidate, value))
+
+    def _resolve(self, identity: ObjectIdentity, key: tuple[str, str]) -> Resolution[T]:
+        return Resolution(identity=identity, _matches=tuple(self._by_key.get(key, ())))
+
+
+@dataclass
+class EngineIndex(_Index[T]):
+    """Exact keys only, for joins where BOTH sides are engine/source artifacts.
+
+    There is no lossy key table here at all, so an engine-to-engine join cannot fall back to one even
+    by accident - the structural answer to a defect that moved down one layer per review round.
     """
 
-    normalized: bool
-    _by_key: dict[tuple[str, str], list[T]] = field(default_factory=dict)
-    _kinds: dict[int, str] = field(default_factory=dict)
-
-    def add(self, candidate: Candidate, value: T) -> None:
-        """Index one value under every spelling the candidate offers. Never overwrites."""
-        self._kinds[id(value)] = candidate.kind
-        for key in candidate.keys(normalized=self.normalized):
-            self._by_key.setdefault((candidate.kind, key), []).append(value)
-
-    def add_identity(self, identity: ObjectIdentity, value: T) -> None:
+    def add(self, identity: ObjectIdentity, value: T) -> None:
         """Index a value under an exact engine identity."""
-        self.add(Candidate(names=(identity.name,), kind=identity.kind), value)
+        if not isinstance(identity, ObjectIdentity):
+            raise IdentityError(f"an EngineIndex is keyed by ObjectIdentity, got {type(identity).__name__}")
+        self._store((identity.kind, identity.name), Candidate(names=(identity.name,), kind=identity.kind), value)
 
     def resolve(self, identity: ObjectIdentity) -> Resolution[T]:
-        """Look up an identity. Zero or many matches are outcomes, never a silent pick.
-
-        A candidate whose kind the producer did not declare is indexed under ``KIND_UNKNOWN`` and so
-        never collides with a real identity - "I cannot tell what this depicts" must not satisfy a
-        page of either type, which is round-3 finding 1.
-        """
-        key = identity.name if not self.normalized else normalize(identity.name)
-        return Resolution(identity=identity, matches=tuple(self._by_key.get((identity.kind, key), ())))
-
-    def unresolvable(self) -> list[str]:
-        """Values indexed under an undeclared kind, so they can be REPORTED rather than vanish."""
-        return [key for (kind, key) in self._by_key if kind == KIND_UNKNOWN]
+        """Look up an exact identity."""
+        if not isinstance(identity, ObjectIdentity):
+            raise IdentityError(f"an EngineIndex is keyed by ObjectIdentity, got {type(identity).__name__}")
+        return self._resolve(identity, (identity.kind, identity.name))
 
 
-def shares_name(identity: ObjectIdentity, candidate: Candidate) -> bool:
-    """Whether a candidate names this object IGNORING kind, for reporting only.
+@dataclass
+class CandidateIndex(_Index[T]):
+    """External producer names: exact first, then a normalized fallback, ambiguity as a refusal.
 
-    The gate needs this to tell "a picture exists but I cannot prove what it is of" (UNVERIFIABLE)
-    apart from "no picture exists" (BLIND) - two different operator actions. It is deliberately here
-    rather than at the call site so the lossy comparison stays inside this module, which is the whole
-    point of `check_identity_normalization.py`.
-
-    It may NEVER be used to satisfy a page. It answers a reporting question, not an identity one.
+    Only external spellings belong here - this repo does not control how a capture manifest writes a
+    name. An :class:`ObjectIdentity` is refused BY TYPE, because round 4 measured a normalized index
+    accepting one and then uniquely resolving a *different* engine name through the lossy key.
     """
-    return any(normalize(name) == normalize(identity.name) for name in candidate.names)
+
+    def add(self, candidate: Candidate, value: T) -> None:
+        """Index a value under every spelling the candidate offers, exact and normalized."""
+        if isinstance(candidate, ObjectIdentity):
+            raise IdentityError(
+                "a CandidateIndex normalizes its keys, so it must never hold an ObjectIdentity - use "
+                "EngineIndex for a join whose both sides are engine artifacts"
+            )
+        if not isinstance(candidate, Candidate):
+            raise IdentityError(f"a CandidateIndex is keyed by Candidate, got {type(candidate).__name__}")
+        for name in candidate.names:
+            self._store((candidate.kind, name), candidate, value)
+            self._store((candidate.kind, normalize(name)), candidate, value)
+
+    def resolve(self, identity: ObjectIdentity) -> Resolution[T]:
+        """Exact match if there is one, else the normalized fallback. Many candidates is AMBIGUOUS."""
+        if not isinstance(identity, ObjectIdentity):
+            raise IdentityError(f"a CandidateIndex resolves an ObjectIdentity, got {type(identity).__name__}")
+        exact = self._resolve(identity, (identity.kind, identity.name))
+        if exact.outcome != ABSENT:
+            return exact
+        loose = self._resolve(identity, (identity.kind, normalize(identity.name)))
+        # An exact key and its normalized twin both index the same entry, so a single record can be
+        # stored twice under one lookup. De-duplicate by value identity before judging multiplicity,
+        # or every unambiguous match would read as AMBIGUOUS.
+        seen: list[tuple[Candidate, T]] = []
+        for entry in loose._matches:  # pylint: disable=protected-access
+            if not any(existing[1] is entry[1] for existing in seen):
+                seen.append(entry)
+        return Resolution(identity=identity, _matches=tuple(seen))
+
+
+def name_lookalikes(identity: ObjectIdentity, candidates: list[Candidate]) -> list[Lookalike]:
+    """Candidates whose NAME resembles this identity, as descriptions that carry no value.
+
+    For reporting only: it separates "a picture exists but I cannot prove what it is of"
+    (UNVERIFIABLE) from "no picture exists" (BLIND), which are different operator actions. Returning
+    :class:`Lookalike` rather than the matched objects is what stops it being used as a resolution
+    predicate - round 4 found the previous bool-returning helper doing exactly that, bypassing the
+    boundary without needing a new lossy function at all.
+    """
+    return [
+        Lookalike(name=name, kind=candidate.kind)
+        for candidate in candidates
+        for name in candidate.names
+        if normalize(name) == normalize(identity.name)
+    ]
 
 
 def collisions(identities: list[ObjectIdentity]) -> list[tuple[str, ...]]:
     """Groups of DISTINCT identities that a normalized key would merge.
 
-    The expected-object side of the join must be free of these before any normalized fallback is
-    safe on the evidence side: if two expected objects collapse to one key, a single capture would
-    match both and neither could be attributed. Multiplicity is preserved throughout - no ``set()``
-    is taken over names, because that is precisely what deleted the collision in round-3 finding 2.
+    The expected-object side must be free of these before any normalized fallback is safe on the
+    evidence side: if two expected objects collapse to one key, a single capture would match both and
+    neither could be attributed. Multiplicity is preserved - no ``set()`` over names, which is
+    precisely what deleted a workbook collision in round 3.
     """
     grouped: dict[tuple[str, str], list[str]] = {}
     for identity in identities:

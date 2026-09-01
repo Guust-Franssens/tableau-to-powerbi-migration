@@ -556,9 +556,13 @@ def test_a_worksheet_scope_can_never_satisfy_a_dashboard_page() -> None:
         workbook_luid=None,
         workbook_name=None,
     )
-    match, name_only = crr.match_evidence(dashboard, [worksheet_render])
+    match, lookalikes = crr.match_evidence(dashboard, [worksheet_render])
     assert match is None
-    assert name_only == [worksheet_render]
+    # Round-4: the report carries DESCRIPTIONS, never the evidence objects, so a caller cannot
+    # quietly promote a lookalike into a match. The previous helper returned a bool and so worked
+    # perfectly well as a resolution predicate, bypassing the whole boundary.
+    assert lookalikes == [crr.oid.Lookalike(name="Ops", kind="worksheet")]
+    assert not any(isinstance(item, crr.Evidence) for item in lookalikes)
 
 
 def test_a_worksheet_render_does_not_make_a_dashboard_page_ready(bundle: Path) -> None:
@@ -897,66 +901,6 @@ def test_the_json_verdict_always_carries_the_true_status(bundle: Path, tmp_path:
 
 
 # --------------------------------------------------------------------------------------------
-# Round-2 finding 3: provenance explicitly marked non-reproducible must not be trusted
-# --------------------------------------------------------------------------------------------
-
-
-def write_provenance(root: Path, source: Path, *, luid: str, match: str) -> None:
-    """A `source-provenance.json` as `stamp_tableau_provenance.py` writes it."""
-    (root / "source-provenance.json").write_text(
-        json.dumps(
-            {
-                "inputs": [
-                    {
-                        "input": {"file": source.name, "sha256": hashlib.sha256(source.read_bytes()).hexdigest()},
-                        "origin": {"workbook_luid": luid, "workbook_name": "Published Name", "match": match},
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-
-
-def test_a_name_only_provenance_luid_is_not_trusted(bundle: Path) -> None:
-    """`match: "name_only"` means local and server bytes DIFFER and figures will not reproduce.
-
-    `stamp_tableau_provenance.py:191-192` says so outright, yet that LUID was making server oracle
-    evidence ready. The repo's own provenance is 26 `sha256` / 15 `name_only` / 6 unmatched.
-    """
-    build_unit(bundle, "WB", worksheets=["Revenue Trend"])
-    write_provenance(bundle, bundle.parent / "assets" / "WB.twb", luid="luid-1", match="name_only")
-    write_oracle(bundle, [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_luid": "luid-1"}])
-
-    assert crr.scan(bundle)["units"][0]["pages"][0]["readiness"] == "blind"
-    assert crr.main([str(bundle), "--quiet"]) == 1
-
-
-def test_a_sha256_confirmed_provenance_luid_is_trusted(bundle: Path) -> None:
-    """Discriminating twin: a byte-confirmed LUID must still work, or the route is dead."""
-    build_unit(bundle, "WB", worksheets=["Revenue Trend"])
-    write_provenance(bundle, bundle.parent / "assets" / "WB.twb", luid="luid-1", match="sha256")
-    write_oracle(bundle, [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_luid": "luid-1"}])
-
-    assert crr.scan(bundle)["units"][0]["pages"][0]["readiness"] == "ready"
-
-
-def test_a_record_carrying_both_luid_and_name_can_still_fall_back_to_the_name(bundle: Path) -> None:
-    """Round-2 finding 3, mirror image: carrying a LUID used to DISCARD the name.
-
-    Removing source provenance then made correctly-named records return `0/3 blind`, so the
-    documented name fallback could not be reached by any record a real capture produces.
-    """
-    build_unit(bundle, "WB", worksheets=["Revenue Trend"])
-    write_oracle(
-        bundle,
-        [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_luid": "luid-1", "workbook_name": "WB"}],
-    )
-
-    assert crr.scan(bundle)["units"][0]["pages"][0]["readiness"] == "ready"
-
-
-# --------------------------------------------------------------------------------------------
 # Round-2 finding 4: pages.json is required, not optional
 # --------------------------------------------------------------------------------------------
 
@@ -1081,86 +1025,106 @@ def test_a_single_differently_spelled_evidence_record_still_matches(bundle: Path
 
 
 # --------------------------------------------------------------------------------------------
-# Round-3 finding 2: lossy normalization on engine-to-engine joins
+# Round-4 HIGH: exclusivity by FILE identity, enforced across all units
 # --------------------------------------------------------------------------------------------
 
 
-def test_two_engine_workbooks_differing_only_by_whitespace_are_both_required(bundle: Path) -> None:
-    """`_unit_names` normalized into SETS, so a collision was permanently discarded.
+def test_the_same_file_under_two_spellings_is_still_one_render(bundle: Path) -> None:
+    """Measured: exclusivity compared `evidence_path` STRINGS, not physical render identity.
 
-    Measured: an engine report listing distinct workbooks `Ops  Summary` and `Ops Summary`, beside
-    only `Ops Summary.Report`, collapsed to the single key `ops summary`, so
-    `_units_without_reports` reported NO missing workbook - one ready report made the bundle ready
-    while the second workbook shipped nothing at all.
+    On Windows the same PNG referenced as `shot.png` and `SHOT.PNG` - `Path.samefile()` True - left
+    both pages ready, because the stored strings differed. `render_key` is filesystem identity now.
     """
-    doubled, single = "Ops  Summary", "Ops Summary"
-    source = write_workbook(bundle.parent / "assets" / f"{single}.twb", worksheets=["Solo"])
-    write_engine_report(bundle, workbooks=[doubled, single])
-    write_handover(bundle, single, source_id=str(source))
-    write_report(bundle, single, [obj.page_id for obj in crr.source_objects(source) or []])
-    write_reference(
+    sha = build_unit(bundle, "WB", worksheets=["Alpha", "Beta"])
+    reference = write_reference(
         bundle,
-        [("Solo", "embedded_thumbnail", ["layout_grade"])],
-        source_sha=hashlib.sha256(source.read_bytes()).hexdigest(),
+        [("Alpha", "embedded_thumbnail", ["layout_grade"]), ("Beta", "embedded_thumbnail", ["layout_grade"])],
+        source_sha=sha,
     )
+    manifest = json.loads((reference / "manifest.json").read_text(encoding="utf-8"))
+    # Point the second entry at the SAME file, spelled differently.
+    (reference / "shot-1.png").unlink()
+    manifest["dashboards"][1]["states"][0]["image"] = "SHOT-0.PNG"
+    manifest["dashboards"][1]["states"][0]["sha256"] = manifest["dashboards"][0]["states"][0]["sha256"]
+    manifest["dashboards"][1]["states"][0]["bytes"] = manifest["dashboards"][0]["states"][0]["bytes"]
+    (reference / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    if not (reference / "SHOT-0.PNG").exists():  # case-insensitive filesystems resolve this already
+        pytest.skip("filesystem is case-sensitive, so the two spellings are genuinely two files")
+    assert (reference / "SHOT-0.PNG").samefile(reference / "shot-0.png")
 
-    report = crr.scan(bundle)
-    missing = [unit for unit in report["units"] if "no report ships for it" in unit["detail"]]
-    assert [unit["unit"] for unit in missing] == [doubled]
-    assert report["status"] == "FINDINGS"
+    rows = {page["source_object"]: page for page in crr.scan(bundle)["units"][0]["pages"]}
+    assert rows["Alpha"]["readiness"] != "ready"
+    assert rows["Beta"]["readiness"] != "ready"
     assert crr.main([str(bundle), "--quiet"]) == 1
 
 
-def test_a_duplicated_engine_workbook_name_cannot_be_attributed(bundle: Path) -> None:
-    """Multiplicity survives: a name listed twice is a refusal, not a silently deduplicated one."""
-    source = write_workbook(bundle.parent / "assets" / "WB.twb", worksheets=["Solo"])
-    write_engine_report(bundle, workbooks=["WB", "WB"])
-    write_handover(bundle, "WB", source_id=str(source))
-    write_report(bundle, "WB", [obj.page_id for obj in crr.source_objects(source) or []])
-
-    report = crr.scan(bundle)
-    assert any("more than once" in unit["detail"] for unit in report["units"])
-    assert report["status"] in {"FINDINGS", "CANNOT_ESTABLISH"}
-    assert crr.main([str(bundle), "--quiet"]) != 0
-
-
-def test_a_datasource_classification_uses_the_exact_name(bundle: Path) -> None:
-    """A near-miss datasource name must not exempt a workbook unit from needing evidence."""
-    write_engine_report(bundle, workbooks=[], datasources=["Shared  DS"])
-    write_report(bundle, "Shared DS", ["page1"])
-
-    report = crr.scan(bundle)
-    assert report["status"] != "NOT_APPLICABLE"
-    assert crr.main([str(bundle), "--quiet"]) != 0
-
-
-def test_source_asset_selection_uses_the_exact_stem(bundle: Path) -> None:
-    """`resolve_source` normalized the asset stem, so it could select the WRONG workbook."""
-    (bundle.parent / "assets" / "Ops  Summary.twb").write_text("<workbook/>", encoding="utf-8")
-    write_engine_report(bundle, workbooks=["Ops Summary"])
-    write_report(bundle, "Ops Summary", ["page1"])
-    (bundle / "input_manifest.json").write_text(
-        json.dumps({"assets": [{"name": "Ops  Summary.twb", "staged_input_path": None}]}), encoding="utf-8"
+def write_manifest_for(directory: Path, name: str, render: Path, source_sha: str) -> None:
+    """A reference manifest pointing at an EXISTING render file, honestly hashed."""
+    directory.mkdir(parents=True, exist_ok=True)
+    blob = render.read_bytes()
+    (directory / "manifest.json").write_text(
+        json.dumps(
+            {
+                "source_workbook_sha256": source_sha,
+                "dashboards": [
+                    {
+                        "name": name,
+                        "states": [
+                            {
+                                "state_slug": "default",
+                                "image": render.name,
+                                "provider": "embedded_thumbnail",
+                                "capabilities": ["layout_grade"],
+                                "sha256": hashlib.sha256(blob).hexdigest(),
+                                "bytes": len(blob),
+                                "dimensions": {"w": 320, "h": 240},
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
     )
 
-    assert crr.resolve_source(bundle, "Ops Summary", None, None) is None
 
+def test_one_render_cannot_satisfy_a_page_in_each_of_two_units(bundle: Path) -> None:
+    """Measured: exclusivity ran independently INSIDE each unit, so the same render satisfied one
+    page in each of two units and the bundle reported `READY 2/2`.
 
-def test_untyped_evidence_is_reported_with_the_route_to_make_it_usable(bundle: Path) -> None:
-    """Round-3: a route that works by guessing is worse than one honestly unavailable AND explained.
-
-    A `manual` record with no declared type cannot satisfy any page. The output must say so and name
-    the fix, rather than letting the operator conclude the gate is broken.
+    Both manifests are individually valid - correct source sha, honest hash, real image - and each
+    is legitimately attributable to its own unit. Only the CROSS-UNIT view shows that one physical
+    file is being credited twice, which is why the check has to run once over every row.
     """
-    sha = build_unit(bundle, "WB", worksheets=["Revenue Trend"])
-    write_reference(
-        bundle,
-        [("tableau-Revenue Trend", "manual", ["layout_grade", "text_readable", "validation_grade"])],
-        source_sha=sha,
-    )
+    first = write_workbook(bundle.parent / "assets" / "One.twb", worksheets=["Shared"])
+    second = write_workbook(bundle.parent / "assets" / "Two.twb", worksheets=["Shared"])
+    # The two workbooks must genuinely DIFFER, or they hash identically and each manifest attaches to
+    # both units - which makes the pages ambiguous and the test pass without ever reaching
+    # exclusivity. Measured: that is exactly what the first version of this fixture did.
+    second.write_text(second.read_text(encoding="utf-8") + "<!-- second -->", encoding="utf-8")
+    assert hashlib.sha256(first.read_bytes()).hexdigest() != hashlib.sha256(second.read_bytes()).hexdigest()
+    write_engine_report(bundle, workbooks=["One", "Two"])
+    for unit, source in (("One", first), ("Two", second)):
+        write_handover(bundle, unit, source_id=str(source))
+        write_report(bundle, unit, [obj.page_id for obj in crr.source_objects(source) or []])
+
+    # `_default_dirs` looks in <bundle>/reference and <bundle>/../reference, so two manifests can
+    # coexist - one per unit - while naming the SAME physical render.
+    render = bundle / "reference" / "shot.png"
+    write_png(render, 320, 240)
+    write_manifest_for(bundle / "reference", "Shared", render, hashlib.sha256(first.read_bytes()).hexdigest())
+    sibling = bundle.parent / "reference"
+    sibling.mkdir(parents=True, exist_ok=True)
+    if hasattr(Path, "hardlink_to"):
+        (sibling / "shot.png").hardlink_to(render)
+    if not (sibling / "shot.png").exists():  # pragma: no cover - platform without hard links
+        pytest.skip("hard links unavailable, so the two manifests cannot name one physical file")
+    write_manifest_for(sibling, "Shared", sibling / "shot.png", hashlib.sha256(second.read_bytes()).hexdigest())
+    assert (sibling / "shot.png").samefile(render)
 
     report = crr.scan(bundle)
-    assert report["evidence_untyped"] == 1
-    rendered = crr.render(report)
-    assert "UNTYPED EVIDENCE" in rendered
-    assert "view_type" in rendered
+    rows = {(unit["unit"], page["source_object"]): page for unit in report["units"] for page in unit["pages"]}
+    assert rows[("One", "Shared")]["readiness"] != "ready"
+    assert rows[("Two", "Shared")]["readiness"] != "ready"
+    assert report["pages_ready"] == 0
+    assert crr.main([str(bundle), "--quiet"]) == 1

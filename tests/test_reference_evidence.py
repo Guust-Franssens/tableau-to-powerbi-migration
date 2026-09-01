@@ -14,6 +14,8 @@ record the sha256/ytes/dimensions the real producers write.
 from __future__ import annotations
 
 import struct
+import hashlib
+import json
 import sys
 from pathlib import Path
 
@@ -24,9 +26,13 @@ import check_reference_readiness as crr  # noqa: E402  # pylint: disable=wrong-i
 from test_check_reference_readiness import (  # noqa: E402  # pylint: disable=wrong-import-position
     build_unit,
     bundle_fixture,
+    write_engine_report,
+    write_handover,
     write_oracle,
     write_png,
     write_reference,
+    write_report,
+    write_workbook,
 )
 
 __all__ = ["bundle_fixture"]
@@ -236,3 +242,149 @@ def test_evidence_attribution_uses_the_exact_workbook_name(bundle: Path) -> None
 
     assert crr.scan(bundle)["units"][0]["pages"][0]["readiness"] == "blind"
     assert crr.main([str(bundle), "--quiet"]) == 1
+
+
+# --------------------------------------------------------------------------------------------
+# Round-2 finding 3: provenance explicitly marked non-reproducible must not be trusted
+# --------------------------------------------------------------------------------------------
+
+
+def write_provenance(root: Path, source: Path, *, luid: str, match: str) -> None:
+    """A `source-provenance.json` as `stamp_tableau_provenance.py` writes it."""
+    (root / "source-provenance.json").write_text(
+        json.dumps(
+            {
+                "inputs": [
+                    {
+                        "input": {"file": source.name, "sha256": hashlib.sha256(source.read_bytes()).hexdigest()},
+                        "origin": {"workbook_luid": luid, "workbook_name": "Published Name", "match": match},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_a_name_only_provenance_luid_is_not_trusted(bundle: Path) -> None:
+    """`match: "name_only"` means local and server bytes DIFFER and figures will not reproduce.
+
+    `stamp_tableau_provenance.py:191-192` says so outright, yet that LUID was making server oracle
+    evidence ready. The repo's own provenance is 26 `sha256` / 15 `name_only` / 6 unmatched.
+    """
+    build_unit(bundle, "WB", worksheets=["Revenue Trend"])
+    write_provenance(bundle, bundle.parent / "assets" / "WB.twb", luid="luid-1", match="name_only")
+    write_oracle(bundle, [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_luid": "luid-1"}])
+
+    assert crr.scan(bundle)["units"][0]["pages"][0]["readiness"] == "blind"
+    assert crr.main([str(bundle), "--quiet"]) == 1
+
+
+def test_a_sha256_confirmed_provenance_luid_is_trusted(bundle: Path) -> None:
+    """Discriminating twin: a byte-confirmed LUID must still work, or the route is dead."""
+    build_unit(bundle, "WB", worksheets=["Revenue Trend"])
+    write_provenance(bundle, bundle.parent / "assets" / "WB.twb", luid="luid-1", match="sha256")
+    write_oracle(bundle, [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_luid": "luid-1"}])
+
+    assert crr.scan(bundle)["units"][0]["pages"][0]["readiness"] == "ready"
+
+
+def test_a_record_carrying_both_luid_and_name_can_still_fall_back_to_the_name(bundle: Path) -> None:
+    """Round-2 finding 3, mirror image: carrying a LUID used to DISCARD the name.
+
+    Removing source provenance then made correctly-named records return `0/3 blind`, so the
+    documented name fallback could not be reached by any record a real capture produces.
+    """
+    build_unit(bundle, "WB", worksheets=["Revenue Trend"])
+    write_oracle(
+        bundle,
+        [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_luid": "luid-1", "workbook_name": "WB"}],
+    )
+
+    assert crr.scan(bundle)["units"][0]["pages"][0]["readiness"] == "ready"
+
+
+# --------------------------------------------------------------------------------------------
+# Round-3 finding 2: lossy normalization on engine-to-engine joins
+# --------------------------------------------------------------------------------------------
+
+
+def test_two_engine_workbooks_differing_only_by_whitespace_are_both_required(bundle: Path) -> None:
+    """`_unit_names` normalized into SETS, so a collision was permanently discarded.
+
+    Measured: an engine report listing distinct workbooks `Ops  Summary` and `Ops Summary`, beside
+    only `Ops Summary.Report`, collapsed to the single key `ops summary`, so
+    `_units_without_reports` reported NO missing workbook - one ready report made the bundle ready
+    while the second workbook shipped nothing at all.
+    """
+    doubled, single = "Ops  Summary", "Ops Summary"
+    source = write_workbook(bundle.parent / "assets" / f"{single}.twb", worksheets=["Solo"])
+    write_engine_report(bundle, workbooks=[doubled, single])
+    write_handover(bundle, single, source_id=str(source))
+    write_report(bundle, single, [obj.page_id for obj in crr.source_objects(source) or []])
+    write_reference(
+        bundle,
+        [("Solo", "embedded_thumbnail", ["layout_grade"])],
+        source_sha=hashlib.sha256(source.read_bytes()).hexdigest(),
+    )
+
+    report = crr.scan(bundle)
+    missing = [unit for unit in report["units"] if "no report ships for it" in unit["detail"]]
+    assert [unit["unit"] for unit in missing] == [doubled]
+    assert report["status"] == "FINDINGS"
+    assert crr.main([str(bundle), "--quiet"]) == 1
+
+
+def test_a_duplicated_engine_workbook_name_cannot_be_attributed(bundle: Path) -> None:
+    """Multiplicity survives: a name listed twice is a refusal, not a silently deduplicated one."""
+    source = write_workbook(bundle.parent / "assets" / "WB.twb", worksheets=["Solo"])
+    write_engine_report(bundle, workbooks=["WB", "WB"])
+    write_handover(bundle, "WB", source_id=str(source))
+    write_report(bundle, "WB", [obj.page_id for obj in crr.source_objects(source) or []])
+
+    report = crr.scan(bundle)
+    assert any("more than once" in unit["detail"] for unit in report["units"])
+    assert report["status"] in {"FINDINGS", "CANNOT_ESTABLISH"}
+    assert crr.main([str(bundle), "--quiet"]) != 0
+
+
+def test_a_datasource_classification_uses_the_exact_name(bundle: Path) -> None:
+    """A near-miss datasource name must not exempt a workbook unit from needing evidence."""
+    write_engine_report(bundle, workbooks=[], datasources=["Shared  DS"])
+    write_report(bundle, "Shared DS", ["page1"])
+
+    report = crr.scan(bundle)
+    assert report["status"] != "NOT_APPLICABLE"
+    assert crr.main([str(bundle), "--quiet"]) != 0
+
+
+def test_source_asset_selection_uses_the_exact_stem(bundle: Path) -> None:
+    """`resolve_source` normalized the asset stem, so it could select the WRONG workbook."""
+    (bundle.parent / "assets" / "Ops  Summary.twb").write_text("<workbook/>", encoding="utf-8")
+    write_engine_report(bundle, workbooks=["Ops Summary"])
+    write_report(bundle, "Ops Summary", ["page1"])
+    (bundle / "input_manifest.json").write_text(
+        json.dumps({"assets": [{"name": "Ops  Summary.twb", "staged_input_path": None}]}), encoding="utf-8"
+    )
+
+    assert crr.resolve_source(bundle, "Ops Summary", None, None) is None
+
+
+def test_untyped_evidence_is_reported_with_the_route_to_make_it_usable(bundle: Path) -> None:
+    """Round-3: a route that works by guessing is worse than one honestly unavailable AND explained.
+
+    A `manual` record with no declared type cannot satisfy any page. The output must say so and name
+    the fix, rather than letting the operator conclude the gate is broken.
+    """
+    sha = build_unit(bundle, "WB", worksheets=["Revenue Trend"])
+    write_reference(
+        bundle,
+        [("tableau-Revenue Trend", "manual", ["layout_grade", "text_readable", "validation_grade"])],
+        source_sha=sha,
+    )
+
+    report = crr.scan(bundle)
+    assert report["evidence_untyped"] == 1
+    rendered = crr.render(report)
+    assert "UNTYPED EVIDENCE" in rendered
+    assert "view_type" in rendered
