@@ -126,6 +126,74 @@ def test_provenance_finds_the_install_that_content_may_not(tmp_path: Path) -> No
     assert by_marker.skills_dir == plugin_root / "skills"
 
 
+def test_the_cli_registry_is_JSONC_and_must_still_prove_ownership(tmp_path: Path) -> None:
+    """Measured on a real machine: `~/.copilot/config.json` OPENS with a `//` comment line.
+
+    Its first line is `// User settings belong in settings.json`, so a strict `json.loads` raises on
+    character 0 and `registry_identities` - which degrades an unreadable registry to "no entries" -
+    returned `{}` every time. The `identity`-by-REGISTRY proof therefore never fired on any real
+    install, silently, and only failed CLOSED (fewer proofs, never more writes), which is why
+    nothing noticed. The bug is not academic here: this machine's plugin lives at
+    `installed-plugins/powerbi-migration-collection/powerbi-migration-skills` and the registry names
+    it correctly.
+
+    The install below is deliberately at a directory whose LAYOUT proves nothing - `abc123@cache` is
+    in no allowlist - so the registry is the only possible proof and a fixture writing strict JSON
+    could not tell the two apart.
+    """
+    plugin_root = _make_plugin(tmp_path, "cache", "abc123")
+    registry = tmp_path / "config.json"
+    registry.write_text(
+        "// User settings belong in settings.json\n"
+        + json.dumps(
+            {
+                "installedPlugins": [
+                    {
+                        "name": build_plugin.PLUGIN_NAME,
+                        "marketplace": build_plugin.MARKETPLACE_NAME,
+                        "cache_path": str(plugin_root),
+                        "version": "0.3.0",
+                    }
+                ]
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    result = discover_skill_plugin(installed_plugins_root=tmp_path, env={}, registry=registry)
+
+    assert result.ok, "a JSONC registry is the real format, so it must be readable"
+    assert result.proof == "identity"
+    assert result.plugin_root == plugin_root
+
+
+def test_a_registry_naming_someone_else_still_refuses(tmp_path: Path) -> None:
+    """Reading the registry must not become a way to be MORE permissive.
+
+    The registry is the CLI's own record and outranks the directory name: when it says this
+    directory is a plugin nobody declared, a layout that happens to look like ours is not ownership.
+    """
+    plugin_root = _make_plugin(tmp_path, *OURS)
+    registry = tmp_path / "config.json"
+    registry.write_text(
+        "// jsonc\n"
+        + json.dumps(
+            {
+                "installedPlugins": [
+                    {"name": "their-plugin", "marketplace": "someone-else", "cache_path": str(plugin_root)}
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = discover_skill_plugin(installed_plugins_root=tmp_path, env={}, registry=registry)
+
+    assert result.status == "unproven"
+    assert not result.ok
+
+
 def test_multiple_proven_installs_fail_loudly_and_name_both_paths(tmp_path: Path) -> None:
     """Two PROVEN copies are a shadowing hazard; discovery must not pick one silently.
 

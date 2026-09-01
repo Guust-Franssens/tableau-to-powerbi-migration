@@ -23,8 +23,9 @@ So a destination must carry one of three PROOFS, none of which is a bundle name:
   ``marker``     it holds `.skill-sync-owner.json` naming this repo's publish URL - written by a
                  previous successful publish, so it is this tool's own provenance record;
   ``identity``   the Copilot CLI's own install record (`~/.copilot/config.json` `installedPlugins`,
-                 falling back to the `<marketplace>/<plugin>` directory layout the CLI creates)
-                 names it as one of `build_plugin.KNOWN_PLUGIN_IDENTITIES`.
+                 which is **JSONC** - see `_load_jsonc` - falling back to the `<marketplace>/<plugin>`
+                 directory layout the CLI creates) names it as one of
+                 `build_plugin.KNOWN_PLUGIN_IDENTITIES`.
 
 With no proof, this returns ``unproven`` and the caller must write NOTHING. Content is still read,
 but only to tell ``unproven`` (something LOOKS like ours - say so, and name it) from ``missing``
@@ -36,6 +37,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -55,6 +57,28 @@ DEFAULT_INSTALL_HINT = (
 # `.mcp.json` / `plugin.json` already live, so nothing reads this as bundle content.
 OWNER_MARKER_NAME = ".skill-sync-owner.json"
 OWNER_MARKER_SCHEMA = 1
+
+# The Copilot CLI writes its own config as JSONC. Measured on a real machine, `~/.copilot/config.json`
+# OPENS with `// User settings belong in settings.json`, so `json.loads` raises on the first
+# character and the `identity`-by-REGISTRY proof - the one that is supposed to survive a rename the
+# directory layout cannot predict - silently never fires. It failed closed (fewer proofs, never more
+# writes), which is exactly why nothing noticed.
+_LINE_COMMENT = re.compile(r"^[ \t]*//.*$", re.MULTILINE)
+
+
+def _load_jsonc(text: str) -> object | None:
+    """Parse JSON, then JSON with whole-line `//` comments; None when neither parses.
+
+    Strict first, so a plain JSON file is never rewritten before being read. Only lines whose first
+    non-whitespace characters are `//` are dropped, and in valid JSON such a line can only be a
+    comment: a string cannot span lines, so no `"https://..."` value can begin one.
+    """
+    for candidate in (text, _LINE_COMMENT.sub("", text)):
+        try:
+            return json.loads(candidate)
+        except ValueError:
+            continue
+    return None
 
 
 @dataclass(frozen=True)
@@ -159,8 +183,10 @@ def write_owner_marker(plugin_root: Path, **fields: object) -> Path:
 def registry_identities(registry: Path) -> dict[Path, str]:
     """`cache_path` -> ``plugin@marketplace`` from the Copilot CLI's own install record."""
     try:
-        loaded = json.loads(registry.read_text(encoding="utf-8"))
+        loaded = _load_jsonc(registry.read_text(encoding="utf-8"))
     except (OSError, ValueError):
+        return {}
+    if not isinstance(loaded, dict):
         return {}
     found: dict[Path, str] = {}
     for entry in loaded.get("installedPlugins") or []:

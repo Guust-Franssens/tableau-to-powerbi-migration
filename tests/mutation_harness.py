@@ -303,6 +303,22 @@ sps._unproven_verdict = lambda lookalikes: (
     sps._multiple_verdict(lookalikes) if len(lookalikes) > 1 else _orig(lookalikes)
 )
 """,
+    "skillsource-registry-must-be-strict-json": """
+import json
+import skill_plugin_source as sps
+# The CLI writes JSONC, so a strict parse makes `registry_identities` return {} on every real
+# machine and the identity-by-registry proof silently never fires.
+sps._load_jsonc = lambda text: json.loads(text)
+""",
+    "skillsource-registry-disagreement-falls-back-to-the-layout": """
+import skill_plugin_source as sps
+_orig = sps.prove_ownership
+def prove(plugin_root, *, publish_repo, identities, registry_map):
+    # The CLI's own record says this directory is someone else's plugin; try the directory
+    # NAME anyway, which is the thing an outsider can choose.
+    return _orig(plugin_root, publish_repo=publish_repo, identities=identities, registry_map={})
+sps.prove_ownership = prove
+""",
 }
 
 
