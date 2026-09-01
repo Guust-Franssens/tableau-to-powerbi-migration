@@ -6,58 +6,59 @@ usage:   import dax_grain; dax_grain.classify(member); dax_grain.read_model_fact
 internal-reason: library split out of `scripts/check_running_total_axis.py` (#218) when that module
 crossed pylint's `max-module-lines` cap. The seam is real rather than arithmetic: everything here
 answers "what does this DAX address, and what is this column?" from TMDL alone, and nothing here
-can see a report. That makes the lineage rules independently testable, and it is the half a second
-gate would reuse first.
+can see a report.
 
-The one idea worth carrying across: a grain is decided from a PROPERTY, never a proxy. The engine
-writes its coarse date bins as calculated TEXT columns - `Month = FORMAT('Date'[Date], "MMM")`,
-`Quarter = "Q" & QUARTER('Date'[Date])` - carrying no `dataType` at all (95 such columns in
-`_runs/estate-2.339.0-20260829`), and their filters survive exactly like a `dateTime` bin's. So
-`ModelFacts.grain_of` reads declared type AND calculated lineage back to the anchor column, and
-falls back to `unassessable` on a name-only hint rather than to "clean".
+THE RECOGNISED GRAMMAR: whole ENGINE templates, fully consumed, or nothing
+--------------------------------------------------------------------------
+Rounds 1-6 of blind review produced 5-6-2-0-3-4 findings and EVERY one of them was a regex reading
+raw DAX text. Round 5 decided to narrow the grammar; round 6 measured that the decision had not
+been executed - the gate still searched for call sites in text, and still returned definite
+verdicts on input it had never consumed. Measured on the shipped code, all by exit code:
 
-THE RECOGNISED GRAMMAR: what the ENGINE emits, and nothing else
----------------------------------------------------------------
-Rounds 1-5 of blind review produced 5-6-2-0-3-4 findings, and by round 5 the gate was wrong in BOTH
-directions - it fired MISMATCH on a correct TEXT measure whose *string literal* contained DAX, and
-it returned OK on a genuinely broken running total because a `REMOVEFILTERS` in an UNREACHABLE `IF`
-branch was unioned into the acquittal. Every one of those findings was the same mistake: a regex
-scanning raw DAX text and mis-reading its syntax. Semantic analysis of arbitrary DAX with regexes
-does not terminate, so round 5 stopped trying.
+    | input                                                         | before | why it was wrong       |
+    |---------------------------------------------------------------|--------|------------------------|
+    | engine measure over a table named `'Orders--Archive'`          | 0 N/A  | truncated at `--`      |
+    | `SUM('WINDOW()'[Sales])`                                       | 0 OK   | matched inside a NAME  |
+    | `SUM('Orders'[WINDOW(1, ABS, 0, REL, ORDERBY(...))])`          | 1 MISM | matched inside a NAME  |
+    | `VAR _dead = <a WINDOW> VAR _answer = SUM(...) RETURN _answer` | 1 MISM | the window is UNUSED   |
+    | `ORDERBY(YEAR('Orders'[Order_Date]), ASC)`                     | 0 OK   | the YEAR() is unread   |
+    | `SUMX(OFFSET(-1), CALCULATE(...))` on a measure-only visual    | 0 OK   | no grain to judge      |
 
-**The recognised set is the engine's closed set.** Read out of the deterministic tier
-(`skills/tableau-migration/scripts/calc_to_dax.py:3548`), every cumulative measure it emits is one
-family, built on the window functions:
-
-    RUNNING_SUM/AVG/MIN/MAX/COUNT(<agg>) -> <X>(WINDOW(1, ABS,  0, REL, <spec>), CALCULATE(<agg>))
-    WINDOW_SUM/AVG/MIN/MAX/COUNT(<agg>)  -> <X>(WINDOW(1, ABS, -1, ABS, <spec>), CALCULATE(<agg>))
-    SIZE()  -> COUNTROWS(WINDOW(1, ABS, -1, ABS, <spec>))     INDEX() -> ROWNUMBER(<spec>)
-
-It emits **no** as-of `FILTER(ALL(t[c]), t[c] <= MAX(t[c]))` and **no** `TOTALYTD`/`DATESYTD`; its
-only `FILTER(ALL(...))` (`calc_to_dax.py:2328`) is a cross-table FIXED LOD whose predicate is an
-EQUALITY conjunction, never an ordering bound. Measured across the 16 committed `examples/` models,
-526 measures: **114** `FILTER(ALL(...))` measures and **0** of them carrying any ordering
-comparison. So the as-of classifier that produced round 4's F1/F2/F3 and round 5's F1/F2 never had
-a single instance to classify in shipped bytes.
+So the reading layer is now a LEXER plus WHOLE-EXPRESSION TEMPLATES (`dax_tokens`), and this module
+recognises exactly the closed set the deterministic tier emits - read out of
+`skills/tableau-migration/scripts/calc_to_dax.py` (`_emit_table_calc` ~3466, `_orderby_clause`
+~3236, `_partitionby_clause` ~3341, `translate_difference_to_dax` ~3738,
+`translate_percent_difference_to_dax` ~3686), whose window calls deliberately omit `<relation>`
+(`calc_to_dax.py:279`) so that the visual's own grain is the contract.
 
 Three rules, in the order they run:
 
-1. **LEX FIRST.** `mask_noncode` blanks string literals and `--`/`//`/`/* */` comments before any
-   regex sees the text, preserving every offset. Quoted table names and bracketed column names are
-   skipped ATOMICALLY, so a `"` inside a column name cannot mis-lex. Round 5 finding 3 is
-   unfixable otherwise, and it is not hypothetical: the single `TOTALYTD` in `examples/` is inside
-   a `///` comment (`superstore-sales-performance/.../Date.tmdl:6`).
-2. **STRUCTURAL READS ONLY.** Both judged mechanisms answer "which columns does this call name?",
-   never "what does this expression mean". Window: read `ORDERBY`'s columns, require the visual to
-   project them. Period-to-date: read the `<dates>` column, compare grains using MODEL facts
-   (declared type / calculated lineage), not DAX semantics.
-3. **EVERYTHING ELSE IS `UNASSESSABLE`.** The as-of family is DETECTED, never classified: a
-   `FILTER(...)` whose predicate carries an ordering comparison can only ever produce exit 3 with
-   "probe it with EVALUATE". It cannot emit a mismatch, so it cannot be wrong in the direction that
-   gets a gate switched off; it cannot emit `ok`, so it cannot grant false confidence.
+1. **LEX ONCE.** `dax_tokens.tokenize` is total, and quoted table names, bracketed column names and
+   string literals are ATOMIC tokens. A `--` or a `WINDOW(` inside an identifier is identifier text
+   and can never be seen as code. There is no second, identifier-unaware pass to get wrong.
+2. **MATCH A WHOLE TEMPLATE, or do not judge.** A match is anchored at token 0 and must end on the
+   last token, with every token either a template literal or inside a declared hole.
+   `Cumulative.consumed` records that receipt, and
+   `check_running_total_axis._enforce_consumption` refuses any `ok`/`mismatch` without it - so "no
+   definite verdict on unconsumed input" is a property of the code, not a claim about coverage.
+3. **EVERYTHING ELSE IS `UNASSESSABLE`.** An expression that carries an accumulation SIGNAL - a
+   called window function, a called period-to-date function, or a `FILTER(...)` restricted by an
+   ordering comparison - but matches no template is reported unassessable with the measure named.
+   An expression with no signal at all is not an accumulation and is not reported.
 
-What this deliberately gives up: a coarse-axis MISMATCH for a hand-authored as-of running total.
-That capability was never exercised on a real artifact and was wrong in both directions.
+What this deliberately gives up: any verdict on a hand-authored accumulation. The as-of family
+(`FILTER(ALL(t[c]), t[c] <= MAX(t[c]))`) is DETECTED, never classified - rounds 4 and 5 measured
+five spellings where classifying it was wrong in BOTH directions, and the engine emits none of it
+(its only `FILTER(ALL(...))`, `calc_to_dax.py:2328`, is a FIXED LOD with an EQUALITY predicate; 0 of
+the 526 measures in the 16 committed `examples/` models carry an ordering comparison inside a
+`FILTER`).
+
+The one idea worth carrying across from earlier rounds: a grain is decided from a PROPERTY, never a
+proxy. The engine writes its coarse date bins as calculated TEXT columns - `Month = FORMAT('Date'
+[Date], "MMM")`, `Quarter = "Q" & QUARTER('Date'[Date])` - carrying no `dataType` at all (95 such
+columns in `_runs/estate-2.339.0-20260829`), and their filters survive exactly like a `dateTime`
+bin's. So `ModelFacts.grain_of` reads declared type AND calculated lineage back to the anchor
+column, and falls back to `unassessable` on a name-only hint rather than to "clean".
 """
 
 from __future__ import annotations
@@ -65,76 +66,106 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from check_relationship_health import _parse_column_census
-from check_stub_measures import is_stub_expression, parse_model, strip_comments
-
-# Window functions whose `<relation>` argument is OPTIONAL and, when omitted, defaults to the
-# visual's own shaped table. That default is the whole reason the visual's axis is the contract.
-# MOVINGAVERAGE/RUNNINGSUM are excluded on purpose: their relation is REQUIRED, so the visual never
-# decides their ordering domain and this gate has no standing to judge them.
-WINDOW_FUNCTIONS = ("WINDOW", "OFFSET", "INDEX", "RANK", "ROWNUMBER")
-
-# Bare positional tokens a window function may legally carry that are NOT a relation. Anything else
-# in a positional slot is treated as an explicit relation, which makes the call unassessable.
-_POSITIONAL_KEYWORDS = frozenset(
-    {
-        "ABS",
-        "REL",
-        "ASC",
-        "DESC",
-        "DEFAULT",
-        "DENSE",
-        "SKIP",
-        "KEEP",
-        "NONE",
-        "BLANK",
-        "FIRST",
-        "LAST",
-        "TRUE",
-        "FALSE",
-    }
+from check_stub_measures import parse_model
+from dax_tokens import (
+    KIND_COLUMN,
+    KIND_NAME,
+    KIND_OP,
+    KIND_TABLE,
+    PERIOD_TO_DATE_FUNCTIONS,
+    WINDOW_FUNCTIONS,
+    ColumnRef,
+    Template,
+    Token,
+    call_body,
+    calls_named,
+    has_ordering_comparison,
+    match_any,
+    tokenize,
 )
-_CLAUSE_FUNCTIONS = ("ORDERBY", "PARTITIONBY", "MATCHBY")
-_NUMBER_RE = re.compile(r"^[+-]?\d+(\.\d+)?$")
 
-# `'Table'[Column]`, `Table[Column]` or a bare `[Column]`. A `'` inside a quoted table name is
-# doubled in DAX exactly as it is in TMDL, so the alternation mirrors `check_field_bindings._NAME`.
-_COLUMN_REF_RE = re.compile(r"(?:'((?:[^']|'')*)'|([A-Za-z_][\w. ]*?))?\s*\[([^\]]+)\]")
+# `ColumnRef` is this module's public vocabulary; consumers import it from here, not from the lexer.
+__all__ = [
+    "ENGINE_TEMPLATES",
+    "GRAIN_DATE",
+    "GRAIN_DERIVED",
+    "GRAIN_SUSPECT",
+    "GRAIN_UNRELATED",
+    "PERIOD_TEMPLATES",
+    "ColumnRef",
+    "Cumulative",
+    "ModelFacts",
+    "PeriodToDateCall",
+    "WindowCall",
+    "classify",
+    "column_references",
+    "read_model_facts",
+]
 
-# Which argument of a period-to-date call carries the <dates> column. `TOTALYTD(<expr>, <dates>)`
-# puts it second; `DATESYTD(<dates>)` first.
-_PERIOD_TO_DATE_FUNCTIONS = {
-    "TOTALYTD": 1,
-    "TOTALMTD": 1,
-    "TOTALQTD": 1,
-    "DATESYTD": 0,
-    "DATESMTD": 0,
-    "DATESQTD": 0,
-}
-# The engine's own words when it could not translate a Tableau running total, plus the name shapes
-# a hand-authored one uses. Used ONLY to surface a `BLANK()` stub as a former running total - never
-# to judge one, because a stub has no DAX shape to judge.
+_FILTER = frozenset({"FILTER"})
+
+# The frame every RUNNING_*/WINDOW_* aggregate folds. Spelled out in each template rather than
+# nested, so a reader can check a template against the engine source line by line.
+_FRAME = "WINDOW ( <num> , <mode> , <num> , <mode> , <spec> )"
+
+# THE CLOSED SET. Each entry is one whole expression the deterministic tier emits, with its engine
+# provenance. A measure that is not EXACTLY one of these is never judged.
+ENGINE_TEMPLATES: tuple[Template, ...] = (
+    # `_emit_table_calc`: RUNNING_*/WINDOW_*/COUNT/statistical aggregates folded over a frame.
+    Template("window_frame_aggregate", f"<aggx> ( {_FRAME} , CALCULATE ( <agg> ) )"),
+    # `_emit_table_calc`: WINDOW_PERCENTILE(<agg>, k).
+    Template("window_percentile", f"PERCENTILEX.INC ( {_FRAME} , CALCULATE ( <agg> ) , <num> )"),
+    # `_emit_table_calc`: LAST(). BEFORE window_size, whose template is a prefix of this one.
+    Template("window_last", f"COUNTROWS ( {_FRAME} ) - ROWNUMBER ( <spec> )"),
+    # `_emit_table_calc`: SIZE().
+    Template("window_size", f"COUNTROWS ( {_FRAME} )"),
+    # `_emit_table_calc`: FIRST().
+    Template("window_first", "1 - ROWNUMBER ( <spec> )"),
+    # `_emit_table_calc`: INDEX().
+    Template("row_number", "ROWNUMBER ( <spec> )"),
+    # `_emit_table_calc`: LOOKUP(<agg>, offset).
+    Template("offset_lookup", "CALCULATE ( <agg> , OFFSET ( <num> , <spec> ) )"),
+    # `translate_percent_difference_to_dax`.
+    Template(
+        "percent_difference",
+        "DIVIDE ( ( <agg> ) - CALCULATE ( <agg> , OFFSET ( <num> , <spec> ) ) , "
+        "ABS ( CALCULATE ( <agg> , OFFSET ( <num> , <spec> ) ) ) )",
+    ),
+    # `translate_difference_to_dax`.
+    Template(
+        "difference",
+        "VAR _prev = CALCULATE ( <agg> , OFFSET ( <num> , <spec> ) ) RETURN "
+        "IF ( ISBLANK ( _prev ) , BLANK ( ) , ( <agg> ) - _prev )",
+    ),
+)
+
+# Period-to-date is NOT emitted by the engine (0 instances across 526 committed `examples/`
+# measures), but a hand-authored one on an unmarked fact table is a real, measured trap - so it is
+# judged, and ONLY in the shapes whose non-date argument is a bare aggregate. `<sagg>` rather than
+# `<agg>` is load-bearing: the judged property here is whether a filter is REMOVED, and an arbitrary
+# inner expression can remove filters itself - `TOTALYTD(CALCULATE(SUM(x),
+# REMOVEFILTERS('Orders'[Month])), 'Date'[Date])` - which would be a verdict formed without reading
+# the thing that decided it.
+PERIOD_TEMPLATES: tuple[Template, ...] = tuple(
+    Template("period_to_date", f"{func} ( <sagg> , <qcol> )") for func in ("TOTALYTD", "TOTALMTD", "TOTALQTD")
+) + tuple(
+    Template("period_to_date", f"CALCULATE ( <sagg> , {func} ( <qcol> ) )")
+    for func in ("DATESYTD", "DATESMTD", "DATESQTD")
+)
+
+# The engine's own words when it could not translate a Tableau running total, plus the name shapes a
+# hand-authored one uses. Used ONLY to surface a `BLANK()` stub as a former running total - never to
+# judge one, because a stub has no DAX shape to judge.
 _RUNNING_STUB_RE = re.compile(r"\bRUNNING[_ ]?(SUM|AVG|COUNT|MAX|MIN)\b|running|cumulative", re.IGNORECASE)
-
-# The as-of DETECTOR, and the whole of it. `FILTER(` plus an ordering comparison somewhere in the
-# call is the shape of an accumulation restricted by a moving cutoff. It is deliberately shallow:
-# it names a measure the gate REFUSES to judge, so over-detection costs an exit 3 and nothing else.
-# `<>` is excluded because it is DAX's not-equal, not an ordering operator (round 2 finding 2).
-_FILTER_CALL_RE = re.compile(r"\bFILTER\s*\(", re.IGNORECASE)
-_ORDERING_COMPARISON_RE = re.compile(r"<=|>=|<(?![>=])|(?<!<)>(?!=)")
 
 # Names that SUGGEST a date grain without proving one. Used only to route an otherwise-undecidable
 # grouping column to `unassessable`, never to a mismatch: a guess must not fail a build.
 _DATE_PART_NAME_RE = re.compile(
     r"(^|[\s_\-])(year|quarter|qtr|month|week|date|period|fiscal|semester|yyyy)([\s_\-]|$)", re.IGNORECASE
 )
-
-# PRESENTATIONAL ONLY, and it lives in the GATE (`check_running_total_axis.AXIS_ROLES`) because it
-# is about rendering a report finding, not about reading a model. Nothing in this module may filter
-# by role: a curated axis-role list is exactly the proxy that let a `dateTime` grain under a
-# pivotTable's `Columns` role pass silently.
 
 _DATE_TYPES = frozenset({"date", "datetime"})
 
@@ -146,92 +177,34 @@ GRAIN_SUSPECT = "suspect"
 GRAIN_UNRELATED = "unrelated"
 
 
-@dataclass(frozen=True)
-class ColumnRef:
-    """One `'Table'[Column]` reference, with the table left None when DAX did not qualify it."""
-
-    table: str | None
-    column: str
-
-    def qualified(self) -> str:
-        """The reference as a human would write it back into DAX."""
-        return f"'{self.table}'[{self.column}]" if self.table else f"[{self.column}]"
-
-    def key(self) -> tuple[str, str]:
-        """Case-insensitive identity, so a casing-only difference does not invent a finding."""
-        return ((self.table or "").casefold(), self.column.casefold())
-
-
 @dataclass
 class WindowCall:
-    """ONE `WINDOW`/`OFFSET`/`INDEX`/`RANK`/`ROWNUMBER` call, judged entirely on its own.
+    """ONE window-family call read out of a MATCHED template, judged entirely on its own.
 
-    Round 2 fixed "the first window call decided the measure" by unioning every call's ORDERBY
-    columns. That closed the false negative but left a second first-match: an UNREADABLE call
-    (an explicit relation, an unqualified ORDERBY) returned early and made the whole measure
-    `unassessable`, suppressing a readable call's mismatch. Measured: an explicit-relation call
-    beside `WINDOW(... ORDERBY('Orders'[Region]))` on an `Order_Date` axis exited 3, where the
-    defective call alone exits 1. Never a pass, but the wrong verdict - worst must win.
+    Every field here comes from a fully-consumed `<spec>` hole, so there is no "unreadable call"
+    state left to represent: an unreadable call means the template did not match, and a measure
+    whose template did not match is never judged at all.
     """
 
     func: str
     ordered_by: list[ColumnRef] = field(default_factory=list)
     partition_by: list[ColumnRef] = field(default_factory=list)
-    assessable: bool = True
-    reason: str = ""
 
 
 @dataclass
 class PeriodToDateCall:
-    """ONE `TOTALYTD`/`DATESYTD`-family call, judged entirely on its own.
-
-    `_classify_period_to_date` returned after the first match found while walking
-    `_PERIOD_TO_DATE_FUNCTIONS` - so not even the first in the TEXT, the first in dict order.
-    Measured: `TOTALYTD(SUM('Orders'[Sales]), 'Date'[Date]) + CALCULATE(SUM('Orders'[Sales]),
-    DATESYTD('Orders'[Order_Date]))` on a `'Date'[Month Start]` axis exited **0** (`date_table_marked`)
-    while the `DATESYTD` term alone exits 3. A silent pass.
-    """
+    """ONE `TOTALYTD`/`DATESYTD`-family call read out of a MATCHED template."""
 
     func: str
-    anchor: ColumnRef | None = None
-    assessable: bool = True
-    reason: str = ""
+    anchor: ColumnRef
 
 
 @dataclass
-class AsOfCall:
-    """ONE `FILTER(...)` restricted by an ordering comparison - DETECTED, never classified.
+class Cumulative:
+    """One measure whose DAX declares an accumulation grain, and how it was read.
 
-    Round 5 retired the classifier this used to carry. Deciding whether an as-of bound *moves with
-    the visual* means answering, from raw text, which `IF` branch is reachable, which operand a
-    `REMOVEFILTERS` belongs to, and what a redundant paren around a column means. Rounds 4 and 5
-    measured five separate ways that went wrong, in BOTH directions:
-    `IF(TRUE(), MAX(d), CALCULATE(MAX(d), REMOVEFILTERS(<the axis>)))` returned **OK** on a broken
-    measure because the unreachable branch's removal was unioned into the acquittal, while
-    `('Orders'[Order_Date]) <= MAX(...)` - one redundant paren - exited **0**.
-
-    The engine emits no measure of this shape at all (`calc_to_dax.py:2328` is a FIXED LOD with an
-    EQUALITY predicate), and 0 of the 526 measures in the committed `examples/` corpus carry an
-    ordering comparison inside a `FILTER`. So there was never anything here to classify, and the
-    honest report is `unassessable` with the measure named.
-
-    `assessable` is a field rather than a constant only so the judge reads every mechanism the same
-    way; nothing ever sets it True.
-    """
-
-    predicate: str = ""
-    assessable: bool = False
-    reason: str = ""
-
-
-@dataclass
-class Cumulative:  # pylint: disable=too-many-instance-attributes
-    """One measure whose DAX declares one or more accumulation grains, and how confidently we read
-    each of them.
-
-    Each mechanism is a LIST of independent calls and `check_running_total_axis._worst` picks the
-    worst verdict across all of them - rule 2 in this module's docstring, arrived at the hard way
-    over four review rounds at eight separate sites, three of which were SILENT PASSES.
+    `consumed` is the receipt that a whole template matched every token. It is the single fact the
+    gate checks before it is allowed to emit `ok` or `mismatch`.
     """
 
     table: str
@@ -240,8 +213,9 @@ class Cumulative:  # pylint: disable=too-many-instance-attributes
     tmdl: str
     line: int
     window_calls: list[WindowCall] = field(default_factory=list)
-    as_of_calls: list[AsOfCall] = field(default_factory=list)
     period_calls: list[PeriodToDateCall] = field(default_factory=list)
+    signals: list[str] = field(default_factory=list)
+    consumed: bool = False
     assessable: bool = True
     reason: str = ""
 
@@ -262,14 +236,8 @@ class Cumulative:  # pylint: disable=too-many-instance-attributes
 
     @property
     def compared(self) -> ColumnRef | None:
-        """The period-to-date anchor, for presentation and routing only.
-
-        Deliberately not a verdict input: every judgement is formed per call, from the lists above.
-        """
-        for period in self.period_calls:
-            if period.anchor is not None:
-                return period.anchor
-        return None
+        """The period-to-date anchor, for presentation and routing only."""
+        return self.period_calls[0].anchor if self.period_calls else None
 
 
 @dataclass
@@ -285,7 +253,7 @@ class ModelFacts:
     """
 
     column_types: dict[str, Any] = field(default_factory=dict)
-    calc_expressions: dict[tuple[str, str], str] = field(default_factory=dict)
+    calc_expressions: dict[tuple[str, str], list[ColumnRef]] = field(default_factory=dict)
     time_tables: set[str] = field(default_factory=set)
 
     def data_type(self, table: str, column: str) -> str:
@@ -315,10 +283,7 @@ class ModelFacts:
         if ref.key() in seen:
             return False
         seen.add(ref.key())
-        expression = self.calc_expressions.get(ref.key())
-        if not expression:
-            return False
-        for found in _column_refs(expression):
+        for found in self.calc_expressions.get(ref.key(), []):
             target = ColumnRef(found.table or ref.table, found.column)
             if target.key() == anchor.key():
                 return True
@@ -337,14 +302,31 @@ class ModelFacts:
         return GRAIN_UNRELATED
 
 
+def column_references(text: str) -> list[ColumnRef]:
+    """Every `'Table'[Column]` / `Table[Column]` / `[Column]` reference in a fragment of DAX.
+
+    Read from TOKENS, so a `[Column]` inside a string literal or a comment contributes nothing - the
+    same reason `classify` never sees raw text. Used for calculated-column lineage, where a phantom
+    reference out of `Bucket = IF(x, "[Date]", "other")` would otherwise invent a date grain.
+    """
+    code = tokenize(text).code
+    refs: list[ColumnRef] = []
+    for position, token in enumerate(code):
+        if token.kind != KIND_COLUMN:
+            continue
+        previous = code[position - 1] if position else None
+        table = previous.value if previous is not None and previous.kind in (KIND_TABLE, KIND_NAME) else None
+        refs.append(ColumnRef(table=table, column=token.value))
+    return refs
+
+
 def read_model_facts(model_dir: Path) -> ModelFacts:
-    """Read the column types, calculated-column expressions and date-table markings in one pass."""
+    """Read the column types, calculated-column lineage and date-table markings in one pass."""
     facts = ModelFacts(column_types=_parse_column_census(model_dir))
     for member in parse_model(model_dir):
         if member.kind == "column" and (member.expression or "").strip():
-            # Masked for the same reason `classify` masks: a calculated column's own string literal
-            # (`Bucket = IF(x, "[Date]", "other")`) would otherwise contribute a phantom lineage ref.
-            facts.calc_expressions[(member.table.casefold(), member.name.casefold())] = mask_noncode(member.expression)
+            key = (member.table.casefold(), member.name.casefold())
+            facts.calc_expressions[key] = column_references(member.expression)
     definition = model_dir / "definition"
     root = definition if definition.is_dir() else model_dir
     for path in sorted(root.rglob("*.tmdl")):
@@ -354,9 +336,9 @@ def read_model_facts(model_dir: Path) -> ModelFacts:
             continue
         table: str | None = None
         for line in text.splitlines():
-            match = _TABLE_DECL_RE.match(line)
-            if match:
-                table = _unquote_tmdl(match.group("name"))
+            declaration = _TABLE_DECL_RE.match(line)
+            if declaration:
+                table = _unquote_tmdl(declaration.group("name"))
             elif table and _TIME_CATEGORY_RE.match(line):
                 facts.time_tables.add(table.casefold())
     return facts
@@ -374,400 +356,89 @@ def _unquote_tmdl(name: str) -> str:
     return name
 
 
-def _split_arguments(text: str) -> list[str]:
-    """Split a DAX argument list at depth 0, respecting strings, parens and brackets.
-
-    `str.split(",")` cannot do this: `ORDERBY('T'[A], ASC)` is ONE argument of `WINDOW`, and a table
-    name may legally contain a comma inside its quotes.
-    """
-    args: list[str] = []
-    depth = 0
-    in_string = False
-    current: list[str] = []
-    for char in text:
-        if in_string:
-            current.append(char)
-            if char == '"':
-                in_string = False
-            continue
-        if char == '"':
-            in_string = True
-            current.append(char)
-        elif char in "([":
-            depth += 1
-            current.append(char)
-        elif char in ")]":
-            depth -= 1
-            current.append(char)
-        elif char == "," and depth == 0:
-            args.append("".join(current).strip())
-            current = []
-        else:
-            current.append(char)
-    tail = "".join(current).strip()
-    if tail or args:
-        args.append(tail)
-    return args
-
-
-def mask_noncode(text: str) -> str:
-    """Blank every string literal and comment, preserving length so all offsets still line up.
-
-    **This runs before any regex sees DAX, and round 5 finding 3 is unfixable otherwise.** Measured:
-    a legitimate TEXT measure whose literal contained
-    `"FILTER(ALL('Orders'[Order_Date]), 'Orders'[Order_Date] <= MAX('Orders'[Order_Date]))"`, bound
-    as a tooltip, was classified a running total and reported **MISMATCH, exit 1** - the gate firing
-    on correct DAX, which is the failure mode that gets a gate switched off. `_call_bodies` cannot
-    fix this itself: it regex-matches a function name over raw text and only then starts tracking
-    quotes, so the lexical context is already lost by the time it looks.
-
-    Not hypothetical, and not only about measures: the single `TOTALYTD` anywhere in the committed
-    `examples/` corpus is inside a `///` documentation comment
-    (`superstore-sales-performance/.../Date.tmdl:6`).
-
-    Quoted table names and bracketed column names are skipped ATOMICALLY rather than masked, for
-    two different reasons: their contents must stay readable (they carry the column references this
-    module exists to read), and a `"` inside a column name - `'T'[He said "hi"]` is a legal DAX
-    identifier - would otherwise open a phantom string literal and mask the rest of the expression.
-    Verified: that expression round-trips through `mask_noncode` unchanged.
-    """
-    out = list(text)
-    index = 0
-    length = len(text)
-    while index < length:
-        char = text[index]
-        if char == "'":  # a quoted table name is atomic - it may legally contain " and --
-            end = text.find("'", index + 1)
-            index = length if end < 0 else end + 1
-            continue
-        if char == "[":  # a bracketed column name is atomic, for the same reason
-            end = text.find("]", index + 1)
-            index = length if end < 0 else end + 1
-            continue
-        if char == '"':
-            index = _mask_string(text, out, index)
-            continue
-        if text.startswith("--", index) or text.startswith("//", index):
-            end = text.find("\n", index)
-            end = length if end < 0 else end
-            _blank(out, index, end)
-            index = end
-            continue
-        if text.startswith("/*", index):
-            end = text.find("*/", index + 2)
-            end = length if end < 0 else end + 2
-            _blank(out, index, end)
-            index = end
-            continue
-        index += 1
-    return "".join(out)
-
-
-def _mask_identifiers(text: str) -> str:
-    """Blank the CONTENTS of quoted table names and bracketed column names as well.
-
-    `mask_noncode` deliberately preserves them - they carry the references this module reads. The
-    as-of DETECTOR reads no references at all, only whether an ordering operator is present, so it
-    gets the stricter mask: a table legally named `'a<b'` must not be read as a comparison.
-    """
-    out = list(text)
-    index = 0
-    length = len(text)
-    while index < length:
-        if text[index] in "'[":
-            closer = "'" if text[index] == "'" else "]"
-            end = text.find(closer, index + 1)
-            end = length if end < 0 else end
-            _blank(out, index + 1, end)
-            index = end + 1
-            continue
-        index += 1
-    return "".join(out)
-
-
-def _blank(out: list[str], start: int, end: int) -> None:
-    """Overwrite a span with spaces, keeping every later offset where it was."""
-    for position in range(start, end):
-        out[position] = " "
-
-
-def _mask_string(text: str, out: list[str], start: int) -> int:
-    """Blank one `"..."` literal, honouring DAX's doubled-quote escape, and return the next index."""
-    index = start + 1
-    length = len(text)
-    while index < length:
-        if text[index] == '"':
-            if index + 1 < length and text[index + 1] == '"':
-                index += 2
-                continue
-            break
-        index += 1
-    end = min(index + 1, length)
-    _blank(out, start, end)
-    return end
-
-
-def _call_bodies(expr: str, name: str) -> list[str]:
-    """The argument text of every `name(...)` call in `expr`, at any nesting depth."""
-    bodies: list[str] = []
-    pattern = re.compile(rf"\b{re.escape(name)}\s*\(", re.IGNORECASE)
-    for match in pattern.finditer(expr):
+def _strip_outer_parens(code: list[Token]) -> list[Token]:
+    """Drop parentheses that redundantly wrap the WHOLE token stream."""
+    while len(code) >= 2 and code[0].kind == KIND_OP and code[0].text == "(":
         depth = 0
-        in_string = False
-        for index in range(match.end() - 1, len(expr)):
-            char = expr[index]
-            if in_string:
-                if char == '"':
-                    in_string = False
-                continue
-            if char == '"':
-                in_string = True
-            elif char == "(":
+        closer = -1
+        for position, token in enumerate(code):
+            if token.kind == KIND_OP and token.text == "(":
                 depth += 1
-            elif char == ")":
+            elif token.kind == KIND_OP and token.text == ")":
                 depth -= 1
                 if depth == 0:
-                    bodies.append(expr[match.end() : index])
+                    closer = position
                     break
-    return bodies
+        if closer != len(code) - 1:
+            return code
+        code = code[1:-1]
+    return code
 
 
-def _column_refs(text: str) -> list[ColumnRef]:
-    """Every column reference in a fragment of DAX, table-qualified where DAX qualified it."""
-    refs: list[ColumnRef] = []
-    for quoted, bare, column in _COLUMN_REF_RE.findall(text):
-        table = quoted.replace("''", "'") if quoted else (bare.strip() or None)
-        refs.append(ColumnRef(table=table, column=column.strip()))
-    return refs
+def _is_blank_stub(code: list[Token]) -> bool:
+    """Whether the ENTIRE expression is one `BLANK()` call, read from tokens rather than text."""
+    inner = _strip_outer_parens(code)
+    return (
+        len(inner) == 3
+        and inner[0].kind == KIND_NAME
+        and inner[0].uppercase == "BLANK"
+        and inner[1].text == "("
+        and inner[2].text == ")"
+    )
 
 
-def _is_positional(arg: str) -> bool:
-    """Whether a window-function argument is a bare literal/keyword rather than a relation."""
-    token = arg.strip().rstrip(")").strip()
-    return bool(_NUMBER_RE.match(token)) or token.upper() in _POSITIONAL_KEYWORDS
+def _signals(code: list[Token]) -> list[str]:
+    """The accumulation mechanisms this expression MENTIONS, however it spells them.
 
-
-def _clause_bodies(args: Iterable[str], name: str) -> list[str]:
-    """The body of EVERY `name(...)` clause among a window function's arguments.
-
-    The documented grammars provide one `orderBy`/`partitionBy` slot per call, and a blind review
-    confirmed that reading (A5): multiple keys belong inside the single clause. `_clause` used to
-    take the first match and rely on that being the only match. It now VERIFIES it - a second
-    clause means the call is not the grammar this module recognises, so it is residue.
+    Detection is by CALLED name - a name token followed by `(` - so a table named `Index` or a
+    column named `[WINDOW(...)]` raises nothing. A signal never produces a verdict; it decides only
+    whether an unmatched expression is reported unassessable or is simply not an accumulation.
     """
-    prefix = re.compile(rf"^{name}\s*\(", re.IGNORECASE)
-    bodies: list[str] = []
-    for arg in args:
-        if prefix.match(arg.strip()):
-            bodies.extend(_call_bodies(arg, name)[:1])
-    return bodies
+    found: list[str] = []
+    for index in calls_named(code, WINDOW_FUNCTIONS) + calls_named(code, PERIOD_TO_DATE_FUNCTIONS):
+        found.append(f"a {code[index].uppercase}(...) call")
+    if any(has_ordering_comparison(call_body(code, index)) for index in calls_named(code, _FILTER)):
+        found.append("a FILTER(...) restricted by an ordering comparison (an as-of accumulation)")
+    return sorted(set(found))
 
 
-def _window_call_sites(expr: str) -> list[tuple[str, list[str]]]:
-    """Every window-family call in the expression, as (function name, split arguments).
-
-    ALL of them, not the first. The invariant this gate states is that *every* ordered column must
-    be projected; returning from inside the first call site quietly narrowed that to the first one,
-    and a second `WINDOW(... ORDERBY(<unprojected>))` in the same measure passed (measured on an
-    estate-shaped measure with two windows: exit 0 with the second ordering column absent).
-    """
-    sites: list[tuple[str, list[str]]] = []
-    for func in WINDOW_FUNCTIONS:
-        for body in _call_bodies(expr, func):
-            sites.append((func, _split_arguments(body)))
-    return sites
-
-
-def _read_window_call(func: str, args: list[str]) -> WindowCall:
-    """Read ONE window-family call, recording why its grain cannot be read rather than returning."""
-    call = WindowCall(func=func)
-    named = [a for a in args if any(re.match(rf"^{c}\s*\(", a.strip(), re.IGNORECASE) for c in _CLAUSE_FUNCTIONS)]
-    positional = [a for a in args if a not in named]
-    if any(not _is_positional(arg) for arg in positional):
-        call.assessable = False
-        call.reason = (
-            f"{func} carries an explicit relation argument, so the ordering domain is that "
-            "table expression rather than the visual"
-        )
-        return call
-    order_bodies = _clause_bodies(args, "ORDERBY")
-    partition_bodies = _clause_bodies(args, "PARTITIONBY")
-    if len(order_bodies) > 1 or len(partition_bodies) > 1:
-        # The grammars give ONE orderBy/partitionBy slot per call, so a second one means this is not
-        # the shape read here. Verified rather than assumed - see `_clause_bodies`.
-        call.assessable = False
-        call.reason = f"{func} carries more than one ORDERBY/PARTITIONBY clause, which is not the grammar read here"
-        return call
-    if not order_bodies:
-        # No ORDERBY means this call orders by the relation's own columns, and the relation IS the
-        # visual. There is no second grain that could disagree - a verified acquittal, not a guess.
-        call.reason = f"{func} has no ORDERBY clause, so it orders by the visual's own grain"
-        return call
-    ordered = _column_refs(order_bodies[0])
-    if not ordered:
-        call.assessable = False
-        call.reason = f"{func} ORDERBY names no resolvable column reference"
-        return call
-    if any(ref.table is None for ref in ordered):
-        call.assessable = False
-        call.reason = f"{func} ORDERBY uses an unqualified column, so its table is ambiguous"
-        return call
-    call.ordered_by = ordered
-    call.partition_by = _column_refs(partition_bodies[0]) if partition_bodies else []
-    return call
-
-
-def _classify_window(expr: str, base: Cumulative) -> Cumulative | None:
-    """Read EVERY window-family call independently; none of them may silence another.
-
-    Round 1 returned from inside the first call site, so a second `WINDOW(... ORDERBY(<unprojected>))`
-    passed. Round 2 unioned the ordering keys, which fixed that but left an unreadable call still
-    returning early and suppressing a readable call's mismatch. Both are the same bug; a list is
-    the fix for both.
-    """
-    sites = _window_call_sites(expr)
-    if not sites:
-        return None
-    base.window_calls.extend(_read_window_call(func, args) for func, args in sites)
-    return base
-
-
-def _detect_as_of(expr: str) -> list[AsOfCall]:
-    """DETECT `FILTER(...)` restricted by an ordering comparison. Never classify it.
-
-    This replaces ~450 lines of bound classification - `_read_bound`, `_own_bound_kinds`,
-    `_context_bound_kinds`, `_bound_removals`, `_removal_scope`, `_fold_bound_kinds`,
-    `_read_conjunct`, `_read_predicate`, `_as_of_predicate`, `_split_top_level`,
-    `_top_level_comparison`, `_strip_enclosing_parens`, `_contains_comparison`, `_resolve_vars` -
-    all deleted in round 5, with the `AsOfCall.pins` acquittal and
-    `check_running_total_axis._judge_same_table_survivors` that consumed them.
-
-    Why the whole thing rather than a sixth patch. Deciding whether an as-of bound MOVES WITH THE
-    VISUAL requires answering, from raw text, which `IF` branch is reachable, which operand a
-    `REMOVEFILTERS` belongs to, and whether a redundant paren around a column changes its meaning.
-    Measured, rounds 4 and 5, all by exit code:
-
-    | spelling                                                          | before |
-    |-------------------------------------------------------------------|--------|
-    | `('Orders'[Order_Date]) <= MAX(...)` - one redundant paren         | 0      |
-    | `(d <= MAX(d)) = TRUE()`                                           | 0      |
-    | `IF(TRUE(), MAX(d), CALCULATE(MAX(d), REMOVEFILTERS(<the axis>)))` | 0 / OK |
-    | `MIN(MAX(d), DATE(...))` inline vs the same via two `VAR`s         | 1 vs 3 |
-
-    The third is the worst: a genuinely broken running total ACQUITTED, because a removal in an
-    unreachable branch was unioned into the acquittal. A gate wrong in both directions is worse
-    than no gate.
-
-    And there was never anything to classify. The engine emits no measure of this shape - its only
-    `FILTER(ALL(...))` (`calc_to_dax.py:2328`) is a cross-table FIXED LOD with an EQUALITY
-    predicate - and **0 of the 526 measures in the 16 committed `examples/` models** carry an
-    ordering comparison inside a `FILTER`. So this detector's measured noise on shipped bytes is
-    zero, and every verdict it can produce is exit 3 with the measure named.
-
-    Deliberately shallow, because shallow is what makes it safe: `FILTER(` plus an ordering
-    operator anywhere in the call. Over-detection costs an `unassessable`; it can never invent a
-    mismatch, and it can never return `ok`.
-    """
-    calls: list[AsOfCall] = []
-    for body in _call_bodies(expr, "FILTER"):
-        if _ORDERING_COMPARISON_RE.search(_mask_identifiers(body)):
-            calls.append(
-                AsOfCall(
-                    predicate=" ".join(body.split())[:160],
-                    reason=(
-                        "the measure restricts a FILTER with an ordering comparison - an as-of "
-                        "accumulation. This gate reads the ENGINE's window-function shapes; it does "
-                        "not judge a hand-authored as-of bound, because whether that bound moves "
-                        "with the visual is not decidable from the DAX text. Probe it with EVALUATE "
-                        "at every axis grain the emitted visuals bind"
-                    ),
-                )
-            )
-    return calls
-
-
-def _classify_as_of(expr: str, base: Cumulative) -> Cumulative | None:
-    """Attach every detected as-of restriction, or None when the measure carries none."""
-    base.as_of_calls.extend(_detect_as_of(expr))
-    return base if base.as_of_calls else None
-
-
-def _read_period_call(func: str, index: int, body: str) -> PeriodToDateCall:
-    """Read ONE period-to-date call, recording why its anchor cannot be read rather than returning.
-
-    A malformed call - too few arguments, or a `<dates>` slot naming several columns - used to be
-    dropped, and a dropped call is indistinguishable from "this model has no period-to-date measure".
-    """
-    call = PeriodToDateCall(func=func)
-    args = _split_arguments(body)
-    if len(args) <= index:
-        call.assessable = False
-        call.reason = f"{func} has no argument in the <dates> position, so its grain cannot be read"
-        return call
-    refs = _column_refs(args[index])
-    distinct = {ref.key() for ref in refs}
-    if not refs or refs[0].table is None:
-        call.assessable = False
-        call.reason = f"{func} names no table-qualified date column, so its grain cannot be read"
-        return call
-    if len(distinct) > 1:
-        call.assessable = False
-        call.reason = f"{func} names more than one column in its <dates> argument, so its anchor is ambiguous"
-        return call
-    call.anchor = refs[0]
-    return call
-
-
-def _classify_period_to_date(expr: str, base: Cumulative) -> Cumulative | None:
-    """Read EVERY `TOTALYTD`/`DATESYTD`-family call and pin down the date column each accumulates.
-
-    This used to be excluded from assessment entirely and merely LISTED as `not_assessed_by_design`.
-    That bucket hid real defects: measured on the committed Superstore model,
-    `TOTALYTD(SUM('Sample Superstore'[Sales]), 'Sample Superstore'[Order Date])` on a coarser
-    same-table month-start axis exited 0 - and that fact table is not even the marked date table.
-    Round 2 made it judged; round 3 found it still stopped at the first call FOUND WHILE WALKING
-    `_PERIOD_TO_DATE_FUNCTIONS`, so not even the first in the text. Measured:
-    `TOTALYTD(SUM('Orders'[Sales]), 'Date'[Date]) + CALCULATE(SUM('Orders'[Sales]),
-    DATESYTD('Orders'[Order_Date]))` on a `'Date'[Month Start]` axis exited **0** while the
-    `DATESYTD` term alone exits 3. Every call is now read.
-    """
-    for func, index in _PERIOD_TO_DATE_FUNCTIONS.items():
-        for body in _call_bodies(expr, func):
-            base.period_calls.append(_read_period_call(func, index, body))
-    return base if base.period_calls else None
-
-
-def _shape_of(base: Cumulative) -> str:
-    """The measure's mechanism(s), joined - a measure may genuinely declare more than one."""
-    names = []
-    if base.window_calls:
-        names.append(f"{base.window_calls[0].func.lower()}_orderby")
-    if base.as_of_calls:
-        names.append("as_of_filter")
-    if base.period_calls:
-        names.append("period_to_date")
-    return "+".join(names) or "unknown"
+def _fill_from_template(base: Cumulative, code: list[Token]) -> bool:
+    """Fill `base` from the ONE engine template that consumes every token, or return False."""
+    window = match_any(ENGINE_TEMPLATES, code)
+    if window is not None:
+        base.shape = window.template
+        base.consumed = True
+        base.window_calls = [
+            WindowCall(func=window.template, ordered_by=list(spec.ordered_by), partition_by=list(spec.partition_by))
+            for spec in window.specs
+        ]
+        return True
+    period = match_any(PERIOD_TEMPLATES, code)
+    if period is not None and period.anchors:
+        base.shape = period.template
+        base.consumed = True
+        base.period_calls = [PeriodToDateCall(func=period.template, anchor=period.anchors[0])]
+        return True
+    return False
 
 
 def classify(member: Any) -> Cumulative | None:
     """Read one TMDL measure as an accumulation, or return None when it declares no grain.
 
     Deliberately shape-driven, never name-driven: a name match would both miss the engine's
-    `Highlight Max`/`% Highlight Max` (real `WINDOW(... ORDERBY(...))` measures) and fire on the
-    five `Running Sum` measures in the estate that are `BLANK()` stubs with no grain at all. The one
-    exception is the stub branch below, which uses the name/annotation only to SURFACE the measure.
+    `Highlight Max`/`% Highlight Max` (real window measures) and fire on the five `Running Sum`
+    measures in the estate that are `BLANK()` stubs with no grain at all. The one exception is the
+    stub branch, which uses the name/annotation only to SURFACE the measure.
 
-    **`mask_noncode` runs here, ONCE, and every reader below sees only masked text.** That is the
-    round-5 finding-3 fix and the reason it is at the entry point rather than inside each reader: a
-    reader that forgets it re-opens the hole, and a TEXT measure whose literal contains DAX was
-    measured reporting MISMATCH / exit 1.
+    Exactly three outcomes, and the middle one is what rounds 1-6 kept getting wrong:
 
-    EVERY reader runs. The chain used to return on the first that matched, so a measure declaring
-    two mechanisms was judged on one of them - measured: a correct `WINDOW(... ORDERBY(...))` beside
-    a defective as-of on another date column exited **0**, where that as-of alone exits 1.
+    * a whole engine template consumed every token -> judged, `consumed=True`;
+    * no template matched but an accumulation signal is present -> `assessable=False`, unassessable;
+    * no signal at all -> None, this is not an accumulation.
     """
-    expr = mask_noncode(strip_comments(member.expression or ""))
-    if not expr.strip():
+    lexed = tokenize(member.expression or "")
+    code = lexed.code
+    if not code:
         return None
     base = Cumulative(
         table=member.table,
@@ -776,13 +447,33 @@ def classify(member: Any) -> Cumulative | None:
         tmdl=member.tmdl.as_posix(),
         line=member.line,
     )
-    if is_stub_expression(member.expression or ""):
+    if _is_blank_stub(code):
         return _classify_stub(member, base)
-    found = [reader(expr, base) is not None for reader in (_classify_window, _classify_as_of, _classify_period_to_date)]
-    if not any(found):
+    readable = not lexed.has_unknown and not lexed.unterminated
+    if readable and _fill_from_template(base, code):
+        return base
+    signals = _signals(code)
+    if not signals:
         return None
-    base.shape = _shape_of(base)
+    base.shape = "unrecognised"
+    base.signals = signals
+    base.assessable = False
+    base.reason = _unrecognised_reason(signals, lexed.unterminated)
     return base
+
+
+def _unrecognised_reason(signals: list[str], unterminated: str) -> str:
+    """Why an expression carrying an accumulation signal is refused rather than judged."""
+    trailer = f", and {unterminated}" if unterminated else ""
+    return (
+        "the measure declares an accumulation - "
+        + ", ".join(signals)
+        + trailer
+        + " - but its whole expression is not one of the "
+        + f"{len(ENGINE_TEMPLATES) + len(PERIOD_TEMPLATES)} shapes this gate recognises, so nothing here reads "
+        "which grain it accumulates over. Probe it with EVALUATE at every axis grain the emitted "
+        "visuals bind"
+    )
 
 
 def _classify_stub(member: Any, base: Cumulative) -> Cumulative | None:

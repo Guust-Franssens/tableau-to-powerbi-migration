@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import check_running_total_axis as crta  # noqa: E402  # pylint: disable=wrong-import-position
 import dax_grain as dg  # noqa: E402  # pylint: disable=wrong-import-position
+import dax_tokens as dt  # noqa: E402  # pylint: disable=wrong-import-position
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -238,18 +239,35 @@ def test_explicit_relation_is_unassessable_not_a_mismatch(tmp_path: Path) -> Non
     assert report["status"] == crta.STATUS_UNASSESSABLE
 
 
-def test_no_orderby_orders_by_the_visual_grain(tmp_path: Path) -> None:
-    """Without ORDERBY the window follows the relation - which is the visual - so it cannot disagree."""
+def test_a_window_without_an_orderby_is_not_an_engine_shape(tmp_path: Path) -> None:
+    """ROUND 6 FINDING 3. `_judge_one_window` used to answer `ok`/`orders_by_visual_grain` for a
+    call with no ORDERBY *before* asking whether the visual had a grain at all - measured,
+    `SUMX(OFFSET(-1), CALCULATE(SUM('Orders'[Sales])))` on a card that projects no grouping column
+    exited **0**. With no visual grain there is nothing to establish the relation against.
+
+    Both halves of the fix are pinned here. Every engine template requires a `<spec>`, so a
+    no-ORDERBY call is not a recognised shape on ANY visual; and the card case - the reviewer's
+    exact reproduction - must not exit 0."""
     measures = _measures_tmdl(_measure("Prev", "SUMX(OFFSET(-1), CALCULATE(SUM('Orders'[Sales])))"))
-    bundle = build_bundle(
-        tmp_path,
+    on_axis = build_bundle(
+        tmp_path / "axis",
         measures,
         {
             "Category": {"projections": [_column_projection("Date", "Month Start")]},
             "Y": {"projections": [_measure_projection("_Measures", "Prev")]},
         },
     )
-    assert codes(crta.scan(bundle)) == ["orders_by_visual_grain"]
+    assert verdicts(crta.scan(on_axis)) == ["unassessable"], crta.render(crta.scan(on_axis))
+
+    card = build_bundle(
+        tmp_path / "card",
+        measures,
+        {"Y": {"projections": [_measure_projection("_Measures", "Prev")]}},
+        visual_type="card",
+    )
+    report = crta.scan(card)
+    assert verdicts(report) == ["unassessable"], crta.render(report)
+    assert crta.main([str(card), "--quiet"]) == crta.EXIT_UNASSESSABLE
 
 
 def test_unqualified_orderby_column_is_unassessable(tmp_path: Path) -> None:
@@ -351,10 +369,14 @@ def _as_of_bundle(tmp_path: Path, axis_entity: str, axis_property: str, expressi
 # --- review finding #4: every window call, not the first ------------------------------------
 
 
-def test_every_window_call_is_assessed_not_just_the_first(tmp_path: Path) -> None:
-    """Finding 4. `_classify_window` returned from inside the first call site, so a second
-    `WINDOW(... ORDERBY(<unprojected>))` in the same measure was ignored - measured exit 0 on an
-    estate-shaped measure with two windows."""
+def test_two_window_calls_in_one_measure_are_refused_not_judged_on_one(tmp_path: Path) -> None:
+    """Rounds 1-2 fixed "the first window call decided the measure" by folding every call. Round 6
+    replaced the fold with a stronger guarantee: a SUM OF TWO windows is not one engine template, so
+    it is never judged at all.
+
+    That is a deliberate narrowing and it must not become a silent pass - the point of the original
+    finding was that the second, defective window exited **0**. It still cannot: the whole measure
+    is `unassessable`, exit 3, with the measure named."""
     two = _measures_tmdl(
         _measure(
             "Two Windows",
@@ -371,8 +393,9 @@ def test_every_window_call_is_assessed_not_just_the_first(tmp_path: Path) -> Non
         },
     )
     report = crta.scan(bundle)
-    assert verdicts(report) == ["mismatch"], crta.render(report)
-    assert "'Orders'[Region]" in report["pairs"][0]["findings"][0]["detail"]
+    assert verdicts(report) == ["unassessable"], crta.render(report)
+    assert report["pairs"][0]["findings"][0]["measure"] == "'_Measures'[Two Windows]"
+    assert crta.main([str(bundle), "--quiet"]) == crta.EXIT_UNASSESSABLE
 
 
 def test_a_relation_on_a_LATER_window_call_still_makes_it_unassessable(tmp_path: Path) -> None:
@@ -467,11 +490,11 @@ def test_a_visual_whose_only_column_is_aggregated_has_no_grouping_column(tmp_pat
     assert codes(report) == ["no_grouping_column"], crta.render(report)
 
 
-def test_an_unreadable_window_call_cannot_suppress_a_readable_one(tmp_path: Path) -> None:
-    """Round 2 unioned every window call's ORDERBY columns, which closed the false negative but left
-    an UNREADABLE call returning early: an explicit-relation `WINDOW` beside
-    `WINDOW(... ORDERBY('Orders'[Region]))` exited 3 where the defective call alone exits 1. Never a
-    pass, but the wrong verdict - worst must win, not first."""
+def test_an_unreadable_window_call_cannot_be_judged_on_its_readable_sibling(tmp_path: Path) -> None:
+    """Round 2's finding, under the round-6 contract. An explicit-relation `WINDOW` beside a
+    readable one used to exit 3 where the defective call alone exits 1 - "never a pass, but the
+    wrong verdict". A whole-expression match cannot produce either: neither call is judged, so the
+    measure is refused with its name printed, and there is no fold left to pick the wrong winner."""
     relation_first = _measures_tmdl(
         _measure(
             "Mixed",
@@ -488,14 +511,14 @@ def test_an_unreadable_window_call_cannot_suppress_a_readable_one(tmp_path: Path
         },
     )
     report = crta.scan(bundle)
-    assert verdicts(report) == ["mismatch"], crta.render(report)
-    assert "'Orders'[Region]" in report["pairs"][0]["findings"][0]["detail"]
+    assert verdicts(report) == ["unassessable"], crta.render(report)
+    assert report["assessed_clean"] == 0
 
 
 def test_a_second_orderby_clause_is_unassessable_rather_than_assumed_away(tmp_path: Path) -> None:
-    """The documented grammars give ONE `ORDERBY` slot per window call, and blind review confirmed
-    that reading. `_clause_bodies` VERIFIES it rather than relying on it, because "audited, not
-    assumed" is only true while someone re-audits it."""
+    """The documented grammars give ONE `ORDERBY` slot per window call. Round 5 VERIFIED that rather
+    than relying on it; round 6 gets the same guarantee for free, because a second clause is an
+    extra token the template never accounts for."""
     measures = _measures_tmdl(
         _measure(
             "Two Orderings",
@@ -512,7 +535,7 @@ def test_a_second_orderby_clause_is_unassessable_rather_than_assumed_away(tmp_pa
     )
     report = crta.scan(bundle)
     assert verdicts(report) == ["unassessable"], crta.render(report)
-    assert codes(report) == ["window_orderby"]
+    assert codes(report) == ["unrecognised"]
 
 
 def test_worst_verdict_wins_is_one_shared_rule_not_four_copies(tmp_path: Path) -> None:
@@ -533,11 +556,11 @@ def test_worst_verdict_wins_is_one_shared_rule_not_four_copies(tmp_path: Path) -
 # --- review finding #5: period-to-date is judged, not excused -------------------------------
 
 
-def test_every_period_to_date_call_is_judged_not_the_first_in_dict_order(tmp_path: Path) -> None:
-    """`_classify_period_to_date` returned after the first match found while walking
-    `_PERIOD_TO_DATE_FUNCTIONS` - so not even the first in the TEXT. Measured: a safe `TOTALYTD` on
-    the marked date table beside a defective fact-table `DATESYTD` exited **0**
-    (`date_table_marked`), while the `DATESYTD` term alone exits 3."""
+def test_two_period_to_date_calls_in_one_measure_are_refused(tmp_path: Path) -> None:
+    """Round 3's finding, under the round-6 contract. A safe `TOTALYTD` on the marked date table
+    beside a defective fact-table `DATESYTD` used to exit **0** (`date_table_marked`), because the
+    classifier stopped at the first function found while walking a dict. A sum of two calls is not
+    one template, so neither is judged - and the measure is still named at exit 3, never cleared."""
     both = _measures_tmdl(
         _measure(
             "Two Periods",
@@ -555,7 +578,8 @@ def test_every_period_to_date_call_is_judged_not_the_first_in_dict_order(tmp_pat
     )
     report = crta.scan(bundle)
     assert verdicts(report) == ["unassessable"], crta.render(report)
-    assert codes(report) == ["period_to_date_grain_unproven"]
+    assert codes(report) == ["unrecognised"]
+    assert report["assessed_clean"] == 0
 
 
 @pytest.mark.parametrize(
@@ -567,13 +591,20 @@ def test_every_period_to_date_call_is_judged_not_the_first_in_dict_order(tmp_pat
             "CALCULATE(SUM('Orders'[Sales]), DATESYTD(DATESBETWEEN('Date'[Date], "
             "MIN('Orders'[Order_Date]), MAX('Orders'[Order_Date]))))",
         ),
+        (
+            "a filter-modifying inner expression",
+            "TOTALYTD(CALCULATE(SUM('Orders'[Sales]), REMOVEFILTERS('Orders'[Order Month Label])), 'Date'[Date])",
+        ),
     ],
 )
 def test_a_period_to_date_call_that_cannot_be_read_is_not_dropped(tmp_path: Path, label: str, expression: str) -> None:
     """A dropped call is indistinguishable from "this model has no period-to-date measure" - the
-    same silence every round of this review has been about, one mechanism over. Period-to-date keeps
-    its residue because reading one argument's column is STRUCTURAL; it is the as-of BOUND, not the
-    as-of call, that round 5 found undecidable."""
+    same silence every round of this review has been about, one mechanism over.
+
+    The third case is why the period-to-date templates take `<sagg>` (a bare aggregate over one
+    column) rather than the window family's `<agg>`. The judged property here is whether a filter is
+    REMOVED, and an arbitrary inner expression can remove filters itself - so admitting one would be
+    a verdict formed without reading the thing that decided it."""
     bundle = build_bundle(
         tmp_path,
         _measures_tmdl(_measure("Ytd", expression)),
@@ -584,7 +615,7 @@ def test_a_period_to_date_call_that_cannot_be_read_is_not_dropped(tmp_path: Path
     )
     report = crta.scan(bundle)
     assert report["status"] == crta.STATUS_UNASSESSABLE, f"{label}: " + crta.render(report)
-    assert codes(report) == ["period_to_date"], f"{label}: " + crta.render(report)
+    assert codes(report) == ["unrecognised"], f"{label}: " + crta.render(report)
 
 
 def test_a_date_named_column_with_no_proof_is_unassessable_not_clean(tmp_path: Path) -> None:
@@ -778,24 +809,65 @@ def test_a_clean_pair_cannot_mask_an_unassessed_one(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------------------------
 
 
-def test_split_arguments_respects_nesting_and_strings() -> None:
-    assert dg._split_arguments("1, ABS, 0, REL, ORDERBY('T'[A], ASC)") == [
-        "1",
-        "ABS",
-        "0",
-        "REL",
-        "ORDERBY('T'[A], ASC)",
+def test_the_lexer_is_total_and_identifiers_are_atomic() -> None:
+    """The lexer, unit-tested directly, because every claim in this file now rests on it.
+
+    ROUND 6 FINDING 1, both directions. `'Orders--Archive'` is ONE token, so no comment scanner can
+    truncate it; `'WINDOW()'` and `[WINDOW(...)]` are ONE token each, so no function search can find
+    a call inside a name. And `<>` is one token, so DAX's not-equal is not the `<` it begins with.
+    """
+    kinds = [(t.kind, t.text) for t in dt.tokenize("SUM('Orders--Archive'[Sales])").code]
+    assert kinds == [
+        ("name", "SUM"),
+        ("op", "("),
+        ("table", "'Orders--Archive'"),
+        ("column", "[Sales]"),
+        ("op", ")"),
     ]
-    assert dg._split_arguments('SUM(a), "x, y"') == ["SUM(a)", '"x, y"']
+    assert [t.kind for t in dt.tokenize("SUM('WINDOW()'[Sales])").code] == ["name", "op", "table", "column", "op"]
+    assert [t.text for t in dt.tokenize("a <> b").code if t.kind == "op"] == ["<>"]
+    assert [t.text for t in dt.tokenize("a <= b").code if t.kind == "op"] == ["<="]
+    # comments and string literals are lexed, then dropped or kept as atoms - never re-scanned
+    assert [t.text for t in dt.tokenize("A -- FILTER(x)\nB").code] == ["A", "B"]
+    assert [t.text for t in dt.tokenize("A /* FILTER(x) */ B").code] == ["A", "B"]
+    assert [t.kind for t in dt.tokenize('A & "FILTER(x)"').code] == ["name", "op", "string"]
+    # a `"` inside a legal column name must not open a phantom literal
+    survives = "'T'[He said \"hi\"] <= MAX('T'[He said \"hi\"])"
+    assert [t.kind for t in dt.tokenize(survives).code] == [
+        "table",
+        "column",
+        "op",
+        "name",
+        "op",
+        "table",
+        "column",
+        "op",
+    ]
+    # totality: every character of the input is covered by exactly one token, in order
+    for sample in ("SUM('a'[b]) -- x", 'A & "q" /* c */ + 1.5e3', "!!weird??"):
+        lexed = dt.tokenize(sample)
+        assert "".join(t.text for t in lexed.tokens) == sample
+        assert [t.start for t in lexed.tokens] == [0] + [t.end for t in lexed.tokens][:-1]
 
 
-def test_column_refs_read_quoted_and_bare_tables() -> None:
-    refs = dg._column_refs("'Sample Superstore'[Order Date], Orders[Sales], [Bare]")
+def test_an_unterminated_identifier_is_reported_not_guessed() -> None:
+    """An expression that cannot be lexed cannot be judged. `classify` refuses it rather than
+    matching a template against a token stream it knows is wrong."""
+    lexed = dt.tokenize("SUMX(WINDOW(1, ABS, 0, REL, ORDERBY('Orders[Order_Date], ASC)), 1)")
+    assert lexed.unterminated
+    assert lexed.has_unknown
+
+
+def test_column_references_are_read_from_tokens_not_text() -> None:
+    refs = dg.column_references("'Sample Superstore'[Order Date], Orders[Sales], [Bare]")
     assert [(r.table, r.column) for r in refs] == [
         ("Sample Superstore", "Order Date"),
         ("Orders", "Sales"),
         (None, "Bare"),
     ]
+    # a reference inside a string literal or a comment is not a reference
+    assert dg.column_references('IF(x, "[Date]", "other")') == []
+    assert dg.column_references("x -- 'Date'[Date]") == []
 
 
 # --------------------------------------------------------------------------------------------
@@ -1013,16 +1085,18 @@ def _r5_exit(tmp_path: Path, slug: str, expression: str, axis: tuple[str, str] =
     ],
 )
 def test_an_as_of_measure_can_only_ever_be_unassessable(tmp_path: Path, label: str, expression: str) -> None:
-    """THE round-5 contract, and the reason six spellings share one test: their VERDICTS no longer
-    depend on anything this module reads out of the DAX. Every one of them used to disagree with at
-    least one other - `('Orders'[Order_Date]) <= MAX(...)` exited 0 against the bare form's 1, and
-    `IF(TRUE(), MAX(d), CALCULATE(MAX(d), REMOVEFILTERS(<the axis>)))` exited 0/OK on a genuinely
-    broken measure. There is nothing left to disagree about: an as-of restriction is DISCLOSED."""
+    """THE round-5 contract, kept by round 6's construction rather than by a detector's discipline:
+    no as-of shape is an engine template, so none of them can be judged.
+
+    Six spellings share one test because their VERDICTS no longer depend on anything read out of
+    the DAX. Every one used to disagree with at least one other - `('Orders'[Order_Date]) <= MAX(...)`
+    exited 0 against the bare form's 1, and `IF(TRUE(), MAX(d), CALCULATE(MAX(d),
+    REMOVEFILTERS(<the axis>)))` exited 0/OK on a genuinely broken measure."""
     bundle = _as_of_bundle(tmp_path, R5_AXIS[0], R5_AXIS[1], expression)
     report = crta.scan(bundle)
     assert report["pairs"][0]["cumulative_measures"] == 1, f"{label}: " + crta.render(report)
     assert verdicts(report) == ["unassessable"], f"{label}: " + crta.render(report)
-    assert codes(report) == ["as_of_filter"]
+    assert codes(report) == ["unrecognised"]
     assert report["mismatches"] == 0
     assert crta.main([str(bundle), "--quiet"]) == crta.EXIT_UNASSESSABLE
 
@@ -1030,13 +1104,19 @@ def test_an_as_of_measure_can_only_ever_be_unassessable(tmp_path: Path, label: s
 def test_an_as_of_measure_is_disclosed_not_dropped(tmp_path: Path) -> None:
     """`unassessable` is only worth anything if the measure REACHES the report. A detector that
     returns nothing produces NOT_APPLICABLE / exit 0, which reads as a clean bill - the silent-drop
-    failure every round of this review has been about."""
-    report = crta.scan(_as_of_bundle(tmp_path, R5_AXIS[0], R5_AXIS[1], R5_BARE))
+    failure every round of this review has been about.
+
+    This is also the standing answer to "does the gate still fire on the `ALL(t[Date])` month-axis
+    case?". It is not a MISMATCH and has not been one since round 5; it is detected, named, and
+    never cleared - exit 3, or exit 1 under `--strict`."""
+    bundle = _as_of_bundle(tmp_path, R5_AXIS[0], R5_AXIS[1], R5_BARE)
+    report = crta.scan(bundle)
     finding = report["pairs"][0]["findings"][0]
     assert finding["measure"] == "'_Measures'[Running Sales]"
-    assert "not judge a hand-authored as-of bound" in finding["detail"]
+    assert "an as-of accumulation" in finding["detail"]
     assert "EVALUATE" in finding["detail"]
-    assert finding["predicate"].startswith("ALL('Orders'[Order_Date])")
+    assert crta.main([str(bundle), "--quiet"]) == crta.EXIT_UNASSESSABLE
+    assert crta.main([str(bundle), "--quiet", "--strict"]) == crta.EXIT_MISMATCH
 
 
 @pytest.mark.parametrize(
@@ -1044,11 +1124,10 @@ def test_an_as_of_measure_is_disclosed_not_dropped(tmp_path: Path) -> None:
     [("a text measure quoting a FILTER", R5_TEXT_FILTER), ("a text measure quoting a WINDOW", R5_TEXT_WINDOW)],
 )
 def test_a_string_literal_is_never_executed_as_dax(tmp_path: Path, label: str, expression: str) -> None:
-    """Finding 3, VERBATIM, and the one that was wrong in the OTHER direction: a legitimate TEXT
-    measure whose literal contains DAX was classified a running total and reported MISMATCH, exit 1.
-    `_call_bodies` cannot fix this itself - it regex-matches a function name over raw text and only
-    then starts tracking quotes - so `mask_noncode` runs once at `classify`'s entry and every reader
-    sees masked text. Bound as a Tooltip, exactly as the reviewer measured it."""
+    """Finding 3 of round 5, VERBATIM, and the one that was wrong in the OTHER direction: a
+    legitimate TEXT measure whose literal contains DAX was classified a running total and reported
+    MISMATCH, exit 1. The lexer makes a string literal one atomic token, so nothing downstream can
+    look inside it. Bound as a Tooltip, exactly as the reviewer measured it."""
     bundle = build_bundle(
         tmp_path,
         _measures_tmdl(_measure("Formula Note", expression)),
@@ -1063,30 +1142,10 @@ def test_a_string_literal_is_never_executed_as_dax(tmp_path: Path, label: str, e
     assert crta.main([str(bundle), "--quiet"]) == crta.EXIT_OK
 
 
-def test_the_lexer_masks_what_it_must_and_keeps_what_it_must() -> None:
-    """`mask_noncode` unit-tested directly, because every claim above rests on it.
-
-    The quotes are blanked WITH their contents, not left standing: `_split_arguments` tracks `"`
-    state itself, so a half-masked literal - contents gone, delimiters kept - would be worse than
-    either extreme. The two identifier cases are not decoration either: a `"` inside a legal column
-    name would open a phantom literal and mask the rest of the expression, and the column
-    references this module exists to read live inside exactly the brackets a naive mask would blank.
-    """
-    assert dg.mask_noncode('A & "FILTER(x)" & B') == "A &             & B"
-    assert dg.mask_noncode('A & "he said ""hi""" & B') == "A &                  & B"
-    assert dg.mask_noncode("A -- FILTER(x)\nB") == "A             \nB"
-    assert dg.mask_noncode("A /* FILTER(x) */ B") == "A                 B"
-    assert dg.mask_noncode("A // FILTER(x)") == "A             "
-    # identifiers survive, contents intact, including a quote inside a column name
-    kept = "'T'[He said \"hi\"] <= MAX('T'[He said \"hi\"])"
-    assert dg.mask_noncode(kept) == kept
-    assert len(dg.mask_noncode('x"abc"y')) == len('x"abc"y')
-
-
 def test_an_operator_inside_an_identifier_is_not_a_comparison(tmp_path: Path) -> None:
-    """A table may legally be named `'a<b'`. The detector reads operator PRESENCE only, so it gets
-    the stricter `_mask_identifiers`, which blanks identifier contents that `mask_noncode` must
-    keep. Without it this ordinary equality filter would be disclosed as an accumulation."""
+    """A table may legally be named `'a<b'`. The lexer makes that ONE token, so the as-of signal -
+    which reads operator PRESENCE only - cannot see a comparison inside a name. Without that, this
+    ordinary equality filter would be disclosed as an accumulation."""
     expression = "CALCULATE(SUM('Orders'[Sales]), FILTER(ALL('Orders'[Region]), 'Orders'[Region] = 'a<b'[X]))"
     report = crta.scan(_as_of_bundle(tmp_path, R5_AXIS[0], R5_AXIS[1], expression))
     assert report["status"] == crta.STATUS_NOT_APPLICABLE, crta.render(report)
@@ -1123,18 +1182,21 @@ def test_the_engines_own_running_total_shape_is_still_judged(tmp_path: Path) -> 
     assert outcomes == {"anchor": crta.EXIT_OK, "coarse": crta.EXIT_MISMATCH, "other": crta.EXIT_MISMATCH}
 
 
-# The functions whose whole job is to FOLD every candidate. The list is much shorter than round 4's
-# because round 5 deleted the machinery most of it named.
+# The functions whose whole job is to FOLD every candidate, or to CONSUME every token. Round 6
+# deleted most of what round 5 named here, because whole-expression matching removed the folds
+# rather than making them careful.
 #
-# ⚠️ **What this test canNOT see, stated because round 5 caught it claiming more than it delivers:**
-# blind review showed the finding-2 class - candidates DISCARDED or UNIONED inside a loop, with no
-# `return` anywhere - is structurally invisible to it. It pins one narrow habit; it is not evidence
-# that a fold is correct, and it never was.
+# WARNING - **what this test canNOT see, stated because round 5 caught it claiming more than it
+# delivers:** blind review showed the finding-2 class - candidates DISCARDED or UNIONED inside a
+# loop, with no `return` anywhere - is structurally invisible to it. It pins one narrow habit; it is
+# not evidence that a fold is correct, and it never was.
 _FOLD_FUNCTIONS = (
-    "_clause_bodies",
-    "_window_call_sites",
-    "_detect_as_of",
-    "_classify_period_to_date",
+    "_signals",
+    "column_references",
+)
+_LEXER_FOLD_FUNCTIONS = (
+    "tokenize",
+    "calls_named",
 )
 
 
@@ -1152,19 +1214,23 @@ def _returns_from_inside_a_loop(source: str, names: tuple[str, ...]) -> list[str
     return sorted(set(offenders))
 
 
-def test_no_fold_function_returns_from_inside_a_loop() -> None:
+@pytest.mark.parametrize(
+    ("module", "names"),
+    [("dax_grain.py", _FOLD_FUNCTIONS), ("dax_tokens.py", _LEXER_FOLD_FUNCTIONS)],
+)
+def test_no_fold_function_returns_from_inside_a_loop(module: str, names: tuple[str, ...]) -> None:
     """Rule 2, enforced instead of asserted. Both halves matter: the real module must be clean, AND
     the checker must be able to fail - an AST check that never flags anything is the "assertion in a
     branch the fixture never enters" vacuity mode, and it would sit here reading as coverage."""
     import ast  # pylint: disable=import-outside-toplevel
 
-    source = (REPO_ROOT / "scripts" / "dax_grain.py").read_text(encoding="utf-8")
+    source = (REPO_ROOT / "scripts" / module).read_text(encoding="utf-8")
     declared = {n.name for n in ast.walk(ast.parse(source)) if isinstance(n, ast.FunctionDef)}
-    assert set(_FOLD_FUNCTIONS) <= declared, "the fold list names a function that no longer exists"
-    assert _returns_from_inside_a_loop(source, _FOLD_FUNCTIONS) == []
+    assert set(names) <= declared, f"{module}: the fold list names a function that no longer exists"
+    assert _returns_from_inside_a_loop(source, names) == []
 
-    planted = "def _detect_as_of(expr):\n    for part in expr:\n        return part\n    return None\n"
-    assert _returns_from_inside_a_loop(planted, _FOLD_FUNCTIONS) == ["_detect_as_of"]
+    planted = f"def {names[0]}(expr):\n    for part in expr:\n        return part\n    return None\n"
+    assert _returns_from_inside_a_loop(planted, names) == [names[0]]
 
 
 # --------------------------------------------------------------------------------------------

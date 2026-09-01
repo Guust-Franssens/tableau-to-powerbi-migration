@@ -393,18 +393,32 @@ def _judge_window(cumulative: Cumulative, visual: VisualBinding) -> dict[str, An
 
 
 def _judge_one_window(call: WindowCall, visual: VisualBinding) -> dict[str, Any]:
-    """One window call: every ORDERBY column must be among the visual's own grouping columns."""
-    if not call.assessable:
-        return _verdict("unassessable", "window_orderby", call.reason)
-    if not call.ordered_by:
-        return _verdict("ok", "orders_by_visual_grain", call.reason)
+    """One window call: every ORDERBY column must be among the visual's own grouping columns.
+
+    **The visual's grouping is established BEFORE any acquittal**, which is round 6 finding 3.
+    `_judge_one_window` used to answer `ok`/`orders_by_visual_grain` for a call with no ORDERBY
+    clause without ever asking whether the visual had a grain to order by - measured,
+    `SUMX(OFFSET(-1), CALCULATE(SUM('Orders'[Sales])))` on a card that projects no grouping column
+    at all exited **0**. With no visual grain there is nothing to establish the relation against.
+
+    A no-ORDERBY call can no longer reach this function either way: `dax_grain`'s templates all
+    require a `<spec>`, so `ordered_by` is never empty here. The empty case is still handled rather
+    than asserted away, because an empty ordering key list would otherwise acquit vacuously.
+    """
     grouping, blocked = _grouping_or_reason(visual)
+    if blocked is not None:
+        return blocked
+    if not call.ordered_by:
+        return _verdict(
+            "unassessable",
+            "no_ordering_key",
+            f"the {call.func} call names no ordering column, so there is no grain to compare with "
+            "this visual's - probe it with EVALUATE",
+        )
     projected = {ColumnRef(ref.entity, ref.prop).key() for ref in grouping}
     absent = [ref for ref in call.ordered_by if ref.key() not in projected]
     if not absent:
         return _verdict("ok", "orderby_projected", "every ORDERBY column is projected by this visual")
-    if blocked is not None:
-        return blocked
     caveat = _hierarchy_caveat(visual)
     if caveat is not None:
         return caveat
@@ -446,35 +460,6 @@ def _worst(verdicts: list[dict[str, Any]]) -> dict[str, Any]:
     return _verdict("unassessable", "unreadable_grain", "the accumulation grain could not be read from the DAX")
 
 
-def _judge_as_of(cumulative: Cumulative, visual: VisualBinding, facts: ModelFacts) -> dict[str, Any]:
-    """As-of restrictions are DISCLOSED, never judged. Always `unassessable`, one per detection.
-
-    Round 5 deleted `_judge_same_table_survivors` and everything it consumed - the cleared-set
-    arithmetic, the grain grading of each survivor, the `anchor_projected` partition reading, and
-    the `AsOfCall.pins` acquittal. All of it rested on `dax_grain` having decided whether the bound
-    MOVES with the visual, and that decision is not derivable from DAX text: measured,
-    `IF(TRUE(), MAX(d), CALCULATE(MAX(d), REMOVEFILTERS(<the axis>)))` returned **OK** on a broken
-    measure, because the removal in the UNREACHABLE branch was unioned into the acquittal.
-
-    `visual` and `facts` stay in the signature because `_judge` calls all three mechanisms
-    uniformly, and because the reason text names the axis the reader has to probe.
-    """
-    del facts  # model facts cannot answer a question about DAX branch reachability
-    axis = _axis_text(visual)
-    return _worst(
-        [
-            _verdict(
-                "unassessable",
-                "as_of_filter",
-                f"{call.reason}. Axis is {axis}",
-                predicate=call.predicate,
-                axis=axis,
-            )
-            for call in cumulative.as_of_calls
-        ]
-    )
-
-
 def _judge_period_to_date(cumulative: Cumulative, visual: VisualBinding, facts: ModelFacts) -> dict[str, Any]:
     """Period-to-date: judge EVERY `TOTALYTD`/`DATESYTD` call independently, worst verdict wins."""
     return _worst([_judge_one_period_to_date(call, visual, facts) for call in cumulative.period_calls])
@@ -490,8 +475,6 @@ def _judge_one_period_to_date(call: PeriodToDateCall, visual: VisualBinding, fac
     the trap. It is reported `unassessable` rather than `mismatch` because the auto-removal rules
     have more inputs than this gate reads; what is NOT acceptable is calling it a pass.
     """
-    if not call.assessable or call.anchor is None:
-        return _verdict("unassessable", "period_to_date", call.reason or "the period-to-date anchor is unreadable")
     anchor = call.anchor
     grouping, blocked = _grouping_or_reason(visual)
     if blocked is not None:
@@ -624,7 +607,7 @@ def _grade_visuals(
 
 
 def _judge(cumulative: Cumulative, visual: VisualBinding, facts: ModelFacts) -> dict[str, Any]:
-    """Grade one pair against EVERY invariant its DAX declares, and let the worst verdict win.
+    """Grade one pair against every invariant its DAX declares, and let the worst verdict win.
 
     This used to route to a single invariant, because `classify` used to return after the first
     reader that matched. A measure can genuinely declare more than one mechanism, and when it did,
@@ -636,11 +619,33 @@ def _judge(cumulative: Cumulative, visual: VisualBinding, facts: ModelFacts) -> 
     verdicts = []
     if cumulative.window_calls:
         verdicts.append(_judge_window(cumulative, visual))
-    if cumulative.as_of_calls:
-        verdicts.append(_judge_as_of(cumulative, visual, facts))
     if cumulative.period_calls:
         verdicts.append(_judge_period_to_date(cumulative, visual, facts))
-    return _worst(verdicts)
+    return _enforce_consumption(cumulative, _worst(verdicts))
+
+
+def _enforce_consumption(cumulative: Cumulative, verdict: dict[str, Any]) -> dict[str, Any]:
+    """**No definite verdict on input the tokeniser did not fully consume.** The one hard rule.
+
+    Rounds 1-6 of blind review each found the same defect in a new spelling, and the common shape
+    was always a verdict formed from a FRAGMENT: a call site found by searching text, a clause read
+    without checking what surrounded it, an expression judged on the part that was recognised while
+    the rest went unread. Measured round 6: `VAR _dead = <a WINDOW> VAR _answer = SUM('Orders'
+    [Sales]) RETURN _answer` reported MISMATCH (exit 1) although the returned value is a plain sum.
+
+    `dax_grain` answers this at the source - `Cumulative.consumed` is set only when one whole
+    template matched from the first token to the last - and this function is the enforcement, sited
+    where the verdict is actually emitted so that no future reader can route around it. A gate that
+    cannot say what it read has not established anything, and `unassessable` is what that is called.
+    """
+    if verdict["verdict"] in ("ok", "mismatch") and not cumulative.consumed:
+        return _verdict(
+            "unassessable",
+            "unconsumed_expression",
+            f"{cumulative.label} was graded without a whole-expression template match, so the "
+            "verdict would rest on a fragment of its DAX - probe it with EVALUATE at the axis grain",
+        )
+    return verdict
 
 
 def _pair_status(
