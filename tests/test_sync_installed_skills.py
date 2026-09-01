@@ -1225,7 +1225,19 @@ def test_a_retired_bundle_is_reported_as_drift_and_then_removed(estate: Estate, 
 def test_a_bundle_this_tool_never_installed_is_left_alone_when_it_is_retired(
     estate: Estate, capsys: pytest.CaptureFixture
 ) -> None:
-    """The distinction finding 1 makes load-bearing: unknown foreign bundles are never removed."""
+    """The distinction finding 1 makes load-bearing: unknown foreign bundles are never removed.
+
+    ⚠️ This test used to assert survival across a run that deleted NOTHING. It published, dropped a
+    foreign bundle in, then published again with the install already in sync - so `_report` returned
+    `in_sync` and `_apply`, which is where both deletion paths live, never executed. Measured with
+    the shared mutation harness: widening `plan.formerly_owned` to every directory in the
+    destination (so retirement rmtree's a bundle this tool never installed) left this test GREEN.
+    It was caught only by tests that notice OUR OWN bundles vanishing - a different property, and
+    one a future sloppier scope could satisfy while still deleting a stranger's files.
+
+    So the run below actually retires a bundle, which is the ONLY path that reaches
+    `shutil.rmtree(installed / name)`, with the foreign bundle present the whole time.
+    """
     assert _run(estate) == sync.EXIT_OK
     capsys.readouterr()
     foreign = estate.plugin / "skills" / "someone-elses-bundle" / "SKILL.md"
@@ -1236,6 +1248,19 @@ def test_a_bundle_this_tool_never_installed_is_left_alone_when_it_is_retired(
     assert _run(estate) == sync.EXIT_OK
     capsys.readouterr()
     assert foreign.read_text(encoding="utf-8") == "not ours to delete\n"
+
+    retired = BUNDLES[-1]
+    _retire_a_bundle(estate, retired)
+    assert _run(estate, "--check") == sync.EXIT_DRIFT, "the fixture must reach the DELETING path"
+
+    assert _run(estate) == sync.EXIT_OK
+    capsys.readouterr()
+
+    assert not (estate.plugin / "skills" / retired).exists(), "our retired bundle must be removed"
+    assert foreign.read_text(encoding="utf-8") == "not ours to delete\n", (
+        "a retirement sweep must not reach a bundle this tool never installed"
+    )
+    assert (estate.plugin / "skills" / "someone-elses-bundle").is_dir()
 
 
 def test_the_marker_records_the_inventory_that_was_published(estate: Estate, capsys: pytest.CaptureFixture) -> None:

@@ -274,6 +274,28 @@ import skill_plugin_source as sps
 # them, which is the shadowing hazard `EXIT_MULTIPLE_PLUGINS` exists to prevent.
 sps._multiple_verdict = lambda roots: sps._found_verdict(roots[0], "identity")
 """,
+    "skillsync-deletion-scope-removed": """
+import sync_installed_skills as sync
+_orig = sync.diff_tree
+def diff_tree(src, dst, scope=None):
+    # The data-loss guard itself: unscoped, `extra` is every file in the destination the build
+    # does not contain, which is how origin/master deleted a stranger's private.txt AND an
+    # entire unrelated bundle while exiting 0.
+    return _orig(src, dst, scope=None)
+sync.diff_tree = diff_tree
+""",
+    "skillsync-retirement-sweeps-everything": """
+import sync_installed_skills as sync
+_orig = sync._apply
+def apply(plan, changed, extra):
+    # The OTHER deletion path: `_apply` rmtree's `plan.formerly_owned`. Widened to every bundle
+    # in the destination, retirement removes bundles this tool never installed.
+    installed = plan.discovery.skills_dir
+    if installed.is_dir():
+        plan.formerly_owned = sorted(p.name for p in installed.iterdir() if p.is_dir())
+    return _orig(plan, changed, extra)
+sync._apply = apply
+""",
     # --- issue #410 round-3: the discovery unit tests (tests/test_skill_plugin_source.py) --------
     # Two tests there pinned the pre-fix contract and were rewritten onto the post-fix one. These
     # restore the defect each rewritten test now owns, so a SURVIVED verdict means the rewrite
