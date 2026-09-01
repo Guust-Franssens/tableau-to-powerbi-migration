@@ -625,6 +625,7 @@ _CENSUS_COUNT = (
     "or a sum of two of them. Nothing is ever keyed or summed BY a luid, a workbook name or a "
     "sheet name; `classify` reads type, emptiness and a regex match, never a value."
 )
+#: Still used for the census key expressions in `census()`; `_emit`'s `label` is REFUSED-AT-SEAM.
 _CENSUS_LABEL = (
     "FIXED-VOCABULARY: composed only of this module's own literals - the `BUCKETS` names and the "
     "two collection names `dashboards`/`sheets`. The server chooses none of it."
@@ -729,17 +730,28 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
     # bool or None, so the "counts and shapes only" promise is enforced by the code rather than by a
     # convention someone has to remember. See the module docstring.
     ("scripts/tableau_luid_census.py", "_emit"): {
-        "label": _CENSUS_LABEL,
+        # ⚠️ `label` was certified FIXED-VOCABULARY unconditionally, and nothing enforced it. Measured
+        # at a83340d: `_emit("SYNTHETIC_CUSTOMER_IDENTIFIER_402", 1)` printed the identifier
+        # verbatim, and injecting a RESPONSE-DERIVED label into `main` still produced
+        # `uncertified_sinks == []` - the certification was the only thing standing there, and it was
+        # a claim rather than a check. It is now the same kind of claim `value` always was: true
+        # because the line above REFUSES anything else.
+        "label": (
+            "REFUSED-AT-SEAM: `_emit` raises SystemExit unless `label` is in `LABELS`, a frozenset "
+            "built from this module's own BUCKETS/SITE_BUCKETS/FIXED_LABELS literals. A "
+            "response-derived label cannot reach this f-string, and the refusal itself does not echo "
+            "the rejected value - quoting it back would reintroduce the leak on the error path."
+        ),
         "type(value).__name__": _PY_TYPE_NAME,
         "value": (
-            "REFUSED-AT-SEAM: the line above raises SystemExit unless `value` is an int, bool or "
+            "REFUSED-AT-SEAM: the lines above raise SystemExit unless `value` is an int, bool or "
             "None, so nothing else can reach this f-string. That guard is the whole reason this "
             "module may talk about a credentialed response at all - it cannot name one."
         ),
     },
     ("scripts/tableau_luid_census.py", "census"): {
-        "classify(workbook['dashboards'] or [])": _CENSUS_COUNT,
-        "classify(workbook['sheets'] or [])": _CENSUS_COUNT,
+        "classify(workbook['dashboards'])": _CENSUS_COUNT,
+        "classify(workbook['sheets'])": _CENSUS_COUNT,
         "totals['dashboards_blank']": _CENSUS_COUNT,
         "totals['dashboards_total']": _CENSUS_COUNT,
         "totals['sheets_blank']": _CENSUS_COUNT,
@@ -752,6 +764,12 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
     },
     ("scripts/tableau_luid_census.py", "main"): {
         "totals": _CENSUS_COUNT,
+        "int(assessable(totals, bool(unavailable)))": (
+            "NOT-A-STRING: 0 or 1. It is derived from whether the parser refused and whether any "
+            "workbook was unreadable - never from response content - and it rides WITH the counts "
+            "so a consumer cannot read `blank_luids: 0` without seeing whether that zero measures "
+            "the site or our own blindness."
+        ),
         "json.dumps(totals, indent=2, sort_keys=True)": (
             "NOT-A-STRING: the serialised COUNTS dict on its way to --json. Its keys are this "
             "module's `BUCKETS` literals and its values are integers, so the file it writes cannot "

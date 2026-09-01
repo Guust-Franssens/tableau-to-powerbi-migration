@@ -50,15 +50,20 @@ def test_emit_refuses_anything_that_could_carry_an_identifier(value):
     This module reads a credentialed, site-wide response. The promise that it reports "counts and
     shapes only" is worth nothing if a later edit can quietly print a workbook name -- so `_emit`
     raises instead, and a careless change fails loudly at the first call.
+
+    ⚠️ The label is a LEGITIMATE one on purpose. It used to be the literal "label", and when the
+    round-3 allowlist landed that stopped being an allowed label -- so this test kept passing while
+    the VALUE check it exists to cover was never reached. Fifth time on this PR that a new guard has
+    quietly made an older fixture vacuous; the fixture must reach its own subject.
     """
     with pytest.raises(SystemExit):
-        census_mod._emit("label", value)  # pylint: disable=protected-access
+        census_mod._emit("blank_luids", value)  # pylint: disable=protected-access
 
 
 @pytest.mark.parametrize("value", [0, 42, True, False, None])
 def test_emit_allows_counts_and_flags(value):
     """The other half: refusing everything would be safe and useless."""
-    census_mod._emit("label", value)  # pylint: disable=protected-access
+    census_mod._emit("blank_luids", value)  # pylint: disable=protected-access
 
 
 def test_the_census_never_reads_a_luid_VALUE_only_its_shape():
@@ -111,16 +116,16 @@ def test_a_workbook_is_counted_once_however_many_blanks_it_holds():
 def test_a_workbook_missing_a_declared_collection_is_reported_not_skipped_silently():
     """The schema declares both non-null, so an absent one is a finding rather than an empty list."""
     totals = census_mod.census(_payload([{"dashboards": [{"luid": LUID}]}]))
-    assert totals["workbooks_missing_a_collection"] == 1
+    assert totals["workbooks_with_an_unusable_collection"] == 1
     assert totals["nodes"] == 0
 
 
 @pytest.mark.parametrize(
     "totals, expected",
     [
-        ({"blank_luids": 116, "nodes": 476}, "CONFIRMED"),
-        ({"blank_luids": 0, "nodes": 476}, "NOT-PRESENT"),
-        ({"blank_luids": 0, "nodes": 0}, "CANNOT-TELL"),
+        ({"blank_luids": 116, "nodes": 476, "workbooks_with_an_unusable_collection": 0}, "CONFIRMED"),
+        ({"blank_luids": 0, "nodes": 476, "workbooks_with_an_unusable_collection": 0}, "NOT-PRESENT"),
+        ({"blank_luids": 0, "nodes": 0, "workbooks_with_an_unusable_collection": 0}, "CANNOT-TELL"),
     ],
 )
 def test_the_three_verdicts_are_distinguishable(totals, expected):
@@ -130,7 +135,7 @@ def test_the_three_verdicts_are_distinguishable(totals, expected):
     is evidence about the site. Collapsing them is how a vacuous run gets cited as a clean result --
     the defect class this repository keeps finding in its own gates.
     """
-    assert census_mod.verdict(totals) == expected
+    assert census_mod.verdict(totals, refused=False) == expected
 
 
 def test_the_census_and_the_parser_agree_on_what_counts_as_a_luid():
@@ -153,3 +158,192 @@ def test_the_json_output_carries_only_integer_counts(tmp_path):
     loaded = json.loads(out.read_text(encoding="utf-8"))
     assert loaded and all(isinstance(v, int) for v in loaded.values())
     assert LUID not in out.read_text(encoding="utf-8")
+
+
+# --------------------------------------------------------------------------- round 3, finding 2
+#
+# ⚠️ `_emit` validated only its `value`. `label` was printed verbatim -- measured, an arbitrary
+# identifier reached stdout through it -- and the taint gate then certified the parameter
+# unconditionally, so nothing anywhere was actually checking it.
+#
+# The byte-identical-census test above is genuinely good and still could not see this: it only ever
+# places identifiers in the VALUE position, so the label path was a branch its fixtures never
+# entered. That is vacuity mode 2, in the one test that carried the whole safety argument.
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        LUID,
+        "Regional Sales Dashboard",
+        f"dashboards_{LUID}",
+        "blank_luids ",
+        "BLANK_LUIDS",
+        "",
+    ],
+)
+def test_emit_refuses_a_label_this_module_did_not_author(label):
+    """⚠️ The second half of the safety argument, and the half that was missing.
+
+    A label is as much a print as a value is. The last three cases matter as much as the first
+    three: an allowlist that tolerated a trailing space or a case fold would be one `f"{...}"` away
+    from being no allowlist at all.
+    """
+    with pytest.raises(SystemExit):
+        census_mod._emit(label, 1)  # pylint: disable=protected-access
+
+
+def test_the_label_refusal_does_not_echo_the_label_it_rejected(capsys):
+    """⚠️ Quoting the rejected label back would reintroduce the leak ON THE ERROR PATH.
+
+    That is not hypothetical in this repo: the reflected-credential rounds that produced
+    `tableau_http` were all about a server-controlled string reaching a diagnostic, and an exception
+    message is a diagnostic.
+    """
+    with pytest.raises(SystemExit) as excinfo:
+        census_mod._emit(LUID, 1)  # pylint: disable=protected-access
+    assert LUID not in str(excinfo.value)
+    assert LUID not in capsys.readouterr().out
+
+
+def test_every_label_the_script_actually_uses_is_allowed():
+    """The mirror assertion: an allowlist that refused a real label would be safe and broken.
+
+    Built from the census keys the script really produces, so adding a bucket without adding it to
+    `LABELS` fails here rather than at the end of a live run against a customer site.
+    """
+    totals = census_mod.census(_payload([{"dashboards": [{"luid": LUID}], "sheets": [{"luid": ""}]}]))
+    totals["assessable"] = 1
+    for key in totals:
+        census_mod._emit(key, totals[key])  # pylint: disable=protected-access
+    for label in census_mod.FIXED_LABELS:
+        census_mod._emit(label, 0)  # pylint: disable=protected-access
+
+
+# --------------------------------------------------------------------------- round 3, finding 1
+#
+# ⚠️ The census reported an authoritative verdict on input it had REFUSED. Measured: a response
+# carrying GraphQL `errors` beside one valid dashboard produced `VERDICT: NOT-PRESENT`, exit 0 -- a
+# permanent measurement artifact stating a site is clean when it was never assessed, and the omitted
+# workbooks are exactly the ones that might have carried the blank luids being looked for.
+#
+# This is the most repeated defect class in this repository: unassessable input collapsing into the
+# clean bucket.
+
+
+class _Stub:
+    """A session whose single GraphQL answer is scripted. No network."""
+
+    def __init__(self, body):
+        self.body = body
+
+    def sign_in(self):
+        return None
+
+    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None):  # noqa: ARG002
+        return 200, self.body.encode("utf-8"), {}
+
+
+@pytest.fixture(name="run_census")
+def _run_census(monkeypatch):
+    """Drive `main()` against a scripted body. Returns (exit_code, stdout)."""
+
+    def run(payload, json_out=None):
+        monkeypatch.setattr(census_mod, "_session", lambda _path: _Stub(json.dumps(payload)))
+        argv = ["--env", "unused"] + (["--json", str(json_out)] if json_out else [])
+        return census_mod.main(argv)
+
+    return run
+
+
+ONE_DASHBOARD = [{"dashboards": [{"luid": LUID}], "sheets": []}]
+
+
+@pytest.mark.parametrize(
+    "payload, why",
+    [
+        ({"errors": [{"message": "boom"}], "data": {"workbooks": ONE_DASHBOARD}}, "graphql errors beside usable data"),
+        ({"data": {"workbooks": [{"dashboards": 7, "sheets": []}]}}, "a collection that is not a list"),
+        ({"data": {"workbooks": [{"dashboards": [{"luid": LUID}]}]}}, "a collection that is absent"),
+        ({"data": {"workbooks": [{"dashboards": [{"luid": LUID}], "sheets": None}]}}, "a collection that is null"),
+    ],
+)
+def test_a_refused_or_unreadable_response_never_yields_an_authoritative_verdict(payload, why, run_census, capsys):
+    """⚠️ The load-bearing property, and the one the script exists to make permanent.
+
+    Each of these once produced `NOT-PRESENT` (or an uncaught `TypeError`). A zero here does not
+    measure the site; it measures how little of it we could read.
+    """
+    code = run_census(payload)
+    out = capsys.readouterr().out
+    assert code == census_mod.EXIT_CANNOT_TELL, f"{why} must not exit as a completed measurement"
+    assert "VERDICT: CANNOT-TELL" in out, f"{why} must not report an authoritative verdict"
+    assert "NOT-PRESENT" not in out and "CONFIRMED" not in out
+
+
+def test_a_healthy_response_still_produces_an_authoritative_answer(run_census, capsys):
+    """⚠️ The control. Refusing everything would satisfy the test above and destroy the tool."""
+    code = run_census({"data": {"workbooks": [{"dashboards": [{"luid": LUID}], "sheets": [{"luid": ""}]}]}})
+    out = capsys.readouterr().out
+    assert code == census_mod.EXIT_OK
+    assert "VERDICT: CONFIRMED" in out
+
+
+def test_a_clean_site_is_reported_as_NOT_PRESENT_not_as_cannot_tell(run_census, capsys):
+    """The other control: CANNOT-TELL must not swallow a real negative result."""
+    code = run_census({"data": {"workbooks": ONE_DASHBOARD}})
+    out = capsys.readouterr().out
+    assert code == census_mod.EXIT_OK
+    assert "VERDICT: NOT-PRESENT" in out
+
+
+def test_the_exit_code_follows_the_verdict_even_with_nothing_to_assess(run_census, capsys):
+    """A run that PRINTED cannot-tell still exited 0, so an automated caller read it as clean."""
+    code = run_census({"data": {"workbooks": []}})
+    assert "VERDICT: CANNOT-TELL" in capsys.readouterr().out
+    assert code == census_mod.EXIT_CANNOT_TELL
+
+
+def test_the_json_of_an_unassessable_run_says_so(run_census, tmp_path):
+    """⚠️ The JSON outlives the terminal output, so it carries the flag rather than implying it.
+
+    A consumer must not be able to read `blank_luids: 0` without also seeing whether that zero is a
+    measurement of the site or of our own blindness.
+    """
+    out = tmp_path / "census.json"
+    run_census({"errors": [{"message": "boom"}], "data": {"workbooks": ONE_DASHBOARD}}, json_out=out)
+    loaded = json.loads(out.read_text(encoding="utf-8"))
+    assert loaded["assessable"] == 0
+    assert all(isinstance(value, int) for value in loaded.values())
+
+
+def test_the_json_of_a_real_measurement_says_so_too(run_census, tmp_path):
+    """The flag has to distinguish, so it must take the other value on a good run."""
+    out = tmp_path / "census.json"
+    run_census({"data": {"workbooks": ONE_DASHBOARD}}, json_out=out)
+    assert json.loads(out.read_text(encoding="utf-8"))["assessable"] == 1
+
+
+@pytest.mark.parametrize(
+    "totals, refused, expected",
+    [
+        ({"blank_luids": 116, "nodes": 476, "workbooks_with_an_unusable_collection": 0}, False, "CONFIRMED"),
+        ({"blank_luids": 0, "nodes": 476, "workbooks_with_an_unusable_collection": 0}, False, "NOT-PRESENT"),
+        ({"blank_luids": 0, "nodes": 0, "workbooks_with_an_unusable_collection": 0}, False, "CANNOT-TELL"),
+        # ⚠️ Both unassessable routes, INCLUDING the one that would otherwise have said CONFIRMED --
+        # a partial answer is not evidence even when the part we read looks decisive.
+        ({"blank_luids": 116, "nodes": 476, "workbooks_with_an_unusable_collection": 0}, True, "CANNOT-TELL"),
+        ({"blank_luids": 116, "nodes": 476, "workbooks_with_an_unusable_collection": 1}, False, "CANNOT-TELL"),
+        ({"blank_luids": 0, "nodes": 476, "workbooks_with_an_unusable_collection": 1}, False, "CANNOT-TELL"),
+    ],
+)
+def test_the_verdict_requires_having_actually_assessed_the_site(totals, refused, expected):
+    """`refused` is a REQUIRED argument precisely so a caller cannot forget it and get a clean answer."""
+    assert census_mod.verdict(totals, refused) == expected
+
+
+def test_an_unreadable_collection_is_counted_rather_than_crashing():
+    """`dashboards: 7` reached `for node in 7` and aborted the whole run with a TypeError."""
+    totals = census_mod.census(_payload([{"dashboards": 7, "sheets": []}, {"dashboards": [], "sheets": None}]))
+    assert totals["workbooks_with_an_unusable_collection"] == 2
+    assert totals["nodes"] == 0

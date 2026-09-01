@@ -51,14 +51,50 @@ PRINTABLE = (int, bool, type(None))
 #: Per-node-list shape buckets. Order is the reporting order.
 BUCKETS = ("total", "missing_key", "non_string", "blank", "uuid", "non_uuid_non_blank")
 
+#: Site-level tallies, and the assessability flag that travels with them.
+SITE_BUCKETS = (
+    "workbooks",
+    "workbooks_with_an_unusable_collection",
+    "workbooks_with_a_blank_luid",
+    "blank_luids",
+    "nodes",
+    "assessable",
+)
+
+#: The handful of labels that are not census keys.
+FIXED_LABELS = (
+    "http status",
+    "views typed by the shipped parser",
+    "shipped parser refused the response",
+)
+
+#: ⚠️ THE CLOSED SET OF LABELS. `_emit` guarded only its `value`, so an arbitrary string reached
+#: stdout through `label` -- measured, and worse, a RESPONSE-DERIVED label produced
+#: `uncertified_sinks == []` because the taint gate had a blanket certification for the parameter.
+#: A safety argument that covers one parameter of two is not a safety argument. Derived from this
+#: module's own literals, so it cannot be widened by accident.
+LABELS = frozenset(
+    [f"{kind}_{bucket}" for kind in ("dashboards", "sheets") for bucket in BUCKETS]
+    + list(SITE_BUCKETS)
+    + list(FIXED_LABELS)
+)
+
 EXIT_OK = 0
 EXIT_CANNOT_TELL = 2
 
 
 def _emit(label: str, value: object) -> None:
-    """Print one measurement. ⚠️ Refuses anything that could carry an identifier."""
+    """Print one measurement. ⚠️ Refuses BOTH parameters, not just the value.
+
+    ⚠️ The label check comes first, and its refusal deliberately does NOT echo the rejected label.
+    Quoting it back would reintroduce the exact leak being refused, on the error path -- the same
+    shape as the reflected-credential findings that produced `tableau_http`. Once a label has passed
+    the allowlist it is one of this module's own literals, so the second refusal may name it.
+    """
+    if label not in LABELS:
+        raise SystemExit("REFUSED to print a label this module did not author (see LABELS)")
     if not isinstance(value, PRINTABLE):
-        raise SystemExit(f"REFUSED to print {label!r}: {type(value).__name__} is not a count or a flag")
+        raise SystemExit(f"REFUSED to print {label!r}: value is a {type(value).__name__}, not a count or a flag")
     print(f"  {label:44s} {value}")
 
 
@@ -82,18 +118,26 @@ def classify(nodes: list) -> dict[str, int]:
     return out
 
 
+def _readable(workbook: dict) -> bool:
+    """Both declared collections present AND actually lists."""
+    return all(isinstance(workbook.get(key), list) for key in ("dashboards", "sheets"))
+
+
 def census(payload: dict) -> dict[str, int]:
     """Whole-site census. Returns counts only -- it is what gets printed and optionally serialised."""
     workbooks = payload.get("data", {}).get("workbooks", [])
     totals = {f"dashboards_{k}": 0 for k in BUCKETS} | {f"sheets_{k}": 0 for k in BUCKETS}
     totals["workbooks"] = len(workbooks) if isinstance(workbooks, list) else 0
-    totals["workbooks_missing_a_collection"] = 0
+    totals["workbooks_with_an_unusable_collection"] = 0
     totals["workbooks_with_a_blank_luid"] = 0
     for workbook in workbooks if isinstance(workbooks, list) else []:
-        if not isinstance(workbook, dict) or "dashboards" not in workbook or "sheets" not in workbook:
-            totals["workbooks_missing_a_collection"] += 1
+        # ⚠️ Absent, null and "not a list" are one bucket because the operator's action is the same:
+        # those workbooks were NOT counted, so any zero below is a partial answer. `dashboards: 7`
+        # used to reach `for node in 7` and abort the run with an uncaught TypeError.
+        if not isinstance(workbook, dict) or not _readable(workbook):
+            totals["workbooks_with_an_unusable_collection"] += 1
             continue
-        one = {"dashboards": classify(workbook["dashboards"] or []), "sheets": classify(workbook["sheets"] or [])}
+        one = {"dashboards": classify(workbook["dashboards"]), "sheets": classify(workbook["sheets"])}
         for kind, counts in one.items():
             for bucket, value in counts.items():
                 totals[f"{kind}_{bucket}"] += value
@@ -104,8 +148,34 @@ def census(payload: dict) -> dict[str, int]:
     return totals
 
 
-def verdict(totals: dict[str, int]) -> str:
-    """CONFIRMED / NOT-PRESENT / CANNOT-TELL. ⚠️ All three are useful; none is the "right" answer."""
+def assessable(totals: dict[str, int], refused: bool) -> bool:
+    """Whether the counts describe THE SITE, rather than the part of it we managed to read.
+
+    ⚠️ Two independent ways to be unassessable, and they are OR-ed rather than assumed equivalent:
+    the shared parser refused the response outright, or the census found a workbook whose
+    collections it could not read. The parser refuses on the FIRST problem, so today the second
+    implies the first -- but they are computed separately, and if they ever disagree the safe answer
+    is "we did not assess this".
+    """
+    return not refused and totals["workbooks_with_an_unusable_collection"] == 0
+
+
+def verdict(totals: dict[str, int], refused: bool) -> str:
+    """CONFIRMED / NOT-PRESENT / CANNOT-TELL. ⚠️ All three are useful; none is the "right" answer.
+
+    ⚠️ `refused` is a REQUIRED argument, not a keyword with a safe-looking default. It was not a
+    parameter at all, and the caller ignored the parser's refusal: a response carrying GraphQL
+    `errors` beside one valid dashboard reported **NOT-PRESENT, exit 0** -- a permanent measurement
+    artifact stating a site is clean when it was never assessed, and the omitted workbooks are
+    exactly the ones that might have carried the blank luids being looked for. Had that run during
+    the live verification, "no blank LUIDs" would have been recorded for a site that has 116.
+
+    That is the most repeated defect class in this repository -- unassessable input collapsing into
+    the clean bucket -- so the fix is to make it impossible to reach a clean verdict without having
+    answered the question.
+    """
+    if not assessable(totals, refused):
+        return "CANNOT-TELL"
     if totals["blank_luids"]:
         return "CONFIRMED"
     if not totals["nodes"]:
@@ -178,6 +248,9 @@ def main(argv: list[str] | None = None) -> int:
     # implementation of "what does this response mean" is how the two would drift apart.
     mapping, unavailable = tableau_view_types.parse_payload(payload)
     totals = census(payload)
+    # ⚠️ Rides WITH the counts, into stdout and into --json, so a consumer cannot read `blank_luids:
+    # 0` without also seeing whether that zero is a measurement of the site or of our own blindness.
+    totals["assessable"] = int(assessable(totals, bool(unavailable)))
     for key in sorted(totals):
         _emit(key, totals[key])
 
@@ -191,16 +264,21 @@ def main(argv: list[str] | None = None) -> int:
     if args.json_out:
         Path(args.json_out).write_text(json.dumps(totals, indent=2, sort_keys=True), encoding="utf-8")
 
-    answer = verdict(totals)
+    answer = verdict(totals, bool(unavailable))
     print(f"\nVERDICT: {answer}")
     if answer == "CONFIRMED":
         print("Blank luids exist here, so this site DOES exercise the hidden-sheet case.")
     elif answer == "NOT-PRESENT":
         print("No blank luids today. The handling is still correct and documented, but this site")
         print("would not have exercised it -- do not cite this run as evidence that it cannot occur.")
+    elif not totals["assessable"]:
+        print("The response was refused or only partly readable, so these counts describe what we")
+        print("could read, NOT the site. ⚠️ Do not record this as evidence either way.")
     else:
         print("No sheet or dashboard nodes came back, so nothing here exercises the case either way.")
-    return EXIT_OK
+    # ⚠️ The exit code FOLLOWS the verdict. It did not: a run that printed CANNOT-TELL still exited
+    # 0, so an automated caller checking only the status read it as a clean measurement.
+    return EXIT_OK if answer != "CANNOT-TELL" else EXIT_CANNOT_TELL
 
 
 if __name__ == "__main__":

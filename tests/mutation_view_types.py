@@ -1,4 +1,11 @@
-"""Mutation campaign for `tableau_view_types` (#402). NOT collected by pytest -- it DRIVES pytest.
+"""Mutation campaign for the #402 modules. NOT collected by pytest -- it DRIVES pytest.
+
+Covers BOTH `tableau_view_types` (against ``tests/test_capture_tableau_oracle.py``) and
+`tableau_luid_census` (against ``tests/test_tableau_luid_census.py``). The census is in the same
+campaign rather than a file of its own because it exists only to keep the view-type premise
+measurable: a census that reported a clean verdict on a response it had refused would quietly retire
+the very finding this campaign defends. Each mutation names its own suite; both suites are
+baselined before anything is mutated.
 
     python tests/mutation_view_types.py [name ...]
 
@@ -54,6 +61,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mutation_harness as mh  # noqa: E402  # pylint: disable=wrong-import-position
 
 TARGET = "tests/test_capture_tableau_oracle.py"
+CENSUS_TARGET = "tests/test_tableau_luid_census.py"
+
+#: Mutations whose subject is `tableau_luid_census` rather than `tableau_view_types`, and which
+#: therefore have to be run against the census suite. The census exists ONLY to keep the view-type
+#: premise measurable, so its guards belong in the same campaign: an unassessable run that reports a
+#: clean verdict would retire the very finding this campaign exists to defend.
+CENSUS_MUTATIONS: set[str] = set()
 
 
 def _source_mutation(old: str, new: str) -> str:
@@ -232,30 +246,62 @@ vt.this_symbol_does_not_exist.attribute = 1
     "absent-anchor-stale-source-text": _source_mutation("this exact text is not in the module", "irrelevant"),
 }
 
+# The census half of the campaign, run against the census suite.
+MUTATIONS.update(
+    {
+        "census-verdict-ignores-the-parser-refusal": '\nimport tableau_luid_census as census\n_src = open(census.__file__, encoding="utf-8").read()\n_old = \'    if not assessable(totals, refused):\\n        return "CANNOT-TELL"\'\n_new = \'    if False:\\n        return "CANNOT-TELL"\'\nassert _old in _src, "mutation anchor not found - the snippet is stale, not the code"\nexec(compile(_src.replace(_old, _new, 1), census.__file__, "exec"), census.__dict__)\n',
+        "census-ignores-an-unreadable-workbook": '\nimport tableau_luid_census as census\n_src = open(census.__file__, encoding="utf-8").read()\n_old = \'    return not refused and totals["workbooks_with_an_unusable_collection"] == 0\'\n_new = \'    return not refused\'\nassert _old in _src, "mutation anchor not found - the snippet is stale, not the code"\nexec(compile(_src.replace(_old, _new, 1), census.__file__, "exec"), census.__dict__)\n',
+        "census-exit-code-always-ok": '\nimport tableau_luid_census as census\n_src = open(census.__file__, encoding="utf-8").read()\n_old = \'    return EXIT_OK if answer != "CANNOT-TELL" else EXIT_CANNOT_TELL\'\n_new = \'    return EXIT_OK\'\nassert _old in _src, "mutation anchor not found - the snippet is stale, not the code"\nexec(compile(_src.replace(_old, _new, 1), census.__file__, "exec"), census.__dict__)\n',
+        "census-json-drops-the-assessable-flag": '\nimport tableau_luid_census as census\n_src = open(census.__file__, encoding="utf-8").read()\n_old = \'    totals["assessable"] = int(assessable(totals, bool(unavailable)))\'\n_new = \'    totals["assessable"] = 1\'\nassert _old in _src, "mutation anchor not found - the snippet is stale, not the code"\nexec(compile(_src.replace(_old, _new, 1), census.__file__, "exec"), census.__dict__)\n',
+        "census-unreadable-collection-crashes-again": '\nimport tableau_luid_census as census\n_src = open(census.__file__, encoding="utf-8").read()\n_old = \'    return all(isinstance(workbook.get(key), list) for key in ("dashboards", "sheets"))\'\n_new = \'    return all(key in workbook for key in ("dashboards", "sheets"))\'\nassert _old in _src, "mutation anchor not found - the snippet is stale, not the code"\nexec(compile(_src.replace(_old, _new, 1), census.__file__, "exec"), census.__dict__)\n',
+        "census-label-allowlist-removed": '\nimport tableau_luid_census as census\n_src = open(census.__file__, encoding="utf-8").read()\n_old = \'    if label not in LABELS:\'\n_new = \'    if False:\'\nassert _old in _src, "mutation anchor not found - the snippet is stale, not the code"\nexec(compile(_src.replace(_old, _new, 1), census.__file__, "exec"), census.__dict__)\n',
+        "census-label-allowlist-case-folded": '\nimport tableau_luid_census as census\n_src = open(census.__file__, encoding="utf-8").read()\n_old = \'    if label not in LABELS:\'\n_new = \'    if label.strip().lower() not in {x.lower() for x in LABELS}:\'\nassert _old in _src, "mutation anchor not found - the snippet is stale, not the code"\nexec(compile(_src.replace(_old, _new, 1), census.__file__, "exec"), census.__dict__)\n',
+        "census-label-refusal-echoes-the-label": '\nimport tableau_luid_census as census\n_src = open(census.__file__, encoding="utf-8").read()\n_old = \'        raise SystemExit("REFUSED to print a label this module did not author (see LABELS)")\'\n_new = \'        raise SystemExit(f"REFUSED to print {label!r}: not an authored label")\'\nassert _old in _src, "mutation anchor not found - the snippet is stale, not the code"\nexec(compile(_src.replace(_old, _new, 1), census.__file__, "exec"), census.__dict__)\n',
+        "cosmetic-census-comment-reworded": '\nimport tableau_luid_census as census\n_src = open(census.__file__, encoding="utf-8").read()\n_old = \'#: Everything this module is willing to put on stdout.\'\n_new = \'#: COSMETIC MUTATION: reworded, nothing else changed.\'\nassert _old in _src, "mutation anchor not found - the snippet is stale, not the code"\nexec(compile(_src.replace(_old, _new, 1), census.__file__, "exec"), census.__dict__)\n',
+        "absent-anchor-stale-census-text": '\nimport tableau_luid_census as census\n_src = open(census.__file__, encoding="utf-8").read()\n_old = \'this exact text is not in the census\'\n_new = \'irrelevant\'\nassert _old in _src, "mutation anchor not found - the snippet is stale, not the code"\nexec(compile(_src.replace(_old, _new, 1), census.__file__, "exec"), census.__dict__)\n',
+    }
+)
+CENSUS_MUTATIONS.update(
+    {
+        "census-label-allowlist-removed",
+        "census-exit-code-always-ok",
+        "census-json-drops-the-assessable-flag",
+        "cosmetic-census-comment-reworded",
+        "census-ignores-an-unreadable-workbook",
+        "census-verdict-ignores-the-parser-refusal",
+        "census-label-allowlist-case-folded",
+        "absent-anchor-stale-census-text",
+        "census-unreadable-collection-crashes-again",
+        "census-label-refusal-echoes-the-label",
+    }
+)
+
 
 def main(argv: list[str]) -> int:
     """Run the campaign. Exit 0 only when every mutation lands on its EXPECTED verdict."""
     wanted = argv or list(MUTATIONS)
-    baseline = mh.subprocess.run(
-        [mh.PY, "-m", "pytest", TARGET, "-q", "--no-header", "--color=no"],
-        cwd=mh.ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-        env=mh.sanitized_env(),
-    )
-    print(f"BASELINE {TARGET} exit={baseline.returncode}  {mh.last_line(baseline)}")
-    if baseline.returncode != 0:
-        # A mutation is only evidence against a clean baseline: an already-failing test would be
-        # credited to every mutation that follows it.
-        print("HARNESS ERROR: baseline is not clean, so no mutation verdict is trustworthy")
-        return 2
+    for suite in (TARGET, CENSUS_TARGET):
+        baseline = mh.subprocess.run(
+            [mh.PY, "-m", "pytest", suite, "-q", "--no-header", "--color=no"],
+            cwd=mh.ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=mh.sanitized_env(),
+        )
+        print(f"BASELINE {suite:38s} exit={baseline.returncode}  {mh.last_line(baseline)}")
+        if baseline.returncode != 0:
+            # A mutation is only evidence against a clean baseline: an already-failing test would be
+            # credited to every mutation that follows it.
+            print("HARNESS ERROR: baseline is not clean, so no mutation verdict is trustworthy")
+            return 2
 
     bad: list[str] = []
     count = 0
     for name in wanted:
+        suite = CENSUS_TARGET if name in CENSUS_MUTATIONS else TARGET
         try:
-            label, _rc, detail, outcomes = mh.run(name, MUTATIONS[name], TARGET)
+            label, _rc, detail, outcomes = mh.run(name, MUTATIONS[name], suite)
         except SystemExit as exc:
             verdict, label, detail = "INVALID ", name, str(exc)
         else:
