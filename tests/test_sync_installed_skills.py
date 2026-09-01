@@ -1351,6 +1351,17 @@ def _stamp(estate: Estate, bundles: list) -> None:
     write_owner_marker(estate.plugin, publish_repo=build_plugin.PUBLISH_REPO, bundles=bundles)
 
 
+def _make_stale(estate: Estate) -> None:
+    """Force the next run to PUBLISH.
+
+    Without this the marker tests are vacuous: with nothing to copy, `_report` returns before
+    `_apply`, which is where `shutil.rmtree` lives, so "it deleted nothing" would hold even with
+    the containment check removed. Measured - with the check mutated away, the absolute-path
+    fixture exited 0 having deleted nothing at all, because it never reached the deleting code.
+    """
+    (estate.plugin / "skills" / FIRST_BUNDLE / "SKILL.md").write_text("stale\n", encoding="utf-8")
+
+
 def test_a_marker_naming_an_absolute_path_refuses_and_deletes_NOTHING(
     estate: Estate, tmp_path: Path, capsys: pytest.CaptureFixture
 ) -> None:
@@ -1361,15 +1372,19 @@ def test_a_marker_naming_an_absolute_path_refuses_and_deletes_NOTHING(
     stranger.mkdir()
     (stranger / "keep.txt").write_text("not ours\n", encoding="utf-8")
     _stamp(estate, [str(stranger)])
+    _make_stale(estate)
 
     code = _run(estate, "--json")
     verdict = json.loads(capsys.readouterr().out)
 
+    # The HARM first, deliberately: an exit-code assertion would fail before this one and hide
+    # whether the directory actually survived (round-3 finding 4's lesson, applied here).
+    assert stranger.is_dir(), "a directory outside the plugin must never be deleted"
+    assert (stranger / "keep.txt").read_text(encoding="utf-8") == "not ours\n"
     assert code == sync.EXIT_UNSAFE_MARKER
     assert verdict["status"] == "unsafe_marker"
     assert "stranger-data" in verdict["detail"] and "not a single path component" in verdict["detail"]
-    assert (stranger / "keep.txt").read_text(encoding="utf-8") == "not ours\n"
-    assert _read_installed(estate.plugin) == f"# {FIRST_BUNDLE}\nmerged\n", "and the publish is refused too"
+    assert _read_installed(estate.plugin) == "stale\n", "and the publish is refused too"
 
 
 @pytest.mark.parametrize(
@@ -1380,17 +1395,18 @@ def test_a_marker_naming_an_absolute_path_refuses_and_deletes_NOTHING(
 def test_a_marker_entry_that_is_not_one_filename_component_is_refused(
     estate: Estate, entry: str, capsys: pytest.CaptureFixture
 ) -> None:
-    """`installed / ".."` is the plugin's PARENT; every one of these escapes or is meaningless."""
+    """`installed / ".."` is the plugin's PARENT and `installed / "."` is the plugin itself."""
     assert _run(estate) == sync.EXIT_OK
     capsys.readouterr()
     _stamp(estate, [entry])
+    _make_stale(estate)
 
     code = _run(estate)
     capsys.readouterr()
 
-    assert code == sync.EXIT_UNSAFE_MARKER
     assert (estate.plugin / "skills" / FIRST_BUNDLE / "SKILL.md").is_file(), "nothing may be removed"
-    assert estate.plugin.is_dir()
+    assert (estate.plugin / "skills").is_dir() and estate.plugin.is_dir()
+    assert code == sync.EXIT_UNSAFE_MARKER
 
 
 def test_a_marker_whose_bundles_is_not_a_list_is_refused(estate: Estate, capsys: pytest.CaptureFixture) -> None:
@@ -1398,6 +1414,7 @@ def test_a_marker_whose_bundles_is_not_a_list_is_refused(estate: Estate, capsys:
     assert _run(estate) == sync.EXIT_OK
     capsys.readouterr()
     _stamp(estate, FIRST_BUNDLE)  # a bare string, not a list
+    _make_stale(estate)
 
     assert _run(estate) == sync.EXIT_UNSAFE_MARKER
     capsys.readouterr()
@@ -1414,13 +1431,16 @@ def test_one_bad_entry_refuses_the_WHOLE_marker_rather_than_skipping_it(
     legacy.mkdir(parents=True)
     (legacy / "SKILL.md").write_text("retired, but only per this marker\n", encoding="utf-8")
     _stamp(estate, ["legacy-bundle", ".."])
+    _make_stale(estate)
 
-    assert _run(estate) == sync.EXIT_UNSAFE_MARKER
+    code = _run(estate)
     capsys.readouterr()
+
     assert (legacy / "SKILL.md").is_file(), (
         "skipping the bad entry and retiring the good one would still be acting on a marker "
         "that has already been shown to be untrustworthy"
     )
+    assert code == sync.EXIT_UNSAFE_MARKER
 
 
 def test_a_valid_marker_is_still_acted_on(estate: Estate, capsys: pytest.CaptureFixture) -> None:
@@ -1503,7 +1523,8 @@ def test_a_same_branch_advance_is_fetched_without_being_asked(estate: Estate) ->
 
     source = sync.resolve_publish_ref(repo=estate.clone)
 
-    assert source.commit == advanced != stale
+    assert source.commit == advanced, "the advertised COMMIT must be fetched, not just the branch name"
+    assert source.commit != stale
     assert source.advertised_commit == advanced
     assert source.default_verified
 
@@ -1514,7 +1535,9 @@ def test_a_stale_clone_reports_drift_rather_than_in_sync(estate: Estate, capsys:
     capsys.readouterr()
     _advance_origin(estate, "advanced")
 
-    assert _run(estate, "--check") == sync.EXIT_DRIFT
+    assert _run(estate, "--check") == sync.EXIT_DRIFT, (
+        "the installed copy is now behind the advertised commit, which is drift, not in_sync"
+    )
     capsys.readouterr()
 
 
