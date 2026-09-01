@@ -31,7 +31,14 @@ same reason ``harvest_gap_shapes``/``harvest_gap_trees`` were split from ``harve
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
+
+# The same closed allowlist `capture_tableau_oracle.artifact_stem` uses for filenames, for the same
+# reason: a value that has been PROVED to be a UUID cannot carry a credential, so it needs no
+# redaction downstream. Validating here means the mapping's keys are shape-verified rather than
+# merely trusted, and a Metadata API that returned something else is refused rather than indexed by.
+_LUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
 # `luid` is not queried anywhere else in this repo, so an older server that does not expose it is a
 # capability question rather than a bug. The GraphQL error it raises is reported verbatim.
@@ -56,6 +63,17 @@ def view_types(session: Any) -> tuple[dict[str, str], str | None]:
     (``tableau_http``). It deliberately does not open a client of its own: three hand-rolled HTTP
     paths in this codebase each leaked a reflected credential in a different review round, and the
     fix was to stop having more than one.
+
+    ⚠️ **The reason string never carries server-controlled text.** The GraphQL ``errors[].message``
+    is attacker-influenceable -- measured: a one-request server that reflects the inbound
+    ``X-Tableau-Auth`` header into ``errors[0].message`` put a live session token into this
+    function's warning. Only the *shape* of the failure is reported. That is the same deletion, for
+    the same reason, as the HTTP reason phrase in ``tableau_render_capability``: detecting a
+    credential FRAGMENT is not solvable, so the defence is to emit fewer server-controlled strings.
+
+    ⚠️ **A partial answer is refused whole.** An earlier version skipped malformed nodes and trusted
+    their valid siblings, which produced a mapping that typed some views and silently left others
+    ``unknown`` -- indistinguishable, downstream, from a run where those views genuinely had no type.
     """
     try:
         status, body, _ = session._request(  # pylint: disable=protected-access
@@ -69,21 +87,54 @@ def view_types(session: Any) -> tuple[dict[str, str], str | None]:
         payload = json.loads(body.decode("utf-8", "replace"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         return {}, f"metadata api response was not JSON: {type(exc).__name__}"
+    if not isinstance(payload, dict):
+        return {}, f"metadata api response was {type(payload).__name__}, not an object"
     if payload.get("errors"):
-        # ⚠️ A GraphQL 200 can carry `errors` BESIDE usable `data` -- notably FieldUndefined when
-        # `luid` is absent from this server's schema. Partial data must not be treated as an answer:
-        # it would type some views and leave others silently unknown, which reads as a complete run.
-        first = (payload["errors"] or [{}])[0]
-        return {}, f"metadata api error: {str(first.get('message') or 'unspecified')[:120]}"
+        # A GraphQL 200 can carry `errors` BESIDE usable `data` -- notably FieldUndefined when `luid`
+        # is absent from this server's schema. The count is ours; the message is the server's and is
+        # deliberately not reported (see the docstring).
+        count = len(payload["errors"]) if isinstance(payload["errors"], list) else 1
+        return {}, f"metadata api returned {count} graphql error(s); response refused"
+    return _mapping_from(payload)
+
+
+def _mapping_from(payload: dict[str, Any]) -> tuple[dict[str, str], str | None]:
+    """Build the LUID -> kind mapping, refusing the WHOLE answer on any malformed part.
+
+    Every ``return {}, reason`` here is a refusal of the entire response, never of one node. Skipping
+    a bad node and keeping its siblings is the failure this function is shaped to prevent: it yields
+    a confident mapping built from an answer we already know is not intact.
+    """
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return {}, f"metadata api `data` was {type(data).__name__}, not an object"
+    workbooks = data.get("workbooks")
+    if not isinstance(workbooks, list):
+        return {}, f"metadata api `workbooks` was {type(workbooks).__name__}, not a list"
     mapping: dict[str, str] = {}
-    for workbook in (payload.get("data") or {}).get("workbooks") or []:
+    for workbook in workbooks:
         if not isinstance(workbook, dict):
-            continue
+            return {}, f"a workbook node was {type(workbook).__name__}, not an object; response refused"
         for key, kind in (("dashboards", DASHBOARD), ("sheets", WORKSHEET)):
-            for node in workbook.get(key) or []:
-                luid = node.get("luid") if isinstance(node, dict) else None
-                if isinstance(luid, str) and luid.strip():
-                    mapping[luid.strip().lower()] = kind
+            nodes = workbook.get(key)
+            if nodes is None:
+                continue
+            if not isinstance(nodes, list):
+                return {}, f"`{key}` was {type(nodes).__name__}, not a list; response refused"
+            for node in nodes:
+                if not isinstance(node, dict):
+                    return {}, f"a `{key}` node was {type(node).__name__}, not an object; response refused"
+                luid = node.get("luid")
+                if not isinstance(luid, str) or not _LUID_RE.match(luid.strip()):
+                    # Shape-verified, not merely non-empty: a proved UUID cannot carry a credential,
+                    # which is what lets the mapping's keys travel without redaction.
+                    return {}, f"a `{key}` node carried a {type(luid).__name__} that is not a luid; response refused"
+                key_luid = luid.strip().lower()
+                # ⚠️ A LUID naming BOTH a dashboard and a sheet is contradictory, not a last-wins
+                # tiebreak. Overwriting would have silently picked whichever the server listed second.
+                if mapping.get(key_luid, kind) != kind:
+                    return {}, "the same luid was reported as both a dashboard and a worksheet; response refused"
+                mapping[key_luid] = kind
     if not mapping:
         return {}, "metadata api returned no dashboards or sheets carrying a luid"
     return mapping, None

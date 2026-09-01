@@ -39,6 +39,7 @@ import ast
 import contextlib
 import http.client
 import importlib
+import io
 import itertools
 import json
 import logging
@@ -47,6 +48,7 @@ import socket
 import sys
 import threading
 import time
+import tokenize
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -521,6 +523,13 @@ MODULES = (
     "scripts/tableau_render_capability.py",
     "scripts/tableau_payload_facts.py",
     "scripts/tableau_http.py",
+    # ⚠️ Added after a blind review found a live leak here that this gate could not see. The module
+    # calls `session._request`, not `urlopen`/`http.client`/`requests`, so `_HTTP_MARKERS` does not
+    # recognise it as credential-handling and the fail-closed module sweep never demanded it -- the
+    # same blind spot #419 records for `provision_tableau_estate.py` (tableauserverclient). A
+    # hand-maintained inventory that cannot detect its own omissions is exactly the shape that
+    # produced the round-7 leak in #405.
+    "scripts/tableau_view_types.py",
 )
 
 # Where response bytes ENTER, declared per function rather than inferred from a parameter's spelling.
@@ -546,6 +555,12 @@ TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
     # Propagation cannot see across a module boundary, so these are irreducible.
     ("scripts/tableau_render_capability.py", "probe_render_capability"): {"views"},
     ("scripts/tableau_render_capability.py", "apply_selected_tier"): {"report"},
+    # `capture_tableau_oracle.main()` hands `resolve_and_stamp` the `/views` listing it just parsed.
+    # ⚠️ Not optional bookkeeping: without it the boundary check fails outright, and `stamp` then
+    # writes onto dicts the analyser believes are clean, so the manifest key it stamps arrives
+    # untracked. Found by `test_every_cross_module_call_carrying_tainted_data_lands_on_a_declared_seed`
+    # the moment this module joined MODULES.
+    ("scripts/tableau_view_types.py", "resolve_and_stamp"): {"views"},
     # The shared HTTP primitive. `req` and `redactor` are OUTBOUND -- the request we are about to send
     # and the scrubber we hand it -- but they arrive from functions the analyser has already tainted,
     # and declaring them keeps the boundary honest rather than silently permeable. `headers` really is
@@ -590,6 +605,12 @@ _INTO_THE_MANIFEST_AGGREGATE = (
     "SCRUBBED-AT-SINK: an aggregate on its way to the manifest; `scrub_tree` walks it whole, values "
     "and keys, immediately before serialisation, and reports anything it had to redact"
 )
+_PY_TYPE_NAME = (
+    "FIXED-VOCABULARY: a Python type NAME, not the value. `json.loads` can only produce dict, list, "
+    "str, int, float, bool or NoneType, so this is a closed set the server cannot influence - it "
+    "reports the SHAPE of a malformed response without echoing any of its content."
+)
+
 _PROBE_VERDICT = (
     "FIXED-VOCABULARY: one of classify_probe's three verdict literals, a ladder tier name, or an "
     "api-version string this module itself chose"
@@ -624,6 +645,47 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
             "OUTBOUND: the site base URL from .env, on its way out in the request line. `self` is "
             "tainted here only because the analyser cannot separate the receiver from the request it "
             "builds; the value itself never came back from Tableau"
+        ),
+    },
+    ("scripts/tableau_view_types.py", "view_types"): {
+        # ⚠️ `type(exc).__name__` was certified here and certified NOTHING: the analyser taints
+        # ASSIGNMENTS, and `except ... as exc` is an ExceptHandler, so `exc` is never a tainted root
+        # and the expression is not a live sink. `test_the_certification_list_has_no_stale_entries`
+        # rejects it -- a claim about nothing is the same silent no-op as the duplicate-key entry the
+        # first round of this PR hit. The expression is still safe; it just needs no certificate.
+        "type(payload).__name__": _PY_TYPE_NAME,
+        "status": "NOT-A-STRING: an HTTP status integer from the hardened transport",
+        "count": (
+            "NOT-A-STRING: len() of the GraphQL errors list, an integer. The error MESSAGE is "
+            "deliberately not reported at all -- measured, a one-request server reflecting the "
+            "inbound X-Tableau-Auth header into errors[0].message put a live session token here."
+        ),
+    },
+    ("scripts/tableau_view_types.py", "_mapping_from"): {
+        "type(data).__name__": _PY_TYPE_NAME,
+        "type(workbooks).__name__": _PY_TYPE_NAME,
+        "type(workbook).__name__": _PY_TYPE_NAME,
+        "type(nodes).__name__": _PY_TYPE_NAME,
+        "type(node).__name__": _PY_TYPE_NAME,
+        "type(luid).__name__": _PY_TYPE_NAME,
+        "key_luid": (
+            "SHAPE-VERIFIED: `_LUID_RE.match` has proved this is a UUID before it is used as a key - "
+            "the same closed allowlist artifact_stem uses for filenames. A proved UUID cannot carry a "
+            "credential, and a node whose luid fails the shape refuses the WHOLE response."
+        ),
+    },
+    ("scripts/tableau_view_types.py", "stamp"): {
+        "mapping.get(luid, UNKNOWN)": (
+            "FIXED-VOCABULARY: one of this module's three constants - 'dashboard', 'worksheet' or "
+            "'unknown'. The mapping's values are assigned from those constants only, never from "
+            "response text."
+        ),
+    },
+    ("scripts/tableau_view_types.py", "resolve_and_stamp"): {
+        "unavailable": (
+            "FIXED-VOCABULARY: the reason string built by view_types/_mapping_from, composed only of "
+            "this module's own literals plus Python type names and integers. No branch interpolates "
+            "server-controlled text - that is the property the credential-reflection probe pins."
         ),
     },
     ("scripts/capture_tableau_oracle.py", "capture_view"): {
@@ -1115,6 +1177,15 @@ def test_taint_reaches_capture_view_without_a_hand_written_seed():
 # worth closing structurally. This fails CLOSED: a new credential-handling script is a hard failure
 # until someone either brings it under the gate or waives it with a stated reason.
 
+# ⚠️ Modules that qualify on their OWN, with no credential marker required. The AND below asks two
+# questions -- "does it speak HTTP" and "does it name a credential" -- and a module can consume
+# credential-bearing RESPONSES while naming no credential at all, because the session holds it. That
+# is `tableau_view_types.py` exactly: its only credential-shaped text is a docstring sentence, so
+# under the AND its coverage would hinge on prose surviving an edit. Calling a session's `_request`
+# is the structural fact, and it is the same name `TAINTING_CALLS` already treats as the response
+# origin. `test_a_session_client_is_detected_without_naming_a_credential` is the positive control.
+_SESSION_CLIENT_MARKERS = ("._request(",)
+
 _HTTP_MARKERS = (
     "urlopen(",
     "http.client",
@@ -1131,6 +1202,15 @@ _HTTP_MARKERS = (
     # otherwise have DELETED both gated modules from this inventory -- measured, and caught only by
     # `test_the_credential_handling_detector_actually_detects`.
     "tableau_http",
+    # ⚠️ A module that takes a SESSION and calls its `_request` reaches HTTP through neither the
+    # stdlib nor a library -- it reaches it through us, and that was invisible here. Not a
+    # hypothetical gap: `tableau_view_types.py` leaked a reflected session token out of a GraphQL
+    # `errors[].message` while this inventory could not see the module at all, so the fail-closed
+    # module sweep never demanded it be gated. `_request` is already the name the taint analyser
+    # treats as the response origin (`TAINTING_CALLS`), so keying on it here keeps the two halves of
+    # the gate consistent. Measured: exactly three scripts match `._request(`, and all three are in
+    # MODULES, so this widening adds coverage without adding a waiver.
+    *_SESSION_CLIENT_MARKERS,
 )
 _CREDENTIAL_MARKERS = ("pat_secret", "X-Tableau-Auth", "TABLEAU_PAT", "personalAccessTokenSecret")
 
@@ -1209,13 +1289,44 @@ KNOWN_GAPS: dict[str, str] = {
 
 
 def _credential_handling_scripts() -> list[str]:
-    """Scripts that make an HTTP call AND reference a Tableau credential."""
+    """Scripts that make an HTTP call AND reference a Tableau credential -- or ARE a session client.
+
+    ⚠️ The second clause is not a convenience. A module handed a signed-in session consumes
+    credential-bearing responses while naming no credential at all, so under the AND alone its
+    coverage depended on whether some docstring happened to spell ``X-Tableau-Auth``. That is prose
+    load-bearing on a security gate, and it is how `tableau_view_types.py` sat outside this inventory
+    while leaking a reflected session token.
+    """
     found = []
     for path in sorted((REPO / "scripts").glob("*.py")):
         source = path.read_text(encoding="utf-8", errors="replace")
-        if any(h in source for h in _HTTP_MARKERS) and any(c in source for c in _CREDENTIAL_MARKERS):
+        speaks_http = any(h in source for h in _HTTP_MARKERS)
+        names_credential = any(c in source for c in _CREDENTIAL_MARKERS)
+        session_client = any(s in source for s in _SESSION_CLIENT_MARKERS)
+        if (speaks_http and names_credential) or session_client:
             found.append(f"scripts/{path.name}")
     return found
+
+
+def test_a_session_client_is_detected_without_naming_a_credential():
+    """⚠️ Positive control for the second clause, and it must be able to FAIL.
+
+    `tableau_view_types.py` names no credential in CODE -- only in prose. Delete every docstring,
+    comment and string literal and the AND stops seeing the module entirely, which is precisely why
+    its coverage must not rest on a sentence. So this asserts on the structural fact instead: it
+    calls a session's `_request`, and the detector reaches it that way.
+    """
+    source = (REPO / "scripts/tableau_view_types.py").read_text(encoding="utf-8")
+    code = "".join(
+        "" if token.type in (tokenize.STRING, tokenize.COMMENT) else token.string
+        for token in tokenize.generate_tokens(io.StringIO(source).readline)
+    )
+    assert not any(c in code for c in _CREDENTIAL_MARKERS), (
+        "this module now names a credential in CODE, so the control no longer proves the second "
+        "clause is what detects it -- re-point the control at a module that does not"
+    )
+    assert any(s in code for s in _SESSION_CLIENT_MARKERS)
+    assert "scripts/tableau_view_types.py" in _credential_handling_scripts()
 
 
 def test_the_credential_handling_detector_actually_detects():

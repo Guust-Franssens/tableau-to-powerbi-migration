@@ -480,6 +480,15 @@ def test_manifest_records_recovery_counts(tmp_path):
 # on a guess. A wrong type would be believed; an absent one cannot be.
 
 
+# ⚠️ These MUST be real UUIDs. An earlier revision used readable stand-ins (`D-1`, `W-1`), which the
+# `_LUID_RE` shape check then refused -- so the happy-path test went red and, worse, every "fails
+# closed" case below was refused by the SHAPE guard before reaching the branch it was written to
+# cover. A fixture that cannot reach its own subject reads as coverage and is not.
+DASH_LUID = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"
+SHEET_LUID = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb"
+SHEET2_LUID = "cccccccc-3333-4333-8333-cccccccccccc"
+
+
 def _wb(dashboards=(), sheets=()):
     return {"dashboards": [{"luid": x} for x in dashboards], "sheets": [{"luid": x} for x in sheets]}
 
@@ -490,10 +499,10 @@ def _graphql(payload):
 
 def test_view_types_joins_dashboards_and_worksheets_by_luid():
     """The join is on LUID, not on name -- a dashboard and its principal sheet often share one."""
-    session = _graphql({"data": {"workbooks": [_wb(dashboards=["D-1"], sheets=["W-1", "W-2"])]}})
+    session = _graphql({"data": {"workbooks": [_wb(dashboards=[DASH_LUID], sheets=[SHEET_LUID, SHEET2_LUID])]}})
     mapping, unavailable = view_types_mod.view_types(session)
     assert unavailable is None
-    assert mapping == {"d-1": "dashboard", "w-1": "worksheet", "w-2": "worksheet"}
+    assert mapping == {DASH_LUID: "dashboard", SHEET_LUID: "worksheet", SHEET2_LUID: "worksheet"}
 
 
 def test_view_types_asks_the_metadata_api_through_the_hardened_path():
@@ -520,7 +529,7 @@ def test_view_types_asks_the_metadata_api_through_the_hardened_path():
                     json.dumps(
                         {
                             "errors": [{"message": "Cannot query field 'luid' on type 'Dashboard'"}],
-                            "data": {"workbooks": [_wb(dashboards=["D-1"], sheets=["W-1"])]},
+                            "data": {"workbooks": [_wb(dashboards=[DASH_LUID], sheets=[SHEET_LUID])]},
                         }
                     ),
                     {},
@@ -528,9 +537,87 @@ def test_view_types_asks_the_metadata_api_through_the_hardened_path():
             ],
             "FieldUndefined beside partial data",
         ),
-        ([(403, "forbidden", {})], "metadata api disabled"),
+        # ⚠️ The body here is a PERFECTLY VALID mapping payload, so the HTTP status is the only reason
+        # to refuse. The earlier fixture sent `403, "forbidden"` -- unparseable, so the JSON guard
+        # refused it too and deleting the status check left all 53 tests green. Measured by review.
+        (
+            [(403, json.dumps({"data": {"workbooks": [_wb(dashboards=[DASH_LUID])]}}), {})],
+            "metadata api disabled, but answering with a well-formed body",
+        ),
+        (
+            [(0, json.dumps({"data": {"workbooks": [_wb(dashboards=[DASH_LUID])]}}), {})],
+            "network error status, with a body that would otherwise parse",
+        ),
         ([(200, "not json at all", {})], "unparseable"),
         ([(200, json.dumps({"data": {"workbooks": []}}), {})], "no luids at all"),
+        # --- one poisoned part BESIDE a valid one. Each of these WOULD yield a non-empty mapping if
+        # its guard were removed, which is what makes the guard the single reason for the refusal.
+        (
+            [(200, json.dumps({"data": {"workbooks": [{"dashboards": [{"luid": DASH_LUID}, {"luid": 7}]}]}}), {})],
+            "a non-string luid beside a valid one",
+        ),
+        (
+            [(200, json.dumps({"data": {"workbooks": [{"dashboards": [{"luid": DASH_LUID}, {"luid": "D-1"}]}]}}), {})],
+            "a non-uuid string luid beside a valid one",
+        ),
+        (
+            [(200, json.dumps({"data": {"workbooks": [{"dashboards": [{"luid": DASH_LUID}, "nope"]}]}}), {})],
+            "a non-dict node beside a valid one",
+        ),
+        (
+            [(200, json.dumps({"data": {"workbooks": [_wb(dashboards=[DASH_LUID]), ["not", "a", "dict"]]}}), {})],
+            "a non-dict workbook beside a valid one",
+        ),
+        (
+            [
+                (
+                    200,
+                    json.dumps({"data": {"workbooks": [{"sheets": [{"luid": SHEET_LUID}], "dashboards": "nope"}]}}),
+                    {},
+                )
+            ],
+            "a non-list `dashboards` beside a valid `sheets`",
+        ),
+        # --- shapes that used to raise rather than refuse. `pytest.raises` is not used: an escaping
+        # AttributeError/KeyError would fail the call outright, which is the point.
+        ([(200, "null", {})], "a top-level null"),
+        ([(200, json.dumps([{"data": {"workbooks": []}}]), {})], "a top-level list"),
+        ([(200, json.dumps("nope"), {})], "a top-level string"),
+        ([(200, json.dumps({"data": None}), {})], "`data` is null"),
+        ([(200, json.dumps({"data": []}), {})], "`data` is a list"),
+        ([(200, json.dumps({"data": {"workbooks": {"dashboards": []}}}), {})], "`workbooks` is a dict"),
+        ([(200, json.dumps({"errors": "boom", "data": {"workbooks": []}}), {})], "`errors` is not a list"),
+        ([(200, json.dumps({"errors": {"message": "boom"}, "data": {"workbooks": []}}), {})], "`errors` is a dict"),
+        ([(200, "", {})], "an empty body"),
+        ([(200, b"\xff\xfe\x00bad", {})], "a body that is not valid utf-8"),
+        # A LUID that names BOTH kinds is contradictory, not a last-wins tiebreak: overwriting would
+        # silently take whichever the server happened to list second.
+        (
+            [
+                (
+                    200,
+                    json.dumps(
+                        {
+                            "data": {
+                                "workbooks": [{"dashboards": [{"luid": DASH_LUID}], "sheets": [{"luid": DASH_LUID}]}]
+                            }
+                        }
+                    ),
+                    {},
+                )
+            ],
+            "one luid reported as both a dashboard and a worksheet",
+        ),
+        (
+            [
+                (
+                    200,
+                    json.dumps({"data": {"workbooks": [_wb(dashboards=[DASH_LUID]), _wb(sheets=[DASH_LUID])]}}),
+                    {},
+                )
+            ],
+            "the same contradiction split across two workbooks",
+        ),
     ],
 )
 def test_view_types_fails_closed_and_never_guesses(responses, why):
@@ -538,10 +625,192 @@ def test_view_types_fails_closed_and_never_guesses(responses, why):
 
     There is deliberately no name-based fallback: matching on the view NAME is the exact join this
     replaces, and it is what let a worksheet stand in as evidence for a dashboard page.
+
+    ⚠️ Two properties, not one. A malformed answer must be refused **whole** -- an earlier revision
+    skipped bad nodes and trusted their valid siblings, producing a mapping that typed some views and
+    left others `unknown`, which downstream is indistinguishable from a run where those views
+    genuinely had no type. And it must never RAISE: a top-level `null`, list or string each escaped
+    as an uncaught `AttributeError`, and `errors` as a dict escaped as a `KeyError`.
     """
     mapping, unavailable = view_types_mod.view_types(FakeSession(responses))
     assert mapping == {}, f"{why} must not produce a mapping"
     assert unavailable, f"{why} must state why the type is unknown"
+
+
+def test_a_repeated_luid_of_the_SAME_kind_is_tolerated_deliberately():
+    """⚠️ A judgement call, pinned so it is a decision rather than an accident.
+
+    Everything else malformed refuses the whole answer. A node repeated under the *same* kind is the
+    one exception: it cannot produce a wrong type, and refusing would blank an entire estate's typing
+    over a duplicate that changes nothing. The CONTRADICTORY case -- one luid under both kinds -- is
+    refused, and is covered above.
+    """
+    session = _graphql({"data": {"workbooks": [{"dashboards": [{"luid": DASH_LUID}, {"luid": DASH_LUID}]}]}})
+    mapping, unavailable = view_types_mod.view_types(session)
+    assert unavailable is None
+    assert mapping == {DASH_LUID: "dashboard"}
+
+
+def test_a_luid_is_matched_case_insensitively_but_keeps_its_shape():
+    """Tableau's REST `id` and the Metadata API's `luid` can differ in case for the same view."""
+    session = _graphql({"data": {"workbooks": [_wb(dashboards=[DASH_LUID.upper()])]}})
+    mapping, unavailable = view_types_mod.view_types(session)
+    assert unavailable is None
+    assert mapping == {DASH_LUID: "dashboard"}
+
+
+# --- #402 finding 2: NO server-controlled string may reach a diagnostic -------------------------
+#
+# A GraphQL `errors[].message` is authored by the server, and a server that reflects the inbound
+# `X-Tableau-Auth` header into it puts a LIVE SESSION TOKEN in our warning. Measured against a
+# one-request localhost server: the pre-fix warning contained the token verbatim.
+#
+# The defence is not detection -- a credential FRAGMENT is not detectable -- it is to emit fewer
+# server-controlled strings. Same deletion, same reason, as the HTTP reason phrase in
+# `tableau_render_capability` (#405 round 8).
+
+REFLECTION_SENTINEL = "SENTINEL_SESSION_TOKEN_FULL_PERMISSION"
+
+#: Planted wherever the SERVER controls a string, so a branch that quotes it back is visible.
+TAINT = "TAINT_SENTINEL"
+
+
+class _Recorder:
+    """Captures what a logging handler would actually emit, i.e. the message AFTER `%` formatting."""
+
+    def __init__(self):
+        self.warnings: list[str] = []
+
+    def warning(self, fmt, *args):
+        self.warnings.append(fmt % args if args else fmt)
+
+
+def test_a_reflected_session_token_never_reaches_the_view_type_warning():
+    """⚠️ The regression test for the leak, driven by a REAL one-request server.
+
+    A `FakeSession` cannot prove this: the leak is about a body that travelled the real transport,
+    and `tableau_http` passes response bodies through RAW **by design** (classification has to see
+    the unmodified text). So the token is genuinely present in the bytes this module parses, and the
+    only thing standing between it and the log is this module declining to quote the server.
+    """
+
+    class Reflector(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            payload = {
+                "errors": [
+                    {
+                        "message": f"Reflected request context: X-Tableau-Auth={self.headers.get('X-Tableau-Auth')}",
+                        "extensions": {"code": "FIELD_UNDEFINED"},
+                    }
+                ],
+                # Beside usable data, so the refusal is the errors branch and not "no luids".
+                "data": {"workbooks": [_wb(dashboards=[DASH_LUID])]},
+            }
+            body = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Reflector)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        session = oracle.TableauSession(
+            oracle.SiteCredentials(
+                base=f"http://127.0.0.1:{server.server_port}",
+                site="site",
+                pat_name="pat-name",
+                pat_secret="PAT_SECRET_1234567890",
+                version="3.29",
+            ),
+            oracle.RetryPolicy(max_attempts=1, budget_sec=1),
+        )
+        session.token, session.site_id = REFLECTION_SENTINEL, "site-id"
+
+        log = _Recorder()
+        views = [{"id": DASH_LUID, "name": "Revenue"}]
+        unavailable = view_types_mod.resolve_and_stamp(session, views, log)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    # The server DID reflect it -- otherwise this test proves nothing about redaction.
+    assert REFLECTION_SENTINEL in session.token
+    assert unavailable, "an errors block must still be reported as a reason"
+    assert REFLECTION_SENTINEL not in unavailable
+    assert log.warnings, "a run that cannot discriminate must say so"
+    assert REFLECTION_SENTINEL not in "\n".join(log.warnings)
+    # ⚠️ Fail-closed, not fail-open: the partial `data` beside the error must NOT have been used.
+    assert views[0][view_types_mod.VIEW_TYPE_KEY] == "unknown"
+
+
+@pytest.mark.parametrize(
+    "responses",
+    [
+        [(200, json.dumps({"errors": [{"message": TAINT}], "data": {"workbooks": []}}), {})],
+        [(200, json.dumps({"errors": [{"message": "x"}, {"message": TAINT}]}), {})],
+        [(200, f"{TAINT} not json", {})],
+        [(418, TAINT, {})],
+        [(200, json.dumps({"data": {"workbooks": [{"dashboards": [{"luid": TAINT}]}]}}), {})],
+        [(200, json.dumps({"data": {"workbooks": [TAINT]}}), {})],
+        [(200, json.dumps({"data": {"workbooks": [{"dashboards": TAINT}]}}), {})],
+        [(200, json.dumps({"data": TAINT}), {})],
+        [(200, json.dumps(TAINT), {})],
+    ],
+)
+def test_no_branch_quotes_the_server_back_into_its_reason(responses):
+    """⚠️ The GENERAL property, not just the one branch that leaked.
+
+    A sentinel is planted in every server-controlled position the parser touches -- error messages,
+    a bad luid, a bad node, a bad container, an unparseable body, an error-status body. No reason
+    string may contain it. Reporting a *type name* or a *count* is fine; those are ours.
+    """
+    mapping, unavailable = view_types_mod.view_types(FakeSession(responses))
+    assert mapping == {}
+    assert unavailable
+    assert TAINT not in unavailable
+
+
+def test_a_transport_exception_is_reported_by_TYPE_not_by_message():
+    """`str(exc)` on a transport error can carry a reflected URL, and so a reflected credential."""
+
+    class Boom:
+        def _request(self, method, path, *, body=None, accept=None, authed=True, api=None):  # noqa: ARG002
+            raise RuntimeError(f"connect failed to http://user:{TAINT}@host/api")
+
+    mapping, unavailable = view_types_mod.view_types(Boom())
+    assert mapping == {}
+    assert "RuntimeError" in unavailable
+    assert TAINT not in unavailable
+
+
+def test_the_run_warns_when_it_cannot_discriminate_at_all():
+    """A "cannot establish" that is merely RETURNED becomes an unexamined variable at the call site."""
+    log = _Recorder()
+    views = [{"id": DASH_LUID, "name": "Revenue"}]
+    unavailable = view_types_mod.resolve_and_stamp(FakeSession([(403, "no", {})]), views, log)
+    assert unavailable
+    assert len(log.warnings) == 1
+    assert "UNKNOWN" in log.warnings[0]
+    assert views[0][view_types_mod.VIEW_TYPE_KEY] == "unknown"
+
+
+def test_stamp_joins_on_the_view_ID_not_on_its_NAME():
+    """⚠️ The whole point of #402, and a hole the review found: keying `stamp` on `view["name"]`
+    instead of `view["id"]` SURVIVED all 53 tests.
+
+    Nothing else in the suite could see it, because every fixture's `name` was absent from the
+    mapping, so a name-keyed lookup fell through to `unknown` and merely looked conservative. Here
+    the name IS a key -- of the OTHER kind -- so the two joins give different, both-plausible answers
+    and only the identity join gives the right one.
+    """
+    view = {"id": DASH_LUID, "name": SHEET_LUID}
+    view_types_mod.stamp([view], {DASH_LUID: "dashboard", SHEET_LUID: "worksheet"})
+    assert view[view_types_mod.VIEW_TYPE_KEY] == "dashboard"
 
 
 def test_an_unmapped_view_records_unknown_not_a_default_type(tmp_path):
