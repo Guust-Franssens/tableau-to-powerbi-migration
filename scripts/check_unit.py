@@ -90,7 +90,7 @@ MODEL_CHECK_IDS = frozenset(
     }
 )
 REPORT_CHECK_IDS = frozenset({"pbir-valid", "pbir-layout", "page-parity", "oracle-coverage", "occlusion"})
-INTEGRATION_CHECK_IDS = frozenset({"blank-placeholders", "field-bindings", "connection-fidelity", "running-total-axis"})
+INTEGRATION_CHECK_IDS = frozenset({"blank-placeholders", "field-bindings", "connection-fidelity"})
 ALL_ONLY_CHECK_IDS = frozenset(
     {"engine-receipt", "desktop-orphans", "path-ceiling", "visual-layer-done", "visual-comparison-done", "finalized"}
 )
@@ -100,7 +100,6 @@ OWNER_HINTS = {
     "field-bindings": "integration (report reference vs model field)",
     MODEL_REFERENCE_ID: "integration (report -> semantic model reference)",
     "connection-fidelity": "integration (spec connection target vs emitted model M)",
-    "running-total-axis": "integration (measure addressing in TMDL vs visual axis in PBIR)",
     "scaffold-partitions": "model",
     "sqlproxy-connections": "model",
     "relationship-health": "model",
@@ -159,17 +158,6 @@ GATES = (
         frozenset({1}),
         frozenset({"SKIPPED", "ERROR"}),
         frozenset({0, 2, 3}),
-    ),
-    Gate(
-        "running-total-axis",
-        "check_running_total_axis.py",
-        (),
-        frozenset({"OK", "NOT_APPLICABLE"}),
-        frozenset({0}),
-        frozenset({"MISMATCH"}),
-        frozenset({1}),
-        frozenset({"UNASSESSABLE", "SKIPPED", "ERROR"}),
-        frozenset({2, 3}),
     ),
     Gate(
         "connection-fidelity",

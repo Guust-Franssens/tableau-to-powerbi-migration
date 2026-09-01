@@ -363,57 +363,47 @@ Desktop on open** — they only surface when the PBIP is actually opened, not fr
 
     The emitted report used `'Date'[Month Start]` on the axis beside a measure ordered by
     `'Orders'[Order_Date]`, so the measure disagreed with its own visual.
-  - **Gate reality (updated 2026-08-31, issue #218 closed):** structural validators and
-    `check_datamodel.py` still do not see PBIR category bindings — but the cross-artifact check now
-    exists: **`python scripts/check_running_total_axis.py <bundle>`**, also wired into
-    `check_unit.py` as the `running-total-axis` row (integration scope). It reads the measure's DAX
-    *shape*, never its name, and enforces one invariant per mechanism: a `WINDOW`/`OFFSET`/`INDEX`/
-    `RANK`/`ROWNUMBER` with `ORDERBY(<col>)` and no explicit relation must have **every** ordered
-    column, in **every** window call, **projected by the visual** (that is exactly the table above);
-    a `FILTER(ALL(...), t[c] <= MAX(t[c]))` must **clear** any date grain on `t`, or have it be
-    `t[c]`; and a `TOTALYTD`/`DATESYTD` must have every date grain on the visual sitting on the
-    marked `dataCategory: Time` table that owns its `<dates>` argument. Exit 0 clean / 1 mismatch /
-    **3 unassessable, which is never a pass**.
+  - ⚠️ **Gate reality: NOTHING VERIFIES THIS. The `EVALUATE` probe is the only check.** Structural
+    validators and `check_datamodel.py` do not see PBIR category bindings, so run `EVALUATE` probes
+    at every axis grain the emitted visuals bind to and compare to the source/oracle. A
+    cross-artifact gate (`check_running_total_axis.py`) was built for issue #218 and **descoped and
+    deleted on 2026-09-01** after seven rounds of blind review; if you remember it existing, it does
+    not. Do not skip the probe on the strength of a green `check_unit.py`.
+  - ⚠️ **Why it was descoped — this is the trap to avoid if you rebuild it.** Reading the DAX
+    *shape* is two problems, not one, and only the first is decidable. Matching a **closed set of
+    whole expressions** the engine emits is sound (a real lexer, atomic identifiers, anchored
+    templates that must consume every token — that half worked). But deciding *"is this an
+    accumulation at all?"* is an **open enumeration**, and everything outside it exits **0** while
+    printing "no running-total measure in this model". Measured on the final build: `RUNNINGSUM(...)`,
+    `MOVINGAVERAGE(...)` and `CALCULATE(SUM(x), t[d] <= MAX(t[d]))` — a comparison not wrapped in a
+    literal `FILTER(` — all exited 0. Rounds 1–7 produced 5-6-2-0-3-4-3 findings and every round
+    closed the spellings the previous one found. See issue #427 for all reproductions.
+  - ⚠️ **`RUNNINGSUM`/`MOVINGAVERAGE` are the strongest case for such a check, not an exclusion.**
+    The deleted gate excluded them believing their relation argument was *required*. It is not:
+    [`RUNNINGSUM`](https://learn.microsoft.com/en-us/dax/runningsum-function-dax) is
+    `RUNNINGSUM(<column>[, <axis>][, <orderBy>][, <blanks>][, <reset>])` — computed *"along the given
+    axis of the **visual matrix**"*, with `axis` **optional** and, *"if omitted, the first axis of the
+    Visual Shape definition is used."* These are **visual calculations**: the visual **always**
+    decides their domain, so they carry exactly the axis-dependence this section is about. Probe them.
   - ⚠️ **A coarse date grain is usually NOT `dataType: dateTime`, so do not check the type alone.**
     Measured across `_runs/estate-2.339.0-20260829`: the engine emits its month/quarter bins as
     **calculated text** columns — `column Month = FORMAT('Date'[Date], "MMM")`, `column Quarter =
     "Q" & QUARTER('Date'[Date])` — carrying **no `dataType` at all** (95 such columns). Their
     filters survive exactly like a `dateTime` bin's, so a running total plotted against one is just
     as wrong and a type-only check waves it through. Only `*_Start` bins (`Year Start`,
-    `Month Start`) are date-typed. Judge by **lineage back to the anchor date column**, which the
-    gate now does; when neither type nor lineage proves it, treat it as unassessable, not clean.
-  - ⚠️ **It reads the ENGINE's shapes, not DAX in general — and round 5 cut it back to exactly that.**
-    Rounds 1-5 of blind review produced 5-6-2-0-3-4 findings, and by round 5 the gate was wrong in
-    BOTH directions at once: it reported **MISMATCH (exit 1)** on a correct TEXT measure whose
-    *string literal* contained DAX, and returned **OK (exit 0)** on a genuinely broken running total
-    because a `REMOVEFILTERS` in an **unreachable `IF` branch** was unioned into the acquittal. A
-    redundant paren around a column (`('Orders'[Order_Date]) <= MAX(...)`) made a measure vanish at
-    exit 0. All three are one mistake: a regex reading raw DAX and mis-reading its syntax. So the
-    grammar is now the closed set `calc_to_dax.py:3548` documents — the `WINDOW`-family shapes the
-    engine emits for `RUNNING_SUM`/`WINDOW_*`/`SIZE`/`INDEX` — plus period-to-date. **Everything else
-    is `unassessable`.**
-  - ⚠️ **A hand-authored `FILTER(ALL(t[c]), t[c] <= MAX(t[c]))` is DISCLOSED, never judged.** The
-    engine emits no measure of that shape (its one `FILTER(ALL(...))`, `calc_to_dax.py:2328`, is a
-    cross-table FIXED LOD with an **equality** predicate), and measured across the 16 committed
-    `examples/` models — 526 measures — **114 are `FILTER(ALL(...))` and not one carries an ordering
-    comparison**. So if you write one by hand, expect **exit 3 and "probe it with EVALUATE"**, and do
-    the probe: whether the bound moves with the visual is not decidable from the DAX text, and the
-    gate no longer pretends otherwise. Deciding it needs branch reachability and operand
-    association, which is what went wrong five times.
-  - ⚠️ **Do not put DAX in a string literal and expect the gate to ignore it — it now does, but only
-    because it lexes first.** `mask_noncode` blanks literals and `--`/`//`/`/* */` comments before
-    any pattern runs. Not hypothetical: the only `TOTALYTD` anywhere in `examples/` is inside a `///`
-    documentation comment (`superstore-sales-performance/.../Date.tmdl:6`).
-  - **It does NOT replace the `EVALUATE` probe, and says so in its own output.** An explicit relation
-    argument, a cross-table as-of axis, a hierarchy projection, `ALLEXCEPT`, a measure-only visual, a
-    column merely *named* like a date part, and any period-to-date measure whose date table is not
-    marked are all reported `unassessable`. For any of those, still run `EVALUATE` probes at every
-    axis grain the emitted visuals bind to and compare to the source/oracle. ⚠️ And note what "gate
-    exists" does not mean: swept over `_runs/estate-2.339.0-20260829` (51 pbip projects) and all 16
-    committed `examples/`, it found **zero live instances** — the estate's two real
-    `WINDOW(... ORDERBY(...))` measures are bound to no visual at all. It is proven against the
-    reproduced S14 fixture and against real engine bytes with a binding injected, not against a
-    defect found in the wild.
+    `Month Start`) are date-typed. Judge by **lineage back to the anchor date column**; when neither
+    type nor lineage proves it, treat it as unverified, not clean.
+  - ⚠️ **Whether an as-of bound moves with the visual is not decidable from the DAX text.** Deciding
+    it needs branch reachability and operand association: measured, `IF(TRUE(), MAX(d),
+    CALCULATE(MAX(d), REMOVEFILTERS(<the axis>)))` reads as acquitted because the **unreachable**
+    branch's removal gets unioned in, and a redundant paren around a column made a measure vanish
+    entirely. Probe it; do not reason about it from the text.
+  - **What the axis-mismatch defect looks like in the estate: rare, and never where you look.**
+    Swept over `_runs/estate-2.339.0-20260829` (51 pbip projects) and all 16 committed `examples/`:
+    **zero** live instances. The estate's two real `WINDOW(... ORDERBY(...))` measures are bound to
+    no visual at all, and its five `RUNNING_SUM` translations are `BLANK()` stubs
+    (`check_stub_measures.py` owns those). So the S14 table above remains the one measured
+    reproduction — treat it as a shape to probe for, not a frequent occurrence.
 
 **Month/quarter binning is a MODEL job, and it lands on you mid-migration:**
 - Power BI cannot bin a date to month in the **report** layer when the model has no date table, no
