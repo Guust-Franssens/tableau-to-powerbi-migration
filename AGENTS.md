@@ -337,7 +337,10 @@ Three things about the oracle bite, all verified in `scripts/capture_tableau_ora
   never reaches the exit code, and zero selected views also exits 0 — so `--images` can return 0
   having produced no image. Confirm the capture in `_oracle/oracle-manifest.json` (a non-zero
   `view_count`, plus each view's image status) before believing it happened. It writes renders to
-  `_oracle/images/<view>__<luid8>.png`, numbers to `_oracle/data/`, and that manifest.
+  `_oracle/images/<full-view-luid>.png`, numbers to `_oracle/data/`, and that manifest. ⚠️ The stem is
+  the **full validated LUID and nothing else** (`artifact_stem`): a view NAME is response data, and a
+  reflected session token arriving as one was once slugged and truncated into the filename, where no
+  downstream scrub could recognise it. Do not expect a readable name in the path.
 
 Credentials for either tool come from `.env` **or exported environment variables** (the latter take
 precedence), never CLI arguments.
@@ -543,6 +546,23 @@ carry no `capabilities` manifest, and are taken in the view's **default state on
 pinning), so they are **layout- and text-grade only**. Say so in the brief, and tell the consumer to
 log that ceiling in `limitations_encountered`: a visual PASS signed off on oracle imagery alone is
 overstated (issue #194). Do not quietly drop this, and do not inflate it.
+
+**Add `--reference-best` to any oracle run that covers dashboards.** `?resolution=high` is measured to
+be **exactly 2× the dashboard's declared size, with no parameter that raises it** — a 650×800 dashboard
+tops out at 1300×1600 forever — so a label-dense page can be structurally legible and content-illegible
+at once. `--reference-best` **probes** the ladder (`svg` → `pdf` → `png_high`) and takes the best rung
+the site actually answers on, then records the tier, the per-rung verdicts and all three version
+numbers in the manifest's `render_capability`.
+
+⚠️ **Which rung a customer gets depends on their Tableau version, and Cloud is not representative.**
+SVG needs REST **3.29** = Cloud June 2026 / **Server 2026.2**, so an on-prem site on 2023.x–2025.x has
+**none** — but `/pdf` reaches back to API **2.8** (Server 10.5, 2018) and is genuinely vector with
+*embedded fonts*, and `?resolution=high` to API **2.5**. Never infer capability from a version string:
+`TABLEAU_REST_API_VERSION` is a *client preference* we send, the same Cloud site moved 3.29 → 3.30 in a
+week, and a client pinned below the floor loses a tier the server supports (now a named warning). None
+of this upgrades the grade: still default-state, still outside `reference/`. It raises the ceiling
+*within* text-grade. Route survey, the API→release map and the numbers:
+[`docs/reference-capture.md`](docs/reference-capture.md) (issues #403, #194).
 
 > **Running the pipeline by hand, or standing behind someone who is?**
 > [`docs/operator-runbook.md`](docs/operator-runbook.md) is the command-by-command version of this

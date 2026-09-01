@@ -446,7 +446,8 @@ paths it emitted, and nothing in it was handed to a parser. The same caution app
 to data, which shipped `ok: true` on **30 of 44** workbooks the same `report.json` recorded defects
 for (measured on `_runs/estate-2.339.0-20260829`). The strongest offline signal is
 `TmdlSerializer.DeserializeDatabaseFromFolder` — `scripts/tmdl_oracle.py`, via `check_datamodel.py` /
-`check_unit.py --scope data-model` — but **that is a parser-level structural gate, necessary and not
+`check_unit.py --scope model` (which runs the `data-model` check) — but **that is a parser-level
+structural gate, necessary and not
 sufficient**: duplicate measure names deserialize cleanly there and Desktop still refuses to open the
 `.pbip`. Only a cold Desktop open settles it. Full breakdown, including which of the `checks`
 omissions are vacuous and which are genuine:

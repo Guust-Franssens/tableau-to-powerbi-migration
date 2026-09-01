@@ -606,7 +606,7 @@ REQUIRED: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "pbi-migration-validator.agent.md",
-        "9275947d74939026a2a95868d1ee05efa3c732fd290d0ee2577baba0272d8b3f",
+        "6565d664facb237fa1c8e07ce15931fe44464ab35b8ac6fb2ed398f8e2e04af3",
         "the validator's rule that `openability_selfcheck.ok` is adjudicated, never cited",
     ),
     (

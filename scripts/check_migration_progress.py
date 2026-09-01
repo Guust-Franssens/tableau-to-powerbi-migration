@@ -43,7 +43,7 @@ import logging
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 try:
     from generated_edit_declarations import load_generated_edit_declarations as _load_generated_edit_declarations
@@ -224,22 +224,70 @@ def load_generated_edit_declarations(bundle: Path) -> list[dict[str, Any]]:
     return _load_generated_edit_declarations(bundle)
 
 
-def _artifact_drift(bundle: Path, baseline: dict[str, str]) -> list[tuple[str, str]]:
-    """Changed, missing, or newly-added generated artifacts."""
+class GeneratedArtifactSnapshot(NamedTuple):
+    """ONE read of the generated-artifact inventory, so two consumers can share one filesystem state.
+
+    ⚠️ Exists because reading the disk twice is not the same as reading it once. Measured (blind
+    review round 6 of PR #399): ``harvest_engine_gaps.py`` adjudicated provenance here and only THEN
+    walked the bundle's trees, so an edit landing between the two operations was described by both at
+    once - the comparison saw the NEW bytes while the stale adjudication still called that path
+    pristine. One injected working-visual edit produced ``status=complete``, ``differing_files=1`` and
+    ``engine_internal=1`` (a TIER edit attributed to the ENGINE) while :func:`tamper_check` returned
+    ``DRIFT`` on the same bundle a second later.
+
+    ``hashes`` covers the recorded inventory UNION whatever is on disk now, so a newly added artifact
+    carries a digest too; the value is ``None`` for a path that is not a file. ``current`` is kept
+    rather than derived from ``hashes`` because "is this a generated artifact" is a classification
+    question (:func:`_is_generated_artifact`), not a "does it hash" one.
+
+    ⚠️ Round 6 also compared two of these end to end and called the difference a race. Round 7 killed
+    that: an ABA edit restores the original bytes, both endpoints match, and the consumer's own read
+    of the changed bytes goes unnoticed. A snapshot is an AUTHORITY to check evidence against - never
+    evidence in its own right that nothing happened.
+    """
+
+    hashes: dict[str, str | None]
+    current: frozenset[str]
+
+
+def observe_generated_artifacts(bundle: Path, baseline: dict[str, str]) -> GeneratedArtifactSnapshot:
+    """Read the whole generated-artifact inventory once, for a caller that must not read it twice."""
+    current = frozenset(current_generated_artifacts(bundle))
+    hashes: dict[str, str | None] = {}
+    for relative in sorted(set(baseline) | current):
+        path = bundle / Path(relative)
+        hashes[relative] = sha256_file(path) if path.is_file() else None
+    return GeneratedArtifactSnapshot(hashes, current)
+
+
+def _artifact_drift(
+    bundle: Path,
+    baseline: dict[str, str],
+    snapshot: GeneratedArtifactSnapshot | None = None,
+) -> list[tuple[str, str]]:
+    """Changed, missing, or newly-added generated artifacts.
+
+    ``snapshot`` lets a caller that has ALREADY read the inventory adjudicate against that exact
+    read instead of taking a second, later one. Omit it and the behaviour is unchanged: this reads
+    the disk itself.
+    """
+    seen = observe_generated_artifacts(bundle, baseline) if snapshot is None else snapshot
     drift = []
     for relative, expected in sorted(baseline.items()):
-        path = bundle / Path(relative)
-        if not path.is_file():
+        actual = seen.hashes.get(relative)
+        if actual is None:
             drift.append((relative, "missing"))
-        elif sha256_file(path) != expected:
+        elif actual != expected:
             drift.append((relative, "changed"))
-    for relative in sorted(current_generated_artifacts(bundle) - set(baseline)):
+    for relative in sorted(seen.current - set(baseline)):
         drift.append((relative, "added"))
     return drift
 
 
-def _current_hash(bundle: Path, relative: str) -> str | None:
+def _current_hash(bundle: Path, relative: str, snapshot: GeneratedArtifactSnapshot | None = None) -> str | None:
     """Hash the current target, or ``None`` when the declared outcome is deletion."""
+    if snapshot is not None and relative in snapshot.hashes:
+        return snapshot.hashes[relative]
     path = bundle / Path(relative)
     return sha256_file(path) if path.is_file() else None
 
@@ -280,6 +328,76 @@ def _matching_declaration(
     return None
 
 
+class UnreadableDeclarations(RuntimeError):
+    """The declaration ledger exists but cannot be read, so drift cannot be adjudicated.
+
+    A DISTINCT outcome on purpose. Reporting unreadable evidence as ``DRIFT`` would give it the exit
+    code of a positively detected undeclared edit, and those are different situations: one says "an
+    artifact moved and nobody declared it", the other says "an artifact moved and the ledger that
+    might exonerate it is corrupt".
+    """
+
+
+def adjudicate_generated_drift(
+    bundle: Path,
+    generated: dict[str, Any],
+    snapshot: GeneratedArtifactSnapshot | None = None,
+) -> list[dict[str, Any]]:
+    """Every generated artifact that moved since the engine ran, with its declaration verdict.
+
+    The structured core of :func:`tamper_check`, exposed as a PUBLIC contract so a second consumer
+    can adjudicate provenance with THIS machinery instead of re-deriving weaker rules of its own
+    (issue #274). ``harvest_engine_gaps.py`` is that consumer: a blind review found its own
+    hand-rolled attribution missed a baseline rewrite, a post-engine file addition, a post-engine
+    deletion and a stale declaration - all four of which this function already reported as drift.
+
+    Returns one record per moved artifact: ``target`` (bundle-relative POSIX path), ``kind``
+    (``changed`` / ``missing`` / ``added``), and ``declared_by`` - the declaring script identity,
+    populated ONLY when a declaration ties this run id, this baseline hash, this operation and this
+    exact resulting hash together. Anything weaker is undeclared, which is the point.
+
+    ⚠️ **Drift is computed FIRST, and declarations are loaded only if there is drift to adjudicate.**
+    The order is load-bearing, not stylistic. An earlier version of this extraction loaded the ledger
+    up front, and a bundle whose generated artifacts were entirely PRISTINE then depended on data
+    that could not affect its verdict: measured (blind review of PR #399), invalid UTF-8 in either
+    supported declaration location turned a `CLEAN` verdict into an uncaught ``UnicodeDecodeError``
+    and a CLI traceback exiting 1 - the same numeric code as a real ``DRIFT``. Declarations are
+    evidence ABOUT drift; with no drift there is nothing for them to be evidence about.
+
+    ``snapshot`` is an already-taken :class:`GeneratedArtifactSnapshot`. Pass one when the verdict
+    must describe the SAME filesystem state as some other read the caller made; omit it and this
+    reads the inventory itself, exactly as before.
+    """
+    drift = _artifact_drift(bundle, generated["files"], snapshot)
+    if not drift:
+        return []
+    try:
+        declarations = load_generated_edit_declarations(bundle)
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise UnreadableDeclarations(
+            f"declaration ledger under {GENERATED_EDIT_DECLARATIONS.parent.as_posix()} could not be read "
+            f"({type(exc).__name__}: {exc}), so {len(drift)} drifted artifact(s) cannot be adjudicated. "
+            "This is NOT the same as undeclared drift - repair or remove the ledger and re-run."
+        ) from exc
+    adjudicated: list[dict[str, Any]] = []
+    for relative, kind in drift:
+        declaration = _matching_declaration(
+            declarations,
+            generated,
+            relative,
+            kind,
+            _current_hash(bundle, relative, snapshot),
+        )
+        adjudicated.append(
+            {
+                "target": relative,
+                "kind": kind,
+                "declared_by": declaration["script_identity"] if declaration else None,
+            }
+        )
+    return adjudicated
+
+
 def tamper_check(bundle: Path) -> tuple[str, list[str]]:
     """Detect generated artifacts that changed without structured declaration evidence."""
     generated = load_generated_artifact_baseline(bundle)
@@ -300,27 +418,22 @@ def tamper_check(bundle: Path) -> tuple[str, list[str]]:
     )
 
     baseline = generated["files"]
-    drift = _artifact_drift(bundle, baseline)
-    if not drift:
+    try:
+        adjudicated = adjudicate_generated_drift(bundle, generated)
+    except UnreadableDeclarations as exc:
+        return "UNREADABLE_DECLARATIONS", [str(exc), *coverage_notes]
+    if not adjudicated:
         return "CLEAN", [
             f"{len(baseline)} generated artifact(s) are pristine against their engine-run hashes",
             *coverage_notes,
         ]
 
-    declarations = load_generated_edit_declarations(bundle)
     notes = []
     undeclared = []
-    for relative, kind in drift:
-        current_hash = _current_hash(bundle, relative)
-        declaration = _matching_declaration(
-            declarations,
-            generated,
-            relative,
-            kind,
-            current_hash,
-        )
-        if declaration:
-            notes.append(f"DECLARED {kind}: {relative} via {declaration['script_identity']}")
+    for item in adjudicated:
+        relative, kind = item["target"], item["kind"]
+        if item["declared_by"]:
+            notes.append(f"DECLARED {kind}: {relative} via {item['declared_by']}")
         else:
             undeclared.append((relative, kind))
             notes.append(
@@ -591,10 +704,23 @@ def run_handoff_mode(bundle: Path, as_json: bool) -> int:
 
 
 def run_tamper_mode(bundle: Path, as_json: bool) -> int:
-    """Run the generated-artifact drift gate and return its process exit code."""
+    """Run the generated-artifact drift gate and return its process exit code.
+
+    ``UNREADABLE_DECLARATIONS`` -> 4 is a NEW code, and it can only replace a situation that
+    previously died with an uncaught traceback (also exiting 1, indistinguishably from a real
+    ``DRIFT``). No bundle that ever produced one of the five existing verdicts produces a different
+    one now.
+    """
     state, notes = tamper_check(bundle)
     _emit_notes("TAMPER", bundle, state, notes, as_json)
-    return {"CLEAN": 0, "DECLARED_DRIFT": 0, "DRIFT": 1, "NO_BASELINE": 2, "NO_BASELINE_BY_DESIGN": 3}[state]
+    return {
+        "CLEAN": 0,
+        "DECLARED_DRIFT": 0,
+        "DRIFT": 1,
+        "NO_BASELINE": 2,
+        "NO_BASELINE_BY_DESIGN": 3,
+        "UNREADABLE_DECLARATIONS": 4,
+    }[state]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -602,7 +728,9 @@ def main(argv: list[str] | None = None) -> int:
 
     ``--tamper`` has its own exit map: 0 CLEAN/DECLARED_DRIFT, 1 DRIFT, 2 NO_BASELINE (a baseline
     that should exist is missing, corrupt, or invalid), 3 NO_BASELINE_BY_DESIGN (this bundle shape
-    never records one - expected absence, not tampering; see ``_no_baseline_verdict``).
+    never records one - expected absence, not tampering; see ``_no_baseline_verdict``),
+    4 UNREADABLE_DECLARATIONS (artifacts drifted and the ledger that might exonerate them cannot be
+    read - deliberately NOT 1, which means "drifted and undeclared").
     """
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--bundle", required=True, type=Path, help="the migration's output directory")

@@ -380,6 +380,149 @@ def redact(text: str, *secrets: str) -> str:
     return "".join(out)
 
 
+def secret_forms(secret: str) -> list[str]:
+    """Every on-the-wire spelling of ``secret`` that :func:`redact` knows how to find.
+
+    Public because a *detector* needs the same vocabulary as the redactor. ``capture_tableau_oracle``
+    refuses a SUCCESSFUL response body that echoes an authenticating credential, and a detector that
+    knew fewer spellings than the scrubber would pass a payload the scrubber would then have had to
+    clean -- which is the wrong order of defence, and unreachable anyway once the bytes are a file.
+    """
+    return _wire_forms(secret)
+
+
+def env_redactor(env: dict[str, str], *extra: str):
+    """A redactor over EVERY credential this env holds, plus any live session token in ``extra``.
+
+    "Every credential known at that point" is the rule, and a call site that hand-picks one of them is
+    how it gets broken: ``tableau_render_capability._cli_fetch`` redacted the session token alone,
+    so a proxy reflecting the PAT *secret* -- sent minutes earlier to the same host, at sign-in -- into
+    a later response wrote it out in clear. Composing the list once, from the env, removes the choice.
+
+    ``pat_secret`` returns ``""`` for an unset value and :func:`redact` skips empty secrets, so this
+    is safe on a partially-populated env: it degrades to the ``X-Tableau-Auth`` header rule rather
+    than raising.
+    """
+    secrets = (pat_secret(env), env.get("TABLEAU_PAT_NAME", ""), *extra)
+
+    def redactor(text: str) -> str:
+        return redact(text, *secrets)
+
+    return redactor
+
+
+def redacted_note(value: str | bytes | None, redactor=None, *, limit: int, quote: bool = False) -> str:
+    """THE ONE WAY attacker-influenced text may enter a diagnostic that is printed, raised or persisted.
+
+    Every leak of a Tableau credential found in review of #405 was the same mistake in a different
+    place, and it is a mistake of ORDER, not of omission:
+
+    ==================================================  ==========================================
+    what ran before the redactor                        what the redactor then failed to find
+    ==================================================  ==========================================
+    ``.lower()`` on a reflected ``Content-Type``         ``image/SYNTHETIC_TOKEN`` -> lowercase
+    ``[:8]`` on the response's first bytes               a *prefix* of a longer secret
+    ``.lstrip()`` on the body                            a secret whose literal begins with a space
+    ``[:256]`` window before decoding                    a secret longer than the window
+    ==================================================  ==========================================
+
+    ``redact`` matches LITERALS. Case-folding, stripping, slicing and splitting each rewrite the
+    needle out of the haystack, so redaction afterwards is looking for a string that is no longer
+    there. The fix cannot be another careful call site -- four rounds of careful call sites is what
+    produced the table above. It has to be impossible to express the wrong order, which is what this
+    function is: the caller hands over the value **untransformed** and receives a finished string. It
+    cannot truncate first, because truncation lives in here, after the redactor.
+
+    ``limit`` and ``quote`` therefore describe the OUTPUT, never the input. Nothing shortens the text
+    before ``redactor`` sees all of it -- deliberately including very large bodies, because any bound
+    that could cut a secret is the defect this replaces, and this path only runs on a failure.
+
+    ``quote`` wraps the result in :func:`ascii`, which is ASCII-safe on purpose: the decode below is
+    lossy, and a literal U+FFFD in a message later printed to a cp1252 console raises
+    ``UnicodeEncodeError``. Quoting AFTER redaction also fixes the reason ``repr(bytes)`` was wrong --
+    it escapes quotes, backslashes and non-ASCII bytes, so a secret containing any of them arrived in
+    an escaped form the redactor had never been shown.
+
+    ⚠️ **Decoding is the one transformation that must precede redaction**, because ``redact`` takes
+    ``str``. It is lossless for any secret that is valid UTF-8 on the wire -- which is every secret
+    this repository handles, since a PAT is what we ourselves sent. A credential re-encoded in
+    transit (base64, percent-encoding, NFD, a non-UTF-8 charset) survives this, exactly as
+    :func:`redact` already documents; that residual is a property of the REDACTOR, and is unchanged.
+    """
+    text = value.decode("utf-8", "replace") if isinstance(value, (bytes, bytearray)) else (value or "")
+    # Redaction first, on the WHOLE value. Every line below this one is a transformation, and every
+    # line above it must remain incapable of shortening or rewriting the text.
+    if redactor is not None:
+        text = redactor(text)
+    text = text.strip()[:limit]
+    return ascii(text) if quote else text
+
+
+def scrub_tree(value, redactor, trail: str = "") -> tuple[object, list[str]]:
+    """Redact every string in a JSON-shaped tree -- **keys included** -- returning ``(scrubbed, paths)``.
+
+    A **SINK-side** guard, and deliberately unconditional: it does not know or care which field it is
+    looking at, because the field nobody thought about is the one that leaks. Six rounds of review on
+    #405 each fixed one SOURCE, and each time the next escape was somewhere nobody had enumerated --
+    a successful CSV's first row, then an artifact FILENAME, then a dict KEY.
+
+    Three properties are load-bearing, and the key one was missing until round 6:
+
+    1. **Keys are scrubbed too.** ``format_hints`` is keyed by CSV column name, so a column matching
+       the PAT name became a key, and a values-only walk put it in the manifest while dutifully
+       redacting the identical string one field over in ``columns``.
+    2. **A redaction-induced key COLLISION is resolved and reported, never silently dropped.** Two
+       distinct keys can scrub to the same string; ``dict`` would keep the last and lose the rest,
+       turning a redaction into data loss.
+    3. **The reported path uses the SCRUBBED key.** Building it from the raw key would put the
+       credential back into ``credential_scrubbed_at_sink`` -- the guard re-emitting what it caught.
+
+    It returns the changed paths rather than scrubbing silently. A sink that quietly cleans up is
+    indistinguishable from one that never had anything to clean, and that is exactly how a source
+    defect survives: the artifact looks perfect either way.
+
+    ⚠️ It is a **backstop, and cannot be the guarantee.** Bytes reach ``data/<luid>.csv`` and
+    ``images/<luid>.svg`` before any manifest exists, so a scrub here would leave a credential in a
+    file it can never reach. Refusing the payload at the seam, and building paths only from a verified
+    LUID, are what cover those; the mechanisms are not redundant, they cover disjoint artifacts.
+    """
+    if isinstance(value, str):
+        scrubbed = redactor(value)
+        return scrubbed, ([trail or "<root>"] if scrubbed != value else [])
+    if isinstance(value, dict):
+        out: dict = {}
+        hits: list[str] = []
+        for key, item in value.items():
+            safe_key, key_hit = _scrub_key(key, redactor, out)
+            here = f"{trail}.{safe_key}" if trail else str(safe_key)
+            if key_hit:
+                hits.append(f"{here} (key)")
+            out[safe_key], found = scrub_tree(item, redactor, here)
+            hits.extend(found)
+        return out, hits
+    if isinstance(value, list):
+        out_list, hits = [], []
+        for index, item in enumerate(value):
+            scrubbed, found = scrub_tree(item, redactor, f"{trail}[{index}]")
+            out_list.append(scrubbed)
+            hits.extend(found)
+        return out_list, hits
+    return value, []
+
+
+def _scrub_key(key, redactor, taken: dict) -> tuple[object, bool]:
+    """Redact one dict key, disambiguating a collision rather than letting a field vanish."""
+    if not isinstance(key, str):
+        return key, False
+    scrubbed = redactor(key)
+    if scrubbed == key:
+        return key, False
+    unique, suffix = scrubbed, 2
+    while unique in taken:
+        unique, suffix = f"{scrubbed}#{suffix}", suffix + 1
+    return unique, True
+
+
 def engine_child_env(env: dict[str, str], base: dict[str, str] | None = None) -> dict[str, str]:
     """Build the child process environment for invoking an ENGINE script (e.g. ``fetch_tds.py``).
 
