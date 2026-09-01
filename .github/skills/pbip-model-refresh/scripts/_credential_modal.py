@@ -66,6 +66,7 @@ import ctypes
 import os
 import re
 import time
+import unicodedata
 from ctypes import wintypes
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -392,18 +393,52 @@ def normalize_texts(texts: Iterable[str]) -> tuple[str, ...]:
     return tuple(clean)
 
 
+def canonical_text(text: str) -> str:
+    """The ONE form in which two strings count as *the same string* in this module.
+
+    ⚠️ **This exists because #417's seam converged on the FAIL-OPEN answer (blind review, HIGH).**
+    Caption removal in :func:`dialog_text_set` used ``!=`` - case-sensitive and normalisation-sensitive
+    - while every signature is compiled ``re.IGNORECASE``. So a second API representation of the same
+    caption, differing only in case, read as INDEPENDENT BODY EVIDENCE. Measured through
+    ``Invoke-DialogDecision``, an owned fully-harvested window, title ``Refresh``, texts
+    ``["Refresh", "REFRESH"]``, refresh in flight::
+
+        {"Verdict":null,"Kind":null,"ExitCode":0,"Candidates":1}
+
+    That is the exact case-sensitivity shape the seam was built to eliminate - and both paths now agreed
+    on **exit 0**, the unsafe answer, where the old PowerShell half had answered exit 3. A differential
+    proves AGREEMENT, never CORRECTNESS, which is why the oracle assertions exist beside it.
+
+    The same equality ran the other way too: title ``Personal Access Token documentation`` with an
+    uppercase duplicate returned ``CREDENTIAL_MISSING`` at **exit 1**, despite the caption-only rule.
+
+    NFC -> ``casefold`` -> NFC, because casefolding can denormalise (Unicode's canonical caseless
+    match). ⚠️ Canonical equivalence only, deliberately NOT compatibility (NFKC): a fullwidth or
+    ligature variant is a genuinely different string, and folding it would silently drop body text that
+    no signature would then read. Leaving it in errs toward an unaccounted element - exit 3, loud.
+    """
+    return unicodedata.normalize("NFC", unicodedata.normalize("NFC", text).casefold())
+
+
 def dialog_text_set(window: DesktopWindow) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
     """Return ``(title, all_texts, content_texts)`` for ``window``.
 
     ``content`` is everything that is NOT the caption, and it is the ONLY view the benign signature may
     read. A caption cannot establish that a dialog is harmless: a real owned WPF modal captioned
     ``Refresh`` whose content read ``Enter your credentials`` was dismissed on exactly that mistake in
-    the arbiter's review. Dropping content that merely EQUALS the caption errs in the safe direction -
-    it can only make a window harder to dismiss, never easier.
+    the arbiter's review.
+
+    Caption identity is :func:`canonical_text`, not ``!=`` - see there for the measured exit-0 that
+    case-sensitive equality produced. Dropping content that merely IS the caption errs in the safe
+    direction, and the reason is structural rather than hopeful: with ``content`` empty there is no
+    ``benign_hit``, so ``benign`` is unreachable; and when it is not empty, the caption itself is still
+    evaluated by :func:`classify_dialog`'s title veto. So removing more text can lose a *conviction*
+    (which is the caption-may-not-convict rule doing its job) but can never buy a *dismissal*.
     """
     title = re.sub(r"\s+", " ", window.title or "").strip()
     all_texts = normalize_texts(window.texts)
-    content = tuple(text for text in all_texts if text != title)
+    canonical_title = canonical_text(title)
+    content = tuple(text for text in all_texts if canonical_text(text) != canonical_title)
     return title, all_texts, content
 
 
@@ -422,8 +457,9 @@ def credential_search_texts(window: DesktopWindow) -> tuple[tuple[str, str], ...
 
     ⚠️ **The PROSE JOIN must be CORROBORATED BY THE BODY.** WPF splits one sentence across visual
     elements, so ``Enter your`` + ``credentials`` matches nothing element-by-element and the join is
-    what recovers it. Interactive elements are dropped from the join because an interposed ``Cancel``
-    button between those two fragments defeated a naive whole-window join. But the join is also the
+    what recovers it. Interactive elements are dropped from the join - by :func:`canonical_text`
+    identity, for the same reason the caption is - because an interposed ``Cancel`` button between
+    those two fragments defeated a naive whole-window join. But the join is also the
     one place a caption could sneak back into a conviction (``Personal Access Token documentation``
     + ``Refresh`` joins to a signature hit), so what is MATCHED is the BODY-only join and what is
     REPORTED is the full prose join including the caption - the sentence a human would read off the
@@ -435,11 +471,11 @@ def credential_search_texts(window: DesktopWindow) -> tuple[tuple[str, str], ...
     false clear.
     """
     _, all_texts, content = dialog_text_set(window)
-    interactive = set(normalize_texts(window.interactive_texts))
+    interactive = {canonical_text(text) for text in normalize_texts(window.interactive_texts)}
     pairs = [(text, text) for text in content]
-    body = tuple(text for text in content if text not in interactive)
+    body = tuple(text for text in content if canonical_text(text) not in interactive)
     if len(body) > 1:
-        prose = tuple(text for text in all_texts if text not in interactive)
+        prose = tuple(text for text in all_texts if canonical_text(text) not in interactive)
         pairs.append((" ".join(body), " ".join(prose)))
     return tuple(pairs)
 

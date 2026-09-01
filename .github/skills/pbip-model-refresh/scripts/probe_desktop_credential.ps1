@@ -595,6 +595,16 @@ function ConvertTo-ProbeWindow {
   }
   return [pscustomobject]@{
     Hwnd             = $Window.Hwnd
+    # ⚠️ **Was MISSING, and its absence made the whole ownership model inert (blind review 2026-09-01).**
+    # The Win32 shim has harvested `OwnerHwnd` since #406, but this projection never forwarded it, so
+    # every window reached the decider looking UNOWNED. Two documented behaviours were silently dead:
+    # `main_frame` saw several unowned rendering roots, returned `$null` and excluded NOTHING (so the
+    # real Desktop frame was classified, and a report titled `Account Key` could fabricate exit 1 -
+    # #376 finding 4, live), and `renders_nothing`'s "unowned AND zero-area" collapsed to "zero-area"
+    # (#400 round 3, live). Nothing detected it because the offline tests synthesise this object
+    # directly rather than going through here; `test_the_collector_emits_exactly_the_fields_the_decider_requires`
+    # now compares this property set against `decide_dialog.WINDOW_FIELDS` in both directions.
+    OwnerHwnd        = $Window.OwnerHwnd
     Title            = $title
     ClassName        = [string]$Window.ClassName
     Width            = [int]$Window.Width

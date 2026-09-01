@@ -2509,9 +2509,24 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 . $Probe -LoadDetectorsOnly
+
+function ConvertTo-AsciiJson {
+  <# JSON with every non-ASCII character escaped as \uXXXX.
+
+  ⚠️ Not cosmetic. `ConvertTo-Json` emits literal UTF-16 characters, this harness is captured through a
+  PIPE, and `subprocess.run(text=True)` decodes with the host's ANSI code page - so a `é` crossed as
+  UTF-8 bytes and arrived as `Ã©`. Measured while building the normalisation oracle: an assertion about
+  Unicode would have compared mojibake and "passed" for the wrong reason. Pure-ASCII transport is
+  immune to every console encoding, and `json.loads` unescapes it back to the exact string.
+  #>
+  param([object]$Value)
+  $json = ConvertTo-Json -InputObject $Value -Compress -Depth 6
+  return [regex]::Replace($json, '[^\x00-\x7F]', { param($m) '\u{0:x4}' -f [int][char]$m.Value })
+}
+
 if ($PayloadJson) {
   $payload = $null
-  try { $payload = ConvertFrom-Json (Get-Content -LiteralPath $PayloadJson -Raw) } catch { $payload = $null }
+  try { $payload = ConvertFrom-Json (Get-Content -LiteralPath $PayloadJson -Raw -Encoding UTF8) } catch { $payload = $null }
   $result = ConvertTo-HarvestResult -Payload $payload -ExitCode $PayloadExit
   $accepted = ($null -ne $result)
   $shaped = [ordered]@{
@@ -2520,10 +2535,10 @@ if ($PayloadJson) {
     items    = $(if ($accepted) { @($result.Items).Count } else { 0 })
     reason   = $(if ($accepted) { [string]$result.Reason } else { $null })
   }
-  Write-Output ('<<<PROBE-JSON>>>' + (ConvertTo-Json $shaped -Compress -Depth 4))
+  Write-Output ('<<<PROBE-JSON>>>' + (ConvertTo-AsciiJson -Value $shaped))
   return
 }
-$parsed = ConvertFrom-Json (Get-Content -LiteralPath $WindowsJson -Raw)
+$parsed = ConvertFrom-Json (Get-Content -LiteralPath $WindowsJson -Raw -Encoding UTF8)
 $windows = @($parsed)
 $decision = Invoke-DialogDecision -Windows $windows -RefreshInFlight:$RefreshInFlight
 $payload = [ordered]@{
@@ -2536,7 +2551,27 @@ $payload = [ordered]@{
   candidates = [int]$decision.Candidates
   line       = $(if ($decision.Verdict) { [string](Format-DialogEvidence -Window $decision.Window) } else { $null })
 }
-Write-Output ('<<<PROBE-JSON>>>' + (ConvertTo-Json $payload -Compress -Depth 4))
+Write-Output ('<<<PROBE-JSON>>>' + (ConvertTo-AsciiJson -Value $payload))
+"""
+
+
+_CANDIDATES_HARNESS = r"""
+param(
+  [Parameter(Mandatory = $true)][string]$Probe,
+  [Parameter(Mandatory = $true)][string]$WindowsJson
+)
+$ErrorActionPreference = 'Stop'
+. $Probe -LoadDetectorsOnly
+$parsed = ConvertFrom-Json (Get-Content -LiteralPath $WindowsJson -Raw -Encoding UTF8)
+$d = Invoke-DialogDecision -Windows @($parsed) -CandidatesOnly
+$out = [ordered]@{
+  verdict   = $d.Verdict
+  kind      = $d.Kind
+  exit_code = [int]$d.ExitCode
+  evidence  = $d.Evidence
+  hwnds     = @($d.CandidateHwnds)
+}
+Write-Output ('<<<PROBE-JSON>>>' + (ConvertTo-Json $out -Compress -Depth 4))
 """
 
 
@@ -4292,6 +4327,141 @@ def test_the_arbiter_has_no_length_amnesty_left_on_disk() -> None:
     assert "benign_chrome_signature.regex" in source, "the arbiter must read the shared chrome allowlist"
 
 
+def test_the_collector_emits_exactly_the_fields_the_decider_requires() -> None:
+    """The contract test that was missing, and its absence made the whole ownership model INERT.
+
+    ⚠️ **Measured 2026-09-01.** The Win32 shim has harvested `OwnerHwnd` since #406, but
+    `ConvertTo-ProbeWindow` never forwarded it - so in PRODUCTION every window reached the decider
+    looking UNOWNED, and two documented behaviours were silently dead: `main_frame` saw several
+    unowned rendering roots, returned `None` and excluded NOTHING (the real Desktop frame was
+    classified, and a report titled `Account Key` could fabricate exit 1 - #376 finding 4, live), and
+    `renders_nothing`'s "unowned AND zero-area" collapsed to "zero-area" (#400 round 3, live).
+
+    **Nothing could see it.** Every offline test synthesises the collected window directly, so it never
+    executes this projection; the live `serial` tests assert credential/truncation paths that do not
+    depend on frame identity. `ConvertTo-ProbeWindow` also sits BELOW `-LoadDetectorsOnly`, so it
+    cannot be called from here at all. Hence a SOURCE-level contract check - deliberately in both
+    directions, because a decider that quietly stops requiring a field is the same defect mirrored.
+    """
+    source = PROBE_PS1.read_text(encoding="utf-8")
+    after = source.split("function ConvertTo-ProbeWindow", 1)
+    assert len(after) == 2, "ConvertTo-ProbeWindow is gone - the collector no longer projects windows"
+    block = re.search(r"return \[pscustomobject\]@\{(.*?)\n  \}", after[1], re.DOTALL)
+    assert block, "ConvertTo-ProbeWindow's return block moved - this gate can no longer see it"
+    # Vacuity control for the gate itself: a first draft anchored on the FIRST `[pscustomobject]@{` in
+    # the file and silently read `Invoke-DialogDecision`'s error record instead, extracting nothing.
+    assert "$Window.ClassName" in block.group(1), "this is not the window projection - the anchor drifted"
+    emitted = set(re.findall(r"(?m)^ {4}(\w+)\s*=", block.group(1)))
+    required = set(decide_dialog.WINDOW_FIELDS) | set(decide_dialog.TOLERATED_FIELDS)
+
+    assert emitted == required, (
+        f"collector and decider have drifted - only the collector emits {sorted(emitted - required)}, "
+        f"only the decider requires {sorted(required - emitted)}"
+    )
+
+
+def test_a_window_record_the_decider_cannot_trust_is_never_a_clean_verdict(tmp_path: Path) -> None:
+    """Finding 1 (blind review 2026-09-01): the fail-closed promise was a claim, not an implementation.
+
+    `decide_dialog.py`'s own docstring says *"Any malformed input, unknown field or internal error
+    exits 3 with a verdict of `DIALOG_UNREADABLE`, never 0."* Measured on the pre-fix build, all three
+    of these returned **exit 0**:
+
+    * a record whose only field was `TotallyUnknown` - accepted as an empty window, then dropped by
+      `renders_nothing` because absent geometry and ownership had become `0`;
+    * `Texts` supplied as a JSON OBJECT - its KEYS were read as window text and authorised in-flight
+      suppression;
+    * a window missing every geometry and ownership field - still reached the credential prepass.
+
+    Note the shape: each one turned MISSING EVIDENCE into GOOD EVIDENCE, which is the defect class this
+    whole bundle exists to remove, arriving over the one boundary that was left unguarded.
+    """
+    frame = _window(
+        Title="MyReport - Power BI Desktop",
+        ClassName="WindowsForms10.Window.8.app.0.x",
+        Width=1920,
+        Height=1080,
+        Texts=["MyReport - Power BI Desktop"],
+        Hwnd=SYNTHESISED_FRAME_HWND,
+        OwnerHwnd=0,
+    )
+    progress = _window(
+        Title="Refresh",
+        Texts=["Refresh", "1,204 rows loaded"],
+        OwnerEnabled=False,
+        Hwnd=0xD001,
+        OwnerHwnd=SYNTHESISED_FRAME_HWND,
+    )
+    malformed = [
+        ({"TotallyUnknown": "nope"}, "unknown field"),
+        ({**progress, "Texts": {"Refresh": 1, "1,204 rows loaded": 2}}, "Texts as an object"),
+        ({"Title": "Refresh", "Texts": ["Refresh"]}, "missing geometry and ownership"),
+        ({**progress, "Width": True}, "a Boolean where a width belongs"),
+        ({**progress, "Texts": ["Refresh", 7]}, "a non-string text element"),
+        ({**progress, "OwnerEnabled": "false"}, "a string where a tri-state Boolean belongs"),
+        ({**progress, "Texts": "Refresh"}, "a bare string instead of a text array"),
+    ]
+
+    for record, why in malformed:
+        result = classify(tmp_path, [record, frame], refresh_in_flight=True, frame=False)
+
+        assert result["exit_code"] == 3, f"{why} produced a clean verdict: {result}"
+        assert result["verdict"] == "DIALOG_UNREADABLE", why
+        assert result["kind"] == "unreadable", why
+        assert "WindowSchemaError" in (result["evidence"] or ""), f"{why}: {result['evidence']!r}"
+
+
+def test_a_malformed_self_report_is_unverified_not_unreadable(tmp_path: Path) -> None:
+    """The ONE field outside the schema, and why that is deliberate rather than an oversight.
+
+    `HarvestComplete` is not structure - it is the collector's self-report about the quality of its own
+    read, and it already has a stricter rule than any type check could express (only a real `True`
+    counts). A malformed self-report therefore has a BETTER answer than "unreadable": same exit-3 band,
+    but it still tells the operator the content looked like progress. Rejecting it would lose that.
+
+    Asserted against the schema in both directions so the carve-out cannot silently grow.
+    """
+    window = _window(Title="Refresh", Texts=["Refresh", "1,204 rows loaded"], OwnerEnabled=False)
+    window["HarvestComplete"] = "definitely"
+
+    result = classify(tmp_path, [window], refresh_in_flight=True)
+
+    assert result["kind"] == "benign-unverified", result
+    assert result["exit_code"] == 3
+    assert decide_dialog.TOLERATED_FIELDS == {"HarvestComplete"}, (
+        "the schema carve-out grew - every field added here loses its type check"
+    )
+    assert "HarvestComplete" not in decide_dialog.WINDOW_FIELDS
+
+
+def test_the_candidates_only_pass_fails_closed_too(tmp_path: Path) -> None:
+    """Validation runs BEFORE the `--candidates-only` branch, and that ordering is load-bearing.
+
+    That branch decides which windows get a UIA harvest. A record accepted there but malformed is a
+    window that never gets enriched - a silent loss of the only text that can convict - so it must not
+    be able to nominate candidates either. Measured pre-fix: an unknown-only record returned exit 0
+    with a candidate hwnd list.
+    """
+    harness = tmp_path / "candidates.ps1"
+    harness.write_text(_CANDIDATES_HARNESS, encoding="utf-8")
+    payload = tmp_path / "windows.json"
+    payload.write_text(json.dumps([{"TotallyUnknown": "nope"}]), encoding="utf-8")
+    done = subprocess.run(
+        [_powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness)]
+        + ["-Probe", str(PROBE_PS1), "-WindowsJson", str(payload)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert done.returncode == 0, f"{done.stdout}\n{done.stderr}"
+    result = json.loads(done.stdout.split("<<<PROBE-JSON>>>", 1)[1].strip().splitlines()[0])
+
+    assert result["exit_code"] == 3, result
+    assert result["verdict"] == "DIALOG_UNREADABLE"
+    assert result["hwnds"] == [], "a record the decider rejected must not nominate a window for harvest"
+
+
 def test_the_chrome_allowlist_stays_an_enumeration_not_a_catch_all() -> None:
     """The one file that can now excuse an unexplained element - so it has to stay tiny and anchored.
 
@@ -4489,7 +4659,7 @@ $ErrorActionPreference = 'Stop'
 # Assign FIRST, then wrap. `@(ConvertFrom-Json ...)` is a Windows PowerShell 5.1 trap: the cmdlet
 # writes the whole array as ONE pipeline object, so `@()` yields a 1-element array containing the
 # array, `foreach` runs once, and `$case.id` silently member-enumerates into every id at once.
-$parsedCases = ConvertFrom-Json (Get-Content -LiteralPath $CasesJson -Raw)
+$parsedCases = ConvertFrom-Json (Get-Content -LiteralPath $CasesJson -Raw -Encoding UTF8)
 $cases = @($parsedCases)
 $results = @()
 foreach ($case in $cases) {
@@ -4560,6 +4730,184 @@ def _seam_corpus() -> list[dict]:
 # Every 28th case by default: 96 of the 2,688, spread deterministically across the whole product and
 # costing ~30s. The full sweep is the same generator with `PBIP_SEAM_SWEEP_STRIDE=1` - see the test.
 SEAM_SWEEP_STRIDE = max(1, int(os.environ.get("PBIP_SEAM_SWEEP_STRIDE", "28")))
+
+# --------------------------------------------------------------------------------------------------
+# THE ORACLE. A differential proves AGREEMENT; only this proves CORRECTNESS.
+# --------------------------------------------------------------------------------------------------
+#
+# ⚠️ **Measured 2026-09-01, blind review, and it is the most important lesson on this branch.** The
+# 2,688-case differential passed with zero mismatches while both entry paths returned **exit 0** for an
+# owned, fully-harvested window titled `Refresh` whose texts were `["Refresh", "REFRESH"]` under
+# `-RefreshInFlight`::
+#
+#     {"Verdict":null,"Kind":null,"ExitCode":0,"Candidates":1}
+#
+# That is the exact case-sensitivity shape the #417 seam was BUILT to eliminate - and the seam had
+# resolved it by adopting the FAIL-OPEN half. The old PowerShell behaviour was exit 3; the merged
+# implementation inherited Python's `!=`. Collapsing two implementations into one removes DIVERGENCE,
+# not DEFECTS, and any measurement whose success criterion is "the two arms match" is satisfied by a
+# shared bug.
+#
+# So every case below carries a hand-derived CORRECT answer, and both entry paths are asserted against
+# it. `expected` is the whole triple - kind, verdict, exit code - because a verdict that is right for
+# the wrong reason is the next defect.
+
+_ORACLE_CASES: list[tuple[str, dict, bool, tuple[str, str | None, int], str]] = [
+    (
+        "case-variant caption duplicate, in flight",
+        _window(Title="Refresh", Texts=["Refresh", "REFRESH"], OwnerEnabled=False),
+        True,
+        ("benign-title-only", "DIALOG_UNREADABLE", 3),
+        "the second element IS the caption in another case; nothing here is body evidence, so the "
+        "window is caption-only and must not be suppressed as our own refresh",
+    ),
+    (
+        "case-variant caption duplicate, t=0",
+        _window(Title="Refresh", Texts=["Refresh", "REFRESH"], OwnerEnabled=False),
+        False,
+        ("benign-title-only", "DIALOG_UNREADABLE", 3),
+        "same window, same answer: the deadline must not be able to erase it either",
+    ),
+    (
+        "case-variant duplicate of a HOSTILE caption",
+        _window(Title="Password:", Texts=["Password:", "PASSWORD:"], OwnerEnabled=False),
+        True,
+        ("unrecognized", "DIALOG_UNRECOGNIZED", 3),
+        "a caption that is not progress status cannot be excused by its own echo",
+    ),
+    (
+        "case-variant duplicate of a caption that CONTAINS a signature phrase",
+        _window(
+            Title=PAT_DOCUMENTATION_CAPTION,
+            Texts=[PAT_DOCUMENTATION_CAPTION, PAT_DOCUMENTATION_CAPTION.upper()],
+            OwnerEnabled=False,
+        ),
+        False,
+        ("unrecognized", "DIALOG_UNRECOGNIZED", 3),
+        "the caption may ACCUSE (exit 3) but never CONVICT - an echo of it is not body evidence, so "
+        "exit 1 here would be a fabricated sign-in wall",
+    ),
+    (
+        "NFC/NFD caption duplicate",
+        _window(
+            Title="Caf\u00e9 Refresh",
+            Texts=["Caf\u00e9 Refresh", "Cafe\u0301 Refresh", "Evaluating"],
+            OwnerEnabled=False,
+        ),
+        True,
+        ("mixed-content", "DIALOG_UNRECOGNIZED", 3),
+        "the NFD spelling is the same caption, so it is not a second unaccounted element - but the "
+        "caption itself is still unaccounted, and the title veto is what holds the exit-3 line",
+    ),
+    (
+        "an NFD interactive label must not break a split signature",
+        _window(
+            Title="Refresh",
+            Texts=["Refresh", "Enter your", "Annul\u00e9", "credentials"],
+            InteractiveTexts=["Annule\u0301"],
+            OwnerEnabled=False,
+        ),
+        True,
+        ("credential", "CREDENTIAL_MISSING", 1),
+        "UIA and Win32 can spell one localised button label in different normalisations; the prose "
+        "join must still drop it, or a real sign-in prompt reads as unrecognised",
+    ),
+    (
+        "a genuine progress dialog is still dismissible in flight",
+        REFRESH_PROGRESS,
+        True,
+        (None, None, 0),
+        "the positive control: without a reachable benign path this probe can never answer "
+        "CREDENTIAL_PRESENT, and every case above would pass by refusing everything",
+    ),
+    (
+        "a genuine progress dialog at t=0 belongs to somebody else",
+        REFRESH_PROGRESS,
+        False,
+        ("benign", "REFRESH_IN_PROGRESS", 3),
+        "same window, different meaning: nobody started it here, so do not stack a second refresh",
+    ),
+    (
+        "a real credential modal is still a hard stop",
+        WPF_CREDENTIAL_MODAL_WITH_UIA_TEXT,
+        True,
+        ("credential", "CREDENTIAL_MISSING", 1),
+        "recall on the hard-stop path is the thing this module never trades away",
+    ),
+    (
+        "a native-query approval is exit 3, not exit 1",
+        _window(Title="Refresh", Texts=["Refresh", "Evaluating", NATIVE_QUERY_PROMPT], OwnerEnabled=False),
+        True,
+        ("needs-human", "DIALOG_NEEDS_HUMAN", 3),
+        "a human must act, but the remedy is an approval, not a sign-in",
+    ),
+    (
+        "an incomplete harvest is never a clean bill of health",
+        _window(Title="Refresh", Texts=["Refresh", "Evaluating"], OwnerEnabled=False, HarvestComplete=False),
+        True,
+        ("benign-unverified", "DIALOG_UNREADABLE", 3),
+        "benign-LOOKING is not benign when the read did not finish",
+    ),
+    (
+        "a short prompt beside progress text is never suppressed",
+        _window(Title="Refresh", Texts=["Refresh", "Evaluating", "Password:"], OwnerEnabled=False),
+        True,
+        ("mixed-content", "DIALOG_UNRECOGNIZED", 3),
+        "issue #406: length is not evidence",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("name", "window", "in_flight", "expected", "why"),
+    _ORACLE_CASES,
+    ids=[case[0].replace(" ", "-") for case in _ORACLE_CASES],
+)
+def test_the_seam_answers_a_known_oracle_CORRECTLY_not_merely_consistently(
+    tmp_path: Path,
+    name: str,
+    window: dict,
+    in_flight: bool,
+    expected: tuple[str | None, str | None, int],
+    why: str,
+) -> None:
+    """Both entry paths, against a hand-derived correct answer rather than against each other.
+
+    This is the insurance the differential cannot provide. It is asserted on BOTH paths deliberately:
+    a correctness oracle on one arm plus an equality check between arms is strictly stronger than
+    either, and it is what turns "they agree" into "they agree on the right answer".
+    """
+    kind, verdict, exit_code = expected
+    windows = _owned_by_a_synthesised_frame([window])
+
+    collector = classify(tmp_path, [window], refresh_in_flight=in_flight)
+    decider = decide_dialog.decide(
+        [decide_dialog._window_from(raw) for raw in windows],
+        in_flight=in_flight,
+    )
+
+    assert (collector["kind"], collector["verdict"], collector["exit_code"]) == (kind, verdict, exit_code), (
+        f"COLLECTOR path is wrong for {name!r} - {why}: {collector}"
+    )
+    assert (decider["kind"], decider["verdict"], decider["exit_code"]) == (kind, verdict, exit_code), (
+        f"DECIDER path is wrong for {name!r} - {why}: {decider}"
+    )
+
+
+def test_the_oracle_covers_every_reportable_kind_and_both_non_indeterminate_exits() -> None:
+    """A vacuity guard on the oracle itself: an oracle that never asserts exit 0 or 1 proves little.
+
+    The failure this whole section exists to catch is a shared FAIL-OPEN, so the table has to contain
+    cases whose right answer is exit 0 - otherwise "refuse everything" passes it - and cases whose
+    right answer is exit 1, otherwise eroding recall passes it too.
+    """
+    exits = {case[3][2] for case in _ORACLE_CASES}
+    kinds = {case[3][0] for case in _ORACLE_CASES}
+
+    assert exits == {0, 1, 3}, f"the oracle never pins one of the three bands: {sorted(exits)}"
+    assert {"benign", "benign-title-only", "benign-unverified", "credential", "needs-human"} <= kinds, (
+        f"the oracle does not reach every decisive kind: {sorted(k for k in kinds if k)}"
+    )
 
 
 def test_the_seam_leaves_no_verdict_mismatch_between_the_two_entry_paths(tmp_path: Path) -> None:

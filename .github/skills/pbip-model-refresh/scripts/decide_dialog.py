@@ -51,12 +51,91 @@ EXIT_INDETERMINATE = 3
 UNREADABLE_GUIDANCE = "the dialog state could not be established at all - look at the Desktop screen"
 
 
-def _window_from(raw: dict) -> DesktopWindow:
-    """Build a :class:`DesktopWindow` from one collected record.
+class WindowSchemaError(ValueError):
+    """A collected record that cannot be trusted enough to classify.
 
-    Every field is read defensively: the collector is a different language and a different process, so
-    a missing or mistyped field is a real possibility and must degrade toward "we know less", never
-    toward "this window is fine".
+    Raised BEFORE a :class:`DesktopWindow` exists, so it lands in :func:`main`'s handler and becomes
+    ``DIALOG_UNREADABLE`` at exit 3 - the module's documented fail-closed promise, which until the
+    2026-09-01 blind review was a claim the code did not implement.
+    """
+
+
+# The window contract, field by field. `probe_desktop_credential.ps1`'s `ConvertTo-ProbeWindow` is the
+# ONLY producer, and `test_the_collector_emits_exactly_the_fields_the_decider_requires` compares its
+# emitted property set against this dict in both directions.
+#
+# ⚠️ Types are matched EXACTLY, not with `isinstance`, and that is load-bearing: `bool` is a subclass
+# of `int` in Python, so an `isinstance(value, int)` check accepts `true` for `Width` - which is
+# precisely the class of silent coercion this validator exists to stop.
+WINDOW_FIELDS: dict[str, tuple[type, ...]] = {
+    "Title": (str,),
+    "ClassName": (str,),
+    "Width": (int,),
+    "Height": (int,),
+    "Hwnd": (int,),
+    "OwnerHwnd": (int,),
+    "Minimized": (bool,),
+    "OwnerEnabled": (bool, type(None)),
+    "Texts": (list,),
+    "InteractiveTexts": (list,),
+    "HarvestReason": (str,),
+}
+
+# ⚠️ **`HarvestComplete` is deliberately outside the schema, and this is the one exception.** It is not
+# structure; it is the collector's SELF-REPORT about the quality of its own read, and it already has a
+# stricter rule than any type check could express - only a real Boolean `True` counts. A malformed
+# self-report therefore has a better answer than "unreadable": `benign-unverified` is the same exit-3
+# band AND still tells the operator that the content looked like progress. Rejecting it would lose
+# that. Gated by `test_only_a_real_boolean_true_can_authorise_suppression` (nine shapes, including an
+# absent field) and by `test_a_malformed_self_report_is_unverified_not_unreadable`.
+TOLERATED_FIELDS = frozenset({"HarvestComplete"})
+
+
+def _has_exact_type(value: object, allowed: tuple[type, ...]) -> bool:
+    """Exact-type membership. `isinstance` is WRONG here - see :data:`WINDOW_FIELDS`."""
+    return any(type(value) is expected for expected in allowed)  # pylint: disable=unidiomatic-typecheck
+
+
+def validate_window(raw: object) -> dict:
+    """Reject anything that is not exactly one well-formed collected window, or return it unchanged.
+
+    Measured on the pre-fix build, all three through ``Invoke-DialogDecision`` and all three **exit 0**:
+
+    * a record whose only field was ``TotallyUnknown`` was accepted as an empty window, and - because
+      absent geometry and ownership became ``0`` - :func:`_credential_modal.renders_nothing` then
+      declared it *proven non-rendering* and dropped it before classification;
+    * ``Texts`` supplied as a JSON **object** had its KEYS read as window text, and those keys
+      authorised in-flight suppression;
+    * a window missing every geometry and ownership field still reached the credential prepass.
+
+    An unknown field is rejected rather than ignored on purpose. There is exactly one producer, so an
+    unrecognised field means the collector and the decider are not the pair we think they are, and
+    "decide anyway on the fields I happen to recognise" is the shape of every defect on this branch.
+    """
+    if not isinstance(raw, dict):
+        raise WindowSchemaError(f"window record is {type(raw).__name__}, expected an object")
+    unknown = sorted(set(raw) - set(WINDOW_FIELDS) - TOLERATED_FIELDS)
+    if unknown:
+        raise WindowSchemaError(f"unknown field(s) {unknown} - collector and decider have drifted")
+    missing = sorted(set(WINDOW_FIELDS) - set(raw))
+    if missing:
+        raise WindowSchemaError(f"missing required field(s) {missing}")
+    for name, allowed in WINDOW_FIELDS.items():
+        value = raw[name]
+        if not _has_exact_type(value, allowed):
+            expected = "|".join(kind.__name__ for kind in allowed)
+            raise WindowSchemaError(f"{name} is {type(value).__name__}, expected {expected}")
+    for name in ("Texts", "InteractiveTexts"):
+        # Exact type again, for the same reason as :data:`WINDOW_FIELDS` - `isinstance` would accept a
+        # `str` subclass, and more importantly would accept `True` for an `int`-typed sibling check.
+        offenders = sorted({type(item).__name__ for item in raw[name] if not _has_exact_type(item, (str,))})
+        if offenders:
+            raise WindowSchemaError(f"{name} holds non-string element(s) of type {offenders}")
+    return raw
+
+
+def _window_from(raw: dict) -> DesktopWindow:
+    """Build a :class:`DesktopWindow` from one VALIDATED collected record.
 
     ⚠️ **``HarvestComplete`` is the field that authorises a dismissal, so ONLY a real Boolean ``True``
     survives here.** JSON round-trips widen types, a caller can predate the field, and a future
@@ -71,30 +150,25 @@ def _window_from(raw: dict) -> DesktopWindow:
     everything that arrives over this boundary, which is why the coercion lives HERE and not in the
     classifier - a classifier that treated ``None`` as incomplete would make every Python-native
     progress dialog unverifiable.
+
+    Every OTHER field is now schema-checked by :func:`validate_window` before this runs, so the
+    defensive ``or 0`` / ``str(...)`` coercions that used to stand in for validation are gone: a
+    missing width is a rejected record, not a zero one.
     """
-
-    def _texts(key: str) -> tuple[str, ...]:
-        value = raw.get(key) or []
-        if isinstance(value, str):
-            value = [value]
-        return tuple(str(item) for item in value if item)
-
-    owner_enabled = raw.get("OwnerEnabled")
-    if not isinstance(owner_enabled, bool):
-        owner_enabled = None
+    validate_window(raw)
     return DesktopWindow(
-        title=str(raw.get("Title") or ""),
-        class_name=str(raw.get("ClassName") or ""),
-        width=int(raw.get("Width") or 0),
-        height=int(raw.get("Height") or 0),
-        texts=_texts("Texts"),
-        minimized=bool(raw.get("Minimized")),
-        hwnd=int(raw.get("Hwnd") or 0),
-        owner_hwnd=int(raw.get("OwnerHwnd") or 0),
-        owner_enabled=owner_enabled,
-        interactive_texts=_texts("InteractiveTexts"),
+        title=raw["Title"],
+        class_name=raw["ClassName"],
+        width=raw["Width"],
+        height=raw["Height"],
+        texts=tuple(text for text in raw["Texts"] if text),
+        minimized=raw["Minimized"],
+        hwnd=raw["Hwnd"],
+        owner_hwnd=raw["OwnerHwnd"],
+        owner_enabled=raw["OwnerEnabled"],
+        interactive_texts=tuple(text for text in raw["InteractiveTexts"] if text),
         harvest_complete=raw.get("HarvestComplete") is True,
-        harvest_reason=str(raw.get("HarvestReason") or ""),
+        harvest_reason=raw["HarvestReason"],
     )
 
 
@@ -162,7 +236,15 @@ def main(argv: list[str] | None = None) -> int:
         # the right place to absorb its collector's encoding quirks.
         raw = json.loads(Path(args.windows).read_text(encoding="utf-8-sig"))
         if isinstance(raw, dict):
+            # PowerShell 5.1 has no `ConvertTo-Json -AsArray`, so a single-element array serialises as
+            # a bare object. That is a SHAPE quirk of the transport, not a malformed record, so it is
+            # normalised here and then validated exactly like any other.
             raw = [raw]
+        if not isinstance(raw, list):
+            raise WindowSchemaError(f"payload is {type(raw).__name__}, expected an array of windows")
+        # ⚠️ Validation runs BEFORE the `--candidates-only` branch on purpose. That branch decides which
+        # windows get a UIA harvest, so a record accepted here but malformed is a window that never gets
+        # enriched - a silent loss of the only text that can convict. Both branches fail closed.
         windows = [_window_from(item) for item in raw]
         if args.candidates_only:
             frame = main_frame(windows)
