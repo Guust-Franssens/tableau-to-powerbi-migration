@@ -113,6 +113,29 @@ a single pass does.
 
 ## Known limitations and honest gaps
 
+- **Tableau Sets do not translate at all, in any form** (measured on canonical engine **2.339.0**,
+  2026-09-01). Every set form we could find is logged as `could not resolve field '<name>' (skipped)`
+  and then **the visual is emitted anyway, without the filter** — so the output renders confidently
+  over an unfiltered superset. Confirmed on a real Tableau training sample (`Section 08 - Organizing
+  Data`) for four distinct forms: a manual/lasso set, a **condition** set (`SUM([Score]) > 400`), a
+  **top-N rank** set, and a **combined** set (`intersection` of two set references). A set used as a
+  `<color>` encoding is dropped just as silently — the emitted `scatterChart` lost its In/Out series
+  split entirely. Reproduction fixture: `tests/fixtures/issue-185-set-filter.twb`; filed upstream as
+  [`Yarbrdab000/tableau-fabric-skills#185`](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/185).
+  ⚠️ **Do not sweep a corpus for sets by grepping `class='set'` — there is no such attribute, and the
+  sweep will report zero on a corpus that contains them.** Tableau encodes a set as a `<group>` holding
+  a `<groupfilter>`, reached from a view through `<column-instance derivation='InOut'>`. A `.twb`-only
+  sweep also misses sets inside `.twbx`, which are ZIP archives and must be extracted to be searched.
+  Both mistakes were made here and together produced a confident "our corpus contains zero Tableau
+  Sets"; the real count is 4 workbooks of 137 assets.
+- **An explicit `mark class='Bar'` supports strictly fewer shelf layouts than `mark class='Automatic'`**
+  (engine 2.339.0). `twb_to_pbir.py::_visual_type` accepts `bar` for exactly two layouts
+  (dimension-on-cols + measure-on-rows, or dimension-on-rows + measure-on-cols); `automatic` reaches
+  five further fallbacks (scatter, matrix, table, column, continuous-date line). So changing a mark
+  from Automatic to Bar in Tableau — cosmetic there — can silently cost the whole visual here
+  (`mark class 'Bar' / shelf layout not supported -> no visual emitted`, `zone left empty`). A raw
+  count of `Bar` marks proves nothing: they are common and mostly work. Controlled A/B fixture:
+  `tests/fixtures/issue-185-bar-shelf-layout.twb`.
 - **Origin-destination and line maps are the hardest surface, and not all are verified yet.** Tableau's
   MAKELINE great-circle arc has no native Power BI equivalent, so `airline-alliance-activity` uses
   destination bubbles instead of arcs (an honest downgrade, documented). Two map-heavy renders,
