@@ -376,8 +376,12 @@ Desktop on open** — they only surface when the PBIP is actually opened, not fr
     accumulation at all?"* is an **open enumeration**, and everything outside it exits **0** while
     printing "no running-total measure in this model". Measured on the final build: `RUNNINGSUM(...)`,
     `MOVINGAVERAGE(...)` and `CALCULATE(SUM(x), t[d] <= MAX(t[d]))` — a comparison not wrapped in a
-    literal `FILTER(` — all exited 0. Rounds 1–7 produced 5-6-2-0-3-4-3 findings and every round
-    closed the spellings the previous one found. See issue #425 for all reproductions.
+    literal `FILTER(` — all exited 0. Rounds 1–7 produced **5-6-2-0-3-4-4** findings and every round
+    closed the spellings the previous one found. Round 7 was the **criterion firing, plus three
+    further findings**: the mutation proof was **void** (14 harness probes named symbols an earlier
+    pruning had deleted, so "mutation-proven" never covered the shipped code), the
+    `RUNNINGSUM`/`MOVINGAVERAGE` exclusion rested on a **factually wrong** premise (below), and three
+    repo gates were red and unnoticed at HEAD. See issue #425 for all reproductions.
   - ⚠️ **`RUNNINGSUM`/`MOVINGAVERAGE` are the strongest case for such a check, not an exclusion.**
     The deleted gate excluded them believing their relation argument was *required*. It is not:
     [`RUNNINGSUM`](https://learn.microsoft.com/en-us/dax/runningsum-function-dax) is
