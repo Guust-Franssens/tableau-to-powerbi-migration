@@ -39,6 +39,15 @@ LOG = logging.getLogger("tableau-oracle")
 SVG_MIN_API_VERSION = "3.29"
 SVG_VERSION_MARKER = "SVG export requires API version"
 
+# What a per-tier status reads as when a leg carries no record at all. A module constant rather than
+# an inline literal, and that is not style: `tests/test_diagnostic_redaction.py` keys its
+# certifications on `ast.unparse` output, and unparse renders an f-string containing a NESTED string
+# literal differently across Python versions -- `f"{k}={s or 'absent'}"` on 3.13 versus
+# `f'{k}={s or 'absent'}'` on the CI interpreter (PEP 701 quote reuse). The certification matched
+# locally and was simultaneously stale AND missing on CI. Interpolating only NAMES keeps the
+# unparsed form identical everywhere.
+ABSENT_LEG = "absent"
+
 # A render leg that was REQUESTED and deliberately not asked for, because a sibling leg drawn from the
 # same VizQL render had just failed. Distinct from every failure status: nothing was learned about
 # this tier, so it must not read as "this tier is broken" -- and distinct from an ABSENT key, which
@@ -352,11 +361,9 @@ def _log_unestablished(unestablished: list[dict[str, Any]], redactor) -> None:
         len(unestablished),
     )
     for entry in unestablished:
-        LOG.warning(
-            "  - %s: %s",
-            redacted_note(entry.get("view_name"), redactor, limit=60),
-            ", ".join(f"{kind}={status or 'absent'}" for kind, status in (entry.get("renders") or {}).items()),
-        )
+        legs = entry.get("renders") or {}
+        detail = ", ".join(f"{kind}={status or ABSENT_LEG}" for kind, status in legs.items())
+        LOG.warning("  - %s: %s", redacted_note(entry.get("view_name"), redactor, limit=60), detail)
 
 
 def _log_blocked_and_stale(

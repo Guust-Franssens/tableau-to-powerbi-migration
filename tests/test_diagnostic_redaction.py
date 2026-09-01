@@ -1122,8 +1122,8 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
             "FIXED-VOCABULARY: a render TIER name -- `render_unestablished` builds these keys from "
             "`sorted(requested)`, the set this repo authors ('png', 'svg', 'pdf'), never from a response"
         ),
-        "status or 'absent'": _A_STATUS_LITERAL,
-        "', '.join((f\"{kind}={status or 'absent'}\" for kind, status in (entry.get('renders') or {}).items()))": (
+        "status or ABSENT_LEG": _A_STATUS_LITERAL,
+        "detail": (
             "FIXED-VOCABULARY: a join of tier names this repo authors and leg-status literals; the view "
             "NAME on the same line goes through `redacted_note`, which is the only response-derived "
             "value in this warning"
@@ -1880,6 +1880,56 @@ def test_every_certification_names_a_category_rather_than_arguing_in_prose():
         for expression, reason in entries.items():
             assert reason.startswith(CATEGORIES), f"{module}:{func} {expression!r} -> {reason!r}"
             assert len(reason) > 30, f"{module}:{func} {expression!r} is certified with no real reason"
+
+
+def test_no_certification_is_written_in_another_interpreters_unparse_dialect():
+    """⚠️ A certification key must be what `ast.unparse` produces HERE, or the gate is version-local.
+
+    Every lookup in this file compares a hand-written key against `ast.unparse` output, and unparse is
+    NOT stable across Python versions. Measured: an f-string containing a nested string literal
+    unparses as ``f"{kind}={status or 'absent'}"`` on 3.13 and ``f'{kind}={status or 'absent'}'`` on
+    the CI interpreter (PEP 701 quote reuse). One certification was therefore simultaneously VALID
+    locally and both stale AND missing on CI -- the suite was green on the machine that wrote it and
+    red on the machine that gates the merge, which is the worst possible split for a security gate.
+
+    This check is version-symmetric by construction: it re-parses each key and demands the local
+    normal form, so it fails on whichever interpreter the key was NOT written for. The fix is always
+    to make the SOURCE expression unparse identically everywhere -- interpolate names, not nested
+    literals -- rather than to encode one interpreter's quoting habit in this table.
+    """
+    drifted = []
+    for (module, func), entries in CERTIFIED.items():
+        for expression in entries:
+            try:
+                normal = ast.unparse(ast.parse(expression, mode="eval").body)
+            except SyntaxError:
+                drifted.append(f"{module}:{func} {expression!r} is not a parseable expression")
+                continue
+            if normal != expression:
+                drifted.append(f"{module}:{func} {expression!r} unparses HERE as {normal!r}")
+    assert not drifted, (
+        "a certification key is not this interpreter's `ast.unparse` normal form, so it matches on "
+        "some Python versions and not others:\n  " + "\n  ".join(drifted)
+    )
+
+
+def test_the_unparse_dialect_detector_can_actually_fire():
+    """Positive control: an assertion that cannot fail is not coverage.
+
+    The literal below is the CI interpreter's rendering of the expression that broke -- an f-string
+    reusing its outer quote around a nested literal, which PEP 701 permits from 3.12. It parses here
+    and unparses to the OTHER form, so the detector separates the two dialects rather than merely
+    accepting whatever it is given.
+    """
+    ci_dialect = "', '.join((f'{kind}={status}' for kind, status in items))"
+    assert ast.unparse(ast.parse(ci_dialect, mode="eval").body) == ci_dialect, (
+        "this control no longer differs between dialects; re-point it at an expression that does"
+    )
+    nested = "f'{kind}={status or 'absent'}'"
+    assert ast.unparse(ast.parse(nested, mode="eval").body) != nested, (
+        "the nested-literal f-string now round-trips, so the hazard this gate exists for is gone "
+        "-- re-verify against the CI interpreter before deleting the gate"
+    )
 
 
 # ---------------------------------------------- the manifest SINK, on the one path that reaches it
