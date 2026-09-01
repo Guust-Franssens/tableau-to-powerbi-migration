@@ -1063,6 +1063,43 @@ def test_an_unowned_lookalike_stops_the_run_instead_of_being_written_to(
     assert sorted(p.name for p in theirs.parent.iterdir()) == [FIRST_BUNDLE]
 
 
+def _snapshot(root: Path) -> dict[Path, bytes]:
+    """Every file under `root` as path -> bytes: the only honest "nothing was touched" check."""
+    return {path: path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
+
+
+def test_two_proven_installs_stop_the_run_and_write_to_NEITHER(
+    estate: Estate, tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """Ambiguity is a refusal, not a coin toss - and the refusal is worth a destructive-scope proof.
+
+    `discover_skill_plugin` reports `multiple` when more than one destination is PROVEN, and
+    `sync.main` turns that into `EXIT_MULTIPLE_PLUGINS`. Nothing exercised that path: it was reached
+    only by a test asserting the pre-fix contract (two plugins proven by CONTENT), which the fix
+    correctly reroutes to `unproven`. Restored here on the post-fix contract, with both proofs the
+    fix accepts - the published identity, and this tool's own marker.
+
+    Both copies are deliberately STALE, so a run that failed to refuse would certainly write; a
+    byte-for-byte snapshot then makes "wrote nothing to either" checkable rather than assumed.
+    """
+    root = tmp_path / "installed-plugins"
+    ours = _install(root, *OURS, FIRST_BUNDLE, "# stale\nold\n").parent.parent
+    marked = _install(root, "renamed-collection", "renamed-plugin", FIRST_BUNDLE, "# stale\nolder\n").parent.parent
+    write_owner_marker(marked, publish_repo=build_plugin.PUBLISH_REPO, bundles=[FIRST_BUNDLE])
+    (ours / "skills" / FIRST_BUNDLE / "private.txt").write_text("theirs too\n", encoding="utf-8")
+    before = _snapshot(root)
+
+    code = sync.main(["--installed-plugins-root", str(root), "--json"])
+    verdict = json.loads(capsys.readouterr().out)
+
+    assert code == sync.EXIT_MULTIPLE_PLUGINS
+    assert verdict["status"] == "multiple_plugins"
+    assert sorted(verdict["candidates"]) == sorted([str(ours), str(marked)]), (
+        "both paths must be named, or the operator cannot tell which copy to remove"
+    )
+    assert _snapshot(root) == before, "an ambiguous run must write to neither candidate"
+
+
 def test_from_worktree_refuses_without_an_explicit_destination(
     estate: Estate, tmp_path: Path, capsys: pytest.CaptureFixture
 ) -> None:

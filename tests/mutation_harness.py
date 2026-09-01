@@ -257,6 +257,52 @@ _out.write_text(
 )
 suite.PREFLIGHT = _out
 """,
+    "skillsync-content-outranks-provenance": """
+import skill_plugin_source as sps
+_orig = sps._scan
+def scan(root, inventory, prove):
+    proven, lookalikes = _orig(root, inventory, prove)
+    # The pre-fix SELECTION restored: a content match wins, so a stranger becomes the
+    # destination even when our own plugin is installed beside it - and the publish then
+    # overwrites its SKILL.md and deletes the private file inside the bundle it shares.
+    return ([(path, "identity") for path in lookalikes] or proven), []
+sps._scan = scan
+""",
+    "skillsync-ambiguous-install-picks-one": """
+import skill_plugin_source as sps
+# Two PROVEN destinations resolved silently instead of refused: the run writes into one of
+# them, which is the shadowing hazard `EXIT_MULTIPLE_PLUGINS` exists to prevent.
+sps._multiple_verdict = lambda roots: sps._found_verdict(roots[0], "identity")
+""",
+    # --- issue #410 round-3: the discovery unit tests (tests/test_skill_plugin_source.py) --------
+    # Two tests there pinned the pre-fix contract and were rewritten onto the post-fix one. These
+    # restore the defect each rewritten test now owns, so a SURVIVED verdict means the rewrite
+    # traded a failing assertion for a vacuous one.
+    "skillsource-content-is-ownership": """
+import skill_plugin_source as sps
+# "It carries our bundles, so it is ours" - the inference the whole fix removed.
+sps.prove_ownership = lambda plugin_root, **kwargs: "identity"
+""",
+    "skillsource-nothing-is-ever-proven": """
+import skill_plugin_source as sps
+# The opposite sign: a proof that never fires makes every real install look foreign, so
+# refusing to write would become correct-looking and permanent.
+sps.prove_ownership = lambda plugin_root, **kwargs: None
+""",
+    "skillsource-ambiguity-resolved-silently": """
+import skill_plugin_source as sps
+# Two PROVEN installs quietly resolved to whichever sorted first.
+sps._multiple_verdict = lambda roots: sps._found_verdict(roots[0], "identity")
+""",
+    "skillsource-two-strangers-called-a-duplicate-install": """
+import skill_plugin_source as sps
+_orig = sps._unproven_verdict
+# `multiple`'s hint says "remove the duplicate". Aimed at two plugins this repo does not own,
+# that hint tells an operator to delete someone else's install.
+sps._unproven_verdict = lambda lookalikes: (
+    sps._multiple_verdict(lookalikes) if len(lookalikes) > 1 else _orig(lookalikes)
+)
+""",
 }
 
 
@@ -637,6 +683,7 @@ def main() -> int:
         "tests/test_mock_fabric.py",
         "tests/test_mock_tableau.py",
         "tests/test_sync_installed_skills.py",
+        "tests/test_skill_plugin_source.py",
     ]
     dirty = []
     for target in targets:
@@ -667,6 +714,8 @@ def main() -> int:
             target = "tests/test_mock_tableau.py"
         elif name.startswith("skillsync-"):
             target = "tests/test_sync_installed_skills.py"
+        elif name.startswith("skillsource-"):
+            target = "tests/test_skill_plugin_source.py"
         else:
             target = "tests/test_e2e_offline.py"
         label, rc, detail, outcomes = run(name, code, target)
