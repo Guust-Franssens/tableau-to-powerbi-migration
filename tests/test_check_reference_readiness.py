@@ -138,6 +138,45 @@ def bundle_fixture(tmp_path: Path) -> Path:
     return root
 
 
+def test_the_status_and_exit_vocabulary_is_pinned_to_its_literal_values() -> None:
+    """Pin every constant the rest of this file compares against.
+
+    Without this the suite is vacuous in one direction: `assert main(...) == crr.EXIT_CANNOT_ESTABLISH`
+    compares the code's answer against the code's own constant, so redefining the constant to 0
+    changes BOTH sides and the assertion still holds. One pin catches every such mutation, and lets
+    the other tests keep reading in names rather than magic numbers.
+
+    The 0/1/2/3 values are `check_connection_fidelity.py:160-163`'s, deliberately shared across gates.
+    """
+    assert (crr.EXIT_OK, crr.EXIT_FINDINGS, crr.EXIT_USAGE, crr.EXIT_CANNOT_ESTABLISH) == (0, 1, 2, 3)
+    assert (crr.READY, crr.BLIND, crr.UNVERIFIABLE) == ("ready", "blind", "unverifiable")
+    assert (crr.STATUS_READY, crr.STATUS_FINDINGS) == ("READY", "FINDINGS")
+    assert (crr.STATUS_NOT_APPLICABLE, crr.STATUS_CANNOT_ESTABLISH) == ("NOT_APPLICABLE", "CANNOT_ESTABLISH")
+    assert (crr.KIND_DASHBOARD, crr.KIND_WORKSHEET, crr.KIND_UNKNOWN) == ("dashboard", "worksheet", "unknown")
+    assert (crr.PAGE_EMITTED, crr.PAGE_DROPPED_EXPLAINED, crr.PAGE_DROPPED_UNEXPLAINED) == (
+        "emitted",
+        "dropped_explained",
+        "dropped_unexplained",
+    )
+    assert crr.GRADE_VALIDATION == "validation-grade"
+
+
+def test_a_worksheet_scope_can_never_satisfy_a_dashboard_page() -> None:
+    """The scope join itself, isolated from any fixture.
+
+    Asserted directly on `match_evidence` so the property is pinned even if a future refactor
+    changes how bundles are walked - and so this cannot pass because a fixture never reached the
+    branch under test.
+    """
+    dashboard = crr.SourceObject(name="Ops", kind="dashboard")
+    worksheet_render = crr.Evidence(
+        name="Ops", kind="worksheet", grade="layout_grade", origin="reference", provider="embedded_thumbnail"
+    )
+    match, name_only = crr.match_evidence(dashboard, [worksheet_render])
+    assert match is None
+    assert name_only == [worksheet_render]
+
+
 def build_unit(  # pylint: disable=too-many-arguments
     bundle: Path,
     unit: str,
