@@ -59,14 +59,21 @@ def _freshen_clean_fixture_cache() -> Path:
 
 
 def _write_spec(unit: Path, names: list[str]) -> None:
+    """A dashboards-only migration spec, with the schema-required empty `worksheets` array."""
     unit.mkdir(parents=True, exist_ok=True)
     (unit / "migration-spec.json").write_text(
-        json.dumps({"dashboards": [{"id": f"dash.{index}", "name": name} for index, name in enumerate(names)]}),
+        json.dumps(
+            {
+                "dashboards": [{"id": f"dash.{index}", "name": name} for index, name in enumerate(names)],
+                "worksheets": [],
+            }
+        ),
         encoding="utf-8",
     )
 
 
-def _write_report(unit: Path, names: list[str]) -> Path:
+def _write_report(unit: Path, names: list[str], *, visuals: int = 1) -> Path:
+    """A PBIR report with `visuals` visual.json files per page (a real page has at least one)."""
     report = unit / "fabric" / "Book.Report"
     pages = report / "definition" / "pages"
     pages.mkdir(parents=True, exist_ok=True)
@@ -80,8 +87,16 @@ def _write_report(unit: Path, names: list[str]) -> Path:
             json.dumps({"name": page_id, "displayName": name, "width": 1600, "height": 900}),
             encoding="utf-8",
         )
+        _write_visuals(page, visuals)
     (pages / "pages.json").write_text(json.dumps({"pageOrder": order}), encoding="utf-8")
     return report
+
+
+def _write_visuals(page: Path, count: int) -> None:
+    for index in range(count):
+        visual = page / "visuals" / f"v{index}"
+        visual.mkdir(parents=True, exist_ok=True)
+        (visual / "visual.json").write_text(json.dumps({"name": f"v{index}"}), encoding="utf-8")
 
 
 def _png(path: Path) -> None:
@@ -260,13 +275,25 @@ def _write_full_spec(
 
 
 def _write_viz_fidelity_handover(
-    unit: Path, rows: list[dict[str, object]], pbip_warnings: list[str] | None = None
+    unit: Path,
+    rows: list[dict[str, object]],
+    pbip_warnings: list[str] | None = None,
+    workbook_name: str = "Book",
 ) -> None:
-    """Handover slice carrying engine-declared per-page rebuild warnings."""
-    workbook: dict[str, object] = {"name": "Unit", "viz_fidelity": rows}
+    """Handover slice carrying engine-declared per-page rebuild rows.
+
+    ``workbook_name`` defaults to ``Book`` because that is the stem of the ``Book.Report`` folder
+    ``_write_report`` creates: a slice only explains pages for a workbook this unit actually ships.
+    """
+    workbook: dict[str, object] = {"name": workbook_name, "viz_fidelity": rows}
     if pbip_warnings is not None:
         workbook["pbip_warnings"] = pbip_warnings
     _write_handover(unit, workbook)
+
+
+def _empty_row(name: str, reason: str = "manual attention required: unsupported") -> dict[str, object]:
+    """A viz_fidelity row that structurally asserts NO page was emitted (tier 'empty')."""
+    return {"worksheet": name, "visual_type": "unsupported", "status": "warned", "tier": "empty", "reason": reason}
 
 
 def test_expected_pages_counts_orphan_worksheets_not_just_dashboards(tmp_path: Path) -> None:
@@ -315,19 +342,14 @@ def test_workbook_with_no_dashboards_expects_its_worksheets(tmp_path: Path) -> N
 
 
 def test_engine_declared_drop_is_explained_and_does_not_fail_parity(tmp_path: Path) -> None:
-    """Kills: failing a unit for a page the engine dropped for a reason it published."""
+    """Kills: failing a unit for a page the engine PROVED produced no visual (tier 'empty')."""
     _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A"), ("ws.b", "B")])
     _write_report(tmp_path, ["A"])
     _write_viz_fidelity_handover(
         tmp_path,
         [
-            {"worksheet": "A", "visual_type": "bar", "status": "rebuilt", "reason": None},
-            {
-                "worksheet": "B",
-                "visual_type": "unsupported",
-                "status": "warned",
-                "reason": "manual attention required: mark class 'Bar' / shelf layout not supported -> no visual",
-            },
+            {"worksheet": "A", "visual_type": "bar", "status": "rebuilt", "tier": "rebuilt", "reason": None},
+            _empty_row("B", "manual attention required: mark class 'Bar' / shelf layout not supported"),
         ],
     )
 
@@ -335,8 +357,82 @@ def test_engine_declared_drop_is_explained_and_does_not_fail_parity(tmp_path: Pa
 
     assert parity["status"] == cu.STATUS_PASS
     assert [page["name"] for page in parity["dropped_explained"]] == ["B"]
+    assert parity["dropped_explained"][0]["evidence_tier"] == "empty"
     assert parity["dropped_unexplained"] == []
     assert parity["effective_expected_count"] == 1
+
+
+def test_a_degraded_warning_asserts_a_rendered_visual_and_excuses_nothing(tmp_path: Path) -> None:
+    """Kills: letting any warned row excuse a missing page.
+
+    migrate_estate._fidelity_tier defines 'degraded' as "a rendered visual whose warning is a genuine
+    degradation" - the OPPOSITE of non-emission - and 'evidence: emitted+linted' appears on 45
+    empty-tier rows in the same estate run, so neither field can decide this.
+    """
+    _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A"), ("ws.b", "B")])
+    _write_report(tmp_path, ["A"])
+    _write_viz_fidelity_handover(
+        tmp_path,
+        [
+            {
+                "worksheet": "B",
+                "visual_type": "bar",
+                "status": "warned",
+                "tier": "degraded",
+                "evidence": "emitted+linted",
+                "reason": "manual attention required: data labels deferred",
+            }
+        ],
+    )
+
+    parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
+
+    assert parity["status"] == cu.STATUS_PRECONDITION_FAILED
+    assert parity["dropped_explained"] == []
+    assert [page["name"] for page in parity["dropped_unexplained"]] == ["B"]
+    assert "does not assert non-emission" in parity["dropped_unexplained"][0]["why_unexplained"]
+
+
+def test_a_row_with_no_tier_at_all_leaves_the_drop_unexplained(tmp_path: Path) -> None:
+    """An engine too old to publish `tier` is 'cannot tell', not 'intentionally dropped'."""
+    _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A"), ("ws.b", "B")])
+    _write_report(tmp_path, ["A"])
+    _write_viz_fidelity_handover(
+        tmp_path,
+        [
+            {
+                "worksheet": "B",
+                "visual_type": "unsupported",
+                "status": "warned",
+                "reason": "manual attention required: unsupported",
+            }
+        ],
+    )
+
+    parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
+
+    assert parity["status"] == cu.STATUS_PRECONDITION_FAILED
+    assert [page["name"] for page in parity["dropped_unexplained"]] == ["B"]
+
+
+def test_another_workbooks_warning_cannot_excuse_this_units_missing_page(tmp_path: Path) -> None:
+    """Kills: borrowing an excuse across workbook boundaries.
+
+    This unit ships Book.Report, so only a handover slice for 'Book' may explain its pages. Without
+    the binding, a tier-'empty' row from 'Different Workbook' silently removed a genuinely missing
+    page from both the parity and the oracle denominator.
+    """
+    _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A"), ("ws.b", "B")])
+    _write_report(tmp_path, ["A"])
+    _write_viz_fidelity_handover(tmp_path, [_empty_row("B")], workbook_name="Different Workbook")
+
+    parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
+
+    assert parity["status"] == cu.STATUS_PRECONDITION_FAILED
+    assert parity["dropped_explained"] == []
+    assert parity["drop_explanations"]["bound_workbooks"] == []
+    assert parity["drop_explanations"]["unbound_workbooks"] == ["Different Workbook"]
+    assert "Different Workbook" in parity["dropped_unexplained"][0]["why_unexplained"]
 
 
 def test_drop_reasons_come_from_viz_fidelity_not_pbip_warnings(tmp_path: Path) -> None:
@@ -344,13 +440,13 @@ def test_drop_reasons_come_from_viz_fidelity_not_pbip_warnings(tmp_path: Path) -
 
     pbip_warnings[] is a flat list of prefixed strings with no scope/name field, so a warning there
     cannot be mapped back to a page. Measured on a real 2.339.0 estate run: 193 pbip_warnings
-    entries across 43 workbooks explained ZERO of the 21 dropped candidates.
+    entries across 43 workbooks explained ZERO of the 23 absent candidates.
     """
     _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A"), ("ws.b", "B")])
     _write_report(tmp_path, ["A"])
     _write_viz_fidelity_handover(
         tmp_path,
-        [{"worksheet": "A", "visual_type": "bar", "status": "rebuilt", "reason": None}],
+        [{"worksheet": "A", "visual_type": "bar", "status": "rebuilt", "tier": "rebuilt", "reason": None}],
         pbip_warnings=["manual attention required: mark class 'Bar' / shelf layout not supported -> no visual emitted"],
     )
 
@@ -362,24 +458,19 @@ def test_drop_reasons_come_from_viz_fidelity_not_pbip_warnings(tmp_path: Path) -
 
 
 def test_warned_but_emitted_page_is_not_treated_as_a_drop(tmp_path: Path) -> None:
-    """Kills: subtracting every warned worksheet, which hides a genuinely missing page.
+    """Kills: subtracting every explained-looking row, which hides a genuinely missing page.
 
-    Most warned worksheets ARE emitted (measured: 'Age' in the HR Dashboard estate slice is warned
-    and is a page). Only a candidate ABSENT from the emitted pages can be an explained drop.
+    'A' carries a tier-'empty' row here AND is emitted with a visual. Only a candidate ABSENT from
+    the rendered pages can be an explained drop, so A must not be subtracted while B still fails.
     """
     _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A"), ("ws.b", "B")])
     _write_report(tmp_path, ["A"])
-    _write_viz_fidelity_handover(
-        tmp_path,
-        [
-            {"worksheet": "A", "visual_type": "bar", "status": "warned", "reason": "manual attention required: labels"},
-        ],
-    )
+    _write_viz_fidelity_handover(tmp_path, [_empty_row("A")])
 
     parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
 
     assert parity["status"] == cu.STATUS_PRECONDITION_FAILED
-    assert parity["dropped_explained"] == [], "A was emitted, so its warning explains no drop"
+    assert parity["dropped_explained"] == [], "A was emitted, so its row explains no drop"
     assert [page["name"] for page in parity["dropped_unexplained"]] == ["B"]
 
 
@@ -391,9 +482,97 @@ def test_missing_handover_says_drop_reasons_were_unavailable(tmp_path: Path) -> 
     parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
 
     assert parity["status"] == cu.STATUS_PRECONDITION_FAILED
-    assert parity["drop_explanations_available"] is False
-    assert parity["drop_explanation_source"] == "handover viz_fidelity[]"
-    assert "no handover slice was readable" in parity["detail"]
+    assert parity["drop_explanations"]["available"] is False
+    assert parity["drop_explanations"]["source"] == "handover viz_fidelity[]"
+    assert "no handover slice was readable" in parity["dropped_unexplained"][0]["why_unexplained"]
+
+
+def test_malformed_required_collection_is_unassessable_not_a_smaller_denominator(tmp_path: Path) -> None:
+    """Kills: silently skipping a malformed required array and trusting what is left.
+
+    docs/migration-spec.schema.json requires both as arrays. A spec with one valid dashboard and a
+    `worksheets` OBJECT used to yield a one-page expected set that page parity and oracle coverage
+    both graded PASS, oracle at grade=validation-grade - the circular denominator one layer earlier.
+    """
+    (tmp_path / "migration-spec.json").write_text(
+        json.dumps({"dashboards": [{"id": "dash.a", "name": "A", "zones": {}}], "worksheets": {"oops": 1}}),
+        encoding="utf-8",
+    )
+    _write_report(tmp_path, ["A"])
+    _write_reference_manifest(tmp_path, ["A"])
+
+    assert cu.expected_pages(tmp_path) is None
+    parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert parity["status"] == cu.STATUS_NOT_CHECKED
+    assert "'worksheets' is dict, not the array the schema requires" in parity["detail"]
+    assert oracle["status"] == cu.STATUS_NOT_CHECKED
+    assert oracle["grade"] != "validation-grade"
+
+
+def test_a_spec_entry_with_no_usable_identity_is_unassessable(tmp_path: Path) -> None:
+    """A page entry that cannot be identified at all must refuse the whole spec, not shrink it.
+
+    ``name`` -> ``title`` -> ``id`` is a deliberate fallback: an entry with only an ``id`` still
+    OCCUPIES a slot in the denominator, so keeping it is the conservative choice (it will simply
+    never match a page and fail closed). An entry with none of the three is different - the old code
+    skipped it, and skipping shrinks the denominator, which is the fail-open shape.
+    """
+    (tmp_path / "migration-spec.json").write_text(
+        json.dumps({"dashboards": [{"id": "dash.a", "name": "A"}, {"size": {}}], "worksheets": []}),
+        encoding="utf-8",
+    )
+    _write_report(tmp_path, ["A"])
+
+    assert cu.expected_pages(tmp_path) is None
+    assert "entry #2 has no usable name" in cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))["detail"]
+
+
+def test_an_id_only_spec_entry_stays_in_the_denominator(tmp_path: Path) -> None:
+    """The other half: an identifiable-but-unnamed entry is kept, so the count cannot silently shrink."""
+    (tmp_path / "migration-spec.json").write_text(
+        json.dumps({"dashboards": [{"id": "dash.a", "name": "A"}, {"id": "dash.b"}], "worksheets": []}),
+        encoding="utf-8",
+    )
+    _write_report(tmp_path, ["A"])
+
+    assert [page["name"] for page in cu.expected_pages(tmp_path) or []] == ["A", "dash.b"]
+    assert cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))["status"] == cu.STATUS_PRECONDITION_FAILED
+
+
+def test_an_unwalkable_zone_tree_is_unassessable(tmp_path: Path) -> None:
+    """A zone tree that cannot be walked means placed worksheets are unknown, not that there are none."""
+    (tmp_path / "migration-spec.json").write_text(
+        json.dumps(
+            {
+                "dashboards": [{"id": "dash.a", "name": "A", "zones": "not-a-tree"}],
+                "worksheets": [{"id": "ws.a", "name": "Sheet"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_report(tmp_path, ["A"])
+
+    assert cu.expected_pages(tmp_path) is None
+    assert "zone tree, which cannot be walked" in cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))["detail"]
+
+
+def test_a_page_with_no_visuals_does_not_certify_a_candidate_as_rebuilt(tmp_path: Path) -> None:
+    """Kills: counting a page that renders nothing as evidence the candidate was rebuilt.
+
+    Renaming the engine's empty crash-guard page to an expected page's title used to PASS parity and
+    report oracle grade=validation-grade for a report that draws nothing.
+    """
+    _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A")])
+    _write_report(tmp_path, ["A"], visuals=0)
+
+    parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
+
+    assert parity["status"] == cu.STATUS_PRECONDITION_FAILED
+    assert parity["emitted_count"] == 0
+    assert [page["name"] for page in parity["blank_pages"]] == ["A"]
+    assert "render nothing" in parity["detail"]
 
 
 def test_oracle_coverage_without_an_expected_set_is_blocking_not_a_pass(tmp_path: Path) -> None:
@@ -437,24 +616,16 @@ def test_spec_declaring_no_pages_cannot_be_graded(tmp_path: Path) -> None:
     oracle = cu.check_oracle_coverage(tmp_path, None, None)
 
     assert oracle["status"] == cu.STATUS_NOT_CHECKED
-    assert "declares no dashboards and no worksheets" in oracle["detail"]
+    assert "has no 'dashboards' or 'worksheets' array" in oracle["detail"]
 
 
 def test_oracle_coverage_excludes_engine_declared_drops_from_the_denominator(tmp_path: Path) -> None:
-    """A page the engine dropped has nothing to hold against a reference; it is not a coverage hole."""
+    """A page the engine proved produced nothing has nothing to hold against a reference."""
     _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A"), ("ws.b", "B")])
     _write_report(tmp_path, ["A"])
     _write_reference_manifest(tmp_path, ["A"])
     _write_viz_fidelity_handover(
-        tmp_path,
-        [
-            {
-                "worksheet": "B",
-                "visual_type": "unsupported",
-                "status": "warned",
-                "reason": "manual attention required: empty worksheet -> nothing to rebuild",
-            }
-        ],
+        tmp_path, [_empty_row("B", "manual attention required: empty worksheet -> nothing to rebuild")]
     )
 
     oracle = cu.check_oracle_coverage(tmp_path, None, None)
@@ -497,35 +668,34 @@ def test_underscore_oracle_directory_is_still_discovered(tmp_path: Path) -> None
 def test_engine_crash_guard_placeholder_is_not_an_extra_page(tmp_path: Path) -> None:
     """Kills: calling the engine's zero-page crash-guard page an unaccounted-for extra.
 
-    twb_to_pbir.py:14719-14727 ships ONE synthetic visual-less page when every candidate was
+    twb_to_pbir.py:14719-14727 ships ONE synthetic VISUAL-LESS page when every candidate was
     dropped, because a PBIR with an empty pageOrder crashes Power BI Desktop on open. Measured: 2 of
     44 workbooks in a real 2.339.0 estate run do this, and both failed page parity without this.
     """
     _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "Sheet 1")])
-    report = tmp_path / "fabric" / "Book.Report"
-    pages = report / "definition" / "pages"
-    (pages / "page-emptyb0302807").mkdir(parents=True)
-    (pages / "page-emptyb0302807" / "page.json").write_text(
-        json.dumps({"name": "page-emptyb0302807", "displayName": "No visuals rebuilt"}), encoding="utf-8"
-    )
-    (pages / "pages.json").write_text(json.dumps({"pageOrder": ["page-emptyb0302807"]}), encoding="utf-8")
+    _write_placeholder_page(tmp_path, visuals=0)
     _write_viz_fidelity_handover(
-        tmp_path,
-        [
-            {
-                "worksheet": "Sheet 1",
-                "visual_type": "unsupported",
-                "status": "warned",
-                "reason": "manual attention required: mark class 'Shape' / shelf layout not supported",
-            }
-        ],
+        tmp_path, [_empty_row("Sheet 1", "manual attention required: mark class 'Shape' not supported")]
     )
 
     parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
 
     assert parity["status"] == cu.STATUS_PASS
     assert [page["name"] for page in parity["engine_placeholder_pages"]] == ["No visuals rebuilt"]
+    assert parity["blank_pages"] == [], "the declared placeholder is not an unexplained blank page"
     assert parity["unexempted_extra"] == []
+
+
+def _write_placeholder_page(unit: Path, *, visuals: int, display: str = "No visuals rebuilt") -> None:
+    """The engine's crash-guard page shape: id `page-empty*`, displayName `No visuals rebuilt`."""
+    pages = unit / "fabric" / "Book.Report" / "definition" / "pages"
+    page = pages / "page-emptyb0302807"
+    page.mkdir(parents=True)
+    (page / "page.json").write_text(
+        json.dumps({"name": "page-emptyb0302807", "displayName": display}), encoding="utf-8"
+    )
+    _write_visuals(page, visuals)
+    (pages / "pages.json").write_text(json.dumps({"pageOrder": ["page-emptyb0302807"]}), encoding="utf-8")
 
 
 def test_a_real_page_titled_like_the_placeholder_is_still_a_page(tmp_path: Path) -> None:
@@ -540,20 +710,32 @@ def test_a_real_page_titled_like_the_placeholder_is_still_a_page(tmp_path: Path)
     assert [page["name"] for page in parity["unexempted_extra"]] == ["No visuals rebuilt"]
 
 
-def test_filled_in_placeholder_page_counts_as_a_real_page(tmp_path: Path) -> None:
-    """The other half of the same rule: a page-empty* id that now carries real content is a page."""
+def test_a_placeholder_id_holding_real_visuals_is_a_rebuilt_page(tmp_path: Path) -> None:
+    """Kills: refusing a page-empty* page that an author actually filled with visuals.
+
+    The placeholder is defined by having NO visuals. Classifying by id+name alone discarded a page
+    carrying real content from the emitted count and produced a false PRECONDITION_FAILED.
+    """
     _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A")])
-    pages = tmp_path / "fabric" / "Book.Report" / "definition" / "pages"
-    (pages / "page-emptyb0302807").mkdir(parents=True)
-    (pages / "page-emptyb0302807" / "page.json").write_text(
-        json.dumps({"name": "page-emptyb0302807", "displayName": "A"}), encoding="utf-8"
-    )
-    (pages / "pages.json").write_text(json.dumps({"pageOrder": ["page-emptyb0302807"]}), encoding="utf-8")
+    _write_placeholder_page(tmp_path, visuals=3)
 
     parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
 
-    assert parity["engine_placeholder_pages"] == [], "the author filled it in; it is no longer a placeholder"
+    assert parity["engine_placeholder_pages"] == [], "it has 3 visuals, so it is not a placeholder"
+    assert parity["emitted_count"] == 1
     assert parity["status"] == cu.STATUS_PASS
+
+
+def test_a_blank_page_that_is_not_the_engine_placeholder_is_reported(tmp_path: Path) -> None:
+    """A zero-visual page nobody declared renders nothing and is a finding, not a silent pass."""
+    _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A")])
+    _write_placeholder_page(tmp_path, visuals=0, display="A")
+
+    parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
+
+    assert parity["engine_placeholder_pages"] == [], "a page-empty* id renamed to 'A' is not the placeholder"
+    assert [page["name"] for page in parity["blank_pages"]] == ["A"]
+    assert parity["status"] == cu.STATUS_PRECONDITION_FAILED
 
 
 def test_page_count_mismatch_is_a_precondition_and_stops_before_oracle(tmp_path: Path) -> None:
@@ -1097,7 +1279,7 @@ def test_occlusion_malformed_output_is_not_checked(tmp_path: Path, monkeypatch: 
 
 def test_actual_pages_falls_back_to_page_directories_when_order_is_missing(tmp_path: Path) -> None:
     """Kills broad mutations of small helper returns that leave ordered fixtures unaffected."""
-    report = _write_report(tmp_path, ["Executive"])
+    report = _write_report(tmp_path, ["Executive"], visuals=2)
     (report / "definition" / "pages" / "pages.json").unlink()
 
     pages = cu.actual_pages(tmp_path)
@@ -1108,8 +1290,16 @@ def test_actual_pages_falls_back_to_page_directories_when_order_is_missing(tmp_p
             "name": "Executive",
             "report": str(report),
             "path": str(report / "definition" / "pages" / "p1" / "page.json"),
+            "visuals": 2,
         }
     ]
+
+
+def test_actual_pages_counts_zero_visuals_for_a_page_with_none(tmp_path: Path) -> None:
+    """The visual count is real evidence, not a constant: an empty page must report 0."""
+    _write_report(tmp_path, ["Executive"], visuals=0)
+
+    assert [page["visuals"] for page in cu.actual_pages(tmp_path)] == [0]
 
 
 def test_clean_input_exits_zero_even_with_claimed_only_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

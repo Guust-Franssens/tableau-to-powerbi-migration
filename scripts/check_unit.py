@@ -83,6 +83,13 @@ ENGINE_PLACEHOLDER_PAGE_ID_PREFIX = "page-empty"
 # prefixed strings with no scope/name, so a warning there cannot be attributed to a page.
 DROP_EXPLANATION_SOURCE = "handover viz_fidelity[]"
 
+# The ONLY structured statement that a candidate produced no page. migrate_estate._fidelity_tier
+# defines `empty` as "no faithful visual emitted"; `degraded` is "a rendered visual whose warning is
+# a genuine degradation" and therefore asserts the OPPOSITE. `status: "warned"` spans both and
+# `evidence: "emitted+linted"` appears on 45 empty-tier rows in one estate run, so neither can decide
+# this. Anything that is not this tier leaves the drop UNEXPLAINED.
+DROP_EVIDENCE_TIER = "empty"
+
 # Oracle capture directory names, both of them documented and both real on disk: the tool's own
 # `--out _oracle` convention (AGENTS.md "capture_tableau_oracle.py --out _oracle";
 # docs/operator-runbook.md) and the canonical per-run layout `_runs/<NNN>-<slug>/oracle/`
@@ -603,16 +610,92 @@ def _zone_worksheet_ids(zone: Any, found: set[str]) -> None:
             _zone_worksheet_ids(child, found)
 
 
-def _named_spec_pages(items: Any) -> list[dict[str, str]]:
-    """Normalize a migration-spec ``dashboards``/``worksheets`` list to ``{id, name}`` rows."""
+def _named_spec_pages(items: Any, collection: str) -> tuple[list[dict[str, str]] | None, str | None]:
+    """Normalize a required migration-spec collection to ``{id, name}`` rows, or refuse it.
+
+    ``docs/migration-spec.schema.json`` requires ``dashboards`` and ``worksheets`` as ARRAYS whose
+    entries each carry ``id`` and ``name``. A malformed shape is refused rather than skipped: quietly
+    narrowing a required collection produces a SMALLER expected set that the rest of the gate then
+    trusts, which is the circular-denominator defect one layer earlier (a spec whose ``worksheets``
+    was an object graded PASS with ``grade=validation-grade``).
+    """
+    if not isinstance(items, list):
+        return None, (
+            f"migration-spec.json '{collection}' is {type(items).__name__}, not the array the schema "
+            "requires (docs/migration-spec.schema.json), so the expected page set cannot be derived"
+        )
     pages: list[dict[str, str]] = []
-    for item in items if isinstance(items, list) else []:
+    for index, item in enumerate(items, 1):
         if not isinstance(item, dict):
-            continue
+            return None, f"migration-spec.json '{collection}' entry #{index} is not an object"
         name = item.get("name") or item.get("title") or item.get("id")
-        if isinstance(name, str) and name.strip():
-            pages.append({"id": str(item.get("id") or name), "name": name.strip()})
-    return pages
+        if not isinstance(name, str) or not name.strip():
+            return None, f"migration-spec.json '{collection}' entry #{index} has no usable name"
+        pages.append({"id": str(item.get("id") or name), "name": name.strip()})
+    return pages, None
+
+
+def _spec_payload(target: Path) -> tuple[dict[str, Any] | None, str | None]:
+    """``(spec object, refusal reason)`` - the file exists, parses, and declares both required arrays."""
+    spec_path = _migration_spec(target)
+    if spec_path is None:
+        return None, (
+            "no migration-spec.json found, so the expected Tableau page set is unknown; "
+            "produce one with scripts/parse_tableau.py <workbook> -o <unit>/migration-spec.json"
+        )
+    try:
+        payload = _read_json(spec_path)
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"migration-spec.json could not be read ({exc})"
+    if not isinstance(payload, dict):
+        return None, "migration-spec.json is not a JSON object"
+    missing = [name for name in ("dashboards", "worksheets") if name not in payload]
+    if missing:
+        return None, (
+            f"migration-spec.json has no {' or '.join(repr(name) for name in missing)} array; the "
+            "schema requires it, so this file cannot be used as the expected page set"
+        )
+    return payload, None
+
+
+def _placed_worksheet_ids(dashboards: list[Any]) -> tuple[set[str], str | None]:
+    """Worksheet ids any dashboard zone tree places, or a refusal when a tree cannot be walked."""
+    placed: set[str] = set()
+    for index, dashboard in enumerate(dashboards, 1):
+        zones = dashboard.get("zones")
+        if zones is not None and not isinstance(zones, (dict, list)):
+            return placed, (
+                f"migration-spec.json dashboard entry #{index} has a '{type(zones).__name__}' zone "
+                "tree, which cannot be walked, so placed worksheets cannot be identified"
+            )
+        _zone_worksheet_ids(zones, placed)
+    return placed, None
+
+
+def _spec_pages(target: Path) -> tuple[list[dict[str, str]] | None, str | None]:
+    """``(candidate pages, refusal reason)`` from the unit's migration spec.
+
+    Exactly one of the two is ever set. Every refusal path is explicit, because a partial answer here
+    silently becomes a confident verdict downstream.
+    """
+    payload, error = _spec_payload(target)
+    if payload is None:
+        return None, error
+    dashboards, error = _named_spec_pages(payload["dashboards"], "dashboards")
+    worksheets, worksheet_error = _named_spec_pages(payload["worksheets"], "worksheets")
+    error = error or worksheet_error
+    if error is not None:
+        return None, error
+    placed, error = _placed_worksheet_ids(payload["dashboards"])
+    if error is not None:
+        return None, error
+    orphans = [page for page in (worksheets or []) if page["id"] not in placed]
+    if not dashboards and not orphans:
+        return None, (
+            "migration-spec.json declares no dashboards and no worksheets, so there is no expected "
+            "page set to grade against"
+        )
+    return (dashboards or []) + orphans, None
 
 
 def expected_pages(target: Path) -> list[dict[str, str]] | None:
@@ -624,122 +707,173 @@ def expected_pages(target: Path) -> list[dict[str, str]] | None:
     ``if ws["name"] in placed ... continue`` -> :14709 ``page_order.append``). Measured across the
     43 workbooks of a real 2.339.0 estate run, 19 have zero dashboards and would have produced an
     EMPTY expected set here, which is what made ``check_oracle_coverage`` grade an artifact against
-    itself (issue #430, defect 2).
+    itself (issue #432, defect 2).
 
     This is the CANDIDATE set, not the emitted set: the engine legitimately drops a candidate in
     three declared cases (:14529 dashboard with no supported visuals, :14558 unsupported visual
     type, :14562 no usable field bindings). Attribution of those drops lives in
     :func:`page_drop_explanations`; this function deliberately reports what Tableau had.
+
+    ``None`` means the candidate set could not be established - a missing spec, an unreadable one, or
+    any malformed required collection. It NEVER means "no pages"; see :func:`_spec_pages` for the
+    specific reason.
     """
-    spec_path = _migration_spec(target)
-    if spec_path is None:
-        return None
-    try:
-        payload = _read_json(spec_path)
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    dashboards = _named_spec_pages(payload.get("dashboards"))
-    placed: set[str] = set()
-    for dashboard in payload.get("dashboards") if isinstance(payload.get("dashboards"), list) else []:
-        if isinstance(dashboard, dict):
-            _zone_worksheet_ids(dashboard.get("zones"), placed)
-    orphans = [page for page in _named_spec_pages(payload.get("worksheets")) if page["id"] not in placed]
-    return dashboards + orphans
+    return _spec_pages(target)[0]
 
 
-def page_drop_explanations(target: Path) -> tuple[dict[str, list[str]], bool]:
-    """Per-page rebuild warnings the engine DECLARED, keyed by slugged Tableau name.
+def _unit_workbook_keys(target: Path) -> set[str]:
+    """Slugged Tableau workbook names this unit ships artifacts for.
 
-    Read from the handover's ``viz_fidelity[]``, NEVER from ``pbip_warnings[]``. ``pbip_warnings``
-    is a flat list of prefixed STRINGS with no scope/name field (see
-    ``tests/fixtures/handover-pbip-warnings.json``), so a warning there cannot be mapped back to the
-    page it belongs to. Measured on a real 2.339.0 estate run: across all 43 workbooks, 193
-    ``pbip_warnings`` entries carried ZERO page-drop reasons, while ``viz_fidelity[]`` explained all
-    21 dropped candidates by name - including dashboards, which ``migrate_estate._viz_fidelity``
-    projects as ``{"worksheet": <dashboard name>, "visual_type": "dashboard"}``. A gate built on
-    ``pbip_warnings`` would therefore mis-attribute every drop.
-
-    Returns ``(reasons_by_slug, source_available)``. ``source_available`` is False when no handover
-    slice could be read at all, which is "cannot tell", not "nothing was declared".
+    The engine names a report folder ``<workbook name>.Report`` (verified on all 44 workbooks of a
+    real 2.339.0 estate run), so an artifact stem is a usable binding key back to a handover slice.
     """
+    keys: set[str] = set()
+    for report in shipping_reports(target):
+        keys.add(_slug(report.name.removesuffix(".Report")))
+    for model in shipping_models(target):
+        keys.add(_slug(model.name.removesuffix(".SemanticModel")))
+    return {key for key in keys if key}
+
+
+def page_drop_explanations(target: Path) -> dict[str, Any]:
+    """Engine statements that a candidate produced NO page, bound to this unit's own workbook.
+
+    Two independent guards, because a page-drop excuse is exactly the kind of evidence that must not
+    be borrowed:
+
+    **Workbook identity.** A handover slice only explains pages for a workbook whose artifacts this
+    unit actually ships (see :func:`_unit_workbook_keys`). Without this, a `viz_fidelity` row from
+    ``"Different Workbook"`` excused a page missing from *this* one - the same "one object's excuse
+    covers another" defect this repo has now found three times.
+
+    **Structured non-emission evidence, never ``status`` and never reason text.** Only
+    ``tier == "empty"`` counts. ``migrate_estate._fidelity_tier`` defines that tier as *"no faithful
+    visual emitted"*, whereas ``degraded`` is *"a rendered visual whose warning is a genuine
+    degradation"* - it asserts the OPPOSITE of non-emission, yet a realistic
+    ``tier: "degraded", evidence: "emitted+linted"`` row used to excuse a missing page. ``status:
+    "warned"`` covers both, so it cannot decide this; ``evidence: "emitted+linted"`` appears on 45
+    ``empty``-tier rows in the same estate run, so it cannot either.
+
+    Anything that is not ``tier == "empty"`` is recorded as AMBIGUOUS and leaves the drop
+    unexplained. Measured cost of that strictness on the real estate: 21 of 23 absent candidates are
+    still explained; the 2 that are not are engine sites :14529 (dashboard-scope) and :14562, whose
+    rows carry ``tier: "degraded"`` because the engine's tier vocabulary describes VISUAL fidelity
+    and has no way to say "this candidate produced no PAGE" (filed upstream).
+    """
+    keys = _unit_workbook_keys(target)
     workbooks, _unreadable = _handover_workbooks(target)
     reasons: dict[str, list[str]] = {}
-    for _source, _workbook_name, workbook in workbooks:
-        rows = workbook.get("viz_fidelity")
-        for row in rows if isinstance(rows, list) else []:
-            if not isinstance(row, dict) or row.get("status") != "warned":
-                continue
-            name = row.get("worksheet")
-            reason = row.get("reason")
-            if not isinstance(name, str) or not name.strip():
-                continue
-            if not isinstance(reason, str) or not reason.strip():
-                continue
-            reasons.setdefault(_slug(name), []).append(reason.strip())
-    return reasons, bool(workbooks)
+    ambiguous: dict[str, list[str]] = {}
+    bound: list[str] = []
+    unbound: list[str] = []
+    for _source, slice_name, workbook in workbooks:
+        name = workbook.get("name") or slice_name
+        if _slug(str(name)) not in keys:
+            unbound.append(str(name))
+            continue
+        bound.append(str(name))
+        _collect_drop_rows(workbook.get("viz_fidelity"), reasons, ambiguous)
+    return {
+        "reasons": reasons,
+        "ambiguous": ambiguous,
+        "bound_workbooks": sorted(set(bound)),
+        "unbound_workbooks": sorted(set(unbound)),
+        "available": bool(bound),
+        "source": DROP_EXPLANATION_SOURCE,
+    }
+
+
+def _collect_drop_rows(rows: Any, reasons: dict[str, list[str]], ambiguous: dict[str, list[str]]) -> None:
+    """Split one workbook's ``viz_fidelity`` rows into non-emission proof and ambiguity."""
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        name = row.get("worksheet")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        tier = row.get("tier")
+        reason = row.get("reason")
+        text = reason.strip() if isinstance(reason, str) and reason.strip() else "(no reason recorded)"
+        if tier == DROP_EVIDENCE_TIER:
+            reasons.setdefault(_slug(name), []).append(text)
+        else:
+            ambiguous.setdefault(_slug(name), []).append(f"tier={tier!r}: {text}")
 
 
 def page_expectation(target: Path) -> dict[str, Any]:
-    """The three page buckets both page checks need, computed once.
+    """The page buckets both page checks need, computed once.
 
-    ``candidates`` = dashboards + orphan worksheets; ``explained_drops`` = candidates that are
-    ABSENT from the emitted pages *and* carry a declared ``viz_fidelity`` warning;
-    ``unexplained_drops`` = absent candidates with no declared reason.
+    ``candidates`` = dashboards + orphan worksheets. A candidate counts as EMITTED only when it
+    matches a page that actually carries at least one visual: a zero-visual page renders nothing, so
+    renaming the engine's empty crash-guard page to an expected page's title must not certify that
+    page as rebuilt (it did, with ``grade=validation-grade``).
+
+    ``explained_drops`` = absent candidates the bound handover proves produced no page
+    (:func:`page_drop_explanations`); ``unexplained_drops`` = every other absent candidate, each
+    annotated with WHY it could not be explained.
 
     ``assessable`` is False when the expected set cannot be established at all. It never degrades
     into the emitted pages: grading an artifact against itself reports a perfect score regardless of
     what is missing, which is the fail-open shape this repo keeps re-shipping.
 
-    ⚠️ ``explained_drops``/``unexplained_drops`` are matched BY NAME, so a PBIR page renamed during
-    hand-finishing (measured: 5 of 16 committed example units rename at least one page) shows up as
-    an unexplained drop even though its page exists. Callers therefore use these lists for
-    ATTRIBUTION and keep the pass/fail verdict on the rename-robust count.
+    ⚠️ Drop attribution is matched BY NAME, so a PBIR page renamed during hand-finishing (measured:
+    5 of 16 committed example units rename at least one page) shows up as an unexplained drop even
+    though its page exists. Callers therefore use these lists for ATTRIBUTION and keep the pass/fail
+    verdict on the rename-robust count.
     """
     actual = actual_pages(target)
-    blank = {
-        "assessable": False,
-        "candidates": None,
-        "actual": actual,
-        "explained_drops": [],
-        "unexplained_drops": [],
-        "drop_reasons": {},
-        "explanations_available": False,
-        "explanation_source": DROP_EXPLANATION_SOURCE,
-    }
-    candidates = expected_pages(target)
+    rendered = [page for page in actual if page.get("visuals", 0) > 0]
+    candidates, refusal = _spec_pages(target)
     if candidates is None:
         return {
-            **blank,
-            "reason": (
-                "no migration-spec.json found, so the expected Tableau page set is unknown; "
-                "produce one with scripts/parse_tableau.py <workbook> -o <unit>/migration-spec.json"
-            ),
+            "assessable": False,
+            "reason": refusal,
+            "candidates": None,
+            "actual": actual,
+            "rendered": rendered,
+            "explained_drops": [],
+            "unexplained_drops": [],
+            "drop_reasons": {},
+            "explanations": page_drop_explanations(target),
         }
-    if not candidates:
-        return {
-            **blank,
-            "reason": (
-                "migration-spec.json declares no dashboards and no worksheets, so there is no "
-                "expected page set to grade against"
-            ),
-        }
-    reasons, available = page_drop_explanations(target)
-    actual_slugs = {_slug(page["name"]) for page in actual}
-    absent = [page for page in candidates if _slug(page["name"]) not in actual_slugs]
+    explanations = page_drop_explanations(target)
+    reasons = explanations["reasons"]
+    rendered_slugs = {_slug(page["name"]) for page in rendered}
+    absent = [page for page in candidates if _slug(page["name"]) not in rendered_slugs]
     explained = [page for page in absent if _slug(page["name"]) in reasons]
     return {
         "assessable": True,
         "reason": None,
         "candidates": candidates,
         "actual": actual,
+        "rendered": rendered,
         "explained_drops": explained,
-        "unexplained_drops": [page for page in absent if _slug(page["name"]) not in reasons],
+        "unexplained_drops": [
+            {**page, "why_unexplained": _why_unexplained(page, explanations)}
+            for page in absent
+            if _slug(page["name"]) not in reasons
+        ],
         "drop_reasons": {page["name"]: reasons[_slug(page["name"])] for page in explained},
-        "explanations_available": available,
-        "explanation_source": DROP_EXPLANATION_SOURCE,
+        "explanations": explanations,
     }
+
+
+def _why_unexplained(page: dict[str, str], explanations: dict[str, Any]) -> str:
+    """Name the specific gap, so an operator knows whether to fetch evidence or sign an exemption."""
+    ambiguous = explanations["ambiguous"].get(_slug(page["name"]))
+    if ambiguous:
+        return (
+            f"the bound handover describes this page but does not assert non-emission "
+            f"(needs tier={DROP_EVIDENCE_TIER!r}; got {'; '.join(ambiguous[:2])})"
+        )
+    if not explanations["available"]:
+        if explanations["unbound_workbooks"]:
+            return (
+                "no handover slice binds to this unit's artifacts; "
+                f"found instead: {', '.join(explanations['unbound_workbooks'][:3])}"
+            )
+        return f"no handover slice was readable, so {explanations['source']} could not be consulted"
+    return "the bound handover records nothing about this page"
 
 
 def _page_order(report_dir: Path) -> list[str]:
@@ -754,9 +888,26 @@ def _page_order(report_dir: Path) -> list[str]:
     return [str(item) for item in order] if isinstance(order, list) else []
 
 
-def actual_pages(target: Path) -> list[dict[str, str]]:
-    """PBIR pages from shipping reports, ordered by pages.json where available."""
-    pages: list[dict[str, str]] = []
+def _page_visual_count(page_json: Path) -> int:
+    """How many visuals a PBIR page actually carries.
+
+    A page with zero ``visuals/**/visual.json`` files renders nothing. That is load-bearing: it is
+    the only thing that distinguishes the engine's crash-guard placeholder from a rebuilt page, and
+    without it renaming an empty page to an expected page's title certified it as rebuilt.
+    """
+    visuals_root = page_json.parent / "visuals"
+    if not visuals_root.is_dir():
+        return 0
+    return sum(1 for _ in visuals_root.rglob("visual.json"))
+
+
+def actual_pages(target: Path) -> list[dict[str, Any]]:
+    """PBIR pages from shipping reports, ordered by pages.json where available.
+
+    Each row carries ``visuals``, the page's own visual count, so callers can tell a rebuilt page
+    from one that renders nothing.
+    """
+    pages: list[dict[str, Any]] = []
     for report in shipping_reports(target):
         pages_root = report / "definition" / "pages"
         ordered = _page_order(report)
@@ -778,6 +929,7 @@ def actual_pages(target: Path) -> list[dict[str, str]]:
                     "name": str(display or internal or page_id),
                     "report": str(report),
                     "path": str(page_json),
+                    "visuals": _page_visual_count(page_json),
                 }
             )
     return pages
@@ -945,18 +1097,18 @@ def check_page_parity(target: Path, exemptions: dict[str, Any]) -> dict[str, Any
     """Page-count parity precondition: expected Tableau pages vs emitted PBIR pages.
 
     "Expected" is the CANDIDATE set (dashboards + orphan worksheets, see :func:`expected_pages`)
-    minus the candidates the engine dropped for a reason it DECLARED (see
+    minus the candidates a bound handover PROVES produced no page (see
     :func:`page_drop_explanations`). Only a shortfall that nothing accounts for fails.
+
+    "Emitted" counts only pages that carry at least one visual. A zero-visual page renders nothing,
+    so it is not evidence that anything was rebuilt; the engine's crash-guard placeholder is the one
+    zero-visual page that is EXPECTED, and every other one is reported as a blank page.
 
     The verdict stays on the COUNT rather than on name matching, deliberately: renaming a PBIR page
     during hand-finishing is legitimate and common (measured: 5 of 16 committed example units do
     it), and a name-matched verdict would fail every one of them. ``dropped_unexplained`` is the
     best-effort *attribution* of a shortfall and is rename-sensitive; when it is non-empty while the
     count balances, a page was renamed rather than lost.
-
-    The engine's zero-page crash-guard placeholder (see :data:`ENGINE_PLACEHOLDER_PAGE_NAME`) is
-    excluded from the emitted side: it is a declared extra with no Tableau counterpart, and counting
-    it failed the 2 workbooks of a real 44-workbook estate run that ship one.
     """
     expectation = page_expectation(target)
     actual = expectation["actual"]
@@ -974,45 +1126,72 @@ def check_page_parity(target: Path, exemptions: dict[str, Any]) -> dict[str, Any
     dropped = [page for page in expected if _exempted(entries, "page-parity", page["name"], {page["id"]})]
     explained = [page for page in expectation["explained_drops"] if page not in dropped]
     effective_expected = [page for page in expected if page not in dropped and page not in explained]
-    placeholders = [page for page in actual if _is_engine_placeholder_page(page)]
-    emitted = [page for page in actual if page not in placeholders]
-    unexempted_missing, unexempted_extra, exempted_extra = _parity_deltas(effective_expected, emitted, entries)
-    status = STATUS_PASS if not unexempted_missing and not unexempted_extra else STATUS_PRECONDITION_FAILED
+    placeholders, blank = _zero_visual_pages(actual, expectation["rendered"])
+    unexempted_missing, unexempted_extra, exempted_extra = _parity_deltas(
+        effective_expected, expectation["rendered"], entries
+    )
+    status = (
+        STATUS_PASS if not unexempted_missing and not unexempted_extra and not blank else STATUS_PRECONDITION_FAILED
+    )
     return {
         "id": "page-parity",
         "status": status,
-        "detail": _page_parity_detail(status, unexempted_missing, unexempted_extra, expectation),
+        "detail": _page_parity_detail(status, unexempted_missing, unexempted_extra, blank, expectation),
         "expected_count": len(expected),
         "effective_expected_count": len(effective_expected),
         "actual_count": len(actual),
+        "emitted_count": len(expectation["rendered"]),
         "expected_pages": expected,
         "actual_pages": actual,
+        "blank_pages": blank,
         "engine_placeholder_pages": placeholders,
         "exemptions": dropped + exempted_extra,
         "unexempted_missing": unexempted_missing,
         "unexempted_extra": unexempted_extra,
-        "dropped_explained": [{**page, "reasons": expectation["drop_reasons"][page["name"]]} for page in explained],
+        "dropped_explained": [
+            {**page, "evidence_tier": DROP_EVIDENCE_TIER, "reasons": expectation["drop_reasons"][page["name"]]}
+            for page in explained
+        ],
         "dropped_unexplained": [page for page in expectation["unexplained_drops"] if page not in dropped],
-        "drop_explanations_available": expectation["explanations_available"],
-        "drop_explanation_source": expectation["explanation_source"],
+        "drop_explanations": expectation["explanations"],
     }
 
 
-def _is_engine_placeholder_page(page: dict[str, str]) -> bool:
-    """Whether an emitted page is the engine's zero-page crash-guard placeholder.
+def _zero_visual_pages(
+    actual: list[dict[str, Any]], emitted: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split the pages that render nothing into the engine's declared placeholder and the rest.
 
-    Both engine constants are required. Either alone would let a hand-authored page be swallowed:
-    a real page can be titled "No visuals rebuilt", and a report can carry a ``page-empty*`` id that
-    the author later filled in.
+    A zero-visual page is never evidence that a candidate was rebuilt. Exactly one such page is
+    EXPECTED - the crash-guard placeholder - and every other one is a page that ships and renders
+    nothing, which is a finding in its own right.
     """
-    return page.get("name") == ENGINE_PLACEHOLDER_PAGE_NAME and str(page.get("id", "")).startswith(
-        ENGINE_PLACEHOLDER_PAGE_ID_PREFIX
+    placeholders = [page for page in actual if _is_engine_placeholder_page(page)]
+    return placeholders, [page for page in actual if page not in emitted and page not in placeholders]
+
+
+def _is_engine_placeholder_page(page: dict[str, Any]) -> bool:
+    """Whether a page is the engine's zero-page crash-guard placeholder.
+
+    All three clauses are load-bearing and each has its own reproduction:
+
+    * ``visuals == 0`` - the placeholder is emitted with NO visuals by design (twb_to_pbir.py:14721
+      passes an empty visual list). Without it, an empty ``page-empty*`` page renamed to an expected
+      page's title certified that page as rebuilt, ``grade=validation-grade``.
+    * the display name and the id prefix - both engine constants (:13091, :14720). Either alone lets
+      a hand-authored page be swallowed: a real page can be titled "No visuals rebuilt", and a report
+      can carry a ``page-empty*`` id whose author later gave it a different title.
+    """
+    return (
+        page.get("visuals", 0) == 0
+        and page.get("name") == ENGINE_PLACEHOLDER_PAGE_NAME
+        and str(page.get("id", "")).startswith(ENGINE_PLACEHOLDER_PAGE_ID_PREFIX)
     )
 
 
 def _parity_deltas(
-    effective_expected: list[dict[str, str]], actual: list[dict[str, str]], entries: list[dict[str, str]]
-) -> tuple[list[dict[str, str]], list[dict[str, str]], list[dict[str, str]]]:
+    effective_expected: list[dict[str, str]], actual: list[dict[str, Any]], entries: list[dict[str, str]]
+) -> tuple[list[dict[str, str]], list[dict[str, Any]], list[dict[str, Any]]]:
     """Count-based missing/extra split, with signed exemptions subtracted from each side."""
     extra = max(0, len(actual) - len(effective_expected))
     extra_pages = actual[-extra:] if extra else []
@@ -1025,13 +1204,14 @@ def _parity_deltas(
     return unexempted_missing, [page for page in extra_pages if page not in exempted_extra], exempted_extra
 
 
-def _page_parity_detail(
+def _page_parity_detail(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     status: str,
     unexempted_missing: list[dict[str, str]],
-    unexempted_extra: list[dict[str, str]],
+    unexempted_extra: list[dict[str, Any]],
+    blank: list[dict[str, Any]],
     expectation: dict[str, Any],
 ) -> str | None:
-    """Name what failed and where its declared reason would have come from."""
+    """Name what failed and, for a missing page, exactly why nothing accounted for it."""
     if status == STATUS_PASS:
         return None
     parts = []
@@ -1039,14 +1219,11 @@ def _page_parity_detail(
         parts.append(f"{len(unexempted_missing)} expected page(s) not emitted and not accounted for")
     if unexempted_extra:
         parts.append(f"{len(unexempted_extra)} emitted page(s) with no Tableau counterpart")
-    named = ", ".join(page["name"] for page in expectation["unexplained_drops"][:5])
-    if named:
-        parts.append(f"unexplained by name: {named}")
-    if not expectation["explanations_available"]:
-        parts.append(
-            f"no handover slice was readable, so declared drop reasons ({expectation['explanation_source']}) "
-            "could not be consulted"
-        )
+    if blank:
+        names = ", ".join(page["name"] for page in blank[:3])
+        parts.append(f"{len(blank)} page(s) carry no visuals and so render nothing: {names}")
+    for page in expectation["unexplained_drops"][:3]:
+        parts.append(f"{page['name']!r} unexplained - {page['why_unexplained']}")
     return "; ".join(parts) or None
 
 
