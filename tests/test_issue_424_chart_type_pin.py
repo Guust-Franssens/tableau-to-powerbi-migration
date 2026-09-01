@@ -33,8 +33,9 @@ import os
 import shutil
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import pytest
 
@@ -96,6 +97,45 @@ EXPECTED_A_BINDING = {
     "Series": [("SLA.AIRLINE_CODE", "SLA", "AIRLINE_CODE", None)],
 }
 
+
+class FixtureInput(NamedTuple):
+    """The distinguishing INPUT of one fixture, read from its `.twb` source."""
+
+    mark_class: str
+    axis_field: str
+    derivation: str
+    datatype: str
+    is_calc: bool
+
+
+# ⚠️ THE SPECIFICATION, hand-written, never derived from a parse. Round-2 review found that the
+# emitted-type matrix alone is vacuous as a discrimination claim: D/E/F/G/H all currently emit
+# ``columnChart``, so replacing any of their distinguishing inputs with A's leaves EVERY type
+# assertion green - including the permanent-invariant test whose entire purpose is guarding D's
+# `Bar` mark. Reproduced before fixing: deleting D's `<mark class='Bar'/>` passed all 9 tests.
+#
+# So the input side is pinned separately, against the parsed source, and WITHOUT the engine - which
+# also means this is the one part of the file that actually runs in CI, where the plugin is absent.
+EXPECTED_INPUTS = {
+    A_AUTO_YEAR: FixtureInput("Automatic", "DATES", "Year", "date", False),
+    B_AUTO_TRUNC: FixtureInput("Automatic", "DATES", "Month-Trunc", "date", False),
+    C_LINE_YEAR: FixtureInput("Line", "DATES", "Year", "date", False),
+    D_BAR_YEAR: FixtureInput("Bar", "DATES", "Year", "date", False),
+    E_AUTO_MDY: FixtureInput("Automatic", "DATES", "MDY", "date", False),
+    F_AUTO_DATETIME: FixtureInput("Automatic", "DATES", "Year", "datetime", False),
+    G_AUTO_CALCDATE: FixtureInput("Automatic", "Calculation_424", "Year", "date", True),
+    H_AUTO_STRING: FixtureInput("Automatic", "TECHNOLOGY_SET", "None", "string", False),
+}
+
+# Shared by all eight. The stacking consequence needs a colour DIMENSION and a measure on the value
+# shelf; without them a fixture stops demonstrating anything even if its axis pill is intact.
+EXPECTED_COMMON = {
+    "dashboard": "Detail",
+    "worksheet": "SLA Availability by Airline",
+    "colour_pill": "none:AIRLINE_CODE:nk",
+    "value_pill": "sum:AVAILABILITY_PCT:qk",
+}
+
 _ENGINE_RUN: dict[str, Any] | None = None
 
 
@@ -110,6 +150,124 @@ def _contract() -> Path | None:
 
 
 requires_engine = pytest.mark.skipif(_contract() is None, reason="deterministic tier not installed")
+
+
+# -- fixture INPUT parsing (no engine; this half runs in CI) ---------------------------------------
+def _pill_instance(ref: str | None) -> str:
+    """``[federated.sla].[yr:DATES:ok]`` -> ``yr:DATES:ok``."""
+    return (ref or "").strip().split("].[")[-1].strip("[]")
+
+
+def _axis_shape(worksheet: ET.Element, slug: str) -> FixtureInput:
+    """Resolve the Columns pill back through its ``column-instance`` to the declaring ``column``."""
+    marks = worksheet.findall("./table/panes/pane/mark")
+    assert len(marks) == 1, f"{slug}: expected exactly one mark card, found {len(marks)}"
+
+    deps = worksheet.find("./table/view/datasource-dependencies")
+    assert deps is not None, f"{slug}: worksheet declares no datasource-dependencies"
+    instances = {inst.get("name", "").strip("[]"): inst for inst in deps.findall("./column-instance")}
+    columns = {col.get("name", "").strip("[]"): col for col in deps.findall("./column")}
+
+    axis_instance = _pill_instance(worksheet.findtext("./table/cols"))
+    assert axis_instance in instances, f"{slug}: the cols pill {axis_instance!r} has no column-instance"
+    instance = instances[axis_instance]
+
+    axis_field = (instance.get("column") or "").strip("[]")
+    assert axis_field in columns, f"{slug}: the axis pill resolves to {axis_field!r}, which is not declared"
+    column = columns[axis_field]
+
+    return FixtureInput(
+        mark_class=marks[0].get("class") or "",
+        axis_field=axis_field,
+        derivation=instance.get("derivation") or "",
+        datatype=column.get("datatype") or "",
+        is_calc=column.find("./calculation") is not None,
+    )
+
+
+def _common_facts(root: ET.Element, worksheet: ET.Element, slug: str) -> dict[str, str]:
+    """The reproduction ingredients every variant shares: the colour dimension and the value pill."""
+    dashboards = root.findall("./dashboards/dashboard")
+    assert len(dashboards) == 1, f"{slug}: expected exactly one dashboard, found {len(dashboards)}"
+    colour = worksheet.findall("./table/panes/pane/encodings/color")
+    return {
+        "dashboard": dashboards[0].get("name") or "",
+        "worksheet": worksheet.get("name") or "",
+        "colour_pill": _pill_instance(colour[0].get("column"))
+        if len(colour) == 1
+        else f"<{len(colour)} colour encodings>",
+        "value_pill": _pill_instance(worksheet.findtext("./table/rows")),
+    }
+
+
+def _parse_fixture_source(slug: str) -> tuple[FixtureInput, dict[str, str]]:
+    """Read one fixture's `.twb` and return its distinguishing input plus the shared facts.
+
+    ⚠️ Deliberately parses the XML directly rather than reading a constant, a filename or the
+    engine's IR. A pin that reads its own description back to itself proves nothing, and going
+    through the engine would make this skip in CI, where the plugin is absent.
+    """
+    root = ET.parse(FIXTURE / f"{slug}.twb").getroot()
+    worksheets = root.findall("./worksheets/worksheet")
+    assert len(worksheets) == 1, f"{slug}: expected exactly one worksheet, found {len(worksheets)}"
+    worksheet = worksheets[0]
+    return _axis_shape(worksheet, slug), _common_facts(root, worksheet, slug)
+
+
+@pytest.mark.parametrize("slug", sorted(EXPECTED_INPUTS))
+def test_every_fixture_declares_the_input_it_claims(slug: str) -> None:
+    """⚠️ THE ANTI-VACUITY PIN. Without it the whole discrimination claim can silently evaporate.
+
+    Round-2 review: because D/E/F/G/H all currently emit ``columnChart``, each one's distinguishing
+    input can be replaced with A's while every emitted-type assertion stays green — measured, and it
+    passed all nine tests with D's ``<mark class='Bar'/>`` deleted. The suite would go on claiming
+    five-way remedy discrimination having lost the controls that provide it.
+
+    Parsed from the `.twb` source, compared against a hand-written specification. Parametrized so a
+    drifted fixture fails its OWN case and no other. Runs WITHOUT the engine, so unlike everything
+    else in this file it is also live in CI.
+    """
+    observed = _parse_fixture_source(slug)[0]
+    assert observed == EXPECTED_INPUTS[slug], (
+        f"{slug} no longer declares the input it is named for ({THE_ONE_DIFFERENCE[slug]}), so this "
+        f"module's remedy-discrimination claim is void for it.\n"
+        f"  expected: {EXPECTED_INPUTS[slug]}\n  observed: {observed}\n"
+        "Restore the input, or if the change is deliberate re-derive which candidate remedies the set "
+        "still separates before updating this expectation."
+    )
+
+
+def test_no_two_fixtures_share_an_input_shape() -> None:
+    """The discrimination property itself: eight fixtures, eight distinct inputs.
+
+    Stated independently of the per-fixture pin above, because this is the property the module's
+    central claim rests on — if two fixtures collapse onto one input, the set separates fewer
+    remedies than its matrix test says it does, whatever the individual expectations were updated to.
+    """
+    observed = {slug: _parse_fixture_source(slug)[0] for slug in EXPECTED_INPUTS}
+    collisions = {
+        shape: sorted(s for s, v in observed.items() if v == shape)
+        for shape in set(observed.values())
+        if sum(1 for v in observed.values() if v == shape) > 1
+    }
+    assert not collisions, (
+        f"Two or more fixtures now carry the SAME input shape: {collisions}. The remedy matrix "
+        "claims each wrong fix is separated by exactly one fixture; duplicated inputs make that false."
+    )
+
+
+@pytest.mark.parametrize("slug", sorted(EXPECTED_INPUTS))
+def test_every_fixture_keeps_the_shared_stacking_ingredients(slug: str) -> None:
+    """A colour DIMENSION and a measure on the value shelf are what make the defect arithmetic.
+
+    An axis pill can be perfectly correct while the fixture has quietly stopped demonstrating a
+    stacked ratio, so the parts every variant shares are pinned too.
+    """
+    common = _parse_fixture_source(slug)[1]
+    assert common == EXPECTED_COMMON, (
+        f"{slug} no longer carries the shared reproduction ingredients.\n"
+        f"  expected: {EXPECTED_COMMON}\n  observed: {common}"
+    )
 
 
 def _signal(expectation: str, direction: str) -> str:

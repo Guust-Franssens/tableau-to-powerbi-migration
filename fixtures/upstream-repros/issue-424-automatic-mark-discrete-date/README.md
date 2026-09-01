@@ -94,6 +94,33 @@ flipping it would *introduce* a defect), and a non-date string dimension with a 
 bar chart. `tests/test_issue_424_chart_type_pin.py` marks both as `PERMANENT_INVARIANTS`, which are
 **not** to be retired with the rest of the pin when upstream fixes the predicate.
 
+### ⚠️ The inputs are pinned too, and that is not redundant
+
+D, E, F, G and H **all currently emit `columnChart`** — the same as A. So each one's distinguishing
+*input* can be replaced with A's and every emitted-type assertion stays green: measured, deleting
+D's `<mark class='Bar'/>` passed the entire suite, including the permanent-invariant test whose only
+purpose is guarding that mark. The set would go on claiming five-way discrimination having lost the
+controls that provide it.
+
+So each fixture's `(mark_class, axis field, derivation, datatype, is_calc)` is pinned by parsing the
+`.twb` **source** against a hand-written specification, plus a distinctness assertion (eight
+fixtures, eight distinct inputs) and the shared ingredients (`Detail` dashboard, the `AIRLINE_CODE`
+colour dimension, the `Sum(AVAILABILITY_PCT)` value pill). That half uses no engine, so — unlike
+every other test in the module — **it also runs in CI**, where the conversion plugin is absent.
+
+Attribution, measured by collapsing each fixture's input onto A's:
+
+| collapse | its own input case | another fixture's | emitted-type matrix |
+|---|---|---|---|
+| D `Bar` → `Automatic` | **FAIL** | pass | pass |
+| E `MDY` → `Year` | **FAIL** | pass | pass |
+| F `datetime` → `date` | **FAIL** | pass | pass |
+| G calc field → base column | **FAIL** | pass | pass |
+| H string dim → date part | **FAIL** | pass | pass |
+
+The matrix column is the point: for all five, the type assertions stay green, so the input pin is
+demonstrably what catches them.
+
 ⚠️ **Still open:** a Tableau **date bin** or date **parameter** is not covered — no real serialization
 of either was available, and a synthetic date-typed bin crossed to `lineChart` under a
 datatype-keyed predicate, so that boundary is untested rather than settled.
