@@ -385,6 +385,65 @@ INTENDED["census-prints-a-glyph-again"] = (
     "tests/test_tableau_luid_census.py::test_an_unassessable_run_survives_a_cp1252_console"
 )
 
+# ⚠️ Round 8: ONE MUTATION PER BRANCH of the console scanner.
+#
+# The gate scanned four call shapes and had ONE positive control -- a positional `print` -- so
+# three branches were asserted by construction rather than proved, and four idiomatic writes
+# inside its claimed coverage were missed: `print(end=)`, `print(sep=)`, `LOG.warning(msg=)` and
+# `LOG.log()`. Those are not the residual that was disclosed (strings built elsewhere,
+# `sys.stdout.write`, third-party exception text); they are ordinary calls to the very functions
+# the gate names.
+#
+# ⚠️ Each mutation removes exactly ONE entry from one constant set, and is anchored on the one
+# control case that must go red. Removing a whole set would turn several controls red at once and
+# none would be attributable -- the 'broad assertion satisfied by any guard' mode, in the gate's
+# own proof. `console_safety` is a separate module precisely so this is possible.
+MUTATIONS.update(
+    {
+        "console-gate-drops-print": '\nimport console_safety\nconsole_safety.RUNTIME_WRITES = console_safety.RUNTIME_WRITES - {"print"}\n',
+        "console-gate-drops-systemexit": '\nimport console_safety\nconsole_safety.RUNTIME_WRITES = console_safety.RUNTIME_WRITES - {"SystemExit"}\n',
+        "console-gate-drops-logging-methods": '\nimport console_safety\nconsole_safety.LOG_METHODS = console_safety.LOG_METHODS - {"warning"}\n',
+        "console-gate-drops-the-log-method": '\nimport console_safety\nconsole_safety.LOG_METHODS = console_safety.LOG_METHODS - {"log"}\n',
+        "console-gate-drops-print-end": '\nimport console_safety\nconsole_safety.PRINT_KEYWORDS = console_safety.PRINT_KEYWORDS - {"end"}\n',
+        "console-gate-drops-print-sep": '\nimport console_safety\nconsole_safety.PRINT_KEYWORDS = console_safety.PRINT_KEYWORDS - {"sep"}\n',
+        "console-gate-drops-logging-msg-keyword": "\nimport console_safety\nconsole_safety.LOG_KEYWORDS = set()\n",
+        "console-gate-drops-argparse-description": '\nimport console_safety\nconsole_safety.ARGPARSE_TEXT = console_safety.ARGPARSE_TEXT - {"description"}\n',
+        "console-gate-drops-argparse-help": '\nimport console_safety\nconsole_safety.ARGPARSE_TEXT = console_safety.ARGPARSE_TEXT - {"help"}\n',
+        "console-gate-drops-argparse-epilog": '\nimport console_safety\nconsole_safety.ARGPARSE_TEXT = console_safety.ARGPARSE_TEXT - {"epilog"}\n',
+        "console-gate-flags-prose-too": "\nimport ast\nimport console_safety\ndef runtime_non_ascii(path):\n    out = []\n    for node in ast.walk(ast.parse(path.read_text(encoding='utf-8'))):\n        if isinstance(node, ast.Constant) and isinstance(node.value, str) and not node.value.isascii():\n            out.append(f'{path.name}:{node.lineno}')\n    return out\nconsole_safety.runtime_non_ascii = runtime_non_ascii\n",
+    }
+)
+CENSUS_MUTATIONS.update(
+    {
+        "console-gate-drops-argparse-description",
+        "console-gate-drops-print-sep",
+        "console-gate-drops-argparse-epilog",
+        "console-gate-drops-print-end",
+        "console-gate-drops-logging-methods",
+        "console-gate-drops-print",
+        "console-gate-drops-the-log-method",
+        "console-gate-flags-prose-too",
+        "console-gate-drops-systemexit",
+        "console-gate-drops-logging-msg-keyword",
+        "console-gate-drops-argparse-help",
+    }
+)
+INTENDED.update(
+    {
+        "console-gate-drops-print": "tests/test_tableau_luid_census.py::test_the_console_gate_catches_every_shape_it_claims[print-positional]",
+        "console-gate-drops-systemexit": "tests/test_tableau_luid_census.py::test_the_console_gate_catches_every_shape_it_claims[systemexit-positional]",
+        "console-gate-drops-logging-methods": "tests/test_tableau_luid_census.py::test_the_console_gate_catches_every_shape_it_claims[logging-positional]",
+        "console-gate-drops-the-log-method": "tests/test_tableau_luid_census.py::test_the_console_gate_catches_every_shape_it_claims[logging-log-method]",
+        "console-gate-drops-print-end": "tests/test_tableau_luid_census.py::test_the_console_gate_catches_every_shape_it_claims[print-end]",
+        "console-gate-drops-print-sep": "tests/test_tableau_luid_census.py::test_the_console_gate_catches_every_shape_it_claims[print-sep]",
+        "console-gate-drops-logging-msg-keyword": "tests/test_tableau_luid_census.py::test_the_console_gate_catches_every_shape_it_claims[logging-msg-keyword]",
+        "console-gate-drops-argparse-description": "tests/test_tableau_luid_census.py::test_the_console_gate_catches_every_shape_it_claims[argparse-desc]",
+        "console-gate-drops-argparse-help": "tests/test_tableau_luid_census.py::test_the_console_gate_catches_every_shape_it_claims[argparse-help]",
+        "console-gate-drops-argparse-epilog": "tests/test_tableau_luid_census.py::test_the_console_gate_catches_every_shape_it_claims[argparse-epilog]",
+        "console-gate-flags-prose-too": "tests/test_tableau_luid_census.py::test_the_console_gate_leaves_prose_alone",
+    }
+)
+
 INTENDED.update(
     {
         "guard-column-is-load-bearing-transport": "tests/test_tableau_luid_census.py::test_the_census_and_the_shipped_parser_agree_on_the_same_bytes",

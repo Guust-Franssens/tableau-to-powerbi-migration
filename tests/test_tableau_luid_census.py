@@ -11,18 +11,17 @@ re-measurable at any time by running the script.
 
 from __future__ import annotations
 
-import ast
 import json
 import os
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
+import console_safety  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_luid_census as census_mod  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_view_types as view_types_mod  # noqa: E402  # pylint: disable=wrong-import-position
 
@@ -732,67 +731,85 @@ def test_a_measurable_run_also_survives_a_cp1252_console(tmp_path):
     assert proc.returncode == census_mod.EXIT_OK
 
 
-#: Where a string can reach a console at RUNTIME. Comments and never-printed docstrings are
-#: deliberately excluded -- they are not written to a stream, and banning glyphs there would cost
-#: real readability for no safety.
-_RUNTIME_WRITES = {"print", "SystemExit"}
-_LOG_METHODS = {"debug", "info", "warning", "error", "exception", "critical"}
-_ARGPARSE_TEXT = {"description", "help", "epilog"}
-
-#: ⚠️ Scoped to the two modules this PR owns, not repo-wide, because sibling agents are mid-flight in
-#: other scripts and one of them is fixing this very class of bug in `--help`. Widening it is the
-#: obvious follow-up; the scoping is an ownership decision, not a judgement that the rest is clean.
+#: ⚠️ Scoped to the two modules this PR owns, not repo-wide, because sibling agents are mid-flight
+#: in other scripts and one of them is fixing this very class of bug in `--help`. Widening it is the
+#: obvious follow-up -- `console_safety` is importable precisely so that is a one-line change -- and
+#: the scoping is an ownership decision, not a judgement that the rest is clean.
 _GATED = ("tableau_luid_census.py", "tableau_view_types.py")
 
+GLYPH = "\u26a0"
 
-def _runtime_non_ascii(path: Path) -> list[str]:
-    findings: list[str] = []
+#: One case PER BRANCH of the scanner. ⚠️ The previous version had a single positive control, which
+#: planted a positional `print` argument -- so it proved ONE branch of four and the other three were
+#: asserted by construction. Four idiomatic writes inside the claimed coverage were missed because of
+#: it: `print(end=)`, `print(sep=)`, `LOG.warning(msg=)` and `LOG.log()`. A scan covering four call
+#: shapes needs four controls, or three of them are decoration.
+_BRANCH_CONTROLS = [
+    pytest.param(f'print("{GLYPH}")', "RUNTIME_WRITES/print", id="print-positional"),
+    pytest.param(f'print("x", end="{GLYPH}")', "PRINT_KEYWORDS/end", id="print-end"),
+    pytest.param(f'print("x", "y", sep="{GLYPH}")', "PRINT_KEYWORDS/sep", id="print-sep"),
+    pytest.param(f'raise SystemExit("{GLYPH}")', "RUNTIME_WRITES/SystemExit", id="systemexit-positional"),
+    pytest.param(f'LOG.warning("{GLYPH}")', "LOG_METHODS/positional", id="logging-positional"),
+    pytest.param(f'LOG.warning(msg="{GLYPH}")', "LOG_KEYWORDS/msg", id="logging-msg-keyword"),
+    pytest.param(f'LOG.log(30, "{GLYPH}")', "LOG_METHODS/log", id="logging-log-method"),
+    pytest.param(f'argparse.ArgumentParser(description="{GLYPH}")', "ARGPARSE_TEXT/description", id="argparse-desc"),
+    pytest.param(f'parser.add_argument("--x", help="{GLYPH}")', "ARGPARSE_TEXT/help", id="argparse-help"),
+    pytest.param(f'argparse.ArgumentParser(epilog="{GLYPH}")', "ARGPARSE_TEXT/epilog", id="argparse-epilog"),
+]
 
-    def scan(node, where: str) -> None:
-        for part in ast.walk(node):
-            if isinstance(part, ast.Constant) and isinstance(part.value, str) and not part.value.isascii():
-                findings.append(f"{path.name}:{part.lineno} via {where}: {part.value[:60]!r}")
+_PROSE = [
+    pytest.param(f"# {GLYPH} a comment", id="comment"),
+    pytest.param(f'"""{GLYPH} a module docstring."""', id="docstring"),
+    pytest.param(f'MARKER = "{GLYPH}"', id="plain-assignment"),
+    pytest.param(f'x = "{GLYPH}".encode("utf-8")', id="encoded-not-printed"),
+]
 
-    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-        if not isinstance(node, ast.Call):
-            continue
-        name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
-        if name in _RUNTIME_WRITES or name in _LOG_METHODS:
-            for arg in node.args:
-                scan(arg, name)
-        for keyword in node.keywords:
-            if keyword.arg in _ARGPARSE_TEXT:
-                scan(keyword.value, f"argparse {keyword.arg}")
-    return findings
+_PREAMBLE = "import argparse\nimport logging\nLOG = logging.getLogger(__name__)\n"
+
+
+def _scan_snippet(snippet: str, tmp_path: Path) -> list[str]:
+    probe = tmp_path / "probe.py"
+    probe.write_text(_PREAMBLE + snippet + "\n", encoding="utf-8")
+    return console_safety.runtime_non_ascii(probe)
+
+
+@pytest.mark.parametrize("snippet, branch", _BRANCH_CONTROLS)
+def test_the_console_gate_catches_every_shape_it_claims(snippet, branch, tmp_path):
+    """⚠️ One control per branch, and each fails if THAT branch alone is removed.
+
+    A single control that fires for the whole scan is the "broad assertion satisfied by any guard"
+    mode already fixed in the census mutation table -- this is the same shape in the gate's own
+    proof. Each case here exercises exactly one entry of `console_safety`'s constant sets, and the
+    campaign mutates those sets one at a time to prove it.
+    """
+    assert _scan_snippet(snippet, tmp_path), f"the gate missed {branch}: {snippet}"
+
+
+@pytest.mark.parametrize("snippet", _PROSE)
+def test_the_console_gate_leaves_prose_alone(snippet, tmp_path):
+    """⚠️ The negative control, and it is not a formality.
+
+    A scanner that flagged comments and docstrings would be satisfied by banning glyphs everywhere,
+    which costs real readability for no safety -- the runtime stream never sees them. It would also
+    make every positive control above pass for the wrong reason.
+    """
+    assert not _scan_snippet(snippet, tmp_path)
 
 
 @pytest.mark.parametrize("module", _GATED)
 def test_no_runtime_string_can_break_a_cp1252_console(module):
-    """⚠️ The durable form of the fix. Repairing line 301 alone would have left the NEXT ``⚠️`` on
-    another refusal path as the same bug with a different line number.
+    """⚠️ The durable form of the round-7 fix. Repairing one line would have left the NEXT glyph
+    on another refusal path as the same bug with a different line number.
 
-    This is the second CP1252 crash on this board in one day -- a sibling PR hit it when glyphs in a
-    module docstring became argparse's `description` and crashed `--help`. Two independent
-    occurrences makes it a repo-level trap, so the rule is enforced rather than written down:
-    **non-ASCII is fine in comments, in docstrings that are never printed, and in test names; it is
-    not safe in anything written to a console at runtime.**
+    Second CP1252 crash on this board in a day -- a sibling hit it when docstring glyphs became
+    argparse's `description` and crashed `--help`. Two independent occurrences makes it a repo-level
+    trap, so the rule is enforced rather than written down: **non-ASCII is fine in comments, in
+    docstrings that are never printed, and in test names; it is not safe in anything written to a
+    console at runtime.**
     """
-    found = _runtime_non_ascii(Path(census_mod.__file__).parent / module)
+    found = console_safety.runtime_non_ascii(Path(census_mod.__file__).parent / module)
     assert not found, (
         "non-ASCII can reach a console at runtime, and a default Windows console is CP1252:\n  "
         + "\n  ".join(found)
         + "\nUse an ASCII marker such as [WARN]."
     )
-
-
-def test_the_console_gate_can_actually_fire():
-    """⚠️ Positive control. A gate that cannot fail is not a gate -- round 6's lesson, applied here
-    before anyone has to learn it again on this file.
-    """
-    probe = Path(census_mod.__file__).parent / "tableau_luid_census.py"
-    source = probe.read_text(encoding="utf-8")
-    planted = source.replace('print("=== blank-luid census', 'print("=== \u26a0 blank-luid census', 1)
-    assert planted != source, "the plant anchor is stale"
-    scratch = Path(tempfile.mkdtemp()) / "tableau_luid_census.py"
-    scratch.write_text(planted, encoding="utf-8")
-    assert _runtime_non_ascii(scratch), "the gate did not notice a planted non-ASCII print"
