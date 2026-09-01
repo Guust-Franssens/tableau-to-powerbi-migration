@@ -53,8 +53,18 @@ from mutation_harness import (  # noqa: E402  # pylint: disable=wrong-import-pos
     session_is_trustworthy,
 )
 
-TARGET = "tests/test_check_reference_readiness.py"
-NODE = TARGET + "::"
+#: Every suite an anchor may live in. The tests were split to match the module split, so an anchor's
+#: file is RESOLVED rather than hard-coded - and a name that exists in none of them, or in more than
+#: one, is a hard error. An anchor that silently stopped existing would make this harness green while
+#: proving nothing, which is the exact attribution defect round-2 finding 6 was about.
+TARGETS = (
+    "tests/test_check_reference_readiness.py",
+    "tests/test_reference_evidence.py",
+    "tests/test_object_identity.py",
+)
+#: `mutation_harness.run` passes its target as ONE argv element, so a whole-suite control names the
+#: gate suite - the only one that exercises `render`, and the one the absent-anchor guard applies to.
+WHOLE_SUITE = TARGETS[0]
 
 CAUGHT = "CAUGHT"
 SURVIVED = "SURVIVED"
@@ -244,7 +254,11 @@ ev.PROVIDER_CEILING = _Permissive(_orig)
     "the-manual-name-prefix-is-not-stripped": Mutation(
         code="""
 import reference_evidence as ev
-ev.Evidence.match_names = lambda self: [self.name]
+import object_identity as oid
+# `collect_manual` globs `tableau-*.png` and names each record from the file stem, so the prefix is
+# imposed by the glob rather than chosen by the operator. Not stripping it makes the route match
+# nothing at all.
+ev.Evidence.candidate = lambda self: oid.Candidate(names=(self.name,), kind=self.kind)
 """,
         anchor="test_validation_grade_is_reported_when_present",
         controls=("test_a_worksheet_render_does_satisfy_a_worksheet_page",),
@@ -346,10 +360,10 @@ crr._expectation = _expectation
     # --- scope, normalization and drop-explanation joins -------------------------------------------
     "worksheet-render-satisfies-dashboard-page": Mutation(
         code="""
-import reference_evidence as ev
+import object_identity as oid
 import check_reference_readiness as crr
 def match_evidence(obj, evidence):
-    named = [e for e in evidence if ev.norm_name(e.name) == ev.norm_name(obj.name)]
+    named = [e for e in evidence if any(oid.normalize(n) == oid.normalize(obj.name) for n in e.candidate().names)]
     return (named[0], []) if named else (None, [])
 crr.match_evidence = match_evidence
 """,
@@ -361,11 +375,12 @@ crr.match_evidence = match_evidence
     ),
     "unknown-scope-counts-as-a-match": Mutation(
         code="""
-import reference_evidence as ev
+import object_identity as oid
 import check_reference_readiness as crr
+# Let a record whose producer declared no object type satisfy a page anyway.
 def match_evidence(obj, evidence):
-    named = [e for e in evidence if ev.norm_name(e.name) == ev.norm_name(obj.name)]
-    ok = [e for e in named if e.kind in (obj.kind, ev.KIND_UNKNOWN, ev.KIND_ASSERTED)]
+    named = [e for e in evidence if any(oid.normalize(n) == oid.normalize(obj.name) for n in e.candidate().names)]
+    ok = [e for e in named if e.kind in (obj.kind, oid.KIND_UNKNOWN)]
     return (ok[0], []) if ok else (None, named)
 crr.match_evidence = match_evidence
 """,
@@ -374,19 +389,19 @@ crr.match_evidence = match_evidence
     ),
     "drop-explanations-normalize-the-name": Mutation(
         code="""
-import reference_evidence as ev
+import object_identity as oid
 import check_reference_readiness as crr
-# Round-2 finding 5: `_norm` collapses case and repeated whitespace, so two objects with DIFFERENT
-# page ids shared one key and one warning excused the wrong page.
+# Round-2 finding 5: normalization collapses case and repeated whitespace, so two objects with
+# DIFFERENT page ids shared one key and one warning excused the wrong page.
 _orig = crr.drop_explanations
 class _Loose(dict):
     def __contains__(self, key):
         kind, name = key
-        return any(k == kind and ev.norm_name(n) == ev.norm_name(name) for k, n in self)
+        return any(k == kind and oid.normalize(n) == oid.normalize(name) for k, n in self)
     def __getitem__(self, key):
         kind, name = key
         for (k, n), v in self.items():
-            if k == kind and ev.norm_name(n) == ev.norm_name(name):
+            if k == kind and oid.normalize(n) == oid.normalize(name):
                 return v
         raise KeyError(key)
 crr.drop_explanations = lambda handover: _Loose(_orig(handover))
@@ -410,13 +425,12 @@ crr._expectation = _expectation
     ),
     "ambiguous-evidence-picks-the-first": Mutation(
         code="""
-import reference_evidence as ev
 import check_reference_readiness as crr
 _orig = crr.match_evidence
 def match_evidence(obj, evidence):
     match, named = _orig(obj, evidence)
-    if match is ev.AMBIGUOUS:
-        ok = [e for e in named if e.kind in (obj.kind, ev.KIND_ASSERTED)]
+    if match is crr.AMBIGUOUS:
+        ok = [e for e in named if e.kind == obj.kind]
         return (ok[0] if ok else None), ([] if ok else named)
     return match, named
 crr.match_evidence = match_evidence
@@ -534,6 +548,164 @@ crr._merge = _merge
         anchor="test_one_validation_grade_page_does_not_silence_the_ceiling_for_the_rest",
         controls=("test_validation_grade_is_reported_when_present",),
     ),
+    # --- round 3: grade may never widen kind, and evidence must be exclusive ---------------------
+    "a-grade-promotes-a-record-kind": Mutation(
+        code="""
+import reference_evidence as ev
+import object_identity as oid
+# Round-3 finding 1: the repair that made the manual route reachable re-created the founding defect.
+# A validation-grade manual record was promoted to a kind matching BOTH dashboards and worksheets.
+_orig = ev.Evidence.candidate
+def candidate(self):
+    base = _orig(self)
+    if self.provider == "manual" and self.grade == ev.GRADE_VALIDATION:
+        return oid.Candidate(names=base.names, kind=oid.KIND_WORKSHEET)
+    return base
+ev.Evidence.candidate = candidate
+""",
+        anchor="test_a_grade_can_never_widen_an_evidence_kind",
+        controls=("test_validation_grade_is_reported_when_present",),
+    ),
+    "one-render-may-satisfy-several-pages": Mutation(
+        code="""
+import check_reference_readiness as crr
+# The alias created a second name with no uniqueness check, so one image made two distinct
+# worksheets ready. Identity is not enough on its own - evidence must be EXCLUSIVE.
+crr._exclusivity_conflicts = lambda rows: set()
+""",
+        anchor="test_one_render_cannot_make_two_pages_ready",
+        controls=("test_a_worksheet_render_does_satisfy_a_worksheet_page",),
+    ),
+    "untyped-evidence-is-silently-dropped": Mutation(
+        code="""
+import check_reference_readiness as crr
+_orig = crr.render
+crr.render = lambda report, *, verbose=False: _orig(report, verbose=verbose).replace("UNTYPED EVIDENCE", "")
+""",
+        anchor="test_untyped_evidence_is_reported_with_the_route_to_make_it_usable",
+        controls=("test_a_worksheet_render_does_satisfy_a_worksheet_page",),
+    ),
+    # --- round 3: lossy normalization on engine-to-engine joins ----------------------------------
+    "engine-workbook-names-are-normalized-into-sets": Mutation(
+        code="""
+import check_reference_readiness as crr
+import object_identity as oid
+# Round-3 finding 2: `_unit_names` returned normalized SETS, so two genuinely distinct workbooks
+# collapsed to one key and the collision was permanently discarded.
+_orig = crr._unit_names
+def _unit_names(engine_report):
+    workbooks, datasources = _orig(engine_report)
+    return sorted({oid.normalize(n) for n in workbooks}), sorted({oid.normalize(n) for n in datasources})
+crr._unit_names = _unit_names
+_shipped = crr._units_without_reports
+def _units_without_reports(engine_report, reports):
+    shipped = {oid.normalize(p.name[: -len(".Report")]) for p in reports}
+    workbooks, _ = _unit_names(engine_report)
+    return [crr.UnitResult(unit=n, status=crr.STATUS_FINDINGS, detail="no report ships for it")
+            for n in sorted(set(workbooks) - shipped)]
+crr._units_without_reports = _units_without_reports
+""",
+        anchor="test_two_engine_workbooks_differing_only_by_whitespace_are_both_required",
+        controls=("test_a_workbook_whose_report_never_shipped_is_a_finding",),
+    ),
+    "a-duplicated-engine-workbook-is-deduplicated": Mutation(
+        code="""
+import check_reference_readiness as crr
+import object_identity as oid
+oid.duplicates = lambda names: []
+crr.oid.duplicates = lambda names: []
+""",
+        anchor="test_a_duplicated_engine_workbook_name_cannot_be_attributed",
+        controls=("test_a_workbook_whose_report_never_shipped_is_a_finding",),
+    ),
+    "the-datasource-classification-normalizes": Mutation(
+        code="""
+import check_reference_readiness as crr
+import object_identity as oid
+_orig = crr._datasource_only
+def _datasource_only(unit, report_dir, engine_report):
+    workbooks, datasources = crr._unit_names(engine_report)
+    norm = {oid.normalize(n) for n in datasources}
+    if engine_report is not None and oid.normalize(unit) in norm and unit not in workbooks:
+        return crr.UnitResult(unit=unit, status=crr.STATUS_NOT_APPLICABLE,
+                              detail="datasource-only unit", report_dir=str(report_dir))
+    return _orig(unit, report_dir, engine_report)
+crr._datasource_only = _datasource_only
+""",
+        anchor="test_a_datasource_classification_uses_the_exact_name",
+        controls=("test_a_datasource_only_unit_is_not_applicable",),
+    ),
+    "source-asset-selection-normalizes-the-stem": Mutation(
+        code="""
+from pathlib import Path
+import check_reference_readiness as crr
+import object_identity as oid
+_orig = crr.resolve_source
+def resolve_source(root, unit, handover, explicit):
+    found = _orig(root, unit, handover, explicit)
+    if found is not None:
+        return found
+    manifest = crr.json_object(root / "input_manifest.json")
+    for asset in (manifest or {}).get("assets") or []:
+        name = str(asset.get("name") or "")
+        if Path(name).stem and oid.normalize(Path(name).stem) == oid.normalize(unit):
+            candidate = root.parent / "assets" / name
+            if candidate.is_file():
+                return candidate
+    return None
+crr.resolve_source = resolve_source
+""",
+        anchor="test_source_asset_selection_uses_the_exact_stem",
+        controls=("test_a_worksheet_render_does_satisfy_a_worksheet_page",),
+    ),
+    # --- round 3: the abstraction's own guarantees ------------------------------------------------
+    "a-resolution-can-be-read-without-being-unique": Mutation(
+        code="""
+import object_identity as oid
+oid.Resolution.value = lambda self: self.matches[0] if self.matches else None
+""",
+        anchor="test_reading_an_ambiguous_resolution_raises_rather_than_picking",
+        controls=("test_collisions_and_duplicates_preserve_multiplicity",),
+    ),
+    "an-engine-index-gains-a-normalized-fallback": Mutation(
+        code="""
+import object_identity as oid
+_orig = oid.IdentityIndex.resolve
+def resolve(self, identity):
+    found = _orig(self, identity)
+    if found.outcome != oid.ABSENT:
+        return found
+    hits = [v for (kind, key), values in self._by_key.items()
+            if kind == identity.kind and oid.normalize(key) == oid.normalize(identity.name)
+            for v in values]
+    return oid.Resolution(identity=identity, matches=tuple(hits))
+oid.IdentityIndex.resolve = resolve
+""",
+        anchor="test_an_engine_index_has_no_normalized_layer_to_fall_back_to",
+        controls=("test_a_normalized_index_resolves_a_spelling_difference_but_refuses_a_collision",),
+    ),
+    "an-unknown-kind-can-become-an-identity": Mutation(
+        code="""
+import object_identity as oid
+oid.ObjectIdentity.from_engine = classmethod(
+    lambda cls, kind, name: cls(kind=kind, name=name) if isinstance(name, str) and name.strip() else None
+)
+""",
+        anchor="test_an_identity_cannot_be_built_from_an_unknown_kind",
+        controls=("test_collisions_and_duplicates_preserve_multiplicity",),
+    ),
+    "an-index-overwrites-instead-of-appending": Mutation(
+        code="""
+import object_identity as oid
+def add(self, candidate, value):
+    self._kinds[id(value)] = candidate.kind
+    for key in candidate.keys(normalized=self.normalized):
+        self._by_key[(candidate.kind, key)] = [value]
+oid.IdentityIndex.add = add
+""",
+        anchor="test_reading_an_ambiguous_resolution_raises_rather_than_picking",
+        controls=("test_an_engine_index_has_no_normalized_layer_to_fall_back_to",),
+    ),
     # --- whole-suite discriminating controls ------------------------------------------------------
     "control-cosmetic-reword-of-a-rendered-line": Mutation(
         code="""
@@ -569,17 +741,25 @@ class Failure:
         return f"{self.mutation} / {self.node}: want {self.want}, got {self.got} ({self.detail})"
 
 
+def resolve_node(name: str) -> str:
+    """The full pytest node id for an anchor, or a hard error if it is not uniquely findable."""
+    hits = [target for target in TARGETS if f"def {name}(" in (ROOT / target).read_text(encoding="utf-8")]
+    if len(hits) != 1:
+        raise SystemExit(f"anchor {name!r} found in {len(hits)} suite(s), expected exactly 1: {hits}")
+    return f"{hits[0]}::{name}"
+
+
 def baseline_is_clean() -> bool:
     """A mutation is only evidence against a clean baseline."""
     proc = subprocess.run(
-        [PY, "-m", "pytest", TARGET, "-q", "--no-header", "--color=no"],
+        [PY, "-m", "pytest", *TARGETS, "-q", "--no-header", "--color=no"],
         cwd=ROOT,
         capture_output=True,
         text=True,
         check=False,
         env=sanitized_env(),
     )
-    print(f"BASELINE {TARGET} exit={proc.returncode}")
+    print(f"BASELINE {len(TARGETS)} suite(s) exit={proc.returncode}")
     if proc.returncode != 0:
         print(proc.stdout[-3000:])
     return proc.returncode == 0
@@ -604,7 +784,7 @@ def check(name: str, mutation: Mutation) -> list[Failure]:
     """Run one mutation against its anchor and controls, or against the whole suite."""
     failures: list[Failure] = []
     if mutation.whole_suite is not None:
-        got, detail = verdict_for(name, mutation.code, TARGET)
+        got, detail = verdict_for(name, mutation.code, WHOLE_SUITE)
         flag = "ok " if got == mutation.whole_suite else "BAD"
         print(f"{flag} {got:8s} (want {mutation.whole_suite:8s})  {name:56s} <whole suite>")
         if got != mutation.whole_suite:
@@ -612,7 +792,7 @@ def check(name: str, mutation: Mutation) -> list[Failure]:
         return failures
     expectations = [(mutation.anchor or "", CAUGHT), *((node, SURVIVED) for node in mutation.controls)]
     for node, want in expectations:
-        got, detail = verdict_for(name, mutation.code, NODE + node)
+        got, detail = verdict_for(name, mutation.code, resolve_node(node))
         flag = "ok " if got == want else "BAD"
         print(f"{flag} {got:8s} (want {want:8s})  {name:56s} {node}")
         if got != want:

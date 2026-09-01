@@ -601,8 +601,3 @@ def oracle_evidence(oracle_dirs: list[Path]) -> tuple[list[Evidence], list[Rejec
             if isinstance(record, dict)
         )
     return _split(built)
-
-
-# Sentinel for `match_evidence`: several records normalize to one name, so no single one can be
-# credited. Round-2 finding 5 - ambiguity must be a refusal, not a resolution.
-AMBIGUOUS = "__ambiguous__"
