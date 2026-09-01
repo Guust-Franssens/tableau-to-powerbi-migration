@@ -1,0 +1,65 @@
+<?xml version='1.0' encoding='utf-8' ?>
+<workbook source-build='2019.2.2 (20192.19.0718.1543)' source-platform='win' version='18.1' xmlns:user='http://www.tableausoftware.com/xml/user'>
+  <datasources>
+    <datasource caption='SLA' inline='true' name='federated.sla' version='18.1'>
+      <connection class='federated'>
+        <named-connections>
+          <named-connection caption='sla' name='excel-direct.sla'>
+            <connection class='excel-direct' />
+          </named-connection>
+        </named-connections>
+        <relation connection='excel-direct.sla' name='SLA' table='[SLA$]' type='table' />
+      </connection>
+      <column caption='Dates' datatype='date' name='[DATES]' role='dimension' type='ordinal' />
+      <column caption='Airline Code' datatype='string' name='[AIRLINE_CODE]' role='dimension' type='nominal' />
+      <column caption='Availability Pct' datatype='real' name='[AVAILABILITY_PCT]' role='measure' type='quantitative' />
+      <column-instance column='[DATES]' derivation='Year' name='[yr:DATES:ok]' pivot='key' type='ordinal' />
+      <column-instance column='[AIRLINE_CODE]' derivation='None' name='[none:AIRLINE_CODE:nk]' pivot='key' type='nominal' />
+      <column-instance column='[AVAILABILITY_PCT]' derivation='Sum' name='[sum:AVAILABILITY_PCT:qk]' pivot='key' type='quantitative' />
+      <metadata-records>
+        <metadata-record class='column'><remote-name>DATES</remote-name><local-name>[DATES]</local-name><parent-name>[SLA]</parent-name><local-type>date</local-type></metadata-record>
+        <metadata-record class='column'><remote-name>AIRLINE_CODE</remote-name><local-name>[AIRLINE_CODE]</local-name><parent-name>[SLA]</parent-name><local-type>string</local-type></metadata-record>
+        <metadata-record class='column'><remote-name>AVAILABILITY_PCT</remote-name><local-name>[AVAILABILITY_PCT]</local-name><parent-name>[SLA]</parent-name><local-type>real</local-type></metadata-record>
+      </metadata-records>
+    </datasource>
+  </datasources>
+  <worksheets>
+    <worksheet name='SLA Availability by Airline'>
+      <table>
+        <view>
+          <datasources>
+            <datasource caption='SLA' name='federated.sla' />
+          </datasources>
+          <datasource-dependencies datasource='federated.sla'>
+            <column caption='Dates' datatype='date' name='[DATES]' role='dimension' type='ordinal' />
+            <column caption='Airline Code' datatype='string' name='[AIRLINE_CODE]' role='dimension' type='nominal' />
+            <column caption='Availability Pct' datatype='real' name='[AVAILABILITY_PCT]' role='measure' type='quantitative' />
+            <column-instance column='[DATES]' derivation='Year' name='[yr:DATES:ok]' pivot='key' type='ordinal' />
+            <column-instance column='[AIRLINE_CODE]' derivation='None' name='[none:AIRLINE_CODE:nk]' pivot='key' type='nominal' />
+            <column-instance column='[AVAILABILITY_PCT]' derivation='Sum' name='[sum:AVAILABILITY_PCT:qk]' pivot='key' type='quantitative' />
+          </datasource-dependencies>
+        </view>
+        <panes>
+          <pane>
+            <mark class='Automatic' />
+            <encodings>
+              <color column='[federated.sla].[none:AIRLINE_CODE:nk]' />
+            </encodings>
+          </pane>
+        </panes>
+        <rows>[federated.sla].[sum:AVAILABILITY_PCT:qk]</rows>
+        <cols>[federated.sla].[yr:DATES:ok]</cols>
+      </table>
+      <simple-id uuid='{42400000-0000-0000-0000-000000000001}' />
+    </worksheet>
+  </worksheets>
+  <dashboards>
+    <dashboard name='Detail'>
+      <size maxheight='800' maxwidth='1000' />
+      <zones>
+        <zone h='100000' id='1' name='SLA Availability by Airline' w='100000' x='0' y='0' />
+      </zones>
+    </dashboard>
+  </dashboards>
+  <windows source-height='30' />
+</workbook>
