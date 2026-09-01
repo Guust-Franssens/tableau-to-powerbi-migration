@@ -39,6 +39,7 @@ the offline ``.twb`` embedded thumbnail (192x192, no server) handled by ``captur
 from __future__ import annotations
 
 import argparse
+import http
 import json
 import logging
 import re
@@ -672,24 +673,42 @@ def sign_in(base: str, site: str, pat_name: str, pat_secret_value: str, api: str
         with urllib.request.urlopen(req, timeout=SIGNIN_TIMEOUT_SEC) as resp:
             creds = json.loads(resp.read())["credentials"]
     except urllib.error.HTTPError as exc:
-        # ⚠️ THE REQUEST WE JUST SENT CONTAINS THE PAT, and `HTTPError`'s own message carries the
-        # server-controlled HTTP **reason phrase** -- a surface distinct from the response body, and
-        # one a reflecting proxy or WAF can fill with whatever it saw. Letting it escape prints the
-        # secret in an uncaught CLI traceback, and CI keeps its logs.
+        # ⚠️ THE REQUEST WE JUST SENT CONTAINS THE PAT, so everything the server hands back here is
+        # attacker-influenceable. The REASON PHRASE is **not reported at all**, and that is a deletion
+        # rather than a stricter redactor, because full-literal redaction cannot survive a SPLIT:
+        # a proxy that puts half a credential in the reason and half in the body defeats two
+        # independent redactors -- neither surface holds the whole literal, both fragments survive,
+        # and they are printed side by side. Measured:
+        #     HTTP 403 SYNTHETIC_PAT_SECR ET_REASON_SPLIT_42     reconstructs=True
+        # Detecting a fragment is not solvable -- a short fragment is indistinguishable from ordinary
+        # text -- so the only defence is to emit fewer server-controlled strings. The phrase below is
+        # derived from the numeric status by OUR OWN table, carries the same information, and cannot
+        # be influenced. `origin/master` reaches the same place by discarding the reason entirely.
         #
-        # `capture_tableau_oracle` has always caught this inside `_request`; this standalone sign-in,
-        # added for the #403 probe, did not -- the one leak in this PR that master does not have.
-        # Both the reason phrase and the body go through the chokepoint, which redacts each whole
-        # value before anything truncates it.
+        # The BODY is still reported, redacted: it is the one surface that carries Tableau's own
+        # actionable error text, and it is now the ONLY attacker-influenced string here, so there is
+        # no second surface to split across.
         def redactor(text: str) -> str:
             return redact(text, pat_secret_value, pat_name)
 
         raise RuntimeError(
-            f"Tableau sign-in failed: HTTP {exc.code} "
-            f"{redacted_note(exc.reason, redactor, limit=120)} "
+            f"Tableau sign-in failed: HTTP {exc.code} {_canonical_phrase(exc.code)}. "
+            f"Check the PAT NAME and SECRET (two values). "
             f"{redacted_note(_read_error_body(exc), redactor, limit=200)}"
         ) from None
     return creds["token"], creds["site"]["id"]
+
+
+def _canonical_phrase(code: int) -> str:
+    """OUR name for an HTTP status, never the server's.
+
+    ``HTTPStatus`` is a fixed table in the standard library, so the string is chosen by the status
+    number and nothing a proxy sends can steer it.
+    """
+    try:
+        return http.HTTPStatus(code).phrase
+    except ValueError:
+        return "Unknown Status"
 
 
 def _read_error_body(exc: urllib.error.HTTPError) -> bytes:

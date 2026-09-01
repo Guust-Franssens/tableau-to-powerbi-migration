@@ -1052,19 +1052,46 @@ def test_taint_reaches_capture_view_without_a_hand_written_seed():
 _HTTP_MARKERS = ("urlopen(", "http.client", "requests.")
 _CREDENTIAL_MARKERS = ("pat_secret", "X-Tableau-Auth", "TABLEAU_PAT", "personalAccessTokenSecret")
 
-# Scripts that touch a credentialed request but are deliberately NOT under the taint gate, each with
-# the reason. A waiver is a decision on the record; absence from both lists is a test failure.
+# Scripts that touch a credentialed request, are NOT under the taint gate, and genuinely cannot leak
+# response text -- each with the reason, verified against the code rather than asserted.
+#
+# ⚠️ This map and MODULES must be DISJOINT, and `test_the_gate_and_the_waivers_are_disjoint` enforces
+# it. They overlapped, and coverage was computed as `MODULES | GATE_WAIVERS`, so dropping a gated
+# module from MODULES left it "covered" by its own waiver -- the gate accepted the removal of the very
+# module round 7's leak was in, and silently stopped every parameterised taint check running on it.
 GATE_WAIVERS: dict[str, str] = {
     "scripts/tableau_env.py": "IS the redactor and the chokepoint; gating it against itself is circular",
-    "scripts/assess_estate.py": "reads Tableau metadata but persists no response text -- counts and IDs only",
-    "scripts/harvest_estate_assets.py": "downloads assets to disk by LUID and already redacts engine stderr",
-    "scripts/tableau_lineage.py": "GraphQL lineage to a fixed schema; no response text reaches a path or a log",
-    "scripts/provision_tableau_estate.py": "publishes TO Tableau; its credentials are outbound, not reflected",
-    "scripts/capture_tableau_reference.py": "no Tableau REST call is wired -- its server provider is a stub (#194)",
-    "scripts/capture_tableau_oracle.py": "under the gate as a MODULE entry, listed here only for completeness",
-    "scripts/tableau_render_capability.py": "under the gate as a MODULE entry, listed here only for completeness",
-    "scripts/run_engine_survey.py": "hands credentials to an engine child process; persists nothing itself",
-    "scripts/stamp_tableau_provenance.py": "stamps provenance from a local spec; no live response text",
+    "scripts/harvest_estate_assets.py": (
+        "persists engine stderr into parse-sweep.json, and redacts it at the point of capture "
+        "(harvest_estate_assets.py:396) with the PAT secret and name"
+    ),
+    "scripts/provision_tableau_estate.py": (
+        "publishes TO Tableau -- its credentials are outbound; the manifest it writes is covered by "
+        "`redact`, which lost its minimum-length skip precisely because a 7-character warehouse "
+        "password reached that file (#381)"
+    ),
+    "scripts/capture_tableau_reference.py": (
+        "makes no Tableau REST call at all -- its `server_rest` provider is a NotImplementedError stub "
+        "(#194), so the bytes it writes are local .twb thumbnails, not responses"
+    ),
+    "scripts/run_engine_survey.py": (
+        "hands credentials to an engine child process and persists nothing itself -- zero write_text, "
+        "write_bytes or json.dump sites"
+    ),
+}
+
+# Scripts that make a credentialed request AND persist response text, and are not yet gated. NOT
+# waivers: a waiver claims safety, and for these three the code contradicts the claim. Recorded as a
+# named gap with an issue so the gate states the truth rather than a comfortable fiction.
+KNOWN_GAPS: dict[str, str] = {
+    "scripts/assess_estate.py": "writes raw API responses to raw/<key>.json (assess_estate.py:1006) -- issue #419",
+    "scripts/tableau_lineage.py": (
+        "writes raw lineage (tableau_lineage.py:480, :933) and raises/logs raw response text "
+        "(:469, :928, :950) -- issue #419"
+    ),
+    "scripts/stamp_tableau_provenance.py": (
+        "writes a result JSON built from live responses (stamp_tableau_provenance.py:302) -- issue #419"
+    ),
 }
 
 
@@ -1086,21 +1113,49 @@ def test_the_credential_handling_detector_actually_detects():
     assert "scripts/check_unit.py" not in scripts, "the detector is matching modules it should not"
 
 
+def test_the_gate_and_the_waivers_are_disjoint():
+    """⚠️ The fail-OPEN that round 8 found: coverage was `MODULES | GATE_WAIVERS`, and both gated HTTP
+    modules were ALSO waived. So removing `tableau_render_capability.py` from MODULES left it
+    "covered" by its own waiver -- every parameterised taint check silently stopped running against
+    the module round 7's leak was in, and all three coverage tests still passed.
+
+    Disjointness is what makes the categories mean something: gated, waived, or a known gap -- exactly
+    one, and any script in none of them is a hard failure.
+    """
+    overlap = sorted((set(MODULES) & set(GATE_WAIVERS)) | (set(MODULES) & set(KNOWN_GAPS)))
+    assert not overlap, f"{overlap} are both gated and excused; dropping them from MODULES would go unnoticed"
+    assert not sorted(set(GATE_WAIVERS) & set(KNOWN_GAPS)), "a script cannot be both safe and a known gap"
+
+
+def test_every_gated_module_is_actually_analysed():
+    """Disjointness alone is not enough: the gate must still RUN on each module it claims to cover."""
+    for module in MODULES:
+        assert (REPO / module).is_file(), f"MODULES names a file that does not exist: {module}"
+        tainted = taint_module((REPO / module).read_text(encoding="utf-8"), module)
+        assert any(tainted.values()), f"{module} is gated but nothing in it is tainted -- the gate is inert there"
+
+
 def test_no_credential_handling_script_sits_outside_the_gate_unwaived():
     """The class round 7 identified: a fourth module could be added tomorrow and be silently outside."""
-    covered = set(MODULES) | set(GATE_WAIVERS)
+    covered = set(MODULES) | set(GATE_WAIVERS) | set(KNOWN_GAPS)
     orphans = sorted(set(_credential_handling_scripts()) - covered)
     assert not orphans, (
-        f"{orphans} make a credentialed HTTP request but are neither under the taint gate (MODULES) "
-        "nor waived. Add them to MODULES and certify their findings, or add a GATE_WAIVERS entry "
-        "saying why response text cannot reach a path, a log line or a persisted artifact from there."
+        f"{orphans} make a credentialed HTTP request but are in none of MODULES, GATE_WAIVERS or "
+        "KNOWN_GAPS. Gate them and certify their findings, waive them with a reason the code supports, "
+        "or record them as a known gap with an issue."
     )
 
 
-def test_every_waiver_names_a_reason_and_a_file_that_exists():
-    for script, reason in GATE_WAIVERS.items():
-        assert (REPO / script).is_file(), f"waiver for a script that no longer exists: {script}"
-        assert len(reason) > 25, f"{script} is waived with no real reason: {reason!r}"
+def test_every_waiver_and_gap_names_a_reason_and_a_file_that_exists():
+    for script, reason in {**GATE_WAIVERS, **KNOWN_GAPS}.items():
+        assert (REPO / script).is_file(), f"an excuse for a script that no longer exists: {script}"
+        assert len(reason) > 25, f"{script} is excused with no real reason: {reason!r}"
+
+
+def test_every_known_gap_cites_an_issue():
+    """A gap without a tracker entry is a gap nobody is going to close."""
+    for script, reason in KNOWN_GAPS.items():
+        assert re.search(r"#\d+", reason), f"{script} is recorded as a known gap with no issue reference"
 
 
 @pytest.mark.parametrize("module", MODULES)
@@ -1439,8 +1494,10 @@ def test_the_signin_reason_phrase_never_carries_a_credential(shape, planted):
     failure whatever the exception type, and the intended type is still pinned below.
     """
     secret = SHAPES[shape].replace("\n", " ").strip() or "SYNTHETIC_SECRET_42"
-    # An HTTP reason phrase is a single header line; CR/LF and non-latin-1 cannot travel in one.
-    reason = "".join(ch for ch in secret if ch.isprintable() and ord(ch) < 256) or "SYNTHETIC_SECRET_42"
+    # An HTTP reason phrase is a single status-line token: ASCII printable only. Anything else cannot
+    # travel there at all -- a non-ASCII reason aborts the connection, which tests the server rather
+    # than our redaction.
+    reason = "".join(ch for ch in secret if ch.isascii() and ch.isprintable()) or "SYNTHETIC_SECRET_42"
     pat_secret_value = reason if planted == "pat_secret" else "an-unrelated-long-pat-secret"
     pat_name = reason if planted == "pat_name" else "an-unrelated-long-pat-name"
     server = _one_request_server(403, reason, b"")
@@ -1476,6 +1533,85 @@ def test_the_signin_error_BODY_is_redacted_too_and_the_reason_still_reads():
     assert "Forbidden" in message and "403" in message
     assert "[REDACTED]" in message
     assert isinstance(raised, RuntimeError), message
+
+
+# --------------------------------- round 8: a credential SPLIT across two independently-redacted
+# surfaces. The eighth escape, and the first that is not about ordering.
+
+
+def _signin_message(reason: str, body: bytes, secret: str) -> str:
+    server = _one_request_server(403, reason, body)
+    raised: BaseException | None = None
+    try:
+        cap.sign_in(f"http://127.0.0.1:{server.server_port}", "site", "a-long-enough-pat-name", secret, "3.29")
+    except BaseException as exc:  # noqa: BLE001
+        raised = exc
+    finally:
+        server.shutdown()
+        server.server_close()
+    return f"{type(raised).__name__}: {raised}"
+
+
+SPLIT_SECRET = "SYNTHETIC_PAT_SECRET_REASON_SPLIT_42"
+
+
+def test_a_credential_split_across_the_reason_and_the_body_does_not_reconstruct():
+    """⚠️ Measured on 2ac8d1b, and the old fixture structurally could not see it.
+
+    That fixture set the configured credential EQUAL to the whole reason, so nine adversarial shapes
+    x both halves all exercised the same easy case: a full literal, which full-literal redaction
+    matches. Split the secret in two and neither surface contains the literal, both fragments survive
+    their own redactor, and they were printed side by side:
+
+        HTTP 403 SYNTHETIC_PAT_SECR ET_REASON_SPLIT_42        reconstructs=True
+
+    The fix is a DELETION: the server-controlled reason phrase is no longer emitted at all, so there
+    is no second surface to split across. Detecting a fragment is not solvable -- a short fragment is
+    indistinguishable from ordinary text -- so emitting fewer attacker-controlled strings is the only
+    defence available.
+    """
+    message = _signin_message(SPLIT_SECRET[:18], SPLIT_SECRET[18:].encode(), SPLIT_SECRET)
+    joined = "".join(ch for ch in message if ch.isalnum() or ch == "_")
+    assert SPLIT_SECRET not in joined, f"the two halves reconstructed: {message}"
+    assert SPLIT_SECRET[:18] not in message, f"the reason-phrase half survived: {message}"
+
+
+@pytest.mark.parametrize("cut", [8, 16, 24])
+def test_a_reason_phrase_carrying_only_a_PREFIX_of_a_longer_credential_never_reaches_the_message(cut):
+    """The other half of the same defect: a fragment is not the literal, so no redactor matches it."""
+    message = _signin_message(SPLIT_SECRET[:cut], b"Forbidden", SPLIT_SECRET)
+    assert SPLIT_SECRET[:cut] not in message, message
+    assert "403" in message
+
+
+def test_the_reason_phrase_is_ours_and_cannot_be_steered_by_the_server():
+    """A canonical phrase from the numeric status. The server may not choose the words at all."""
+    for reason in ("Forbidden", "TOTALLY-ARBITRARY-SERVER-TEXT", ""):
+        message = _signin_message(reason, b"nothing useful", "an-unrelated-long-pat-secret")
+        assert "TOTALLY-ARBITRARY-SERVER-TEXT" not in message
+        assert "403 Forbidden" in message, message
+
+
+def test_the_body_fragment_residual_is_pinned_at_PARITY_with_master():
+    """⚠️ An honest bound, not a claim of safety.
+
+    With the reason phrase gone, the body is the only attacker-influenced string left, and a FRAGMENT
+    of a credential in the body still survives full-literal redaction. That is not new and not a
+    regression: `origin/master`'s own `capture_tableau_oracle.sign_in` leaks the identical fragment on
+    the identical input (measured: both emit `ET_REASON_SPLIT_42`). It is a property of `redact`
+    itself, tracked as the residual this project has documented since round 4, and closing it needs a
+    different redactor rather than a different call site.
+
+    This test exists so the bound is a KNOWN one: if the body ever stops being redacted at all, the
+    first assertion fails; if the fragment residual is ever fixed, the second fails and this test
+    should be rewritten rather than deleted.
+    """
+    message = _signin_message("Forbidden", SPLIT_SECRET[18:].encode(), SPLIT_SECRET)
+    assert SPLIT_SECRET not in message, "the WHOLE credential must never survive"
+    assert SPLIT_SECRET[18:] in message, (
+        "the body fragment no longer survives -- if that is deliberate, this parity pin is stale and "
+        "the residual documented in docs/reference-capture.md should be updated"
+    )
 
 
 # ------------------------------------------------- the reviewer's two round-4 reproductions, named
