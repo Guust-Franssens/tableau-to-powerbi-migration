@@ -1,116 +1,58 @@
 """
-purpose: ENTRY gate - before an agent starts building, prove there is legible reference evidence of
-         the Tableau source object behind every page the engine emitted, and name the grade.
+purpose: ENTRY gate - before an agent starts building, prove there is legible, ATTRIBUTABLE reference
+         evidence of the Tableau source object behind every page the engine emitted, and name the grade.
 usage:   python scripts/check_reference_readiness.py <bundle-or-unit> [...]
                 [--source <workbook.twb|.twbx>] [--reference <dir>] [--oracle <dir>]
-                [--require-validation-grade] [--json <file>] [--quiet] [--verbose] [--warn-only]
+                [--require-validation-grade] [--json <file>] [--quiet] [--verbose]
 
-Why this exists
----------------
 Every other gate in this toolkit is an EXIT gate. `check_unit.py`'s own header says it answers
-"whether one migration unit is **done**", so the visual-evidence question is asked *after* the work
-instead of before it. Issue #421: an agent started building with no picture of the source and nothing
-stopped it.
+"whether one migration unit is **done**", so the visual-evidence question was asked *after* the work
+instead of before it (issue #421). Wherever a capture gap exists, an equivalent fidelity bug is
+**structurally unfalsifiable**, not merely unverified - so this gate makes the gap visible up front,
+per page, with its grade.
 
-A customer audit (SES) shipped a `columnChart` that should have been a `lineChart`, stacking five
-airlines' 95/92/88/97/90% into one ~462% bar. Their conclusion is the argument for this gate:
+Three questions, in order: **completeness** (a page for every source object the engine's own rule says
+should exist), **evidence** (a usable render provably OF that object, in THIS workbook, at THIS
+revision), and **grade**.
 
-    "This was only catchable because a Tableau reference image for that page happens to exist. The
-    same class of bug on 'Availability Summary by Tail' would be completely invisible - there is
-    nothing to compare against."
+Fail closed - the ONE design rule
+----------------------------------
+`blind`, `unverifiable` and `insufficient-grade` are all distinct from `ready`, and **none of
+them exits 0**. A readiness gate that green-lights on absent or unattributable evidence is worse than
+no gate: it launches an agent to build confidently against nothing.
 
-So wherever a capture gap exists, an equivalent fidelity bug is **structurally unfalsifiable**, not
-merely unverified. This gate makes that gap visible up front, per page, with its grade.
-
-Three questions, in order
-------------------------
-1. **Completeness** - does the emitted report have a page for every source object the engine's own
-   rule says it should? A missing page is a *conversion* gap the agent must know about before it
-   starts, not a fidelity gap discovered later.
-2. **Evidence** - is there a reference render for each of those pages?
-3. **Grade** - `validation-grade`, `layout/text only`, or unknown?
-
-Why it does not reuse `check_unit.expected_pages()`
----------------------------------------------------
-It cannot, three ways, all measured (and `check_unit.py` is owned by another change - not edited
-here):
-
-* its docstring says "dashboards only, never worksheets" (`check_unit.py:572`), but the engine emits
-  a page per dashboard **and** a page per orphan worksheet (`twb_to_pbir.py:14040`). On the Meridian
-  workbook - 0 dashboards, 3 worksheets - it expects 0 where the engine correctly emitted 3;
-* it reads `migration-spec.json` via `_migration_spec` (`:285`), and no such file exists in an engine
-  bundle, so it returns `None`;
-* its consumer is then circular: `check_oracle_coverage:925` does
-  `pages = expected_pages(target) or actual_pages(target)`, grading the output against itself, so a
-  page the engine DROPPED cannot be counted as missing evidence.
-
-This gate derives its own expectation from the source workbook and **never** falls back to what was
-built. No expectation means `CANNOT_ESTABLISH`, which fails closed.
-
-The engine's real page rule, and why a naive diff cries wolf
-------------------------------------------------------------
-"dashboards + orphan worksheets" names the *candidates*, not the emitted pages. `twb_to_pbir.py`
-deliberately drops a page in three further cases, each with a recorded warning:
-
-| `:14529` | a dashboard whose zones yield no supported visuals | "no supported visuals on this dashboard" |
-| `:14558` | an orphan worksheet with `visual_type == VT_UNSUPPORTED` | "unsupported visual type" |
-| `:14562` | an orphan worksheet whose query state is incomplete | "... no usable field bindings (skipped)" |
-
-A gate that simply diffs candidates against emitted pages therefore raises a completeness finding on
-every CORRECT bundle - the false-positive direction, and how a gate gets muted and stops protecting
-anything. So drops are split:
-
-* `dropped_explained`   - absent, and the engine said why (a matching `viz_fidelity[]` row exists)
-* `dropped_unexplained` - absent with no engine explanation. This is the real conversion defect.
-
-Both are reported and counted separately; only `dropped_unexplained` is a finding.
-
-Identity, not name slug
------------------------
-`check_unit.py:265` matches on `_slug(view_name)` - lowercased alphanumerics. In Tableau a dashboard
-routinely shares its name with its principal worksheet, so a worksheet render satisfies a dashboard
-page. That false match is the NORMAL case, not an edge case, and it is live today:
-`capture_tableau_reference.py:199` files `embedded_thumbnail` records - which are *worksheet* renders
-(`extract_twb_thumbnails.py`: "Dashboards are not thumbnailed per se") - under the manifest's
-`dashboards` key, where they are then slug-matched.
-
-Two independent defences here:
-
-* **Page identity is cryptographic.** The engine names pages `_sanitize("page-" + dashboard)` or
-  `_sanitize("page-ws-" + worksheet)`, where `_sanitize` appends an md5 of the FULL prefixed string
-  (`twb_to_pbir.py:748-761`). Reproduced in `engine_page_id()` and verified against the Meridian
-  bundle: `Revenue by Region` -> `page-ws-Revenuebb7d27f78` as a worksheet but
-  `page-RevenuebyRe2b117987` as a dashboard. Same name, different page, by construction.
-* **Evidence carries a scope**, and it must match the page's kind. A worksheet-scope render can never
-  satisfy a dashboard page. Scope that cannot be established (`unknown`) satisfies nothing.
-
-Grade ceiling - stated in the output, not implied
---------------------------------------------------
-`validation_grade` is today reachable only via `capture_tableau_reference.py --manual-validation-grade`
-on a user-dropped screenshot; even a `reference/` capture records `"state": {}` with a live TODO to
-pin parameter defaults, and an oracle capture is default-view-state with no `?vf_` filter pinning. So
-in practice nearly everything is layout/text grade. The rendered verdict says so rather than letting
-`READY` imply more evidence than exists.
+The mechanism is that **unverified evidence is unrepresentable**. `Evidence` is only reachable
+through `Evidence.build()`, which returns either a fully verified record or a `RejectedEvidence`
+that can never be matched. Round-1 review of PR #428 found three fail-open paths (a zero-byte render,
+an empty `capabilities` list, and evidence attributed to the wrong workbook) precisely because
+validity was re-checked at three call sites instead of being a construction precondition. Rejections
+are counted and printed, so a capture that does not count says why rather than vanishing.
 
 Exit codes
 ----------
-The 0/1/2/3 shape is `check_connection_fidelity.py:160-163`'s, adopted deliberately rather than
-invented. Its comment at `:165` records issue #366 - "'nothing to compare here' and 'this unit could
-not be examined' printed identically, and nine unexamined workbooks read as a clean bill of health" -
-which is precisely the failure this gate exists to prevent.
+The 0/1/2/3 shape is `check_connection_fidelity.py:160-163`'s, adopted rather than invented; its
+`:165` comment records issue #366, where nine unexamined workbooks read as a clean bill of health.
 
-| 0 | READY, or NOT_APPLICABLE: every expected page is emitted with evidence, or the unit
-      legitimately has no pages. |
-| 1 | FINDINGS: a page is blind (no evidence), its evidence's identity is unverifiable, it was
-      dropped with no engine explanation, or its grade is below `--require-validation-grade`. |
+| 0 | READY, or NOT_APPLICABLE (a datasource-only unit with no Tableau views). |
+| 1 | FINDINGS: a page is blind, unverifiable, stale, dropped with no engine explanation, below the
+      required grade, or its workbook shipped no report at all. |
 | 2 | usage error (argparse) - a missing path never produces a verdict. |
-| 3 | CANNOT_ESTABLISH: the expectation itself could not be derived, so this gate has no opinion
-      and you must not read that as a pass. |
+| 3 | CANNOT_ESTABLISH: the expectation or the page mapping could not be derived, so this gate has no
+      opinion and you must NOT read that as a pass. |
 
-Precedence follows the sibling gate: findings outrank cannot-establish, and both counts are always
-printed so neither hides the other. `NOT_APPLICABLE` is EARNED from the engine's own report
-(`report.json` lists the unit under `datasources[]`, not `workbooks[]`) - never inferred from "I
-found no pages", which is the fail-open shape this gate refuses.
+WARNING: **There is deliberately NO `--warn-only`.** Every sibling gate has one; this gate had one until
+round-1 review measured it returning exit 0 on a bundle whose own output said "CANNOT_ESTABLISH is
+NOT a pass". An entry gate that can be asked to say yes is not an entry gate. Advisory consumers read
+`--json`, whose `status` always carries the true verdict.
+
+WARNING: `NOT_APPLICABLE` is EARNED from the engine's own `report.json` - never inferred from "I found
+no pages" and never from "some semantic model exists", both of which were measured granting a clean
+exit to a workbook whose report generation had FAILED.
+
+**Full rationale, with every measured defect and its citation: docs/reference-readiness.md.** That
+covers why `check_unit.expected_pages()` cannot be reused, why candidates are not emitted pages, why a
+drop explanation must match in KIND as well as name, the cryptographic page-identity join and its
+collision limit, the evidence scope table, and the grade ceiling.
 """
 
 from __future__ import annotations
@@ -119,6 +61,7 @@ import argparse
 import hashlib
 import json
 import re
+import struct
 import sys
 import zipfile
 from dataclasses import dataclass, field
@@ -126,7 +69,7 @@ from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
 
-from bundle_corpus import shipping_models, shipping_reports
+from bundle_corpus import shipping_reports
 
 REPORT_NAME = "reference-readiness-check.json"
 
@@ -151,6 +94,7 @@ PAGE_DROPPED_UNEXPLAINED = "dropped_unexplained"
 READY = "ready"
 BLIND = "blind"
 UNVERIFIABLE = "unverifiable"
+INSUFFICIENT_GRADE = "insufficient-grade"
 
 # Grade strings are `check_unit.py:868,906`'s, reused verbatim so one vocabulary describes evidence
 # everywhere. Inventing a second spelling would make two gates disagree about the same artifact.
@@ -160,18 +104,25 @@ GRADE_UNKNOWN = "unknown"
 
 CAP_VALIDATION = "validation_grade"
 
+# `capture_tableau_reference.py:44-48`. Closed on purpose: an unrecognised capability means the
+# manifest was written by something this gate does not understand, which is a rejection rather than
+# an unknown grade.
+ALLOWED_CAPABILITIES = frozenset(
+    {"layout_grade", "text_readable", "state_reproducible", "revision_bound", CAP_VALIDATION}
+)
+
+# A reference must be legible, not merely present. 64px sits well below the 192x192 embedded Tableau
+# thumbnail (`extract_twb_thumbnails.py`), the smallest render this toolkit treats as real evidence,
+# so the floor rejects placeholders without rejecting the genuine low-fidelity route.
+MIN_RENDER_EDGE = 64
+MIN_PDF_BYTES = 1024
+
 # What object a reference provider's output can possibly be a render OF. This is the scope join that
-# replaces the name slug, and each entry is a structural fact about the provider, not a guess:
-#
-#   embedded_thumbnail - Tableau's `<thumbnail>` blocks are per-WORKSHEET renders. `extract_twb_
-#                        thumbnails.py`: "Dashboards are not thumbnailed per se -- these are
-#                        worksheet renders." This is the entry that makes the regression test bite.
-#   public_playwright  - driven from the spec's dashboard list (`capture_tableau_reference.py:135`),
-#                        so its records are dashboards by construction.
-#   manual             - a user-dropped PNG. `_manual_capabilities` (`:261-266`) says the tool cannot
-#                        know "even that it is a screenshot of this dashboard", so scope is UNKNOWN
-#                        and it satisfies nothing on its own.
-#   server_rest        - raises NotImplementedError today; listed so a future wiring is explicit.
+# replaces the name slug, and each entry is a structural fact about the provider, not a guess -
+# `embedded_thumbnail` is per-WORKSHEET ("dashboards are not thumbnailed per se",
+# `extract_twb_thumbnails.py`), `public_playwright` is driven from the spec's dashboard list
+# (`capture_tableau_reference.py:135`), and `manual` cannot know "even that it is a screenshot of
+# this dashboard" (`:261-266`) so it satisfies nothing on its own. Table: docs/reference-readiness.md.
 PROVIDER_SCOPE = {
     "embedded_thumbnail": KIND_WORKSHEET,
     "public_playwright": KIND_DASHBOARD,
@@ -203,16 +154,111 @@ class SourceObject:
         return engine_page_id(prefix + self.name)
 
 
-@dataclass
-class Evidence:
-    """One reference render, with the scope that decides what it may satisfy."""
+@dataclass(frozen=True)
+class UnitIdentity:
+    """Who a unit is, for attributing evidence to it."""
+
+    name: str
+    source_path: Path
+    source_sha256: str
+    workbook_luid: str | None = None
+
+
+@dataclass(frozen=True)
+class RejectedEvidence:
+    """A candidate render that failed a construction precondition, kept so it can be REPORTED.
+
+    Rejections are printed rather than dropped: an operator who captured a picture that does not
+    count needs to be told why, or they will conclude the gate is broken and route around it.
+    """
+
+    name: str
+    origin: str
+    path: str | None
+    reason: str
+
+
+@dataclass(frozen=True)
+class Evidence:  # pylint: disable=too-many-instance-attributes
+    """A render proven usable AND attributable. Construct only via :meth:`build`.
+
+    Every field is a precondition, not a hint - which is why there are ten of them. Round-1 review of
+    PR #428 found three fail-open paths (zero-byte render, empty capabilities, wrong-workbook
+    attribution) that all existed because validity was checked at call sites instead of at
+    construction, so folding these into a smaller object would recreate the defect.
+    """
 
     name: str
     kind: str
     grade: str
     origin: str
-    provider: str | None = None
-    path: str | None = None
+    provider: str | None
+    path: str
+    width: int | None
+    height: int | None
+    workbook_key: str
+    workbook_kind: str
+
+    @classmethod
+    def build(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        cls,
+        *,
+        name: str,
+        kind: str,
+        grade: str,
+        origin: str,
+        provider: str | None,
+        render_path: Path,
+        workbook_key: str | None,
+        workbook_kind: str,
+    ) -> Evidence | RejectedEvidence:
+        """Return verified evidence, or a rejection naming the precondition that failed."""
+        display = str(render_path)
+        if not name.strip():
+            return RejectedEvidence(name=name, origin=origin, path=display, reason="record has no view name")
+        if not workbook_key:
+            return RejectedEvidence(
+                name=name,
+                origin=origin,
+                path=display,
+                reason=(
+                    "no workbook identity recorded, so this render cannot be attributed to any unit "
+                    "(a reference manifest must carry source_workbook_sha256; an oracle record must "
+                    "carry workbook_luid or workbook_name)"
+                ),
+            )
+        if grade == GRADE_UNKNOWN:
+            return RejectedEvidence(name=name, origin=origin, path=display, reason="no usable capability grade")
+        facts = render_facts(render_path)
+        if isinstance(facts, str):
+            return RejectedEvidence(name=name, origin=origin, path=display, reason=facts)
+        width, height = facts
+        return cls(
+            name=name,
+            kind=kind,
+            grade=grade,
+            origin=origin,
+            provider=provider,
+            path=display,
+            width=width,
+            height=height,
+            workbook_key=workbook_key,
+            workbook_kind=workbook_kind,
+        )
+
+    def is_for(self, unit: UnitIdentity) -> bool:
+        """Whether this render is provably evidence for ``unit``.
+
+        Reference evidence is keyed by the SOURCE SHA, so a capture taken against an older revision
+        of the workbook does not silently remain valid - a stale picture is worse than a missing one
+        because it looks like evidence. Oracle evidence is keyed by workbook LUID where the bundle
+        recorded one, falling back to the published workbook name.
+        """
+        if self.workbook_kind == "sha256":
+            return self.workbook_key.casefold() == unit.source_sha256.casefold()
+        if self.workbook_kind == "luid":
+            return bool(unit.workbook_luid) and self.workbook_key.casefold() == (unit.workbook_luid or "").casefold()
+        return _norm(self.workbook_key) == _norm(unit.name)
 
 
 @dataclass
@@ -230,11 +276,11 @@ class UnitResult:
 def engine_page_id(text: str) -> str:
     """Reproduce the engine's `twb_to_pbir._sanitize` (installed plugin, :748-761).
 
-    Copied rather than imported on purpose: the engine plugin is resolved through
-    `engine_source.py` and may legitimately be absent (a bundle can be audited on a machine with no
-    engine installed), and this gate must still be able to name the page an object maps to. The
-    md5 over the FULL prefixed string is what makes a dashboard and a same-named worksheet land on
-    different page ids, which is the whole identity join - so it is pinned by its own test.
+    Copied rather than imported on purpose: the engine plugin is resolved through `engine_source.py`
+    and may legitimately be absent (a bundle can be audited on a machine with no engine installed),
+    and this gate must still be able to name the page an object maps to. The md5 over the FULL
+    prefixed string is what makes a dashboard and a same-named worksheet land on different page ids,
+    which is the whole identity join - so it is pinned by its own test.
     """
     base = re.sub(r"[^0-9A-Za-z_-]+", "", (text or "").replace(" ", ""))
     digest = hashlib.md5((text or "").encode("utf-8")).hexdigest()[:8]  # noqa: S324
@@ -247,17 +293,84 @@ def _norm(text: str | None) -> str:
     return re.sub(r"\s+", " ", (text or "")).strip().casefold()
 
 
-def _read_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8-sig"))
+def _sha256(path: Path) -> str | None:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
 
 
 def _json_object(path: Path) -> dict[str, Any] | None:
     """Read a JSON object, or None when it is absent, unreadable or not an object."""
     try:
-        payload = _read_json(path)
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _png_size(blob: bytes) -> tuple[int, int] | None:
+    if len(blob) < 24 or blob[:8] != b"\x89PNG\r\n\x1a\n" or blob[12:16] != b"IHDR":
+        return None
+    width, height = struct.unpack(">II", blob[16:24])
+    return int(width), int(height)
+
+
+def _svg_size(blob: bytes) -> tuple[int, int] | None:
+    try:
+        root = ElementTree.fromstring(blob.decode("utf-8", "ignore"))  # noqa: S314
+    except ElementTree.ParseError:
+        return None
+    numbers: list[float | None] = []
+    for attr in ("width", "height"):
+        match = re.match(r"\s*([0-9.]+)", str(root.get(attr) or ""))
+        numbers.append(float(match.group(1)) if match else None)
+    if numbers[0] is not None and numbers[1] is not None:
+        return int(numbers[0]), int(numbers[1])
+    box = re.findall(r"[-0-9.]+", str(root.get("viewBox") or ""))
+    return (int(float(box[2])), int(float(box[3]))) if len(box) == 4 else None
+
+
+def _render_size(blob: bytes, suffix: str) -> tuple[int, int] | None | str:
+    """`(w, h)` for a parsed raster/vector render, `None` for PDF (accepted on header+size), or a reason."""
+    if suffix == ".pdf":
+        if not blob.startswith(b"%PDF-"):
+            return "render is not a PDF despite its .pdf extension"
+        if len(blob) < MIN_PDF_BYTES:
+            return f"PDF render is only {len(blob)} bytes, below the {MIN_PDF_BYTES}-byte floor"
+        return None
+    size = _png_size(blob) if suffix == ".png" else _svg_size(blob) if suffix == ".svg" else None
+    if size is None:
+        return f"render did not parse as {suffix.lstrip('.') or 'an image'} (truncated, empty or mislabelled)"
+    return size
+
+
+def render_facts(path: Path) -> tuple[int | None, int | None] | str:
+    """`(width, height)` for a render that genuinely parses, else a rejection reason.
+
+    This is the check `Path.is_file()` was standing in for. Round-1 review measured a **zero-byte**
+    file reaching `READY`, so existence is not evidence: the bytes must decode as the format their
+    extension claims, and the result must be big enough to read.
+
+    A PDF has no cheap dimension read (the MediaBox may sit behind an object stream), so it is
+    accepted on a `%PDF-` header plus a size floor. That is a deliberately weaker check, and it is
+    stated rather than hidden.
+    """
+    try:
+        blob = path.read_bytes()
+    except OSError as exc:
+        return f"render could not be read: {exc}"
+    if not blob:
+        return "render is zero bytes"
+    size = _render_size(blob, path.suffix.lower())
+    if isinstance(size, str):
+        return size
+    if size is None:
+        return (None, None)
+    width, height = size
+    if min(width, height) < MIN_RENDER_EDGE:
+        return f"render is {width}x{height}, below the {MIN_RENDER_EDGE}px legibility floor"
+    return width, height
 
 
 def _workbook_xml(path: Path) -> str | None:
@@ -266,9 +379,7 @@ def _workbook_xml(path: Path) -> str | None:
         if path.suffix.lower() == ".twbx":
             with zipfile.ZipFile(path) as archive:
                 members = [n for n in archive.namelist() if n.lower().endswith(".twb")]
-                if not members:
-                    return None
-                return archive.read(members[0]).decode("utf-8", "ignore")
+                return archive.read(members[0]).decode("utf-8", "ignore") if members else None
         return path.read_text(encoding="utf-8", errors="ignore")
     except (OSError, zipfile.BadZipFile, KeyError):
         return None
@@ -302,52 +413,75 @@ def source_objects(path: Path) -> list[SourceObject] | None:
     placed: set[str] = set()
     for dashboard in dashboards:
         for zone in dashboard.iter("zone"):
-            zone_name = zone.get("name")
-            if zone_name in worksheet_names:
-                placed.add(zone_name)
+            if zone.get("name") in worksheet_names:
+                placed.add(str(zone.get("name")))
 
     objects = [SourceObject(name=d.get("name", ""), kind=KIND_DASHBOARD) for d in dashboards]
     objects.extend(SourceObject(name=name, kind=KIND_WORKSHEET) for name in worksheets if name and name not in placed)
     return objects
 
 
-def actual_page_ids(report_dir: Path) -> dict[str, str]:
-    """`{page id: displayName}` for every page in a PBIR report."""
+def page_map(report_dir: Path) -> tuple[dict[str, str], list[str]]:
+    """`({page id: displayName}, problems)` for a PBIR report.
+
+    A page whose `page.json` cannot be read is a PROBLEM, not a page. The previous version fell back
+    to the containing directory's name, so round-1 review measured forcing every read to fail and
+    still getting three pages and a `READY` verdict - completeness passed with no readable mapping at
+    all. `pages.json.pageOrder` is cross-checked for the same reason: it is the report's own
+    statement of which pages exist, and a disagreement means the join cannot be trusted.
+    """
     pages_root = report_dir / "definition" / "pages"
     found: dict[str, str] = {}
+    problems: list[str] = []
     if not pages_root.is_dir():
-        return found
+        return found, ["no definition/pages folder"]
     for page_json in sorted(pages_root.rglob("page.json")):
         payload = _json_object(page_json)
-        page_id = str((payload or {}).get("name") or page_json.parent.name)
-        found[page_id] = str((payload or {}).get("displayName") or page_id)
-    return found
+        name = (payload or {}).get("name")
+        if not isinstance(name, str) or not name.strip():
+            problems.append(f"unreadable or nameless page definition: {page_json.parent.name}/page.json")
+            continue
+        if name in found:
+            problems.append(f"two page definitions both declare the id {name!r}")
+        found[name] = str((payload or {}).get("displayName") or name)
+    order = (_json_object(pages_root / "pages.json") or {}).get("pageOrder")
+    if isinstance(order, list):
+        declared = {str(item) for item in order}
+        problems.extend(
+            f"pages.json lists {missing!r} but no readable page definition exists for it"
+            for missing in sorted(declared - set(found))
+        )
+        problems.extend(
+            f"page {extra!r} exists but pages.json does not list it" for extra in sorted(set(found) - declared)
+        )
+    return found, problems
 
 
-def drop_explanations(handover: dict[str, Any] | None) -> dict[str, str]:
-    """`{normalized object name: engine reason}` for pages the engine dropped ON PURPOSE.
+def drop_explanations(handover: dict[str, Any] | None) -> dict[tuple[str, str], str]:
+    """`{(kind, normalized name): engine reason}` for pages the engine dropped ON PURPOSE.
 
-    Read from the handover's `workbook.viz_fidelity[]`, which is the engine's structured per-object
-    disclosure channel and covers BOTH scopes: worksheet rows carry the worksheet name, while
-    dashboard-scope warnings are appended as rows whose `worksheet` holds the dashboard name and
-    whose `visual_type` holds the scope (`migrate_estate.py:1201-1204`).
+    Read from the handover's `workbook.viz_fidelity[]`, the engine's structured per-object disclosure
+    channel, which covers BOTH scopes: worksheet rows carry the worksheet name, while dashboard-scope
+    warnings are appended as rows whose `worksheet` holds the dashboard name and whose `visual_type`
+    holds the scope string (`migrate_estate.py:1201-1204`).
 
-    `pbip_warnings[]` is deliberately NOT used for this: it is a flat list of reason strings, and
-    `_warn("dashboard", name, "no supported visuals on this dashboard")` produces a reason that does
-    not contain the dashboard's name (`twb_to_pbir.py:6428-6430`). Matching on it would attribute one
-    dashboard's explanation to every dropped dashboard in the workbook.
+    WARNING: Keyed by KIND as well as name. Keying on name alone is the same defect that made
+    `pbip_warnings[]` unusable - one object's excuse covering another's drop - and round-1 review
+    measured it: a worksheet warning for `Ops` made a genuinely missing DASHBOARD named `Ops` read as
+    accounted-for, and the unit went READY. A real worksheet row's `visual_type` is a visual type
+    (`column`, `line`, `unsupported`, or absent), never the literal `"dashboard"`, so the scope is
+    recoverable without guessing.
     """
-    explained: dict[str, str] = {}
+    explained: dict[tuple[str, str], str] = {}
     workbook = (handover or {}).get("workbook")
     rows = workbook.get("viz_fidelity") if isinstance(workbook, dict) else None
     for row in rows if isinstance(rows, list) else []:
         if not isinstance(row, dict) or row.get("status") != "warned":
             continue
-        name = row.get("worksheet")
-        reasons = [row.get("reason"), *(row.get("additional_reasons") or [])]
-        for reason in reasons:
+        kind = KIND_DASHBOARD if row.get("visual_type") == KIND_DASHBOARD else KIND_WORKSHEET
+        for reason in [row.get("reason"), *(row.get("additional_reasons") or [])]:
             if isinstance(reason, str) and any(marker in reason for marker in DELIBERATE_DROP_MARKERS):
-                explained.setdefault(_norm(name), reason)
+                explained.setdefault((kind, _norm(row.get("worksheet"))), reason)
                 break
     return explained
 
@@ -365,50 +499,116 @@ def _entry_scope(entry: dict[str, Any], provider: str | None) -> str:
     return PROVIDER_SCOPE.get(str(provider or ""), KIND_UNKNOWN)
 
 
-def _reference_grade(capabilities: list[str]) -> str:
-    """Grade for a `reference/manifest.json` state, in `check_unit.py:868`'s vocabulary."""
-    caps = {str(cap) for cap in capabilities if isinstance(cap, str)}
-    if not caps:
+def reference_grade(capabilities: Any) -> str:
+    """Grade for a `reference/manifest.json` state, in `check_unit.py:868`'s vocabulary.
+
+    An empty list, a non-list, or any capability outside `ALLOWED_CAPABILITIES` yields
+    `GRADE_UNKNOWN`, which `Evidence.build` refuses. Round-1 review measured `capabilities: []`
+    reaching `ready [unknown]`.
+    """
+    if not isinstance(capabilities, list) or not capabilities:
+        return GRADE_UNKNOWN
+    caps = {cap for cap in capabilities if isinstance(cap, str)}
+    if not caps or not caps <= ALLOWED_CAPABILITIES:
         return GRADE_UNKNOWN
     return GRADE_VALIDATION if CAP_VALIDATION in caps else "/".join(sorted(caps))
 
 
-def reference_evidence(reference_dirs: list[Path]) -> list[Evidence]:
-    """Evidence declared by `reference/manifest.json` files.
+def _reference_states(directory: Path, entry: dict[str, Any], workbook_sha: Any) -> list[Evidence | RejectedEvidence]:
+    """Build every state of one `reference/manifest.json` entry."""
+    name = str(entry.get("name") or "")
+    built: list[Evidence | RejectedEvidence] = []
+    for state in entry.get("states") or []:
+        if not isinstance(state, dict):
+            continue
+        image = state.get("image")
+        if not isinstance(image, str) or not image:
+            built.append(RejectedEvidence(name, "reference", None, "state declares no image"))
+            continue
+        built.append(
+            Evidence.build(
+                name=name,
+                kind=_entry_scope({**entry, **state}, state.get("provider")),
+                grade=reference_grade(state.get("capabilities")),
+                origin="reference",
+                provider=str(state.get("provider")) if state.get("provider") else None,
+                render_path=directory / image,
+                workbook_key=str(workbook_sha) if isinstance(workbook_sha, str) and workbook_sha else None,
+                workbook_kind="sha256",
+            )
+        )
+    return built
+
+
+def _split(built: list[Evidence | RejectedEvidence]) -> tuple[list[Evidence], list[RejectedEvidence]]:
+    """Partition build results, so no call site can accidentally treat a rejection as evidence."""
+    usable = [item for item in built if isinstance(item, Evidence)]
+    return usable, [item for item in built if isinstance(item, RejectedEvidence)]
+
+
+def reference_evidence(reference_dirs: list[Path]) -> tuple[list[Evidence], list[RejectedEvidence]]:
+    """Evidence declared by `reference/manifest.json` files, split into usable and rejected.
 
     Note the manifest's top-level key is `dashboards`, but `capture_tableau_reference.py:199` files
     WORKSHEET thumbnails there too. The key is therefore not evidence of scope; the provider is.
     """
-    found: list[Evidence] = []
+    built: list[Evidence | RejectedEvidence] = []
     for directory in reference_dirs:
         payload = _json_object(directory / "manifest.json")
         entries = (payload or {}).get("dashboards")
         for entry in entries if isinstance(entries, list) else []:
-            if not isinstance(entry, dict):
-                continue
-            name = str(entry.get("name") or "")
-            for state in entry.get("states") or []:
-                if not isinstance(state, dict):
-                    continue
-                image = state.get("image")
-                if not (isinstance(image, str) and (directory / image).is_file()):
-                    continue
-                provider = state.get("provider")
-                found.append(
-                    Evidence(
-                        name=name,
-                        kind=_entry_scope({**entry, **state}, provider),
-                        grade=_reference_grade(state.get("capabilities") or []),
-                        origin="reference",
-                        provider=str(provider) if provider else None,
-                        path=str(directory / image),
-                    )
-                )
-    return found
+            if isinstance(entry, dict):
+                built.extend(_reference_states(directory, entry, (payload or {}).get("source_workbook_sha256")))
+    return _split(built)
 
 
-def oracle_evidence(oracle_dirs: list[Path]) -> list[Evidence]:
-    """Evidence declared by `_oracle/oracle-manifest.json` files.
+def _oracle_render(directory: Path, record: dict[str, Any]) -> Path | None:
+    """The first render leg the record claims succeeded. Validity is decided by `Evidence.build`."""
+    for leg in ("image", "svg", "pdf"):
+        payload = record.get(leg)
+        if isinstance(payload, dict) and payload.get("status") == "ok" and isinstance(payload.get("path"), str):
+            return directory / payload["path"]
+    return None
+
+
+def _oracle_workbook_key(record: dict[str, Any]) -> tuple[str | None, str]:
+    """`(key, kind)` identifying which workbook an oracle record belongs to."""
+    luid = record.get("workbook_luid")
+    if isinstance(luid, str) and luid:
+        return luid, "luid"
+    name = record.get("workbook_name")
+    return (name if isinstance(name, str) and name else None), "name"
+
+
+def _oracle_view_kind(record: dict[str, Any]) -> str:
+    """PR #422's `view_type`, or UNKNOWN. Absent and `unknown` both mean "cannot establish"."""
+    declared = record.get("view_type")
+    if isinstance(declared, str) and declared.strip().casefold() in (KIND_DASHBOARD, KIND_WORKSHEET):
+        return declared.strip().casefold()
+    return KIND_UNKNOWN
+
+
+def _oracle_record(directory: Path, record: dict[str, Any]) -> Evidence | RejectedEvidence:
+    """Build one oracle view record."""
+    render_path = _oracle_render(directory, record)
+    name = str(record.get("view_name") or record.get("view_url_name") or "")
+    if render_path is None:
+        return RejectedEvidence(name, "oracle", None, "no render leg reported status ok")
+    key, key_kind = _oracle_workbook_key(record)
+    return Evidence.build(
+        name=name,
+        kind=_oracle_view_kind(record),
+        grade=GRADE_ORACLE,
+        origin="oracle",
+        provider="oracle_capture",
+        render_path=render_path,
+        workbook_key=key,
+        workbook_kind=key_kind,
+    )
+
+
+def oracle_evidence(oracle_dirs: list[Path]) -> tuple[list[Evidence], list[RejectedEvidence]]:
+    """Evidence declared by `_oracle/oracle-manifest.json` files, split into usable and rejected.
 
     `view_type` comes from PR #422's Metadata-API join and is consumed if present. It fails closed by
     design there (a disabled Metadata API yields `unknown` for everything), and it fails closed here
@@ -416,49 +616,19 @@ def oracle_evidence(oracle_dirs: list[Path]) -> list[Evidence]:
     satisfy either kind. An oracle capture is default-view-state with no `?vf_` pinning, so its grade
     is layout/text only regardless of render leg.
     """
-    found: list[Evidence] = []
+    built: list[Evidence | RejectedEvidence] = []
     for directory in oracle_dirs:
         payload = _json_object(directory / "oracle-manifest.json")
-        for record in (payload or {}).get("views") or []:
-            if not isinstance(record, dict):
-                continue
-            legs = [record.get(leg) for leg in ("image", "svg", "pdf")]
-            rendered = next(
-                (
-                    leg
-                    for leg in legs
-                    if isinstance(leg, dict)
-                    and leg.get("status") == "ok"
-                    and isinstance(leg.get("path"), str)
-                    and (directory / leg["path"]).is_file()
-                ),
-                None,
-            )
-            if rendered is None:
-                continue
-            declared = record.get("view_type")
-            kind = (
-                declared.strip().casefold()
-                if isinstance(declared, str) and declared.strip().casefold() in (KIND_DASHBOARD, KIND_WORKSHEET)
-                else KIND_UNKNOWN
-            )
-            for label in (record.get("view_name"), record.get("view_url_name")):
-                if isinstance(label, str) and label.strip():
-                    found.append(
-                        Evidence(
-                            name=label,
-                            kind=kind,
-                            grade=GRADE_ORACLE,
-                            origin="oracle",
-                            provider="oracle_capture",
-                            path=str(directory / rendered["path"]),
-                        )
-                    )
-    return found
+        built.extend(
+            _oracle_record(directory, record)
+            for record in (payload or {}).get("views") or []
+            if isinstance(record, dict)
+        )
+    return _split(built)
 
 
 def match_evidence(obj: SourceObject, evidence: list[Evidence]) -> tuple[Evidence | None, list[Evidence]]:
-    """Return `(match, name_only)` for one source object.
+    """Return `(match, name_only)` for one source object, against evidence ALREADY scoped to its unit.
 
     A match requires BOTH the normalized name and the scope to agree - this is the rule that stops a
     worksheet render satisfying a dashboard page. `name_only` carries entries that share the name but
@@ -469,12 +639,17 @@ def match_evidence(obj: SourceObject, evidence: list[Evidence]) -> tuple[Evidenc
     named = [item for item in evidence if _norm(item.name) == _norm(obj.name)]
     matched = [item for item in named if item.kind == obj.kind]
     if matched:
-        best = next((item for item in matched if item.grade == GRADE_VALIDATION), matched[0])
-        return best, []
+        return next((item for item in matched if item.grade == GRADE_VALIDATION), matched[0]), []
     return None, named
 
 
-def _page_row(obj: SourceObject, page_status: str, evidence: list[Evidence], reason: str | None) -> dict[str, Any]:
+def _page_row(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    obj: SourceObject,
+    page_status: str,
+    evidence: list[Evidence],
+    reason: str | None,
+    require_validation_grade: bool,
+) -> dict[str, Any]:
     """One page's readiness row: what it came from, whether it exists, and what proves it."""
     row: dict[str, Any] = {
         "source_object": obj.name,
@@ -494,13 +669,14 @@ def _page_row(obj: SourceObject, page_status: str, evidence: list[Evidence], rea
         return row
     match, name_only = match_evidence(obj, evidence)
     if match is not None:
+        insufficient = require_validation_grade and match.grade != GRADE_VALIDATION
         row.update(
             {
                 "evidence": "present",
                 "grade": match.grade,
                 "matched_by": f"{match.origin}:{match.provider or 'unknown'} (scope={match.kind})",
                 "evidence_path": match.path,
-                "readiness": READY,
+                "readiness": INSUFFICIENT_GRADE if insufficient else READY,
             }
         )
         return row
@@ -518,6 +694,12 @@ def _page_row(obj: SourceObject, page_status: str, evidence: list[Evidence], rea
     return row
 
 
+def _engine_report(root: Path) -> dict[str, Any] | None:
+    """The engine's own `report.json`, which is what classifies a unit as workbook vs datasource."""
+    payload = _json_object(root / "report.json")
+    return payload if isinstance((payload or {}).get("workbooks"), list) else None
+
+
 def _unit_names(engine_report: dict[str, Any] | None) -> tuple[set[str], set[str]]:
     """`(workbook names, datasource names)` the engine says this bundle produced."""
     report = engine_report or {}
@@ -532,14 +714,22 @@ def _unit_names(engine_report: dict[str, Any] | None) -> tuple[set[str], set[str
     return workbooks, datasources
 
 
-def _engine_report(root: Path) -> dict[str, Any] | None:
-    """The engine's own `report.json`, which is what classifies a unit as workbook vs datasource."""
-    payload = _json_object(root / "report.json")
-    return payload if isinstance((payload or {}).get("workbooks"), list) else None
-
-
 def _handover(root: Path, unit: str) -> dict[str, Any] | None:
     return _json_object(root / "handover" / f"{unit}.json")
+
+
+def _provenance_luid(root: Path, source: Path, source_sha: str) -> str | None:
+    """The published workbook LUID for this source, from `source-provenance.json` when stamped."""
+    payload = _json_object(root / "source-provenance.json")
+    for record in (payload or {}).get("inputs") or []:
+        if not isinstance(record, dict):
+            continue
+        stamped = record.get("input") if isinstance(record.get("input"), dict) else {}
+        origin = record.get("origin") if isinstance(record.get("origin"), dict) else {}
+        if stamped.get("sha256") == source_sha or _norm(stamped.get("file")) == _norm(source.name):
+            luid = origin.get("workbook_luid")
+            return str(luid) if isinstance(luid, str) and luid else None
+    return None
 
 
 def resolve_source(root: Path, unit: str, handover: dict[str, Any] | None, explicit: Path | None) -> Path | None:
@@ -578,61 +768,127 @@ def resolve_source(root: Path, unit: str, handover: dict[str, Any] | None, expli
 
 def _default_dirs(root: Path, name: str) -> list[Path]:
     """Conventional evidence locations, mirroring `check_unit.py:830-839`."""
-    candidates = [root / name, root.parent / name, root.parent.parent / name]
     seen: list[Path] = []
-    for candidate in candidates:
-        resolved = candidate.resolve()
-        if candidate.is_dir() and resolved not in {path.resolve() for path in seen}:
+    for candidate in (root / name, root.parent / name, root.parent.parent / name):
+        if candidate.is_dir() and candidate.resolve() not in {path.resolve() for path in seen}:
             seen.append(candidate)
     return seen
 
 
-def _classify_unit(unit: str, engine_report: dict[str, Any] | None) -> str | None:
-    """`NOT_APPLICABLE` when the engine itself says this unit has no Tableau views, else None.
+def _cannot(unit: str, detail: str, report_dir: Path | None = None, source: Path | None = None) -> UnitResult:
+    """A unit this gate could not form an opinion about. Never a pass."""
+    return UnitResult(
+        unit=unit,
+        status=STATUS_CANNOT_ESTABLISH,
+        detail=detail,
+        report_dir=str(report_dir) if report_dir else None,
+        source=str(source) if source else None,
+    )
 
-    EARNED from the engine's own `report.json` classification. Deriving it from "I found no pages"
-    instead would be fail-open: a workbook whose report failed to emit would read as a clean pass.
-    """
-    workbooks, datasources = _unit_names(engine_report)
-    if engine_report is not None and _norm(unit) in datasources and _norm(unit) not in workbooks:
-        return STATUS_NOT_APPLICABLE
-    return None
+
+def _identify(root: Path, unit: str, source: Path) -> UnitIdentity | None:
+    """Unit identity, or None when the source cannot be hashed (so evidence cannot be attributed)."""
+    digest = _sha256(source)
+    if digest is None:
+        return None
+    return UnitIdentity(
+        name=unit, source_path=source, source_sha256=digest, workbook_luid=_provenance_luid(root, source, digest)
+    )
 
 
 def _page_rows(
     objects: list[SourceObject],
-    report_dir: Path,
-    handover: dict[str, Any] | None,
-    evidence: list[Evidence],
+    emitted: dict[str, str],
+    explained: dict[tuple[str, str], str],
+    scoped: list[Evidence],
+    require_validation_grade: bool,
 ) -> list[dict[str, Any]]:
     """One readiness row per expected page, splitting explained from unexplained drops."""
-    emitted = actual_page_ids(report_dir)
-    explained = drop_explanations(handover)
     rows = []
     for obj in objects:
+        key = (obj.kind, _norm(obj.name))
         if obj.page_id in emitted:
             status, reason = PAGE_EMITTED, None
-        elif _norm(obj.name) in explained:
-            status, reason = PAGE_DROPPED_EXPLAINED, explained[_norm(obj.name)]
+        elif key in explained:
+            status, reason = PAGE_DROPPED_EXPLAINED, explained[key]
         else:
             status, reason = PAGE_DROPPED_UNEXPLAINED, None
-        rows.append(_page_row(obj, status, evidence, reason))
+        rows.append(_page_row(obj, status, scoped, reason, require_validation_grade))
     return rows
 
 
-def _findings(rows: list[dict[str, Any]], require_validation_grade: bool) -> list[dict[str, Any]]:
-    """Rows that block a start: not ready, or ready only at a grade below the requested bar."""
-    findings = [row for row in rows if row["readiness"] != READY]
-    if require_validation_grade:
-        findings.extend(
-            row
-            for row in rows
-            if row["readiness"] == READY and row["page_status"] == PAGE_EMITTED and row["grade"] != GRADE_VALIDATION
+def _expectation(unit: str, report_dir: Path, source: Path) -> list[SourceObject] | UnitResult:
+    """The expected page set for a unit, or the `CANNOT_ESTABLISH` result explaining why not."""
+    objects = source_objects(source)
+    if not objects:
+        return _cannot(
+            unit,
+            f"source workbook could not be parsed: {source}"
+            if objects is None
+            else f"{source.name} declares no dashboards and no worksheets, so no page expectation exists "
+            "- this gate has no opinion and that is NOT a pass",
+            report_dir,
+            source,
         )
-    return findings
+    ids = [obj.page_id for obj in objects]
+    duplicates = sorted({page_id for page_id in ids if ids.count(page_id) > 1})
+    if duplicates:
+        return _cannot(
+            unit,
+            f"{len(duplicates)} page id(s) are claimed by more than one source object "
+            f"({', '.join(duplicates)}) - the engine keeps only 8 md5 digits, so one physical page "
+            "would satisfy two expectations and neither could be attributed",
+            report_dir,
+            source,
+        )
+    return objects
 
 
-def assess_unit(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+def _datasource_only(unit: str, report_dir: Path, engine_report: dict[str, Any] | None) -> UnitResult | None:
+    """`NOT_APPLICABLE` when the engine itself classifies this unit as datasource-only, else None.
+
+    EARNED from the engine's own `report.json`. Round-1 review measured the fail-open alternatives:
+    inferring it from an empty page list, or from the mere existence of a semantic model, both gave a
+    clean exit 0 to a workbook whose report generation had FAILED.
+    """
+    workbooks, datasources = _unit_names(engine_report)
+    if engine_report is None or _norm(unit) not in datasources or _norm(unit) in workbooks:
+        return None
+    return UnitResult(
+        unit=unit,
+        status=STATUS_NOT_APPLICABLE,
+        detail="datasource-only unit: the engine lists it under datasources[], so it has no Tableau views",
+        report_dir=str(report_dir),
+    )
+
+
+def _readiness_result(unit: str, report_dir: Path, source: Path, rows: list[dict[str, Any]]) -> UnitResult:
+    """Fold per-page rows into the unit verdict."""
+    findings = [row for row in rows if row["readiness"] != READY]
+    return UnitResult(
+        unit=unit,
+        status=STATUS_FINDINGS if findings else STATUS_READY,
+        detail=f"{len(rows) - len(findings)}/{len(rows)} expected page(s) ready",
+        report_dir=str(report_dir),
+        source=str(source),
+        pages=rows,
+    )
+
+
+def _emitted_pages(unit: str, report_dir: Path, source: Path) -> dict[str, str] | UnitResult:
+    """The report's readable page ids, or the `CANNOT_ESTABLISH` result explaining why not."""
+    emitted, problems = page_map(report_dir)
+    if problems:
+        return _cannot(
+            unit,
+            f"the report's page mapping is not readable, so completeness cannot be judged: {'; '.join(problems[:4])}",
+            report_dir,
+            source,
+        )
+    return emitted
+
+
+def assess_unit(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-return-statements
     root: Path,
     report_dir: Path,
     engine_report: dict[str, Any] | None,
@@ -642,57 +898,79 @@ def assess_unit(  # pylint: disable=too-many-arguments,too-many-positional-argum
 ) -> UnitResult:
     """Readiness for one shipping report."""
     unit = report_dir.name[: -len(".Report")]
-    if _classify_unit(unit, engine_report) == STATUS_NOT_APPLICABLE:
-        return UnitResult(
-            unit=unit,
-            status=STATUS_NOT_APPLICABLE,
-            detail="datasource-only unit: the engine lists it under datasources[], so it has no Tableau views",
-            report_dir=str(report_dir),
-        )
+    exempt = _datasource_only(unit, report_dir, engine_report)
+    if exempt is not None:
+        return exempt
 
     handover = _handover(root, unit)
     source = resolve_source(root, unit, handover, explicit_source)
     if source is None:
-        return UnitResult(
-            unit=unit,
-            status=STATUS_CANNOT_ESTABLISH,
+        return _cannot(
+            unit,
+            "no Tableau source workbook could be resolved, so the expected page set cannot be derived "
+            "- pass --source, or run this against the bundle whose assets/ holds it",
+            report_dir,
+        )
+    identity = _identify(root, unit, source)
+    if identity is None:
+        return _cannot(unit, f"source workbook could not be hashed, so evidence cannot be attributed: {source}")
+
+    objects = _expectation(unit, report_dir, source)
+    if isinstance(objects, UnitResult):
+        return objects
+    emitted = _emitted_pages(unit, report_dir, source)
+    if isinstance(emitted, UnitResult):
+        return emitted
+
+    scoped = [item for item in evidence if item.is_for(identity)]
+    rows = _page_rows(objects, emitted, drop_explanations(handover), scoped, require_validation_grade)
+    return _readiness_result(unit, report_dir, source, rows)
+
+
+def _units_without_reports(engine_report: dict[str, Any] | None, reports: list[Path]) -> list[UnitResult]:
+    """A workbook the engine says it produced, with no shipping report, is a FINDING.
+
+    Round-1 review measured the fail-open shape this replaces: any semantic model anywhere granted
+    `NOT_APPLICABLE` and exit 0, so a workbook whose report generation FAILED read as legitimately
+    reference-free. `NOT_APPLICABLE` must be earned from the datasource classification, never from
+    the mere absence of a report.
+    """
+    shipped = {_norm(path.name[: -len(".Report")]) for path in reports}
+    workbooks, _ = _unit_names(engine_report)
+    return [
+        UnitResult(
+            unit=name,
+            status=STATUS_FINDINGS,
             detail=(
-                "no Tableau source workbook could be resolved, so the expected page set cannot be "
-                "derived - pass --source, or run this against the bundle whose assets/ holds it"
+                "the engine lists this workbook but no report ships for it - conversion did not "
+                "produce a report, so there is nothing to reference and nothing to build on"
             ),
-            report_dir=str(report_dir),
         )
+        for name in sorted(workbooks - shipped)
+    ]
 
-    objects = source_objects(source)
-    if not objects:
-        detail = (
-            f"source workbook could not be parsed: {source}"
-            if objects is None
-            else (
-                f"{source.name} declares no dashboards and no worksheets, so no page expectation "
-                "exists - this gate has no opinion and that is NOT a pass"
-            )
-        )
+
+def _empty_bundle_unit(root: Path, engine_report: dict[str, Any] | None) -> UnitResult:
+    """The verdict for a bundle that shipped no report at all."""
+    _, datasources = _unit_names(engine_report)
+    if datasources:
         return UnitResult(
-            unit=unit,
-            status=STATUS_CANNOT_ESTABLISH,
-            detail=detail,
-            report_dir=str(report_dir),
-            source=str(source),
+            unit=root.name,
+            status=STATUS_NOT_APPLICABLE,
+            detail="the engine produced datasource migrations only, so there are no Tableau views to reference",
         )
+    return _cannot(root.name, "the engine report lists neither workbooks nor datasources - nothing was measured")
 
-    rows = _page_rows(objects, report_dir, handover, evidence)
-    findings = _findings(rows, require_validation_grade)
-    status = STATUS_FINDINGS if findings else STATUS_READY
-    ready_count = len(rows) - len(findings)
-    return UnitResult(
-        unit=unit,
-        status=status,
-        detail=f"{ready_count}/{len(rows)} expected page(s) ready",
-        report_dir=str(report_dir),
-        source=str(source),
-        pages=rows,
-    )
+
+def _collect_evidence(
+    root: Path, reference_dir: Path | None, oracle_dir: Path | None
+) -> tuple[list[Evidence], list[RejectedEvidence]]:
+    """Every candidate render under ``root``, split into verified evidence and rejections."""
+    reference_dirs = [reference_dir] if reference_dir else _default_dirs(root, "reference")
+    oracle_dirs = [oracle_dir] if oracle_dir else _default_dirs(root, "_oracle") + _default_dirs(root, "oracle")
+    ref_ok, ref_bad = reference_evidence(reference_dirs)
+    orc_ok, orc_bad = oracle_evidence(oracle_dirs)
+    return ref_ok + orc_ok, ref_bad + orc_bad
 
 
 def scan(
@@ -705,34 +983,29 @@ def scan(
 ) -> dict[str, Any]:
     """Assess every shipping report under ``root``."""
     root = root.resolve()
-    reference_dirs = [reference_dir] if reference_dir else _default_dirs(root, "reference")
-    oracle_dirs = [oracle_dir] if oracle_dir else _default_dirs(root, "_oracle") + _default_dirs(root, "oracle")
-    evidence = reference_evidence(reference_dirs) + oracle_evidence(oracle_dirs)
+    evidence, rejected = _collect_evidence(root, reference_dir, oracle_dir)
     engine_report = _engine_report(root)
     reports = shipping_reports(root)
 
-    if not reports:
-        models = shipping_models(root, include_standalone=True)
-        detail = (
-            "no shipping report found; only semantic model(s) ship here, so there are no pages to reference"
-            if models
-            else "no shipping report and no semantic model found - nothing was measured"
-        )
-        status = STATUS_NOT_APPLICABLE if models else STATUS_CANNOT_ESTABLISH
-        return _merge(root, [UnitResult(unit=root.name, status=status, detail=detail)], evidence)
-
+    if not reports and engine_report is None:
+        detail = "no shipping report and no engine report.json found - nothing was measured"
+        return _merge(root, [_cannot(root.name, detail)], evidence, rejected)
     units = [
         assess_unit(root, report, engine_report, evidence, explicit_source, require_validation_grade)
         for report in reports
     ]
-    return _merge(root, units, evidence)
+    units.extend(_units_without_reports(engine_report, reports))
+    return _merge(root, units or [_empty_bundle_unit(root, engine_report)], evidence, rejected)
 
 
-def _merge(root: Path, units: list[UnitResult], evidence: list[Evidence]) -> dict[str, Any]:
+def _merge(
+    root: Path, units: list[UnitResult], evidence: list[Evidence], rejected: list[RejectedEvidence]
+) -> dict[str, Any]:
     """Roll per-unit verdicts into one report, keeping every count visible."""
     pages = [page for unit in units for page in unit.pages]
     findings = [page for page in pages if page["readiness"] != READY]
-    graded = {page["grade"] for page in pages if page["evidence"] == "present"}
+    evidenced = [page for page in pages if page["evidence"] == "present"]
+    graded = {page["grade"] for page in evidenced}
     if any(unit.status == STATUS_FINDINGS for unit in units):
         status = STATUS_FINDINGS
     elif any(unit.status == STATUS_CANNOT_ESTABLISH for unit in units):
@@ -753,12 +1026,18 @@ def _merge(root: Path, units: list[UnitResult], evidence: list[Evidence]) -> dic
         "pages_ready": len(pages) - len(findings),
         "pages_blind": sum(1 for page in pages if page["readiness"] == BLIND),
         "pages_unverifiable": sum(1 for page in pages if page["readiness"] == UNVERIFIABLE),
+        "pages_insufficient_grade": sum(1 for page in pages if page["readiness"] == INSUFFICIENT_GRADE),
         "pages_emitted": sum(1 for page in pages if page["page_status"] == PAGE_EMITTED),
         "pages_dropped_explained": sum(1 for page in pages if page["page_status"] == PAGE_DROPPED_EXPLAINED),
         "pages_dropped_unexplained": sum(1 for page in pages if page["page_status"] == PAGE_DROPPED_UNEXPLAINED),
         "evidence_records": len(evidence),
+        "evidence_rejected": [
+            {"name": item.name, "origin": item.origin, "path": item.path, "reason": item.reason} for item in rejected
+        ],
         "grades_present": sorted(graded),
-        "validation_grade_present": GRADE_VALIDATION in graded,
+        # True only when EVERY evidenced page is validation-grade. `any` would let one good capture
+        # silence the ceiling warning for every other page - round-1 finding 7.
+        "all_evidence_validation_grade": bool(evidenced) and graded == {GRADE_VALIDATION},
         "units": [
             {
                 "unit": unit.unit,
@@ -774,35 +1053,37 @@ def _merge(root: Path, units: list[UnitResult], evidence: list[Evidence]) -> dic
 
 
 GRADE_CEILING_NOTE = (
-    "  GRADE CEILING: no evidence here carries `validation_grade`. In practice that is the normal "
-    "state - it is reachable only via `capture_tableau_reference.py --manual-validation-grade`, and "
-    "both an oracle capture and a reference capture record the DEFAULT view state (no `?vf_` filter "
-    "pinning). Treat READY as 'a legible picture of the source exists', not as signed-off fidelity."
+    "  GRADE CEILING: not every page's evidence carries `validation_grade`. In practice that is the "
+    "normal state - it is reachable only via `capture_tableau_reference.py --manual-validation-grade`, "
+    "and both an oracle capture and a reference capture record the DEFAULT view state (no `?vf_` "
+    "filter pinning). Treat READY as 'a legible picture of the source exists', not as signed-off "
+    "fidelity."
 )
 
 
 def render(report: dict[str, Any], *, verbose: bool = False) -> str:
     """Human-readable verdict, matching the sibling offline gates."""
-    head = (
+    lines = [
         f"REFERENCE READINESS: {report['status']} - {report['pages_ready']}/{report['pages_expected']} "
         f"expected page(s) ready across {report['units_scanned']} unit(s); "
         f"{report['pages_blind']} blind, {report['pages_unverifiable']} unverifiable, "
+        f"{report['pages_insufficient_grade']} below the required grade, "
         f"{report['pages_dropped_unexplained']} dropped with no engine explanation "
         f"({report['pages_dropped_explained']} explained)."
-    )
-    lines = [head]
+    ]
     for unit in report["units"]:
         lines.append(f"  [{unit['status']}] {unit['unit']}: {unit['detail']}")
-        for page in unit["pages"]:
-            if page["readiness"] == READY and not verbose:
-                continue
-            lines.append(_render_page(page))
+        lines.extend(_render_page(page) for page in unit["pages"] if verbose or page["readiness"] != READY)
+    lines.extend(
+        f"  [REJECTED EVIDENCE] {item['name']!r} ({item['origin']}): {item['reason']}"
+        for item in report["evidence_rejected"]
+    )
     if report["status"] == STATUS_CANNOT_ESTABLISH:
         lines.append(
             "  CANNOT_ESTABLISH is NOT a pass: this gate formed no opinion, so an agent starting "
             "here would be building blind with nothing to compare against."
         )
-    if report["pages_expected"] and not report["validation_grade_present"]:
+    if report["pages_expected"] and not report["all_evidence_validation_grade"]:
         lines.append(GRADE_CEILING_NOTE)
     if not verbose and report["pages_ready"]:
         lines.append("  Run with --verbose to list the pages that ARE ready and their grades.")
@@ -820,6 +1101,8 @@ def _render_page(page: dict[str, Any]) -> str:
         return f"{label}: BLIND - no reference render, so a fidelity bug here is unfalsifiable"
     if page["readiness"] == UNVERIFIABLE:
         return f"{label}: UNVERIFIABLE - {page['matched_by']}"
+    if page["readiness"] == INSUFFICIENT_GRADE:
+        return f"{label}: INSUFFICIENT GRADE - [{page['grade']}] below the required validation-grade bar"
     return f"{label}: ready [{page['grade']}] via {page['matched_by']}"
 
 
@@ -838,7 +1121,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", type=Path, help="write the machine-readable verdict here")
     parser.add_argument("--quiet", action="store_true", help="suppress the rendered verdict")
     parser.add_argument("--verbose", action="store_true", help="also list the pages that are ready")
-    parser.add_argument("--warn-only", action="store_true", help="always exit 0 after a successful scan")
     args = parser.parse_args(argv)
 
     if not args.paths:
@@ -864,8 +1146,8 @@ def main(argv: list[str] | None = None) -> int:
         args.json.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
     if not args.quiet:
         print(render(merged, verbose=args.verbose))
-    if args.warn_only:
-        return EXIT_OK
+    # There is deliberately no --warn-only: see the module docstring. An entry gate that can be asked
+    # to say yes is not an entry gate, and the flag was measured returning 0 on CANNOT_ESTABLISH.
     if merged["status"] == STATUS_FINDINGS:
         return EXIT_FINDINGS
     if merged["status"] == STATUS_CANNOT_ESTABLISH:
@@ -878,6 +1160,7 @@ def _merge_scans(reports: list[dict[str, Any]]) -> dict[str, Any]:
     merged = dict(reports[0])
     merged["target"] = ", ".join(report["target"] for report in reports)
     merged["units"] = [unit for report in reports for unit in report["units"]]
+    merged["evidence_rejected"] = [item for report in reports for item in report["evidence_rejected"]]
     for key in (
         "units_scanned",
         "units_ready",
@@ -887,15 +1170,15 @@ def _merge_scans(reports: list[dict[str, Any]]) -> dict[str, Any]:
         "pages_ready",
         "pages_blind",
         "pages_unverifiable",
+        "pages_insufficient_grade",
         "pages_emitted",
         "pages_dropped_explained",
         "pages_dropped_unexplained",
         "evidence_records",
     ):
         merged[key] = sum(report[key] for report in reports)
-    grades = sorted({grade for report in reports for grade in report["grades_present"]})
-    merged["grades_present"] = grades
-    merged["validation_grade_present"] = GRADE_VALIDATION in grades
+    merged["grades_present"] = sorted({grade for report in reports for grade in report["grades_present"]})
+    merged["all_evidence_validation_grade"] = all(report["all_evidence_validation_grade"] for report in reports)
     statuses = {report["status"] for report in reports}
     if STATUS_FINDINGS in statuses:
         merged["status"] = STATUS_FINDINGS

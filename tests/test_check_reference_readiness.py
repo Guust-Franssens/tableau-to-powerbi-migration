@@ -1,19 +1,30 @@
 """Tests for the reference-readiness ENTRY gate (issue #421).
 
-The load-bearing property is **fail closed**: `unknown` and `missing` must both be distinct from
-`ready`, and neither may exit 0. A readiness gate that green-lights on absent evidence is worse than
-no gate, because it launches an agent to build confidently against nothing.
+The load-bearing property is **fail closed**: `blind`, `unverifiable` and `insufficient-grade` are
+all distinct from `ready`, and none may exit 0. A readiness gate that green-lights on absent or
+unattributable evidence is worse than no gate, because it launches an agent to build confidently
+against nothing.
 
-The headline regression is `test_a_worksheet_render_does_not_make_a_dashboard_page_ready`. It is
-paired with `test_a_worksheet_render_does_satisfy_a_worksheet_page` on purpose: without the second
-test, the first would also pass if the matcher simply never matched anything, and a test that cannot
-distinguish "correctly refused" from "broken" is not coverage.
+Round-1 review of PR #428 found eight ways it exited 0 on evidence it should refuse. Each has a test
+below naming its finding number, and each is mutation-proved by
+`tests/mutation_reference_readiness.py`.
+
+⚠️ Two fixture rules exist because round 1 measured the fixtures themselves encoding the defect:
+
+* **renders are REAL images.** The first version used an 8-byte PNG signature as "evidence" and
+  asserted readiness, so the suite could not have caught a zero-byte render being promoted to READY.
+  `write_png` emits a genuine, parseable PNG of a stated size.
+* **evidence carries workbook identity.** Without `source_workbook_sha256`, one record satisfied two
+  different units, and no fixture would have noticed.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
+import struct
 import sys
+import zlib
 from pathlib import Path
 
 import pytest
@@ -31,6 +42,33 @@ MERIDIAN_PAGE_IDS = {
     "Regional Share": "page-ws-Regional05286155",
 }
 
+# Verified: only 8 md5 hex digits survive `_sanitize`, so these two distinct worksheet names both
+# produce `page-ws-Collisioc5d9dc9d`.
+COLLIDING_NAMES = ("Collision030344", "Collision079370")
+
+
+def write_png(path: Path, width: int = 320, height: int = 240) -> Path:
+    """A genuine, parseable PNG - not a signature stub.
+
+    The round-1 fixtures wrote 8 bytes and asserted READY, so they encoded the very assumption the
+    gate was supposed to refuse. Anything claiming to be evidence in this file is a real image.
+    """
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        body = tag + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
+
+    raw = b"".join(b"\x00" + bytes((x * 7 + y * 13) % 256 for x in range(width * 3)) for y in range(height))
+    blob = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(raw))
+        + chunk(b"IEND", b"")
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(blob)
+    return path
+
 
 def write_workbook(path: Path, *, worksheets: list[str], dashboards: dict[str, list[str]] | None = None) -> Path:
     """A minimal `.twb`. ``dashboards`` maps a dashboard name to the worksheets placed on it."""
@@ -39,6 +77,7 @@ def write_workbook(path: Path, *, worksheets: list[str], dashboards: dict[str, l
     for db_name, placed in (dashboards or {}).items():
         zones = "".join(f"<zone name='{name}' />" for name in placed)
         db_xml += f"<dashboard name='{db_name}'><zones><zone>{zones}</zone></zones></dashboard>"
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         f"<?xml version='1.0'?><workbook><worksheets>{ws_xml}</worksheets><dashboards>{db_xml}</dashboards></workbook>",
         encoding="utf-8",
@@ -61,6 +100,7 @@ def write_report(root: Path, unit: str, page_ids: list[str]) -> Path:
 
 def write_engine_report(root: Path, *, workbooks: list[str], datasources: list[str] | None = None) -> None:
     """The engine's `report.json`, which is what classifies a unit as workbook vs datasource."""
+    root.mkdir(parents=True, exist_ok=True)
     (root / "report.json").write_text(
         json.dumps(
             {
@@ -72,29 +112,58 @@ def write_engine_report(root: Path, *, workbooks: list[str], datasources: list[s
     )
 
 
-def write_handover(root: Path, unit: str, *, source_id: str, viz_fidelity: list[dict] | None = None) -> None:
-    """The engine's per-workbook handover slice, carrying `source_id` and `viz_fidelity[]`."""
+def write_handover(
+    root: Path,
+    unit: str,
+    *,
+    source_id: str,
+    viz_fidelity: list[dict] | None = None,
+    pbip_warnings: list[str] | None = None,
+) -> None:
+    """The engine's per-workbook handover slice.
+
+    `pbip_warnings` is populated by the routing tests on purpose: round-1 review found that the test
+    claiming to pin the `viz_fidelity[]`-over-`pbip_warnings[]` routing never supplied
+    `pbip_warnings` at all, so a mutation adding a flat-warning fallback survived the whole suite.
+    """
     handover = root / "handover"
     handover.mkdir(parents=True, exist_ok=True)
     (handover / f"{unit}.json").write_text(
-        json.dumps({"workbook": {"source_id": source_id, "viz_fidelity": viz_fidelity or []}}),
+        json.dumps(
+            {
+                "workbook": {
+                    "source_id": source_id,
+                    "viz_fidelity": viz_fidelity or [],
+                    "pbip_warnings": pbip_warnings or [],
+                }
+            }
+        ),
         encoding="utf-8",
     )
 
 
-def write_reference(root: Path, entries: list[tuple[str, str, list[str]]]) -> Path:
+def write_reference(
+    root: Path,
+    entries: list[tuple[str, str, list[str]]],
+    *,
+    source_sha: str | None = None,
+    size: tuple[int, int] = (320, 240),
+    render_bytes: bytes | None = None,
+) -> Path:
     """A `reference/manifest.json`. Each entry is ``(name, provider, capabilities)``.
 
-    Note the manifest's top-level key is `dashboards` even for WORKSHEET renders - that is exactly
-    what `capture_tableau_reference.py:199` does for `embedded_thumbnail`, and is the reason the
-    key cannot be treated as evidence of scope.
+    Note the manifest's top-level key is `dashboards`, but `capture_tableau_reference.py:199` files
+    WORKSHEET thumbnails there too - which is why the key cannot be evidence of scope.
     """
     reference = root / "reference"
     reference.mkdir(parents=True, exist_ok=True)
     dashboards = []
     for index, (name, provider, capabilities) in enumerate(entries):
         image = f"shot-{index}.png"
-        (reference / image).write_bytes(b"\x89PNG\r\n\x1a\n")
+        if render_bytes is None:
+            write_png(reference / image, *size)
+        else:
+            (reference / image).write_bytes(render_bytes)
         dashboards.append(
             {
                 "name": name,
@@ -109,19 +178,20 @@ def write_reference(root: Path, entries: list[tuple[str, str, list[str]]]) -> Pa
                 ],
             }
         )
-    (reference / "manifest.json").write_text(json.dumps({"dashboards": dashboards}), encoding="utf-8")
+    (reference / "manifest.json").write_text(
+        json.dumps({"source_workbook_sha256": source_sha, "dashboards": dashboards}), encoding="utf-8"
+    )
     return reference
 
 
 def write_oracle(root: Path, views: list[dict]) -> Path:
     """An `_oracle/oracle-manifest.json`. Each view dict may carry `view_type` (PR #422)."""
     oracle = root / "_oracle"
-    images = oracle / "images"
-    images.mkdir(parents=True, exist_ok=True)
+    (oracle / "images").mkdir(parents=True, exist_ok=True)
     records = []
     for index, view in enumerate(views):
         image = f"images/view-{index}.png"
-        (oracle / image).write_bytes(b"\x89PNG\r\n\x1a\n")
+        write_png(oracle / image)
         records.append({**view, "image": {"status": "ok", "path": image}})
     (oracle / "oracle-manifest.json").write_text(
         json.dumps({"view_count": len(records), "views": records}), encoding="utf-8"
@@ -138,18 +208,47 @@ def bundle_fixture(tmp_path: Path) -> Path:
     return root
 
 
+def build_unit(  # pylint: disable=too-many-arguments
+    bundle: Path,
+    unit: str,
+    *,
+    worksheets: list[str],
+    dashboards: dict[str, list[str]] | None = None,
+    page_ids: list[str] | None = None,
+    viz_fidelity: list[dict] | None = None,
+    pbip_warnings: list[str] | None = None,
+) -> str:
+    """Wire a complete workbook unit and return its source sha256, which evidence must carry."""
+    source = write_workbook(bundle.parent / "assets" / f"{unit}.twb", worksheets=worksheets, dashboards=dashboards)
+    write_engine_report(bundle, workbooks=[unit])
+    write_handover(bundle, unit, source_id=str(source), viz_fidelity=viz_fidelity, pbip_warnings=pbip_warnings)
+    if page_ids is None:
+        page_ids = [obj.page_id for obj in crr.source_objects(source) or []]
+    write_report(bundle, unit, page_ids)
+    return hashlib.sha256(source.read_bytes()).hexdigest()
+
+
+# --------------------------------------------------------------------------------------------
+# Vocabulary pins - without these, every comparison against a constant is vacuous
+# --------------------------------------------------------------------------------------------
+
+
 def test_the_status_and_exit_vocabulary_is_pinned_to_its_literal_values() -> None:
     """Pin every constant the rest of this file compares against.
 
-    Without this the suite is vacuous in one direction: `assert main(...) == crr.EXIT_CANNOT_ESTABLISH`
+    Without this the suite is vacuous in one direction: `main(...) == crr.EXIT_CANNOT_ESTABLISH`
     compares the code's answer against the code's own constant, so redefining the constant to 0
-    changes BOTH sides and the assertion still holds. One pin catches every such mutation, and lets
-    the other tests keep reading in names rather than magic numbers.
+    changes BOTH sides and the assertion still holds.
+
+    ⚠️ Round-1 review found this pin INCOMPLETE: `GRADE_ORACLE` was omitted, and the oracle test
+    compared against that same mutable constant, so `GRADE_ORACLE = GRADE_VALIDATION` survived the
+    whole suite. Every grade string is pinned now, for exactly that reason.
 
     The 0/1/2/3 values are `check_connection_fidelity.py:160-163`'s, deliberately shared across gates.
     """
     assert (crr.EXIT_OK, crr.EXIT_FINDINGS, crr.EXIT_USAGE, crr.EXIT_CANNOT_ESTABLISH) == (0, 1, 2, 3)
     assert (crr.READY, crr.BLIND, crr.UNVERIFIABLE) == ("ready", "blind", "unverifiable")
+    assert crr.INSUFFICIENT_GRADE == "insufficient-grade"
     assert (crr.STATUS_READY, crr.STATUS_FINDINGS) == ("READY", "FINDINGS")
     assert (crr.STATUS_NOT_APPLICABLE, crr.STATUS_CANNOT_ESTABLISH) == ("NOT_APPLICABLE", "CANNOT_ESTABLISH")
     assert (crr.KIND_DASHBOARD, crr.KIND_WORKSHEET, crr.KIND_UNKNOWN) == ("dashboard", "worksheet", "unknown")
@@ -159,41 +258,20 @@ def test_the_status_and_exit_vocabulary_is_pinned_to_its_literal_values() -> Non
         "dropped_unexplained",
     )
     assert crr.GRADE_VALIDATION == "validation-grade"
+    assert crr.GRADE_ORACLE == "layout/text only (oracle capture, default view state)"
+    assert crr.GRADE_UNKNOWN == "unknown"
+    assert crr.GRADE_ORACLE != crr.GRADE_VALIDATION
 
 
-def test_a_worksheet_scope_can_never_satisfy_a_dashboard_page() -> None:
-    """The scope join itself, isolated from any fixture.
+def test_there_is_no_flag_that_can_soften_the_verdict(tmp_path: Path) -> None:
+    """Round-1 finding 1: `--warn-only` returned exit 0 on a CANNOT_ESTABLISH bundle.
 
-    Asserted directly on `match_evidence` so the property is pinned even if a future refactor
-    changes how bundles are walked - and so this cannot pass because a fixture never reached the
-    branch under test.
+    An entry gate that can be asked to say yes is not an entry gate, so the flag is gone rather than
+    fixed. Argparse must reject it - otherwise a caller's muscle memory silently re-opens the hole.
     """
-    dashboard = crr.SourceObject(name="Ops", kind="dashboard")
-    worksheet_render = crr.Evidence(
-        name="Ops", kind="worksheet", grade="layout_grade", origin="reference", provider="embedded_thumbnail"
-    )
-    match, name_only = crr.match_evidence(dashboard, [worksheet_render])
-    assert match is None
-    assert name_only == [worksheet_render]
-
-
-def build_unit(  # pylint: disable=too-many-arguments
-    bundle: Path,
-    unit: str,
-    *,
-    worksheets: list[str],
-    dashboards: dict[str, list[str]] | None = None,
-    page_ids: list[str] | None = None,
-    viz_fidelity: list[dict] | None = None,
-) -> None:
-    """Wire a complete workbook unit: source asset, engine report.json, handover and PBIR pages."""
-    source = write_workbook(bundle.parent / "assets" / f"{unit}.twb", worksheets=worksheets, dashboards=dashboards)
-    write_engine_report(bundle, workbooks=[unit])
-    write_handover(bundle, unit, source_id=str(source), viz_fidelity=viz_fidelity)
-    if page_ids is None:
-        objects = crr.source_objects(source) or []
-        page_ids = [obj.page_id for obj in objects]
-    write_report(bundle, unit, page_ids)
+    with pytest.raises(SystemExit) as excinfo:
+        crr.main(["--warn-only", str(tmp_path)])
+    assert excinfo.value.code == 2
 
 
 # --------------------------------------------------------------------------------------------
@@ -208,15 +286,28 @@ def test_engine_page_id_reproduces_the_real_engine_output(worksheet: str, page_i
 
 
 def test_a_dashboard_and_a_same_named_worksheet_get_different_page_ids() -> None:
-    """The identity join that a name slug cannot make.
-
-    In Tableau a dashboard routinely shares its name with its principal worksheet. `check_unit.py`'s
-    `_slug` collapses them; the engine's md5-over-the-prefixed-string does not.
-    """
-    as_worksheet = crr.SourceObject(name="Regional Share", kind=crr.KIND_WORKSHEET).page_id
-    as_dashboard = crr.SourceObject(name="Regional Share", kind=crr.KIND_DASHBOARD).page_id
+    """The identity join that a name slug cannot make."""
+    as_worksheet = crr.SourceObject(name="Regional Share", kind="worksheet").page_id
+    as_dashboard = crr.SourceObject(name="Regional Share", kind="dashboard").page_id
     assert as_worksheet == "page-ws-Regional05286155"
     assert as_dashboard != as_worksheet
+
+
+def test_colliding_page_ids_cannot_be_attributed(bundle: Path) -> None:
+    """Round-1 finding 6b: the identity join is strong but NOT collision-free.
+
+    Only 8 md5 hex digits survive `_sanitize`, and these two names collide. One physical page must
+    never satisfy two expected pages, so this is `CANNOT_ESTABLISH` rather than a silent double
+    count.
+    """
+    first, second = COLLIDING_NAMES
+    assert crr.engine_page_id(f"page-ws-{first}") == crr.engine_page_id(f"page-ws-{second}")
+    build_unit(bundle, "WB", worksheets=list(COLLIDING_NAMES))
+
+    report = crr.scan(bundle)
+    assert report["status"] == "CANNOT_ESTABLISH"
+    assert "page-ws-Collisioc5d9dc9d" in report["units"][0]["detail"]
+    assert crr.main([str(bundle), "--quiet"]) == 3
 
 
 # --------------------------------------------------------------------------------------------
@@ -230,22 +321,15 @@ def test_orphan_worksheets_are_expected_pages(tmp_path: Path) -> None:
     objects = crr.source_objects(source)
     assert objects is not None
     assert {obj.name for obj in objects} == set(MERIDIAN_PAGE_IDS)
-    assert {obj.kind for obj in objects} == {crr.KIND_WORKSHEET}
+    assert {obj.kind for obj in objects} == {"worksheet"}
 
 
 def test_a_worksheet_placed_on_a_dashboard_is_not_an_orphan(tmp_path: Path) -> None:
     """A worksheet laid onto a dashboard gets no page of its own - the engine's `placed` set."""
-    source = write_workbook(
-        tmp_path / "wb.twb",
-        worksheets=["Placed", "Loose"],
-        dashboards={"Main": ["Placed"]},
-    )
+    source = write_workbook(tmp_path / "wb.twb", worksheets=["Placed", "Loose"], dashboards={"Main": ["Placed"]})
     objects = crr.source_objects(source)
     assert objects is not None
-    assert {(obj.name, obj.kind) for obj in objects} == {
-        ("Main", crr.KIND_DASHBOARD),
-        ("Loose", crr.KIND_WORKSHEET),
-    }
+    assert {(obj.name, obj.kind) for obj in objects} == {("Main", "dashboard"), ("Loose", "worksheet")}
 
 
 def test_an_unreadable_source_is_none_not_an_empty_expectation(tmp_path: Path) -> None:
@@ -255,24 +339,48 @@ def test_an_unreadable_source_is_none_not_an_empty_expectation(tmp_path: Path) -
     assert crr.source_objects(broken) is None
 
 
+def test_an_unreadable_page_definition_is_not_a_page(bundle: Path) -> None:
+    """Round-1 finding 6a: completeness passed with no readable page mapping at all.
+
+    The old `actual_page_ids` fell back to the containing directory's name, so corrupting every
+    `page.json` still yielded three pages and READY. A page whose definition cannot be read is a
+    problem, not a page.
+    """
+    sha = build_unit(bundle, "WB", worksheets=list(MERIDIAN_PAGE_IDS))
+    write_reference(bundle, [(n, "embedded_thumbnail", ["layout_grade"]) for n in MERIDIAN_PAGE_IDS], source_sha=sha)
+    assert crr.scan(bundle)["status"] == "READY"
+
+    pages = bundle / "pbip" / "WB" / "WB.Report" / "definition" / "pages"
+    for page_json in pages.rglob("page.json"):
+        page_json.write_text("{ not json", encoding="utf-8")
+
+    assert crr.scan(bundle)["status"] == "CANNOT_ESTABLISH"
+    assert crr.main([str(bundle), "--quiet"]) == 3
+
+
+def test_pages_json_disagreeing_with_the_page_definitions_cannot_be_judged(bundle: Path) -> None:
+    """`pages.json` is the report's own statement of which pages exist; a disagreement voids the join."""
+    build_unit(bundle, "WB", worksheets=["Solo"])
+    pages = bundle / "pbip" / "WB" / "WB.Report" / "definition" / "pages"
+    (pages / "pages.json").write_text(json.dumps({"pageOrder": ["page-that-does-not-exist"]}), encoding="utf-8")
+
+    assert crr.scan(bundle)["status"] == "CANNOT_ESTABLISH"
+
+
 def test_a_page_the_engine_dropped_with_a_reason_is_accounted_for(bundle: Path) -> None:
     """`dropped_explained` must not read as a conversion gap - that is the cry-wolf direction."""
     build_unit(
         bundle,
         "WB",
         worksheets=["Kept", "Dropped"],
-        page_ids=[crr.SourceObject(name="Kept", kind=crr.KIND_WORKSHEET).page_id],
+        page_ids=[crr.SourceObject(name="Kept", kind="worksheet").page_id],
         viz_fidelity=[
-            {
-                "worksheet": "Dropped",
-                "status": "warned",
-                "reason": "manual attention required: unsupported visual type",
-            }
+            {"worksheet": "Dropped", "status": "warned", "reason": "manual attention required: unsupported visual type"}
         ],
     )
     report = crr.scan(bundle)
     rows = {page["source_object"]: page for page in report["units"][0]["pages"]}
-    assert rows["Dropped"]["page_status"] == crr.PAGE_DROPPED_EXPLAINED
+    assert rows["Dropped"]["page_status"] == "dropped_explained"
     assert report["pages_dropped_unexplained"] == 0
     assert report["pages_dropped_explained"] == 1
 
@@ -283,137 +391,379 @@ def test_a_page_the_engine_dropped_silently_is_a_finding(bundle: Path) -> None:
         bundle,
         "WB",
         worksheets=["Kept", "Vanished"],
-        page_ids=[crr.SourceObject(name="Kept", kind=crr.KIND_WORKSHEET).page_id],
+        page_ids=[crr.SourceObject(name="Kept", kind="worksheet").page_id],
     )
+    rows = {page["source_object"]: page for page in crr.scan(bundle)["units"][0]["pages"]}
+    assert rows["Vanished"]["page_status"] == "dropped_unexplained"
+    assert rows["Vanished"]["readiness"] == "blind"
+    assert crr.main([str(bundle), "--quiet"]) == 1
+
+
+def test_a_worksheet_warning_cannot_excuse_a_missing_dashboard(bundle: Path) -> None:
+    """Round-1 finding 5: the `pbip_warnings[]` defect, one level down.
+
+    `drop_explanations` keyed on the normalized name alone, so a WORKSHEET warning for `Ops` made a
+    genuinely missing DASHBOARD named `Ops` read as `dropped_explained` and the unit went READY.
+    Sharing a name between a dashboard and its principal worksheet is the normal Tableau case, so
+    this is not an edge case.
+    """
+    build_unit(
+        bundle,
+        "WB",
+        worksheets=["Ops"],
+        dashboards={"Ops": []},
+        page_ids=[crr.SourceObject(name="Ops", kind="worksheet").page_id],
+        viz_fidelity=[
+            {
+                "worksheet": "Ops",
+                "visual_type": "unsupported",
+                "status": "warned",
+                "reason": "manual attention required: unsupported visual type",
+            }
+        ],
+    )
+    rows = {(p["source_type"], p["source_object"]): p for p in crr.scan(bundle)["units"][0]["pages"]}
+    assert rows[("dashboard", "Ops")]["page_status"] == "dropped_unexplained"
+    assert crr.main([str(bundle), "--quiet"]) == 1
+
+
+def test_a_dashboard_scope_warning_does_explain_a_missing_dashboard(bundle: Path) -> None:
+    """Discriminating twin: the kind-aware key must still ACCEPT a correctly scoped explanation.
+
+    `migrate_estate.py:1201-1204` writes dashboard-scope warnings with `visual_type` set to the scope
+    string `"dashboard"`. Without this test the previous one would also pass if explanations never
+    matched anything.
+    """
+    build_unit(
+        bundle,
+        "WB",
+        worksheets=["Ops"],
+        dashboards={"Ops": []},
+        page_ids=[crr.SourceObject(name="Ops", kind="worksheet").page_id],
+        viz_fidelity=[
+            {
+                "worksheet": "Ops",
+                "visual_type": "dashboard",
+                "status": "warned",
+                "reason": "manual attention required: no supported visuals on this dashboard",
+            }
+        ],
+    )
+    rows = {(p["source_type"], p["source_object"]): p for p in crr.scan(bundle)["units"][0]["pages"]}
+    assert rows[("dashboard", "Ops")]["page_status"] == "dropped_explained"
+
+
+def test_a_flat_pbip_warning_cannot_explain_any_drop(bundle: Path) -> None:
+    """Why `viz_fidelity[]` is the channel and `pbip_warnings[]` is not.
+
+    ⚠️ Round-1 review found the previous version of this test supplied no `pbip_warnings` at all, so
+    a mutation adding a flat-warning fallback SURVIVED - the test claiming to pin the routing did not
+    pin it. The warnings below are real, nameless ones the engine emits
+    (`_warn("dashboard", name, ...)` drops the name), and they must not account for anything.
+    """
+    build_unit(
+        bundle,
+        "WB",
+        worksheets=["A", "B"],
+        dashboards={"DashA": ["A"], "DashB": ["B"]},
+        page_ids=[crr.SourceObject(name="DashA", kind="dashboard").page_id],
+        pbip_warnings=[
+            "manual attention required: no supported visuals on this dashboard",
+            "manual attention required: unsupported visual type",
+        ],
+    )
+    rows = {page["source_object"]: page for page in crr.scan(bundle)["units"][0]["pages"]}
+    assert rows["DashB"]["page_status"] == "dropped_unexplained"
+    assert crr.main([str(bundle), "--quiet"]) == 1
+
+
+def test_an_unrelated_engine_warning_does_not_explain_a_drop(bundle: Path) -> None:
+    """Only the three deliberate-drop reasons account for a missing page."""
+    build_unit(
+        bundle,
+        "WB",
+        worksheets=["Kept", "Gone"],
+        page_ids=[crr.SourceObject(name="Kept", kind="worksheet").page_id],
+        viz_fidelity=[
+            {
+                "worksheet": "Gone",
+                "status": "warned",
+                "reason": "manual attention required: field 'Region' bound by caption fallback",
+            }
+        ],
+    )
+    rows = {page["source_object"]: page for page in crr.scan(bundle)["units"][0]["pages"]}
+    assert rows["Gone"]["page_status"] == "dropped_unexplained"
+
+
+# --------------------------------------------------------------------------------------------
+# Question 2: evidence must be USABLE and ATTRIBUTABLE (round-1 findings 3 and 4)
+# --------------------------------------------------------------------------------------------
+
+
+def test_a_zero_byte_render_is_rejected_not_promoted(bundle: Path) -> None:
+    """Round-1 finding 3a: validity was `Path.is_file()`, so an empty file reached READY."""
+    sha = build_unit(bundle, "WB", worksheets=["Solo"])
+    write_reference(bundle, [("Solo", "embedded_thumbnail", ["layout_grade"])], source_sha=sha, render_bytes=b"")
+
     report = crr.scan(bundle)
-    rows = {page["source_object"]: page for page in report["units"][0]["pages"]}
-    assert rows["Vanished"]["page_status"] == crr.PAGE_DROPPED_UNEXPLAINED
-    assert rows["Vanished"]["readiness"] == crr.BLIND
-    assert report["status"] == crr.STATUS_FINDINGS
-    assert crr.main([str(bundle), "--quiet"]) == crr.EXIT_FINDINGS
+    assert report["units"][0]["pages"][0]["readiness"] == "blind"
+    assert any("zero bytes" in item["reason"] for item in report["evidence_rejected"])
+    assert crr.main([str(bundle), "--quiet"]) == 1
+
+
+def test_a_truncated_render_is_rejected(bundle: Path) -> None:
+    """A PNG signature with no IHDR is exactly what the round-1 fixtures used as evidence."""
+    sha = build_unit(bundle, "WB", worksheets=["Solo"])
+    write_reference(
+        bundle, [("Solo", "embedded_thumbnail", ["layout_grade"])], source_sha=sha, render_bytes=b"\x89PNG\r\n\x1a\n"
+    )
+
+    report = crr.scan(bundle)
+    assert report["units"][0]["pages"][0]["readiness"] == "blind"
+    assert any("did not parse" in item["reason"] for item in report["evidence_rejected"])
+
+
+def test_an_illegibly_small_render_is_rejected(bundle: Path) -> None:
+    """A real PNG, but a 16x16 favicon is not a reference anyone can compare against."""
+    sha = build_unit(bundle, "WB", worksheets=["Solo"])
+    write_reference(bundle, [("Solo", "embedded_thumbnail", ["layout_grade"])], source_sha=sha, size=(16, 16))
+
+    report = crr.scan(bundle)
+    assert report["units"][0]["pages"][0]["readiness"] == "blind"
+    assert any("legibility floor" in item["reason"] for item in report["evidence_rejected"])
+
+
+def test_the_192px_embedded_thumbnail_route_still_counts(bundle: Path) -> None:
+    """Discriminating control for the legibility floor.
+
+    Tableau's embedded thumbnails are typically 192x192 (`extract_twb_thumbnails.py`), and they are a
+    genuine evidence route. A floor that rejected them would make the gate refuse real captures.
+    """
+    sha = build_unit(bundle, "WB", worksheets=["Solo"])
+    write_reference(bundle, [("Solo", "embedded_thumbnail", ["layout_grade"])], source_sha=sha, size=(192, 192))
+
+    assert crr.scan(bundle)["status"] == "READY"
+
+
+def test_empty_capabilities_are_rejected_not_graded_unknown(bundle: Path) -> None:
+    """Round-1 finding 3b: `capabilities: []` produced `ready [unknown]` and exit 0."""
+    sha = build_unit(bundle, "WB", worksheets=["Solo"])
+    write_reference(bundle, [("Solo", "embedded_thumbnail", [])], source_sha=sha)
+
+    assert crr.scan(bundle)["units"][0]["pages"][0]["readiness"] == "blind"
+    assert crr.main([str(bundle), "--quiet"]) == 1
+
+
+def test_an_unrecognised_capability_is_rejected(bundle: Path) -> None:
+    """A capability outside the allowlist means a manifest this gate does not understand."""
+    sha = build_unit(bundle, "WB", worksheets=["Solo"])
+    write_reference(bundle, [("Solo", "embedded_thumbnail", ["looks_fine_to_me"])], source_sha=sha)
+
+    assert crr.scan(bundle)["units"][0]["pages"][0]["readiness"] == "blind"
+
+
+def test_evidence_with_no_workbook_identity_is_rejected(bundle: Path) -> None:
+    """Round-1 finding 4a: a manifest with no `source_workbook_sha256` cannot be attributed."""
+    build_unit(bundle, "WB", worksheets=["Solo"])
+    write_reference(bundle, [("Solo", "embedded_thumbnail", ["layout_grade"])], source_sha=None)
+
+    report = crr.scan(bundle)
+    assert report["units"][0]["pages"][0]["readiness"] == "blind"
+    assert any("cannot be attributed" in item["reason"] for item in report["evidence_rejected"])
+
+
+def test_evidence_for_another_workbook_does_not_satisfy_this_one(bundle: Path) -> None:
+    """Round-1 finding 4b: one synthetic record made two different units report READY."""
+    build_unit(bundle, "WB", worksheets=["Solo"])
+    write_reference(bundle, [("Solo", "embedded_thumbnail", ["layout_grade"])], source_sha="deadbeef" * 8)
+
+    assert crr.scan(bundle)["units"][0]["pages"][0]["readiness"] == "blind"
+    assert crr.main([str(bundle), "--quiet"]) == 1
+
+
+def test_a_stale_capture_stops_counting_when_the_source_changes(bundle: Path) -> None:
+    """A stale picture is worse than a missing one, because it looks like evidence."""
+    sha = build_unit(bundle, "WB", worksheets=["Solo"])
+    write_reference(bundle, [("Solo", "embedded_thumbnail", ["layout_grade"])], source_sha=sha)
+    assert crr.scan(bundle)["status"] == "READY"
+
+    source = bundle.parent / "assets" / "WB.twb"
+    source.write_text(source.read_text(encoding="utf-8") + "<!-- edited -->", encoding="utf-8")
+
+    assert crr.scan(bundle)["units"][0]["pages"][0]["readiness"] == "blind"
+
+
+def test_oracle_evidence_is_scoped_by_workbook_name(bundle: Path) -> None:
+    """Oracle records carry `workbook_name`/`workbook_luid`; one for another workbook must not count."""
+    build_unit(bundle, "WB", worksheets=["Revenue Trend"])
+    write_oracle(bundle, [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_name": "Other Book"}])
+
+    assert crr.scan(bundle)["units"][0]["pages"][0]["readiness"] == "blind"
+
+
+def test_oracle_evidence_for_this_workbook_does_count(bundle: Path) -> None:
+    """Discriminating twin of the scoping test above."""
+    build_unit(bundle, "WB", worksheets=["Revenue Trend"])
+    write_oracle(bundle, [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_name": "WB"}])
+
+    page = crr.scan(bundle)["units"][0]["pages"][0]
+    assert page["readiness"] == "ready"
+    assert page["grade"] == "layout/text only (oracle capture, default view state)"
 
 
 # --------------------------------------------------------------------------------------------
-# Questions 2 and 3: evidence and grade, matched by IDENTITY not name
+# Scope: a worksheet render can never satisfy a dashboard page
 # --------------------------------------------------------------------------------------------
+
+
+def test_a_worksheet_scope_can_never_satisfy_a_dashboard_page() -> None:
+    """The scope join itself, isolated from any fixture."""
+    dashboard = crr.SourceObject(name="Ops", kind="dashboard")
+    worksheet_render = crr.Evidence(
+        name="Ops",
+        kind="worksheet",
+        grade="layout_grade",
+        origin="reference",
+        provider="embedded_thumbnail",
+        path="x.png",
+        width=320,
+        height=240,
+        workbook_key="abc",
+        workbook_kind="sha256",
+    )
+    match, name_only = crr.match_evidence(dashboard, [worksheet_render])
+    assert match is None
+    assert name_only == [worksheet_render]
 
 
 def test_a_worksheet_render_does_not_make_a_dashboard_page_ready(bundle: Path) -> None:
     """THE regression test (issue #421).
 
-    A Tableau `<thumbnail>` is a WORKSHEET render (`extract_twb_thumbnails.py`), yet
-    `capture_tableau_reference.py:199` files it under the manifest's `dashboards` key, where
-    `check_unit.py`'s `_slug` match then lets it satisfy a same-named DASHBOARD page. The dashboard
-    and its principal worksheet sharing a name is the normal case in Tableau, so this is not an edge
-    case - it is the default one.
+    A Tableau `<thumbnail>` is a WORKSHEET render, yet `capture_tableau_reference.py:199` files it
+    under the manifest's `dashboards` key, where `check_unit.py`'s `_slug` match then lets it satisfy
+    a same-named DASHBOARD page.
     """
-    build_unit(bundle, "WB", worksheets=["Regional Share"], dashboards={"Regional Share": ["Regional Share"]})
-    write_reference(bundle, [("Regional Share", "embedded_thumbnail", ["layout_grade"])])
+    sha = build_unit(bundle, "WB", worksheets=["Regional Share"], dashboards={"Regional Share": ["Regional Share"]})
+    write_reference(bundle, [("Regional Share", "embedded_thumbnail", ["layout_grade"])], source_sha=sha)
 
-    report = crr.scan(bundle)
-    page = report["units"][0]["pages"][0]
-
-    assert page["source_type"] == crr.KIND_DASHBOARD
-    assert page["readiness"] != crr.READY
-    assert page["readiness"] == crr.UNVERIFIABLE
-    assert page["evidence"] == "unverifiable"
+    page = crr.scan(bundle)["units"][0]["pages"][0]
+    assert page["source_type"] == "dashboard"
+    assert page["readiness"] == "unverifiable"
     assert "worksheet" in page["matched_by"]
-    assert report["status"] == crr.STATUS_FINDINGS
-    assert crr.main([str(bundle), "--quiet"]) == crr.EXIT_FINDINGS
+    assert crr.main([str(bundle), "--quiet"]) == 1
 
 
 def test_a_worksheet_render_does_satisfy_a_worksheet_page(bundle: Path) -> None:
-    """Discriminating twin of the test above.
+    """Discriminating twin: without it, the regression would also pass if nothing ever matched."""
+    sha = build_unit(bundle, "WB", worksheets=["Regional Share"])
+    write_reference(bundle, [("Regional Share", "embedded_thumbnail", ["layout_grade"])], source_sha=sha)
 
-    Without this, the regression test would also pass if the matcher simply never matched anything.
-    Same evidence, same provider, same name - only the page's source type differs.
-    """
-    build_unit(bundle, "WB", worksheets=["Regional Share"])
-    write_reference(bundle, [("Regional Share", "embedded_thumbnail", ["layout_grade"])])
-
-    report = crr.scan(bundle)
-    page = report["units"][0]["pages"][0]
-
-    assert page["source_type"] == crr.KIND_WORKSHEET
-    assert page["readiness"] == crr.READY
+    page = crr.scan(bundle)["units"][0]["pages"][0]
+    assert page["source_type"] == "worksheet"
+    assert page["readiness"] == "ready"
     assert page["grade"] == "layout_grade"
-    assert report["status"] == crr.STATUS_READY
-    assert crr.main([str(bundle), "--quiet"]) == crr.EXIT_OK
+    assert crr.main([str(bundle), "--quiet"]) == 0
 
 
 def test_an_oracle_record_with_no_view_type_cannot_satisfy_a_page(bundle: Path) -> None:
     """PR #422's field absent = cannot establish, never "it could be either"."""
     build_unit(bundle, "WB", worksheets=["Revenue Trend"])
-    write_oracle(bundle, [{"view_name": "Revenue Trend", "view_luid": "abc"}])
+    write_oracle(bundle, [{"view_name": "Revenue Trend", "workbook_name": "WB"}])
 
     page = crr.scan(bundle)["units"][0]["pages"][0]
-    assert page["readiness"] == crr.UNVERIFIABLE
+    assert page["readiness"] == "unverifiable"
     assert "unknown" in page["matched_by"]
 
 
 def test_an_oracle_record_typed_unknown_cannot_satisfy_a_page(bundle: Path) -> None:
     """PR #422 fails closed to `unknown` when the Metadata API is disabled; so must this."""
     build_unit(bundle, "WB", worksheets=["Revenue Trend"])
-    write_oracle(bundle, [{"view_name": "Revenue Trend", "view_type": "unknown"}])
+    write_oracle(bundle, [{"view_name": "Revenue Trend", "view_type": "unknown", "workbook_name": "WB"}])
 
-    assert crr.scan(bundle)["units"][0]["pages"][0]["readiness"] == crr.UNVERIFIABLE
-
-
-def test_an_oracle_record_typed_worksheet_satisfies_a_worksheet_page(bundle: Path) -> None:
-    """The discriminating control for the two tests above."""
-    build_unit(bundle, "WB", worksheets=["Revenue Trend"])
-    write_oracle(bundle, [{"view_name": "Revenue Trend", "view_type": "worksheet"}])
-
-    page = crr.scan(bundle)["units"][0]["pages"][0]
-    assert page["readiness"] == crr.READY
-    assert page["grade"] == crr.GRADE_ORACLE
+    assert crr.scan(bundle)["units"][0]["pages"][0]["readiness"] == "unverifiable"
 
 
 def test_an_oracle_record_typed_worksheet_still_cannot_satisfy_a_dashboard_page(bundle: Path) -> None:
     """The scope join applies to the oracle route too, not only to `reference/`."""
     build_unit(bundle, "WB", worksheets=["Ops"], dashboards={"Ops": ["Ops"]})
-    write_oracle(bundle, [{"view_name": "Ops", "view_type": "worksheet"}])
+    write_oracle(bundle, [{"view_name": "Ops", "view_type": "worksheet", "workbook_name": "WB"}])
 
-    assert crr.scan(bundle)["units"][0]["pages"][0]["readiness"] == crr.UNVERIFIABLE
+    assert crr.scan(bundle)["units"][0]["pages"][0]["readiness"] == "unverifiable"
 
 
 def test_a_page_with_no_evidence_at_all_is_blind_not_unverifiable(bundle: Path) -> None:
     """`blind` and `unverifiable` are different operator actions: capture one, or identify one."""
     build_unit(bundle, "WB", worksheets=["Revenue Trend"])
     page = crr.scan(bundle)["units"][0]["pages"][0]
-    assert page["readiness"] == crr.BLIND
+    assert page["readiness"] == "blind"
     assert page["evidence"] == "absent"
+
+
+# --------------------------------------------------------------------------------------------
+# Question 3: grade (round-1 finding 7)
+# --------------------------------------------------------------------------------------------
 
 
 def test_validation_grade_is_reported_when_present(bundle: Path) -> None:
     """The one route to `validation_grade` today: an operator-asserted manual capture."""
-    build_unit(bundle, "WB", worksheets=["Revenue Trend"])
-    write_reference(bundle, [("Revenue Trend", "embedded_thumbnail", ["layout_grade", "validation_grade"])])
+    sha = build_unit(bundle, "WB", worksheets=["Revenue Trend"])
+    write_reference(
+        bundle, [("Revenue Trend", "embedded_thumbnail", ["layout_grade", "validation_grade"])], source_sha=sha
+    )
 
     report = crr.scan(bundle)
-    assert report["units"][0]["pages"][0]["grade"] == crr.GRADE_VALIDATION
-    assert report["validation_grade_present"] is True
+    assert report["units"][0]["pages"][0]["grade"] == "validation-grade"
+    assert report["all_evidence_validation_grade"] is True
     assert crr.GRADE_CEILING_NOTE not in crr.render(report)
 
 
-def test_the_grade_ceiling_is_stated_when_nothing_is_validation_grade(bundle: Path) -> None:
-    """A READY verdict must not imply more evidence than exists."""
-    build_unit(bundle, "WB", worksheets=["Revenue Trend"])
-    write_reference(bundle, [("Revenue Trend", "embedded_thumbnail", ["layout_grade"])])
+def test_one_validation_grade_page_does_not_silence_the_ceiling_for_the_rest(bundle: Path) -> None:
+    """Round-1 finding 7b: the warning keyed on `any`, so one good capture hid every other page."""
+    sha = build_unit(bundle, "WB", worksheets=["Good", "Weak"])
+    write_reference(
+        bundle,
+        [
+            ("Good", "embedded_thumbnail", ["layout_grade", "validation_grade"]),
+            ("Weak", "embedded_thumbnail", ["layout_grade"]),
+        ],
+        source_sha=sha,
+    )
 
     report = crr.scan(bundle)
-    assert report["validation_grade_present"] is False
+    assert report["all_evidence_validation_grade"] is False
     assert crr.GRADE_CEILING_NOTE in crr.render(report)
 
 
-def test_require_validation_grade_turns_layout_only_into_a_finding(bundle: Path) -> None:
-    """The opt-in strict bar: layout/text evidence is enough to START, not to sign off."""
-    build_unit(bundle, "WB", worksheets=["Revenue Trend"])
-    write_reference(bundle, [("Revenue Trend", "embedded_thumbnail", ["layout_grade"])])
+def test_require_validation_grade_changes_page_readiness_not_just_the_unit(bundle: Path) -> None:
+    """Round-1 finding 7a: the unit said 1/2 while the top level said 2/2 ready.
 
-    assert crr.scan(bundle)["status"] == crr.STATUS_READY
-    assert crr.scan(bundle, require_validation_grade=True)["status"] == crr.STATUS_FINDINGS
-    assert crr.main([str(bundle), "--quiet", "--require-validation-grade"]) == crr.EXIT_FINDINGS
+    The bar now lands on the PAGE, so every count agrees.
+    """
+    sha = build_unit(bundle, "WB", worksheets=["Revenue Trend"])
+    write_reference(bundle, [("Revenue Trend", "embedded_thumbnail", ["layout_grade"])], source_sha=sha)
+
+    assert crr.scan(bundle)["status"] == "READY"
+    strict = crr.scan(bundle, require_validation_grade=True)
+    assert strict["status"] == "FINDINGS"
+    assert strict["pages_ready"] == 0
+    assert strict["pages_insufficient_grade"] == 1
+    assert strict["units"][0]["detail"].startswith("0/1")
+    assert crr.main([str(bundle), "--quiet", "--require-validation-grade"]) == 1
+
+
+def test_oracle_grade_is_below_the_validation_bar(bundle: Path) -> None:
+    """Round-1 finding 8a: `GRADE_ORACLE = GRADE_VALIDATION` survived the entire suite.
+
+    Nothing exercised the oracle grade against the bar, and the only oracle assertion compared it to
+    that same mutable constant.
+    """
+    build_unit(bundle, "WB", worksheets=["Revenue Trend"])
+    write_oracle(bundle, [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_name": "WB"}])
+
+    strict = crr.scan(bundle, require_validation_grade=True)
+    assert strict["pages_insufficient_grade"] == 1
+    assert strict["status"] == "FINDINGS"
 
 
 # --------------------------------------------------------------------------------------------
@@ -426,27 +776,21 @@ def test_an_unresolvable_source_cannot_establish_and_does_not_exit_zero(bundle: 
     write_engine_report(bundle, workbooks=["WB"])
     write_report(bundle, "WB", ["page-ws-anything"])
 
-    report = crr.scan(bundle)
-    assert report["status"] == crr.STATUS_CANNOT_ESTABLISH
-    assert crr.main([str(bundle), "--quiet"]) == crr.EXIT_CANNOT_ESTABLISH
+    assert crr.scan(bundle)["status"] == "CANNOT_ESTABLISH"
+    assert crr.main([str(bundle), "--quiet"]) == 3
 
 
 def test_the_expectation_never_falls_back_to_the_pages_that_were_built(bundle: Path) -> None:
-    """The circularity in `check_oracle_coverage:925`, refused.
-
-    A workbook declaring no dashboards and no worksheets, beside a report that ships three pages,
-    must NOT grade the artifact against itself and report three ready pages.
-    """
+    """The circularity in `check_oracle_coverage:925`, refused."""
     source = write_workbook(bundle.parent / "assets" / "WB.twb", worksheets=[])
     write_engine_report(bundle, workbooks=["WB"])
     write_handover(bundle, "WB", source_id=str(source))
     write_report(bundle, "WB", ["page1", "page2", "page3"])
 
     report = crr.scan(bundle)
-    assert report["status"] == crr.STATUS_CANNOT_ESTABLISH
+    assert report["status"] == "CANNOT_ESTABLISH"
     assert report["pages_expected"] == 0
-    assert report["pages_ready"] == 0
-    assert crr.main([str(bundle), "--quiet"]) == crr.EXIT_CANNOT_ESTABLISH
+    assert crr.main([str(bundle), "--quiet"]) == 3
 
 
 def test_a_datasource_only_unit_is_not_applicable(bundle: Path) -> None:
@@ -454,21 +798,33 @@ def test_a_datasource_only_unit_is_not_applicable(bundle: Path) -> None:
     write_engine_report(bundle, workbooks=[], datasources=["Shared DS"])
     write_report(bundle, "Shared DS", ["page1"])
 
+    assert crr.scan(bundle)["status"] == "NOT_APPLICABLE"
+    assert crr.main([str(bundle), "--quiet"]) == 0
+
+
+def test_a_workbook_whose_report_never_shipped_is_a_finding(bundle: Path) -> None:
+    """Round-1 finding 2: any semantic model anywhere granted NOT_APPLICABLE and exit 0.
+
+    A workbook whose report generation FAILED is the loudest possible signal that work cannot start,
+    and it read as legitimately reference-free.
+    """
+    write_engine_report(bundle, workbooks=["WB"], datasources=["Shared DS"])
+    (bundle / "pbip" / "WB" / "Model.SemanticModel" / "definition").mkdir(parents=True)
+
     report = crr.scan(bundle)
-    assert report["status"] == crr.STATUS_NOT_APPLICABLE
-    assert crr.main([str(bundle), "--quiet"]) == crr.EXIT_OK
+    assert report["status"] == "FINDINGS"
+    assert report["units_not_applicable"] == 0
+    assert "no report ships for it" in report["units"][0]["detail"]
+    assert crr.main([str(bundle), "--quiet"]) == 1
 
 
 def test_not_applicable_is_earned_from_the_engine_report_not_from_an_empty_page_list(bundle: Path) -> None:
-    """A workbook unit that emitted nothing is NOT `NOT_APPLICABLE` - it is unassessable.
-
-    This is the fail-open shape the gate refuses: 'I found no pages, so nothing applies'.
-    """
+    """A workbook unit that emitted no pages is unassessable, not `NOT_APPLICABLE`."""
     write_engine_report(bundle, workbooks=["WB"], datasources=["Shared DS"])
     write_report(bundle, "WB", [])
 
     report = crr.scan(bundle)
-    assert report["status"] == crr.STATUS_CANNOT_ESTABLISH
+    assert report["status"] == "CANNOT_ESTABLISH"
     assert report["units_not_applicable"] == 0
 
 
@@ -476,8 +832,8 @@ def test_an_empty_target_is_cannot_establish(tmp_path: Path) -> None:
     """An empty directory has nothing to measure, and that must never read as a pass."""
     empty = tmp_path / "nothing"
     empty.mkdir()
-    assert crr.scan(empty)["status"] == crr.STATUS_CANNOT_ESTABLISH
-    assert crr.main([str(empty), "--quiet"]) == crr.EXIT_CANNOT_ESTABLISH
+    assert crr.scan(empty)["status"] == "CANNOT_ESTABLISH"
+    assert crr.main([str(empty), "--quiet"]) == 3
 
 
 def test_findings_outrank_cannot_establish_but_both_stay_visible(bundle: Path) -> None:
@@ -487,75 +843,22 @@ def test_findings_outrank_cannot_establish_but_both_stay_visible(bundle: Path) -
     write_report(bundle, "Orphaned", ["page1"])
 
     report = crr.scan(bundle)
-    assert report["status"] == crr.STATUS_FINDINGS
+    assert report["status"] == "FINDINGS"
     assert report["units_cannot_establish"] == 1
-    rendered = crr.render(report)
-    assert crr.STATUS_CANNOT_ESTABLISH in rendered
+    assert "CANNOT_ESTABLISH" in crr.render(report)
 
 
 def test_a_missing_path_is_a_usage_error_not_a_verdict(tmp_path: Path) -> None:
     """A bad path must exit 2, never produce a readiness opinion about nothing."""
     with pytest.raises(SystemExit) as excinfo:
         crr.main([str(tmp_path / "does-not-exist"), "--quiet"])
-    assert excinfo.value.code == crr.EXIT_USAGE
+    assert excinfo.value.code == 2
 
 
-def test_warn_only_never_hides_the_verdict_in_the_json(bundle: Path, tmp_path: Path) -> None:
-    """`--warn-only` may soften the exit code; it must not soften the recorded status."""
+def test_the_json_verdict_always_carries_the_true_status(bundle: Path, tmp_path: Path) -> None:
+    """`--json` is the advisory route now that `--warn-only` is gone; it must never soften."""
     build_unit(bundle, "WB", worksheets=["Revenue Trend"])
     out = tmp_path / "verdict.json"
 
-    assert crr.main([str(bundle), "--quiet", "--warn-only", "--json", str(out)]) == crr.EXIT_OK
-    assert json.loads(out.read_text(encoding="utf-8"))["status"] == crr.STATUS_FINDINGS
-
-
-# --------------------------------------------------------------------------------------------
-# Drop-explanation channel
-# --------------------------------------------------------------------------------------------
-
-
-def test_a_nameless_dashboard_warning_does_not_explain_every_dropped_dashboard(bundle: Path) -> None:
-    """Why `pbip_warnings[]` is not the explanation channel.
-
-    `_warn("dashboard", name, "no supported visuals on this dashboard")` produces a reason string
-    that does not contain the dashboard's name (`twb_to_pbir.py:6428-6430`), so matching on the flat
-    warning list would attribute one dashboard's explanation to every dropped dashboard. The
-    structured `viz_fidelity[]` row carries the name; a row for a DIFFERENT object must not excuse
-    this one.
-    """
-    build_unit(
-        bundle,
-        "WB",
-        worksheets=["A", "B"],
-        dashboards={"DashA": ["A"], "DashB": ["B"]},
-        page_ids=[crr.SourceObject(name="DashA", kind=crr.KIND_DASHBOARD).page_id],
-        viz_fidelity=[
-            {
-                "worksheet": "DashA",
-                "visual_type": "dashboard",
-                "status": "warned",
-                "reason": "manual attention required: no supported visuals on this dashboard",
-            }
-        ],
-    )
-    rows = {page["source_object"]: page for page in crr.scan(bundle)["units"][0]["pages"]}
-    assert rows["DashB"]["page_status"] == crr.PAGE_DROPPED_UNEXPLAINED
-
-
-def test_an_unrelated_engine_warning_does_not_explain_a_drop(bundle: Path) -> None:
-    """Only the three deliberate-drop reasons account for a missing page."""
-    build_unit(
-        bundle,
-        "WB",
-        worksheets=["Kept", "Gone"],
-        page_ids=[crr.SourceObject(name="Kept", kind=crr.KIND_WORKSHEET).page_id],
-        viz_fidelity=[
-            {
-                "worksheet": "Gone",
-                "status": "warned",
-                "reason": "manual attention required: field 'Region' bound by caption fallback",
-            }
-        ],
-    )
-    rows = {page["source_object"]: page for page in crr.scan(bundle)["units"][0]["pages"]}
-    assert rows["Gone"]["page_status"] == crr.PAGE_DROPPED_UNEXPLAINED
+    assert crr.main([str(bundle), "--quiet", "--json", str(out)]) == 1
+    assert json.loads(out.read_text(encoding="utf-8"))["status"] == "FINDINGS"
