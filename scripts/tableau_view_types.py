@@ -115,21 +115,31 @@ def view_types(session: Any) -> tuple[dict[str, str], str | None]:
     return parse_payload(payload)
 
 
-def parse_payload(payload: dict[str, Any]) -> tuple[dict[str, str], str | None]:
+def parse_payload(payload: Any) -> tuple[dict[str, str], str | None]:
     """Everything :func:`view_types` does EXCEPT the request. Returns ``(mapping, reason)``.
 
     Public so a caller that already holds a response -- ``tableau_luid_census`` measuring a real
     site, a replayed capture, a fixture -- applies the same protocol and mapping rules without
     spending a second GraphQL round trip, and without reaching into a private. Sharing the seam is
     the point: a second implementation of "what does this response mean" is how the two would drift.
+
+    ⚠️ **It accepts ARBITRARY decoded JSON, and that is a correctness requirement rather than
+    politeness.** It used to be typed and written for a ``dict``, which was true only because its one
+    caller pre-validated in ``_fetch_payload``. The moment a second caller appeared -- the census,
+    holding a body it had decoded itself -- a top-level ``null`` escaped as ``TypeError`` and a
+    top-level list or string as ``AttributeError``, *before* any verdict, exit code or assessability
+    flag was produced. A precondition that lives in one caller's path is not a precondition; the
+    check now lives here, once, where every caller must pass through it.
     """
+    if not isinstance(payload, dict):
+        return {}, f"metadata api response was {type(payload).__name__}, not an object"
     refused = _errors_refusal(payload)
     if refused:
         return {}, refused
     return _mapping_from(payload)
 
 
-def _fetch_payload(session: Any) -> tuple[dict[str, Any], str | None]:
+def _fetch_payload(session: Any) -> tuple[Any, str | None]:
     """One round trip, decoded and shape-checked. Returns ``(payload, refusal_reason)``.
 
     ⚠️ **The parse catch is deliberately broad, and that is the safer choice here.** An enumerated
@@ -170,8 +180,9 @@ def _fetch_payload(session: Any) -> tuple[dict[str, Any], str | None]:
         payload = json.loads(body.decode("utf-8"))
     except Exception as exc:  # pylint: disable=broad-exception-caught
         return {}, f"metadata api response was not usable JSON: {type(exc).__name__}"
-    if not isinstance(payload, dict):
-        return {}, f"metadata api response was {type(payload).__name__}, not an object"
+    # ⚠️ The top-level SHAPE check deliberately is NOT here. It belongs to `parse_payload`, which is
+    # the shared seam every caller goes through -- keeping a copy here as well would be a guard no
+    # mutation could kill, because removing it changes nothing.
     return payload, None
 
 

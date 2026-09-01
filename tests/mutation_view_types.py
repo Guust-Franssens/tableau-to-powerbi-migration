@@ -69,6 +69,15 @@ CENSUS_TARGET = "tests/test_tableau_luid_census.py"
 #: clean verdict would retire the very finding this campaign exists to defend.
 CENSUS_MUTATIONS: set[str] = set()
 
+#: ⚠️ mutation -> the single test node it must be caught by.
+#:
+#: `mutation_harness.run` passes `-x`, so a CAUGHT verdict names whichever test failed FIRST -- not
+#: necessarily the one the mutation was written for. That is not pedantry: crediting the wrong test
+#: inverted three verdicts on a sibling PR the same day. Where a mutation declares an anchor here it
+#: is run against THAT NODE ALONE, which is strictly stronger evidence -- the named test is then the
+#: sole reason to refuse, and a mutation that survives it cannot be rescued by a bystander.
+INTENDED: dict[str, str] = {}
+
 
 def _source_mutation(old: str, new: str) -> str:
     """A plugin snippet that replaces real source text and re-execs the module IN PLACE.
@@ -250,7 +259,11 @@ vt.this_symbol_does_not_exist.attribute = 1
 MUTATIONS.update(
     {
         "census-verdict-ignores-the-parser-refusal": '\nimport tableau_luid_census as census\n_src = open(census.__file__, encoding="utf-8").read()\n_old = \'    if not assessable(totals, refused):\\n        return "CANNOT-TELL"\'\n_new = \'    if False:\\n        return "CANNOT-TELL"\'\nassert _old in _src, "mutation anchor not found - the snippet is stale, not the code"\nexec(compile(_src.replace(_old, _new, 1), census.__file__, "exec"), census.__dict__)\n',
-        "census-ignores-an-unreadable-workbook": '\nimport tableau_luid_census as census\n_src = open(census.__file__, encoding="utf-8").read()\n_old = \'    return not refused and totals["workbooks_with_an_unusable_collection"] == 0\'\n_new = \'    return not refused\'\nassert _old in _src, "mutation anchor not found - the snippet is stale, not the code"\nexec(compile(_src.replace(_old, _new, 1), census.__file__, "exec"), census.__dict__)\n',
+        # ⚠️ `census-ignores-an-unreadable-workbook` lived here until round 4 replaced the single
+        # -clause `assessable` return with three clauses. Its anchor went stale and it scored
+        # INVALID -- the mechanism working. Not re-anchored: `census-assessable-drops-the-collection
+        # -clause` is the same mutation with a valid anchor and an intended node, and a redundant
+        # duplicate would produce a CAUGHT verdict that proves nothing the other does not.
         "census-exit-code-always-ok": '\nimport tableau_luid_census as census\n_src = open(census.__file__, encoding="utf-8").read()\n_old = \'    return EXIT_OK if answer != "CANNOT-TELL" else EXIT_CANNOT_TELL\'\n_new = \'    return EXIT_OK\'\nassert _old in _src, "mutation anchor not found - the snippet is stale, not the code"\nexec(compile(_src.replace(_old, _new, 1), census.__file__, "exec"), census.__dict__)\n',
         "census-json-drops-the-assessable-flag": '\nimport tableau_luid_census as census\n_src = open(census.__file__, encoding="utf-8").read()\n_old = \'    totals["assessable"] = int(assessable(totals, bool(unavailable)))\'\n_new = \'    totals["assessable"] = 1\'\nassert _old in _src, "mutation anchor not found - the snippet is stale, not the code"\nexec(compile(_src.replace(_old, _new, 1), census.__file__, "exec"), census.__dict__)\n',
         "census-unreadable-collection-crashes-again": '\nimport tableau_luid_census as census\n_src = open(census.__file__, encoding="utf-8").read()\n_old = \'    return all(isinstance(workbook.get(key), list) for key in ("dashboards", "sheets"))\'\n_new = \'    return all(key in workbook for key in ("dashboards", "sheets"))\'\nassert _old in _src, "mutation anchor not found - the snippet is stale, not the code"\nexec(compile(_src.replace(_old, _new, 1), census.__file__, "exec"), census.__dict__)\n',
@@ -261,6 +274,39 @@ MUTATIONS.update(
         "absent-anchor-stale-census-text": '\nimport tableau_luid_census as census\n_src = open(census.__file__, encoding="utf-8").read()\n_old = \'this exact text is not in the census\'\n_new = \'irrelevant\'\nassert _old in _src, "mutation anchor not found - the snippet is stale, not the code"\nexec(compile(_src.replace(_old, _new, 1), census.__file__, "exec"), census.__dict__)\n',
     }
 )
+MUTATIONS.update(
+    {
+        "seam-requires-a-dict-envelope-again": '\nimport tableau_view_types as vt\n_src = open(vt.__file__, encoding="utf-8").read()\n_old = \'    if not isinstance(payload, dict):\\n        return {}, f"metadata api response was {type(payload).__name__}, not an object"\\n    refused = _errors_refusal(payload)\'\n_new = \'    refused = _errors_refusal(payload)\'\nassert _old in _src, "mutation anchor not found - the snippet is stale, not the code"\nexec(compile(_src.replace(_old, _new, 1), vt.__file__, "exec"), vt.__dict__)\n',
+        "census-envelope-assumed-to-be-a-dict-again": '\nimport tableau_luid_census as census\n_src = open(census.__file__, encoding="utf-8").read()\n_old = \'    data = payload.get("data") if isinstance(payload, dict) else None\\n    workbooks = data.get("workbooks") if isinstance(data, dict) else None\'\n_new = \'    data = payload.get("data", {})\\n    workbooks = data.get("workbooks", [])\'\nassert _old in _src, "mutation anchor not found - the snippet is stale, not the code"\nexec(compile(_src.replace(_old, _new, 1), census.__file__, "exec"), census.__dict__)\n',
+        "census-envelope-flag-always-readable": '\nimport tableau_luid_census as census\n_src = open(census.__file__, encoding="utf-8").read()\n_old = \'    totals["envelope_readable"] = int(isinstance(workbooks, list))\'\n_new = \'    totals["envelope_readable"] = 1\'\nassert _old in _src, "mutation anchor not found - the snippet is stale, not the code"\nexec(compile(_src.replace(_old, _new, 1), census.__file__, "exec"), census.__dict__)\n',
+        "census-envelope-flag-always-unreadable": '\nimport tableau_luid_census as census\n_src = open(census.__file__, encoding="utf-8").read()\n_old = \'    totals["envelope_readable"] = int(isinstance(workbooks, list))\'\n_new = \'    totals["envelope_readable"] = 0\'\nassert _old in _src, "mutation anchor not found - the snippet is stale, not the code"\nexec(compile(_src.replace(_old, _new, 1), census.__file__, "exec"), census.__dict__)\n',
+        "census-assessable-drops-the-envelope-clause": '\nimport tableau_luid_census as census\n_src = open(census.__file__, encoding="utf-8").read()\n_old = \'        not refused and totals.get("envelope_readable", 1) == 1 and totals["workbooks_with_an_unusable_collection"] == 0\'\n_new = \'        not refused and totals["workbooks_with_an_unusable_collection"] == 0\'\nassert _old in _src, "mutation anchor not found - the snippet is stale, not the code"\nexec(compile(_src.replace(_old, _new, 1), census.__file__, "exec"), census.__dict__)\n',
+        "census-assessable-drops-the-collection-clause": '\nimport tableau_luid_census as census\n_src = open(census.__file__, encoding="utf-8").read()\n_old = \'        not refused and totals.get("envelope_readable", 1) == 1 and totals["workbooks_with_an_unusable_collection"] == 0\'\n_new = \'        not refused and totals.get("envelope_readable", 1) == 1\'\nassert _old in _src, "mutation anchor not found - the snippet is stale, not the code"\nexec(compile(_src.replace(_old, _new, 1), census.__file__, "exec"), census.__dict__)\n',
+        "census-assessable-drops-the-refusal-clause": '\nimport tableau_luid_census as census\n_src = open(census.__file__, encoding="utf-8").read()\n_old = \'        not refused and totals.get("envelope_readable", 1) == 1 and totals["workbooks_with_an_unusable_collection"] == 0\'\n_new = \'        totals.get("envelope_readable", 1) == 1 and totals["workbooks_with_an_unusable_collection"] == 0\'\nassert _old in _src, "mutation anchor not found - the snippet is stale, not the code"\nexec(compile(_src.replace(_old, _new, 1), census.__file__, "exec"), census.__dict__)\n',
+    }
+)
+CENSUS_MUTATIONS.update(
+    {
+        "census-assessable-drops-the-collection-clause",
+        "census-envelope-flag-always-unreadable",
+        "census-assessable-drops-the-envelope-clause",
+        "census-assessable-drops-the-refusal-clause",
+        "census-envelope-flag-always-readable",
+        "census-envelope-assumed-to-be-a-dict-again",
+    }
+)
+INTENDED.update(
+    {
+        "seam-requires-a-dict-envelope-again": "tests/test_capture_tableau_oracle.py::test_parse_payload_accepts_arbitrary_decoded_json",
+        "census-envelope-assumed-to-be-a-dict-again": "tests/test_tableau_luid_census.py::test_census_is_total_over_arbitrary_decoded_json",
+        "census-envelope-flag-always-readable": "tests/test_tableau_luid_census.py::test_census_is_total_over_arbitrary_decoded_json",
+        "census-envelope-flag-always-unreadable": "tests/test_tableau_luid_census.py::test_a_readable_envelope_says_so",
+        "census-assessable-drops-the-envelope-clause": "tests/test_tableau_luid_census.py::test_each_unassessable_route_is_pinned_independently",
+        "census-assessable-drops-the-collection-clause": "tests/test_tableau_luid_census.py::test_each_unassessable_route_is_pinned_independently",
+        "census-assessable-drops-the-refusal-clause": "tests/test_tableau_luid_census.py::test_each_unassessable_route_is_pinned_independently",
+    }
+)
+
 CENSUS_MUTATIONS.update(
     {
         "census-label-allowlist-removed",
@@ -299,7 +345,8 @@ def main(argv: list[str]) -> int:
     bad: list[str] = []
     count = 0
     for name in wanted:
-        suite = CENSUS_TARGET if name in CENSUS_MUTATIONS else TARGET
+        # An intended anchor wins: the named test alone is then the sole reason to refuse.
+        suite = INTENDED.get(name) or (CENSUS_TARGET if name in CENSUS_MUTATIONS else TARGET)
         try:
             label, _rc, detail, outcomes = mh.run(name, MUTATIONS[name], suite)
         except SystemExit as exc:

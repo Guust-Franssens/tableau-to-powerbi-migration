@@ -1042,6 +1042,24 @@ def test_no_branch_quotes_the_server_back_into_its_reason(responses):
     assert TAINT not in unavailable
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [None, [], "nope", 7, 3.5, True, {"data": None}, {"data": []}, {"data": "x"}, {"data": {"workbooks": 1}}],
+)
+def test_parse_payload_accepts_arbitrary_decoded_json(payload):
+    """⚠️ The shared seam is TOTAL, and that is a correctness requirement rather than politeness.
+
+    It was written for a `dict`, which was true only because its one caller pre-validated in
+    `_fetch_payload`. The moment a second caller appeared - `tableau_luid_census`, holding a body it
+    had decoded itself - a top-level `null` escaped as `TypeError` and a list or string as
+    `AttributeError`. A precondition living in one caller's path is not a precondition.
+    """
+    mapping, unavailable = view_types_mod.parse_payload(payload)
+    assert mapping == {}
+    assert unavailable
+    assert TAINT not in unavailable
+
+
 def test_a_transport_exception_is_reported_by_TYPE_not_by_message():
     """`str(exc)` on a transport error can carry a reflected URL, and so a reflected credential."""
 

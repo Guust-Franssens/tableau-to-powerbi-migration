@@ -54,6 +54,7 @@ BUCKETS = ("total", "missing_key", "non_string", "blank", "uuid", "non_uuid_non_
 #: Site-level tallies, and the assessability flag that travels with them.
 SITE_BUCKETS = (
     "workbooks",
+    "envelope_readable",
     "workbooks_with_an_unusable_collection",
     "workbooks_with_a_blank_luid",
     "blank_luids",
@@ -123,11 +124,20 @@ def _readable(workbook: dict) -> bool:
     return all(isinstance(workbook.get(key), list) for key in ("dashboards", "sheets"))
 
 
-def census(payload: dict) -> dict[str, int]:
-    """Whole-site census. Returns counts only -- it is what gets printed and optionally serialised."""
-    workbooks = payload.get("data", {}).get("workbooks", [])
+def census(payload: object) -> dict[str, int]:
+    """Whole-site census over ARBITRARY decoded JSON. Returns counts only.
+
+    ⚠️ Total by construction. It used to assume a dict-shaped envelope, so a top-level ``null``,
+    list or string -- or ``"data": null`` -- raised before a single count existed. Every level is now
+    read defensively and reported: an unreadable envelope yields all-zero counts WITH
+    ``envelope_readable = 0``, because a zero that means "we could not look" must never be
+    indistinguishable from a zero that means "we looked and found none".
+    """
+    data = payload.get("data") if isinstance(payload, dict) else None
+    workbooks = data.get("workbooks") if isinstance(data, dict) else None
     totals = {f"dashboards_{k}": 0 for k in BUCKETS} | {f"sheets_{k}": 0 for k in BUCKETS}
     totals["workbooks"] = len(workbooks) if isinstance(workbooks, list) else 0
+    totals["envelope_readable"] = int(isinstance(workbooks, list))
     totals["workbooks_with_an_unusable_collection"] = 0
     totals["workbooks_with_a_blank_luid"] = 0
     for workbook in workbooks if isinstance(workbooks, list) else []:
@@ -151,13 +161,22 @@ def census(payload: dict) -> dict[str, int]:
 def assessable(totals: dict[str, int], refused: bool) -> bool:
     """Whether the counts describe THE SITE, rather than the part of it we managed to read.
 
-    ⚠️ Two independent ways to be unassessable, and they are OR-ed rather than assumed equivalent:
-    the shared parser refused the response outright, or the census found a workbook whose
-    collections it could not read. The parser refuses on the FIRST problem, so today the second
-    implies the first -- but they are computed separately, and if they ever disagree the safe answer
-    is "we did not assess this".
+    ⚠️ THREE independent ways to be unassessable, OR-ed rather than assumed equivalent: the shared
+    parser refused the response outright, the census could not read the envelope at all, or it found
+    a workbook whose collections it could not read. The parser refuses on the FIRST problem, so today
+    each of the last two implies the first -- they are computed from different data, and if they ever
+    disagree the safe answer is "we did not assess this".
+
+    ⚠️ Because they are implied, neither of the last two clauses can be killed by a mutation driven
+    through `main()`; a clause no test can fail is worse than no clause, so both are pinned directly
+    against this function with a `totals` a loader would not produce today
+    (`test_each_unassessable_route_is_pinned_independently`), and the implication itself is asserted
+    rather than assumed (`test_an_unreadable_envelope_always_makes_the_parser_refuse`). That is the
+    same treatment an arithmetically-implied clause got in the #384 campaign.
     """
-    return not refused and totals["workbooks_with_an_unusable_collection"] == 0
+    return (
+        not refused and totals.get("envelope_readable", 1) == 1 and totals["workbooks_with_an_unusable_collection"] == 0
+    )
 
 
 def verdict(totals: dict[str, int], refused: bool) -> str:
@@ -272,8 +291,8 @@ def main(argv: list[str] | None = None) -> int:
         print("No blank luids today. The handling is still correct and documented, but this site")
         print("would not have exercised it -- do not cite this run as evidence that it cannot occur.")
     elif not totals["assessable"]:
-        print("The response was refused or only partly readable, so these counts describe what we")
-        print("could read, NOT the site. ⚠️ Do not record this as evidence either way.")
+        print("The response was refused, unreadable, or only partly readable, so these counts")
+        print("describe what we could read, NOT the site. ⚠️ Do not record this as evidence.")
     else:
         print("No sheet or dashboard nodes came back, so nothing here exercises the case either way.")
     # ⚠️ The exit code FOLLOWS the verdict. It did not: a run that printed CANNOT-TELL still exited

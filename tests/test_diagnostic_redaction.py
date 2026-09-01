@@ -676,8 +676,15 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
     #
     # The transport hop. `body` and `status` arrive from `_request`, the analyser's taint origin.
     ("scripts/tableau_view_types.py", "_fetch_payload"): {
-        "type(payload).__name__": _PY_TYPE_NAME,
+        # ⚠️ `type(payload).__name__` is no longer certified HERE, and its absence is the round-4
+        # fix rather than an omission: the top-level shape check MOVED into `parse_payload`, the
+        # shared seam every caller passes through. Keeping a copy here as well would have been a
+        # guard no mutation could kill - remove it and the seam still refuses - so it would have
+        # shipped as coverage that cannot fail.
         "status": "NOT-A-STRING: an HTTP status integer from the hardened transport",
+    },
+    ("scripts/tableau_view_types.py", "parse_payload"): {
+        "type(payload).__name__": _PY_TYPE_NAME,
     },
     # The GraphQL protocol hop.
     ("scripts/tableau_view_types.py", "_errors_refusal"): {
@@ -759,6 +766,11 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "totals['dashboards_blank'] + totals['sheets_blank']": _CENSUS_COUNT,
         "totals['dashboards_total'] + totals['sheets_total']": _CENSUS_COUNT,
         "len(workbooks) if isinstance(workbooks, list) else 0": _CENSUS_COUNT,
+        "int(isinstance(workbooks, list))": (
+            "NOT-A-STRING: 0 or 1, read from the TYPE of the decoded `workbooks` value and never "
+            "from its content. It exists so an all-zero census that means 'we could not read the "
+            "envelope' is distinguishable from one that means 'we read it and found nothing'."
+        ),
         "bucket": _CENSUS_LABEL,
         "kind": _CENSUS_LABEL,
     },

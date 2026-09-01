@@ -397,3 +397,96 @@ def test_the_recorded_live_measurement_replays_to_the_same_verdict(run_census, c
     assert loaded["assessable"] == 1
     assert code == census_mod.EXIT_OK
     assert "VERDICT: CONFIRMED" in printed
+
+
+# --------------------------------------------------------------------------- round 4
+#
+# ⚠️ Every fixture above this line constructs a valid ENVELOPE and varies what is inside it. A defect
+# ABOVE where a fixture starts is structurally invisible to it, which is exactly why the workbook-
+# level fix of round 3 left this open -- and it is the same class as the round-3 `_emit` hole, where
+# the safety test only ever placed identifiers in the value position and so could never reach the
+# label path. These start above the envelope.
+
+
+@pytest.mark.parametrize(
+    "payload, why",
+    [
+        (None, "a top-level null"),
+        ([{"data": {"workbooks": []}}], "a top-level list"),
+        ("nope", "a top-level string"),
+        (7, "a top-level int"),
+        ({"data": None}, "`data` is null"),
+        ({"data": []}, "`data` is a list"),
+        ({"data": "nope"}, "`data` is a string"),
+        ({"extensions": {}}, "`data` is absent"),
+        ({"data": {"workbooks": None}}, "`workbooks` is null"),
+        ({"data": {"workbooks": {"dashboards": []}}}, "`workbooks` is a dict"),
+        ({"data": {}}, "`workbooks` is absent"),
+    ],
+)
+def test_a_malformed_envelope_cannot_bypass_the_guarantees(payload, why, run_census, capsys, tmp_path):
+    """⚠️ Each of these once escaped as an uncaught TypeError or AttributeError, BEFORE any verdict,
+    exit code or assessability flag existed - so a server-controlled body bypassed every guarantee.
+    """
+    out = tmp_path / "census.json"
+    code = run_census(payload, json_out=out)
+    printed = capsys.readouterr().out
+    assert code == census_mod.EXIT_CANNOT_TELL, f"{why} must not exit as a completed measurement"
+    assert "VERDICT: CANNOT-TELL" in printed, why
+    assert json.loads(out.read_text(encoding="utf-8"))["assessable"] == 0, why
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [None, [], "nope", 7, 3.5, True, {"data": None}, {"data": []}, {"data": "x"}, {"data": {"workbooks": None}}],
+)
+def test_census_is_total_over_arbitrary_decoded_json(payload):
+    """`census` is public and its whole job is to describe a POSSIBLY MALFORMED response.
+
+    ⚠️ An unreadable envelope must produce zeroes WITH `envelope_readable = 0`. A zero that means
+    "we could not look" being indistinguishable from one that means "we looked and found none" is
+    the defect class this whole script exists to avoid.
+    """
+    totals = census_mod.census(payload)
+    assert totals["nodes"] == 0
+    assert totals["blank_luids"] == 0
+    assert totals["envelope_readable"] == 0
+
+
+def test_a_readable_envelope_says_so():
+    """The mirror. A flag that is always 0 would satisfy the test above and mean nothing."""
+    totals = census_mod.census(_payload([{"dashboards": [{"luid": LUID}], "sheets": []}]))
+    assert totals["envelope_readable"] == 1
+    assert census_mod.census({"data": {"workbooks": []}})["envelope_readable"] == 1
+
+
+def test_each_unassessable_route_is_pinned_independently():
+    """⚠️ Two of `assessable`'s three clauses are IMPLIED by the first, so nothing driven through
+    `main()` can kill them - a clause no test can fail is worse than no clause.
+
+    They are pinned here directly, against a `totals` today's loader would not produce, exactly as an
+    arithmetically-implied clause was pinned in the #384 campaign. Each row removes ONE reason, so it
+    fails if that clause is dropped.
+    """
+    healthy = {"envelope_readable": 1, "workbooks_with_an_unusable_collection": 0}
+    assert census_mod.assessable(healthy, refused=False)
+    assert not census_mod.assessable(healthy, refused=True)
+    assert not census_mod.assessable({**healthy, "envelope_readable": 0}, refused=False)
+    assert not census_mod.assessable({**healthy, "workbooks_with_an_unusable_collection": 1}, refused=False)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [None, [], "nope", 7, {"data": None}, {"data": []}, {"data": {"workbooks": None}}, {"data": {}}],
+)
+def test_an_unreadable_envelope_always_makes_the_parser_refuse(payload):
+    """⚠️ The IMPLICATION itself, asserted rather than assumed.
+
+    `assessable`'s envelope clause is redundant only for as long as this holds. Asserting it is what
+    lets the clause be kept as an independent requirement instead of quietly deleted - and if a
+    future parser change breaks the implication, this fails rather than the clause silently becoming
+    load-bearing without anyone noticing.
+    """
+    assert census_mod.census(payload)["envelope_readable"] == 0
+    _mapping, unavailable = view_types_mod.parse_payload(payload)
+    assert unavailable, "an envelope the census cannot read must also be one the parser refuses"
