@@ -89,8 +89,10 @@ from pathlib import Path
 
 from skill_plugin_source import (
     DEFAULT_INSTALL_HINT,
+    OWNER_MARKER_NAME,
     PLUGIN_ROOT_ENV,
     discover_skill_plugin,
+    marker_bundle_problems,
     read_owner_marker,
     write_owner_marker,
 )
@@ -119,6 +121,7 @@ EXIT_MULTIPLE_PLUGINS = 4
 EXIT_NO_REF = 5
 EXIT_UNPROVEN_PLUGIN = 6
 EXIT_UNVERIFIED_DEFAULT = 7
+EXIT_UNSAFE_MARKER = 8
 
 
 class PublishRefError(RuntimeError):
@@ -127,6 +130,10 @@ class PublishRefError(RuntimeError):
 
 class UnverifiedDefaultError(RuntimeError):
     """The remote's advertised default branch could not be established, so nothing is authoritative."""
+
+
+class UnsafeMarkerError(RuntimeError):
+    """The ownership marker's recorded inventory could name a deletion target outside the plugin."""
 
 
 @dataclass(frozen=True)
@@ -141,6 +148,7 @@ class PublishSource:  # pylint: disable=too-many-instance-attributes
     default_proof: str = "none"  # "explicit" | "remote" | "recorded" | "worktree"
     default_verified_at: str | None = None
     alternatives: tuple[str, ...] = ()
+    advertised_commit: str | None = None
 
     @property
     def from_worktree(self) -> bool:
@@ -198,8 +206,8 @@ def has_origin(repo: Path | None = None) -> bool:
     return _git(["remote", "get-url", "origin"], repo=repo).returncode == 0
 
 
-def remote_default_ref(repo: Path | None = None) -> str | None:
-    """Ask the REMOTE which branch it advertises as HEAD, mapped to its remote-tracking ref.
+def remote_default(repo: Path | None = None) -> tuple[str | None, str | None]:
+    """Ask the REMOTE which branch it advertises as HEAD, and at which COMMIT - in ONE call.
 
     `refs/remotes/origin/HEAD` is a *local* symbolic ref, and `git fetch` does NOT refresh it when
     the remote's default branch is renamed. Reproduced in review: a bare remote moved `master` ->
@@ -207,17 +215,31 @@ def remote_default_ref(repo: Path | None = None) -> str | None:
     `origin/master`, and the sync published master as if it were the default. `ls-remote --symref`
     is the one question that cannot go stale - and unlike `git remote set-head --auto` it writes
     nothing into the repository.
+
+    The COMMIT half exists because verifying only the branch NAME leaves a second staleness intact:
+    if the local remote-tracking ref already exists, nothing fetches it, so a same-branch advance
+    (A -> B on `master`) stays invisible while the run still reports `default_verified` (round-3
+    finding 3). `ls-remote --symref origin HEAD` already prints that sha beside `HEAD`, so this
+    costs no extra network call.
     """
     listed = _git(["ls-remote", "--symref", "origin", "HEAD"], repo=repo, timeout=LS_REMOTE_TIMEOUT_SECONDS)
     if listed.returncode != 0:
-        return None
+        return None, None
+    ref: str | None = None
+    head: str | None = None
     for line in listed.stdout.splitlines():
-        if not line.startswith("ref:"):
-            continue
         parts = line.split()
-        if len(parts) >= 2 and parts[1].startswith("refs/heads/"):
-            return "refs/remotes/origin/" + parts[1][len("refs/heads/") :]
-    return None
+        if line.startswith("ref:"):
+            if len(parts) >= 2 and parts[1].startswith("refs/heads/"):
+                ref = "refs/remotes/origin/" + parts[1][len("refs/heads/") :]
+        elif len(parts) >= 2 and parts[1] == "HEAD":
+            head = parts[0]
+    return ref, head
+
+
+def remote_default_ref(repo: Path | None = None) -> str | None:
+    """The advertised default branch as a remote-tracking ref name, without its commit."""
+    return remote_default(repo)[0]
 
 
 def _record_path(repo: Path | None = None) -> Path | None:
@@ -310,15 +332,15 @@ def _explicit_source(explicit: str, repo: Path | None) -> PublishSource:
     )
 
 
-def _advertised_default(repo: Path | None) -> tuple[str, str, str | None]:
-    """(ref, proof, verified_at) for the remote's default branch, or raise rather than guess."""
-    advertised = remote_default_ref(repo)
+def _advertised_default(repo: Path | None) -> tuple[str, str, str | None, str | None]:
+    """(ref, proof, verified_at, advertised commit) for the default branch, or raise rather than guess."""
+    advertised, head = remote_default(repo)
     if advertised:
         write_default_record(advertised, repo)
-        return advertised, "remote", datetime.now(timezone.utc).isoformat(timespec="seconds")
+        return advertised, "remote", datetime.now(timezone.utc).isoformat(timespec="seconds"), head
     record = read_default_record(repo)
     if record:
-        return str(record["ref"]), "recorded", record.get("verified_at")
+        return str(record["ref"]), "recorded", record.get("verified_at"), None
     raise UnverifiedDefaultError(
         "origin did not answer `ls-remote --symref`, and no earlier run recorded a verified default "
         "branch, so which branch is authoritative is UNKNOWN"
@@ -343,15 +365,25 @@ def resolve_publish_ref(
     if not has_origin(repo):
         raise PublishRefError("this repository has no `origin` remote, so no merged ref can be resolved")
 
-    ref, proof, verified_at = _advertised_default(repo)
+    ref, proof, verified_at, advertised = _advertised_default(repo)
     commit = _rev_parse(ref, repo)
-    if (commit is None or fetch) and proof == "remote":
+    # Verifying the branch NAME is only half of it. If the local remote-tracking ref already exists,
+    # nothing fetches it, so a same-branch advance stays invisible and stale guidance reports
+    # `in_sync` with `default_verified=True` (round-3 finding 3). Fetch whenever the local tip is
+    # ABSENT, DIFFERENT from the sha the remote just advertised, or `--fetch` asked for it.
+    stale = advertised is not None and commit != advertised
+    if proof == "remote" and (commit is None or fetch or stale):
         fetch_exact_ref(ref, repo)
         commit = _rev_parse(ref, repo)
     if commit is None:
         raise UnverifiedDefaultError(
             f"{ref} is the default branch to publish ({proof}), but it could not be fetched or "
             "resolved locally, and falling back to another branch would publish the wrong one"
+        )
+    if advertised is not None and commit != advertised:
+        raise UnverifiedDefaultError(
+            f"{ref} advertises {advertised[:12]} but this clone still resolves it to {commit[:12]} "
+            "after fetching that exact refspec, so the authoritative content is UNKNOWN"
         )
     return PublishSource(
         kind="ref",
@@ -362,6 +394,7 @@ def resolve_publish_ref(
         default_proof=proof,
         default_verified_at=verified_at,
         alternatives=_default_alternatives(commit, repo),
+        advertised_commit=advertised,
     )
 
 
@@ -647,7 +680,7 @@ def _plan(args: argparse.Namespace, source: PublishSource, workdir: Path, fetch_
         publish_repo=identity.publish_repo,
     )
     marker = read_owner_marker(discovery.plugin_root)
-    recorded = [str(name) for name in (marker or {}).get("bundles", []) if isinstance(name, str)]
+    recorded = _recorded_inventory(marker, discovery.skills_dir)
     formerly = sorted(name for name in set(recorded) - set(bundles))
     plan = SyncPlan(
         source=source,
@@ -674,9 +707,30 @@ def _plan(args: argparse.Namespace, source: PublishSource, workdir: Path, fetch_
         "default_proof": source.default_proof,
         "default_verified_at": source.default_verified_at,
         "default_alternatives": list(source.alternatives),
+        "advertised_commit": source.advertised_commit,
         "fetch": fetch_note,
     }
     return plan
+
+
+def _recorded_inventory(marker: dict | None, skills_dir: Path | None) -> list[str]:
+    """The bundles a previous publish recorded, or raise when acting on them would be unsafe.
+
+    Every name here reaches `shutil.rmtree(installed / name)`. The old filter kept any `str`, which
+    is not a safety property at all: `installed / "C:/stranger-data"` is that absolute path, and
+    `installed / ".."` is the plugin's parent. Measured through public `sync.main` in review, a
+    marker naming an absolute path deleted an unrelated directory and exited 0.
+
+    A bad entry does not merely get skipped. A marker that lies about one name is not trustworthy
+    about the others, so the whole run refuses and writes nothing.
+    """
+    if marker is None or skills_dir is None:
+        return []
+    names = marker.get("bundles", [])
+    problems = marker_bundle_problems(names, skills_dir)
+    if problems:
+        raise UnsafeMarkerError("; ".join(problems))
+    return [str(name) for name in names]
 
 
 def _notes(plan: SyncPlan, unmerged: list[str], unmerged_error: str | None) -> list[str]:
@@ -759,6 +813,39 @@ def _report(args: argparse.Namespace, plan: SyncPlan) -> int:  # pylint: disable
     }
 
     if not changed and not extra:
+        # A retirement whose directory is ALREADY gone leaves nothing for the diff to see, so this
+        # used to return `in_sync` with the marker untouched - and because `marker_present` was
+        # true, nothing ever rewrote it. The tool then claimed that name forever, and deleted
+        # whatever appeared under it next (round-3 finding 1). Marker inventory drift is WORK.
+        if plan.formerly_owned:
+            if args.check:
+                return _emit(
+                    args,
+                    {**payload, "status": "ownership_drift"},
+                    [
+                        *inventory,
+                        f"SYNC: DRIFT - the marker still claims {len(plan.formerly_owned)} bundle(s) "
+                        f"{plan.source.described} no longer ships, and their directories are already gone",
+                        *(f"        still claimed: {name}" for name in plan.formerly_owned),
+                        "      Reconcile it: python scripts/sync_installed_skills.py",
+                        "      Until then a NEW bundle appearing under one of those names would be",
+                        "      deleted as formerly-owned.",
+                        *note,
+                    ],
+                    EXIT_DRIFT,
+                )
+            _record_ownership(plan)
+            return _emit(
+                args,
+                {**payload, "status": "ownership_reconciled"},
+                [
+                    *inventory,
+                    f"SYNC: RECONCILED - the marker no longer claims {len(plan.formerly_owned)} retired "
+                    f"bundle(s); no file needed copying or removing at {installed}",
+                    *note,
+                ],
+                EXIT_OK,
+            )
         if not args.check and not plan.marker_present:
             _record_ownership(plan)
         return _emit(
@@ -855,7 +942,22 @@ def main(argv: list[str] | None = None) -> int:
     build_dir.mkdir(parents=True, exist_ok=True)
     workdir = Path(tempfile.mkdtemp(prefix="skill-plugin-", dir=build_dir))
     try:
-        plan = _plan(args, source, workdir, fetch_note)
+        try:
+            plan = _plan(args, source, workdir, fetch_note)
+        except UnsafeMarkerError as exc:
+            return _emit(
+                args,
+                {"status": "unsafe_marker", "detail": str(exc), "default_verified": source.default_verified},
+                [
+                    "SYNC: ERROR - the ownership marker names a deletion target outside the plugin,",
+                    "      so NOTHING was written or removed.",
+                    f"      {exc}",
+                    "      Every recorded bundle must be a single directory name inside the plugin's",
+                    "      skills/ folder; `installed / <name>` is fed to shutil.rmtree.",
+                    f"      Delete or repair {OWNER_MARKER_NAME} in the plugin root, then re-run.",
+                ],
+                EXIT_UNSAFE_MARKER,
+            )
         failed = _discovery_failure(args, plan.discovery, plan.base)
         return failed if failed is not None else _report(args, plan)
     finally:

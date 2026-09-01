@@ -16,7 +16,7 @@ python -m pytest tests/test_mock_fabric.py tests/test_mock_tableau.py tests/test
 | [`tests/test_mock_fabric.py`](../tests/test_mock_fabric.py) | 51 fidelity self-tests for the Fabric fake |
 | [`tests/test_mock_tableau.py`](../tests/test_mock_tableau.py) | 21 fidelity self-tests for the Tableau fake |
 | [`tests/test_e2e_offline.py`](../tests/test_e2e_offline.py) | 18 joined end-to-end tests (marked `slow`) |
-| [`tests/mutation_harness.py`](../tests/mutation_harness.py) | 40 deliberate mutations that prove those tests can fail — **22** attack this offline-mock suite (tabled below); the other **18** attack the skill-plugin sync (`skillsync-` / `skillsource-`, issue #410), which shares this harness rather than growing a second scorer |
+| [`tests/mutation_harness.py`](../tests/mutation_harness.py) | 43 deliberate mutations that prove those tests can fail — **22** attack this offline-mock suite (tabled below); the other **21** attack the skill-plugin sync (`skillsync-` / `skillsource-`, issue #410), which shares this harness rather than growing a second scorer |
 
 ---
 
@@ -183,12 +183,18 @@ mutations (`tests/mutation_harness.py` — run it with
 `python tests/mutation_harness.py`). Each patches the real deployer or the mock in a subprocess and
 re-runs the suite. **All 22 were caught; there were no survivors.**
 
-> The harness is **shared**, not offline-mock-specific: it also carries 18 mutations against the
+> The harness is **shared**, not offline-mock-specific: it also carries 21 mutations against the
 > skill-plugin sync (`skillsync-` and `skillsource-`, routed to `tests/test_sync_installed_skills.py`
 > and `tests/test_skill_plugin_source.py`), each restoring one defect issue #410's review reproduced
 > by exit code. They are not tabled here — the tests they attack document them — but they run in the
 > same pass, and a second scorer is deliberately never written: the verdict comes from pytest's own
 > lifecycle records, and two attempts at a hand-rolled scorer had to be retracted.
+>
+> ⚠️ **Exact-node failure is not the bar; failing on the RIGHT assertion is.** Round-3 review found
+> two of those mutations red for the wrong reason — one flipped the preliminary `--check` to drift
+> before the deleting code ran, the other tripped post-copy verification — so neither ever reached
+> the property it claimed to defend. Both are now scoped to apply time, and both die on the named
+> foreign-survival assertion. When a mutation goes red, read WHICH assertion failed.
 
 | mutation | caught by |
 |---|---|

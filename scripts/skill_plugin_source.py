@@ -41,7 +41,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePath
 
 from build_plugin import KNOWN_PLUGIN_IDENTITIES, MARKETPLACE_NAME, PLUGIN_NAME, PUBLISH_REPO, SHIPPED_SKILLS
 
@@ -160,6 +160,44 @@ def read_owner_marker(plugin_root: Path | None) -> dict | None:
     except (OSError, ValueError):
         return None
     return loaded if isinstance(loaded, dict) else None
+
+
+def marker_bundle_problems(names: object, skills_dir: Path) -> list[str]:
+    """Why a marker's recorded inventory cannot be acted on, or `[]` when every entry is safe.
+
+    The marker is a DATA FILE, and `sync_installed_skills._apply` feeds its `bundles` array
+    straight to ``shutil.rmtree(installed / name)``. In `pathlib`, ``Path("/abs") / x`` and
+    ``installed / ".."`` both ESCAPE by construction, so an absolute path, a `..`, a separator or
+    an empty string in that array turns a sync into an arbitrary recursive delete that still exits
+    0 - strictly worse than the in-plugin deletion this whole fix exists to stop. Measured through
+    public `sync.main` in review: a valid-looking marker naming an absolute path deleted an
+    unrelated directory and reported success.
+
+    So each entry must be exactly ONE filename component, and the path it names must resolve to a
+    DIRECT CHILD of `skills_dir` - which also refuses a symlink pointing out of the plugin, since
+    `resolve()` follows it. The caller must refuse the WHOLE marker on any problem: a marker that
+    lies about one name is not evidence for the others.
+    """
+    if not isinstance(names, list):
+        return [f"`bundles` must be a list, not {type(names).__name__}"]
+    problems: list[str] = []
+    parent = skills_dir.resolve()
+    for entry in names:
+        if not isinstance(entry, str) or not entry.strip():
+            problems.append(f"{entry!r} is not a non-empty string")
+            continue
+        component = PurePath(entry)
+        if len(component.parts) != 1 or component.anchor or entry in (".", "..") or "/" in entry or "\\" in entry:
+            problems.append(f"{entry!r} is not a single path component")
+            continue
+        try:
+            resolved = (skills_dir / entry).resolve()
+        except (OSError, ValueError):  # pragma: no cover - only on a path the OS rejects outright
+            problems.append(f"{entry!r} could not be resolved under {skills_dir}")
+            continue
+        if resolved.parent != parent:
+            problems.append(f"{entry!r} resolves outside {skills_dir} (to {resolved})")
+    return problems
 
 
 def write_owner_marker(plugin_root: Path, **fields: object) -> Path:

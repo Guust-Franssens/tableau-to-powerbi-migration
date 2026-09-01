@@ -213,8 +213,10 @@ sync._advertised_default = guess
 """,
     "skillsync-never-ask-the-remote": """
 import sync_installed_skills as sync
-# Finding 2: trust the LOCAL origin/HEAD marker `git fetch` never refreshes.
-sync.remote_default_ref = lambda repo=None: None
+# Finding 2: trust the LOCAL origin/HEAD marker `git fetch` never refreshes. Patched at
+# `remote_default`, which is the single `ls-remote --symref` call that answers BOTH the branch
+# name and the commit it advertises (round-3 finding 3 added the second half).
+sync.remote_default = lambda repo=None: (None, None)
 """,
     "skillsync-owned-scope-is-the-current-inventory": """
 import sync_installed_skills as sync
@@ -276,23 +278,34 @@ sps._multiple_verdict = lambda roots: sps._found_verdict(roots[0], "identity")
 """,
     "skillsync-deletion-scope-removed": """
 import sync_installed_skills as sync
-_orig = sync.diff_tree
-def diff_tree(src, dst, scope=None):
+_orig_apply = sync._apply
+_orig_diff = sync.diff_tree
+def apply(plan, changed, extra):
     # The data-loss guard itself: unscoped, `extra` is every file in the destination the build
     # does not contain, which is how origin/master deleted a stranger's private.txt AND an
     # entire unrelated bundle while exiting 0.
-    return _orig(src, dst, scope=None)
-sync.diff_tree = diff_tree
+    #
+    # Applied at APPLY time only, deliberately (round-3 finding 4). Patching `diff_tree`
+    # globally made the preliminary `--check` return drift, so the test died on an exit code
+    # BEFORE `_apply` ran and never exercised foreign-file survival at all. Here `--check` and
+    # the post-copy re-diff both keep the real scope, so the only observable difference is that
+    # files belonging to an unrelated bundle are swept.
+    _, unscoped = _orig_diff(plan.src, plan.discovery.skills_dir, scope=None)
+    return _orig_apply(plan, changed, sorted(set(extra) | set(unscoped)))
+sync._apply = apply
 """,
     "skillsync-retirement-sweeps-everything": """
 import sync_installed_skills as sync
 _orig = sync._apply
 def apply(plan, changed, extra):
-    # The OTHER deletion path: `_apply` rmtree's `plan.formerly_owned`. Widened to every bundle
-    # in the destination, retirement removes bundles this tool never installed.
+    # The OTHER deletion path: `_apply` rmtree's `plan.formerly_owned`. Widened to the FOREIGN
+    # directories only - current bundles stay owned, so the post-copy verification still passes
+    # and the run cannot die on EXIT_COPY_FAILED before the foreign-survival assertion is
+    # reached (round-3 finding 4).
     installed = plan.discovery.skills_dir
     if installed.is_dir():
-        plan.formerly_owned = sorted(p.name for p in installed.iterdir() if p.is_dir())
+        foreign = [p.name for p in installed.iterdir() if p.is_dir() and p.name not in plan.bundles]
+        plan.formerly_owned = sorted(set(plan.formerly_owned) | set(foreign))
     return _orig(plan, changed, extra)
 sync._apply = apply
 """,
@@ -340,6 +353,36 @@ def prove(plugin_root, *, publish_repo, identities, registry_map):
     # NAME anyway, which is the thing an outsider can choose.
     return _orig(plugin_root, publish_repo=publish_repo, identities=identities, registry_map={})
 sps.prove_ownership = prove
+""",
+    "skillsync-marker-inventory-unvalidated": """
+import skill_plugin_source as sps
+# Round-3 finding 2: every string in the marker's `bundles` array reaches
+# `shutil.rmtree(installed / name)`. Accepting any string is not a safety property - an
+# absolute path or a `..` escapes the plugin by construction.
+sps.marker_bundle_problems = lambda names, skills_dir: []
+""",
+    "skillsync-unreconciled-ownership-is-in-sync": """
+import sync_installed_skills as sync
+_orig = sync._plan
+def plan(args, source, workdir, fetch_note):
+    built = _orig(args, source, workdir, fetch_note)
+    # Round-3 finding 1: with the retired directory already gone there is nothing for the diff
+    # to see, so forgetting the retirement here restores the silent `in_sync` that left the
+    # marker claiming the name forever.
+    built.formerly_owned = []
+    built.base["formerly_owned"] = []
+    return built
+sync._plan = plan
+""",
+    "skillsync-advertised-commit-ignored": """
+import sync_installed_skills as sync
+_orig = sync._advertised_default
+def advertised(repo):
+    ref, proof, verified_at, _head = _orig(repo)
+    # Round-3 finding 3: verify the branch NAME only, so a same-branch advance stays invisible
+    # while the run still reports default_verified.
+    return ref, proof, verified_at, None
+sync._advertised_default = advertised
 """,
 }
 

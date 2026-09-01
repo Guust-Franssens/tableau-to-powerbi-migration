@@ -1247,6 +1247,7 @@ def test_a_bundle_this_tool_never_installed_is_left_alone_when_it_is_retired(
     assert _run(estate, "--check") == sync.EXIT_OK
     assert _run(estate) == sync.EXIT_OK
     capsys.readouterr()
+    assert foreign.exists(), "a run with nothing to do must not delete a bundle we never installed"
     assert foreign.read_text(encoding="utf-8") == "not ours to delete\n"
 
     retired = BUNDLES[-1]
@@ -1257,9 +1258,8 @@ def test_a_bundle_this_tool_never_installed_is_left_alone_when_it_is_retired(
     capsys.readouterr()
 
     assert not (estate.plugin / "skills" / retired).exists(), "our retired bundle must be removed"
-    assert foreign.read_text(encoding="utf-8") == "not ours to delete\n", (
-        "a retirement sweep must not reach a bundle this tool never installed"
-    )
+    assert foreign.exists(), "a retirement sweep must not reach a bundle this tool never installed"
+    assert foreign.read_text(encoding="utf-8") == "not ours to delete\n"
     assert (estate.plugin / "skills" / "someone-elses-bundle").is_dir()
 
 
@@ -1334,3 +1334,194 @@ def test_preflight_refuses_in_sync_against_an_unverified_default() -> None:
         _skill_verdict(unverified.replace('"default_verified": false', '"default_verified": true'), "$v.Merged.Ok")
         == "True"
     )
+
+
+# --------------------------------------------------------------------------------------------
+# Round-3 finding 2 - the marker is a DATA FILE, and its inventory reaches shutil.rmtree.
+#
+# Reproduced by the reviewer through public `sync.main`: an ownership marker whose `bundles`
+# array held an ABSOLUTE path made the sync copy its normal bundles, recursively delete an
+# unrelated directory, and exit 0 - strictly worse than the in-plugin deletion this PR fixes.
+# `Path("/abs") / x` and `installed / ".."` both escape by construction in pathlib.
+# --------------------------------------------------------------------------------------------
+
+
+def _stamp(estate: Estate, bundles: list) -> None:
+    """Write an ownership marker whose recorded inventory is exactly `bundles`."""
+    write_owner_marker(estate.plugin, publish_repo=build_plugin.PUBLISH_REPO, bundles=bundles)
+
+
+def test_a_marker_naming_an_absolute_path_refuses_and_deletes_NOTHING(
+    estate: Estate, tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """The reviewer's reproduction, by exit code: an unrelated directory survives untouched."""
+    assert _run(estate) == sync.EXIT_OK
+    capsys.readouterr()
+    stranger = tmp_path / "stranger-data"
+    stranger.mkdir()
+    (stranger / "keep.txt").write_text("not ours\n", encoding="utf-8")
+    _stamp(estate, [str(stranger)])
+
+    code = _run(estate, "--json")
+    verdict = json.loads(capsys.readouterr().out)
+
+    assert code == sync.EXIT_UNSAFE_MARKER
+    assert verdict["status"] == "unsafe_marker"
+    assert "stranger-data" in verdict["detail"] and "not a single path component" in verdict["detail"]
+    assert (stranger / "keep.txt").read_text(encoding="utf-8") == "not ours\n"
+    assert _read_installed(estate.plugin) == f"# {FIRST_BUNDLE}\nmerged\n", "and the publish is refused too"
+
+
+@pytest.mark.parametrize(
+    "entry",
+    ["..", ".", "", "   ", "nested/name", "nested\\name", "/absolute", "C:/absolute"],
+    ids=["dotdot", "dot", "empty", "blank", "posix-sep", "windows-sep", "posix-abs", "windows-abs"],
+)
+def test_a_marker_entry_that_is_not_one_filename_component_is_refused(
+    estate: Estate, entry: str, capsys: pytest.CaptureFixture
+) -> None:
+    """`installed / ".."` is the plugin's PARENT; every one of these escapes or is meaningless."""
+    assert _run(estate) == sync.EXIT_OK
+    capsys.readouterr()
+    _stamp(estate, [entry])
+
+    code = _run(estate)
+    capsys.readouterr()
+
+    assert code == sync.EXIT_UNSAFE_MARKER
+    assert (estate.plugin / "skills" / FIRST_BUNDLE / "SKILL.md").is_file(), "nothing may be removed"
+    assert estate.plugin.is_dir()
+
+
+def test_a_marker_whose_bundles_is_not_a_list_is_refused(estate: Estate, capsys: pytest.CaptureFixture) -> None:
+    """A string is iterable, so the old code would have walked it CHARACTER BY CHARACTER."""
+    assert _run(estate) == sync.EXIT_OK
+    capsys.readouterr()
+    _stamp(estate, FIRST_BUNDLE)  # a bare string, not a list
+
+    assert _run(estate) == sync.EXIT_UNSAFE_MARKER
+    capsys.readouterr()
+    assert (estate.plugin / "skills" / FIRST_BUNDLE / "SKILL.md").is_file()
+
+
+def test_one_bad_entry_refuses_the_WHOLE_marker_rather_than_skipping_it(
+    estate: Estate, capsys: pytest.CaptureFixture
+) -> None:
+    """A marker that lies about one name is not evidence for the others, so none of it is acted on."""
+    assert _run(estate) == sync.EXIT_OK
+    capsys.readouterr()
+    legacy = estate.plugin / "skills" / "legacy-bundle"
+    legacy.mkdir(parents=True)
+    (legacy / "SKILL.md").write_text("retired, but only per this marker\n", encoding="utf-8")
+    _stamp(estate, ["legacy-bundle", ".."])
+
+    assert _run(estate) == sync.EXIT_UNSAFE_MARKER
+    capsys.readouterr()
+    assert (legacy / "SKILL.md").is_file(), (
+        "skipping the bad entry and retiring the good one would still be acting on a marker "
+        "that has already been shown to be untrustworthy"
+    )
+
+
+def test_a_valid_marker_is_still_acted_on(estate: Estate, capsys: pytest.CaptureFixture) -> None:
+    """The control: containment must not have disabled retirement itself."""
+    assert _run(estate) == sync.EXIT_OK
+    capsys.readouterr()
+    legacy = estate.plugin / "skills" / "legacy-bundle"
+    legacy.mkdir(parents=True)
+    (legacy / "SKILL.md").write_text("we put this here\n", encoding="utf-8")
+    _stamp(estate, ["legacy-bundle", *BUNDLES])
+
+    assert _run(estate) == sync.EXIT_OK
+    capsys.readouterr()
+    assert not legacy.exists(), "a single-component name this tool recorded is still retired"
+
+
+# --------------------------------------------------------------------------------------------
+# Round-3 finding 1 - a no-op retirement left the marker claiming the name forever.
+# --------------------------------------------------------------------------------------------
+
+
+def test_a_retirement_whose_directory_is_already_gone_is_still_reconciled(
+    estate: Estate, capsys: pytest.CaptureFixture
+) -> None:
+    """The early-return path: nothing for the diff to see, so `_report` never reached the fix.
+
+    With the directory already absent, `changed` and `extra` are both empty and the run returned
+    `in_sync` with `marker_present` true, so the marker was never rewritten and the tool kept
+    claiming the retired name. The harm is at the end of this test: a DIFFERENT bundle appearing
+    under that name is then deleted as formerly-owned.
+    """
+    assert _run(estate) == sync.EXIT_OK
+    capsys.readouterr()
+    retired = BUNDLES[-1]
+    _retire_a_bundle(estate, retired)
+    shutil.rmtree(estate.plugin / "skills" / retired)
+
+    assert _run(estate, "--check", "--json") == sync.EXIT_DRIFT, "unreconciled ownership is WORK, not in_sync"
+    verdict = json.loads(capsys.readouterr().out)
+    assert verdict["status"] == "ownership_drift"
+    assert verdict["formerly_owned"] == [retired]
+
+    assert _run(estate) == sync.EXIT_OK
+    capsys.readouterr()
+    recorded = json.loads((estate.plugin / sync.OWNER_MARKER_NAME).read_text(encoding="utf-8"))["bundles"]
+    assert retired not in recorded, "a plain sync must stop claiming a name it no longer ships"
+    assert _run(estate, "--check") == sync.EXIT_OK
+    capsys.readouterr()
+
+    replacement = estate.plugin / "skills" / retired / "SKILL.md"
+    replacement.parent.mkdir(parents=True)
+    replacement.write_text("someone else's bundle\n", encoding="utf-8")
+
+    assert _run(estate) == sync.EXIT_OK
+    capsys.readouterr()
+    assert replacement.read_text(encoding="utf-8") == "someone else's bundle\n", (
+        "a stale ownership claim would have deleted this as formerly-owned"
+    )
+
+
+# --------------------------------------------------------------------------------------------
+# Round-3 finding 3 - `ls-remote` verified the branch NAME, so a same-branch advance was invisible.
+# --------------------------------------------------------------------------------------------
+
+
+def _advance_origin(estate: Estate, marker: str) -> str:
+    """Push new bundle content to origin/master and return its commit, leaving the clone stale."""
+    _write_bundles(estate.seed, marker)
+    _git(estate.seed, "add", "-A")
+    _git(estate.seed, "commit", "-m", f"advance to {marker}")
+    _git(estate.seed, "push", "origin", "master")
+    return _git(estate.seed, "rev-parse", "HEAD")
+
+
+def test_a_same_branch_advance_is_fetched_without_being_asked(estate: Estate) -> None:
+    """Verifying the NAME is half the answer: the tracking ref can be stale at the same name."""
+    stale = _git(estate.clone, "rev-parse", "origin/master")
+    advanced = _advance_origin(estate, "advanced")
+    assert _git(estate.clone, "rev-parse", "origin/master") == stale, "the fixture must leave the clone behind"
+
+    source = sync.resolve_publish_ref(repo=estate.clone)
+
+    assert source.commit == advanced != stale
+    assert source.advertised_commit == advanced
+    assert source.default_verified
+
+
+def test_a_stale_clone_reports_drift_rather_than_in_sync(estate: Estate, capsys: pytest.CaptureFixture) -> None:
+    """The harm, end to end: stale installed guidance used to pass the gate as `in_sync`."""
+    assert _run(estate) == sync.EXIT_OK
+    capsys.readouterr()
+    _advance_origin(estate, "advanced")
+
+    assert _run(estate, "--check") == sync.EXIT_DRIFT
+    capsys.readouterr()
+
+
+def test_an_advertised_commit_that_cannot_be_fetched_refuses(estate: Estate, monkeypatch) -> None:
+    """Unreachable is UNKNOWN: publishing the older commit while claiming `default_verified` is the bug."""
+    _advance_origin(estate, "advanced")
+    monkeypatch.setattr(sync, "fetch_exact_ref", lambda ref, repo=None: False)
+
+    with pytest.raises(sync.UnverifiedDefaultError):
+        sync.resolve_publish_ref(repo=estate.clone)
