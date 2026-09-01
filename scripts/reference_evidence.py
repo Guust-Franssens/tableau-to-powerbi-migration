@@ -259,17 +259,18 @@ class Evidence:  # pylint: disable=too-many-instance-attributes
         (untrusted) source provenance made correctly-NAMED records return `0/3 blind`. A LUID is
         trusted only when the unit's provenance was byte-confirmed; otherwise the name is the
         fallback, exactly as documented.
+
+        WARNING: the name fallback is EXACT. It was normalized, which made this a lossy join on
+        workbook identity - the same collapse defect, at a layer nobody had enumerated. Two workbook
+        names differing only by case or repeated whitespace would have attributed one workbook's
+        captures to the other. If a published workbook name genuinely differs from the unit name, the
+        LUID route is the answer; guessing across the difference is not.
         """
         if self.workbook_sha is not None:
             return self.workbook_sha.casefold() == unit.source_sha256.casefold()
         if self.workbook_luid and unit.workbook_luid:
             return self.workbook_luid.casefold() == unit.workbook_luid.casefold()
-        return bool(self.workbook_name) and norm_name(self.workbook_name) == norm_name(unit.name)
-
-
-def norm_name(text: str | None) -> str:
-    """Whitespace/case-normalized name, for comparing two spellings of the same object."""
-    return re.sub(r"\s+", " ", (text or "")).strip().casefold()
+        return self.workbook_name == unit.name
 
 
 def sha256_of(path: Path) -> str | None:

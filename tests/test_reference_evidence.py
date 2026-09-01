@@ -218,3 +218,21 @@ def test_oracle_evidence_is_integrity_checked_too(bundle: Path) -> None:
 
     write_png(oracle / "images" / "view-0.png", 400, 300)
     assert crr.scan(bundle)["units"][0]["pages"][0]["readiness"] == "blind"
+
+
+def test_evidence_attribution_uses_the_exact_workbook_name(bundle: Path) -> None:
+    """Found by WRITING the quarantine rule, not by reasoning (issue #421, round 4).
+
+    `Evidence.is_for` compared workbook names through the lossy function, so a capture for
+    `Ops  Summary` would have been attributed to a unit named `Ops Summary` - the same collapse
+    defect, on WORKBOOK identity, at a layer neither the reviewer nor I had enumerated. If a
+    published workbook name genuinely differs from the unit name, the LUID route is the answer.
+    """
+    build_unit(bundle, "Ops Summary", worksheets=["Revenue Trend"])
+    write_oracle(
+        bundle,
+        [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_name": "Ops  Summary"}],
+    )
+
+    assert crr.scan(bundle)["units"][0]["pages"][0]["readiness"] == "blind"
+    assert crr.main([str(bundle), "--quiet"]) == 1

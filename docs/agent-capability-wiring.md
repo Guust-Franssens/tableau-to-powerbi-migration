@@ -52,6 +52,7 @@ must appear below unless the script docstring marks it `internal: true` with an 
 | `scripts/check_empty_model.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/check_engine_receipts.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/check_field_bindings.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
+| `scripts/check_identity_normalization.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/check_m_syntax.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/check_migration_progress.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/check_navigation_index.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |

@@ -27,9 +27,38 @@ So each entry declares:
   distinguished from "the mutation broke everything", which is the failure mode that makes a
   mutation score meaningless.
 
+Anchors are RESOLVED across the suites, and that guard is load-bearing
+-----------------------------------------------------------------------
+:func:`resolve_node` finds an anchor's file rather than hard-coding one, and **raises** when a name
+exists in zero suites or in more than one. That is not tidiness; it catches a specific and measured
+false-green.
+
+The shared ``mutation_harness.py`` records the original form: its first run reported **22 of 22
+caught**, and every one was an *import error* exiting non-zero before a single test executed. The
+same shape recurs whenever a mutation goes stale - it patches a symbol that has been renamed or
+deleted, and either does nothing (SURVIVED against its own anchor) or raises ``AttributeError``
+/``NameError`` inside an unrelated test (CAUGHT against its own CONTROL). Both are the harness
+scoring the *state of the mutation* rather than the state of the code.
+
+Measured, when the test suite was split to match the module split, this guard flagged four entries on
+its first run and **all four were stale rather than wrong**:
+
+* one patched ``Evidence.match_names``, since renamed to ``.candidate()`` - a no-op that SURVIVED;
+* one referenced the deleted ``KIND_ASSERTED`` and raised, scoring CAUGHT against its own control;
+* one compared against ``reference_evidence.AMBIGUOUS`` while the gate had moved to
+  ``object_identity.AMBIGUOUS`` - which exposed a real defect in the *shipped* code, not the test:
+  the module split had left **two constants of the same name with different values**, one dead and
+  shadowing the other's meaning;
+* one used ``oid`` without importing it, so a ``NameError`` was being scored as a detection.
+
+The lesson worth keeping: **a mutation harness is not self-validating.** It reports on code it
+patches by name, so any rename silently converts a real check into a no-op. Resolving anchors and
+failing on an unknown one is what makes that visible by construction, instead of leaving a green run
+that proves nothing.
+
 Two entries are whole-suite controls rather than fail-closed properties: a cosmetic reword MUST
 survive (otherwise the suite asserts on incidental wording), and an absent anchor MUST be reported
-INVALID rather than credited as a detection - the exact false-green the shared harness guards.
+INVALID rather than credited as a detection - the exact false-green described above.
 
 Exit 0 only when every anchor caught its mutation and every control survived it.
 """
@@ -61,6 +90,7 @@ TARGETS = (
     "tests/test_check_reference_readiness.py",
     "tests/test_reference_evidence.py",
     "tests/test_object_identity.py",
+    "tests/test_identity_normalization.py",
 )
 #: `mutation_harness.run` passes its target as ONE argv element, so a whole-suite control names the
 #: gate suite - the only one that exercises `render`, and the one the absent-anchor guard applies to.
@@ -705,6 +735,109 @@ oid.IdentityIndex.add = add
 """,
         anchor="test_reading_an_ambiguous_resolution_raises_rather_than_picking",
         controls=("test_an_engine_index_has_no_normalized_layer_to_fall_back_to",),
+    ),
+    # --- round 4: the quarantine rule that closes the residual risk --------------------------------
+    "the-quarantine-rule-sees-no-violations": Mutation(
+        code="""
+import check_identity_normalization as rule
+# The rule's own fail-open: a detector that reports nothing passes the real-repo assertion while
+# proving nothing at all.
+rule.scan_source = lambda path, source: []
+""",
+        anchor="test_a_module_alias_call_is_caught",
+        controls=("test_the_repository_has_no_lossy_join_outside_the_identity_module",),
+    ),
+    "the-quarantine-rule-matches-on-the-name-alone": Mutation(
+        code="""
+import ast
+import check_identity_normalization as rule
+# Drop the per-file alias resolution and match any callee spelled `normalize`. This is the BROAD
+# rule the reviewer warned against: it still catches real violations, so only the false-positive
+# controls can tell it apart from the narrow one - and a rule that cries wolf gets switched off.
+def scan_source(path, source):
+    if path.name == rule.OWNER_FILE:
+        return []
+    tree = ast.parse(source)
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            if name == rule.GUARDED_FUNCTION:
+                found.append(rule.Violation(path.name, node.lineno, rule._expression(node)))
+    return found
+rule.scan_source = scan_source
+""",
+        anchor="test_another_modules_own_normalize_is_not_reported",
+        controls=("test_a_module_alias_call_is_caught",),
+    ),
+    "the-quarantine-rule-skips-unparseable-files": Mutation(
+        code="""
+import check_identity_normalization as rule
+_orig = rule.scan_source
+def scan_source(path, source):
+    try:
+        return _orig(path, source)
+    except Exception:
+        return []
+import ast
+_parse = ast.parse
+def parse(src, *a, **kw):
+    return _parse(src, *a, **kw)
+rule.scan_source = lambda path, source: [] if _unparseable(source) else _orig(path, source)
+def _unparseable(source):
+    try:
+        ast.parse(source)
+        return False
+    except SyntaxError:
+        return True
+""",
+        anchor="test_an_unparseable_file_is_reported_rather_than_skipped",
+        controls=("test_a_module_alias_call_is_caught",),
+    ),
+    "the-quarantine-rule-refuses-without-naming-the-fix": Mutation(
+        code="""
+import check_identity_normalization as rule
+rule.FIX = "do not do this"
+""",
+        anchor="test_the_rendered_verdict_names_the_fix_not_just_the_refusal",
+        controls=("test_a_module_alias_call_is_caught",),
+    ),
+    "the-quarantine-rule-ignores-string-literals-by-scanning-text": Mutation(
+        code="""
+import check_identity_normalization as rule
+# Textual scanning instead of AST: catches real calls, but also every mutation SOURCE string in this
+# very harness, so the rule would fight the tests that defend the invariant.
+def scan_source(path, source):
+    if path.name == rule.OWNER_FILE:
+        return []
+    hits = []
+    for number, line in enumerate(source.splitlines(), start=1):
+        if f".{rule.GUARDED_FUNCTION}(" in line or line.strip().startswith(f"{rule.GUARDED_FUNCTION}("):
+            hits.append(rule.Violation(path.name, number, f"{rule.GUARDED_FUNCTION}()"))
+    return hits
+rule.scan_source = scan_source
+""",
+        anchor="test_an_occurrence_inside_a_string_literal_is_not_reported",
+        controls=("test_a_local_function_called_normalize_is_not_reported",),
+    ),
+    "evidence-attribution-normalizes-the-workbook-name": Mutation(
+        code="""
+import object_identity as oid
+import reference_evidence as ev
+# Found by WRITING the quarantine rule, not by reasoning: `Evidence.is_for` compared workbook names
+# through the lossy function, so two workbooks differing only by whitespace would have swapped
+# captures. A layer nobody had enumerated.
+def is_for(self, unit):
+    if self.workbook_sha is not None:
+        return self.workbook_sha.casefold() == unit.source_sha256.casefold()
+    if self.workbook_luid and unit.workbook_luid:
+        return self.workbook_luid.casefold() == unit.workbook_luid.casefold()
+    return bool(self.workbook_name) and oid.normalize(self.workbook_name) == oid.normalize(unit.name)
+ev.Evidence.is_for = is_for
+""",
+        anchor="test_evidence_attribution_uses_the_exact_workbook_name",
+        controls=("test_oracle_evidence_for_this_workbook_does_count",),
     ),
     # --- whole-suite discriminating controls ------------------------------------------------------
     "control-cosmetic-reword-of-a-rendered-line": Mutation(

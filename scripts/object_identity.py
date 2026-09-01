@@ -188,6 +188,19 @@ class IdentityIndex(Generic[T]):
         return [key for (kind, key) in self._by_key if kind == KIND_UNKNOWN]
 
 
+def shares_name(identity: ObjectIdentity, candidate: Candidate) -> bool:
+    """Whether a candidate names this object IGNORING kind, for reporting only.
+
+    The gate needs this to tell "a picture exists but I cannot prove what it is of" (UNVERIFIABLE)
+    apart from "no picture exists" (BLIND) - two different operator actions. It is deliberately here
+    rather than at the call site so the lossy comparison stays inside this module, which is the whole
+    point of `check_identity_normalization.py`.
+
+    It may NEVER be used to satisfy a page. It answers a reporting question, not an identity one.
+    """
+    return any(normalize(name) == normalize(identity.name) for name in candidate.names)
+
+
 def collisions(identities: list[ObjectIdentity]) -> list[tuple[str, ...]]:
     """Groups of DISTINCT identities that a normalized key would merge.
 

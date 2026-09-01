@@ -175,6 +175,7 @@ check_desktop_orphans.py
 check_empty_model.py
 check_engine_receipts.py
 check_field_bindings.py
+check_identity_normalization.py
 check_m_syntax.py
 check_migration_progress.py
 check_navigation_index.py

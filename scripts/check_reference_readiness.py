@@ -346,9 +346,10 @@ def match_evidence(obj: SourceObject, evidence: list[Evidence]) -> tuple[Evidenc
         return resolution.value(), []
     if resolution.outcome == oid.AMBIGUOUS:
         return AMBIGUOUS, list(resolution.matches)
-    named = [
-        item for item in evidence if any(oid.normalize(n) == oid.normalize(obj.name) for n in item.candidate().names)
-    ]
+    # Reporting only: a record that NAMES this object but could not resolve against it is
+    # `unverifiable`, not `blind` - a different operator action. The lossy comparison lives inside
+    # `object_identity` so it cannot drift back out here (`check_identity_normalization.py`).
+    named = [item for item in evidence if oid.shares_name(key, item.candidate())]
     return None, named
 
 

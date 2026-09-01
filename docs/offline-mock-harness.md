@@ -227,6 +227,34 @@ A third finding was in the harness itself and is worth recording: the first muta
 now fails loudly if the mutation did not apply. *A mutation run that catches everything on the first
 try deserves suspicion, not celebration.*
 
+### The same false-green returns whenever a mutation goes STALE
+
+⚠️ A mutation harness is **not self-validating**. It patches symbols *by name*, so any rename or
+deletion silently converts a real check into one of two useless outcomes:
+
+| what the stale mutation does | how it scores | what it actually proves |
+|---|---|---|
+| patches a symbol that no longer exists as a plain attribute set | **SURVIVED** against its own anchor | nothing — the mutation was a no-op |
+| references a deleted symbol and raises | **CAUGHT** against its own *control* | nothing — a `NameError`/`AttributeError`, not a detection |
+
+Measured on `tests/mutation_reference_readiness.py` (issue #421) when the test suite was split to
+match a module split: an anchor-resolution guard — resolve each anchor's file across the suites, and
+**raise when a name is found in zero suites or in more than one** — flagged four entries on its first
+run, and **all four were stale rather than wrong**. One patched a method since renamed; one
+referenced a deleted constant; one used a module alias it never imported; and one compared against a
+constant that had moved.
+
+⚠️ **That last one exposed a real defect in the SHIPPED code, not the test.** Splitting a module had
+left **two constants of the same name with different values** — `AMBIGUOUS = "__ambiguous__"` in the
+old module and `AMBIGUOUS = "ambiguous"` in the new one — with the dead copy shadowing the live one's
+meaning for any caller that imported the wrong module. Nothing in the type checker, the linter or the
+test suite saw it; the mutation harness did, because a mutation written against one spelling stopped
+biting.
+
+**Generalisable:** when you split a module, enumerate the constants that existed in both halves
+afterwards. A duplicate that agrees today is a landmine, and a duplicate that disagrees is already a
+bug. Grep for the name, do not reason about whether you moved it.
+
 ---
 
 ## What the E2E asserts
