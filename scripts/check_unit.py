@@ -71,6 +71,14 @@ EXIT_USAGE = 64
 EXEMPTIONS_FILE = "unit-check-exemptions.json"
 VALID_EXEMPTION_CHECKS = frozenset({"stub-measures", "page-parity", "scaffold-partitions"})
 
+# The engine's ZERO-PAGE CRASH GUARD page. When every candidate is dropped, twb_to_pbir.py:14719-14727
+# emits ONE synthetic, visual-less page - `_sanitize("page-empty")` with displayName
+# `_EMPTY_REPORT_PAGE_NAME` (:13091) - because a PBIR with an empty `pageOrder` crashes Power BI
+# Desktop on open. It is a DECLARED extra with no Tableau counterpart, so page parity must not count
+# it as an unexplained extra page. Measured on a real 2.339.0 estate run: 2 of 44 workbooks ship one.
+ENGINE_PLACEHOLDER_PAGE_NAME = "No visuals rebuilt"
+ENGINE_PLACEHOLDER_PAGE_ID_PREFIX = "page-empty"
+
 # Where a dropped page's declared reason is read from. NOT pbip_warnings[]: that list carries bare
 # prefixed strings with no scope/name, so a warning there cannot be attributed to a page.
 DROP_EXPLANATION_SOURCE = "handover viz_fidelity[]"
@@ -945,6 +953,10 @@ def check_page_parity(target: Path, exemptions: dict[str, Any]) -> dict[str, Any
     it), and a name-matched verdict would fail every one of them. ``dropped_unexplained`` is the
     best-effort *attribution* of a shortfall and is rename-sensitive; when it is non-empty while the
     count balances, a page was renamed rather than lost.
+
+    The engine's zero-page crash-guard placeholder (see :data:`ENGINE_PLACEHOLDER_PAGE_NAME`) is
+    excluded from the emitted side: it is a declared extra with no Tableau counterpart, and counting
+    it failed the 2 workbooks of a real 44-workbook estate run that ship one.
     """
     expectation = page_expectation(target)
     actual = expectation["actual"]
@@ -962,7 +974,9 @@ def check_page_parity(target: Path, exemptions: dict[str, Any]) -> dict[str, Any
     dropped = [page for page in expected if _exempted(entries, "page-parity", page["name"], {page["id"]})]
     explained = [page for page in expectation["explained_drops"] if page not in dropped]
     effective_expected = [page for page in expected if page not in dropped and page not in explained]
-    unexempted_missing, unexempted_extra, exempted_extra = _parity_deltas(effective_expected, actual, entries)
+    placeholders = [page for page in actual if _is_engine_placeholder_page(page)]
+    emitted = [page for page in actual if page not in placeholders]
+    unexempted_missing, unexempted_extra, exempted_extra = _parity_deltas(effective_expected, emitted, entries)
     status = STATUS_PASS if not unexempted_missing and not unexempted_extra else STATUS_PRECONDITION_FAILED
     return {
         "id": "page-parity",
@@ -973,6 +987,7 @@ def check_page_parity(target: Path, exemptions: dict[str, Any]) -> dict[str, Any
         "actual_count": len(actual),
         "expected_pages": expected,
         "actual_pages": actual,
+        "engine_placeholder_pages": placeholders,
         "exemptions": dropped + exempted_extra,
         "unexempted_missing": unexempted_missing,
         "unexempted_extra": unexempted_extra,
@@ -981,6 +996,18 @@ def check_page_parity(target: Path, exemptions: dict[str, Any]) -> dict[str, Any
         "drop_explanations_available": expectation["explanations_available"],
         "drop_explanation_source": expectation["explanation_source"],
     }
+
+
+def _is_engine_placeholder_page(page: dict[str, str]) -> bool:
+    """Whether an emitted page is the engine's zero-page crash-guard placeholder.
+
+    Both engine constants are required. Either alone would let a hand-authored page be swallowed:
+    a real page can be titled "No visuals rebuilt", and a report can carry a ``page-empty*`` id that
+    the author later filled in.
+    """
+    return page.get("name") == ENGINE_PLACEHOLDER_PAGE_NAME and str(page.get("id", "")).startswith(
+        ENGINE_PLACEHOLDER_PAGE_ID_PREFIX
+    )
 
 
 def _parity_deltas(

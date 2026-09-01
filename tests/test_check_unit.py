@@ -289,14 +289,18 @@ def test_expected_pages_counts_orphan_worksheets_not_just_dashboards(tmp_path: P
 
 
 def test_expected_pages_finds_placed_worksheets_at_any_zone_depth(tmp_path: Path) -> None:
-    """Kills: a non-recursive zone walk that calls every nested sheet an orphan."""
+    """Kills: a non-recursive zone walk that calls every nested sheet an orphan.
+
+    The loose sheet is here so the assertion cannot also be satisfied by the old dashboards-only
+    rule: that rule returns ``["Exec"]``, which is neither this expectation nor the flat-walk one.
+    """
     _write_full_spec(
         tmp_path,
         dashboards=[("Exec", ["ws.deep"])],
-        worksheets=[("ws.deep", "Deep Sheet")],
+        worksheets=[("ws.deep", "Deep Sheet"), ("ws.loose", "Loose Sheet")],
     )
 
-    assert [page["name"] for page in cu.expected_pages(tmp_path) or []] == ["Exec"]
+    assert [page["name"] for page in cu.expected_pages(tmp_path) or []] == ["Exec", "Loose Sheet"]
 
 
 def test_workbook_with_no_dashboards_expects_its_worksheets(tmp_path: Path) -> None:
@@ -488,6 +492,68 @@ def test_underscore_oracle_directory_is_still_discovered(tmp_path: Path) -> None
 
     assert "_oracle" in {path.name for path in cu._oracle_dirs(tmp_path, None)}  # pylint: disable=protected-access
     assert cu.check_oracle_coverage(tmp_path, None, None)["status"] == cu.STATUS_PASS
+
+
+def test_engine_crash_guard_placeholder_is_not_an_extra_page(tmp_path: Path) -> None:
+    """Kills: calling the engine's zero-page crash-guard page an unaccounted-for extra.
+
+    twb_to_pbir.py:14719-14727 ships ONE synthetic visual-less page when every candidate was
+    dropped, because a PBIR with an empty pageOrder crashes Power BI Desktop on open. Measured: 2 of
+    44 workbooks in a real 2.339.0 estate run do this, and both failed page parity without this.
+    """
+    _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "Sheet 1")])
+    report = tmp_path / "fabric" / "Book.Report"
+    pages = report / "definition" / "pages"
+    (pages / "page-emptyb0302807").mkdir(parents=True)
+    (pages / "page-emptyb0302807" / "page.json").write_text(
+        json.dumps({"name": "page-emptyb0302807", "displayName": "No visuals rebuilt"}), encoding="utf-8"
+    )
+    (pages / "pages.json").write_text(json.dumps({"pageOrder": ["page-emptyb0302807"]}), encoding="utf-8")
+    _write_viz_fidelity_handover(
+        tmp_path,
+        [
+            {
+                "worksheet": "Sheet 1",
+                "visual_type": "unsupported",
+                "status": "warned",
+                "reason": "manual attention required: mark class 'Shape' / shelf layout not supported",
+            }
+        ],
+    )
+
+    parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
+
+    assert parity["status"] == cu.STATUS_PASS
+    assert [page["name"] for page in parity["engine_placeholder_pages"]] == ["No visuals rebuilt"]
+    assert parity["unexempted_extra"] == []
+
+
+def test_a_real_page_titled_like_the_placeholder_is_still_a_page(tmp_path: Path) -> None:
+    """The placeholder identity needs BOTH engine constants, so a hand-authored page is not eaten."""
+    _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A")])
+    _write_report(tmp_path, ["A", "No visuals rebuilt"])
+
+    parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
+
+    assert parity["engine_placeholder_pages"] == [], "p2 is an ordinary page id, not page-empty*"
+    assert parity["status"] == cu.STATUS_PRECONDITION_FAILED
+    assert [page["name"] for page in parity["unexempted_extra"]] == ["No visuals rebuilt"]
+
+
+def test_filled_in_placeholder_page_counts_as_a_real_page(tmp_path: Path) -> None:
+    """The other half of the same rule: a page-empty* id that now carries real content is a page."""
+    _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A")])
+    pages = tmp_path / "fabric" / "Book.Report" / "definition" / "pages"
+    (pages / "page-emptyb0302807").mkdir(parents=True)
+    (pages / "page-emptyb0302807" / "page.json").write_text(
+        json.dumps({"name": "page-emptyb0302807", "displayName": "A"}), encoding="utf-8"
+    )
+    (pages / "pages.json").write_text(json.dumps({"pageOrder": ["page-emptyb0302807"]}), encoding="utf-8")
+
+    parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
+
+    assert parity["engine_placeholder_pages"] == [], "the author filled it in; it is no longer a placeholder"
+    assert parity["status"] == cu.STATUS_PASS
 
 
 def test_page_count_mismatch_is_a_precondition_and_stops_before_oracle(tmp_path: Path) -> None:
