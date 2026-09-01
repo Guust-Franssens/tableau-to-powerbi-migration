@@ -1916,20 +1916,39 @@ def test_no_certification_is_written_in_another_interpreters_unparse_dialect():
 def test_the_unparse_dialect_detector_can_actually_fire():
     """Positive control: an assertion that cannot fail is not coverage.
 
-    The literal below is the CI interpreter's rendering of the expression that broke -- an f-string
-    reusing its outer quote around a nested literal, which PEP 701 permits from 3.12. It parses here
-    and unparses to the OTHER form, so the detector separates the two dialects rather than merely
-    accepting whatever it is given.
+    ⚠️ And this control's FIRST version was itself dialect-dependent -- the exact defect it exists to
+    guard. It hard-coded the local interpreter's rendering of a nested-literal f-string and asserted
+    the other spelling was non-normal, which is true on 3.13 and false on the CI interpreter, where
+    that spelling IS the normal form. It went red on CI for the opposite reason to the bug it was
+    added for. So the property is asserted RELATIONALLY here, never against a remembered spelling.
+
+    Part 1 holds on every interpreter and is the load-bearing half: `ast.unparse` normalises a
+    double-quoted string to a single-quoted one, so the detector demonstrably separates two spellings
+    of the same expression rather than accepting whatever it is handed.
+
+    Part 2 pins the specific hazard, and is guarded because it cannot be EXPRESSED before 3.12: quote
+    reuse inside an f-string is PEP 701, so on 3.11 the second spelling is a SyntaxError rather than a
+    dialect. Where both spellings parse they must mean the same thing and exactly one must be normal.
     """
-    ci_dialect = "', '.join((f'{kind}={status}' for kind, status in items))"
-    assert ast.unparse(ast.parse(ci_dialect, mode="eval").body) == ci_dialect, (
-        "this control no longer differs between dialects; re-point it at an expression that does"
+    assert ast.unparse(ast.parse("'plain'", mode="eval").body) == "'plain'"
+    assert ast.unparse(ast.parse('"plain"', mode="eval").body) != '"plain"', (
+        "unparse no longer normalises quoting, so this detector cannot separate two spellings at all"
     )
-    nested = "f'{kind}={status or 'absent'}'"
-    assert ast.unparse(ast.parse(nested, mode="eval").body) != nested, (
-        "the nested-literal f-string now round-trips, so the hazard this gate exists for is gone "
-        "-- re-verify against the CI interpreter before deleting the gate"
-    )
+
+    spellings = ["f\"{k}={s or 'x'}\"", "f'{k}={s or 'x'}'"]
+    parsed = []
+    for spelling in spellings:
+        try:
+            parsed.append((spelling, ast.unparse(ast.parse(spelling, mode="eval").body)))
+        except SyntaxError:  # pre-PEP-701 interpreter: the hazard cannot be written down
+            continue
+    assert parsed, "the double-quoted spelling must parse on every supported interpreter"
+    assert len({normal for _src, normal in parsed}) == 1, "both spellings must denote the same expression"
+    if len(parsed) == 2:
+        assert sum(src == normal for src, normal in parsed) == 1, (
+            "exactly one spelling must be this interpreter's normal form -- if neither or both are, "
+            "the nested-literal hazard has changed shape and the gate above needs re-verifying"
+        )
 
 
 # ---------------------------------------------- the manifest SINK, on the one path that reaches it
