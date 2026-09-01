@@ -179,6 +179,7 @@ check_navigation_index.py
 check_path_ceiling.py
 check_pbir_layout.py
 check_pbir_valid.py
+check_reference_readiness.py
 check_relationship_health.py
 check_sqlproxy_connections.py
 check_stub_measures.py
