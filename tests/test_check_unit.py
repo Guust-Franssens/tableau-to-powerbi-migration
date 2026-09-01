@@ -195,13 +195,299 @@ def test_brownfield_partial_pbip_reports_evidenced_and_missing_phases() -> None:
     assert "handover queue: NOT_EVIDENCED (no handover/*.json slices found)" in rendered
 
 
-def test_brownfield_canonical_bundle_stays_quiet() -> None:
-    """A recognisable bundle does not gain brownfield guidance noise."""
+def test_brownfield_canonical_bundle_proposes_no_reorganisation() -> None:
+    """A recognisable bundle is never told to reorganise itself.
+
+    This test used to assert the whole BROWNFIELD block was absent, and it passed only because
+    ``page-parity`` raised a FALSE ``PRECONDITION_FAILED`` on this fixture (its ``migration-spec.json``
+    is the placeholder ``{"workbook": ...}``, which declares no pages, so "0 expected vs 1 emitted"
+    read as an extra page) and the run aborted before any NOT_CHECKED row existed. ``_render_brownfield``
+    deliberately prints the inventory whenever a check reports a missing input - a NOT_CHECKED row
+    often IS a misplaced input - so no correct page-parity can keep that block hidden here. What the
+    test actually cared about is asserted directly instead: recognised shape, and no reorganisation
+    plan.
+    """
     fixture = REPO_ROOT / "tests" / "fixtures" / "check-gates-dirty"
 
-    rendered = cu.render(cu.run_all(fixture))
+    report = cu.run_all(fixture)
+    rendered = cu.render(report)
 
-    assert "BROWNFIELD DISCOVERY" not in rendered
+    assert report["brownfield"]["recognized_target_shape"] is True
+    assert report["brownfield"]["plan"] == []
+    assert "reorganisation plan (not applied): no recognised artifacts to place" in rendered
+    parity = next(check for check in report["checks"] if check["id"] == "page-parity")
+    assert parity["status"] == cu.STATUS_NOT_CHECKED, "a placeholder spec declares nothing; that is not an extra page"
+    assert report["stopped_after"] is None
+
+
+def _write_full_spec(
+    unit: Path,
+    dashboards: list[tuple[str, list[str]]],
+    worksheets: list[tuple[str, str]],
+) -> None:
+    """Write a migration-spec with dashboard zone trees, as parse_tableau.py emits them.
+
+    ``dashboards`` is ``[(dashboard name, [worksheet ids placed on it])]`` and ``worksheets`` is
+    ``[(worksheet id, worksheet name)]``. The placed ids are nested one level deep so the walk is
+    exercised on a tree, not a flat list - the real parser nests zones several layers.
+    """
+    unit.mkdir(parents=True, exist_ok=True)
+    spec_dashboards = []
+    for index, (name, placed) in enumerate(dashboards):
+        children = [
+            {"id": f"z{position}", "worksheet_id": ws_id, "children": []} for position, ws_id in enumerate(placed)
+        ]
+        spec_dashboards.append(
+            {
+                "id": f"dash.{index}",
+                "name": name,
+                "zones": {
+                    "id": "root",
+                    "worksheet_id": None,
+                    "children": [{"id": "flow", "worksheet_id": None, "children": children}],
+                },
+            }
+        )
+    (unit / "migration-spec.json").write_text(
+        json.dumps(
+            {
+                "dashboards": spec_dashboards,
+                "worksheets": [{"id": ws_id, "name": name} for ws_id, name in worksheets],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_viz_fidelity_handover(
+    unit: Path, rows: list[dict[str, object]], pbip_warnings: list[str] | None = None
+) -> None:
+    """Handover slice carrying engine-declared per-page rebuild warnings."""
+    workbook: dict[str, object] = {"name": "Unit", "viz_fidelity": rows}
+    if pbip_warnings is not None:
+        workbook["pbip_warnings"] = pbip_warnings
+    _write_handover(unit, workbook)
+
+
+def test_expected_pages_counts_orphan_worksheets_not_just_dashboards(tmp_path: Path) -> None:
+    """Kills: the dashboards-only page rule the engine has never used.
+
+    twb_to_pbir.py (2.339.0) emits a page per dashboard AND a page per worksheet that no dashboard
+    placed (:14557-14558 skip-if-placed, :14709 page_order.append). Measured on a real 2.339.0
+    estate run, 19 of 43 workbooks have ZERO dashboards, so the old rule returned an empty expected
+    set for nearly half the estate.
+    """
+    _write_full_spec(
+        tmp_path,
+        dashboards=[("Exec", ["ws.placed"])],
+        worksheets=[("ws.placed", "Placed Sheet"), ("ws.loose", "Loose Sheet")],
+    )
+
+    names = [page["name"] for page in cu.expected_pages(tmp_path) or []]
+
+    assert names == ["Exec", "Loose Sheet"], "a dashboard's own sheets are not pages; a loose sheet is"
+
+
+def test_expected_pages_finds_placed_worksheets_at_any_zone_depth(tmp_path: Path) -> None:
+    """Kills: a non-recursive zone walk that calls every nested sheet an orphan."""
+    _write_full_spec(
+        tmp_path,
+        dashboards=[("Exec", ["ws.deep"])],
+        worksheets=[("ws.deep", "Deep Sheet")],
+    )
+
+    assert [page["name"] for page in cu.expected_pages(tmp_path) or []] == ["Exec"]
+
+
+def test_workbook_with_no_dashboards_expects_its_worksheets(tmp_path: Path) -> None:
+    """A dashboard-less workbook is the common engine case, not an empty expectation."""
+    _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A"), ("ws.b", "B")])
+    _write_report(tmp_path, ["A", "B"])
+
+    parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
+
+    assert parity["status"] == cu.STATUS_PASS
+    assert parity["expected_count"] == 2
+
+
+def test_engine_declared_drop_is_explained_and_does_not_fail_parity(tmp_path: Path) -> None:
+    """Kills: failing a unit for a page the engine dropped for a reason it published."""
+    _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A"), ("ws.b", "B")])
+    _write_report(tmp_path, ["A"])
+    _write_viz_fidelity_handover(
+        tmp_path,
+        [
+            {"worksheet": "A", "visual_type": "bar", "status": "rebuilt", "reason": None},
+            {
+                "worksheet": "B",
+                "visual_type": "unsupported",
+                "status": "warned",
+                "reason": "manual attention required: mark class 'Bar' / shelf layout not supported -> no visual",
+            },
+        ],
+    )
+
+    parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
+
+    assert parity["status"] == cu.STATUS_PASS
+    assert [page["name"] for page in parity["dropped_explained"]] == ["B"]
+    assert parity["dropped_unexplained"] == []
+    assert parity["effective_expected_count"] == 1
+
+
+def test_drop_reasons_come_from_viz_fidelity_not_pbip_warnings(tmp_path: Path) -> None:
+    """Kills: attributing drops from pbip_warnings[], which carries no page name at all.
+
+    pbip_warnings[] is a flat list of prefixed strings with no scope/name field, so a warning there
+    cannot be mapped back to a page. Measured on a real 2.339.0 estate run: 193 pbip_warnings
+    entries across 43 workbooks explained ZERO of the 21 dropped candidates.
+    """
+    _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A"), ("ws.b", "B")])
+    _write_report(tmp_path, ["A"])
+    _write_viz_fidelity_handover(
+        tmp_path,
+        [{"worksheet": "A", "visual_type": "bar", "status": "rebuilt", "reason": None}],
+        pbip_warnings=["manual attention required: mark class 'Bar' / shelf layout not supported -> no visual emitted"],
+    )
+
+    parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
+
+    assert parity["status"] == cu.STATUS_PRECONDITION_FAILED
+    assert [page["name"] for page in parity["dropped_unexplained"]] == ["B"]
+    assert parity["dropped_explained"] == []
+
+
+def test_warned_but_emitted_page_is_not_treated_as_a_drop(tmp_path: Path) -> None:
+    """Kills: subtracting every warned worksheet, which hides a genuinely missing page.
+
+    Most warned worksheets ARE emitted (measured: 'Age' in the HR Dashboard estate slice is warned
+    and is a page). Only a candidate ABSENT from the emitted pages can be an explained drop.
+    """
+    _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A"), ("ws.b", "B")])
+    _write_report(tmp_path, ["A"])
+    _write_viz_fidelity_handover(
+        tmp_path,
+        [
+            {"worksheet": "A", "visual_type": "bar", "status": "warned", "reason": "manual attention required: labels"},
+        ],
+    )
+
+    parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
+
+    assert parity["status"] == cu.STATUS_PRECONDITION_FAILED
+    assert parity["dropped_explained"] == [], "A was emitted, so its warning explains no drop"
+    assert [page["name"] for page in parity["dropped_unexplained"]] == ["B"]
+
+
+def test_missing_handover_says_drop_reasons_were_unavailable(tmp_path: Path) -> None:
+    """'No declared reason' and 'could not read the declarations' are different states."""
+    _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A"), ("ws.b", "B")])
+    _write_report(tmp_path, ["A"])
+
+    parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
+
+    assert parity["status"] == cu.STATUS_PRECONDITION_FAILED
+    assert parity["drop_explanations_available"] is False
+    assert parity["drop_explanation_source"] == "handover viz_fidelity[]"
+    assert "no handover slice was readable" in parity["detail"]
+
+
+def test_oracle_coverage_without_an_expected_set_is_blocking_not_a_pass(tmp_path: Path) -> None:
+    """Kills the circular denominator: ``expected_pages(target) or actual_pages(target)``.
+
+    With no migration-spec.json the old code graded the artifact against ITSELF - every emitted page
+    matched its own reference row and coverage reported a perfect PASS regardless of what was
+    missing. There is no fallback now.
+    """
+    _write_report(tmp_path, ["Executive", "Detail"])
+    _write_reference_manifest(tmp_path, ["Executive", "Detail"])
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["status"] == cu.STATUS_NOT_CHECKED
+    assert oracle["pages"] == 0
+    assert oracle["visual_present"] == 0
+    assert "cannot assess oracle coverage" in oracle["detail"]
+    assert "no migration-spec.json found" in oracle["detail"]
+
+
+def test_unassessable_oracle_coverage_fails_the_whole_run_closed(tmp_path: Path) -> None:
+    """The unassessable case must reach a non-zero exit, not just a quiet row."""
+    _write_report(tmp_path, ["Executive"])
+    _write_reference_manifest(tmp_path, ["Executive"])
+
+    report = cu.run_all(tmp_path, scope=cu.SCOPE_REPORT)
+
+    assert report["exit_code"] == 2, "an unestablished expected set is NOT_CHECKED, never a pass"
+    assert report["status"] == cu.STATUS_NOT_CHECKED
+    oracle = next(check for check in report["checks"] if check["id"] == "oracle-coverage")
+    assert oracle["status"] == cu.STATUS_NOT_CHECKED
+
+
+def test_spec_declaring_no_pages_cannot_be_graded(tmp_path: Path) -> None:
+    """A spec with neither dashboards nor worksheets is unassessable, not a zero-work pass."""
+    (tmp_path / "migration-spec.json").write_text(json.dumps({"workbook": "Book"}), encoding="utf-8")
+    _write_report(tmp_path, ["Executive"])
+    _write_reference_manifest(tmp_path, ["Executive"])
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["status"] == cu.STATUS_NOT_CHECKED
+    assert "declares no dashboards and no worksheets" in oracle["detail"]
+
+
+def test_oracle_coverage_excludes_engine_declared_drops_from_the_denominator(tmp_path: Path) -> None:
+    """A page the engine dropped has nothing to hold against a reference; it is not a coverage hole."""
+    _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A"), ("ws.b", "B")])
+    _write_report(tmp_path, ["A"])
+    _write_reference_manifest(tmp_path, ["A"])
+    _write_viz_fidelity_handover(
+        tmp_path,
+        [
+            {
+                "worksheet": "B",
+                "visual_type": "unsupported",
+                "status": "warned",
+                "reason": "manual attention required: empty worksheet -> nothing to rebuild",
+            }
+        ],
+    )
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["status"] == cu.STATUS_PASS
+    assert oracle["pages"] == 1
+    assert [page["name"] for page in oracle["excluded_explained_drops"]] == ["B"]
+
+
+def test_oracle_capture_is_discovered_under_the_canonical_run_layout(tmp_path: Path) -> None:
+    """Kills: looking only for `_oracle/` and missing `_runs/<NNN>-<slug>/oracle/`.
+
+    work_dirs.CANONICAL_SUBDIRS puts a run's capture in a sibling `oracle/` beside `bundle/`, while
+    capture_tableau_oracle.py is documented as `--out _oracle`. Both are real; discovery must accept
+    both or a capture that exists reads as "no oracle manifest found".
+    """
+    run_root = tmp_path / "042-unit"
+    bundle = run_root / "bundle"
+    _write_spec(bundle, ["Executive"])
+    _write_report(bundle, ["Executive"])
+    _write_oracle_manifest(run_root, ["Executive"])
+    (run_root / "_oracle").rename(run_root / "oracle")
+
+    assert "oracle" in {path.name for path in cu._oracle_dirs(bundle, None)}  # pylint: disable=protected-access
+    oracle = cu.check_oracle_coverage(bundle, None, None)
+    assert oracle["status"] == cu.STATUS_PASS
+    assert oracle["grade"] == "layout/text only (oracle capture, default view state)"
+
+
+def test_underscore_oracle_directory_is_still_discovered(tmp_path: Path) -> None:
+    """The documented `--out _oracle` convention keeps working beside the canonical layout."""
+    _write_spec(tmp_path, ["Executive"])
+    _write_report(tmp_path, ["Executive"])
+    _write_oracle_manifest(tmp_path, ["Executive"])
+
+    assert "_oracle" in {path.name for path in cu._oracle_dirs(tmp_path, None)}  # pylint: disable=protected-access
+    assert cu.check_oracle_coverage(tmp_path, None, None)["status"] == cu.STATUS_PASS
 
 
 def test_page_count_mismatch_is_a_precondition_and_stops_before_oracle(tmp_path: Path) -> None:
