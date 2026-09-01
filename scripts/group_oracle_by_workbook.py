@@ -68,6 +68,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+# The ONE census, shared with the capture rather than re-derived here: the two manifests must agree
+# on what "no establishable render" means, and a second copy of that rule is how they drift apart.
+# This is a pure function over records -- it makes no request and needs no session -- so importing it
+# keeps this script the offline, network-free step its module docstring promises.
+from tableau_oracle_manifest import render_unestablished  # noqa: E402  # pylint: disable=wrong-import-position
+
 LOG = logging.getLogger("group-oracle")
 
 MANIFEST_NAME = "oracle-manifest.json"
@@ -327,6 +334,12 @@ def subset_manifest(manifest: dict[str, Any], workbook: str, views: list[dict[st
         )
     ]
     not_copied = sum(1 for v in views for kind, _ in RENDER_LEGS if status_of(v, kind) == NOT_COPIED_STATUS)
+    # ⚠️ Recomputed over the GROUPED views, not carried from the capture (#423). This is the manifest
+    # a fidelity review reads, and it must answer "for which pages of THIS workbook can no visual
+    # finding be made" -- which is not the capture-wide answer, and is not the capture's answer
+    # either: a leg the capture obtained but this grouping could not place (`not_copied`) means the
+    # reference folder does not hold that image, so the view IS unestablished here.
+    unestablished = render_unestablished(views, frozenset(manifest.get("requested_renders") or []))
     subset = {
         "schema": "tableau-oracle-workbook/1",
         "grouped_from": manifest.get("schema"),
@@ -341,6 +354,8 @@ def subset_manifest(manifest: dict[str, Any], workbook: str, views: list[dict[st
         "data_empty": len([v for v in ok if (v.get("data") or {}).get("row_count") == 0]),
         "credential_blocked": len(blocked),
         "failed": len(failed),
+        "render_unestablished": len(unestablished),
+        "render_unestablished_views": unestablished,
         # Legs the CAPTURE obtained but this grouping could not place. Separate from `failed` so a
         # reader knows to re-run the (free) grouping rather than the (metered) capture.
         "not_copied": not_copied,

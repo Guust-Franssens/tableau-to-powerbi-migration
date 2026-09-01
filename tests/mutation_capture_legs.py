@@ -316,6 +316,37 @@ def merge_one(candidates, roots):
 g._merge_one_view = merge_one
 """,
     ),
+    "workbook-census-omitted": (
+        BATCH,
+        """
+import group_oracle_by_workbook as g
+_orig = g.subset_manifest
+def subset(manifest, workbook, views):
+    out = _orig(manifest, workbook, views)
+    # The per-workbook manifest stops answering "which pages of THIS workbook have no reference".
+    out.pop("render_unestablished", None)
+    out.pop("render_unestablished_views", None)
+    return out
+g.subset_manifest = subset
+""",
+    ),
+    "workbook-census-reads-the-capture-not-the-grouping": (
+        BATCH,
+        """
+import group_oracle_by_workbook as g
+_orig = g.subset_manifest
+def subset(manifest, workbook, views):
+    out = _orig(manifest, workbook, views)
+    # Recomputes from the CAPTURE's statuses instead of the GROUPED ones, so a leg the capture
+    # obtained but this grouping could not place still reads as covered.
+    capture_views = [v for v in manifest.get("views", []) if v.get("workbook_name") == workbook]
+    census = g.render_unestablished(capture_views, frozenset(manifest.get("requested_renders") or []))
+    out["render_unestablished"] = len(census)
+    out["render_unestablished_views"] = census
+    return out
+g.subset_manifest = subset
+""",
+    ),
     # -------------------------------------------------------------- discriminating controls
     "control-cosmetic-log-wording": (
         LEGS,

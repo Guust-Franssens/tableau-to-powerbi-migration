@@ -351,6 +351,67 @@ def test_a_single_dated_capture_reports_captured_at_as_the_basis(tmp_path):
     assert _grouped(migrations)["merge_order_basis"] == "captured_at"
 
 
+def test_the_workbook_manifest_says_which_views_have_no_establishable_render(tmp_path):
+    """⚠️ The per-workbook manifest is what a fidelity review actually opens, and it must answer
+    "for which pages of THIS workbook can no visual finding be made". The capture-wide count cannot:
+    it spans every workbook, and it is computed BEFORE grouping, so it cannot see a leg the capture
+    obtained but the grouping could not place."""
+    oracle_dir = tmp_path / "_oracle"
+    batch = _batch(
+        oracle_dir,
+        "only",
+        [
+            _view(LUID, "Daily Monitoring", data="ok", image="ok", captured_at="2026-08-18T14:46:00Z"),
+            _view(
+                OTHER,
+                "Availability Summary by Tail",
+                data="transient",
+                image="transient",
+                captured_at="2026-08-18T14:46:00Z",
+            ),
+        ],
+    )
+    migrations = _migrations(tmp_path)
+    grp.run([batch], migrations, dry_run=False)
+
+    grouped = _grouped(migrations)
+    assert grouped["render_unestablished"] == 1
+    named = grouped["render_unestablished_views"]
+    assert [v["view_name"] for v in named] == ["Availability Summary by Tail"]
+    assert named[0]["renders"] == {"png": "transient"}
+
+
+def test_an_artifact_the_grouping_could_not_place_counts_as_unestablished(tmp_path):
+    """The half the capture-wide count structurally cannot see. The capture says `image: ok`; the
+    file is gone, so the reference folder does NOT hold that image -- and a reviewer reading only
+    this manifest must not be told the page is covered."""
+    oracle_dir = tmp_path / "_oracle"
+    batch = _batch(
+        oracle_dir,
+        "only",
+        [_view(LUID, "Daily Monitoring", data="ok", image="ok", captured_at="2026-08-18T14:46:00Z")],
+    )
+    (batch / "images" / f"{LUID}.png").unlink()
+
+    migrations = _migrations(tmp_path)
+    assert grp.run([batch], migrations, dry_run=False) == 1
+
+    grouped = _grouped(migrations)
+    assert grouped["image_ok"] == 0
+    assert grouped["render_unestablished"] == 1
+    assert grouped["render_unestablished_views"][0]["renders"] == {"png": grp.NOT_COPIED_STATUS}
+
+
+def test_a_workbook_whose_renders_all_landed_reports_zero_unestablished(tmp_path):
+    """Positive control: the field must be able to be zero, or it is a view count in disguise."""
+    batches = _three_batches(tmp_path)
+    migrations = _migrations(tmp_path)
+    grp.run(batches, migrations, dry_run=False)
+    grouped = _grouped(migrations)
+    assert grouped["render_unestablished"] == 0
+    assert grouped["render_unestablished_views"] == []
+
+
 # ------------------------------------------------------------------------------- CLI and compatibility
 
 
