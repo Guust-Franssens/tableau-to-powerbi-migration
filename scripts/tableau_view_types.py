@@ -98,7 +98,11 @@ def view_types(session: Any) -> tuple[dict[str, str], str | None]:
     return _mapping_from(payload)
 
 
-def _mapping_from(payload: dict[str, Any]) -> tuple[dict[str, str], str | None]:
+# Nine returns, and every one is a DIFFERENT refusal reason -- which is the function's whole output.
+# Folding them into one exit means accumulating a reason in a variable, and then "which refusal won"
+# becomes a question the reader has to answer by tracing, rather than by reading the line that
+# refused. Waived deliberately rather than restructured, as `_request`'s too-many-arguments is.
+def _mapping_from(payload: dict[str, Any]) -> tuple[dict[str, str], str | None]:  # pylint: disable=too-many-return-statements
     """Build the LUID -> kind mapping, refusing the WHOLE answer on any malformed part.
 
     Every ``return {}, reason`` here is a refusal of the entire response, never of one node. Skipping
