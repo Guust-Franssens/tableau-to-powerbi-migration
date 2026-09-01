@@ -738,11 +738,18 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
     # convention someone has to remember. See the module docstring.
     ("scripts/tableau_luid_census.py", "_emit"): {
         # ⚠️ `label` was certified FIXED-VOCABULARY unconditionally, and nothing enforced it. Measured
-        # at a83340d: `_emit("SYNTHETIC_CUSTOMER_IDENTIFIER_402", 1)` printed the identifier
-        # verbatim, and injecting a RESPONSE-DERIVED label into `main` still produced
-        # `uncertified_sinks == []` - the certification was the only thing standing there, and it was
-        # a claim rather than a check. It is now the same kind of claim `value` always was: true
-        # because the line above REFUSES anything else.
+        # at a83340d: `_emit("SYNTHETIC_CUSTOMER_IDENTIFIER_402", 1)` printed the identifier verbatim.
+        # It is now the same kind of claim `value` always was: true because the line above REFUSES
+        # anything else.
+        #
+        # ⚠️ Be precise about what this gate can and cannot see here, because the loose version of it
+        # is wrong. Intra-module propagation DOES carry a tainted argument into `_emit`: delete these
+        # entries and the gate reports `label`, `value` AND `type(value).__name__` inside the callee.
+        # What it cannot do is report the leak at the CALL SITE, because `_emit` is not one of its
+        # recognised sink calls -- which is why injecting a response-derived label into `main` still
+        # produced `uncertified_sinks == []`. So the certification DOCUMENTS the enforcement; the
+        # runtime allowlist IS the enforcement. Neither replaces the other, and a mutation proving
+        # rejection must delete the runtime check rather than expect a static finding.
         "label": (
             "REFUSED-AT-SEAM: `_emit` raises SystemExit unless `label` is in `LABELS`, a frozenset "
             "built from this module's own BUCKETS/SITE_BUCKETS/FIXED_LABELS literals. A "

@@ -1043,10 +1043,21 @@ def test_no_branch_quotes_the_server_back_into_its_reason(responses):
 
 
 @pytest.mark.parametrize(
-    "payload",
-    [None, [], "nope", 7, 3.5, True, {"data": None}, {"data": []}, {"data": "x"}, {"data": {"workbooks": 1}}],
+    "payload, guard",
+    [
+        (None, "response was NoneType, not an object"),
+        ([], "response was list, not an object"),
+        ("nope", "response was str, not an object"),
+        (7, "response was int, not an object"),
+        (3.5, "response was float, not an object"),
+        (True, "response was bool, not an object"),
+        ({"data": None}, "`data` was NoneType, not an object"),
+        ({"data": []}, "`data` was list, not an object"),
+        ({"data": "x"}, "`data` was str, not an object"),
+        ({"data": {"workbooks": 1}}, "`workbooks` was int, not a list"),
+    ],
 )
-def test_parse_payload_accepts_arbitrary_decoded_json(payload):
+def test_parse_payload_accepts_arbitrary_decoded_json(payload, guard):
     """⚠️ The shared seam is TOTAL, and that is a correctness requirement rather than politeness.
 
     It was written for a `dict`, which was true only because its one caller pre-validated in
@@ -1058,6 +1069,10 @@ def test_parse_payload_accepts_arbitrary_decoded_json(payload):
     assert mapping == {}
     assert unavailable
     assert TAINT not in unavailable
+    # ⚠️ WHICH guard refused, not merely that one did. Several fail-closed guards satisfy the bare
+    # assertion, so without this a later guard can quietly take over and the case stops covering
+    # its own subject -- which has happened five times on this PR.
+    assert guard in unavailable, f"expected a refusal mentioning {guard!r}, got {unavailable!r}"
 
 
 def test_a_transport_exception_is_reported_by_TYPE_not_by_message():

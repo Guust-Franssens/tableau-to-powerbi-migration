@@ -295,6 +295,38 @@ CENSUS_MUTATIONS.update(
         "census-envelope-assumed-to-be-a-dict-again",
     }
 )
+# ⚠️ The three label mutations exercise the RUNTIME allowlist, not a static call-site finding.
+# The gate CAN see `_emit`'s parameters through intra-module propagation - removing the
+# certification produces findings for `label`, `value` and `type(value).__name__` inside the
+# callee - but it is not a recognised sink CALL, so it cannot report a leak at the call site.
+# The certification therefore documents the enforcement; the allowlist IS the enforcement, and
+# these mutations must (and do) delete the runtime check rather than expect a static finding.
+# ⚠️ Proves the `guard` column is load-bearing rather than decorative. This mutation leaves every
+# other assertion in those tables true -- empty mapping, a reason present, CANNOT-TELL, exit 2,
+# assessable 0 -- and changes only WHICH guard refused. Nothing but the guard assertion can
+# catch it, which is the countermeasure to this module's systematic vacuity: several fail-closed
+# guards all satisfy a broad 'it refused', so the guard under test never has to be the reason.
+MUTATIONS.update(
+    {
+        "guard-column-is-load-bearing-seam": '\nimport tableau_view_types as vt\n# Every fail-closed guard replaced by ONE generic refusal. Still refuses, still empty, still a\n# reason -- only the REASON\'s identity is lost.\nvt.parse_payload = lambda payload: ({}, "metadata api response refused")\n',
+        "guard-column-is-load-bearing-census": '\nimport tableau_view_types as vt\n# Every fail-closed guard replaced by ONE generic refusal. Still refuses, still empty, still a\n# reason -- only the REASON\'s identity is lost.\nvt.parse_payload = lambda payload: ({}, "metadata api response refused")\n',
+    }
+)
+CENSUS_MUTATIONS.add("guard-column-is-load-bearing-census")
+INTENDED.update(
+    {
+        "guard-column-is-load-bearing-seam": "tests/test_capture_tableau_oracle.py::test_parse_payload_accepts_arbitrary_decoded_json",
+        "guard-column-is-load-bearing-census": "tests/test_tableau_luid_census.py::test_a_malformed_envelope_cannot_bypass_the_guarantees",
+    }
+)
+
+INTENDED.update(
+    {
+        "census-label-allowlist-removed": "tests/test_tableau_luid_census.py::test_emit_refuses_a_label_this_module_did_not_author",
+        "census-label-allowlist-case-folded": "tests/test_tableau_luid_census.py::test_emit_refuses_a_label_this_module_did_not_author",
+        "census-label-refusal-echoes-the-label": "tests/test_tableau_luid_census.py::test_the_label_refusal_does_not_echo_the_label_it_rejected",
+    }
+)
 INTENDED.update(
     {
         "seam-requires-a-dict-envelope-again": "tests/test_capture_tableau_oracle.py::test_parse_payload_accepts_arbitrary_decoded_json",

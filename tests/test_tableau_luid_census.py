@@ -409,24 +409,30 @@ def test_the_recorded_live_measurement_replays_to_the_same_verdict(run_census, c
 
 
 @pytest.mark.parametrize(
-    "payload, why",
+    "payload, why, guard",
     [
-        (None, "a top-level null"),
-        ([{"data": {"workbooks": []}}], "a top-level list"),
-        ("nope", "a top-level string"),
-        (7, "a top-level int"),
-        ({"data": None}, "`data` is null"),
-        ({"data": []}, "`data` is a list"),
-        ({"data": "nope"}, "`data` is a string"),
-        ({"extensions": {}}, "`data` is absent"),
-        ({"data": {"workbooks": None}}, "`workbooks` is null"),
-        ({"data": {"workbooks": {"dashboards": []}}}, "`workbooks` is a dict"),
-        ({"data": {}}, "`workbooks` is absent"),
+        (None, "a top-level null", "response was NoneType, not an object"),
+        ([{"data": {"workbooks": []}}], "a top-level list", "response was list, not an object"),
+        ("nope", "a top-level string", "response was str, not an object"),
+        (7, "a top-level int", "response was int, not an object"),
+        ({"data": None}, "`data` is null", "`data` was NoneType, not an object"),
+        ({"data": []}, "`data` is a list", "`data` was list, not an object"),
+        ({"data": "nope"}, "`data` is a string", "`data` was str, not an object"),
+        ({"extensions": {}}, "`data` is absent", "`data` was NoneType, not an object"),
+        ({"data": {"workbooks": None}}, "`workbooks` is null", "`workbooks` was NoneType, not a list"),
+        ({"data": {"workbooks": {"dashboards": []}}}, "`workbooks` is a dict", "`workbooks` was dict, not a list"),
+        ({"data": {}}, "`workbooks` is absent", "`workbooks` was NoneType, not a list"),
     ],
 )
-def test_a_malformed_envelope_cannot_bypass_the_guarantees(payload, why, run_census, capsys, tmp_path):
+def test_a_malformed_envelope_cannot_bypass_the_guarantees(payload, why, guard, run_census, capsys, tmp_path):
     """⚠️ Each of these once escaped as an uncaught TypeError or AttributeError, BEFORE any verdict,
     exit code or assessability flag existed - so a server-controlled body bypassed every guarantee.
+
+    ⚠️ `guard` is not decoration. This code is SYSTEMATICALLY prone to vacuity because several
+    fail-closed guards all satisfy a broad "it refused" assertion, so the guard under test never has
+    to be the reason - five fixtures on this PR have already been made vacuous that way by a later
+    guard. Four new envelope guards in fail-closed-heavy code is four fresh chances, so each row
+    names the refusal it must provoke, measured rather than guessed.
     """
     out = tmp_path / "census.json"
     code = run_census(payload, json_out=out)
@@ -434,6 +440,10 @@ def test_a_malformed_envelope_cannot_bypass_the_guarantees(payload, why, run_cen
     assert code == census_mod.EXIT_CANNOT_TELL, f"{why} must not exit as a completed measurement"
     assert "VERDICT: CANNOT-TELL" in printed, why
     assert json.loads(out.read_text(encoding="utf-8"))["assessable"] == 0, why
+    assert guard in printed, (
+        f"{why} refused, but not for its own reason: expected a refusal mentioning {guard!r}. "
+        "The fixture no longer reaches the guard it was written to cover."
+    )
 
 
 @pytest.mark.parametrize(
