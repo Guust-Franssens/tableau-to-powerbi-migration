@@ -4,10 +4,11 @@ Map of maps for agent-facing knowledge. Start here, then open the matching index
 
 ## Start here for a migration unit
 
-1. `python scripts/check_unit.py <unit-or-bundle> --scope <model|report|integration|all>` — first status and final gate; direct `check_*.py` gates only isolate one finding.
-2. `python scripts/read_handover.py <bundle> --workbook <name>` — residual work queue and engine-block reason.
-3. `python scripts/credential_gate.py list <estate-root>` — which units are gated, across a whole estate (`--json` for an agent). Exit 1 = still blocked, so it is the resume signal after a human signs in. A credential caches machine-wide, so re-probe the blocked units to earn a `probe-cleared`; never mass-`authorize`, which stamps a build UNVALIDATED permanently. Detail: [`docs/credential-gate.md`](credential-gate.md).
-4. Load the right skill before acting: `live-source-reachability` for live-source proof and
+1. `python scripts/check_reference_readiness.py <bundle>` — **run this FIRST**, before any building. It is the only ENTRY gate here: every other gate answers whether the work is *done*, so the "do I have a legible picture of the Tableau source?" question was only ever asked afterwards. Per page it reports completeness, evidence and **grade**. Exit 0 ready / 1 findings / 3 `CANNOT_ESTABLISH`, and neither 1 nor 3 is a pass — a blind page means an equivalent fidelity bug there is **structurally unfalsifiable**, not merely unverified. `NOT_APPLICABLE` (a datasource-only unit) is earned from the engine's own `report.json`, so it never blocks legitimately reference-free work.
+2. `python scripts/check_unit.py <unit-or-bundle> --scope <model|report|integration|all>` — first status and final gate; direct `check_*.py` gates only isolate one finding.
+3. `python scripts/read_handover.py <bundle> --workbook <name>` — residual work queue and engine-block reason.
+4. `python scripts/credential_gate.py list <estate-root>` — which units are gated, across a whole estate (`--json` for an agent). Exit 1 = still blocked, so it is the resume signal after a human signs in. A credential caches machine-wide, so re-probe the blocked units to earn a `probe-cleared`; never mass-`authorize`, which stamps a build UNVALIDATED permanently. Detail: [`docs/credential-gate.md`](credential-gate.md).
+5. Load the right skill before acting: `live-source-reachability` for live-source proof and
    credential-gate routing, `powerbi-semantic-model-gotchas` for TMDL/DAX,
    `powerbi-report-gotchas` for PBIR/visuals, `pbip-model-refresh` for cache/refresh, and
    `powerbi-ai-readiness` for Copilot/Q&A metadata.
