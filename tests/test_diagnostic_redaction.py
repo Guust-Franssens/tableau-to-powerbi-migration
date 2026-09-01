@@ -62,6 +62,7 @@ sys.path.insert(0, str(REPO / "scripts"))
 
 import capture_tableau_oracle as oracle  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_http  # noqa: E402  # pylint: disable=wrong-import-position
+import tableau_oracle_manifest as verdict  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_render_capability as cap  # noqa: E402  # pylint: disable=wrong-import-position
 from tableau_env import (  # noqa: E402  # pylint: disable=wrong-import-position
     env_redactor,
@@ -535,6 +536,13 @@ MODULES = (
     # names no credential anywhere in code, so under `HTTP AND credential` it would have been
     # invisible to the inventory exactly as `tableau_view_types.py` was.
     "scripts/tableau_luid_census.py",
+    # ⚠️ Added when the verdict layer was split out of `capture_tableau_oracle.py` (#423). It holds
+    # THE SINK -- `scrub_tree` immediately before `json.dumps` -- plus every console line that quotes
+    # a response-derived view name, so leaving it out would have moved the most sensitive code in the
+    # capture OUT of this gate while every parameterised check kept reporting green. Like
+    # `tableau_payload_facts.py`, it is not detected by `_credential_handling_scripts()` (it makes no
+    # request and names no credential); MODULES is a superset of that detector, never a mirror of it.
+    "scripts/tableau_oracle_manifest.py",
 )
 
 # Where response bytes ENTER, declared per function rather than inferred from a parameter's spelling.
@@ -570,6 +578,19 @@ TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
     # re-implementing them. Both are cross-module, so propagation cannot see them.
     ("scripts/tableau_view_types.py", "parse_payload"): {"payload"},
     ("scripts/tableau_view_types.py", "is_luid"): {"value"},
+    # `capture_tableau_oracle.main()` hands the verdict layer the records it just built from
+    # responses, and `log_progress` one record per view. Both cross a module boundary, so propagation
+    # cannot carry the taint and the seeds are irreducible -- without them the manifest sink and every
+    # console line in that module would be analysed as clean.
+    ("scripts/tableau_oracle_manifest.py", "write_manifest"): {"records", "capability_report"},
+    ("scripts/tableau_oracle_manifest.py", "log_progress"): {"record", "index", "total"},
+    # ⚠️ Seeding `records` WIDENS this gate rather than preserving it. On master the list itself was
+    # never tainted: `main` binds it with `records, started = [], time.perf_counter()` and then grows
+    # it with `records.append(record)`, and `_bind` fires on ASSIGNMENT, not on a container-store call
+    # -- so a list full of response records crossed into `write_manifest` analysed as clean, and only
+    # `capability_report` made the manifest tainted at all. Declaring it here is what puts the
+    # partition, the counts and the census under the certification requirement.
+    ("scripts/tableau_view_types.py", "census"): {"records"},
     # The shared HTTP primitive. `req` and `redactor` are OUTBOUND -- the request we are about to send
     # and the scrubber we hand it -- but they arrive from functions the analyser has already tainted,
     # and declaring them keeps the boundary honest rather than silently permeable. `headers` really is
@@ -638,6 +659,19 @@ _CENSUS_LABEL = (
 _PROBE_VERDICT = (
     "FIXED-VOCABULARY: one of classify_probe's three verdict literals, a ladder tier name, or an "
     "api-version string this module itself chose"
+)
+
+_A_COUNT = (
+    "NOT-A-STRING: an integer count of records or legs -- the SHAPE of the capture, never any text the server sent"
+)
+_A_STATUS_LITERAL = (
+    "FIXED-VOCABULARY: one of classify_export_error's status literals, `unsupported_api_version`, "
+    "`format_mismatch`, `not_attempted` or `not_captured` -- a closed set this repo authors, and the "
+    "only thing a leg record's `status` key is ever assigned"
+)
+_CENSUS_COUNTS = (
+    "NOT-A-STRING: `tableau_view_types.census` returns integer tallies keyed by its own three module "
+    "constants (dashboard/worksheet/unknown); no response text survives it"
 )
 
 _LUID_OK = (
@@ -834,7 +868,7 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
     ("scripts/capture_tableau_oracle.py", "artifact_stem"): {
         "len(view_luid or '')": "NOT-A-STRING: a character count, reported instead of the rejected identifier",
     },
-    ("scripts/capture_tableau_oracle.py", "log_progress"): {
+    ("scripts/tableau_oracle_manifest.py", "log_progress"): {
         "index": "NOT-A-STRING: an integer position in the loop",
         "total": "NOT-A-STRING: an integer view count",
         "status": "FIXED-VOCABULARY: one of classify_export_error's status literals",
@@ -1010,9 +1044,10 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "len(views)": "NOT-A-STRING: an integer view count",
         "workbook_names.get(record['workbook_luid'])": _INTO_THE_MANIFEST,
     },
-    ("scripts/capture_tableau_oracle.py", "write_manifest"): {
+    ("scripts/tableau_oracle_manifest.py", "write_manifest"): {
         "manifest": _INTO_THE_MANIFEST_AGGREGATE,
         "capability_report": _INTO_THE_MANIFEST_AGGREGATE,
+        "records": _INTO_THE_MANIFEST_AGGREGATE,
         "json.dumps(manifest, indent=2)": (
             "SCRUBBED-AT-SINK: `manifest` is the ALREADY-scrubbed tree -- `scrub_tree` runs on the line "
             "above this one, so the serialisation sees only redacted values and keys"
@@ -1021,8 +1056,37 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
             "SCRUBBED-AT-SINK: `manifest` is the ALREADY-scrubbed tree; the concatenation is a newline"
         ),
         "manifest['elapsed_sec']": "NOT-A-STRING: a float duration in seconds",
+        "tableau_view_types.census(records)": _CENSUS_COUNTS,
+        "len(records)": _A_COUNT,
+        "len(blocked)": _A_COUNT,
+        "len(complete)": _A_COUNT,
+        "len(failed)": _A_COUNT,
+        "len(sets['ok'])": _A_COUNT,
+        "len(sets['empty'])": _A_COUNT,
+        "reference_missing": "NOT-A-STRING: a bool -- rendered==0 AND required AND not credential-only",
+        "sum((1 for r in records if r.get('image', {}).get('status') == 'ok'))": _A_COUNT,
+        "sum((1 for r in records if r.get('svg', {}).get('status') == 'ok'))": _A_COUNT,
+        "sum((1 for r in records if r.get('pdf', {}).get('status') == 'ok'))": _A_COUNT,
     },
-    ("scripts/capture_tableau_oracle.py", "_log_blocked_and_stale"): {"warning": _PROBE_VERDICT},
+    ("scripts/tableau_oracle_manifest.py", "_render_statuses"): {
+        "absent": _A_STATUS_LITERAL,
+        "record[leg].get('status')": _A_STATUS_LITERAL,
+    },
+    ("scripts/tableau_oracle_manifest.py", "_partition"): {
+        "ok": _INTO_THE_MANIFEST_AGGREGATE,
+        "[r for r in ok if r['data']['row_count'] == 0]": _INTO_THE_MANIFEST_AGGREGATE,
+        "[r for r in records if r.get('data', {}).get('status') == 'ok' and all((s == 'ok' for s in "
+        "_render_statuses(r, requested)))]": _INTO_THE_MANIFEST_AGGREGATE,
+        "[r for r in records if 'source_credential' in {r.get('data', {}).get('status'), "
+        "*_render_statuses(r, requested)}]": _INTO_THE_MANIFEST_AGGREGATE,
+        "[r for r in records if any((status not in {'ok', 'source_credential'} for status in "
+        "(r.get('data', {}).get('status'), *_render_statuses(r, requested))))]": _INTO_THE_MANIFEST_AGGREGATE,
+    },
+    ("scripts/tableau_oracle_manifest.py", "_log_blocked_and_stale"): {
+        "warning": _PROBE_VERDICT,
+        "len(blocked)": _A_COUNT,
+        "len(stale_api)": _A_COUNT,
+    },
     ("scripts/tableau_payload_facts.py", "png_dimensions"): {
         "int.from_bytes(payload[16:20], 'big')": "NOT-A-STRING: an integer read from the IHDR",
         "int.from_bytes(payload[20:24], 'big')": "NOT-A-STRING: an integer read from the IHDR",
@@ -1278,12 +1342,21 @@ def test_taint_reaches_capture_view_without_a_hand_written_seed():
     defect. It is now derived -- `get_json` -> `list_views` -> `select_views` -> `main`'s loop ->
     `capture_view` -- because taint propagates through RETURN values. This test fails if that chain
     breaks, which is what would silently push the burden back onto the hand-written table.
+
+    ⚠️ `log_progress` moved to `tableau_oracle_manifest.py` when the verdict layer was split out
+    (#423), and a module boundary is exactly what propagation cannot cross -- so there its `record`
+    IS a declared seed, and the assertion below checks the seed is honoured rather than that the
+    chain still reaches it. Deriving it is not available across modules; asserting it is still
+    coverage, because dropping the seed makes that whole module analyse as clean.
     """
     module = "scripts/capture_tableau_oracle.py"
     assert (module, "capture_view") not in TAINT_SEEDS, "re-seeding by hand would hide a broken chain"
     tainted = taint_module((REPO / module).read_text(encoding="utf-8"), module)
     assert "view" in tainted["capture_view"]
-    assert "record" in tainted["log_progress"]
+    verdict_module = "scripts/tableau_oracle_manifest.py"
+    verdict_taint = taint_module((REPO / verdict_module).read_text(encoding="utf-8"), verdict_module)
+    assert "record" in verdict_taint["log_progress"]
+    assert "records" in verdict_taint["write_manifest"]
 
 
 # ---- module coverage: a credential-handling module may not sit OUTSIDE the gate ------------------
@@ -1832,7 +1905,7 @@ def test_the_blocked_list_redacts_the_names_it_prints(caplog):
     session.token = token
     blocked = [{"view_name": token, "workbook_name": token, "data": {"status": "source_credential", "detail": token}}]
     with caplog.at_level(logging.WARNING, logger="tableau-oracle"):
-        oracle._log_blocked_and_stale(blocked, blocked, None, session.redact_text)  # pylint: disable=protected-access
+        verdict._log_blocked_and_stale(blocked, blocked, None, session.redact_text)  # pylint: disable=protected-access
     assert longest_surviving_run(token, caplog.text) == ""
     assert "[REDACTED]" in caplog.text
 

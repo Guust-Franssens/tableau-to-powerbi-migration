@@ -21,6 +21,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import capture_tableau_oracle as oracle  # noqa: E402  # pylint: disable=wrong-import-position
+import tableau_oracle_manifest as verdict  # noqa: E402  # pylint: disable=wrong-import-position
 
 # The real root element of a `?format=svg` capture of `HR Dashboard | HR | Summary` (declared
 # 1400x800 px), trimmed to the parts this module reasons about. 370.681mm * 96 / 25.4 == 1400.99,
@@ -366,8 +367,8 @@ def test_raw_get_body_is_only_reported_through_the_session_redactor():
 
 def test_a_requested_render_that_never_arrived_is_a_failure(tmp_path):
     """Absent-because-not-asked-for is fine; absent-when-asked-for is the exit-0-with-nothing hole."""
-    assert oracle._render_statuses(_ok_record()) == ("ok", "ok", "ok")  # pylint: disable=protected-access
-    assert "not_captured" in oracle._render_statuses(_ok_record(), frozenset({"svg"}))  # pylint: disable=protected-access
+    assert verdict._render_statuses(_ok_record()) == ("ok", "ok", "ok")  # pylint: disable=protected-access
+    assert "not_captured" in verdict._render_statuses(_ok_record(), frozenset({"svg"}))  # pylint: disable=protected-access
 
 
 def test_reference_best_that_selected_no_tier_exits_5_rather_than_0(tmp_path):
@@ -467,14 +468,14 @@ def test_a_render_never_attempted_because_its_data_leg_was_blocked_inherits_that
     render, so re-asking three times costs metered calls to learn the same thing. Inventing an
     independent `not_captured` for each made ONE credential fault look like a credential fault AND
     three hard failures."""
-    statuses = oracle._render_statuses(_blocked_record(), frozenset({"svg"}))  # pylint: disable=protected-access
+    statuses = verdict._render_statuses(_blocked_record(), frozenset({"svg"}))  # pylint: disable=protected-access
     assert statuses == ("ok", "source_credential", "ok")
 
 
 def test_a_genuinely_broken_data_leg_still_fails_its_requested_renders():
     """The other half of the same rule: propagation must not turn every absence into 'blocked'."""
     record = {"view_name": "v", "data": {"status": "failed", "detail": "boom"}}
-    statuses = oracle._render_statuses(record, frozenset({"svg", "pdf"}))  # pylint: disable=protected-access
+    statuses = verdict._render_statuses(record, frozenset({"svg", "pdf"}))  # pylint: disable=protected-access
     assert statuses == ("ok", "failed", "failed")
 
 
