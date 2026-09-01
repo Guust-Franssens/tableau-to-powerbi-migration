@@ -347,3 +347,53 @@ def test_an_unreadable_collection_is_counted_rather_than_crashing():
     totals = census_mod.census(_payload([{"dashboards": 7, "sheets": []}, {"dashboards": [], "sheets": None}]))
     assert totals["workbooks_with_an_unusable_collection"] == 2
     assert totals["nodes"] == 0
+
+
+def test_the_recorded_live_measurement_replays_to_the_same_verdict(run_census, capsys, tmp_path):
+    """⚠️ Ties the measured citation to executable code, so it cannot rot into folklore.
+
+    Reconstructed from the counts recorded on 2026-09-01 against our Tableau Cloud trial: 48
+    workbooks, 60 dashboards all with real luids, 416 sheets of which 116 are blank, those blanks
+    spread across 5 workbooks. Nothing here is an identifier -- the shape is the whole measurement,
+    which is the same reason the census reports counts and never names anything.
+
+    This is a REPLAY, not a re-measurement: it proves the pipeline still turns that shape into
+    CONFIRMED and exit 0. If the recorded numbers in the fixture docstring are ever edited without
+    re-running the script, this stays green -- so it pins reproducibility, not truth. The truth is
+    re-established by running `scripts/tableau_luid_census.py`.
+    """
+    workbooks = []
+    blanks_left, blank_workbooks_left = 116, 5
+    for index in range(48):
+        # 60 dashboards over 48 workbooks, and 416 sheets, distributed so the totals land exactly.
+        dashboards = [{"luid": f"{index:08x}-1111-4111-8111-aaaaaaaaaaaa"}] + (
+            [{"luid": f"{index:08x}-2222-4222-8222-aaaaaaaaaaaa"}] if index < 12 else []
+        )
+        take = 0
+        if blank_workbooks_left and blanks_left:
+            take = min(blanks_left, 24 if blank_workbooks_left > 1 else blanks_left)
+            blanks_left -= take
+            blank_workbooks_left -= 1
+        sheets = [{"luid": ""} for _ in range(take)]
+        sheets += [
+            {"luid": f"{index:08x}-3333-4333-8333-{position:012x}"}
+            for position in range(300 // 48 + (index < 300 % 48))
+        ]
+        workbooks.append({"dashboards": dashboards, "sheets": sheets})
+
+    out = tmp_path / "census.json"
+    code = run_census({"data": {"workbooks": workbooks}}, json_out=out)
+    printed = capsys.readouterr().out
+    loaded = json.loads(out.read_text(encoding="utf-8"))
+
+    assert loaded["workbooks"] == 48
+    assert loaded["dashboards_total"] == 60
+    assert loaded["dashboards_blank"] == 0
+    assert loaded["sheets_total"] == 416
+    assert loaded["sheets_blank"] == 116
+    assert loaded["workbooks_with_a_blank_luid"] == 5
+    assert loaded["sheets_non_uuid_non_blank"] == 0
+    assert loaded["dashboards_non_uuid_non_blank"] == 0
+    assert loaded["assessable"] == 1
+    assert code == census_mod.EXIT_OK
+    assert "VERDICT: CONFIRMED" in printed
