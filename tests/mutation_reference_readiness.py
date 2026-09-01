@@ -12,28 +12,33 @@ Scoring is therefore the shared, lifecycle-record-based verdict (``observed_muta
 its first run reported 22/22 caught because a plugin *import* error exits non-zero before any test
 runs, and a naive verdict scored that as a detection.
 
-What this file adds is an EXPECTATION per mutation, so it is a gate rather than a report. Three
-verdicts are expected and all three are meaningful:
+Every mutation names its ANCHOR, and that is the whole point of this file
+------------------------------------------------------------------------
+Round-2 finding 6: the previous version ran each mutation against the WHOLE test file under ``-x``
+and credited whichever test failed first. That is not attribution - two unrelated mutations were both
+credited to ``test_colliding_page_ids_cannot_be_attributed`` simply because it ran early, and the
+harness would have stayed green if their real anchors regressed while an unrelated test failed first.
+The per-anchor verification existed only in a session transcript, not in the repo.
 
-* ``CAUGHT``   -- a fail-closed property the suite must defend.
-* ``SURVIVED`` -- the discriminating **control**. A cosmetic change MUST survive; if it were caught,
-  the suite is asserting on incidental wording and its detections prove less than they appear.
-* ``INVALID``  -- the **absent-anchor** control. A mutation naming something that does not exist must
-  be reported as invalid, never as caught. This is the exact false-green the shared harness guards.
+So each entry declares:
 
-⚠️ Round-1 review of PR #428 found two mutations that left all 31 tests passing, and both were
-fixture blind spots rather than code defects: ``GRADE_ORACLE = GRADE_VALIDATION`` survived because the
-literal pin omitted ``GRADE_ORACLE`` and the only oracle assertion compared against that same mutable
-constant, and a flat-``pbip_warnings[]`` fallback survived because the routing fixture never supplied
-``pbip_warnings``. Both are now mutations here, and both fixtures were repaired.
+* ``anchor``   -- the pytest node that must CATCH it, run ALONE. This is the committed claim.
+* ``controls`` -- nodes that must SURVIVE it, run alone. Without these, "caught" cannot be
+  distinguished from "the mutation broke everything", which is the failure mode that makes a
+  mutation score meaningless.
 
-Exit 0 only when every mutation matched its expectation.
+Two entries are whole-suite controls rather than fail-closed properties: a cosmetic reword MUST
+survive (otherwise the suite asserts on incidental wording), and an absent anchor MUST be reported
+INVALID rather than credited as a detection - the exact false-green the shared harness guards.
+
+Exit 0 only when every anchor caught its mutation and every control survived it.
 """
 
 from __future__ import annotations
 
 import subprocess
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -49,22 +54,31 @@ from mutation_harness import (  # noqa: E402  # pylint: disable=wrong-import-pos
 )
 
 TARGET = "tests/test_check_reference_readiness.py"
+NODE = TARGET + "::"
 
 CAUGHT = "CAUGHT"
 SURVIVED = "SURVIVED"
 INVALID = "INVALID"
 
-# name -> (expected verdict, patch injected as a pytest plugin at interpreter start)
-MUTATIONS: dict[str, tuple[str, str]] = {
-    # --- the exit contract itself (round-1 finding 1) --------------------------------------
-    "reinstate-warn-only": (
-        CAUGHT,
-        """
+
+@dataclass(frozen=True)
+class Mutation:
+    """One patch, the test that must catch it, and the tests that must not."""
+
+    code: str
+    anchor: str | None = None
+    controls: tuple[str, ...] = ()
+    whole_suite: str | None = None
+
+
+MUTATIONS: dict[str, Mutation] = {
+    # --- the exit contract itself ------------------------------------------------------------
+    "reinstate-warn-only": Mutation(
+        code="""
 import argparse
 import check_reference_readiness as crr
-# Put the flag back exactly as it was: parsed, and returning EXIT_OK before FINDINGS or
-# CANNOT_ESTABLISH are mapped. Measured on real bundles, this returned 0 while the gate's own
-# output said "CANNOT_ESTABLISH is NOT a pass".
+# Round-1 finding 1: parsed, and returning EXIT_OK before FINDINGS or CANNOT_ESTABLISH are mapped.
+# Measured returning 0 while the gate's own output said "CANNOT_ESTABLISH is NOT a pass".
 _orig = crr.main
 def main(argv=None):
     argv = [a for a in (argv or []) if a != "--warn-only"]
@@ -72,47 +86,51 @@ def main(argv=None):
     return crr.EXIT_OK
 crr.main = main
 """,
+        anchor="test_there_is_no_flag_that_can_soften_the_verdict",
+        controls=("test_orphan_worksheets_are_expected_pages",),
     ),
-    "cannot-establish-exits-zero": (
-        CAUGHT,
-        """
+    "cannot-establish-exits-zero": Mutation(
+        code="""
 import check_reference_readiness as crr
 crr.EXIT_CANNOT_ESTABLISH = crr.EXIT_OK
 """,
+        anchor="test_the_status_and_exit_vocabulary_is_pinned_to_its_literal_values",
+        controls=("test_a_worksheet_render_does_satisfy_a_worksheet_page",),
     ),
-    "unverifiable-is-treated-as-ready": (
-        CAUGHT,
-        """
+    "unverifiable-is-treated-as-ready": Mutation(
+        code="""
 import check_reference_readiness as crr
 crr.UNVERIFIABLE = crr.READY
 """,
+        anchor="test_the_status_and_exit_vocabulary_is_pinned_to_its_literal_values",
+        controls=("test_orphan_worksheets_are_expected_pages",),
     ),
-    "oracle-grade-equals-validation-grade": (
-        CAUGHT,
-        """
+    "oracle-grade-equals-validation-grade": Mutation(
+        code="""
+import reference_evidence as ev
 import check_reference_readiness as crr
 # Round-1 finding 8a: this SURVIVED the whole suite, because the literal pin omitted GRADE_ORACLE
 # and the only oracle assertion compared against the same mutable constant.
-crr.GRADE_ORACLE = crr.GRADE_VALIDATION
+ev.GRADE_ORACLE = ev.GRADE_VALIDATION
+crr.GRADE_ORACLE = ev.GRADE_VALIDATION
 """,
+        anchor="test_the_status_and_exit_vocabulary_is_pinned_to_its_literal_values",
+        controls=("test_a_page_with_no_evidence_at_all_is_blind_not_unverifiable",),
     ),
-    # --- NOT_APPLICABLE must be earned (round-1 finding 2) ----------------------------------
-    "a-vanished-report-is-not-applicable": (
-        CAUGHT,
-        """
+    # --- NOT_APPLICABLE must be earned --------------------------------------------------------
+    "a-vanished-report-is-not-applicable": Mutation(
+        code="""
 import check_reference_readiness as crr
-# The measured fail-open: a workbook the engine lists, with NO shipping report, granted a clean
-# exit because some semantic model existed somewhere.
 crr._units_without_reports = lambda engine_report, reports: []
-_orig = crr._empty_bundle_unit
 def _empty_bundle_unit(root, engine_report):
     return crr.UnitResult(unit=root.name, status=crr.STATUS_NOT_APPLICABLE, detail="models only")
 crr._empty_bundle_unit = _empty_bundle_unit
 """,
+        anchor="test_a_workbook_whose_report_never_shipped_is_a_finding",
+        controls=("test_a_datasource_only_unit_is_not_applicable",),
     ),
-    "no-pages-found-means-not-applicable": (
-        CAUGHT,
-        """
+    "no-pages-found-means-not-applicable": Mutation(
+        code="""
 import check_reference_readiness as crr
 _orig = crr.assess_unit
 def assess_unit(root, report_dir, *args, **kwargs):
@@ -123,74 +141,198 @@ def assess_unit(root, report_dir, *args, **kwargs):
     return _orig(root, report_dir, *args, **kwargs)
 crr.assess_unit = assess_unit
 """,
+        anchor="test_not_applicable_is_earned_from_the_engine_report_not_from_an_empty_page_list",
+        controls=("test_a_datasource_only_unit_is_not_applicable",),
     ),
-    # --- evidence must be USABLE (round-1 finding 3) ----------------------------------------
-    "existence-is-evidence": (
-        CAUGHT,
-        """
-import check_reference_readiness as crr
-# Restore `Path.is_file()` as the whole validity check: a zero-byte or truncated render counts.
-crr.render_facts = lambda path: (None, None) if path.is_file() else "missing"
+    # --- evidence must be USABLE ---------------------------------------------------------------
+    "existence-is-evidence": Mutation(
+        code="""
+import reference_evidence as ev
+ev.render_facts = lambda path, recorded: (None, None) if path.is_file() else "missing"
 """,
+        anchor="test_a_zero_byte_render_is_rejected_not_promoted",
+        controls=("test_a_page_with_no_evidence_at_all_is_blind_not_unverifiable",),
     ),
-    "empty-capabilities-grade-as-unknown-and-still-count": (
-        CAUGHT,
-        """
-import check_reference_readiness as crr
-# Round-1 finding 3b: `capabilities: []` reached `ready [unknown]`.
-crr.reference_grade = lambda capabilities: (
-    crr.GRADE_VALIDATION if isinstance(capabilities, list) and crr.CAP_VALIDATION in capabilities
-    else "/".join(sorted(str(c) for c in capabilities)) if isinstance(capabilities, list) and capabilities
-    else "layout_grade"
-)
+    "shallow-png-header-check": Mutation(
+        code="""
+import struct
+import reference_evidence as ev
+# Round-2 finding 1: the pre-fix parse - signature, IHDR marker, 8 dimension bytes. A 24-byte blob
+# passed while Pillow called the same bytes truncated.
+def _png_size(blob):
+    if len(blob) < 24 or blob[:8] != b"\\x89PNG\\r\\n\\x1a\\n" or blob[12:16] != b"IHDR":
+        return None
+    w, h = struct.unpack(">II", blob[16:24])
+    return int(w), int(h)
+ev._png_size = _png_size
 """,
+        anchor="test_a_24_byte_blob_is_not_a_png",
+        controls=("test_the_192px_embedded_thumbnail_route_still_counts",),
     ),
-    "the-legibility-floor-is-removed": (
-        CAUGHT,
-        """
-import check_reference_readiness as crr
-crr.MIN_RENDER_EDGE = 0
+    "recorded-integrity-is-ignored": Mutation(
+        code="""
+import reference_evidence as ev
+# The measured shape: zeroed hashes and 1x1 dimensions still returned READY 3/3.
+ev._integrity_mismatch = lambda blob, size, recorded: None
 """,
+        anchor="test_a_swapped_image_no_longer_counts",
+        controls=("test_the_192px_embedded_thumbnail_route_still_counts",),
     ),
-    # --- evidence must be ATTRIBUTABLE (round-1 finding 4) -----------------------------------
-    "evidence-matches-any-workbook": (
-        CAUGHT,
-        """
-import check_reference_readiness as crr
-# The measured shape: one synthetic record made two DIFFERENT units report 2/2 READY.
-crr.Evidence.is_for = lambda self, unit: True
+    "a-missing-recorded-hash-is-accepted": Mutation(
+        code="""
+import reference_evidence as ev
+_orig = ev._integrity_mismatch
+def _integrity_mismatch(blob, size, recorded):
+    return None if not recorded.sha256 else _orig(blob, size, recorded)
+ev._integrity_mismatch = _integrity_mismatch
 """,
+        anchor="test_a_manifest_with_no_recorded_hash_cannot_be_trusted",
+        controls=("test_a_swapped_image_no_longer_counts",),
     ),
-    "missing-workbook-identity-is-accepted": (
-        CAUGHT,
-        """
-import check_reference_readiness as crr
-_orig = crr.Evidence.build.__func__
+    "empty-capabilities-grade-as-layout": Mutation(
+        code="""
+import reference_evidence as ev
+_orig = ev.provider_grade
+def provider_grade(provider, capabilities):
+    if not isinstance(capabilities, list) or not capabilities:
+        return ev.CAP_LAYOUT
+    return _orig(provider, capabilities)
+ev.provider_grade = provider_grade
+""",
+        anchor="test_empty_capabilities_are_rejected_not_graded_unknown",
+        controls=("test_a_worksheet_render_does_satisfy_a_worksheet_page",),
+    ),
+    "the-legibility-floor-is-removed": Mutation(
+        code="""
+import reference_evidence as ev
+ev.MIN_RENDER_EDGE = 0
+""",
+        anchor="test_an_illegibly_small_render_is_rejected",
+        controls=("test_the_192px_embedded_thumbnail_route_still_counts",),
+    ),
+    # --- grade must be capped by the producer ---------------------------------------------------
+    "a-provider-may-grade-itself": Mutation(
+        code="""
+import reference_evidence as ev
+# Round-2 finding 2: grade from the self-reported list, with no provider ceiling.
+def provider_grade(provider, capabilities):
+    if not isinstance(capabilities, list) or not capabilities:
+        return "!no usable capability grade"
+    caps = {c for c in capabilities if isinstance(c, str)}
+    if not caps <= ev.ALLOWED_CAPABILITIES:
+        return "!capabilities outside the known vocabulary"
+    if provider == "oracle_capture":
+        return ev.GRADE_ORACLE
+    return ev.GRADE_VALIDATION if ev.CAP_VALIDATION in caps else "/".join(sorted(caps))
+ev.provider_grade = provider_grade
+""",
+        anchor="test_a_low_grade_provider_cannot_promote_itself",
+        controls=("test_validation_grade_is_reported_when_present",),
+    ),
+    "an-unknown-provider-gets-a-default-ceiling": Mutation(
+        code="""
+import reference_evidence as ev
+_orig = ev.PROVIDER_CEILING
+class _Permissive(dict):
+    def get(self, key, default=None):
+        return dict.get(self, key, ev.ALLOWED_CAPABILITIES)
+ev.PROVIDER_CEILING = _Permissive(_orig)
+""",
+        anchor="test_an_unrecognised_provider_can_claim_nothing",
+        controls=("test_validation_grade_is_reported_when_present",),
+    ),
+    "the-manual-name-prefix-is-not-stripped": Mutation(
+        code="""
+import reference_evidence as ev
+ev.Evidence.match_names = lambda self: [self.name]
+""",
+        anchor="test_validation_grade_is_reported_when_present",
+        controls=("test_a_worksheet_render_does_satisfy_a_worksheet_page",),
+    ),
+    # --- evidence must be ATTRIBUTABLE ----------------------------------------------------------
+    "evidence-matches-any-workbook": Mutation(
+        code="""
+import reference_evidence as ev
+ev.Evidence.is_for = lambda self, unit: True
+""",
+        anchor="test_evidence_for_another_workbook_does_not_satisfy_this_one",
+        controls=("test_a_page_with_no_evidence_at_all_is_blind_not_unverifiable",),
+    ),
+    "missing-workbook-identity-is-accepted": Mutation(
+        code="""
+import reference_evidence as ev
+_orig = ev.Evidence.build.__func__
 def build(cls, **kwargs):
-    kwargs["workbook_key"] = kwargs.get("workbook_key") or "any"
+    if not (kwargs.get("workbook_sha") or kwargs.get("workbook_luid") or kwargs.get("workbook_name")):
+        kwargs["workbook_name"] = "WB"
     return _orig(cls, **kwargs)
-crr.Evidence.build = classmethod(build)
+ev.Evidence.build = classmethod(build)
 """,
+        anchor="test_evidence_with_no_workbook_identity_is_rejected",
+        controls=("test_a_worksheet_render_does_satisfy_a_worksheet_page",),
     ),
-    # --- completeness needs a readable, unique mapping (round-1 finding 6) --------------------
-    "unreadable-page-json-falls-back-to-the-directory-name": (
-        CAUGHT,
-        """
+    "a-name-only-provenance-luid-is-trusted": Mutation(
+        code="""
+import check_reference_readiness as crr
+# Round-2 finding 3: origin.match was never consulted, so a LUID whose bytes DIFFER from the
+# server's - which stamp_tableau_provenance.py says will not reproduce - made evidence ready.
+def _provenance_luid(root, source_sha):
+    payload = crr.json_object(root / "source-provenance.json")
+    for record in (payload or {}).get("inputs") or []:
+        origin = record.get("origin") or {}
+        luid = origin.get("workbook_luid")
+        if isinstance(luid, str) and luid:
+            return luid
+    return None
+crr._provenance_luid = _provenance_luid
+""",
+        anchor="test_a_name_only_provenance_luid_is_not_trusted",
+        controls=("test_a_sha256_confirmed_provenance_luid_is_trusted",),
+    ),
+    "a-luid-record-discards-its-workbook-name": Mutation(
+        code="""
+import reference_evidence as ev
+_orig = ev._oracle_workbook_ids
+def _oracle_workbook_ids(record):
+    luid, name = _orig(record)
+    return (luid, None) if luid else (None, name)
+ev._oracle_workbook_ids = _oracle_workbook_ids
+""",
+        anchor="test_a_record_carrying_both_luid_and_name_can_still_fall_back_to_the_name",
+        controls=("test_a_sha256_confirmed_provenance_luid_is_trusted",),
+    ),
+    # --- completeness needs a readable, unique mapping --------------------------------------------
+    "unreadable-page-json-falls-back-to-the-directory-name": Mutation(
+        code="""
 import check_reference_readiness as crr
 def page_map(report_dir):
     root = report_dir / "definition" / "pages"
     found = {}
     if root.is_dir():
         for page_json in sorted(root.rglob("page.json")):
-            payload = crr._json_object(page_json) or {}
+            payload = crr.json_object(page_json) or {}
             found[str(payload.get("name") or page_json.parent.name)] = str(payload.get("displayName") or "")
     return found, []
 crr.page_map = page_map
 """,
+        anchor="test_an_unreadable_page_definition_is_not_a_page",
+        controls=("test_a_worksheet_render_does_satisfy_a_worksheet_page",),
     ),
-    "colliding-page-ids-are-not-detected": (
-        CAUGHT,
-        """
+    "pages-json-is-checked-only-when-well-formed": Mutation(
+        code="""
+import check_reference_readiness as crr
+# Round-2 finding 4: the cross-check ran only when pageOrder happened to be a list.
+_orig = crr.page_map
+def page_map(report_dir):
+    found, problems = _orig(report_dir)
+    return found, [p for p in problems if "pages.json is missing" not in p]
+crr.page_map = page_map
+""",
+        anchor="test_an_unreadable_pages_json_is_not_a_valid_mapping",
+        controls=("test_a_worksheet_render_does_satisfy_a_worksheet_page",),
+    ),
+    "colliding-page-ids-are-not-detected": Mutation(
+        code="""
 import check_reference_readiness as crr
 _orig = crr._expectation
 def _expectation(unit, report_dir, source):
@@ -198,60 +340,107 @@ def _expectation(unit, report_dir, source):
     return objects if objects else _orig(unit, report_dir, source)
 crr._expectation = _expectation
 """,
+        anchor="test_colliding_page_ids_cannot_be_attributed",
+        controls=("test_orphan_worksheets_are_expected_pages",),
     ),
-    # --- scope and drop-explanation joins ------------------------------------------------------
-    "worksheet-render-satisfies-dashboard-page": (
-        CAUGHT,
-        """
+    # --- scope, normalization and drop-explanation joins -------------------------------------------
+    "worksheet-render-satisfies-dashboard-page": Mutation(
+        code="""
+import reference_evidence as ev
 import check_reference_readiness as crr
-# Restore the pre-#421 behaviour: match on NAME alone, discarding scope. This is what
-# `check_unit.py:265`'s `_slug` join does today.
 def match_evidence(obj, evidence):
-    named = [e for e in evidence if crr._norm(e.name) == crr._norm(obj.name)]
+    named = [e for e in evidence if ev.norm_name(e.name) == ev.norm_name(obj.name)]
     return (named[0], []) if named else (None, [])
 crr.match_evidence = match_evidence
 """,
+        anchor="test_a_worksheet_render_does_not_make_a_dashboard_page_ready",
+        controls=(
+            "test_a_worksheet_render_does_satisfy_a_worksheet_page",
+            "test_a_dashboard_and_a_same_named_worksheet_get_different_page_ids",
+        ),
     ),
-    "unknown-scope-counts-as-a-match": (
-        CAUGHT,
-        """
+    "unknown-scope-counts-as-a-match": Mutation(
+        code="""
+import reference_evidence as ev
 import check_reference_readiness as crr
 def match_evidence(obj, evidence):
-    named = [e for e in evidence if crr._norm(e.name) == crr._norm(obj.name)]
-    ok = [e for e in named if e.kind in (obj.kind, crr.KIND_UNKNOWN)]
+    named = [e for e in evidence if ev.norm_name(e.name) == ev.norm_name(obj.name)]
+    ok = [e for e in named if e.kind in (obj.kind, ev.KIND_UNKNOWN, ev.KIND_ASSERTED)]
     return (ok[0], []) if ok else (None, named)
 crr.match_evidence = match_evidence
 """,
+        anchor="test_an_oracle_record_typed_unknown_cannot_satisfy_a_page",
+        controls=("test_oracle_evidence_for_this_workbook_does_count",),
     ),
-    "drop-explanations-key-on-name-alone": (
-        CAUGHT,
-        """
+    "drop-explanations-normalize-the-name": Mutation(
+        code="""
+import reference_evidence as ev
 import check_reference_readiness as crr
-# Round-1 finding 5: a WORKSHEET warning for `Ops` excused a genuinely missing DASHBOARD `Ops`.
+# Round-2 finding 5: `_norm` collapses case and repeated whitespace, so two objects with DIFFERENT
+# page ids shared one key and one warning excused the wrong page.
+_orig = crr.drop_explanations
+class _Loose(dict):
+    def __contains__(self, key):
+        kind, name = key
+        return any(k == kind and ev.norm_name(n) == ev.norm_name(name) for k, n in self)
+    def __getitem__(self, key):
+        kind, name = key
+        for (k, n), v in self.items():
+            if k == kind and ev.norm_name(n) == ev.norm_name(name):
+                return v
+        raise KeyError(key)
+crr.drop_explanations = lambda handover: _Loose(_orig(handover))
+""",
+        anchor="test_a_drop_warning_matches_the_exact_object_name_only",
+        controls=("test_an_exact_drop_warning_still_explains_its_own_object",),
+    ),
+    "normalized-name-collisions-are-resolved-not-refused": Mutation(
+        code="""
+import check_reference_readiness as crr
+_orig = crr._expectation
+def _expectation(unit, report_dir, source):
+    result = _orig(unit, report_dir, source)
+    if isinstance(result, crr.UnitResult) and "differ only by case" in result.detail:
+        return crr.source_objects(source)
+    return result
+crr._expectation = _expectation
+""",
+        anchor="test_names_differing_only_by_whitespace_cannot_be_attributed",
+        controls=("test_orphan_worksheets_are_expected_pages",),
+    ),
+    "ambiguous-evidence-picks-the-first": Mutation(
+        code="""
+import reference_evidence as ev
+import check_reference_readiness as crr
+_orig = crr.match_evidence
+def match_evidence(obj, evidence):
+    match, named = _orig(obj, evidence)
+    if match is ev.AMBIGUOUS:
+        ok = [e for e in named if e.kind in (obj.kind, ev.KIND_ASSERTED)]
+        return (ok[0] if ok else None), ([] if ok else named)
+    return match, named
+crr.match_evidence = match_evidence
+""",
+        anchor="test_two_evidence_records_sharing_a_normalized_name_are_ambiguous",
+        controls=("test_a_single_differently_spelled_evidence_record_still_matches",),
+    ),
+    "drop-explanations-key-on-name-alone": Mutation(
+        code="""
+import check_reference_readiness as crr
 _orig = crr.drop_explanations
 def drop_explanations(handover):
-    byname = {}
-    for (kind, name), reason in _orig(handover).items():
-        byname[name] = reason
+    byname = {name: reason for (_kind, name), reason in _orig(handover).items()}
     return {(k, name): reason for name, reason in byname.items()
             for k in (crr.KIND_DASHBOARD, crr.KIND_WORKSHEET)}
 crr.drop_explanations = drop_explanations
 """,
+        anchor="test_a_worksheet_warning_cannot_excuse_a_missing_dashboard",
+        controls=("test_a_dashboard_scope_warning_does_explain_a_missing_dashboard",),
     ),
-    "flat-pbip-warnings-explain-any-drop": (
-        CAUGHT,
-        """
+    "flat-pbip-warnings-explain-any-drop": Mutation(
+        code="""
 import check_reference_readiness as crr
-# Round-1 finding 8b: this SURVIVED, because the routing fixture supplied no `pbip_warnings` at all.
 _orig = crr.drop_explanations
-def drop_explanations(handover):
-    explained = dict(_orig(handover))
-    workbook = (handover or {}).get("workbook") or {}
-    flat = [w for w in (workbook.get("pbip_warnings") or [])
-            if isinstance(w, str) and any(m in w for m in crr.DELIBERATE_DROP_MARKERS)]
-    if flat:
-        explained.setdefault("__any__", flat[0])
-    return _Any(explained, flat[0] if flat else None)
 class _Any(dict):
     def __init__(self, base, fallback):
         super().__init__(base)
@@ -259,24 +448,28 @@ class _Any(dict):
     def __contains__(self, key):
         return dict.__contains__(self, key) or self._fallback is not None
     def __getitem__(self, key):
-        if dict.__contains__(self, key):
-            return dict.__getitem__(self, key)
-        return self._fallback
+        return dict.__getitem__(self, key) if dict.__contains__(self, key) else self._fallback
+def drop_explanations(handover):
+    workbook = (handover or {}).get("workbook") or {}
+    flat = [w for w in (workbook.get("pbip_warnings") or [])
+            if isinstance(w, str) and any(m in w for m in crr.DELIBERATE_DROP_MARKERS)]
+    return _Any(_orig(handover), flat[0] if flat else None)
 crr.drop_explanations = drop_explanations
 """,
+        anchor="test_a_flat_pbip_warning_cannot_explain_any_drop",
+        controls=("test_a_dashboard_scope_warning_does_explain_a_missing_dashboard",),
     ),
-    "every-dropped-page-is-a-finding": (
-        CAUGHT,
-        """
+    "every-dropped-page-is-a-finding": Mutation(
+        code="""
 import check_reference_readiness as crr
-# The cry-wolf direction: no drop is ever accounted for, so a CORRECT bundle reports findings.
 crr.DELIBERATE_DROP_MARKERS = ()
 """,
+        anchor="test_a_page_the_engine_dropped_with_a_reason_is_accounted_for",
+        controls=("test_a_page_the_engine_dropped_silently_is_a_finding",),
     ),
-    # --- expectation must not be circular -------------------------------------------------------
-    "expectation-falls-back-to-the-pages-that-were-built": (
-        CAUGHT,
-        """
+    # --- expectation must not be circular ----------------------------------------------------------
+    "expectation-falls-back-to-the-pages-that-were-built": Mutation(
+        code="""
 import check_reference_readiness as crr
 _orig = crr.assess_unit
 def assess_unit(root, report_dir, engine_report, evidence, explicit_source, require_validation_grade):
@@ -293,42 +486,43 @@ def assess_unit(root, report_dir, engine_report, evidence, explicit_source, requ
     return result
 crr.assess_unit = assess_unit
 """,
+        anchor="test_the_expectation_never_falls_back_to_the_pages_that_were_built",
+        controls=("test_a_worksheet_render_does_satisfy_a_worksheet_page",),
     ),
-    "orphan-worksheets-are-not-expected": (
-        CAUGHT,
-        """
+    "orphan-worksheets-are-not-expected": Mutation(
+        code="""
 import check_reference_readiness as crr
-# Reinstate `check_unit.expected_pages`'s "dashboards only, never worksheets" docstring rule.
 _orig = crr.source_objects
 def source_objects(path):
     objects = _orig(path)
     return None if objects is None else [o for o in objects if o.kind == crr.KIND_DASHBOARD]
 crr.source_objects = source_objects
 """,
+        anchor="test_orphan_worksheets_are_expected_pages",
+        controls=("test_a_datasource_only_unit_is_not_applicable",),
     ),
-    "page-id-drops-the-scope-prefix": (
-        CAUGHT,
-        """
+    "page-id-drops-the-scope-prefix": Mutation(
+        code="""
 import check_reference_readiness as crr
-# Collapse the cryptographic identity: a dashboard and its same-named principal worksheet land on
-# the SAME page id again.
 crr.SourceObject.page_id = property(lambda self: crr.engine_page_id(self.name))
 """,
+        anchor="test_a_dashboard_and_a_same_named_worksheet_get_different_page_ids",
+        controls=("test_a_datasource_only_unit_is_not_applicable",),
     ),
-    # --- grade bar (round-1 finding 7) -----------------------------------------------------------
-    "require-validation-grade-does-not-change-page-readiness": (
-        CAUGHT,
-        """
+    # --- grade bar --------------------------------------------------------------------------------
+    "require-validation-grade-does-not-change-page-readiness": Mutation(
+        code="""
 import check_reference_readiness as crr
 _orig = crr._page_row
 def _page_row(obj, page_status, evidence, reason, require_validation_grade):
     return _orig(obj, page_status, evidence, reason, False)
 crr._page_row = _page_row
 """,
+        anchor="test_require_validation_grade_changes_page_readiness_not_just_the_unit",
+        controls=("test_a_worksheet_render_does_satisfy_a_worksheet_page",),
     ),
-    "one-validation-grade-page-silences-the-ceiling": (
-        CAUGHT,
-        """
+    "one-validation-grade-page-silences-the-ceiling": Mutation(
+        code="""
 import check_reference_readiness as crr
 _orig = crr._merge
 def _merge(root, units, evidence, rejected):
@@ -337,26 +531,42 @@ def _merge(root, units, evidence, rejected):
     return report
 crr._merge = _merge
 """,
+        anchor="test_one_validation_grade_page_does_not_silence_the_ceiling_for_the_rest",
+        controls=("test_validation_grade_is_reported_when_present",),
     ),
-    # --- discriminating controls -------------------------------------------------------------
-    "control-cosmetic-reword-of-a-rendered-line": (
-        SURVIVED,
-        """
+    # --- whole-suite discriminating controls ------------------------------------------------------
+    "control-cosmetic-reword-of-a-rendered-line": Mutation(
+        code="""
 import check_reference_readiness as crr
 # Pure presentation. If this is CAUGHT, the suite is asserting on incidental wording.
 _orig = crr._render_page
 crr._render_page = lambda page: _orig(page).replace(" -> ", " ==> ").replace("    - ", "  * ")
 """,
+        whole_suite=SURVIVED,
     ),
-    "control-absent-anchor": (
-        INVALID,
-        """
+    "control-absent-anchor": Mutation(
+        code="""
 import check_reference_readiness as crr
-# Names something that does not exist. Must be reported as invalid, never as a detection.
+# Names something that does not exist. Must be reported invalid, never credited as a detection.
 crr.no_such_function_exists.disabled = True
 """,
+        whole_suite=INVALID,
     ),
 }
+
+
+@dataclass
+class Failure:
+    """One expectation that did not hold."""
+
+    mutation: str
+    node: str
+    want: str
+    got: str
+    detail: str = field(default="")
+
+    def __str__(self) -> str:
+        return f"{self.mutation} / {self.node}: want {self.want}, got {self.got} ({self.detail})"
 
 
 def baseline_is_clean() -> bool:
@@ -375,12 +585,12 @@ def baseline_is_clean() -> bool:
     return proc.returncode == 0
 
 
-def verdict_for(name: str, code: str) -> tuple[str, str]:
-    """Score one mutation, mapping the shared harness's outcomes onto the three verdicts."""
+def verdict_for(name: str, code: str, target: str) -> tuple[str, str]:
+    """Score one mutation against one pytest target, using the shared harness's lifecycle record."""
     try:
-        _, exit_code, detail, outcomes = run(name, code, TARGET)
+        _, exit_code, detail, outcomes = run(name, code, target)
     except SystemExit as exc:
-        # `run()` raises when the injected plugin never imported, which is the absent-anchor case.
+        # `run()` raises when the injected plugin never imported - the absent-anchor case.
         return INVALID, str(exc)
     if observed_mutation(outcomes):
         note = detail if not session_ended_abnormally(outcomes) else f"{detail} [abnormal exit {exit_code}]"
@@ -390,26 +600,41 @@ def verdict_for(name: str, code: str) -> tuple[str, str]:
     return INVALID, f"no verdict (exit {exit_code}, {detail})"
 
 
+def check(name: str, mutation: Mutation) -> list[Failure]:
+    """Run one mutation against its anchor and controls, or against the whole suite."""
+    failures: list[Failure] = []
+    if mutation.whole_suite is not None:
+        got, detail = verdict_for(name, mutation.code, TARGET)
+        flag = "ok " if got == mutation.whole_suite else "BAD"
+        print(f"{flag} {got:8s} (want {mutation.whole_suite:8s})  {name:56s} <whole suite>")
+        if got != mutation.whole_suite:
+            failures.append(Failure(name, "<whole suite>", mutation.whole_suite, got, detail))
+        return failures
+    expectations = [(mutation.anchor or "", CAUGHT), *((node, SURVIVED) for node in mutation.controls)]
+    for node, want in expectations:
+        got, detail = verdict_for(name, mutation.code, NODE + node)
+        flag = "ok " if got == want else "BAD"
+        print(f"{flag} {got:8s} (want {want:8s})  {name:56s} {node}")
+        if got != want:
+            failures.append(Failure(name, node, want, got, detail))
+    return failures
+
+
 def main() -> int:
-    """Run every mutation and fail unless each matched its documented expectation."""
+    """Run every mutation against its committed anchor, and fail on any mismatch."""
     if not baseline_is_clean():
         print("\nHARNESS ERROR: baseline is not clean, so no mutation verdict is trustworthy.")
         return 2
     print()
-    mismatches = []
-    for name, (expected, code) in MUTATIONS.items():
-        actual, detail = verdict_for(name, code)
-        flag = "ok " if actual == expected else "BAD"
-        print(f"{flag} {actual:8s} (want {expected:8s})  {name:56s} -> {detail}")
-        if actual != expected:
-            mismatches.append(f"{name}: expected {expected}, got {actual} ({detail})")
+    failures = [failure for name, mutation in MUTATIONS.items() for failure in check(name, mutation)]
+    checks = sum(1 if m.whole_suite else 1 + len(m.controls) for m in MUTATIONS.values())
     print()
-    if mismatches:
+    if failures:
         print("MUTATION EXPECTATIONS NOT MET:")
-        for item in mismatches:
-            print(f"  {item}")
+        for failure in failures:
+            print(f"  {failure}")
         return 1
-    print(f"All {len(MUTATIONS)} mutations matched their expected verdict.")
+    print(f"All {len(MUTATIONS)} mutations matched their expectations ({checks} anchor/control checks).")
     return 0
 
 

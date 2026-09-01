@@ -73,13 +73,64 @@ Rejections are counted and **printed**, so a capture that does not count says wh
 
 | precondition | what it replaced |
 |---|---|
-| **A render that PARSES.** PNG dimensions from the IHDR, SVG from `width`/`height` or `viewBox`; a PDF has no cheap dimension read, so it is accepted on a `%PDF-` header plus a size floor. Both edges must clear `MIN_RENDER_EDGE` (64 px). | `Path.is_file()` — a **zero-byte** PNG reached `READY` |
-| **Capabilities from a closed allowlist, non-empty.** An unrecognised capability is a *rejection*, not an unknown grade; `GRADE_UNKNOWN` never reaches `ready`. | `capabilities: []` produced `ready [unknown]` |
-| **Workbook identity.** Reference evidence carries the manifest's `source_workbook_sha256`; oracle evidence carries `workbook_luid`/`workbook_name`. No identity ⇒ unattributable ⇒ rejected. | one synthetic `Overview` record made **two different** units report `2/2 READY` |
-| **Source revision.** A manifest whose `source_workbook_sha256` differs from the sha256 of the resolved source does not match that unit. | a **stale** capture is worse than a missing one, because it looks like evidence |
+| **A structurally complete render.** The whole PNG chunk stream is walked — every length and CRC verified, a 13-byte IHDR required, IDAT and IEND required. SVG parses `width`/`height` or `viewBox`; a PDF has no cheap dimension read, so it is accepted on a `%PDF-` header plus a size floor. Both edges must clear `MIN_RENDER_EDGE` (64 px). | `Path.is_file()` — a **zero-byte** PNG reached `READY` (round 1). Then a **24-byte blob** did, because the parse read only the signature, the `IHDR` marker and 8 dimension bytes; Pillow rejects the same bytes as `Truncated File Read` (round 2) |
+| **A match against the producer's own recorded facts** — `sha256`, `bytes`, `dimensions`. A recorded hash is *required*: both producers always write one, so its absence means a manifest nothing can confirm. | Measured on the real bundle: zeroing every manifest hash and setting dimensions to `1x1` still returned `READY 3/3` with **zero rejected records**, so a captured image could be swapped wholesale. The integrity data needed to catch it was already recorded and simply unread |
+| **A grade capped by `PROVIDER_CEILING`**, derived from what the producer can physically capture. A claim above the ceiling is a rejection; an unrecognised provider has an **empty** ceiling. | Grade came from the self-reported capability list alone, so an `embedded_thumbnail` record — a 192×192 worksheet render — claimed `validation_grade`, reached `READY` under `--require-validation-grade`, and **suppressed the ceiling warning** |
+| **Workbook identity**, carrying **both** LUID and name. Reference evidence uses `source_workbook_sha256`; oracle evidence uses a LUID when provenance is byte-confirmed, else the workbook name. | One synthetic `Overview` record made **two different** units report `2/2 READY`. Separately, a record carrying a LUID *discarded* its name, so removing source provenance made correctly-named records return `0/3 blind` |
+| **Trusted provenance only.** A LUID counts only when the stamped input hash is this file **and** `origin.match == "sha256"`. | `stamp_tableau_provenance.py` writes `match: "name_only"` when local and server bytes differ and says figures **will not reproduce** — yet that LUID made oracle evidence ready. Repo provenance today: **26 `sha256`, 15 `name_only`, 6 unmatched**, so this is the common case |
+| **Source revision.** A manifest whose `source_workbook_sha256` no longer matches the resolved source does not match that unit. | a **stale** capture is worse than a missing one, because it looks like evidence |
 
 The 64 px floor is set below Tableau's 192×192 embedded thumbnails (`extract_twb_thumbnails.py`), which
 are a genuine low-fidelity evidence route, so it rejects placeholders without rejecting real captures.
+
+### Provider ceilings — and the one walkable route to validation grade
+
+| provider | may claim | scope |
+|---|---|---|
+| `embedded_thumbnail` | `layout_grade` | worksheet — Tableau `<thumbnail>` blocks are per-worksheet renders |
+| `public_playwright` | `layout_grade`, `text_readable` | dashboard — driven from the spec's dashboard list |
+| `oracle_capture` | `layout_grade`, `text_readable` | PR #422's `view_type`; absent or `unknown` ⇒ cannot establish |
+| `manual` | `layout_grade`, `text_readable`, **`validation_grade`** | unknown — *unless* the operator asserted validation grade, which is an explicit claim about this object |
+| `server_rest` | *nothing* (not wired) | — |
+| anything else | *nothing* | — |
+
+⚠️ **`manual` is the only route to validation grade**, via `capture_tableau_reference.py
+--manual-validation-grade`, which logs a warning naming what it did **not** verify. That route was
+also *unwalkable* until round 2: `collect_manual` globs `tableau-*.png` and names each record from the
+file stem, so every name carried a `tableau-` prefix and matched nothing. The prefix is stripped now,
+so a file dropped as `tableau-<object>.png` resolves. The ceiling note in the output names each
+provider's ceiling and this route, rather than merely saying validation grade is rare.
+
+### The page mapping must be readable
+
+An unreadable `page.json` is a **problem, not a page** — the first version fell back to the containing
+directory's name, so forcing every read to fail still produced three pages and `READY`.
+
+⚠️ `pages.json` is **required**, and must declare a list `pageOrder`. The cross-check originally ran
+only when `pageOrder` *happened to be* a list, so absent, unreadable, wrong-shaped JSON or a non-list
+`pageOrder` all reported no problem and every discovered `page.json` was trusted — measured, failing
+**only** the `pages.json` reads still produced `READY 3/3`.
+
+### Ambiguity is a refusal, not a resolution
+
+One defect recurred at three successive layers, each time one object's excuse covering another's:
+
+| round | layer | fix |
+|---|---|---|
+| — | **routing** | `viz_fidelity[]` instead of `pbip_warnings[]`, whose reason strings drop the object name |
+| 1 | **matching** | key on `(kind, name)`, not `name` — a *worksheet* warning was excusing a missing *dashboard* |
+| 2 | **normalization** | `_norm` collapsed case and repeated whitespace, so `Ops  Summary` and `Ops Summary` — which take **different** engine page ids — shared one key |
+
+Rather than adding a fourth key component, the join changed shape:
+
+- **Drop explanations match EXACTLY.** Both sides are engine/source artifacts and byte-exact:
+  `viz_fidelity[].worksheet` is the IR's own object name, and `SourceObject.name` comes from the same
+  workbook XML. There is no normalization to do.
+- **Evidence names may still normalize**, because external providers spell them in ways this repo does
+  not control — but only when unambiguous. More than one candidate is `AMBIGUOUS`, reported as
+  `unverifiable`, because picking one would be a guess.
+- **A normalized collision among the EXPECTED objects is `CANNOT_ESTABLISH`**, since it is
+  unresolvable by construction: one evidence record would match both.
 
 `NOT_APPLICABLE` is **earned** from the engine's own `report.json` (the unit is listed under
 `datasources[]`, not `workbooks[]`) — never inferred from "I found no pages", and never from "some
@@ -190,11 +241,29 @@ anything less as a finding, and the bar lands on the **page**, so every count ag
 
 ## Tests and mutation proof
 
-- `tests/test_check_reference_readiness.py` — one test per round-1 finding, each naming its number.
+- `scripts/reference_evidence.py` — the evidence layer, split out because it answers a different
+  question from the gate: not "is this bundle ready" but "is this a picture I may believe, and of
+  what".
+- `tests/test_check_reference_readiness.py` — one test per review finding, each naming its round and
+  number, and each paired with a **discriminating twin** so "correctly refused" cannot be confused
+  with "broken".
 - `tests/mutation_reference_readiness.py` — imports the shared `tests/mutation_harness.py` scoring and
-  adds an *expected verdict* per mutation, so it is a gate rather than a report. Keeps discriminating
-  controls: a cosmetic reword must **SURVIVE**, an absent anchor must be **INVALID**.
+  adds an *expected verdict* per mutation, so it is a gate rather than a report.
 
-⚠️ Two fixture rules exist because round 1 measured the fixtures themselves encoding the defect:
-renders are **real, parseable images** (the first version used an 8-byte PNG signature and asserted
-readiness), and evidence **carries workbook identity** (without it, one record satisfied two units).
+⚠️ **Every mutation names its ANCHOR, and that is the point of the file.** It previously ran each
+mutation against the whole test file under `-x` and credited whichever test failed first, so two
+unrelated mutations were both credited to `test_colliding_page_ids_cannot_be_attributed` simply
+because it ran early — and the harness would have stayed green if their real anchors regressed while
+an unrelated test failed first. Each entry now declares the node that must **CATCH** it run alone,
+plus control nodes that must **SURVIVE** it run alone. 37 mutations, 73 anchor/control checks.
+
+⚠️ Fixture rules, each because a review measured the fixtures themselves encoding the defect:
+
+- renders are **real, parseable images** (the first version used an 8-byte PNG signature and asserted
+  readiness);
+- evidence **carries workbook identity** (without it, one record satisfied two units);
+- evidence **carries the producer's recorded `sha256`/`bytes`/`dimensions`** (without them, a fixture
+  could not notice that a swapped image still counted);
+- the positive grade test uses the **producer's real shape** — it previously used `embedded_thumbnail`
+  + `validation_grade`, an impossible combination, so it encoded the self-promotion bug as expected
+  behaviour.
