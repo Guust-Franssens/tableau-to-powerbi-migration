@@ -7,6 +7,7 @@ purpose: Pin the integrity of tests/fixtures/issue-185-set-filter.twb, the repro
 usage:   pytest -q tests/test_issue_185_set_fixture.py
 """
 
+import re
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -155,3 +156,40 @@ def test_bar_fixture_layout_is_measure_on_both_axes_with_a_dimension_on_detail()
     assert "sum:" in rows, f"rows must carry a measure, got {rows!r}"
     assert "sum:" in cols, f"cols must carry a measure, got {cols!r}"
     assert enc == [("lod", "[federated.bards].[none:Tail:nk]")], enc
+
+
+# --- the SET-DETECTION PREDICATE, pinned -----------------------------------------------------------
+# Three predicates were tried on this corpus and two produced confident false answers. The fixture
+# below is a live specimen of all three outcomes, so the lesson survives as an executable check
+# rather than as prose someone has to remember.
+
+UI_BUILDER = "{http://www.tableausoftware.com/xml/user}ui-builder"
+SET_BUILDERS = {"filter-group", "lasso-group"}
+
+
+def test_correct_predicate_finds_the_set():
+    """POSITIVE CONTROL for every set sweep in this repo.
+
+    A set is a <group> stamped by the authoring UI with user:ui-builder='filter-group' (condition
+    and top-N sets) or 'lasso-group' (manual sets). Any corpus sweep whose predicate cannot find
+    THIS group is producing a false zero, and its count must not be believed.
+    """
+    groups = [g for g in _root().iter("group") if (g.get(UI_BUILDER) or "") in SET_BUILDERS]
+    assert len(groups) == 1, [g.get("name") for g in groups]
+    assert groups[0].get("name") == SET_NAME
+
+
+def test_the_class_set_predicate_finds_nothing():
+    """Trap 1: there is no class='set' attribute in Tableau XML. This sweep returns a false zero."""
+    assert [g for g in _root().iter("group") if g.get("class") == "set"] == []
+    assert list(_root().iter("set")) == []
+
+
+def test_the_literal_set_name_predicate_finds_nothing():
+    """Trap 2: matching the literal name `[Set N]` only finds sets a user never renamed.
+
+    This fixture's set is named `[Technology Set]`, so a `[Set \\d+]` sweep misses it - which is how
+    12 set-bearing workbooks were once counted as 4.
+    """
+    named = [g for g in _root().iter("group") if re.fullmatch(r"\[Set \d+\]", g.get("name") or "")]
+    assert named == []

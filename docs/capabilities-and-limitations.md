@@ -122,12 +122,47 @@ a single pass does.
   `<color>` encoding is dropped just as silently — the emitted `scatterChart` lost its In/Out series
   split entirely. Reproduction fixture: `tests/fixtures/issue-185-set-filter.twb`; filed upstream as
   [`Yarbrdab000/tableau-fabric-skills#185`](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/185).
-  ⚠️ **Do not sweep a corpus for sets by grepping `class='set'` — there is no such attribute, and the
-  sweep will report zero on a corpus that contains them.** Tableau encodes a set as a `<group>` holding
-  a `<groupfilter>`, reached from a view through `<column-instance derivation='InOut'>`. A `.twb`-only
-  sweep also misses sets inside `.twbx`, which are ZIP archives and must be extracted to be searched.
-  Both mistakes were made here and together produced a confident "our corpus contains zero Tableau
-  Sets"; the real count is 4 workbooks of 137 assets.
+  ⚠️ **Sets are hard to find with a naive grep, and this project produced THREE wrong counts in a row
+  before getting it right.** There is no `class='set'` attribute (count: 0). Naming the set literally
+  (`[Set 1]`) finds only sets a user never renamed (count: 4 workbooks). The correct marker is the
+  authoring attribute on the group: **`user:ui-builder='filter-group'`** (condition / top-N sets) or
+  **`'lasso-group'`** (manual sets). `.twbx` are ZIP archives and must be extracted, or a `.twb`-only
+  sweep misses them entirely. Measured correctly, with controls:
+
+  ```
+  assets scanned                              137
+  files containing <group>                     51
+  files with a SET marker                      23   -> 12 DISTINCT workbooks
+  NEGATIVE CONTROL: <group> but no set marker  28
+  POSITIVE CONTROL: a known set-bearing file   FOUND
+  set kinds: top-n 32 | membership 27 | condition 13
+  ```
+
+  ⚠️ **Set kind matters when reporting a defect:** "sets are dropped" and "top-N sets are dropped" are
+  different claims. All three kinds are dropped, verified on three unrelated workbooks — but a count of
+  set *markers* is not a count of *defects*: `Airline Alliance` carries 10 markers and only 2 warn,
+  because only sets actually referenced by a view are ever resolved.
+- **A zero is not a measurement unless you state the positive control that proves the predicate can
+  see what it is looking for.** Four false zeros were produced here in one day: the `class='set'` sweep
+  above; a `[Set N]` sweep that undercounted 12 workbooks as 4; a shell function-scope bug that
+  silently returned an empty array; and a `Conditional.Cases` search that returned 0 against the
+  engine and was used to infer the engine cannot emit conditional fills — it emits **13 of them** into
+  a public workbook, because `Conditional.Cases` is *path notation in prose* and the serialized form is
+  nested keys `{"Conditional": {"Cases": [...]}}`. Every count in this repo should name its positive
+  control beside it, and a corpus too simple to exhibit the effect is a control failure too: our first
+  "0 visuals under 20px tall" was measured on single-zone workbooks, and a real multi-zone dashboard
+  produced **14**, the smallest at **12.56px**.
+- **The PBIR height floor covers `slicer` and `textbox` only, so sub-renderable CHART visuals pass
+  validation silently.** Measured on engine 2.339.0 against the public `Airline Alliance Activity
+  Dashboard _ #VOTD.twbx`: `powerbi-report-author` 0.1.4 raised 6 errors, all
+  `PBIR_SLICER_HEIGHT_BELOW_FLOOR` / `PBIR_TEXTBOX_HEIGHT_BELOW_FLOOR` — while a **12.56px**
+  `clusteredColumnChart` (and 13 more chart visuals under 20px tall, 64 under the 76px slicer floor,
+  22 under 150px wide) raised **nothing**. So "validate passed" does not mean "the visuals can be
+  seen"; this is the concrete, named instance of the general rule that structural validation is
+  necessary but not sufficient. Reported upstream on
+  [#186](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/186); related to
+  [#180](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/180) (slicers regressed to 57/62px
+  against a 76px floor).
 - **An explicit `mark class='Bar'` supports strictly fewer shelf layouts than `mark class='Automatic'`**
   (engine 2.339.0). `twb_to_pbir.py::_visual_type` accepts `bar` for exactly two layouts
   (dimension-on-cols + measure-on-rows, or dimension-on-rows + measure-on-cols); `automatic` reaches
