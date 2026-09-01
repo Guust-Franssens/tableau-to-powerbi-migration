@@ -17,7 +17,9 @@ The two rules the tests exist to pin:
 
 from __future__ import annotations
 
+import inspect
 import json
+import re
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -28,6 +30,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import capture_tableau_oracle as oracle  # noqa: E402  # pylint: disable=wrong-import-position
+import tableau_payload_facts as payload_facts  # noqa: E402  # pylint: disable=wrong-import-position
 
 FEDERATED_401 = (
     "<?xml version='1.0'?><tsResponse><error code='401002'><summary>Unauthorized Access</summary></error></tsResponse>"
@@ -61,7 +64,7 @@ class FakeSession(oracle.TableauSession):
         self.signin_count = 0
         self.token, self.site_id = "tok", "sid"
 
-    def _request(self, method, path, *, body=None, accept=None, authed=True):  # noqa: ARG002
+    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None):  # noqa: ARG002
         self.calls.append(path)
         status, payload, headers = self.responses.pop(0)
         return status, payload.encode() if isinstance(payload, str) else payload, headers
@@ -260,16 +263,22 @@ def test_reflected_session_token_is_redacted_from_exceptions_and_manifest(tmp_pa
 
         record = oracle.capture_view(
             session,
-            {"id": "view-id-12345678", "name": "Echo", "workbook": {"id": "wb", "name": "Workbook"}},
+            {
+                "id": "eb00995d-1ff1-4a42-9ac9-28846f861d31",
+                "name": "Echo",
+                "workbook": {"id": "wb", "name": "Workbook"},
+            },
             tmp_path,
-            False,
+            frozenset(),
         )
         oracle.write_manifest(
             [record],
-            session,
-            {"TABLEAU_SERVER_URL": "http://example", "TABLEAU_SITE": "site", "TABLEAU_REST_API_VERSION": "3.29"},
-            tmp_path,
-            0.0,
+            oracle.CaptureRun(
+                session,
+                {"TABLEAU_SERVER_URL": "http://example", "TABLEAU_SITE": "site", "TABLEAU_REST_API_VERSION": "3.29"},
+                tmp_path,
+                0.0,
+            ),
         )
         manifest = (tmp_path / "oracle-manifest.json").read_text(encoding="utf-8")
         assert token not in manifest
@@ -295,7 +304,7 @@ def test_reflected_session_token_is_redacted_from_exceptions_and_manifest(tmp_pa
 )
 def test_display_formatting_is_detected(values, expected):
     """/views/{id}/data returns display-formatted text, so a naive numeric diff would be garbage."""
-    assert oracle.detect_format(values) == expected
+    assert payload_facts.detect_format(values) == expected
 
 
 def test_csv_summary_proves_a_capture_is_non_empty():
@@ -309,8 +318,89 @@ def test_empty_csv_reports_zero_rows_rather_than_failing():
     assert oracle.summarise_csv(b"")["row_count"] == 0
 
 
-def test_slug_is_filesystem_safe():
-    assert "/" not in oracle.safe_slug("Superstore/sheets/Overview")
+def test_artifact_paths_are_built_only_from_a_verified_luid(tmp_path):
+    """Replaces `test_slug_is_filesystem_safe`, because `safe_slug` is gone rather than fixed.
+
+    A view NAME is response data. Slugging one into a filename truncated a reflected session token
+    into a prefix no redactor could then match (#405 round 6), so the name no longer reaches a path at
+    all: the only input is a LUID, whose UUID shape is verifiable in full. An identifier that is not a
+    LUID is refused rather than sanitised -- sanitising is the screen this replaces.
+    """
+    assert oracle.artifact_stem("EB00995D-1FF1-4A42-9AC9-28846F861D31") == "eb00995d-1ff1-4a42-9ac9-28846f861d31"
+    for bad in ("view-id-12345678", "", "../../etc/passwd", "eb00995d-1ff1-4a42-9ac9-28846f861d3"):
+        with pytest.raises(ValueError):
+            oracle.artifact_stem(bad)
+
+
+def test_a_view_whose_identifier_is_not_a_luid_is_refused_not_named(tmp_path):
+    session = FakeSession([(200, "a\n1\n", {})])
+    record = oracle.capture_view(session, {"id": "not-a-luid", "name": "V"}, tmp_path, frozenset())
+    assert record["data"]["status"] == "failed"
+    assert not list(tmp_path.rglob("*.csv"))
+
+
+def test_a_luid_that_IS_one_of_our_credentials_is_refused_too(tmp_path):
+    """Closes the one residual the LUID allowlist leaves on its own.
+
+    The shape check alone says "this is a UUID", not "this is not a credential". Measured against the
+    live site, none of ours could pass it -- PAT secret, PAT name and session token are 57/20/92
+    characters and none is hex-and-dash-only -- so this is belt and braces. It is what makes the claim
+    unconditional rather than true-of-today's-credentials.
+    """
+    luid = "eb00995d-1ff1-4a42-9ac9-28846f861d31"
+    session = FakeSession([(200, "a\n1\n", {})])
+    session.token = luid
+    record = oracle.capture_view(session, {"id": luid, "name": "V"}, tmp_path, frozenset())
+    assert record["data"]["status"] == oracle.CREDENTIAL_REFLECTED
+    assert not list(tmp_path.rglob("*.csv"))
+
+
+# ------------------ #405 round 3, finding 2: the api override changed a signature every double copies
+
+
+def test_the_request_contract_carries_the_api_override():
+    """``export``/``raw_get`` pass ``api`` on EVERY call, so it is part of ``_request``'s contract."""
+    parameters = inspect.signature(oracle.TableauSession._request).parameters  # pylint: disable=protected-access
+    assert "api" in parameters
+    assert parameters["api"].kind is inspect.Parameter.KEYWORD_ONLY
+
+
+@pytest.mark.parametrize("api", [None, "3.29"])
+def test_export_and_raw_get_forward_the_api_override(api):
+    """Including ``None``. Passing the keyword unconditionally is the deliberate choice: the
+    alternative -- omitting it when there is no override -- lets a stale adapter work for ordinary
+    exports and crash only on the rare floor-re-probe path, which is the failure arriving LATE."""
+    seen: list[str | None] = []
+
+    class _Recording(FakeSession):
+        def _request(self, method, path, *, body=None, accept=None, authed=True, api=None):  # noqa: ARG002
+            seen.append(api)
+            return super()._request(method, path, body=body, accept=accept, authed=authed, api=api)
+
+    session = _Recording([(200, "a\n1\n", {}), (200, b"x", {})])
+    session.export("/views/x/data", api=api)
+    session.raw_get("/views/x/image?format=svg", api=api)
+    assert seen == [api, api]
+
+
+def test_every_scripted_session_double_in_this_suite_accepts_the_api_override():
+    """The gate that would have caught the red CI without running the file.
+
+    ``TimedSession`` in ``test_capture_tableau_oracle_retry_budget.py`` overrides ``_request`` with
+    the PREVIOUS signature, so five ordinary-export tests died on ``unexpected keyword argument
+    'api'`` -- invisible to a test selection made from the changed *source* files, because that
+    double exercises the same class through a subclass in a differently-named module. The adapter set
+    is closed (three subclasses, all under ``tests/``), so updating them is right; this keeps it
+    closed. Scoped to ``def _request(self`` so module-level ``_request`` fakes for other scripts
+    (``deploy_estate``, ``verify_bindings``) are not swept up.
+    """
+    overrides = []
+    for path in sorted(Path(__file__).resolve().parent.glob("test_*.py")):
+        for match in re.finditer(r"def _request\(\s*self\s*,([^)]*)\)", path.read_text(encoding="utf-8")):
+            overrides.append((path.name, match.group(1)))
+    assert overrides, "the scan found no session doubles at all -- it has stopped testing anything"
+    stale = [name for name, params in overrides if "api" not in params]
+    assert not stale, f"session double(s) missing the 'api' keyword, so every export through them raises: {stale}"
 
 
 # --------------------------------------------------------------------------- manifest contract
@@ -334,7 +424,7 @@ def _record(status: str, rows: int = 1, image_status: str | None = None) -> dict
 def _write(tmp_path, records):
     session = oracle.TableauSession(_creds())
     env = {"TABLEAU_SERVER_URL": "https://x", "TABLEAU_SITE": "s", "TABLEAU_REST_API_VERSION": "3.29"}
-    return oracle.write_manifest(records, session, env, tmp_path, 0.0)
+    return oracle.write_manifest(records, oracle.CaptureRun(session, env, tmp_path, 0.0))
 
 
 def test_a_clean_capture_exits_zero(tmp_path):

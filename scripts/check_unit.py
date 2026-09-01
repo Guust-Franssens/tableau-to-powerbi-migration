@@ -891,13 +891,17 @@ def _oracle_capture_oracles(target: Path, oracle_dir: Path | None) -> tuple[dict
             name = str(record.get("view_name") or record.get("view_url_name") or "")
             entry = found.setdefault(_slug(name), {"visual": False, "numeric": False})
             data = record.get("data") if isinstance(record.get("data"), dict) else {}
-            image = record.get("image") if isinstance(record.get("image"), dict) else {}
             entry["numeric"] = (
                 entry["numeric"] or data.get("status") == "ok" and _existing_relative(directory, data.get("path"))
             )
-            entry["visual"] = (
-                entry["visual"] or image.get("status") == "ok" and _existing_relative(directory, image.get("path"))
-            )
+            # Any RENDER leg is visual evidence, not just the PNG. `--reference-best` now normally
+            # selects SVG on Tableau Cloud (issue #403), and reading only `image` meant a run whose
+            # reference was a vector SVG counted as having no visual oracle at all.
+            for leg in ("image", "svg", "pdf"):
+                leg_entry = record.get(leg) if isinstance(record.get(leg), dict) else {}
+                entry["visual"] = entry["visual"] or (
+                    leg_entry.get("status") == "ok" and _existing_relative(directory, leg_entry.get("path"))
+                )
             if entry["visual"] or entry["numeric"]:
                 grades.add("layout/text only (oracle capture, default view state)")
     return found, grades
