@@ -368,7 +368,10 @@ def plan(args, source, workdir, fetch_note):
     built = _orig(args, source, workdir, fetch_note)
     # Round-3 finding 1: with the retired directory already gone there is nothing for the diff
     # to see, so forgetting the retirement here restores the silent `in_sync` that left the
-    # marker claiming the name forever.
+    # marker claiming the name forever. `inventory_stale` is cleared too - clearing only
+    # `formerly_owned` no longer restores the defect, because the reconcile branch keys on the
+    # record matching in EITHER direction.
+    built.inventory_stale = False
     built.formerly_owned = []
     built.base["formerly_owned"] = []
     return built
@@ -383,6 +386,18 @@ def advertised(repo):
     # while the run still reports default_verified.
     return ref, proof, verified_at, None
 sync._advertised_default = advertised
+""",
+    "skillsync-under-claiming-marker-is-in-sync": """
+import sync_installed_skills as sync
+_orig = sync._plan
+def plan(args, source, workdir, fetch_note):
+    built = _orig(args, source, workdir, fetch_note)
+    # Reconcile only the OVER-claiming direction, which leaves a record that has forgotten an
+    # installed bundle reported as in_sync forever - and that bundle can then never be retired,
+    # which is round-2 finding 3 restored.
+    built.inventory_stale = bool(built.formerly_owned)
+    return built
+sync._plan = plan
 """,
 }
 

@@ -176,6 +176,7 @@ class SyncPlan:  # pylint: disable=too-many-instance-attributes
     discovery: object
     identity: PublishIdentity
     marker_present: bool
+    inventory_stale: bool
     workdir: Path
     base: dict = field(default_factory=dict)
 
@@ -691,6 +692,7 @@ def _plan(args: argparse.Namespace, source: PublishSource, workdir: Path, fetch_
         discovery=discovery,
         identity=identity,
         marker_present=marker is not None,
+        inventory_stale=marker is not None and sorted(recorded) != bundles,
         workdir=workdir,
     )
     plan.base = {
@@ -817,19 +819,31 @@ def _report(args: argparse.Namespace, plan: SyncPlan) -> int:  # pylint: disable
         # used to return `in_sync` with the marker untouched - and because `marker_present` was
         # true, nothing ever rewrote it. The tool then claimed that name forever, and deleted
         # whatever appeared under it next (round-3 finding 1). Marker inventory drift is WORK.
-        if plan.formerly_owned:
+        #
+        # The condition is `inventory_stale`, not `formerly_owned`, because the record can be wrong
+        # in BOTH directions and the other one is the same bug displaced in time: a marker that
+        # UNDER-claims (a name we installed is missing from it) cannot retire that bundle later,
+        # which is round-2 finding 3 all over again. Over-claiming is the dangerous direction and is
+        # named separately in the message; either way the fix is the same rewrite.
+        if plan.inventory_stale:
+            claimed = plan.formerly_owned
+            headline = (
+                f"the marker still claims {len(claimed)} bundle(s) {plan.source.described} no longer ships"
+                if claimed
+                else f"the marker does not record what is installed from {plan.source.described}"
+            )
             if args.check:
                 return _emit(
                     args,
                     {**payload, "status": "ownership_drift"},
                     [
                         *inventory,
-                        f"SYNC: DRIFT - the marker still claims {len(plan.formerly_owned)} bundle(s) "
-                        f"{plan.source.described} no longer ships, and their directories are already gone",
-                        *(f"        still claimed: {name}" for name in plan.formerly_owned),
+                        f"SYNC: DRIFT - {headline}, and no file differs, so only the record is wrong",
+                        *(f"        still claimed: {name}" for name in claimed),
                         "      Reconcile it: python scripts/sync_installed_skills.py",
-                        "      Until then a NEW bundle appearing under one of those names would be",
-                        "      deleted as formerly-owned.",
+                        "      Until then a NEW bundle appearing under a claimed name would be deleted",
+                        "      as formerly-owned, and a bundle missing from the record could never be",
+                        "      retired at all.",
                         *note,
                     ],
                     EXIT_DRIFT,
@@ -840,8 +854,8 @@ def _report(args: argparse.Namespace, plan: SyncPlan) -> int:  # pylint: disable
                 {**payload, "status": "ownership_reconciled"},
                 [
                     *inventory,
-                    f"SYNC: RECONCILED - the marker no longer claims {len(plan.formerly_owned)} retired "
-                    f"bundle(s); no file needed copying or removing at {installed}",
+                    f"SYNC: RECONCILED - {headline}; the record now matches, and no file needed "
+                    f"copying or removing at {installed}",
                     *note,
                 ],
                 EXIT_OK,

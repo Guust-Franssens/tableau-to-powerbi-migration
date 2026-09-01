@@ -1548,3 +1548,34 @@ def test_an_advertised_commit_that_cannot_be_fetched_refuses(estate: Estate, mon
 
     with pytest.raises(sync.UnverifiedDefaultError):
         sync.resolve_publish_ref(repo=estate.clone)
+
+
+def test_a_marker_that_UNDER_claims_is_reconciled_too(estate: Estate, capsys: pytest.CaptureFixture) -> None:
+    """The same bug displaced in time: a record missing a bundle can never retire it later.
+
+    Asked immediately after fixing the over-claiming direction: what does the NEXT unreached path
+    look like? A marker that under-claims is reachable the same way (a hand-edited or truncated
+    record), reports `in_sync` for exactly the same reason - no file differs - and its harm is
+    round-2 finding 3 restored: the unrecorded bundle stays installed forever once it is retired.
+    """
+    assert _run(estate) == sync.EXIT_OK
+    capsys.readouterr()
+    forgotten = BUNDLES[-1]
+    _stamp(estate, [name for name in BUNDLES if name != forgotten])
+
+    assert _run(estate, "--check", "--json") == sync.EXIT_DRIFT, "a record that does not match is WORK"
+    verdict = json.loads(capsys.readouterr().out)
+    assert verdict["status"] == "ownership_drift"
+    assert verdict["formerly_owned"] == [], "nothing is over-claimed here; only the record is short"
+
+    assert _run(estate) == sync.EXIT_OK
+    capsys.readouterr()
+    recorded = json.loads((estate.plugin / sync.OWNER_MARKER_NAME).read_text(encoding="utf-8"))["bundles"]
+    assert sorted(recorded) == sorted(BUNDLES), "the record must be repaired before it is needed"
+
+    # The harm it would otherwise cause, proven rather than asserted: retire the forgotten bundle
+    # and it must still be cleaned up, which an under-claiming record could not do.
+    _retire_a_bundle(estate, forgotten)
+    assert _run(estate) == sync.EXIT_OK
+    capsys.readouterr()
+    assert not (estate.plugin / "skills" / forgotten).exists()
