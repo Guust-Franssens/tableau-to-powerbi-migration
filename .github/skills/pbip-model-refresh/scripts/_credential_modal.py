@@ -1,8 +1,15 @@
 """Credential modal detection shared by the PBIP refresh/query scripts.
 
-All FOUR ``*_signature.regex`` files beside this one are the same signatures ``probe_desktop_credential.ps1``
-reads - it adopted ``benign_chrome_signature.regex`` when #406 removed its length amnesty. The seam is SHARED
-RESOURCES, PORTED CONTROL FLOW, gated by ``test_the_arbiter_and_the_python_detector_share_one_vocabulary``.
+**THE SINGLE DECISION IMPLEMENTATION (issue #417).** Both entry paths reach these functions: the
+in-process Win32 detector (``inspect_credential_modal``, used by ``probe_desktop_query.py`` and
+``refresh_pbip_model.py``) and the PowerShell collector, which harvests Win32 + UI Automation text and
+forwards it to ``decide_dialog.py``. ``probe_desktop_credential.ps1`` used to re-implement candidate
+selection and classification; two independent divergences survived a review round aimed specifically
+at removing divergence, one of them CASE SENSITIVITY at the LANGUAGE level, which cannot be fixed
+once. So there is one implementation rather than two agreeing ones, and the four ``*_signature.regex``
+files beside this one have exactly one reader. Gated by
+``test_the_arbiter_and_the_python_detector_share_one_vocabulary`` (resource sharing) and
+``test_the_seam_leaves_no_verdict_mismatch_between_the_two_entry_paths`` (verdict equality).
 
 ⚠️ **A big window is NOT evidence of anything (issue #376).** Until this module was fixed,
 ``inspect_credential_modal`` returned the FIRST visible non-main window >= 100x100 as a
@@ -13,27 +20,25 @@ trivially, so a working refresh could halt a migration and send someone to a sig
 never on show. That is the same defect #367 removed from the PowerShell arbiter, on a more dangerous
 path: this detector feeds ``probe_desktop_query.py``, the gate of record.
 
-**The burden of proof runs ONE WAY, exactly as in the arbiter:** a dialog is dismissed only when its
-CONTENT positively reads as recognised progress status. It is never dismissed because the caption
-looked reassuring, and never because we merely read *something*. Everything we could not account for -
-unreadable, caption-only, unrecognised, or progress text mixed with prose - surfaces as its own
-non-credential finding at **exit 3**, which is loud and recoverable, and never as a credential wall.
+**The burden of proof runs ONE WAY:** a dialog is dismissed only when its CONTENT positively reads as
+recognised progress status. It is never dismissed because the caption looked reassuring, and never
+because we merely read *something*. Everything we could not account for - unreadable, caption-only,
+unrecognised, or progress text mixed with prose - surfaces as its own non-credential finding at
+**exit 3**, which is loud and recoverable, and never as a credential wall.
 
-Three deliberate divergences from ``probe_desktop_credential.ps1``, each because this detector has
-strictly LESS evidence than the arbiter (Win32 child-HWND text only; no UI Automation):
+Two structural divergences remain, and they are about EVIDENCE, not about code. The functions are the
+same; what differs is what each caller can COLLECT, and the classifier degrades safely on the weaker
+input:
 
-* **No prose join.** The arbiter joins non-interactive elements before matching the credential
-  signature, which needs a control-type signal to exclude an interposed ``Cancel``. Win32 gives no
-  control type, so the only join available here is the naive whole-window one the arbiter discarded in
-  review - and a join can MANUFACTURE a phrase (two adjacent labels ``Account`` + ``Key`` join to the
-  signature ``Account Key``). That error would land on the one verdict issue #376 says to err away
-  from, so matching here stays per-element. The recall this costs routes to ``unrecognized`` /
-  ``unreadable`` (exit 3, loud), and the arbiter - which HAS the control-type signal - is the
-  escalation path.
-* **No ``benign-unverified`` kind.** The arbiter needs it because a UIA harvest can be truncated while
-  still returning text. Here a text read that throws fails the WHOLE enumeration
-  (``Win32EnumerationError`` -> ``unknown_reason``), so a partial read cannot reach the classifier in
-  the first place.
+* **The prose join is weaker in-process.** It skips elements listed in ``interactive_texts``, which
+  only a UI Automation harvest can supply. With none, an interposed ``Cancel`` sits inside the join
+  and can break the sentence. The join is also body-corroborated (see
+  :func:`credential_search_texts`), so it cannot manufacture a conviction from a caption; the recall
+  it costs routes to ``unrecognized`` / ``unreadable`` (exit 3, loud), never to a silent clear.
+* **``benign-unverified`` is unreachable in-process, by construction.** ``harvest_complete`` defaults
+  to ``None`` - "the question does not apply" - because a text read that throws fails the WHOLE
+  enumeration (``Win32EnumerationError`` -> ``unknown_reason``), so a partial read cannot reach the
+  classifier here at all. Only a collected window can carry ``False``.
 
 ⚠️ **Blocking is decided from MODALITY, never from class, size or name (#400 review round 3).** An
 earlier pass answered *"is this window blocking a human?"* with three correlates in turn - a
@@ -41,8 +46,8 @@ earlier pass answered *"is this window blocking a human?"* with three correlates
 ``Internet Explorer_Hidden`` name allowlist - and native Win32 experiments defeated all three, each
 time by collapsing a real blocker into the healthy state. Win32 answers the question directly: a modal
 disables its owner. So :func:`main_frame`, :func:`is_proven_non_blocking` and :func:`renders_nothing`
-decide from ``GetWindow(GW_OWNER)`` and ``IsWindowEnabled(owner)``, and the arbiter's one-way
-enabled-owner exoneration is now ported here rather than skipped.
+decide from ``GetWindow(GW_OWNER)`` and ``IsWindowEnabled(owner)``, and the one-way enabled-owner
+exoneration is applied once, here, for both entry paths.
 
 ⚠️ **Frame identity is ENUMERATED, and ambiguity excludes nothing (#400 review round 5).** The one
 thing this module does with the frame is EXCLUDE it, so a wrong identity is a silently missed prompt.
@@ -259,8 +264,8 @@ DESKTOP_MAIN_CLASS_PREFIX = "WindowsForms10.Window.8"
 # `GetWindow(hwnd, GW_OWNER)`. The owner of a top-level window - the window a modal disables.
 GW_OWNER = 4
 
-# Classifier vocabulary, shared verbatim with the PowerShell arbiter's `Get-DialogClassification` so a
-# reader moving between the two detectors meets one set of words, not two.
+# Classifier vocabulary. Since issue #417 there is exactly one classifier, so these tokens travel to
+# the PowerShell collector over the decider's `DECISION:` line rather than being spelled twice.
 DIALOG_KIND_CREDENTIAL = "credential"
 DIALOG_KIND_NEEDS_HUMAN = "needs-human"
 DIALOG_KIND_MIXED_CONTENT = "mixed-content"
@@ -376,7 +381,7 @@ def blocking_prompt_signature() -> re.Pattern[str]:
 
 
 def normalize_texts(texts: Iterable[str]) -> tuple[str, ...]:
-    """Whitespace-normalised, de-duplicated, order-preserving text (mirrors ``Get-NormalizedText``)."""
+    """Whitespace-normalised, de-duplicated, order-preserving text."""
     clean: list[str] = []
     for text in texts:
         if not text:
