@@ -50,6 +50,21 @@ from typing import Any
 # merely trusted, and a Metadata API that returned something else is refused rather than indexed by.
 _LUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
+
+def is_luid(value: str) -> bool:
+    """True when ``value`` is a Tableau LUID. Whitespace-insensitive, case-insensitive.
+
+    Public because the shape rule is the thing external code needs to agree with -- a caller that
+    re-implements the regex is a caller that will drift from it. It reads ``_LUID_RE`` at call time
+    rather than closing over it, so a test may substitute the pattern.
+
+    ⚠️ A BLANK value is not a luid and is not malformed either: Tableau documents ``Sheet.luid`` as
+    blank for a hidden worksheet. Callers must decide between "skip" and "refuse" themselves; see
+    :func:`_fold_nodes`, which skips blanks and refuses non-empty non-luids.
+    """
+    return bool(_LUID_RE.match(value.strip()))
+
+
 # `luid` is not queried anywhere else in this repo, so an older server that does not expose it is a
 # capability question rather than a bug. Only the SHAPE of the resulting GraphQL error is reported --
 # never its message, which is server-controlled (see `view_types`).
@@ -97,6 +112,17 @@ def view_types(session: Any) -> tuple[dict[str, str], str | None]:
     payload, refused = _fetch_payload(session)
     if refused:
         return {}, refused
+    return parse_payload(payload)
+
+
+def parse_payload(payload: dict[str, Any]) -> tuple[dict[str, str], str | None]:
+    """Everything :func:`view_types` does EXCEPT the request. Returns ``(mapping, reason)``.
+
+    Public so a caller that already holds a response -- ``tableau_luid_census`` measuring a real
+    site, a replayed capture, a fixture -- applies the same protocol and mapping rules without
+    spending a second GraphQL round trip, and without reaching into a private. Sharing the seam is
+    the point: a second implementation of "what does this response mean" is how the two would drift.
+    """
     refused = _errors_refusal(payload)
     if refused:
         return {}, refused
@@ -273,7 +299,7 @@ def _fold_nodes(key: str, kind: str, nodes: list[Any], mapping: dict[str, str]) 
         stripped = luid.strip()
         if not stripped:
             continue
-        if not _LUID_RE.match(stripped):
+        if not is_luid(stripped):
             return f"a `{key}` node carried a non-empty value that is not a luid; response refused"
         key_luid = stripped.lower()
         # ⚠️ A LUID naming BOTH a dashboard and a sheet is contradictory, not a last-wins tiebreak.

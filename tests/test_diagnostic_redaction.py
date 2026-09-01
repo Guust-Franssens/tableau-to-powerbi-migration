@@ -530,6 +530,11 @@ MODULES = (
     # hand-maintained inventory that cannot detect its own omissions is exactly the shape that
     # produced the round-7 leak in #405.
     "scripts/tableau_view_types.py",
+    # ⚠️ Caught by `_SESSION_CLIENT_MARKERS` on its FIRST run, which is the demonstration that the
+    # widening does real work rather than merely restating what was already covered: this module
+    # names no credential anywhere in code, so under `HTTP AND credential` it would have been
+    # invisible to the inventory exactly as `tableau_view_types.py` was.
+    "scripts/tableau_luid_census.py",
 )
 
 # Where response bytes ENTER, declared per function rather than inferred from a parameter's spelling.
@@ -561,6 +566,10 @@ TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
     # untracked. Found by `test_every_cross_module_call_carrying_tainted_data_lands_on_a_declared_seed`
     # the moment this module joined MODULES.
     ("scripts/tableau_view_types.py", "resolve_and_stamp"): {"views"},
+    # `tableau_luid_census` holds a response and reuses the module's own rules on it rather than
+    # re-implementing them. Both are cross-module, so propagation cannot see them.
+    ("scripts/tableau_view_types.py", "parse_payload"): {"payload"},
+    ("scripts/tableau_view_types.py", "is_luid"): {"value"},
     # The shared HTTP primitive. `req` and `redactor` are OUTBOUND -- the request we are about to send
     # and the scrubber we hand it -- but they arrive from functions the analyser has already tainted,
     # and declaring them keeps the boundary honest rather than silently permeable. `headers` really is
@@ -609,6 +618,16 @@ _PY_TYPE_NAME = (
     "FIXED-VOCABULARY: a Python type NAME, not the value. `json.loads` can only produce dict, list, "
     "str, int, float, bool or NoneType, so this is a closed set the server cannot influence - it "
     "reports the SHAPE of a malformed response without echoing any of its content."
+)
+
+_CENSUS_COUNT = (
+    "NOT-A-STRING: an integer tallied from the response's SHAPE - a node count, a bucket total, "
+    "or a sum of two of them. Nothing is ever keyed or summed BY a luid, a workbook name or a "
+    "sheet name; `classify` reads type, emptiness and a regex match, never a value."
+)
+_CENSUS_LABEL = (
+    "FIXED-VOCABULARY: composed only of this module's own literals - the `BUCKETS` names and the "
+    "two collection names `dashboards`/`sheets`. The server chooses none of it."
 )
 
 _PROBE_VERDICT = (
@@ -703,6 +722,46 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
             "FIXED-VOCABULARY: the reason string built by view_types/_mapping_from, composed only of "
             "this module's own literals plus Python type names and integers. No branch interpolates "
             "server-controlled text - that is the property the credential-reflection probe pins."
+        ),
+    },
+    # ⚠️ Every expression here is a COUNT, a module literal, or a module-authored reason. That is
+    # not an accident of how it was written: `_emit` REFUSES to print anything that is not an int,
+    # bool or None, so the "counts and shapes only" promise is enforced by the code rather than by a
+    # convention someone has to remember. See the module docstring.
+    ("scripts/tableau_luid_census.py", "_emit"): {
+        "label": _CENSUS_LABEL,
+        "type(value).__name__": _PY_TYPE_NAME,
+        "value": (
+            "REFUSED-AT-SEAM: the line above raises SystemExit unless `value` is an int, bool or "
+            "None, so nothing else can reach this f-string. That guard is the whole reason this "
+            "module may talk about a credentialed response at all - it cannot name one."
+        ),
+    },
+    ("scripts/tableau_luid_census.py", "census"): {
+        "classify(workbook['dashboards'] or [])": _CENSUS_COUNT,
+        "classify(workbook['sheets'] or [])": _CENSUS_COUNT,
+        "totals['dashboards_blank']": _CENSUS_COUNT,
+        "totals['dashboards_total']": _CENSUS_COUNT,
+        "totals['sheets_blank']": _CENSUS_COUNT,
+        "totals['sheets_total']": _CENSUS_COUNT,
+        "totals['dashboards_blank'] + totals['sheets_blank']": _CENSUS_COUNT,
+        "totals['dashboards_total'] + totals['sheets_total']": _CENSUS_COUNT,
+        "len(workbooks) if isinstance(workbooks, list) else 0": _CENSUS_COUNT,
+        "bucket": _CENSUS_LABEL,
+        "kind": _CENSUS_LABEL,
+    },
+    ("scripts/tableau_luid_census.py", "main"): {
+        "totals": _CENSUS_COUNT,
+        "json.dumps(totals, indent=2, sort_keys=True)": (
+            "NOT-A-STRING: the serialised COUNTS dict on its way to --json. Its keys are this "
+            "module's `BUCKETS` literals and its values are integers, so the file it writes cannot "
+            "contain a workbook name, a sheet name or a luid."
+        ),
+        "answer": ("FIXED-VOCABULARY: one of `verdict`'s three literals - CONFIRMED, NOT-PRESENT or CANNOT-TELL."),
+        "unavailable": (
+            "FIXED-VOCABULARY: the reason string built by tableau_view_types, composed only of that "
+            "module's own literals plus Python type names and integers. No branch of it interpolates "
+            "server-controlled text; the credential-reflection probe pins that property."
         ),
     },
     ("scripts/capture_tableau_oracle.py", "capture_view"): {

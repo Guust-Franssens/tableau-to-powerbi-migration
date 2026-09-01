@@ -813,6 +813,26 @@ def test_a_hidden_sheet_does_not_switch_typing_off_for_the_whole_site(workbooks,
 
     Hidden sheets are ordinary in a real estate, so the feature would have been inert exactly where
     it was built to be used -- and inert SILENTLY, reported as a clean fail-closed run.
+
+    ⚠️ **MEASURED, not merely documented.** Tableau's docs say ``Sheet.luid: String!`` is *"Blank if
+    worksheet is hidden in Workbook"*, but nobody had confirmed a real site emits one. Measured
+    against our Tableau Cloud trial on **2026-09-01**, REST **3.29** requested, one read-only
+    Metadata API query (``scripts/tableau_luid_census.py``, re-runnable):
+
+    ==========================================  =========
+    workbooks returned                          48
+    dashboard nodes / blank                     60 / **0**
+    sheet nodes / blank                         416 / **116**
+    workbooks holding at least one blank luid   **5**
+    non-empty non-uuid luids                    0
+    views typed by the SHIPPED parser           **360**
+    views typed by the PRE-FIX rule             **0** (refused the whole response)
+    ==========================================  =========
+
+    So this is not "would break a site that has hidden sheets" -- **27.9% of sheets on the site this
+    feature was built against carry a blank luid**, and the pre-fix rule typed nothing at all there.
+    Re-measure with ``python scripts/tableau_luid_census.py``; the three verdicts are CONFIRMED,
+    NOT-PRESENT and CANNOT-TELL, and it does not push toward any of them.
     """
     mapping, unavailable = view_types_mod.view_types(_graphql({"data": {"workbooks": workbooks}}))
     assert unavailable is None, f"{why} must not refuse the response"
