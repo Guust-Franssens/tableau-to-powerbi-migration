@@ -1,7 +1,7 @@
 """
-purpose: group a flat `capture_tableau_oracle.py` capture into per-workbook reference folders
-usage:   python scripts/group_oracle_by_workbook.py --oracle _oracle [--migrations migrations/workbooks]
-                                                    [--dry-run]
+purpose: group flat `capture_tableau_oracle.py` captures into per-workbook reference folders
+usage:   python scripts/group_oracle_by_workbook.py --oracle _oracle [--oracle _oracle-retry ...]
+                                                    [--migrations migrations/workbooks] [--dry-run]
 
 `capture_tableau_oracle.py` writes every view flat into `<oracle>/data/` and `<oracle>/images/`,
 with workbook association living only in `oracle-manifest.json`. That is deliberate and is NOT
@@ -30,6 +30,30 @@ collapses punctuation and case but never words, so a name carrying Tableau's cro
 disambiguation suffix (`"Sales | Project : Finance"`) does NOT match a `sales` folder. It is
 reported as unmatched -- which is the honest outcome, and the reason this script's exit code
 distinguishes "grouped everything" from "grouped what it could".
+
+`--oracle` IS REPEATABLE, and it has to be (issue #423)
+-------------------------------------------------------
+A metered, timing-out capture is re-run in BATCHES, and the same view can succeed in a later batch
+having failed in an earlier one. Field evidence: *Daily Monitoring* failed its data leg twice, then
+on a third batch produced both a data leg and 905,098 bytes of PNG -- and the workbook's
+`reference/` folder only ever cross-referenced the first two batches, so a successful capture sat
+unused on disk. Grouping one directory at a time cannot fix that: the last invocation overwrites the
+per-workbook manifest, so it does not merely miss the good artifact, it can REPLACE a good one with
+a failure from a partial re-run.
+
+So every batch is read and merged per view and PER LEG, newest-successful-wins:
+
+* a leg is a candidate only if its status is `ok` AND the artifact it names is on disk -- a manifest
+  entry alone is a claim, and this script already refuses to promote claims it cannot back;
+* if no batch has a successful leg, the NEWEST batch's record for that leg is kept, so the failure
+  (or `not_attempted`, or `source_credential`) stays visible. A view with no establishable render
+  must not quietly vanish from the merged manifest -- that collapse is the whole of #423;
+* every promoted leg records `source_batch`, and the merged manifest lists `batches`, so "which
+  capture did this image come from" is answerable from the artifact rather than from memory.
+
+WARNING: "Newest" is the view record's `captured_at`, falling back to the batch manifest's. When a batch
+carries NEITHER, the order is undetermined and this script says so (`merge_order_basis:
+"argument order"`, plus a warning) rather than pretending the argv order is a timestamp.
 """
 
 from __future__ import annotations
@@ -56,8 +80,29 @@ class _Context:
 
     manifest: dict[str, Any]
     destinations: dict[str, list[Path]]
-    oracle_dir: Path
+    roots: dict[str, Path]
     dry_run: bool
+
+
+@dataclass(frozen=True)
+class _Batch:
+    """One `_oracle/<dir>` capture, plus the two things the merge orders by.
+
+    ``label`` is the directory NAME -- what a report shows and what a leg's ``source_batch`` records.
+    ``order`` is the position on the command line, and is the LAST-RESORT tiebreak only: a batch that
+    carries no ``captured_at`` anywhere cannot be dated, and argv order is an operator's habit rather
+    than evidence, so relying on it is reported (see :func:`merge_batches`).
+    """
+
+    directory: Path
+    manifest: dict[str, Any]
+    label: str
+    order: int
+
+    @property
+    def captured_at(self) -> str:
+        """The batch-level capture time, or ``""`` when this manifest does not carry one."""
+        return self.manifest.get("captured_at") or ""
 
 
 def normalize(name: str) -> str:
@@ -91,6 +136,99 @@ def load_manifest(oracle_dir: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def load_batches(oracle_dirs: list[Path]) -> list[_Batch]:
+    """Read every named capture directory, preserving the order they were given in.
+
+    A missing manifest is fatal for the WHOLE run rather than skipped: silently grouping two of three
+    batches would produce a merged folder that looks complete and is not, which is the exact failure
+    class this script exists to make visible.
+    """
+    return [
+        _Batch(directory, load_manifest(directory), directory.name, index)
+        for index, directory in enumerate(oracle_dirs)
+    ]
+
+
+def _leg_is_promotable(entry: dict[str, Any], root: Path) -> bool:
+    """A leg may only win the merge if it is ``ok`` AND the artifact it names is on disk.
+
+    ⚠️ Both halves. A manifest entry is a CLAIM; a later batch whose manifest says ``ok`` for a file
+    somebody has since deleted must not displace an earlier batch that still has the bytes. Without
+    the on-disk half, merging could make a reference set worse than either input.
+    """
+    relative = entry.get("path")
+    return bool(entry.get("status") == "ok" and relative and (root / relative).is_file())
+
+
+def _merge_one_view(candidates: list[tuple[_Batch, dict[str, Any]]], roots: dict[str, Path]) -> dict[str, Any]:
+    """Merge one view across batches, newest-successful-wins PER LEG.
+
+    ``candidates`` is already ordered newest-first. The view's identity fields come from the newest
+    batch that saw it at all; each leg is then resolved independently, because the field case that
+    started this is precisely a view whose data and image succeeded in DIFFERENT batches.
+    """
+    newest_batch, newest_view = candidates[0]
+    merged = dict(newest_view)
+    merged["source_batch"] = newest_batch.label
+    for kind, _sub in RENDER_LEGS:
+        winner = next(
+            (
+                (batch, view[kind])
+                for batch, view in candidates
+                if _leg_is_promotable(view.get(kind) or {}, roots[batch.label])
+            ),
+            None,
+        )
+        if winner is None:
+            # No batch established this leg. Keep the NEWEST record so the failure -- or the absence
+            # of any record at all -- stays exactly as visible as it was, and mark where it came from.
+            if kind in merged:
+                merged[kind] = {**merged[kind], "source_batch": newest_batch.label}
+            continue
+        batch, entry = winner
+        merged[kind] = {**entry, "source_batch": batch.label}
+    return merged
+
+
+def merge_batches(batches: list[_Batch]) -> tuple[dict[str, Any], dict[str, Path], str]:
+    """Fold every batch into ONE manifest, newest-successful-wins per view and per leg.
+
+    Returns ``(merged manifest, label -> directory, the basis the ordering used)``.
+
+    The newest batch supplies the provenance fields (`server`, `site`, `rest_api_version`, the
+    `#403` capability block), because those describe the run that produced the winning artifacts more
+    often than any older one does. `batches` records every input in newest-first order, so a reader
+    can see what was merged rather than infer it from one `source_batch` at a time.
+    """
+    roots = {batch.label: batch.directory for batch in batches}
+    dated = [
+        batch
+        for batch in batches
+        if batch.captured_at or any(v.get("captured_at") for v in batch.manifest.get("views", []))
+    ]
+    basis = "captured_at" if len(dated) == len(batches) else "argument order"
+
+    def freshness(batch: _Batch, view: dict[str, Any]) -> tuple[str, int]:
+        return (view.get("captured_at") or batch.captured_at or "", batch.order)
+
+    by_view: dict[str, list[tuple[_Batch, dict[str, Any]]]] = {}
+    for batch in batches:
+        for view in batch.manifest.get("views", []):
+            by_view.setdefault(view.get("view_luid") or "", []).append((batch, view))
+
+    views = []
+    for candidates in by_view.values():
+        candidates.sort(key=lambda pair: freshness(pair[0], pair[1]), reverse=True)
+        views.append(_merge_one_view(candidates, roots))
+
+    newest = max(batches, key=lambda b: (b.captured_at, b.order))
+    merged = {key: value for key, value in newest.manifest.items() if key != "views"}
+    merged["views"] = views
+    merged["batches"] = [b.label for b in sorted(batches, key=lambda b: (b.captured_at, b.order), reverse=True)]
+    merged["merge_order_basis"] = basis
+    return merged, roots, basis
+
+
 def group_views(manifest: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     """Bucket the manifest's views by workbook name, preserving capture order within each bucket."""
     buckets: dict[str, list[dict[str, Any]]] = {}
@@ -108,7 +246,7 @@ NOT_COPIED_STATUS = "not_copied"
 
 
 def copy_view_files(
-    view: dict[str, Any], oracle_dir: Path, destination: Path, *, dry_run: bool
+    view: dict[str, Any], roots: dict[str, Path], destination: Path, *, dry_run: bool
 ) -> tuple[list[str], dict[str, Any]]:
     """Copy one view's captured artifacts. Returns ``(relative paths written, the view AS GROUPED)``.
 
@@ -125,6 +263,10 @@ def copy_view_files(
     `path` re-creates that same shape one level up: the grouped folder asserts evidence nothing ever
     put there. The returned view is a copy -- the capture manifest is never mutated -- whose affected
     legs carry ``NOT_COPIED_STATUS``, no ``path``, and the reason.
+
+    ⚠️ ``roots`` is a MAP, not one directory, because after #423 two legs of the same view can come
+    from two different batches. Each leg is resolved against the batch that actually produced it
+    (``source_batch``); resolving everything against a single root is what stranded a good image.
     """
     written: list[str] = []
     grouped = dict(view)
@@ -133,9 +275,10 @@ def copy_view_files(
         relative = entry.get("path")
         if entry.get("status") != "ok" or not relative:
             continue
+        oracle_dir = roots[entry.get("source_batch", next(iter(roots)))]
         source = oracle_dir / relative
         if not source.is_file():
-            LOG.warning("  MISSING on disk, not copied: %s", relative)
+            LOG.warning("  MISSING on disk, not copied: %s (%s)", relative, oracle_dir.name)
             downgraded = {k: v for k, v in entry.items() if k != "path"}
             downgraded["status"] = NOT_COPIED_STATUS
             downgraded["not_copied_reason"] = (
@@ -206,7 +349,17 @@ def subset_manifest(manifest: dict[str, Any], workbook: str, views: list[dict[st
     for kind in render_kinds:
         subset[f"{'image' if kind == 'image' else kind}_ok"] = sum(1 for v in views if status_of(v, kind) == "ok")
     # Carried, not recomputed: these describe the CAPTURE RUN, not this workbook's slice of it.
-    for field in ("render_capability", "requested_renders", "reference_required", "reference_missing"):
+    # `batches` / `merge_order_basis` travel with them (#423) so a consumer reading ONLY this file can
+    # see which captures were folded together and on what evidence "newest" was decided -- otherwise
+    # the per-leg `source_batch` names a directory the reader has no list of.
+    for field in (
+        "render_capability",
+        "requested_renders",
+        "reference_required",
+        "reference_missing",
+        "batches",
+        "merge_order_basis",
+    ):
         if field in manifest:
             subset[field] = manifest[field]
     return subset
@@ -215,7 +368,21 @@ def subset_manifest(manifest: dict[str, Any], workbook: str, views: list[dict[st
 def build_parser() -> argparse.ArgumentParser:
     """CLI surface: which capture to read, which folder tree to group it into."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--oracle", required=True, type=Path, help="the capture directory holding oracle-manifest.json")
+    parser.add_argument(
+        "--oracle",
+        required=True,
+        action="append",
+        type=Path,
+        metavar="DIR",
+        help=(
+            "a capture directory holding oracle-manifest.json. WARNING: REPEATABLE, and normally should be: "
+            "a metered capture is re-run in batches, and the same view can succeed in a later one "
+            "having failed earlier. Every batch given is merged newest-successful-wins per view and "
+            "per LEG, and each promoted artifact records the batch it came from. Grouping one "
+            "directory at a time strands a later good image -- or overwrites a good manifest with a "
+            "partial re-run's failure"
+        ),
+    )
     parser.add_argument(
         "--migrations",
         type=Path,
@@ -248,7 +415,7 @@ def _group_one(
     files: list[str] = []
     grouped_views: list[dict[str, Any]] = []
     for view in views:
-        written, grouped = copy_view_files(view, ctx.oracle_dir, destination, dry_run=ctx.dry_run)
+        written, grouped = copy_view_files(view, ctx.roots, destination, dry_run=ctx.dry_run)
         files.extend(written)
         grouped_views.append(grouped)
     subset = subset_manifest(ctx.manifest, workbook, grouped_views)
@@ -279,34 +446,35 @@ def _group_one(
     return "grouped", record
 
 
-def run(oracle_dir: Path, migrations_root: Path, *, dry_run: bool) -> int:
-    """Group the capture. Returns 0 when every workbook landed, 1 when some could not.
-
-    "Could not" covers three things, and the third used to be invisible: no destination folder, an
-    ambiguous destination, and a destination that was reached but did **not** receive every artifact
-    the capture manifest named. All three mean the same to a caller gating on the exit code -- the
-    per-workbook copies are partial and the flat capture remains the authoritative one.
-    """
-    manifest = load_manifest(oracle_dir)
-    destinations, folder_count = index_destinations(migrations_root)
-    buckets = group_views(manifest)
-    LOG.info(
-        "%d workbook(s) in the capture, %d candidate folder(s) under %s%s",
-        len(buckets),
-        folder_count,
-        migrations_root,
-        " [DRY RUN]" if dry_run else "",
-    )
-
+def _group_all(buckets: dict[str, list[dict[str, Any]]], ctx: _Context) -> dict[str, list[dict[str, Any]]]:
+    """Place every workbook, bucketed by outcome. Split out of ``run`` to keep it readable."""
     outcomes: dict[str, list[dict[str, Any]]] = {"grouped": [], "incomplete": [], "unmatched": [], "ambiguous": []}
-    ctx = _Context(manifest=manifest, destinations=destinations, oracle_dir=oracle_dir, dry_run=dry_run)
     for workbook, views in sorted(buckets.items()):
         bucket, record = _group_one(workbook, views, ctx)
         outcomes[bucket].append(record)
+    return outcomes
 
+
+def _write_grouping_report(
+    batches: list[_Batch],
+    migrations_root: Path,
+    basis: str,
+    outcomes: dict[str, list[dict[str, Any]]],
+    *,
+    dry_run: bool,
+) -> Path:
+    """Write the run report beside the LAST capture given, and return that directory.
+
+    ``oracle_dirs`` and ``merge_order_basis`` are new (#423): with several batches folded together,
+    "which captures produced this" and "on what evidence was newest decided" are the two questions a
+    reader of a merged reference folder actually has. ``oracle_dir`` is kept for callers that read it.
+    """
+    report_dir = batches[-1].directory
     report = {
         "schema": "tableau-oracle-grouping/1",
-        "oracle_dir": str(oracle_dir),
+        "oracle_dir": str(report_dir),
+        "oracle_dirs": [str(b.directory) for b in batches],
+        "merge_order_basis": basis,
         "migrations_root": str(migrations_root),
         "dry_run": dry_run,
         "workbooks_grouped": len(outcomes["grouped"]),
@@ -316,7 +484,50 @@ def run(oracle_dir: Path, migrations_root: Path, *, dry_run: bool) -> int:
         **outcomes,
     }
     if not dry_run:
-        (oracle_dir / UNMATCHED_REPORT).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        (report_dir / UNMATCHED_REPORT).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    return report_dir
+
+
+def run(oracle: Path | list[Path], migrations_root: Path, *, dry_run: bool) -> int:
+    """Group one or more captures. Returns 0 when every workbook landed, 1 when some could not.
+
+    "Could not" covers three things, and the third used to be invisible: no destination folder, an
+    ambiguous destination, and a destination that was reached but did **not** receive every artifact
+    the capture manifest named. All three mean the same to a caller gating on the exit code -- the
+    per-workbook copies are partial and the flat capture remains the authoritative one.
+
+    ``oracle`` accepts a single ``Path`` as well as a list, deliberately: the single-capture call is
+    the common one and is what every existing caller writes. A list is folded newest-successful-wins
+    by :func:`merge_batches` before anything is copied (#423), which is what stops an operator's
+    third, finally-successful retry batch from being stranded on disk -- or, worse, a partial re-run
+    from OVERWRITING a good per-workbook manifest with a failure.
+    """
+    batches = load_batches([oracle] if isinstance(oracle, Path) else list(oracle))
+    manifest, roots, basis = merge_batches(batches)
+    destinations, folder_count = index_destinations(migrations_root)
+    buckets = group_views(manifest)
+    LOG.info(
+        "%d workbook(s) across %d capture(s), %d candidate folder(s) under %s%s",
+        len(buckets),
+        len(batches),
+        folder_count,
+        migrations_root,
+        " [DRY RUN]" if dry_run else "",
+    )
+    if len(batches) > 1 and basis != "captured_at":
+        # Not a detail. Merging is "newest wins", so an undated batch means the WINNER is decided by
+        # the order somebody happened to type -- which is a habit, not evidence. Say so rather than
+        # letting a merged manifest imply a provenance it does not have.
+        LOG.warning(
+            "at least one capture carries no captured_at, so 'newest' fell back to ARGUMENT ORDER "
+            "(last --oracle wins). The merged manifests record merge_order_basis='%s'; pass the "
+            "batches oldest-first, or re-capture with a manifest that carries a timestamp.",
+            basis,
+        )
+
+    ctx = _Context(manifest=manifest, destinations=destinations, roots=roots, dry_run=dry_run)
+    outcomes = _group_all(buckets, ctx)
+    report_dir = _write_grouping_report(batches, migrations_root, basis, outcomes, dry_run=dry_run)
 
     LOG.info(
         "\n%d grouped, %d incomplete, %d without a folder, %d ambiguous%s",
@@ -324,7 +535,7 @@ def run(oracle_dir: Path, migrations_root: Path, *, dry_run: bool) -> int:
         len(outcomes["incomplete"]),
         len(outcomes["unmatched"]),
         len(outcomes["ambiguous"]),
-        "" if dry_run else f" -> {oracle_dir / UNMATCHED_REPORT}",
+        "" if dry_run else f" -> {report_dir / UNMATCHED_REPORT}",
     )
     if outcomes["incomplete"]:
         LOG.warning(
@@ -336,8 +547,8 @@ def run(oracle_dir: Path, migrations_root: Path, *, dry_run: bool) -> int:
         )
     if outcomes["unmatched"] or outcomes["ambiguous"] or outcomes["incomplete"]:
         LOG.warning(
-            "the capture in %s remains complete and authoritative - only the per-workbook copies are partial",
-            oracle_dir,
+            "the capture(s) in %s remain complete and authoritative - only the per-workbook copies are partial",
+            ", ".join(str(b.directory) for b in batches),
         )
         return 1
     return 0

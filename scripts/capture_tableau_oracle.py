@@ -84,7 +84,7 @@ Two knobs and one guard rail come out of that:
 * **``--rest-timeout``** exposes what was a hardcoded 180s module constant. Three identical
   ``TimeoutError`` failures across two days is not a network blip; it is a view whose query cannot
   export server-side in the time allowed.
-* **``--retry-budget`` now tracks ``--rest-timeout`` (2x) instead of being frozen at 360s.** ⚠️ The
+* **``--retry-budget`` now tracks ``--rest-timeout`` (2x) instead of being frozen at 360s.** WARNING: The
   budget is charged from BEFORE attempt 1, so ONE full-timeout failure spends half of it and TWO
   exhaust it -- the run gives up well short of ``--max-attempts 5``, **by design**. Freezing the
   budget while the timeout rose would have put it *below* one timeout, removing every retry from
@@ -93,7 +93,7 @@ Two knobs and one guard rail come out of that:
   the first one that fails for a reason the view controls stops the rest. So decoupling adds at most
   ONE request timeout to a doomed view, not one per tier and not a second full budget.
 
-⚠️ **A requested render leg now ALWAYS gets a record**, even when it is deliberately not attempted
+WARNING: **A requested render leg now ALWAYS gets a record**, even when it is deliberately not attempted
 (``not_attempted``, or the data leg's own ``source_credential``). An absent key therefore means "not
 requested" and nothing else. The manifest additionally counts and NAMES the views for which no
 requested render was obtained (``render_unestablished``), because an unassessable state that reads as
@@ -955,7 +955,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             f"per-request socket timeout in seconds (default {REST_TIMEOUT_SEC}). Raise it for a view "
             f"whose export genuinely cannot finish in time -- the signature is 'HTTP 0' with "
-            f"'TimeoutError: read operation timed out', repeatable across runs. ⚠️ --retry-budget "
+            f"'TimeoutError: read operation timed out', repeatable across runs. WARNING: --retry-budget "
             f"tracks this by default (2x), and it MUST: the budget is charged from BEFORE attempt 1, "
             f"so a budget left at {DEFAULT_RETRY_BUDGET_SEC:.0f}s while this rises above "
             f"{DEFAULT_RETRY_BUDGET_SEC:.0f}s is already spent when the first timeout returns and "
@@ -976,7 +976,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             f"seconds to admit retries for ONE export -- a deadline for admitting the NEXT retry, "
             f"charged from before attempt 1, NOT a hard wall-clock cap (default: 2x --rest-timeout, "
-            f"so {DEFAULT_RETRY_BUDGET_SEC:.0f}s unless you raise the timeout). ⚠️ Two consequences "
+            f"so {DEFAULT_RETRY_BUDGET_SEC:.0f}s unless you raise the timeout). WARNING: Two consequences "
             f"operators are surprised by, both by design: at or below ONE request timeout a failure "
             f"that blocks for the full timeout cannot be retried at all, and even at 2x only ONE such "
             f"failure fits -- a second exhausts the budget, so the run gives up well short of "

@@ -196,16 +196,23 @@ def test_the_first_failed_salvage_render_stops_the_rest_and_records_them(tmp_pat
 
 def test_a_version_gate_does_not_stop_the_remaining_salvage_legs(tmp_path):
     """`unsupported_api_version` is a CONFIGURATION fault answered instantly with a 400 -- it is not
-    evidence the view is unwell, so it must not short-circuit a tier that might still work. Getting
-    this wrong would lose the PNG on every pre-3.29 site whenever `--svg` was also requested."""
+    evidence the view is unwell, so it must not short-circuit a tier that might still work.
+
+    ⚠️ The tier order is fixed (`png`, `svg`, `pdf`), so the gated tier must be asked BEFORE the one
+    that has to survive it, or this test asserts nothing. Measured: an earlier version of it requested
+    `{"svg", "png"}`, PNG was therefore attempted first and succeeded, and the mutation that adds
+    `unsupported_api_version` to `_VIEW_HEALTH_FAILURES` SURVIVED -- an assertion inside a branch the
+    fixture never entered. `{"svg", "pdf"}` is what actually exercises the short-circuit.
+    """
     session = FakeSession(
-        {"/data": [(0, TIMEOUT_BODY, {})], "?format=svg": [(400, SVG_GATE, {})], "?resolution=high": [(200, PNG, {})]},
+        {"/data": [(0, TIMEOUT_BODY, {})], "?format=svg": [(400, SVG_GATE, {})], "/pdf": [(200, PDF, {})]},
         retry=oracle.RetryPolicy(max_attempts=2, budget_sec=1e6),
     )
-    record = oracle.capture_view(session, _view(), tmp_path, frozenset({"svg", "png"}), None)
+    record = oracle.capture_view(session, _view(), tmp_path, frozenset({"svg", "pdf"}), None)
 
     assert record["svg"]["status"] == "unsupported_api_version"
-    assert record["image"]["status"] == "ok", "a version gate on one tier must not cost another tier"
+    assert session.count("/pdf") == 1, "the gated tier must not stop the one after it"
+    assert record["pdf"]["status"] == "ok", "a version gate on one tier must not cost another tier"
 
 
 # ------------------------------------------------------- the credential carve-out, and its exit code
