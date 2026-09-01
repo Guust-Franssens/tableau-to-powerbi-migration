@@ -1596,6 +1596,40 @@ def test_the_report_never_claims_more_than_it_verified_about_concurrency(tmp_pat
     assert "NOT verified" in report["concurrency"]["note"]
 
 
+@pytest.mark.parametrize("branch", ["clean", "tier_edit", "undetermined"])
+def test_every_tier_edit_branch_carries_the_concurrency_caveat(tmp_path, branch):
+    """⚠️ The caveat was appended PER BRANCH, and `Undetermined` returned without it.
+
+    So the reports carrying it were the trustworthy ones, and the report that could not attribute
+    its own differences - the one whose reader most needs to know the bundle was never proven
+    still - printed no caveat at all. Round 10 of review measured it on the pristine estate:
+    `status: incomplete`, 500 engine_internal differences, `CAVEAT_PRESENT=False`.
+
+    Parametrised over every branch on purpose. A test that pinned only the third branch would be
+    satisfied by the same per-branch fix that created the hole, and would say nothing about the
+    fourth branch somebody adds next.
+    """
+    report = heg.harvest(_bundle(tmp_path, entity_baseline="Extract", entity_working="Orders"))
+    if branch == "tier_edit":
+        report["tier_edits"] = [
+            {"unit": "u", "layer": "report", "path": "p", "shapes": ["LAYOUT"], "declared_by": None}
+        ]
+    elif branch == "undetermined":
+        # Not a clean result and not a finding: the run could not attribute what it saw.
+        report["status"] = "incomplete"
+        report["incomplete_reasons"] = ["the working tree could not be read"]
+        report["provenance"] = dict(report["provenance"], unattributed=3, differing_files=5)
+        report["tier_edits"] = []
+
+    markdown = hgr.render_markdown(report)
+
+    if branch == "undetermined":
+        assert "**Undetermined - this is NOT a clean result.**" in markdown, "fixture missed its branch"
+        assert CLEAN_CLAIM not in markdown
+    assert "Attribution assumes the bundle was not modified during the harvest" in markdown
+    assert "issue #418" in markdown
+
+
 def test_the_caveat_is_printed_beside_a_tier_edit_finding_too(tmp_path):
     """Not only on the clean path: a report that DOES answer #274 rests on the same assumption."""
     bundle = _identical_bundle(tmp_path)

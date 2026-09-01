@@ -225,31 +225,41 @@ def _tier_edits_determined(report: dict[str, Any]) -> bool:
 
 
 def _tier_edit_section(report: dict[str, Any], top: int) -> list[str]:
-    """The section that answers issue #274 - or explains why this run cannot."""
+    """The section that answers issue #274 - or explains why this run cannot.
+
+    ⚠️ ONE exit, and the caveat is appended there. It used to be appended per branch, and the
+    `Undetermined` branch returned without it - so the caveat was missing from exactly the reports
+    that deserved it most, while the clean ones carried it. Adding it to the third branch would have
+    left the fourth branch open to whoever writes it next; a single exit cannot be forgotten.
+    """
     lines = ["", "## Tier edits (the engine-gap evidence)", ""]
+    lines += _tier_edit_conclusion(report, top)
+    return lines + ["", CONCURRENCY_CAVEAT]
+
+
+def _tier_edit_conclusion(report: dict[str, Any], top: int) -> list[str]:
+    """The branch-specific body only. Never append the concurrency caveat here."""
     if report["tier_edits"]:
-        lines += ["| unit | layer | file | shapes | declared by |", "|---|---|---|---|---|"]
+        lines = ["| unit | layer | file | shapes | declared by |", "|---|---|---|---|---|"]
         for record in report["tier_edits"][:top]:
             lines.append(
                 f"| {record['unit']} | {record['layer']} | `{record['path']}` |"
                 f" {', '.join(record['shapes'])} | {record['declared_by'] or '**undeclared**'} |"
             )
-        return lines + ["", CONCURRENCY_CAVEAT]
+        return lines
     if _tier_edits_determined(report):
-        lines.append(
+        return [
             "**None.** Every differing byte in this bundle is still hash-identical to what the engine"
             " itself recorded, so nothing here shows work a human or agent had to do. A bundle with no"
             " fix pass cannot answer issue #274's question, and this report does not pretend it can."
-        )
-        lines += ["", CONCURRENCY_CAVEAT]
-        return lines
+        ]
     provenance = report["provenance"]
-    lines.append(
+    lines = [
         "**Undetermined - this is NOT a clean result.** No tier edit is listed, but that is an absence"
         " of evidence rather than evidence of absence: this run could not attribute"
         f" {provenance['unattributed']} of {provenance['differing_files']} differing path(s), so"
         " nothing here supports the claim that the engine wrote every byte."
-    )
+    ]
     if report["baseline_drift"] or report["baseline_tampered"]:
         lines.append(
             "\nThe engine's own baseline drifted, so the comparison this section rests on is not a"
