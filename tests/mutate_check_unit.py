@@ -76,22 +76,22 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
     ),
     (
         "APPROVAL: engine evidence accepts an omission, no signature needed",
-        "        if signed and not ambiguous:\n            disposition = OMISSION_SIGNED",
-        '        if (signed or page["declared_reason"]) and not ambiguous:\n            disposition = OMISSION_SIGNED',
+        "        elif signature == SIGNATURE_UNIQUE and not ambiguous:\n            disposition = OMISSION_SIGNED",
+        '        elif (signature == SIGNATURE_UNIQUE or page["declared_reason"]) and not ambiguous:\n'
+        "            disposition = OMISSION_SIGNED",
         ["test_engine_evidence_explains_an_omission_but_does_not_accept_it"],
     ),
     (
         "APPROVAL: a signature stops accepting an omission",
-        "        if signed and not ambiguous:\n            disposition = OMISSION_SIGNED",
-        "        if False:  # pragma: no cover\n            disposition = OMISSION_SIGNED",
+        "        elif signature == SIGNATURE_UNIQUE and not ambiguous:\n            disposition = OMISSION_SIGNED",
+        "        elif False:  # pragma: no cover\n            disposition = OMISSION_SIGNED",
         ["test_a_signed_omission_with_engine_evidence_passes_and_counts_as_a_compromise"],
     ),
     (
         "APPROVAL: the oracle denominator drops engine-declared omissions too",
-        '    return [page for page in expectation["omissions"] '
-        'if _exempted(entries, "page-parity", page["name"], {page["id"]})]',
-        '    return [page for page in expectation["omissions"] '
-        'if page["declared_reason"] or _exempted(entries, "page-parity", page["name"], {page["id"]})]',
+        '        if _page_signature(page, entries, expectation["index"]) == SIGNATURE_UNIQUE\n    ]',
+        '        if page["declared_reason"]\n'
+        '        or _page_signature(page, entries, expectation["index"]) == SIGNATURE_UNIQUE\n    ]',
         ["test_oracle_coverage_still_expects_a_page_the_engine_merely_declared"],
     ),
     (
@@ -102,12 +102,12 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
     ),
     (
         "KIND: evidence is indexed under both kinds, so a worksheet row settles a dashboard",
-        "        index.add_identity(identity, text)",
-        "        index.add_identity(identity, text)\n"
+        "        index.add(identity, text)",
+        "        index.add(identity, text)\n"
         "        for kind in oid.IDENTIFIABLE_KINDS:\n"
         "            crossed = oid.ObjectIdentity.from_engine(kind, identity.name)\n"
         "            if crossed is not None and crossed != identity:\n"
-        "                index.add_identity(crossed, text)",
+        "                index.add(crossed, text)",
         ["test_a_worksheet_row_can_never_explain_a_same_named_dashboard"],
     ),
     (
@@ -154,7 +154,7 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
     ),
     (
         "PAGES: an EMITTED candidate is still treated as an omission",
-        '    absent = [page for page in candidates if rendered_names.count(page["name"]) != 1]',
+        "    absent = [page for page in candidates if id(page) not in satisfied]",
         "    absent = list(candidates)",
         ["test_an_emitted_page_is_never_an_omission"],
     ),
@@ -194,40 +194,39 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
     ),
     (
         "BLANK: a page that renders nothing no longer fails the gate",
-        "    status = STATUS_PASS if not unsigned and not unaccounted_extra and not blank "
-        "else STATUS_PRECONDITION_FAILED",
-        "    status = STATUS_PASS if not unsigned and not unaccounted_extra else STATUS_PRECONDITION_FAILED",
+        '        if not unsigned and not unaccounted_extra and not blank and not expectation["contested_names"]',
+        '        if not unsigned and not unaccounted_extra and not expectation["contested_names"]',
         ["test_a_blank_page_alone_fails_the_gate_even_when_every_page_is_paired"],
     ),
     (
         "ATTRIBUTION: an omission is named by position rather than by content",
-        '    absent = [page for page in candidates if rendered_names.count(page["name"]) != 1]',
+        "    absent = [page for page in candidates if id(page) not in satisfied]",
         "    absent = candidates[-1:]",
         ["test_a_missing_page_is_named_by_content_not_by_position"],
     ),
     (
         "ATTRIBUTION: an extra page is named by position rather than by content",
-        '    unmatched = [page for page in rendered if page["name"] not in candidate_names]',
-        "    unmatched = rendered[-1:]",
+        "        if claim.outcome == oid.ABSENT:\n            unmatched.append(page)",
+        "        if True:\n            unmatched.append(page)",
         ["test_an_extra_page_is_named_by_content_not_by_position"],
     ),
     (
         "SIGNATURE: an exemption applies even to a page that is present",
         '    for page in expectation["omissions"]:\n'
-        '        signed = _exempted(entries, "page-parity", page["name"], {page["id"]})',
+        '        signature = _page_signature(page, entries, expectation["index"])',
         '    for page in expectation["candidates"]:\n'
-        '        signed = _exempted(entries, "page-parity", page["name"], {page["id"]})',
+        '        signature = _page_signature(page, entries, expectation["index"])',
         ["test_an_exemption_naming_a_present_page_accepts_nothing"],
     ),
     (
         "SIGNATURE: rename ambiguity no longer suspends a name-only signature (parity side)",
-        "        if signed and not ambiguous:",
-        "        if signed:",
+        "        elif signature == SIGNATURE_UNIQUE and not ambiguous:",
+        "        elif signature == SIGNATURE_UNIQUE:",
         ["test_a_rename_makes_attribution_ambiguous_and_suspends_every_signature"],
     ),
     (
         "SIGNATURE: rename ambiguity no longer suspends a name-only signature (oracle side)",
-        '    if expectation["attribution_ambiguous"]:\n        return []',
+        '    if expectation["unmatched_rendered"] or expectation["contested_names"]:\n        return []',
         "    if False:  # pragma: no cover\n        return []",
         ["test_a_rename_suspends_signatures_on_the_oracle_denominator_too"],
     ),
@@ -264,6 +263,61 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
             "test_oracle_coverage_without_an_expected_set_is_blocking_not_a_pass",
             "test_unassessable_oracle_coverage_fails_the_whole_run_closed",
         ],
+    ),
+    (
+        "SHARED TYPE: pairing falls back to a raw name, so two candidates share one page",
+        '        elif claim.outcome == oid.AMBIGUOUS or rendered_names.count(page["name"]) != 1:\n'
+        "            contested.add(claim.name)",
+        "        elif False:  # pragma: no cover\n            contested.add(claim.name)",
+        ["test_two_same_named_candidates_cannot_share_one_rendered_page"],
+    ),
+    (
+        "SHARED TYPE: oracle evidence satisfies a contested candidate",
+        '    contested = _claim(index, page["name"]).outcome != oid.UNIQUE',
+        "    contested = False",
+        ["test_one_oracle_row_cannot_cover_two_same_named_candidates"],
+    ),
+    (
+        "SHARED TYPE: a bare-name signature is applied without resolving it",
+        '    return SIGNATURE_UNIQUE if _claim(index, page["name"]).outcome == oid.UNIQUE else SIGNATURE_CONTESTED',
+        "    return SIGNATURE_UNIQUE",
+        ["test_one_name_only_signature_cannot_sign_two_omissions"],
+    ),
+    (
+        "SHARED TYPE: an id signature no longer resolves a contested name",
+        '    if _exempted(entries, "page-parity", page["id"]):\n        return SIGNATURE_UNIQUE',
+        "    if False:  # pragma: no cover\n        return SIGNATURE_UNIQUE",
+        ["test_a_signature_naming_the_page_id_resolves_a_contested_name"],
+    ),
+    (
+        "PATHS: handover roots de-duplicated before they are resolved",
+        "        resolved = candidate.resolve()\n        if resolved not in roots:\n            roots.append(resolved)",
+        "        if candidate not in roots:\n            roots.append(candidate)",
+        ["test_evidence_is_found_from_a_relative_target_path"],
+    ),
+    (
+        "SOURCE-EMPTY: a blank source worksheet is still reported as a rebuild gap",
+        '        if page.get("source_empty"):\n            disposition = OMISSION_SOURCE_EMPTY',
+        "        if False:  # pragma: no cover\n            disposition = OMISSION_SOURCE_EMPTY",
+        ["test_a_source_empty_worksheet_owes_no_page"],
+    ),
+    (
+        "SOURCE-EMPTY: a populated shelf is treated as blank",
+        "    if any(encodings.values()):\n        return False",
+        "    if False:  # pragma: no cover\n        return False",
+        ["test_a_worksheet_with_any_encoding_still_owes_a_page"],
+    ),
+    (
+        "SOURCE-EMPTY: a missing encodings key is treated as blank",
+        "    if not isinstance(encodings, dict) or not encodings:\n        return False",
+        "    if not isinstance(encodings, dict):\n        encodings = {}",
+        ["test_a_worksheet_with_no_encodings_key_at_all_is_not_called_empty"],
+    ),
+    (
+        "SOURCE-EMPTY: a filter no longer counts as content",
+        '    return not item.get("filters")',
+        "    return True",
+        ["test_a_source_empty_sheet_that_still_has_a_filter_owes_a_page"],
     ),
     (
         "oracle discovery: canonical oracle/ name removed",
