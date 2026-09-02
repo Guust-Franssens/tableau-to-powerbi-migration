@@ -1934,12 +1934,17 @@ def test_a_marker_naming_a_JUNCTION_out_of_the_plugin_is_refused(
     outside = tmp_path / "outside-the-plugin"
     outside.mkdir()
     (outside / "keep.txt").write_text("not ours\n", encoding="utf-8")
+    if os.name != "nt":
+        pytest.skip("a junction is a Windows concept; the containment rule is exercised by the alias tests too")
     assert _run(estate) == sync.EXIT_OK
     capsys.readouterr()
     link = estate.plugin / "skills" / "junction-bundle"
-    made = subprocess.run(
-        ["cmd", "/c", "mklink", "/J", str(link), str(outside)], capture_output=True, text=True, check=False
-    )
+    try:
+        made = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(outside)], capture_output=True, text=True, check=False
+        )
+    except OSError as exc:  # `cmd` absent from PATH is a skip, not a failure
+        pytest.skip(f"cannot invoke mklink here: {exc}")
     if made.returncode != 0 or not link.exists():
         pytest.skip(f"this platform cannot create a junction: {made.stderr.strip() or made.stdout.strip()}")
     _stamp(estate, ["junction-bundle"])
