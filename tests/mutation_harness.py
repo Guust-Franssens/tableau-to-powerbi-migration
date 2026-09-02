@@ -420,13 +420,18 @@ def plan(args, source, workdir, fetch_note):
 sync._plan = plan
 """,
     "skillsync-marker-alias-accepted": """
+import inspect
 import skill_plugin_source as sps
 _orig = sps.marker_bundle_problems
+_ANCHORS = ("on-disk name", "trailing dot")
+_src = inspect.getsource(_orig)
+for _anchor in _ANCHORS:
+    assert _anchor in _src, "mutation anchor missing - refusing to report a FALSE verdict"
 def problems(names, skills_dir):
     # Round-4 finding 1: keep structure and containment, drop the checks that make the name
     # reaching the delete the same name that was validated. `FOREIGN`, `foreign.` and
     # `foreign ` are all genuine direct children of skills/ on Windows.
-    return [p for p in _orig(names, skills_dir) if "on-disk name" not in p and "trailing dot" not in p]
+    return [p for p in _orig(names, skills_dir) if not any(a in p for a in _ANCHORS)]
 sps.marker_bundle_problems = problems
 """,
     "skillsync-missing-marker-is-in-sync": """
@@ -481,13 +486,22 @@ def problems(names, skills_dir):
 sps.marker_bundle_problems = problems
 """,
     "skillsync-marker-containment-removed": """
+import inspect
 import skill_plugin_source as sps
 _orig = sps.marker_bundle_problems
+# ⚠️ Keyed on message TEXT, so it must fail LOUDLY when that text changes. Measured: this
+# mutation silently SURVIVED after round-6 replaced "resolves outside" with a stronger
+# identity rule - it filtered a string that no longer existed, restored nothing, and reported
+# a hole in the suite that was really a hole in the mutation.
+_ANCHORS = ("does not name ITSELF", "is a link or reparse point")
+_src = inspect.getsource(_orig)
+for _anchor in _ANCHORS:
+    assert _anchor in _src, "mutation anchor missing - refusing to report a FALSE verdict"
 def problems(names, skills_dir):
-    # Drop CONTAINMENT only. A junction into another directory is a genuine directory entry, so
-    # every other rule - single component, no reserved characters, spells the entry exactly -
-    # passes, and containment is the only thing between the record and the outside directory.
-    return [p for p in _orig(names, skills_dir) if "resolves outside" not in p]
+    # Drop CONTAINMENT only. A junction is a genuine directory entry, so every other rule -
+    # single component, no reserved characters, spells the entry exactly - passes, and these
+    # two are all that stand between the record and another directory.
+    return [p for p in _orig(names, skills_dir) if not any(a in p for a in _ANCHORS)]
 sps.marker_bundle_problems = problems
 """,
     "skillsync-preflight-passes-an-unsafe-marker": """
@@ -727,9 +741,17 @@ def run(name: str, code: str, target: str | Sequence[str]) -> tuple[str, int, st
         env=env,
     )
     plugin.unlink(missing_ok=True)
-    if "Error importing plugin" in proc.stdout + proc.stderr:
+    combined = proc.stdout + proc.stderr
+    if "Error importing plugin" in combined:
         outcomes_file.unlink(missing_ok=True)
         raise SystemExit(f"{name}: the mutation never applied - the harness would report a FALSE 'CAUGHT'")
+    if "mutation anchor missing" in combined:
+        # A mutation keyed on message TEXT whose anchor has moved. Without this it surfaces as a
+        # generic HARNESS-ERROR ("pytest never started"), which is fail-closed but reads like an
+        # infrastructure hiccup; measured, the same drift with NO anchor at all reported SURVIVED,
+        # i.e. a hole in the suite that was really a hole in the mutation.
+        outcomes_file.unlink(missing_ok=True)
+        raise SystemExit(f"{name}: INVALID - its anchor text no longer exists, so it restores nothing")
     outcomes = read_outcomes(outcomes_file)
     # The record is the view from INSIDE the session; the return code is the view from
     # outside. A trylast sessionfinish hook or an atexit os._exit() can make them disagree,
@@ -774,10 +796,16 @@ def failed_on_an_assertion(outcomes: dict) -> bool:
     after I had checked only the failure's LOCATION. Location is checkable by eye; the reason is
     what scales to a whole campaign, so it is recorded and asserted rather than read.
 
+    ⚠️ Two renderings, both legitimate, and the first pass of this predicate knew only one:
+    `assert x, "why"` produces ``AssertionError: why`` while a bare `assert a == b` produces
+    ``assert 7 == 1`` with no exception name at all. Measured - `skillsync-never-ask-the-remote`
+    was flagged SUSPECT for a perfectly good detection. A false SUSPECT is far cheaper than a
+    false CAUGHT, but it is still noise, and noise is what makes a signal get ignored.
+
     A skipped/absent reason list is not evidence of an assertion, so it answers False.
     """
     reasons = outcomes.get("failure_reasons") or []
-    return bool(reasons) and all(reason.startswith(("AssertionError", "Failed")) for reason in reasons)
+    return bool(reasons) and all(reason.startswith(("AssertionError", "assert ", "Failed")) for reason in reasons)
 
 
 def first_reason(outcomes: dict) -> str:

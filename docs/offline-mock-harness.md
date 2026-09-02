@@ -16,7 +16,7 @@ python -m pytest tests/test_mock_fabric.py tests/test_mock_tableau.py tests/test
 | [`tests/test_mock_fabric.py`](../tests/test_mock_fabric.py) | 51 fidelity self-tests for the Fabric fake |
 | [`tests/test_mock_tableau.py`](../tests/test_mock_tableau.py) | 21 fidelity self-tests for the Tableau fake |
 | [`tests/test_e2e_offline.py`](../tests/test_e2e_offline.py) | 18 joined end-to-end tests (marked `slow`) |
-| [`tests/mutation_harness.py`](../tests/mutation_harness.py) | 51 deliberate mutations that prove those tests can fail — **22** attack this offline-mock suite (tabled below); the other **29** attack the skill-plugin sync (`skillsync-` / `skillsource-`, issue #410), which shares this harness rather than growing a second scorer |
+| [`tests/mutation_harness.py`](../tests/mutation_harness.py) | 52 deliberate mutations that prove those tests can fail — **22** attack this offline-mock suite (tabled below); the other **30** attack the skill-plugin sync (`skillsync-` / `skillsource-`, issue #410), which shares this harness rather than growing a second scorer |
 
 ---
 
@@ -194,7 +194,17 @@ re-runs the suite. **All 22 were caught; there were no survivors.**
 > two of those mutations red for the wrong reason — one flipped the preliminary `--check` to drift
 > before the deleting code ran, the other tripped post-copy verification — so neither ever reached
 > the property it claimed to defend. Both are now scoped to apply time, and both die on the named
-> foreign-survival assertion. When a mutation goes red, read WHICH assertion failed.
+> foreign-survival assertion.
+>
+> ⚠️ **That check is now MECHANICAL, because reading the node is not enough.** The harness records
+> each failure's REASON (`reprcrash.message`) and reports `SUSPECT` — a non-zero exit — for any
+> mutation whose detection was not an assertion. Three stale mutations were found this way, two of
+> them mine, each credited to a plausible test while dying on `TypeError`/`ValueError` from a
+> monkeypatch signature its own refactor had moved past. A mutation keyed on message TEXT also
+> carries an anchor assertion, because one silently **SURVIVED** when the text it filtered was
+> reworded: it restored nothing, and reported a hole in the suite that was really a hole in itself.
+> Note both renderings count as assertions — `assert x, "why"` gives `AssertionError: why`, a bare
+> `assert a == b` gives `assert 7 == 1`.
 
 | mutation | caught by |
 |---|---|

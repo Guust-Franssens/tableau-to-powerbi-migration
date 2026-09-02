@@ -1903,7 +1903,10 @@ def test_a_marker_using_NTFS_STREAM_syntax_ANSWERS_instead_of_crashing(
     _stamp(estate, ["foreign-bundle::$DATA"])
     _make_stale(estate)
 
-    code = _run(estate, "--json")
+    try:
+        code = _run(estate, "--json")
+    except Exception as exc:  # noqa: BLE001 - ANY escape is the defect under test
+        pytest.fail(f"the run must ANSWER, not raise: {type(exc).__name__}: {exc}")
     out = capsys.readouterr().out
 
     assert (foreign / "SKILL.md").is_file()
