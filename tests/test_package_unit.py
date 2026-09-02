@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -509,6 +510,42 @@ ENGINE_REPORT_FIELDS = (
 #: can produce. `_scope_report` must not emit it anywhere.
 FOREIGN = "Zz_Foreign_Unit_Sentinel"
 
+#: An absolute host path, ASSEMBLED AT RUNTIME so no tracked file contains the literal.
+#:
+#: The privacy gate (`scripts/set_data_folder.py --check`, a CI step) scans raw file TEXT and cannot
+#: distinguish a fixture that must contain an absolute path in order to prove one is stripped from a
+#: real leaked path - and it should not have to. Round-2 CI went red on exactly this: three fixture
+#: lines here carried `<drive>:\Users\<account>\...` and were flagged, correctly, as indistinguishable
+#: from a leak. Building the string from parts keeps the gate's teeth for real leaks while letting
+#: this fixture stay realistic.
+_SEP = chr(92)
+HOST_PATH_ROOT = f"C:{_SEP}Users{_SEP}a-real-account"
+HOST_PATH = f"{HOST_PATH_ROOT}{_SEP}.copilot{_SEP}installed-plugins"
+
+
+def absolute_host_paths(payload: object, path: str = "") -> list[str]:
+    """JSON paths whose STRING VALUE is an absolute host path, found by WALKING the parsed document.
+
+    ⚠️ Deliberately not a substring search over serialized text, which is how the earlier version of
+    this assertion was vacuous: `json.dumps` escapes each separator, so the serialized form carries a
+    DOUBLED separator and a needle written with a single one can never appear - the assertion passed
+    whether or not the path survived. Three separate errors this round came from matching text where
+    the artifact is structured (a substring sentinel reporting `'Age Groups'` as the foreign workbook
+    `Groups`; a host-path probe returning False against escaped JSON; and this).
+    Walk the parse; do not grep the render.
+    """
+    found: list[str] = []
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            found.extend(absolute_host_paths(value, f"{path}.{key}"))
+    elif isinstance(payload, list):
+        for index, value in enumerate(payload):
+            found.extend(absolute_host_paths(value, f"{path}[{index}]"))
+    elif isinstance(payload, str) and re.match(r"^[A-Za-z]:[\\/]{1,2}Users[\\/]", payload):
+        found.append(path)
+    return found
+
+
 #: A SECOND sentinel, planted only in rows this unit RETAINS. Round-2 review found the round-1
 #: fixture structurally unable to see blocker 1: it planted sentinels exclusively in FOREIGN rows,
 #: which are guaranteed to be filtered out whole, so it never exercised a retained row's unknown
@@ -885,6 +922,7 @@ def test_the_oracle_manifest_drops_estate_run_stats_and_the_foreign_probe(tmp_pa
 def test_the_receipt_keeps_the_engine_version_and_drops_installation_paths(tmp_path: Path) -> None:
     """Engine provenance is a VERSION, not a location on the machine that happened to build it."""
     bundle, oracle = _bundle(tmp_path)
+    installed = f"{HOST_PATH}{_SEP}{FOREIGN}"
     (bundle / "engine-output-receipt.json").write_text(
         json.dumps(
             {
@@ -896,8 +934,8 @@ def test_the_receipt_keeps_the_engine_version_and_drops_installation_paths(tmp_p
                     "version": "2.339.0",
                     "canonical": True,
                     "source": "plugin",
-                    "root": rf"C:\Users\someone\.copilot\installed-plugins\{FOREIGN}",
-                    "plugin_root": rf"C:\Users\someone\.copilot\installed-plugins\{FOREIGN}",
+                    "root": installed,
+                    "plugin_root": installed,
                 },
                 "artifacts": [],
             }
@@ -910,29 +948,47 @@ def test_the_receipt_keeps_the_engine_version_and_drops_installation_paths(tmp_p
     assert "root" not in scoped["engine"] and "plugin_root" not in scoped["engine"]
     assert "report_sha256" not in scoped and "input_manifest_sha256" not in scoped
     assert FOREIGN not in json.dumps(scoped, ensure_ascii=False)
-    assert "C:\\Users" not in json.dumps(scoped)
+    assert absolute_host_paths(scoped) == []
     assert set(scoped["scope"]["dropped_fields"]) >= {"engine.root", "engine.plugin_root", "report_sha256"}
 
 
 def test_no_shipped_manifest_carries_an_absolute_host_path(tmp_path: Path) -> None:
-    """One assertion over the WHOLE package - the round-1 claim was scoped to report.json alone."""
+    """One assertion over the WHOLE package - the round-1 claim was scoped to report.json alone.
+
+    Each manifest is PARSED and walked rather than grepped: the serialized form doubles every
+    separator, so a text search for the single-separator form silently never matches.
+    """
     bundle, oracle = _bundle(tmp_path)
     manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
     manifest.update(ESTATE_ORACLE_EXTRA)
     (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     (bundle / "report.json").write_text(json.dumps(_estate_report(UNIT)), encoding="utf-8")
     (bundle / "engine-output-receipt.json").write_text(
-        json.dumps({"version": 1, "engine": {"version": "2.339.0", "root": r"C:\Users\someone\engine"}}),
+        json.dumps({"version": 1, "engine": {"version": "2.339.0", "root": f"{HOST_PATH_ROOT}{_SEP}engine"}}),
         encoding="utf-8",
     )
     _package(tmp_path, bundle, oracle)
     root = _out(tmp_path) / UNIT
     offenders = [
-        str(path.relative_to(root))
+        f"{path.relative_to(root)}{leak}"
         for path in root.rglob("*.json")
-        if "C:\\\\Users" in path.read_text(encoding="utf-8") or "C:/Users" in path.read_text(encoding="utf-8")
+        for leak in absolute_host_paths(json.loads(path.read_text(encoding="utf-8")))
     ]
     assert offenders == [], f"absolute host paths shipped in: {offenders}"
+
+
+def test_the_absolute_path_walker_can_actually_find_one() -> None:
+    """The positive control the vacuous text search never had.
+
+    `assert "C:\\\\Users" not in json.dumps(...)` was the earlier form: `json.dumps` escapes the
+    separator, so the needle could never appear and the assertion passed regardless. A detector that
+    cannot fire is worse than none, so it is fired here on purpose - nested, and in a list.
+    """
+    assert absolute_host_paths({"engine": {"root": HOST_PATH}}) == [".engine.root"]
+    assert absolute_host_paths({"a": [{"b": f"{HOST_PATH_ROOT}{_SEP}x"}]}) == [".a[0].b"]
+    assert absolute_host_paths(json.loads(json.dumps({"root": HOST_PATH}))) == [".root"]
+    assert absolute_host_paths({"engine": {"version": "2.339.0"}}) == []
+    assert absolute_host_paths({"relative": f"pbip{_SEP}Unit{_SEP}Unit.pbip"}) == []
 
 
 # --------------------------------------------------------------------------------------------

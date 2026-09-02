@@ -123,6 +123,13 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
         "    scoped, dropped = dict(narrowed), []",
         ["test_no_shipped_manifest_carries_an_absolute_host_path"],
     ),
+    (
+        "receipt: let an absolute host path survive into the shipped package",
+        MECHANISM,
+        '    "engine": _fields("version", "source", "canonical"),',
+        '    "engine": KEEP,',
+        ["test_no_shipped_manifest_carries_an_absolute_host_path"],
+    ),
     # ---- round-2 blocker 3: repackaging --------------------------------------------------------
     (
         "repackaging: merge into the existing package instead of replacing it",
