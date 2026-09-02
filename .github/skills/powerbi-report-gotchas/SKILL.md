@@ -299,6 +299,26 @@ idioms see `.github/pbi.kb/visuals/table-cond-format.md`.
   re-applies the correct set for the final type and strips the other's leftovers, so both orders land
   byte-identical. Prove it by hashing the whole `definition/` tree across several shuffled orders, not
   by reasoning about it.
+  - ✅ **The good news: a leftover foreign property is a HARD `validate` error, not a silent render
+    bug** — this is the rare formatting mistake the CLI does catch. 🟢 Measured against
+    `powerbi-report-author` on engine-built column/line charts: injecting `dataPoint.fillTransparency`
+    into a `lineChart` exits **1** with `PBIR_FORMATTING_PROP_UNKNOWN` — *Unknown property
+    "fillTransparency" in formatting object "dataPoint" for lineChart* — as does
+    `dataPoint.transparency` on a `columnChart` and `labels.labelOverflow` on a `lineChart`; each
+    type with its own property exits 0.
+  - **So a `columnChart` → `lineChart` flip is never just `visualType`.** The minimum swap:
+    `dataPoint.fillTransparency` → `dataPoint.transparency`; drop `labels.labelOverflow` (columnChart
+    only) and use `labels.maximumOffset` / `minimumOffset` instead (lineChart only, see §1); and if a
+    flat mark colour was set, add **`lineStyles.strokeColor`** beside `dataPoint.defaultColor`.
+    🟢 The *validation* half is measured: all three of `defaultColor` alone, `strokeColor` alone, and
+    both together return **exit 0** on a lineChart — so `validate` catches the leftover from the old
+    type but is structurally blind to the **omission** of the new type's property.
+    ⚠️ The *rendering* half is **inferred, not verified** — no Desktop render was possible. The claim
+    that `dataPoint` alone leaves the stroke on the theme colour ("which on a line chart is the whole
+    visual") is the deterministic engine's own, in `_constant_mark_color_objects`
+    (`twb_to_pbir.py`), where it is described as verified against an adjudicated corpus rebuild.
+    Second-hand. Treat "add both" as cheap insurance rather than a measured necessity, and upgrade
+    this line on the first render that shows it either way.
 - **Normalise JSON key order when you write PBIR back.** Two scripts that *insert* different formatting
   cards into `visual.objects` produce byte-different-but-semantically-identical files depending on run
   order, which makes a genuine order-independence proof impossible to distinguish from a real defect.
@@ -594,6 +614,53 @@ shelves, tooltips and manual sorts.
   classic bump chart of 17 crossing lines. The engine reported it `tier: rebuilt, status: rebuilt` with
   no warning, because stacking is structurally valid. **Never resolve `Automatic` from the XML alone
   when a date is on Columns — check the thumbnail.**
+
+  ⚠️ **This is a KNOWN ENGINE DEFECT with a committed reproduction — recognise it, don't re-derive it.**
+  Filed upstream as `Yarbrdab000/tableau-fabric-skills#184`; ours is #424. Two things were previously
+  missing from this entry and both cost a cycle: *why* Tableau does it, and *where* in the engine it
+  goes wrong.
+  - **The Tableau rule is documentation, not folklore.** *[Change the Type of Marks in the
+    View](https://help.tableau.com/current/pro/desktop/en-us/viewparts_marks_marktypes.htm)* (fetched
+    2026-09-01) states it twice and neither statement mentions continuity: *"The Line mark type is
+    selected when there is **a date field** and a measure as the inner fields"*, and, under **Bar**,
+    *"If the dimension is a date dimension, the **Line** mark is used instead."* ⚠️ Popular blog
+    summaries say the opposite ("blue pill → bar, green pill → line") and a web search will hand you
+    that first — cite the product doc.
+  - **The engine gates on CONTINUITY instead of date-ness.** `twb_to_pbir.py:2366`
+    `_has_continuous_date` is true only for a `*-Trunc` derivation, and its own docstring states the
+    belief the docs contradict — *"a discrete date PART … is NOT continuous. Under an Automatic mark
+    Tableau renders a continuous date + a measure as a LINE (a discrete date -> bars)"*. Consumed at
+    `twb_to_pbir.py:2505-2508`, and the predicate is `endswith("-Trunc")` — so by construction nothing
+    in `_DATE_PARTS` (`:394`) or `_DATE_EXACT_DERIVATIONS` (`:410`) satisfies it. 🟢 Measured on engine
+    2.339.0: `Year`, `MonthYear` **and `MDY`** (the literal date value at day grain — unambiguously a
+    date dimension) all emit `columnChart`; `Month-Trunc` and an explicit `Line` mark emit `lineChart`.
+    ⚠️ The Tableau half is doc-derived, not render-verified — no Tableau install was used.
+  - **Reproduction:** `fixtures/upstream-repros/issue-424-automatic-mark-discrete-date/` — an A/B/C
+    triple identical but for one thing each — pinned by `tests/test_issue_424_chart_type_pin.py`.
+  - ⚠️ **A shared visual id across two workbooks is NOT evidence of an engine inconsistency**, and
+    #424 was reported on exactly that inference. A PBIR visual name is
+    `_sanitize(f"v-{page_name}-{i}-{ws['name']}")` (`twb_to_pbir.py:14280`), and `_sanitize` (`:748`)
+    is a 16-char prefix plus an 8-char md5 of that whole string — so the id is a deterministic
+    function of **(dashboard name, zone index, worksheet name) only** and encodes nothing about mark
+    type, encodings or data. Sibling dashboards copy-pasted inside one estate collide by
+    construction. 🟢 Measured: the three fixtures above all emit `v-page-Detail8fe20137fae` while two
+    of them disagree on `visualType`.
+  - **What still needs the source, and cannot be inferred:** *which* of the two inputs a given
+    workbook has. An explicit `<mark class='Bar'/>` is a faithful `columnChart` (Tableau stacks bars
+    by default too, so the meaningless total exists in the source as well) — a real defect only if
+    the mark is `Automatic` or `Line`. Read the worksheet's `<mark class=…>` and the date pill's
+    `derivation` before "fixing" anything; a `.twb`/`.twbx` thumbnail settles it (see the entry
+    above).
+  - ⚠️ **The over-broad "fix" is a real hazard, not a hypothetical — do not flip every date chart to
+    a line.** 🟢 Measured by injecting five candidate remedies into 2.339.0 over eight one-variable
+    fixtures: a **mark-agnostic** remedy (every date-on-Columns chart becomes a line) breaks the
+    explicit-`Bar` case that is currently correct, and an **any-discrete** remedy also breaks a plain
+    string dimension. Each wrong remedy was separated by exactly one fixture — `Year`-only by a
+    discrete *exact date*, a `datatype=='date'` remedy by a **`datetime`** column, a
+    base-columns-only remedy by a date-valued **calculated field**, mark-agnostic by the `Bar` mark,
+    any-discrete by the string dimension — and a three-fixture set covering only the obvious cases
+    **passed all five**. If you repair one of these by hand, keep an explicit-`Bar` chart and a
+    non-date bar chart in front of you as controls.
 - **`columnChart` + `Series` STACKS. Never use it for a ranking/index measure.** Stacking is only
   meaningful for additive quantities; ranks, indices, percentages and averages are not additive, so a
   stacked encoding of them is always wrong and never raises a validation error.

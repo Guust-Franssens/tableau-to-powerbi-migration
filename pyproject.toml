@@ -113,6 +113,20 @@ limit-inference-results = 100
 persistent = true
 py-version = "3.11"
 extension-pkg-allow-list = ["lxml.etree"]
+# `scripts/` is an import root at RUNTIME - tests and skill scripts do `sys.path.insert(0, scripts)`
+# before `import engine_source` - but pylint does not execute that, so it reported E0401 import-error
+# on every such module. Not cosmetic: pylint then prints a healthy-looking score and still exits
+# non-zero, and the repo rule is to judge it by EXIT CODE, so a changed file looks clean and fails.
+#
+# ⚠️ `source-roots` is the wrong lever and was measured to make things worse: it only decides the
+# package NAME of the analysed files, never the import search path, so it left the E0401 in place
+# AND re-labelled `.github/skills/*/scripts/*.py` as members of a deep `.github.skills...` package,
+# which broke their sibling-by-bare-name imports (that invocation went exit 0 -> exit 2).
+# `init-hook` does affect `sys.path`. Measured with it in place: all four CI pylint invocations plus
+# `tests/` stay at their prior exit codes, including the pbip-model-refresh shim collision the CI
+# comment warns about. CWD-relative, which is what every documented command and CI itself uses; from
+# another directory it degrades to today's behaviour rather than misreporting.
+init-hook = 'import os, sys; sys.path.insert(0, os.path.join(os.getcwd(), "scripts"))'
 
 [tool.pylint.format]
 max-line-length = 120
