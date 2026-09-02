@@ -1,7 +1,7 @@
 """
 purpose: assemble ONE self-contained, no-flags handover package per migration unit (report or datasource).
 usage:   python scripts/package_unit.py --bundle <bundle> --out <dir> [--unit NAME ...]
-                                        [--oracle <dir>] [--assets <dir>] [--json <file>] [--force]
+                                        [--oracle <dir>] [--assets <dir>] [--json <file>] [--quiet]
 
 Issue #446: the three things an agent needs to start one report all exist and NOTHING assembles them.
 They live in four naming schemes across two trees - the engine keys `pbip/`, `reports/` and
@@ -437,7 +437,7 @@ def package_oracle(  # pylint: disable=too-many-locals
         luid = str(view.get("view_luid") or "")
         stem = object_filename(str(view.get("view_name") or view.get("view_url_name") or ""), luid, taken)
         record = dict(view)
-        files: list[str] = []
+        images: list[str] = []
 
         for leg_name in RENDER_LEGS:
             suffix = Path(str((view.get(leg_name) or {}).get("path") or "")).suffix or f".{leg_name}"
@@ -449,7 +449,7 @@ def package_oracle(  # pylint: disable=too-many-locals
             if reason:
                 omissions.append({"view_luid": luid, "leg": leg_name, "reason": reason})
             elif rewritten is not None and rewritten.get("status") == "ok":
-                files.append(str(rewritten["path"]))
+                images.append(str(rewritten["path"]))
 
         rewritten, reason = _copy_leg(
             oracle_dir, dest, view.get("data"), Path(kind) / "data" / f"{stem}.csv", f"{kind}/data"
@@ -458,8 +458,9 @@ def package_oracle(  # pylint: disable=too-many-locals
             record["data"] = rewritten
         if reason:
             omissions.append({"view_luid": luid, "leg": "data", "reason": reason})
-        elif rewritten is not None and rewritten.get("status") == "ok":
-            files.append(str(rewritten["path"]))
+        numbers = (
+            str(rewritten["path"]) if rewritten is not None and rewritten.get("status") == "ok" and not reason else None
+        )
 
         record["packaged_object_stem"] = stem
         packaged.append(record)
@@ -469,7 +470,11 @@ def package_oracle(  # pylint: disable=too-many-locals
                 "view_luid": luid,
                 "view_type": kind,
                 "declared_view_type": view.get("view_type"),
-                "files": files,
+                # Visual and numeric are kept APART, not merged into one file list. The operator asked
+                # for both and they answer different questions - and merging them mislabels a
+                # data-only view as a render, which `grep -c ^ORACLE_RENDER` would then over-report.
+                "images": images,
+                "data": numbers,
             }
         )
 
@@ -593,18 +598,19 @@ def render_handover(result: dict[str, Any], workbook: dict[str, Any] | None, pag
         f"reason={_field(identity.get('reason') or oracle.get('reason'))}"
     ]
     for obj in oracle.get("objects") or []:
-        # Three prefixes, not one: a selected view with NO usable leg must not be greppable as a
-        # render. `grep -c ^ORACLE_RENDER` is the inventory an agent will trust, and counting
-        # render-less views into it is manufacturing coverage in the human-readable layer - measured,
-        # a workbook whose six views all failed capture produced six ORACLE_RENDER lines. `unknown`
-        # wins over both, because "I cannot tell what this is a picture of" is the louder fact.
+        # Three prefixes, not one, and keyed on the IMAGE legs alone: a selected view with no usable
+        # render must not be greppable as a render. `grep -c ^ORACLE_RENDER` is the inventory an agent
+        # will trust, and counting a data-only view into it over-reports the reference they think they
+        # have. `unknown` wins over both, because "I cannot tell what this is a picture of" is the
+        # louder fact.
         if obj["view_type"] == KIND_UNKNOWN:
             prefix = "UNTYPED_RENDER"
         else:
-            prefix = "ORACLE_RENDER" if obj["files"] else "ORACLE_NO_RENDER"
+            prefix = "ORACLE_RENDER" if obj["images"] else "ORACLE_NO_RENDER"
         tail.append(
             f"{prefix} type={_field(obj['view_type'])} object={_field(obj['name'])} "
-            f"luid={_field(obj['view_luid'])} files={_field(', '.join(obj['files']) or 'none')}"
+            f"luid={_field(obj['view_luid'])} images={_field(', '.join(obj['images']) or 'none')} "
+            f"data={_field(obj['data'] or 'none')}"
         )
     for omission in oracle.get("omissions") or []:
         tail.append(

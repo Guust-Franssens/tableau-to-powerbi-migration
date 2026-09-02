@@ -386,7 +386,11 @@ def test_a_leg_claiming_ok_whose_file_is_absent_cannot_become_evidence(tmp_path:
 
 
 def test_a_selected_view_with_no_render_is_not_greppable_as_a_render(tmp_path: Path) -> None:
-    """`grep -c ^ORACLE_RENDER` is the inventory an agent trusts; a render-less view must not inflate it."""
+    """`grep -c ^ORACLE_RENDER` is the inventory an agent trusts; a render-less view must not inflate it.
+
+    ⚠️ The label keys on the IMAGE legs alone. A view whose `/data` leg succeeded and whose `/image`
+    leg failed still carries a CSV, so a label keyed on "any copied file" would call it a render.
+    """
     views = [
         _view(
             "Sales",
@@ -399,12 +403,18 @@ def test_a_selected_view_with_no_render_is_not_greppable_as_a_render(tmp_path: P
     bundle, oracle = _bundle(tmp_path, views=views)
     manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
     manifest["views"][0]["image"] = {"status": "failed"}
+    manifest["views"][0]["data"] = {"status": "ok", "path": "data/sales.csv"}
+    (oracle / "data").mkdir(exist_ok=True)
+    (oracle / "data" / "sales.csv").write_text("a,b\n1,2\n", encoding="utf-8")
     (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
 
-    _package(tmp_path, bundle, oracle)
+    result = _package(tmp_path, bundle, oracle)
+    assert result["oracle"]["objects"][0]["images"] == []
+    assert result["oracle"]["objects"][0]["data"] == "worksheet/data/Sales.csv"
     lines = _lines(tmp_path)
     assert not [line for line in lines if line.startswith("ORACLE_RENDER")]
-    assert [line for line in lines if line.startswith("ORACLE_NO_RENDER")]
+    no_render = [line for line in lines if line.startswith("ORACLE_NO_RENDER")]
+    assert no_render and "data=worksheet/data/Sales.csv" in no_render[0]
 
 
 # --------------------------------------------------------------------------------------------
