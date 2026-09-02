@@ -228,51 +228,79 @@ them. Re-dispatching blindly would have redone or overwritten ACMU's already-ver
   verified-good artifact — ACMU's fixes above were already confirmed live in Desktop; blindly
   re-dispatching that unit would have redone (and risked corrupting) work that was already done.
 
-### The review spiral, and the four lines in a brief that stop it
+### The review spiral: what an independent measurement actually found
 
-Measured 2026-09-01/02 across eight PRs in one night: **six needed five or more blind-review rounds**,
-one needed nine. That is not thoroughness, it is a defect in the *brief*, and the numbers say where.
+⚠️ **An earlier version of this section was written from memory under a deadline and was wrong in
+three checkable ways.** It is preserved here only as a worked example of why a plausible process
+diagnosis must be measured before it is adopted. Full data, method and limits:
+[`docs/review-throughput-postmortem.md`](docs/review-throughput-postmortem.md) (PR #449) — produced
+blind, with its phase-1 conclusions frozen *before* reading this section, precisely so it could
+falsify it rather than ratify it.
 
-**The evidence.** PR #428 shipped an **entry gate** — "before an agent starts, is there a reference
-image for every page?" — as **9,929 insertions, 4 new scripts and 9 new test modules**, over six
-rounds. PR #431 ("decouple the capture legs and expose the timeout") took **13 commits across 7
-rounds**, of which **three fix defects introduced by the fix itself** (`806614d` *"CI found silent
-corruption in my own round-3 fix"*; `2a2c8dc` *"the dialect control was version-asymmetric — it was
-the defect it guards"*).
+What it corrected, and each of these was load-bearing:
 
-**The diagnosis, and it is not "the reviewers were too fussy".** Every round-3-and-later finding on
-that board collapses into **the same three questions**, asked in a new place each time:
+| the earlier claim | measured |
+|---|---|
+| "#428 shipped **9,929 insertions**, 4 new scripts and 9 new test modules" | **+5551/-4, 4 new scripts, 5 new test files.** The figure was fabricated and was then repeated into three agent briefs |
+| "six PRs needed five or more rounds" | **all eight** merged PRs did; mean **7.75**, median 8 |
+| a proof:product ratio of **2.4x** | **1.86x** all-tests, **0.55x** machinery. The inflated number came from a **two-dot** `master..branch` diff, which counts master-only changes as PR additions on a stale branch |
 
-1. **Can the test reach the production code path?** (ten distinct vacuity modes catalogued here)
-2. **Does the guard cover the whole surface its name claims?**
-3. **Does the evidence prove what the verdict claims?**
+**The reviews were mostly right, so do not read any of this as "review less".** 184 recoverable
+findings: **139 product / 45 proof**. From round 3 onward it is still **75 product / 31 proof — 71% of
+late findings were product defects**, commonly security, data loss, or a false-clean verdict.
 
-Because the *author* never answered them, the *reviewer* discovered them — which converts one pass of
-work into N serial round-trips. Worse, each round's fix was a **new mechanism** (a mutation harness,
-an anchor map, an identity abstraction, a lint rule quarantining a lossy comparison), and the next
-round then attacked *that*. Instruments needing instruments is the spiral; the product stopped being
-the subject around round three.
+**What did NOT cause the spirals** — each ruled out by a discriminating case, not by correlation alone:
 
-**The fix is four lines in the brief, and they are cheap:**
+- **Size.** Additions vs pre-merge rounds: Pearson **−0.060**. #422 took 11 rounds at +3214; larger
+  #428 and #431 took five.
+- **Contention.** #399 reached **10 rounds with zero shared core files**. It amplifies; it does not cause.
+- **Operator routing.** #422 ran 11 rounds in **8h31** with no inter-commit gap above 58 minutes.
+- **Proof machinery itself.** #430: proof-only, one round.
 
-- **Make the author answer the three questions in the PR body, before requesting review.** This is the
-  single biggest lever, because it moves that work from serial to parallel. A brief that names the
-  *fix* but not the *class of defect to hunt* guarantees the reviewer finds the class instead.
-- **Bound the artifact, not just the behaviour.** State a budget — *"no new script, at most one new
-  test module"* — and require a PR-body justification to exceed it. #428 had no budget and grew four
-  scripts. A gate is not a framework.
-- **Cap the rounds explicitly: two, then ship what is correct and file the residual.** With no bound
-  the process runs until the reviewer runs out of ideas, and a good reviewer never does. Route the
-  residual by direction, which is the criterion that actually decides shipping: a **fail-closed**
-  defect (blocks work that should proceed) is an issue; a **fail-open** one (passes work that should
-  be blocked) is a merge-blocker. Those are not symmetric and must not be weighed as if they were.
-- **Separate "is it correct" from "is it *provably* correct".** Much of the late-round work is proof
-  machinery, not product. Time-box it separately, and skip it outright for low-risk changes.
+**What did:** *an unbounded claim fixed one site at a time.* **66% of round-2+ findings shared a defect
+class with round N−1 of a DIFFERENT PR** (32/32 for wrong-object evidence, 19/22 for false-clean). The
+classes were already known elsewhere and were rediscovered serially. Machinery is an **amplifier and a
+symptom** — in 4 of 5 machinery-bearing PRs it arrived *after* review began, and proof share climbs
+18% (R1‑2) → 29% (R3+) → **33% (R5+)**.
 
-⚠️ **Do not read this as "review less".** Blind review caught real, working reproductions on every one
-of these PRs, including three defects the fix itself introduced. The waste is not the reviewing — it
-is *discovering in review what the author could have answered in one pass*, and then growing a
-mechanism per finding.
+⚠️ **Two rules the earlier version proposed are contradicted; do not reintroduce them.**
+
+- **A hard artifact cap** ("no new script, ≤1 test module") — new test-file count vs rounds is Spearman
+  **−0.695**: *more* test files went with *fewer* rounds. Capping files would have increased rounds.
+- **An absolute two-round cap** — after round 2 there were **44 false-clean / wrong-object / security
+  findings**, which normally block a merge. A hard cap either ships known blockers or stops being a
+  cap. The **direction** half survives (below); the count does not.
+
+#### The review contract — state this in the brief BEFORE coding
+
+1. **Invariant and direction.** State the exact pass / refuse / cannot-establish contract. Name the
+   fail-open consequence, the fail-closed consequence, and which one blocks merge.
+2. **Closed surface.** Enumerate every consumer, phase, transformation, identity-loss join and mutable
+   read that can affect the invariant (`N = ___`); name residuals explicitly. **If review finds a new
+   class or an unlisted surface after round 1, do not add another local guard — simplify, delete,
+   split, or descope.** This is the stop rule the 66% recurrence argues for.
+3. **Independent oracle.** For each verdict name evidence *not produced by the code under test*, plus
+   one positive and one negative control. A proof must fail on its intended assertion; a non-zero exit
+   alone is not a kill.
+4. **Proof escalation.** Direct tests are the default. A new mutation runner, digest, census, anchor
+   map or pin requires **all four**: a real need (customer/repo reproduction, accepted requirement, or
+   a mandatory security/data-loss boundary); a severe consequence if the ordinary test is vacuous;
+   a **demonstrated** mutation that direct positive/negative tests miss; and evidence the mechanism has
+   power over *this* claim. ⚠️ The deciding factor is the **consequence of vacuity — not file type and
+   not the guard's nominal direction**: a "fail-open only" rule is too narrow, because #414's
+   destructive sync, #430's fixture-premise tests and #448's sole-mitigation caveat all earn machinery
+   without being fail-open guards. Machinery larger than the product change is a **split trigger**.
+5. **Round route.** R1 reviews the invariant and the enumerated surface; R2 checks regressions and
+   whether the class is closed. **After R2 freeze scope**: a further defect *in the same class* may be
+   fixed; a **new class or new proof mechanism** forces simplify/delete/split/descope. Fail-open,
+   security and data-loss findings block; fail-closed, diagnostic and proof residuals become issues.
+6. **Integration.** Name shared/contended files and the base SHA. Bring the branch current once before
+   final review and **prove the reviewed tree's SHA** — a stale head is how a review round gets spent
+   on code that no longer exists.
+
+⚠️ **No PR has yet used this contract prospectively, so its benefit is a testable hypothesis, not a
+measured result.** Record what happens on the first ones that do, and correct this section from that
+evidence rather than from memory.
 
 ## Desktop concurrency budget: RAM, not addressability
 
