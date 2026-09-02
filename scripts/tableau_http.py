@@ -185,6 +185,23 @@ def _read_bounded(stream, deadline: float | None, timeout: float) -> bytes:
         else:
             chunk = stream.read(_BODY_CHUNK_BYTES)
         if not chunk:
+            # ⚠️ EOF is NOT proof the body is complete, and this check exists because CI proved it on
+            # a platform this was not developed on. `_abort_socket` calls `shutdown(SHUT_RDWR)`; on
+            # Windows an in-flight read then raises `ConnectionAbortedError`, but on Linux the read
+            # returns **b"" -- a clean EOF**. So an aborted trickle was reported as a COMPLETE body
+            # with `status 200`: the silent-corruption outcome, worse than the unbounded read this
+            # whole mechanism replaced, and green on the developer's machine.
+            #
+            # The deadline is therefore re-checked at EOF as well as before each read. A body that
+            # genuinely finished before the deadline still returns; one whose EOF arrived at or after
+            # it cannot be told apart from an abort, so it is refused. Conservative on purpose: being
+            # wrong here costs a retry, and being wrong the other way records a truncated CSV.
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"the response body ended at or after its end-to-end deadline, after "
+                    f"{sum(len(c) for c in chunks)} byte(s). An abandoned read reaches EOF on some "
+                    f"platforms rather than raising, so a complete body cannot be assumed here"
+                )
             return b"".join(chunks)
         chunks.append(chunk)
 

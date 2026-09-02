@@ -793,6 +793,40 @@ def parse(source, *args, **kwargs):
 ast.parse = parse
 """,
     ),
+    "eof-at-the-deadline-is-a-complete-body": (
+        ("tests/test_tableau_http_deadline.py::test_an_eof_at_the_deadline_is_not_treated_as_a_complete_body",),
+        """
+import tableau_http as h
+_orig = h._read_bounded
+def read_bounded(stream, deadline, timeout):
+    # The platform divergence CI found: `shutdown(SHUT_RDWR)` raises on Windows but yields a clean
+    # EOF on Linux, so an aborted trickle is read as a COMPLETE body and reported HTTP 200. Silent
+    # corruption, and green on the machine the fix was written on.
+    try:
+        return _orig(stream, deadline, timeout)
+    except TimeoutError as exc:
+        if "cannot be assumed" in str(exc):
+            return b""
+        raise
+h._read_bounded = read_bounded
+""",
+    ),
+    "abort-uses-shutdown-but-eof-is-still-trusted": (
+        ("tests/test_tableau_http_deadline.py::test_a_body_that_genuinely_finishes_in_time_still_returns",),
+        """
+import time
+import tableau_http as h
+_orig = h._read_bounded
+def read_bounded(stream, deadline, timeout):
+    # The opposite over-correction: refuse EVERY eof once a deadline is in force, which passes the
+    # abort test and breaks every real capture whose body simply finished.
+    if deadline is None:
+        return _orig(stream, deadline, timeout)
+    result = _orig(stream, deadline, timeout)
+    raise TimeoutError("a complete body cannot be assumed here")
+h._read_bounded = read_bounded
+""",
+    ),
     # -------------------------------------------------------------- discriminating controls
     "control-cosmetic-log-wording": (
         (

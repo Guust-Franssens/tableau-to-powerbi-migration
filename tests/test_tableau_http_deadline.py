@@ -388,6 +388,55 @@ def test_read_bounded_without_a_deadline_reads_the_whole_stream():
     assert _read_bounded(_FakeTrickleStream(total=3, gap=0.0), None, SOCKET_TIMEOUT_SEC) == b"aaa"
 
 
+class _EofOnAbortStream:
+    """A stream whose read BLOCKS ACROSS the deadline and then returns a clean EOF -- Linux behaviour.
+
+    ⚠️ Written from a CI failure, not from imagination. ``_abort_socket`` uses
+    ``shutdown(SHUT_RDWR)``; on Windows an in-flight read raises ``ConnectionAbortedError``, on Linux
+    it returns ``b""``. The transport read that as a complete body and reported **HTTP 200** for an
+    aborted trickle -- silent corruption, green on the machine it was written on, red on the machine
+    that gates the merge.
+
+    ⚠️ The read must CROSS the deadline rather than start after it, or the loop's top-of-iteration
+    check fires first and the EOF branch is never reached -- which is what the first version of this
+    fixture did, passing for the wrong reason.
+    """
+
+    def __init__(self, deadline: float) -> None:
+        self._deadline = deadline
+        self.reads = 0
+
+    def read1(self, _size: int) -> bytes:
+        self.reads += 1
+        remaining = self._deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(remaining + 0.01)
+        return b""
+
+
+def test_an_eof_at_the_deadline_is_not_treated_as_a_complete_body():
+    """⚠️ The platform-divergence case, pinned so it cannot depend on which OS ran the suite.
+
+    Reporting a truncated CSV as a 200 is worse than the unbounded read this mechanism replaced,
+    because it is silent -- and it is precisely what an abandoned read looks like where ``shutdown``
+    yields EOF rather than an error.
+    """
+    deadline = time.monotonic() + DEADLINE_SEC
+    stream = _EofOnAbortStream(deadline)
+    with pytest.raises(TimeoutError) as excinfo:
+        _read_bounded(stream, deadline, SOCKET_TIMEOUT_SEC)
+
+    assert stream.reads == 1, "the read must have been ENTERED, or the EOF branch was never reached"
+    assert "cannot be assumed" in str(excinfo.value)
+
+
+def test_a_body_that_genuinely_finishes_in_time_still_returns():
+    """The discriminating control. Refusing every EOF would turn the check into "always fail", which
+    would pass the test above and break every real capture."""
+    stream = _FakeTrickleStream(total=3, gap=0.0)
+    assert _read_bounded(stream, time.monotonic() + DEADLINE_SEC, SOCKET_TIMEOUT_SEC) == b"aaa"
+
+
 class _TrickleHTTPError(urllib.error.HTTPError):
     """A 5xx whose body trickles. `HTTPError.read` is reached from inside an `except` clause."""
 
