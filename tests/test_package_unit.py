@@ -171,7 +171,7 @@ def test_only_this_workbooks_views_are_copied_in(tmp_path: Path) -> None:
 
 
 def test_a_render_with_no_attributable_workbook_is_omitted_with_a_reason(tmp_path: Path) -> None:
-    """No provenance and no exact name match copies NOTHING - #438 in a new place."""
+    """No workbook LUID copies NOTHING - #438 in a new place."""
     views = [
         _view(
             "Sales",
@@ -184,36 +184,19 @@ def test_a_render_with_no_attributable_workbook_is_omitted_with_a_reason(tmp_pat
     bundle, oracle = _bundle(tmp_path, views=views, provenance_luid=None, asset_prefix=None)
     result = _package(tmp_path, bundle, oracle)
     assert result["oracle"]["objects"] == []
-    assert "no oracle view names it exactly" in result["oracle"]["reason"]
+    assert "no workbook LUID for this unit" in result["oracle"]["reason"]
     assert not (_out(tmp_path) / UNIT / "oracle").exists()
 
 
-def test_a_workbook_name_claimed_by_two_workbooks_attributes_nothing(tmp_path: Path) -> None:
-    """The name route requires ONE owning workbook; two make every render unattributable."""
-    views = [
-        _view(
-            "Sales",
-            "aaaaaaaa-0000-0000-0000-000000000001",
-            workbook_luid=WB_LUID,
-            workbook_name=UNIT,
-            view_type="worksheet",
-        ),
-        _view(
-            "Sales",
-            "aaaaaaaa-0000-0000-0000-000000000002",
-            workbook_luid=OTHER_LUID,
-            workbook_name=UNIT,
-            view_type="worksheet",
-        ),
-    ]
-    bundle, oracle = _bundle(tmp_path, views=views, provenance_luid=None, asset_prefix=None)
-    result = _package(tmp_path, bundle, oracle)
-    assert result["oracle"]["objects"] == []
-    assert "claimed by 2 workbooks" in result["oracle"]["reason"]
+def test_a_matching_display_name_is_never_enough_to_attribute_a_render(tmp_path: Path) -> None:
+    """A display NAME is not an identity, even when it matches exactly and uniquely (issue #450).
 
-
-def test_the_exact_name_route_works_when_there_is_no_provenance(tmp_path: Path) -> None:
-    """Without a LUID the EXACT name still attributes - the same fallback `Evidence.is_for` uses."""
+    There WAS an exact-name fallback here, mirroring `reference_evidence.Evidence.is_for`. It was
+    deleted rather than further guarded: it fired **0 times in 67 units** on the reference estate, and
+    #450 measured the same class failing OPEN in `check_unit` on **360 of 360** real records, where a
+    foreign workbook's render is admitted as this unit's evidence. Two projects can hold workbooks
+    with the same name; the LUID is the identity and the name is decoration.
+    """
     views = [
         _view(
             "Sales",
@@ -225,23 +208,71 @@ def test_the_exact_name_route_works_when_there_is_no_provenance(tmp_path: Path) 
     ]
     bundle, oracle = _bundle(tmp_path, views=views, provenance_luid=None, asset_prefix=None)
     result = _package(tmp_path, bundle, oracle)
-    assert result["oracle"]["route"] == "workbook_name (exact)"
-    assert [obj["name"] for obj in result["oracle"]["objects"]] == ["Sales"]
+    assert result["oracle"]["objects"] == []
+    assert result["oracle"]["route"] is None
+    assert "a display name is not an identity" in result["oracle"]["reason"]
+    assert not (_out(tmp_path) / UNIT / "oracle").exists()
+
+
+def test_one_asset_mapped_onto_two_workbook_luids_attributes_nothing(tmp_path: Path) -> None:
+    """Byte-identical uploads in two projects: provenance holds two LUIDs for one sha256.
+
+    Neither may win. This is the multi-owner case that the deleted name route used to have its own
+    single-owner guard for; with one identity route the same refusal lives in exactly one place.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    payload = json.loads((bundle / "source-provenance.json").read_text(encoding="utf-8"))
+    same_sha = payload["inputs"][0]["input"]["sha256"]
+    payload["inputs"].append(
+        {
+            "input": {"file": "same_bytes_elsewhere.twb", "sha256": same_sha},
+            "origin": {"workbook_luid": OTHER_LUID, "workbook_name": "Book", "match": "sha256"},
+        }
+    )
+    (bundle / "source-provenance.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    result = _package(tmp_path, bundle, oracle)
+    assert result["workbook_identity"]["luid"] is None
+    assert "2 workbook LUIDs" in result["workbook_identity"]["reason"]
+    assert result["oracle"]["objects"] == []
+
+
+def test_a_datasource_filename_luid_is_never_promoted_to_a_workbook_identity(tmp_path: Path) -> None:
+    """`harvest_estate_assets.py` prefixes a `.tds` with its DATASOURCE LUID - a different namespace.
+
+    Measured on the reference estate: **all 19** units carrying a filename LUID with no provenance
+    entry are datasources. Promoting the prefix would feed a datasource LUID into a `workbook_luid`
+    comparison, which buys nothing (those 19 have no views) and fails OPEN if the namespaces collide.
+    """
+    views = [
+        _view(
+            "Sales",
+            "aaaaaaaa-0000-0000-0000-000000000001",
+            workbook_luid=OTHER_LUID,
+            workbook_name="Anything",
+            view_type="worksheet",
+        )
+    ]
+    bundle, oracle = _bundle(tmp_path, views=views, provenance_luid=None, asset_prefix=OTHER_LUID)
+    result = _package(tmp_path, bundle, oracle)
+    assert pkg.filename_luid(Path(f"{OTHER_LUID}_x.tds")) == OTHER_LUID
+    assert result["workbook_identity"]["luid"] is None
+    assert result["oracle"]["objects"] == []
 
 
 def test_a_provenance_luid_contradicting_the_asset_filename_fails_closed(tmp_path: Path) -> None:
     """Two identities that disagree resolve to NEITHER, rather than to whichever is read first.
 
-    The second assertion is the one that caught a real fail-open path: refusing the LUID is not
-    enough if the name route then attributes the same renders anyway. Two contradictory identities
-    are LESS evidence than none.
+    This once caught a real fail-open path: refusing the LUID was not enough while an exact-name
+    fallback still attributed the same renders. That fallback is now deleted outright (#450), so a
+    contradiction has nowhere to fall through to - which is the simplification, not another guard.
     """
     bundle, oracle = _bundle(tmp_path, provenance_luid=OTHER_LUID, asset_prefix=WB_LUID)
     result = _package(tmp_path, bundle, oracle)
     assert result["workbook_identity"]["luid"] is None
-    assert "asset filename declares workbook LUID" in result["workbook_identity"]["reason"]
+    assert "asset filename declares LUID" in result["workbook_identity"]["reason"]
     assert result["oracle"]["objects"] == []
-    assert "contradictory" in result["oracle"]["reason"]
+    assert "no workbook LUID for this unit" in result["oracle"]["reason"]
 
 
 def test_a_name_only_provenance_match_still_carries_its_renders_but_says_so(tmp_path: Path) -> None:

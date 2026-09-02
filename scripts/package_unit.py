@@ -37,17 +37,23 @@ already carries that basename. Reusing the existing convention means this packag
 changes to either gate - the whole feature is arrangement, which is the only kind of fix that cannot
 regress a verdict.
 
-Attribution is FAIL-CLOSED - the one design rule
-------------------------------------------------
-A render this script cannot tie to a specific workbook is OMITTED and the reason recorded in
-`package-manifest.json`; it is never copied in "because it was in the same capture" (issue #438 in a
-new place). The two admissible routes mirror `reference_evidence.Evidence.is_for` exactly, so
-packaging can never widen attribution beyond what the gate itself would accept:
+Attribution is FAIL-CLOSED, and by IDENTITY only - the one design rule
+----------------------------------------------------------------------
+A render this script cannot tie to a specific workbook **by LUID** is OMITTED and the reason recorded
+in `package-manifest.json`; it is never copied in "because it was in the same capture" (issue #438 in
+a new place), and never adopted because a display NAME happened to match.
 
-1. **LUID** - `source-provenance.json`'s `origin.workbook_luid` for the sha256 of the copied asset,
-   cross-checked against the asset filename's LUID prefix. A conflict fails closed.
-2. **exact workbook name** - `workbook_name == <unit>`, and only when every view carrying that name
-   shares ONE `workbook_luid`. An ambiguous name resolves to nothing.
+There is exactly ONE admissible route: `oracle-manifest.json`'s `workbook_luid`, matched against the
+LUID `source-provenance.json` records for the sha256 of the copied asset, cross-checked against the
+asset filename's LUID prefix. A disagreement fails closed.
+
+⚠️ **A display name is not an identity, and a name route was DELETED rather than guarded.** Two
+projects can hold workbooks with the same name - the exact ambiguity `_runs/<NNN>-<slug>/` numbering
+exists to avoid elsewhere in this repo. Issue #450 measured the consequence in a sibling gate:
+`check_unit`'s workbook-attribution guard reads a field the capture does not write, is inert on
+**360 of 360** real records, and therefore admits a foreign workbook's render as this unit's
+evidence. This packager will not inherit that class. Measured cost of the deletion on the reference
+estate: **zero** - the name route fired 0 times in 67 units.
 
 Copying a render is NOT a claim that it is byte-faithful. `stamp_tableau_provenance.py` records
 `origin.match: "name_only"` when the local and server bytes DIFFER, and the readiness gate refuses to
@@ -60,6 +66,55 @@ worksheets, and `capture_tableau_oracle.py`'s type resolver is non-fatal by desi
 legitimate value. An untyped render is filed under `unknown/` and named on its own `UNTYPED_RENDER`
 line - never defaulted into either kind, because `reference_evidence._oracle_view_kind` treats absent
 and `unknown` alike as "cannot satisfy any page".
+
+Review contract
+---------------
+**Invariant.** Packaging RELOCATES and SCOPES; it never changes a page verdict. For every unit, the
+entry gate run on the package must yield the same per-page readiness as the bundle-level run with
+`--oracle`. Measured across the 67-unit reference estate: `pages_expected 220 / pages_ready 42 /
+pages_blind 178`, identical both ways.
+
+**Direction.** *Fail-open* (blocks merge): a render attributed to the wrong unit, crediting coverage
+that does not exist. *Fail-closed* (residual, becomes an issue): a render that could have been
+attributed is omitted, so a page reads BLIND - costs work, credits nothing false.
+
+**Closed surface, N = 17 joins/transformations that can move the invariant**, plus 4 named residuals:
+
+| # | join or transformation | key | how it is closed |
+|---|---|---|---|
+| 1 | `pbip/<Unit>/` -> `fabric/` | folder name | copied whole |
+| 2 | report <-> model pairing | containment, NOT name | folder copied whole (a) |
+| 3 | unit -> handover slice | file stem | exact |
+| 4 | unit -> asset (handover) | `workbook.source_id` basename | run-root-relative, so basename only |
+| 5 | unit -> asset (input manifest) | `Path(name).stem == unit` | exact, fallback only |
+| 6 | asset -> workbook LUID | `input.sha256` | content-keyed; >1 LUID refuses |
+| 7 | asset filename LUID | `<uuid>_` prefix | cross-check only, never a source (b) |
+| 8 | workbook LUID -> oracle views | `workbook_luid` | the only route (#450) |
+| 9 | view -> object kind | `view_type` | `unknown/`, marked, never defaulted |
+| 10 | view -> filename | sanitized `view_name` | LUID-suffix disambiguation |
+| 11 | leg -> bytes | recorded sha256/bytes/dims | verbatim copy, only `path` rewritten |
+| 12 | leg claiming ok, file absent | — | status -> `omitted_by_packager` |
+| 13 | unit -> engine classification | `report.json` name | exact; LISTS not sets, so duplicates show |
+| 14 | unit universe | `report.json` U `pbip/` | neither side is a superset (c) |
+| 15 | receipt artifacts | `pbip/<unit>/` prefix | re-rooted to `fabric/` |
+| 16 | emptied visual -> page | visual id -> PBIR dir | directory lookup |
+| 17 | package location -> gate discovery | `_default_dirs` scans the GRANDPARENT | shadowing refused, exit 2 |
+
+(a) `byPath ../<Model>.SemanticModel` survives the copy, and 27 of 62 model names differ from their
+unit's, so the pair is never re-established by name. (b) on a `.tds` the prefix is a DATASOURCE LUID,
+a different identity namespace. (c) 4 workbooks ship no working copy, and 2 working copies are
+unlisted because the engine disambiguated two same-named workbooks on disk.
+
+**Residuals, named not guarded.** (R1) `<bundle>/reports/` is the engine BASELINE and is deliberately
+never packaged - no model sits beside it, so a copy would not resolve `byPath`. (R2) issue #450 lives
+in `check_unit._declared_workbook`, not here: the packaged manifest preserves `workbook_name`
+verbatim and deliberately does **not** add the `workbook` key that would make that guard live, since
+doing so would change a gate's verdict as a side effect of packaging - which is the invariant this
+script exists to hold. (R3) `parse_tableau.py` can refuse a valid workbook (measured:
+`World_Indicators`, a `quantiles` reference line outside its schema enum), so a unit may ship without
+`migration-spec.json`; recorded as a `PACKAGE_NOTE`, never swallowed. (R4) an oracle capture is
+default-view-state with no `?vf_` pinning, so `oracle/` is **layout/text grade only** regardless of
+render leg.
 
 Exit codes
 ----------
@@ -263,7 +318,20 @@ def scope_provenance(provenance: Any, asset_sha: str | None) -> tuple[dict[str, 
 
 
 def filename_luid(asset: Path | None) -> str | None:
-    """The workbook LUID `harvest_estate_assets.py` prefixes onto a downloaded asset filename."""
+    """The LUID `harvest_estate_assets.py` prefixes onto a downloaded asset filename.
+
+    ⚠️ **This is NOT usable as a workbook identity on its own, and is never used as one here.** The
+    harvester prefixes a `.tds`/`.tdsx` with its **datasource** LUID, which lives in a different
+    identity namespace from `oracle-manifest.json`'s `workbook_luid`. Measured on the 67-unit
+    reference estate: **all 19** units that carry a filename LUID with no provenance entry are
+    datasources. Promoting it would feed a datasource LUID into a workbook-LUID comparison - a
+    category error that buys nothing (those 19 have no views) and fails OPEN if the namespaces ever
+    collide.
+
+    It is therefore only a CROSS-CHECK against a provenance LUID, and that comparison is structurally
+    scoped to workbooks already: `stamp_tableau_provenance.py` stamps workbooks only, so a datasource
+    never reaches it.
+    """
     if asset is None:
         return None
     found = _LUID_PREFIX.match(asset.name)
@@ -273,9 +341,13 @@ def filename_luid(asset: Path | None) -> str | None:
 def workbook_identity(entries: list[dict[str, Any]], asset: Path | None) -> dict[str, Any]:
     """The workbook LUID this unit's renders may be attributed to, or a refusal naming why.
 
-    Returns `{"luid", "match", "workbook_name", "route", "reason"}`. `luid` is None whenever the
-    identity is not established, and `reason` then says which precondition failed. A provenance LUID
-    that DISAGREES with the asset filename's LUID prefix fails closed rather than picking one.
+    Returns `{"luid", "match", "workbook_name", "reason"}`. `luid` is None whenever the identity is
+    not established, and `reason` then says which precondition failed - which is the whole verdict,
+    because a unit with no workbook LUID attributes nothing at all (see :func:`select_views`).
+
+    One source, one cross-check: `source-provenance.json` keyed by the asset's **sha256**, checked
+    against the asset filename's LUID prefix when there is one. A disagreement fails closed rather
+    than picking whichever was read first.
     """
     stamped = filename_luid(asset)
     luids = {
@@ -284,49 +356,28 @@ def workbook_identity(entries: list[dict[str, Any]], asset: Path | None) -> dict
         if isinstance(entry.get("origin"), dict) and entry["origin"].get("workbook_luid")
     }
     if len(luids) > 1:
-        return {
-            "luid": None,
-            "match": None,
-            "workbook_name": None,
-            "route": "provenance",
-            "conflict": True,
-            "reason": f"source-provenance.json maps this asset's bytes onto {len(luids)} workbook LUIDs",
-        }
+        return _no_identity(f"source-provenance.json maps this asset's bytes onto {len(luids)} workbook LUIDs")
     if not luids:
-        return {
-            "luid": None,
-            "match": None,
-            "workbook_name": None,
-            "route": None,
-            "conflict": False,
-            "reason": "no provenance entry",
-        }
+        return _no_identity("no source-provenance.json entry for this asset's bytes")
 
     luid = next(iter(luids))
     if stamped and stamped.casefold() != luid.casefold():
-        return {
-            "luid": None,
-            "match": None,
-            "workbook_name": None,
-            "route": "provenance",
-            "conflict": True,
-            "reason": (
-                f"asset filename declares workbook LUID {stamped} but source-provenance.json "
-                f"records {luid} for these bytes"
-            ),
-        }
-    origin = next(
-        (entry["origin"] for entry in entries if isinstance(entry.get("origin"), dict)),
-        {},
-    )
+        return _no_identity(
+            f"asset filename declares LUID {stamped} but source-provenance.json records {luid} "
+            "for these bytes - two identities that disagree are LESS evidence than none"
+        )
+    origin = next((entry["origin"] for entry in entries if isinstance(entry.get("origin"), dict)), {})
     return {
         "luid": luid,
         "match": origin.get("match"),
         "workbook_name": origin.get("workbook_name"),
-        "route": "provenance",
-        "conflict": False,
         "reason": None,
     }
+
+
+def _no_identity(reason: str) -> dict[str, Any]:
+    """No usable workbook identity, carrying the precondition that failed."""
+    return {"luid": None, "match": None, "workbook_name": None, "reason": reason}
 
 
 # --------------------------------------------------------------------------------------------
@@ -334,37 +385,39 @@ def workbook_identity(entries: list[dict[str, Any]], asset: Path | None) -> dict
 # --------------------------------------------------------------------------------------------
 
 
-def select_views(manifest: Any, identity: dict[str, Any], unit: str) -> tuple[list[dict[str, Any]], str]:
+def select_views(manifest: Any, identity: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
     """`(this unit's views, route)` from a flat oracle manifest - or `([], reason)`.
 
-    Two routes, mirroring `reference_evidence.Evidence.is_for`: a workbook LUID, else an EXACT
-    workbook-name match that resolves to exactly one workbook. Anything else attributes nothing.
+    **ONE route: `workbook_luid`.** A display name is not an identity - two projects can hold
+    workbooks with the same name, which is the exact ambiguity `_runs/<NNN>-<slug>/` numbering exists
+    to avoid elsewhere in this repo (issue #450).
 
-    ⚠️ A CONFLICTED identity is not a missing one, and must not fall through to the name route. Found
-    by this file's own test: an asset whose filename LUID contradicted its provenance LUID correctly
-    refused to produce a LUID - and then attributed two renders by name anyway, silently downgrading
-    "two sources disagree about which workbook this is" to "I have no idea, so use the name". Two
-    contradictory identities are LESS evidence than none, not the same amount.
+    ⚠️ There WAS a second route here - an exact `workbook_name == <unit>` match guarded by a
+    single-owner check - added because `reference_evidence.Evidence.is_for` has the same fallback.
+    It is deleted rather than further guarded. Two measurements decided it:
+
+    * it fired **0 times in 67 units** on the reference estate (46 resolve by `workbook_luid`, 21
+      attribute nothing), so it was untested-in-production surface with no measured benefit; and
+    * a name route is the same class as #450, where `check_unit`'s workbook guard reads a field the
+      capture does not write and is inert on **360 of 360** real records - failing OPEN, admitting a
+      foreign workbook's render as this unit's evidence.
+
+    Mirroring a fallback that a sibling gate is being fixed to distrust is not a reason to keep it.
     """
     views = [view for view in (manifest or {}).get("views") or [] if isinstance(view, dict)]
     if not views:
         return [], "no views in oracle manifest"
 
-    if identity.get("conflict"):
-        return [], f"workbook identity is contradictory, so no render can be attributed: {identity.get('reason')}"
-
     luid = identity.get("luid")
-    if luid:
-        picked = [view for view in views if str(view.get("workbook_luid") or "").casefold() == luid.casefold()]
-        return picked, "workbook_luid"
-
-    named = [view for view in views if view.get("workbook_name") == unit]
-    if not named:
-        return [], "no workbook LUID for this unit, and no oracle view names it exactly"
-    owners = {str(view.get("workbook_luid") or "") for view in named}
-    if len(owners) > 1:
-        return [], f"the name {unit!r} is claimed by {len(owners)} workbooks in the capture, so it attributes nothing"
-    return named, "workbook_name (exact)"
+    if not luid:
+        return [], (
+            f"no workbook LUID for this unit ({identity.get('reason')}), so no render can be "
+            "attributed - a display name is not an identity (#450)"
+        )
+    picked = [view for view in views if str(view.get("workbook_luid") or "").casefold() == luid.casefold()]
+    if not picked:
+        return [], f"no oracle view carries workbook_luid {luid}"
+    return picked, "workbook_luid"
 
 
 def view_kind(view: dict[str, Any]) -> str:
@@ -748,14 +801,14 @@ def _write_spec(asset: Path | None, dest: Path) -> tuple[str | None, str | None]
     return "migration-spec.json", None
 
 
-def _attach_oracle(oracle_dir: Path | None, identity: dict[str, Any], unit: str, dest: Path) -> dict[str, Any]:
+def _attach_oracle(oracle_dir: Path | None, identity: dict[str, Any], dest: Path) -> dict[str, Any]:
     """This unit's slice of the flat capture, or an empty slice carrying the refusal reason."""
     oracle: dict[str, Any] = {"objects": [], "omissions": [], "route": None, "reason": None}
     manifest = read_json(oracle_dir / "oracle-manifest.json") if oracle_dir else None
     if manifest is None:
         oracle["reason"] = "no oracle-manifest.json found" if oracle_dir else "no oracle capture supplied"
         return oracle
-    views, route = select_views(manifest, identity, unit)
+    views, route = select_views(manifest, identity)
     if not views:
         oracle["reason"] = route
         return oracle
@@ -809,7 +862,7 @@ def package_unit(  # pylint: disable=too-many-locals
         write_json(dest / "engine-output-receipt.json", receipt)
 
     identity = workbook_identity(entries, asset)
-    oracle = _attach_oracle(oracle_dir, identity, unit, dest)
+    oracle = _attach_oracle(oracle_dir, identity, dest)
     spec, spec_note = _write_spec(asset, dest)
     if spec_note:
         notes.append(spec_note)

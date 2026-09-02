@@ -722,10 +722,12 @@ What to check in the output:
 - **`handover.md` is the agent's entry point**, one finding per line with a stable prefix, emptied
   visuals first: `grep '^EMPTIED_VISUAL' _packages\<Unit>\handover.md`. They render blank on a report
   that validates clean, and nothing else in the toolkit surfaces them.
-- **`package-manifest.json` carries every omission with its reason.** A render that cannot be tied to
-  a specific workbook is omitted, never copied in because it was in the same capture. On the
-  reference estate that is 4 renders belonging to two same-named workbooks the engine disambiguated
-  on disk — real evidence, genuinely unattributable, correctly left out.
+- **`package-manifest.json` carries every omission with its reason.** A render is attributed by
+  **`workbook_luid` only** — a display name is not an identity, and #450 measured that class failing
+  open in `check_unit` on 360 of 360 real records. A render that cannot be tied to a workbook by LUID
+  is omitted, never copied in because it was in the same capture. On the reference estate that is 4
+  renders belonging to two same-named workbooks the engine disambiguated on disk — real evidence,
+  genuinely unattributable, correctly left out.
 - **`oracle/` is layout/text grade only** — default view state, no `?vf_` pinning. Record that ceiling
   in `limitations_encountered`; a visual PASS signed off on it alone is overstated.
 
