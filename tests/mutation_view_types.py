@@ -61,6 +61,68 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mutation_harness as mh  # noqa: E402  # pylint: disable=wrong-import-position
 
 TARGET = "tests/test_capture_tableau_oracle.py"
+
+
+#: The complete positive/negative control matrix for the console scanner.
+MATRIX = (
+    "tests/test_tableau_luid_census.py::test_the_console_gate_catches_every_shape_it_claims",
+    "tests/test_tableau_luid_census.py::test_the_console_gate_leaves_prose_alone",
+)
+
+#: ⚠️ mutation -> the EXACT set of control nodes it must redden, and no others.
+#:
+#: Running a mutation against its `INTENDED` node alone proves that node fails. It CANNOT prove that
+#: node is the ONLY one that fails -- and two mutations were measured reddening more than they
+#: claimed while the campaign stayed green, because it never observed the collateral.
+#:
+#: ⚠️ This is the completion of an arc, not a new mistake. The harness first ran mutations against
+#: the whole file under `-x` and credited whichever test failed FIRST -- attribution too broad. The
+#: fix, running against the intended anchor alone, was correct and created the mirror blind spot:
+#: collateral damage became invisible. Neither extreme measures the thing. A declared SET does, and
+#: it is honest about the cases where more than one control legitimately goes red.
+#:
+#: Node names are `report.nodeid.split("::")[-1]`, which is what the harness records -- so they are
+#: function+parameter only. Fine here (one file, two functions); it would collide across files.
+EXPECTED_FAILURES: dict[str, frozenset[str]] = {}
+
+
+def run_matrix(name: str, code: str) -> tuple[frozenset[str], str]:
+    """Run one mutation over the WHOLE control matrix with NO `-x`, and return every node that fails.
+
+    Deliberately not `mutation_harness.run`: that passes `-x`, which stops at the first failure and
+    is exactly what makes collateral damage invisible. Everything else -- the injected plugin, the
+    lifecycle record, the sanitized environment -- is the harness's, so the two paths cannot drift on
+    how a verdict is observed.
+    """
+    plugin = mh.ROOT / "tests" / "_mutation_plugin.py"
+    outcomes_file = mh.ROOT / "tests" / "_mutation_outcomes.json"
+    outcomes_file.unlink(missing_ok=True)
+    plugin.write_text(
+        "import sys\nfrom pathlib import Path\n"
+        f"sys.path.insert(0, r'{mh.ROOT / 'scripts'}')\nsys.path.insert(0, r'{mh.ROOT / 'tests'}')\n"
+        + code
+        + mh.OUTCOME_HOOKS.format(outcome_path=str(outcomes_file)),
+        encoding="utf-8",
+    )
+    proc = mh.subprocess.run(
+        [mh.PY, "-m", "pytest", *MATRIX, "-q", "-p", "_mutation_plugin", "--no-header", "--tb=no", "--color=no"],
+        cwd=mh.ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        env=mh.sanitized_env(),
+    )
+    plugin.unlink(missing_ok=True)
+    if "Error importing plugin" in proc.stdout + proc.stderr:
+        outcomes_file.unlink(missing_ok=True)
+        raise SystemExit(f"{name}: the mutation never applied - the harness would report a FALSE verdict")
+    outcomes = mh.read_outcomes(outcomes_file)
+    outcomes_file.unlink(missing_ok=True)
+    if not mh.session_is_trustworthy(outcomes) and not mh.observed_mutation(outcomes):
+        raise SystemExit(f"{name}: pytest never reached a verdict over the matrix")
+    return frozenset(outcomes["call_failed"]), mh.last_line(proc)
+
+
 CENSUS_TARGET = "tests/test_tableau_luid_census.py"
 
 #: Mutations whose subject is `tableau_luid_census` rather than `tableau_view_types`, and which
@@ -428,6 +490,51 @@ CENSUS_MUTATIONS.update(
         "console-gate-drops-argparse-help",
     }
 )
+EXPECTED_FAILURES.update(
+    {
+        "console-gate-drops-argparse-description": frozenset(
+            ["test_the_console_gate_catches_every_shape_it_claims[argparse-desc]"]
+        ),
+        "console-gate-drops-argparse-epilog": frozenset(
+            ["test_the_console_gate_catches_every_shape_it_claims[argparse-epilog]"]
+        ),
+        "console-gate-drops-argparse-help": frozenset(
+            ["test_the_console_gate_catches_every_shape_it_claims[argparse-help]"]
+        ),
+        "console-gate-drops-logging-methods": frozenset(
+            [
+                "test_the_console_gate_catches_every_shape_it_claims[logging-msg-keyword]",
+                "test_the_console_gate_catches_every_shape_it_claims[logging-positional]",
+            ]
+        ),
+        "console-gate-drops-logging-msg-keyword": frozenset(
+            ["test_the_console_gate_catches_every_shape_it_claims[logging-msg-keyword]"]
+        ),
+        "console-gate-drops-print": frozenset(
+            ["test_the_console_gate_catches_every_shape_it_claims[print-positional]"]
+        ),
+        "console-gate-drops-print-end": frozenset(["test_the_console_gate_catches_every_shape_it_claims[print-end]"]),
+        "console-gate-drops-print-sep": frozenset(["test_the_console_gate_catches_every_shape_it_claims[print-sep]"]),
+        "console-gate-drops-systemexit": frozenset(
+            ["test_the_console_gate_catches_every_shape_it_claims[systemexit-positional]"]
+        ),
+        "console-gate-drops-the-log-method": frozenset(
+            ["test_the_console_gate_catches_every_shape_it_claims[logging-log-method]"]
+        ),
+        "console-gate-flags-prose-too": frozenset(
+            [
+                "test_the_console_gate_leaves_prose_alone[docstring]",
+                "test_the_console_gate_leaves_prose_alone[encoded-not-printed]",
+                "test_the_console_gate_leaves_prose_alone[plain-assignment]",
+            ]
+        ),
+    }
+)
+# ⚠️ Scanner mutations declare a SET and are removed from INTENDED, so each has exactly one
+# declaration. Two sources of truth for the same expectation is how they drift.
+for _name in EXPECTED_FAILURES:
+    INTENDED.pop(_name, None)
+
 INTENDED.update(
     {
         "console-gate-drops-print": "tests/test_tableau_luid_census.py::test_the_console_gate_catches_every_shape_it_claims[print-positional]",
@@ -516,6 +623,30 @@ def main(argv: list[str]) -> int:
     bad: list[str] = []
     count = 0
     for name in wanted:
+        if name in EXPECTED_FAILURES:
+            # The exact failed-node SET, measured without `-x`. Proving the declared node fails is
+            # not the same as proving it is the only one that does.
+            expected = EXPECTED_FAILURES[name]
+            try:
+                observed, detail = run_matrix(name, MUTATIONS[name])
+            except SystemExit as exc:
+                verdict, label, detail = "INVALID ", name, str(exc)
+            else:
+                label = name
+                if observed == expected:
+                    verdict = "CAUGHT  "
+                    detail = f"exactly {len(expected)} declared node(s)"
+                elif observed:
+                    verdict = "MIS-SCOPED"
+                    detail = f"expected {sorted(expected)}, reddened {sorted(observed)}"
+                else:
+                    verdict = "SURVIVED"
+            count += 1
+            if verdict.strip() != "CAUGHT":
+                bad.append(f"{name}: expected CAUGHT over its declared set, got {verdict.strip()} -- {detail}")
+            print(f"{verdict}  {label:42s} -> {detail}")
+            continue
+
         # An intended anchor wins: the named test alone is then the sole reason to refuse.
         suite = INTENDED.get(name) or (CENSUS_TARGET if name in CENSUS_MUTATIONS else TARGET)
         try:
