@@ -54,6 +54,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
+from xml.etree import ElementTree
 
 import pytest
 
@@ -63,6 +64,7 @@ sys.path.insert(0, str(REPO / "scripts"))
 import capture_tableau_oracle as oracle  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_http  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_oracle_manifest as verdict  # noqa: E402  # pylint: disable=wrong-import-position
+import tableau_payload_facts as payload_facts  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_render_capability as cap  # noqa: E402  # pylint: disable=wrong-import-position
 from tableau_env import (  # noqa: E402  # pylint: disable=wrong-import-position
     env_redactor,
@@ -602,6 +604,7 @@ TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
     ("scripts/tableau_payload_facts.py", "png_dimensions"): {"payload"},
     ("scripts/tableau_payload_facts.py", "svg_facts"): {"payload"},
     ("scripts/tableau_payload_facts.py", "pdf_facts"): {"payload"},
+    ("scripts/tableau_payload_facts.py", "payload_is_complete"): {"payload"},
 }
 
 # Calls whose RESULT is response data.
@@ -923,6 +926,12 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
             "echoing the PAT secret or session token before these bytes reach a file"
         ),
         "why": "REDACTED-UPSTREAM: `format_matches` builds it entirely from `redacted_note` output",
+        "why_incomplete": (
+            "FIXED-VOCABULARY: `payload_is_complete` returns one of nine literal reasons, interpolating "
+            "only integers -- chunk counts, a byte cap, and expat's numeric error code and position. It "
+            "never quotes a byte of the payload, which is why it needs no redactor; "
+            "`test_the_completeness_diagnostic_quotes_no_payload_bytes` proves that rather than assuming it"
+        ),
         "stats": "REDACTED-UPSTREAM: counters, plus `retry_reasons` whose entries are redacted details",
         "hashlib.sha256(payload).hexdigest()": "DERIVED-IRREVERSIBLY: a one-way digest, not the payload",
         "len(payload)": "NOT-A-STRING: an integer byte count",
@@ -2505,6 +2514,113 @@ def test_header_value_is_case_insensitive_like_the_HTTPMessage_it_replaced():
     assert tableau_http.header_value(headers, "retry-after") == "30"
     assert tableau_http.header_value(headers, "Retry-After") == "30"
     assert tableau_http.header_value(headers, "X-Absent") is None
+
+
+@pytest.mark.parametrize("shape", sorted(SHAPES))
+@pytest.mark.parametrize("kind", ["png", "svg", "pdf"])
+def test_the_completeness_diagnostic_quotes_no_payload_bytes(kind, shape):
+    """The `why_incomplete` certification claims FIXED-VOCABULARY. This measures it.
+
+    ⚠️ `payload_is_complete` is the ONE diagnostic on this path that takes no redactor, and the whole
+    justification is that it interpolates integers and never a byte of the payload. That is a claim
+    about code someone will edit later -- the cheapest possible regression is an f-string quoting the
+    root element's tag or expat's message, and `str(ParseError)` for an undefined entity echoes
+    document text verbatim. So the claim is exercised with the same adversarial battery every other
+    site faces, and against the parse-error path specifically, where the temptation lives.
+
+    The decoy subtraction matters as much here as anywhere: a reason string legitimately contains
+    `<svg`, `%%EOF` and digits, and a naive substring search would credit those as a leak.
+    """
+    secret, decoy = SHAPES[shape], DECOYS[shape]
+    bodies = {
+        # Truncated after a good prefix, with the secret in the bytes that never made it out.
+        "png": lambda value: b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + value.encode(),
+        # Reaches the ParseError branch, whose expat message is the one that echoes document text.
+        "svg": lambda value: f'<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" id="{value}">'.encode(),
+        "pdf": lambda value: f"%PDF-1.4\n1 0 obj\n<< /Title ({value}) >>\nendobj\n".encode(),
+    }
+    ok, why = payload_facts.payload_is_complete(kind, bodies[kind](secret))
+    _decoy_ok, decoy_why = payload_facts.payload_is_complete(kind, bodies[kind](decoy))
+
+    assert ok is False, f"the {kind} fixture is meant to be incomplete, so this proves nothing: {why!r}"
+    assert why, "an incomplete payload must say why, or the manifest records a refusal with no reason"
+    leak = longest_surviving_run(secret, why)
+    assert leak == "" or leak in decoy_why, (
+        f"`payload_is_complete({kind!r}, ...)` echoed {leak!r} from the payload into a diagnostic that "
+        f"is persisted UNREDACTED into oracle-manifest.json: {why!r}"
+    )
+
+
+def test_an_undefined_entity_is_the_control_that_makes_that_test_bite():
+    """⚠️ This control FALSIFIED the docstring it was written to confirm. Kept, corrected, not deleted.
+
+    The first version of `_svg_is_complete` justified not forwarding `str(exc)` with "expat's
+    'undefined entity &foo;' message echoes document text". Measured on CPython 3.13 that is **false**:
+    across ten malformed shapes -- undefined entity, mismatched tag, unbound prefix, junk after the
+    root, duplicate attribute, unclosed token, invalid token, an encoding mismatch and a mis-declared
+    UTF-16 document -- every `ParseError` message is fixed vocabulary plus a line/column and quotes
+    nothing.
+
+    ⚠️ What the same probe DID find is a live defect the wrong assumption was hiding: a document
+    declaring an unknown encoding raises `LookupError: unknown encoding: <attacker text>`, which is
+    **not a ParseError**, so `except ElementTree.ParseError` let it out of the module entirely -- into
+    a traceback carrying the document's own bytes, crashing the capture on the way. That is the shape
+    this test now pins, and the `ParseError` half is kept as the negative control: if a future Python
+    starts quoting document text there, this fails and says so.
+    """
+    entity = f'<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg">&{SHAPES["plain"]};</svg>'.encode()
+    encoding = f'<?xml version="1.0" encoding="{SHAPES["plain"]}"?><svg/>'.encode()
+
+    with pytest.raises(ElementTree.ParseError) as parse_error:
+        ElementTree.fromstring(entity)
+    assert longest_surviving_run(SHAPES["plain"], str(parse_error.value)) == "", (
+        f"a ParseError now echoes document text ({str(parse_error.value)!r}); `_svg_is_complete` "
+        "already refuses to forward it, but the module docstring's measured claim is out of date"
+    )
+
+    with pytest.raises(LookupError) as lookup_error:
+        ElementTree.fromstring(encoding)
+    assert longest_surviving_run(SHAPES["plain"], str(lookup_error.value)) != "", (
+        "the unknown-encoding message no longer echoes the document, so the `except LookupError` "
+        "branch is no longer covering the leak it was added for -- re-measure before trusting it"
+    )
+    assert not isinstance(lookup_error.value, ElementTree.ParseError), (
+        "LookupError became a ParseError, so the separate handler is now redundant rather than "
+        "load-bearing; say so in the docstring instead of leaving a claim that no longer bites"
+    )
+
+    for body in (entity, encoding):
+        ok, why = payload_facts.payload_is_complete("svg", body)
+        assert ok is False, why
+        assert longest_surviving_run(SHAPES["plain"], why) == "", why
+
+
+def test_the_entity_refusal_prevents_an_expansion_expat_would_otherwise_perform():
+    """⚠️ A guard that guards nothing reads exactly like one that does. This measures the difference.
+
+    `_svg_is_complete` refuses a DTD rather than parsing it, on the grounds that expat expands
+    internal entities and a nested set is a memory-exhaustion primitive. That is only worth the code
+    if expat really would expand it, so the expansion is demonstrated here on a deliberately small
+    payload -- three levels, not a bomb -- and the refusal is then shown to stop before reaching it.
+    """
+    bomb = (
+        b'<?xml version="1.0"?><!DOCTYPE svg [<!ENTITY a "AAAAAAAAAA">'
+        b'<!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;">'
+        b'<!ENTITY c "&b;&b;&b;&b;&b;&b;&b;&b;&b;&b;">]>'
+        b'<svg xmlns="http://www.w3.org/2000/svg"><text>&c;</text></svg>'
+    )
+    root = ElementTree.fromstring(bomb)
+    expanded = len(root[0].text or "")
+
+    assert expanded == 1000, (
+        f"expat expanded the entity to {expanded} characters from a 3-level declaration; if it has "
+        "stopped expanding at all, the refusal in `_svg_is_complete` is now dead code"
+    )
+
+    ok, why = payload_facts.payload_is_complete("svg", bomb)
+
+    assert ok is False
+    assert why == "the SVG declares XML entities, which this parser refuses to expand", why
 
 
 # ------------------------------------------ round 9: the KNOWN_GAPS classification, as MEASURED

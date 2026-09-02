@@ -34,9 +34,11 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import capture_tableau_oracle as oracle  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_oracle_manifest as verdict  # noqa: E402  # pylint: disable=wrong-import-position
+from png_fixtures import valid_png  # noqa: E402  # pylint: disable=wrong-import-position
 
 LUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 TIMEOUT_BODY = "TimeoutError: read operation timed out"
@@ -48,7 +50,7 @@ SVG_GATE = f"<error code='400'><detail>{oracle.SVG_VERSION_MARKER} 3.29 or later
 SESSION_LOST = (
     "<?xml version='1.0'?><tsResponse><error code='401002'><summary>Unauthorized Access</summary></error></tsResponse>"
 )
-PNG = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + (800).to_bytes(4, "big") + (600).to_bytes(4, "big") + b"\x08\x02"
+PNG = valid_png(800, 600)
 SVG = b'<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"></svg>'
 PDF = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n%%EOF\n"
 

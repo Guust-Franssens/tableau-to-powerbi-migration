@@ -129,6 +129,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tableau_render_capability as capability  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_view_types  # noqa: E402  # pylint: disable=wrong-import-position
 from tableau_payload_facts import (  # noqa: E402  # pylint: disable=wrong-import-position
+    payload_is_complete,
     pdf_facts,
     png_dimensions,
     summarise_csv,
@@ -902,7 +903,7 @@ class _RenderOptions:
     hard_deadline: float | None = None
 
 
-def _capture_render(
+def _capture_render(  # pylint: disable=too-many-locals
     session: TableauSession, view_luid: str, path: Path, kind: str, options: _RenderOptions
 ) -> dict[str, Any]:
     """Fetch one rendered form of a view and describe what was actually obtained.
@@ -956,6 +957,28 @@ def _capture_render(
             "status": "format_mismatch",
             "requested_format": kind,
             "detail": why,
+            "bytes": len(payload),
+            "elapsed_sec": round(elapsed, 2),
+            **stats,
+        }
+    # ⚠️ And a payload that STARTS like the requested format is not a payload that IS one. A leading
+    # signature is 8 bytes of evidence about a file that may be 900 KB short: measured against a
+    # loopback server declaring `Content-Length: 1024` and sending only the PNG signature before
+    # closing, those 8 bytes reached here, passed `format_matches`, were written to disk, and were
+    # recorded `status: ok` with a SHA-256 -- while `render_unestablished` stayed 0. That is the
+    # decoupling this whole change exists for, INVERTED: a render leg that fails loudly is the point,
+    # and a truncated one credited as evidence is worse than the suppression it replaced, because the
+    # entry gate then reports the view as covered.
+    #
+    # `truncated` is deliberately NOT in `_VIEW_HEALTH_FAILURES`, for the same reason
+    # `format_mismatch` is not: it arrived as a 200, so it says nothing about whether the VIEW can
+    # render, and the remaining salvage tiers are still worth asking.
+    complete, why_incomplete = payload_is_complete(kind, payload)
+    if not complete:
+        return {
+            "status": "truncated",
+            "requested_format": kind,
+            "detail": why_incomplete,
             "bytes": len(payload),
             "elapsed_sec": round(elapsed, 2),
             **stats,

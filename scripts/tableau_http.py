@@ -148,6 +148,12 @@ def _read_bounded(stream, deadline: float | None, timeout: float) -> bytes:
     :data:`NETWORK_ERROR_STATUS` -- a transient, retry-eligible failure. Reporting a truncated CSV as
     a 200 would manufacture exactly the false evidence this repository exists to prevent.
 
+    ⚠️ **Neither is a body the peer TRUNCATED.** A premature close with bytes still outstanding under
+    ``Content-Length`` reaches this function as a plain EOF -- ``HTTPResponse.read1`` closes the
+    connection and returns ``b""`` rather than raising ``IncompleteRead`` -- so the deadline path was
+    briefly *weaker* than the unbounded ``read()`` it wraps, and credited 8 bytes as a whole PNG. See
+    the EOF branch below; the outstanding-length check is the FIRST thing it does, ahead of the clock.
+
     ``deadline=None`` is the default and reads the whole body in one call, byte-for-byte as before, so
     no existing caller changes behaviour. That matters: the data leg legitimately streams a large
     export, and a deadline applied to it would truncate a capture that is making real progress.
@@ -185,6 +191,31 @@ def _read_bounded(stream, deadline: float | None, timeout: float) -> bytes:
         else:
             chunk = stream.read(_BODY_CHUNK_BYTES)
         if not chunk:
+            # ⚠️ FIRST, and independent of the clock: the peer may have closed with bytes still
+            # OUTSTANDING under its own `Content-Length`. `HTTPResponse.read1` does not raise
+            # `IncompleteRead` there -- it calls `_close_conn()` and returns `b""` -- so before this
+            # check a premature close was credited as a complete body. Measured against a loopback
+            # server declaring `Content-Length: 1024` and sending only the 8-byte PNG signature:
+            #
+            #     with the deadline:  status=200, 8 bytes, format_matches("png", ...) == True
+            #     without it:         status=0,   IncompleteRead(8 bytes read, 1016 more expected)
+            #
+            # The deadline path was therefore WEAKER than the unbounded one it wraps, and the 8 bytes
+            # then passed the leading-signature check and were persisted as a render with a SHA-256
+            # beside them. `stream.length` is `http.client`'s own remaining-byte accounting (`None`
+            # for chunked or connection-close framing, where EOF is legitimate), which is why it is
+            # read rather than the raw header: it is decremented by the same `read1` calls above and
+            # needs no parsing. `HTTPError` forwards the attribute to its underlying response, so the
+            # error-body path is covered by the same check -- verified, not assumed.
+            #
+            # `IncompleteRead`, deliberately, and not a `TimeoutError`: it is what the unbounded path
+            # raises for this exact shape, it is an `HTTPException` that :func:`_request` already
+            # catches, and raising the SAME type keeps the two paths' classification identical
+            # instead of merely both-failing. Its `str()` is its repr -- a byte COUNT, never the
+            # partial bytes -- so nothing response-derived reaches the diagnostic.
+            outstanding = getattr(stream, "length", None)
+            if isinstance(outstanding, int) and outstanding > 0:
+                raise http.client.IncompleteRead(b"".join(chunks), outstanding)
             # ⚠️ EOF is NOT proof the body is complete, and this check exists because CI proved it on
             # a platform this was not developed on. `_abort_socket` calls `shutdown(SHUT_RDWR)`; on
             # Windows an in-flight read then raises `ConnectionAbortedError`, but on Linux the read
@@ -292,6 +323,52 @@ class _DeadlineHTTPConnection(http.client.HTTPConnection):
         super().close()
 
 
+class _DeferredHandshakeContext:
+    """The real SSL context, except that ``wrap_socket`` hands back an UN-handshaked socket.
+
+    ⚠️ This exists because the handshake was the one blocking phase no bound covered, and it is not
+    a phase a Tableau caller can skip: every real request is HTTPS. ``wrap_socket`` DETACHES the raw
+    socket the early watchdog points at (measured: its ``fileno()`` goes to -1, and every abort call
+    then raises ``OSError``, swallowed by :func:`_abort_socket`), and with
+    ``do_handshake_on_connect=True`` the handshake then runs INSIDE that same call -- before
+    ``super().connect()`` has returned and therefore before
+    :meth:`_DeadlineHTTPConnection._rearm_if_the_socket_was_replaced` can re-point anything. So the
+    only thing bounding it was the socket timeout, which restarts at the handshake instead of
+    counting down the remaining absolute budget. Measured against a proxy delaying ``CONNECT`` by
+    0.10s and then trickling a well-formed TLS record, with :func:`_open`'s own narrowing applied:
+
+    ==========================================  ===================================================
+    0.16s deadline, socket timeout 0.16s        failed at **0.327s -- 0.167s OVER**, via
+                                                ``TimeoutError: _ssl.c:1011: handshake timed out``
+    the watchdog at that instant                fired on ``fileno=-1``: the detached raw socket
+    ==========================================  ===================================================
+
+    ⚠️ The existing TLS test could not see this: its fake ``wrap_socket`` returns immediately, so it
+    samples the timer either side of the blocking phase rather than during it. A fixture that cannot
+    block cannot show a missing bound -- the same shape three earlier rounds hit here.
+
+    Deferring costs no verification. ``do_handshake()`` is what performs certificate and hostname
+    checking, so moving it a few lines later leaves ``check_hostname``/``verify_mode`` doing exactly
+    what they did; only the ``SSLSocket``'s CREATION moves earlier, which is what gives the watchdog
+    something abortable to point at.
+
+    ⚠️ No ``**kwargs`` here, and that is not style: ``tests/test_diagnostic_redaction.py`` refuses
+    star-args in a guarded module because the taint analyser cannot follow them. ``__getattr__``
+    forwards every attribute ``http.client`` reads off a context (``check_hostname``, ``verify_mode``,
+    ``post_handshake_auth``), so this is a proxy rather than a partial re-implementation.
+    """
+
+    def __init__(self, context) -> None:
+        self._context = context
+
+    def __getattr__(self, name: str):
+        return getattr(self._context, name)
+
+    def wrap_socket(self, sock, server_hostname=None):
+        """The real wrap, minus the handshake. The caller runs it once the watchdog is re-pointed."""
+        return self._context.wrap_socket(sock, server_hostname=server_hostname, do_handshake_on_connect=False)
+
+
 class _DeadlineHTTPSConnection(_DeadlineHTTPConnection, http.client.HTTPSConnection):
     """The TLS twin. The watchdog is armed on the raw socket, then re-pointed at the wrapped one.
 
@@ -301,16 +378,49 @@ class _DeadlineHTTPSConnection(_DeadlineHTTPConnection, http.client.HTTPSConnect
     tests pass. This order resolves ``connect`` to :class:`_DeadlineHTTPConnection`, whose
     ``super().connect()`` IS ``HTTPSConnection.connect``.
 
-    ⚠️ The TLS HANDSHAKE itself is bounded by the socket timeout rather than by the watchdog, and
-    that is measured rather than hoped. The handshake runs while the raw socket is detached and the
-    ``SSLSocket`` does not exist yet, so there is nothing to abort -- but it does not need aborting:
-    a server trickling a **well-formed** TLS record (a valid 8192-byte record header, then one
-    payload byte per 0.02s) was refused at **0.204s against a 0.2s socket timeout**, exactly as a
-    silent peer was. ``SSLSocket`` applies the timeout to the handshake as a whole; ``makefile()``
-    reads, which is how ``http.client`` takes the status line and headers, apply it per ``recv`` --
-    and THAT asymmetry is why a trickling header escapes while a trickling handshake does not. Since
-    ``_open`` narrows the socket timeout to the remaining deadline, the handshake is inside it.
+    ⚠️ **The TLS HANDSHAKE was the last unbounded blocking phase, and the claim that the socket
+    timeout covered it was wrong.** That claim rested on one measurement -- a trickling well-formed
+    record refused at 0.204s against a 0.2s socket timeout -- which shows the timeout bounds the
+    handshake *relative to when the handshake started*, not relative to the deadline. Those differ by
+    everything that ran first. Re-measured with :func:`_open`'s own narrowing applied, against a proxy
+    delaying ``CONNECT`` by 0.10s then trickling a well-formed record: a 0.16s deadline failed at
+    **0.327s, 0.167s over**, and the watchdog fired that whole time on ``fileno=-1`` -- the raw socket
+    ``wrap_socket`` had detached. A per-phase timeout is not a share of an end-to-end budget.
+
+    So the handshake is now DEFERRED (:class:`_DeferredHandshakeContext`), the ``SSLSocket`` is
+    installed as ``self.sock`` while it is still abortable, the watchdog is re-pointed at it, its
+    timeout is narrowed to what is left of the absolute budget, and only then does the handshake run.
+    Certificate and hostname verification are unchanged -- they happen inside ``do_handshake()``,
+    which is the call being moved, not skipped.
     """
+
+    def connect(self) -> None:
+        """Connect and negotiate TLS, with both phases inside the deadline.
+
+        ``_context`` is swapped for a proxy only while ``super().connect()`` runs, so nothing outside
+        this call ever sees the substitute and the shared context object is never mutated.
+        """
+        if self._t2p_deadline is None:
+            super().connect()
+            return
+        real_context = self._context
+        self._context = _DeferredHandshakeContext(real_context)
+        try:
+            # `super().connect()` reaches `_DeadlineHTTPConnection.connect`, which arms the watchdog on
+            # the raw socket, runs `HTTPSConnection.connect` (TCP, any proxy CONNECT, then the now
+            # handshake-free `wrap_socket`), and re-points the watchdog at the `SSLSocket` it returned.
+            super().connect()
+        finally:
+            self._context = real_context
+        remaining = self._t2p_deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("the end-to-end deadline passed before the TLS handshake could start")
+        # Narrowed to the REMAINING budget, never to the connection's nominal timeout: the whole
+        # defect above was a per-phase timeout restarting at each phase. `gettimeout()` may be None on
+        # a connection built without one, so the existing value is only honoured when it is tighter.
+        current = self.sock.gettimeout()
+        self.sock.settimeout(remaining if current is None else min(current, remaining))
+        self.sock.do_handshake()
 
 
 def _with_deadline(base: type, deadline: float) -> type:
