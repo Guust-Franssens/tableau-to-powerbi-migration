@@ -231,13 +231,15 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
     ),
     (
         "SIGNATURE: an unaccounted rendered page no longer creates ambiguity",
-        '        page for page in expectation["unmatched_rendered"] if page["name"] not in _page_parity_items(entries)[1]',
+        '        page for page in expectation["unmatched_rendered"] '
+        'if page["name"] not in _page_parity_items(entries)[1]',
         '        page for page in expectation["unmatched_rendered"] if False  # pragma: no cover',
         ["test_a_rename_makes_attribution_ambiguous_and_suspends_every_signature"],
     ),
     (
         "SIGNATURE: an extra: signature cannot resolve the ambiguity",
-        '        page for page in expectation["unmatched_rendered"] if page["name"] not in _page_parity_items(entries)[1]',
+        '        page for page in expectation["unmatched_rendered"] '
+        'if page["name"] not in _page_parity_items(entries)[1]',
         '        page for page in expectation["unmatched_rendered"]',
         ["test_declaring_the_renamed_page_resolves_the_ambiguity"],
     ),
@@ -324,7 +326,8 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
     ),
     (
         "SIGNATURE: an extra: item is matched through the lossy slug",
-        '        page for page in expectation["unmatched_rendered"] if page["name"] not in _page_parity_items(entries)[1]',
+        '        page for page in expectation["unmatched_rendered"] '
+        'if page["name"] not in _page_parity_items(entries)[1]',
         "        page\n"
         '        for page in expectation["unmatched_rendered"]\n'
         '        if not any(_slug(page["name"]) == _slug(name) for name in _page_parity_items(entries)[1])',
