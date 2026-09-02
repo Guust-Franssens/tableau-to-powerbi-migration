@@ -89,8 +89,8 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
     ),
     (
         "APPROVAL: the oracle denominator drops engine-declared omissions too",
-        '        if row["disposition"] in {OMISSION_SIGNED, OMISSION_SOURCE_EMPTY}',
-        '        if row["disposition"] in {OMISSION_SIGNED, OMISSION_SOURCE_EMPTY, OMISSION_DECLARED}',
+        '        if row["disposition"] in OMISSIONS_OWING_NOTHING',
+        '        if row["disposition"] in OMISSIONS_OWING_NOTHING | {OMISSION_DECLARED}',
         ["test_oracle_coverage_still_expects_a_page_the_engine_merely_declared"],
     ),
     (
@@ -129,8 +129,8 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
     ),
     (
         "EVIDENCE: workbook binding removed, so any slice explains any unit",
-        "        if _slug(str(name)) not in keys:",
-        "        if False:  # pragma: no cover",
+        "        bound.append((name, workbook if exact or loose else None))",
+        "        bound.append((name, workbook))",
         ["test_another_workbooks_row_cannot_explain_this_units_omission"],
     ),
     (
@@ -211,10 +211,8 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
     ),
     (
         "SIGNATURE: an exemption applies even to a page that is present",
-        '    for page in expectation["omissions"]:\n'
-        '        signature = _page_signature(page, entries, expectation["index"])',
-        '    for page in expectation["candidates"]:\n'
-        '        signature = _page_signature(page, entries, expectation["index"])',
+        '    for page in expectation["omissions"]:\n        signature = signatures.signature_for(page)',
+        '    for page in expectation["candidates"]:\n        signature = signatures.signature_for(page)',
         ["test_an_exemption_naming_a_present_page_accepts_nothing"],
     ),
     (
@@ -225,22 +223,21 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
     ),
     (
         "SIGNATURE: rename ambiguity no longer suspends a name-only signature (oracle side)",
-        '    ambiguous = bool(expectation["unmatched_rendered"]) or bool(expectation["contested_names"])',
-        "    ambiguous = False",
+        '    return bool(unaccounted) or bool(expectation["contested_names"])',
+        "    return False",
         ["test_a_rename_suspends_signatures_on_the_oracle_denominator_too"],
     ),
     (
         "SIGNATURE: an unaccounted rendered page no longer creates ambiguity",
-        '        page for page in expectation["unmatched_rendered"] '
-        'if page["name"] not in _page_parity_items(entries)[1]',
-        '        page for page in expectation["unmatched_rendered"] if False  # pragma: no cover',
+        '    return bool(unaccounted) or bool(expectation["contested_names"])',
+        '    return bool(expectation["contested_names"])',
         ["test_a_rename_makes_attribution_ambiguous_and_suspends_every_signature"],
     ),
     (
         "SIGNATURE: an extra: signature cannot resolve the ambiguity",
-        '        page for page in expectation["unmatched_rendered"] '
-        'if page["name"] not in _page_parity_items(entries)[1]',
-        '        page for page in expectation["unmatched_rendered"]',
+        '    unaccounted = [page for page in expectation["unmatched_rendered"] if id(page) not in '
+        "signatures.accounted_extra]",
+        '    unaccounted = list(expectation["unmatched_rendered"])',
         ["test_declaring_the_renamed_page_resolves_the_ambiguity"],
     ),
     (
@@ -276,14 +273,15 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
     ),
     (
         "SHARED TYPE: a bare-name signature is applied without resolving it",
-        "            return SIGNATURE_UNIQUE if _claim(index, item).outcome == oid.UNIQUE else SIGNATURE_CONTESTED",
-        "            return SIGNATURE_UNIQUE",
+        "        if len(matched) == 1:\n            applied[_page_key(next(iter(matched.values())))] = item",
+        "        if matched:\n            applied[_page_key(next(iter(matched.values())))] = item",
         ["test_one_name_only_signature_cannot_sign_two_omissions"],
     ),
     (
         "SHARED TYPE: an id signature no longer resolves a contested name",
-        '        if item == page["id"]:\n            return SIGNATURE_UNIQUE',
-        "        if False:  # pragma: no cover\n            return SIGNATURE_UNIQUE",
+        '        matched = {id(page): page for page in expectation["candidates"] if item in {page["id"], '
+        'page["name"]}}',
+        '        matched = {id(page): page for page in expectation["candidates"] if item == page["name"]}',
         ["test_a_signature_naming_the_page_id_resolves_a_contested_name"],
     ),
     (
@@ -318,19 +316,16 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
     ),
     (
         "SIGNATURE: a plain item is matched through the lossy slug",
-        '        if item == page["name"]:\n'
-        "            return SIGNATURE_UNIQUE if _claim(index, item).outcome == oid.UNIQUE else SIGNATURE_CONTESTED",
-        '        if _slug(item) == _slug(page["name"]):\n'
-        "            return SIGNATURE_UNIQUE if _claim(index, item).outcome == oid.UNIQUE else SIGNATURE_CONTESTED",
+        '        matched = {id(page): page for page in expectation["candidates"] if item in {page["id"], '
+        'page["name"]}}',
+        '        matched = {id(page): page for page in expectation["candidates"] if _slug(item) in '
+        '{_slug(page["id"]), _slug(page["name"])}}',
         ["test_a_punctuation_variant_name_is_not_the_same_signature"],
     ),
     (
         "SIGNATURE: an extra: item is matched through the lossy slug",
-        '        page for page in expectation["unmatched_rendered"] '
-        'if page["name"] not in _page_parity_items(entries)[1]',
-        "        page\n"
-        '        for page in expectation["unmatched_rendered"]\n'
-        '        if not any(_slug(page["name"]) == _slug(name) for name in _page_parity_items(entries)[1])',
+        '        matched = {id(page): page for page in expectation["rendered"] if page["name"] == item}',
+        '        matched = {id(page): page for page in expectation["rendered"] if _slug(page["name"]) == _slug(item)}',
         ["test_an_extra_signature_matches_the_page_name_exactly"],
     ),
     (
@@ -372,7 +367,7 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
     ),
     (
         "ORACLE: the denominator stops honouring a source-empty omission",
-        '        if row["disposition"] in {OMISSION_SIGNED, OMISSION_SOURCE_EMPTY}',
+        '        if row["disposition"] in OMISSIONS_OWING_NOTHING',
         '        if row["disposition"] in {OMISSION_SIGNED}',
         ["test_a_source_empty_page_owes_no_oracle_evidence_either"],
     ),
@@ -381,6 +376,69 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
         "            excluded=accepted,",
         "            excluded=None,",
         ["test_an_emptied_oracle_denominator_still_names_why_it_emptied"],
+    ),
+    (
+        "GLOBALITY: a signature is resolved per page instead of once globally",
+        '        matched = {id(page): page for page in expectation["candidates"] if item in {page["id"], '
+        'page["name"]}}',
+        '        matched = {id(page): page for page in expectation["candidates"][:1] '
+        'if item in {page["id"], page["name"]}}',
+        ["test_one_item_matching_two_objects_across_namespaces_signs_neither"],
+    ),
+    (
+        "GLOBALITY: matches are counted by row rather than by distinct object",
+        '        matched = {id(page): page for page in expectation["candidates"] if item in {page["id"], '
+        'page["name"]}}',
+        "        matched = dict(\n"
+        "            enumerate(\n"
+        '                [page for page in expectation["candidates"] if item == page["id"]]\n'
+        '                + [page for page in expectation["candidates"] if item == page["name"]]\n'
+        "            )\n"
+        "        )",
+        ["test_an_item_matching_one_object_through_both_namespaces_still_applies"],
+    ),
+    (
+        "GLOBALITY: an extra: item accepts every page sharing its name",
+        '        matched = {id(page): page for page in expectation["rendered"] if page["name"] == item}\n'
+        "        if len(matched) == 1:\n"
+        "            accounted.add(next(iter(matched)))",
+        '        matched = {id(page): page for page in expectation["rendered"] if page["name"] == item}\n'
+        "        if matched:\n"
+        "            accounted.update(matched)",
+        ["test_one_extra_signature_cannot_account_for_two_same_named_pages"],
+    ),
+    (
+        "IDENTITY->STR: the oracle denominator removes by display name",
+        "    excluded_keys = {_page_key(page) for page in accepted}\n"
+        '    pages = [page for page in expectation["candidates"] if _page_key(page) not in excluded_keys]',
+        '    excluded_keys = {page["name"] for page in accepted}\n'
+        '    pages = [page for page in expectation["candidates"] if page["name"] not in excluded_keys]',
+        ["test_the_oracle_denominator_removes_by_identity_not_by_display_name"],
+    ),
+    (
+        "IDENTITY->STR: stale detection compares omitted pages by display name",
+        '    omitted = {_page_key(page) for page in expectation["omissions"]}',
+        '    omitted = {page["name"] for page in expectation["omissions"]}',
+        ["test_a_stale_signature_is_reported_even_when_a_same_named_page_is_omitted"],
+    ),
+    (
+        "IDENTITY->STR: the two halves compute ambiguity separately again",
+        "    ambiguous = _attribution_ambiguous(expectation, signatures := _resolve_signatures(expectation, entries))",
+        "    signatures = _resolve_signatures(expectation, entries)\n"
+        '    ambiguous = bool(expectation["unmatched_rendered"]) or bool(expectation["contested_names"])',
+        ["test_both_halves_agree_on_whether_attribution_is_ambiguous"],
+    ),
+    (
+        "IDENTITY->STR: a non-unique slugged workbook name still binds",
+        "        loose = slug in slugged_stems and slugs.count(slug) == 1",
+        "        loose = slug in slugged_stems",
+        ["test_two_workbooks_whose_names_slug_alike_do_not_bind_interchangeably"],
+    ),
+    (
+        "IDENTITY->STR: the slugged workbook fallback is removed entirely",
+        "        loose = slug in slugged_stems and slugs.count(slug) == 1",
+        "        loose = False",
+        ["test_a_filesystem_sanitised_workbook_name_still_binds_when_unambiguous"],
     ),
     (
         "oracle discovery: canonical oracle/ name removed",

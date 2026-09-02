@@ -107,6 +107,10 @@ OMISSION_DECLARED = "declared-by-engine-unsigned"
 OMISSION_UNEXPLAINED = "unexplained"
 OMISSION_AMBIGUOUS = "cannot-establish"
 
+#: The dispositions that owe no Power BI output - and therefore no oracle evidence either. Named once
+#: so page parity and the oracle denominator cannot disagree about it, which they did in round 4.
+OMISSIONS_OWING_NOTHING = frozenset({OMISSION_SIGNED, OMISSION_SOURCE_EMPTY})
+
 # Exemption dispositions. Only APPLIED is an accepted compromise; the other two did nothing and must
 # not be counted as one.
 EXEMPTION_APPLIED = "applied"
@@ -824,18 +828,23 @@ def expected_pages(target: Path) -> list[dict[str, Any]] | None:
     return _spec_pages(target)[0]
 
 
-def _unit_workbook_keys(target: Path) -> set[str]:
-    """Slugged Tableau workbook names this unit ships artifacts for.
+def _unit_workbook_keys(target: Path) -> tuple[set[str], set[str]]:
+    """``(exact stems, slugged stems)`` of the Tableau workbooks this unit ships artifacts for.
 
     The engine names a report folder ``<workbook name>.Report`` (verified on all 44 workbooks of a
     real 2.339.0 estate run), so an artifact stem is a usable binding key back to a handover slice.
+
+    Two sets, because the filesystem is allowed to have changed the spelling: an EXACT match binds,
+    and a slugged match is the fallback for a name a filesystem sanitised. The fallback is only
+    consulted when it is unambiguous - see :func:`page_drop_explanations`.
     """
-    keys: set[str] = set()
+    exact: set[str] = set()
     for report in shipping_reports(target):
-        keys.add(_slug(report.name.removesuffix(".Report")))
+        exact.add(report.name.removesuffix(".Report"))
     for model in shipping_models(target):
-        keys.add(_slug(model.name.removesuffix(".SemanticModel")))
-    return {key for key in keys if key}
+        exact.add(model.name.removesuffix(".SemanticModel"))
+    exact = {stem for stem in exact if stem}
+    return exact, {_slug(stem) for stem in exact}
 
 
 def page_drop_explanations(target: Path) -> dict[str, Any]:
@@ -866,18 +875,17 @@ def page_drop_explanations(target: Path) -> dict[str, Any]:
 
     ⚠️ This function DIAGNOSES an omission. It never approves one - see :func:`check_page_parity`.
     """
-    keys = _unit_workbook_keys(target)
+    exact_stems, slugged_stems = _unit_workbook_keys(target)
     workbooks, _unreadable = _handover_workbooks(target)
     index: oid.EngineIndex[str] = oid.EngineIndex()
     described: dict[str, list[str]] = {}
     bound: list[str] = []
     unbound: list[str] = []
-    for _source, slice_name, workbook in workbooks:
-        name = workbook.get("name") or slice_name
-        if _slug(str(name)) not in keys:
-            unbound.append(str(name))
+    for name, workbook in _bindable_workbooks(workbooks, exact_stems, slugged_stems):
+        if workbook is None:
+            unbound.append(name)
             continue
-        bound.append(str(name))
+        bound.append(name)
         _collect_drop_rows(workbook.get("viz_fidelity"), index, described)
     return {
         "index": index,
@@ -887,6 +895,26 @@ def page_drop_explanations(target: Path) -> dict[str, Any]:
         "available": bool(bound),
         "source": DROP_EXPLANATION_SOURCE,
     }
+
+
+def _bindable_workbooks(
+    workbooks: list[tuple[Path, str, dict[str, Any]]], exact_stems: set[str], slugged_stems: set[str]
+) -> list[tuple[str, dict[str, Any] | None]]:
+    """``(name, payload-or-None)`` per handover workbook: None means it does not bind to this unit.
+
+    An EXACT stem match binds. A slugged match is the fallback for a name the filesystem sanitised,
+    and it binds only when nothing else could have claimed it - a lossy compare between an artifact
+    folder name and a workbook name would otherwise let two workbooks whose names slug alike bind
+    interchangeably, which is the borrowed-evidence defect one level up from the page.
+    """
+    names = [str(workbook.get("name") or slice_name) for _source, slice_name, workbook in workbooks]
+    slugs = [_slug(name) for name in names]
+    bound: list[tuple[str, dict[str, Any] | None]] = []
+    for (_source, _slice_name, workbook), name, slug in zip(workbooks, names, slugs, strict=True):
+        exact = name in exact_stems
+        loose = slug in slugged_stems and slugs.count(slug) == 1
+        bound.append((name, workbook if exact or loose else None))
+    return bound
 
 
 def _collect_drop_rows(rows: Any, index: oid.EngineIndex[str], described: dict[str, list[str]]) -> None:
@@ -1345,15 +1373,16 @@ def check_page_parity(target: Path, exemptions: dict[str, Any]) -> dict[str, Any
             "unapplied_exemptions": [],
         }
     entries = exemptions["entries"]
+    signatures = _resolve_signatures(expectation, entries)
     placeholders, blank = _zero_visual_pages(actual, expectation["rendered"])
     unaccounted_extra = [
-        page for page in expectation["unmatched_rendered"] if page["name"] not in _page_parity_items(entries)[1]
+        page for page in expectation["unmatched_rendered"] if id(page) not in signatures.accounted_extra
     ]
-    ambiguous = bool(unaccounted_extra) or bool(expectation["contested_names"])
-    omissions = _disposition_omissions(expectation, entries, ambiguous)
+    ambiguous = _attribution_ambiguous(expectation, signatures)
+    omissions = _disposition_omissions(expectation, signatures, ambiguous)
     applied = [row for row in omissions if row["disposition"] == OMISSION_SIGNED]
-    unsigned = [row for row in omissions if row["disposition"] not in {OMISSION_SIGNED, OMISSION_SOURCE_EMPTY}]
-    unapplied = _unapplied_exemptions(expectation, entries, ambiguous)
+    unsigned = [row for row in omissions if row["disposition"] not in OMISSIONS_OWING_NOTHING]
+    unapplied = _unapplied_exemptions(expectation, signatures, ambiguous)
     status = (
         STATUS_PASS
         if not unsigned and not unaccounted_extra and not blank and not expectation["contested_names"]
@@ -1384,7 +1413,7 @@ def check_page_parity(target: Path, exemptions: dict[str, Any]) -> dict[str, Any
 
 
 def _disposition_omissions(
-    expectation: dict[str, Any], entries: list[dict[str, str]], ambiguous: bool
+    expectation: dict[str, Any], signatures: SignatureResolution, ambiguous: bool
 ) -> list[dict[str, Any]]:
     """Classify every omission. Only a signature that can be attributed accepts one.
 
@@ -1394,7 +1423,7 @@ def _disposition_omissions(
     """
     rows = []
     for page in expectation["omissions"]:
-        signature = _page_signature(page, entries, expectation["index"])
+        signature = signatures.signature_for(page)
         if page.get("source_empty"):
             disposition = OMISSION_SOURCE_EMPTY
         elif signature == SIGNATURE_UNIQUE and not ambiguous:
@@ -1418,37 +1447,85 @@ SIGNATURE_CONTESTED = "contested"
 EXTRA_SIGNATURE_PREFIX = "extra:"
 
 
-def _page_parity_items(entries: list[dict[str, str]]) -> tuple[list[str], set[str]]:
-    """``(plain items, extra: names)`` from the signed file, as EXACT strings.
+def _page_key(page: dict[str, Any]) -> tuple[str, str, str]:
+    """A candidate's exact identity as a hashable key: ``(kind, id, name)``.
+
+    Used wherever pages must be compared or removed as a set. ⚠️ Never the display name alone - that
+    is the flattening this gate keeps re-introducing, most recently in the oracle denominator, where
+    one accepted ``Sales`` removed BOTH a dashboard and a worksheet called ``Sales``.
+    """
+    return (str(page.get("kind")), str(page.get("id")), str(page.get("name")))
+
+
+def _page_parity_items(entries: list[dict[str, str]]) -> tuple[list[str], list[str]]:
+    """``(plain items, extra: names)`` from the signed file, as EXACT strings, multiplicity kept.
 
     ⚠️ Never through :func:`_exempted`. That helper compares slugs, which is right for its own item
     vocabularies but wrong for an engine identity: one entry named ``A-B`` signed both ``A-B`` and
     ``A B``, because punctuation vanishes in a slug. A signature applies to an engine object or it
-    does not.
+    does not. Lists, not sets, because two identical entries are two claims.
     """
     items = [entry["item"] for entry in entries if entry.get("check") == "page-parity"]
     return (
         [item for item in items if not item.startswith(EXTRA_SIGNATURE_PREFIX)],
-        {item[len(EXTRA_SIGNATURE_PREFIX) :] for item in items if item.startswith(EXTRA_SIGNATURE_PREFIX)},
+        [item[len(EXTRA_SIGNATURE_PREFIX) :] for item in items if item.startswith(EXTRA_SIGNATURE_PREFIX)],
     )
 
 
-def _page_signature(page: dict[str, Any], entries: list[dict[str, str]], index: Any) -> str | None:
-    """How a page-parity signature names this page: uniquely, contested, or not at all.
+@dataclass(frozen=True)
+class SignatureResolution:
+    """Every page-parity signature resolved ONCE, GLOBALLY, before any page is judged.
 
-    Each raw item is resolved exactly once, by exact id then exact name. An id is unique per spec -
-    :func:`_spec_pages` refuses a spec whose page ids collide, so there is no second copy for an id
-    signature to also match. A NAME is not unique: with a dashboard and a worksheet both called
-    ``Sales``, one entry signed BOTH omissions and recorded a single compromise, so a contested name
-    is never applied.
+    The previous shape asked, per page, whether an item equalled *that* page's id or name. Exactness
+    without globality still lets one item match two objects, because nothing ever asked how many
+    things the item matches in total: an item equal to page A's ID and page B's NAME signed both, and
+    one ``extra:Bonus`` accepted two distinct rendered pages both called ``Bonus``.
+
+    So each raw item is resolved against the whole unit and counted by DISTINCT OBJECT - across the
+    id and name namespaces together, so a cross-namespace collision is contested rather than lucky.
+    An item matching one object applies; an item matching several applies to none.
     """
-    plain, _extra = _page_parity_items(entries)
-    for item in plain:
-        if item == page["id"]:
+
+    applied: dict[tuple[str, str, str], str]
+    contested_items: tuple[str, ...]
+    accounted_extra: frozenset[int]
+    contested_extra_items: tuple[str, ...]
+
+    def signature_for(self, page: dict[str, Any]) -> str | None:
+        """``SIGNATURE_UNIQUE`` when this page is signed, ``SIGNATURE_CONTESTED`` when a signature
+        names it but cannot be attributed, else ``None``."""
+        if _page_key(page) in self.applied:
             return SIGNATURE_UNIQUE
-        if item == page["name"]:
-            return SIGNATURE_UNIQUE if _claim(index, item).outcome == oid.UNIQUE else SIGNATURE_CONTESTED
-    return None
+        if any(item in {page["id"], page["name"]} for item in self.contested_items):
+            return SIGNATURE_CONTESTED
+        return None
+
+
+def _resolve_signatures(expectation: dict[str, Any], entries: list[dict[str, str]]) -> SignatureResolution:
+    """Resolve every signature against the whole unit exactly once."""
+    plain, extra = _page_parity_items(entries)
+    applied: dict[tuple[str, str, str], str] = {}
+    contested: list[str] = []
+    for item in plain:
+        matched = {id(page): page for page in expectation["candidates"] if item in {page["id"], page["name"]}}
+        if len(matched) == 1:
+            applied[_page_key(next(iter(matched.values())))] = item
+        elif matched:
+            contested.append(item)
+    accounted: set[int] = set()
+    contested_extra: list[str] = []
+    for item in extra:
+        matched = {id(page): page for page in expectation["rendered"] if page["name"] == item}
+        if len(matched) == 1:
+            accounted.add(next(iter(matched)))
+        elif matched:
+            contested_extra.append(item)
+    return SignatureResolution(
+        applied=applied,
+        contested_items=tuple(contested),
+        accounted_extra=frozenset(accounted),
+        contested_extra_items=tuple(contested_extra),
+    )
 
 
 def _omission_why(page: dict[str, Any], disposition: str, expectation: dict[str, Any], signature: str | None) -> str:
@@ -1482,27 +1559,33 @@ def _omission_why(page: dict[str, Any], disposition: str, expectation: dict[str,
 
 
 def _unapplied_exemptions(
-    expectation: dict[str, Any], entries: list[dict[str, str]], ambiguous: bool
+    expectation: dict[str, Any], signatures: SignatureResolution, ambiguous: bool
 ) -> list[dict[str, Any]]:
     """Page-parity signatures that accepted NOTHING, each carrying why.
 
     A signature naming a page that is present accepted nothing (``stale``); one that could not be
     attributed accepted nothing either (``ambiguous``) - whether because a rendered page is
-    unaccounted for or because more than one expected page carries the name it uses. Neither may
-    count as a compromise, and both are reported so a reader can see the file promised more than it
-    delivered.
+    unaccounted for, because more than one expected page carries the name it uses, or because the
+    item itself matched several objects. Neither may count as a compromise, and both are reported so
+    a reader can see the file promised more than it delivered.
+
+    ⚠️ Omitted pages are compared by :func:`_page_key`, not by display name. A name set here meant a
+    present page whose name matched an omitted one was never reported stale.
     """
-    omitted = {page["name"] for page in expectation["omissions"]}
+    omitted = {_page_key(page) for page in expectation["omissions"]}
     rows = [
         {**page, "disposition": EXEMPTION_STALE}
         for page in expectation["candidates"]
-        if page["name"] not in omitted and _page_signature(page, entries, expectation["index"]) is not None
+        if _page_key(page) not in omitted and signatures.signature_for(page) is not None
     ]
-    return rows + [
+    rows += [
         {**page, "disposition": EXEMPTION_AMBIGUOUS}
         for page in expectation["omissions"]
-        if (signature := _page_signature(page, entries, expectation["index"])) is not None
-        and (ambiguous or signature == SIGNATURE_CONTESTED)
+        if (signature := signatures.signature_for(page)) is not None and (ambiguous or signature == SIGNATURE_CONTESTED)
+    ]
+    return rows + [
+        {"id": item, "name": item, "kind": "extra", "disposition": EXEMPTION_AMBIGUOUS}
+        for item in signatures.contested_extra_items
     ]
 
 
@@ -1701,8 +1784,8 @@ def check_oracle_coverage(target: Path, reference_dir: Path | None, oracle_dir: 
     if not expectation["assessable"]:
         return _oracle_not_assessable(f"cannot assess oracle coverage: {expectation['reason']}")
     accepted = _oracle_excluded_omissions(expectation, load_exemptions(target)["entries"])
-    accepted_names = {page["name"] for page in accepted}
-    pages = [page for page in expectation["candidates"] if page["name"] not in accepted_names]
+    excluded_keys = {_page_key(page) for page in accepted}
+    pages = [page for page in expectation["candidates"] if _page_key(page) not in excluded_keys]
     if not pages:
         return _oracle_not_assessable(
             "cannot assess oracle coverage: every expected Tableau page is a signed omission or owes "
@@ -1740,6 +1823,17 @@ def _oracle_row(page: dict[str, Any], index: Any, combined: dict[str, dict[str, 
     }
 
 
+def _attribution_ambiguous(expectation: dict[str, Any], signatures: SignatureResolution) -> bool:
+    """Whether any omission can be attributed at all, computed ONCE for both halves of the gate.
+
+    Page parity subtracted accounted-for ``extra:`` pages before deciding this; the oracle side did
+    not, so the same unit was ambiguous in one half and not in the other and a signed omission was
+    excluded from one denominator but not the other. One predicate, one answer.
+    """
+    unaccounted = [page for page in expectation["unmatched_rendered"] if id(page) not in signatures.accounted_extra]
+    return bool(unaccounted) or bool(expectation["contested_names"])
+
+
 def _oracle_excluded_omissions(expectation: dict[str, Any], entries: list[dict[str, str]]) -> list[dict[str, Any]]:
     """Omissions that owe no oracle evidence - the SAME dispositions page parity does not fail on.
 
@@ -1749,14 +1843,19 @@ def _oracle_excluded_omissions(expectation: dict[str, Any], entries: list[dict[s
     parity and be NOT_CHECKED here for the same page. A page declared to owe no output owes no
     picture of that output either.
 
+    ⚠️ The caller removes these by :func:`_page_key`, never by display name. Round 5 measured the
+    name set: a SIGNED dashboard ``Sales`` removed the UNSIGNED worksheet ``Sales`` from the
+    denominator too, so the check reported ``pages=0`` and claimed every expected page was accounted
+    for while listing only one exclusion.
+
     An engine-DECLARED omission is still not here: ``tier: "empty"`` reports what the engine did, not
     what anyone agreed to ship.
     """
-    ambiguous = bool(expectation["unmatched_rendered"]) or bool(expectation["contested_names"])
+    ambiguous = _attribution_ambiguous(expectation, signatures := _resolve_signatures(expectation, entries))
     return [
         row
-        for row in _disposition_omissions(expectation, entries, ambiguous)
-        if row["disposition"] in {OMISSION_SIGNED, OMISSION_SOURCE_EMPTY}
+        for row in _disposition_omissions(expectation, signatures, ambiguous)
+        if row["disposition"] in OMISSIONS_OWING_NOTHING
     ]
 
 

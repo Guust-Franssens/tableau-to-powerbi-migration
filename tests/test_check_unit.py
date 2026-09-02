@@ -840,6 +840,212 @@ def test_a_source_empty_sheet_that_still_has_a_filter_owes_a_page(tmp_path: Path
     assert [row["name"] for row in parity["unsigned_omissions"]] == ["B"]
 
 
+def test_one_item_matching_two_objects_across_namespaces_signs_neither(tmp_path: Path) -> None:
+    """Kills: resolving a signature per PAGE instead of once GLOBALLY.
+
+    Exactness without globality still lets one item match two objects, because nothing asks how many
+    things the item matches in TOTAL. Here 'collide' is page A's id AND page B's name; it used to
+    sign both omissions and record one compromise.
+    """
+    (tmp_path / "migration-spec.json").write_text(
+        json.dumps(
+            {
+                "dashboards": [],
+                "worksheets": [
+                    {"id": "collide", "name": "A"},
+                    {"id": "ws.b", "name": "collide"},
+                    {"id": "ws.c", "name": "C"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_report(tmp_path, ["C"])
+    (tmp_path / cu.EXEMPTIONS_FILE).write_text(
+        json.dumps({"exemptions": [{"check": "page-parity", "item": "collide", "reason": "r", "decided_by": "gf"}]}),
+        encoding="utf-8",
+    )
+
+    report = cu.run_all(tmp_path, scope=cu.SCOPE_REPORT)
+    parity = next(check for check in report["checks"] if check["id"] == "page-parity")
+
+    assert parity["applied_exemptions"] == []
+    assert {row["name"] for row in parity["unsigned_omissions"]} == {"A", "collide"}
+    assert cu._compromise_count(report) == 0  # pylint: disable=protected-access
+    assert parity["status"] == cu.STATUS_PRECONDITION_FAILED
+
+
+def test_an_item_matching_one_object_through_both_namespaces_still_applies(tmp_path: Path) -> None:
+    """The other half: a page whose id EQUALS its own name is one object, so its signature applies."""
+    (tmp_path / "migration-spec.json").write_text(
+        json.dumps({"dashboards": [], "worksheets": [{"id": "Solo", "name": "Solo"}, {"id": "ws.c", "name": "C"}]}),
+        encoding="utf-8",
+    )
+    _write_report(tmp_path, ["C"])
+    (tmp_path / cu.EXEMPTIONS_FILE).write_text(
+        json.dumps({"exemptions": [{"check": "page-parity", "item": "Solo", "reason": "r", "decided_by": "gf"}]}),
+        encoding="utf-8",
+    )
+
+    parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
+
+    assert [page["name"] for page in parity["applied_exemptions"]] == ["Solo"]
+    assert parity["status"] == cu.STATUS_PASS
+
+
+def test_one_extra_signature_cannot_account_for_two_same_named_pages(tmp_path: Path) -> None:
+    """Kills: an `extra:` item accepting every rendered page that happens to share the name."""
+    _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A")])
+    pages = tmp_path / "fabric" / "Book.Report" / "definition" / "pages"
+    _write_report(tmp_path, ["A", "Bonus"])
+    second = pages / "p3"
+    second.mkdir()
+    (second / "page.json").write_text(json.dumps({"name": "p3", "displayName": "Bonus"}), encoding="utf-8")
+    _write_visuals(second, 1)
+    (pages / "pages.json").write_text(json.dumps({"pageOrder": ["p1", "p2", "p3"]}), encoding="utf-8")
+    (tmp_path / cu.EXEMPTIONS_FILE).write_text(
+        json.dumps(
+            {"exemptions": [{"check": "page-parity", "item": "extra:Bonus", "reason": "r", "decided_by": "gf"}]}
+        ),
+        encoding="utf-8",
+    )
+
+    report = cu.run_all(tmp_path, scope=cu.SCOPE_REPORT)
+    parity = next(check for check in report["checks"] if check["id"] == "page-parity")
+
+    assert [page["name"] for page in parity["unaccounted_extra_pages"]] == ["Bonus", "Bonus"]
+    assert cu._compromise_count(report) == 0  # pylint: disable=protected-access
+    assert parity["status"] == cu.STATUS_PRECONDITION_FAILED
+
+
+def test_the_oracle_denominator_removes_by_identity_not_by_display_name(tmp_path: Path) -> None:
+    """Kills: reducing dispositioned identity rows back to a set of display NAMES.
+
+    A SIGNED dashboard 'Sales' and an UNSIGNED worksheet 'Sales'. Parity distinguishes them; the
+    oracle removed BOTH from its denominator and reported pages=0 while listing one exclusion.
+    """
+    (tmp_path / "migration-spec.json").write_text(
+        json.dumps(
+            {
+                "dashboards": [{"id": "d.sales", "name": "Sales", "zones": {}}],
+                "worksheets": [{"id": "ws.sales", "name": "Sales"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_report(tmp_path, ["Other"])
+    (tmp_path / cu.EXEMPTIONS_FILE).write_text(
+        json.dumps(
+            {
+                "exemptions": [
+                    {"check": "page-parity", "item": "d.sales", "reason": "cut", "decided_by": "gf"},
+                    {"check": "page-parity", "item": "extra:Other", "reason": "new", "decided_by": "gf"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert [page["id"] for page in parity["applied_exemptions"]] == ["d.sales"]
+    assert [row["id"] for row in parity["unsigned_omissions"]] == ["ws.sales"]
+    assert [page["id"] for page in oracle["excluded_omissions"]] == ["d.sales"]
+    assert oracle["pages"] == 1, "the unsigned worksheet still owes evidence"
+
+
+def test_both_halves_agree_on_whether_attribution_is_ambiguous(tmp_path: Path) -> None:
+    """Kills: parity and the oracle computing the same predicate differently.
+
+    Parity subtracted accounted-for `extra:` pages before deciding ambiguity and the oracle did not,
+    so the same unit was ambiguous in one half and not the other - and a signed omission left one
+    denominator but not the other. Found by the round-5 reproduction, not by a test.
+    """
+    _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A"), ("ws.b", "B")])
+    _write_report(tmp_path, ["Renamed"])
+    (tmp_path / cu.EXEMPTIONS_FILE).write_text(
+        json.dumps(
+            {
+                "exemptions": [
+                    {"check": "page-parity", "item": "extra:Renamed", "reason": "new", "decided_by": "gf"},
+                    {"check": "page-parity", "item": "A", "reason": "cut", "decided_by": "gf"},
+                    {"check": "page-parity", "item": "B", "reason": "cut", "decided_by": "gf"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert parity["attribution_ambiguous"] is False
+    assert {page["name"] for page in parity["applied_exemptions"]} == {"A", "B"}
+    assert {page["name"] for page in oracle["excluded_omissions"]} == {"A", "B"}
+
+
+def test_a_stale_signature_is_reported_even_when_a_same_named_page_is_omitted(tmp_path: Path) -> None:
+    """Kills: comparing omitted pages by display name when deciding which signatures are stale."""
+    (tmp_path / "migration-spec.json").write_text(
+        json.dumps(
+            {
+                "dashboards": [{"id": "d.sales", "name": "Sales", "zones": {}}],
+                "worksheets": [{"id": "ws.sales", "name": "Sales"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_report(tmp_path, ["Sales"])
+    (tmp_path / cu.EXEMPTIONS_FILE).write_text(
+        json.dumps({"exemptions": [{"check": "page-parity", "item": "d.sales", "reason": "r", "decided_by": "gf"}]}),
+        encoding="utf-8",
+    )
+
+    parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
+
+    assert parity["contested_names"] == ["Sales"], "one page, two claimants"
+    assert [row["id"] for row in parity["unapplied_exemptions"]] == ["d.sales"]
+    assert parity["applied_exemptions"] == []
+
+
+def test_two_workbooks_whose_names_slug_alike_do_not_bind_interchangeably(tmp_path: Path) -> None:
+    """Kills: binding a handover slice to a unit through the lossy slug when it is not unique.
+
+    Both names slug to the report stem's slug ('book') and NEITHER matches it exactly, so only the
+    uniqueness guard can decide. Found by enumerating every place an identity becomes a string.
+    """
+    _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A"), ("ws.b", "B")])
+    _write_report(tmp_path, ["A"])
+    run_estate.slice_handovers(
+        {
+            "tool": "t",
+            "generated_at": "now",
+            "workbooks": [
+                {"name": "Bo ok", "viz_fidelity": [_empty_row("B")]},
+                {"name": "Bo-ok", "viz_fidelity": []},
+            ],
+        },
+        tmp_path,
+    )
+
+    explanations = cu.page_drop_explanations(tmp_path)
+
+    assert explanations["bound_workbooks"] == [], "'Bo ok' and 'Bo-ok' slug alike; neither may bind"
+    assert explanations["unbound_workbooks"] == ["Bo ok", "Bo-ok"]
+
+
+def test_a_filesystem_sanitised_workbook_name_still_binds_when_unambiguous(tmp_path: Path) -> None:
+    """The other half: a single lossy candidate is the fallback the sanitised folder name needs."""
+    _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A"), ("ws.b", "B")])
+    _write_report(tmp_path, ["A"])
+    _write_viz_fidelity_handover(tmp_path, [_empty_row("B")], workbook_name="Book!")
+
+    explanations = cu.page_drop_explanations(tmp_path)
+
+    assert explanations["bound_workbooks"] == ["Book!"]
+
+
 def test_a_worksheet_row_can_never_explain_a_same_named_dashboard(tmp_path: Path) -> None:
     """Kills: evidence about object X settling a question about object Y of a different KIND.
 
