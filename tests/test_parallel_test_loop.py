@@ -521,14 +521,38 @@ def test_the_opt_out_flag_puts_the_contended_tests_back() -> None:
     )
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
-    assert "deselected" not in output, f"--include-contended did not restore them:\n{output[-1500:]}"
-    for node in sorted(node for node in _contended_nodes() if node.startswith(BUNDLE_TESTS + "::")):
+    # ⚠️ This used to assert `"deselected" not in output`, which was a PROXY for "the contended tests
+    # came back" and became wrong the moment a second, orthogonal deselection existed: `gui` tests
+    # spawn a real top-level window and are deselected by default on purpose (issue #447), and
+    # `--include-contended` is about `serial`/`timing`, not about hijacking someone's desktop. The
+    # per-node loop below is the real check; keep the count assertion so this stays falsifiable
+    # rather than merely relaxed - a NEW unexplained deselection must still fail here.
+    gui_nodes = {node for node in _gui_nodes() if node.startswith(BUNDLE_TESTS + "::")}
+    deselected = re.search(r"\((\d+) deselected\)", output)
+    remaining = int(deselected.group(1)) if deselected else 0
+    assert remaining == len(gui_nodes), (
+        f"--include-contended left {remaining} test(s) deselected but {len(gui_nodes)} carry "
+        f"@pytest.mark.gui; an unexplained deselection means the opt-out no longer restores "
+        f"everything it claims to:\n{output[-1500:]}"
+    )
+    for node in sorted(node for node in _contended_nodes() - gui_nodes if node.startswith(BUNDLE_TESTS + "::")):
         assert node in output, f"{node} missing even with --include-contended"
 
 
 def _contended_nodes() -> set[str]:
     """Every node id that carries a marker the parallel tier excludes."""
     return _marked_tests("serial") | _marked_tests("timing")
+
+
+def _gui_nodes() -> set[str]:
+    """Every node id that spawns a real top-level window, so is deselected by default (issue #447).
+
+    Deliberately NOT folded into `_contended_nodes()`. `serial`/`timing` are excluded from the
+    PARALLEL tier and restored by `--include-contended` for deliberate stress-testing; `gui` is
+    excluded from EVERY tier because it hijacks the operator's desktop, and `--include-contended`
+    must not put it back. Two reasons, two sets.
+    """
+    return _marked_tests("gui")
 
 
 def test_the_loop_doc_documents_both_tiers() -> None:

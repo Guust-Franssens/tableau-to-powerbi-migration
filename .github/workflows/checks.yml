@@ -130,3 +130,11 @@ jobs:
 
       - name: Tests (pbip-model-refresh bundle, on the platform it actually runs on)
         run: uv run pytest -q .github/skills/pbip-model-refresh/tests/
+
+      # `addopts = "-m 'not gui'"` deselects the window-spawning tests everywhere, so an operator's
+      # desktop is never hijacked (issue #447). That protection is worthless if NOBODY runs them:
+      # issue #435 is this repo's own record of 15 engine tests skipping silently in CI, where a
+      # skip was being read as a pass. A hosted Windows runner has no one to interrupt, so this is
+      # where they belong - and `-m gui` here OVERRIDES the default, it does not add to it.
+      - name: Tests (GUI, opt-in - the real UI-Automation path the credential probe depends on)
+        run: uv run pytest -q -m gui .github/skills/pbip-model-refresh/tests/
