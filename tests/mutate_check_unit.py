@@ -605,15 +605,15 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
     ),
     (
         "DISCLOSURE: the #438 caveat fires unconditionally, so it becomes a banner nobody reads",
-        "    certified = [row[\"page\"][\"name\"] for row in rows if row[\"visual\"] or row[\"numeric\"]]",
-        "    certified = [row[\"page\"][\"name\"] for row in rows] or [\"any\"]",
+        '    certified = [row["page"]["name"] for row in rows if row["visual"] or row["numeric"]]',
+        '    certified = [row["page"]["name"] for row in rows] or ["any"]',
         ["test_a_run_that_certified_nothing_prints_no_caveat"],
     ),
     (
         "DISCLOSURE: the #438 caveat stops naming the pages it applies to",
-        "            f\"depicts, so treat their PASS as unconfirmed where a worksheet shares the page's name: \"\n"
-        "            f\"{names}{more}\"",
-        "            f\"depicts.\"",
+        '            f"depicts, so treat their PASS as unconfirmed where a worksheet shares the page\'s name: "\n'
+        '            f"{names}{more}"',
+        '            f"depicts."',
         ["test_a_certified_page_carries_the_kind_caveat_naming_it"],
     ),
     (
