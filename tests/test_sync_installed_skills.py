@@ -1919,3 +1919,35 @@ def test_an_unlistable_skills_directory_is_refused_not_raised(estate: Estate, ca
     assert problems == [] or "could not be listed" in problems[0] or "is not the on-disk name" in problems[0]
     assert _run(estate) == sync.EXIT_OK
     capsys.readouterr()
+
+
+def test_a_marker_naming_a_JUNCTION_out_of_the_plugin_is_refused(
+    estate: Estate, tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """The escaping-link case, as a real test rather than a construction argument.
+
+    A true symlink needs privileges this account does not have (`WinError 1314`), so that half
+    stayed unverified through three rounds. A junction does NOT need them, follows the same
+    resolution path, and is a genuine directory entry - so `entry in actual` passes and containment
+    is the only thing standing between the record and someone else's directory.
+    """
+    outside = tmp_path / "outside-the-plugin"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("not ours\n", encoding="utf-8")
+    assert _run(estate) == sync.EXIT_OK
+    capsys.readouterr()
+    link = estate.plugin / "skills" / "junction-bundle"
+    made = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link), str(outside)], capture_output=True, text=True, check=False
+    )
+    if made.returncode != 0 or not link.exists():
+        pytest.skip(f"this platform cannot create a junction: {made.stderr.strip() or made.stdout.strip()}")
+    _stamp(estate, ["junction-bundle"])
+    _make_stale(estate)
+
+    code = _run(estate)
+    capsys.readouterr()
+
+    assert (outside / "keep.txt").exists(), "a link out of the plugin must not carry a delete with it"
+    assert (outside / "keep.txt").read_text(encoding="utf-8") == "not ours\n"
+    assert code == sync.EXIT_UNSAFE_MARKER

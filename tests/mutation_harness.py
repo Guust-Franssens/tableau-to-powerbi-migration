@@ -18,6 +18,12 @@ filenames, so a second driver in the SAME worktree deleted the first one's recor
 detection was scored ``HARNESS-ERROR`` -- measured. Separate branch worktrees never collided, and
 the failure mode was always an explicit harness error rather than a false clean, but the paths are
 now unique per run so correctness does not depend on remembering to serialise.
+
+⚠️ **And they are staged in ``_build/mutation/``, not in ``tests/``.** A transient file inside a
+LINTED directory is a gate failure waiting to happen: measured, ``ruff check tests --fix`` run while
+a campaign was in flight found ``E402`` in the injected plugin -- code this harness generates, that
+nobody wrote and nobody can fix -- and exited 1. ``_build`` is in ruff's ``exclude`` with
+``force-exclude``, so staging there removes the exposure rather than documenting it.
 """
 
 from __future__ import annotations
@@ -471,6 +477,16 @@ def problems(names, skills_dir):
     return _orig(names, skills_dir)
 sps.marker_bundle_problems = problems
 """,
+    "skillsync-marker-containment-removed": """
+import skill_plugin_source as sps
+_orig = sps.marker_bundle_problems
+def problems(names, skills_dir):
+    # Drop CONTAINMENT only. A junction into another directory is a genuine directory entry, so
+    # every other rule - single component, no reserved characters, spells the entry exactly -
+    # passes, and containment is the only thing between the record and the outside directory.
+    return [p for p in _orig(names, skills_dir) if "resolves outside" not in p]
+sps.marker_bundle_problems = problems
+""",
     "skillsync-preflight-passes-an-unsafe-marker": """
 from pathlib import Path
 import test_sync_installed_skills as suite
@@ -633,7 +649,7 @@ def sanitized_env() -> dict:
     """
     env = {
         **os.environ,
-        "PYTHONPATH": os.pathsep.join([str(ROOT / "tests"), str(ROOT / "scripts")]),
+        "PYTHONPATH": os.pathsep.join([str(ROOT / "tests"), str(ROOT / "scripts"), str(ROOT / "_build" / "mutation")]),
     }
     env.pop("PYTEST_ADDOPTS", None)
     env.pop("PY_COLORS", None)
@@ -678,8 +694,10 @@ def run(name: str, code: str, target: str | Sequence[str]) -> tuple[str, int, st
     false clean, but a driver should not need a documented serialisation rule to be correct.
     """
     token = f"{os.getpid()}_{next(_RUN_TOKEN)}"
-    plugin = ROOT / "tests" / f"_mutation_plugin_{token}.py"
-    outcomes_file = ROOT / "tests" / f"_mutation_outcomes_{token}.json"
+    staging = ROOT / "_build" / "mutation"
+    staging.mkdir(parents=True, exist_ok=True)
+    plugin = staging / f"_mutation_plugin_{token}.py"
+    outcomes_file = staging / f"_mutation_outcomes_{token}.json"
     outcomes_file.unlink(missing_ok=True)
     plugin.write_text(
         "import sys\nfrom pathlib import Path\n"
