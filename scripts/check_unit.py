@@ -1870,12 +1870,22 @@ class OracleEvidence:
     * **Exact spelling first.** An exact name match wins outright.
     * **A normalized fallback only when it is unique on BOTH sides** - exactly one producer record and
       exactly one expected page share the lossy key. Anything else satisfies nothing.
+
+    ⚠️ **KNOWN GAP, shipped deliberately and disclosed at runtime: issue #438.** A record carries no
+    object KIND, so nothing here can tell a dashboard's capture from its principal worksheet's, and a
+    Tableau dashboard sharing a name with its principal worksheet is the ordinary case rather than an
+    edge one. The workbook guard is also one-sided: uniqueness of the lossy workbook key is checked
+    among THIS unit's workbooks and never among the workbooks claiming it, so two producing workbooks
+    that normalize alike are both admitted. Both weaken a PASS rather than a failure, which is why
+    :func:`_oracle_caveats` names the affected pages instead of printing a general disclaimer.
     """
 
     by_exact: dict[str, list[OracleRecord]]
     by_normalized: dict[str, list[OracleRecord]]
     expected_normalized: dict[str, int]
     unattributed: int
+    #: Records admitted on a LOSSY workbook key rather than an exact one (issue #438).
+    loosely_attributed: list[str]
     foreign: tuple[str, ...]
 
     def evidence_for(self, page: dict[str, Any]) -> tuple[OracleRecord | None, str | None]:
@@ -1904,6 +1914,7 @@ def _resolve_oracle_evidence(
     admissible: list[OracleRecord] = []
     foreign: list[str] = []
     unattributed = 0
+    loosely_attributed: list[str] = []
     for record in records:
         if record.workbook is None:
             unattributed += 1
@@ -1912,6 +1923,9 @@ def _resolve_oracle_evidence(
             if len(alike) != 1:
                 foreign.append(record.workbook)
                 continue
+            # Admitted on a LOSSY workbook key, and uniqueness was checked only among THIS unit's
+            # workbooks - never among the workbooks claiming it. See issue #438.
+            loosely_attributed.append(record.workbook)
         admissible.append(record)
     by_exact: dict[str, list[OracleRecord]] = {}
     by_normalized: dict[str, list[OracleRecord]] = {}
@@ -1927,6 +1941,7 @@ def _resolve_oracle_evidence(
         by_normalized=by_normalized,
         expected_normalized=expected_normalized,
         unattributed=unattributed,
+        loosely_attributed=loosely_attributed,
         foreign=tuple(sorted(set(foreign))),
     )
 
@@ -1984,8 +1999,53 @@ def check_oracle_coverage(target: Path, reference_dir: Path | None, oracle_dir: 
         "unattributed_evidence": evidence.unattributed,
         "excluded_omissions": accepted,
         "grade": _oracle_grade(reference_grades | oracle_grades, evidence),
+        "known_gap_caveats": _oracle_caveats(rows, evidence),
         "rows": rows,
     }
+
+
+def _oracle_caveats(rows: list[dict[str, Any]], evidence: OracleEvidence) -> list[str]:
+    """What this oracle verdict CANNOT establish, naming the pages it applies to (issue #438).
+
+    ⚠️ Written to answer "which PASS should I distrust", not "is this tool imperfect". A general
+    disclaimer on every run is noise an operator learns to skip, and it would fire hardest on the runs
+    where nothing was certified and therefore nothing is at risk. So each caveat is emitted **only
+    when a page actually took the evidence it describes**, and it lists those pages by name.
+
+    Two open gaps, both of which can only make a PASS too generous:
+
+    * **No object kind on any record.** Evidence says a picture is of "Sales"; it never says whether
+      that is the dashboard or the worksheet. A Tableau dashboard routinely shares its name with its
+      principal worksheet, so a worksheet's capture certifying a whole dashboard page is the ORDINARY
+      case, not an edge one.
+    * **One-sided workbook uniqueness.** A record admitted through the lossy workbook key was checked
+      for uniqueness among this unit's workbooks only, never among the workbooks claiming it, so two
+      producing workbooks that normalize alike are both admitted.
+
+    Both are tracked in issue #438 and are expected to disappear when it lands. This function and its
+    tests are the disclosure; deleting them is part of that fix, not separate from it.
+    """
+    certified = [row["page"]["name"] for row in rows if row["visual"] or row["numeric"]]
+    caveats: list[str] = []
+    if certified:
+        names = ", ".join(repr(name) for name in certified[:5])
+        more = f" (+{len(certified) - 5} more)" if len(certified) > 5 else ""
+        caveats.append(
+            f"⚠️ #438 KIND NOT ESTABLISHED: oracle/reference evidence carries no dashboard/worksheet "
+            f"kind, so a worksheet's capture can satisfy a dashboard page of the same name. "
+            f"{len(certified)} page(s) were certified on evidence that cannot say which object it "
+            f"depicts, so treat their PASS as unconfirmed where a worksheet shares the page's name: "
+            f"{names}{more}"
+        )
+    if evidence.loosely_attributed and certified:
+        workbooks = ", ".join(repr(name) for name in sorted(set(evidence.loosely_attributed)))
+        caveats.append(
+            f"⚠️ #438 WORKBOOK MATCHED LOOSELY: {len(evidence.loosely_attributed)} record(s) were "
+            f"admitted on a normalized workbook name, and uniqueness was checked only among this "
+            f"unit's workbooks - never among the workbooks claiming it, so a second workbook "
+            f"normalizing alike would also have been admitted: {workbooks}"
+        )
+    return caveats
 
 
 def _oracle_grade(grades: set[str], evidence: OracleEvidence) -> str:
@@ -2912,13 +2972,17 @@ def _render_check_headline(check: dict[str, Any]) -> list[str]:  # pylint: disab
     status = check["status"]
     if check_id == "oracle-coverage" and "pages" in check:
         pages = check["pages"]
-        return [
+        lines = [
             f"  oracle coverage:  {check['visual_present']} of {pages} pages have a visual oracle"
             f"{_count_suffix(pages - check['visual_present'])}",
             f"                    {check['numeric_present']} of {pages} pages have a numeric oracle"
             f"{_count_suffix(pages - check['numeric_present'])}",
             f"                    grade: {check['grade']}  [{status}]",
         ]
+        # A payload key nobody prints is not a disclosure. These say WHICH pages' PASS to distrust
+        # and why; see issue #438 and :func:`_oracle_caveats`.
+        lines.extend(f"                    {caveat}" for caveat in check.get("known_gap_caveats", []))
+        return lines
     if check_id == "page-parity" and "expected_count" in check:
         lines = [
             f"  page pairing:      {check['emitted_count']} rebuilt PBIR page(s) for "

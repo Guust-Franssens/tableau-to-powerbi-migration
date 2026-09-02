@@ -26,6 +26,43 @@ a mechanical proof where one exists:
     The slug only shapes a message about a verdict that has already been reached elsewhere. There is
     no mechanical proof of "does not decide", so this class is held by the pin alone: the exact source
     line is recorded, and any edit to it fails this test and forces re-adjudication.
+
+⚠️ **KNOWN GAP - ALL THREE PROOFS ARE VACUOUS. Issue #439. Read this before trusting a green run.**
+
+The category error is that this file pins **where** ``_slug()`` is called and then claims a property
+of **how its result is used**. Those are different questions, and the second does not follow from the
+first. Each class was attacked and each was defeated, measured against this exact file:
+
+==============================  =================================================================
+class                            what it actually accepts
+==============================  =================================================================
+``uniqueness-guarded``           **any** comparison against the literal ``1`` anywhere in the
+                                 enclosing function - including an unrelated ``if unrelated == 1``
+                                 sitting beside a completely unguarded slug comparison.
+``multiplicity-preserving``      only a ``_slug()`` call **syntactically inside** a set. It does not
+                                 see ``slugs = [_slug(...)]`` followed by ``set(slugs)`` on the next
+                                 line, which loses exactly the multiplicity being claimed.
+``reporting-only``               nothing at all. There is no consumer guard: the value may be read
+                                 by any decision anywhere.
+==============================  =================================================================
+
+⚠️ **The consequence that matters, and the reason this warning is not a formality:** a reporting-only
+value can be **promoted into a decision without changing a single ``_slug()`` call site**, so every
+test in this file still passes. Verified by promoting ``explanations["described"]`` into the omission
+disposition logic: no pinned line changed and all eight tests passed. **That transition is the one
+this gate was built to catch, and it does not catch it.**
+
+So state the claim accurately: this file gives an **exhaustive, adjudicated enumeration** of the
+lossy call sites - which is real, and is what makes a NEW site a CI failure - and it gives **no
+guarantee whatever** about how any of those values are consumed. Do not cite a green run here as
+evidence that an identity is not being flattened.
+
+Fixing it means following the **value**, not the call site: tying each proof to the specific call
+result and its downstream consumers, and replacing the ``reporting-only`` pin with either a consumer
+allowlist or a behavioural non-interference test. Whether the third class is provable at all is an
+open question that #439 must answer explicitly rather than assume - if following the value is
+undecidable for it, the honest outcome is to narrow this file's claim rather than keep a proof that
+passes on everything.
 """
 
 from __future__ import annotations

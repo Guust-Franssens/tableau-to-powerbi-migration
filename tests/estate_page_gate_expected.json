@@ -1,0 +1,21 @@
+{
+  "sha256": "eef8b1121899da209c083217755a02fa023d8c41dd0ad00da28a57262e7fdf80",
+  "summary": {
+    "blank_pages": 0,
+    "contested_names": 0,
+    "disagreements": [],
+    "dispositions": {
+      "declared-by-engine-unsigned": 19,
+      "no-source-content": 2,
+      "unexplained": 2
+    },
+    "unaccounted_extra_pages": 0,
+    "units": 51,
+    "verdicts": {
+      "NOT_CHECKED": 7,
+      "PASS": 35,
+      "PRECONDITION_FAILED": 9
+    }
+  },
+  "unstaged": []
+}
