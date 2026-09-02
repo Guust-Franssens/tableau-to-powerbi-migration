@@ -113,6 +113,81 @@ a single pass does.
 
 ## Known limitations and honest gaps
 
+- **Tableau Sets do not translate at all, in any form** (measured on canonical engine **2.339.0**,
+  2026-09-01). Every set form we could find is logged as `could not resolve field '<name>' (skipped)`
+  and then **the visual is emitted anyway, without the filter** — so the output renders confidently
+  over an unfiltered superset. Confirmed on a real Tableau training sample (`Section 08 - Organizing
+  Data`) for four distinct forms: a manual/lasso set, a **condition** set (`SUM([Score]) > 400`), a
+  **top-N rank** set, and a **combined** set (`intersection` of two set references). A set used as a
+  `<color>` encoding is dropped just as silently — the emitted `scatterChart` lost its In/Out series
+  split entirely. Reproduction fixture: `tests/fixtures/issue-185-set-filter.twb`; filed upstream as
+  [`Yarbrdab000/tableau-fabric-skills#185`](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/185).
+  ⚠️ **Sets are hard to find with a naive grep, and this project produced THREE wrong counts in a row
+  before getting it right.** There is no `class='set'` attribute (count: 0). Naming the set literally
+  (`[Set 1]`) finds only sets a user never renamed (count: 4 workbooks). The correct marker is the
+  authoring attribute on the group: **`user:ui-builder='filter-group'`** (condition / top-N sets) or
+  **`'lasso-group'`** (manual sets). `.twbx` are ZIP archives and must be extracted, or a `.twb`-only
+  sweep misses them entirely. Measured correctly, with controls:
+
+  ```
+  assets scanned                              137
+  files containing <group>                     51
+  files with a SET marker                      23   -> 12 DISTINCT workbooks
+  NEGATIVE CONTROL: <group> but no set marker  28
+  POSITIVE CONTROL: a known set-bearing file   FOUND
+  set kinds: top-n 32 | membership 27 | condition 13
+  ```
+
+  ⚠️ **Set kind matters when reporting a defect:** "sets are dropped" and "top-N sets are dropped" are
+  different claims. All three kinds are dropped, verified on three unrelated workbooks — but a count of
+  set *markers* is not a count of *defects*: `Airline Alliance` carries 10 markers and only 2 warn,
+  because only sets actually referenced by a view are ever resolved.
+- **A zero is not a measurement unless you state the positive control that proves the predicate can
+  see what it is looking for.** Four false zeros were produced here in one day: the `class='set'` sweep
+  above; a `[Set N]` sweep that undercounted 12 workbooks as 4; a shell function-scope bug that
+  silently returned an empty array; and a `Conditional.Cases` search that returned 0 against the
+  engine and was used to infer the engine cannot emit conditional fills — it emits **13 of them** into
+  a public workbook, because `Conditional.Cases` is *path notation in prose* and the serialized form is
+  nested keys `{"Conditional": {"Cases": [...]}}`. Every count in this repo should name its positive
+  control beside it, and a corpus too simple to exhibit the effect is a control failure too: our first
+  "0 visuals under 20px tall" was measured on single-zone workbooks, and a real multi-zone dashboard
+  produced **14 in its `pbip/` tree** (9 in `reports/`), the smallest at **12.56px**. ⚠️ **Name the
+  tree with any bundle count** — `reports/` and `pbip/` hold different visual populations, so a count
+  without its tree is not reproducible.
+- **The PBIR height floor covers `slicer` and `textbox` only, so sub-renderable CHART visuals carry no
+  height diagnostic at all.** Measured on engine 2.339.0 against the public `Airline Alliance Activity
+  Dashboard _ #VOTD.twbx`, **in the `pbip/` tree** (⚠️ the tree is part of the measurement — the
+  pristine `reports/` tree holds 95 positioned visuals and 9 under 20px, because `image` visuals are
+  `pbip/`-only):
+
+  ```
+  pbip/  positioned visuals            111        <- positive control
+         under  20px tall               14        clusteredColumnChart 5 | image 5 | textbox 4
+         under  76px tall               64        clusteredColumnChart 26 | tableEx 17 | textbox 9
+                                                  | image 6 | slicer 6
+         under 150px wide               22        multiRowCard 9 | tableEx 6 | image 6
+                                                  | clusteredBarChart 1
+  powerbi-report-author 0.1.4          6 errors, 4 warnings
+         PBIR_SLICER_HEIGHT_BELOW_FLOOR   x6  (errors)
+         PBIR_TEXTBOX_HEIGHT_BELOW_FLOOR      (4 warnings)
+  ```
+
+  So of the 14 sub-20px visuals, the **4 textboxes DO get a height diagnostic** and the **5 charts
+  (12.56px, plus four at 14.0px) get none** — there is no chart-height rule. "Validate passed" does not
+  mean "the visuals can be seen", but the gap is specifically *chart* visuals, not visuals in general.
+  This is the concrete, named instance of the general rule that structural validation is necessary but
+  not sufficient. Reported upstream on
+  [#186](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/186); related to
+  [#180](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/180) (slicers regressed to 57/62px
+  against a 76px floor).
+- **An explicit `mark class='Bar'` supports strictly fewer shelf layouts than `mark class='Automatic'`**
+  (engine 2.339.0). `twb_to_pbir.py::_visual_type` accepts `bar` for exactly two layouts
+  (dimension-on-cols + measure-on-rows, or dimension-on-rows + measure-on-cols); `automatic` reaches
+  five further fallbacks (scatter, matrix, table, column, continuous-date line). So changing a mark
+  from Automatic to Bar in Tableau — cosmetic there — can silently cost the whole visual here
+  (`mark class 'Bar' / shelf layout not supported -> no visual emitted`, `zone left empty`). A raw
+  count of `Bar` marks proves nothing: they are common and mostly work. Controlled A/B fixture:
+  `tests/fixtures/issue-185-bar-shelf-layout.twb`.
 - **Origin-destination and line maps are the hardest surface, and not all are verified yet.** Tableau's
   MAKELINE great-circle arc has no native Power BI equivalent, so `airline-alliance-activity` uses
   destination bubbles instead of arcs (an honest downgrade, documented). Two map-heavy renders,

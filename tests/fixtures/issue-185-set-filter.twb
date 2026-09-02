@@ -1,0 +1,121 @@
+<?xml version='1.0' encoding='utf-8' ?>
+<!-- Fixture for upstream issue Yarbrdab000/tableau-fabric-skills#185.
+
+     Shape: a Tableau SET whose domain is a simple condition, used as a RESTRICTIVE
+     worksheet filter. The set XML below is copied structurally from a real Tableau-authored
+     workbook (`Section 08 - Organizing Data`, a Tableau training sample), not invented:
+     a set is a <group> carrying a <groupfilter>, referenced from a view through a
+     <column-instance derivation='InOut'>. There is no `class='set'` attribute - grepping for
+     one is why a corpus sweep can wrongly report "zero sets".
+
+     `Technology Set` is the condition set (`[Technology] != "NC"`, Hemang Patel's reported
+     domain). The worksheet keeps ONLY the "In" members, so dropping this filter is not a
+     no-op: it widens the result set. -->
+<workbook source-build='2019.2.2 (20192.19.0718.1543)' source-platform='win' version='18.1' xmlns:user='http://www.tableausoftware.com/xml/user'>
+  <repository-location derived-from='https://public.tableau.com/workbooks/issue-185?rev=1.0' id='issue_185_set_filter' path='/workbooks' revision='1.0' />
+  <datasources>
+    <datasource caption='Tails' inline='true' name='federated.setds' version='18.1'>
+      <connection class='federated'>
+        <named-connections>
+          <named-connection caption='tails' name='textscan.tails'>
+            <connection class='textscan' directory='Data' filename='tails.csv' />
+          </named-connection>
+        </named-connections>
+        <relation connection='textscan.tails' name='tails.csv' table='[tails#csv]' type='table' />
+      </connection>
+      <column caption='Tail' datatype='string' name='[Tail]' role='dimension' type='nominal' />
+      <column caption='Technology' datatype='string' name='[Technology]' role='dimension' type='nominal' />
+      <column caption='Score' datatype='integer' name='[Score]' role='measure' type='quantitative' />
+
+      <!-- The SET. A condition set: domain is `[Technology] != "NC"`. -->
+      <group caption='Technology Set' name='[Technology Set]' name-style='unqualified' user:ui-builder='filter-group'>
+        <groupfilter expression='[Technology] != &quot;NC&quot;' function='filter' user:ui-filter-by-field='true' user:ui-marker='filter-by'>
+          <groupfilter function='level-members' level='[Technology]' user:ui-enumeration='all' user:ui-marker='enumerate' />
+        </groupfilter>
+      </group>
+
+      <!-- The set's IN/OUT membership instance, as referenced from a view. -->
+      <column-instance column='[Technology Set]' derivation='InOut' name='[io:Technology Set:nk]' pivot='key' type='nominal' />
+      <column-instance column='[Tail]' derivation='None' name='[none:Tail:nk]' pivot='key' type='nominal' />
+      <column-instance column='[Score]' derivation='Sum' name='[sum:Score:qk]' pivot='key' type='quantitative' />
+      <metadata-records>
+        <metadata-record class='column'>
+          <remote-name>Tail</remote-name>
+          <local-name>[Tail]</local-name>
+          <parent-name>[tails.csv]</parent-name>
+          <local-type>string</local-type>
+          <aggregation>Count</aggregation>
+        </metadata-record>
+        <metadata-record class='column'>
+          <remote-name>Technology</remote-name>
+          <local-name>[Technology]</local-name>
+          <parent-name>[tails.csv]</parent-name>
+          <local-type>string</local-type>
+          <aggregation>Count</aggregation>
+        </metadata-record>
+        <metadata-record class='column'>
+          <remote-name>Score</remote-name>
+          <local-name>[Score]</local-name>
+          <parent-name>[tails.csv]</parent-name>
+          <local-type>integer</local-type>
+          <aggregation>Sum</aggregation>
+        </metadata-record>
+      </metadata-records>
+    </datasource>
+  </datasources>
+  <worksheets>
+    <worksheet name='Score by Tail'>
+      <layout-options>
+        <title>
+          <formatted-text>
+            <run>Score by Tail (Technology Set = In)</run>
+          </formatted-text>
+        </title>
+      </layout-options>
+      <table>
+        <view>
+          <datasources>
+            <datasource caption='Tails' name='federated.setds' />
+          </datasources>
+          <datasource-dependencies datasource='federated.setds'>
+            <column caption='Tail' datatype='string' name='[Tail]' role='dimension' type='nominal' />
+            <column caption='Technology' datatype='string' name='[Technology]' role='dimension' type='nominal' />
+            <column caption='Score' datatype='integer' name='[Score]' role='measure' type='quantitative' />
+            <column-instance column='[Technology Set]' derivation='InOut' name='[io:Technology Set:nk]' pivot='key' type='nominal' />
+            <column-instance column='[Tail]' derivation='None' name='[none:Tail:nk]' pivot='key' type='nominal' />
+            <column-instance column='[Score]' derivation='Sum' name='[sum:Score:qk]' pivot='key' type='quantitative' />
+          </datasource-dependencies>
+          <!-- RESTRICTIVE: keep only set members ("In"). Dropping this widens the result set. -->
+          <filter class='categorical' column='[federated.setds].[io:Technology Set:nk]'>
+            <groupfilter function='union' user:ui-domain='relevant' user:ui-enumeration='inclusive' user:ui-marker='enumerate'>
+              <groupfilter function='member' level='[io:Technology Set:nk]' member='&quot;In&quot;' />
+            </groupfilter>
+          </filter>
+          <slices>
+            <column>[federated.setds].[io:Technology Set:nk]</column>
+          </slices>
+          <aggregation value='true' />
+        </view>
+        <panes>
+          <pane>
+            <mark class='Bar' />
+            <encodings />
+          </pane>
+        </panes>
+        <rows>[federated.setds].[sum:Score:qk]</rows>
+        <cols>[federated.setds].[none:Tail:nk]</cols>
+      </table>
+      <simple-id uuid='{00000000-0000-0000-0000-000000000185}' />
+    </worksheet>
+  </worksheets>
+  <dashboards>
+    <dashboard name='Set Filter Repro'>
+      <size maxheight='800' maxwidth='1000' />
+      <zones>
+        <zone h='100000' id='1' type='layout-basic' w='100000' x='0' y='0'>
+          <zone h='100000' id='2' name='Score by Tail' w='100000' x='0' y='0' />
+        </zone>
+      </zones>
+    </dashboard>
+  </dashboards>
+</workbook>

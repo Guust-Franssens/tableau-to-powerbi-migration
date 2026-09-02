@@ -1,0 +1,132 @@
+<?xml version='1.0' encoding='utf-8' ?>
+<!-- Fixture for the CAPABILITY-GAP half of upstream Yarbrdab000/tableau-fabric-skills#185
+     ("mark class 'Bar' with a shelf layout outside the emitter's supported set").
+
+     `<mark class='Bar'/>` is common and works: a raw count of Bar marks establishes nothing.
+     This fixture is a CONTROLLED EXPERIMENT that isolates the actual trigger. Both worksheets
+     below carry byte-identical shelves and encodings - a measure on each axis, one dimension on
+     the Detail (lod) encoding. The ONLY difference is the mark class.
+
+     Engine 2.339.0, twb_to_pbir.py `_visual_type`: an explicit `bar` mark accepts exactly two
+     shelf layouts (dim-on-cols + meas-on-rows, or dim-on-rows + meas-on-cols) and otherwise
+     returns VT_UNSUPPORTED. An `automatic` mark reaches five further fallbacks (scatter, matrix,
+     table, column, continuous-date line). So `bar` is strictly LESS supported than `automatic`
+     over identical shelves, and the gap - not the Bar mark itself - is the defect. -->
+<workbook source-build='2019.2.2 (20192.19.0718.1543)' source-platform='win' version='18.1' xmlns:user='http://www.tableausoftware.com/xml/user'>
+  <repository-location derived-from='https://public.tableau.com/workbooks/issue-185-bar?rev=1.0' id='issue_185_bar_shelf' path='/workbooks' revision='1.0' />
+  <datasources>
+    <datasource caption='Tails' inline='true' name='federated.bards' version='18.1'>
+      <connection class='federated'>
+        <named-connections>
+          <named-connection caption='tails' name='textscan.tails'>
+            <connection class='textscan' directory='Data' filename='tails.csv' />
+          </named-connection>
+        </named-connections>
+        <relation connection='textscan.tails' name='tails.csv' table='[tails#csv]' type='table' />
+      </connection>
+      <column caption='Tail' datatype='string' name='[Tail]' role='dimension' type='nominal' />
+      <column caption='Score' datatype='integer' name='[Score]' role='measure' type='quantitative' />
+      <column caption='Availability' datatype='real' name='[Availability]' role='measure' type='quantitative' />
+      <column-instance column='[Tail]' derivation='None' name='[none:Tail:nk]' pivot='key' type='nominal' />
+      <column-instance column='[Score]' derivation='Sum' name='[sum:Score:qk]' pivot='key' type='quantitative' />
+      <column-instance column='[Availability]' derivation='Sum' name='[sum:Availability:qk]' pivot='key' type='quantitative' />
+      <metadata-records>
+        <metadata-record class='column'>
+          <remote-name>Tail</remote-name>
+          <local-name>[Tail]</local-name>
+          <parent-name>[tails.csv]</parent-name>
+          <local-type>string</local-type>
+          <aggregation>Count</aggregation>
+        </metadata-record>
+        <metadata-record class='column'>
+          <remote-name>Score</remote-name>
+          <local-name>[Score]</local-name>
+          <parent-name>[tails.csv]</parent-name>
+          <local-type>integer</local-type>
+          <aggregation>Sum</aggregation>
+        </metadata-record>
+        <metadata-record class='column'>
+          <remote-name>Availability</remote-name>
+          <local-name>[Availability]</local-name>
+          <parent-name>[tails.csv]</parent-name>
+          <local-type>real</local-type>
+          <aggregation>Sum</aggregation>
+        </metadata-record>
+      </metadata-records>
+    </datasource>
+  </datasources>
+  <worksheets>
+    <!-- CONTROL: identical shelves, mark class Automatic. Expected to emit. -->
+    <worksheet name='Auto Two Measures'>
+      <table>
+        <view>
+          <datasources>
+            <datasource caption='Tails' name='federated.bards' />
+          </datasources>
+          <datasource-dependencies datasource='federated.bards'>
+            <column caption='Tail' datatype='string' name='[Tail]' role='dimension' type='nominal' />
+            <column caption='Score' datatype='integer' name='[Score]' role='measure' type='quantitative' />
+            <column caption='Availability' datatype='real' name='[Availability]' role='measure' type='quantitative' />
+            <column-instance column='[Tail]' derivation='None' name='[none:Tail:nk]' pivot='key' type='nominal' />
+            <column-instance column='[Score]' derivation='Sum' name='[sum:Score:qk]' pivot='key' type='quantitative' />
+            <column-instance column='[Availability]' derivation='Sum' name='[sum:Availability:qk]' pivot='key' type='quantitative' />
+          </datasource-dependencies>
+          <aggregation value='true' />
+        </view>
+        <panes>
+          <pane>
+            <mark class='Automatic' />
+            <encodings>
+              <lod column='[federated.bards].[none:Tail:nk]' />
+            </encodings>
+          </pane>
+        </panes>
+        <rows>[federated.bards].[sum:Score:qk]</rows>
+        <cols>[federated.bards].[sum:Availability:qk]</cols>
+      </table>
+      <simple-id uuid='{00000000-0000-0000-0000-0000000185A0}' />
+    </worksheet>
+
+    <!-- TREATMENT: byte-identical shelves and encodings, mark class Bar. Expected UNSUPPORTED. -->
+    <worksheet name='Bar Two Measures'>
+      <table>
+        <view>
+          <datasources>
+            <datasource caption='Tails' name='federated.bards' />
+          </datasources>
+          <datasource-dependencies datasource='federated.bards'>
+            <column caption='Tail' datatype='string' name='[Tail]' role='dimension' type='nominal' />
+            <column caption='Score' datatype='integer' name='[Score]' role='measure' type='quantitative' />
+            <column caption='Availability' datatype='real' name='[Availability]' role='measure' type='quantitative' />
+            <column-instance column='[Tail]' derivation='None' name='[none:Tail:nk]' pivot='key' type='nominal' />
+            <column-instance column='[Score]' derivation='Sum' name='[sum:Score:qk]' pivot='key' type='quantitative' />
+            <column-instance column='[Availability]' derivation='Sum' name='[sum:Availability:qk]' pivot='key' type='quantitative' />
+          </datasource-dependencies>
+          <aggregation value='true' />
+        </view>
+        <panes>
+          <pane>
+            <mark class='Bar' />
+            <encodings>
+              <lod column='[federated.bards].[none:Tail:nk]' />
+            </encodings>
+          </pane>
+        </panes>
+        <rows>[federated.bards].[sum:Score:qk]</rows>
+        <cols>[federated.bards].[sum:Availability:qk]</cols>
+      </table>
+      <simple-id uuid='{00000000-0000-0000-0000-0000000185B0}' />
+    </worksheet>
+  </worksheets>
+  <dashboards>
+    <dashboard name='Bar Shelf Repro'>
+      <size maxheight='800' maxwidth='1000' />
+      <zones>
+        <zone h='100000' id='1' type='layout-basic' w='100000' x='0' y='0'>
+          <zone h='50000' id='2' name='Auto Two Measures' w='100000' x='0' y='0' />
+          <zone h='50000' id='3' name='Bar Two Measures' w='100000' x='0' y='50000' />
+        </zone>
+      </zones>
+    </dashboard>
+  </dashboards>
+</workbook>
