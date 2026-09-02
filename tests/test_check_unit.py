@@ -578,6 +578,23 @@ def test_a_source_empty_worksheet_owes_no_page(tmp_path: Path) -> None:
     assert parity["status"] == cu.STATUS_PASS
 
 
+def test_an_emptied_oracle_denominator_still_names_why_it_emptied(tmp_path: Path) -> None:
+    """Kills: dropping the exclusion list on the not-assessable early return.
+
+    A workbook whose only expected page is source-empty empties the denominator legitimately. The
+    early return used to report `excluded_omissions: []`, so a page BOTH halves had accepted looked
+    like the two halves disagreeing. Found by the estate cross-check, not by a test.
+    """
+    _spec_with_worksheets(tmp_path, [_complete_worksheet("ws.b", "B")])
+    _write_report(tmp_path, ["B"], visuals=0)
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["status"] == cu.STATUS_NOT_CHECKED
+    assert [page["name"] for page in oracle["excluded_omissions"]] == ["B"]
+    assert "owes no output" in oracle["detail"]
+
+
 def test_a_source_empty_page_owes_no_oracle_evidence_either(tmp_path: Path) -> None:
     """Kills: page parity and the oracle denominator disagreeing about the same page.
 

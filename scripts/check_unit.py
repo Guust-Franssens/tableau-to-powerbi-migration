@@ -1706,7 +1706,8 @@ def check_oracle_coverage(target: Path, reference_dir: Path | None, oracle_dir: 
     if not pages:
         return _oracle_not_assessable(
             "cannot assess oracle coverage: every expected Tableau page is a signed omission or owes "
-            "no output, so there is no page left to hold against a reference"
+            "no output, so there is no page left to hold against a reference",
+            excluded=accepted,
         )
     combined = _merge_oracle_maps(reference, oracle)
     rows = [_oracle_row(page, expectation["index"], combined) for page in pages]
@@ -1759,8 +1760,13 @@ def _oracle_excluded_omissions(expectation: dict[str, Any], entries: list[dict[s
     ]
 
 
-def _oracle_not_assessable(detail: str) -> dict[str, Any]:
-    """Blocking 'cannot assess' row: an unestablished expected set never reads as coverage."""
+def _oracle_not_assessable(detail: str, excluded: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Blocking 'cannot assess' row: an unestablished expected set never reads as coverage.
+
+    ``excluded`` is carried through so the reason a denominator emptied stays visible. Without it the
+    early return dropped the list, and a page correctly accepted by BOTH halves of the gate looked
+    like a disagreement between them - found by the estate cross-check, not by a test.
+    """
     return {
         "id": "oracle-coverage",
         "status": STATUS_NOT_CHECKED,
@@ -1770,7 +1776,8 @@ def _oracle_not_assessable(detail: str) -> dict[str, Any]:
         "numeric_present": 0,
         "visual_missing": [],
         "numeric_missing": [],
-        "excluded_omissions": [],
+        "contested_names": [],
+        "excluded_omissions": excluded or [],
         "grade": "not checked (expected page set could not be established)",
         "rows": [],
     }

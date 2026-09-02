@@ -377,6 +377,12 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
         ["test_a_source_empty_page_owes_no_oracle_evidence_either"],
     ),
     (
+        "ORACLE: an emptied denominator drops the reason it emptied",
+        "            excluded=accepted,",
+        "            excluded=None,",
+        ["test_an_emptied_oracle_denominator_still_names_why_it_emptied"],
+    ),
+    (
         "oracle discovery: canonical oracle/ name removed",
         'ORACLE_DIR_NAMES = ("_oracle", "oracle")',
         'ORACLE_DIR_NAMES = ("_oracle",)',
