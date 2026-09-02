@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import package_unit as pkg  # noqa: E402  # pylint: disable=wrong-import-position
 import reference_evidence as rev  # noqa: E402  # pylint: disable=wrong-import-position
+from manifest_scope import KEEP, REPORT_ALLOW, Rows, project  # noqa: E402  # pylint: disable=wrong-import-position
 from test_check_reference_readiness import (  # noqa: E402  # pylint: disable=wrong-import-position
     write_engine_report,
     write_handover,
@@ -508,6 +509,18 @@ ENGINE_REPORT_FIELDS = (
 #: can produce. `_scope_report` must not emit it anywhere.
 FOREIGN = "Zz_Foreign_Unit_Sentinel"
 
+#: A SECOND sentinel, planted only in rows this unit RETAINS. Round-2 review found the round-1
+#: fixture structurally unable to see blocker 1: it planted sentinels exclusively in FOREIGN rows,
+#: which are guaranteed to be filtered out whole, so it never exercised a retained row's unknown
+#: extensions - and `workbooks[0].future_nested` shipped unnoticed. A guard that cannot fail is
+#: worse than no guard, because it is credited as coverage.
+RETAINED_EXTENSION = "Zz_Retained_Row_Extension_Sentinel"
+
+
+def _verbatim_top_level() -> set[str]:
+    """Top-level `report.json` fields the allowlist carries verbatim, read from the spec itself."""
+    return {key for key, spec in REPORT_ALLOW.items() if spec is KEEP}
+
 
 def _estate_report(unit: str) -> dict:
     """A `report.json` in the REAL engine's 13-field shape, sentinel-planted in EVERY aggregate field.
@@ -517,12 +530,23 @@ def _estate_report(unit: str) -> dict:
     `model_folder` paths, `definition_of_done.workbooks[]` carry `workbook`/`pbip_folder`/`reason`,
     and `fallbacks[]` carry `datasource`/`source_id`. A fixture that planted the sentinel only in a
     field the engine does not really write would prove nothing about a real package.
+
+    ⚠️ It plants TWO sentinels, in two structurally different places. `FOREIGN` goes in rows and
+    containers belonging to other units, which filtering removes wholesale. `RETAINED_EXTENSION`
+    goes inside the rows this unit KEEPS - `workbooks[0].future_nested` and
+    `definition_of_done.workbooks[0].future_nested` - which only a NESTED allowlist can remove, and
+    which the round-1 fixture had no case for at all.
     """
     return {
         "tool": "migrate_estate",
         "generated_at": "2026-09-02T07:04:07Z",
         "workbooks": [
-            {"name": unit, "pbip_status": "ok", "pbip_folder": f"pbip/{unit}/{unit}.pbip"},
+            {
+                "name": unit,
+                "pbip_status": "ok",
+                "pbip_folder": f"pbip/{unit}/{unit}.pbip",
+                "future_nested": RETAINED_EXTENSION,
+            },
             {"name": FOREIGN, "pbip_status": "failed", "pbip_folder": f"pbip/{FOREIGN}/{FOREIGN}.pbip"},
         ],
         "datasources": [{"name": f"{FOREIGN}_ds", "source_id": f"assets/{FOREIGN}.tds"}],
@@ -533,7 +557,12 @@ def _estate_report(unit: str) -> dict:
             "reports_failed": 18,
             "reports_warned": 14,
             "workbooks": [
-                {"workbook": unit, "status": "warn", "reason": "1 visual(s) rebuilt with warnings"},
+                {
+                    "workbook": unit,
+                    "status": "warn",
+                    "reason": "1 visual(s) rebuilt with warnings",
+                    "future_nested": RETAINED_EXTENSION,
+                },
                 {"workbook": FOREIGN, "status": "failed", "pbip_folder": f"pbip/{FOREIGN}", "reason": "it failed"},
             ],
         },
@@ -587,12 +616,55 @@ def test_no_engine_report_field_is_copied_unchanged_from_the_estate(tmp_path: Pa
     verbatim = [
         key
         for key, value in full.items()
-        if key not in pkg.REPORT_VERBATIM_FIELDS
+        if key not in _verbatim_top_level()
         and key in scoped
         and json.dumps(scoped[key], sort_keys=True) == json.dumps(value, sort_keys=True)
     ]
     assert verbatim == [], f"copied unchanged from the whole-estate report: {verbatim}"
     assert set(scoped) - set(full) == {"scoped_by", "scope"}
+
+
+def test_a_retained_row_does_not_smuggle_unknown_nested_fields(tmp_path: Path) -> None:
+    """Round-2 blocker 1: the allowlist stopped at the collection boundary.
+
+    Filtering `workbooks[]` to this unit removes FOREIGN rows whole - which is why the round-1
+    fixture, planting only in foreign rows, could never fail. The row this unit KEEPS was still
+    copied wholesale, so `workbooks[0].future_nested` and its `definition_of_done` twin shipped
+    automatically. Only a nested allowlist removes them, and only a retained-row sentinel sees it.
+    """
+    _full, scoped, text = _package_estate_report(tmp_path)
+    assert RETAINED_EXTENSION not in text
+    assert "future_nested" not in scoped["workbooks"][0]
+    assert "future_nested" not in scoped["definition_of_done"]["workbooks"][0]
+    assert scoped["workbooks"][0]["name"] == UNIT
+    assert scoped["definition_of_done"]["workbooks"][0]["workbook"] == UNIT
+
+
+def test_a_dropped_nested_field_is_recorded_by_its_full_path(tmp_path: Path) -> None:
+    """An omission must be discoverable: the path is engine schema, the value is the estate content."""
+    _full, scoped, _text = _package_estate_report(tmp_path)
+    dropped = scoped["scope"]["dropped_fields"]
+    assert "workbooks[].future_nested" in dropped
+    assert "definition_of_done.workbooks[].future_nested" in dropped
+    assert "input_manifest" in dropped
+    assert "definition_of_done.status" in dropped
+    assert not any(RETAINED_EXTENSION in entry or FOREIGN in entry for entry in dropped)
+
+
+def test_one_unknown_field_across_many_rows_is_reported_once(tmp_path: Path) -> None:
+    """48 rows carrying the same unknown field is one finding, not 48 indexed near-duplicates.
+
+    ⚠️ Exercised against `project()` DIRECTLY, on a `Rows` spec at the top level. Routing it through
+    a packaged report proved nothing: the mapping branch de-duplicates the accumulated list on the
+    way out, so it masked the row branch entirely and the mutation that removes the row-level
+    `sorted(set(...))` SURVIVED. The committed mutation campaign is what surfaced that.
+    """
+    rows = [{"name": UNIT, "future_nested": RETAINED_EXTENSION} for _ in range(24)]
+    _kept, dropped = project(rows, Rows({"name": KEEP}), prefix="workbooks")
+    assert dropped == ["workbooks[].future_nested"]
+
+    _kept, nested = project({"workbooks": rows}, {"workbooks": Rows({"name": KEEP})})
+    assert nested.count("workbooks[].future_nested") == 1
 
 
 def test_an_unknown_engine_field_is_dropped_rather_than_carried(tmp_path: Path) -> None:
@@ -608,14 +680,15 @@ def test_an_unknown_engine_field_is_dropped_rather_than_carried(tmp_path: Path) 
 
 
 def test_only_unit_neutral_engine_identity_is_carried_verbatim() -> None:
-    """Widening this tuple is exactly how the leak returns, so the CONTENT is checked, not the name.
+    """Widening this is exactly how the leak returns, so the CONTENT is checked, not the name.
 
     A scalar cannot carry another unit's name, path or status; every field that leaked in round 1 was
     a list or a dict of per-unit rows.
     """
     full = _estate_report(UNIT)
-    assert set(pkg.REPORT_VERBATIM_FIELDS) <= set(full)
-    for key in pkg.REPORT_VERBATIM_FIELDS:
+    verbatim = _verbatim_top_level()
+    assert verbatim <= set(full)
+    for key in verbatim:
         assert isinstance(full[key], str), f"{key} is not a scalar - it can carry estate content"
 
 
@@ -635,11 +708,23 @@ def test_the_scoped_report_still_declares_both_collections_as_lists(tmp_path: Pa
     `check_reference_readiness._engine_report` returns None without it - which silently costs a
     datasource-only unit its earned `NOT_APPLICABLE` - and `check_unit._is_engine_report` stops
     recognising the package as engine output at all.
+
+    ⚠️ The load-bearing case is a report that OMITS a collection, not one that merely filters to
+    empty. An allowlist only emits keys the source actually had, so a report with no `datasources`
+    key would ship without one - and the round-2 mutation campaign showed the earlier version of
+    this test could not see that, because its fixture always supplied both.
     """
     _full, scoped, _text = _package_estate_report(tmp_path)
     assert isinstance(scoped["workbooks"], list)
     assert isinstance(scoped["datasources"], list)
     assert [entry["name"] for entry in scoped["workbooks"]] == [UNIT]
+
+    bundle, oracle = _bundle(tmp_path)
+    (bundle / "report.json").write_text(json.dumps({"tool": "migrate_estate"}), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+    sparse = _packaged_report(tmp_path)
+    assert sparse["workbooks"] == [] and sparse["datasources"] == []
+    assert isinstance(sparse["workbooks"], list), "a report with no workbooks key must still declare one"
 
 
 # --------------------------------------------------------------------------------------------
@@ -709,15 +794,208 @@ def test_the_module_layout_comment_names_the_oracle_kinds_the_code_emits() -> No
 def test_the_readme_separates_the_png_and_svg_evidence_legs(tmp_path: Path) -> None:
     """They are different evidence, not duplicates: the PNG is looked at, the SVG is grepped.
 
-    Measured on this estate's `HR | Summary` capture: the SVG carries **122** `<text>` elements
-    including `Human Resources Dashboard`, `Active Employees` and `7,984`, so exact values are
-    readable with no OCR - while three of the same workbook's worksheets carry **zero**, because
-    their labels render as paths. An agent told only "renders" picks one and loses half the evidence.
+    ⚠️ Round-2 review: this asserted only "not duplicates", the two extensions and `122`, so
+    **deleting the entire zero-text caveat left it green**. The caveat is the half an agent acts on -
+    it is what stops "the SVG has no text" being read as "the object has no content" - so it is
+    asserted here explicitly, by the worksheets it names.
+
+    The count was also wrong: **four** worksheets in that workbook carry zero `<text>` elements, not
+    three. `Terminated By Year` was omitted when the finding was first written up.
     """
     readme = (_package_with_receipt(tmp_path) / "README.md").read_text(encoding="utf-8")
     assert "not duplicates" in readme
     assert "`.png`" in readme and "`.svg`" in readme
     assert "122" in readme
+    assert "zero" in readme
+    for silent in ("Hired By Year", "Terminated By Year", "Age Groups", "Education Levels"):
+        assert silent in readme, f"the zero-text caveat does not name {silent}"
+
+
+# --------------------------------------------------------------------------------------------
+# 4c. the OTHER shipped manifests (round-2 blocker 2)
+#
+# Round 1 fixed one denylist. `package_oracle()` and `_scope_receipt()` were still denylists in
+# their own right - measured on the packaged `HR_Dashboard`, the oracle manifest carried **22 fields
+# byte-identical** to the 360-view estate manifest (`view_types` still totalling 360 beside a
+# rewritten `view_count: 23`), and the receipt shipped two absolute `C:\\Users\\<user>\\...` paths.
+# --------------------------------------------------------------------------------------------
+
+ESTATE_ORACLE_EXTRA = {
+    "view_count": 360,
+    "view_types": {"dashboard": 60, "worksheet": 300, "unknown": 0},
+    "captured_complete": 312,
+    "failed": 47,
+    "elapsed_sec": 6823.1,
+    "total_retries": 8,
+    "total_reauths": 0,
+    "data_ok": 314,
+    "image_ok": 313,
+    "svg_ok": 313,
+    "credential_scrubbed_at_sink": [],
+    "reference_missing": False,
+    "reference_required": True,
+    "render_capability": {
+        "selected_tier": "svg",
+        "configured_api_version": "3.29",
+        "probe_view_luid": "1e54f1a1-7655-487b-bcf1-a74f55cbacb4",
+        "probe_view_name": FOREIGN,
+        "probe_view_luids": ["1e54f1a1-7655-487b-bcf1-a74f55cbacb4"],
+        "probe_views_tried": 1,
+        "warnings": [f"probed against {FOREIGN}"],
+    },
+    "future_manifest_field": FOREIGN,
+}
+
+
+def _package_with_estate_oracle(tmp_path: Path) -> dict:
+    """Package one unit whose capture manifest carries the estate's own aggregates and probe."""
+    bundle, oracle = _bundle(tmp_path)
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    manifest.update(ESTATE_ORACLE_EXTRA)
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+    return json.loads((_out(tmp_path) / UNIT / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
+
+
+def test_the_oracle_manifest_recomputes_its_counts_from_the_packaged_views(tmp_path: Path) -> None:
+    """`view_count` was rewritten while `view_types` still totalled the whole estate."""
+    scoped = _package_with_estate_oracle(tmp_path)
+    shipped = scoped["views"]
+    assert scoped["view_count"] == len(shipped)
+    assert sum(scoped["view_types"].values()) == len(shipped)
+    assert scoped["view_types"] != ESTATE_ORACLE_EXTRA["view_types"]
+    for leg in ("image", "svg", "pdf", "data"):
+        expected = sum(1 for view in shipped if isinstance(view.get(leg), dict) and view[leg].get("status") == "ok")
+        assert scoped[f"{leg}_ok"] == expected
+
+
+def test_the_oracle_manifest_drops_estate_run_stats_and_the_foreign_probe(tmp_path: Path) -> None:
+    """The probe view identifies a view in ANOTHER workbook - on the reference estate, `Superstore`."""
+    scoped = _package_with_estate_oracle(tmp_path)
+    assert FOREIGN not in json.dumps(scoped, ensure_ascii=False)
+    for estate_only in ("captured_complete", "failed", "elapsed_sec", "total_retries", "total_reauths"):
+        assert estate_only not in scoped
+    capability = scoped.get("render_capability") or {}
+    assert not [key for key in capability if key.startswith("probe_")]
+    assert "warnings" not in capability
+    assert capability["selected_tier"] == "svg", "the evidence GRADE must survive - that is the useful half"
+    assert "future_manifest_field" in scoped["scope"]["dropped_fields"]
+
+
+def test_the_receipt_keeps_the_engine_version_and_drops_installation_paths(tmp_path: Path) -> None:
+    """Engine provenance is a VERSION, not a location on the machine that happened to build it."""
+    bundle, oracle = _bundle(tmp_path)
+    (bundle / "engine-output-receipt.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "created_at": "2026-09-02T07:05:08+00:00",
+                "report_sha256": "a" * 64,
+                "input_manifest_sha256": "b" * 64,
+                "engine": {
+                    "version": "2.339.0",
+                    "canonical": True,
+                    "source": "plugin",
+                    "root": rf"C:\Users\someone\.copilot\installed-plugins\{FOREIGN}",
+                    "plugin_root": rf"C:\Users\someone\.copilot\installed-plugins\{FOREIGN}",
+                },
+                "artifacts": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _package(tmp_path, bundle, oracle)
+    scoped = json.loads((_out(tmp_path) / UNIT / "engine-output-receipt.json").read_text(encoding="utf-8"))
+    assert scoped["engine"]["version"] == "2.339.0"
+    assert "root" not in scoped["engine"] and "plugin_root" not in scoped["engine"]
+    assert "report_sha256" not in scoped and "input_manifest_sha256" not in scoped
+    assert FOREIGN not in json.dumps(scoped, ensure_ascii=False)
+    assert "C:\\Users" not in json.dumps(scoped)
+    assert set(scoped["scope"]["dropped_fields"]) >= {"engine.root", "engine.plugin_root", "report_sha256"}
+
+
+def test_no_shipped_manifest_carries_an_absolute_host_path(tmp_path: Path) -> None:
+    """One assertion over the WHOLE package - the round-1 claim was scoped to report.json alone."""
+    bundle, oracle = _bundle(tmp_path)
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    manifest.update(ESTATE_ORACLE_EXTRA)
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (bundle / "report.json").write_text(json.dumps(_estate_report(UNIT)), encoding="utf-8")
+    (bundle / "engine-output-receipt.json").write_text(
+        json.dumps({"version": 1, "engine": {"version": "2.339.0", "root": r"C:\Users\someone\engine"}}),
+        encoding="utf-8",
+    )
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    offenders = [
+        str(path.relative_to(root))
+        for path in root.rglob("*.json")
+        if "C:\\\\Users" in path.read_text(encoding="utf-8") or "C:/Users" in path.read_text(encoding="utf-8")
+    ]
+    assert offenders == [], f"absolute host paths shipped in: {offenders}"
+
+
+# --------------------------------------------------------------------------------------------
+# 4d. repackaging (round-2 blocker 3) - the worst of the three
+#
+# An existing `<out>/<unit>` was merged into, never rebuilt, so an artifact the new input no longer
+# produces was never removed. Re-running with an EMPTY oracle left the previous capture in place and
+# the entry gate still returned READY - an agent builds against evidence that no longer exists, with
+# a gate agreeing.
+# --------------------------------------------------------------------------------------------
+
+
+def test_repackaging_removes_evidence_the_new_input_no_longer_produces(tmp_path: Path) -> None:
+    bundle, oracle = _bundle(tmp_path)
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    assert (root / "oracle" / "oracle-manifest.json").is_file()
+    assert _images(tmp_path)
+
+    empty = tmp_path / "empty-capture"
+    empty.mkdir()
+    pkg.package_unit(bundle, UNIT, _out(tmp_path), oracle_dir=empty, assets_dir=bundle.parent / "assets")
+    assert not (root / "oracle").exists(), "the previous capture survived a re-run that captured nothing"
+    manifest = json.loads((root / "package-manifest.json").read_text(encoding="utf-8"))
+    assert manifest["oracle"]["objects"] == []
+
+
+def test_repackaging_removes_a_stale_file_from_every_copied_tree(tmp_path: Path) -> None:
+    """Not just `oracle/`: stale `assets/` and `fabric/` files persisted the same way."""
+    bundle, oracle = _bundle(tmp_path)
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    planted = [
+        root / "assets" / "left-over-from-a-previous-run.twb",
+        root / "fabric" / f"{UNIT}.Report" / "definition" / "pages" / "stale-page.json",
+        root / "handover" / "Someone_Else.json",
+    ]
+    for path in planted:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}", encoding="utf-8")
+
+    _package(tmp_path, bundle, oracle)
+    survivors = [str(path.relative_to(root)) for path in planted if path.exists()]
+    assert survivors == [], f"stale artifacts survived repackaging: {survivors}"
+
+
+def test_a_failed_repackage_leaves_the_previous_package_intact(tmp_path: Path) -> None:
+    """Staging exists so a crash mid-build cannot replace a good package with half of one."""
+    bundle, oracle = _bundle(tmp_path)
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    before = sorted(path.name for path in root.iterdir())
+
+    boom = pkg._assemble_unit  # pylint: disable=protected-access
+    try:
+        pkg._assemble_unit = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("engine exploded"))
+        with pytest.raises(RuntimeError):
+            pkg.package_unit(bundle, UNIT, _out(tmp_path), oracle_dir=oracle, assets_dir=bundle.parent / "assets")
+    finally:
+        pkg._assemble_unit = boom
+
+    assert sorted(path.name for path in root.iterdir()) == before
+    assert not [path for path in _out(tmp_path).iterdir() if path.name.startswith(".")], "staging dir left behind"
 
 
 def test_the_scoped_receipt_names_files_that_exist_in_the_package(tmp_path: Path) -> None:

@@ -735,8 +735,9 @@ What to check in the output:
   the real label and value strings, so exact figures read out with no OCR — measured on this estate's
   `HR | Summary` dashboard, **122 `<text>` elements** including `Human Resources Dashboard`,
   `Active Employees` and `7,984`. ⚠️ Not universal: a chart whose labels render as paths carries
-  **zero** (measured: `Hired By Year`, `Age Groups`, `Education Levels`), so absence of text is not
-  absence of content — fall back to the PNG.
+  **zero** — measured, **four** worksheets in that workbook (`Hired By Year`, `Terminated By Year`,
+  `Age Groups`, `Education Levels`) — so absence of text is not absence of content; fall back to the
+  PNG.
 - **Three files in the package are load-bearing rather than incidental**, and the package's own
   `README.md` now names them: `report.json` (this unit's engine classification — what earns a
   datasource-only unit its `NOT_APPLICABLE`), `source-provenance.json` (the only trusted route to a

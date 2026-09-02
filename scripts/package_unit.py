@@ -137,12 +137,20 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import read_handover  # noqa: E402  # pylint: disable=wrong-import-position
+from manifest_scope import (  # noqa: E402  # pylint: disable=wrong-import-position
+    ORACLE_MANIFEST_ALLOW,
+    RECEIPT_ALLOW,
+    REPORT_ALLOW,
+    REPORT_UNIT_LISTS,
+    project,
+)
 from object_identity import (  # noqa: E402  # pylint: disable=wrong-import-position
     KIND_DASHBOARD,
     KIND_UNKNOWN,
@@ -165,16 +173,6 @@ _MAX_OBJECT_NAME = 60
 KIND_WORKBOOK = "workbook"
 KIND_DATASOURCE = "datasource"
 KIND_UNCLASSIFIED = "unclassified"
-
-#: `report.json` fields the packaged copy carries VERBATIM - engine identity, no estate content.
-#: Measured on the 48-workbook reference bundle: `tool` is `"migrate_estate"` (16 bytes) and
-#: `generated_at` an ISO timestamp (22 bytes). Widening this tuple is how the round-1 leak would
-#: come back, so `test_package_unit.py` pins it against the real engine field set.
-REPORT_VERBATIM_FIELDS = ("tool", "generated_at")
-#: `report.json` fields filtered to this unit's entries. These two ARE the gate surface: both
-#: `check_reference_readiness._engine_report` and `check_unit._is_engine_report` reject the file
-#: unless `workbooks` is a list, and `._unit_names` reads the names of both.
-REPORT_UNIT_LISTS = ("workbooks", "datasources")
 
 
 # --------------------------------------------------------------------------------------------
@@ -482,7 +480,7 @@ def _copy_leg(
 
 
 def package_oracle(  # pylint: disable=too-many-locals
-    views: list[dict[str, Any]], manifest: Any, oracle_dir: Path, dest: Path
+    views: list[dict[str, Any]], manifest: Any, oracle_dir: Path, dest: Path, unit: str = ""
 ) -> dict[str, Any]:
     """Copy this unit's renders and numbers into `<dest>`, type-separated, and rewrite the manifest.
 
@@ -541,12 +539,49 @@ def package_oracle(  # pylint: disable=too-many-locals
             }
         )
 
-    scoped = {key: value for key, value in (manifest or {}).items() if key != "views"}
-    scoped["views"] = packaged
-    scoped["view_count"] = len(packaged)
-    scoped["scoped_by"] = "package_unit.py: views filtered to this unit and re-filed by view_type"
+    scoped = _scope_oracle_manifest(manifest, packaged, objects, unit)
     write_json(dest / "oracle-manifest.json", scoped)
     return {"objects": objects, "omissions": omissions}
+
+
+def _scope_oracle_manifest(
+    manifest: Any, packaged: list[dict[str, Any]], objects: list[dict[str, Any]], unit: str
+) -> dict[str, Any]:
+    """The capture manifest rebuilt for ONE unit: allowlisted, and every count RECOMPUTED.
+
+    ⚠️ **Round-2 finding: this was a denylist too** - it copied every manifest key except `views`,
+    so a package holding 23 views shipped **22 fields byte-identical to the 360-view estate
+    manifest**. `view_count` was rewritten to 23 while `view_types` still totalled 360
+    (`dashboard: 60, worksheet: 300`), beside `captured_complete: 312` and `failed: 47`. A consumer
+    reading those numbers is reading the estate and being told it is this unit.
+
+    Two different remedies, because the fields fail differently:
+
+    * **counts are RECOMPUTED from the packaged views**, not dropped - `view_count`, `view_types` and
+      the per-leg `*_ok` tallies all describe what actually shipped, and the leg tallies are taken
+      AFTER copying, so a leg the packager refused is not counted as present.
+    * **estate-run and foreign-identity fields are DROPPED** - `elapsed_sec`, `total_retries`,
+      `total_reauths` describe the whole capture run; `captured_complete`, `failed`, `data_empty`,
+      `credential_blocked`, `reference_missing`, `reference_required` and
+      `credential_scrubbed_at_sink` encode capture-time semantics this packager cannot reconstruct
+      faithfully, and inventing a per-unit definition under an existing name would be worse than
+      omitting it.
+    """
+    narrowed = dict(manifest if isinstance(manifest, dict) else {})
+    narrowed["views"] = packaged
+    scoped, dropped = project(narrowed, ORACLE_MANIFEST_ALLOW)
+
+    shipped = scoped.get("views") or []
+    counts = dict.fromkeys(KIND_DIRS, 0)
+    for obj in objects:
+        counts[obj["view_type"]] = counts.get(obj["view_type"], 0) + 1
+    scoped["view_count"] = len(shipped)
+    scoped["view_types"] = counts
+    for leg in (*RENDER_LEGS, "data"):
+        scoped[f"{leg}_ok"] = sum(
+            1 for view in shipped if isinstance(view.get(leg), dict) and view[leg].get("status") == "ok"
+        )
+    return _stamp_scope(scoped, unit, dropped, "oracle-manifest.json views filtered to this unit, counts recomputed")
 
 
 # --------------------------------------------------------------------------------------------
@@ -720,8 +755,9 @@ and record the ceiling in `limitations_encountered`.
   `HR | Summary` dashboard - **122 `<text>` elements**, including `Human Resources Dashboard`,
   `Active Employees` and `7,984`.
 * ⚠️ but an SVG is not universally a data oracle: a chart whose labels render as paths carries
-  **zero** `<text>` elements (measured: `Hired By Year`, `Age Groups`, `Education Levels`). Absence of
-  text is not absence of content - fall back to the PNG.
+  **zero** `<text>` elements. Measured on the same workbook, **four** of its worksheets do -
+  `Hired By Year`, `Terminated By Year`, `Age Groups` and `Education Levels`. Absence of text is not
+  absence of content - fall back to the PNG.
 """
 
 
@@ -767,82 +803,78 @@ def _copy_fabric(bundle: Path, unit: str, dest: Path) -> tuple[str | None, str |
 
 
 def _scope_definition_of_done(dod: Any, unit: str) -> dict[str, Any] | None:
-    """`definition_of_done` narrowed to this unit's own row, or None when the engine wrote none.
+    """`definition_of_done` narrowed to this unit's own row, before projection.
 
     Its `workbooks[]` is a per-workbook DoD row carrying `workbook`, `pbip_folder`, `bound_model`,
     `report_bound`, `status` and the failure `reason`. Measured on the reference bundle it holds
-    **48** rows - so it is a second copy of the estate, and copying it whole leaks exactly what
-    filtering `workbooks[]` was meant to stop.
+    **48** rows, so it is a second copy of the estate.
 
-    The estate counters beside it (`status`, `reports_bound`, `reports_failed`, `reports_warned`) are
-    DROPPED rather than carried, and that is a correctness fix as much as a scoping one: measured,
-    the estate's `status` is `"failed"` because 18 of 48 reports failed, and in a one-unit package
-    that reads as this unit's verdict. The unit's real verdict is on its own row.
+    Filtering happens here; the estate counters beside it are dropped by `REPORT_ALLOW`, which is
+    both a scoping fix and a correctness one - the estate's `status` is `"failed"` because 18 of 48
+    reports failed, and in a one-unit package that reads as this unit's verdict.
     """
     if not isinstance(dod, dict):
         return None
-    scoped: dict[str, Any] = {
+    return {
+        **dod,
         "workbooks": [
             row for row in dod.get("workbooks") or [] if isinstance(row, dict) and row.get("workbook") == unit
-        ]
+        ],
     }
-    if "applicable" in dod:
-        scoped["applicable"] = dod["applicable"]
-    scoped["scoped_by"] = (
-        "package_unit.py: workbooks[] filtered to this unit; the estate's own status/reports_* "
-        "counters dropped, because in a one-unit package they read as this unit's verdict"
-    )
-    return scoped
 
 
 def _scope_report(engine_report: Any, unit: str) -> dict[str, Any]:
-    """A `report.json` BUILT for this unit - never the estate's with two lists filtered.
+    """A `report.json` BUILT for this unit - never the estate's with some collections filtered.
 
-    ⚠️ **This is an ALLOWLIST, and the direction is the whole point.** It previously copied every
-    key it did not explicitly filter, which is fail-open by construction: any field the engine adds
-    later arrives in every package unnoticed. Round-1 blind review measured the consequence on
-    `HR_Dashboard` in the 48-workbook reference bundle - `workbooks[]` was filtered to 1 entry while
-    **11 of the 13 top-level fields were byte-identical to the whole-estate report**:
-    `input_manifest.assets` still listed **67** assets with absolute staged paths,
-    `openable_outputs` still listed **62** units with absolute `pbip`/`report_folder`/`model_folder`
-    paths, `definition_of_done.workbooks` still held **48** rows, and `Superstore`,
-    `World_Indicators` and `Groups` were all still greppable in a package advertised as one unit.
-    A handover package is a customer deliverable; it must not name another customer's workbooks.
+    ⚠️ **Projected through `project()` at EVERY level, which is what round 2 fixed.** Round 1
+    replaced a top-level denylist with a top-level allowlist and stopped at the collection boundary:
+    a RETAINED `workbooks[]` or `definition_of_done.workbooks[]` row was still copied wholesale, so
+    an unenumerated nested field shipped automatically. Reproduced by planting a sentinel at
+    `workbooks[0].future_nested` and `definition_of_done.workbooks[0].future_nested` - both survived.
 
-    So an unknown field is now DROPPED, not carried, and its NAME (never its value - names are engine
-    schema, not customer data) is recorded in `scope.dropped_fields` so the omission is discoverable
-    rather than silent. That trade is deliberate: the leak blocks a merge, while a gate that one day
-    wants a dropped field fails closed and says so in the package itself.
+    The original round-1 leak, for the record: measured on `HR_Dashboard` in the 48-workbook
+    reference bundle, **11 of 13** top-level fields were byte-identical to the whole-estate report -
+    `input_manifest.assets` listed **67** assets with absolute staged paths, `openable_outputs`
+    listed **62** units, and the exact scalar `"Groups"` (a FOREIGN workbook) sat at
+    `input_manifest.assets[0].name` and `openable_outputs[44].name`.
 
-    Over-trimming is the opposite failure and is bounded by measurement, not by taste. The gate
-    surface of `report.json` is exactly two fields, read at four sites:
-    `check_reference_readiness._engine_report` (:461-462) rejects the whole file unless `workbooks`
-    is a **list**, `._unit_names` (:478-483) reads `workbooks[].name`/`datasources[].name`, and
-    `check_unit._is_engine_report` (:378-380) again requires `workbooks` to be a list. Both are
-    always written, as lists, even when empty - a datasource unit whose `workbooks` went missing
-    would lose `_datasource_only`'s earned `NOT_APPLICABLE` and read as a broken workbook.
-
-    Entries are kept WHOLE rather than reduced to a `{"name": ...}` stub: the gates read only the
-    name, but the entry is the engine's own account of what it did with *this* unit.
+    Over-trimming is the opposite failure and is bounded by measurement: `workbooks` and
+    `datasources` are always emitted, always as lists, because
+    `check_reference_readiness._engine_report` (:461) returns None without it - which silently costs
+    a datasource-only unit its earned `NOT_APPLICABLE` - and `check_unit._is_engine_report` (:379)
+    stops recognising the package as engine output at all.
     """
     payload = engine_report if isinstance(engine_report, dict) else {}
-    scoped: dict[str, Any] = {key: payload[key] for key in REPORT_VERBATIM_FIELDS if key in payload}
+    narrowed = dict(payload)
+    # Assigned unconditionally, which is what GUARANTEES both collections exist as lists in the
+    # output - a `setdefault` after projection used to sit below and was dead code, proven by the
+    # mutation campaign: removing it changed nothing, because this loop has already run.
     for collection in REPORT_UNIT_LISTS:
-        scoped[collection] = [
+        narrowed[collection] = [
             entry for entry in payload.get(collection) or [] if isinstance(entry, dict) and entry.get("name") == unit
         ]
     dod = _scope_definition_of_done(payload.get("definition_of_done"), unit)
     if dod is not None:
-        scoped["definition_of_done"] = dod
-    kept = set(scoped)
-    scoped["scoped_by"] = "package_unit.py: rebuilt for this unit from an allowlist, not filtered"
+        narrowed["definition_of_done"] = dod
+
+    scoped, dropped = project(narrowed, REPORT_ALLOW)
+    return _stamp_scope(scoped, unit, dropped, "report.json")
+
+
+def _stamp_scope(scoped: dict[str, Any], unit: str, dropped: list[str], what: str) -> dict[str, Any]:
+    """Record how a manifest was narrowed, so the omission is discoverable rather than silent.
+
+    Field PATHS are recorded, never their values: a path like `workbooks[].future_nested` or
+    `input_manifest` is engine schema, while the value is exactly the estate content being removed.
+    """
+    scoped["scoped_by"] = f"package_unit.py: {what} rebuilt for this unit from an allowlist, at every level"
     scoped["scope"] = {
         "unit": unit,
-        "kept_fields": sorted(kept),
-        "dropped_fields": sorted(set(payload) - kept),
+        "kept_fields": sorted(scoped),
+        "dropped_fields": dropped,
         "reason": (
-            "estate-wide: a one-unit handover package must not carry another unit's names, paths or "
-            "status. Field NAMES are listed (engine schema); values are not."
+            "estate-wide, or not this unit: a one-unit handover package must not carry another "
+            "unit's names, paths, status or counts. Field PATHS are listed; values are not."
         ),
     }
     return scoped
@@ -853,25 +885,31 @@ def _scope_receipt(receipt: Any, unit: str) -> dict[str, Any] | None:
 
     Copying the bundle receipt verbatim would be 780 KB per unit attesting to 3,138 artifacts, 3,135
     of which are not here. Scoped, it still answers `check_engine_receipts.py`'s only question -
-    `engine.version` - and its `artifacts[]` hashes now name real files in the package, with the
-    `pbip/<unit>/` prefix rewritten to `fabric/`.
+    `engine.version` (:33-35) - and its `artifacts[]` hashes now name real files in the package, with
+    the `pbip/<unit>/` prefix rewritten to `fabric/`.
 
-    It deliberately does NOT become a credential-gate exemption: `credential_gate._receipt_matches_bundle`
-    additionally requires `report_sha256`/`input_manifest_sha256` to hash the files beside it, and the
-    package's `report.json` is scoped, so that check fails closed exactly as it should.
+    ⚠️ **Round-2 finding: this was still a denylist**, copying every receipt key except `artifacts`,
+    so it shipped **two absolute `C:\\Users\\<user>\\...` paths** at `engine.root` and
+    `engine.plugin_root`. It is now projected through `RECEIPT_ALLOW` like every other manifest -
+    engine provenance is a VERSION, not a location on the machine that happened to build it.
+
+    It still deliberately does NOT become a credential-gate exemption, and now fails closed one step
+    earlier: `credential_gate._receipt_matches_bundle` raises OSError on the package's absent
+    `input_manifest.json` before it ever reads the hashes this no longer carries.
     """
     if not isinstance(receipt, dict):
         return None
     prefix = f"pbip/{unit}/"
-    artifacts = [
+    narrowed = dict(receipt)
+    narrowed["artifacts"] = [
         {**entry, "path": f"fabric/{entry['path'][len(prefix) :]}"}
         for entry in receipt.get("artifacts") or []
         if isinstance(entry, dict) and isinstance(entry.get("path"), str) and entry["path"].startswith(prefix)
     ]
-    scoped = {key: value for key, value in receipt.items() if key != "artifacts"}
-    scoped["artifacts"] = artifacts
-    scoped["scoped_by"] = f"package_unit.py: artifacts[] filtered to pbip/{unit}/ and re-rooted at fabric/"
-    return scoped
+    scoped, dropped = project(narrowed, RECEIPT_ALLOW)
+    return _stamp_scope(
+        scoped, unit, dropped, f"engine-output-receipt.json artifacts[] re-rooted at fabric/ from {prefix}"
+    )
 
 
 def _write_spec(asset: Path | None, dest: Path) -> tuple[str | None, str | None]:
@@ -891,7 +929,7 @@ def _write_spec(asset: Path | None, dest: Path) -> tuple[str | None, str | None]
     return "migration-spec.json", None
 
 
-def _attach_oracle(oracle_dir: Path | None, identity: dict[str, Any], dest: Path) -> dict[str, Any]:
+def _attach_oracle(oracle_dir: Path | None, identity: dict[str, Any], dest: Path, unit: str = "") -> dict[str, Any]:
     """This unit's slice of the flat capture, or an empty slice carrying the refusal reason."""
     oracle: dict[str, Any] = {"objects": [], "omissions": [], "route": None, "reason": None}
     manifest = read_json(oracle_dir / "oracle-manifest.json") if oracle_dir else None
@@ -902,7 +940,7 @@ def _attach_oracle(oracle_dir: Path | None, identity: dict[str, Any], dest: Path
     if not views:
         oracle["reason"] = route
         return oracle
-    oracle.update(package_oracle(views, manifest, oracle_dir, dest / "oracle"))
+    oracle.update(package_oracle(views, manifest, oracle_dir, dest / "oracle", unit))
     oracle["route"] = route
     return oracle
 
@@ -915,13 +953,85 @@ def _handover_workbook(handover: Any, unit: str, dest: Path) -> dict[str, Any] |
     return next((wb for name, wb, _ in found if name == unit), found[0][1] if found else None)
 
 
-def package_unit(  # pylint: disable=too-many-locals
+def package_unit(
     bundle: Path, unit: str, out_root: Path, *, oracle_dir: Path | None, assets_dir: Path | None
 ) -> dict[str, Any]:
     """Assemble one unit's package. Returns the record written to `package-manifest.json`."""
+    staging = out_root / f".{sanitize_staging_name(unit)}.staging"
+    shutil.rmtree(staging, ignore_errors=True)
+    try:
+        result = _assemble_unit(bundle, unit, staging, oracle_dir=oracle_dir, assets_dir=assets_dir)
+        replace_dir(staging, out_root / unit)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    return result
+
+
+def sanitize_staging_name(unit: str) -> str:
+    """A filesystem-safe stem for this unit's staging directory."""
+    return _UNSAFE.sub("_", unit)[:_MAX_OBJECT_NAME] or "unit"
+
+
+def replace_dir(staged: Path, final: Path) -> None:
+    """Put ``staged`` at ``final``, REPLACING whatever was there - never merging into it.
+
+    ⚠️ **Round-2 blocker: packaging used to merge into an existing `<out>/<unit>`**, because every
+    write was `mkdir(exist_ok=True)` / `copytree(dirs_exist_ok=True)` and nothing ever removed a file
+    the new input no longer produced. Reproduced end to end: package a unit with a 4-view oracle
+    (entry gate READY, 4 ready / 0 blind), then re-run the documented CLI into the SAME `--out` with
+    an EMPTY oracle directory. Both runs exit 0, the new `package-manifest.json` correctly reports
+    zero oracle objects and `"no oracle-manifest.json found"` - and the PREVIOUS
+    `oracle/oracle-manifest.json` survives, so the entry gate still returns **READY, 4 ready / 0
+    blind**. An agent then builds against evidence that no longer exists, with a gate agreeing.
+    Stale `assets/` and `fabric/` files persisted the same way.
+
+    Replace-not-merge is the fix, staged so a crash mid-build cannot leave a half-package in place of
+    a good one. The retired directory is moved aside before the swap and only deleted once the new
+    one has landed, and it is restored if the rename fails - on Windows a directory rename onto an
+    existing target fails outright, so the move-aside is required rather than defensive.
+    """
+    final.parent.mkdir(parents=True, exist_ok=True)
+    if not final.exists():
+        _rename_retrying(staged, final)
+        return
+    retired = final.with_name(f".{final.name}.replaced")
+    shutil.rmtree(retired, ignore_errors=True)
+    _rename_retrying(final, retired)
+    try:
+        _rename_retrying(staged, final)
+    except OSError:
+        _rename_retrying(retired, final)
+        raise
+    shutil.rmtree(retired, ignore_errors=True)
+
+
+#: Windows denies a directory rename while anything still holds a handle inside it, and a scanner
+#: routinely does for a moment after a large write. Measured: renaming a freshly-assembled
+#: `HR_Dashboard` staging tree (337 entries, 51 MB of renders) failed `WinError 5` once and succeeded
+#: on the first attempt when retried. So this is a race, not a defect - but it is one a user would
+#: hit, so it is retried on a BOUNDED budget (2 s) rather than either ignored or waited on forever.
+_SWAP_ATTEMPTS = 10
+_SWAP_BACKOFF_SEC = 0.2
+
+
+def _rename_retrying(src: Path, dst: Path) -> None:
+    """Rename, retrying a transient Windows lock on a bounded budget before giving up."""
+    for attempt in range(1, _SWAP_ATTEMPTS + 1):
+        try:
+            src.rename(dst)
+            return
+        except PermissionError:
+            if attempt == _SWAP_ATTEMPTS:
+                raise
+            time.sleep(_SWAP_BACKOFF_SEC)
+
+
+def _assemble_unit(  # pylint: disable=too-many-locals
+    bundle: Path, unit: str, dest: Path, *, oracle_dir: Path | None, assets_dir: Path | None
+) -> dict[str, Any]:
+    """Build one unit's package into ``dest``, which is always a fresh, empty directory."""
     engine_report = read_json(bundle / "report.json")
     workbooks, datasources = engine_unit_names(engine_report)
-    dest = out_root / unit
     dest.mkdir(parents=True, exist_ok=True)
     notes: list[str] = []
 
@@ -952,7 +1062,7 @@ def package_unit(  # pylint: disable=too-many-locals
         write_json(dest / "engine-output-receipt.json", receipt)
 
     identity = workbook_identity(entries, asset)
-    oracle = _attach_oracle(oracle_dir, identity, dest)
+    oracle = _attach_oracle(oracle_dir, identity, dest, unit)
     spec, spec_note = _write_spec(asset, dest)
     if spec_note:
         notes.append(spec_note)
