@@ -172,9 +172,10 @@ Paste this into the implementation brief **before coding**:
 > 3. **Independent oracle:** For each verdict, name evidence not produced by the code under test and
 >    one positive plus one negative control. A proof must fail on its intended assertion; a non-zero
 >    process alone is not a kill.
-> 4. **Budgets:** Product budget: ___ files / ___ hours. Proof budget: ___ files / ___ hours. Exceeding
->    either requires splitting the PR. Missing proof may remain in this PR only when it could hide a
->    fail-open, security, or data-loss defect.
+> 4. **Proof escalation:** Direct tests are the default. A new mutation runner, digest, census,
+>    anchor map, or pin requires: an observed/accepted need; named harm if the ordinary test is
+>    vacuous; a demonstrated mutation that the ordinary test misses; and why an existing harness or
+>    direct positive/negative control cannot close it. Otherwise do not add the mechanism.
 > 5. **Round route:** Round 1 reviews the invariant and enumerated surface. Round 2 checks regressions
 >    and whether the class is closed. After round 2, freeze scope: a new defect in the same class may
 >    be fixed; a new class or new proof mechanism forces simplify/delete/split/descope. Fail-open,
@@ -186,6 +187,52 @@ Traceability: line 2 addresses the 66% cross-PR recurrence; line 3 the 45 Q find
 64.2% proof footprint; line 5 preserves the useful direction rule without pretending two rounds
 erase 44 late blockers; line 6 addresses the measured contention/currency findings without blaming
 them for the whole spiral.
+
+## Follow-up at 2026-09-02 09:57Z: falsifying the proof-ratio hypothesis
+
+The reported totals could be reproduced only with a **two-dot** `origin/master..origin/<branch>`
+diff. On branches behind master that counts master-only changes as PR additions: tests were
+overstated by 102 (#431), 106 (#430), 102 (#414), and 118 (#412). Use GitHub or a three-dot diff.
+
+I classified by purpose: runtime plus normative docs are product; #430's fixtures are its
+deliverable; tests matching `mutat|digest|anchor|_pin|census|expected.json|verify_` are machinery.
+
+| PR | product | machinery | plain tests | all-test:product | machinery:product | machinery arrived |
+|---|---:|---:|---:|---:|---:|---|
+| #445 | 207 | 579 | 187 | 3.70x | 2.80x | inherited round 7 |
+| #448 | 66 | 280 | 75 | 5.38x | 4.24x | initial commit |
+| #431 | 1817 | 1079 | 2557 | 2.00x | 0.59x | 472 before R1; 607 net later |
+| #430 | 328 | 0 | 197 | 0.60x | 0 | direct fixture tests only |
+| #414 | 1580 | 424 | 2224 | 1.68x | 0.27x | first introduced after R2 |
+| #412 | 1015 | 382 | 1333 | 1.69x | 0.38x | late redesign; PR now closed |
+| **total** | **5013** | **2744** | **6573** | **1.86x** | **0.55x** | |
+
+The inversion is **partly real**, but “fixed cost per PR” is too strong. Absolute all-test volume
+scaled with product size (Pearson 0.971 / Spearman 0.829); machinery also rose (0.642 / 0.543).
+The ratio fell with size (Spearman -0.486), consistent with a setup floor plus proportional tests.
+#430's apparent 4.2x was mostly a stale-base diff and treating its deliverable fixtures as tests.
+
+Commit attribution makes machinery an **amplifier/symptom** in four of five machinery-bearing PRs:
+all #445 machinery was R7 work; #414/#412 started with none; 56% of #431's arrived after R1.
+#448 is the counterexample: 280 lines preceded review. #445/#448 are competing branches and both
+carry the same expected digest, so summing open PRs also double-counts alternatives.
+
+### Rule for when custom proof machinery is warranted
+
+The proposed “fail-open only; never docs, fixtures, or fail-closed” rule is **too narrow**. #414's
+destructive sync needs proof against deleting foreign files; #430's fixture-premise tests prevented
+false upstream claims; #448's caveat is the sole mitigation for a known false PASS. The deciding
+factor is the **consequence of vacuity**, not file type or the guard's nominal direction.
+
+Use custom machinery only when all four are true:
+
+1. **Need is real:** customer/repo reproduction, accepted requirement, or mandatory security/data-loss boundary. Speculative #412 fails here.
+2. **Vacuity has severe consequence:** false PASS, credential exposure, destructive action, data loss, or an irreversible wrong fix; a warning qualifies only as the sole mitigation.
+3. **Ordinary proof demonstrably fails:** show a mutation that passes direct positive/negative tests for the wrong reason before creating a runner/digest/census.
+4. **The mechanism has power over this claim:** #445/#448's estate digest has zero oracle records, so its roughly 200 lines cannot validate oracle identity and should be split or dropped.
+
+Docs, fixtures, and fail-closed/diagnostic changes default to direct tests, not zero tests. Machinery
+larger than the product change, or any new runner, is a **split/approval trigger**; record retirement.
 
 ## What could not be determined
 
