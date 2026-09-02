@@ -228,6 +228,52 @@ them. Re-dispatching blindly would have redone or overwritten ACMU's already-ver
   verified-good artifact — ACMU's fixes above were already confirmed live in Desktop; blindly
   re-dispatching that unit would have redone (and risked corrupting) work that was already done.
 
+### The review spiral, and the four lines in a brief that stop it
+
+Measured 2026-09-01/02 across eight PRs in one night: **six needed five or more blind-review rounds**,
+one needed nine. That is not thoroughness, it is a defect in the *brief*, and the numbers say where.
+
+**The evidence.** PR #428 shipped an **entry gate** — "before an agent starts, is there a reference
+image for every page?" — as **9,929 insertions, 4 new scripts and 9 new test modules**, over six
+rounds. PR #431 ("decouple the capture legs and expose the timeout") took **13 commits across 7
+rounds**, of which **three fix defects introduced by the fix itself** (`806614d` *"CI found silent
+corruption in my own round-3 fix"*; `2a2c8dc` *"the dialect control was version-asymmetric — it was
+the defect it guards"*).
+
+**The diagnosis, and it is not "the reviewers were too fussy".** Every round-3-and-later finding on
+that board collapses into **the same three questions**, asked in a new place each time:
+
+1. **Can the test reach the production code path?** (ten distinct vacuity modes catalogued here)
+2. **Does the guard cover the whole surface its name claims?**
+3. **Does the evidence prove what the verdict claims?**
+
+Because the *author* never answered them, the *reviewer* discovered them — which converts one pass of
+work into N serial round-trips. Worse, each round's fix was a **new mechanism** (a mutation harness,
+an anchor map, an identity abstraction, a lint rule quarantining a lossy comparison), and the next
+round then attacked *that*. Instruments needing instruments is the spiral; the product stopped being
+the subject around round three.
+
+**The fix is four lines in the brief, and they are cheap:**
+
+- **Make the author answer the three questions in the PR body, before requesting review.** This is the
+  single biggest lever, because it moves that work from serial to parallel. A brief that names the
+  *fix* but not the *class of defect to hunt* guarantees the reviewer finds the class instead.
+- **Bound the artifact, not just the behaviour.** State a budget — *"no new script, at most one new
+  test module"* — and require a PR-body justification to exceed it. #428 had no budget and grew four
+  scripts. A gate is not a framework.
+- **Cap the rounds explicitly: two, then ship what is correct and file the residual.** With no bound
+  the process runs until the reviewer runs out of ideas, and a good reviewer never does. Route the
+  residual by direction, which is the criterion that actually decides shipping: a **fail-closed**
+  defect (blocks work that should proceed) is an issue; a **fail-open** one (passes work that should
+  be blocked) is a merge-blocker. Those are not symmetric and must not be weighed as if they were.
+- **Separate "is it correct" from "is it *provably* correct".** Much of the late-round work is proof
+  machinery, not product. Time-box it separately, and skip it outright for low-risk changes.
+
+⚠️ **Do not read this as "review less".** Blind review caught real, working reproductions on every one
+of these PRs, including three defects the fix itself introduced. The waste is not the reviewing — it
+is *discovering in review what the author could have answered in one pass*, and then growing a
+mechanism per finding.
+
 ## Desktop concurrency budget: RAM, not addressability
 
 The shared cleanup rule below is still true: concurrent Power BI Desktop instances are addressable
