@@ -117,6 +117,12 @@ def run_matrix(name: str, code: str) -> tuple[frozenset[str], str]:
         outcomes_file.unlink(missing_ok=True)
         raise SystemExit(f"{name}: the mutation never applied - the harness would report a FALSE verdict")
     outcomes = mh.read_outcomes(outcomes_file)
+    # ⚠️ The record is the view from INSIDE the session; the return code is the view from outside,
+    # and `session_is_trustworthy` requires BOTH. Omitting it made the predicate always reject, so a
+    # clean matrix run with no failures was reported as "pytest never reached a verdict" -- SURVIVED
+    # was unreachable through this path and a cosmetic scanner mutation could not be told from a
+    # broken one. That is round 3's collapse again: two different states arriving at one output.
+    outcomes["process_returncode"] = proc.returncode
     outcomes_file.unlink(missing_ok=True)
     if not mh.session_is_trustworthy(outcomes) and not mh.observed_mutation(outcomes):
         raise SystemExit(f"{name}: pytest never reached a verdict over the matrix")
@@ -490,8 +496,23 @@ CENSUS_MUTATIONS.update(
         "console-gate-drops-argparse-help",
     }
 )
+# ⚠️ The two MATRIX controls, and they are why the SURVIVED branch is now proved rather than merely
+# repaired. `cosmetic-console-gate-no-op` reassigns a constant to itself: a complete, clean matrix run
+# that reddens NOTHING. It reported "pytest never reached a verdict" before the `process_returncode`
+# fix, which is how an unreachable branch hides. `absent-anchor-matrix-stale` targets text that is not
+# in the module, so it must be INVALID -- distinct from SURVIVED, which is the whole point.
+MUTATIONS["cosmetic-console-gate-no-op"] = (
+    "\nimport console_safety\nconsole_safety.RUNTIME_WRITES = console_safety.RUNTIME_WRITES\n"
+)
+MUTATIONS["absent-anchor-matrix-stale"] = (
+    "\nimport console_safety\nassert 'this text is not in console_safety' in console_safety.__doc__, 'anchor stale'\n"
+)
+CENSUS_MUTATIONS.update({"cosmetic-console-gate-no-op", "absent-anchor-matrix-stale"})
+
 EXPECTED_FAILURES.update(
     {
+        "cosmetic-console-gate-no-op": frozenset(),
+        "absent-anchor-matrix-stale": frozenset(),
         "console-gate-drops-argparse-description": frozenset(
             ["test_the_console_gate_catches_every_shape_it_claims[argparse-desc]"]
         ),
@@ -532,24 +553,11 @@ EXPECTED_FAILURES.update(
 )
 # ⚠️ Scanner mutations declare a SET and are removed from INTENDED, so each has exactly one
 # declaration. Two sources of truth for the same expectation is how they drift.
-for _name in EXPECTED_FAILURES:
-    INTENDED.pop(_name, None)
-
-INTENDED.update(
-    {
-        "console-gate-drops-print": "tests/test_tableau_luid_census.py::test_the_console_gate_catches_every_shape_it_claims[print-positional]",
-        "console-gate-drops-systemexit": "tests/test_tableau_luid_census.py::test_the_console_gate_catches_every_shape_it_claims[systemexit-positional]",
-        "console-gate-drops-logging-methods": "tests/test_tableau_luid_census.py::test_the_console_gate_catches_every_shape_it_claims[logging-positional]",
-        "console-gate-drops-the-log-method": "tests/test_tableau_luid_census.py::test_the_console_gate_catches_every_shape_it_claims[logging-log-method]",
-        "console-gate-drops-print-end": "tests/test_tableau_luid_census.py::test_the_console_gate_catches_every_shape_it_claims[print-end]",
-        "console-gate-drops-print-sep": "tests/test_tableau_luid_census.py::test_the_console_gate_catches_every_shape_it_claims[print-sep]",
-        "console-gate-drops-logging-msg-keyword": "tests/test_tableau_luid_census.py::test_the_console_gate_catches_every_shape_it_claims[logging-msg-keyword]",
-        "console-gate-drops-argparse-description": "tests/test_tableau_luid_census.py::test_the_console_gate_catches_every_shape_it_claims[argparse-desc]",
-        "console-gate-drops-argparse-help": "tests/test_tableau_luid_census.py::test_the_console_gate_catches_every_shape_it_claims[argparse-help]",
-        "console-gate-drops-argparse-epilog": "tests/test_tableau_luid_census.py::test_the_console_gate_catches_every_shape_it_claims[argparse-epilog]",
-        "console-gate-flags-prose-too": "tests/test_tableau_luid_census.py::test_the_console_gate_leaves_prose_alone",
-    }
-)
+# ⚠️ Scanner mutations declare a SET in EXPECTED_FAILURES and MUST NOT also appear in INTENDED.
+# They did: the removal loop that used to sit here ran BEFORE the `INTENDED.update(...)` that
+# re-added all eleven, and the campaign stayed green only because the matrix branch is consulted
+# first and masked them. A declaration that is never read is not a second opinion, it is a
+# second SOURCE, and `_assert_one_declaration_each` now refuses to run rather than reconcile.
 
 INTENDED.update(
     {
@@ -601,8 +609,25 @@ CENSUS_MUTATIONS.update(
 )
 
 
+def _assert_one_declaration_each() -> None:
+    """⚠️ Refuse to run if any mutation declares its expectation twice.
+
+    Deleting the duplicate entries is not the durable half -- this is. The next append to `INTENDED`
+    would silently reintroduce the overlap, and it would go unnoticed for exactly the same reason it
+    did the first time: `EXPECTED_FAILURES` is consulted first, so the stale entry is masked rather
+    than contradicted. Checked at RUN time, not import time, so no declaration order can defeat it.
+    """
+    overlap = sorted(set(EXPECTED_FAILURES) & set(INTENDED))
+    if overlap:
+        raise SystemExit(
+            "these mutations declare their expectation TWICE, in EXPECTED_FAILURES and in INTENDED; "
+            f"keep one: {overlap}"
+        )
+
+
 def main(argv: list[str]) -> int:
     """Run the campaign. Exit 0 only when every mutation lands on its EXPECTED verdict."""
+    _assert_one_declaration_each()
     wanted = argv or list(MUTATIONS)
     for suite in (TARGET, CENSUS_TARGET):
         baseline = mh.subprocess.run(
@@ -634,16 +659,22 @@ def main(argv: list[str]) -> int:
             else:
                 label = name
                 if observed == expected:
-                    verdict = "CAUGHT  "
+                    # ⚠️ An EMPTY declared set is the cosmetic control: reddening nothing is the
+                    # correct outcome, and it must read SURVIVED rather than CAUGHT-of-nothing.
+                    verdict = "CAUGHT  " if expected else "SURVIVED"
                     detail = f"exactly {len(expected)} declared node(s)"
                 elif observed:
                     verdict = "MIS-SCOPED"
                     detail = f"expected {sorted(expected)}, reddened {sorted(observed)}"
                 else:
                     verdict = "SURVIVED"
+                    detail = f"reddened nothing; expected {sorted(expected)}"
             count += 1
-            if verdict.strip() != "CAUGHT":
-                bad.append(f"{name}: expected CAUGHT over its declared set, got {verdict.strip()} -- {detail}")
+            expect = "SURVIVED" if name.startswith("cosmetic-") else "CAUGHT"
+            if name.startswith("absent-anchor-"):
+                expect = "INVALID"
+            if not verdict.strip().startswith(expect):
+                bad.append(f"{name}: expected {expect} over its declared set, got {verdict.strip()} -- {detail}")
             print(f"{verdict}  {label:42s} -> {detail}")
             continue
 
