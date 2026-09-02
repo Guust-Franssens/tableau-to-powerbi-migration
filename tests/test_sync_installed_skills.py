@@ -1956,3 +1956,68 @@ def test_a_marker_naming_a_JUNCTION_out_of_the_plugin_is_refused(
     assert (outside / "keep.txt").exists(), "a link out of the plugin must not carry a delete with it"
     assert (outside / "keep.txt").read_text(encoding="utf-8") == "not ours\n"
     assert code == sync.EXIT_UNSAFE_MARKER
+
+
+def _junction(link: Path, target: Path) -> bool:
+    """Create a directory junction, or report that this platform cannot."""
+    if os.name != "nt":
+        return False
+    try:
+        made = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)], capture_output=True, text=True, check=False
+        )
+    except OSError:
+        return False
+    return made.returncode == 0 and link.exists()
+
+
+def test_a_marker_naming_a_junction_to_a_SIBLING_bundle_is_refused(
+    estate: Estate, capsys: pytest.CaptureFixture
+) -> None:
+    """The alias that passes every rule - and that RESOLUTION itself used to deliver.
+
+    An exact-named junction to another direct child satisfies all of them: its name is really in
+    `iterdir()`, and its resolved parent is still `skills/`. `marker_bundle_target` then returned
+    the resolved SIBLING, so `_apply` deleted the sibling and reported `status: updated`, exit 0.
+    The outward-junction test cannot see this: that one escapes the directory, this one does not.
+
+    Two rules now stop it, and both are checked here by their effect: the entry must resolve to
+    ITSELF, and a reparse point is not a directory this tool installed. The delete uses the literal
+    validated child, so resolution is no longer in the deletion path at all.
+    """
+    assert _run(estate) == sync.EXIT_OK
+    capsys.readouterr()
+    foreign = estate.plugin / "skills" / "foreign-bundle"
+    foreign.mkdir(parents=True)
+    (foreign / "keep.txt").write_text("not ours to delete\n", encoding="utf-8")
+    if not _junction(estate.plugin / "skills" / "alias-bundle", foreign):
+        pytest.skip("this platform cannot create a junction")
+    _stamp(estate, ["alias-bundle"])
+    _make_stale(estate)
+
+    code = _run(estate)
+    capsys.readouterr()
+
+    assert (foreign / "keep.txt").exists(), "a junction to a SIBLING must not delete the sibling"
+    assert (foreign / "keep.txt").read_text(encoding="utf-8") == "not ours to delete\n"
+    assert code == sync.EXIT_UNSAFE_MARKER
+
+
+def test_an_already_absent_bundle_is_still_retirable(estate: Estate, capsys: pytest.CaptureFixture) -> None:
+    """The control the link rule could easily have broken: `lstat` on a missing name raises.
+
+    Failing closed on any OSError would have refused every already-absent retirement - the exact
+    case round-3 finding 1 exists for. FileNotFoundError therefore means "nothing there", not
+    "cannot tell", and only the latter refuses.
+    """
+    assert _run(estate) == sync.EXIT_OK
+    capsys.readouterr()
+    retired = BUNDLES[-1]
+    _retire_a_bundle(estate, retired)
+    shutil.rmtree(estate.plugin / "skills" / retired)
+
+    assert _run(estate, "--check") == sync.EXIT_DRIFT
+    assert _run(estate) == sync.EXIT_OK
+    capsys.readouterr()
+    recorded = json.loads((estate.plugin / sync.OWNER_MARKER_NAME).read_text(encoding="utf-8"))["bundles"]
+    assert retired not in recorded

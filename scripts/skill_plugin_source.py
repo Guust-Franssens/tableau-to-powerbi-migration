@@ -38,6 +38,7 @@ import argparse
 import json
 import os
 import re
+import stat
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -193,8 +194,10 @@ def marker_bundle_problems(names: object, skills_dir: Path) -> list[str]:
     unchanged when nothing is there), so resolution alone cannot be the test.
 
     So an entry that names something on disk must equal the REAL directory entry exactly, compared
-    against the actual listing rather than against anything derived from the string itself; and the
-    caller deletes the RESOLVED path (`marker_bundle_target`), never `skills_dir / raw`.
+    against the actual listing rather than against anything derived from the string itself; it must
+    resolve to ITSELF rather than to a link's target; and the caller deletes the LITERAL validated
+    child (`marker_bundle_target`), never the resolved path - resolving is how a sibling junction
+    turned into a delete of the sibling.
 
     The caller must refuse the WHOLE marker on any problem: a marker that lies about one name is
     not evidence for the others.
@@ -235,8 +238,18 @@ def marker_bundle_problems(names: object, skills_dir: Path) -> list[str]:
             # closed, but "cannot assess" must still arrive as an ANSWER.
             problems.append(f"{entry!r} could not be inspected under {skills_dir}: {exc}")
             continue
-        if resolved.parent != parent:
-            problems.append(f"{entry!r} resolves outside {skills_dir} (to {resolved})")
+        if resolved != parent / entry:
+            problems.append(
+                f"{entry!r} does not name ITSELF: it resolves to {resolved}. A junction or symlink whose target "
+                "is another bundle passes every other rule - its name is in the listing and its resolved parent "
+                "is still this directory - and deleting what it resolves to destroys the sibling"
+            )
+            continue
+        if _is_link(skills_dir / entry):
+            problems.append(
+                f"{entry!r} is a link or reparse point, not a directory this tool installed; a record may only "
+                "own a real bundle directory"
+            )
             continue
         if names_something and entry not in actual:
             problems.append(
@@ -246,17 +259,48 @@ def marker_bundle_problems(names: object, skills_dir: Path) -> list[str]:
     return problems
 
 
-def marker_bundle_target(skills_dir: Path, name: str) -> Path:
-    """The one path a recorded bundle name may name: RESOLVED and re-validated, never `dir / raw`.
+def _is_link(path: Path) -> bool:
+    """Whether `path` is a symlink or any other reparse point - failing CLOSED if it cannot be told.
 
-    Deleting `skills_dir / name` would delete whatever the OS decides that string means, which is
-    the alias hole above. Callers delete THIS path, and re-validating here rather than trusting the
-    planning-time check means a marker that became unsafe in between cannot slip through.
+    `Path.is_symlink()` is not enough on Windows: measured, a JUNCTION reports `is_symlink() False`
+    and `S_ISLNK False`, and is only visible as `FILE_ATTRIBUTE_REPARSE_POINT` in
+    `st_file_attributes`. A junction is exactly what round-5 review used to aim a delete at a
+    sibling bundle, so "is this entry really a directory, or a pointer at one" has to be asked
+    directly rather than inferred from the name.
+    """
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        # Nothing there at all. That is the ALREADY-ABSENT retirement case round-3 finding 1
+        # depends on, so it must not be refused here; the other rules judge the name itself.
+        return False
+    except OSError:
+        return True
+    if stat.S_ISLNK(info.st_mode):
+        return True
+    return bool(getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def marker_bundle_target(skills_dir: Path, name: str) -> Path:
+    """The one path a recorded bundle name may name: the LITERAL validated child.
+
+    ⚠️ This used to return `(skills_dir / name).resolve()`, and round-4 review was right that the
+    raw string must not reach the filesystem - but resolving was the wrong way to achieve it, and
+    round-5 review measured why. An exact-named junction to a SIBLING satisfies every other rule:
+    its name is in `iterdir()`, and its resolved parent is still `skills/`. Resolution then handed
+    the delete the sibling's path, and `sync.main` reported `status: updated`, exit 0, having
+    removed `foreign-bundle` entirely. Defence in depth had become the delivery mechanism.
+
+    So the name is validated - it must BE the on-disk entry, and must name ITSELF rather than a
+    link's target - and then the LITERAL child is what gets deleted. Once the entry is proven to be
+    the directory it spells, `skills_dir / name` is unambiguous, which is what makes not resolving
+    safe here. Re-validating rather than trusting the planning-time check keeps a marker that
+    became unsafe in between from slipping through.
     """
     problems = marker_bundle_problems([name], skills_dir)
     if problems:
         raise ValueError("; ".join(problems))
-    return (skills_dir / name).resolve()
+    return skills_dir / name
 
 
 def write_owner_marker(plugin_root: Path, **fields: object) -> Path:

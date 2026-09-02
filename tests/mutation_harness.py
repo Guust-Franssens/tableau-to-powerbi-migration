@@ -224,8 +224,11 @@ def guess(repo):
     try:
         return _orig(repo)
     except sync.UnverifiedDefaultError:
-        # Finding 2: the ordered fallback to likely branch names.
-        return "refs/remotes/origin/master", "recorded", "guessed"
+        # Finding 2: the ordered fallback to likely branch names. Four elements, matching the
+        # tuple production returns since the advertised COMMIT was added - the three-element
+        # version raised ValueError before any assertion ran and was scored CAUGHT for a
+        # defect it never restored (round-5 finding 2).
+        return "refs/remotes/origin/master", "recorded", "guessed", None
 sync._advertised_default = guess
 """,
     "skillsync-never-ask-the-remote": """
@@ -546,6 +549,7 @@ _RECORD = {{
     "runtest_loop_completed": False,
     "runtest_loop_exception": None,
     "synthetic_failed": [],
+    "failure_reasons": [],
 }}
 
 
@@ -569,6 +573,12 @@ def pytest_runtest_logreport(report):
     if report.when in ("call", "setup", "teardown"):
         name = report.nodeid.split("::")[-1]
         _RECORD["call_failed" if report.when == "call" else "setup_failed"].append(name)
+        # The REASON, not merely the location. A mutation can die at exactly the right test and
+        # still never restore its defect -- measured twice on this branch, both times a stale
+        # monkeypatch signature raising TypeError/ValueError before the assertion ran. Location
+        # is checkable by eye; the reason is what scales to a whole campaign.
+        crash = getattr(getattr(report, "longrepr", None), "reprcrash", None)
+        _RECORD["failure_reasons"].append(getattr(crash, "message", "") or "unknown")
     else:
         _RECORD["synthetic_failed"].append(f"{{report.nodeid}}::{{report.when}}")
     _flush()
@@ -744,6 +754,7 @@ def read_outcomes(path: Path) -> dict:
         "runtest_loop_completed": False,
         "runtest_loop_exception": None,
         "synthetic_failed": [],
+        "failure_reasons": [],
         "recorded": False,
     }
     try:
@@ -752,6 +763,27 @@ def read_outcomes(path: Path) -> dict:
         return empty
     loaded["recorded"] = True
     return loaded
+
+
+def failed_on_an_assertion(outcomes: dict) -> bool:
+    """Whether every recorded failure was an ASSERTION rather than an incidental exception.
+
+    Round-5 review's lesson, made mechanical. A mutation credited to exactly the right test can
+    still die on a `TypeError`/`ValueError` raised by a stale monkeypatch signature, restoring no
+    defect at all - measured twice on this branch, and the second one was found by the reviewer
+    after I had checked only the failure's LOCATION. Location is checkable by eye; the reason is
+    what scales to a whole campaign, so it is recorded and asserted rather than read.
+
+    A skipped/absent reason list is not evidence of an assertion, so it answers False.
+    """
+    reasons = outcomes.get("failure_reasons") or []
+    return bool(reasons) and all(reason.startswith(("AssertionError", "Failed")) for reason in reasons)
+
+
+def first_reason(outcomes: dict) -> str:
+    """The first recorded failure reason, for reporting."""
+    reasons = outcomes.get("failure_reasons") or []
+    return reasons[0].splitlines()[0][:90] if reasons else "(no reason recorded)"
 
 
 def observed_mutation(outcomes: dict) -> bool:
@@ -925,7 +957,7 @@ def main() -> int:
             print(f"  {item}")
         return 2
     print()
-    survivors, harness_errors = [], []
+    survivors, harness_errors, suspect = [], [], []
     for name, code in MUTATIONS.items():
         if name.startswith("mock-"):
             target = "tests/test_mock_fabric.py"
@@ -942,6 +974,10 @@ def main() -> int:
             # Detection is durable. A real call-phase failure noticed the mutation even if the
             # session later fell over; only a synthetic `node_down` record is excluded.
             verdict = "CAUGHT  " if outcomes["call_failed"] else "CAUGHT* "
+            if not failed_on_an_assertion(outcomes):
+                # Right place, wrong reason: an incidental exception restores no defect.
+                verdict = "SUSPECT "
+                suspect.append(f"{label} ({first_reason(outcomes)})")
             if session_ended_abnormally(outcomes):
                 detail = f"{detail} [session ended abnormally: exit {rc}]"
         elif session_is_trustworthy(outcomes):
@@ -955,12 +991,18 @@ def main() -> int:
     print()
     print("survivors (holes in the suite):", survivors or "none")
     print("CAUGHT* = a named test ERRORED rather than asserting; weaker coverage, still observed")
+    if suspect:
+        # A mutation that dies on an incidental exception restores NO defect, so it is evidence
+        # of nothing even though something went red. It fails the run for the same reason a
+        # survivor does: the campaign's claim is not supported.
+        print("SUSPECT (right place, wrong reason - the mutation never restored its defect):")
+        for item in suspect:
+            print(f"  {item}")
     if harness_errors:
         print("HARNESS ERRORS (no verdict - pytest never ran the tests):")
         for item in harness_errors:
             print(f"  {item}")
-        return 2
-    return 0
+    return 2 if (harness_errors or suspect) else 0
 
 
 if __name__ == "__main__":
