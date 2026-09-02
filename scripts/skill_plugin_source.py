@@ -58,6 +58,13 @@ DEFAULT_INSTALL_HINT = (
 OWNER_MARKER_NAME = ".skill-sync-owner.json"
 OWNER_MARKER_SCHEMA = 1
 
+# Characters no bundle DIRECTORY may contain. Windows forbids them outright, and `:` is the one that
+# bites: NTFS reads `foreign::$DATA` as alternate-data-stream syntax, so it is a real path to a real
+# directory whose mere `exists()` raises PermissionError. Deliberately stricter than POSIX allows -
+# this record is copied between machines that must all read it the same way, and no bundle this repo
+# ships could ever want one.
+_RESERVED_CHARS = frozenset('<>:"|?*') | frozenset(chr(code) for code in range(32))
+
 # The Copilot CLI writes its own config as JSONC. Measured on a real machine, `~/.copilot/config.json`
 # OPENS with `// User settings belong in settings.json`, so `json.loads` raises on the first
 # character and the `identity`-by-REGISTRY proof - the one that is supposed to survive a rename the
@@ -195,8 +202,11 @@ def marker_bundle_problems(names: object, skills_dir: Path) -> list[str]:
     if not isinstance(names, list):
         return [f"`bundles` must be a list, not {type(names).__name__}"]
     problems: list[str] = []
-    parent = skills_dir.resolve()
-    actual = {child.name for child in skills_dir.iterdir()} if skills_dir.is_dir() else set()
+    try:
+        parent = skills_dir.resolve()
+        actual = {child.name for child in skills_dir.iterdir()} if skills_dir.is_dir() else set()
+    except (OSError, ValueError) as exc:
+        return [f"{skills_dir} could not be listed, so no recorded name can be checked against it: {exc}"]
     for entry in names:
         if not isinstance(entry, str) or not entry.strip():
             problems.append(f"{entry!r} is not a non-empty string")
@@ -208,15 +218,27 @@ def marker_bundle_problems(names: object, skills_dir: Path) -> list[str]:
         if entry != entry.strip() or entry.endswith("."):
             problems.append(f"{entry!r} has leading/trailing whitespace or a trailing dot, which Windows strips")
             continue
+        if set(entry) & _RESERVED_CHARS:
+            problems.append(
+                f"{entry!r} contains a character no bundle directory may hold; NTFS reads `name::$DATA` as "
+                "stream syntax, and merely asking whether it EXISTS raises PermissionError"
+            )
+            continue
         try:
             resolved = (skills_dir / entry).resolve()
-        except (OSError, ValueError):  # pragma: no cover - only on a path the OS rejects outright
-            problems.append(f"{entry!r} could not be resolved under {skills_dir}")
+            names_something = (skills_dir / entry).exists()
+        except (OSError, ValueError) as exc:
+            # Both the resolution AND the existence probe are inside the guard. The probe used to
+            # sit outside it, so `foreign::$DATA` raised PermissionError past `UnsafeMarkerError`
+            # and the CLI exited 1 with a traceback and NO json verdict - preflight then saw
+            # "did not report" rather than the promised refusal (round-5 finding 2). It failed
+            # closed, but "cannot assess" must still arrive as an ANSWER.
+            problems.append(f"{entry!r} could not be inspected under {skills_dir}: {exc}")
             continue
         if resolved.parent != parent:
             problems.append(f"{entry!r} resolves outside {skills_dir} (to {resolved})")
             continue
-        if (skills_dir / entry).exists() and entry not in actual:
+        if names_something and entry not in actual:
             problems.append(
                 f"{entry!r} is not the on-disk name of what it points at ({resolved.name!r}); a record that "
                 "does not spell the directory it claims to have installed is not describing that directory"
@@ -277,6 +299,34 @@ def registry_identities(registry: Path) -> dict[Path, str]:
     return found
 
 
+def marker_is_usable(marker: dict | None, *, publish_repo: str, skills_dir: Path) -> bool:
+    """Whether this record may be ACTED ON at all - as ownership proof, or as an inventory.
+
+    ONE predicate for both consumers, deliberately. They had drifted: `_recorded_inventory` refused
+    to interpret an unknown `schema`, while `prove_ownership` accepted the very same file as proof
+    of the DESTINATION because its `publish_repo` matched. So an uninterpretable record still chose
+    which plugin got written to. Measured through public `sync.main` with a `schema: 99` marker
+    planted in an arbitrarily named foreign plugin: selected with proof `marker`, its `SKILL.md`
+    overwritten, its `private.txt` DELETED, the marker rewritten as schema 1, exit 0.
+
+    The lesson is structural, not local: a data file with two consumers needs one notion of
+    "usable", or fixing the consumer under review leaves the other one holding the door open.
+
+    Usable means all of: a JSON object; a `schema` this build knows; a `publish_repo` naming this
+    repo; and a `bundles` inventory that is a list of names safe to act on. An unusable record is
+    not evidence of anything - ownership must then come from `explicit`, the CLI registry, or a
+    known `<marketplace>/<plugin>` layout, none of which a dropped file can forge.
+    """
+    if not isinstance(marker, dict):
+        return False
+    if marker.get("schema") != OWNER_MARKER_SCHEMA:
+        return False
+    if not publish_repo or marker.get("publish_repo") != publish_repo:
+        return False
+    names = marker.get("bundles")
+    return isinstance(names, list) and not marker_bundle_problems(names, skills_dir)
+
+
 def prove_ownership(
     plugin_root: Path,
     *,
@@ -286,7 +336,7 @@ def prove_ownership(
 ) -> str | None:
     """Return the PROOF kind for `plugin_root`, or None when ownership cannot be established."""
     marker = read_owner_marker(plugin_root)
-    if marker and marker.get("publish_repo") == publish_repo:
+    if marker_is_usable(marker, publish_repo=publish_repo, skills_dir=_skills_dir(plugin_root)):
         return "marker"
     allowed = set(identities)
     registered = registry_map.get(plugin_root)

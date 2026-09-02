@@ -90,11 +90,11 @@ from pathlib import Path
 from skill_plugin_source import (
     DEFAULT_INSTALL_HINT,
     OWNER_MARKER_NAME,
-    OWNER_MARKER_SCHEMA,
     PLUGIN_ROOT_ENV,
     discover_skill_plugin,
     marker_bundle_problems,
     marker_bundle_target,
+    marker_is_usable,
     read_owner_marker,
     write_owner_marker,
 )
@@ -683,7 +683,7 @@ def _plan(args: argparse.Namespace, source: PublishSource, workdir: Path, fetch_
         publish_repo=identity.publish_repo,
     )
     marker = read_owner_marker(discovery.plugin_root)
-    recorded = _recorded_inventory(marker, discovery.skills_dir)
+    recorded = _recorded_inventory(marker, discovery.skills_dir, identity.publish_repo)
     formerly = sorted(name for name in set(recorded) - set(bundles))
     plan = SyncPlan(
         source=source,
@@ -722,7 +722,7 @@ def _plan(args: argparse.Namespace, source: PublishSource, workdir: Path, fetch_
     return plan
 
 
-def _recorded_inventory(marker: dict | None, skills_dir: Path | None) -> list[str]:
+def _recorded_inventory(marker: dict | None, skills_dir: Path | None, publish_repo: str) -> list[str]:
     """The bundles a previous publish recorded, or raise when acting on them would be unsafe.
 
     Every name here reaches a deletion. The old filter kept any `str`, which is not a safety
@@ -740,13 +740,16 @@ def _recorded_inventory(marker: dict | None, skills_dir: Path | None) -> list[st
     """
     if marker is None or skills_dir is None:
         return []
-    if marker.get("schema") != OWNER_MARKER_SCHEMA:
+    if not marker_is_usable(marker, publish_repo=publish_repo, skills_dir=skills_dir):
+        # Unusable is not the same as EMPTY, and the difference decides the exit code. A record
+        # whose entries could delete the wrong thing is a refusal (exit 8, loud); one this build
+        # merely cannot interpret - an unknown schema, another repo's marker - acts on nothing and
+        # is rewritten by the reconcile path. Both act on NOTHING; only one is an error.
+        problems = marker_bundle_problems(marker.get("bundles", []), skills_dir)
+        if problems:
+            raise UnsafeMarkerError("; ".join(problems))
         return []
-    names = marker.get("bundles", [])
-    problems = marker_bundle_problems(names, skills_dir)
-    if problems:
-        raise UnsafeMarkerError("; ".join(problems))
-    return [str(name) for name in names]
+    return [str(name) for name in marker["bundles"]]
 
 
 def _notes(plan: SyncPlan, unmerged: list[str], unmerged_error: str | None) -> list[str]:

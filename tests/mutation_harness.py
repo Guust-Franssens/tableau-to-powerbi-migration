@@ -445,6 +445,32 @@ def recorded(marker, skills_dir):
     return [str(name) for name in names]
 sync._recorded_inventory = recorded
 """,
+    "skillsync-marker-proves-ownership-without-schema": """
+import skill_plugin_source as sps
+_orig = sps.prove_ownership
+def prove(plugin_root, *, publish_repo, identities, registry_map):
+    # Round-5 finding 1: the marker's OTHER consumer. Accept it as proof of the destination on
+    # a matching publish_repo alone, exactly as before - so a record whose inventory this build
+    # refuses to interpret still chooses which plugin gets written to.
+    marker = sps.read_owner_marker(plugin_root)
+    if marker and marker.get("publish_repo") == publish_repo:
+        return "marker"
+    return _orig(plugin_root, publish_repo=publish_repo, identities=identities, registry_map=registry_map)
+sps.prove_ownership = prove
+""",
+    "skillsync-marker-existence-probed-outside-the-guard": """
+import skill_plugin_source as sps
+_orig = sps.marker_bundle_problems
+def problems(names, skills_dir):
+    # Round-5 finding 2: stat the entry BEFORE the guarded block, which is where the probe used
+    # to live. `foreign::$DATA` raises PermissionError past UnsafeMarkerError, so the CLI exits
+    # 1 with a traceback and no JSON verdict at all.
+    for entry in names if isinstance(names, list) else []:
+        if isinstance(entry, str):
+            (skills_dir / entry).exists()
+    return _orig(names, skills_dir)
+sps.marker_bundle_problems = problems
+""",
     "skillsync-preflight-passes-an-unsafe-marker": """
 from pathlib import Path
 import test_sync_installed_skills as suite

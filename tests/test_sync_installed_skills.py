@@ -1802,3 +1802,120 @@ def test_a_marker_naming_an_8_3_SHORT_NAME_alias_is_refused(estate: Estate, caps
 
     assert (foreign / "SKILL.md").is_file(), f"the 8.3 alias {alias!r} must not delete what it points at"
     assert code == sync.EXIT_UNSAFE_MARKER
+
+
+# --------------------------------------------------------------------------------------------
+# Round-5 finding 1 - the marker has TWO consumers, and only one of them was guarded.
+#
+# `_recorded_inventory` refused to interpret an unknown schema; `prove_ownership` accepted the
+# same file as proof of the DESTINATION because its publish_repo matched. Measured through
+# public `sync.main` with a `schema: 99` marker in an arbitrarily named foreign plugin:
+# selected with proof "marker", SKILL.md overwritten, private.txt DELETED, marker rewritten as
+# schema 1, exit 0.
+# --------------------------------------------------------------------------------------------
+
+
+def _plant_marker(plugin_root: Path, payload: dict) -> None:
+    """Write a raw marker document, bypassing `write_owner_marker`'s schema stamping."""
+    (plugin_root / sync.OWNER_MARKER_NAME).write_text(json.dumps(payload), encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"schema": 99, "publish_repo": build_plugin.PUBLISH_REPO, "bundles": []},
+        {"publish_repo": build_plugin.PUBLISH_REPO, "bundles": []},
+        {"schema": 1, "publish_repo": build_plugin.PUBLISH_REPO},
+        {"schema": 1, "publish_repo": build_plugin.PUBLISH_REPO, "bundles": "not-a-list"},
+    ],
+    ids=["unknown-schema", "no-schema", "no-bundles", "bundles-not-a-list"],
+)
+def test_an_unusable_marker_cannot_prove_the_DESTINATION(
+    estate: Estate, tmp_path: Path, payload: dict, capsys: pytest.CaptureFixture
+) -> None:
+    """A record this build cannot interpret must not choose which plugin gets written to."""
+    root = tmp_path / "installed-plugins"
+    theirs = _install(root, "someone-else", "their-plugin", FIRST_BUNDLE, "their own guidance\n")
+    (theirs / "private.txt").write_text("their data\n", encoding="utf-8")
+    _plant_marker(theirs.parent.parent, payload)
+    before = _snapshot(root)
+
+    code = sync.main(["--installed-plugins-root", str(root), "--json"])
+    verdict = json.loads(capsys.readouterr().out)
+
+    assert _snapshot(root) == before, "an unusable record must not select a destination, let alone write to it"
+    assert code == sync.EXIT_UNPROVEN_PLUGIN
+    assert verdict["status"] == "unproven_plugin"
+
+
+def test_a_marker_naming_ANOTHER_repo_cannot_prove_the_destination(
+    estate: Estate, tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """The pre-existing half of the same rule, kept honest by the shared predicate."""
+    root = tmp_path / "installed-plugins"
+    theirs = _install(root, "someone-else", "their-plugin", FIRST_BUNDLE, "their own guidance\n")
+    _plant_marker(theirs.parent.parent, {"schema": 1, "publish_repo": "https://example.invalid/other", "bundles": []})
+    before = _snapshot(root)
+
+    code = sync.main(["--installed-plugins-root", str(root), "--json"])
+
+    capsys.readouterr()
+    assert _snapshot(root) == before
+    assert code == sync.EXIT_UNPROVEN_PLUGIN
+
+
+def test_a_USABLE_marker_still_proves_ownership_of_an_unpredictable_directory(
+    estate: Estate, tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """The control: tightening the predicate must not disable the proof it exists to provide."""
+    root = tmp_path / "installed-plugins"
+    ours = _install(root, "unpredictable", "directory-name", FIRST_BUNDLE, "# stale\nold\n").parent.parent
+    write_owner_marker(ours, publish_repo=build_plugin.PUBLISH_REPO, bundles=[FIRST_BUNDLE])
+
+    code = sync.main(["--installed-plugins-root", str(root), "--json"])
+    verdict = json.loads(capsys.readouterr().out)
+
+    assert code == sync.EXIT_OK
+    assert verdict["proof"] == "marker"
+    assert _read_installed(ours) == f"# {FIRST_BUNDLE}\nmerged\n"
+
+
+# --------------------------------------------------------------------------------------------
+# Round-5 finding 2 - the existence probe sat OUTSIDE the guard.
+# --------------------------------------------------------------------------------------------
+
+
+def test_a_marker_using_NTFS_STREAM_syntax_ANSWERS_instead_of_crashing(
+    estate: Estate, capsys: pytest.CaptureFixture
+) -> None:
+    """`foreign::$DATA` is a real NTFS path whose mere `exists()` raises PermissionError.
+
+    That escaped `UnsafeMarkerError` and the CLI exited 1 with a traceback and an EMPTY stdout, so
+    preflight - which parses this JSON - saw "did not report" rather than the refusal it was
+    promised. It failed CLOSED, so this is not data loss; it is the cannot-assess-versus-answer
+    distinction. The verdict must PARSE, which a traceback cannot.
+    """
+    assert _run(estate) == sync.EXIT_OK
+    capsys.readouterr()
+    foreign = estate.plugin / "skills" / "foreign-bundle"
+    foreign.mkdir(parents=True)
+    (foreign / "SKILL.md").write_text("not ours to delete\n", encoding="utf-8")
+    _stamp(estate, ["foreign-bundle::$DATA"])
+    _make_stale(estate)
+
+    code = _run(estate, "--json")
+    out = capsys.readouterr().out
+
+    assert (foreign / "SKILL.md").is_file()
+    verdict = json.loads(out)
+    assert verdict["status"] == "unsafe_marker"
+    assert code == sync.EXIT_UNSAFE_MARKER
+
+
+def test_an_unlistable_skills_directory_is_refused_not_raised(estate: Estate, capsys: pytest.CaptureFixture) -> None:
+    """The same rule one level up: the LISTING the name is compared against can fail too."""
+    problems = sync.marker_bundle_problems([FIRST_BUNDLE], estate.plugin / "skills" / "no-such-dir" / "deeper")
+
+    assert problems == [] or "could not be listed" in problems[0] or "is not the on-disk name" in problems[0]
+    assert _run(estate) == sync.EXIT_OK
+    capsys.readouterr()
