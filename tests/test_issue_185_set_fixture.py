@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from parse_tableau import parse_workbook  # noqa: E402  (path insert must precede this import)
+from parse_tableau import parse_workbook  # noqa: E402  (path insert must precede this import)  # pylint: disable=wrong-import-position
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "issue-185-set-filter.twb"
 BAR_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "issue-185-bar-shelf-layout.twb"
@@ -181,8 +181,10 @@ def test_correct_predicate_finds_the_set():
 
 def test_the_class_set_predicate_finds_nothing():
     """Trap 1: there is no class='set' attribute in Tableau XML. This sweep returns a false zero."""
-    assert [g for g in _root().iter("group") if g.get("class") == "set"] == []
-    assert list(_root().iter("set")) == []
+    classed = [g for g in _root().iter("group") if g.get("class") == "set"]
+    assert not classed, classed
+    elements = list(_root().iter("set"))
+    assert not elements, elements
 
 
 def test_the_literal_set_name_predicate_finds_nothing():
@@ -192,4 +194,4 @@ def test_the_literal_set_name_predicate_finds_nothing():
     12 set-bearing workbooks were once counted as 4.
     """
     named = [g for g in _root().iter("group") if re.fullmatch(r"\[Set \d+\]", g.get("name") or "")]
-    assert named == []
+    assert not named, named

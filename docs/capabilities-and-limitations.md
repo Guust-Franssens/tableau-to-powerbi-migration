@@ -151,15 +151,32 @@ a single pass does.
   nested keys `{"Conditional": {"Cases": [...]}}`. Every count in this repo should name its positive
   control beside it, and a corpus too simple to exhibit the effect is a control failure too: our first
   "0 visuals under 20px tall" was measured on single-zone workbooks, and a real multi-zone dashboard
-  produced **14**, the smallest at **12.56px**.
-- **The PBIR height floor covers `slicer` and `textbox` only, so sub-renderable CHART visuals pass
-  validation silently.** Measured on engine 2.339.0 against the public `Airline Alliance Activity
-  Dashboard _ #VOTD.twbx`: `powerbi-report-author` 0.1.4 raised 6 errors, all
-  `PBIR_SLICER_HEIGHT_BELOW_FLOOR` / `PBIR_TEXTBOX_HEIGHT_BELOW_FLOOR` — while a **12.56px**
-  `clusteredColumnChart` (and 13 more chart visuals under 20px tall, 64 under the 76px slicer floor,
-  22 under 150px wide) raised **nothing**. So "validate passed" does not mean "the visuals can be
-  seen"; this is the concrete, named instance of the general rule that structural validation is
-  necessary but not sufficient. Reported upstream on
+  produced **14 in its `pbip/` tree** (9 in `reports/`), the smallest at **12.56px**. ⚠️ **Name the
+  tree with any bundle count** — `reports/` and `pbip/` hold different visual populations, so a count
+  without its tree is not reproducible.
+- **The PBIR height floor covers `slicer` and `textbox` only, so sub-renderable CHART visuals carry no
+  height diagnostic at all.** Measured on engine 2.339.0 against the public `Airline Alliance Activity
+  Dashboard _ #VOTD.twbx`, **in the `pbip/` tree** (⚠️ the tree is part of the measurement — the
+  pristine `reports/` tree holds 95 positioned visuals and 9 under 20px, because `image` visuals are
+  `pbip/`-only):
+
+  ```
+  pbip/  positioned visuals            111        <- positive control
+         under  20px tall               14        clusteredColumnChart 5 | image 5 | textbox 4
+         under  76px tall               64        clusteredColumnChart 26 | tableEx 17 | textbox 9
+                                                  | image 6 | slicer 6
+         under 150px wide               22        multiRowCard 9 | tableEx 6 | image 6
+                                                  | clusteredBarChart 1
+  powerbi-report-author 0.1.4          6 errors, 4 warnings
+         PBIR_SLICER_HEIGHT_BELOW_FLOOR   x6  (errors)
+         PBIR_TEXTBOX_HEIGHT_BELOW_FLOOR      (4 warnings)
+  ```
+
+  So of the 14 sub-20px visuals, the **4 textboxes DO get a height diagnostic** and the **5 charts
+  (12.56px, plus four at 14.0px) get none** — there is no chart-height rule. "Validate passed" does not
+  mean "the visuals can be seen", but the gap is specifically *chart* visuals, not visuals in general.
+  This is the concrete, named instance of the general rule that structural validation is necessary but
+  not sufficient. Reported upstream on
   [#186](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/186); related to
   [#180](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/180) (slicers regressed to 57/62px
   against a 76px floor).
