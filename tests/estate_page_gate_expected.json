@@ -1,21 +1,58 @@
 {
-  "sha256": "eef8b1121899da209c083217755a02fa023d8c41dd0ad00da28a57262e7fdf80",
+  "sha256": "0bc01927e88f53fff91d17eb8a30123a6f7473a6f7abbf02a7759e11ed67e480",
   "summary": {
     "blank_pages": 0,
     "contested_names": 0,
     "disagreements": [],
     "dispositions": {
-      "declared-by-engine-unsigned": 19,
+      "declared-by-engine-unsigned": 17,
       "no-source-content": 2,
       "unexplained": 2
     },
+    "oracle_layer": {
+      "dashboard_pages_satisfied": 36,
+      "evidence_by_kind": {
+        "dashboard": 60,
+        "worksheet": 300
+      },
+      "evidence_records": 360,
+      "evidence_unattributed_to_a_workbook": 360,
+      "evidence_untyped": 0,
+      "pages_blind": 60,
+      "pages_expected": 210,
+      "pages_ready": 150,
+      "synthetic_kindless_admitted": 0,
+      "synthetic_kindless_refused": true,
+      "worksheet_render_satisfying_a_dashboard_page": []
+    },
     "unaccounted_extra_pages": 0,
-    "units": 51,
+    "units": 41,
     "verdicts": {
-      "NOT_CHECKED": 7,
-      "PASS": 35,
+      "PASS": 32,
       "PRECONDITION_FAILED": 9
     }
   },
-  "unstaged": []
+  "unstaged": [
+    "Groups (no parsed spec)",
+    "Job_Performance (no parsed spec)",
+    "Meridian_Calc_Gauntlet__Live_Snowflake_ (no parsed spec)",
+    "Meridian_Custom_SQL_Databricks (no parsed spec)",
+    "Meridian_Custom_SQL_Snowflake (no parsed spec)",
+    "Meridian_Hostile_Identifiers__Live_Snowflake_ (no parsed spec)",
+    "Meridian_Sales__Live_Snowflake_ (no parsed spec)",
+    "Meridian_Sales__No_Embedded_Credentials_ (no parsed spec)",
+    "Meridian_Sales_RLS__Entitlement_Join_ (no parsed spec)",
+    "Meridian_Supply_Chain__Live_Snowflake_ (no parsed spec)",
+    "Meridian_Trips__Live_Databricks_ (no parsed spec)",
+    "Permissions (no parsed spec)",
+    "Seed_-_R_D_2 (no parsed spec)",
+    "Seed_-_R_D_3 (no parsed spec)",
+    "Site_Content (no parsed spec)",
+    "Subscriptions (no parsed spec)",
+    "Superstore_Datasource (no parsed spec)",
+    "Tokens (no parsed spec)",
+    "TS_Events (no parsed spec)",
+    "Viz_Load_Times (no parsed spec)",
+    "World_Indicators (no parsed spec)"
+  ]
 }

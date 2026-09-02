@@ -616,7 +616,7 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
         "DISCLOSURE: loose workbook attribution is no longer tracked, so its caveat never fires",
         "            loosely_attributed.append(record.workbook)",
         "            pass",
-        ["test_a_loosely_attributed_workbook_adds_its_own_caveat"],
+        ["test_a_loosely_attributed_workbook_carries_a_caveat_naming_it"],
     ),
     (
         "DISCLOSURE: the caveats never reach the rendered output",

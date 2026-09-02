@@ -3512,6 +3512,7 @@ def test_the_normalized_index_is_what_bindable_workbooks_consults(tmp_path: Path
     assert explanations["available"] is False
     assert explanations["unbound_workbooks"] == ["Book"]
 
+
 # --- known-gap disclosure (issue #450) ---------------------------------------------------------
 # ⚠️ What is left of the #438 disclosure after its KIND half was fixed. The two tests that pinned
 # the kind caveat are gone WITH that caveat - a disclosure outliving its gap manufactures doubt as
