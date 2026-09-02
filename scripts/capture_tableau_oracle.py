@@ -93,15 +93,16 @@ Two knobs and one guard rail come out of that:
   first one that fails for a reason the view controls stops the rest, and every salvage leg shares
   ONE budget of ``2 x --rest-timeout``.
 
-WARNING: the salvage bound is ``budget + at most one socket timeout``, and the qualifier is not
-hedging. A per-request timeout bounds one socket OPERATION, not a request: measured against a local
-server trickling one byte every 0.08s, ``timeout=0.1`` returned **HTTP 200 after 0.479s** -- 4.8x
-nominal, no error at any layer. A response that keeps trickling never times out, so a ceiling built
-on "one request cannot outlive its timeout" is not a ceiling. Salvage legs therefore carry an
-**end-to-end deadline** into the transport, which abandons a trickling body between chunk reads; the
-in-flight chunk cannot be interrupted, which is where the ``+ one socket timeout`` comes from. Other
-legs carry no deadline on purpose: the data leg streams a real export and must not be truncated for
-making slow progress.
+WARNING: the salvage bound is the shared admission budget plus a small settling margin, and the two
+things that make that true are BOTH necessary. A per-request timeout bounds one socket OPERATION, not
+a request: measured against a local server trickling one byte every 0.08s, ``timeout=0.1`` returned
+**HTTP 200 after 0.479s** -- 4.8x nominal, no error at any layer. And trickling HEADERS are worse,
+because they run before any body check exists: a 0.15s deadline returned after **1.378s**. So a
+salvage leg carries an absolute deadline into the transport that covers the WHOLE request -- a
+watchdog aborts the connection at that instant whatever phase it is in, and the body read checks the
+same clock between chunks. Other legs carry no deadline on purpose: the data leg streams a real
+export and must not be truncated for making slow progress. What is still NOT bounded is name
+resolution, which happens before a socket exists.
 
 WARNING: **A requested render leg now ALWAYS gets a record**, even when it is deliberately not attempted
 (``not_attempted``, or the data leg's own ``source_credential``). An absent key therefore means "not
@@ -716,24 +717,27 @@ def _capture_renders(
       twice over. The rules above bound *attempts*, not wall clock: three ``format_mismatch`` legs
       were each attempted with no cross-leg limit, **539.7 s against a stated 180 s bound**. A leg is
       now ADMITTED only while a whole request timeout still remains, AND carries that same instant
-      into the transport as an **end-to-end deadline** -- because admission alone bounds nothing when
-      one request is unbounded, and it is: a per-request timeout bounds one socket OPERATION, so a
-      trickling response never times out (measured, ``timeout=0.1`` returned **HTTP 200 after
-      0.479s**, 4.8x nominal).
+      into the transport as an **end-to-end deadline** covering the whole request -- because admission
+      alone bounds nothing when one request is unbounded, and it is: a per-request timeout bounds one
+      socket OPERATION, so neither a trickling body (**HTTP 200 after 0.479 s** on a 0.1 s timeout)
+      nor trickling HEADERS (**1.378 s** against a 0.15 s deadline) ever trip it.
 
-    So salvage costs at most ``SALVAGE_BUDGET_MULTIPLIER x`` the request timeout of admission **plus
-    at most one socket timeout** for the in-flight chunk, whatever the tier count -- one timeout in
-    practice, since reaching the second admission needs the first leg to fail almost instantly. The
-    ``+ one socket timeout`` is not hedging: a chunk read in progress cannot be interrupted.
+    So salvage costs at most ``SALVAGE_BUDGET_MULTIPLIER x`` the request timeout of admission plus a
+    small settling margin, whatever the tier count -- one timeout in practice, since reaching the
+    second admission needs the first leg to fail almost instantly. What remains unbounded is name
+    resolution, which happens before there is a socket to abort.
 
-    ⚠️ **Two earlier statements of this bound were wrong, differently, and both are worth keeping.**
-    A flat "one timeout" ignored that nothing capped the legs collectively and that a
+    ⚠️ **Three earlier statements of this bound were wrong, differently, and all three are worth
+    keeping.** A flat "one timeout" ignored that nothing capped the legs collectively and that a
     ``session_lost`` on a one-attempt leg triggered a full ``sign_in`` on the SESSION policy (now
     refused on the final attempt -- see :meth:`TableauSession.export`). A "hard 2x" rested on a
     ``urllib`` property that does not hold -- and the virtual-clock tests that "proved" it modelled
     every request as bounded by its nominal timeout, so the instrument shared the defect with the
-    thing it measured and structurally could not fail. ``tests/test_tableau_http_deadline.py`` uses a
-    real socket because of that, not in addition to it.
+    thing it measured and structurally could not fail. Then ``admission + one socket timeout`` was
+    still wrong, because the deadline covered only the BODY: every real-socket test sent its headers
+    instantly and trickled only the body, so the fixture could not reach the phase that was unbound.
+    The pattern each time was the same, and it is the question to ask of any bound here: **what can
+    the control not see?**
 
     ⚠️ ``source_credential`` and ``credential_reflected`` skip the renders ENTIRELY, and the skipped
     legs inherit the data leg's status rather than a failure of their own. A credential block is a

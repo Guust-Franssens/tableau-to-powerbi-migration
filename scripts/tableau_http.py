@@ -57,7 +57,9 @@ here; the type name beside it is Python's, never the server's, so it cannot be s
 from __future__ import annotations
 
 import http.client
+import socket
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -125,10 +127,21 @@ def _read_bounded(stream, deadline: float | None, timeout: float) -> bytes:
     Any ceiling built on "one request cannot outlive its timeout" is therefore not a ceiling.
 
     With ``deadline`` supplied this reads in chunks and checks the clock between them, so a trickling
-    body is abandoned instead of followed forever. The composition is what makes the bound real: each
-    individual ``read`` is bounded by the socket timeout, and the loop is bounded by the deadline, so
-    the total cannot exceed **deadline + one socket timeout** -- the in-flight chunk cannot be
-    interrupted, and pretending otherwise would be the same false precision this fixes.
+    body is abandoned instead of followed forever.
+
+    ⚠️ **This bounds the BODY, and that is not the same as bounding the request** -- a distinction
+    that cost a review round. Everything before the first body byte (connect, status line, headers,
+    redirects) happens inside ``_open``, and is bounded by :class:`_DeadlineHTTPConnection`'s
+    watchdog, not here. Read this docstring as the body half of a two-part mechanism; the request-level
+    claim lives on :func:`_request`.
+
+    Since the watchdog also aborts the socket at the same instant, this check is **defence in depth
+    rather than an independent bound** on a real connection: it is what turns an abandonment into a
+    diagnostic naming the deadline and the byte count instead of a bare ``ConnectionAbortedError``,
+    and it is the only mechanism when the stream is not a socket at all. It is pinned on its own
+    terms in ``tests/test_tableau_http_deadline.py`` with no socket in the fixture, because three
+    mutations aimed at it SURVIVED once the watchdog existed -- a guard implied by a stronger sibling
+    is unkillable, and this repository's rule is to pin such a guard independently or delete it.
 
     A body abandoned this way is NOT returned as a partial success: the ``TimeoutError`` raised here
     is an ``OSError``, so :func:`_request`'s existing handler turns it into
@@ -176,6 +189,137 @@ def _read_bounded(stream, deadline: float | None, timeout: float) -> bytes:
         chunks.append(chunk)
 
 
+class _DeadlineHTTPConnection(http.client.HTTPConnection):
+    """An HTTP connection whose socket is shut at an absolute deadline, whatever phase it is in.
+
+    ⚠️ This exists because ``_read_bounded`` bounds the BODY and the claim was about the REQUEST.
+    Everything before the first body byte -- DNS, connect, the status line, headers, redirects --
+    happened under the per-socket-operation timeout alone, and a server trickling its HEADERS one
+    byte at a time never trips that. Measured against a local server at one header byte per 0.02s
+    with a 0.05s socket timeout: a 0.15s deadline returned after **1.378s**, 6.9x the ceiling being
+    claimed. The eight real-socket tests could not see it, because every one of them sends headers
+    immediately and only trickles the body -- the fixture could not reach the phase that was unbound.
+
+    A watchdog rather than per-read timeout arithmetic, deliberately: ``http.client`` reads the status
+    line and headers through a buffered file object created by ``makefile``, so re-arming
+    ``settimeout`` per read would mean interposing on ``SocketIO`` and re-implementing its refcount
+    contract. Aborting the socket is one call, works identically in every phase, and surfaces as an
+    ``OSError`` that :func:`_request` already handles -- so an abandoned request is a transient
+    failure, never a partial success.
+
+    ⚠️ The deadline arrives as a CLASS attribute, set by :func:`_with_deadline`, rather than through
+    an ``__init__`` taking ``**kwargs``. That is not style: ``tests/test_diagnostic_redaction.py``
+    refuses ``*args``/``**kwargs`` in a guarded module because the taint analyser cannot follow them,
+    and it caught the first version of this class. Forwarding by naming every parameter of
+    ``HTTPConnection.__init__`` would duplicate a stdlib signature that varies by version; a
+    per-request subclass needs no signature at all.
+    """
+
+    _t2p_deadline: float | None = None
+    _t2p_timer: threading.Timer | None = None
+
+    def connect(self) -> None:
+        super().connect()
+        self._t2p_timer = _arm_watchdog(self.sock, self._t2p_deadline)
+
+    def close(self) -> None:
+        if self._t2p_timer is not None:
+            self._t2p_timer.cancel()
+            self._t2p_timer = None
+        super().close()
+
+
+class _DeadlineHTTPSConnection(_DeadlineHTTPConnection, http.client.HTTPSConnection):
+    """The TLS twin. The watchdog is armed after the handshake, on the wrapped SSL socket.
+
+    ⚠️ Base order is load-bearing and was wrong once. With ``(HTTPSConnection, _DeadlineHTTPConnection)``
+    the MRO finds ``HTTPSConnection.connect`` first, so the watchdog is never armed and every HTTPS
+    request -- which is every real Tableau request -- is silently unbounded while the loopback HTTP
+    tests pass. This order resolves ``connect`` to :class:`_DeadlineHTTPConnection`, whose
+    ``super().connect()`` IS ``HTTPSConnection.connect``, so TLS still happens and the watchdog arms
+    after it. ``test_the_https_twin_resolves_connect_to_the_watchdog`` pins the resolution, because no
+    fixture here can complete a TLS handshake.
+    """
+
+
+def _with_deadline(base: type, deadline: float) -> type:
+    """A one-off subclass of ``base`` carrying ``deadline``, so no constructor has to accept it."""
+    return type(f"_Deadlined{base.__name__}", (base,), {"_t2p_deadline": deadline})
+
+
+class _DeadlineHTTPHandler(urllib.request.HTTPHandler):
+    """Routes ``http://`` through :class:`_DeadlineHTTPConnection`, carrying the deadline."""
+
+    def __init__(self, deadline: float) -> None:
+        super().__init__()
+        self._deadline = deadline
+
+    def http_open(self, req):
+        return self.do_open(_with_deadline(_DeadlineHTTPConnection, self._deadline), req)
+
+
+class _DeadlineHTTPSHandler(urllib.request.HTTPSHandler):
+    """The ``https://`` twin. ``context`` is forwarded so certificate verification is unchanged."""
+
+    def __init__(self, deadline: float) -> None:
+        super().__init__()
+        self._deadline = deadline
+
+    def https_open(self, req):
+        return self.do_open(_with_deadline(_DeadlineHTTPSConnection, self._deadline), req, context=self._context)
+
+
+def _abort_socket(sock) -> None:
+    """Force a blocked read on ``sock`` to fail, from another thread.
+
+    ⚠️ ``close()`` alone is not enough on Windows, and that is measured rather than assumed: with
+    ``close`` the watchdog fired, the timer was armed, and the header read still ran to completion --
+    0.878s against a 0.15s deadline, with the eventual failure coming from the body check rather than
+    the watchdog. Closing a socket decrements a handle; it does not interrupt a peer-blocked ``recv``.
+    ``shutdown(SHUT_RDWR)`` tears down the connection in both directions and makes the pending read
+    return immediately, on Windows and POSIX alike.
+
+    Both calls are guarded: the socket may already be closed by the normal path, and a watchdog that
+    raised here would surface on a timer thread where nothing can catch it.
+    """
+    for call in (lambda: sock.shutdown(socket.SHUT_RDWR), sock.close):
+        try:
+            call()
+        except OSError:
+            pass
+
+
+def _arm_watchdog(sock, deadline: float | None) -> threading.Timer | None:
+    """Abort ``sock`` at ``deadline``. Returns the timer so the caller can cancel it."""
+    if deadline is None:
+        return None
+    timer = threading.Timer(max(deadline - time.monotonic(), 0.0), _abort_socket, args=(sock,))
+    timer.daemon = True
+    timer.start()
+    return timer
+
+
+def _open(req: urllib.request.Request, timeout: float, deadline: float | None):
+    """``urlopen``, or a deadline-bounded equivalent when one is asked for.
+
+    With no deadline this is byte-for-byte the previous behaviour, which is what keeps every other
+    caller -- the data leg above all -- streaming a slow but progressing export untouched.
+
+    With one, the request runs through an opener whose connections carry a watchdog, AND the socket
+    timeout is narrowed to whatever is left, so the connect phase cannot outlive the deadline either.
+    ``build_opener`` installs the same default handler chain ``urlopen`` uses, plus these two, so
+    redirect and proxy behaviour is unchanged; a redirect simply opens a new connection, which arms a
+    new watchdog against the SAME absolute instant.
+    """
+    if deadline is None:
+        return urllib.request.urlopen(req, timeout=timeout)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("the end-to-end deadline had already passed before the request was issued")
+    opener = urllib.request.build_opener(_DeadlineHTTPHandler(deadline), _DeadlineHTTPSHandler(deadline))
+    return opener.open(req, timeout=min(timeout, remaining))
+
+
 def _request(
     req: urllib.request.Request, *, timeout: float, redactor, deadline: float | None = None
 ) -> tuple[int, bytes, dict[str, str]]:
@@ -186,10 +330,16 @@ def _request(
     mid-stream, because a 503 whose body read timed out is still usefully a 503 and stays
     retry-eligible.
 
-    ``deadline`` is an absolute :func:`time.monotonic` instant, and is the only thing here that
-    bounds a request end to end -- ``timeout`` bounds one socket operation and nothing more (see
-    :func:`_read_bounded`). It is opt-in because a deadline is a caller's policy, not the transport's:
-    the data leg streams a real export and must not be truncated for making slow progress.
+    ``deadline`` is an absolute :func:`time.monotonic` instant and is the only thing here that bounds
+    a request END TO END. ``timeout`` bounds one socket operation and nothing more -- neither a
+    trickling body (:func:`_read_bounded`) nor trickling HEADERS (:class:`_DeadlineHTTPConnection`),
+    and both of those were measured outliving it. It is opt-in because a deadline is a caller's
+    policy, not the transport's: the data leg streams a real export and must not be truncated for
+    making slow progress.
+
+    ⚠️ What the deadline still does NOT bound, stated rather than implied: **name resolution**.
+    ``getaddrinfo`` runs inside ``connect`` before any socket exists to watchdog, and the OS resolver
+    ignores socket timeouts. A host that never resolves is bounded by the resolver, not by us.
 
     ``redactor`` is a **required** keyword, not an optional nicety: every caller either holds a
     credential or can be handed :func:`tableau_env.redact` itself, whose header rule scrubs a
@@ -205,17 +355,19 @@ def _request(
         It is read under the same deadline, because an ERROR body can trickle just as a success body
         can.
     ``OSError``
-        covers ``URLError`` and so DNS failure, refused connection and timeout -- and now the
-        deadline abandonment, which is a ``TimeoutError`` and therefore already handled here.
+        covers ``URLError`` and so DNS failure, refused connection and timeout -- and now both
+        deadline abandonments: the body check raises ``TimeoutError``, and the watchdog closes the
+        socket out from under an in-flight read, which surfaces as an ``OSError`` too.
     ``http.client.HTTPException``
         ⚠️ **not an OSError**, and the round-9 finding. ``BadStatusLine`` carries the server's raw
         status line and ``InvalidURL`` carries a redirect's host/port -- both fully server-controlled,
         both raised straight through ``urlopen``, and neither caught by
         ``except (OSError, urllib.error.URLError)``. ``RemoteDisconnected`` and ``IncompleteRead``
-        arrive here too.
+        arrive here too. ⚠️ A watchdog that fires mid-header also lands here, as ``BadStatusLine`` or
+        ``IncompleteRead`` -- which is why abandoning must be caught by BOTH clauses, not just OSError.
     """
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _open(req, timeout, deadline) as resp:
             return resp.status, _read_bounded(resp, deadline, timeout), dict(resp.headers)
     except urllib.error.HTTPError as exc:
         try:

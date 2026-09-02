@@ -151,9 +151,10 @@ SALVAGE_RETRY = RetryPolicy(max_attempts=1, budget_sec=0.0)
 # a sequence of fast failures still reaches every tier, while any leg that actually consumes a full
 # timeout leaves too little for a second. The ADMISSION ceiling is hard and independent of tier
 # count; the WALL-CLOCK ceiling is that plus one socket timeout, because each salvage leg also
-# carries this instant as an end-to-end deadline into the transport and the in-flight chunk read
-# cannot be interrupted. Admission alone would not bound wall clock at all: `urllib`'s timeout is
-# per socket OPERATION, so a trickling response outlives it indefinitely (measured, HTTP 200 at 4.8x).
+# carries this instant as an end-to-end deadline into the transport, where a watchdog aborts the
+# connection in ANY phase -- connect, status line, headers, body. Admission alone would not bound wall
+# clock at all: `urllib`'s timeout is per socket OPERATION, so neither a trickling body (HTTP 200 at
+# 4.8x) nor trickling headers (1.378s against a 0.15s deadline) ever trip it.
 SALVAGE_BUDGET_MULTIPLIER = 2.0
 
 

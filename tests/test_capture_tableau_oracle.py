@@ -17,9 +17,9 @@ The two rules the tests exist to pin:
 
 from __future__ import annotations
 
+import ast
 import inspect
 import json
-import re
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -391,32 +391,78 @@ def test_every_scripted_session_double_in_this_suite_accepts_every_pass_through_
     the PREVIOUS signature, so five ordinary-export tests died on ``unexpected keyword argument
     'api'`` -- invisible to a test selection made from the changed *source* files, because that
     double exercises the same class through a subclass in a differently-named module. The adapter set
-    is closed (all under ``tests/``), so updating them is right; this keeps it closed. Scoped to
-    ``def _request(self`` so module-level ``_request`` fakes for other scripts (``deploy_estate``,
-    ``verify_bindings``) are not swept up.
+    is closed (all under ``tests/``), so updating them is right; this keeps it closed.
 
     ⚠️ The keyword list is DERIVED from the real method, not hand-maintained. It was hand-maintained
     and named only ``api``; ``deadline`` was then added to the production signature and thirteen
-    doubles went stale at once, which this gate could not see because nobody remembered to add the
-    new name to it. A gate whose coverage depends on somebody remembering to widen it is the shape
-    this repository keeps paying for.
+    doubles went stale at once, which this gate could not see because nobody remembered to widen it.
+
+    ⚠️ And the comparison is by EXACT keyword-only NAME, parsed with ``ast`` -- not by substring, and
+    not by regex over the parameter text. Measured: a double declaring ``api_version=None`` and
+    ``deadline_seconds=None`` SATISFIED the substring form for both ``api`` and ``deadline``,
+    reporting nothing stale, while calling it with the production arguments raised
+    ``TypeError: unexpected keyword argument 'api'`` immediately. Deriving the right names and then
+    comparing them wrongly is the same shape as the defect it was written to catch: the guard names
+    the keyword and matches a prefix of it.
+
+    A double that takes ``**kwargs`` genuinely accepts everything, so it is exempt -- but only if it
+    really declares one, which the AST can tell and a regex cannot.
     """
     real = inspect.signature(oracle.TableauSession._request)  # pylint: disable=protected-access
-    expected = [
+    expected = {
         name
         for name, parameter in real.parameters.items()
         if parameter.kind is inspect.Parameter.KEYWORD_ONLY and parameter.default is not inspect.Parameter.empty
-    ]
+    }
     assert expected, "the real _request has no optional keywords, so this gate proves nothing"
+
     overrides = []
     for path in sorted(Path(__file__).resolve().parent.glob("test_*.py")):
-        for match in re.finditer(r"def _request\(\s*self\s*,([^)]*)\)", path.read_text(encoding="utf-8")):
-            overrides.append((path.name, match.group(1)))
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) or node.name != "_request":
+                continue
+            positional = [arg.arg for arg in node.args.posonlyargs + node.args.args]
+            if positional[:1] != ["self"]:
+                continue  # a module-level `_request` fake for another script, not a session double
+            accepted = {arg.arg for arg in node.args.kwonlyargs}
+            overrides.append((f"{path.name}:{node.lineno}", accepted, node.args.kwarg is not None))
+
     assert overrides, "the scan found no session doubles at all -- it has stopped testing anything"
     stale = [
-        f"{name} (missing {keyword!r})" for name, params in overrides for keyword in expected if keyword not in params
+        f"{where} (missing {sorted(expected - accepted)})"
+        for where, accepted, takes_kwargs in overrides
+        if not takes_kwargs and expected - accepted
     ]
     assert not stale, f"session double(s) missing a pass-through keyword, so every export through them raises: {stale}"
+
+
+def test_the_double_gate_rejects_a_merely_similar_keyword():
+    """Positive control for the exactness above, built from the reproduction that broke it.
+
+    ``api_version`` contains ``api``; ``deadline_seconds`` contains ``deadline``. Under the substring
+    comparison this double was reported clean. It must now be reported stale, and a ``**kwargs`` double
+    must still be accepted -- otherwise "exact" would just mean "stricter", and the exemption that
+    makes the gate usable would be gone.
+    """
+    similar = (
+        "class D:\n"
+        "    def _request(self, method, path, *, body=None, api_version=None, deadline_seconds=None):\n"
+        "        pass\n"
+    )
+    catchall = "class D:\n    def _request(self, method, path, *, body=None, **kwargs):\n        pass\n"
+
+    def accepted_by(source: str) -> tuple[set[str], bool]:
+        node = next(n for n in ast.walk(ast.parse(source)) if isinstance(n, ast.FunctionDef))
+        return {arg.arg for arg in node.args.kwonlyargs}, node.args.kwarg is not None
+
+    names, takes_kwargs = accepted_by(similar)
+    assert "api" not in names and "deadline" not in names, "the control no longer differs from the real names"
+    assert not takes_kwargs
+    assert "api_version" in names, "the control must actually declare the confusable name"
+
+    names, takes_kwargs = accepted_by(catchall)
+    assert takes_kwargs, "a **kwargs double must remain exempt, or the exemption is untested"
 
 
 # --------------------------------------------------------------------------- manifest contract

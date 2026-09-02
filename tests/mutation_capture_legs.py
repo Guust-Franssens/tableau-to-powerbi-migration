@@ -68,6 +68,7 @@ from mutation_harness import (  # noqa: E402  # pylint: disable=wrong-import-pos
 LEGS = "tests/test_capture_tableau_oracle_leg_decoupling.py"
 BATCH = "tests/test_group_oracle_multi_batch.py"
 SOCKET = "tests/test_tableau_http_deadline.py"
+ORACLE = "tests/test_capture_tableau_oracle.py"
 
 # name -> (the test NODE IDs that must observe it, the patch injected as a pytest plugin at startup)
 #
@@ -602,7 +603,7 @@ o._capture_render = render
 """,
     ),
     "deadline-checked-with-read-not-read1": (
-        ("tests/test_tableau_http_deadline.py::test_the_deadline_abandons_a_trickling_body",),
+        ("tests/test_tableau_http_deadline.py::test_read_bounded_abandons_a_stream_that_outlives_its_deadline",),
         """
 import tableau_http as h
 _orig = h._read_bounded
@@ -625,7 +626,7 @@ h._read_bounded = read_bounded
 """,
     ),
     "abandoned-body-returned-as-a-success": (
-        ("tests/test_tableau_http_deadline.py::test_an_abandoned_body_is_a_transient_failure_never_a_partial_success",),
+        ("tests/test_tableau_http_deadline.py::test_read_bounded_never_returns_a_partial_body",),
         """
 import tableau_http as h
 _orig = h._read_bounded
@@ -640,7 +641,7 @@ h._read_bounded = read_bounded
 """,
     ),
     "deadline-covers-only-the-success-path": (
-        ("tests/test_tableau_http_deadline.py::test_an_error_body_is_bounded_too",),
+        ("tests/test_tableau_http_deadline.py::test_the_error_body_path_is_bounded_without_any_socket",),
         """
 import tableau_http as h
 _orig = h._read_bounded
@@ -723,6 +724,75 @@ def load(dirs):
 g.load_batches = load
 """,
     ),
+    # ------------------------------------- review round 3: the whole request, and an exact keyword
+    "deadline-covers-only-the-body": (
+        ("tests/test_tableau_http_deadline.py::test_slow_HEADERS_are_bounded_by_the_deadline_too",),
+        """
+import urllib.request
+import tableau_http as h
+# Round 3's finding 1: enforce the deadline only AFTER urlopen() returns, so connection, status line
+# and headers run under the per-socket-operation timeout alone -- which a server trickling its
+# HEADERS never trips. Measured before the fix: 1.378s against a 0.20s ceiling.
+h._open = lambda req, timeout, deadline: urllib.request.urlopen(req, timeout=timeout)
+""",
+    ),
+    "watchdog-closes-instead-of-shutting-down": (
+        ("tests/test_tableau_http_deadline.py::test_slow_HEADERS_are_bounded_by_the_deadline_too",),
+        """
+import tableau_http as h
+# The subtler half, and it is platform behaviour rather than logic: `close()` decrements a handle and
+# does NOT interrupt a peer-blocked recv on Windows. Measured with close(): the timer fired, the
+# header read still ran to completion, 0.878s against a 0.15s deadline. Only shutdown(SHUT_RDWR)
+# tears the connection down in both directions.
+def abort(sock):
+    try:
+        sock.close()
+    except OSError:
+        pass
+h._abort_socket = abort
+""",
+    ),
+    "no-pre-request-deadline-check": (
+        ("tests/test_tableau_http_deadline.py::test_a_deadline_already_passed_never_opens_a_connection",),
+        """
+import urllib.request
+import tableau_http as h
+_orig = h._open
+def open_(req, timeout, deadline):
+    # Drop the "already spent" refusal, so a request with no budget left still opens a socket and
+    # does network work before being aborted.
+    if deadline is not None and deadline - h.time.monotonic() <= 0:
+        opener = urllib.request.build_opener(h._DeadlineHTTPHandler(deadline), h._DeadlineHTTPSHandler(deadline))
+        return opener.open(req, timeout=timeout)
+    return _orig(req, timeout, deadline)
+h._open = open_
+""",
+    ),
+    "a-deadline-on-every-request-lifecycle-too": (
+        ("tests/test_tableau_http_deadline.py::test_slow_headers_are_UNBOUNDED_without_the_deadline",),
+        """
+import tableau_http as h
+import time
+_orig = h._open
+# Over-reach: bound the lifecycle even when the caller asked for no deadline, which truncates the
+# DATA leg -- a real export streaming legitimately slowly.
+h._open = lambda req, timeout, deadline: _orig(req, timeout, deadline if deadline is not None else time.monotonic() + timeout)
+""",
+    ),
+    "double-gate-matches-keywords-by-substring": (
+        ("tests/test_capture_tableau_oracle.py::test_the_double_gate_rejects_a_merely_similar_keyword",),
+        """
+import ast
+# Round 3's finding 2: derive the right keyword names and then compare them by SUBSTRING, so a
+# double declaring `api_version` / `deadline_seconds` satisfies the gate for `api` / `deadline` while
+# raising TypeError on the first real call. Modelled by making the control's parse report the
+# confusable names as if they were the real ones.
+_orig = ast.parse
+def parse(source, *args, **kwargs):
+    return _orig(source.replace("api_version", "api").replace("deadline_seconds", "deadline"), *args, **kwargs)
+ast.parse = parse
+""",
+    ),
     # -------------------------------------------------------------- discriminating controls
     "control-cosmetic-log-wording": (
         (
@@ -783,7 +853,7 @@ def verify_anchors() -> list[str]:
     that never ran. This is the same false-green shape the shared harness's own docstring records.
     """
     collected: set[str] = set()
-    for suite in (LEGS, BATCH, SOCKET):
+    for suite in (LEGS, BATCH, SOCKET, ORACLE):
         proc = subprocess.run(
             [PY, "-m", "pytest", suite, "--collect-only", "-q", "--no-header", "--color=no"],
             cwd=ROOT,

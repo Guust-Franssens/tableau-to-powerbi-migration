@@ -23,9 +23,12 @@ rather than tight bounds -- what is being pinned is "bounded vs unbounded", not 
 
 from __future__ import annotations
 
+import http.client
+import socket
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -34,7 +37,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from tableau_http import NETWORK_ERROR_STATUS, _request  # noqa: E402  # pylint: disable=wrong-import-position
+import tableau_http as th  # noqa: E402  # pylint: disable=wrong-import-position
+from tableau_http import (  # noqa: E402  # pylint: disable=wrong-import-position
+    NETWORK_ERROR_STATUS,
+    _read_bounded,
+    _request,
+)
 import capture_tableau_oracle as oracle  # noqa: E402  # pylint: disable=wrong-import-position
 
 pytestmark = pytest.mark.timing
@@ -47,6 +55,9 @@ SOCKET_TIMEOUT_SEC = 0.1
 # The whole trickled body takes BODY_BYTES * GAP_SEC ~= 0.96s, so a deadline well under that must cut
 # it short, and "no deadline" must run to completion. Both directions are asserted.
 DEADLINE_SEC = 0.3
+# The slow-HEADER fixture's own gap, 3x inside the socket timeout rather than 1.25x. Its ~72 bytes
+# take ~2.2s in total, comfortably past DEADLINE_SEC in the unbounded direction.
+HEADER_GAP_SEC = 0.03
 
 
 class _Trickle(BaseHTTPRequestHandler):
@@ -81,6 +92,133 @@ class _TrickleError(_Trickle):
     """The same trickle, but as a 5xx -- `HTTPError.read()` is a separate code path in the transport."""
 
     status = 503
+
+
+def _serve_slow_headers(listener: socket.socket) -> None:
+    """Answer one request byte-by-byte from the STATUS LINE onward, never idling past the timeout.
+
+    Deliberately a raw socket rather than ``BaseHTTPRequestHandler``: the handler writes its status
+    line and headers as whole buffered writes, which is exactly why every earlier fixture in this file
+    sends headers instantly and could not reach the phase that was unbounded.
+
+    ⚠️ ``HEADER_GAP_SEC`` is its own constant, well under the socket timeout rather than merely under
+    it. At the body fixture's 0.08s against a 0.1s timeout the margin is 25%, and a loaded box
+    overshoots that -- the unbounded control flaked with a spurious ``status 0``, which would have
+    read as "the timeout caught it" and hidden the very thing the control exists to show.
+    """
+    conn, _addr = listener.accept()
+    try:
+        conn.recv(4096)
+        response = f"HTTP/1.1 200 OK\r\nContent-Type: text/csv\r\nContent-Length: {BODY_BYTES}\r\n\r\n"
+        for char in response + "a" * BODY_BYTES:
+            time.sleep(HEADER_GAP_SEC)
+            conn.sendall(char.encode())
+    except OSError:
+        pass  # the client aborted at its deadline, which is the behaviour under test
+    finally:
+        conn.close()
+
+
+@pytest.fixture(name="slow_header_url")
+def _slow_header_url():
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    threading.Thread(target=_serve_slow_headers, args=(listener,), daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{listener.getsockname()[1]}/data"
+    finally:
+        listener.close()
+
+
+def test_slow_HEADERS_are_bounded_by_the_deadline_too(slow_header_url):
+    """⚠️ Review round 3, finding 1 -- reproduced, then fixed. And the reason it was reachable at all.
+
+    The deadline used to be enforced only AFTER ``urlopen()`` returned, so connection, status line,
+    headers and redirects ran under the per-socket-operation timeout alone. A server trickling its
+    HEADERS one byte at a time never trips that. Measured on the production ``_request``: a 0.15s
+    deadline with a 0.05s socket timeout returned after **1.378s**, 6.9x the claimed ceiling.
+
+    ⚠️ **The eight tests above could not catch it**, and the reason is worth more than the fix: every
+    one of them sends headers immediately and trickles only the BODY, so their deadline-removed
+    control proves the body is bounded and is structurally blind to the pre-body phase. The control
+    was real; the claim it was read as supporting was larger than the fixture could reach. Same shape
+    as the virtual clock two rounds earlier -- **ask what the control cannot see**.
+    """
+    started = time.monotonic()
+    status, _body, _headers = _request(
+        urllib.request.Request(slow_header_url),
+        timeout=SOCKET_TIMEOUT_SEC,
+        redactor=lambda text: text,
+        deadline=started + DEADLINE_SEC,
+    )
+    elapsed = time.monotonic() - started
+
+    assert status == NETWORK_ERROR_STATUS
+    assert elapsed < DEADLINE_SEC + SOCKET_TIMEOUT_SEC + GAP_SEC * 4, (
+        f"the headers ran past the deadline: {elapsed:.3f}s against {DEADLINE_SEC}s"
+    )
+
+
+def test_slow_headers_are_UNBOUNDED_without_the_deadline(slow_header_url):
+    """The discriminating control for the test above. Without a deadline the same fixture runs to
+    completion, so the bound is attributable to the deadline rather than to the fixture being quick."""
+    started = time.monotonic()
+    status, _body, _headers = _request(
+        urllib.request.Request(slow_header_url), timeout=SOCKET_TIMEOUT_SEC, redactor=lambda text: text
+    )
+    elapsed = time.monotonic() - started
+
+    assert status == 200
+    assert elapsed > DEADLINE_SEC * 2, (
+        f"the fixture completed in {elapsed:.3f}s, too fast to show the deadline is doing the work"
+    )
+
+
+def test_the_https_twin_resolves_connect_to_the_watchdog():
+    """⚠️ No fixture here can complete a TLS handshake, so the HTTPS path is pinned STATICALLY.
+
+    Base order decides this, and the natural order is the wrong one: with
+    ``(HTTPSConnection, _DeadlineHTTPConnection)`` the MRO finds ``HTTPSConnection.connect`` first, the
+    watchdog never arms, and **every real Tableau request** -- all of which are HTTPS -- is silently
+    unbounded while every loopback test in this file passes. That is the same shape as the finding
+    this file exists for: the fixture cannot reach the case that fails.
+    """
+    assert th._DeadlineHTTPSConnection.connect is th._DeadlineHTTPConnection.connect, (
+        "HTTPS resolves `connect` to the stdlib implementation, so the deadline watchdog never arms"
+    )
+    mro = th._DeadlineHTTPSConnection.__mro__
+    assert mro.index(th._DeadlineHTTPConnection) < mro.index(http.client.HTTPSConnection)
+    assert issubclass(th._DeadlineHTTPSConnection, http.client.HTTPSConnection), "TLS must still happen"
+
+
+def test_the_deadline_subclass_carries_the_instant_without_a_constructor():
+    """`_with_deadline` exists because a guarded module may not use `*args`/`**kwargs` -- the taint
+    analyser cannot follow them, and `tests/test_diagnostic_redaction.py` refuses them. This pins that
+    the class attribute actually arrives, so the no-constructor route is not merely lint-shaped."""
+    deadline = time.monotonic() + 5.0
+    made = th._with_deadline(th._DeadlineHTTPConnection, deadline)
+
+    assert made._t2p_deadline == deadline
+    assert issubclass(made, th._DeadlineHTTPConnection)
+    assert th._DeadlineHTTPConnection._t2p_deadline is None, "the base must stay unbound"
+
+
+def test_a_deadline_already_passed_never_opens_a_connection(slow_header_url):
+    """The pre-request check. If the budget is spent before the request is issued, the honest move is
+    to refuse rather than to open a socket and abort it a moment later."""
+    started = time.monotonic()
+    status, body, _headers = _request(
+        urllib.request.Request(slow_header_url),
+        timeout=SOCKET_TIMEOUT_SEC,
+        redactor=lambda text: text,
+        deadline=started - 1.0,
+    )
+    elapsed = time.monotonic() - started
+
+    assert status == NETWORK_ERROR_STATUS
+    assert b"already passed" in body
+    assert elapsed < GAP_SEC * 2, f"a spent deadline still did network work for {elapsed:.3f}s"
 
 
 @pytest.fixture(name="trickling_url")
@@ -146,12 +284,21 @@ def test_the_deadline_abandons_a_trickling_body(trickling_url):
 def test_an_abandoned_body_is_a_transient_failure_never_a_partial_success(trickling_url):
     """⚠️ A truncated CSV reported as a 200 would manufacture exactly the false evidence this whole
     capture exists to prevent -- worse than the unbounded read, because it is silent. The abandoned
-    read must surface as `NETWORK_ERROR_STATUS`, which the retry classifier treats as transient."""
+    read must surface as `NETWORK_ERROR_STATUS`, which the retry classifier treats as transient.
+
+    ⚠️ TWO mechanisms can abandon, and asserting on either one specifically is how this test broke
+    once already: the body clock check raises `TimeoutError`, and the lifecycle watchdog aborts the
+    socket, which arrives as `ConnectionAbortedError`/`OSError`. Which one wins is a timing race
+    between the deadline instant and the next chunk. Both are correct; the PROPERTY under test is
+    that the outcome is transient and the partial body is not returned as though complete.
+    """
     status, body, _elapsed = _fetch(trickling_url, deadline_in=DEADLINE_SEC)
 
     assert status == NETWORK_ERROR_STATUS
     assert b"a" * BODY_BYTES not in body, "the partial body must not be returned as though complete"
-    assert b"TimeoutError" in body
+    assert any(marker in body for marker in (b"TimeoutError", b"Error")), (
+        f"the diagnostic does not name why the read was abandoned: {body[:120]!r}"
+    )
 
 
 def test_an_error_body_is_bounded_too(trickling_error_url):
@@ -179,6 +326,103 @@ def test_a_deadline_already_passed_refuses_before_reading(trickling_url):
 
     assert status == NETWORK_ERROR_STATUS
     assert elapsed < GAP_SEC * 3, f"a passed deadline still read the body for {elapsed:.3f}s"
+
+
+# -------------------------------------------- `_read_bounded` as an INDEPENDENT requirement
+#
+# ⚠️ Once the lifecycle watchdog landed, three mutations aimed at the body check SURVIVED: the
+# watchdog aborts the socket first, so neutering `_read_bounded` no longer changed any socket-level
+# outcome. That is this repository's "a clause implied by its siblings is unkillable" mode, and its
+# documented remedy is to pin the clause as an independent requirement or delete it -- never to ship
+# it undefended. It is kept, because it is what turns an abandoned read into a diagnostic that names
+# the deadline and the byte count instead of `ConnectionAbortedError`, and because a stream is not
+# always a socket. So it is pinned HERE, with no socket and no watchdog anywhere in the fixture.
+
+
+class _FakeTrickleStream:
+    """A stream that yields one byte per `read1`, slowly, and blocks for the whole body on `read`.
+
+    Models the property that made `read1` necessary: `HTTPResponse.read(n)` waits for n bytes, so a
+    chunked loop written with `read` consults its clock exactly once.
+    """
+
+    def __init__(self, total: int = BODY_BYTES, gap: float = GAP_SEC) -> None:
+        self.remaining, self.gap, self.reads = total, gap, 0
+
+    def read1(self, _size: int) -> bytes:
+        self.reads += 1
+        if not self.remaining:
+            return b""
+        time.sleep(self.gap)
+        self.remaining -= 1
+        return b"a"
+
+    def read(self, _size: int = -1) -> bytes:
+        self.reads += 1
+        time.sleep(self.gap * self.remaining)
+        out, self.remaining = b"a" * self.remaining, 0
+        return out
+
+
+def test_read_bounded_abandons_a_stream_that_outlives_its_deadline():
+    """No socket, no watchdog: the body check alone must refuse to follow a trickling stream."""
+    stream = _FakeTrickleStream()
+    started = time.monotonic()
+    with pytest.raises(TimeoutError) as excinfo:
+        _read_bounded(stream, started + DEADLINE_SEC, SOCKET_TIMEOUT_SEC)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < DEADLINE_SEC + GAP_SEC * 3, f"{elapsed:.3f}s against a {DEADLINE_SEC}s deadline"
+    assert stream.reads > 2, "it consulted the clock once and then read everything -- `read`, not `read1`"
+    assert "deadline" in str(excinfo.value)
+
+
+def test_read_bounded_never_returns_a_partial_body():
+    """The silent-corruption case. Returning what arrived would report a truncated CSV as complete."""
+    with pytest.raises(TimeoutError):
+        _read_bounded(_FakeTrickleStream(), time.monotonic() + DEADLINE_SEC, SOCKET_TIMEOUT_SEC)
+
+
+def test_read_bounded_without_a_deadline_reads_the_whole_stream():
+    """The control: the default path is unchanged, so the data leg still streams a slow export."""
+    assert _read_bounded(_FakeTrickleStream(total=3, gap=0.0), None, SOCKET_TIMEOUT_SEC) == b"aaa"
+
+
+class _TrickleHTTPError(urllib.error.HTTPError):
+    """A 5xx whose body trickles. `HTTPError.read` is reached from inside an `except` clause."""
+
+    def __init__(self) -> None:
+        super().__init__("http://x/y", 503, "Service Unavailable", {}, None)
+        self._stream = _FakeTrickleStream()
+
+    def read1(self, size: int) -> bytes:
+        return self._stream.read1(size)
+
+    def read(self, size: int = -1) -> bytes:
+        return self._stream.read(size)
+
+
+def test_the_error_body_path_is_bounded_without_any_socket(monkeypatch):
+    """⚠️ The HTTPError branch is a SEPARATE call site, and a deadline applied only to the success
+    path leaves it unbounded. Pinned with `_open` stubbed, so neither a socket nor the watchdog can
+    stand in for the body check and mask a bypass."""
+
+    def _raise(_req, _timeout, _deadline):
+        raise _TrickleHTTPError()
+
+    monkeypatch.setattr("tableau_http._open", _raise)
+    started = time.monotonic()
+    status, body, _headers = _request(
+        urllib.request.Request("http://127.0.0.1:1/x"),
+        timeout=SOCKET_TIMEOUT_SEC,
+        redactor=lambda text: text,
+        deadline=started + DEADLINE_SEC,
+    )
+    elapsed = time.monotonic() - started
+
+    assert status == 503, "the real status must survive a bounded error-body read"
+    assert elapsed < DEADLINE_SEC + GAP_SEC * 4, f"the error body was followed for {elapsed:.3f}s"
+    assert b"a" * BODY_BYTES not in body
 
 
 # ------------------------------------------- the SALVAGE bound, end to end, over a real socket
