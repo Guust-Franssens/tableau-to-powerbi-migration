@@ -1849,13 +1849,25 @@ class OracleRecord:
     ORDINARY case rather than an edge one (``scripts/tableau_view_types.py``). Measured before this:
     a record explicitly carrying ``view_type: "worksheet"`` gave a full oracle PASS to the DASHBOARD
     of the same name - the kind was present in the manifest and thrown away here.
+
+    ``workbook`` is an :class:`object_identity.WorkbookIdentity`, shared with
+    ``check_reference_readiness`` - see issue #450, where this gate read a ``workbook`` key that no
+    producer writes while the sibling gate read a LUID it then distrusted, and one disagreement about
+    "what identifies a workbook" produced a fail-open defect here and a fail-closed one there.
+
+    ``unit_local`` records a LOCATION fact, not an identity one: a ``reference/manifest.json`` found
+    INSIDE the unit was captured for that unit by construction (``_reference_dirs`` never walks up,
+    and ``capture_tableau_reference.py`` writes per-unit), and it declares no workbook at all - only
+    the source workbook's sha256. Marking it is what lets an *oracle* record with no establishable
+    identity be refused without also refusing every locally-captured reference render.
     """
 
     name: str
     kind: str | None
-    workbook: str | None
+    workbook: oid.WorkbookIdentity
     visual: bool
     numeric: bool
+    unit_local: bool = False
 
 
 def _declared_kind(record: Any) -> str | None:
@@ -1878,9 +1890,17 @@ def _reference_oracles(target: Path, reference_dir: Path | None) -> tuple[list[O
     Every entry is a DASHBOARD by construction: ``capture_tableau_reference.py`` builds this array
     from the migration spec's ``dashboards`` (``_dashboard_names``), so the kind is structurally known
     here and does not depend on #402 landing.
+
+    A `reference/manifest.json` declares no producing workbook - it records ``source_workbook_sha256``
+    and nothing else - and :func:`_reference_dirs` only ever looks INSIDE the unit, so such a record
+    is this unit's by LOCATION. That is stated as ``unit_local`` rather than left to look like an
+    unattributed record, because issue #450's fix refuses unattributed ORACLE records and the two
+    cases must not be confused: one is "found in this unit's own folder", the other is "found in a
+    shared capture with nothing saying whose it is".
     """
     records: list[OracleRecord] = []
     grades: set[str] = set()
+    unit = _unit_dir(target)
     for directory in _reference_dirs(target, reference_dir):
         manifest = directory / "manifest.json"
         if not manifest.is_file():
@@ -1889,37 +1909,66 @@ def _reference_oracles(target: Path, reference_dir: Path | None) -> tuple[list[O
             payload = _read_json(manifest)
         except (OSError, json.JSONDecodeError):
             continue
+        local = _is_within(directory, unit) or _is_within(directory, target)
         for dashboard in payload.get("dashboards", []) if isinstance(payload, dict) else []:
             if not isinstance(dashboard, dict):
                 continue
-            visual = numeric = False
-            for state in dashboard.get("states", []):
-                if not isinstance(state, dict):
-                    continue
-                caps = {str(cap) for cap in state.get("capabilities", []) if isinstance(cap, str)}
-                if caps:
-                    grades.add("validation-grade" if "validation_grade" in caps else "/".join(sorted(caps)))
-                visual = visual or _existing_relative(directory, state.get("image"))
-                oracle = state.get("numeric_oracle")
-                numeric = numeric or (isinstance(oracle, str) and _existing_relative(directory, oracle))
+            visual, numeric, caps = _reference_states(directory, dashboard)
+            grades |= caps
             records.append(
                 OracleRecord(
                     name=str(dashboard.get("name") or ""),
                     kind="dashboard",
-                    workbook=_declared_workbook(dashboard) or _declared_workbook(payload),
+                    workbook=_declared_workbook(dashboard, payload, sha256=payload.get("source_workbook_sha256")),
                     visual=visual,
                     numeric=numeric,
+                    unit_local=local,
                 )
             )
     return records, grades
 
 
-def _declared_workbook(payload: Any) -> str | None:
-    """The producing workbook a manifest entry declares, or None when it declares none."""
-    if not isinstance(payload, dict):
-        return None
-    value = payload.get("workbook")
-    return value.strip() if isinstance(value, str) and value.strip() else None
+def _reference_states(directory: Path, dashboard: dict[str, Any]) -> tuple[bool, bool, set[str]]:
+    """``(visual, numeric, grades)`` across one dashboard entry's captured states."""
+    visual = numeric = False
+    grades: set[str] = set()
+    for state in dashboard.get("states", []):
+        if not isinstance(state, dict):
+            continue
+        caps = {str(cap) for cap in state.get("capabilities", []) if isinstance(cap, str)}
+        if caps:
+            grades.add("validation-grade" if "validation_grade" in caps else "/".join(sorted(caps)))
+        visual = visual or _existing_relative(directory, state.get("image"))
+        oracle = state.get("numeric_oracle")
+        numeric = numeric or (isinstance(oracle, str) and _existing_relative(directory, oracle))
+    return visual, numeric, grades
+
+
+def _is_within(directory: Path, base: Path) -> bool:
+    """Whether ``directory`` sits inside ``base``. Both are already resolved by their finders."""
+    try:
+        return directory.resolve().is_relative_to(base.resolve())
+    except (OSError, ValueError):
+        return False
+
+
+def _declared_workbook(payload: Any, container: Any = None, *, sha256: Any = None) -> oid.WorkbookIdentity:
+    """The producing workbook a manifest entry declares, on whichever axes it wrote.
+
+    ⚠️ **Issue #450 was exactly this function reading a key nobody writes.** It read ``workbook``;
+    ``capture_tableau_oracle.py`` writes ``workbook_luid`` and ``workbook_name`` per view, and
+    ``capture_tableau_reference.py`` writes ``source_workbook_sha256`` on the manifest. Measured on a
+    real 360-view capture, every single record therefore arrived ownerless, and the foreign-workbook
+    guard that this gate advertises had never once fired. ``workbook`` is still read, first, because
+    it is the documented override a hand-written manifest may carry.
+    """
+    entry = payload if isinstance(payload, dict) else {}
+    outer = container if isinstance(container, dict) else {}
+    return oid.WorkbookIdentity.of(
+        luid=entry.get("workbook_luid") or outer.get("workbook_luid"),
+        name=entry.get("workbook") or outer.get("workbook") or entry.get("workbook_name") or outer.get("workbook_name"),
+        sha256=sha256,
+    )
 
 
 def _oracle_capture_oracles(target: Path, oracle_dir: Path | None) -> tuple[list[OracleRecord], set[str]]:
@@ -1954,7 +2003,7 @@ def _oracle_capture_oracles(target: Path, oracle_dir: Path | None) -> tuple[list
                 OracleRecord(
                     name=str(record.get("view_name") or record.get("view_url_name") or ""),
                     kind=_declared_kind(record),
-                    workbook=_declared_workbook(record) or _declared_workbook(payload),
+                    workbook=_declared_workbook(record, payload),
                     visual=bool(visual),
                     numeric=bool(numeric),
                 )
@@ -1968,14 +2017,12 @@ class OracleEvidence:
 
     Four guards, one per measured defect:
 
-    * **Workbook.** A record that DECLARES a producing workbook must declare one this unit ships. The
-      unit side is a filesystem-sanitised artifact stem, so a lossy fallback is legitimate here - but
-      only when the key resolves uniquely on **BOTH** sides. Measured before this: records declaring
-      ``Bo ok`` and ``Bo-ok`` were both admitted to unit workbook ``Book``, because uniqueness was
-      checked among unit workbooks only. Uniqueness of a lossy key on one side is not identity.
-      A record declaring no workbook is admissible but counted in ``unattributed`` and surfaced in
-      the grade: "I cannot tell whose picture this is" is weaker evidence and the reader should see
-      that rather than infer it.
+    * **Workbook.** A record must be tied to THIS unit's workbook by identity - LUID first, exact
+      display name second, and a lossy name only when the key resolves uniquely on **BOTH** sides.
+      Measured before that last guard: records declaring ``Bo ok`` and ``Bo-ok`` were both admitted to
+      unit workbook ``Book``, because uniqueness was checked among unit workbooks only. A record
+      whose workbook CANNOT be established certifies nothing and is counted in ``unattributed`` -
+      see :func:`_admissible_oracle_records`, where issue #450 lived.
     * **Kind.** A record may only satisfy a page of the SAME kind, and a record whose kind cannot be
       established satisfies nothing. See :class:`OracleRecord`.
     * **Exact spelling.** A view name and a page name are BOTH source-owned - they come from the same
@@ -1987,12 +2034,14 @@ class OracleEvidence:
 
     ⚠️ **The KIND half of issue #438 is CLOSED here**, so the runtime caveat that disclosed it while
     it was open is gone with it - a disclosure that outlives its gap manufactures doubt exactly as
-    falsely as a missing one manufactures confidence. What remains is
-    [#450](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/450): a real
-    manifest names its producer ``workbook_name`` while :func:`_declared_workbook` reads ``workbook``,
-    so on a live capture every record is ownerless (measured 360 of 360) and the two-sided guard
-    above never engages. ``loosely_attributed`` and :func:`_oracle_caveats` therefore stay, re-aimed
-    at #450.
+    falsely as a missing one manufactures confidence.
+    [#450](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/450) is closed too:
+    :func:`_declared_workbook` read a ``workbook`` key no producer writes, so on a live capture every
+    record arrived ownerless (measured 360 of 360) and was **admitted anyway**. It now reads the
+    fields the producers do write - ``workbook_luid``/``workbook_name`` for an oracle capture,
+    ``source_workbook_sha256`` for a reference one - and an unestablished workbook is a refusal.
+    ``loosely_attributed`` and :func:`_oracle_caveats` remain, because the lossy NAME route is still
+    reachable for a unit whose LUID cannot be established.
     """
 
     by_exact: dict[tuple[str, str], list[OracleRecord]]
@@ -2013,15 +2062,58 @@ class OracleEvidence:
         return None, None
 
 
+def _unit_workbook_identities(target: Path) -> list[oid.WorkbookIdentity]:
+    """This unit's workbook, once per artifact stem, each carrying the unit's LUID when known.
+
+    The LUID comes from the handover slice's ``workbook.source_id``, whose basename is
+    ``harvest_estate_assets.py``'s ``<luid>_<sanitized-name>`` - this repo's own record of which
+    published workbook it downloaded, exact and needing neither server nor credentials. Every claim
+    must agree (:func:`object_identity.agreed_luid`): a unit whose slices name two different source
+    workbooks has no single workbook identity, and picking the first would be the #438 coin toss.
+
+    One identity PER STEM rather than one identity with several names, so the LUID axis is consulted
+    first for each of them. That ordering is the guard: a record whose LUID disagrees is foreign
+    against every stem, and cannot be re-admitted by a stem whose display name happens to match.
+    """
+    stems, _ = _unit_workbook_keys(target)
+    workbooks, _ = _handover_workbooks(target)
+    luid = oid.agreed_luid(
+        *(
+            oid.harvest_luid(Path(str(payload.get("source_id"))).stem)
+            for _path, _name, payload in workbooks
+            if isinstance(payload, dict) and payload.get("source_id")
+        )
+    )
+    return [oid.WorkbookIdentity(luid=luid, name=stem) for stem in sorted(stems)] or [oid.WorkbookIdentity(luid=luid)]
+
+
+def _attribute_record(unit_ids: list[oid.WorkbookIdentity], record: OracleRecord) -> oid.Attribution:
+    """How ``record`` ties to this unit: the first admission, else the strongest refusal.
+
+    A unit may ship artifacts under several stems, so every candidate identity is tried. Ordering the
+    result - admission, then ``foreign``, then ``unknown`` - matters because ``unknown`` against one
+    stem must never mask a ``foreign`` verdict reached against another: a record we could compare and
+    reject is a stronger statement than one we could not compare at all.
+    """
+    verdicts = [identity.attribute(record.workbook) for identity in unit_ids]
+    if not verdicts:
+        verdicts = [oid.WorkbookIdentity().attribute(record.workbook)]
+    return next(
+        (verdict for verdict in verdicts if verdict.admitted),
+        next((verdict for verdict in verdicts if verdict.route == oid.WB_FOREIGN), verdicts[0]),
+    )
+
+
 def _admissible_oracle_records(
-    records: list[OracleRecord], unit_workbooks: set[str]
+    records: list[OracleRecord], unit_ids: list[oid.WorkbookIdentity]
 ) -> tuple[list[OracleRecord], list[str], int, int, list[str]]:
     """``(admissible, foreign, unattributed, kindless, loosely_attributed)`` after both guards."""
     unit_index: NormalizedIndex[str] = NormalizedIndex()
-    for name in sorted(unit_workbooks):
-        unit_index.add(name, name)
+    for identity in unit_ids:
+        if identity.name:
+            unit_index.add(identity.name, identity.name)
     producer_index: NormalizedIndex[str] = NormalizedIndex()
-    for declared in sorted({record.workbook for record in records if record.workbook is not None}):
+    for declared in sorted({record.workbook.name for record in records if record.workbook.name}):
         producer_index.add(declared, declared)
 
     admissible: list[OracleRecord] = []
@@ -2029,20 +2121,21 @@ def _admissible_oracle_records(
     loosely_attributed: list[str] = []
     unattributed = kindless = 0
     for record in records:
-        if record.workbook is None:
-            unattributed += 1
-        elif record.workbook not in unit_workbooks:
-            two_sided = unit_index.unique(record.workbook) is not None and (
-                producer_index.unique(record.workbook) is not None
-            )
-            if not two_sided:
-                foreign.append(record.workbook)
+        verdict = _attribute_record(unit_ids, record)
+        if not record.unit_local and not verdict.admitted:
+            if verdict.route == oid.WB_UNKNOWN:
+                # ⚠️ Issue #450: this used to `unattributed += 1` and then FALL THROUGH to
+                # `admissible`, so a record whose producing workbook could not be established was
+                # admitted anyway - and because the field this gate read was one no producer writes,
+                # that was every record on a real capture (360 of 360). Refusing is the fix; the
+                # count stays, because a refusal nobody can see is not a guard.
+                unattributed += 1
                 continue
-            # Admitted on a LOSSY workbook key rather than an exact one. Both sides are now checked,
-            # so this is no longer the #438 coin toss - but it is still a weaker join than an exact
-            # match, and #450 makes it unreachable on real captures anyway (the manifest declares
-            # `workbook_name`, not `workbook`), so it stays disclosed rather than assumed sound.
-            loosely_attributed.append(record.workbook)
+            rescued = _lossy_workbook_rescue(verdict, record, unit_index, producer_index)
+            if rescued is None:
+                foreign.append(record.workbook.describe())
+                continue
+            loosely_attributed.append(rescued)
         if record.kind is None:
             kindless += 1
             continue
@@ -2050,12 +2143,39 @@ def _admissible_oracle_records(
     return admissible, foreign, unattributed, kindless, loosely_attributed
 
 
+def _lossy_workbook_rescue(
+    verdict: oid.Attribution,
+    record: OracleRecord,
+    unit_index: NormalizedIndex[str],
+    producer_index: NormalizedIndex[str],
+) -> str | None:
+    """The declared name a LOSSY workbook key may still admit, or None to refuse.
+
+    The unit side is a filesystem-sanitised artifact stem, so a lossy fallback is legitimate on the
+    NAME axis - but only when the key resolves uniquely on **BOTH** sides. Measured before that:
+    records declaring ``Bo ok`` and ``Bo-ok`` were both admitted to unit workbook ``Book``, because
+    uniqueness was checked among unit workbooks only. Uniqueness of a lossy key on one side is not
+    identity.
+
+    ⚠️ **Only a NAME disagreement is rescuable.** If the LUIDs or the source hashes were compared and
+    disagreed, this returns None unconditionally: a stronger axis that has already answered must not
+    be overridden by a weaker one, which is the identity-loss join
+    (:meth:`object_identity.WorkbookIdentity.attribute`) that both halves of #450 grew out of.
+    """
+    name = record.workbook.name
+    if verdict.axis != oid.WB_NAME or not name:
+        return None
+    if unit_index.unique(name) is None or producer_index.unique(name) is None:
+        return None
+    return name
+
+
 def _resolve_oracle_evidence(
-    records: list[OracleRecord], candidates: list[dict[str, Any]], unit_workbooks: set[str]
+    records: list[OracleRecord], candidates: list[dict[str, Any]], unit_ids: list[oid.WorkbookIdentity]
 ) -> OracleEvidence:
     """Index producer records against the expected pages without losing a collision."""
     _ = candidates
-    admissible, foreign, unattributed, kindless, loosely = _admissible_oracle_records(records, unit_workbooks)
+    admissible, foreign, unattributed, kindless, loosely = _admissible_oracle_records(records, unit_ids)
     by_exact: dict[tuple[str, str], list[OracleRecord]] = {}
     for record in admissible:
         by_exact.setdefault((str(record.kind), record.name), []).append(record)
@@ -2104,7 +2224,7 @@ def check_oracle_coverage(target: Path, reference_dir: Path | None, oracle_dir: 
             "no output, so there is no page left to hold against a reference",
             excluded=accepted,
         )
-    evidence = _resolve_oracle_evidence(reference + oracle, pages, _unit_workbook_keys(target)[0])
+    evidence = _resolve_oracle_evidence(reference + oracle, pages, _unit_workbook_identities(target))
     rows = [_oracle_row(page, expectation["index"], evidence) for page in pages]
     visual_missing = [row["page"] for row in rows if not row["visual"]]
     numeric_missing = [row["page"] for row in rows if not row["numeric"]]
@@ -2148,12 +2268,11 @@ def _oracle_caveats(rows: list[dict[str, Any]], evidence: OracleEvidence) -> lis
     exactly as falsely as omitting it once manufactured confidence. A disclosure is only honest while
     its gap is open; retiring it is part of the fix, not a separate cleanup.
 
-    What remains is [#450](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/450):
-    a record admitted through the LOSSY workbook key is a weaker join than an exact match. Both sides
-    of that key are now checked for uniqueness, so this is no longer the coin toss #438 described -
-    but it is still worth naming, and on a live capture it is unreachable for a different reason
-    worth knowing: the manifest declares ``workbook_name`` while :func:`_declared_workbook` reads
-    ``workbook``, so every record arrives ownerless (measured 360 of 360).
+    What remains is [#450](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/450)'s
+    residual: a record admitted through the LOSSY workbook name is a weaker join than an exact match
+    or a LUID. Both sides of that key are checked for uniqueness, so it is not the coin toss #438
+    described - but it is the route a unit takes whenever its own workbook LUID cannot be
+    established, and a reader deciding which PASS to distrust should be told which ones rest on it.
     """
     certified = [row["page"]["name"] for row in rows if row["visual"] or row["numeric"]]
     caveats: list[str] = []
@@ -2161,8 +2280,9 @@ def _oracle_caveats(rows: list[dict[str, Any]], evidence: OracleEvidence) -> lis
         workbooks = ", ".join(repr(name) for name in sorted(set(evidence.loosely_attributed)))
         caveats.append(
             f"⚠️ #450 WORKBOOK MATCHED LOOSELY: {len(evidence.loosely_attributed)} record(s) were "
-            f"admitted on a normalized workbook name rather than an exact one, so {len(certified)} "
-            f"certified page(s) rest on a lossier join than an exact workbook match: {workbooks}"
+            f"admitted on a normalized workbook name rather than a LUID or an exact name, so "
+            f"{len(certified)} certified page(s) rest on a lossier join than an exact workbook "
+            f"match: {workbooks}"
         )
     return caveats
 
@@ -2176,7 +2296,10 @@ def _oracle_grade(grades: set[str], evidence: OracleEvidence) -> str:
     """
     grade = ", ".join(sorted(grades)) or "not checked (no oracle manifest found)"
     if evidence.unattributed:
-        grade += f" (⚠️ {evidence.unattributed} record(s) declare no producing workbook)"
+        grade += (
+            f" (⚠️ {evidence.unattributed} record(s) establish no producing workbook and certify "
+            "nothing; a capture must carry workbook_luid, or the manifest a source_workbook_sha256)"
+        )
     if evidence.kindless:
         grade += (
             f" (⚠️ {evidence.kindless} record(s) establish no dashboard/worksheet kind and "

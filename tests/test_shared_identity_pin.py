@@ -1,24 +1,30 @@
-"""Byte-identity gate for the SHARED identity type this branch reuses from PR #428.
+"""Byte-identity gate for the SHARED identity type BOTH offline gates join on.
 
-`scripts/object_identity.py` and `tests/test_object_identity.py` are not ours. They are carried here
-byte-identical so `check_unit` can join on the same type the reference-readiness gate does, and so
-whichever PR merges second does not silently overwrite the other's contract.
+`scripts/object_identity.py` and `tests/test_object_identity.py` are shared surface:
+`check_reference_readiness` (the entry gate) and `check_unit` (the exit gate) both resolve identity
+through them, so an edit here changes a contract in two places at once and must be deliberate.
 
-Round 3 measured why this needs to be a gate rather than a claim: the copy on this branch was the
-sibling's ROUND-3 version, and the sibling had since renamed `IdentityIndex` to
+Round 3 measured why this needs to be a gate rather than a claim: the copy on the then-open branch was
+the sibling's ROUND-3 version, and the sibling had since renamed `IdentityIndex` to
 `EngineIndex`/`CandidateIndex`, added `__post_init__` validation and made `__bool__` raise. "Either PR
 can merge first" was false, and nothing said so.
+
+⚠️ **What this pin means changed when both PRs landed on master.** While they were open it proved
+"this branch has not edited a file it does not own". Both have merged, so `origin/master` IS the
+shared truth (`verify_shared_identity_pin.PREFERRED_REFS` already said so), and the pin's job is now
+to make an edit to shared surface a REVIEWED event rather than a silent one: a change here fails this
+test, and clearing it means re-deriving the digest below and saying in the PR why both gates want it.
 
 Two halves, because they prove different things and only one of them can run in CI:
 
 * :func:`test_shared_identity_files_are_unmodified` pins the SHA-256 of both files. It is offline and
-  runs everywhere, and it proves this branch has not edited a file it does not own. `actions/checkout@v4`
-  makes a shallow clone, so no other ref exists in CI and a ref-diff cannot run there.
-* `tests/verify_shared_identity_pin.py` compares against the sibling ref itself and **fails when it
+  runs everywhere. `actions/checkout@v4` makes a shallow clone, so no other ref exists in CI and a
+  ref-diff cannot run there.
+* `tests/verify_shared_identity_pin.py` compares against `origin/master` itself and **fails when it
   cannot compare** - "I could not check" is never "it is fine". Run it whenever the pin is updated.
 
-Updating the pin is deliberate: re-take both files with `git checkout <ref> -- <paths>`, run the
-verifier, then paste the new digests and provenance here.
+Updating the pin is deliberate: make the change, run `ruff format`, re-derive with :func:`digest`
+below, paste the new value, and record the reason in ``PIN_PROVENANCE``.
 
 ⚠️ **The digest is taken over LINE-ENDING-NORMALIZED bytes**, and that is not cosmetic. The first CI
 run of this gate failed on a file nobody had touched: `git checkout` applies `core.autocrlf`, so the
@@ -35,17 +41,26 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 #: Where the pinned bytes came from. Recorded so the pin is auditable rather than self-referential.
-#: ⚠️ Taken from ``UPSTREAM_COMMIT`` and then ``ruff format``-ed on landing, so the pinned digest is
-#: NOT the digest of that commit's blob: the round-6 fix arrived unformatted and ``ruff format
-#: --check`` exited 1 on it. Re-take with ``git checkout <ref> -- <paths>``, re-run ``ruff format``,
-#: then re-derive the digests with ``digest()`` below - never with a raw ``sha256(read_bytes())``,
-#: which yields a different, CRLF-dependent value on Windows.
-UPSTREAM_REF = "origin/feat/reference-readiness-gate"
-UPSTREAM_COMMIT = "6ef21241caa9427e6d249e411785baf1b2b1ccf3"
+#: ⚠️ Digests are taken AFTER ``ruff format``, so a pinned digest is not necessarily the digest of the
+#: named commit's blob: the round-6 fix arrived unformatted and ``ruff format --check`` exited 1 on
+#: it. Re-derive with :func:`digest` below - never with a raw ``sha256(read_bytes())``, which yields a
+#: different, CRLF-dependent value on Windows.
+UPSTREAM_REF = "origin/master"
+UPSTREAM_COMMIT = "0fae0cf75bee7c49489573b4735788106af5d8e0"
 
-#: SHA-256 of each shared file, over LF-normalized bytes, as taken from ``UPSTREAM_COMMIT``.
+#: Why the pin last moved. An edit to shared surface is a two-gate contract change; this is the
+#: record of the one that was reviewed.
+PIN_PROVENANCE = (
+    "master@0fae0cf7 plus issue #450: `object_identity.py` gained the WORKBOOK-identity join "
+    "(WorkbookIdentity/Attribution/harvest_luid/agreed_luid) that both gates now share, because "
+    "each had invented its own key for 'whose workbook is this render of' - one fail-closed "
+    "(23 attributable renders discarded, 0/7 pages ready) and one fail-open (360 of 360 records "
+    "ownerless and admitted anyway). `tests/test_object_identity.py` is UNCHANGED."
+)
+
+#: SHA-256 of each shared file, over LF-normalized bytes.
 PINNED: dict[str, str] = {
-    "scripts/object_identity.py": "3929b02c716f2521452be6e12e32645612d65aaf627dae31491ea004993eab21",
+    "scripts/object_identity.py": "de42e60387e100e42a8df0b8c17e6a410b84f3900b321cc810c21da509a03e58",
     "tests/test_object_identity.py": "11d6881a960fa3c23beaa6928706de88a83fc1605b051314038ffdc14711c967",
 }
 
@@ -56,15 +71,25 @@ def digest(relative: str) -> str:
 
 
 def test_shared_identity_files_are_unmodified() -> None:
-    """Kills: editing a shared file this branch does not own, or letting the copy drift silently."""
+    """Kills: editing shared surface both gates join on without anyone reviewing the contract."""
     actual = {relative: digest(relative) for relative in PINNED}
 
     assert actual == PINNED, (
         "a shared identity file differs from the bytes pinned from "
-        f"{UPSTREAM_REF}@{UPSTREAM_COMMIT[:8]}. This branch must not edit it: re-take it with "
-        "`git checkout <ref> -- scripts/object_identity.py tests/test_object_identity.py`, run "
-        "`python tests/verify_shared_identity_pin.py`, then update PINNED here."
+        f"{UPSTREAM_REF}@{UPSTREAM_COMMIT[:8]}. Both offline gates join on it, so this is a two-gate "
+        "contract change: run `ruff format`, re-derive with `digest()`, update PINNED and "
+        "PIN_PROVENANCE here, then run `python tests/verify_shared_identity_pin.py`."
     )
+
+
+def test_the_pin_provenance_names_a_reason_rather_than_only_a_commit() -> None:
+    """Kills: re-taking the digest to silence the gate without recording what changed or why.
+
+    A pin whose provenance is only a SHA cannot be audited - the whole value of this gate is that a
+    shared-surface edit leaves a reviewable trace, and "I re-ran digest()" is not one.
+    """
+    assert len(PIN_PROVENANCE) > 120
+    assert UPSTREAM_COMMIT[:8] in PIN_PROVENANCE
 
 
 def test_the_digest_is_line_ending_independent(tmp_path: Path) -> None:

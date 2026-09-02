@@ -541,30 +541,42 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
     ),
     (
         "ORACLE WORKBOOK: the producing side of the uniqueness guard is dropped",
-        "            two_sided = unit_index.unique(record.workbook) is not None and (\n"
-        "                producer_index.unique(record.workbook) is not None\n            )",
-        "            two_sided = unit_index.unique(record.workbook) is not None",
+        "    if unit_index.unique(name) is None or producer_index.unique(name) is None:",
+        "    if unit_index.unique(name) is None:",
         ["test_two_producing_workbooks_slugging_alike_are_both_refused"],
     ),
     (
         "ORACLE WORKBOOK: the unit side of the uniqueness guard is dropped",
-        "            two_sided = unit_index.unique(record.workbook) is not None and (\n"
-        "                producer_index.unique(record.workbook) is not None\n            )",
-        "            two_sided = producer_index.unique(record.workbook) is not None",
+        "    if unit_index.unique(name) is None or producer_index.unique(name) is None:",
+        "    if producer_index.unique(name) is None:",
         ["test_oracle_evidence_from_a_different_workbook_satisfies_nothing"],
     ),
     (
         "ORACLE WORKBOOK: the sanitised-spelling fallback is removed entirely",
-        "            two_sided = unit_index.unique(record.workbook) is not None and (\n"
-        "                producer_index.unique(record.workbook) is not None\n            )",
-        "            two_sided = False",
+        "    if unit_index.unique(name) is None or producer_index.unique(name) is None:",
+        "    if True:",
         ["test_one_producing_workbook_still_binds_through_a_sanitised_spelling"],
     ),
     (
+        # Issue #450: `_declared_workbook` read a `workbook` key no capture producer writes, so on a
+        # real 360-view capture EVERY record arrived ownerless and was admitted anyway.
+        "ORACLE WORKBOOK: the fields a real capture writes are ignored again (#450)",
+        '        name=entry.get("workbook") or outer.get("workbook") or entry.get("workbook_name")'
+        ' or outer.get("workbook_name"),',
+        '        name=entry.get("workbook") or outer.get("workbook"),',
+        ["test_the_workbook_name_a_real_capture_writes_is_read"],
+    ),
+    (
+        "ORACLE WORKBOOK: a lossy name rescues a LUID disagreement (#450, the fail-open direction)",
+        "    if verdict.axis != oid.WB_NAME or not name:",
+        "    if not name:",
+        ["test_a_foreign_luid_is_refused_even_when_the_workbook_name_matches_exactly"],
+    ),
+    (
         "ORACLE WORKBOOK: unattributed evidence is no longer disclosed in the grade",
-        '        grade += f" (\u26a0\ufe0f {evidence.unattributed} record(s) declare no producing workbook)"',
-        "        pass",
-        ["test_oracle_evidence_declaring_no_workbook_is_admitted_but_flagged"],
+        '        grade += (\n            f" (\u26a0\ufe0f {evidence.unattributed} record(s) establish no producing workbook and certify "',
+        '        grade += (\n            f" ("',
+        ["test_a_record_whose_workbook_cannot_be_established_certifies_nothing"],
     ),
     (
         "ORACLE KIND: kind-less evidence is discarded SILENTLY",
@@ -614,7 +626,7 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
         # The kind half of #438 is fixed on this branch, so the two mutations that defended its
         # caveat are gone with the caveat. These two survive because #450 does.
         "DISCLOSURE: loose workbook attribution is no longer tracked, so its caveat never fires",
-        "            loosely_attributed.append(record.workbook)",
+        "            loosely_attributed.append(rescued)",
         "            pass",
         ["test_a_loosely_attributed_workbook_carries_a_caveat_naming_it"],
     ),

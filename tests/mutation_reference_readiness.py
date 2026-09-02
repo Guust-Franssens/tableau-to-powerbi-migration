@@ -296,8 +296,9 @@ ev.Evidence.candidate = lambda self: oid.Candidate(names=(self.name,), kind=self
     # --- evidence must be ATTRIBUTABLE ----------------------------------------------------------
     "evidence-matches-any-workbook": Mutation(
         code="""
+import object_identity as oid
 import reference_evidence as ev
-ev.Evidence.is_for = lambda self, unit: True
+ev.Evidence.attribution = lambda self, unit: oid.Attribution(oid.WB_LUID, "mutant admits everything")
 """,
         anchor="test_evidence_for_another_workbook_does_not_satisfy_this_one",
         controls=("test_a_page_with_no_evidence_at_all_is_blind_not_unverifiable",),
@@ -318,9 +319,9 @@ ev.Evidence.build = classmethod(build)
     "a-name-only-provenance-luid-is-trusted": Mutation(
         code="""
 import check_reference_readiness as crr
-# Round-2 finding 3: origin.match was never consulted, so a LUID whose bytes DIFFER from the
-# server's - which stamp_tableau_provenance.py says will not reproduce - made evidence ready.
-def _provenance_luid(root, source_sha):
+# An origin that establishes identity by NEITHER route - no `matched_by: "luid"` and unconfirmed
+# bytes - must yield no LUID. This mutant trusts one anyway, which is the name-collision hole.
+def _provenance_luid(root, source_sha, source=None):
     payload = crr.json_object(root / "source-provenance.json")
     for record in (payload or {}).get("inputs") or []:
         origin = record.get("origin") or {}
@@ -332,6 +333,30 @@ crr._provenance_luid = _provenance_luid
 """,
         anchor="test_a_name_only_provenance_luid_is_not_trusted",
         controls=("test_a_sha256_confirmed_provenance_luid_is_trusted",),
+    ),
+    "a-luid-matched-provenance-is-discarded-when-the-bytes-differ": Mutation(
+        code="""
+import check_reference_readiness as crr
+# Issue #450, symptom A: `origin.match` answers a REVISION question and was read as if it were the
+# identity one, so a LUID-matched workbook whose bytes had since changed lost its identity entirely
+# and fell back to comparing an artifact stem against a published display name.
+_orig = crr._provenance_luid
+def _provenance_luid(root, source_sha, source=None):
+    payload = crr.json_object(root / "source-provenance.json")
+    for record in (payload or {}).get("inputs") or []:
+        stamped = record.get("input") or {}
+        origin = record.get("origin") or {}
+        if stamped.get("sha256") != source_sha:
+            continue
+        if origin.get("match") != "sha256":
+            return None
+        luid = origin.get("workbook_luid")
+        return luid if isinstance(luid, str) and luid else None
+    return None
+crr._provenance_luid = _provenance_luid
+""",
+        anchor="test_a_luid_matched_provenance_survives_a_changed_revision",
+        controls=("test_a_name_only_provenance_luid_is_not_trusted",),
     ),
     "a-luid-record-discards-its-workbook-name": Mutation(
         code="""
@@ -807,17 +832,16 @@ rule.scan_source = scan_source
     "evidence-attribution-normalizes-the-workbook-name": Mutation(
         code="""
 import object_identity as oid
-import reference_evidence as ev
-# Found by WRITING the quarantine rule, not by reasoning: `Evidence.is_for` compared workbook names
-# through the lossy function, so two workbooks differing only by whitespace would have swapped
-# captures. A layer nobody had enumerated.
-def is_for(self, unit):
-    if self.workbook_sha is not None:
-        return self.workbook_sha.casefold() == unit.source_sha256.casefold()
-    if self.workbook_luid and unit.workbook_luid:
-        return self.workbook_luid.casefold() == unit.workbook_luid.casefold()
-    return bool(self.workbook_name) and oid.normalize(self.workbook_name) == oid.normalize(unit.name)
-ev.Evidence.is_for = is_for
+# Found by WRITING the quarantine rule, not by reasoning: the workbook-name comparison ran through
+# the lossy function, so two workbooks differing only by whitespace would have swapped captures. A
+# layer nobody had enumerated - and since #450 it lives in the join BOTH gates share, so this mutant
+# aims at that one function rather than at one gate's copy of the rule.
+_orig = oid._axis_equal
+def _axis_equal(axis, mine, theirs):
+    if axis == oid.WB_NAME:
+        return oid.normalize(mine) == oid.normalize(theirs)
+    return _orig(axis, mine, theirs)
+oid._axis_equal = _axis_equal
 """,
         anchor="test_evidence_attribution_uses_the_exact_workbook_name",
         controls=("test_oracle_evidence_for_this_workbook_does_count",),

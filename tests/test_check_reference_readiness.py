@@ -1150,3 +1150,78 @@ def test_one_render_cannot_satisfy_a_page_in_each_of_two_units(bundle: Path) -> 
     assert rows[("Two", "Shared")]["readiness"] != "ready"
     assert report["pages_ready"] == 0
     assert crr.main([str(bundle), "--quiet"]) == 1
+
+
+# --------------------------------------------------------------------------------------------
+# Evidence discovery: the walk-up is a UNION, and a self-contained package must stop it (#451)
+# --------------------------------------------------------------------------------------------
+
+
+def test_a_non_packaged_target_still_finds_an_ancestors_oracle(tmp_path: Path) -> None:
+    """The control that makes the package test below meaningful rather than a deletion.
+
+    `_default_dirs` looks beside the target, beside its parent AND beside its grandparent, because an
+    un-packaged unit under `<bundle>/pbip/<Unit>/` finds the run's flat capture that way. Removing
+    the walk-up would break the ordinary case, so it has to keep working IN THE SAME RUN as the
+    package that must not inherit.
+    """
+    target = tmp_path / "run" / "bundle" / "unit"
+    target.mkdir(parents=True)
+    (tmp_path / "run" / "_oracle").mkdir()
+
+    assert crr._default_dirs(target, "_oracle") == [tmp_path / "run" / "_oracle"]
+
+
+def test_a_self_contained_package_does_not_inherit_an_ancestors_oracle(tmp_path: Path) -> None:
+    """A `package-manifest.json` beside the target stops the walk (issue #451).
+
+    `package_unit.py` writes a unit-scoped `oracle/oracle-manifest.json` holding THIS unit's views
+    with rewritten paths. A package assembled INSIDE a run directory therefore saw its own copy AND
+    the run's flat capture two levels up, every view matched twice, and the gate refused the pair as
+    "2 records share this name once normalized" - taking every page from ready to unverifiable,
+    silently, so packaging was strictly worse than not packaging.
+    """
+    target = tmp_path / "run" / "packages" / "unit"
+    (target / "oracle").mkdir(parents=True)
+    (target / "package-manifest.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "run" / "oracle").mkdir()
+
+    assert crr._default_dirs(target, "oracle") == [target / "oracle"]
+
+
+def test_a_package_with_no_evidence_of_its_own_still_inherits_nothing(tmp_path: Path) -> None:
+    """Kills: "stop only when the package has its own copy", which re-opens the union by accident.
+
+    A package that omitted a render because it could not attribute it must NOT then pick that render
+    up from the ancestor - that is the omission being undone by the consumer, which is how a
+    fail-closed packaging decision would turn back into a fail-open one.
+    """
+    target = tmp_path / "run" / "packages" / "unit"
+    target.mkdir(parents=True)
+    (target / "package-manifest.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "run" / "oracle").mkdir()
+
+    assert crr._default_dirs(target, "oracle") == []
+
+
+def test_a_packaged_unit_reads_only_its_own_manifest_end_to_end(tmp_path: Path) -> None:
+    """The same defect at gate level: the doubled record must not reach the readiness verdict.
+
+    Both manifests describe the SAME view of the SAME workbook, which is what a package inside a run
+    directory produces; the ancestor copy is the one that must be ignored.
+    """
+    package = tmp_path / "run" / "unit"
+    package.mkdir(parents=True)
+    (tmp_path / "assets").mkdir()
+    sha = build_unit(package, "WB", worksheets=["Revenue Trend"])
+    view = {"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_name": "WB"}
+    write_oracle(package, [view])
+    write_oracle(tmp_path / "run", [view])
+    assert crr.scan(package)["units"][0]["pages"][0]["readiness"] == "unverifiable"
+
+    (package / "package-manifest.json").write_text("{}", encoding="utf-8")
+
+    report = crr.scan(package)
+    assert report["units"][0]["pages"][0]["readiness"] == "ready"
+    assert report["evidence_records"] == 1
+    assert sha

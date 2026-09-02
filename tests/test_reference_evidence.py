@@ -249,15 +249,24 @@ def test_evidence_attribution_uses_the_exact_workbook_name(bundle: Path) -> None
 # --------------------------------------------------------------------------------------------
 
 
-def write_provenance(root: Path, source: Path, *, luid: str, match: str) -> None:
-    """A `source-provenance.json` as `stamp_tableau_provenance.py` writes it."""
+def write_provenance(root: Path, source: Path, *, luid: str, match: str, matched_by: str | None = None) -> None:
+    """A `source-provenance.json` as `stamp_tableau_provenance.py` writes it.
+
+    ``matched_by`` and ``match`` are two INDEPENDENT axes and the fixture keeps them separate:
+    ``find_origin`` records *how the workbook was found* in the first and *how strongly the bytes
+    were confirmed* in the second. Omitting ``matched_by`` - the default here - is the shape of an
+    origin that establishes identity by neither route.
+    """
+    origin: dict[str, object] = {"workbook_luid": luid, "workbook_name": "Published Name", "match": match}
+    if matched_by is not None:
+        origin["matched_by"] = matched_by
     (root / "source-provenance.json").write_text(
         json.dumps(
             {
                 "inputs": [
                     {
                         "input": {"file": source.name, "sha256": hashlib.sha256(source.read_bytes()).hexdigest()},
-                        "origin": {"workbook_luid": luid, "workbook_name": "Published Name", "match": match},
+                        "origin": origin,
                     }
                 ]
             }
@@ -267,10 +276,15 @@ def write_provenance(root: Path, source: Path, *, luid: str, match: str) -> None
 
 
 def test_a_name_only_provenance_luid_is_not_trusted(bundle: Path) -> None:
-    """`match: "name_only"` means local and server bytes DIFFER and figures will not reproduce.
+    """An origin that establishes identity by NEITHER route yields no LUID.
 
-    `stamp_tableau_provenance.py:191-192` says so outright, yet that LUID was making server oracle
-    evidence ready. The repo's own provenance is 26 `sha256` / 15 `name_only` / 6 unmatched.
+    ⚠️ Re-aimed by issue #450, and the distinction is the whole point. This fixture records no
+    ``matched_by`` at all AND unconfirmed bytes, so nothing says how the workbook was found - it may
+    have been a name collision, which ``find_origin`` falls back to and counts in ``same_name_count``.
+    Refusing is right. It is NOT right for ``matched_by: "luid"``, which is the discriminating twin
+    below: `stamp_tableau_provenance.find_origin` documents the two fields as "two independent axes",
+    and reading the revision one as if it were the identity one is what discarded 23 correctly
+    attributed renders on the reference estate.
     """
     build_unit(bundle, "WB", worksheets=["Revenue Trend"])
     write_provenance(bundle, bundle.parent / "assets" / "WB.twb", luid="luid-1", match="name_only")
@@ -278,6 +292,115 @@ def test_a_name_only_provenance_luid_is_not_trusted(bundle: Path) -> None:
 
     assert crr.scan(bundle)["units"][0]["pages"][0]["readiness"] == "blind"
     assert crr.main([str(bundle), "--quiet"]) == 1
+
+
+def test_a_luid_matched_provenance_survives_a_changed_revision(bundle: Path) -> None:
+    """Issue #450, symptom A: `matched_by: "luid"` establishes identity even when the bytes differ.
+
+    ``find_origin``'s own docstring: "a LUID match with ``name_only`` means 'this is provably the same
+    item on the site, and it has changed since we harvested it', which is a different and more useful
+    statement than a name collision". Measured on the reference estate, 48 of 78 inputs are
+    ``name_only`` while matched BY LUID - the common case - and every one of them lost its identity
+    and fell back to comparing an artifact stem against a published display name.
+    """
+    build_unit(bundle, "WB", worksheets=["Revenue Trend"])
+    write_provenance(bundle, bundle.parent / "assets" / "WB.twb", luid="luid-1", match="name_only", matched_by="luid")
+    write_oracle(
+        bundle,
+        [
+            {
+                "view_name": "Revenue Trend",
+                "view_type": "worksheet",
+                "workbook_luid": "luid-1",
+                "workbook_name": "Not WB",
+            }
+        ],
+    )
+
+    page = crr.scan(bundle)["units"][0]["pages"][0]
+    assert page["readiness"] == "ready"
+    assert crr.scan(bundle)["evidence_attributed"]["luid"] == 1
+
+
+def test_a_luid_matched_provenance_still_refuses_another_workbooks_render(bundle: Path) -> None:
+    """The discriminating twin of the test above: trusting the LUID must still REFUSE a foreign one.
+
+    Deliberately named identically to this unit, because that is the case a name fallback would get
+    wrong: two projects may hold workbooks with the same display name.
+    """
+    build_unit(bundle, "WB", worksheets=["Revenue Trend"])
+    write_provenance(bundle, bundle.parent / "assets" / "WB.twb", luid="luid-1", match="name_only", matched_by="luid")
+    write_oracle(
+        bundle,
+        [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_luid": "luid-2", "workbook_name": "WB"}],
+    )
+
+    report = crr.scan(bundle)
+    assert report["units"][0]["pages"][0]["readiness"] == "blind"
+    assert report["evidence_attributed"]["foreign"] == 1
+    assert report["evidence_attributed"]["luid"] == 0
+
+
+def test_the_asset_filename_luid_prefix_attributes_evidence_with_no_provenance_at_all(bundle: Path) -> None:
+    """`harvest_estate_assets.py` names downloads `<luid>_<name>`, which needs no server to read.
+
+    A harvested estate is the ordinary shape (`_runs/<NNN>-<slug>/assets/`), so this is the route a
+    unit takes whenever provenance stamping was skipped or could not reach the site.
+    """
+    luid = "adc431bb-aeeb-43fe-8ecb-092d4bae8bfa"
+    build_unit(bundle, f"{luid}_WB", worksheets=["Revenue Trend"])
+    write_oracle(
+        bundle,
+        [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_luid": luid, "workbook_name": "Published"}],
+    )
+
+    report = crr.scan(bundle)
+    assert report["units"][0]["pages"][0]["readiness"] == "ready"
+    assert report["evidence_attributed"]["luid"] == 1
+
+
+def test_a_filename_luid_that_contradicts_provenance_establishes_nothing(bundle: Path) -> None:
+    """Two identities that disagree are LESS evidence than none, so the join falls closed.
+
+    Picking whichever was read first is the coin toss issue #438 named; here the render is refused
+    and the page reports blind rather than being certified on a contested identity.
+    """
+    luid = "adc431bb-aeeb-43fe-8ecb-092d4bae8bfa"
+    other = "007f70ac-bf40-4838-9d73-134d40f504db"
+    build_unit(bundle, f"{luid}_WB", worksheets=["Revenue Trend"])
+    write_provenance(
+        bundle,
+        bundle.parent / "assets" / f"{luid}_WB.twb",
+        luid=other,
+        match="sha256",
+        matched_by="luid",
+    )
+    write_oracle(bundle, [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_luid": luid}])
+
+    report = crr.scan(bundle)
+    assert report["units"][0]["pages"][0]["readiness"] == "blind"
+    assert report["evidence_attributed"]["unknown"] == 1
+
+
+def test_every_refusal_is_counted_so_it_can_be_told_from_a_missing_capture(bundle: Path) -> None:
+    """A refusal nobody can see is indistinguishable from a render that was never taken.
+
+    That ambiguity is exactly how issue #450's inert guard passed for six review rounds: coverage
+    numbers alone cannot tell "the guard refused this" from "nobody captured it", so a fix that only
+    makes `pages_ready` go up cannot be told apart from one that deleted the guard.
+    """
+    build_unit(bundle, "WB", worksheets=["Revenue Trend"])
+    write_oracle(
+        bundle,
+        [
+            {"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_name": "WB"},
+            {"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_name": "Other Book"},
+            {"view_name": "Orphan", "view_type": "worksheet", "workbook_luid": "luid-9"},
+        ],
+    )
+
+    census = crr.scan(bundle)["evidence_attributed"]
+    assert census == {"sha256": 0, "luid": 0, "name": 1, "foreign": 1, "unknown": 1}
 
 
 def test_a_sha256_confirmed_provenance_luid_is_trusted(bundle: Path) -> None:

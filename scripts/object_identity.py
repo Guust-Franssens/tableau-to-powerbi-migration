@@ -42,11 +42,31 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Generic, TypeVar
+from typing import Any, Generic, TypeVar
 
 KIND_DASHBOARD = "dashboard"
 KIND_WORKSHEET = "worksheet"
 KIND_UNKNOWN = "unknown"
+
+#: How a render was tied to a unit's workbook. The first three ADMIT; the last two REFUSE.
+WB_SHA = "sha256"
+WB_LUID = "luid"
+WB_NAME = "name"
+WB_FOREIGN = "foreign"
+WB_UNKNOWN = "unknown"
+
+#: Routes that admit. Ordered strongest-first, which is also the order :meth:`WorkbookIdentity.attribute`
+#: consults them - a stronger axis, once BOTH sides carry it, is decisive and is never re-litigated by
+#: a weaker one.
+WB_ROUTES = (WB_SHA, WB_LUID, WB_NAME)
+WB_ADMITTING = frozenset(WB_ROUTES)
+
+#: `harvest_estate_assets.py` names every download `<luid>_<sanitized-name><ext>`, which is the only
+#: offline route to a workbook LUID that needs no server. Mirrors
+#: `stamp_tableau_provenance.HARVEST_STEM_RE`, kept here so both gates share one parser.
+HARVEST_STEM_RE = re.compile(
+    r"^(?P<luid>[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})_(?P<rest>.+)$"
+)
 
 #: The only kinds an identity may carry. `KIND_UNKNOWN` is deliberately absent: an object whose kind
 #: is unknown has no identity, which is the whole point.
@@ -325,3 +345,162 @@ def collisions(identities: list[ObjectIdentity]) -> list[tuple[str, ...]]:
 def duplicates(names: list[str]) -> list[str]:
     """Names appearing more than once in an engine list, kept because a ``set()`` would hide them."""
     return sorted({name for name in names if names.count(name) > 1})
+
+
+# ------------------------------------------------------------------------------------------------
+# WORKBOOK identity - which workbook a render belongs to
+# ------------------------------------------------------------------------------------------------
+#
+# Everything above answers "which OBJECT is this a picture of". This half answers the question one
+# level up - "whose workbook is it" - and it lives here because BOTH gates ask it and, until issue
+# #450, each had invented its own key for it. Measured on the reference estate:
+#
+# * `check_reference_readiness` joined an artifact stem against a display name, and trusted a LUID
+#   ONLY when `origin.match == "sha256"` - a field that answers a revision question. So a workbook
+#   proven by LUID whose bytes had since changed lost its identity, `HR_Dashboard` fell back to exact
+#   equality against `HR Dashboard`, and 23 correctly-typed renders were discarded: 0 of 7 pages
+#   ready. **Fail-closed.**
+# * `check_unit` read `record["workbook"]`, a key NO capture producer writes, while the manifest
+#   carries `workbook_luid` and `workbook_name`. Every record arrived ownerless - 360 of 360 - and
+#   was admitted anyway, so its foreign-workbook guard had never once fired. **Fail-open.**
+#
+# One of each direction, from one cause: no shared definition of what identifies a workbook. So the
+# definition is here, once, and both gates construct their two sides through it.
+
+
+@dataclass(frozen=True)
+class Attribution:
+    """Which axis tied a render to a unit, or why it could not be tied. Never a condition.
+
+    ``__bool__`` raises for the same reason :meth:`Resolution.__bool__` does, and here the reason is
+    concrete: ``route`` is a non-empty string for ``foreign`` and ``unknown`` too, so ``if
+    identity.attribute(record):`` would admit a FOREIGN workbook's render. :attr:`admitted` is the
+    only reader that answers the question.
+
+    ``axis`` names the axis that DECIDED - the same value as ``route`` for an admission, and for a
+    refusal the axis whose two sides disagreed. It exists so a caller can tell "the LUIDs differ"
+    from "the display names differ": a lossy name fallback may legitimately widen the latter and must
+    never be allowed to override the former.
+    """
+
+    route: str
+    detail: str
+    axis: str | None = None
+
+    @property
+    def admitted(self) -> bool:
+        """Whether this render may certify a page in the unit it was attributed against."""
+        return self.route in WB_ADMITTING
+
+    def __bool__(self) -> bool:
+        raise AmbiguousIdentity(
+            f"an Attribution is not a condition - read .admitted; this one is {self.route} ({self.detail})"
+        )
+
+
+@dataclass(frozen=True)
+class WorkbookIdentity:
+    """Who a Tableau workbook is, on the three axes a producer can actually record.
+
+    * ``sha256`` - the bytes of the source workbook. Strongest: it is revision-bound as well as
+      identity-bound, which is why a stale capture cannot hide behind it.
+    * ``luid`` - the published workbook's server id. **This is the identity.** Exact, unique across
+      projects, and the one thing `capture_tableau_oracle.py` always writes.
+    * ``name`` - the display name. **Decoration.** Two projects may hold workbooks with the same
+      name, which is the ambiguity `_runs/<NNN>-<slug>/` numbering exists to avoid elsewhere.
+
+    Every axis is optional because every producer records a different subset; an identity carrying
+    none of them is *unestablished* and, by :meth:`attribute`, certifies nothing.
+    """
+
+    luid: str | None = None
+    name: str | None = None
+    sha256: str | None = None
+
+    @classmethod
+    def of(cls, *, luid: Any = None, name: Any = None, sha256: Any = None) -> WorkbookIdentity:
+        """Build from raw manifest values, keeping only non-blank strings.
+
+        A blank or non-string value is *absent*, never an empty-string identity that would compare
+        equal to another absent one.
+        """
+        return cls(luid=_text(luid), name=_text(name), sha256=_text(sha256))
+
+    @property
+    def established(self) -> bool:
+        """Whether this identity carries anything at all to compare on."""
+        return any((self.luid, self.name, self.sha256))
+
+    def describe(self) -> str:
+        """A short, reportable rendering - so a refusal can name what it compared."""
+        parts = [f"{axis}={value!r}" for axis, value in (("luid", self.luid), ("name", self.name)) if value]
+        if self.sha256:
+            parts.append(f"sha256={self.sha256[:12]}...")
+        return ", ".join(parts) or "no workbook identity"
+
+    def attribute(self, record: WorkbookIdentity) -> Attribution:
+        """Tie ``record`` to this unit, on the STRONGEST axis both sides carry.
+
+        ⚠️ **The first shared axis is decisive.** A mismatch there returns ``foreign`` and never falls
+        through to a weaker one - otherwise a foreign workbook that happens to share a display name
+        would be admitted on the name axis after its LUID had already said no. That fall-through is
+        the identity-loss join this module exists to make unrepresentable.
+
+        ⚠️ **The name axis is EXACT.** A normalized comparison would attribute one workbook's captures
+        to another whose name differs only by case or spacing. If a published display name genuinely
+        differs from the local artifact stem - `HR Dashboard` vs `HR_Dashboard` - the LUID is the
+        answer, and guessing across the difference is not.
+
+        No shared axis at all is ``unknown``: **cannot establish**, never "belongs to this unit".
+        """
+        for axis, mine, theirs in (
+            (WB_SHA, self.sha256, record.sha256),
+            (WB_LUID, self.luid, record.luid),
+            (WB_NAME, self.name, record.name),
+        ):
+            if mine is None or theirs is None:
+                continue
+            if _axis_equal(axis, mine, theirs):
+                return Attribution(axis, f"{axis} matches ({self.describe()})", axis=axis)
+            return Attribution(
+                WB_FOREIGN,
+                f"{axis} differs: unit {self.describe()} vs record {record.describe()}",
+                axis=axis,
+            )
+        return Attribution(
+            WB_UNKNOWN,
+            f"no shared identity axis: unit {self.describe()} vs record {record.describe()}",
+        )
+
+
+def _text(value: Any) -> str | None:
+    """A non-blank string, or None. Blank is absence, not an identity that compares equal."""
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _axis_equal(axis: str, mine: str, theirs: str) -> bool:
+    """Axis comparison. Machine ids are case-insensitive; a display NAME is compared exactly."""
+    return mine == theirs if axis == WB_NAME else mine.casefold() == theirs.casefold()
+
+
+def harvest_luid(stem: str | None) -> str | None:
+    """The LUID prefix of a `harvest_estate_assets.py` filename stem, or None for any other name.
+
+    ``<luid>_<sanitized-name>`` is the harvester's own convention (display names are not unique
+    across projects), so the prefix is this repo's own record of which published workbook it
+    downloaded - exact, and available with no server and no credentials. A hand-placed or renamed
+    workbook simply yields None and keeps the weaker routes, gaining nothing it did not ask for.
+    """
+    found = HARVEST_STEM_RE.match(stem or "")
+    return found.group("luid") if found else None
+
+
+def agreed_luid(*claims: str | None) -> str | None:
+    """The one LUID every non-blank claim agrees on, or None when they disagree.
+
+    Two identities that disagree are LESS evidence than none: a filename prefix that contradicts the
+    stamped provenance means one of them is about a different workbook, and picking whichever was
+    read first is exactly how a foreign render gets admitted. Disagreement therefore fails closed.
+    """
+    seen = {claim.strip().casefold() for claim in claims if isinstance(claim, str) and claim.strip()}
+    return seen.pop() if len(seen) == 1 else None

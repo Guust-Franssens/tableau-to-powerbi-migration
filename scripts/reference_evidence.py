@@ -30,7 +30,9 @@ from object_identity import (
     KIND_DASHBOARD,
     KIND_UNKNOWN,
     KIND_WORKSHEET,
+    Attribution,
     Candidate,
+    WorkbookIdentity,
 )
 
 
@@ -111,17 +113,36 @@ MANUAL_KIND_HINT = (
 class UnitIdentity:
     """Who a unit is, for attributing evidence to it.
 
-    ``workbook_luid`` is populated ONLY when provenance is byte-confirmed. Round-2 review measured
-    the alternative: ``stamp_tableau_provenance.py`` records ``origin.match: "name_only"`` when the
-    local and server bytes DIFFER and says outright that figures will not reproduce, yet that LUID
-    was making server oracle evidence ready. The repo's own provenance is 26 ``sha256`` / 15
-    ``name_only`` / 6 unmatched, so trusting it unconditionally is the common case, not an edge one.
+    ``workbook_luid`` is the published workbook's server id, and it is **the** identity: a display
+    name is not unique across projects, and the local artifact stem is a filesystem-sanitised
+    spelling of one (`HR_Dashboard` for `HR Dashboard`), so the name axis cannot bridge harvest.
+
+    ⚠️ Round-2 review gated this LUID on ``origin.match == "sha256"`` and issue #450's fix removed
+    that gate, because ``match`` answers a different question. ``stamp_tableau_provenance.find_origin``
+    says so itself: ``matched_by`` records *how the workbook was found* (``luid``/``name``/
+    ``sanitized_name``) and ``match`` records *how strongly the bytes were confirmed* (``sha256`` vs
+    ``name_only``), and they are "two independent axes: a LUID match with ``name_only`` means 'this is
+    provably the same item on the site, and it has changed since we harvested it'". Reading the
+    REVISION axis as if it were the IDENTITY axis discarded a proven LUID and fell back to exact-name
+    equality - a join that is weaker on identity **and** carries no revision guarantee either, so it
+    traded nothing for the 23 renders it threw away. Freshness is disclosed by the grade, which for an
+    oracle capture is already "layout/text only"; it is not an identity question.
     """
 
     name: str
     source_path: Path
     source_sha256: str
     workbook_luid: str | None = None
+
+    def workbook(self) -> WorkbookIdentity:
+        """This unit's workbook, on the axes it can establish.
+
+        The unit's ``name`` is an ARTIFACT STEM, not a published display name. It is offered on the
+        name axis anyway because that is the only axis a locally-captured `reference/` manifest and a
+        server oracle can share when no LUID is available - but it is the weakest route, and
+        :meth:`WorkbookIdentity.attribute` consults it last.
+        """
+        return WorkbookIdentity.of(luid=self.workbook_luid, name=self.name, sha256=self.source_sha256)
 
 
 @dataclass(frozen=True)
@@ -256,30 +277,30 @@ class Evidence:  # pylint: disable=too-many-instance-attributes
             names.append(self.name[len(MANUAL_NAME_PREFIX) :])
         return Candidate(names=tuple(names), kind=self.kind)
 
-    def is_for(self, unit: UnitIdentity) -> bool:
-        """Whether this render is provably evidence for ``unit``.
+    def workbook(self) -> WorkbookIdentity:
+        """The workbook this render declares it came from, on whichever axes its producer wrote."""
+        return WorkbookIdentity.of(luid=self.workbook_luid, name=self.workbook_name, sha256=self.workbook_sha)
 
-        Reference evidence is keyed by the SOURCE SHA, so a capture taken against an older revision
-        of the workbook does not silently remain valid - a stale picture is worse than a missing one
-        because it looks like evidence.
+    def attribution(self, unit: UnitIdentity) -> Attribution:
+        """Why this render does or does not belong to ``unit``, naming the axis that decided.
 
-        Oracle evidence carries BOTH a LUID and a workbook name, and both are used. Round-2 review
-        measured the previous either/or: a record carrying a LUID discarded its name, so removing the
-        (untrusted) source provenance made correctly-NAMED records return `0/3 blind`. A LUID is
-        trusted only when the unit's provenance was byte-confirmed; otherwise the name is the
-        fallback, exactly as documented.
+        The whole join is :meth:`WorkbookIdentity.attribute`, shared with ``check_unit.py`` - see
+        issue #450, where the two gates disagreed about how a workbook is identified and produced one
+        fail-closed and one fail-open defect from that single disagreement.
 
-        WARNING: the name fallback is EXACT. It was normalized, which made this a lossy join on
-        workbook identity - the same collapse defect, at a layer nobody had enumerated. Two workbook
-        names differing only by case or repeated whitespace would have attributed one workbook's
-        captures to the other. If a published workbook name genuinely differs from the unit name, the
-        LUID route is the answer; guessing across the difference is not.
+        Reference evidence carries the source SHA, so it is matched revision-first: a capture taken
+        against an older revision of the workbook does not silently remain valid, because a stale
+        picture is worse than a missing one - it looks like evidence. Oracle evidence carries a LUID
+        and a display name, and the LUID is decisive whenever the unit has one.
+
+        ⚠️ There is deliberately **no** ``is_for()`` boolean beside this. There was, as a one-line
+        delegate, and the mutation runner measured what that cost: two mutants pinning the old
+        boolean went on reporting CAUGHT while patching a method the gate no longer called. A second
+        reader of one contract is a place for two answers to diverge, which is the whole shape of
+        #450. Callers read ``.admitted``, which :class:`object_identity.Attribution` makes the only
+        legal reader.
         """
-        if self.workbook_sha is not None:
-            return self.workbook_sha.casefold() == unit.source_sha256.casefold()
-        if self.workbook_luid and unit.workbook_luid:
-            return self.workbook_luid.casefold() == unit.workbook_luid.casefold()
-        return self.workbook_name == unit.name
+        return unit.workbook().attribute(self.workbook())
 
 
 def sha256_of(path: Path) -> str | None:
