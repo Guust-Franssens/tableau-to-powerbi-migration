@@ -431,131 +431,172 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
         ["test_both_halves_agree_on_whether_attribution_is_ambiguous"],
     ),
     (
-        "IDENTITY->STR: a non-unique slugged HANDOVER name still binds",
-        "        loose = slugs.count(slug) == 1 and slugged_stems.count(slug) == 1",
-        "        loose = slugged_stems.count(slug) == 1",
+        "BINDING: the handover side of the uniqueness guard is dropped",
+        "        loose = handover_index.unique(name) is not None and stem_index.unique(name) is not None",
+        "        loose = stem_index.unique(name) is not None",
         ["test_two_workbooks_whose_names_slug_alike_do_not_bind_interchangeably"],
     ),
     (
-        "SLUG AUDIT: a non-unique slugged TARGET ARTIFACT still binds",
-        "        loose = slugs.count(slug) == 1 and slugged_stems.count(slug) == 1",
-        "        loose = slugs.count(slug) == 1 and slug in slugged_stems",
-        ["test_two_artifacts_slugging_alike_refuse_a_single_handover_workbook"],
+        "BINDING: the target-artifact side of the uniqueness guard is dropped",
+        "        loose = handover_index.unique(name) is not None and stem_index.unique(name) is not None",
+        "        loose = handover_index.unique(name) is not None",
+        ["test_the_normalized_index_is_what_bindable_workbooks_consults"],
     ),
     (
-        "SLUG AUDIT: the target artifact keys collapse into a set again",
-        "    return stems, [_slug(stem) for stem in sorted(stems)]",
-        "    return stems, list({_slug(stem) for stem in sorted(stems)})",
-        ["test_two_artifacts_slugging_alike_refuse_a_single_handover_workbook"],
-    ),
-    (
-        "SLUG AUDIT: the target artifact keys count files instead of distinct stems",
-        "    stems = {stem for stem in stems if stem}\n    return stems, [_slug(stem) for stem in sorted(stems)]",
-        "    stems = {stem for stem in stems if stem}\n"
-        "    doubled = sorted(stems) * 2\n"
-        "    return stems, [_slug(stem) for stem in doubled]",
-        ["test_a_filesystem_sanitised_workbook_name_still_binds_when_unambiguous"],
-    ),
-    (
-        "IDENTITY->STR: the slugged workbook fallback is removed entirely",
-        "        loose = slugs.count(slug) == 1 and slugged_stems.count(slug) == 1",
+        "BINDING: the lossy workbook fallback is removed entirely",
+        "        loose = handover_index.unique(name) is not None and stem_index.unique(name) is not None",
         "        loose = False",
         ["test_a_filesystem_sanitised_workbook_name_still_binds_when_unambiguous"],
     ),
     (
-        "SLUG AUDIT: one exemption entry may exempt every finding it matches",
-        "        if len(matched) == 1:\n            exempted.add(matched[0])",
-        "        if matched:\n            exempted.update(matched)",
-        ["test_a_scaffold_signature_matching_two_findings_only_by_slug_applies_to_neither"],
+        "BINDING: two distinct artifact stems are indexed as ONE candidate",
+        "    for stem in sorted(stems):\n        index.add(stem, stem)",
+        "    for stem in sorted(stems):\n        index.add_spelling(stem, 'any')",
+        ["test_the_normalized_index_is_what_bindable_workbooks_consults"],
     ),
     (
-        "SLUG AUDIT: the exemption slug fallback runs even when a finding matched exactly",
-        "        matched = exact or [",
-        "        matched = [",
-        ["test_one_scaffold_signature_cannot_exempt_two_findings"],
+        "INDEX: unique() picks the first candidate instead of refusing a collision",
+        "        return matches[0] if len(matches) == 1 else None",
+        "        return matches[0] if matches else None",
+        ["test_the_index_refuses_zero_and_refuses_many"],
     ),
     (
-        "SLUG AUDIT: an ambiguous exemption is silently dropped instead of reported",
-        "        elif matched:\n            contested.append(item)\n    return exempted, contested",
-        "        elif matched:\n            pass\n    return exempted, contested",
-        ["test_a_scaffold_signature_matching_two_findings_only_by_slug_applies_to_neither"],
+        "INDEX: unique() refuses everything, including a legitimate single candidate",
+        "        return matches[0] if len(matches) == 1 else None",
+        "        return None",
+        ["test_a_filesystem_sanitised_workbook_name_still_binds_when_unambiguous"],
     ),
     (
-        "SLUG AUDIT: exact exemption matching is removed, so only the lossy slug decides",
+        "INDEX: add() overwrites, so a collision is never observable",
+        "        self.__buckets.setdefault(_slug(name), []).append(value)",
+        "        self.__buckets[_slug(name)] = [value]",
+        ["test_the_index_refuses_zero_and_refuses_many"],
+    ),
+    (
+        "INDEX: add_spelling() inflates one candidate into several",
+        "        bucket = self.__buckets.setdefault(_slug(name), [])\n        if value not in bucket:\n"
+        "            bucket.append(value)",
+        "        bucket = self.__buckets.setdefault(_slug(name), [])\n        bucket.append(value)",
+        ["test_add_spelling_does_not_inflate_a_single_candidate"],
+    ),
+    (
+        "EXEMPTIONS: exact matching is removed, so only the lossy key decides",
         "        exact = [key for key, name, aliases in findings if item == name or item in aliases]",
         "        exact = []",
         ["test_one_scaffold_signature_cannot_exempt_two_findings"],
     ),
     (
-        "ORACLE IDENTITY: producer records are merged into a name->bool map again",
-        "        by_exact.setdefault(record.name, []).append(record)",
-        "        by_exact[record.name] = [record]",
-        ["test_two_reference_records_with_one_name_satisfy_nothing_and_say_why"],
+        "EXEMPTIONS: every lossy spelling resolves to the FIRST finding",
+        "                lossy.add_spelling(value, key)",
+        "                lossy.add_spelling(value, findings[0][0])",
+        ["test_a_scaffold_signature_matching_two_findings_only_by_slug_applies_to_neither"],
     ),
     (
-        "ORACLE IDENTITY: a normalized match is taken without checking the producer side",
-        "        if len(loose) != 1 or self.expected_normalized.get(key, 0) != 1:",
-        "        if self.expected_normalized.get(key, 0) != 1:",
-        ["test_two_records_sharing_a_normalized_key_satisfy_nothing"],
+        "EXEMPTIONS: an ambiguous entry is silently dropped instead of reported",
+        "        elif lossy.count(item):\n            contested.append(item)",
+        "        elif False:\n            contested.append(item)",
+        ["test_a_scaffold_signature_matching_two_findings_only_by_slug_applies_to_neither"],
     ),
     (
-        "ORACLE IDENTITY: a normalized match is taken without checking the expected side",
-        "        if len(loose) != 1 or self.expected_normalized.get(key, 0) != 1:",
-        "        if len(loose) != 1:",
-        ["test_reference_evidence_cannot_satisfy_a_page_when_the_normalized_key_is_shared"],
+        "EXEMPTIONS: the lossy fallback is removed entirely",
+        "        elif (match := lossy.unique(item)) is not None:",
+        "        elif False:",
+        ["test_a_scaffold_signature_still_applies_when_it_names_exactly_one_finding"],
     ),
     (
-        "ORACLE IDENTITY: the normalized fallback is removed entirely",
-        "        loose = self.by_normalized.get(key, [])",
-        "        loose = []",
-        ["test_reference_evidence_satisfies_a_page_when_the_normalized_key_is_unique_on_both_sides"],
+        "ORACLE KIND: view_type is discarded, so a worksheet certifies a dashboard",
+        '    return value if value in {"dashboard", "worksheet"} else None',
+        '    return "dashboard"',
+        ["test_a_worksheet_typed_record_cannot_certify_a_same_named_dashboard"],
     ),
     (
-        "ORACLE IDENTITY: exact spelling no longer wins over a shared normalized key",
-        '        exact = self.by_exact.get(page["name"], [])',
-        "        exact = []",
-        ["test_exact_reference_evidence_beats_a_shared_normalized_key"],
+        "ORACLE KIND: 'unknown' is accepted as if it were a kind",
+        '    return value if value in {"dashboard", "worksheet"} else None',
+        "    return value if isinstance(value, str) and value else None",
+        ["test_a_record_whose_kind_is_unestablished_certifies_nothing"],
     ),
     (
-        "ORACLE IDENTITY: evidence from another workbook is admitted",
-        "            alike = [name for name in unit_workbooks if _slug(name) == _slug(record.workbook)]",
-        "            alike = [record.workbook]",
+        "ORACLE KIND: a kind-less record is admitted anyway",
+        "        if record.kind is None:\n            kindless += 1\n            continue",
+        "        if record.kind is None:\n            kindless += 1",
+        ["test_a_record_whose_kind_is_unestablished_certifies_nothing"],
+    ),
+    (
+        "ORACLE KIND: the page lookup ignores the record's kind",
+        '        exact = self.by_exact.get((str(page.get("kind")), page["name"]), [])',
+        '        exact = next((v for k, v in self.by_exact.items() if k[1] == page["name"]), [])',
+        ["test_a_worksheet_typed_record_cannot_certify_a_same_named_dashboard"],
+    ),
+    (
+        "ORACLE KIND: a reference entry stops being a dashboard by construction",
+        '                    kind="dashboard",',
+        "                    kind=None,",
+        ["test_reference_manifest_entries_are_dashboards_by_construction"],
+    ),
+    (
+        "ORACLE IDENTITY: producer records are collapsed to one per key again",
+        "        by_exact.setdefault((str(record.kind), record.name), []).append(record)",
+        "        by_exact[(str(record.kind), record.name)] = [record]",
+        ["test_two_producer_records_naming_one_page_satisfy_nothing"],
+    ),
+    (
+        "ORACLE WORKBOOK: the producing side of the uniqueness guard is dropped",
+        "            two_sided = unit_index.unique(record.workbook) is not None and (\n"
+        "                producer_index.unique(record.workbook) is not None\n            )",
+        "            two_sided = unit_index.unique(record.workbook) is not None",
+        ["test_two_producing_workbooks_slugging_alike_are_both_refused"],
+    ),
+    (
+        "ORACLE WORKBOOK: the unit side of the uniqueness guard is dropped",
+        "            two_sided = unit_index.unique(record.workbook) is not None and (\n"
+        "                producer_index.unique(record.workbook) is not None\n            )",
+        "            two_sided = producer_index.unique(record.workbook) is not None",
         ["test_oracle_evidence_from_a_different_workbook_satisfies_nothing"],
     ),
     (
-        "ORACLE IDENTITY: the workbook guard rejects the unit's own evidence",
-        "        elif record.workbook not in unit_workbooks:\n"
-        "            alike = [name for name in unit_workbooks if _slug(name) == _slug(record.workbook)]",
-        "        elif True:\n            alike = []",
-        ["test_oracle_evidence_from_this_workbook_still_counts"],
+        "ORACLE WORKBOOK: the sanitised-spelling fallback is removed entirely",
+        "            two_sided = unit_index.unique(record.workbook) is not None and (\n"
+        "                producer_index.unique(record.workbook) is not None\n            )",
+        "            two_sided = False",
+        ["test_one_producing_workbook_still_binds_through_a_sanitised_spelling"],
     ),
     (
-        "ORACLE IDENTITY: unattributed evidence is no longer disclosed in the grade",
-        '        grade += f" (⚠️ {evidence.unattributed} record(s) declare no producing workbook)"',
+        "ORACLE WORKBOOK: unattributed evidence is no longer disclosed in the grade",
+        '        grade += f" (\u26a0\ufe0f {evidence.unattributed} record(s) declare no producing workbook)"',
         "        pass",
         ["test_oracle_evidence_declaring_no_workbook_is_admitted_but_flagged"],
     ),
     (
-        "DISCOVERY: candidate reference directories are no longer deduplicated at all",
-        "        if resolved not in dirs:\n            dirs.append(resolved)",
-        "        dirs.append(resolved)",
-        ["test_one_reference_directory_is_read_once_even_when_named_two_ways"],
+        "ORACLE KIND: kind-less evidence is discarded SILENTLY",
+        "    if evidence.kindless:\n        grade += (",
+        "    if False:\n        grade += (",
+        ["test_a_record_whose_kind_is_unestablished_certifies_nothing"],
     ),
     (
-        "DISCOVERY: reference directories are deduplicated BEFORE they are resolved",
-        "def _reference_dirs(target: Path, explicit: Path | None) -> list[Path]:\n"
-        "    unit = _unit_dir(target)\n"
-        '    candidates = [explicit] if explicit else [unit / "reference", target / "reference"]\n'
-        "    return _resolved_unique(candidates)",
-        "def _reference_dirs(target: Path, explicit: Path | None) -> list[Path]:\n"
-        "    unit = _unit_dir(target)\n"
-        '    candidates = [explicit] if explicit else [unit / "reference", target / "reference"]\n'
-        "    seen: list[Path] = []\n"
-        "    for path in candidates:\n"
-        "        if path and path.exists() and path not in seen:\n"
-        "            seen.append(path)\n"
-        "    return [path.resolve() for path in seen]",
-        ["test_a_relative_target_reads_one_reference_directory_once"],
+        "SLUG CENSUS: a brand-new lossy call site outside the index",
+        "def _page_key(page: dict[str, Any]) -> tuple[str, str, str]:",
+        "def _unadjudicated_new_site(text: str) -> str:\n"
+        "    return _slug(text)\n"
+        "\n"
+        "\n"
+        "def _page_key(page: dict[str, Any]) -> tuple[str, str, str]:",
+        ["test_every_slug_call_site_is_inside_the_index_or_allowlisted"],
+    ),
+    (
+        "SLUG CENSUS: the reporting-only map is PROMOTED into a disposition",
+        '        elif page["declared_reason"]:\n            disposition = OMISSION_DECLARED',
+        '        elif page["declared_reason"] or expectation["explanations"]["described"]:\n'
+        "            disposition = OMISSION_DECLARED",
+        ["test_reporting_only_evidence_does_not_change_any_verdict"],
+    ),
+    (
+        "SLUG CENSUS: the index grows a public accessor that leaks the bucket",
+        "    def count(self, name: str) -> int:",
+        "    def bucket(self, name: str) -> list[_T]:\n"
+        "        return self.__buckets.get(_slug(name), [])\n"
+        "\n"
+        "    def count(self, name: str) -> int:",
+        ["test_the_index_exposes_no_way_to_read_a_bucket"],
     ),
     (
         "oracle discovery: canonical oracle/ name removed",
@@ -570,57 +611,12 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
         ["test_underscore_oracle_directory_is_still_discovered"],
     ),
     (
-        "SLUG CENSUS: a brand-new lossy call site rides in unadjudicated",
-        "def _page_key(page: dict[str, Any]) -> tuple[str, str, str]:",
-        "def _unadjudicated_new_site(text: str) -> str:\n"
-        "    return _slug(text)\n"
-        "\n"
-        "\n"
-        "def _page_key(page: dict[str, Any]) -> tuple[str, str, str]:",
-        ["test_every_slug_call_site_is_pinned"],
-    ),
-    (
-        "SLUG CENSUS: a second _slug is added to an already-pinned line",
-        '    described = explanations["described"].get(_slug(page["name"]))',
-        '    described = explanations["described"].get(_slug(_slug(page["name"])))',
-        ["test_census_call_counts_match_the_source"],
-    ),
-    (
-        "SLUG CENSUS: a pinned call site disappears without the census being updated",
-        '    described = explanations["described"].get(_slug(page["name"]))\n    if described:',
-        '    described = explanations["described"].get(page["name"])\n    if described:',
-        ["test_no_census_entry_is_stale"],
-    ),
-    (
-        "SLUG CENSUS: a function claiming to be uniqueness-guarded stops guarding",
-        "        loose = slugs.count(slug) == 1 and slugged_stems.count(slug) == 1",
-        "        loose = bool(set(slugs) & set(slugged_stems))",
-        ["test_uniqueness_guarded_sites_actually_guard_on_one"],
-    ),
-    (
-        "SLUG CENSUS: a function claiming to preserve multiplicity slugs into a set",
-        "        by_normalized.setdefault(_slug(record.name), []).append(record)",
-        "        by_normalized.setdefault(next(iter({_slug(record.name)})), []).append(record)",
-        ["test_multiplicity_preserving_functions_never_slug_into_a_set"],
-    ),
-    (
-        "DISCLOSURE: the #438 caveat fires unconditionally, so it becomes a banner nobody reads",
-        '    certified = [row["page"]["name"] for row in rows if row["visual"] or row["numeric"]]',
-        '    certified = [row["page"]["name"] for row in rows] or ["any"]',
-        ["test_a_run_that_certified_nothing_prints_no_caveat"],
-    ),
-    (
-        "DISCLOSURE: the #438 caveat stops naming the pages it applies to",
-        '            f"depicts, so treat their PASS as unconfirmed where a worksheet shares the page\'s name: "\n'
-        '            f"{names}{more}"',
-        '            f"depicts."',
-        ["test_a_certified_page_carries_the_kind_caveat_naming_it"],
-    ),
-    (
+        # The kind half of #438 is fixed on this branch, so the two mutations that defended its
+        # caveat are gone with the caveat. These two survive because #450 does.
         "DISCLOSURE: loose workbook attribution is no longer tracked, so its caveat never fires",
         "            loosely_attributed.append(record.workbook)",
         "            pass",
-        ["test_a_loosely_attributed_workbook_adds_its_own_caveat"],
+        ["test_a_loosely_attributed_workbook_carries_a_caveat_naming_it"],
     ),
     (
         "DISCLOSURE: the caveats never reach the rendered output",
