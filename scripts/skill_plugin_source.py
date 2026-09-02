@@ -165,23 +165,38 @@ def read_owner_marker(plugin_root: Path | None) -> dict | None:
 def marker_bundle_problems(names: object, skills_dir: Path) -> list[str]:
     """Why a marker's recorded inventory cannot be acted on, or `[]` when every entry is safe.
 
-    The marker is a DATA FILE, and `sync_installed_skills._apply` feeds its `bundles` array
-    straight to ``shutil.rmtree(installed / name)``. In `pathlib`, ``Path("/abs") / x`` and
-    ``installed / ".."`` both ESCAPE by construction, so an absolute path, a `..`, a separator or
-    an empty string in that array turns a sync into an arbitrary recursive delete that still exits
-    0 - strictly worse than the in-plugin deletion this whole fix exists to stop. Measured through
-    public `sync.main` in review: a valid-looking marker naming an absolute path deleted an
-    unrelated directory and reported success.
+    The marker is a DATA FILE, and `sync_installed_skills._apply` deletes what its `bundles` array
+    names. In `pathlib`, ``Path("/abs") / x`` and ``installed / ".."`` both ESCAPE by construction,
+    so an absolute path, a `..`, a separator or an empty string in that array turns a sync into an
+    arbitrary recursive delete that still exits 0 - strictly worse than the in-plugin deletion this
+    whole fix exists to stop. Measured through public `sync.main` in review: a valid-looking marker
+    naming an absolute path deleted an unrelated directory and reported success.
 
-    So each entry must be exactly ONE filename component, and the path it names must resolve to a
-    DIRECT CHILD of `skills_dir` - which also refuses a symlink pointing out of the plugin, since
-    `resolve()` follows it. The caller must refuse the WHOLE marker on any problem: a marker that
-    lies about one name is not evidence for the others.
+    ⚠️ Structure and containment are NOT enough, because the name that reaches the delete is not
+    always the name that was checked. Measured on Windows, with only `foreign/` on disk:
+
+        entry        exists  (skills/entry).resolve().name   direct child of skills/
+        'FOREIGN'    True    'foreign'                       yes
+        'foreign.'   True    'foreign'                       yes
+        'foreign '   True    'foreign'                       yes
+
+    Windows compares case-insensitively and strips trailing dots and spaces, so all three are
+    genuine direct children - containment holds - and each would have deleted a bundle the marker
+    does not own. Note `resolve()` normalises only paths that EXIST ('GONE.' and 'gone ' come back
+    unchanged when nothing is there), so resolution alone cannot be the test.
+
+    So an entry that names something on disk must equal the REAL directory entry exactly, compared
+    against the actual listing rather than against anything derived from the string itself; and the
+    caller deletes the RESOLVED path (`marker_bundle_target`), never `skills_dir / raw`.
+
+    The caller must refuse the WHOLE marker on any problem: a marker that lies about one name is
+    not evidence for the others.
     """
     if not isinstance(names, list):
         return [f"`bundles` must be a list, not {type(names).__name__}"]
     problems: list[str] = []
     parent = skills_dir.resolve()
+    actual = {child.name for child in skills_dir.iterdir()} if skills_dir.is_dir() else set()
     for entry in names:
         if not isinstance(entry, str) or not entry.strip():
             problems.append(f"{entry!r} is not a non-empty string")
@@ -190,6 +205,9 @@ def marker_bundle_problems(names: object, skills_dir: Path) -> list[str]:
         if len(component.parts) != 1 or component.anchor or entry in (".", "..") or "/" in entry or "\\" in entry:
             problems.append(f"{entry!r} is not a single path component")
             continue
+        if entry != entry.strip() or entry.endswith("."):
+            problems.append(f"{entry!r} has leading/trailing whitespace or a trailing dot, which Windows strips")
+            continue
         try:
             resolved = (skills_dir / entry).resolve()
         except (OSError, ValueError):  # pragma: no cover - only on a path the OS rejects outright
@@ -197,7 +215,26 @@ def marker_bundle_problems(names: object, skills_dir: Path) -> list[str]:
             continue
         if resolved.parent != parent:
             problems.append(f"{entry!r} resolves outside {skills_dir} (to {resolved})")
+            continue
+        if (skills_dir / entry).exists() and entry not in actual:
+            problems.append(
+                f"{entry!r} is not the on-disk name of what it points at ({resolved.name!r}); a record that "
+                "does not spell the directory it claims to have installed is not describing that directory"
+            )
     return problems
+
+
+def marker_bundle_target(skills_dir: Path, name: str) -> Path:
+    """The one path a recorded bundle name may name: RESOLVED and re-validated, never `dir / raw`.
+
+    Deleting `skills_dir / name` would delete whatever the OS decides that string means, which is
+    the alias hole above. Callers delete THIS path, and re-validating here rather than trusting the
+    planning-time check means a marker that became unsafe in between cannot slip through.
+    """
+    problems = marker_bundle_problems([name], skills_dir)
+    if problems:
+        raise ValueError("; ".join(problems))
+    return (skills_dir / name).resolve()
 
 
 def write_owner_marker(plugin_root: Path, **fields: object) -> Path:

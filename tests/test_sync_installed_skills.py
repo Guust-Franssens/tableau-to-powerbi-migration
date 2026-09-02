@@ -1615,3 +1615,150 @@ def test_preflight_blocks_unreconciled_ownership_and_says_so(estate: Estate, cap
     assert json.loads(verdict)["status"] == "ownership_drift"
     assert _skill_verdict(verdict, "$v.Merged.Ok") == "False"
     assert "RECORD does not match" in _skill_verdict(verdict, "$v.Merged.Detail")
+
+
+# --------------------------------------------------------------------------------------------
+# Round-4 finding 1 - the name that reaches the delete was not the name that was checked.
+#
+# Measured on Windows with only `foreign/` on disk: 'FOREIGN', 'foreign.' and 'foreign ' all
+# report exists() True and resolve to `foreign`, so containment holds and each would have
+# deleted a bundle the marker does not own.
+# --------------------------------------------------------------------------------------------
+
+
+def _case_insensitive(directory: Path) -> bool:
+    """Whether THIS filesystem aliases case, decided by probing it rather than by platform name."""
+    probe = directory / "case-probe-dir"
+    probe.mkdir(exist_ok=True)
+    try:
+        return (directory / "CASE-PROBE-DIR").exists()
+    finally:
+        probe.rmdir()
+
+
+@pytest.mark.parametrize(
+    "alias",
+    ["foreign-bundle.", "foreign-bundle ", " foreign-bundle"],
+    ids=["trailing-dot", "trailing-space", "leading-space"],
+)
+def test_a_marker_naming_a_filename_ALIAS_of_a_bundle_is_refused(
+    estate: Estate, alias: str, capsys: pytest.CaptureFixture
+) -> None:
+    """Windows strips trailing dots and spaces, so these are the SAME directory to the OS."""
+    assert _run(estate) == sync.EXIT_OK
+    capsys.readouterr()
+    foreign = estate.plugin / "skills" / "foreign-bundle"
+    foreign.mkdir(parents=True)
+    (foreign / "SKILL.md").write_text("not ours to delete\n", encoding="utf-8")
+    _stamp(estate, [alias])
+    _make_stale(estate)
+
+    code = _run(estate)
+    capsys.readouterr()
+
+    assert (foreign / "SKILL.md").is_file(), "a name that only ALIASES a bundle must not delete it"
+    assert code == sync.EXIT_UNSAFE_MARKER
+
+
+def test_a_marker_naming_a_CASE_alias_of_a_bundle_is_refused(estate: Estate, capsys: pytest.CaptureFixture) -> None:
+    """The alias that needs no punctuation at all - and the one containment cannot see.
+
+    Skipped where the filesystem is case-SENSITIVE, because there `FOREIGN-BUNDLE` is simply a
+    different directory that does not exist, and deleting nothing is the correct outcome. The probe
+    asks the filesystem rather than trusting `os.name`.
+    """
+    if not _case_insensitive(estate.plugin):
+        pytest.skip("case-sensitive filesystem: an upper-case name is a different directory here")
+    assert _run(estate) == sync.EXIT_OK
+    capsys.readouterr()
+    foreign = estate.plugin / "skills" / "foreign-bundle"
+    foreign.mkdir(parents=True)
+    (foreign / "SKILL.md").write_text("not ours to delete\n", encoding="utf-8")
+    _stamp(estate, ["FOREIGN-BUNDLE"])
+    _make_stale(estate)
+
+    code = _run(estate)
+    capsys.readouterr()
+
+    assert (foreign / "SKILL.md").is_file(), "a record that does not SPELL the directory does not own it"
+    assert code == sync.EXIT_UNSAFE_MARKER
+
+
+def test_a_recorded_name_that_matches_on_disk_exactly_is_still_retired(
+    estate: Estate, capsys: pytest.CaptureFixture
+) -> None:
+    """The control for both alias tests: exact-match retirement must still work."""
+    assert _run(estate) == sync.EXIT_OK
+    capsys.readouterr()
+    ours = estate.plugin / "skills" / "legacy-bundle"
+    ours.mkdir(parents=True)
+    (ours / "SKILL.md").write_text("we put this here\n", encoding="utf-8")
+    _stamp(estate, ["legacy-bundle", *BUNDLES])
+    _make_stale(estate)
+
+    assert _run(estate) == sync.EXIT_OK
+    capsys.readouterr()
+    assert not ours.exists()
+
+
+# --------------------------------------------------------------------------------------------
+# Round-4 finding 2 - a MISSING marker is the installed base, and it was excluded from the check.
+# --------------------------------------------------------------------------------------------
+
+
+def test_a_markerless_install_is_unreconciled_and_can_then_retire(
+    estate: Estate, capsys: pytest.CaptureFixture
+) -> None:
+    """Every install that predates the record has none, so none could detect its FIRST retirement.
+
+    Measured through public `sync.main`: markerless and byte-identical exited 0; a bundle was then
+    retired and it exited 0 AGAIN with the retired bundle still installed - because with no record
+    there is no previously-owned inventory, so the stale directory is out of the deletion scope.
+    """
+    assert _run(estate) == sync.EXIT_OK
+    capsys.readouterr()
+    (estate.plugin / sync.OWNER_MARKER_NAME).unlink()
+
+    assert _run(estate, "--check", "--json") == sync.EXIT_DRIFT, "no record at all is not a record that agrees"
+    verdict = json.loads(capsys.readouterr().out)
+    assert verdict["status"] == "ownership_drift"
+    assert verdict["owner_marker"] == "absent"
+
+    assert _run(estate) == sync.EXIT_OK
+    capsys.readouterr()
+    assert (estate.plugin / sync.OWNER_MARKER_NAME).is_file(), "a plain sync must stamp the missing record"
+
+    retired = BUNDLES[-1]
+    _retire_a_bundle(estate, retired)
+    assert _run(estate) == sync.EXIT_OK
+    capsys.readouterr()
+    assert not (estate.plugin / "skills" / retired).exists(), (
+        "this is what the missing record cost: the first retirement after it was invisible"
+    )
+
+
+def test_a_marker_with_an_unknown_schema_is_never_acted_on(estate: Estate, capsys: pytest.CaptureFixture) -> None:
+    """The next unchecked input after finding 2: a record this build cannot interpret.
+
+    `bundles` means what THIS schema says it means. If a future writer changes that, guessing is
+    the one thing that must not happen, so an unknown schema acts on nothing - no deletions - and
+    reports the record as unreconciled, which rewrites it at a schema this build understands.
+    """
+    assert _run(estate) == sync.EXIT_OK
+    capsys.readouterr()
+    foreign = estate.plugin / "skills" / "foreign-bundle"
+    foreign.mkdir(parents=True)
+    (foreign / "SKILL.md").write_text("not ours to delete\n", encoding="utf-8")
+    (estate.plugin / sync.OWNER_MARKER_NAME).write_text(
+        json.dumps({"schema": 99, "publish_repo": build_plugin.PUBLISH_REPO, "bundles": ["foreign-bundle"]}),
+        encoding="utf-8",
+    )
+
+    assert _run(estate, "--check") == sync.EXIT_DRIFT
+    capsys.readouterr()
+    assert _run(estate) == sync.EXIT_OK
+    capsys.readouterr()
+
+    assert (foreign / "SKILL.md").is_file(), "an uninterpretable record must delete NOTHING"
+    recorded = json.loads((estate.plugin / sync.OWNER_MARKER_NAME).read_text(encoding="utf-8"))
+    assert recorded["schema"] == 1 and sorted(recorded["bundles"]) == sorted(BUNDLES)

@@ -90,9 +90,11 @@ from pathlib import Path
 from skill_plugin_source import (
     DEFAULT_INSTALL_HINT,
     OWNER_MARKER_NAME,
+    OWNER_MARKER_SCHEMA,
     PLUGIN_ROOT_ENV,
     discover_skill_plugin,
     marker_bundle_problems,
+    marker_bundle_target,
     read_owner_marker,
     write_owner_marker,
 )
@@ -692,7 +694,12 @@ def _plan(args: argparse.Namespace, source: PublishSource, workdir: Path, fetch_
         discovery=discovery,
         identity=identity,
         marker_present=marker is not None,
-        inventory_stale=marker is not None and sorted(recorded) != bundles,
+        # ⚠️ `marker is None` counts as STALE, deliberately. Every install that predates this
+        # record - i.e. the entire installed base - has no marker, and without one a retirement is
+        # invisible: measured, a markerless byte-identical install exited 0, a bundle was retired,
+        # and the next run exited 0 again with the retired bundle still installed. A record that
+        # does not exist is not a record that agrees (round-4 finding 2).
+        inventory_stale=marker is None or sorted(recorded) != bundles,
         workdir=workdir,
     )
     plan.base = {
@@ -718,15 +725,22 @@ def _plan(args: argparse.Namespace, source: PublishSource, workdir: Path, fetch_
 def _recorded_inventory(marker: dict | None, skills_dir: Path | None) -> list[str]:
     """The bundles a previous publish recorded, or raise when acting on them would be unsafe.
 
-    Every name here reaches `shutil.rmtree(installed / name)`. The old filter kept any `str`, which
-    is not a safety property at all: `installed / "C:/stranger-data"` is that absolute path, and
-    `installed / ".."` is the plugin's parent. Measured through public `sync.main` in review, a
-    marker naming an absolute path deleted an unrelated directory and exited 0.
+    Every name here reaches a deletion. The old filter kept any `str`, which is not a safety
+    property at all: `installed / "C:/stranger-data"` is that absolute path, and `installed / ".."`
+    is the plugin's parent. Measured through public `sync.main` in review, a marker naming an
+    absolute path deleted an unrelated directory and exited 0.
 
     A bad entry does not merely get skipped. A marker that lies about one name is not trustworthy
     about the others, so the whole run refuses and writes nothing.
+
+    An UNKNOWN SCHEMA is the same question one layer out, and gets the safe answer rather than a
+    guess: if some future writer changes what `bundles` means, this build cannot interpret it, so
+    it acts on NOTHING (no deletions) and reports the record as unreconciled, which rewrites it at
+    the schema this build does understand. Fail-closed, and self-healing.
     """
     if marker is None or skills_dir is None:
+        return []
+    if marker.get("schema") != OWNER_MARKER_SCHEMA:
         return []
     names = marker.get("bundles", [])
     problems = marker_bundle_problems(names, skills_dir)
@@ -775,14 +789,22 @@ def _record_ownership(plan: SyncPlan) -> None:
 def _apply(plan: SyncPlan, changed: list[Path], extra: list[Path]) -> list[Path]:
     """Copy the reference files in, remove the OWNED files that are no longer shipped, and re-verify."""
     installed = plan.discovery.skills_dir
+    # Resolve and RE-VALIDATE every deletion target BEFORE anything is written. Two reasons: the
+    # raw recorded string must never reach the filesystem (Windows aliases `FOREIGN`, `foreign.`
+    # and `foreign ` onto a real `foreign/`), and a marker that became unsafe between planning and
+    # applying must abort while the install is still untouched rather than half-published.
+    try:
+        retire = [marker_bundle_target(installed, name) for name in plan.formerly_owned]
+    except ValueError as exc:
+        raise UnsafeMarkerError(str(exc)) from exc
     for rel in changed:
         target = installed / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(plan.src / rel, target)
     for rel in extra:
         (installed / rel).unlink()
-    for name in plan.formerly_owned:
-        shutil.rmtree(installed / name, ignore_errors=True)
+    for target in retire:
+        shutil.rmtree(target, ignore_errors=True)
     # Re-diff rather than trusting the copies. The whole reason this script exists is a lock that
     # makes some filesystem operations fail, so "it did not raise" is not evidence.
     still, _ = diff_tree(plan.src, installed, scope=plan.owned)
@@ -827,11 +849,15 @@ def _report(args: argparse.Namespace, plan: SyncPlan) -> int:  # pylint: disable
         # named separately in the message; either way the fix is the same rewrite.
         if plan.inventory_stale:
             claimed = plan.formerly_owned
-            headline = (
-                f"the marker still claims {len(claimed)} bundle(s) {plan.source.described} no longer ships"
-                if claimed
-                else f"the marker does not record what is installed from {plan.source.described}"
-            )
+            if not plan.marker_present:
+                headline = (
+                    f"there is NO ownership record for this install, so a bundle {plan.source.described} "
+                    "later retires could never be recognised as ours to remove"
+                )
+            elif claimed:
+                headline = f"the marker still claims {len(claimed)} bundle(s) {plan.source.described} no longer ships"
+            else:
+                headline = f"the marker does not record what is installed from {plan.source.described}"
             if args.check:
                 return _emit(
                     args,
@@ -860,8 +886,6 @@ def _report(args: argparse.Namespace, plan: SyncPlan) -> int:  # pylint: disable
                 ],
                 EXIT_OK,
             )
-        if not args.check and not plan.marker_present:
-            _record_ownership(plan)
         return _emit(
             args,
             payload,
@@ -958,22 +982,23 @@ def main(argv: list[str] | None = None) -> int:
     try:
         try:
             plan = _plan(args, source, workdir, fetch_note)
+            failed = _discovery_failure(args, plan.discovery, plan.base)
+            return failed if failed is not None else _report(args, plan)
         except UnsafeMarkerError as exc:
             return _emit(
                 args,
                 {"status": "unsafe_marker", "detail": str(exc), "default_verified": source.default_verified},
                 [
-                    "SYNC: ERROR - the ownership marker names a deletion target outside the plugin,",
-                    "      so NOTHING was written or removed.",
+                    "SYNC: ERROR - the ownership marker names a deletion target this run cannot",
+                    "      prove it owns, so NOTHING was removed.",
                     f"      {exc}",
-                    "      Every recorded bundle must be a single directory name inside the plugin's",
-                    "      skills/ folder; `installed / <name>` is fed to shutil.rmtree.",
+                    "      Every recorded bundle must be a single directory name that spells an",
+                    "      existing child of the plugin's skills/ folder EXACTLY - Windows aliases",
+                    "      `FOREIGN`, `foreign.` and `foreign ` onto a real `foreign/`.",
                     f"      Delete or repair {OWNER_MARKER_NAME} in the plugin root, then re-run.",
                 ],
                 EXIT_UNSAFE_MARKER,
             )
-        failed = _discovery_failure(args, plan.discovery, plan.base)
-        return failed if failed is not None else _report(args, plan)
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 

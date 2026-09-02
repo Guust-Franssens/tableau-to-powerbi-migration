@@ -13,16 +13,16 @@ One trap is guarded explicitly: if the injected plugin fails to import, pytest e
 running a single test and a naive harness scores that as CAUGHT. The first run of this file reported
 22/22 caught for exactly that reason. ``run()`` raises rather than reporting a false green.
 
-⚠️ **Do not run two harness drivers at once.** Every run writes the same two paths --
-``tests/_mutation_plugin.py`` and ``tests/_mutation_outcomes.json`` -- so a second concurrent driver
-deletes the first one's record and its verdict degrades to ``HARNESS-ERROR``. Measured while a
-background sweep was running: a mutation that pytest had genuinely caught (the right assertion
-failed, visible in the terminal) was scored ``HARNESS-ERROR`` because its outcomes file had been
-removed by the other process. Re-running it serially reported ``CAUGHT``.
+⚠️ **Two drivers no longer collide.** The injected plugin and its record used to be two FIXED
+filenames, so a second driver in the SAME worktree deleted the first one's record and a genuine
+detection was scored ``HARNESS-ERROR`` -- measured. Separate branch worktrees never collided, and
+the failure mode was always an explicit harness error rather than a false clean, but the paths are
+now unique per run so correctness does not depend on remembering to serialise.
 """
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import subprocess
@@ -32,6 +32,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PY = sys.executable
+
+# Per-run suffix for the injected plugin and its record, so two drivers cannot delete each
+# other's files (see `run`). Process id plus a counter: unique across drivers and within one.
+_RUN_TOKEN = itertools.count()
 
 # name -> a conftest-style patch injected via a sitecustomize-like plugin file
 MUTATIONS = {
@@ -406,6 +410,41 @@ def plan(args, source, workdir, fetch_note):
     return built
 sync._plan = plan
 """,
+    "skillsync-marker-alias-accepted": """
+import skill_plugin_source as sps
+_orig = sps.marker_bundle_problems
+def problems(names, skills_dir):
+    # Round-4 finding 1: keep structure and containment, drop the checks that make the name
+    # reaching the delete the same name that was validated. `FOREIGN`, `foreign.` and
+    # `foreign ` are all genuine direct children of skills/ on Windows.
+    return [p for p in _orig(names, skills_dir) if "on-disk name" not in p and "trailing dot" not in p]
+sps.marker_bundle_problems = problems
+""",
+    "skillsync-missing-marker-is-in-sync": """
+import sync_installed_skills as sync
+_orig = sync._plan
+def plan(args, source, workdir, fetch_note):
+    built = _orig(args, source, workdir, fetch_note)
+    # Round-4 finding 2: require a marker to exist before its inventory can be called stale,
+    # which excludes the whole installed base - none of which can detect a FIRST retirement.
+    built.inventory_stale = built.marker_present and built.inventory_stale
+    return built
+sync._plan = plan
+""",
+    "skillsync-unknown-marker-schema-is-trusted": """
+import sync_installed_skills as sync
+import skill_plugin_source as sps
+def recorded(marker, skills_dir):
+    # Interpret `bundles` under a schema this build does not know, i.e. guess.
+    if marker is None or skills_dir is None:
+        return []
+    names = marker.get("bundles", [])
+    problems = sps.marker_bundle_problems(names, skills_dir)
+    if problems:
+        raise sync.UnsafeMarkerError("; ".join(problems))
+    return [str(name) for name in names]
+sync._recorded_inventory = recorded
+""",
     "skillsync-preflight-passes-an-unsafe-marker": """
 from pathlib import Path
 import test_sync_installed_skills as suite
@@ -605,9 +644,16 @@ def run(name: str, code: str, target: str | Sequence[str]) -> tuple[str, int, st
     ``--color=no`` and a scrubbed ``PYTEST_ADDOPTS`` are belt-and-braces: with ``PY_COLORS=1``
     the summary tokens carry ANSI prefixes, which silently turned real detections into
     harness errors.
+
+    The plugin and record paths are UNIQUE PER RUN. They used to be two fixed names, so two
+    drivers in the same worktree deleted each other's record and a genuine detection was
+    scored ``HARNESS-ERROR`` -- measured. Separate branch worktrees never collided (different
+    directories), and the failure mode was always an explicit harness error rather than a
+    false clean, but a driver should not need a documented serialisation rule to be correct.
     """
-    plugin = ROOT / "tests" / "_mutation_plugin.py"
-    outcomes_file = ROOT / "tests" / "_mutation_outcomes.json"
+    token = f"{os.getpid()}_{next(_RUN_TOKEN)}"
+    plugin = ROOT / "tests" / f"_mutation_plugin_{token}.py"
+    outcomes_file = ROOT / "tests" / f"_mutation_outcomes_{token}.json"
     outcomes_file.unlink(missing_ok=True)
     plugin.write_text(
         "import sys\nfrom pathlib import Path\n"
@@ -619,7 +665,7 @@ def run(name: str, code: str, target: str | Sequence[str]) -> tuple[str, int, st
     env = sanitized_env()
     proc = subprocess.run(
         [PY, "-m", "pytest", *pytest_targets(target)]
-        + ["-q", "-p", "_mutation_plugin", "--no-header", "-x", "--tb=no", "--color=no"],
+        + ["-q", "-p", plugin.stem, "--no-header", "-x", "--tb=no", "--color=no"],
         cwd=ROOT,
         capture_output=True,
         text=True,
