@@ -1762,3 +1762,43 @@ def test_a_marker_with_an_unknown_schema_is_never_acted_on(estate: Estate, capsy
     assert (foreign / "SKILL.md").is_file(), "an uninterpretable record must delete NOTHING"
     recorded = json.loads((estate.plugin / sync.OWNER_MARKER_NAME).read_text(encoding="utf-8"))
     assert recorded["schema"] == 1 and sorted(recorded["bundles"]) == sorted(BUNDLES)
+
+
+def _short_name(path: Path) -> str | None:
+    """The volume's 8.3 alias for `path`, or None when it has none (not Windows, or 8.3 disabled)."""
+    if os.name != "nt":
+        return None
+    import ctypes  # noqa: PLC0415 - Windows-only, and nothing outside this probe needs it
+
+    buffer = ctypes.create_unicode_buffer(1024)
+    if not ctypes.windll.kernel32.GetShortPathNameW(str(path), buffer, 1024):
+        return None
+    alias = Path(buffer.value).name
+    return alias if alias != path.name else None
+
+
+def test_a_marker_naming_an_8_3_SHORT_NAME_alias_is_refused(estate: Estate, capsys: pytest.CaptureFixture) -> None:
+    """A FOURTH alias form, found by asking what else the OS aliases - and measured, not assumed.
+
+    `dir /x` on this volume shows `powerbi-ai-readiness` also answers to `POWERB~1`, which exists,
+    is a genuine direct child, and is not case, whitespace or punctuation. It is refused for the
+    same reason as the others and by the same rule: the recorded name must BE the directory entry,
+    compared against the actual listing. That rule is closed over whatever aliasing the filesystem
+    invents, which is why it is the rule rather than a patch for the three forms review measured.
+    """
+    assert _run(estate) == sync.EXIT_OK
+    capsys.readouterr()
+    foreign = estate.plugin / "skills" / "foreign-bundle-with-a-long-name"
+    foreign.mkdir(parents=True)
+    (foreign / "SKILL.md").write_text("not ours to delete\n", encoding="utf-8")
+    alias = _short_name(foreign)
+    if not alias:
+        pytest.skip("this volume publishes no 8.3 alias for the fixture directory")
+    _stamp(estate, [alias])
+    _make_stale(estate)
+
+    code = _run(estate)
+    capsys.readouterr()
+
+    assert (foreign / "SKILL.md").is_file(), f"the 8.3 alias {alias!r} must not delete what it points at"
+    assert code == sync.EXIT_UNSAFE_MARKER
