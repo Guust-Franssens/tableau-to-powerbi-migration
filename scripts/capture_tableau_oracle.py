@@ -724,12 +724,15 @@ def _capture_renders(
 
     So salvage costs at most ``SALVAGE_BUDGET_MULTIPLIER x`` the request timeout of admission plus a
     small settling margin, whatever the tier count -- one timeout in practice, since reaching the
-    second admission needs the first leg to fail almost instantly. What remains unbounded is name
-    resolution, which happens before there is a socket to abort. ⚠️ It is the ONLY residual now, but
-    it was not when that was first written: the proxy ``CONNECT`` exchange and TLS setup were
-    unbounded too, and saying "only DNS" made them invisible.
+    second admission needs the first leg to fail almost instantly. ⚠️ **What is ENFORCED is the
+    admission budget; the transport deadline is hardening on top of it, not a wall-clock guarantee.**
+    Everything from the first live socket onward is watchdogged; everything BEFORE it is not. That is
+    name resolution *and* -- measured in round 5, and not the same thing -- ``socket.create_connection``
+    walking every resolved address with the full timeout applied to each, **0.177s against a 0.110s
+    ceiling with the timer not yet armed**. See :func:`tableau_http._request`'s phase table, which is
+    the one place this is stated per phase.
 
-    ⚠️ **FOUR earlier statements of this bound were wrong, differently, and all four are worth
+    ⚠️ **FIVE earlier statements of this bound were wrong, differently, and all five are worth
     keeping.** A flat "one timeout" ignored that nothing capped the legs collectively and that a
     ``session_lost`` on a one-attempt leg triggered a full ``sign_in`` on the SESSION policy (now
     refused on the final attempt -- see :meth:`TableauSession.export`). A "hard 2x" rested on a
@@ -740,9 +743,17 @@ def _capture_renders(
     instantly and trickled only the body, so the fixture could not reach the phase that was unbound.
     Then the watchdog was armed **after** the connection sequence, so a proxy trickling its
     ``CONNECT`` response ran for **1.241s against a 0.20s ceiling** with the timer not yet started --
-    and no fixture tunnelled or negotiated TLS, so once again nothing could reach it.
-    The pattern each time was the same, and it is the question to ask of any bound here: **what can
-    the control not see?**
+    and no fixture tunnelled or negotiated TLS, so once again nothing could reach it. Then "DNS is
+    the only residual" hid address iteration behind it, and every fixture connected to ONE localhost
+    address so none could observe an all-address failure.
+
+    ⚠️ **Five rounds, five findings, each one the phase immediately BEFORE wherever the watchdog was
+    then armed. That is not five defects; it is one wrong shape of claim.** Guarding points in a
+    connection sequence nobody can enumerate by reading will keep losing to the next point. The claim
+    is therefore stated as what is enforced -- admission, plus a watchdog from the first live socket
+    -- and the residual is pinned by an executable test rather than a sentence, because the sentence
+    has now been wrong four times. The question that found every one of them is still the one to ask
+    of any bound here: **what can the control not see?**
 
     ⚠️ ``source_credential`` and ``credential_reflected`` skip the renders ENTIRELY, and the skipped
     legs inherit the data leg's status rather than a failure of their own. A credential block is a

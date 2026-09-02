@@ -444,9 +444,16 @@ def _request(
     phase                       what bounds it
     ==========================  ====================================================================
     name resolution             **nothing of ours.** ``getaddrinfo`` runs before a socket exists to
-                                watchdog and the OS resolver ignores socket timeouts. Genuinely
-                                outside reach, and the only remaining one.
-    TCP connect                 the socket timeout, narrowed by :func:`_open` to what is left
+                                watchdog and the OS resolver ignores socket timeouts
+    address iteration           ⚠️ **nothing of ours, and this is NOT DNS.**
+                                ``socket.create_connection`` walks every ``getaddrinfo`` result and
+                                applies the timeout to EACH candidate, so N unreachable addresses
+                                cost N timeouts before any socket -- and therefore any watchdog --
+                                exists. Measured with three already-resolved unroutable addresses at
+                                a 0.05s connect timeout: **0.177s against a 0.110s ceiling**, with
+                                ``timer_armed = False``. Pinned by
+                                ``test_multiple_addresses_are_a_known_unbounded_phase``
+    TCP connect (one address)   the socket timeout, narrowed by :func:`_open` to what is left
     proxy ``CONNECT``           the watchdog, armed at raw-socket creation. Read through
                                 ``makefile()``, so a trickling proxy escapes the socket timeout --
                                 measured at **1.241s against a 0.20s ceiling** before this
@@ -458,6 +465,14 @@ def _request(
     status line and headers     the watchdog, re-pointed at the wrapped socket
     body                        the watchdog, plus :func:`_read_bounded`'s own per-chunk check
     ==========================  ====================================================================
+
+    ⚠️ **So this is HARDENING, not a wall-clock guarantee, and calling it one has been the recurring
+    defect rather than any single phase.** What is enforced is the retry-ADMISSION budget plus a
+    watchdog covering every phase from the first live socket onward. Everything before that first
+    socket -- resolution and address iteration -- is bounded by the OS and by the candidate count,
+    not by the deadline. Each of the four previous statements of this bound named a smaller residual
+    than the truth, and each was falsified by the phase immediately before wherever the watchdog was
+    then armed.
 
     ``redactor`` is a **required** keyword, not an optional nicety: every caller either holds a
     credential or can be handed :func:`tableau_env.redact` itself, whose header rule scrubs a

@@ -805,3 +805,48 @@ def test_the_abort_covers_a_bare_recv_not_only_a_makefile_stream():
         f"a bare recv ran for {elapsed:.3f}s despite the abort: only `close` interrupts one, so "
         f"`_abort_socket` must keep calling it as well as `shutdown`"
     )
+
+
+CONNECT_TIMEOUT_SEC = 0.05
+# TEST-NET-3 (RFC 5737): reserved for documentation and guaranteed not to be routed, so each of
+# these costs a full connect timeout without depending on anyone's network being down.
+UNROUTABLE = ("203.0.113.1", "203.0.113.2", "203.0.113.3")
+
+
+def test_multiple_addresses_are_a_known_unbounded_phase(monkeypatch):
+    """⚠️ A PIN ON A RESIDUAL, deliberately, not a bound. Review round 5, and it is NOT DNS.
+
+    `socket.create_connection` walks every `getaddrinfo` result and applies the timeout to EACH
+    candidate, so N unreachable A/AAAA records cost N timeouts before any socket -- and therefore any
+    watchdog -- exists. `getaddrinfo` has already returned by then, so this is not the resolver
+    residual that was documented; it was hidden behind it for three corrections of that prose.
+
+    ⚠️ Every other fixture in this file connects successfully to ONE localhost address and so cannot
+    observe an all-address failure. That is the fifth consecutive round in which the finding was the
+    phase immediately before wherever the watchdog was armed, and the fifth in which no control could
+    reach it. So the residual is written as an executable fact rather than a sentence: a sentence has
+    been wrong four times, and **if someone bounds this phase, this test fails and makes them correct
+    the claim** instead of leaving a stale one behind.
+    """
+    resolved = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (addr, 9)) for addr in UNROUTABLE]
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: resolved)
+
+    deadline_sec = CONNECT_TIMEOUT_SEC + 0.01
+    factory = th._with_deadline(th._DeadlineHTTPConnection, time.monotonic() + deadline_sec)
+    conn = factory("unreachable.invalid", 9, timeout=CONNECT_TIMEOUT_SEC)
+    started = time.monotonic()
+    with pytest.raises(OSError):
+        conn.connect()
+    elapsed = time.monotonic() - started
+    armed = conn._t2p_timer is not None
+    conn.close()
+
+    assert armed is False, (
+        "a watchdog was armed during address iteration -- this phase may now be bounded, in which "
+        "case fix the claim in `_request`'s phase table and in scripts/README.md, not this test"
+    )
+    assert elapsed > deadline_sec + CONNECT_TIMEOUT_SEC, (
+        f"{len(UNROUTABLE)} unreachable addresses completed in {elapsed:.3f}s, inside the "
+        f"deadline-plus-one-timeout ceiling. Either this phase became bounded -- update the claim -- "
+        f"or the fixture stopped costing a timeout per candidate and no longer pins anything"
+    )

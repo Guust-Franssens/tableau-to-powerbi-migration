@@ -150,13 +150,14 @@ SALVAGE_RETRY = RetryPolicy(max_attempts=1, budget_sec=0.0)
 # fast-failing tier (a version gate answered in milliseconds) could not be followed by another. At 2x
 # a sequence of fast failures still reaches every tier, while any leg that actually consumes a full
 # timeout leaves too little for a second. The ADMISSION ceiling is hard and independent of tier
-# count; the WALL-CLOCK ceiling is that plus one socket timeout, because each salvage leg also
-# carries this instant as an end-to-end deadline into the transport, where a watchdog aborts the
-# connection in ANY phase -- connect, proxy CONNECT, status line, headers, body. ⚠️ "Any phase" is
-# true only because the watchdog is armed the instant the raw socket exists; arming it after the
-# connection sequence, as it was, left a trickling proxy running 1.241s against a 0.20s ceiling. The
-# TLS handshake is the one phase bounded by the socket timeout instead, and measurably does not need
-# the watchdog: `SSLSocket` applies the timeout to the handshake as a whole, so a well-formed
+# count. ⚠️ The WALL-CLOCK ceiling is NOT: each salvage leg also carries this instant into the
+# transport as an end-to-end deadline, and a watchdog aborts the connection in every phase FROM THE
+# FIRST LIVE SOCKET ONWARD -- proxy CONNECT, status line, headers, body. Before that socket exists
+# there is nothing to abort, and two phases live there: name resolution, and `create_connection`
+# walking every resolved address with the full timeout applied to each (measured, 0.177s against a
+# 0.110s ceiling, timer not yet armed). So the transport deadline is HARDENING on top of admission,
+# not a wall-clock guarantee -- see `tableau_http._request`'s phase table. The TLS handshake needs no
+# watchdog: `SSLSocket` applies the socket timeout to the handshake as a whole, so a well-formed
 # trickling record was refused at 0.204s on a 0.2s timeout. Admission alone would not bound wall
 # clock at all: `urllib`'s timeout is per socket OPERATION, so neither a trickling body (HTTP 200 at
 # 4.8x) nor trickling headers (1.378s against a 0.15s deadline) ever trip it.
