@@ -72,24 +72,33 @@ def _write_spec(unit: Path, names: list[str]) -> None:
     )
 
 
-def _write_report(unit: Path, names: list[str], *, visuals: int = 1) -> Path:
+def _write_report(unit: Path, names: list[str], *, visuals: int = 1, name: str = "Book") -> Path:
     """A PBIR report with `visuals` visual.json files per page (a real page has at least one)."""
-    report = unit / "fabric" / "Book.Report"
+    report = unit / "fabric" / f"{name}.Report"
     pages = report / "definition" / "pages"
     pages.mkdir(parents=True, exist_ok=True)
     order = []
-    for index, name in enumerate(names):
+    for index, page_name in enumerate(names):
         page_id = f"p{index + 1}"
         order.append(page_id)
         page = pages / page_id
         page.mkdir()
         (page / "page.json").write_text(
-            json.dumps({"name": page_id, "displayName": name, "width": 1600, "height": 900}),
+            json.dumps({"name": page_id, "displayName": page_name, "width": 1600, "height": 900}),
             encoding="utf-8",
         )
         _write_visuals(page, visuals)
     (pages / "pages.json").write_text(json.dumps({"pageOrder": order}), encoding="utf-8")
     return report
+
+
+def _write_exemptions(unit: Path, entries: list[dict[str, str]]) -> None:
+    """A signed exemptions file; ``reason``/``decided_by`` default so a test can name only the item."""
+    unit.mkdir(parents=True, exist_ok=True)
+    payload = [
+        {"reason": "accepted for this proof of concept", "decided_by": "migration lead", **entry} for entry in entries
+    ]
+    (unit / "unit-check-exemptions.json").write_text(json.dumps({"exemptions": payload}), encoding="utf-8")
 
 
 def _write_visuals(page: Path, count: int) -> None:
@@ -109,7 +118,9 @@ def _csv(path: Path) -> None:
     path.write_text("a\n1\n", encoding="utf-8")
 
 
-def _write_reference_manifest(unit: Path, names: list[str], *, numeric: bool = True) -> None:
+def _write_reference_manifest(
+    unit: Path, names: list[str], *, numeric: bool = True, workbook: str | None = "Book"
+) -> None:
     states = []
     dashboards = []
     for name in names:
@@ -126,10 +137,15 @@ def _write_reference_manifest(unit: Path, names: list[str], *, numeric: bool = T
             }
         ]
         dashboards.append({"name": name, "states": states})
-    (unit / "reference" / "manifest.json").write_text(json.dumps({"dashboards": dashboards}), encoding="utf-8")
+    payload: dict[str, object] = {"dashboards": dashboards}
+    if workbook is not None:
+        payload["workbook"] = workbook
+    (unit / "reference" / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
-def _write_oracle_manifest(unit: Path, names: list[str], *, images: bool = True, data: bool = True) -> None:
+def _write_oracle_manifest(
+    unit: Path, names: list[str], *, images: bool = True, data: bool = True, workbook: str | None = "Book"
+) -> None:
     records = []
     for index, name in enumerate(names):
         image_path = f"images/{name}__{index}.png"
@@ -146,7 +162,10 @@ def _write_oracle_manifest(unit: Path, names: list[str], *, images: bool = True,
             }
         )
     (unit / "_oracle").mkdir(exist_ok=True)
-    (unit / "_oracle" / "oracle-manifest.json").write_text(json.dumps({"views": records}), encoding="utf-8")
+    payload: dict[str, object] = {"views": records}
+    if workbook is not None:
+        payload["workbook"] = workbook
+    (unit / "_oracle" / "oracle-manifest.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
 @pytest.fixture(autouse=True)
@@ -3057,3 +3076,301 @@ def _scan_paths(unit: Path, json_path: Path) -> dict:
         check=False,
     )
     return json.loads(json_path.read_text(encoding="utf-8"))
+
+
+# --- round 6: the _slug audit adjudicated -----------------------------------------------------
+# Three sites the round-5 prose audit classified "safe" were not. Each test below is the measured
+# reproduction, inverted.
+
+
+def test_one_scaffold_signature_cannot_exempt_two_findings(tmp_path: Path) -> None:
+    """Kills: a signature named 'A-B' exempting BOTH table 'A-B' and table 'A B' from one entry.
+
+    Measured before this: the gate flipped to PASS and reported *two* exemptions from *one* signature,
+    because ``_exempted`` compared slugs per finding and never asked how many findings the raw entry
+    matched in total.
+    """
+    _write_handover(
+        tmp_path,
+        {
+            "name": "Unit",
+            "partitions_needs_review": [
+                {"kind": "m_partition", "table": "A-B", "reason": "flat-file source"},
+                {"kind": "m_partition", "table": "A B", "reason": "flat-file source"},
+            ],
+        },
+    )
+    _write_exemptions(tmp_path, [{"check": "scaffold-partitions", "item": "A-B"}])
+
+    report = cu.run_all(tmp_path, scope=cu.SCOPE_MODEL)
+    scaffold = next(check for check in report["checks"] if check["id"] == "scaffold-partitions")
+
+    assert scaffold["status"] == cu.STATUS_FINDINGS
+    assert scaffold["scaffold_exemptions"] == 1
+    assert scaffold["unexempted_scaffolds"] == 1
+
+
+def test_a_scaffold_signature_matching_two_findings_only_by_slug_applies_to_neither(tmp_path: Path) -> None:
+    """Kills: applying a lossy signature that names no finding exactly but slugs onto two."""
+    _write_handover(
+        tmp_path,
+        {
+            "name": "Unit",
+            "partitions_needs_review": [
+                {"kind": "m_partition", "table": "A-B", "reason": "flat-file source"},
+                {"kind": "m_partition", "table": "A B", "reason": "flat-file source"},
+            ],
+        },
+    )
+    _write_exemptions(tmp_path, [{"check": "scaffold-partitions", "item": "a/b"}])
+
+    report = cu.run_all(tmp_path, scope=cu.SCOPE_MODEL)
+    scaffold = next(check for check in report["checks"] if check["id"] == "scaffold-partitions")
+
+    assert scaffold["status"] == cu.STATUS_FINDINGS
+    assert scaffold["scaffold_exemptions"] == 0
+    assert scaffold["unexempted_scaffolds"] == 2
+    assert scaffold["contested_exemptions"] == ["a/b"]
+
+
+def test_a_scaffold_signature_still_applies_when_it_names_exactly_one_finding(tmp_path: Path) -> None:
+    """The refusal above must not swallow the ordinary case: one signature, one finding, applied."""
+    _write_handover(
+        tmp_path,
+        {
+            "name": "Unit",
+            "partitions_needs_review": [
+                {"kind": "m_partition", "table": "A-B", "reason": "flat-file source"},
+                {"kind": "m_partition", "table": "Orders", "reason": "flat-file source"},
+            ],
+        },
+    )
+    _write_exemptions(tmp_path, [{"check": "scaffold-partitions", "item": "a b"}])
+
+    report = cu.run_all(tmp_path, scope=cu.SCOPE_MODEL)
+    scaffold = next(check for check in report["checks"] if check["id"] == "scaffold-partitions")
+
+    assert scaffold["scaffold_exemptions"] == 1
+    assert scaffold["contested_exemptions"] == []
+    assert [row["table"] for row in scaffold["scaffolds"] if row["exempted"]] == ["A-B"]
+
+
+def test_two_artifacts_slugging_alike_refuse_a_single_handover_workbook(tmp_path: Path) -> None:
+    """Kills: the uniqueness guard held on the handover side only.
+
+    Measured: a unit shipping ``Bo ok.Report`` and ``Bo-ok.Report`` collapsed to ONE target key
+    ``book``, and a single handover workbook ``Book`` was accepted even though either artifact could
+    own it. The guard has to hold on both sides of the join.
+    """
+    _write_spec(tmp_path, ["Sales"])
+    _write_report(tmp_path, ["Sales"], name="Bo ok")
+    _write_report(tmp_path, ["Sales"], name="Bo-ok")
+    _write_viz_fidelity_handover(tmp_path, [_empty_row("Sales")], workbook_name="Book")
+
+    explanations = cu.page_drop_explanations(tmp_path)
+
+    assert explanations["available"] is False
+    assert explanations["unbound_workbooks"] == ["Book"]
+
+
+def test_one_artifact_still_binds_a_slugged_handover_workbook(tmp_path: Path) -> None:
+    """The fallback survives its guard: one artifact, one handover, differently spelled, binds."""
+    _write_spec(tmp_path, ["Sales"])
+    _write_report(tmp_path, ["Sales"], name="Bo ok")
+    _write_viz_fidelity_handover(tmp_path, [_empty_row("Sales")], workbook_name="Bo-ok")
+
+    explanations = cu.page_drop_explanations(tmp_path)
+
+    assert explanations["available"] is True
+    assert explanations["unbound_workbooks"] == []
+
+
+def test_reference_evidence_cannot_satisfy_a_page_when_the_normalized_key_is_shared(tmp_path: Path) -> None:
+    """Kills: reference evidence named 'A B' giving a validation-grade PASS to expected page 'A-B'.
+
+    The records used to be merged into a ``{slug: bool}`` map before coverage was evaluated, so exact
+    spelling and multiplicity were both gone by the time anything was decided. Here two expected
+    pages share the lossy key and one record spells neither exactly, so it settles nothing.
+    """
+    _write_spec(tmp_path, ["A-B", "A_B"])
+    _write_report(tmp_path, ["A-B", "A_B"])
+    _write_reference_manifest(tmp_path, ["A B"])
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["status"] == cu.STATUS_NOT_CHECKED
+    assert oracle["visual_present"] == 0
+    assert oracle["refused_evidence"] == [
+        "a normalized match for 'A-B' is not unique (1 producer record(s), 2 expected page(s))",
+        "a normalized match for 'A_B' is not unique (1 producer record(s), 2 expected page(s))",
+    ]
+
+
+def test_reference_evidence_satisfies_a_page_when_the_normalized_key_is_unique_on_both_sides(
+    tmp_path: Path,
+) -> None:
+    """The normalized fallback is NARROWED, not deleted: one record, one page, one shared key.
+
+    A filesystem or capture tool is allowed to have re-spelled a name. What is not allowed is
+    resolving that re-spelling when more than one thing answers to it.
+    """
+    _write_spec(tmp_path, ["A-B"])
+    _write_report(tmp_path, ["A-B"])
+    _write_reference_manifest(tmp_path, ["A B"])
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["status"] == cu.STATUS_PASS
+    assert oracle["visual_present"] == 1
+    assert oracle["refused_evidence"] == []
+
+
+def test_exact_reference_evidence_beats_a_shared_normalized_key(tmp_path: Path) -> None:
+    """Exact spelling wins outright, so a same-key sibling neither steals nor blocks the match."""
+    _write_spec(tmp_path, ["A-B", "A B"])
+    _write_report(tmp_path, ["A-B", "A B"])
+    _write_reference_manifest(tmp_path, ["A B"])
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["visual_present"] == 1
+    assert [row["page"]["name"] for row in oracle["rows"] if row["visual"]] == ["A B"]
+
+
+def test_oracle_evidence_from_a_different_workbook_satisfies_nothing(tmp_path: Path) -> None:
+    """Kills: an oracle record for 'Revenue' produced by 'Different Workbook' passing this unit.
+
+    Drop evidence was bound to its producing workbook in round 2. Oracle evidence never was, so the
+    round-2 cross-workbook defect survived at the oracle layer.
+    """
+    _write_spec(tmp_path, ["Revenue"])
+    _write_report(tmp_path, ["Revenue"])
+    _write_oracle_manifest(tmp_path, ["Revenue"], workbook="Different Workbook")
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["status"] == cu.STATUS_NOT_CHECKED
+    assert oracle["visual_present"] == 0
+    assert oracle["numeric_present"] == 0
+    assert oracle["foreign_workbook_evidence"] == ["Different Workbook"]
+
+
+def test_oracle_evidence_from_this_workbook_still_counts(tmp_path: Path) -> None:
+    """The workbook guard must not reject the unit's own evidence."""
+    _write_spec(tmp_path, ["Revenue"])
+    _write_report(tmp_path, ["Revenue"])
+    _write_oracle_manifest(tmp_path, ["Revenue"], workbook="Book")
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["visual_present"] == 1
+    assert oracle["foreign_workbook_evidence"] == []
+
+
+def test_oracle_evidence_declaring_no_workbook_is_admitted_but_flagged(tmp_path: Path) -> None:
+    """'I cannot tell whose picture this is' is weaker evidence and the grade must say so.
+
+    Real oracle manifests carry no workbook field, so refusing them outright would reject every
+    capture in the estate. They are admitted and counted, and the count is printed.
+    """
+    _write_spec(tmp_path, ["Revenue"])
+    _write_report(tmp_path, ["Revenue"])
+    _write_oracle_manifest(tmp_path, ["Revenue"], workbook=None)
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["visual_present"] == 1
+    assert oracle["unattributed_evidence"] == 1
+    assert "1 record(s) declare no producing workbook" in oracle["grade"]
+
+
+def test_two_reference_records_with_one_name_satisfy_nothing_and_say_why(tmp_path: Path) -> None:
+    """Multiplicity is the point of keeping records: two claims about one name settle nothing."""
+    _write_spec(tmp_path, ["Revenue"])
+    _write_report(tmp_path, ["Revenue"])
+    _write_reference_manifest(tmp_path, ["Revenue", "Revenue"])
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["status"] == cu.STATUS_NOT_CHECKED
+    assert oracle["visual_present"] == 0
+    assert oracle["refused_evidence"] == ["2 producer records are named 'Revenue'"]
+
+
+def test_one_reference_directory_is_read_once_even_when_named_two_ways(tmp_path: Path) -> None:
+    """Kills: resolving candidate reference directories AFTER deduplicating them.
+
+    ``_unit_dir(target)`` and ``target`` are the same directory under two spellings, so the manifest
+    was read twice and every dashboard produced two records - which then refused each other as "2
+    producer records are named X". The same defect was fixed for handover discovery in round 3 and
+    for oracle discovery; reference discovery was left behind, and was invisible until multiplicity
+    stopped being collapsed.
+    """
+    _write_spec(tmp_path, ["Revenue"])
+    _write_report(tmp_path, ["Revenue"])
+    _write_reference_manifest(tmp_path, ["Revenue"])
+
+    records, _grades = cu._reference_oracles(tmp_path, None)
+
+    assert len(records) == 1
+    assert cu.check_oracle_coverage(tmp_path, None, None)["visual_present"] == 1
+
+
+def test_two_records_sharing_a_normalized_key_satisfy_nothing(tmp_path: Path) -> None:
+    """The producer side of the uniqueness guard, pinned on its own.
+
+    One expected page, no exact spelling match, and TWO producer records answering to the same lossy
+    key. Checking only the expected side would take the first record and report coverage; nothing
+    establishes which of the two is a picture of this page.
+    """
+    _write_spec(tmp_path, ["A-B"])
+    _write_report(tmp_path, ["A-B"])
+    _write_reference_manifest(tmp_path, ["A B", "A_B"])
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["status"] == cu.STATUS_NOT_CHECKED
+    assert oracle["visual_present"] == 0
+    assert oracle["refused_evidence"] == [
+        "a normalized match for 'A-B' is not unique (2 producer record(s), 1 expected page(s))"
+    ]
+
+
+def test_a_relative_target_reads_one_reference_directory_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Kills: deduplicating candidate reference directories BEFORE resolving them.
+
+    ``_unit_dir`` resolves its result while ``target`` stays as the caller spelled it, so under the
+    documented relative-path CLI shape the two candidates are unequal Path values that name one
+    directory. Deduplicating first cannot see that; resolving first can. Round 3 measured the same
+    ordering defect in handover discovery, where it turned a declared reason into 'ambiguous'.
+    """
+    unit = tmp_path / "unit"
+    _write_spec(unit, ["Revenue"])
+    _write_report(unit, ["Revenue"])
+    _write_reference_manifest(unit, ["Revenue"])
+    monkeypatch.chdir(tmp_path)
+
+    records, _grades = cu._reference_oracles(Path("unit"), None)
+
+    assert len(records) == 1
+    assert cu.check_oracle_coverage(Path("unit"), None, None)["visual_present"] == 1
+
+
+def test_a_report_and_its_model_sharing_a_stem_are_one_owner_not_a_collision(tmp_path: Path) -> None:
+    """Kills: counting artifact FILES rather than distinct stems on the target side of the guard.
+
+    Every ordinary unit ships ``<Name>.Report`` beside ``<Name>.SemanticModel``. Counting the files
+    made the shared stem look like two competing owners, so the slugged fallback refused to bind for
+    the whole estate - measured, it turned 19 engine-declared omissions into 21 unexplained ones. A
+    report and its model are one name.
+    """
+    _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A"), ("ws.b", "B")])
+    _write_report(tmp_path, ["A"], name="Book!")
+    (tmp_path / "fabric" / "Book!.SemanticModel" / "definition").mkdir(parents=True)
+    _write_viz_fidelity_handover(tmp_path, [_empty_row("B")], workbook_name="Book?")
+
+    exact, slugged = cu._unit_workbook_keys(tmp_path)
+
+    assert exact == {"Book!"}
+    assert slugged == ["book"]
+    assert cu.page_drop_explanations(tmp_path)["bound_workbooks"] == ["Book?"]

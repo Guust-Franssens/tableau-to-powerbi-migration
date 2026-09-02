@@ -26,7 +26,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TARGET = REPO_ROOT / "scripts" / "check_unit.py"
-SUITE = REPO_ROOT / "tests" / "test_check_unit.py"
+# Both suites are collected and ``-k`` picks the anchor out of them: the _slug census gate lives in
+# its own file but is a test OF this production file, so its mutations belong in this campaign.
+SUITES = (REPO_ROOT / "tests" / "test_check_unit.py", REPO_ROOT / "tests" / "test_slug_call_site_census.py")
 
 NEGATIVE_CONTROL = "NEGATIVE CONTROL"
 
@@ -429,16 +431,131 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
         ["test_both_halves_agree_on_whether_attribution_is_ambiguous"],
     ),
     (
-        "IDENTITY->STR: a non-unique slugged workbook name still binds",
-        "        loose = slug in slugged_stems and slugs.count(slug) == 1",
-        "        loose = slug in slugged_stems",
+        "IDENTITY->STR: a non-unique slugged HANDOVER name still binds",
+        "        loose = slugs.count(slug) == 1 and slugged_stems.count(slug) == 1",
+        "        loose = slugged_stems.count(slug) == 1",
         ["test_two_workbooks_whose_names_slug_alike_do_not_bind_interchangeably"],
     ),
     (
+        "SLUG AUDIT: a non-unique slugged TARGET ARTIFACT still binds",
+        "        loose = slugs.count(slug) == 1 and slugged_stems.count(slug) == 1",
+        "        loose = slugs.count(slug) == 1 and slug in slugged_stems",
+        ["test_two_artifacts_slugging_alike_refuse_a_single_handover_workbook"],
+    ),
+    (
+        "SLUG AUDIT: the target artifact keys collapse into a set again",
+        "    return stems, [_slug(stem) for stem in sorted(stems)]",
+        "    return stems, list({_slug(stem) for stem in sorted(stems)})",
+        ["test_two_artifacts_slugging_alike_refuse_a_single_handover_workbook"],
+    ),
+    (
+        "SLUG AUDIT: the target artifact keys count files instead of distinct stems",
+        "    stems = {stem for stem in stems if stem}\n    return stems, [_slug(stem) for stem in sorted(stems)]",
+        "    stems = {stem for stem in stems if stem}\n"
+        "    doubled = sorted(stems) * 2\n"
+        "    return stems, [_slug(stem) for stem in doubled]",
+        ["test_a_filesystem_sanitised_workbook_name_still_binds_when_unambiguous"],
+    ),
+    (
         "IDENTITY->STR: the slugged workbook fallback is removed entirely",
-        "        loose = slug in slugged_stems and slugs.count(slug) == 1",
+        "        loose = slugs.count(slug) == 1 and slugged_stems.count(slug) == 1",
         "        loose = False",
         ["test_a_filesystem_sanitised_workbook_name_still_binds_when_unambiguous"],
+    ),
+    (
+        "SLUG AUDIT: one exemption entry may exempt every finding it matches",
+        "        if len(matched) == 1:\n            exempted.add(matched[0])",
+        "        if matched:\n            exempted.update(matched)",
+        ["test_a_scaffold_signature_matching_two_findings_only_by_slug_applies_to_neither"],
+    ),
+    (
+        "SLUG AUDIT: the exemption slug fallback runs even when a finding matched exactly",
+        "        matched = exact or [",
+        "        matched = [",
+        ["test_one_scaffold_signature_cannot_exempt_two_findings"],
+    ),
+    (
+        "SLUG AUDIT: an ambiguous exemption is silently dropped instead of reported",
+        "        elif matched:\n            contested.append(item)\n    return exempted, contested",
+        "        elif matched:\n            pass\n    return exempted, contested",
+        ["test_a_scaffold_signature_matching_two_findings_only_by_slug_applies_to_neither"],
+    ),
+    (
+        "SLUG AUDIT: exact exemption matching is removed, so only the lossy slug decides",
+        "        exact = [key for key, name, aliases in findings if item == name or item in aliases]",
+        "        exact = []",
+        ["test_one_scaffold_signature_cannot_exempt_two_findings"],
+    ),
+    (
+        "ORACLE IDENTITY: producer records are merged into a name->bool map again",
+        "        by_exact.setdefault(record.name, []).append(record)",
+        "        by_exact[record.name] = [record]",
+        ["test_two_reference_records_with_one_name_satisfy_nothing_and_say_why"],
+    ),
+    (
+        "ORACLE IDENTITY: a normalized match is taken without checking the producer side",
+        "        if len(loose) != 1 or self.expected_normalized.get(key, 0) != 1:",
+        "        if self.expected_normalized.get(key, 0) != 1:",
+        ["test_two_records_sharing_a_normalized_key_satisfy_nothing"],
+    ),
+    (
+        "ORACLE IDENTITY: a normalized match is taken without checking the expected side",
+        "        if len(loose) != 1 or self.expected_normalized.get(key, 0) != 1:",
+        "        if len(loose) != 1:",
+        ["test_reference_evidence_cannot_satisfy_a_page_when_the_normalized_key_is_shared"],
+    ),
+    (
+        "ORACLE IDENTITY: the normalized fallback is removed entirely",
+        "        loose = self.by_normalized.get(key, [])",
+        "        loose = []",
+        ["test_reference_evidence_satisfies_a_page_when_the_normalized_key_is_unique_on_both_sides"],
+    ),
+    (
+        "ORACLE IDENTITY: exact spelling no longer wins over a shared normalized key",
+        '        exact = self.by_exact.get(page["name"], [])',
+        "        exact = []",
+        ["test_exact_reference_evidence_beats_a_shared_normalized_key"],
+    ),
+    (
+        "ORACLE IDENTITY: evidence from another workbook is admitted",
+        "            alike = [name for name in unit_workbooks if _slug(name) == _slug(record.workbook)]",
+        "            alike = [record.workbook]",
+        ["test_oracle_evidence_from_a_different_workbook_satisfies_nothing"],
+    ),
+    (
+        "ORACLE IDENTITY: the workbook guard rejects the unit's own evidence",
+        "        elif record.workbook not in unit_workbooks:\n"
+        "            alike = [name for name in unit_workbooks if _slug(name) == _slug(record.workbook)]",
+        "        elif True:\n            alike = []",
+        ["test_oracle_evidence_from_this_workbook_still_counts"],
+    ),
+    (
+        "ORACLE IDENTITY: unattributed evidence is no longer disclosed in the grade",
+        '        grade += f" (⚠️ {evidence.unattributed} record(s) declare no producing workbook)"',
+        "        pass",
+        ["test_oracle_evidence_declaring_no_workbook_is_admitted_but_flagged"],
+    ),
+    (
+        "DISCOVERY: candidate reference directories are no longer deduplicated at all",
+        "        if resolved not in dirs:\n            dirs.append(resolved)",
+        "        dirs.append(resolved)",
+        ["test_one_reference_directory_is_read_once_even_when_named_two_ways"],
+    ),
+    (
+        "DISCOVERY: reference directories are deduplicated BEFORE they are resolved",
+        "def _reference_dirs(target: Path, explicit: Path | None) -> list[Path]:\n"
+        "    unit = _unit_dir(target)\n"
+        '    candidates = [explicit] if explicit else [unit / "reference", target / "reference"]\n'
+        "    return _resolved_unique(candidates)",
+        "def _reference_dirs(target: Path, explicit: Path | None) -> list[Path]:\n"
+        "    unit = _unit_dir(target)\n"
+        '    candidates = [explicit] if explicit else [unit / "reference", target / "reference"]\n'
+        "    seen: list[Path] = []\n"
+        "    for path in candidates:\n"
+        "        if path and path.exists() and path not in seen:\n"
+        "            seen.append(path)\n"
+        "    return [path.resolve() for path in seen]",
+        ["test_a_relative_target_reads_one_reference_directory_once"],
     ),
     (
         "oracle discovery: canonical oracle/ name removed",
@@ -451,6 +568,40 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
         'ORACLE_DIR_NAMES = ("_oracle", "oracle")',
         'ORACLE_DIR_NAMES = ("oracle",)',
         ["test_underscore_oracle_directory_is_still_discovered"],
+    ),
+    (
+        "SLUG CENSUS: a brand-new lossy call site rides in unadjudicated",
+        "def _page_key(page: dict[str, Any]) -> tuple[str, str, str]:",
+        "def _unadjudicated_new_site(text: str) -> str:\n"
+        "    return _slug(text)\n"
+        "\n"
+        "\n"
+        "def _page_key(page: dict[str, Any]) -> tuple[str, str, str]:",
+        ["test_every_slug_call_site_is_pinned"],
+    ),
+    (
+        "SLUG CENSUS: a second _slug is added to an already-pinned line",
+        '    described = explanations["described"].get(_slug(page["name"]))',
+        '    described = explanations["described"].get(_slug(_slug(page["name"])))',
+        ["test_census_call_counts_match_the_source"],
+    ),
+    (
+        "SLUG CENSUS: a pinned call site disappears without the census being updated",
+        '    described = explanations["described"].get(_slug(page["name"]))\n    if described:',
+        '    described = explanations["described"].get(page["name"])\n    if described:',
+        ["test_no_census_entry_is_stale"],
+    ),
+    (
+        "SLUG CENSUS: a function claiming to be uniqueness-guarded stops guarding",
+        "        loose = slugs.count(slug) == 1 and slugged_stems.count(slug) == 1",
+        "        loose = bool(set(slugs) & set(slugged_stems))",
+        ["test_uniqueness_guarded_sites_actually_guard_on_one"],
+    ),
+    (
+        "SLUG CENSUS: a function claiming to preserve multiplicity slugs into a set",
+        "        by_normalized.setdefault(_slug(record.name), []).append(record)",
+        "        by_normalized.setdefault(next(iter({_slug(record.name)})), []).append(record)",
+        ["test_multiplicity_preserving_functions_never_slug_into_a_set"],
     ),
     (
         f"{NEGATIVE_CONTROL}: a no-op comment edit must SURVIVE",
@@ -469,7 +620,7 @@ _FAILED = re.compile(r"(\d+) failed")
 def run_anchor(names: list[str]) -> tuple[str, str]:
     """Run only the anchor tests; return (verdict, note)."""
     proc = subprocess.run(
-        [sys.executable, "-m", "pytest", str(SUITE), "-q", "-k", " or ".join(names)],
+        [sys.executable, "-m", "pytest", *[str(suite) for suite in SUITES], "-q", "-k", " or ".join(names)],
         capture_output=True,
         text=True,
         check=False,
@@ -522,18 +673,29 @@ def main(argv: list[str] | None = None) -> int:
         return 64
 
     results = run_campaign(selected)
-    ok = all(
-        verdict == "SURVIVED" if NEGATIVE_CONTROL in label else verdict.startswith("CAUGHT")
-        for label, verdict, _note in results
-    )
-    caught = sum(1 for _label, verdict, _note in results if verdict.startswith("CAUGHT"))
-    controls = sum(1 for label, _verdict, _note in results if NEGATIVE_CONTROL in label)
+    controls = [(label, verdict) for label, verdict, _note in results if NEGATIVE_CONTROL in label]
+    mutations = [(label, verdict) for label, verdict, _note in results if NEGATIVE_CONTROL not in label]
+    caught = sum(1 for _label, verdict in mutations if verdict.startswith("CAUGHT"))
+    broken = [label for label, verdict in mutations if verdict.startswith("ANCHOR-SNIPPET")]
+    survived = [label for label, verdict in mutations if verdict == "SURVIVED"]
+    control_ok = bool(controls) and all(verdict == "SURVIVED" for _label, verdict in controls)
     print()
-    print(
-        f"{caught}/{len(results) - controls} mutations caught; "
-        f"negative control {'SURVIVED' if ok else 'DID NOT behave as required'}"
-    )
-    return 0 if ok else 1
+    print(f"{caught}/{len(mutations)} mutations caught")
+    # Report the three states SEPARATELY. Folding them into one sentence made this harness answer
+    # "negative control DID NOT behave as required" when the control had in fact survived and the
+    # real problem was two stale anchor snippets - a confident wrong answer from the instrument
+    # written to prove the tests can fail.
+    if broken:
+        print(f"{len(broken)} mutation(s) COULD NOT BE APPLIED (stale anchor snippet): {'; '.join(broken)}")
+    if survived:
+        print(f"{len(survived)} mutation(s) SURVIVED (no test failed): {'; '.join(survived)}")
+    if not controls:
+        # A --only selection that excludes the control is UNVALIDATED, not failed: nothing has shown
+        # the harness could report a survivor at all. Say which of the two it is.
+        print("no negative control in this selection - result is UNVALIDATED, run the full campaign")
+    else:
+        print(f"negative control {'SURVIVED as required' if control_ok else 'DID NOT behave as required'}")
+    return 0 if controls and control_ok and not broken and not survived else 1
 
 
 if __name__ == "__main__":

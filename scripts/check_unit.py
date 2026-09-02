@@ -834,17 +834,24 @@ def _unit_workbook_keys(target: Path) -> tuple[set[str], set[str]]:
     The engine names a report folder ``<workbook name>.Report`` (verified on all 44 workbooks of a
     real 2.339.0 estate run), so an artifact stem is a usable binding key back to a handover slice.
 
-    Two sets, because the filesystem is allowed to have changed the spelling: an EXACT match binds,
-    and a slugged match is the fallback for a name a filesystem sanitised. The fallback is only
-    consulted when it is unambiguous - see :func:`page_drop_explanations`.
+    Two collections, because the filesystem is allowed to have changed the spelling: an EXACT match
+    binds, and a slugged match is the fallback for a name a filesystem sanitised.
+
+    ⚠️ The slugged side is a LIST, not a set - but one entry per DISTINCT exact stem. Collapsing it
+    lost the collision it exists to detect: a unit shipping both ``Bo ok.Report`` and ``Bo-ok.Report``
+    produced one key ``book``, and a handover workbook ``Book`` was accepted even though either
+    artifact could own it. The uniqueness guard has to hold on BOTH sides of the join. Keying on
+    distinct stems is equally load-bearing in the other direction: a report and its model share a
+    stem and are one name, not two competing owners, and counting the raw files made every ordinary
+    unit look collided.
     """
-    exact: set[str] = set()
+    stems: set[str] = set()
     for report in shipping_reports(target):
-        exact.add(report.name.removesuffix(".Report"))
+        stems.add(report.name.removesuffix(".Report"))
     for model in shipping_models(target):
-        exact.add(model.name.removesuffix(".SemanticModel"))
-    exact = {stem for stem in exact if stem}
-    return exact, {_slug(stem) for stem in exact}
+        stems.add(model.name.removesuffix(".SemanticModel"))
+    stems = {stem for stem in stems if stem}
+    return stems, [_slug(stem) for stem in sorted(stems)]
 
 
 def page_drop_explanations(target: Path) -> dict[str, Any]:
@@ -898,21 +905,22 @@ def page_drop_explanations(target: Path) -> dict[str, Any]:
 
 
 def _bindable_workbooks(
-    workbooks: list[tuple[Path, str, dict[str, Any]]], exact_stems: set[str], slugged_stems: set[str]
+    workbooks: list[tuple[Path, str, dict[str, Any]]], exact_stems: set[str], slugged_stems: list[str]
 ) -> list[tuple[str, dict[str, Any] | None]]:
     """``(name, payload-or-None)`` per handover workbook: None means it does not bind to this unit.
 
     An EXACT stem match binds. A slugged match is the fallback for a name the filesystem sanitised,
-    and it binds only when nothing else could have claimed it - a lossy compare between an artifact
-    folder name and a workbook name would otherwise let two workbooks whose names slug alike bind
-    interchangeably, which is the borrowed-evidence defect one level up from the page.
+    and it binds only when it is unique on BOTH sides - exactly one handover workbook AND exactly one
+    shipped artifact carry that key. Either collision alone makes the binding a coin toss, and the
+    target side was unguarded: a unit shipping ``Bo ok.Report`` and ``Bo-ok.Report`` accepted a single
+    handover ``Book`` that either artifact could have owned.
     """
     names = [str(workbook.get("name") or slice_name) for _source, slice_name, workbook in workbooks]
     slugs = [_slug(name) for name in names]
     bound: list[tuple[str, dict[str, Any] | None]] = []
     for (_source, _slice_name, workbook), name, slug in zip(workbooks, names, slugs, strict=True):
         exact = name in exact_stems
-        loose = slug in slugged_stems and slugs.count(slug) == 1
+        loose = slugs.count(slug) == 1 and slugged_stems.count(slug) == 1
         bound.append((name, workbook if exact or loose else None))
     return bound
 
@@ -1212,10 +1220,34 @@ def load_exemptions(target: Path) -> dict[str, Any]:
     return {"path": str(path), "entries": entries, "invalid": invalid}
 
 
-def _exempted(entries: list[dict[str, str]], check: str, item: str, aliases: set[str] | None = None) -> bool:
-    wanted = {item, *(aliases or set())}
-    normalized = {_slug(value) for value in wanted if value}
-    return any(entry["check"] == check and _slug(entry["item"]) in normalized for entry in entries)
+def resolve_exemptions(
+    entries: list[dict[str, str]], check: str, findings: list[tuple[str, str, set[str]]]
+) -> tuple[set[str], list[str]]:
+    """``(exempted finding keys, entries that matched several findings)``.
+
+    ``findings`` is ``(key, item, aliases)`` per finding. Each raw entry is resolved ONCE against all
+    of them: an exact name or alias match wins outright, and the lossy slug is consulted only when no
+    finding matches exactly. An entry matching more than one finding applies to none - measured, a
+    single ``scaffold-partitions`` signature named ``A-B`` exempted both table ``A-B`` and table
+    ``A B`` and flipped the gate to PASS while reporting two exemptions from one signature.
+    """
+    exempted: set[str] = set()
+    contested: list[str] = []
+    for entry in entries:
+        if entry.get("check") != check:
+            continue
+        item = entry["item"]
+        exact = [key for key, name, aliases in findings if item == name or item in aliases]
+        matched = exact or [
+            key
+            for key, name, aliases in findings
+            if _slug(item) in {_slug(value) for value in {name, *aliases} if value}
+        ]
+        if len(matched) == 1:
+            exempted.add(matched[0])
+        elif matched:
+            contested.append(item)
+    return exempted, contested
 
 
 def _handover_workbooks(target: Path) -> tuple[list[tuple[Path, str, dict[str, Any]]], list[str]]:
@@ -1262,33 +1294,63 @@ def _scaffold_row_identity(row: dict[str, Any], handover: Path) -> tuple[str, se
     return item, {alias for alias in aliases if alias}
 
 
-def _scaffold_partition_rows(
-    workbooks: list[tuple[Path, str, dict[str, Any]]], entries: list[dict[str, str]]
-) -> tuple[list[dict[str, Any]], list[str], list[str]]:
-    """Classify scaffold rows plus workbook payloads whose key is missing/invalid."""
+def _scaffold_rows_for_workbook(
+    path: Path, handover: str, raw_rows: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[tuple[str, str, set[str]]]]:
+    """``(rows, findings)`` for one handover workbook; the key ties a row to its finding."""
+    rows: list[dict[str, Any]] = []
+    findings: list[tuple[str, str, set[str]]] = []
+    for index, row in enumerate(raw_rows):
+        item, aliases = _scaffold_row_identity(row, path)
+        key = f"{handover}#{index}"
+        findings.append((key, item, aliases))
+        rows.append(
+            {
+                "handover": handover,
+                "table": str(row.get("table") or ""),
+                "reason": str(row.get("reason") or ""),
+                "item": item,
+                "key": key,
+                "exempted": False,
+            }
+        )
+    return rows, findings
+
+
+def _scaffold_scan(
+    workbooks: list[tuple[Path, str, dict[str, Any]]],
+) -> tuple[list[dict[str, Any]], list[str], list[str], list[tuple[str, str, set[str]]]]:
+    """``(rows, missing, invalid, findings)`` across every handover workbook, before any signature."""
     rows: list[dict[str, Any]] = []
     missing: list[str] = []
     invalid: list[str] = []
+    findings: list[tuple[str, str, set[str]]] = []
+    buckets = {read_handover.PARTITION_REVIEW_MISSING: missing, read_handover.PARTITION_REVIEW_INVALID: invalid}
     for path, workbook_name, workbook in workbooks:
         status, raw_rows = read_handover.partitions_needs_review_status(workbook)
         handover = f"{_display_path(path)}::{workbook_name}"
-        if status == read_handover.PARTITION_REVIEW_MISSING:
-            missing.append(handover)
-        elif status == read_handover.PARTITION_REVIEW_INVALID:
-            invalid.append(handover)
+        if status in buckets:
+            buckets[status].append(handover)
         elif status == read_handover.PARTITION_REVIEW_PRESENT:
-            for row in raw_rows:
-                item, aliases = _scaffold_row_identity(row, path)
-                rows.append(
-                    {
-                        "handover": handover,
-                        "table": str(row.get("table") or ""),
-                        "reason": str(row.get("reason") or ""),
-                        "item": item,
-                        "exempted": _exempted(entries, "scaffold-partitions", item, aliases),
-                    }
-                )
-    return rows, missing, invalid
+            found = _scaffold_rows_for_workbook(path, handover, raw_rows)
+            rows.extend(found[0])
+            findings.extend(found[1])
+    return rows, missing, invalid, findings
+
+
+def _scaffold_partition_rows(
+    workbooks: list[tuple[Path, str, dict[str, Any]]], entries: list[dict[str, str]]
+) -> tuple[list[dict[str, Any]], list[str], list[str], list[str]]:
+    """Classify scaffold rows plus workbook payloads whose key is missing/invalid.
+
+    Signatures are resolved GLOBALLY across every row before any row is marked exempt, so a raw entry
+    naming two rows exempts neither and is returned as contested.
+    """
+    rows, missing, invalid, findings = _scaffold_scan(workbooks)
+    exempted, contested = resolve_exemptions(entries, "scaffold-partitions", findings)
+    for row in rows:
+        row["exempted"] = row["key"] in exempted
+    return rows, missing, invalid, contested
 
 
 def check_scaffold_partitions(target: Path, exemptions: dict[str, Any]) -> dict[str, Any] | None:
@@ -1312,7 +1374,7 @@ def check_scaffold_partitions(target: Path, exemptions: dict[str, Any]) -> dict[
             "missing_handover_keys": [],
             "invalid_handover_keys": unreadable,
         }
-    rows, missing, invalid = _scaffold_partition_rows(workbooks, exemptions["entries"])
+    rows, missing, invalid, contested = _scaffold_partition_rows(workbooks, exemptions["entries"])
     invalid.extend(unreadable)
     unexempted = [row for row in rows if not row["exempted"]]
     if unexempted or invalid:
@@ -1335,6 +1397,7 @@ def check_scaffold_partitions(target: Path, exemptions: dict[str, Any]) -> dict[
         "scaffolds": rows,
         "unexempted_scaffolds": len(unexempted),
         "scaffold_exemptions": len(rows) - len(unexempted),
+        "contested_exemptions": contested,
         "missing_handover_keys": missing,
         "invalid_handover_keys": invalid,
     }
@@ -1460,10 +1523,10 @@ def _page_key(page: dict[str, Any]) -> tuple[str, str, str]:
 def _page_parity_items(entries: list[dict[str, str]]) -> tuple[list[str], list[str]]:
     """``(plain items, extra: names)`` from the signed file, as EXACT strings, multiplicity kept.
 
-    ⚠️ Never through :func:`_exempted`. That helper compares slugs, which is right for its own item
-    vocabularies but wrong for an engine identity: one entry named ``A-B`` signed both ``A-B`` and
-    ``A B``, because punctuation vanishes in a slug. A signature applies to an engine object or it
-    does not. Lists, not sets, because two identical entries are two claims.
+    ⚠️ Never through :func:`resolve_exemptions`. That helper falls back to slugs, which is right for
+    its own item vocabularies but wrong for an engine identity: one entry named ``A-B`` signed both
+    ``A-B`` and ``A B``, because punctuation vanishes in a slug. A signature applies to an engine
+    object or it does not. Lists, not sets, because two identical entries are two claims.
     """
     items = [entry["item"] for entry in entries if entry.get("check") == "page-parity"]
     return (
@@ -1645,10 +1708,30 @@ def _page_parity_detail(  # pylint: disable=too-many-arguments,too-many-position
     return "; ".join(parts) or None
 
 
+def _resolved_unique(candidates: list[Path | None]) -> list[Path]:
+    """Existing directories, RESOLVED first and then deduplicated.
+
+    Order matters and this is the third place it has: round 3 measured handover discovery indexing
+    every evidence row twice because ``target`` and ``_unit_dir(target)`` are the same directory
+    under two spellings, and deduplicating before resolving cannot see that. ``_reference_dirs`` was
+    left behind - harmless while records were merged into a ``{slug: bool}`` map, and immediately
+    visible once multiplicity was preserved: one reference manifest produced two records for every
+    dashboard, and the pair then refused itself as "2 producer records are named X".
+    """
+    dirs: list[Path] = []
+    for path in candidates:
+        if not path or not path.exists():
+            continue
+        resolved = path.resolve()
+        if resolved not in dirs:
+            dirs.append(resolved)
+    return dirs
+
+
 def _reference_dirs(target: Path, explicit: Path | None) -> list[Path]:
     unit = _unit_dir(target)
     candidates = [explicit] if explicit else [unit / "reference", target / "reference"]
-    return [path.resolve() for path in candidates if path and path.exists()]
+    return _resolved_unique(candidates)
 
 
 def _oracle_dirs(target: Path, explicit: Path | None) -> list[Path]:
@@ -1662,26 +1745,38 @@ def _oracle_dirs(target: Path, explicit: Path | None) -> list[Path]:
     manifest found" for evidence that existed.
     """
     if explicit:
-        candidates = [explicit]
+        candidates: list[Path | None] = [explicit]
     else:
         unit = _unit_dir(target)
         candidates = [base / name for base in (unit, target, target.parent) for name in ORACLE_DIR_NAMES]
-    dirs: list[Path] = []
-    for path in candidates:
-        if not path or not path.exists():
-            continue
-        resolved = path.resolve()
-        if resolved not in dirs:
-            dirs.append(resolved)
-    return dirs
+    return _resolved_unique(candidates)
 
 
 def _existing_relative(base: Path, rel: str | None) -> bool:
     return bool(rel) and (base / rel).is_file()
 
 
-def _reference_oracles(target: Path, reference_dir: Path | None) -> tuple[dict[str, dict[str, bool]], set[str]]:
-    found: dict[str, dict[str, bool]] = {}
+@dataclass(frozen=True)
+class OracleRecord:
+    """One producer's claim about one Tableau object, with its identity intact.
+
+    ⚠️ Deliberately NOT collapsed into a ``{slug: bool}`` map. That collapse - which is what this gate
+    did for six rounds - destroys multiplicity, exact spelling and the producing WORKBOOK before
+    coverage is evaluated, and it is what let reference evidence named ``A B`` give a validation-grade
+    PASS to an expected page ``A-B``, and an oracle record for ``Revenue`` belonging to
+    ``"Different Workbook"`` satisfy this unit's ``Revenue`` page. Drop evidence was bound to its
+    workbook in round 2; oracle evidence was never bound at all.
+    """
+
+    name: str
+    workbook: str | None
+    visual: bool
+    numeric: bool
+
+
+def _reference_oracles(target: Path, reference_dir: Path | None) -> tuple[list[OracleRecord], set[str]]:
+    """Reference-capture records, one per dashboard entry, multiplicity preserved."""
+    records: list[OracleRecord] = []
     grades: set[str] = set()
     for directory in _reference_dirs(target, reference_dir):
         manifest = directory / "manifest.json"
@@ -1694,25 +1789,38 @@ def _reference_oracles(target: Path, reference_dir: Path | None) -> tuple[dict[s
         for dashboard in payload.get("dashboards", []) if isinstance(payload, dict) else []:
             if not isinstance(dashboard, dict):
                 continue
-            name = str(dashboard.get("name") or "")
-            key = _slug(name)
-            entry = found.setdefault(key, {"visual": False, "numeric": False})
+            visual = numeric = False
             for state in dashboard.get("states", []):
                 if not isinstance(state, dict):
                     continue
                 caps = {str(cap) for cap in state.get("capabilities", []) if isinstance(cap, str)}
                 if caps:
                     grades.add("validation-grade" if "validation_grade" in caps else "/".join(sorted(caps)))
-                entry["visual"] = entry["visual"] or _existing_relative(directory, state.get("image"))
-                numeric = state.get("numeric_oracle")
-                entry["numeric"] = entry["numeric"] or (
-                    isinstance(numeric, str) and _existing_relative(directory, numeric)
+                visual = visual or _existing_relative(directory, state.get("image"))
+                oracle = state.get("numeric_oracle")
+                numeric = numeric or (isinstance(oracle, str) and _existing_relative(directory, oracle))
+            records.append(
+                OracleRecord(
+                    name=str(dashboard.get("name") or ""),
+                    workbook=_declared_workbook(dashboard) or _declared_workbook(payload),
+                    visual=visual,
+                    numeric=numeric,
                 )
-    return found, grades
+            )
+    return records, grades
 
 
-def _oracle_capture_oracles(target: Path, oracle_dir: Path | None) -> tuple[dict[str, dict[str, bool]], set[str]]:
-    found: dict[str, dict[str, bool]] = {}
+def _declared_workbook(payload: Any) -> str | None:
+    """The producing workbook a manifest entry declares, or None when it declares none."""
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("workbook")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _oracle_capture_oracles(target: Path, oracle_dir: Path | None) -> tuple[list[OracleRecord], set[str]]:
+    """Tableau Server oracle-capture records, one per view, multiplicity preserved."""
+    records: list[OracleRecord] = []
     grades: set[str] = set()
     for directory in _oracle_dirs(target, oracle_dir):
         manifest = directory / "oracle-manifest.json"
@@ -1725,36 +1833,102 @@ def _oracle_capture_oracles(target: Path, oracle_dir: Path | None) -> tuple[dict
         for record in payload.get("views", []) if isinstance(payload, dict) else []:
             if not isinstance(record, dict):
                 continue
-            name = str(record.get("view_name") or record.get("view_url_name") or "")
-            entry = found.setdefault(_slug(name), {"visual": False, "numeric": False})
             data = record.get("data") if isinstance(record.get("data"), dict) else {}
-            entry["numeric"] = (
-                entry["numeric"] or data.get("status") == "ok" and _existing_relative(directory, data.get("path"))
-            )
+            numeric = data.get("status") == "ok" and _existing_relative(directory, data.get("path"))
             # Any RENDER leg is visual evidence, not just the PNG. `--reference-best` now normally
             # selects SVG on Tableau Cloud (issue #403), and reading only `image` meant a run whose
             # reference was a vector SVG counted as having no visual oracle at all.
+            visual = False
             for leg in ("image", "svg", "pdf"):
                 leg_entry = record.get(leg) if isinstance(record.get(leg), dict) else {}
-                entry["visual"] = entry["visual"] or (
+                visual = visual or (
                     leg_entry.get("status") == "ok" and _existing_relative(directory, leg_entry.get("path"))
                 )
-            if entry["visual"] or entry["numeric"]:
+            if visual or numeric:
                 grades.add("layout/text only (oracle capture, default view state)")
-    return found, grades
+            records.append(
+                OracleRecord(
+                    name=str(record.get("view_name") or record.get("view_url_name") or ""),
+                    workbook=_declared_workbook(record) or _declared_workbook(payload),
+                    visual=bool(visual),
+                    numeric=bool(numeric),
+                )
+            )
+    return records, grades
 
 
-def _merge_oracle_maps(
-    reference: dict[str, dict[str, bool]], oracle: dict[str, dict[str, bool]]
-) -> dict[str, dict[str, bool]]:
-    """Combine reference/ and _oracle coverage without losing either source."""
-    combined: dict[str, dict[str, bool]] = {}
-    for key in set(reference) | set(oracle):
-        combined[key] = {
-            "visual": reference.get(key, {}).get("visual", False) or oracle.get(key, {}).get("visual", False),
-            "numeric": reference.get(key, {}).get("numeric", False) or oracle.get(key, {}).get("numeric", False),
-        }
-    return combined
+@dataclass(frozen=True)
+class OracleEvidence:
+    """Producer records resolved against the expected pages, refusing every ambiguity.
+
+    Three guards, one per measured defect:
+
+    * **Workbook.** A record that DECLARES a producing workbook must declare one this unit ships, or
+      it is discarded. A record that declares none is admissible but counted in ``unattributed`` and
+      surfaced in the grade, because "I cannot tell whose picture this is" is weaker evidence and the
+      reader should see that rather than infer it.
+    * **Exact spelling first.** An exact name match wins outright.
+    * **A normalized fallback only when it is unique on BOTH sides** - exactly one producer record and
+      exactly one expected page share the lossy key. Anything else satisfies nothing.
+    """
+
+    by_exact: dict[str, list[OracleRecord]]
+    by_normalized: dict[str, list[OracleRecord]]
+    expected_normalized: dict[str, int]
+    unattributed: int
+    foreign: tuple[str, ...]
+
+    def evidence_for(self, page: dict[str, Any]) -> tuple[OracleRecord | None, str | None]:
+        """``(record, refusal)`` for one expected page. At most one of the two is ever set."""
+        exact = self.by_exact.get(page["name"], [])
+        if len(exact) == 1:
+            return exact[0], None
+        if exact:
+            return None, f"{len(exact)} producer records are named {page['name']!r}"
+        key = _slug(page["name"])
+        loose = self.by_normalized.get(key, [])
+        if not loose:
+            return None, None
+        if len(loose) != 1 or self.expected_normalized.get(key, 0) != 1:
+            return None, (
+                f"a normalized match for {page['name']!r} is not unique "
+                f"({len(loose)} producer record(s), {self.expected_normalized.get(key, 0)} expected page(s))"
+            )
+        return loose[0], None
+
+
+def _resolve_oracle_evidence(
+    records: list[OracleRecord], candidates: list[dict[str, Any]], unit_workbooks: set[str]
+) -> OracleEvidence:
+    """Index producer records against the expected pages without losing a collision."""
+    admissible: list[OracleRecord] = []
+    foreign: list[str] = []
+    unattributed = 0
+    for record in records:
+        if record.workbook is None:
+            unattributed += 1
+        elif record.workbook not in unit_workbooks:
+            alike = [name for name in unit_workbooks if _slug(name) == _slug(record.workbook)]
+            if len(alike) != 1:
+                foreign.append(record.workbook)
+                continue
+        admissible.append(record)
+    by_exact: dict[str, list[OracleRecord]] = {}
+    by_normalized: dict[str, list[OracleRecord]] = {}
+    for record in admissible:
+        by_exact.setdefault(record.name, []).append(record)
+        by_normalized.setdefault(_slug(record.name), []).append(record)
+    expected_normalized: dict[str, int] = {}
+    for page in candidates:
+        key = _slug(page["name"])
+        expected_normalized[key] = expected_normalized.get(key, 0) + 1
+    return OracleEvidence(
+        by_exact=by_exact,
+        by_normalized=by_normalized,
+        expected_normalized=expected_normalized,
+        unattributed=unattributed,
+        foreign=tuple(sorted(set(foreign))),
+    )
 
 
 def check_oracle_coverage(target: Path, reference_dir: Path | None, oracle_dir: Path | None) -> dict[str, Any]:
@@ -1792,8 +1966,8 @@ def check_oracle_coverage(target: Path, reference_dir: Path | None, oracle_dir: 
             "no output, so there is no page left to hold against a reference",
             excluded=accepted,
         )
-    combined = _merge_oracle_maps(reference, oracle)
-    rows = [_oracle_row(page, expectation["index"], combined) for page in pages]
+    evidence = _resolve_oracle_evidence(reference + oracle, pages, _unit_workbook_keys(target)[0])
+    rows = [_oracle_row(page, expectation["index"], evidence) for page in pages]
     visual_missing = [row["page"] for row in rows if not row["visual"]]
     numeric_missing = [row["page"] for row in rows if not row["numeric"]]
     return {
@@ -1805,21 +1979,33 @@ def check_oracle_coverage(target: Path, reference_dir: Path | None, oracle_dir: 
         "visual_missing": visual_missing,
         "numeric_missing": numeric_missing,
         "contested_names": [row["page"]["name"] for row in rows if row["contested"]],
+        "refused_evidence": [row["refusal"] for row in rows if row["refusal"]],
+        "foreign_workbook_evidence": list(evidence.foreign),
+        "unattributed_evidence": evidence.unattributed,
         "excluded_omissions": accepted,
-        "grade": ", ".join(sorted(reference_grades | oracle_grades)) or "not checked (no oracle manifest found)",
+        "grade": _oracle_grade(reference_grades | oracle_grades, evidence),
         "rows": rows,
     }
 
 
-def _oracle_row(page: dict[str, Any], index: Any, combined: dict[str, dict[str, bool]]) -> dict[str, Any]:
-    """Coverage for one expected page. A contested name takes no evidence at all."""
+def _oracle_grade(grades: set[str], evidence: OracleEvidence) -> str:
+    """The grade string, saying plainly when evidence could not be tied to a workbook."""
+    grade = ", ".join(sorted(grades)) or "not checked (no oracle manifest found)"
+    if evidence.unattributed:
+        grade += f" (⚠️ {evidence.unattributed} record(s) declare no producing workbook)"
+    return grade
+
+
+def _oracle_row(page: dict[str, Any], index: Any, evidence: OracleEvidence) -> dict[str, Any]:
+    """Coverage for one expected page. A contested name or an ambiguous match takes no evidence."""
     contested = _claim(index, page["name"]).outcome != oid.UNIQUE
-    evidence = {"visual": False, "numeric": False} if contested else combined.get(_slug(page["name"]), {})
+    record, refusal = (None, None) if contested else evidence.evidence_for(page)
     return {
         "page": page,
         "contested": contested,
-        "visual": bool(evidence.get("visual")),
-        "numeric": bool(evidence.get("numeric")),
+        "refusal": refusal,
+        "visual": bool(record and record.visual),
+        "numeric": bool(record and record.numeric),
     }
 
 
@@ -1963,24 +2149,31 @@ def _run_cli_gate(gate: Gate, target: Path, output_dir: Path) -> dict[str, Any]:
     return _gate_result(gate, target, proc, payload, native_status)
 
 
-def _apply_stub_exemptions(check: dict[str, Any], exemptions: dict[str, Any]) -> dict[str, Any]:
-    payload = check.get("payload") if isinstance(check.get("payload"), dict) else {}
-    entries = exemptions["entries"]
-    stubs = []
-    for model in payload.get("models", []) if isinstance(payload.get("models"), list) else []:
-        for finding in model.get("findings", []) if isinstance(model, dict) else []:
+def _stub_findings(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[tuple[str, str, set[str]]]]:
+    """``(stubs, findings)`` from a stub-measure gate payload; the key ties a stub to its finding."""
+    stubs: list[dict[str, Any]] = []
+    findings: list[tuple[str, str, set[str]]] = []
+    models = payload.get("models", []) if isinstance(payload.get("models"), list) else []
+    for model_index, model in enumerate(models):
+        for finding_index, finding in enumerate(model.get("findings", []) if isinstance(model, dict) else []):
             canonical = f"{finding.get('kind')}:{finding.get('table')}[{finding.get('name')}]"
             aliases = {f"{finding.get('table')}[{finding.get('name')}]", str(finding.get("name") or "")}
-            stubs.append(
-                {
-                    "canonical": canonical,
-                    "finding": finding,
-                    "exempted": _exempted(entries, "stub-measures", canonical, aliases),
-                }
-            )
+            key = f"{model_index}#{finding_index}"
+            findings.append((key, canonical, aliases))
+            stubs.append({"canonical": canonical, "finding": finding, "key": key, "exempted": False})
+    return stubs, findings
+
+
+def _apply_stub_exemptions(check: dict[str, Any], exemptions: dict[str, Any]) -> dict[str, Any]:
+    payload = check.get("payload") if isinstance(check.get("payload"), dict) else {}
+    stubs, findings = _stub_findings(payload)
+    exempted, contested = resolve_exemptions(exemptions["entries"], "stub-measures", findings)
+    for stub in stubs:
+        stub["exempted"] = stub["key"] in exempted
     unexempted = [stub for stub in stubs if not stub["exempted"]]
     check["stub_exemptions"] = len(stubs) - len(unexempted)
     check["unexempted_stubs"] = len(unexempted)
+    check["contested_exemptions"] = contested
     if check["native_status"] == "STUBS":
         check["status"] = STATUS_FINDINGS if unexempted else STATUS_PASS
     return check
