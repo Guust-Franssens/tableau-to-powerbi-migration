@@ -407,7 +407,7 @@ def test_oracle_coverage_drops_a_signed_omission_from_the_denominator(tmp_path: 
     oracle = cu.check_oracle_coverage(tmp_path, None, None)
 
     assert oracle["pages"] == 1
-    assert [page["name"] for page in oracle["excluded_signed_omissions"]] == ["B"]
+    assert [page["name"] for page in oracle["excluded_omissions"]] == ["B"]
     assert oracle["status"] == cu.STATUS_PASS
 
 
@@ -513,39 +513,61 @@ def test_evidence_is_found_from_a_relative_target_path(tmp_path: Path, monkeypat
     assert relative["omissions"][0]["disposition"] == cu.OMISSION_DECLARED
 
 
+def _complete_worksheet(ws_id: str, name: str, **overrides: object) -> dict[str, object]:
+    """A worksheet carrying EVERY property the committed spec schema declares, all content empty.
+
+    Completeness is the point: `_source_empty` now refuses a partial structure, because treating an
+    incomplete one as proof of emptiness is what let a Text worksheet with `title_text: "Important
+    instructions"` pass as owing no page. Real parser output carries all eleven properties, so this
+    is what a genuinely blank sheet looks like on disk.
+    """
+    worksheet: dict[str, object] = {
+        "id": ws_id,
+        "name": name,
+        "title_text": None,
+        "data_source_ids": [],
+        "mark_type": "Automatic",
+        "encodings": {
+            "rows": [],
+            "columns": [],
+            "color": None,
+            "size": None,
+            "shape": None,
+            "label": [],
+            "detail": [],
+            "tooltip": [],
+        },
+        "reference_lines": [],
+        "filters": [],
+        "manual_sort": [],
+        "measure_names_values_pivot": None,
+        "customized_tooltip_text": None,
+    }
+    worksheet.update(overrides)
+    return worksheet
+
+
+def _spec_with_worksheets(unit: Path, worksheets: list[dict[str, object]]) -> None:
+    unit.mkdir(parents=True, exist_ok=True)
+    (unit / "migration-spec.json").write_text(
+        json.dumps({"migration_spec_version": "1.0", "dashboards": [], "worksheets": worksheets}),
+        encoding="utf-8",
+    )
+
+
 def test_a_source_empty_worksheet_owes_no_page(tmp_path: Path) -> None:
-    """A worksheet with no encodings and no filters renders blank in Tableau too.
+    """A worksheet with every schema channel empty renders blank in Tableau too, so it owes no page.
 
     Corrects a round-2 claim of mine that this case did not occur: two exist in the measured estate
-    (`Meridian Multi-Source (3 systems)/Probe Sheet`, `vishnu_dashboard/Sheet 3`), both with every
-    shelf empty and no filters. It is established from the SPEC, never from an engine tier.
+    (`Meridian Multi-Source (3 systems)/Probe Sheet`, `vishnu_dashboard/Sheet 3`), both complete and
+    entirely empty. Established from the SPEC, never from an engine tier.
     """
-    (tmp_path / "migration-spec.json").write_text(
-        json.dumps(
-            {
-                "dashboards": [],
-                "worksheets": [
-                    {"id": "ws.a", "name": "A", "encodings": {"rows": ["x"], "columns": []}, "filters": []},
-                    {
-                        "id": "ws.probe",
-                        "name": "Probe Sheet",
-                        "mark_type": "Automatic",
-                        "encodings": {
-                            "rows": [],
-                            "columns": [],
-                            "color": None,
-                            "size": None,
-                            "shape": None,
-                            "label": [],
-                            "detail": [],
-                            "tooltip": [],
-                        },
-                        "filters": [],
-                    },
-                ],
-            }
-        ),
-        encoding="utf-8",
+    _spec_with_worksheets(
+        tmp_path,
+        [
+            _complete_worksheet("ws.a", "A", encodings={"rows": ["x"], "columns": [], "color": None}),
+            _complete_worksheet("ws.probe", "Probe Sheet"),
+        ],
     )
     _write_report(tmp_path, ["A"])
 
@@ -556,19 +578,182 @@ def test_a_source_empty_worksheet_owes_no_page(tmp_path: Path) -> None:
     assert parity["status"] == cu.STATUS_PASS
 
 
-def test_a_worksheet_with_any_encoding_still_owes_a_page(tmp_path: Path) -> None:
-    """The other half: one populated shelf is content, so its omission is still a rebuild gap."""
+def test_a_source_empty_page_owes_no_oracle_evidence_either(tmp_path: Path) -> None:
+    """Kills: page parity and the oracle denominator disagreeing about the same page.
+
+    Parity accepted a source-empty omission while the oracle still demanded a visual AND a numeric
+    oracle for it, so one page could PASS one half of the gate and be NOT_CHECKED in the other. Both
+    now read the same disposition.
+    """
+    _spec_with_worksheets(
+        tmp_path,
+        [
+            _complete_worksheet("ws.a", "A", encodings={"rows": ["x"], "columns": [], "color": None}),
+            _complete_worksheet("ws.b", "B"),
+        ],
+    )
+    _write_report(tmp_path, ["A"])
+    _write_reference_manifest(tmp_path, ["A"])
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert [page["name"] for page in oracle["excluded_omissions"]] == ["B"]
+    assert oracle["pages"] == 1
+    assert oracle["status"] == cu.STATUS_PASS
+
+
+def test_a_visible_title_is_content_even_with_every_shelf_empty(tmp_path: Path) -> None:
+    """Kills: inspecting only the encoding shelves, and missing a visible channel.
+
+    A Text worksheet whose title reads "Important instructions" draws something. It passed as
+    source-empty, and because that disposition needs no signature the false positive was a silent PASS.
+    """
+    _spec_with_worksheets(
+        tmp_path,
+        [
+            _complete_worksheet("ws.a", "A", encodings={"rows": ["x"], "columns": [], "color": None}),
+            _complete_worksheet("ws.b", "B", title_text="Important instructions"),
+        ],
+    )
+    _write_report(tmp_path, ["A"])
+
+    parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
+
+    assert parity["source_empty_omissions"] == []
+    assert [row["name"] for row in parity["unsigned_omissions"]] == ["B"]
+
+
+def test_an_incomplete_worksheet_structure_is_not_proof_of_emptiness(tmp_path: Path) -> None:
+    """Kills: reading a partial structure as proof. Unknown is not empty."""
+    _spec_with_worksheets(
+        tmp_path,
+        [
+            _complete_worksheet("ws.a", "A", encodings={"rows": ["x"], "columns": [], "color": None}),
+            {"id": "ws.b", "name": "B", "encodings": {"rows": []}},
+        ],
+    )
+    _write_report(tmp_path, ["A"])
+
+    parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
+
+    assert parity["source_empty_omissions"] == []
+    assert [row["name"] for row in parity["unsigned_omissions"]] == ["B"]
+
+
+def test_a_worksheet_missing_one_schema_key_is_not_proof_of_emptiness(tmp_path: Path) -> None:
+    """The completeness rule is per-KEY: dropping `filters` alone must still refuse the claim."""
+    partial = _complete_worksheet("ws.b", "B")
+    del partial["filters"]
+    _spec_with_worksheets(
+        tmp_path,
+        [_complete_worksheet("ws.a", "A", encodings={"rows": ["x"], "columns": [], "color": None}), partial],
+    )
+    _write_report(tmp_path, ["A"])
+
+    parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
+
+    assert parity["source_empty_omissions"] == []
+    assert [row["name"] for row in parity["unsigned_omissions"]] == ["B"]
+
+
+def test_an_unrecognised_spec_version_cannot_be_classified_as_empty(tmp_path: Path) -> None:
+    """The classification is derived against one schema version; another cannot be read with it."""
     (tmp_path / "migration-spec.json").write_text(
         json.dumps(
             {
+                "migration_spec_version": "2.0",
                 "dashboards": [],
                 "worksheets": [
-                    {"id": "ws.a", "name": "A", "encodings": {"rows": ["x"]}, "filters": []},
-                    {"id": "ws.b", "name": "B", "encodings": {"rows": [], "color": "Region"}, "filters": []},
+                    _complete_worksheet("ws.a", "A", encodings={"rows": ["x"], "columns": [], "color": None}),
+                    _complete_worksheet("ws.b", "B"),
                 ],
             }
         ),
         encoding="utf-8",
+    )
+    _write_report(tmp_path, ["A"])
+
+    parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
+
+    assert parity["source_empty_omissions"] == []
+    assert [row["name"] for row in parity["unsigned_omissions"]] == ["B"]
+
+
+def test_a_punctuation_variant_name_is_not_the_same_signature(tmp_path: Path) -> None:
+    """Kills: deciding a signature through the lossy slug, where 'A-B' and 'A B' are one name."""
+    _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.1", "A-B"), ("ws.2", "A B"), ("ws.3", "C")])
+    _write_report(tmp_path, ["C"])
+    (tmp_path / cu.EXEMPTIONS_FILE).write_text(
+        json.dumps({"exemptions": [{"check": "page-parity", "item": "A-B", "reason": "cut", "decided_by": "gf"}]}),
+        encoding="utf-8",
+    )
+
+    parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
+
+    assert [page["name"] for page in parity["applied_exemptions"]] == ["A-B"]
+    assert [row["name"] for row in parity["unsigned_omissions"]] == ["A B"], "'A B' was never signed"
+    assert parity["status"] == cu.STATUS_PRECONDITION_FAILED
+
+
+def test_an_extra_signature_matches_the_page_name_exactly(tmp_path: Path) -> None:
+    """The same rule for `extra:`: a punctuation variant does not account for a rendered page."""
+    _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A")])
+    _write_report(tmp_path, ["A", "Bonus-Page"])
+    (tmp_path / cu.EXEMPTIONS_FILE).write_text(
+        json.dumps(
+            {"exemptions": [{"check": "page-parity", "item": "extra:Bonus Page", "reason": "x", "decided_by": "gf"}]}
+        ),
+        encoding="utf-8",
+    )
+
+    parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
+
+    assert [page["name"] for page in parity["unaccounted_extra_pages"]] == ["Bonus-Page"]
+    assert parity["status"] == cu.STATUS_PRECONDITION_FAILED
+
+
+def test_a_spec_that_reuses_a_page_id_cannot_be_graded(tmp_path: Path) -> None:
+    """An id is the only way to sign one of two same-named objects, so a colliding id is fatal.
+
+    Measured: two pages sharing id 'ws.same' were BOTH signed by one 'ws.same' entry, and passed.
+    """
+    (tmp_path / "migration-spec.json").write_text(
+        json.dumps(
+            {
+                "dashboards": [],
+                "worksheets": [{"id": "ws.same", "name": "A"}, {"id": "ws.same", "name": "B"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_report(tmp_path, ["A"])
+
+    assert cu.expected_pages(tmp_path) is None
+    detail = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))["detail"]
+    assert "reuses page id(s) ws.same" in detail
+
+
+def test_a_worksheet_with_any_encoding_still_owes_a_page(tmp_path: Path) -> None:
+    """One populated shelf is content. Everything else is complete, so only that shelf can turn this."""
+    _spec_with_worksheets(
+        tmp_path,
+        [
+            _complete_worksheet("ws.a", "A", encodings={"rows": ["x"], "columns": [], "color": None}),
+            _complete_worksheet(
+                "ws.b",
+                "B",
+                encodings={
+                    "rows": [],
+                    "columns": [],
+                    "color": "Region",
+                    "size": None,
+                    "shape": None,
+                    "label": [],
+                    "detail": [],
+                    "tooltip": [],
+                },
+            ),
+        ],
     )
     _write_report(tmp_path, ["A"])
 
@@ -579,11 +764,39 @@ def test_a_worksheet_with_any_encoding_still_owes_a_page(tmp_path: Path) -> None
     assert parity["status"] == cu.STATUS_PRECONDITION_FAILED
 
 
-def test_a_worksheet_with_no_encodings_key_at_all_is_not_called_empty(tmp_path: Path) -> None:
-    """Unknown is not empty: a spec that never declared encodings cannot prove the sheet was blank."""
-    (tmp_path / "migration-spec.json").write_text(
-        json.dumps({"dashboards": [], "worksheets": [{"id": "ws.a", "name": "A"}, {"id": "ws.b", "name": "B"}]}),
-        encoding="utf-8",
+def test_a_worksheet_whose_encodings_are_not_an_object_is_not_called_empty(tmp_path: Path) -> None:
+    """Unknown is not empty, and the type guard is what keeps a malformed spec from crashing the gate.
+
+    The list carries exactly the schema's channel NAMES, so the key-set check cannot refuse it - only
+    the `isinstance` guard can. Without it the gate reaches `.values()` on a list.
+    """
+    _spec_with_worksheets(
+        tmp_path,
+        [
+            _complete_worksheet("ws.a", "A", encodings={"rows": ["x"], "columns": [], "color": None}),
+            _complete_worksheet(
+                "ws.b",
+                "B",
+                encodings=["rows", "columns", "color", "size", "shape", "label", "detail", "tooltip"],
+            ),
+        ],
+    )
+    _write_report(tmp_path, ["A"])
+
+    parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
+
+    assert parity["source_empty_omissions"] == []
+    assert [row["name"] for row in parity["unsigned_omissions"]] == ["B"]
+
+
+def test_a_complete_worksheet_with_partial_encodings_is_not_proof_of_emptiness(tmp_path: Path) -> None:
+    """The encodings key-set check on its own: every worksheet key is present, only the shelves are not."""
+    _spec_with_worksheets(
+        tmp_path,
+        [
+            _complete_worksheet("ws.a", "A", encodings={"rows": ["x"], "columns": [], "color": None}),
+            _complete_worksheet("ws.b", "B", encodings={"rows": []}),
+        ],
     )
     _write_report(tmp_path, ["A"])
 
@@ -594,18 +807,13 @@ def test_a_worksheet_with_no_encodings_key_at_all_is_not_called_empty(tmp_path: 
 
 
 def test_a_source_empty_sheet_that_still_has_a_filter_owes_a_page(tmp_path: Path) -> None:
-    """A filter is content the author placed: empty shelves alone do not make a sheet blank."""
-    (tmp_path / "migration-spec.json").write_text(
-        json.dumps(
-            {
-                "dashboards": [],
-                "worksheets": [
-                    {"id": "ws.a", "name": "A", "encodings": {"rows": ["x"]}, "filters": []},
-                    {"id": "ws.b", "name": "B", "encodings": {"rows": [], "color": None}, "filters": [{"f": 1}]},
-                ],
-            }
-        ),
-        encoding="utf-8",
+    """A filter is content the author placed. Only the filter differs from the blank case above."""
+    _spec_with_worksheets(
+        tmp_path,
+        [
+            _complete_worksheet("ws.a", "A", encodings={"rows": ["x"], "columns": [], "color": None}),
+            _complete_worksheet("ws.b", "B", filters=[{"field": "Region"}]),
+        ],
     )
     _write_report(tmp_path, ["A"])
 
@@ -1171,7 +1379,7 @@ def test_a_rename_suspends_signatures_on_the_oracle_denominator_too(tmp_path: Pa
 
     oracle = cu.check_oracle_coverage(tmp_path, None, None)
 
-    assert oracle["excluded_signed_omissions"] == [], "attribution is ambiguous; no signature applies"
+    assert oracle["excluded_omissions"] == [], "attribution is ambiguous; no signature applies"
     assert oracle["pages"] == 2
     assert oracle["status"] == cu.STATUS_NOT_CHECKED
 

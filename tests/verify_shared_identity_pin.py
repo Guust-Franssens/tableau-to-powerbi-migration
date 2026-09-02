@@ -9,6 +9,12 @@ Why "cannot establish" is a FAILURE, not a skip: round 3 measured a claim of byt
 false by two commits and an incompatible API, and nothing in the repo would have caught it. A check
 that quietly passes when it could not look is worse than no check, because it is credited as one.
 
+⚠️ The same rule applies to `git diff`'s own exit code, and round 4 found this gate breaking it.
+`git diff --quiet` exits **1** for a difference and **>1** for a comparison FAILURE (a corrupt object,
+an unreadable ref, a broken index). Treating every nonzero as drift reported a confident answer -
+"DRIFTED" - for a run that had established nothing at all. `0` is identical, `1` is drifted, anything
+above 1 is CANNOT ESTABLISH.
+
 Ref resolution prefers ``origin/master`` - once the sibling PR merges, that IS the shared truth - and
 falls back to the sibling branch while it is still open.
 """
@@ -66,7 +72,19 @@ def main(argv: list[str] | None = None) -> int:
         )
         return EXIT_CANNOT_ESTABLISH
 
-    drifted = [relative for relative in SHARED if _git("diff", "--quiet", ref, "--", relative).returncode != 0]
+    drifted = []
+    for relative in SHARED:
+        result = _git("diff", "--quiet", ref, "--", relative)
+        if result.returncode == 0:
+            continue
+        if result.returncode > 1:
+            print(
+                f"CANNOT ESTABLISH: `git diff` exited {result.returncode} comparing {relative} against {ref} - "
+                f"that is a comparison FAILURE, not a difference. {result.stderr.decode(errors='replace').strip()}",
+                file=sys.stderr,
+            )
+            return EXIT_CANNOT_ESTABLISH
+        drifted.append(relative)
     commit = _git("rev-parse", ref).stdout.decode().strip()
     if drifted:
         print(f"DRIFTED from {ref}@{commit[:8]}: {', '.join(drifted)}", file=sys.stderr)

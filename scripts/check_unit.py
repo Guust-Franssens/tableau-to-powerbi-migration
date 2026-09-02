@@ -633,30 +633,67 @@ def _zone_worksheet_ids(zone: Any, found: set[str]) -> None:
             _zone_worksheet_ids(child, found)
 
 
-def _source_empty(item: dict[str, Any]) -> bool:
-    """Whether a spec worksheet declares NOTHING to render, established from source structure.
+def _source_content_shape() -> tuple[frozenset[str], frozenset[str]] | None:
+    """``(worksheet keys, encoding channels)`` the COMMITTED spec schema declares, or None.
 
-    Every encoding shelf empty and no filters. Tableau renders such a sheet blank too, so it owes no
-    Power BI page and its omission is not a rebuild gap - which is a fact about the SOURCE, never
-    inferred from an engine tier that merely reports what happened.
-
-    Measured, correcting a round-2 claim of mine that this case did not exist: two of the 44 estate
-    workbooks have one (``Meridian Multi-Source (3 systems)/Probe Sheet``,
-    ``vishnu_dashboard/Sheet 3``), both with ``rows/columns/label/detail/tooltip: []``,
-    ``color/size/shape: null`` and zero filters. My "zero occurrences" was measured against a spec
-    directory I had already deleted, so the scan found no specs at all and reported 0.
-
-    Missing or malformed encodings are NOT source-empty: unknown is not empty.
+    Read from ``docs/migration-spec.schema.json`` rather than enumerated here. An open enumeration
+    inside the gate is what makes "is this worksheet empty?" undecidable: a channel nobody listed is
+    silently ignored, and a partial structure reads as proof of emptiness. Deriving the closed set
+    from the schema means a channel added there tightens this rule automatically instead of opening
+    a hole in it.
     """
+    try:
+        schema = _read_json(REPO_ROOT / "docs" / "migration-spec.schema.json")
+    except (OSError, json.JSONDecodeError):
+        return None
+    worksheet = ((schema.get("properties") or {}).get("worksheets") or {}).get("items") or {}
+    worksheet_keys = worksheet.get("properties") or {}
+    encodings = (worksheet_keys.get("encodings") or {}).get("properties") or {}
+    if not worksheet_keys or not encodings:
+        return None
+    return frozenset(worksheet_keys), frozenset(encodings)
+
+
+#: Worksheet properties that describe the sheet rather than anything it draws. Everything else the
+#: schema declares is treated as CONTENT, so a property added upstream makes this rule stricter, not
+#: looser - a new channel is content until someone deliberately says otherwise.
+NON_CONTENT_WORKSHEET_KEYS = frozenset({"id", "name", "mark_type", "data_source_ids", "encodings"})
+
+#: The spec version this classification was derived against. A different version cannot be classified.
+SOURCE_EMPTY_SPEC_VERSION = "1.0"
+
+
+def _source_empty(item: dict[str, Any], shape: tuple[frozenset[str], frozenset[str]] | None) -> bool:
+    """Whether a spec worksheet PROVES it declares nothing to render.
+
+    Proof needs the structure to be COMPLETE, not merely to look empty where it was populated. Round
+    4 measured the weaker predicate accepting three things it should not: a Text worksheet whose
+    ``title_text`` reads "Important instructions" (a visible channel it never inspected), a partial
+    ``encodings: {"rows": []}``, and a worksheet with no ``filters`` key at all. Because this
+    disposition needs no signature, every false positive was a silent PASS.
+
+    So: the worksheet must carry exactly the schema's key set, ``encodings`` must carry exactly the
+    schema's channels, and every content-bearing key must be falsy. Anything else - an unknown key, a
+    missing one, an unreadable schema - is NOT proof, and the omission stays a rebuild gap.
+
+    Measured against the estate: both genuinely-empty sheets (``Meridian Multi-Source (3 systems)``
+    ``/Probe Sheet``, ``vishnu_dashboard/Sheet 3``) carry all eleven schema properties with every
+    content channel falsy, so completeness costs nothing on real parser output.
+    """
+    if shape is None:
+        return False
+    worksheet_keys, encoding_keys = shape
+    if set(item) != worksheet_keys:
+        return False
     encodings = item.get("encodings")
-    if not isinstance(encodings, dict) or not encodings:
+    if not isinstance(encodings, dict) or set(encodings) != encoding_keys or any(encodings.values()):
         return False
-    if any(encodings.values()):
-        return False
-    return not item.get("filters")
+    return not any(item[key] for key in worksheet_keys - NON_CONTENT_WORKSHEET_KEYS)
 
 
-def _named_spec_pages(items: Any, collection: str, kind: str) -> tuple[list[dict[str, Any]] | None, str | None]:
+def _named_spec_pages(
+    items: Any, collection: str, kind: str, shape: tuple[frozenset[str], frozenset[str]] | None
+) -> tuple[list[dict[str, Any]] | None, str | None]:
     """Normalize a required migration-spec collection to identified page rows, or refuse it.
 
     ``docs/migration-spec.schema.json`` requires ``dashboards`` and ``worksheets`` as ARRAYS whose
@@ -686,7 +723,7 @@ def _named_spec_pages(items: Any, collection: str, kind: str) -> tuple[list[dict
                 "id": str(item.get("id") or identity.name),
                 "name": identity.name,
                 "kind": kind,
-                "source_empty": kind == oid.KIND_WORKSHEET and _source_empty(item),
+                "source_empty": kind == oid.KIND_WORKSHEET and _source_empty(item, shape),
             }
         )
     return pages, None
@@ -729,7 +766,7 @@ def _placed_worksheet_ids(dashboards: list[Any]) -> tuple[set[str], str | None]:
     return placed, None
 
 
-def _spec_pages(target: Path) -> tuple[list[dict[str, str]] | None, str | None]:
+def _spec_pages(target: Path) -> tuple[list[dict[str, Any]] | None, str | None]:
     """``(candidate pages, refusal reason)`` from the unit's migration spec.
 
     Exactly one of the two is ever set. Every refusal path is explicit, because a partial answer here
@@ -738,8 +775,9 @@ def _spec_pages(target: Path) -> tuple[list[dict[str, str]] | None, str | None]:
     payload, error = _spec_payload(target)
     if payload is None:
         return None, error
-    dashboards, error = _named_spec_pages(payload["dashboards"], "dashboards", oid.KIND_DASHBOARD)
-    worksheets, worksheet_error = _named_spec_pages(payload["worksheets"], "worksheets", oid.KIND_WORKSHEET)
+    shape = _source_content_shape() if payload.get("migration_spec_version") == SOURCE_EMPTY_SPEC_VERSION else None
+    dashboards, error = _named_spec_pages(payload["dashboards"], "dashboards", oid.KIND_DASHBOARD, shape)
+    worksheets, worksheet_error = _named_spec_pages(payload["worksheets"], "worksheets", oid.KIND_WORKSHEET, shape)
     error = error or worksheet_error
     if error is not None:
         return None, error
@@ -747,15 +785,23 @@ def _spec_pages(target: Path) -> tuple[list[dict[str, str]] | None, str | None]:
     if error is not None:
         return None, error
     orphans = [page for page in (worksheets or []) if page["id"] not in placed]
-    if not dashboards and not orphans:
+    candidates = (dashboards or []) + orphans
+    if not candidates:
         return None, (
             "migration-spec.json declares no dashboards and no worksheets, so there is no expected "
             "page set to grade against"
         )
-    return (dashboards or []) + orphans, None
+    repeated = oid.duplicates([page["id"] for page in candidates])
+    if repeated:
+        return None, (
+            f"migration-spec.json reuses page id(s) {', '.join(repeated)}. An id is the ONLY way to "
+            "sign one of two objects that share a name, so a colliding id makes every signature "
+            "unattributable and the expected set cannot be graded"
+        )
+    return candidates, None
 
 
-def expected_pages(target: Path) -> list[dict[str, str]] | None:
+def expected_pages(target: Path) -> list[dict[str, Any]] | None:
     """Pages the engine could emit: every Tableau dashboard PLUS every ORPHAN worksheet.
 
     "Dashboards only" was wrong. ``twb_to_pbir.py`` (engine 2.339.0) emits one page per dashboard
@@ -1301,9 +1347,7 @@ def check_page_parity(target: Path, exemptions: dict[str, Any]) -> dict[str, Any
     entries = exemptions["entries"]
     placeholders, blank = _zero_visual_pages(actual, expectation["rendered"])
     unaccounted_extra = [
-        page
-        for page in expectation["unmatched_rendered"]
-        if not _exempted(entries, "page-parity", f"extra:{page['name']}")
+        page for page in expectation["unmatched_rendered"] if page["name"] not in _page_parity_items(entries)[1]
     ]
     ambiguous = bool(unaccounted_extra) or bool(expectation["contested_names"])
     omissions = _disposition_omissions(expectation, entries, ambiguous)
@@ -1370,20 +1414,41 @@ def _disposition_omissions(
 SIGNATURE_UNIQUE = "unique"
 SIGNATURE_CONTESTED = "contested"
 
+#: Prefix marking a signature that declares an EMITTED page the source never had.
+EXTRA_SIGNATURE_PREFIX = "extra:"
+
+
+def _page_parity_items(entries: list[dict[str, str]]) -> tuple[list[str], set[str]]:
+    """``(plain items, extra: names)`` from the signed file, as EXACT strings.
+
+    ⚠️ Never through :func:`_exempted`. That helper compares slugs, which is right for its own item
+    vocabularies but wrong for an engine identity: one entry named ``A-B`` signed both ``A-B`` and
+    ``A B``, because punctuation vanishes in a slug. A signature applies to an engine object or it
+    does not.
+    """
+    items = [entry["item"] for entry in entries if entry.get("check") == "page-parity"]
+    return (
+        [item for item in items if not item.startswith(EXTRA_SIGNATURE_PREFIX)],
+        {item[len(EXTRA_SIGNATURE_PREFIX) :] for item in items if item.startswith(EXTRA_SIGNATURE_PREFIX)},
+    )
+
 
 def _page_signature(page: dict[str, Any], entries: list[dict[str, str]], index: Any) -> str | None:
     """How a page-parity signature names this page: uniquely, contested, or not at all.
 
-    An entry naming the page's ``id`` is unambiguous by construction - ids are per-object. An entry
-    naming only the page's NAME is not: with a dashboard and a worksheet both called ``Sales``, one
-    entry signed BOTH omissions and recorded a single compromise. A contested name is therefore never
-    applied, exactly like the rename case.
+    Each raw item is resolved exactly once, by exact id then exact name. An id is unique per spec -
+    :func:`_spec_pages` refuses a spec whose page ids collide, so there is no second copy for an id
+    signature to also match. A NAME is not unique: with a dashboard and a worksheet both called
+    ``Sales``, one entry signed BOTH omissions and recorded a single compromise, so a contested name
+    is never applied.
     """
-    if _exempted(entries, "page-parity", page["id"]):
-        return SIGNATURE_UNIQUE
-    if not _exempted(entries, "page-parity", page["name"]):
-        return None
-    return SIGNATURE_UNIQUE if _claim(index, page["name"]).outcome == oid.UNIQUE else SIGNATURE_CONTESTED
+    plain, _extra = _page_parity_items(entries)
+    for item in plain:
+        if item == page["id"]:
+            return SIGNATURE_UNIQUE
+        if item == page["name"]:
+            return SIGNATURE_UNIQUE if _claim(index, item).outcome == oid.UNIQUE else SIGNATURE_CONTESTED
+    return None
 
 
 def _omission_why(page: dict[str, Any], disposition: str, expectation: dict[str, Any], signature: str | None) -> str:
@@ -1431,13 +1496,13 @@ def _unapplied_exemptions(
     rows = [
         {**page, "disposition": EXEMPTION_STALE}
         for page in expectation["candidates"]
-        if page["name"] not in omitted and _exempted(entries, "page-parity", page["name"], {page["id"]})
+        if page["name"] not in omitted and _page_signature(page, entries, expectation["index"]) is not None
     ]
     return rows + [
         {**page, "disposition": EXEMPTION_AMBIGUOUS}
         for page in expectation["omissions"]
-        if _exempted(entries, "page-parity", page["name"], {page["id"]})
-        and (ambiguous or _page_signature(page, entries, expectation["index"]) == SIGNATURE_CONTESTED)
+        if (signature := _page_signature(page, entries, expectation["index"])) is not None
+        and (ambiguous or signature == SIGNATURE_CONTESTED)
     ]
 
 
@@ -1635,13 +1700,13 @@ def check_oracle_coverage(target: Path, reference_dir: Path | None, oracle_dir: 
     oracle, oracle_grades = _oracle_capture_oracles(target, oracle_dir)
     if not expectation["assessable"]:
         return _oracle_not_assessable(f"cannot assess oracle coverage: {expectation['reason']}")
-    accepted = _signed_omissions(expectation, load_exemptions(target)["entries"])
+    accepted = _oracle_excluded_omissions(expectation, load_exemptions(target)["entries"])
     accepted_names = {page["name"] for page in accepted}
     pages = [page for page in expectation["candidates"] if page["name"] not in accepted_names]
     if not pages:
         return _oracle_not_assessable(
-            "cannot assess oracle coverage: every expected Tableau page is a signed omission, so "
-            "there is no page left to hold against a reference"
+            "cannot assess oracle coverage: every expected Tableau page is a signed omission or owes "
+            "no output, so there is no page left to hold against a reference"
         )
     combined = _merge_oracle_maps(reference, oracle)
     rows = [_oracle_row(page, expectation["index"], combined) for page in pages]
@@ -1656,7 +1721,7 @@ def check_oracle_coverage(target: Path, reference_dir: Path | None, oracle_dir: 
         "visual_missing": visual_missing,
         "numeric_missing": numeric_missing,
         "contested_names": [row["page"]["name"] for row in rows if row["contested"]],
-        "excluded_signed_omissions": accepted,
+        "excluded_omissions": accepted,
         "grade": ", ".join(sorted(reference_grades | oracle_grades)) or "not checked (no oracle manifest found)",
         "rows": rows,
     }
@@ -1674,20 +1739,23 @@ def _oracle_row(page: dict[str, Any], index: Any, combined: dict[str, dict[str, 
     }
 
 
-def _signed_omissions(expectation: dict[str, Any], entries: list[dict[str, str]]) -> list[dict[str, Any]]:
-    """Omissions a human accepted, and only those.
+def _oracle_excluded_omissions(expectation: dict[str, Any], entries: list[dict[str, str]]) -> list[dict[str, Any]]:
+    """Omissions that owe no oracle evidence - the SAME dispositions page parity does not fail on.
 
-    An engine-declared omission is deliberately NOT here: ``tier: "empty"`` reports what the engine
-    did, not what anyone agreed to ship. An ambiguous attribution is not here either - while a
-    rendered page is unaccounted for, or a name is claimed by more than one expected page, a
-    signature cannot be tied to the page it names.
+    Computed from :func:`_disposition_omissions`, deliberately, so the two checks cannot drift apart
+    again. Round 4 measured them disagreeing: page parity accepted a ``no-source-content`` omission
+    while this denominator still demanded a visual and a numeric oracle for it, so a unit could PASS
+    parity and be NOT_CHECKED here for the same page. A page declared to owe no output owes no
+    picture of that output either.
+
+    An engine-DECLARED omission is still not here: ``tier: "empty"`` reports what the engine did, not
+    what anyone agreed to ship.
     """
-    if expectation["unmatched_rendered"] or expectation["contested_names"]:
-        return []
+    ambiguous = bool(expectation["unmatched_rendered"]) or bool(expectation["contested_names"])
     return [
-        page
-        for page in expectation["omissions"]
-        if _page_signature(page, entries, expectation["index"]) == SIGNATURE_UNIQUE
+        row
+        for row in _disposition_omissions(expectation, entries, ambiguous)
+        if row["disposition"] in {OMISSION_SIGNED, OMISSION_SOURCE_EMPTY}
     ]
 
 
@@ -1702,7 +1770,7 @@ def _oracle_not_assessable(detail: str) -> dict[str, Any]:
         "numeric_present": 0,
         "visual_missing": [],
         "numeric_missing": [],
-        "excluded_signed_omissions": [],
+        "excluded_omissions": [],
         "grade": "not checked (expected page set could not be established)",
         "rows": [],
     }

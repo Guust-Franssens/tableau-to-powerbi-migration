@@ -89,14 +89,13 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
     ),
     (
         "APPROVAL: the oracle denominator drops engine-declared omissions too",
-        '        if _page_signature(page, entries, expectation["index"]) == SIGNATURE_UNIQUE\n    ]',
-        '        if page["declared_reason"]\n'
-        '        or _page_signature(page, entries, expectation["index"]) == SIGNATURE_UNIQUE\n    ]',
+        '        if row["disposition"] in {OMISSION_SIGNED, OMISSION_SOURCE_EMPTY}',
+        '        if row["disposition"] in {OMISSION_SIGNED, OMISSION_SOURCE_EMPTY, OMISSION_DECLARED}',
         ["test_oracle_coverage_still_expects_a_page_the_engine_merely_declared"],
     ),
     (
         "APPROVAL: the oracle denominator keeps a signed omission",
-        '    accepted = _signed_omissions(expectation, load_exemptions(target)["entries"])',
+        '    accepted = _oracle_excluded_omissions(expectation, load_exemptions(target)["entries"])',
         "    accepted = []",
         ["test_oracle_coverage_drops_a_signed_omission_from_the_denominator"],
     ),
@@ -226,24 +225,20 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
     ),
     (
         "SIGNATURE: rename ambiguity no longer suspends a name-only signature (oracle side)",
-        '    if expectation["unmatched_rendered"] or expectation["contested_names"]:\n        return []',
-        "    if False:  # pragma: no cover\n        return []",
+        '    ambiguous = bool(expectation["unmatched_rendered"]) or bool(expectation["contested_names"])',
+        "    ambiguous = False",
         ["test_a_rename_suspends_signatures_on_the_oracle_denominator_too"],
     ),
     (
         "SIGNATURE: an unaccounted rendered page no longer creates ambiguity",
-        '        if not _exempted(entries, "page-parity", f"extra:{page[\'name\']}")',
-        "        if False  # pragma: no cover",
+        '        page for page in expectation["unmatched_rendered"] if page["name"] not in _page_parity_items(entries)[1]',
+        '        page for page in expectation["unmatched_rendered"] if False  # pragma: no cover',
         ["test_a_rename_makes_attribution_ambiguous_and_suspends_every_signature"],
     ),
     (
         "SIGNATURE: an extra: signature cannot resolve the ambiguity",
-        "    unaccounted_extra = [\n"
-        "        page\n"
-        '        for page in expectation["unmatched_rendered"]\n'
-        '        if not _exempted(entries, "page-parity", f"extra:{page[\'name\']}")\n'
-        "    ]",
-        '    unaccounted_extra = list(expectation["unmatched_rendered"])',
+        '        page for page in expectation["unmatched_rendered"] if page["name"] not in _page_parity_items(entries)[1]',
+        '        page for page in expectation["unmatched_rendered"]',
         ["test_declaring_the_renamed_page_resolves_the_ambiguity"],
     ),
     (
@@ -279,14 +274,14 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
     ),
     (
         "SHARED TYPE: a bare-name signature is applied without resolving it",
-        '    return SIGNATURE_UNIQUE if _claim(index, page["name"]).outcome == oid.UNIQUE else SIGNATURE_CONTESTED',
-        "    return SIGNATURE_UNIQUE",
+        "            return SIGNATURE_UNIQUE if _claim(index, item).outcome == oid.UNIQUE else SIGNATURE_CONTESTED",
+        "            return SIGNATURE_UNIQUE",
         ["test_one_name_only_signature_cannot_sign_two_omissions"],
     ),
     (
         "SHARED TYPE: an id signature no longer resolves a contested name",
-        '    if _exempted(entries, "page-parity", page["id"]):\n        return SIGNATURE_UNIQUE',
-        "    if False:  # pragma: no cover\n        return SIGNATURE_UNIQUE",
+        '        if item == page["id"]:\n            return SIGNATURE_UNIQUE',
+        "        if False:  # pragma: no cover\n            return SIGNATURE_UNIQUE",
         ["test_a_signature_naming_the_page_id_resolves_a_contested_name"],
     ),
     (
@@ -303,21 +298,80 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
     ),
     (
         "SOURCE-EMPTY: a populated shelf is treated as blank",
-        "    if any(encodings.values()):\n        return False",
-        "    if False:  # pragma: no cover\n        return False",
+        "    if not isinstance(encodings, dict) or set(encodings) != encoding_keys or any(encodings.values()):",
+        "    if not isinstance(encodings, dict) or set(encodings) != encoding_keys:",
         ["test_a_worksheet_with_any_encoding_still_owes_a_page"],
     ),
     (
-        "SOURCE-EMPTY: a missing encodings key is treated as blank",
-        "    if not isinstance(encodings, dict) or not encodings:\n        return False",
-        "    if not isinstance(encodings, dict):\n        encodings = {}",
-        ["test_a_worksheet_with_no_encodings_key_at_all_is_not_called_empty"],
+        "SOURCE-EMPTY: a non-object encodings value is treated as blank",
+        "    if not isinstance(encodings, dict) or set(encodings) != encoding_keys or any(encodings.values()):",
+        "    if set(encodings) != encoding_keys or any(encodings.values()):",
+        ["test_a_worksheet_whose_encodings_are_not_an_object_is_not_called_empty"],
     ),
     (
         "SOURCE-EMPTY: a filter no longer counts as content",
-        '    return not item.get("filters")',
-        "    return True",
+        "    return not any(item[key] for key in worksheet_keys - NON_CONTENT_WORKSHEET_KEYS)",
+        '    return not any(item[key] for key in worksheet_keys - NON_CONTENT_WORKSHEET_KEYS - {"filters"})',
         ["test_a_source_empty_sheet_that_still_has_a_filter_owes_a_page"],
+    ),
+    (
+        "SIGNATURE: a plain item is matched through the lossy slug",
+        '        if item == page["name"]:\n'
+        "            return SIGNATURE_UNIQUE if _claim(index, item).outcome == oid.UNIQUE else SIGNATURE_CONTESTED",
+        '        if _slug(item) == _slug(page["name"]):\n'
+        "            return SIGNATURE_UNIQUE if _claim(index, item).outcome == oid.UNIQUE else SIGNATURE_CONTESTED",
+        ["test_a_punctuation_variant_name_is_not_the_same_signature"],
+    ),
+    (
+        "SIGNATURE: an extra: item is matched through the lossy slug",
+        '        page for page in expectation["unmatched_rendered"] if page["name"] not in _page_parity_items(entries)[1]',
+        "        page\n"
+        '        for page in expectation["unmatched_rendered"]\n'
+        '        if not any(_slug(page["name"]) == _slug(name) for name in _page_parity_items(entries)[1])',
+        ["test_an_extra_signature_matches_the_page_name_exactly"],
+    ),
+    (
+        "SPEC: a reused page id is accepted, so one signature signs two pages",
+        '    repeated = oid.duplicates([page["id"] for page in candidates])',
+        "    repeated = []",
+        ["test_a_spec_that_reuses_a_page_id_cannot_be_graded"],
+    ),
+    (
+        "SOURCE-EMPTY: a visible title is no longer content",
+        "    return not any(item[key] for key in worksheet_keys - NON_CONTENT_WORKSHEET_KEYS)",
+        '    return not any(item[key] for key in worksheet_keys - NON_CONTENT_WORKSHEET_KEYS - {"title_text"})',
+        ["test_a_visible_title_is_content_even_with_every_shelf_empty"],
+    ),
+    (
+        "SOURCE-EMPTY: an incomplete worksheet structure is accepted as proof",
+        "    if set(item) != worksheet_keys:\n        return False",
+        "    if False:  # pragma: no cover\n        return False",
+        ["test_a_worksheet_missing_one_schema_key_is_not_proof_of_emptiness"],
+    ),
+    (
+        "SOURCE-EMPTY: an incomplete encodings structure is accepted as proof",
+        "    if not isinstance(encodings, dict) or set(encodings) != encoding_keys or any(encodings.values()):",
+        "    if not isinstance(encodings, dict) or any(encodings.values()):",
+        ["test_a_complete_worksheet_with_partial_encodings_is_not_proof_of_emptiness"],
+    ),
+    (
+        "SOURCE-EMPTY: the spec version is no longer checked before classifying",
+        '    shape = _source_content_shape() if payload.get("migration_spec_version") == SOURCE_EMPTY_SPEC_VERSION '
+        "else None",
+        "    shape = _source_content_shape()",
+        ["test_an_unrecognised_spec_version_cannot_be_classified_as_empty"],
+    ),
+    (
+        "SOURCE-EMPTY: the channel set is hard-coded instead of read from the schema",
+        '    worksheet = ((schema.get("properties") or {}).get("worksheets") or {}).get("items") or {}',
+        '    worksheet = {"properties": {"encodings": {"properties": {"rows": {}}}, "id": {}, "name": {}}}',
+        ["test_a_source_empty_worksheet_owes_no_page"],
+    ),
+    (
+        "ORACLE: the denominator stops honouring a source-empty omission",
+        '        if row["disposition"] in {OMISSION_SIGNED, OMISSION_SOURCE_EMPTY}',
+        '        if row["disposition"] in {OMISSION_SIGNED}',
+        ["test_a_source_empty_page_owes_no_oracle_evidence_either"],
     ),
     (
         "oracle discovery: canonical oracle/ name removed",
