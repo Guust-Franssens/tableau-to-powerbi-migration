@@ -204,36 +204,45 @@ class Resolution(Generic[T]):
 
 @dataclass
 class _Index(Generic[T]):
-    """Shared storage. Multiplicity survives: entries are appended, never overwritten."""
+    """Shared storage. Multiplicity survives: entries are appended, never overwritten.
 
-    _by_key: dict[tuple[str, str], list[tuple[Candidate, T]]] = field(default_factory=dict, repr=False)
+    Two SEPARATE tables, which is not a detail. Round 6 measured what one shared table does: an
+    already-lowercase name like ``ops`` has an exact spelling identical to its normalized one, so a
+    single record landed twice under the same key and the exact lookup - which runs before any
+    de-duplication - returned AMBIGUOUS for one genuinely verified render. That is a false FAIL, and
+    a gate that rejects correct evidence gets switched off, which is how a good gate dies.
+    """
 
-    def _store(self, key: tuple[str, str], candidate: Candidate, value: T) -> None:
-        self._by_key.setdefault(key, []).append((candidate, value))
+    _exact: dict[tuple[str, str], list[tuple[Candidate, T]]] = field(default_factory=dict, repr=False)
+    _loose: dict[tuple[str, str], list[tuple[Candidate, T]]] = field(default_factory=dict, repr=False)
 
-    def _resolve(self, identity: ObjectIdentity, key: tuple[str, str]) -> Resolution[T]:
-        return Resolution.of(identity, list(self._by_key.get(key, ())))
+    def _store_exact(self, key: tuple[str, str], candidate: Candidate, value: T) -> None:
+        self._exact.setdefault(key, []).append((candidate, value))
+
+    def _store_loose(self, key: tuple[str, str], candidate: Candidate, value: T) -> None:
+        self._loose.setdefault(key, []).append((candidate, value))
 
 
 @dataclass
 class EngineIndex(_Index[T]):
     """Exact keys only, for joins where BOTH sides are engine/source artifacts.
 
-    There is no lossy key table here at all, so an engine-to-engine join cannot fall back to one even
-    by accident - the structural answer to a defect that moved down one layer per review round.
+    There is no lossy key table populated here at all, so an engine-to-engine join cannot fall back
+    to one even by accident - the structural answer to a defect that moved down one layer per review
+    round.
     """
 
     def add(self, identity: ObjectIdentity, value: T) -> None:
         """Index a value under an exact engine identity."""
         if not isinstance(identity, ObjectIdentity):
             raise IdentityError(f"an EngineIndex is keyed by ObjectIdentity, got {type(identity).__name__}")
-        self._store((identity.kind, identity.name), Candidate(names=(identity.name,), kind=identity.kind), value)
+        self._store_exact((identity.kind, identity.name), Candidate(names=(identity.name,), kind=identity.kind), value)
 
     def resolve(self, identity: ObjectIdentity) -> Resolution[T]:
         """Look up an exact identity."""
         if not isinstance(identity, ObjectIdentity):
             raise IdentityError(f"an EngineIndex is keyed by ObjectIdentity, got {type(identity).__name__}")
-        return self._resolve(identity, (identity.kind, identity.name))
+        return Resolution.of(identity, list(self._exact.get((identity.kind, identity.name), ())))
 
 
 @dataclass
@@ -246,7 +255,11 @@ class CandidateIndex(_Index[T]):
     """
 
     def add(self, candidate: Candidate, value: T) -> None:
-        """Index a value under every spelling the candidate offers, exact and normalized."""
+        """Index a value under every spelling the candidate offers, exact and normalized.
+
+        The two spellings go in SEPARATE tables. Writing both into one made an already-normalized
+        name self-collide - see :class:`_Index`.
+        """
         if isinstance(candidate, ObjectIdentity):
             raise IdentityError(
                 "a CandidateIndex normalizes its keys, so it must never hold an ObjectIdentity - use "
@@ -255,21 +268,24 @@ class CandidateIndex(_Index[T]):
         if not isinstance(candidate, Candidate):
             raise IdentityError(f"a CandidateIndex is keyed by Candidate, got {type(candidate).__name__}")
         for name in candidate.names:
-            self._store((candidate.kind, name), candidate, value)
-            self._store((candidate.kind, normalize(name)), candidate, value)
+            self._store_exact((candidate.kind, name), candidate, value)
+            self._store_loose((candidate.kind, normalize(name)), candidate, value)
 
     def resolve(self, identity: ObjectIdentity) -> Resolution[T]:
-        """Exact match if there is one, else the normalized fallback. Many candidates is AMBIGUOUS."""
+        """Exact match if there is one, else the normalized fallback. Many candidates is AMBIGUOUS.
+
+        The exact table is authoritative and is consulted alone, so an exact hit beats a normalized
+        one and cannot be diluted by it. Only an ABSENT exact result reaches the fallback, where
+        entries are de-duplicated by value identity - one record offering several spellings that
+        normalize alike is still one record, not an ambiguity.
+        """
         if not isinstance(identity, ObjectIdentity):
             raise IdentityError(f"a CandidateIndex resolves an ObjectIdentity, got {type(identity).__name__}")
-        exact = self._resolve(identity, (identity.kind, identity.name))
+        exact = Resolution.of(identity, list(self._exact.get((identity.kind, identity.name), ())))
         if exact.outcome != ABSENT:
             return exact
-        # An exact key and its normalized twin both index the same entry, so a single record can be
-        # stored twice under one lookup. De-duplicate by value identity before judging multiplicity,
-        # or every unambiguous match would read as AMBIGUOUS.
         seen: list[tuple[Candidate, T]] = []
-        for entry in self._by_key.get((identity.kind, normalize(identity.name)), ()):
+        for entry in self._loose.get((identity.kind, normalize(identity.name)), ()):
             if not any(existing[1] is entry[1] for existing in seen):
                 seen.append(entry)
         return Resolution.of(identity, seen)

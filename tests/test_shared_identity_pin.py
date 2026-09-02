@@ -35,13 +35,18 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 #: Where the pinned bytes came from. Recorded so the pin is auditable rather than self-referential.
+#: ⚠️ Taken from ``UPSTREAM_COMMIT`` and then ``ruff format``-ed on landing, so the pinned digest is
+#: NOT the digest of that commit's blob: the round-6 fix arrived unformatted and ``ruff format
+#: --check`` exited 1 on it. Re-take with ``git checkout <ref> -- <paths>``, re-run ``ruff format``,
+#: then re-derive the digests with ``digest()`` below - never with a raw ``sha256(read_bytes())``,
+#: which yields a different, CRLF-dependent value on Windows.
 UPSTREAM_REF = "origin/feat/reference-readiness-gate"
-UPSTREAM_COMMIT = "cc70833d749cc25df148e20099cdaf9cfc5d8a49"
+UPSTREAM_COMMIT = "6ef21241caa9427e6d249e411785baf1b2b1ccf3"
 
 #: SHA-256 of each shared file, over LF-normalized bytes, as taken from ``UPSTREAM_COMMIT``.
 PINNED: dict[str, str] = {
-    "scripts/object_identity.py": "d5971e00410b384bb77cc13d98d2ba15f8eb0299050fa0b18070966e09bf8314",
-    "tests/test_object_identity.py": "7e0856ac694d3bcd0c0320ad02e84e2dbe36ebf1688a68f34113b4e1244b6a62",
+    "scripts/object_identity.py": "3929b02c716f2521452be6e12e32645612d65aaf627dae31491ea004993eab21",
+    "tests/test_object_identity.py": "11d6881a960fa3c23beaa6928706de88a83fc1605b051314038ffdc14711c967",
 }
 
 

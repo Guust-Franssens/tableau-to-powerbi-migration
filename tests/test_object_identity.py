@@ -250,3 +250,58 @@ def test_the_probed_operations_that_are_safe_stay_safe() -> None:
     # iterating a resolution raises rather than yielding a winner
     with pytest.raises(TypeError):
         list(ambiguous_resolution())
+
+
+def test_an_already_lowercase_name_does_not_self_collide() -> None:
+    """Round 6, a false FAIL: one shared key table made a normalized-looking name collide with itself.
+
+    `ops` has an exact spelling identical to its normalized one, so a single record landed twice
+    under one key and the exact lookup - which runs before any de-duplication - returned AMBIGUOUS.
+    It fires on any already-lowercase name (`ops`, `main`, `detail`, `summary`), which on a real
+    estate is most of them, so the gate would have rejected evidence it had just verified.
+    """
+    index: oid.CandidateIndex[str] = oid.CandidateIndex()
+    index.add(oid.Candidate(names=("ops",), kind="worksheet"), "a")
+
+    resolution = index.resolve(oid.ObjectIdentity("worksheet", "ops"))
+    assert resolution.outcome == oid.UNIQUE
+    assert resolution.count == 1
+    assert resolution.value() == "a"
+
+
+def test_one_record_offering_several_alike_spellings_is_still_one_record() -> None:
+    """A `manual` record offers both `tableau-ops` and `ops`; alike spellings must not self-collide."""
+    index: oid.CandidateIndex[str] = oid.CandidateIndex()
+    index.add(oid.Candidate(names=("Ops", "ops"), kind="worksheet"), "a")
+
+    assert index.resolve(oid.ObjectIdentity("worksheet", "ops")).outcome == oid.UNIQUE
+    assert index.resolve(oid.ObjectIdentity("worksheet", "Ops")).outcome == oid.UNIQUE
+
+
+def test_an_exact_match_beats_a_normalized_one() -> None:
+    """The exact table is authoritative and consulted alone, so a lookalike cannot dilute it."""
+    index: oid.CandidateIndex[str] = oid.CandidateIndex()
+    index.add(oid.Candidate(names=("ops",), kind="worksheet"), "exact")
+    index.add(oid.Candidate(names=("OPS",), kind="worksheet"), "lookalike")
+
+    resolution = index.resolve(oid.ObjectIdentity("worksheet", "ops"))
+    assert resolution.outcome == oid.UNIQUE
+    assert resolution.value() == "exact"
+
+
+def test_two_external_spellings_with_no_exact_match_are_still_ambiguous() -> None:
+    """⚠️ The discriminating control for the round-6 fix.
+
+    Making the false FAIL go away must not be achieved by weakening the ambiguity detection this PR
+    spent four rounds building. Neither candidate matches exactly, both normalize to the identity, so
+    picking one would be a guess - and a guess is what this gate exists to refuse.
+    """
+    index: oid.CandidateIndex[str] = oid.CandidateIndex()
+    index.add(oid.Candidate(names=("Ops Summary",), kind="worksheet"), "a")
+    index.add(oid.Candidate(names=("ops  summary",), kind="worksheet"), "b")
+
+    resolution = index.resolve(oid.ObjectIdentity("worksheet", "OPS SUMMARY"))
+    assert resolution.outcome == oid.AMBIGUOUS
+    assert resolution.count == 2
+    with pytest.raises(oid.AmbiguousIdentity):
+        resolution.value()

@@ -712,9 +712,9 @@ oid.ObjectIdentity.from_engine = classmethod(
         code="""
 import object_identity as oid
 # Multiplicity is what makes a collision visible; overwriting deletes it silently.
-def _store(self, key, candidate, value):
-    self._by_key[key] = [(candidate, value)]
-oid._Index._store = _store
+def _store_exact(self, key, candidate, value):
+    self._exact[key] = [(candidate, value)]
+oid._Index._store_exact = _store_exact
 """,
         anchor="test_reading_an_ambiguous_resolution_raises_rather_than_picking",
         controls=("test_an_engine_index_has_no_normalized_layer_to_fall_back_to",),
@@ -875,7 +875,7 @@ def resolve(self, identity):
     found = _orig(self, identity)
     if found.outcome != oid.ABSENT:
         return found
-    hits = [entry for (kind, key), entries in self._by_key.items()
+    hits = [entry for (kind, key), entries in self._exact.items()
             if kind == identity.kind and oid.normalize(key) == oid.normalize(identity.name)
             for entry in entries]
     return oid.Resolution(identity=identity, _matches=tuple(hits))
@@ -980,6 +980,57 @@ ev._integrity_mismatch = _integrity_mismatch
 """,
         anchor="test_a_swapped_image_no_longer_counts",
         controls=("test_a_worksheet_render_does_satisfy_a_worksheet_page",),
+    ),
+    "one-shared-key-table-for-exact-and-normalized": Mutation(
+        code="""
+import object_identity as oid
+# Round 6, a false FAIL: writing both spellings into ONE table made an already-lowercase name
+# collide with itself, so a single verified render resolved AMBIGUOUS. It fires on `ops`, `main`,
+# `detail`, `summary` - most of a real estate.
+def add(self, candidate, value):
+    if isinstance(candidate, oid.ObjectIdentity):
+        raise oid.IdentityError("no ObjectIdentity")
+    for name in candidate.names:
+        self._store_exact((candidate.kind, name), candidate, value)
+        self._store_exact((candidate.kind, oid.normalize(name)), candidate, value)
+oid.CandidateIndex.add = add
+""",
+        anchor="test_an_already_lowercase_name_does_not_self_collide",
+        controls=("test_collisions_and_duplicates_preserve_multiplicity",),
+    ),
+    "the-normalized-table-dilutes-an-exact-hit": Mutation(
+        code="""
+import object_identity as oid
+# The other direction: merging both tables at resolve time lets a lookalike outvote an exact hit.
+def resolve(self, identity):
+    if not isinstance(identity, oid.ObjectIdentity):
+        raise oid.IdentityError("needs an ObjectIdentity")
+    merged = list(self._exact.get((identity.kind, identity.name), ()))
+    for entry in self._loose.get((identity.kind, oid.normalize(identity.name)), ()):
+        if not any(existing[1] is entry[1] for existing in merged):
+            merged.append(entry)
+    return oid.Resolution.of(identity, merged)
+oid.CandidateIndex.resolve = resolve
+""",
+        anchor="test_an_exact_match_beats_a_normalized_one",
+        controls=("test_an_already_lowercase_name_does_not_self_collide",),
+    ),
+    "ambiguity-detection-is-weakened-to-fix-the-false-fail": Mutation(
+        code="""
+import object_identity as oid
+# The wrong way to make the round-6 false FAIL go away: de-duplicate by NAME, which also collapses
+# two genuinely different records that merely spell alike.
+_orig = oid.CandidateIndex.resolve
+def resolve(self, identity):
+    found = _orig(self, identity)
+    if found.outcome != oid.AMBIGUOUS:
+        return found
+    entries = list(self._loose.get((identity.kind, oid.normalize(identity.name)), ()))
+    return oid.Resolution.of(identity, entries[:1])
+oid.CandidateIndex.resolve = resolve
+""",
+        anchor="test_two_external_spellings_with_no_exact_match_are_still_ambiguous",
+        controls=("test_an_already_lowercase_name_does_not_self_collide",),
     ),
     # --- whole-suite discriminating controls ------------------------------------------------------
     "control-cosmetic-reword-of-a-rendered-line": Mutation(
