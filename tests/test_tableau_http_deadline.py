@@ -778,6 +778,7 @@ def test_the_connection_factory_the_early_arm_hooks_still_exists():
     conn.close()
 
 
+@pytest.mark.timing
 def test_the_abort_covers_a_bare_recv_not_only_a_makefile_stream():
     """⚠️ Both calls in `_abort_socket` are load-bearing, in phases that do not overlap.
 
