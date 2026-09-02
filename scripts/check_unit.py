@@ -37,6 +37,7 @@ from typing import Any
 import check_desktop_orphans as check_desktop_orphans_module
 import object_identity as oid
 import read_handover
+import tableau_view_types
 from bundle_corpus import shipping_models, shipping_reports
 from check_field_bindings import model_for_report
 
@@ -1769,6 +1770,7 @@ class OracleRecord:
     """
 
     name: str
+    kind: str
     workbook: str | None
     visual: bool
     numeric: bool
@@ -1802,6 +1804,7 @@ def _reference_oracles(target: Path, reference_dir: Path | None) -> tuple[list[O
             records.append(
                 OracleRecord(
                     name=str(dashboard.get("name") or ""),
+                    kind=tableau_view_types.DASHBOARD,
                     workbook=_declared_workbook(dashboard) or _declared_workbook(payload),
                     visual=visual,
                     numeric=numeric,
@@ -1849,6 +1852,11 @@ def _oracle_capture_oracles(target: Path, oracle_dir: Path | None) -> tuple[list
             records.append(
                 OracleRecord(
                     name=str(record.get("view_name") or record.get("view_url_name") or ""),
+                    kind=(
+                        str(record.get("view_type"))
+                        if record.get("view_type") in {tableau_view_types.DASHBOARD, tableau_view_types.WORKSHEET}
+                        else tableau_view_types.UNKNOWN
+                    ),
                     workbook=_declared_workbook(record) or _declared_workbook(payload),
                     visual=bool(visual),
                     numeric=bool(numeric),
@@ -1874,25 +1882,26 @@ class OracleEvidence:
 
     by_exact: dict[str, list[OracleRecord]]
     by_normalized: dict[str, list[OracleRecord]]
-    expected_normalized: dict[str, int]
+    expected_normalized: dict[tuple[str, str], int]
     unattributed: int
     foreign: tuple[str, ...]
 
     def evidence_for(self, page: dict[str, Any]) -> tuple[OracleRecord | None, str | None]:
         """``(record, refusal)`` for one expected page. At most one of the two is ever set."""
-        exact = self.by_exact.get(page["name"], [])
+        exact = [record for record in self.by_exact.get(page["name"], []) if record.kind == page["kind"]]
         if len(exact) == 1:
             return exact[0], None
         if exact:
             return None, f"{len(exact)} producer records are named {page['name']!r}"
         key = _slug(page["name"])
-        loose = self.by_normalized.get(key, [])
+        loose = [record for record in self.by_normalized.get(key, []) if record.kind == page["kind"]]
         if not loose:
             return None, None
-        if len(loose) != 1 or self.expected_normalized.get(key, 0) != 1:
+        expected_count = self.expected_normalized.get((page["kind"], key), 0)
+        if len(loose) != 1 or expected_count != 1:
             return None, (
                 f"a normalized match for {page['name']!r} is not unique "
-                f"({len(loose)} producer record(s), {self.expected_normalized.get(key, 0)} expected page(s))"
+                f"({len(loose)} producer record(s), {expected_count} expected page(s))"
             )
         return loose[0], None
 
@@ -1918,10 +1927,11 @@ def _resolve_oracle_evidence(
     for record in admissible:
         by_exact.setdefault(record.name, []).append(record)
         by_normalized.setdefault(_slug(record.name), []).append(record)
-    expected_normalized: dict[str, int] = {}
+    expected_normalized: dict[tuple[str, str], int] = {}
     for page in candidates:
         key = _slug(page["name"])
-        expected_normalized[key] = expected_normalized.get(key, 0) + 1
+        identity = (page["kind"], key)
+        expected_normalized[identity] = expected_normalized.get(identity, 0) + 1
     return OracleEvidence(
         by_exact=by_exact,
         by_normalized=by_normalized,

@@ -144,7 +144,13 @@ def _write_reference_manifest(
 
 
 def _write_oracle_manifest(
-    unit: Path, names: list[str], *, images: bool = True, data: bool = True, workbook: str | None = "Book"
+    unit: Path,
+    names: list[str],
+    *,
+    images: bool = True,
+    data: bool = True,
+    workbook: str | None = "Book",
+    view_type: str = "dashboard",
 ) -> None:
     records = []
     for index, name in enumerate(names):
@@ -154,13 +160,13 @@ def _write_oracle_manifest(
             _png(unit / "_oracle" / image_path)
         if data:
             _csv(unit / "_oracle" / data_path)
-        records.append(
-            {
-                "view_name": name,
-                "data": {"status": "ok", "path": data_path, "row_count": 1} if data else {"status": "failed"},
-                "image": {"status": "ok", "path": image_path} if images else {"status": "failed"},
-            }
-        )
+        record: dict[str, object] = {
+            "view_name": name,
+            "view_type": view_type,
+            "data": {"status": "ok", "path": data_path, "row_count": 1} if data else {"status": "failed"},
+            "image": {"status": "ok", "path": image_path} if images else {"status": "failed"},
+        }
+        records.append(record)
     (unit / "_oracle").mkdir(exist_ok=True)
     payload: dict[str, object] = {"views": records}
     if workbook is not None:
@@ -403,7 +409,7 @@ def test_oracle_coverage_still_expects_a_page_the_engine_merely_declared(tmp_pat
     """The same rule on the oracle denominator: only a SIGNED omission takes a page out."""
     _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A"), ("ws.b", "B")])
     _write_report(tmp_path, ["A"])
-    _write_reference_manifest(tmp_path, ["A"])
+    _write_oracle_manifest(tmp_path, ["A"], view_type="worksheet")
     _write_viz_fidelity_handover(tmp_path, [_empty_row("B")])
 
     oracle = cu.check_oracle_coverage(tmp_path, None, None)
@@ -417,7 +423,7 @@ def test_oracle_coverage_drops_a_signed_omission_from_the_denominator(tmp_path: 
     """A page a human accepted losing has nothing to hold against a reference."""
     _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A"), ("ws.b", "B")])
     _write_report(tmp_path, ["A"])
-    _write_reference_manifest(tmp_path, ["A"])
+    _write_oracle_manifest(tmp_path, ["A"], view_type="worksheet")
     (tmp_path / cu.EXEMPTIONS_FILE).write_text(
         json.dumps({"exemptions": [{"check": "page-parity", "item": "B", "reason": "dropped", "decided_by": "gf"}]}),
         encoding="utf-8",
@@ -462,6 +468,32 @@ def test_one_oracle_row_cannot_cover_two_same_named_candidates(tmp_path: Path) -
     assert oracle["visual_present"] == 0, "one picture cannot prove two different objects"
     assert oracle["contested_names"] == ["Sales", "Sales"]
     assert oracle["status"] == cu.STATUS_NOT_CHECKED
+
+
+def test_oracle_evidence_requires_a_matching_object_kind(tmp_path: Path) -> None:
+    """A dashboard's own capture passes; worksheet and unknown captures fail closed.
+
+    The source dashboard and its placed worksheet deliberately share ``Sales``. Mutating only the
+    oracle record's kind reproduces the former name-only false pass without changing the expected
+    dashboard page or either evidence file.
+    """
+    _write_full_spec(tmp_path, dashboards=[("Sales", ["ws.sales"])], worksheets=[("ws.sales", "Sales")])
+    _write_report(tmp_path, ["Sales"])
+
+    _write_oracle_manifest(tmp_path, ["Sales"])
+    own_dashboard_capture = cu.check_oracle_coverage(tmp_path, None, None)
+    assert own_dashboard_capture["status"] == cu.STATUS_PASS
+    assert own_dashboard_capture["visual_present"] == 1
+
+    _write_oracle_manifest(tmp_path, ["Sales"], view_type="worksheet")
+    worksheet_capture = cu.check_oracle_coverage(tmp_path, None, None)
+    assert worksheet_capture["status"] == cu.STATUS_NOT_CHECKED
+    assert worksheet_capture["visual_present"] == 0
+
+    _write_oracle_manifest(tmp_path, ["Sales"], view_type="unknown")
+    unknown_capture = cu.check_oracle_coverage(tmp_path, None, None)
+    assert unknown_capture["status"] == cu.STATUS_NOT_CHECKED
+    assert unknown_capture["visual_present"] == 0
 
 
 def test_one_name_only_signature_cannot_sign_two_omissions(tmp_path: Path) -> None:
@@ -629,7 +661,7 @@ def test_a_source_empty_page_owes_no_oracle_evidence_either(tmp_path: Path) -> N
         ],
     )
     _write_report(tmp_path, ["A"])
-    _write_reference_manifest(tmp_path, ["A"])
+    _write_oracle_manifest(tmp_path, ["A"], view_type="worksheet")
 
     oracle = cu.check_oracle_coverage(tmp_path, None, None)
 
