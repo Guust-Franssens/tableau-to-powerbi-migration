@@ -75,133 +75,195 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
         ["test_spec_declaring_no_pages_cannot_be_graded"],
     ),
     (
-        "drop evidence: any warned row explains a drop (tier ignored)",
-        "        if tier == DROP_EVIDENCE_TIER:",
-        '        if row.get("status") == "warned":',
-        ["test_a_degraded_warning_asserts_a_rendered_visual_and_excuses_nothing"],
+        "APPROVAL: engine evidence accepts an omission, no signature needed",
+        "        if signed and not ambiguous:\n            disposition = OMISSION_SIGNED",
+        '        if (signed or page["declared_reason"]) and not ambiguous:\n            disposition = OMISSION_SIGNED',
+        ["test_engine_evidence_explains_an_omission_but_does_not_accept_it"],
     ),
     (
-        "drop evidence: a row with no tier at all is accepted",
-        "        if tier == DROP_EVIDENCE_TIER:",
-        "        if tier in (DROP_EVIDENCE_TIER, None):",
-        ["test_a_row_with_no_tier_at_all_leaves_the_drop_unexplained"],
+        "APPROVAL: a signature stops accepting an omission",
+        "        if signed and not ambiguous:\n            disposition = OMISSION_SIGNED",
+        "        if False:  # pragma: no cover\n            disposition = OMISSION_SIGNED",
+        ["test_a_signed_omission_with_engine_evidence_passes_and_counts_as_a_compromise"],
     ),
     (
-        "drop evidence: workbook binding removed, so any slice explains any unit",
+        "APPROVAL: the oracle denominator drops engine-declared omissions too",
+        '    return [page for page in expectation["omissions"] '
+        'if _exempted(entries, "page-parity", page["name"], {page["id"]})]',
+        '    return [page for page in expectation["omissions"] '
+        'if page["declared_reason"] or _exempted(entries, "page-parity", page["name"], {page["id"]})]',
+        ["test_oracle_coverage_still_expects_a_page_the_engine_merely_declared"],
+    ),
+    (
+        "APPROVAL: the oracle denominator keeps a signed omission",
+        '    accepted = _signed_omissions(expectation, load_exemptions(target)["entries"])',
+        "    accepted = []",
+        ["test_oracle_coverage_drops_a_signed_omission_from_the_denominator"],
+    ),
+    (
+        "KIND: evidence is indexed under both kinds, so a worksheet row settles a dashboard",
+        "        index.add_identity(identity, text)",
+        "        index.add_identity(identity, text)\n"
+        "        for kind in oid.IDENTIFIABLE_KINDS:\n"
+        "            crossed = oid.ObjectIdentity.from_engine(kind, identity.name)\n"
+        "            if crossed is not None and crossed != identity:\n"
+        "                index.add_identity(crossed, text)",
+        ["test_a_worksheet_row_can_never_explain_a_same_named_dashboard"],
+    ),
+    (
+        "KIND: a candidate's own kind is ignored when resolving evidence",
+        '    return oid.ObjectIdentity.from_engine(str(page.get("kind") or ""), page.get("name"))',
+        '    return oid.ObjectIdentity.from_engine(oid.KIND_WORKSHEET, page.get("name"))',
+        ["test_a_worksheet_row_can_never_explain_a_same_named_dashboard"],
+    ),
+    (
+        "EVIDENCE: visual_type is no longer required, so a non-object scope row becomes evidence",
+        '    if row.get("tier") != DROP_EVIDENCE_TIER or row.get("visual_type") != DROP_EVIDENCE_VISUAL_TYPE:',
+        '    if row.get("tier") != DROP_EVIDENCE_TIER:',
+        ["test_a_filter_scope_row_cannot_explain_a_same_named_worksheet"],
+    ),
+    (
+        "EVIDENCE: tier is no longer required, so a degraded row explains a drop",
+        '    if row.get("tier") != DROP_EVIDENCE_TIER or row.get("visual_type") != DROP_EVIDENCE_VISUAL_TYPE:',
+        '    if row.get("visual_type") != DROP_EVIDENCE_VISUAL_TYPE:',
+        ["test_a_row_with_no_tier_at_all_leaves_the_omission_unexplained"],
+    ),
+    (
+        "EVIDENCE: workbook binding removed, so any slice explains any unit",
         "        if _slug(str(name)) not in keys:",
         "        if False:  # pragma: no cover",
-        ["test_another_workbooks_warning_cannot_excuse_this_units_missing_page"],
+        ["test_another_workbooks_row_cannot_explain_this_units_omission"],
     ),
     (
-        "drop evidence: explanations read from pbip_warnings instead of viz_fidelity",
-        '        _collect_drop_rows(workbook.get("viz_fidelity"), reasons, ambiguous)',
-        '        _collect_drop_rows([{"worksheet": "B", "tier": "empty", "reason": w} '
-        'for w in (workbook.get("pbip_warnings") or [])] or workbook.get("viz_fidelity"), reasons, ambiguous)',
-        ["test_drop_reasons_come_from_viz_fidelity_not_pbip_warnings"],
+        "EVIDENCE: read from pbip_warnings instead of viz_fidelity",
+        '        _collect_drop_rows(workbook.get("viz_fidelity"), index, described)',
+        "        _collect_drop_rows(\n"
+        '            [{"worksheet": "B", "tier": "empty", "visual_type": "unsupported", "reason": w} '
+        'for w in (workbook.get("pbip_warnings") or [])]\n'
+        '            or workbook.get("viz_fidelity"),\n'
+        "            index,\n"
+        "            described,\n"
+        "        )",
+        ["test_drop_evidence_comes_from_viz_fidelity_not_pbip_warnings"],
     ),
     (
-        "drop evidence: an EMITTED page is still treated as a drop",
-        '    absent = [page for page in candidates if _slug(page["name"]) not in rendered_slugs]',
+        "EVIDENCE: an ambiguous resolution is read as its first match",
+        "    if resolution.outcome != oid.UNIQUE:\n        return None",
+        "    if resolution.outcome == oid.ABSENT:\n        return None\n    return resolution.matches[0]",
+        ["test_two_identical_evidence_rows_resolve_to_nothing_rather_than_the_first"],
+    ),
+    (
+        "PAGES: an EMITTED candidate is still treated as an omission",
+        '    absent = [page for page in candidates if rendered_names.count(page["name"]) != 1]',
         "    absent = list(candidates)",
-        ["test_warned_but_emitted_page_is_not_treated_as_a_drop"],
+        ["test_an_emitted_page_is_never_an_omission"],
     ),
     (
-        "drop evidence: declared drops no longer subtracted from the expectation",
-        '    explained = [page for page in expectation["explained_drops"] if page not in dropped]',
-        "    explained = []",
-        ["test_engine_declared_drop_is_explained_and_does_not_fail_parity"],
+        "PAGES: a zero-visual page counts as a rebuilt page",
+        '    rendered = [page for page in actual if page.get("visuals", 0) > 0]',
+        "    rendered = list(actual)",
+        ["test_a_page_with_no_visuals_does_not_certify_a_candidate_as_rebuilt"],
     ),
     (
-        "drop evidence: an unreadable handover reads as if reasons had been consulted",
-        '        "available": bool(bound),',
-        '        "available": True,',
-        ["test_missing_handover_says_drop_reasons_were_unavailable"],
+        "PAGES: visual count is fabricated instead of measured",
+        '    return sum(1 for _ in visuals_root.rglob("visual.json"))',
+        "    return 1",
+        ["test_actual_pages_counts_zero_visuals_for_a_page_with_none"],
+    ),
+    (
+        "PLACEHOLDER: identity drops the display-name clause",
+        '    return page.get("name") == ENGINE_PLACEHOLDER_PAGE_NAME and str(page.get("id", "")).startswith(\n'
+        "        ENGINE_PLACEHOLDER_PAGE_ID_PREFIX\n"
+        "    )",
+        '    return str(page.get("id", "")).startswith(ENGINE_PLACEHOLDER_PAGE_ID_PREFIX)',
+        ["test_a_retitled_placeholder_id_is_still_a_blank_page"],
+    ),
+    (
+        "PLACEHOLDER: identity drops the id-prefix clause",
+        '    return page.get("name") == ENGINE_PLACEHOLDER_PAGE_NAME and str(page.get("id", "")).startswith(\n'
+        "        ENGINE_PLACEHOLDER_PAGE_ID_PREFIX\n"
+        "    )",
+        '    return page.get("name") == ENGINE_PLACEHOLDER_PAGE_NAME',
+        ["test_a_blank_page_titled_like_the_placeholder_is_still_blank"],
+    ),
+    (
+        "PLACEHOLDER: a declared crash-guard page is reported as a blank page",
+        "    placeholders = [page for page in blankish if _is_engine_placeholder_page(page)]",
+        "    placeholders = []",
+        ["test_engine_crash_guard_placeholder_is_not_a_blank_page"],
+    ),
+    (
+        "BLANK: a page that renders nothing no longer fails the gate",
+        "    status = STATUS_PASS if not unsigned and not unaccounted_extra and not blank "
+        "else STATUS_PRECONDITION_FAILED",
+        "    status = STATUS_PASS if not unsigned and not unaccounted_extra else STATUS_PRECONDITION_FAILED",
+        ["test_a_blank_page_alone_fails_the_gate_even_when_every_page_is_paired"],
+    ),
+    (
+        "ATTRIBUTION: an omission is named by position rather than by content",
+        '    absent = [page for page in candidates if rendered_names.count(page["name"]) != 1]',
+        "    absent = candidates[-1:]",
+        ["test_a_missing_page_is_named_by_content_not_by_position"],
+    ),
+    (
+        "ATTRIBUTION: an extra page is named by position rather than by content",
+        '    unmatched = [page for page in rendered if page["name"] not in candidate_names]',
+        "    unmatched = rendered[-1:]",
+        ["test_an_extra_page_is_named_by_content_not_by_position"],
+    ),
+    (
+        "SIGNATURE: an exemption applies even to a page that is present",
+        '    for page in expectation["omissions"]:\n'
+        '        signed = _exempted(entries, "page-parity", page["name"], {page["id"]})',
+        '    for page in expectation["candidates"]:\n'
+        '        signed = _exempted(entries, "page-parity", page["name"], {page["id"]})',
+        ["test_an_exemption_naming_a_present_page_accepts_nothing"],
+    ),
+    (
+        "SIGNATURE: rename ambiguity no longer suspends a name-only signature (parity side)",
+        "        if signed and not ambiguous:",
+        "        if signed:",
+        ["test_a_rename_makes_attribution_ambiguous_and_suspends_every_signature"],
+    ),
+    (
+        "SIGNATURE: rename ambiguity no longer suspends a name-only signature (oracle side)",
+        '    if expectation["attribution_ambiguous"]:\n        return []',
+        "    if False:  # pragma: no cover\n        return []",
+        ["test_a_rename_suspends_signatures_on_the_oracle_denominator_too"],
+    ),
+    (
+        "SIGNATURE: an unaccounted rendered page no longer creates ambiguity",
+        '        if not _exempted(entries, "page-parity", f"extra:{page[\'name\']}")',
+        "        if False  # pragma: no cover",
+        ["test_a_rename_makes_attribution_ambiguous_and_suspends_every_signature"],
+    ),
+    (
+        "SIGNATURE: an extra: signature cannot resolve the ambiguity",
+        "    unaccounted_extra = [\n"
+        "        page\n"
+        '        for page in expectation["unmatched_rendered"]\n'
+        '        if not _exempted(entries, "page-parity", f"extra:{page[\'name\']}")\n'
+        "    ]",
+        '    unaccounted_extra = list(expectation["unmatched_rendered"])',
+        ["test_declaring_the_renamed_page_resolves_the_ambiguity"],
+    ),
+    (
+        "COMPROMISE: a signature that accepted nothing is still counted",
+        '    unapplied = sum(len(check.get("unapplied_exemptions") or []) for check in report["checks"])',
+        "    unapplied = 0",
+        ["test_an_exemption_naming_a_present_page_accepts_nothing"],
     ),
     (
         "oracle: circular denominator restored (expected or actual)",
         '    if not expectation["assessable"]:\n        return _oracle_not_assessable(',
         '    if not expectation["assessable"]:\n'
         '        expectation = {**expectation, "assessable": True, "candidates": expectation["actual"], '
-        '"explained_drops": []}\n'
+        '"omissions": [], "attribution_ambiguous": False}\n'
         '    if not expectation["assessable"]:\n        return _oracle_not_assessable(',
         [
             "test_oracle_coverage_without_an_expected_set_is_blocking_not_a_pass",
             "test_unassessable_oracle_coverage_fails_the_whole_run_closed",
         ],
-    ),
-    (
-        "oracle: denominator stops excluding declared drops",
-        '    pages = [page for page in expectation["candidates"] if _slug(page["name"]) not in explained]',
-        '    pages = list(expectation["candidates"])',
-        ["test_oracle_coverage_excludes_engine_declared_drops_from_the_denominator"],
-    ),
-    (
-        "pages: a zero-visual page counts as a rebuilt page",
-        '    rendered = [page for page in actual if page.get("visuals", 0) > 0]',
-        "    rendered = list(actual)",
-        ["test_a_page_with_no_visuals_does_not_certify_a_candidate_as_rebuilt"],
-    ),
-    (
-        "pages: visual count is fabricated instead of measured",
-        '    return sum(1 for _ in visuals_root.rglob("visual.json"))',
-        "    return 1",
-        ["test_actual_pages_counts_zero_visuals_for_a_page_with_none"],
-    ),
-    (
-        "placeholder: identity drops the zero-visual clause",
-        '        page.get("visuals", 0) == 0\n        and page.get("name") == ENGINE_PLACEHOLDER_PAGE_NAME',
-        '        page.get("name") == ENGINE_PLACEHOLDER_PAGE_NAME',
-        ["test_a_placeholder_id_holding_real_visuals_is_a_rebuilt_page"],
-    ),
-    (
-        "placeholder: identity drops the display-name clause",
-        '        and page.get("name") == ENGINE_PLACEHOLDER_PAGE_NAME\n',
-        "",
-        ["test_a_blank_page_that_is_not_the_engine_placeholder_is_reported"],
-    ),
-    (
-        "placeholder: identity drops the id-prefix clause",
-        '        and str(page.get("id", "")).startswith(ENGINE_PLACEHOLDER_PAGE_ID_PREFIX)\n',
-        "",
-        ["test_a_real_page_titled_like_the_placeholder_is_still_a_page"],
-    ),
-    (
-        "placeholder: a declared crash-guard page counts as an extra page",
-        "    placeholders = [page for page in actual if _is_engine_placeholder_page(page)]",
-        "    placeholders = []",
-        ["test_engine_crash_guard_placeholder_is_not_an_extra_page"],
-    ),
-    (
-        "blank pages: a page that renders nothing no longer fails the gate",
-        "        STATUS_PASS if not unexempted_missing and not unexempted_extra and not blank "
-        "else STATUS_PRECONDITION_FAILED",
-        "        STATUS_PASS if not unexempted_missing and not unexempted_extra else STATUS_PRECONDITION_FAILED",
-        ["test_a_blank_page_alone_fails_the_gate_even_when_the_counts_balance"],
-    ),
-    (
-        "attribution: a shortfall is attributed by position, so exemptions excuse the wrong page",
-        '    missing = [page for page in effective_expected if _slug(page["name"]) not in rendered_slugs] '
-        "if shortfall else []",
-        "    missing = effective_expected[-shortfall:] if shortfall else []",
-        ["test_a_missing_page_is_named_by_content_not_by_position"],
-    ),
-    (
-        "attribution: an exemption applies even to a page that is present",
-        '        [page for page in signed if _slug(page["name"]) not in rendered_slugs],',
-        "        list(signed),",
-        ["test_an_exemption_excuses_the_page_it_names_and_no_other"],
-    ),
-    (
-        "attribution: a surplus is attributed by position, so an extra page is misnamed",
-        '    unmatched = [page for page in rendered if _slug(page["name"]) not in expected_slugs] if surplus else []',
-        "    unmatched = rendered[-surplus:] if surplus else []",
-        ["test_an_extra_page_is_named_by_content_not_by_position"],
-    ),
-    (
-        "attribution: name matching replaces the count, so a renamed page fails",
-        "    shortfall = max(0, len(effective_expected) - len(rendered))",
-        "    shortfall = 1",
-        ["test_a_placeholder_id_holding_real_visuals_is_a_rebuilt_page"],
     ),
     (
         "oracle discovery: canonical oracle/ name removed",
@@ -220,8 +282,8 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
         "# Where a dropped page's declared reason is read from.",
         "# Harness negative control - a comment edit that changes no behaviour.",
         [
-            "test_a_degraded_warning_asserts_a_rendered_visual_and_excuses_nothing",
-            "test_engine_crash_guard_placeholder_is_not_an_extra_page",
+            "test_engine_evidence_explains_an_omission_but_does_not_accept_it",
+            "test_a_worksheet_row_can_never_explain_a_same_named_dashboard",
         ],
     ),
 ]

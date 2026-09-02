@@ -442,6 +442,38 @@ def test_a_worksheet_row_can_never_explain_a_same_named_dashboard(tmp_path: Path
     assert parity["status"] == cu.STATUS_PRECONDITION_FAILED
 
 
+def test_a_filter_scope_row_cannot_explain_a_same_named_worksheet(tmp_path: Path) -> None:
+    """visual_type is load-bearing on its own: a non-object scope row proves nothing about a page.
+
+    Real shape, from the HR Dashboard estate slice: a 'filter'-scope row named 'Location' sits beside
+    a worksheet also named 'Location'. Without the visual_type requirement, that filter row would be
+    indexed as worksheet evidence and explain the worksheet's omission.
+    """
+    _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A"), ("ws.loc", "Location")])
+    _write_report(tmp_path, ["A"])
+    _write_viz_fidelity_handover(
+        tmp_path,
+        [
+            {
+                "worksheet": "Location",
+                "visual_type": "filter",
+                "status": "warned",
+                "tier": "empty",
+                "reason": "manual attention required: applied selection reduced to null members",
+            }
+        ],
+    )
+
+    omission = next(
+        row
+        for row in cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))["omissions"]
+        if row["name"] == "Location"
+    )
+
+    assert omission["declared_reason"] is None, "a filter-scope row is not evidence about a worksheet"
+    assert omission["disposition"] == cu.OMISSION_UNEXPLAINED
+
+
 def test_a_dashboard_kind_row_claiming_empty_tier_still_proves_nothing(tmp_path: Path) -> None:
     """Both evidence fields are load-bearing: an empty-tier row must also be visual_type 'unsupported'.
 
@@ -921,6 +953,23 @@ def test_a_rename_makes_attribution_ambiguous_and_suspends_every_signature(tmp_p
     assert {page["name"] for page in parity["unsigned_omissions"]} == {"A", "C"}
     assert cu._compromise_count(report) == 0  # pylint: disable=protected-access
     assert parity["status"] == cu.STATUS_PRECONDITION_FAILED
+
+
+def test_a_rename_suspends_signatures_on_the_oracle_denominator_too(tmp_path: Path) -> None:
+    """The ambiguity guard exists on BOTH sides: a suspended signature cannot shrink oracle coverage."""
+    _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A"), ("ws.b", "B")])
+    _write_report(tmp_path, ["A renamed"])
+    _write_reference_manifest(tmp_path, ["A renamed"])
+    (tmp_path / cu.EXEMPTIONS_FILE).write_text(
+        json.dumps({"exemptions": [{"check": "page-parity", "item": "B", "reason": "dropped", "decided_by": "gf"}]}),
+        encoding="utf-8",
+    )
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["excluded_signed_omissions"] == [], "attribution is ambiguous; no signature applies"
+    assert oracle["pages"] == 2
+    assert oracle["status"] == cu.STATUS_NOT_CHECKED
 
 
 def test_declaring_the_renamed_page_resolves_the_ambiguity(tmp_path: Path) -> None:
