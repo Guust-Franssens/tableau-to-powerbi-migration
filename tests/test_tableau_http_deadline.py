@@ -306,17 +306,27 @@ def test_an_abandoned_body_is_a_transient_failure_never_a_partial_success(trickl
     capture exists to prevent -- worse than the unbounded read, because it is silent. The abandoned
     read must surface as `NETWORK_ERROR_STATUS`, which the retry classifier treats as transient.
 
-    ⚠️ TWO mechanisms can abandon, and asserting on either one specifically is how this test broke
-    once already: the body clock check raises `TimeoutError`, and the lifecycle watchdog aborts the
-    socket, which arrives as `ConnectionAbortedError`/`OSError`. Which one wins is a timing race
-    between the deadline instant and the next chunk. Both are correct; the PROPERTY under test is
-    that the outcome is transient and the partial body is not returned as though complete.
+    ⚠️ **THREE mechanisms can abandon, and asserting on any one specifically is how this test has now
+    broken twice.** Which one wins is a race between the deadline instant, the next chunk, and how the
+    platform reports an aborted socket -- so the marker list is a UNION and the property under test is
+    the outcome, never the mechanism:
+
+    * the body clock check raises `TimeoutError`;
+    * the lifecycle watchdog aborts the socket, arriving as `ConnectionAbortedError`/`OSError`;
+    * the abort lands as a clean EOF with bytes still outstanding under `Content-Length`, which is
+      now refused as `IncompleteRead`.
+
+    The third is new, and CI found it on Linux where local Windows runs could not: `shutdown(SHUT_RDWR)`
+    raises on Windows but yields a clean EOF on Linux -- the platform divergence `tableau_http`'s own
+    EOF branch records -- so on Linux the outstanding-length check fires first. All three are correct
+    refusals; `IncompleteRead` is the most precise of them, because it names the byte count the peer
+    still owed.
     """
     status, body, _elapsed = _fetch(trickling_url, deadline_in=DEADLINE_SEC)
 
     assert status == NETWORK_ERROR_STATUS
     assert b"a" * BODY_BYTES not in body, "the partial body must not be returned as though complete"
-    assert any(marker in body for marker in (b"TimeoutError", b"Error")), (
+    assert any(marker in body for marker in (b"TimeoutError", b"Error", b"IncompleteRead")), (
         f"the diagnostic does not name why the read was abandoned: {body[:120]!r}"
     )
 

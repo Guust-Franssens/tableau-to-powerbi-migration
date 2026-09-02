@@ -213,6 +213,12 @@ def _read_bounded(stream, deadline: float | None, timeout: float) -> bytes:
             # catches, and raising the SAME type keeps the two paths' classification identical
             # instead of merely both-failing. Its `str()` is its repr -- a byte COUNT, never the
             # partial bytes -- so nothing response-derived reaches the diagnostic.
+            #
+            # ⚠️ On Linux this check ALSO fires for an aborted trickle, ahead of the deadline branch
+            # below, because `_abort_socket`'s `shutdown(SHUT_RDWR)` yields a clean EOF there rather
+            # than raising -- the same platform divergence that branch records. Both refusals are
+            # correct and both are transient; this one is simply more precise, naming the byte count
+            # the peer still owed. CI found it; a Windows-only run cannot reach it.
             outstanding = getattr(stream, "length", None)
             if isinstance(outstanding, int) and outstanding > 0:
                 raise http.client.IncompleteRead(b"".join(chunks), outstanding)
