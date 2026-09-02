@@ -4,10 +4,11 @@ Map of maps for agent-facing knowledge. Start here, then open the matching index
 
 ## Start here for a migration unit
 
-1. `python scripts/check_unit.py <unit-or-bundle> --scope <model|report|integration|all>` — first status and final gate; direct `check_*.py` gates only isolate one finding.
-2. `python scripts/read_handover.py <bundle> --workbook <name>` — residual work queue and engine-block reason.
-3. `python scripts/credential_gate.py list <estate-root>` — which units are gated, across a whole estate (`--json` for an agent). Exit 1 = still blocked, so it is the resume signal after a human signs in. A credential caches machine-wide, so re-probe the blocked units to earn a `probe-cleared`; never mass-`authorize`, which stamps a build UNVALIDATED permanently. Detail: [`docs/credential-gate.md`](credential-gate.md).
-4. Load the right skill before acting: `live-source-reachability` for live-source proof and
+1. `python scripts/check_reference_readiness.py <bundle>` — **run this FIRST**, before any building. It is the only ENTRY gate here: every other gate answers whether the work is *done*, so the "do I have a legible picture of the Tableau source?" question was only ever asked afterwards. Per page it reports completeness, evidence and **grade**. Exit 0 ready / 1 findings / 3 `CANNOT_ESTABLISH`, and neither 1 nor 3 is a pass — a blind page means an equivalent fidelity bug there is **structurally unfalsifiable**, not merely unverified. `NOT_APPLICABLE` (a datasource-only unit) is earned from the engine's own `report.json`, so it never blocks legitimately reference-free work.
+2. `python scripts/check_unit.py <unit-or-bundle> --scope <model|report|integration|all>` — first status and final gate; direct `check_*.py` gates only isolate one finding.
+3. `python scripts/read_handover.py <bundle> --workbook <name>` — residual work queue and engine-block reason.
+4. `python scripts/credential_gate.py list <estate-root>` — which units are gated, across a whole estate (`--json` for an agent). Exit 1 = still blocked, so it is the resume signal after a human signs in. A credential caches machine-wide, so re-probe the blocked units to earn a `probe-cleared`; never mass-`authorize`, which stamps a build UNVALIDATED permanently. Detail: [`docs/credential-gate.md`](credential-gate.md).
+5. Load the right skill before acting: `live-source-reachability` for live-source proof and
    credential-gate routing, `powerbi-semantic-model-gotchas` for TMDL/DAX,
    `powerbi-report-gotchas` for PBIR/visuals, `pbip-model-refresh` for cache/refresh, and
    `powerbi-ai-readiness` for Copilot/Q&A metadata.
@@ -77,6 +78,7 @@ Eligible files: tracked Markdown knowledge/navigation files, `.github/pbi.kb/**/
 | Test the offline deployment rehearsal | [`docs/offline-mock-harness.md`](offline-mock-harness.md) | Offline Tableau-to-Fabric mock harness and fidelity boundary. |
 | Run the test suite | [`docs/parallel-test-loop.md`](parallel-test-loop.md) | Fast parallel loop vs the serial pre-PR gate, and the `serial` marker. |
 | Find migration guidance | [`docs/reference-capture.md`](../docs/reference-capture.md) | Tableau reference capture and evidence grading. |
+| Find migration guidance | [`docs/reference-readiness.md`](../docs/reference-readiness.md) | The ENTRY gate: is there enough visual evidence to START, per page, with its grade. |
 | Find migration guidance | [`docs/review-remediation-plan.md`](../docs/review-remediation-plan.md) | Route validation/review findings. |
 | Find migration guidance | [`docs/tableau-dax-translation-guide.md`](../docs/tableau-dax-translation-guide.md) | Translate Tableau calcs/LODs/table calcs. |
 | Find migration guidance | [`docs/tableau-map-to-azuremaps.md`](../docs/tableau-map-to-azuremaps.md) | Translate Tableau maps to Azure Maps. |
@@ -173,12 +175,14 @@ check_desktop_orphans.py
 check_empty_model.py
 check_engine_receipts.py
 check_field_bindings.py
+check_identity_normalization.py
 check_m_syntax.py
 check_migration_progress.py
 check_navigation_index.py
 check_path_ceiling.py
 check_pbir_layout.py
 check_pbir_valid.py
+check_reference_readiness.py
 check_relationship_health.py
 check_sqlproxy_connections.py
 check_stub_measures.py
