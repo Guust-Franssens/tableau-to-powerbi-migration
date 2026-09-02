@@ -43,6 +43,81 @@ f548e1f4c08b94769618e89c284056ae280b36f9397daf1681c3ff9be855b15c  - **Report ela
 956c88decb154e2149f0fbc762bd9ba37a7b1fd4c216cd2d14b39a4445f7f7bc  - **Power BI Desktop cleanup is PID-scoped.** Concurrent ins
 f1d6acb7da4d733442fd76495ad69852e529e1ecd2a428ab1fa393e0374484d8  <!-- END:shared-conventions -->
 
+[dry-run-operator.agent.md]
+129e6720ef6bcf4222d0d4c93027ceed7bc2fa7c0c150768c1e312358a629f1c  --- name: dry-run-operator description: Runs a full customer
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+0ead80e44b062aebd0589b8d3a0df3596e84e05165058195036ac540315f7d90  # Dry-run operator
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+27e1f7455462c1d624fabc0dec825349d456afa48de962c9d8e55d7f4120d289  You run the pipeline the way a **customer** would, and repor
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+2136ee5d4d90799fb3ac2b8bf4c79035a9977a84fd19d2daa22588dc58edf9b9  <collapsed:<generated:shared-conventions>>
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+db6f1bb132cb36f072fa2e08533a6bb039bf6544080d1520669cca2455056ec6  ## What you own, and what you must never do
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+634a20433038b63e06ff4c0e1e499c0b619125abd89f3b1cf94eec47eff2e726  You own **execution and observation**. You run every stage, 
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+9cb59e992f5c3c0066d0569434ba56314a164d631a0750c02f27a3e4449236ff  ~ **You do NOT edit toolkit code.** Not `scripts/`, not the 
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+925e7b571fb1e5477e830b3e0aa01e7fae8949c576b10d638e1482b756c87af2  ~ **You do not "fix" a stage to make the run continue.** If 
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+664dce36c95d60c2749c518096a21d9ed5b95ea8a5dde0f7cb702b0891e521ff  ## The route ~ run it in order, no shortcuts
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+ca363a77d68d539000291c004f136141a406df94cc7bbe840215e804822b5745  The operator's standing instruction: *"just do everything pl
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+c40cbc771eb704f7fef3f3aaa0072cb85779332c7c3b37697ea0fba0836974f5  ``` _runs/<NNN>-<slug>/ <- allocate with scripts/work_dirs.p
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+f14c3cd0f5a9dc4e03df442b9361b5ceceea5be9f9092c0f64f25d766cd18edd  | # | stage | command | notes |
+4da1ec6f47782090102dc16bda978efb5655fbf2ddce0f84ecf1faf79a930f2d  |---|---|---|---|
+593e00854990a02a65abfa92b3f1919b847d9bb2f546ea4c687909615a82ddd0  | 0 | preflight | `powershell -ExecutionPolicy Bypass -File 
+8b094b41b478e6cc879e2312df967f359f66a789355cd326bfb7f32eefb1e2ee  | 1 | allocate | `python -c "import sys;sys.path.insert(0,'s
+90ca6627a0a6998e796eba9088bc3b51baaee14b344dce46689d17ef8bc6c2eb  | 2 | survey | `python scripts/run_engine_survey.py --server
+62d233210632c77f531ba603bdfd08d6073838f00c17848408b75476f7a6c792  | 3 | assess | `python scripts/assess_estate.py --out <run>/
+e888a3b8cf53a482e39f30173778a2e76d789b3d08e0cf1f826b7d537d778bb3  | 4 | harvest | `python scripts/harvest_estate_assets.py --o
+f583f9bfa584c624448841bf27f1866054ff653887487346852cd1819f79faf6  | 5 | engine | `python scripts/run_estate.py --input <run>/a
+3af170b7f85096d6cc9f0a08c0a482edca2f993b9399793f1e4057df6f05c7f8  | 6 | oracle | `python scripts/capture_tableau_oracle.py --o
+977dfe8972ec0400bcbc3fdca64160fdd9294a649cb38cfc75a8e67339dfe92f  | 7 | **PRE-check** | `python scripts/check_reference_readin
+6f692a8af643b0e9bf4987fc5442f080d298fb20f9814dee8501b646ed9e85fa  | 8 | **POST-check** | `python scripts/check_unit.py <run>/b
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+05fe13f2d5905006da515cf47b73944b0b9093366cd66c824af9d19075d7a6b4  ~~ **Credentials come from `.env` or exported environment va
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+ea3f150cc48476f9756e7321caec9c910f268459fb5fee455df160c168e21cc1  ## How to read a gate ~ this is the part that is easy to get
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+c3cd22ab62f4b0e0209b674c8be3a8db517ff04ae292137a0f4981cbd832b950  **Judge every gate by its EXIT CODE, and never through a tru
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+34efe7fb276354bd8b8fc58c2bbe06db08871bce84b31686a2be1ace6551c309  Exit codes that matter:
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+ec29516f1823d0f3f215b2e37b3ecff7ca85484005671f149fb79deb8fec5ed2  | gate | code | meaning |
+23cca02b74f386463efa24796c7a9011b0d2c93f0c38b4d15d5d276205b59b43  |---|---|---|
+7a43a866c3d85f60bec66b22cc3f91a43e97a6032ad27d3a3e631b327742aafb  | `check_reference_readiness.py` | 0 OK ~ **1 FINDINGS** ~ 2
+65e86213c12818e9e6c0bbbdfe6edffe2fc85387e166a38c50ac5164d0aa20f5  | `check_unit.py` | 0 pass ~ 1 findings ~ **2 could not be f
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+b6f0db94e897c73cfc8916b6e519d7fa2f35978fd2fdb10e1659b28fcdb0e4bc  ~~ **`NOT_CHECKED` is a result, and it is the one most worth
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+70e5470df0f67b5c41e2be59ef91d04a5f82aa0e519300990898554ff8bae33f  ## Reporting ~ what the orchestrator actually needs back
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+058736a43dbcb4b340929bd54fe37993bbf4becf848be7e4be3c46f8f93e09eb  Keep it short and numeric. For each stage: the **command**, 
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+108e003318f869059db079513918bd113ec137ebd8e8aa32dda5e83c7da1e7f1  1. **What broke**, with the exact output ~ not a paraphrase.
+6cf553f4be01912332bf7a226d9752253a3f58a291d1ae983940651dd0b45b75  2. **What the gates said**, both of them, with exit codes an
+52c7b1429544d1061aac5bddcd5243ae62abc666bf5eceb5c4c374e798ff4d50  3. **Integration gaps** ~ a stage that ran fine but whose ou
+ed06af846334f0b47d83dea0f6030f2bee587b4ba6ff0fecbd7eccbddd92d7ab  4. **What you could not exercise**, and which upstream failu
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+ca820c9d0abbdb2f2b2243e6a038c299fc7c0155d0527ee0f447269e58ef90d7  ~~ **A number names the estate it came from.** Say whether i
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+3950f5f7cecfd71d9b99ff2258ff6e7ef9b2e336f92f4d12a125e3ad7906d308  ## Filing issues
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+0808f99da0ed5c9072f63a27e600b0723747b941fb65dd2cf0d72d407d7d8ecc  File one issue per distinct defect, with a **reproduction**:
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+3350a1b4b12122e5c3ab3827e6751d50fca76de04961893c23692780edac93b8  ~~ **Confirm the artifact was produced by the code you are a
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+d941e5dd2cf4f6e94e15f80203557c272a866ce83393afcbb9bc56a380f5ea1d  ~~ **An engine defect goes UPSTREAM** ~ `gh issue create --r
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+76a434c22dd020490b1affb239b16663cb0c1504b5e1ff09df1bacec4b929bc2  ## Cleanup
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+0f23ef7b3f9538560859546ce4fbce701bef90c2fc0663fe6ffbb6203de72088  Everything you write lives under `_runs/<NNN>-<slug>/`, whic
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+f2852236b044ddc0109027f5486ad5d448a5b2ce400c84fe5d5bc21af58b2586  ~~ Power BI Desktop cleanup is **PID-scoped**: `Stop-Process
+
 [pbi-migration-validator.agent.md]
 292a8eb2e3683149b7aa0ec1b8c99a68ecc257b24c6bc8445e1009cf106aa4fd  --- name: pbi-migration-validator description: Read-only rev
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
