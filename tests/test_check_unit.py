@@ -411,6 +411,210 @@ def test_oracle_coverage_drops_a_signed_omission_from_the_denominator(tmp_path: 
     assert oracle["status"] == cu.STATUS_PASS
 
 
+def test_two_same_named_candidates_cannot_share_one_rendered_page(tmp_path: Path) -> None:
+    """Kills: a kind-less page name satisfying more than one expected page.
+
+    A PBIR page names an object without saying what KIND it is. With dashboard 'Sales' and worksheet
+    'Sales' both expected, one rendered 'Sales' page used to satisfy BOTH: PASS at expected_count=2,
+    emitted_count=1. It attributes to neither.
+    """
+    _write_full_spec(tmp_path, dashboards=[("Sales", [])], worksheets=[("ws.sales", "Sales")])
+    _write_report(tmp_path, ["Sales"])
+
+    parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
+
+    assert parity["contested_names"] == ["Sales"]
+    assert [row["name"] for row in parity["omissions"]] == ["Sales", "Sales"]
+    assert parity["status"] == cu.STATUS_PRECONDITION_FAILED
+
+
+def test_one_oracle_row_cannot_cover_two_same_named_candidates(tmp_path: Path) -> None:
+    """The same rule on the oracle side: contested names take no evidence at all.
+
+    One reference row named 'Sales' was counted as 2-of-2 coverage for a dashboard AND a worksheet.
+    """
+    _write_full_spec(tmp_path, dashboards=[("Sales", [])], worksheets=[("ws.sales", "Sales")])
+    _write_report(tmp_path, ["Sales"])
+    _write_reference_manifest(tmp_path, ["Sales"])
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["pages"] == 2
+    assert oracle["visual_present"] == 0, "one picture cannot prove two different objects"
+    assert oracle["contested_names"] == ["Sales", "Sales"]
+    assert oracle["status"] == cu.STATUS_NOT_CHECKED
+
+
+def test_one_name_only_signature_cannot_sign_two_omissions(tmp_path: Path) -> None:
+    """Kills: a bare-name exemption accepting every candidate that happens to share the name.
+
+    Deliberately built so nothing else is ambiguous - 'A' is paired, so there is no unmatched
+    rendered page - leaving the contested SIGNATURE as the only thing that can turn this test.
+    """
+    _write_full_spec(tmp_path, dashboards=[("Sales", [])], worksheets=[("ws.sales", "Sales"), ("ws.a", "A")])
+    _write_report(tmp_path, ["A"])
+    (tmp_path / cu.EXEMPTIONS_FILE).write_text(
+        json.dumps({"exemptions": [{"check": "page-parity", "item": "Sales", "reason": "x", "decided_by": "gf"}]}),
+        encoding="utf-8",
+    )
+
+    report = cu.run_all(tmp_path, scope=cu.SCOPE_REPORT)
+    parity = next(check for check in report["checks"] if check["id"] == "page-parity")
+
+    assert parity["applied_exemptions"] == []
+    assert len(parity["unsigned_omissions"]) == 2
+    assert [row["disposition"] for row in parity["unapplied_exemptions"]] == [cu.EXEMPTION_AMBIGUOUS] * 2
+    assert cu._compromise_count(report) == 0  # pylint: disable=protected-access
+    assert parity["status"] == cu.STATUS_PRECONDITION_FAILED
+
+
+def test_a_signature_naming_the_page_id_resolves_a_contested_name(tmp_path: Path) -> None:
+    """The way out: an id is per-object, so signing the id accepts exactly one of the two."""
+    _write_full_spec(tmp_path, dashboards=[("Sales", [])], worksheets=[("ws.sales", "Sales"), ("ws.a", "A")])
+    _write_report(tmp_path, ["A"])
+    (tmp_path / cu.EXEMPTIONS_FILE).write_text(
+        json.dumps(
+            {
+                "exemptions": [
+                    {"check": "page-parity", "item": "dash.0", "reason": "dashboard cut", "decided_by": "gf"},
+                    {"check": "page-parity", "item": "ws.sales", "reason": "sheet cut", "decided_by": "gf"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
+
+    assert {row["kind"] for row in parity["applied_exemptions"]} == {"dashboard", "worksheet"}
+    assert parity["unsigned_omissions"] == []
+    assert parity["status"] == cu.STATUS_PASS
+
+
+def test_evidence_is_found_from_a_relative_target_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Kills: de-duplicating handover roots BEFORE resolving them.
+
+    `_unit_dir` resolves its return value while `target` keeps the caller's spelling, so with the
+    documented relative CLI invocation the same directory was scanned twice, every evidence row was
+    indexed twice, and each became an AMBIGUOUS resolution whose declared reason vanished. The
+    absolute form happened to work, which is how it survived review.
+    """
+    unit = tmp_path / "unit"
+    _write_full_spec(unit, dashboards=[], worksheets=[("ws.a", "A"), ("ws.b", "B")])
+    _write_report(unit, ["A"])
+    _write_viz_fidelity_handover(unit, [_empty_row("B")])
+    monkeypatch.chdir(tmp_path)
+
+    absolute = cu.check_page_parity(unit.resolve(), cu.load_exemptions(unit.resolve()))
+    relative = cu.check_page_parity(Path("unit"), cu.load_exemptions(Path("unit")))
+
+    assert absolute["omissions"][0]["declared_reason"] is not None
+    assert relative["omissions"][0]["declared_reason"] == absolute["omissions"][0]["declared_reason"]
+    assert relative["omissions"][0]["disposition"] == cu.OMISSION_DECLARED
+
+
+def test_a_source_empty_worksheet_owes_no_page(tmp_path: Path) -> None:
+    """A worksheet with no encodings and no filters renders blank in Tableau too.
+
+    Corrects a round-2 claim of mine that this case did not occur: two exist in the measured estate
+    (`Meridian Multi-Source (3 systems)/Probe Sheet`, `vishnu_dashboard/Sheet 3`), both with every
+    shelf empty and no filters. It is established from the SPEC, never from an engine tier.
+    """
+    (tmp_path / "migration-spec.json").write_text(
+        json.dumps(
+            {
+                "dashboards": [],
+                "worksheets": [
+                    {"id": "ws.a", "name": "A", "encodings": {"rows": ["x"], "columns": []}, "filters": []},
+                    {
+                        "id": "ws.probe",
+                        "name": "Probe Sheet",
+                        "mark_type": "Automatic",
+                        "encodings": {
+                            "rows": [],
+                            "columns": [],
+                            "color": None,
+                            "size": None,
+                            "shape": None,
+                            "label": [],
+                            "detail": [],
+                            "tooltip": [],
+                        },
+                        "filters": [],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_report(tmp_path, ["A"])
+
+    parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
+
+    assert [row["name"] for row in parity["source_empty_omissions"]] == ["Probe Sheet"]
+    assert parity["unsigned_omissions"] == []
+    assert parity["status"] == cu.STATUS_PASS
+
+
+def test_a_worksheet_with_any_encoding_still_owes_a_page(tmp_path: Path) -> None:
+    """The other half: one populated shelf is content, so its omission is still a rebuild gap."""
+    (tmp_path / "migration-spec.json").write_text(
+        json.dumps(
+            {
+                "dashboards": [],
+                "worksheets": [
+                    {"id": "ws.a", "name": "A", "encodings": {"rows": ["x"]}, "filters": []},
+                    {"id": "ws.b", "name": "B", "encodings": {"rows": [], "color": "Region"}, "filters": []},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_report(tmp_path, ["A"])
+
+    parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
+
+    assert parity["source_empty_omissions"] == []
+    assert [row["name"] for row in parity["unsigned_omissions"]] == ["B"]
+    assert parity["status"] == cu.STATUS_PRECONDITION_FAILED
+
+
+def test_a_worksheet_with_no_encodings_key_at_all_is_not_called_empty(tmp_path: Path) -> None:
+    """Unknown is not empty: a spec that never declared encodings cannot prove the sheet was blank."""
+    (tmp_path / "migration-spec.json").write_text(
+        json.dumps({"dashboards": [], "worksheets": [{"id": "ws.a", "name": "A"}, {"id": "ws.b", "name": "B"}]}),
+        encoding="utf-8",
+    )
+    _write_report(tmp_path, ["A"])
+
+    parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
+
+    assert parity["source_empty_omissions"] == []
+    assert [row["name"] for row in parity["unsigned_omissions"]] == ["B"]
+
+
+def test_a_source_empty_sheet_that_still_has_a_filter_owes_a_page(tmp_path: Path) -> None:
+    """A filter is content the author placed: empty shelves alone do not make a sheet blank."""
+    (tmp_path / "migration-spec.json").write_text(
+        json.dumps(
+            {
+                "dashboards": [],
+                "worksheets": [
+                    {"id": "ws.a", "name": "A", "encodings": {"rows": ["x"]}, "filters": []},
+                    {"id": "ws.b", "name": "B", "encodings": {"rows": [], "color": None}, "filters": [{"f": 1}]},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_report(tmp_path, ["A"])
+
+    parity = cu.check_page_parity(tmp_path, cu.load_exemptions(tmp_path))
+
+    assert parity["source_empty_omissions"] == []
+    assert [row["name"] for row in parity["unsigned_omissions"]] == ["B"]
+
+
 def test_a_worksheet_row_can_never_explain_a_same_named_dashboard(tmp_path: Path) -> None:
     """Kills: evidence about object X settling a question about object Y of a different KIND.
 
