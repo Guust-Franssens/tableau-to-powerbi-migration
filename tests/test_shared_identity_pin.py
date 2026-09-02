@@ -19,6 +19,12 @@ Two halves, because they prove different things and only one of them can run in 
 
 Updating the pin is deliberate: re-take both files with `git checkout <ref> -- <paths>`, run the
 verifier, then paste the new digests and provenance here.
+
+⚠️ **The digest is taken over LINE-ENDING-NORMALIZED bytes**, and that is not cosmetic. The first CI
+run of this gate failed on a file nobody had touched: `git checkout` applies `core.autocrlf`, so the
+same blob is CRLF in a Windows working tree and LF on the Linux runner, and a raw byte hash makes the
+pin platform-dependent rather than content-dependent. Normalizing `\r\n` -> `\n` keeps the gate
+sensitive to every real edit while surviving the checkout that git performs on our behalf.
 """
 
 from __future__ import annotations
@@ -32,16 +38,16 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 UPSTREAM_REF = "origin/feat/reference-readiness-gate"
 UPSTREAM_COMMIT = "cc70833d749cc25df148e20099cdaf9cfc5d8a49"
 
-#: SHA-256 of each shared file as taken from ``UPSTREAM_COMMIT``.
+#: SHA-256 of each shared file, over LF-normalized bytes, as taken from ``UPSTREAM_COMMIT``.
 PINNED: dict[str, str] = {
-    "scripts/object_identity.py": "58a8e6d3abb6c1fa26ff91dc94b56e61927445c3959a059d564f8e3a164062b3",
-    "tests/test_object_identity.py": "13ed4012555ba9cb7b677be9d920ea91c1abb71097bf426d1d9b2b4163806219",
+    "scripts/object_identity.py": "d5971e00410b384bb77cc13d98d2ba15f8eb0299050fa0b18070966e09bf8314",
+    "tests/test_object_identity.py": "7e0856ac694d3bcd0c0320ad02e84e2dbe36ebf1688a68f34113b4e1244b6a62",
 }
 
 
 def digest(relative: str) -> str:
-    """SHA-256 of one shared file as it exists on disk."""
-    return hashlib.sha256((REPO_ROOT / relative).read_bytes()).hexdigest()
+    """SHA-256 of one shared file, over LF-normalized bytes so the pin is platform-independent."""
+    return hashlib.sha256((REPO_ROOT / relative).read_bytes().replace(b"\r\n", b"\n")).hexdigest()
 
 
 def test_shared_identity_files_are_unmodified() -> None:
@@ -54,6 +60,27 @@ def test_shared_identity_files_are_unmodified() -> None:
         "`git checkout <ref> -- scripts/object_identity.py tests/test_object_identity.py`, run "
         "`python tests/verify_shared_identity_pin.py`, then update PINNED here."
     )
+
+
+def test_the_digest_is_line_ending_independent(tmp_path: Path) -> None:
+    """Kills: a raw byte hash, which makes the pin fail on the platform rather than on an edit.
+
+    Measured: the first CI run of this gate failed on files nobody had touched, because `git checkout`
+    stores them CRLF on Windows and LF on the Linux runner. The same content must digest the same;
+    a real edit must not.
+    """
+    crlf = tmp_path / "crlf.py"
+    lf = tmp_path / "lf.py"
+    edited = tmp_path / "edited.py"
+    crlf.write_bytes(b"a = 1\r\nb = 2\r\n")
+    lf.write_bytes(b"a = 1\nb = 2\n")
+    edited.write_bytes(b"a = 1\nb = 3\n")
+
+    def digest_of(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+
+    assert digest_of(crlf) == digest_of(lf)
+    assert digest_of(crlf) != digest_of(edited)
 
 
 def test_the_pin_covers_every_shared_file_check_unit_imports() -> None:
