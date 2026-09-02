@@ -65,7 +65,7 @@ class FakeSession(oracle.TableauSession):
         self.signin_count = 0
         self.token, self.site_id = "tok", "sid"
 
-    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None):  # noqa: ARG002
+    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None, deadline=None):  # noqa: ARG002
         self.calls.append(path)
         status, payload, headers = self.responses.pop(0)
         return status, payload.encode() if isinstance(payload, str) else payload, headers
@@ -374,9 +374,9 @@ def test_export_and_raw_get_forward_the_api_override(api):
     seen: list[str | None] = []
 
     class _Recording(FakeSession):
-        def _request(self, method, path, *, body=None, accept=None, authed=True, api=None):  # noqa: ARG002
+        def _request(self, method, path, *, body=None, accept=None, authed=True, api=None, deadline=None):  # noqa: ARG002
             seen.append(api)
-            return super()._request(method, path, body=body, accept=accept, authed=authed, api=api)
+            return super()._request(method, path, body=body, accept=accept, authed=authed, api=api, deadline=deadline)
 
     session = _Recording([(200, "a\n1\n", {}), (200, b"x", {})])
     session.export("/views/x/data", api=api)
@@ -384,24 +384,39 @@ def test_export_and_raw_get_forward_the_api_override(api):
     assert seen == [api, api]
 
 
-def test_every_scripted_session_double_in_this_suite_accepts_the_api_override():
+def test_every_scripted_session_double_in_this_suite_accepts_every_pass_through_keyword():
     """The gate that would have caught the red CI without running the file.
 
     ``TimedSession`` in ``test_capture_tableau_oracle_retry_budget.py`` overrides ``_request`` with
     the PREVIOUS signature, so five ordinary-export tests died on ``unexpected keyword argument
     'api'`` -- invisible to a test selection made from the changed *source* files, because that
     double exercises the same class through a subclass in a differently-named module. The adapter set
-    is closed (three subclasses, all under ``tests/``), so updating them is right; this keeps it
-    closed. Scoped to ``def _request(self`` so module-level ``_request`` fakes for other scripts
-    (``deploy_estate``, ``verify_bindings``) are not swept up.
+    is closed (all under ``tests/``), so updating them is right; this keeps it closed. Scoped to
+    ``def _request(self`` so module-level ``_request`` fakes for other scripts (``deploy_estate``,
+    ``verify_bindings``) are not swept up.
+
+    ⚠️ The keyword list is DERIVED from the real method, not hand-maintained. It was hand-maintained
+    and named only ``api``; ``deadline`` was then added to the production signature and thirteen
+    doubles went stale at once, which this gate could not see because nobody remembered to add the
+    new name to it. A gate whose coverage depends on somebody remembering to widen it is the shape
+    this repository keeps paying for.
     """
+    real = inspect.signature(oracle.TableauSession._request)  # pylint: disable=protected-access
+    expected = [
+        name
+        for name, parameter in real.parameters.items()
+        if parameter.kind is inspect.Parameter.KEYWORD_ONLY and parameter.default is not inspect.Parameter.empty
+    ]
+    assert expected, "the real _request has no optional keywords, so this gate proves nothing"
     overrides = []
     for path in sorted(Path(__file__).resolve().parent.glob("test_*.py")):
         for match in re.finditer(r"def _request\(\s*self\s*,([^)]*)\)", path.read_text(encoding="utf-8")):
             overrides.append((path.name, match.group(1)))
     assert overrides, "the scan found no session doubles at all -- it has stopped testing anything"
-    stale = [name for name, params in overrides if "api" not in params]
-    assert not stale, f"session double(s) missing the 'api' keyword, so every export through them raises: {stale}"
+    stale = [
+        f"{name} (missing {keyword!r})" for name, params in overrides for keyword in expected if keyword not in params
+    ]
+    assert not stale, f"session double(s) missing a pass-through keyword, so every export through them raises: {stale}"
 
 
 # --------------------------------------------------------------------------- manifest contract
@@ -1079,7 +1094,7 @@ def test_a_transport_exception_is_reported_by_TYPE_not_by_message():
     """`str(exc)` on a transport error can carry a reflected URL, and so a reflected credential."""
 
     class Boom:
-        def _request(self, method, path, *, body=None, accept=None, authed=True, api=None):  # noqa: ARG002
+        def _request(self, method, path, *, body=None, accept=None, authed=True, api=None, deadline=None):  # noqa: ARG002
             raise RuntimeError(f"connect failed to http://user:{TAINT}@host/api")
 
     mapping, unavailable = view_types_mod.view_types(Boom())

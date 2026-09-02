@@ -204,7 +204,7 @@ class _Session(oracle.TableauSession):
         self.data_reply = (*data_reply, {}) if data_reply and len(data_reply) == 2 else data_reply
         self.token, self.site_id = "tok", "sid"
 
-    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None):  # noqa: ARG002
+    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None, deadline=None):  # noqa: ARG002
         if path.endswith("/data"):
             return self.data_reply or (200, b"a\n1\n", {})
         return self.reply
@@ -595,7 +595,7 @@ TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
     # and the scrubber we hand it -- but they arrive from functions the analyser has already tainted,
     # and declaring them keeps the boundary honest rather than silently permeable. `headers` really is
     # response-derived.
-    ("scripts/tableau_http.py", "_request"): {"req", "redactor", "timeout"},
+    ("scripts/tableau_http.py", "_request"): {"req", "redactor", "timeout", "deadline"},
     ("scripts/tableau_http.py", "header_value"): {"headers"},
     ("scripts/tableau_payload_facts.py", "detect_format"): {"values"},
     ("scripts/tableau_payload_facts.py", "summarise_csv"): {"payload"},
@@ -609,7 +609,7 @@ TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
 # is: its return IS the response. It became load-bearing when `tableau_luid_census` stopped
 # making its own request -- taint propagation is intra-module, so a cross-module call's result
 # is invisible without this, and the gate went inert on a module that still looked gated.
-TAINTING_CALLS = {"_request", "fetch_payload", "export", "raw_get", "get_json", "read", "decode", "loads"}
+TAINTING_CALLS = {"_request", "fetch_payload", "export", "raw_get", "get_json", "read", "read1", "decode", "loads"}
 # The ONE thing that clears taint. Not "any helper" -- see test_the_chokepoint_is_the_only_...
 UNTAINTING = {"redacted_note", "scrub_tree", "artifact_stem"}
 LOG_AND_RAISE = {"info", "warning", "error", "debug", "exception", "ExportFailed", "RuntimeError", "ValueError"}
@@ -881,7 +881,7 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         ),
         "_capture_render(session, record['view_luid'], targets.out_dir / 'images' / "
         "f'{targets.stem}.{_RENDER_EXTENSIONS[kind]}', kind, _RenderOptions(targets.api_overrides.get(kind), "
-        "SALVAGE_RETRY if salvage else None))": (
+        "SALVAGE_RETRY if salvage else None, deadline if salvage else None))": (
             "SCRUBBED-AT-SINK: the returned leg record, whose own fields are certified in _capture_render; "
             "the PATH argument is built from `targets.stem`, which comes only from `artifact_stem`"
         ),
@@ -933,7 +933,6 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
     },
     ("scripts/capture_tableau_oracle.py", "sign_in"): {
         "status": "NOT-A-STRING: an HTTP status integer",
-        "delay": "NOT-A-STRING: a float backoff delay",
     },
     ("scripts/capture_tableau_oracle.py", "get_json"): {
         "status": "NOT-A-STRING: an HTTP status integer",
@@ -1133,6 +1132,16 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "warning": _PROBE_VERDICT,
         "len(blocked)": _A_COUNT,
         "len(stale_api)": _A_COUNT,
+    },
+    ("scripts/tableau_http.py", "_read_bounded"): {
+        "chunk": (
+            "REFUSED-AT-SEAM: the response BODY, which is this round trip's result and passes through "
+            "raw by design (see the module docstring: classification must see unmodified text). "
+            "Accumulating it in chunks changes nothing about what is returned versus the single "
+            "`.read()` it replaces; the reflected-credential refusal and every redaction happen at the "
+            "callers' seams, unchanged"
+        ),
+        "timeout": "NOT-A-STRING: the float socket timeout, quoted so the diagnostic names the bound it is not",
     },
     ("scripts/tableau_payload_facts.py", "png_dimensions"): {
         "int.from_bytes(payload[16:20], 'big')": "NOT-A-STRING: an integer read from the IHDR",
@@ -1675,6 +1684,32 @@ def test_the_shared_request_primitive_keeps_the_name_the_gate_taints():
             f"{caller} must import `_request` under its own name -- an alias renames it away from "
             "TAINTING_CALLS and the taint stops propagating"
         )
+
+
+def test_the_body_read_primitive_keeps_the_name_the_gate_taints():
+    """⚠️ The same trap, one layer down, and it FIRED -- this is not a hypothetical.
+
+    ``_read_bounded`` reads a response body in chunks, and the first version hoisted the choice of
+    primitive into a local: ``read_once = getattr(stream, "read1", None) or stream.read``. That is
+    ordinary Python and it silently un-tainted the response body, because ``_called()`` then sees
+    ``read_once`` rather than a name in ``TAINTING_CALLS``. The symptom was a certification going
+    STALE -- which reads as "no longer reaches an exit" and actually meant "no longer tracked at all",
+    the friendlier-sounding of the two by far.
+
+    So both branches must call the primitive BY NAME, and both names must be in the vocabulary.
+    """
+    assert {"read", "read1"} <= TAINTING_CALLS
+    source = (REPO / "scripts" / "tableau_http.py").read_text(encoding="utf-8")
+    assert "def _read_bounded(" in source
+    assert re.search(r"stream\.read1\(", source), (
+        "the bounded read no longer calls `read1` by name -- if it was hoisted into a local, the "
+        "response body is no longer tainted and this gate covers nothing"
+    )
+    assert re.search(r"stream\.read\(", source), "the fallback read must also be called by name"
+    tainted = taint_module(source, "scripts/tableau_http.py")
+    assert "chunk" in tainted["_read_bounded"], (
+        "the accumulated body is not tainted, so nothing stops it reaching an exit uncertified"
+    )
 
 
 def test_no_credential_handling_script_sits_outside_the_gate_unwaived():

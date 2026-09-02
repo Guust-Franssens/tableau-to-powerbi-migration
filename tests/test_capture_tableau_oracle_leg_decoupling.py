@@ -78,7 +78,7 @@ class FakeSession(oracle.TableauSession):
         self.signin_count = 0
         self.token, self.site_id = "tok", "sid"
 
-    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None):  # noqa: ARG002
+    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None, deadline=None):  # noqa: ARG002
         self.calls.append(path)
         for key, responses in self.routes.items():
             if key in path:
@@ -144,12 +144,12 @@ class _TimedSession(FakeSession):
         self._clock = clock
         self._durations = {key: [entry[0] for entry in value] for key, value in routes.items()}
 
-    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None):
+    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None, deadline=None):
         for key, durations in self._durations.items():
             if key in path:
                 self._clock.t += durations[0] if len(durations) == 1 else durations.pop(0)
                 break
-        return super()._request(method, path, body=body, accept=accept, authed=authed, api=api)
+        return super()._request(method, path, body=body, accept=accept, authed=authed, api=api, deadline=deadline)
 
 
 def _view() -> dict:
@@ -384,7 +384,7 @@ def test_the_request_timeout_reaches_the_transport(monkeypatch):
     not grant it more time without editing the script."""
     seen: list[float] = []
 
-    def _fake_request(_req, *, timeout, redactor):  # noqa: ARG001
+    def _fake_request(_req, *, timeout, redactor, deadline=None):  # noqa: ARG001
         seen.append(timeout)
         return 200, b'{"credentials": {"token": "t", "site": {"id": "s"}}}', {}
 
@@ -397,7 +397,7 @@ def test_the_default_timeout_is_unchanged_when_nothing_is_passed(monkeypatch):
     """The flag must not move the default out from under an existing runbook."""
     seen: list[float] = []
 
-    def _fake_request(_req, *, timeout, redactor):  # noqa: ARG001
+    def _fake_request(_req, *, timeout, redactor, deadline=None):  # noqa: ARG001
         seen.append(timeout)
         return 200, b'{"credentials": {"token": "t", "site": {"id": "s"}}}', {}
 

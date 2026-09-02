@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import http.client
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -74,6 +75,11 @@ NETWORK_ERROR_STATUS = 0
 # input -- `redacted_note` has already seen the whole message by the time this applies, so cutting it
 # can only lose diagnostic text and can never leave a secret behind.
 _EXC_CHARS = 500
+
+# How much body is read per socket operation when a deadline is in force. Big enough that a healthy
+# response costs a handful of reads, small enough that the clock is consulted often on a slow one.
+# It only affects the DEADLINE path; without a deadline the body is still read in one call.
+_BODY_CHUNK_BYTES = 65536
 
 
 def _describe(exc: BaseException, redactor) -> bytes:
@@ -109,13 +115,81 @@ def header_value(headers: dict[str, str], name: str) -> str | None:
     return None
 
 
-def _request(req: urllib.request.Request, *, timeout: float, redactor) -> tuple[int, bytes, dict[str, str]]:
+def _read_bounded(stream, deadline: float | None, timeout: float) -> bytes:
+    """Read a response body, optionally under an END-TO-END deadline.
+
+    ⚠️ ``timeout`` is a **socket-operation** timeout, not a deadline. It bounds how long one read may
+    block with no data arriving; it says nothing about how long a response that keeps trickling may
+    take in total. Measured against a local server sending one byte every 0.08s: ``timeout=0.1``
+    returned **HTTP 200 after 0.420-0.479s**, 4-5x its nominal timeout, with no error at any layer.
+    Any ceiling built on "one request cannot outlive its timeout" is therefore not a ceiling.
+
+    With ``deadline`` supplied this reads in chunks and checks the clock between them, so a trickling
+    body is abandoned instead of followed forever. The composition is what makes the bound real: each
+    individual ``read`` is bounded by the socket timeout, and the loop is bounded by the deadline, so
+    the total cannot exceed **deadline + one socket timeout** -- the in-flight chunk cannot be
+    interrupted, and pretending otherwise would be the same false precision this fixes.
+
+    A body abandoned this way is NOT returned as a partial success: the ``TimeoutError`` raised here
+    is an ``OSError``, so :func:`_request`'s existing handler turns it into
+    :data:`NETWORK_ERROR_STATUS` -- a transient, retry-eligible failure. Reporting a truncated CSV as
+    a 200 would manufacture exactly the false evidence this repository exists to prevent.
+
+    ``deadline=None`` is the default and reads the whole body in one call, byte-for-byte as before, so
+    no existing caller changes behaviour. That matters: the data leg legitimately streams a large
+    export, and a deadline applied to it would truncate a capture that is making real progress.
+    """
+    if deadline is None:
+        return stream.read()
+    # ⚠️ `read1`, not `read`. `HTTPResponse.read(n)` blocks until it has n bytes or the stream ends,
+    # so with a 64 KiB chunk a trickling 12-byte body is delivered in ONE call and the loop below
+    # never gets to consult the clock -- measured: 0.970s against a 0.3s deadline, i.e. the deadline
+    # did nothing. `read1` performs at most one underlying read and returns what has arrived, which is
+    # what makes the check reachable. The fallback keeps a stream without `read1` working, with a
+    # correspondingly looser bound; every stream this transport sees today has it.
+    #
+    # ⚠️ Both branches call the read primitive BY NAME, and that is load-bearing rather than stylistic.
+    # `TAINTING_CALLS` in `tests/test_diagnostic_redaction.py` keys on the call name, so hoisting this
+    # to `read_once = getattr(stream, "read1", None) or stream.read` -- which is what this was first
+    # written as -- silently un-taints the response body and the gate stops covering it. Measured: the
+    # `chunk` certification went STALE, meaning the body was no longer tracked at all. Same trap the
+    # module docstring records for `_request`.
+    has_read1 = callable(getattr(stream, "read1", None))
+    chunks: list[bytes] = []
+    while True:
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"the response body was still arriving at its end-to-end deadline after "
+                f"{sum(len(c) for c in chunks)} byte(s); a socket timeout of {timeout:.1f}s does not "
+                f"bound a trickling response, so the read was abandoned rather than followed"
+            )
+        # Written as an if/else rather than a ternary on purpose: the taint analyser reads the CALL of
+        # an assignment's value, and an `IfExp` is not a call, so `chunk = a() if p else b()` propagates
+        # nothing. Caught by `test_the_body_read_primitive_keeps_the_name_the_gate_taints`, which is
+        # the second time in this one function that ordinary refactoring quietly un-tainted the body.
+        if has_read1:
+            chunk = stream.read1(_BODY_CHUNK_BYTES)
+        else:
+            chunk = stream.read(_BODY_CHUNK_BYTES)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+
+
+def _request(
+    req: urllib.request.Request, *, timeout: float, redactor, deadline: float | None = None
+) -> tuple[int, bytes, dict[str, str]]:
     """One HTTP round trip. **Never raises** for anything the network or the server can do.
 
     Returns ``(status, body, headers)``. ``status`` is :data:`NETWORK_ERROR_STATUS` when no HTTP
     response arrived at all, and the real status otherwise -- including when reading the body failed
     mid-stream, because a 503 whose body read timed out is still usefully a 503 and stays
     retry-eligible.
+
+    ``deadline`` is an absolute :func:`time.monotonic` instant, and is the only thing here that
+    bounds a request end to end -- ``timeout`` bounds one socket operation and nothing more (see
+    :func:`_read_bounded`). It is opt-in because a deadline is a caller's policy, not the transport's:
+    the data leg streams a real export and must not be truncated for making slow progress.
 
     ``redactor`` is a **required** keyword, not an optional nicety: every caller either holds a
     credential or can be handed :func:`tableau_env.redact` itself, whose header rule scrubs a
@@ -128,8 +202,11 @@ def _request(req: urllib.request.Request, *, timeout: float, redactor) -> tuple[
         an ordinary 4xx/5xx. Reading its body is *itself* a socket read, so it is guarded too --
         Python does **not** route an exception raised inside one ``except`` clause to a sibling
         ``except`` of the same ``try``, so an unguarded ``exc.read()`` escapes this function entirely.
+        It is read under the same deadline, because an ERROR body can trickle just as a success body
+        can.
     ``OSError``
-        covers ``URLError`` and so DNS failure, refused connection and timeout.
+        covers ``URLError`` and so DNS failure, refused connection and timeout -- and now the
+        deadline abandonment, which is a ``TimeoutError`` and therefore already handled here.
     ``http.client.HTTPException``
         ⚠️ **not an OSError**, and the round-9 finding. ``BadStatusLine`` carries the server's raw
         status line and ``InvalidURL`` carries a redirect's host/port -- both fully server-controlled,
@@ -139,10 +216,10 @@ def _request(req: urllib.request.Request, *, timeout: float, redactor) -> tuple[
     """
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, resp.read(), dict(resp.headers)
+            return resp.status, _read_bounded(resp, deadline, timeout), dict(resp.headers)
     except urllib.error.HTTPError as exc:
         try:
-            body = exc.read()
+            body = _read_bounded(exc, deadline, timeout)
         except (OSError, http.client.HTTPException) as read_exc:
             body = _describe(read_exc, redactor)
         return exc.code, body, dict(exc.headers or {})

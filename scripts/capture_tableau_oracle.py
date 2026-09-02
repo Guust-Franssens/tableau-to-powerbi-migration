@@ -89,9 +89,19 @@ Two knobs and one guard rail come out of that:
   exhaust it -- the run gives up well short of ``--max-attempts 5``, **by design**. Freezing the
   budget while the timeout rose would have put it *below* one timeout, removing every retry from
   precisely the slow failure the operator raised the timeout to survive.
-* A salvage render (one whose data leg already failed) gets **one attempt and no retry budget**, and
-  the first one that fails for a reason the view controls stops the rest. So decoupling adds at most
-  ONE request timeout to a doomed view, not one per tier and not a second full budget.
+* A salvage render (one whose data leg already failed) gets **one attempt and no retry budget**, the
+  first one that fails for a reason the view controls stops the rest, and every salvage leg shares
+  ONE budget of ``2 x --rest-timeout``.
+
+WARNING: the salvage bound is ``budget + at most one socket timeout``, and the qualifier is not
+hedging. A per-request timeout bounds one socket OPERATION, not a request: measured against a local
+server trickling one byte every 0.08s, ``timeout=0.1`` returned **HTTP 200 after 0.479s** -- 4.8x
+nominal, no error at any layer. A response that keeps trickling never times out, so a ceiling built
+on "one request cannot outlive its timeout" is not a ceiling. Salvage legs therefore carry an
+**end-to-end deadline** into the transport, which abandons a trickling body between chunk reads; the
+in-flight chunk cannot be interrupted, which is where the ``+ one socket timeout`` comes from. Other
+legs carry no deadline on purpose: the data leg streams a real export and must not be truncated for
+making slow progress.
 
 WARNING: **A requested render leg now ALWAYS gets a record**, even when it is deliberately not attempted
 (``not_attempted``, or the data leg's own ``source_credential``). An absent key therefore means "not
@@ -106,7 +116,6 @@ import argparse
 import hashlib
 import json
 import logging
-import random
 import re
 import sys
 import time
@@ -144,6 +153,46 @@ from tableau_oracle_manifest import (  # noqa: E402  # pylint: disable=wrong-imp
     write_manifest,
 )
 
+# Every bound the run works under, re-exported so callers and tests keep reading them off this
+# module. Split out when this file hit its line ceiling a third time -- see that module's docstring
+# for why the three time-related words here mean three different things.
+from tableau_capture_policy import (  # noqa: E402  # pylint: disable=wrong-import-position
+    CREDENTIAL_REFLECTED,
+    DEFAULT_MAX_ATTEMPTS,
+    DEFAULT_RETRY_BUDGET_SEC,
+    MAX_REAUTH_PER_VIEW,
+    REST_TIMEOUT_SEC,
+    SALVAGE_BUDGET_MULTIPLIER,
+    SALVAGE_RETRY,
+    SESSION_LOST_CODE,
+    TRANSIENT_STATUSES,
+    RetryPolicy,
+    backoff_delay,
+    build_retry_policy,
+)
+
+# Re-exported, not used here: callers and tests read these off THIS module
+# (`oracle.BACKOFF_BASE_SEC`, `oracle.retry_admission_floor`) -- nineteen references across three
+# suites, which is a public surface whether or not it was ever declared one. `__all__` is what makes
+# that surface explicit to BOTH linters and stops either one deleting a name that three files import
+# at module load: ruff honours the redundant-alias form, pylint rejects it as a useless alias, and
+# only `__all__` satisfies both.
+__all__ = [
+    "BACKOFF_BASE_SEC",
+    "BACKOFF_CAP_SEC",
+    "RETRY_ADMISSION_FLOOR_SEC",
+    "default_retry_budget",
+    "retry_admission_floor",
+]
+
+from tableau_capture_policy import (  # noqa: E402  # pylint: disable=wrong-import-position
+    BACKOFF_BASE_SEC,
+    BACKOFF_CAP_SEC,
+    RETRY_ADMISSION_FLOOR_SEC,
+    default_retry_budget,
+    retry_admission_floor,
+)
+
 # ⚠️ Imported as plain NAMES, not reached through the module. `tableau_http._request(...)` is
 # `protected-access` to pylint (W0212, measured), and any alias would rename the call away from
 # `TAINTING_CALLS` in `tests/test_diagnostic_redaction.py`, silently un-tainting every call site.
@@ -157,74 +206,20 @@ from tableau_http import (  # noqa: E402  # pylint: disable=wrong-import-positio
 
 LOG = logging.getLogger("tableau-oracle")
 
-REST_TIMEOUT_SEC = 180
-SESSION_LOST_CODE = "401002"
-# A **successful** response that echoes our own credential is refused outright rather than persisted.
-# It is not a diagnostic status: nothing is written, because the alternative is a live credential in a
-# `.csv` or `.svg` on disk, which no downstream redaction can reach.
-CREDENTIAL_REFLECTED = "credential_reflected"
-MAX_REAUTH_PER_VIEW = 2
-DEFAULT_MAX_ATTEMPTS = 5
-BACKOFF_BASE_SEC = 1.0
-BACKOFF_CAP_SEC = 30.0
-# The retry budget is a RETRY-ADMISSION DEADLINE, not a hard wall-clock cap. export() charges it from
-# monotonic() BEFORE the first attempt, and only AFTER an attempt returns does it admit another retry
-# -- while monotonic() is still inside the deadline. A socket timeout takes the whole REST_TIMEOUT_SEC
-# to return, and _request() reports it as a *transient* NETWORK_ERROR_STATUS (it does not raise), so
-# it is retry-eligible -- yet a budget at or below one REST_TIMEOUT_SEC is already spent by the time
-# that full-timeout failure returns, so THAT failure (the commonest on a slow/proxied/VPN link) gets
-# ZERO retries at any --max-attempts (issue #197, field-reported, reproduced with a virtual clock).
-# The floor below which a full-timeout failure cannot be retried is therefore ONE timeout plus the
-# first backoff -- NOT 2x. 2x is neither the minimum needed to admit a retry (a budget between 1x and
-# 2x retries a slow failure fine) nor enough to fit two COMPLETE full-timeout attempts once backoff is
-# counted (2*180 + backoff > 360). Faster transients -- an immediate 5xx, a short Retry-After -- still
-# retry until the budget is spent, so a smaller budget is a deliberate choice, not a bug. The default
-# sits comfortably above the floor; both are expressed via REST_TIMEOUT_SEC so they cannot drift.
-
-
-def retry_admission_floor(timeout_sec: float) -> float:
-    """The budget below which a failure that blocks for the FULL request timeout gets zero retries.
-
-    A function rather than only a constant, because ``--rest-timeout`` makes the timeout a per-run
-    value (#423). The floor tracks whatever timeout is actually in force;
-    ``RETRY_ADMISSION_FLOOR_SEC`` is this function evaluated at the default, kept as a name because
-    tests and prose refer to it.
-    """
-    return timeout_sec + BACKOFF_BASE_SEC
-
-
-def default_retry_budget(timeout_sec: float) -> float:
-    """The default retry-admission deadline for a given request timeout.
-
-    ⚠️ It MUST move with ``--rest-timeout``. The two are expressed as a ratio precisely so they cannot
-    drift, and pinning the budget at 360s while the operator raises the timeout to 600s would leave a
-    budget BELOW one timeout -- which admits zero retries after the slow failure they raised the
-    timeout to survive. That is the second of the two surprises #423 names.
-
-    ⚠️ But 2x is NOT always above the admission floor, and review round 1 measured where it stops
-    being: the floor is ``timeout + first backoff``, and the backoff is an ABSOLUTE 1.0s, so for any
-    timeout below one second ``2 x timeout`` is under it -- ``0.25s -> budget 0.5s vs floor 1.25s``
-    admits exactly one attempt, i.e. ZERO retries, which is the very footgun the default exists to
-    avoid. ``--rest-timeout`` takes a float with no minimum, so this is reachable from the CLI.
-    Taking the max of the two rules keeps the ratio where it dominates (every realistic timeout) and
-    the floor where it does not, without forbidding a small timeout an operator may genuinely want.
-    """
-    return max(2.0 * timeout_sec, retry_admission_floor(timeout_sec))
-
-
-RETRY_ADMISSION_FLOOR_SEC = retry_admission_floor(REST_TIMEOUT_SEC)
-DEFAULT_RETRY_BUDGET_SEC = default_retry_budget(REST_TIMEOUT_SEC)
-
-# Status 0 is our own marker for a network-level failure (reset, DNS, gateway timeout) that never
-# produced an HTTP status at all. Tableau Cloud sits behind a gateway that intermittently 502/504s.
-# Defined once, in `tableau_http`, beside the code that returns it; re-exported here because callers
-# and tests read it off this module.
-TRANSIENT_STATUSES = frozenset({NETWORK_ERROR_STATUS, 429, 500, 502, 503, 504})
-
-
 # A Tableau LUID is a UUID. Checkable in full, so a value matching it is provably not a credential --
 # which is what lets `artifact_stem` be an allowlist rather than one more screen.
 _LUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+
+@dataclass(frozen=True)
+class SiteCredentials:
+    """Everything needed to reach one Tableau site. The PAT secret is never logged or serialised."""
+
+    base: str
+    site: str
+    pat_name: str
+    pat_secret: str
+    version: str
 
 
 class ExportFailed(RuntimeError):
@@ -278,46 +273,6 @@ def classify_export_error(status: int, text: str, *, redactor=None) -> tuple[str
     return "failed", f"HTTP {status}: {safe[:200]}"
 
 
-def backoff_delay(attempt: int, retry_after: str | None = None, *, jitter: bool = True) -> float:
-    """Exponential backoff with full jitter, honouring a server-supplied ``Retry-After``.
-
-    Jitter matters even for a sequential capture: without it, a whole estate run that trips a rate
-    limit retries in lockstep with any other client behind the same gateway.
-    """
-    if retry_after:
-        try:
-            return min(float(retry_after), BACKOFF_CAP_SEC)
-        except ValueError:
-            pass
-    delay = min(BACKOFF_CAP_SEC, BACKOFF_BASE_SEC * (2 ** (attempt - 1)))
-    return delay * (0.5 + random.random() / 2) if jitter else delay
-
-
-@dataclass(frozen=True)
-class SiteCredentials:
-    """Everything needed to reach one Tableau site. The PAT secret is never logged or serialised."""
-
-    base: str
-    site: str
-    pat_name: str
-    pat_secret: str
-    version: str
-
-
-@dataclass(frozen=True)
-class RetryPolicy:
-    """Bounds on recovery. Both bounds matter: attempts alone cannot stop a slow-failing endpoint
-    from eating an estate run, and a wall-clock budget alone would allow an unbounded fast loop.
-
-    ``budget_sec`` is a RETRY-ADMISSION DEADLINE, not a hard wall-clock cap: charged from before the
-    first attempt, it gates whether ANOTHER retry is admitted, so an already-started attempt (or a
-    nested re-auth) may finish past it. A value at or below one ``REST_TIMEOUT_SEC`` admits zero
-    retries after a full-timeout failure (see the constant note above)."""
-
-    max_attempts: int = DEFAULT_MAX_ATTEMPTS
-    budget_sec: float = DEFAULT_RETRY_BUDGET_SEC
-
-
 class TableauSession:
     """Minimal stdlib Tableau REST client that survives mid-loop session loss and transient faults."""
 
@@ -358,6 +313,7 @@ class TableauSession:
         accept: str | None = None,
         authed: bool = True,
         api: str | None = None,
+        deadline: float | None = None,
     ) -> tuple[int, bytes, dict[str, str]]:
         """One HTTP round trip. Never raises for a network failure -- returns status 0 when no HTTP
         response arrived at all (reset/DNS/refused/timeout), so the retry loop can treat a reset
@@ -367,6 +323,12 @@ class TableauSession:
 
         ``api`` overrides the client api-version for this one call. Only the capability probe uses it,
         to re-measure a version-gated feature at its documented floor rather than inferring support.
+
+        ``deadline`` is an absolute ``time.monotonic`` instant and is the ONLY end-to-end bound
+        available: ``timeout_sec`` bounds one socket operation, so a response that keeps trickling
+        outlives it indefinitely (measured: HTTP 200 after 4.8x a 0.1s timeout). Opt-in, because a
+        deadline belongs to a caller's policy -- the data leg streams a real export and must not be
+        truncated for making slow progress.
 
         This is now a **thin adapter**: it shapes the outbound request and hands it to
         ``tableau_http._request``, the one hardened round trip in the repository. The exception
@@ -385,7 +347,7 @@ class TableauSession:
             req.add_header("Content-Type", "application/json")
         if authed and self.token:
             req.add_header("X-Tableau-Auth", self.token)
-        return _request(req, timeout=self.timeout_sec, redactor=self._redact_response)
+        return _request(req, timeout=self.timeout_sec, redactor=self._redact_response, deadline=deadline)
 
     def sign_in(self) -> None:
         """Exchange the PAT for a session token, retrying transient failures.
@@ -490,7 +452,12 @@ class TableauSession:
     # One recovery ladder, and it now holds the raw body and its redacted copy side by side so
     # classification and reporting cannot be confused for each other.
     def export(  # pylint: disable=too-many-locals
-        self, path: str, *, api: str | None = None, retry: RetryPolicy | None = None
+        self,
+        path: str,
+        *,
+        api: str | None = None,
+        retry: RetryPolicy | None = None,
+        hard_deadline: float | None = None,
     ) -> tuple[bytes, float, dict[str, Any]]:
         """GET a content-export endpoint, recovering from session loss and transient failures.
 
@@ -499,6 +466,14 @@ class TableauSession:
         that actually answered, the run is told "svg is available" and then fetches at the configured
         version, where the same request is still refused (measured: floor 3.29 ``available``, the same
         request at the configured 3.21 ``unsupported``).
+
+        ``hard_deadline`` is an absolute ``time.monotonic`` instant passed to the transport, and it is
+        what makes a wall-clock claim about this export true rather than assumed: the per-request
+        timeout bounds one socket operation only, so a trickling response outlives it (measured:
+        HTTP 200 after 4.8x a 0.1s timeout). Only the salvage path supplies one. ⚠️ It is deliberately
+        NOT called ``deadline``: the local of that name below is the retry-ADMISSION deadline, which
+        an in-flight attempt may legitimately overrun. Two deadlines with opposite guarantees sharing
+        one name is how the distinction got lost in the first place.
 
         ``retry`` overrides the session policy for THIS export only. The budget is therefore per-leg,
         never a pool the legs draw down: a salvage render after a failed data leg gets one attempt and
@@ -529,7 +504,7 @@ class TableauSession:
         deadline = time.monotonic() + policy.budget_sec
         for attempt in range(1, policy.max_attempts + 1):
             started = time.perf_counter()
-            status, payload, headers = self._request("GET", path, api=api)
+            status, payload, headers = self._request("GET", path, api=api, deadline=hard_deadline)
             elapsed = time.perf_counter() - started
             if status == 200:
                 # A SUCCESSFUL body is the one thing this class hands back for PERSISTING -- to
@@ -730,29 +705,35 @@ def _capture_renders(
 
     * a salvage render gets **one attempt and no retry budget** (``RetryPolicy(max_attempts=1,
       budget_sec=0)``). Its job is to establish whether an image EXISTS, and re-asking a view that
-      just spent a full budget failing is asking the same slow question again. The retry budget is
-      therefore per-leg, and the salvage leg's is zero -- deliberately not shared with the data leg,
-      whose behaviour is unchanged.
+      just spent a full budget failing is the same slow question again. The budget is per-leg, and
+      the salvage leg's is zero -- the data leg's own behaviour is unchanged.
     * the first salvage leg that fails **for a reason the view controls** stops the remaining ones,
-      which are recorded ``not_attempted`` with the leg that blocked them. All render routes come from
-      the same VizQL render (measured: ``image``, ``image?format=svg``, ``pdf`` and ``data`` fail
-      identically on ``data sources not connected``), so a second and third ask cost a metered call to
-      learn the same thing. A ``unsupported_api_version`` or ``format_mismatch`` failure does NOT
-      stop them: both are configuration faults answered instantly, not evidence the view is unwell.
-    * ⚠️ **one deadline SHARED by every salvage leg** (:data:`SALVAGE_BUDGET_MULTIPLIER`). The two
-      rules above bound *attempts*, not wall clock, and review round 1 measured the gap: three legs
-      failing ``format_mismatch`` -- a status that deliberately does NOT short-circuit -- were each
-      attempted with no cross-leg limit, **539.7 s against a stated 180 s bound**. A leg is now
-      admitted only while at least one whole request timeout remains in the shared budget, so no
-      salvage sequence can exceed ``SALVAGE_BUDGET_MULTIPLIER x`` the request timeout **whatever the
-      tier count**, and a leg that consumes a full timeout leaves too little for a second.
+      recorded ``not_attempted``. All render routes come from the same VizQL render (measured:
+      ``image``, ``image?format=svg``, ``pdf`` and ``data`` fail identically on ``data sources not
+      connected``). ``unsupported_api_version`` and ``format_mismatch`` do NOT stop them: both are
+      configuration faults answered instantly, not evidence the view is unwell.
+    * ⚠️ **one deadline SHARED by every salvage leg** (:data:`SALVAGE_BUDGET_MULTIPLIER`), enforced
+      twice over. The rules above bound *attempts*, not wall clock: three ``format_mismatch`` legs
+      were each attempted with no cross-leg limit, **539.7 s against a stated 180 s bound**. A leg is
+      now ADMITTED only while a whole request timeout still remains, AND carries that same instant
+      into the transport as an **end-to-end deadline** -- because admission alone bounds nothing when
+      one request is unbounded, and it is: a per-request timeout bounds one socket OPERATION, so a
+      trickling response never times out (measured, ``timeout=0.1`` returned **HTTP 200 after
+      0.479s**, 4.8x nominal).
 
-    So the worst case a decoupled capture adds to a doomed view is ``2 x REST_TIMEOUT_SEC``, HARD,
-    however many tiers were requested -- and one timeout in practice, because the only way to reach
-    the second is for the first leg to fail almost instantly. The earlier claim of a flat "one
-    timeout" was wrong twice over: nothing capped the legs collectively, and a ``session_lost`` on a
-    one-attempt leg additionally triggered a full ``sign_in`` on the SESSION policy (see
-    :meth:`TableauSession.export`, where that is now refused on the final attempt).
+    So salvage costs at most ``SALVAGE_BUDGET_MULTIPLIER x`` the request timeout of admission **plus
+    at most one socket timeout** for the in-flight chunk, whatever the tier count -- one timeout in
+    practice, since reaching the second admission needs the first leg to fail almost instantly. The
+    ``+ one socket timeout`` is not hedging: a chunk read in progress cannot be interrupted.
+
+    ⚠️ **Two earlier statements of this bound were wrong, differently, and both are worth keeping.**
+    A flat "one timeout" ignored that nothing capped the legs collectively and that a
+    ``session_lost`` on a one-attempt leg triggered a full ``sign_in`` on the SESSION policy (now
+    refused on the final attempt -- see :meth:`TableauSession.export`). A "hard 2x" rested on a
+    ``urllib`` property that does not hold -- and the virtual-clock tests that "proved" it modelled
+    every request as bounded by its nominal timeout, so the instrument shared the defect with the
+    thing it measured and structurally could not fail. ``tests/test_tableau_http_deadline.py`` uses a
+    real socket because of that, not in addition to it.
 
     ⚠️ ``source_credential`` and ``credential_reflected`` skip the renders ENTIRELY, and the skipped
     legs inherit the data leg's status rather than a failure of their own. A credential block is a
@@ -798,7 +779,11 @@ def _capture_renders(
             record["view_luid"],
             targets.out_dir / "images" / f"{targets.stem}.{_RENDER_EXTENSIONS[kind]}",
             kind,
-            _RenderOptions(targets.api_overrides.get(kind), SALVAGE_RETRY if salvage else None),
+            _RenderOptions(
+                targets.api_overrides.get(kind),
+                SALVAGE_RETRY if salvage else None,
+                deadline if salvage else None,
+            ),
         )
         if salvage and record[leg]["status"] in _VIEW_HEALTH_FAILURES:
             blocked_by = (
@@ -878,36 +863,23 @@ _SHARED_ROOT_CAUSE = frozenset({"source_credential", CREDENTIAL_REFLECTED})
 # evidence that asking the next tier will be slow or futile.
 _VIEW_HEALTH_FAILURES = frozenset({"transient", "failed", "session_lost", "source_credential", CREDENTIAL_REFLECTED})
 
-# One attempt, no retry budget. A salvage render runs only AFTER the data leg has already spent its
-# full budget failing, and its job is to establish whether an image exists at all -- not to out-wait
-# a view that has just demonstrated it cannot answer.
-SALVAGE_RETRY = RetryPolicy(max_attempts=1, budget_sec=0.0)
-
-# The SHARED wall-clock ceiling for all salvage legs of one view, as a multiple of the request
-# timeout. `SALVAGE_RETRY` bounds attempts per leg; this bounds the sequence, which is the half review
-# round 1 measured missing: three `format_mismatch` legs (a status that deliberately does not
-# short-circuit) were attempted with no cross-leg limit -- 539.7s against a stated 180s bound.
-#
-# 2x rather than 1x, and the reason is the admission rule in `_salvage_exhausted`: a leg is admitted
-# only while a WHOLE timeout still fits, so at 1x only the very first leg could ever run and a
-# fast-failing tier (a version gate answered in milliseconds) could not be followed by another. At 2x
-# a sequence of fast failures still reaches every tier, while any leg that actually consumes a full
-# timeout leaves too little for a second. The ceiling is hard and independent of tier count.
-SALVAGE_BUDGET_MULTIPLIER = 2.0
-
 
 @dataclass(frozen=True)
 class _RenderOptions:
-    """HOW one render leg is fetched: at which api-version, with how much recovery.
+    """HOW one render leg is fetched: at which api-version, with how much recovery, until when.
 
-    Bundled rather than passed loose because the two only ever travel together, and because ``kind``
+    Bundled rather than passed loose because they only ever travel together, and because ``kind``
     -- the WHAT -- must stay a first-class parameter: the redaction gate taints a whole constructed
     object from any tainted field, and folding the (clean) tier name in beside a ``retry`` derived
     from the data leg's status would have marked the tier name response-derived, which it is not.
+
+    ``hard_deadline`` is the SHARED salvage deadline, and it is what turns a bound that was assumed
+    into one that is enforced -- see :func:`_capture_renders`.
     """
 
     api: str | None = None
     retry: RetryPolicy | None = None
+    hard_deadline: float | None = None
 
 
 def _capture_render(
@@ -930,7 +902,10 @@ def _capture_render(
     endpoint, query = _RENDER_ROUTES[kind]
     try:
         payload, elapsed, stats = session.export(
-            f"/sites/{session.site_id}/views/{view_luid}/{endpoint}{query}", api=options.api, retry=options.retry
+            f"/sites/{session.site_id}/views/{view_luid}/{endpoint}{query}",
+            api=options.api,
+            retry=options.retry,
+            hard_deadline=options.hard_deadline,
         )
     except ExportFailed as exc:
         record = {"status": exc.kind, "error": str(exc), "detail": exc.detail}
@@ -1077,44 +1052,6 @@ def select_views(
     if limit:
         views = views[:limit]
     return views, names
-
-
-def build_retry_policy(
-    max_attempts: int, budget_sec: float | None, timeout_sec: float = REST_TIMEOUT_SEC
-) -> RetryPolicy:
-    """Build the retry policy, warning when the budget is too small to retry a full-timeout failure.
-
-    ``budget_sec`` is a retry-admission deadline, charged from before the first attempt, which can
-    itself block for the full request timeout on a socket timeout. Below
-    :func:`retry_admission_floor` (one timeout plus the first backoff) the deadline is already spent
-    when such a failure returns, so it is retried zero times -- the issue #197 footgun.
-
-    ``budget_sec=None`` means "the operator did not choose one", and it resolves to
-    :func:`default_retry_budget` of the timeout ACTUALLY in force. That is the #423 half: with
-    ``--rest-timeout`` exposed, a budget frozen at the default's 360s would silently fall below one
-    request timeout the moment an operator raised the timeout past 360s -- removing every retry from
-    exactly the slow failure they were trying to survive.
-
-    This warns rather than clamps OR rejects, on purpose. A sub-floor budget is NOT incoherent: it is
-    a deliberate, useful choice for FAST-failing transients (a tight budget cutting a long Retry-After
-    loop short is exactly what ``test_retry_budget_stops_a_slow_failure_before_max_attempts`` relies
-    on), so clamping would silently defeat it and rejecting would forbid it. The warning is therefore
-    scoped to the one thing that is actually broken -- a failure that blocks for the *full* per-request
-    timeout -- and says so, rather than the old, false blanket claim that nothing below 2x is retried.
-    """
-    if budget_sec is None:
-        budget_sec = default_retry_budget(timeout_sec)
-    floor = retry_admission_floor(timeout_sec)
-    if budget_sec < floor:
-        LOG.warning(
-            "--retry-budget %.0fs is below the %.0fs needed to retry a failure that blocks for the "
-            "full %.0fs request timeout (one timeout plus the first backoff), so such a failure will "
-            "NOT be retried; faster transient failures still retry until the budget is spent",
-            budget_sec,
-            floor,
-            timeout_sec,
-        )
-    return RetryPolicy(max_attempts=max_attempts, budget_sec=budget_sec)
 
 
 def main() -> int:

@@ -671,6 +671,81 @@ def test_a_workbook_whose_renders_all_landed_reports_zero_unestablished(tmp_path
     assert grouped["render_unestablished_views"] == []
 
 
+# ------------------------------------------------------------- batch identity must be unambiguous
+
+
+def test_two_captures_with_the_same_directory_NAME_stay_distinguishable(tmp_path):
+    """⚠️ Review round 2, finding 2 -- reproduced exactly, then fixed.
+
+    `run1\\oracle` and `run2\\oracle` are two captures. Labelled by `directory.name` they collapsed
+    into ONE `roots["oracle"]` pointing at whichever was read last, `batches` read
+    `["oracle", "oracle"]`, and both legs claimed indistinguishable `source_batch="oracle"` -- so an
+    older candidate could resolve its artifact against the WRONG directory, and one batch's render
+    intent could be erased. Same class as round 1's finding 2, arriving through provenance rather
+    than through merge order.
+    """
+    first = _batch(
+        tmp_path / "run1",
+        "oracle",
+        [_view(LUID, "Daily Monitoring", data="ok", image="ok", captured_at="2026-08-17T20:17:00Z")],
+        captured_at="2026-08-17T20:17:00Z",
+    )
+    second = _batch(
+        tmp_path / "run2",
+        "oracle",
+        [_view(LUID, "Daily Monitoring", data="ok", image="ok", captured_at="2026-08-18T14:46:00Z")],
+        captured_at="2026-08-18T14:46:00Z",
+    )
+    migrations = _migrations(tmp_path)
+    assert grp.run([first, second], migrations, dry_run=False) == 0
+
+    grouped = _grouped(migrations)
+    assert len(set(grouped["batches"])) == 2, f"two captures collapsed into one label: {grouped['batches']}"
+    assert grouped["views"][0]["image"]["source_batch"] == "run2/oracle", "the newer capture must win, by NAME"
+    assert set(grouped["requested_renders_by_batch"]) == {"run1/oracle", "run2/oracle"}
+
+
+def test_a_disambiguated_label_says_WHICH_capture_not_merely_that_they_differ(tmp_path):
+    """An index suffix (`oracle`, `oracle-2`) would satisfy uniqueness and destroy the point: the
+    label is provenance, and a reader has to be able to find the directory it names."""
+    labels = grp._batch_labels([tmp_path / "run1" / "oracle", tmp_path / "run2" / "oracle"])
+    assert labels == ["run1/oracle", "run2/oracle"]
+
+
+def test_unique_names_are_left_alone(tmp_path):
+    """Discriminating control: disambiguation must be the exception. Prefixing every label with its
+    parent would churn `source_batch` for every existing capture and make the common case unreadable."""
+    labels = grp._batch_labels([tmp_path / "_oracle" / "first", tmp_path / "_oracle" / "second"])
+    assert labels == ["first", "second"]
+
+
+def test_the_same_capture_given_twice_is_refused_not_deduplicated(tmp_path):
+    """Merging a batch with itself cannot add evidence, so it is a mistake worth naming rather than a
+    no-op -- and silently deduplicating would hide a mis-typed command line."""
+    only = _batch(
+        tmp_path / "_oracle",
+        "only",
+        [_view(LUID, "Daily Monitoring", data="ok", image="ok", captured_at="2026-08-18T14:46:00Z")],
+    )
+    with pytest.raises(grp.DuplicateBatchLabel) as excinfo:
+        grp.run([only, only], _migrations(tmp_path), dry_run=False)
+    assert "more than once" in str(excinfo.value)
+
+
+def test_a_duplicate_capture_exits_2_rather_than_crashing(tmp_path):
+    """The operator sees an exit code, not an exception. `main` must classify this like every other
+    unusable input."""
+    only = _batch(
+        tmp_path / "_oracle",
+        "only",
+        [_view(LUID, "Daily Monitoring", data="ok", image="ok", captured_at="2026-08-18T14:46:00Z")],
+    )
+    migrations = _migrations(tmp_path)
+    argv = ["--oracle", str(only), "--oracle", str(only), "--migrations", str(migrations)]
+    sys.argv = ["group_oracle_by_workbook.py", *argv]
+    assert grp.main() == 2
+
+
 # ------------------------------------------------------------------------------- CLI and compatibility
 
 

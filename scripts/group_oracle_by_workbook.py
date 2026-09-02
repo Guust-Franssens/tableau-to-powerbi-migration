@@ -124,6 +124,41 @@ class _Batch:
         return self.manifest.get("captured_at") or ""
 
 
+class DuplicateBatchLabel(ValueError):
+    """Two capture directories would carry the same ``source_batch`` label. Refused, never resolved."""
+
+
+def _batch_labels(oracle_dirs: list[Path]) -> list[str]:
+    """A label per directory: its NAME where that is unique, else enough of its path to separate it.
+
+    ⚠️ The label is the identity every promoted leg records as ``source_batch``, and it keys ``roots``,
+    the map a leg's artifact is resolved against. Measured before this existed: ``run1\\oracle`` and
+    ``run2\\oracle`` collapsed into ONE ``roots["oracle"]`` pointing at the second, ``batches`` read
+    ``["oracle", "oracle"]``, and two legs claimed indistinguishable provenance -- so an older
+    candidate could resolve against the wrong directory, and one batch's render intent could be
+    erased. Same failure class as review round 1's finding 2, arriving through provenance rather than
+    through merge order.
+
+    Disambiguation is by ADDING parent components, never by appending an index: an index says only
+    "these two differ", while ``run1/oracle`` says WHICH capture a reader is looking at, which is the
+    whole point of recording provenance. Two directories that resolve to the same absolute path are a
+    genuine duplicate and are REFUSED rather than silently deduplicated -- passing the same capture
+    twice is a mistake worth telling the operator about, not a no-op.
+    """
+    resolved = [directory.resolve() for directory in oracle_dirs]
+    repeated = sorted({str(path) for path in resolved if resolved.count(path) > 1})
+    if repeated:
+        raise DuplicateBatchLabel(
+            f"the same capture directory was given more than once: {', '.join(repeated)}. Each "
+            f"--oracle must name a distinct capture; merging a batch with itself cannot add evidence."
+        )
+    for depth in range(1, max((len(path.parts) for path in resolved), default=1) + 1):
+        labels = ["/".join(path.parts[-depth:]) for path in resolved]
+        if len(set(labels)) == len(labels):
+            return labels
+    raise DuplicateBatchLabel(f"cannot build distinct labels for {[str(p) for p in resolved]}")
+
+
 def normalize(name: str) -> str:
     """Match key: lowercased with every non-alphanumeric removed.
 
@@ -161,10 +196,15 @@ def load_batches(oracle_dirs: list[Path]) -> list[_Batch]:
     A missing manifest is fatal for the WHOLE run rather than skipped: silently grouping two of three
     batches would produce a merged folder that looks complete and is not, which is the exact failure
     class this script exists to make visible.
+
+    Labels come from :func:`_batch_labels`, which guarantees they are DISTINCT -- ``run1/oracle`` and
+    ``run2/oracle`` are two captures, not one, and collapsing them silently pointed every leg of both
+    at whichever directory was read last (review round 2, finding 2).
     """
+    labels = _batch_labels(oracle_dirs)
     return [
-        _Batch(directory, load_manifest(directory), directory.name, index)
-        for index, directory in enumerate(oracle_dirs)
+        _Batch(directory, load_manifest(directory), label, index)
+        for index, (directory, label) in enumerate(zip(oracle_dirs, labels, strict=True))
     ]
 
 
@@ -699,7 +739,7 @@ def main() -> int:
     args = build_parser().parse_args()
     try:
         return run(args.oracle, args.migrations, dry_run=args.dry_run)
-    except (FileNotFoundError, json.JSONDecodeError) as exc:
+    except (FileNotFoundError, json.JSONDecodeError, DuplicateBatchLabel) as exc:
         LOG.error("%s", exc)
         return 2
 

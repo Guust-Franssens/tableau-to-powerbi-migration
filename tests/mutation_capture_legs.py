@@ -67,6 +67,7 @@ from mutation_harness import (  # noqa: E402  # pylint: disable=wrong-import-pos
 
 LEGS = "tests/test_capture_tableau_oracle_leg_decoupling.py"
 BATCH = "tests/test_group_oracle_multi_batch.py"
+SOCKET = "tests/test_tableau_http_deadline.py"
 
 # name -> (the test NODE IDs that must observe it, the patch injected as a pytest plugin at startup)
 #
@@ -248,9 +249,16 @@ o.TableauSession.__init__ = init
         ),
         """
 import capture_tableau_oracle as o
+import tableau_capture_policy as p
 # The budget stops tracking the timeout: raise --rest-timeout past 360s and the deadline is already
 # spent when the first timeout returns, so it grants ZERO retries at any --max-attempts.
-o.default_retry_budget = lambda timeout_sec: o.DEFAULT_RETRY_BUDGET_SEC
+#
+# ⚠️ Patched on BOTH modules. `build_retry_policy` now lives in `tableau_capture_policy` and calls
+# ITS module-global, so patching only the `capture_tableau_oracle` re-export left the real code
+# untouched and this mutation SURVIVED after the split -- caught by running it against its own
+# anchor, which is the whole argument for per-anchor mutation runs.
+p.default_retry_budget = lambda timeout_sec: p.DEFAULT_RETRY_BUDGET_SEC
+o.default_retry_budget = p.default_retry_budget
 """,
     ),
     "clamp-an-explicit-budget": (
@@ -560,18 +568,159 @@ o._capture_renders = renders
         ),
         """
 import capture_tableau_oracle as o
+import tableau_capture_policy as p
 # Finding 4: 2x is below the admission floor for any sub-second timeout, so a full-timeout failure
-# gets ZERO retries at the DEFAULT budget -- the footgun the default exists to prevent.
-o.default_retry_budget = lambda timeout_sec: 2.0 * timeout_sec
+# gets ZERO retries at the DEFAULT budget -- the footgun the default exists to prevent. Patched on
+# both modules because the arithmetic test reads the re-export and the loop test reaches the owner.
+p.default_retry_budget = lambda timeout_sec: 2.0 * timeout_sec
+o.default_retry_budget = p.default_retry_budget
 """,
     ),
     "default-budget-collapses-to-the-floor": (
         ("tests/test_capture_tableau_oracle_leg_decoupling.py::test_the_ratio_still_dominates_at_realistic_timeouts",),
         """
 import capture_tableau_oracle as o
+import tableau_capture_policy as p
 # The opposite over-correction: taking the floor everywhere shrinks every real budget from 360s to
 # 181s while still clearing the floor, so the arithmetic test alone cannot see it.
-o.default_retry_budget = o.retry_admission_floor
+p.default_retry_budget = p.retry_admission_floor
+o.default_retry_budget = p.default_retry_budget
+""",
+    ),
+    # ------------------------------------------------- review round 2: a real bound, and real identity
+    "no-end-to-end-deadline-on-a-salvage-leg": (
+        ("tests/test_tableau_http_deadline.py::test_a_trickling_salvage_sequence_is_bounded_end_to_end",),
+        """
+import capture_tableau_oracle as o
+_orig = o._capture_render
+def render(session, view_luid, path, kind, options):
+    # Round 2's finding 1: admission alone, with no end-to-end deadline. `urllib`'s timeout bounds one
+    # socket OPERATION, so a trickling response outlives it and one admitted leg exceeds the whole
+    # budget by itself. The virtual-clock tests cannot see this; only a real socket can.
+    return _orig(session, view_luid, path, kind, o._RenderOptions(options.api, options.retry, None))
+o._capture_render = render
+""",
+    ),
+    "deadline-checked-with-read-not-read1": (
+        ("tests/test_tableau_http_deadline.py::test_the_deadline_abandons_a_trickling_body",),
+        """
+import tableau_http as h
+_orig = h._read_bounded
+def read_bounded(stream, deadline, timeout):
+    # The subtler half: keep the deadline but read with `read`, which blocks until the whole chunk
+    # has arrived -- so a small trickling body is delivered in ONE call and the clock is never
+    # consulted. Measured before the fix: 0.970s against a 0.3s deadline, i.e. the deadline did
+    # nothing while looking entirely present in the code.
+    if deadline is None:
+        return stream.read()
+    if hasattr(stream, "read1"):
+        stream = _NoRead1(stream)
+    return _orig(stream, deadline, timeout)
+class _NoRead1:
+    def __init__(self, inner):
+        self._inner = inner
+    def read(self, *args):
+        return self._inner.read(*args)
+h._read_bounded = read_bounded
+""",
+    ),
+    "abandoned-body-returned-as-a-success": (
+        ("tests/test_tableau_http_deadline.py::test_an_abandoned_body_is_a_transient_failure_never_a_partial_success",),
+        """
+import tableau_http as h
+_orig = h._read_bounded
+def read_bounded(stream, deadline, timeout):
+    # Worse than the unbounded read, because it is silent: return whatever arrived before the
+    # deadline as though the body were complete, so a truncated CSV is recorded as a 200.
+    try:
+        return _orig(stream, deadline, timeout)
+    except TimeoutError:
+        return b""
+h._read_bounded = read_bounded
+""",
+    ),
+    "deadline-covers-only-the-success-path": (
+        ("tests/test_tableau_http_deadline.py::test_an_error_body_is_bounded_too",),
+        """
+import tableau_http as h
+_orig = h._read_bounded
+_depth = {"n": 0}
+def read_bounded(stream, deadline, timeout):
+    # `HTTPError.read()` is a separate code path, reached from inside an `except` clause. A deadline
+    # applied only to the success path leaves the transport unbounded on every 4xx/5xx.
+    import http.client, urllib.error
+    if isinstance(stream, urllib.error.HTTPError):
+        return stream.read()
+    return _orig(stream, deadline, timeout)
+h._read_bounded = read_bounded
+""",
+    ),
+    "a-deadline-on-every-request-not-just-salvage": (
+        ("tests/test_tableau_http_deadline.py::test_no_deadline_leaves_every_other_caller_byte_for_byte_unchanged",),
+        """
+import tableau_http as h
+import time
+_orig = h._read_bounded
+def read_bounded(stream, deadline, timeout):
+    # Over-reach: apply a deadline even when the caller asked for none, which truncates the DATA leg
+    # -- a real export streaming legitimately slowly -- and silently shrinks every capture.
+    return _orig(stream, deadline if deadline is not None else time.monotonic() + timeout, timeout)
+h._read_bounded = read_bounded
+""",
+    ),
+    "batch-label-is-the-directory-name": (
+        (
+            "tests/test_group_oracle_multi_batch.py"
+            "::test_two_captures_with_the_same_directory_NAME_stay_distinguishable",
+        ),
+        """
+import group_oracle_by_workbook as g
+# Round 2's finding 2: two captures at run1/oracle and run2/oracle collapse into one label, one
+# `roots` entry, and indistinguishable provenance.
+g._batch_labels = lambda dirs: [d.name for d in dirs]
+""",
+    ),
+    "batch-labels-disambiguated-by-index": (
+        (
+            "tests/test_group_oracle_multi_batch.py"
+            "::test_a_disambiguated_label_says_WHICH_capture_not_merely_that_they_differ",
+        ),
+        """
+import group_oracle_by_workbook as g
+def labels(dirs):
+    # Unique, and useless as provenance: `oracle`, `oracle-2` says only THAT they differ, never which
+    # directory a reader should open.
+    seen, out = {}, []
+    for d in dirs:
+        seen[d.name] = seen.get(d.name, 0) + 1
+        out.append(d.name if seen[d.name] == 1 else f"{d.name}-{seen[d.name]}")
+    return out
+g._batch_labels = labels
+""",
+    ),
+    "every-label-prefixed-whether-or-not-it-collides": (
+        ("tests/test_group_oracle_multi_batch.py::test_unique_names_are_left_alone",),
+        """
+import group_oracle_by_workbook as g
+_orig = g._batch_labels
+# The opposite over-reach: prefix everything, churning `source_batch` for every existing capture.
+g._batch_labels = lambda dirs: ["/".join(d.resolve().parts[-2:]) for d in dirs]
+""",
+    ),
+    "the-same-capture-twice-is-silently-deduplicated": (
+        ("tests/test_group_oracle_multi_batch.py::test_the_same_capture_given_twice_is_refused_not_deduplicated",),
+        """
+import group_oracle_by_workbook as g
+_orig = g.load_batches
+def load(dirs):
+    seen, unique = set(), []
+    for d in dirs:
+        key = str(d.resolve())
+        if key not in seen:
+            seen.add(key)
+            unique.append(d)
+    return _orig(unique)
+g.load_batches = load
 """,
     ),
     # -------------------------------------------------------------- discriminating controls
@@ -634,7 +783,7 @@ def verify_anchors() -> list[str]:
     that never ran. This is the same false-green shape the shared harness's own docstring records.
     """
     collected: set[str] = set()
-    for suite in (LEGS, BATCH):
+    for suite in (LEGS, BATCH, SOCKET):
         proc = subprocess.run(
             [PY, "-m", "pytest", suite, "--collect-only", "-q", "--no-header", "--color=no"],
             cwd=ROOT,

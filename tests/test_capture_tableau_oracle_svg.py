@@ -75,7 +75,7 @@ class _Session(oracle.TableauSession):
         self.paths: list[str] = []
         self.token, self.site_id = "tok", "sid"
 
-    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None):  # noqa: ARG002
+    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None, deadline=None):  # noqa: ARG002
         self.paths.append(path)
         for suffix, (status, payload) in self.responses.items():
             if path.endswith(suffix):
@@ -546,7 +546,7 @@ class _ProbeSession(oracle.TableauSession):
         self.probed: list[tuple[str, str]] = []
         self.token, self.site_id = "tok", "sid"
 
-    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None):  # noqa: ARG002
+    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None, deadline=None):  # noqa: ARG002
         luid, route = path.split("/views/")[1].split("/", 1)
         self.probed.append((luid, route))
         return (*self.responses[(luid, route)], {})
