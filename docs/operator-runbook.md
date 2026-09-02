@@ -730,6 +730,20 @@ What to check in the output:
   genuinely unattributable, correctly left out.
 - **`oracle/` is layout/text grade only** — default view state, no `?vf_` pinning. Record that ceiling
   in `limitations_encountered`; a visual PASS signed off on it alone is overstated.
+- **A `.png` and a `.svg` of the same object are different evidence, not duplicates.** The PNG is the
+  one leg an agent can *look at*; the SVG is a **greppable data oracle** whose `<text>` elements carry
+  the real label and value strings, so exact figures read out with no OCR — measured on this estate's
+  `HR | Summary` dashboard, **122 `<text>` elements** including `Human Resources Dashboard`,
+  `Active Employees` and `7,984`. ⚠️ Not universal: a chart whose labels render as paths carries
+  **zero** (measured: `Hired By Year`, `Age Groups`, `Education Levels`), so absence of text is not
+  absence of content — fall back to the PNG.
+- **Three files in the package are load-bearing rather than incidental**, and the package's own
+  `README.md` now names them: `report.json` (this unit's engine classification — what earns a
+  datasource-only unit its `NOT_APPLICABLE`), `source-provenance.json` (the only trusted route to a
+  workbook LUID; read `origin.match` before trusting a render) and `engine-output-receipt.json`
+  (`engine.version`, so version drift stays checkable). ⚠️ All three are **scoped to this unit**:
+  `report.json` in particular is rebuilt from an allowlist, so a package names one unit and no other
+  — do not read it as an estate census.
 
 ### Step 6 — deploy
 

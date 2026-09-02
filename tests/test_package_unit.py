@@ -642,6 +642,84 @@ def test_the_scoped_report_still_declares_both_collections_as_lists(tmp_path: Pa
     assert [entry["name"] for entry in scoped["workbooks"]] == [UNIT]
 
 
+# --------------------------------------------------------------------------------------------
+# 4b. the generated README as the package MAP (round-1 findings 2 and 3)
+#
+# Both findings were prose drifting from code, in opposite directions, and both are fail-CLOSED: an
+# agent believes the README, cannot find what it names, and concludes the package is broken.
+#
+# * finding 2 - the README and the module layout comment said `dashboards/` and `worksheets/`; the
+#   code emits `object_identity`'s KIND_* values, which are SINGULAR. The code is right (`Path(kind)`,
+#   and the committed tests above assert `worksheet/data/Sales.csv`), so the prose was fixed.
+# * finding 3 - the table presented itself as the package map while omitting `report.json`,
+#   `source-provenance.json` and `engine-output-receipt.json`, all three of which ship in every
+#   package and are load-bearing rather than incidental.
+#
+# So the guard is derived from the package the code ACTUALLY writes, never from a second hand-kept
+# list - a list would drift exactly as the prose did.
+# --------------------------------------------------------------------------------------------
+
+
+def _package_with_receipt(tmp_path: Path) -> Path:
+    """A package carrying every artifact the packager can emit, including the engine receipt."""
+    bundle, oracle = _bundle(tmp_path)
+    emitted = bundle / "pbip" / UNIT / f"{UNIT}.Report" / "definition" / "report.json"
+    emitted.parent.mkdir(parents=True, exist_ok=True)
+    emitted.write_text("{}", encoding="utf-8")
+    (bundle / "engine-output-receipt.json").write_text(
+        json.dumps({"version": 1, "engine": {"version": "2.339.0"}, "artifacts": []}), encoding="utf-8"
+    )
+    _package(tmp_path, bundle, oracle)
+    return _out(tmp_path) / UNIT
+
+
+def test_the_generated_readme_names_every_file_the_package_contains(tmp_path: Path) -> None:
+    """Finding 3: three files shipped in every package and appeared nowhere in its own map."""
+    root = _package_with_receipt(tmp_path)
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    shipped = sorted(path.name for path in root.iterdir() if path.name != "README.md")
+    missing = [name for name in shipped if name not in readme]
+    assert missing == [], f"shipped but unnamed in the package's own README: {missing}"
+    for load_bearing in ("report.json", "source-provenance.json", "engine-output-receipt.json"):
+        assert load_bearing in shipped
+
+
+def test_the_readme_names_the_oracle_kinds_exactly_as_the_code_emits_them(tmp_path: Path) -> None:
+    """Finding 2: the directory IS `object_identity`'s kind value, so a pluralised copy is wrong."""
+    root = _package_with_receipt(tmp_path)
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    emitted = {path.name for path in (root / "oracle").iterdir() if path.is_dir()}
+    assert emitted, "the fixture must emit at least one kind directory or this proves nothing"
+    assert emitted <= set(pkg.KIND_DIRS)
+    for kind in sorted(emitted):
+        assert f"`{kind}/`" in readme, f"the README does not name the emitted directory {kind}/"
+    assert "dashboards/" not in readme
+    assert "worksheets/" not in readme
+
+
+def test_the_module_layout_comment_names_the_oracle_kinds_the_code_emits() -> None:
+    """The same drift, in the other documented copy - `package_unit.py`'s own layout sketch."""
+    doc = pkg.__doc__ or ""
+    assert "dashboards/{images,data}" not in doc
+    assert "worksheets/{images,data}" not in doc
+    for kind in pkg.KIND_DIRS:
+        assert f"{kind}/{{images,data}}" in doc, f"the layout comment does not name {kind}/"
+
+
+def test_the_readme_separates_the_png_and_svg_evidence_legs(tmp_path: Path) -> None:
+    """They are different evidence, not duplicates: the PNG is looked at, the SVG is grepped.
+
+    Measured on this estate's `HR | Summary` capture: the SVG carries **122** `<text>` elements
+    including `Human Resources Dashboard`, `Active Employees` and `7,984`, so exact values are
+    readable with no OCR - while three of the same workbook's worksheets carry **zero**, because
+    their labels render as paths. An agent told only "renders" picks one and loses half the evidence.
+    """
+    readme = (_package_with_receipt(tmp_path) / "README.md").read_text(encoding="utf-8")
+    assert "not duplicates" in readme
+    assert "`.png`" in readme and "`.svg`" in readme
+    assert "122" in readme
+
+
 def test_the_scoped_receipt_names_files_that_exist_in_the_package(tmp_path: Path) -> None:
     """Re-rooted `pbip/<unit>/` -> `fabric/`, so the receipt attests to what is actually here."""
     bundle, oracle = _bundle(tmp_path)

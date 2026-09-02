@@ -25,9 +25,9 @@ This script emits a folder both gates accept with NO flags:
         handover.md                  <- flat, one-finding-per-line, emptied visuals FIRST
         oracle/
             oracle-manifest.json     <- THIS unit's views only, paths rewritten
-            dashboards/{images,data}/<Object>.<ext>
-            worksheets/{images,data}/<Object>.<ext>
-            unknown/{images,data}/<Object>.<ext>   <- carried but MARKED, never filed as either kind
+            dashboard/{images,data}/<Object>.<ext>   <- SINGULAR: the directory is object_identity's
+            worksheet/{images,data}/<Object>.<ext>      KIND_* value verbatim, never a pluralised copy
+            unknown/{images,data}/<Object>.<ext>     <- carried but MARKED, never filed as either kind
         package-manifest.json        <- what was packaged, and every omission with its reason
         README.md
 
@@ -700,13 +700,28 @@ against this folder with **no flags**:
 | `fabric/` | the engine WORKING COPY - edit here. The pristine baseline stays in `<bundle>/reports/`. |
 | `assets/` | the Tableau source this was built from |
 | `migration-spec.json` | the parsed source; the expected page set both gates grade against |
-| `oracle/` | this unit's Tableau reference, split `dashboards/` vs `worksheets/` vs `unknown/` |
+| `oracle/` | this unit's Tableau reference, split `dashboard/` vs `worksheet/` vs `unknown/` (**singular** - the directory is the object kind, not a plural) |
+| `report.json` | **gate input, and readable.** The engine's own classification of THIS unit - workbook vs datasource - which is what earns a datasource-only unit its `NOT_APPLICABLE` instead of a finding. Scoped: it names this unit and no other. |
+| `source-provenance.json` | **gate input.** The only trusted route from this package's asset to a Tableau workbook LUID, keyed by the asset's sha256. Read `origin.match` before trusting a render: `sha256` means local and server bytes agree, `name_only` means they DIFFER. |
+| `engine-output-receipt.json` | **read `engine.version` when a result looks wrong.** It establishes which engine built this, so version drift stays checkable months later; its `artifacts[]` hashes name files in *this* package. |
 | `package-manifest.json` | what was packaged, and every omission with its reason |
 
 `oracle/` is **layout/text grade only**: an oracle capture is taken in the view's default state with
 no `?vf_` filter pinning, so a visual PASS signed off on it alone is overstated. Renders present here
 are not a claim of byte-faithfulness either - see `ORACLE_ATTRIBUTION ... match=` in `handover.md`,
 and record the ceiling in `limitations_encountered`.
+
+⚠️ **A PNG and an SVG of the same object are DIFFERENT EVIDENCE, not duplicates - do not pick one.**
+
+* the **`.png` is the visual oracle**: the only leg an agent can actually look at to judge layout,
+  colour and chart type.
+* the **`.svg` is a greppable DATA oracle**: its `<text>` elements carry the real label and value
+  strings, so exact figures are readable with no OCR and no judgement. Measured on this estate's
+  `HR | Summary` dashboard - **122 `<text>` elements**, including `Human Resources Dashboard`,
+  `Active Employees` and `7,984`.
+* ⚠️ but an SVG is not universally a data oracle: a chart whose labels render as paths carries
+  **zero** `<text>` elements (measured: `Hired By Year`, `Age Groups`, `Education Levels`). Absence of
+  text is not absence of content - fall back to the PNG.
 """
 
 
