@@ -604,6 +604,31 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
         ["test_multiplicity_preserving_functions_never_slug_into_a_set"],
     ),
     (
+        "DISCLOSURE: the #438 caveat fires unconditionally, so it becomes a banner nobody reads",
+        "    certified = [row[\"page\"][\"name\"] for row in rows if row[\"visual\"] or row[\"numeric\"]]",
+        "    certified = [row[\"page\"][\"name\"] for row in rows] or [\"any\"]",
+        ["test_a_run_that_certified_nothing_prints_no_caveat"],
+    ),
+    (
+        "DISCLOSURE: the #438 caveat stops naming the pages it applies to",
+        "            f\"depicts, so treat their PASS as unconfirmed where a worksheet shares the page's name: \"\n"
+        "            f\"{names}{more}\"",
+        "            f\"depicts.\"",
+        ["test_a_certified_page_carries_the_kind_caveat_naming_it"],
+    ),
+    (
+        "DISCLOSURE: loose workbook attribution is no longer tracked, so its caveat never fires",
+        "            loosely_attributed.append(record.workbook)",
+        "            pass",
+        ["test_a_loosely_attributed_workbook_adds_its_own_caveat"],
+    ),
+    (
+        "DISCLOSURE: the caveats never reach the rendered output",
+        '        lines.extend(f"                    {caveat}" for caveat in check.get("known_gap_caveats", []))',
+        "        pass",
+        ["test_the_caveats_reach_the_rendered_cli_output"],
+    ),
+    (
         f"{NEGATIVE_CONTROL}: a no-op comment edit must SURVIVE",
         "# Where a dropped page's declared reason is read from.",
         "# Harness negative control - a comment edit that changes no behaviour.",
@@ -618,11 +643,20 @@ _FAILED = re.compile(r"(\d+) failed")
 
 
 def run_anchor(names: list[str]) -> tuple[str, str]:
-    """Run only the anchor tests; return (verdict, note)."""
+    """Run only the anchor tests; return (verdict, note).
+
+    ⚠️ ``encoding="utf-8"`` is load-bearing on Windows. ``text=True`` alone decodes the child's stdout
+    with the console codepage (cp1252 here), which raises ``UnicodeDecodeError`` the moment a failing
+    assertion prints a non-Latin-1 character - and the gate's own ``⚠️`` caveats do exactly that. The
+    harness then reported BROKEN with no output, which is at least fail-closed rather than a false
+    CAUGHT, but it made every emoji-carrying assertion structurally unmutatable.
+    """
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", *[str(suite) for suite in SUITES], "-q", "-k", " or ".join(names)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
         cwd=REPO_ROOT,
     )

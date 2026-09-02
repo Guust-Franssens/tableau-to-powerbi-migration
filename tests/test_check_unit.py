@@ -3374,3 +3374,78 @@ def test_a_report_and_its_model_sharing_a_stem_are_one_owner_not_a_collision(tmp
     assert exact == {"Book!"}
     assert slugged == ["book"]
     assert cu.page_drop_explanations(tmp_path)["bound_workbooks"] == ["Book?"]
+
+
+# --- known-gap disclosure (issue #438) --------------------------------------------------------
+# ⚠️ These tests exist BECAUSE the gap is shipped unfixed. They are a tripwire, not a feature: when
+# #438 lands, oracle evidence will carry a kind and the workbook guard will be two-sided, and these
+# tests MUST be deleted along with `_oracle_caveats`. A failing test here after that fix is the
+# expected signal to remove the disclosure - not a regression to work around.
+
+
+def test_a_certified_page_carries_the_kind_caveat_naming_it(tmp_path: Path) -> None:
+    """An operator reading a PASS must be told WHICH page's PASS is unconfirmed, by name."""
+    _write_spec(tmp_path, ["Sales"])
+    _write_report(tmp_path, ["Sales"])
+    _write_reference_manifest(tmp_path, ["Sales"])
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["status"] == cu.STATUS_PASS
+    caveats = oracle["known_gap_caveats"]
+    assert len(caveats) == 1
+    assert "#438" in caveats[0]
+    assert "KIND NOT ESTABLISHED" in caveats[0]
+    assert "'Sales'" in caveats[0], "the caveat must name the page, not disclaim generically"
+
+
+def test_a_run_that_certified_nothing_prints_no_caveat(tmp_path: Path) -> None:
+    """Kills a generic disclaimer: with no page certified, nothing is at risk and nothing is said.
+
+    This is the clause that makes the caveat worth reading. A banner on every run - loudest on the
+    runs where no evidence counted - is noise an operator learns to skip past.
+    """
+    _write_spec(tmp_path, ["Sales"])
+    _write_report(tmp_path, ["Sales"])
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["visual_present"] == 0
+    assert oracle["known_gap_caveats"] == []
+
+
+def test_a_loosely_attributed_workbook_adds_its_own_caveat(tmp_path: Path) -> None:
+    """The second half of #438: uniqueness was checked on one side of the workbook join only."""
+    _write_spec(tmp_path, ["Sales"])
+    _write_report(tmp_path, ["Sales"], name="Bo ok")
+    _write_oracle_manifest(tmp_path, ["Sales"], workbook="Bo-ok")
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    caveats = oracle["known_gap_caveats"]
+    assert len(caveats) == 2
+    assert any("WORKBOOK MATCHED LOOSELY" in caveat and "'Bo-ok'" in caveat for caveat in caveats)
+
+
+def test_an_exactly_attributed_workbook_adds_no_workbook_caveat(tmp_path: Path) -> None:
+    """An exact workbook match is not affected by the one-sided guard, so it must not be flagged."""
+    _write_spec(tmp_path, ["Sales"])
+    _write_report(tmp_path, ["Sales"])
+    _write_oracle_manifest(tmp_path, ["Sales"], workbook="Book")
+
+    caveats = cu.check_oracle_coverage(tmp_path, None, None)["known_gap_caveats"]
+
+    assert len(caveats) == 1
+    assert all("WORKBOOK MATCHED LOOSELY" not in caveat for caveat in caveats)
+
+
+def test_the_caveats_reach_the_rendered_cli_output(tmp_path: Path) -> None:
+    """A payload key nobody prints is not a disclosure."""
+    _write_spec(tmp_path, ["Sales"])
+    _write_report(tmp_path, ["Sales"])
+    _write_reference_manifest(tmp_path, ["Sales"])
+
+    rendered = cu.render(cu.run_all(tmp_path, scope=cu.SCOPE_REPORT))
+
+    assert "#438 KIND NOT ESTABLISHED" in rendered
+    assert "'Sales'" in rendered
