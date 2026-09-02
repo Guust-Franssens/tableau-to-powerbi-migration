@@ -1853,8 +1853,9 @@ def _oracle_capture_oracles(target: Path, oracle_dir: Path | None) -> tuple[list
                 OracleRecord(
                     name=str(record.get("view_name") or record.get("view_url_name") or ""),
                     kind=(
-                        str(record.get("view_type"))
-                        if record.get("view_type") in {tableau_view_types.DASHBOARD, tableau_view_types.WORKSHEET}
+                        record["view_type"]
+                        if isinstance(record.get("view_type"), str)
+                        and record["view_type"] in {tableau_view_types.DASHBOARD, tableau_view_types.WORKSHEET}
                         else tableau_view_types.UNKNOWN
                     ),
                     workbook=_declared_workbook(record) or _declared_workbook(payload),
@@ -1882,6 +1883,7 @@ class OracleEvidence:
 
     by_exact: dict[str, list[OracleRecord]]
     by_normalized: dict[str, list[OracleRecord]]
+    expected_exact: dict[tuple[str, str], int]
     expected_normalized: dict[tuple[str, str], int]
     unattributed: int
     foreign: tuple[str, ...]
@@ -1890,7 +1892,10 @@ class OracleEvidence:
         """``(record, refusal)`` for one expected page. At most one of the two is ever set."""
         exact = [record for record in self.by_exact.get(page["name"], []) if record.kind == page["kind"]]
         if len(exact) == 1:
-            return exact[0], None
+            expected_count = self.expected_exact.get((page["kind"], page["name"]), 0)
+            if expected_count == 1:
+                return exact[0], None
+            return None, f"an exact match for {page['name']!r} is not unique ({expected_count} expected page(s))"
         if exact:
             return None, f"{len(exact)} producer records are named {page['name']!r}"
         key = _slug(page["name"])
@@ -1927,14 +1932,17 @@ def _resolve_oracle_evidence(
     for record in admissible:
         by_exact.setdefault(record.name, []).append(record)
         by_normalized.setdefault(_slug(record.name), []).append(record)
+    expected_exact: dict[tuple[str, str], int] = {}
     expected_normalized: dict[tuple[str, str], int] = {}
     for page in candidates:
+        exact = (page["kind"], page["name"])
+        expected_exact[exact] = expected_exact.get(exact, 0) + 1
         key = _slug(page["name"])
-        identity = (page["kind"], key)
-        expected_normalized[identity] = expected_normalized.get(identity, 0) + 1
+        expected_normalized[(page["kind"], key)] = expected_normalized.get((page["kind"], key), 0) + 1
     return OracleEvidence(
         by_exact=by_exact,
         by_normalized=by_normalized,
+        expected_exact=expected_exact,
         expected_normalized=expected_normalized,
         unattributed=unattributed,
         foreign=tuple(sorted(set(foreign))),
@@ -2008,11 +2016,11 @@ def _oracle_grade(grades: set[str], evidence: OracleEvidence) -> str:
 
 def _oracle_row(page: dict[str, Any], index: Any, evidence: OracleEvidence) -> dict[str, Any]:
     """Coverage for one expected page. A contested name or an ambiguous match takes no evidence."""
-    contested = _claim(index, page["name"]).outcome != oid.UNIQUE
-    record, refusal = (None, None) if contested else evidence.evidence_for(page)
+    _ = index
+    record, refusal = evidence.evidence_for(page)
     return {
         "page": page,
-        "contested": contested,
+        "contested": refusal is not None,
         "refusal": refusal,
         "visual": bool(record and record.visual),
         "numeric": bool(record and record.numeric),

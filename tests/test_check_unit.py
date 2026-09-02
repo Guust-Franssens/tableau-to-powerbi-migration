@@ -150,7 +150,7 @@ def _write_oracle_manifest(
     images: bool = True,
     data: bool = True,
     workbook: str | None = "Book",
-    view_type: str = "dashboard",
+    view_type: object = "dashboard",
 ) -> None:
     records = []
     for index, name in enumerate(names):
@@ -453,11 +453,8 @@ def test_two_same_named_candidates_cannot_share_one_rendered_page(tmp_path: Path
     assert parity["status"] == cu.STATUS_PRECONDITION_FAILED
 
 
-def test_one_oracle_row_cannot_cover_two_same_named_candidates(tmp_path: Path) -> None:
-    """The same rule on the oracle side: contested names take no evidence at all.
-
-    One reference row named 'Sales' was counted as 2-of-2 coverage for a dashboard AND a worksheet.
-    """
+def test_typed_oracle_evidence_covers_only_its_same_named_kind(tmp_path: Path) -> None:
+    """Dashboard evidence does not cover a same-named worksheet."""
     _write_full_spec(tmp_path, dashboards=[("Sales", [])], worksheets=[("ws.sales", "Sales")])
     _write_report(tmp_path, ["Sales"])
     _write_reference_manifest(tmp_path, ["Sales"])
@@ -465,8 +462,9 @@ def test_one_oracle_row_cannot_cover_two_same_named_candidates(tmp_path: Path) -
     oracle = cu.check_oracle_coverage(tmp_path, None, None)
 
     assert oracle["pages"] == 2
-    assert oracle["visual_present"] == 0, "one picture cannot prove two different objects"
-    assert oracle["contested_names"] == ["Sales", "Sales"]
+    assert oracle["visual_present"] == 1
+    assert [page["kind"] for page in oracle["visual_missing"]] == ["worksheet"]
+    assert oracle["contested_names"] == []
     assert oracle["status"] == cu.STATUS_NOT_CHECKED
 
 
@@ -490,7 +488,7 @@ def test_oracle_evidence_requires_a_matching_object_kind(tmp_path: Path) -> None
     assert worksheet_capture["status"] == cu.STATUS_NOT_CHECKED
     assert worksheet_capture["visual_present"] == 0
 
-    _write_oracle_manifest(tmp_path, ["Sales"], view_type="unknown")
+    _write_oracle_manifest(tmp_path, ["Sales"], view_type=[])
     unknown_capture = cu.check_oracle_coverage(tmp_path, None, None)
     assert unknown_capture["status"] == cu.STATUS_NOT_CHECKED
     assert unknown_capture["visual_present"] == 0
