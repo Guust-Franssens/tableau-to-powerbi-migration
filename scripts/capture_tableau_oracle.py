@@ -725,9 +725,11 @@ def _capture_renders(
     So salvage costs at most ``SALVAGE_BUDGET_MULTIPLIER x`` the request timeout of admission plus a
     small settling margin, whatever the tier count -- one timeout in practice, since reaching the
     second admission needs the first leg to fail almost instantly. What remains unbounded is name
-    resolution, which happens before there is a socket to abort.
+    resolution, which happens before there is a socket to abort. ⚠️ It is the ONLY residual now, but
+    it was not when that was first written: the proxy ``CONNECT`` exchange and TLS setup were
+    unbounded too, and saying "only DNS" made them invisible.
 
-    ⚠️ **Three earlier statements of this bound were wrong, differently, and all three are worth
+    ⚠️ **FOUR earlier statements of this bound were wrong, differently, and all four are worth
     keeping.** A flat "one timeout" ignored that nothing capped the legs collectively and that a
     ``session_lost`` on a one-attempt leg triggered a full ``sign_in`` on the SESSION policy (now
     refused on the final attempt -- see :meth:`TableauSession.export`). A "hard 2x" rested on a
@@ -736,6 +738,9 @@ def _capture_renders(
     thing it measured and structurally could not fail. Then ``admission + one socket timeout`` was
     still wrong, because the deadline covered only the BODY: every real-socket test sent its headers
     instantly and trickled only the body, so the fixture could not reach the phase that was unbound.
+    Then the watchdog was armed **after** the connection sequence, so a proxy trickling its
+    ``CONNECT`` response ran for **1.241s against a 0.20s ceiling** with the timer not yet started --
+    and no fixture tunnelled or negotiated TLS, so once again nothing could reach it.
     The pattern each time was the same, and it is the question to ask of any bound here: **what can
     the control not see?**
 

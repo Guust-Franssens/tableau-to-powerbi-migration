@@ -740,10 +740,13 @@ h._open = lambda req, timeout, deadline: urllib.request.urlopen(req, timeout=tim
         ("tests/test_tableau_http_deadline.py::test_slow_HEADERS_are_bounded_by_the_deadline_too",),
         """
 import tableau_http as h
-# The subtler half, and it is platform behaviour rather than logic: `close()` decrements a handle and
-# does NOT interrupt a peer-blocked recv on Windows. Measured with close(): the timer fired, the
-# header read still ran to completion, 0.878s against a 0.15s deadline. Only shutdown(SHUT_RDWR)
-# tears the connection down in both directions.
+# `close` alone. ⚠️ The original comment here explained this as "close does not interrupt a
+# peer-blocked recv on Windows", which is FALSE as a general statement -- re-measured, close alone
+# aborts a bare recv in 0.254s while shutdown alone does not. The real asymmetry is the stream: a
+# `makefile()` read (how http.client takes the status line and headers) defers the underlying close
+# through `SocketIO`'s refcount, so against a trickling peer shutdown aborts in 0.257s and close
+# does not abort at all. Both calls are load-bearing, in phases that do not overlap; the bare-recv
+# half is pinned by `abort-drops-close-so-a-bare-recv-runs-on`.
 def abort(sock):
     try:
         sock.close()
@@ -825,6 +828,52 @@ def read_bounded(stream, deadline, timeout):
     result = _orig(stream, deadline, timeout)
     raise TimeoutError("a complete body cannot be assumed here")
 h._read_bounded = read_bounded
+""",
+    ),
+    "watchdog-armed-after-the-connection-sequence": (
+        (
+            "tests/test_tableau_http_deadline.py::test_a_proxy_that_trickles_its_CONNECT_response_is_bounded",
+            "tests/test_tableau_http_deadline.py::test_the_watchdog_is_armed_before_TLS_negotiation",
+        ),
+        """
+import tableau_http as h
+def connect(self):
+    # Round 4, finding 1: arm only once the whole connection sequence is done. With the corrected
+    # HTTPS MRO that `super()` is `HTTPSConnection.connect`, so TCP setup, the proxy CONNECT
+    # exchange and the entire TLS handshake run outside the watchdog.
+    super(h._DeadlineHTTPConnection, self).connect()
+    self._t2p_armed_sock = self.sock
+    self._t2p_timer = h._arm_watchdog(self.sock, self._t2p_deadline)
+h._DeadlineHTTPConnection.connect = connect
+""",
+    ),
+    "watchdog-not-repointed-when-tls-replaces-the-socket": (
+        ("tests/test_tableau_http_deadline.py::test_the_watchdog_is_armed_before_TLS_negotiation",),
+        """
+import tableau_http as h
+def rearm(self):
+    # Arming early WITHOUT re-pointing trades one blind phase for a later one: `wrap_socket`
+    # detaches the raw socket, so the early watchdog is inert from the handshake onwards -- which
+    # is where the status line, the headers and the body are read.
+    return None
+h._DeadlineHTTPConnection._rearm_if_the_socket_was_replaced = rearm
+""",
+    ),
+    "abort-drops-shutdown-so-a-trickling-stream-runs-on": (
+        ("tests/test_tableau_http_deadline.py::test_the_abort_covers_a_bare_recv_not_only_a_makefile_stream",),
+        """
+import socket
+import tableau_http as h
+def abort(sock):
+    # ⚠️ A NEGATIVE-CONTROL pairing, not a duplicate: `watchdog-closes-instead-of-shutting-down`
+    # drops `shutdown` and is killed by the makefile-stream anchor; this drops `close` and must be
+    # killed by the bare-recv anchor. Either alone would let half of `_abort_socket` be deleted
+    # unnoticed, because every other socket test in the file reads through `makefile()`.
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+h._abort_socket = abort
 """,
     ),
     # -------------------------------------------------------------- discriminating controls

@@ -152,7 +152,12 @@ SALVAGE_RETRY = RetryPolicy(max_attempts=1, budget_sec=0.0)
 # timeout leaves too little for a second. The ADMISSION ceiling is hard and independent of tier
 # count; the WALL-CLOCK ceiling is that plus one socket timeout, because each salvage leg also
 # carries this instant as an end-to-end deadline into the transport, where a watchdog aborts the
-# connection in ANY phase -- connect, status line, headers, body. Admission alone would not bound wall
+# connection in ANY phase -- connect, proxy CONNECT, status line, headers, body. ⚠️ "Any phase" is
+# true only because the watchdog is armed the instant the raw socket exists; arming it after the
+# connection sequence, as it was, left a trickling proxy running 1.241s against a 0.20s ceiling. The
+# TLS handshake is the one phase bounded by the socket timeout instead, and measurably does not need
+# the watchdog: `SSLSocket` applies the timeout to the handshake as a whole, so a well-formed
+# trickling record was refused at 0.204s on a 0.2s timeout. Admission alone would not bound wall
 # clock at all: `urllib`'s timeout is per socket OPERATION, so neither a trickling body (HTTP 200 at
 # 4.8x) nor trickling headers (1.378s against a 0.15s deadline) ever trip it.
 SALVAGE_BUDGET_MULTIPLIER = 2.0

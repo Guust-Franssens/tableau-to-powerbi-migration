@@ -616,3 +616,191 @@ def _render_without_deadline(original):
         return original(session, view_luid, path, kind, oracle._RenderOptions(options.api, options.retry, None))
 
     return render
+
+
+# ---------------------------------------------------------------------------------------------
+# Review round 4, finding 1: the watchdog was armed AFTER proxy tunnelling and TLS setup.
+#
+# ⚠️ The point of this whole section is not the assertions -- it is that no fixture above can
+# REACH these phases. The slow-header server proves the phase after the connection is bounded;
+# it arms the timer the instant plain TCP is up and never tunnels or negotiates. So a defect in
+# the connection sequence itself was invisible to all eight of them, for the third round running:
+# body-bounded (headers sent instantly), MRO (every fixture is HTTP), arming point (nothing
+# reaches TLS or a proxy). A fixture that cannot produce the failure mode cannot refute it.
+# ---------------------------------------------------------------------------------------------
+
+PROXY_ESTABLISHED = "HTTP/1.1 200 Connection established\r\n\r\n"
+
+
+def _serve_trickling_proxy(listener: socket.socket) -> None:
+    """A proxy that answers CONNECT one byte at a time, each byte inside the socket timeout.
+
+    This is the reviewer''s measured reproduction: `_tunnel()` reads the proxy''s response through
+    `makefile()`, so the per-operation timeout never fires and the exchange runs unbounded.
+    """
+    conn, _addr = listener.accept()
+    try:
+        conn.recv(4096)  # the CONNECT request line and its headers
+        for char in PROXY_ESTABLISHED:
+            time.sleep(HEADER_GAP_SEC)
+            conn.sendall(char.encode())
+    except OSError:
+        pass  # the client aborted at its deadline, which is the behaviour under test
+    finally:
+        conn.close()
+
+
+def _listening(server) -> tuple[str, int]:
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    threading.Thread(target=server, args=(listener,), daemon=True).start()
+    return listener
+
+
+@pytest.fixture(name="trickling_proxy")
+def _trickling_proxy():
+    listener = _listening(_serve_trickling_proxy)
+    try:
+        yield "127.0.0.1", listener.getsockname()[1]
+    finally:
+        listener.close()
+
+
+def _tunnel_through(proxy: tuple[str, int], deadline: float | None) -> float:
+    """Open a tunnelled connection through `proxy`, returning how long the attempt took."""
+    host, port = proxy
+    factory = (
+        th._DeadlineHTTPConnection if deadline is None else th._with_deadline(th._DeadlineHTTPConnection, deadline)
+    )
+    conn = factory(host, port, timeout=SOCKET_TIMEOUT_SEC)
+    conn.set_tunnel("example.invalid", 443)
+    started = time.monotonic()
+    try:
+        conn.connect()
+    except (OSError, http.client.HTTPException):
+        pass  # an abandoned tunnel, which is what a bounded connect looks like
+    finally:
+        elapsed = time.monotonic() - started
+        conn.close()
+    return elapsed
+
+
+def test_a_proxy_that_trickles_its_CONNECT_response_is_bounded(trickling_proxy):
+    """⚠️ Round 4, finding 1 -- reproduced and fixed. Measured 1.241s against a 0.20s ceiling.
+
+    `connect()` armed the watchdog only after `super().connect()` returned, and with the corrected
+    HTTPS MRO that `super()` is `HTTPSConnection.connect`: TCP setup, the proxy CONNECT exchange and
+    the entire TLS handshake ran outside it, with `timer_armed = False` throughout.
+    """
+    elapsed = _tunnel_through(trickling_proxy, time.monotonic() + DEADLINE_SEC)
+
+    assert elapsed < DEADLINE_SEC + SOCKET_TIMEOUT_SEC + GAP_SEC * 4, (
+        f"the proxy exchange ran past the deadline: {elapsed:.3f}s against {DEADLINE_SEC}s"
+    )
+
+
+def test_a_trickling_proxy_is_UNBOUNDED_without_the_deadline(trickling_proxy):
+    """The discriminating control. Without a deadline the same proxy runs to completion, so the bound
+    above is attributable to the watchdog rather than to the fixture finishing quickly on its own."""
+    elapsed = _tunnel_through(trickling_proxy, None)
+
+    assert elapsed > DEADLINE_SEC * 2, (
+        f"the tunnel completed in {elapsed:.3f}s, too fast to show the deadline is doing the work"
+    )
+
+
+def _serve_idle(listener: socket.socket) -> None:
+    """Accept one connection and hold it open, sending nothing. Enough to reach the TLS phase."""
+    conn, _addr = listener.accept()
+    time.sleep(5.0)
+    conn.close()
+
+
+class _RecordingContext:
+    """Stands in for the SSL context, so the TLS phase is reachable without a certificate.
+
+    ⚠️ It records whether the watchdog was ALREADY armed when TLS negotiation began -- which is the
+    claim under test, and the one thing `test_the_https_twin_resolves_connect_to_the_watchdog` cannot
+    show. That test proves WHICH `connect` runs; this proves WHEN its watchdog is armed.
+    """
+
+    def __init__(self, replacement: socket.socket) -> None:
+        self.connection = None
+        self.replacement = replacement
+        self.armed_at_entry = None
+        self.server_hostname = None
+
+    def wrap_socket(self, sock: socket.socket, server_hostname: str | None = None) -> socket.socket:
+        self.armed_at_entry = self.connection._t2p_timer is not None
+        self.server_hostname = server_hostname
+        sock.close()
+        return self.replacement
+
+
+def test_the_watchdog_is_armed_before_TLS_negotiation():
+    """The phase no fixture in this file could reach before: `wrap_socket` on a real connection."""
+    listener = _listening(_serve_idle)
+    replacement = socket.socket()
+    context = _RecordingContext(replacement)
+    try:
+        deadline = time.monotonic() + 5.0
+        factory = th._with_deadline(th._DeadlineHTTPSConnection, deadline)
+        conn = factory("127.0.0.1", listener.getsockname()[1], timeout=SOCKET_TIMEOUT_SEC, context=context)
+        context.connection = conn
+        conn.connect()
+        armed_at_entry, armed_sock = context.armed_at_entry, conn._t2p_armed_sock
+        conn.close()
+    finally:
+        listener.close()
+        replacement.close()
+
+    assert armed_at_entry is True, "TLS negotiation began with no watchdog armed"
+    assert armed_sock is replacement, (
+        "the watchdog still points at the raw socket `wrap_socket` detached, so it is inert from the "
+        "handshake onwards -- where the status line, the headers and the body are read"
+    )
+
+
+def test_the_connection_factory_the_early_arm_hooks_still_exists():
+    """⚠️ If a future Python drops `_create_connection`, the early arm silently stops happening.
+
+    It is also pinned as an INSTANCE attribute deliberately: that is why a subclass method of the
+    same name would be shadowed and never called, which is the reason `connect()` wraps it in place
+    rather than overriding it.
+    """
+    conn = http.client.HTTPConnection("127.0.0.1", 1)
+
+    assert "_create_connection" in vars(conn), (
+        "`HTTPConnection.__init__` no longer assigns `_create_connection`; the watchdog is now armed "
+        "after the connection sequence again, and the round-4 defect is back"
+    )
+    conn.close()
+
+
+def test_the_abort_covers_a_bare_recv_not_only_a_makefile_stream():
+    """⚠️ Both calls in `_abort_socket` are load-bearing, in phases that do not overlap.
+
+    Measured on Windows, one abort at 0.25s: against a peer trickling a byte per 0.02s read through
+    `makefile()` -- how `http.client` takes the status line and headers -- `shutdown` alone aborts in
+    0.257s and `close` alone does **not** abort at all. Against a bare `recv` -- which is what the TLS
+    handshake does -- it is exactly the reverse: `close` aborts in 0.254s, `shutdown` alone does not.
+
+    Every other socket test in this file reads through `makefile()`, so dropping `close` would be
+    invisible to all of them. This is the one that keeps it killable.
+    """
+    listener = _listening(_serve_idle)
+    try:
+        client = socket.create_connection(("127.0.0.1", listener.getsockname()[1]), timeout=2.0)
+        threading.Timer(0.15, th._abort_socket, args=(client,)).start()
+        started = time.monotonic()
+        with pytest.raises(OSError):
+            client.recv(16)
+        elapsed = time.monotonic() - started
+    finally:
+        listener.close()
+
+    assert elapsed < 1.0, (
+        f"a bare recv ran for {elapsed:.3f}s despite the abort: only `close` interrupts one, so "
+        f"`_abort_socket` must keep calling it as well as `shutdown`"
+    )

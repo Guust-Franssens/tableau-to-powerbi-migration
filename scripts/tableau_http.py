@@ -234,28 +234,82 @@ class _DeadlineHTTPConnection(http.client.HTTPConnection):
 
     _t2p_deadline: float | None = None
     _t2p_timer: threading.Timer | None = None
+    _t2p_armed_sock = None
 
     def connect(self) -> None:
-        super().connect()
+        """Connect, with the watchdog armed the INSTANT a raw socket exists.
+
+        ⚠️ It used to be armed after ``super().connect()`` returned, which is after **everything**
+        this method sets up. With the corrected HTTPS MRO that ``super()`` is
+        ``HTTPSConnection.connect``: TCP setup, any proxy ``CONNECT`` exchange, and the whole TLS
+        handshake all ran outside the watchdog. Measured against a local proxy trickling its
+        ``CONNECT`` response one byte per 0.02s -- under a 0.05s socket timeout -- a 0.15s deadline
+        returned after **1.241s**, with ``timer_armed = False``.
+
+        ``_create_connection`` is an INSTANCE attribute that ``HTTPConnection.__init__`` assigns, so
+        a subclass method of that name is shadowed and never called. Wrapping it here instead is the
+        one hook that sits between "the socket exists" and "``_tunnel()`` reads from it", and it
+        needs no constructor -- which matters, because the taint gate refuses ``**kwargs`` in this
+        module (see the class docstring).
+        """
+        create_connection = self._create_connection
+
+        def create_and_arm(address, timeout, source_address):
+            """The stdlib factory, plus the watchdog, before the caller can read a byte."""
+            sock = create_connection(address, timeout, source_address)
+            self._t2p_armed_sock = sock
+            self._t2p_timer = _arm_watchdog(sock, self._t2p_deadline)
+            return sock
+
+        self._create_connection = create_and_arm
+        try:
+            super().connect()
+        finally:
+            self._create_connection = create_connection
+        self._rearm_if_the_socket_was_replaced()
+
+    def _rearm_if_the_socket_was_replaced(self) -> None:
+        """Re-point the watchdog when TLS swapped the socket underneath it.
+
+        ⚠️ Arming early is not sufficient on its own, and skipping this would trade one blind phase
+        for a later one. ``wrap_socket`` **detaches** the raw socket -- measured, its ``fileno()``
+        goes from 440 to -1 and every abort call on it then raises ``OSError`` -- so on an HTTPS
+        connection the early watchdog is inert from the handshake onwards, which is precisely where
+        the status line, the headers and the body are read. One deadline, re-pointed, not two.
+        """
+        if self.sock is None or self.sock is self._t2p_armed_sock:
+            return
+        if self._t2p_timer is not None:
+            self._t2p_timer.cancel()
+        self._t2p_armed_sock = self.sock
         self._t2p_timer = _arm_watchdog(self.sock, self._t2p_deadline)
 
     def close(self) -> None:
         if self._t2p_timer is not None:
             self._t2p_timer.cancel()
             self._t2p_timer = None
+        self._t2p_armed_sock = None
         super().close()
 
 
 class _DeadlineHTTPSConnection(_DeadlineHTTPConnection, http.client.HTTPSConnection):
-    """The TLS twin. The watchdog is armed after the handshake, on the wrapped SSL socket.
+    """The TLS twin. The watchdog is armed on the raw socket, then re-pointed at the wrapped one.
 
     ⚠️ Base order is load-bearing and was wrong once. With ``(HTTPSConnection, _DeadlineHTTPConnection)``
     the MRO finds ``HTTPSConnection.connect`` first, so the watchdog is never armed and every HTTPS
     request -- which is every real Tableau request -- is silently unbounded while the loopback HTTP
     tests pass. This order resolves ``connect`` to :class:`_DeadlineHTTPConnection`, whose
-    ``super().connect()`` IS ``HTTPSConnection.connect``, so TLS still happens and the watchdog arms
-    after it. ``test_the_https_twin_resolves_connect_to_the_watchdog`` pins the resolution, because no
-    fixture here can complete a TLS handshake.
+    ``super().connect()`` IS ``HTTPSConnection.connect``.
+
+    ⚠️ The TLS HANDSHAKE itself is bounded by the socket timeout rather than by the watchdog, and
+    that is measured rather than hoped. The handshake runs while the raw socket is detached and the
+    ``SSLSocket`` does not exist yet, so there is nothing to abort -- but it does not need aborting:
+    a server trickling a **well-formed** TLS record (a valid 8192-byte record header, then one
+    payload byte per 0.02s) was refused at **0.204s against a 0.2s socket timeout**, exactly as a
+    silent peer was. ``SSLSocket`` applies the timeout to the handshake as a whole; ``makefile()``
+    reads, which is how ``http.client`` takes the status line and headers, apply it per ``recv`` --
+    and THAT asymmetry is why a trickling header escapes while a trickling handshake does not. Since
+    ``_open`` narrows the socket timeout to the remaining deadline, the handshake is inside it.
     """
 
 
@@ -289,15 +343,43 @@ class _DeadlineHTTPSHandler(urllib.request.HTTPSHandler):
 def _abort_socket(sock) -> None:
     """Force a blocked read on ``sock`` to fail, from another thread.
 
-    ⚠️ ``close()`` alone is not enough on Windows, and that is measured rather than assumed: with
-    ``close`` the watchdog fired, the timer was armed, and the header read still ran to completion --
-    0.878s against a 0.15s deadline, with the eventual failure coming from the body check rather than
-    the watchdog. Closing a socket decrements a handle; it does not interrupt a peer-blocked ``recv``.
-    ``shutdown(SHUT_RDWR)`` tears down the connection in both directions and makes the pending read
-    return immediately, on Windows and POSIX alike.
+    ⚠️ **Both calls are load-bearing, and the reason is not the one this docstring gave for two
+    rounds.** It claimed ``shutdown`` interrupts a peer-blocked ``recv`` where ``close`` does not.
+    Re-measured properly on Windows, one abort at 0.25s against a 5s socket timeout:
 
-    Both calls are guarded: the socket may already be closed by the normal path, and a watchdog that
-    raised here would surface on a timer thread where nothing can catch it.
+    ========================  ==========  ==========
+    read blocked in           shutdown    close
+    ========================  ==========  ==========
+    bare ``recv``             5.006s      **0.254s**
+    ``makefile()`` readline   5.001s      5.004s
+    ========================  ==========  ==========
+
+    So neither call interrupts an in-flight read of an **idle** peer through ``makefile()`` -- which
+    is how ``http.client`` reads the status line and headers. What actually happens is that the abort
+    lands on the **next** socket operation. Re-measured against a peer trickling one byte per 0.02s,
+    which is the shape this transport actually meets:
+
+    ============================  ==========  ==========
+    trickling peer, ``makefile``  shutdown    close
+    ============================  ==========  ==========
+    outcome                       **0.257s**  1.992s
+    ============================  ==========  ==========
+
+    ⚠️ ``close`` there did not abort at all -- 1.992s is the peer falling silent, and against an
+    endlessly trickling peer the same read never returned.
+
+    That is exactly the division of labour this transport needs, and it is why the watchdog does not
+    replace the narrowed socket timeout:
+
+    * a **trickling** peer never trips a per-operation timeout, and the watchdog stops it;
+    * a **silent** peer never gives the watchdog a next operation to poison, and the socket timeout
+      -- narrowed by :func:`_open` to whatever is left of the deadline -- stops it.
+
+    Keep both calls. ``close`` is the one that bites a bare ``recv``; ``shutdown`` is the one that
+    poisons a ``makefile()`` stream, whose ``close`` is deferred by ``SocketIO``'s refcount. Both are
+    guarded: the socket may already be closed by the normal path, it may have been detached by
+    ``wrap_socket`` (``fileno() == -1``), and a watchdog that raised would do so on a timer thread
+    where nothing can catch it.
     """
     for call in (lambda: sock.shutdown(socket.SHUT_RDWR), sock.close):
         try:
@@ -354,9 +436,28 @@ def _request(
     policy, not the transport's: the data leg streams a real export and must not be truncated for
     making slow progress.
 
-    ⚠️ What the deadline still does NOT bound, stated rather than implied: **name resolution**.
-    ``getaddrinfo`` runs inside ``connect`` before any socket exists to watchdog, and the OS resolver
-    ignores socket timeouts. A host that never resolves is bounded by the resolver, not by us.
+    ⚠️ **Which phase is bounded by what, measured, because "the deadline bounds the request" has
+    been wrong three times in three different places.** DNS was once documented as the only residual;
+    it was not.
+
+    ==========================  ====================================================================
+    phase                       what bounds it
+    ==========================  ====================================================================
+    name resolution             **nothing of ours.** ``getaddrinfo`` runs before a socket exists to
+                                watchdog and the OS resolver ignores socket timeouts. Genuinely
+                                outside reach, and the only remaining one.
+    TCP connect                 the socket timeout, narrowed by :func:`_open` to what is left
+    proxy ``CONNECT``           the watchdog, armed at raw-socket creation. Read through
+                                ``makefile()``, so a trickling proxy escapes the socket timeout --
+                                measured at **1.241s against a 0.20s ceiling** before this
+    TLS handshake               the socket timeout. ``SSLSocket`` applies it to the handshake as a
+                                whole, so a trickling well-formed record is refused at **0.204s on a
+                                0.2s timeout** -- unlike a ``makefile()`` read. The watchdog cannot
+                                help here anyway: ``wrap_socket`` has detached the raw socket and the
+                                ``SSLSocket`` does not exist yet
+    status line and headers     the watchdog, re-pointed at the wrapped socket
+    body                        the watchdog, plus :func:`_read_bounded`'s own per-chunk check
+    ==========================  ====================================================================
 
     ``redactor`` is a **required** keyword, not an optional nicety: every caller either holds a
     credential or can be handed :func:`tableau_env.redact` itself, whose header rule scrubs a
