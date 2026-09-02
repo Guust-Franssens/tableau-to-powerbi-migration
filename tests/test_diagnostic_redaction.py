@@ -39,6 +39,7 @@ import ast
 import contextlib
 import http.client
 import importlib
+import io
 import itertools
 import json
 import logging
@@ -47,6 +48,7 @@ import socket
 import sys
 import threading
 import time
+import tokenize
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -521,6 +523,18 @@ MODULES = (
     "scripts/tableau_render_capability.py",
     "scripts/tableau_payload_facts.py",
     "scripts/tableau_http.py",
+    # ⚠️ Added after a blind review found a live leak here that this gate could not see. The module
+    # calls `session._request`, not `urlopen`/`http.client`/`requests`, so `_HTTP_MARKERS` does not
+    # recognise it as credential-handling and the fail-closed module sweep never demanded it -- the
+    # same blind spot #419 records for `provision_tableau_estate.py` (tableauserverclient). A
+    # hand-maintained inventory that cannot detect its own omissions is exactly the shape that
+    # produced the round-7 leak in #405.
+    "scripts/tableau_view_types.py",
+    # ⚠️ Caught by `_SESSION_CLIENT_MARKERS` on its FIRST run, which is the demonstration that the
+    # widening does real work rather than merely restating what was already covered: this module
+    # names no credential anywhere in code, so under `HTTP AND credential` it would have been
+    # invisible to the inventory exactly as `tableau_view_types.py` was.
+    "scripts/tableau_luid_census.py",
 )
 
 # Where response bytes ENTER, declared per function rather than inferred from a parameter's spelling.
@@ -546,6 +560,16 @@ TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
     # Propagation cannot see across a module boundary, so these are irreducible.
     ("scripts/tableau_render_capability.py", "probe_render_capability"): {"views"},
     ("scripts/tableau_render_capability.py", "apply_selected_tier"): {"report"},
+    # `capture_tableau_oracle.main()` hands `resolve_and_stamp` the `/views` listing it just parsed.
+    # ⚠️ Not optional bookkeeping: without it the boundary check fails outright, and `stamp` then
+    # writes onto dicts the analyser believes are clean, so the manifest key it stamps arrives
+    # untracked. Found by `test_every_cross_module_call_carrying_tainted_data_lands_on_a_declared_seed`
+    # the moment this module joined MODULES.
+    ("scripts/tableau_view_types.py", "resolve_and_stamp"): {"views"},
+    # `tableau_luid_census` holds a response and reuses the module's own rules on it rather than
+    # re-implementing them. Both are cross-module, so propagation cannot see them.
+    ("scripts/tableau_view_types.py", "parse_payload"): {"payload"},
+    ("scripts/tableau_view_types.py", "is_luid"): {"value"},
     # The shared HTTP primitive. `req` and `redactor` are OUTBOUND -- the request we are about to send
     # and the scrubber we hand it -- but they arrive from functions the analyser has already tainted,
     # and declaring them keeps the boundary honest rather than silently permeable. `headers` really is
@@ -559,8 +583,12 @@ TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
     ("scripts/tableau_payload_facts.py", "pdf_facts"): {"payload"},
 }
 
-# Calls whose RESULT is response data wherever they appear.
-TAINTING_CALLS = {"_request", "export", "raw_get", "get_json", "read", "decode", "loads"}
+# Calls whose RESULT is response data.
+# ⚠️ `fetch_payload` is the shared TRANSPORT hop, and it is here for the same reason `_request`
+# is: its return IS the response. It became load-bearing when `tableau_luid_census` stopped
+# making its own request -- taint propagation is intra-module, so a cross-module call's result
+# is invisible without this, and the gate went inert on a module that still looked gated.
+TAINTING_CALLS = {"_request", "fetch_payload", "export", "raw_get", "get_json", "read", "decode", "loads"}
 # The ONE thing that clears taint. Not "any helper" -- see test_the_chokepoint_is_the_only_...
 UNTAINTING = {"redacted_note", "scrub_tree", "artifact_stem"}
 LOG_AND_RAISE = {"info", "warning", "error", "debug", "exception", "ExportFailed", "RuntimeError", "ValueError"}
@@ -590,6 +618,23 @@ _INTO_THE_MANIFEST_AGGREGATE = (
     "SCRUBBED-AT-SINK: an aggregate on its way to the manifest; `scrub_tree` walks it whole, values "
     "and keys, immediately before serialisation, and reports anything it had to redact"
 )
+_PY_TYPE_NAME = (
+    "FIXED-VOCABULARY: a Python type NAME, not the value. `json.loads` can only produce dict, list, "
+    "str, int, float, bool or NoneType, so this is a closed set the server cannot influence - it "
+    "reports the SHAPE of a malformed response without echoing any of its content."
+)
+
+_CENSUS_COUNT = (
+    "NOT-A-STRING: an integer tallied from the response's SHAPE - a node count, a bucket total, "
+    "or a sum of two of them. Nothing is ever keyed or summed BY a luid, a workbook name or a "
+    "sheet name; `classify` reads type, emptiness and a regex match, never a value."
+)
+#: Still used for the census key expressions in `census()`; `_emit`'s `label` is REFUSED-AT-SEAM.
+_CENSUS_LABEL = (
+    "FIXED-VOCABULARY: composed only of this module's own literals - the `BUCKETS` names and the "
+    "two collection names `dashboards`/`sheets`. The server chooses none of it."
+)
+
 _PROBE_VERDICT = (
     "FIXED-VOCABULARY: one of classify_probe's three verdict literals, a ladder tier name, or an "
     "api-version string this module itself chose"
@@ -626,8 +671,151 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
             "builds; the value itself never came back from Tableau"
         ),
     },
+    # ⚠️ `view_types` itself has NO certified expressions and that is correct, not an omission: after
+    # the round-2 split it only routes between three helpers, so no response-derived value reaches an
+    # exit inside it. `test_the_certification_list_has_no_stale_entries` would reject a leftover entry
+    # -- a claim about nothing is the same silent no-op as the duplicate CERTIFIED key this PR hit in
+    # round 1, and as `type(exc).__name__`, which certified nothing because `except ... as exc` binds
+    # through an ExceptHandler rather than an Assign and so is never a tainted root.
+    #
+    # The transport hop. `body` and `status` arrive from `_request`, the analyser's taint origin.
+    ("scripts/tableau_view_types.py", "fetch_payload"): {
+        # ⚠️ `type(payload).__name__` is no longer certified HERE, and its absence is the round-4
+        # fix rather than an omission: the top-level shape check MOVED into `parse_payload`, the
+        # shared seam every caller passes through. Keeping a copy here as well would have been a
+        # guard no mutation could kill - remove it and the seam still refuses - so it would have
+        # shipped as coverage that cannot fail.
+        "status": "NOT-A-STRING: an HTTP status integer from the hardened transport",
+    },
+    ("scripts/tableau_view_types.py", "parse_payload"): {
+        "type(payload).__name__": _PY_TYPE_NAME,
+    },
+    # The GraphQL protocol hop.
+    ("scripts/tableau_view_types.py", "_errors_refusal"): {
+        "len(errors)": (
+            "NOT-A-STRING: len() of the GraphQL errors list, an integer. The error MESSAGE is "
+            "deliberately not reported at all -- measured, a one-request server reflecting the "
+            "inbound X-Tableau-Auth header into errors[0].message put a live session token here."
+        ),
+        "type(errors).__name__": _PY_TYPE_NAME,
+    },
+    # The response ENVELOPE: only the two container shapes are decided here.
+    ("scripts/tableau_view_types.py", "_mapping_from"): {
+        "type(data).__name__": _PY_TYPE_NAME,
+        "type(workbooks).__name__": _PY_TYPE_NAME,
+    },
+    # ONE workbook: its own shape and the presence/shape of its two node collections.
+    ("scripts/tableau_view_types.py", "_fold_workbook"): {
+        "type(workbook).__name__": _PY_TYPE_NAME,
+        "type(nodes).__name__": _PY_TYPE_NAME,
+    },
+    # ONE node list. The gate followed every expression across each new seam unprompted, which is the
+    # property that makes splitting a module under it cheap rather than risky.
+    ("scripts/tableau_view_types.py", "_fold_nodes"): {
+        "type(node).__name__": _PY_TYPE_NAME,
+        "type(luid).__name__": _PY_TYPE_NAME,
+        "key_luid": (
+            "SHAPE-VERIFIED: `_LUID_RE.match` has proved this is a UUID before it is used as a key - "
+            "the same closed allowlist artifact_stem uses for filenames. A proved UUID cannot carry a "
+            "credential. A node whose luid is NON-EMPTY and fails the shape refuses the whole "
+            "response; a BLANK one is skipped (Tableau documents a blank luid for a hidden sheet) and "
+            "never becomes a key, so nothing unverified reaches this expression either way."
+        ),
+    },
+    ("scripts/tableau_view_types.py", "stamp"): {
+        "mapping.get(luid, UNKNOWN)": (
+            "FIXED-VOCABULARY: one of this module's three constants - 'dashboard', 'worksheet' or "
+            "'unknown'. The mapping's values are assigned from those constants only, never from "
+            "response text."
+        ),
+    },
+    ("scripts/tableau_view_types.py", "resolve_and_stamp"): {
+        "unavailable": (
+            "FIXED-VOCABULARY: the reason string built by view_types/_mapping_from, composed only of "
+            "this module's own literals plus Python type names and integers. No branch interpolates "
+            "server-controlled text - that is the property the credential-reflection probe pins."
+        ),
+    },
+    # ⚠️ Every expression here is a COUNT, a module literal, or a module-authored reason. That is
+    # not an accident of how it was written: `_emit` REFUSES to print anything that is not an int,
+    # bool or None, so the "counts and shapes only" promise is enforced by the code rather than by a
+    # convention someone has to remember. See the module docstring.
+    ("scripts/tableau_luid_census.py", "_emit"): {
+        # ⚠️ `label` was certified FIXED-VOCABULARY unconditionally, and nothing enforced it. Measured
+        # at a83340d: `_emit("SYNTHETIC_CUSTOMER_IDENTIFIER_402", 1)` printed the identifier verbatim.
+        # It is now the same kind of claim `value` always was: true because the line above REFUSES
+        # anything else.
+        #
+        # ⚠️ Be precise about what this gate can and cannot see here, because the loose version of it
+        # is wrong. Intra-module propagation DOES carry a tainted argument into `_emit`: delete these
+        # entries and the gate reports `label`, `value` AND `type(value).__name__` inside the callee.
+        # What it cannot do is report the leak at the CALL SITE, because `_emit` is not one of its
+        # recognised sink calls -- which is why injecting a response-derived label into `main` still
+        # produced `uncertified_sinks == []`. So the certification DOCUMENTS the enforcement; the
+        # runtime allowlist IS the enforcement. Neither replaces the other, and a mutation proving
+        # rejection must delete the runtime check rather than expect a static finding.
+        "label": (
+            "REFUSED-AT-SEAM: `_emit` raises SystemExit unless `label` is in `LABELS`, a frozenset "
+            "built from this module's own BUCKETS/SITE_BUCKETS/FIXED_LABELS literals. A "
+            "response-derived label cannot reach this f-string, and the refusal itself does not echo "
+            "the rejected value - quoting it back would reintroduce the leak on the error path."
+        ),
+        "type(value).__name__": _PY_TYPE_NAME,
+        "value": (
+            "REFUSED-AT-SEAM: the lines above raise SystemExit unless `value` is an int, bool or "
+            "None, so nothing else can reach this f-string. That guard is the whole reason this "
+            "module may talk about a credentialed response at all - it cannot name one."
+        ),
+    },
+    ("scripts/tableau_luid_census.py", "census"): {
+        "classify(workbook['dashboards'])": _CENSUS_COUNT,
+        "classify(workbook['sheets'])": _CENSUS_COUNT,
+        "totals['dashboards_blank']": _CENSUS_COUNT,
+        "totals['dashboards_total']": _CENSUS_COUNT,
+        "totals['sheets_blank']": _CENSUS_COUNT,
+        "totals['sheets_total']": _CENSUS_COUNT,
+        "totals['dashboards_blank'] + totals['sheets_blank']": _CENSUS_COUNT,
+        "totals['dashboards_total'] + totals['sheets_total']": _CENSUS_COUNT,
+        "len(workbooks) if isinstance(workbooks, list) else 0": _CENSUS_COUNT,
+        "int(isinstance(workbooks, list))": (
+            "NOT-A-STRING: 0 or 1, read from the TYPE of the decoded `workbooks` value and never "
+            "from its content. It exists so an all-zero census that means 'we could not read the "
+            "envelope' is distinguishable from one that means 'we read it and found nothing'."
+        ),
+        "bucket": _CENSUS_LABEL,
+        "kind": _CENSUS_LABEL,
+    },
+    ("scripts/tableau_luid_census.py", "main"): {
+        "totals": _CENSUS_COUNT,
+        "int(assessable(totals, bool(unavailable)))": (
+            "NOT-A-STRING: 0 or 1. It is derived from whether the parser refused and whether any "
+            "workbook was unreadable - never from response content - and it rides WITH the counts "
+            "so a consumer cannot read `blank_luids: 0` without seeing whether that zero measures "
+            "the site or our own blindness."
+        ),
+        "json.dumps(totals, indent=2, sort_keys=True)": (
+            "NOT-A-STRING: the serialised COUNTS dict on its way to --json. Its keys are this "
+            "module's `BUCKETS` literals and its values are integers, so the file it writes cannot "
+            "contain a workbook name, a sheet name or a luid."
+        ),
+        "answer": ("FIXED-VOCABULARY: one of `verdict`'s three literals - CONFIRMED, NOT-PRESENT or CANNOT-TELL."),
+        "unavailable": (
+            "FIXED-VOCABULARY: the reason string built by tableau_view_types, composed only of that "
+            "module's own literals plus Python type names and integers. No branch of it interpolates "
+            "server-controlled text; the credential-reflection probe pins that property."
+        ),
+    },
     ("scripts/capture_tableau_oracle.py", "capture_view"): {
         "view_luid": _LUID_OK,
+        "view.get(tableau_view_types.VIEW_TYPE_KEY, tableau_view_types.UNKNOWN)": (
+            "FIXED-VOCABULARY: exactly one of tableau_view_types' three module constants - "
+            "'dashboard', 'worksheet' or 'unknown'. The `view` dict IS response-derived, so the gate "
+            "is right to stop here; but this key is not a Tableau field. `tableau_view_types.stamp` "
+            "writes it, and writes only `mapping.get(luid, UNKNOWN)`, whose values are those same "
+            "constants - never a name, never any response text. A hostile Metadata API can at worst "
+            "cause a wrong CHOICE among the three, which is a correctness question (#402), not a "
+            "disclosure one."
+        ),
         "view.get('name')": _INTO_THE_MANIFEST,
         "view.get('viewUrlName')": _INTO_THE_MANIFEST,
         "view.get('contentUrl')": _INTO_THE_MANIFEST,
@@ -1106,6 +1294,15 @@ def test_taint_reaches_capture_view_without_a_hand_written_seed():
 # worth closing structurally. This fails CLOSED: a new credential-handling script is a hard failure
 # until someone either brings it under the gate or waives it with a stated reason.
 
+# ⚠️ Modules that qualify on their OWN, with no credential marker required. The AND below asks two
+# questions -- "does it speak HTTP" and "does it name a credential" -- and a module can consume
+# credential-bearing RESPONSES while naming no credential at all, because the session holds it. That
+# is `tableau_view_types.py` exactly: its only credential-shaped text is a docstring sentence, so
+# under the AND its coverage would hinge on prose surviving an edit. Calling a session's `_request`
+# is the structural fact, and it is the same name `TAINTING_CALLS` already treats as the response
+# origin. `test_a_session_client_is_detected_without_naming_a_credential` is the positive control.
+_SESSION_CLIENT_MARKERS = ("._request(",)
+
 _HTTP_MARKERS = (
     "urlopen(",
     "http.client",
@@ -1122,6 +1319,15 @@ _HTTP_MARKERS = (
     # otherwise have DELETED both gated modules from this inventory -- measured, and caught only by
     # `test_the_credential_handling_detector_actually_detects`.
     "tableau_http",
+    # ⚠️ A module that takes a SESSION and calls its `_request` reaches HTTP through neither the
+    # stdlib nor a library -- it reaches it through us, and that was invisible here. Not a
+    # hypothetical gap: `tableau_view_types.py` leaked a reflected session token out of a GraphQL
+    # `errors[].message` while this inventory could not see the module at all, so the fail-closed
+    # module sweep never demanded it be gated. `_request` is already the name the taint analyser
+    # treats as the response origin (`TAINTING_CALLS`), so keying on it here keeps the two halves of
+    # the gate consistent. Measured: exactly three scripts match `._request(`, and all three are in
+    # MODULES, so this widening adds coverage without adding a waiver.
+    *_SESSION_CLIENT_MARKERS,
 )
 _CREDENTIAL_MARKERS = ("pat_secret", "X-Tableau-Auth", "TABLEAU_PAT", "personalAccessTokenSecret")
 
@@ -1200,13 +1406,44 @@ KNOWN_GAPS: dict[str, str] = {
 
 
 def _credential_handling_scripts() -> list[str]:
-    """Scripts that make an HTTP call AND reference a Tableau credential."""
+    """Scripts that make an HTTP call AND reference a Tableau credential -- or ARE a session client.
+
+    ⚠️ The second clause is not a convenience. A module handed a signed-in session consumes
+    credential-bearing responses while naming no credential at all, so under the AND alone its
+    coverage depended on whether some docstring happened to spell ``X-Tableau-Auth``. That is prose
+    load-bearing on a security gate, and it is how `tableau_view_types.py` sat outside this inventory
+    while leaking a reflected session token.
+    """
     found = []
     for path in sorted((REPO / "scripts").glob("*.py")):
         source = path.read_text(encoding="utf-8", errors="replace")
-        if any(h in source for h in _HTTP_MARKERS) and any(c in source for c in _CREDENTIAL_MARKERS):
+        speaks_http = any(h in source for h in _HTTP_MARKERS)
+        names_credential = any(c in source for c in _CREDENTIAL_MARKERS)
+        session_client = any(s in source for s in _SESSION_CLIENT_MARKERS)
+        if (speaks_http and names_credential) or session_client:
             found.append(f"scripts/{path.name}")
     return found
+
+
+def test_a_session_client_is_detected_without_naming_a_credential():
+    """⚠️ Positive control for the second clause, and it must be able to FAIL.
+
+    `tableau_view_types.py` names no credential in CODE -- only in prose. Delete every docstring,
+    comment and string literal and the AND stops seeing the module entirely, which is precisely why
+    its coverage must not rest on a sentence. So this asserts on the structural fact instead: it
+    calls a session's `_request`, and the detector reaches it that way.
+    """
+    source = (REPO / "scripts/tableau_view_types.py").read_text(encoding="utf-8")
+    code = "".join(
+        "" if token.type in (tokenize.STRING, tokenize.COMMENT) else token.string
+        for token in tokenize.generate_tokens(io.StringIO(source).readline)
+    )
+    assert not any(c in code for c in _CREDENTIAL_MARKERS), (
+        "this module now names a credential in CODE, so the control no longer proves the second "
+        "clause is what detects it -- re-point the control at a module that does not"
+    )
+    assert any(s in code for s in _SESSION_CLIENT_MARKERS)
+    assert "scripts/tableau_view_types.py" in _credential_handling_scripts()
 
 
 def test_the_credential_handling_detector_actually_detects():
