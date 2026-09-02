@@ -438,18 +438,18 @@ def plan(args, source, workdir, fetch_note):
 sync._plan = plan
 """,
     "skillsync-unknown-marker-schema-is-trusted": """
-import sync_installed_skills as sync
 import skill_plugin_source as sps
-def recorded(marker, skills_dir):
-    # Interpret `bundles` under a schema this build does not know, i.e. guess.
-    if marker is None or skills_dir is None:
-        return []
-    names = marker.get("bundles", [])
-    problems = sps.marker_bundle_problems(names, skills_dir)
-    if problems:
-        raise sync.UnsafeMarkerError("; ".join(problems))
-    return [str(name) for name in names]
-sync._recorded_inventory = recorded
+def usable(marker, *, publish_repo, skills_dir):
+    # Drop ONLY the schema clause from the shared predicate: interpret `bundles` under a schema
+    # this build does not know, i.e. guess. Written against `marker_is_usable` rather than
+    # against `_recorded_inventory`, whose signature this refactor changed - the previous
+    # version of this mutation died on a TypeError and was scored CAUGHT for a defect it never
+    # restored, which is the vacuity trap one level up from the tests.
+    if not isinstance(marker, dict) or marker.get("publish_repo") != publish_repo:
+        return False
+    names = marker.get("bundles")
+    return isinstance(names, list) and not sps.marker_bundle_problems(names, skills_dir)
+sps.marker_is_usable = usable
 """,
     "skillsync-marker-proves-ownership-without-schema": """
 import skill_plugin_source as sps
