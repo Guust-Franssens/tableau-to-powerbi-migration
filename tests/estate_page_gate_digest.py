@@ -20,16 +20,6 @@ hashes a canonical summary.
   split from 19/2 to 18/3.
 * **Exit 3 when nothing could be staged.** A measurement that could not be made must not report a
   clean digest; that is the failure mode this whole PR exists to remove.
-
-⚠️ **On comparing digests with a reviewer's.** The hash is over the canonical JSON of the summary
-*this script* emits, so it is only comparable against another run of *this script*. A reviewer who
-reconstructed the same measurement independently reported
-``7a29f6c4ff146367f8c351148086b00fb526ac33871705184f5f96c825a52b87``; this script reports
-``eef8b1121899da209c083217755a02fa023d8c41dd0ad00da28a57262e7fdf80`` for the same estate. The two
-disagree because they hash different canonical forms, **not** because they measured different things
-- the underlying counts (35 PASS / 9 not PASS, 23 omissions, zero disagreements) are identical and
-are stored in plain text beside the hash in ``estate_page_gate_expected.json`` precisely so the
-comparison never depends on agreeing about a serialization.
 """
 
 from __future__ import annotations

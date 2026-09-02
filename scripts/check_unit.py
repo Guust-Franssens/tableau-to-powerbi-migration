@@ -32,7 +32,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Generic, TypeVar
 
 import check_desktop_orphans as check_desktop_orphans_module
 import object_identity as oid
@@ -314,9 +314,70 @@ GATES = (
 )
 
 
+_T = TypeVar("_T")
+
+
 def _slug(text: str) -> str:
-    """Lossy name normalization for matching Tableau/PBIR/oracle page labels."""
+    """Lossy name normalization for matching Tableau/PBIR/oracle page labels.
+
+    ⚠️ **Deliberately lossy, therefore never a decision on its own.** Every defect this gate has
+    shipped across seven review rounds is the same shape: a lossy key settled a question without
+    anyone asking *how many things answer to it*. Round 6 answered that with a census of `_slug`
+    CALL SITES; round 7 proved the census vacuous, and named why in one sentence worth keeping:
+
+        *a census that pins WHERE a function is called cannot prove HOW its result is used.*
+
+    So the guarantee no longer lives in a test that inspects call sites - it lives in
+    :class:`NormalizedIndex`, whose only accessor is a cardinality check. Call this function outside
+    that class **only** for reporting text, and only from a site the census allowlists.
+    """
     return re.sub(r"[^a-z0-9]+", "", text.casefold())
+
+
+class NormalizedIndex(Generic[_T]):
+    """Candidates grouped by a lossy key, readable ONLY through a cardinality check.
+
+    This is the "follow the value" fix. A syntactic audit of `_slug()` call sites could not prove
+    the property it claimed: it accepted any unrelated ``== 1`` in the same function as a guard, it
+    could not see a ``set()`` collapse one line later, and a reporting-only value could be promoted
+    into a decision without touching a single pinned line. Rather than chase the value through
+    arbitrary Python - undecidable in general - the value is made **inaccessible except through the
+    guard**:
+
+    * candidates are stored as a LIST per key, so multiplicity cannot be lost on the way in;
+    * :meth:`unique` is the only way to get one out, and it returns ``None`` for 0 **and** for >1;
+    * there is no accessor that returns the bucket, so a caller cannot take ``[0]`` itself.
+
+    ``count`` exists for reporting a collision honestly ("2 producer records are named X"); it
+    returns an ``int`` and so cannot be mistaken for the candidate.
+    """
+
+    def __init__(self) -> None:
+        self.__buckets: dict[str, list[_T]] = {}
+
+    def add(self, name: str, value: _T) -> None:
+        """Record one candidate under ``name``'s lossy key, keeping earlier ones."""
+        self.__buckets.setdefault(_slug(name), []).append(value)
+
+    def add_spelling(self, name: str, value: _T) -> None:
+        """Record ANOTHER spelling of a candidate already added.
+
+        Idempotent per key, so several aliases of ONE finding never look like several candidates -
+        while two genuinely different findings sharing a key still do. Without this the alias set
+        of a single exemption target would contest itself.
+        """
+        bucket = self.__buckets.setdefault(_slug(name), [])
+        if value not in bucket:
+            bucket.append(value)
+
+    def count(self, name: str) -> int:
+        """How many candidates answer to ``name``'s lossy key. Reporting only."""
+        return len(self.__buckets.get(_slug(name), []))
+
+    def unique(self, name: str) -> _T | None:
+        """The single candidate for ``name``'s lossy key, or ``None`` when 0 or more than 1."""
+        matches = self.__buckets.get(_slug(name), [])
+        return matches[0] if len(matches) == 1 else None
 
 
 def _read_json(path: Path) -> Any:
@@ -835,15 +896,14 @@ def _unit_workbook_keys(target: Path) -> tuple[set[str], set[str]]:
     real 2.339.0 estate run), so an artifact stem is a usable binding key back to a handover slice.
 
     Two collections, because the filesystem is allowed to have changed the spelling: an EXACT match
-    binds, and a slugged match is the fallback for a name a filesystem sanitised.
+    binds, and a lossy match is the fallback for a name a filesystem sanitised.
 
-    ⚠️ The slugged side is a LIST, not a set - but one entry per DISTINCT exact stem. Collapsing it
-    lost the collision it exists to detect: a unit shipping both ``Bo ok.Report`` and ``Bo-ok.Report``
-    produced one key ``book``, and a handover workbook ``Book`` was accepted even though either
-    artifact could own it. The uniqueness guard has to hold on BOTH sides of the join. Keying on
-    distinct stems is equally load-bearing in the other direction: a report and its model share a
-    stem and are one name, not two competing owners, and counting the raw files made every ordinary
-    unit look collided.
+    ⚠️ The lossy side is a :class:`NormalizedIndex`, not a set of keys. Collapsing it lost the
+    collision it exists to detect: a unit shipping both ``Bo ok.Report`` and ``Bo-ok.Report`` produced
+    one key ``book``, and a handover workbook ``Book`` was accepted even though either artifact could
+    own it. The uniqueness guard has to hold on BOTH sides of the join. Indexing DISTINCT stems is
+    equally load-bearing in the other direction: a report and its model share a stem and are one name,
+    not two competing owners, and counting the raw files made every ordinary unit look collided.
     """
     stems: set[str] = set()
     for report in shipping_reports(target):
@@ -851,7 +911,10 @@ def _unit_workbook_keys(target: Path) -> tuple[set[str], set[str]]:
     for model in shipping_models(target):
         stems.add(model.name.removesuffix(".SemanticModel"))
     stems = {stem for stem in stems if stem}
-    return stems, [_slug(stem) for stem in sorted(stems)]
+    index: NormalizedIndex[str] = NormalizedIndex()
+    for stem in sorted(stems):
+        index.add(stem, stem)
+    return stems, index
 
 
 def page_drop_explanations(target: Path) -> dict[str, Any]:
@@ -905,22 +968,27 @@ def page_drop_explanations(target: Path) -> dict[str, Any]:
 
 
 def _bindable_workbooks(
-    workbooks: list[tuple[Path, str, dict[str, Any]]], exact_stems: set[str], slugged_stems: list[str]
+    workbooks: list[tuple[Path, str, dict[str, Any]]], exact_stems: set[str], stem_index: NormalizedIndex[str]
 ) -> list[tuple[str, dict[str, Any] | None]]:
     """``(name, payload-or-None)`` per handover workbook: None means it does not bind to this unit.
 
-    An EXACT stem match binds. A slugged match is the fallback for a name the filesystem sanitised,
-    and it binds only when it is unique on BOTH sides - exactly one handover workbook AND exactly one
+    An EXACT stem match binds. A lossy match is the fallback for a name the filesystem sanitised, and
+    it binds only when it is unique on BOTH sides - exactly one handover workbook AND exactly one
     shipped artifact carry that key. Either collision alone makes the binding a coin toss, and the
     target side was unguarded: a unit shipping ``Bo ok.Report`` and ``Bo-ok.Report`` accepted a single
     handover ``Book`` that either artifact could have owned.
+
+    Both sides are :class:`NormalizedIndex`es rather than key lists, so neither uniqueness check can
+    be quietly dropped or collapsed downstream - the bucket is unreachable except through ``unique``.
     """
     names = [str(workbook.get("name") or slice_name) for _source, slice_name, workbook in workbooks]
-    slugs = [_slug(name) for name in names]
+    handover_index: NormalizedIndex[str] = NormalizedIndex()
+    for name in names:
+        handover_index.add(name, name)
     bound: list[tuple[str, dict[str, Any] | None]] = []
-    for (_source, _slice_name, workbook), name, slug in zip(workbooks, names, slugs, strict=True):
+    for (_source, _slice_name, workbook), name in zip(workbooks, names, strict=True):
         exact = name in exact_stems
-        loose = slugs.count(slug) == 1 and slugged_stems.count(slug) == 1
+        loose = handover_index.unique(name) is not None and stem_index.unique(name) is not None
         bound.append((name, workbook if exact or loose else None))
     return bound
 
@@ -1226,11 +1294,19 @@ def resolve_exemptions(
     """``(exempted finding keys, entries that matched several findings)``.
 
     ``findings`` is ``(key, item, aliases)`` per finding. Each raw entry is resolved ONCE against all
-    of them: an exact name or alias match wins outright, and the lossy slug is consulted only when no
+    of them: an exact name or alias match wins outright, and the lossy key is consulted only when no
     finding matches exactly. An entry matching more than one finding applies to none - measured, a
     single ``scaffold-partitions`` signature named ``A-B`` exempted both table ``A-B`` and table
     ``A B`` and flipped the gate to PASS while reporting two exemptions from one signature.
+
+    The lossy half goes through a :class:`NormalizedIndex` keyed by *finding*, so a name and an alias
+    of the SAME finding cannot look like two candidates while two different findings still do.
     """
+    lossy: NormalizedIndex[str] = NormalizedIndex()
+    for key, name, aliases in findings:
+        for value in sorted({name, *aliases}):
+            if value:
+                lossy.add_spelling(value, key)
     exempted: set[str] = set()
     contested: list[str] = []
     for entry in entries:
@@ -1238,14 +1314,13 @@ def resolve_exemptions(
             continue
         item = entry["item"]
         exact = [key for key, name, aliases in findings if item == name or item in aliases]
-        matched = exact or [
-            key
-            for key, name, aliases in findings
-            if _slug(item) in {_slug(value) for value in {name, *aliases} if value}
-        ]
-        if len(matched) == 1:
-            exempted.add(matched[0])
-        elif matched:
+        if len(exact) == 1:
+            exempted.add(exact[0])
+        elif exact:
+            contested.append(item)
+        elif (match := lossy.unique(item)) is not None:
+            exempted.add(match)
+        elif lossy.count(item):
             contested.append(item)
     return exempted, contested
 
@@ -1766,16 +1841,44 @@ class OracleRecord:
     PASS to an expected page ``A-B``, and an oracle record for ``Revenue`` belonging to
     ``"Different Workbook"`` satisfy this unit's ``Revenue`` page. Drop evidence was bound to its
     workbook in round 2; oracle evidence was never bound at all.
+
+    ``kind`` is ``dashboard``/``worksheet`` when the producer establishes it, and ``None`` when it
+    does not. ⚠️ ``None`` is **cannot establish**, never "either" - a record whose kind is unknown may
+    not certify a page. A Tableau dashboard routinely shares its name with its principal worksheet,
+    so a kind-less name match accepts one visual as evidence for a whole page, and that is the
+    ORDINARY case rather than an edge one (``scripts/tableau_view_types.py``). Measured before this:
+    a record explicitly carrying ``view_type: "worksheet"`` gave a full oracle PASS to the DASHBOARD
+    of the same name - the kind was present in the manifest and thrown away here.
     """
 
     name: str
+    kind: str | None
     workbook: str | None
     visual: bool
     numeric: bool
 
 
+def _declared_kind(record: Any) -> str | None:
+    """``dashboard``/``worksheet`` from an oracle view record, or None when it cannot be established.
+
+    ``capture_tableau_oracle.py`` writes ``view_type`` from the Metadata API (#402) and uses the
+    literal ``"unknown"`` when the API could not be reached or exposed no LUID. That value is a
+    refusal, not a third kind, so it maps to ``None`` exactly like an absent key - and so does any
+    value outside the vocabulary, because an unrecognised string is equally unestablished.
+    """
+    if not isinstance(record, dict):
+        return None
+    value = record.get("view_type")
+    return value if value in {"dashboard", "worksheet"} else None
+
+
 def _reference_oracles(target: Path, reference_dir: Path | None) -> tuple[list[OracleRecord], set[str]]:
-    """Reference-capture records, one per dashboard entry, multiplicity preserved."""
+    """Reference-capture records, one per dashboard entry, multiplicity preserved.
+
+    Every entry is a DASHBOARD by construction: ``capture_tableau_reference.py`` builds this array
+    from the migration spec's ``dashboards`` (``_dashboard_names``), so the kind is structurally known
+    here and does not depend on #402 landing.
+    """
     records: list[OracleRecord] = []
     grades: set[str] = set()
     for directory in _reference_dirs(target, reference_dir):
@@ -1802,6 +1905,7 @@ def _reference_oracles(target: Path, reference_dir: Path | None) -> tuple[list[O
             records.append(
                 OracleRecord(
                     name=str(dashboard.get("name") or ""),
+                    kind="dashboard",
                     workbook=_declared_workbook(dashboard) or _declared_workbook(payload),
                     visual=visual,
                     numeric=numeric,
@@ -1849,6 +1953,7 @@ def _oracle_capture_oracles(target: Path, oracle_dir: Path | None) -> tuple[list
             records.append(
                 OracleRecord(
                     name=str(record.get("view_name") or record.get("view_url_name") or ""),
+                    kind=_declared_kind(record),
                     workbook=_declared_workbook(record) or _declared_workbook(payload),
                     visual=bool(visual),
                     numeric=bool(numeric),
@@ -1861,87 +1966,105 @@ def _oracle_capture_oracles(target: Path, oracle_dir: Path | None) -> tuple[list
 class OracleEvidence:
     """Producer records resolved against the expected pages, refusing every ambiguity.
 
-    Three guards, one per measured defect:
+    Four guards, one per measured defect:
 
-    * **Workbook.** A record that DECLARES a producing workbook must declare one this unit ships, or
-      it is discarded. A record that declares none is admissible but counted in ``unattributed`` and
-      surfaced in the grade, because "I cannot tell whose picture this is" is weaker evidence and the
-      reader should see that rather than infer it.
-    * **Exact spelling first.** An exact name match wins outright.
-    * **A normalized fallback only when it is unique on BOTH sides** - exactly one producer record and
-      exactly one expected page share the lossy key. Anything else satisfies nothing.
+    * **Workbook.** A record that DECLARES a producing workbook must declare one this unit ships. The
+      unit side is a filesystem-sanitised artifact stem, so a lossy fallback is legitimate here - but
+      only when the key resolves uniquely on **BOTH** sides. Measured before this: records declaring
+      ``Bo ok`` and ``Bo-ok`` were both admitted to unit workbook ``Book``, because uniqueness was
+      checked among unit workbooks only. Uniqueness of a lossy key on one side is not identity.
+      A record declaring no workbook is admissible but counted in ``unattributed`` and surfaced in
+      the grade: "I cannot tell whose picture this is" is weaker evidence and the reader should see
+      that rather than infer it.
+    * **Kind.** A record may only satisfy a page of the SAME kind, and a record whose kind cannot be
+      established satisfies nothing. See :class:`OracleRecord`.
+    * **Exact spelling.** A view name and a page name are BOTH source-owned - they come from the same
+      Tableau workbook with no filesystem in between - so nothing legitimately re-spells one into the
+      other and there is no lossy fallback on names at all. (Round 6 permitted a uniqueness-guarded
+      one; round 7 removed it, because a guard on a fallback that has no mechanism behind it only
+      narrows an unjustified match.)
+    * **Multiplicity.** Two records answering to one page name settle nothing, and say so.
 
-    ⚠️ **KNOWN GAP, shipped deliberately and disclosed at runtime: issue #438.** A record carries no
-    object KIND, so nothing here can tell a dashboard's capture from its principal worksheet's, and a
-    Tableau dashboard sharing a name with its principal worksheet is the ordinary case rather than an
-    edge one. The workbook guard is also one-sided: uniqueness of the lossy workbook key is checked
-    among THIS unit's workbooks and never among the workbooks claiming it, so two producing workbooks
-    that normalize alike are both admitted. Both weaken a PASS rather than a failure, which is why
-    :func:`_oracle_caveats` names the affected pages instead of printing a general disclaimer.
+    ⚠️ **The KIND half of issue #438 is CLOSED here**, so the runtime caveat that disclosed it while
+    it was open is gone with it - a disclosure that outlives its gap manufactures doubt exactly as
+    falsely as a missing one manufactures confidence. What remains is
+    [#450](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/450): a real
+    manifest names its producer ``workbook_name`` while :func:`_declared_workbook` reads ``workbook``,
+    so on a live capture every record is ownerless (measured 360 of 360) and the two-sided guard
+    above never engages. ``loosely_attributed`` and :func:`_oracle_caveats` therefore stay, re-aimed
+    at #450.
     """
 
-    by_exact: dict[str, list[OracleRecord]]
-    by_normalized: dict[str, list[OracleRecord]]
-    expected_normalized: dict[str, int]
+    by_exact: dict[tuple[str, str], list[OracleRecord]]
     unattributed: int
-    #: Records admitted on a LOSSY workbook key rather than an exact one (issue #438).
+    kindless: int
+    admitted: int
+    #: Records admitted on a LOSSY workbook key rather than an exact one (issue #450).
     loosely_attributed: list[str]
     foreign: tuple[str, ...]
 
     def evidence_for(self, page: dict[str, Any]) -> tuple[OracleRecord | None, str | None]:
         """``(record, refusal)`` for one expected page. At most one of the two is ever set."""
-        exact = self.by_exact.get(page["name"], [])
+        exact = self.by_exact.get((str(page.get("kind")), page["name"]), [])
         if len(exact) == 1:
             return exact[0], None
         if exact:
             return None, f"{len(exact)} producer records are named {page['name']!r}"
-        key = _slug(page["name"])
-        loose = self.by_normalized.get(key, [])
-        if not loose:
-            return None, None
-        if len(loose) != 1 or self.expected_normalized.get(key, 0) != 1:
-            return None, (
-                f"a normalized match for {page['name']!r} is not unique "
-                f"({len(loose)} producer record(s), {self.expected_normalized.get(key, 0)} expected page(s))"
+        return None, None
+
+
+def _admissible_oracle_records(
+    records: list[OracleRecord], unit_workbooks: set[str]
+) -> tuple[list[OracleRecord], list[str], int, int, list[str]]:
+    """``(admissible, foreign, unattributed, kindless, loosely_attributed)`` after both guards."""
+    unit_index: NormalizedIndex[str] = NormalizedIndex()
+    for name in sorted(unit_workbooks):
+        unit_index.add(name, name)
+    producer_index: NormalizedIndex[str] = NormalizedIndex()
+    for declared in sorted({record.workbook for record in records if record.workbook is not None}):
+        producer_index.add(declared, declared)
+
+    admissible: list[OracleRecord] = []
+    foreign: list[str] = []
+    loosely_attributed: list[str] = []
+    unattributed = kindless = 0
+    for record in records:
+        if record.workbook is None:
+            unattributed += 1
+        elif record.workbook not in unit_workbooks:
+            two_sided = unit_index.unique(record.workbook) is not None and (
+                producer_index.unique(record.workbook) is not None
             )
-        return loose[0], None
+            if not two_sided:
+                foreign.append(record.workbook)
+                continue
+            # Admitted on a LOSSY workbook key rather than an exact one. Both sides are now checked,
+            # so this is no longer the #438 coin toss - but it is still a weaker join than an exact
+            # match, and #450 makes it unreachable on real captures anyway (the manifest declares
+            # `workbook_name`, not `workbook`), so it stays disclosed rather than assumed sound.
+            loosely_attributed.append(record.workbook)
+        if record.kind is None:
+            kindless += 1
+            continue
+        admissible.append(record)
+    return admissible, foreign, unattributed, kindless, loosely_attributed
 
 
 def _resolve_oracle_evidence(
     records: list[OracleRecord], candidates: list[dict[str, Any]], unit_workbooks: set[str]
 ) -> OracleEvidence:
     """Index producer records against the expected pages without losing a collision."""
-    admissible: list[OracleRecord] = []
-    foreign: list[str] = []
-    unattributed = 0
-    loosely_attributed: list[str] = []
-    for record in records:
-        if record.workbook is None:
-            unattributed += 1
-        elif record.workbook not in unit_workbooks:
-            alike = [name for name in unit_workbooks if _slug(name) == _slug(record.workbook)]
-            if len(alike) != 1:
-                foreign.append(record.workbook)
-                continue
-            # Admitted on a LOSSY workbook key, and uniqueness was checked only among THIS unit's
-            # workbooks - never among the workbooks claiming it. See issue #438.
-            loosely_attributed.append(record.workbook)
-        admissible.append(record)
-    by_exact: dict[str, list[OracleRecord]] = {}
-    by_normalized: dict[str, list[OracleRecord]] = {}
+    _ = candidates
+    admissible, foreign, unattributed, kindless, loosely = _admissible_oracle_records(records, unit_workbooks)
+    by_exact: dict[tuple[str, str], list[OracleRecord]] = {}
     for record in admissible:
-        by_exact.setdefault(record.name, []).append(record)
-        by_normalized.setdefault(_slug(record.name), []).append(record)
-    expected_normalized: dict[str, int] = {}
-    for page in candidates:
-        key = _slug(page["name"])
-        expected_normalized[key] = expected_normalized.get(key, 0) + 1
+        by_exact.setdefault((str(record.kind), record.name), []).append(record)
     return OracleEvidence(
         by_exact=by_exact,
-        by_normalized=by_normalized,
-        expected_normalized=expected_normalized,
         unattributed=unattributed,
-        loosely_attributed=loosely_attributed,
+        kindless=kindless,
+        admitted=len(admissible),
+        loosely_attributed=loosely,
         foreign=tuple(sorted(set(foreign))),
     )
 
@@ -1997,6 +2120,13 @@ def check_oracle_coverage(target: Path, reference_dir: Path | None, oracle_dir: 
         "refused_evidence": [row["refusal"] for row in rows if row["refusal"]],
         "foreign_workbook_evidence": list(evidence.foreign),
         "unattributed_evidence": evidence.unattributed,
+        "kindless_evidence": evidence.kindless,
+        # ⚠️ Reported because the kind guard is otherwise UNKILLABLE: dropping the record would also
+        # be masked by the `(kind, name)` lookup key never matching a kind-less record, so a test
+        # could not tell the guard from its sibling. Vacuity mode 3 - pin it independently or delete
+        # it. This is the independent pin, and it is useful in its own right: an operator can tell
+        # "nobody captured that page" from "the capture could not say what it was a picture of".
+        "admitted_evidence": evidence.admitted,
         "excluded_omissions": accepted,
         "grade": _oracle_grade(reference_grades | oracle_grades, evidence),
         "known_gap_caveats": _oracle_caveats(rows, evidence),
@@ -2005,54 +2135,53 @@ def check_oracle_coverage(target: Path, reference_dir: Path | None, oracle_dir: 
 
 
 def _oracle_caveats(rows: list[dict[str, Any]], evidence: OracleEvidence) -> list[str]:
-    """What this oracle verdict CANNOT establish, naming the pages it applies to (issue #438).
+    """What this oracle verdict CANNOT establish, naming the objects it applies to (issue #450).
 
     ⚠️ Written to answer "which PASS should I distrust", not "is this tool imperfect". A general
     disclaimer on every run is noise an operator learns to skip, and it would fire hardest on the runs
     where nothing was certified and therefore nothing is at risk. So each caveat is emitted **only
-    when a page actually took the evidence it describes**, and it lists those pages by name.
+    when a page actually took the evidence it describes**, and it names those objects.
 
-    Two open gaps, both of which can only make a PASS too generous:
+    ⚠️ **The kind caveat that used to head this list is GONE, because its gap is closed.** Evidence
+    now carries ``dashboard``/``worksheet`` and a record whose kind cannot be established certifies
+    nothing (:class:`OracleRecord`), so printing "kind not established" would manufacture doubt
+    exactly as falsely as omitting it once manufactured confidence. A disclosure is only honest while
+    its gap is open; retiring it is part of the fix, not a separate cleanup.
 
-    * **No object kind on any record.** Evidence says a picture is of "Sales"; it never says whether
-      that is the dashboard or the worksheet. A Tableau dashboard routinely shares its name with its
-      principal worksheet, so a worksheet's capture certifying a whole dashboard page is the ORDINARY
-      case, not an edge one.
-    * **One-sided workbook uniqueness.** A record admitted through the lossy workbook key was checked
-      for uniqueness among this unit's workbooks only, never among the workbooks claiming it, so two
-      producing workbooks that normalize alike are both admitted.
-
-    Both are tracked in issue #438 and are expected to disappear when it lands. This function and its
-    tests are the disclosure; deleting them is part of that fix, not separate from it.
+    What remains is [#450](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/450):
+    a record admitted through the LOSSY workbook key is a weaker join than an exact match. Both sides
+    of that key are now checked for uniqueness, so this is no longer the coin toss #438 described -
+    but it is still worth naming, and on a live capture it is unreachable for a different reason
+    worth knowing: the manifest declares ``workbook_name`` while :func:`_declared_workbook` reads
+    ``workbook``, so every record arrives ownerless (measured 360 of 360).
     """
     certified = [row["page"]["name"] for row in rows if row["visual"] or row["numeric"]]
     caveats: list[str] = []
-    if certified:
-        names = ", ".join(repr(name) for name in certified[:5])
-        more = f" (+{len(certified) - 5} more)" if len(certified) > 5 else ""
-        caveats.append(
-            f"⚠️ #438 KIND NOT ESTABLISHED: oracle/reference evidence carries no dashboard/worksheet "
-            f"kind, so a worksheet's capture can satisfy a dashboard page of the same name. "
-            f"{len(certified)} page(s) were certified on evidence that cannot say which object it "
-            f"depicts, so treat their PASS as unconfirmed where a worksheet shares the page's name: "
-            f"{names}{more}"
-        )
     if evidence.loosely_attributed and certified:
         workbooks = ", ".join(repr(name) for name in sorted(set(evidence.loosely_attributed)))
         caveats.append(
-            f"⚠️ #438 WORKBOOK MATCHED LOOSELY: {len(evidence.loosely_attributed)} record(s) were "
-            f"admitted on a normalized workbook name, and uniqueness was checked only among this "
-            f"unit's workbooks - never among the workbooks claiming it, so a second workbook "
-            f"normalizing alike would also have been admitted: {workbooks}"
+            f"⚠️ #450 WORKBOOK MATCHED LOOSELY: {len(evidence.loosely_attributed)} record(s) were "
+            f"admitted on a normalized workbook name rather than an exact one, so {len(certified)} "
+            f"certified page(s) rest on a lossier join than an exact workbook match: {workbooks}"
         )
     return caveats
 
 
 def _oracle_grade(grades: set[str], evidence: OracleEvidence) -> str:
-    """The grade string, saying plainly when evidence could not be tied to a workbook."""
+    """The grade string, saying plainly when evidence could not be tied to a workbook OR to a kind.
+
+    Both caveats are printed rather than inferred. A discarded record is invisible in the coverage
+    numbers - the page simply has no evidence - so without this the reader cannot tell "nobody
+    captured that page" from "the capture could not say what it was a picture of".
+    """
     grade = ", ".join(sorted(grades)) or "not checked (no oracle manifest found)"
     if evidence.unattributed:
         grade += f" (⚠️ {evidence.unattributed} record(s) declare no producing workbook)"
+    if evidence.kindless:
+        grade += (
+            f" (⚠️ {evidence.kindless} record(s) establish no dashboard/worksheet kind and "
+            "certify nothing; re-capture with view typing - scripts/tableau_view_types.py)"
+        )
     return grade
 
 

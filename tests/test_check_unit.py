@@ -144,7 +144,13 @@ def _write_reference_manifest(
 
 
 def _write_oracle_manifest(
-    unit: Path, names: list[str], *, images: bool = True, data: bool = True, workbook: str | None = "Book"
+    unit: Path,
+    names: list[str],
+    *,
+    images: bool = True,
+    data: bool = True,
+    workbook: str | None = "Book",
+    view_type: str | None = "dashboard",
 ) -> None:
     records = []
     for index, name in enumerate(names):
@@ -154,13 +160,14 @@ def _write_oracle_manifest(
             _png(unit / "_oracle" / image_path)
         if data:
             _csv(unit / "_oracle" / data_path)
-        records.append(
-            {
-                "view_name": name,
-                "data": {"status": "ok", "path": data_path, "row_count": 1} if data else {"status": "failed"},
-                "image": {"status": "ok", "path": image_path} if images else {"status": "failed"},
-            }
-        )
+        record: dict[str, object] = {
+            "view_name": name,
+            "data": {"status": "ok", "path": data_path, "row_count": 1} if data else {"status": "failed"},
+            "image": {"status": "ok", "path": image_path} if images else {"status": "failed"},
+        }
+        if view_type is not None:
+            record["view_type"] = view_type
+        records.append(record)
     (unit / "_oracle").mkdir(exist_ok=True)
     payload: dict[str, object] = {"views": records}
     if workbook is not None:
@@ -403,7 +410,7 @@ def test_oracle_coverage_still_expects_a_page_the_engine_merely_declared(tmp_pat
     """The same rule on the oracle denominator: only a SIGNED omission takes a page out."""
     _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A"), ("ws.b", "B")])
     _write_report(tmp_path, ["A"])
-    _write_reference_manifest(tmp_path, ["A"])
+    _write_oracle_manifest(tmp_path, ["A"], view_type="worksheet")
     _write_viz_fidelity_handover(tmp_path, [_empty_row("B")])
 
     oracle = cu.check_oracle_coverage(tmp_path, None, None)
@@ -417,7 +424,7 @@ def test_oracle_coverage_drops_a_signed_omission_from_the_denominator(tmp_path: 
     """A page a human accepted losing has nothing to hold against a reference."""
     _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A"), ("ws.b", "B")])
     _write_report(tmp_path, ["A"])
-    _write_reference_manifest(tmp_path, ["A"])
+    _write_oracle_manifest(tmp_path, ["A"], view_type="worksheet")
     (tmp_path / cu.EXEMPTIONS_FILE).write_text(
         json.dumps({"exemptions": [{"check": "page-parity", "item": "B", "reason": "dropped", "decided_by": "gf"}]}),
         encoding="utf-8",
@@ -629,7 +636,7 @@ def test_a_source_empty_page_owes_no_oracle_evidence_either(tmp_path: Path) -> N
         ],
     )
     _write_report(tmp_path, ["A"])
-    _write_reference_manifest(tmp_path, ["A"])
+    _write_oracle_manifest(tmp_path, ["A"], view_type="worksheet")
 
     oracle = cu.check_oracle_coverage(tmp_path, None, None)
 
@@ -3185,34 +3192,13 @@ def test_one_artifact_still_binds_a_slugged_handover_workbook(tmp_path: Path) ->
     assert explanations["unbound_workbooks"] == []
 
 
-def test_reference_evidence_cannot_satisfy_a_page_when_the_normalized_key_is_shared(tmp_path: Path) -> None:
+def test_reference_evidence_never_satisfies_a_differently_spelled_page(tmp_path: Path) -> None:
     """Kills: reference evidence named 'A B' giving a validation-grade PASS to expected page 'A-B'.
 
-    The records used to be merged into a ``{slug: bool}`` map before coverage was evaluated, so exact
-    spelling and multiplicity were both gone by the time anything was decided. Here two expected
-    pages share the lossy key and one record spells neither exactly, so it settles nothing.
-    """
-    _write_spec(tmp_path, ["A-B", "A_B"])
-    _write_report(tmp_path, ["A-B", "A_B"])
-    _write_reference_manifest(tmp_path, ["A B"])
-
-    oracle = cu.check_oracle_coverage(tmp_path, None, None)
-
-    assert oracle["status"] == cu.STATUS_NOT_CHECKED
-    assert oracle["visual_present"] == 0
-    assert oracle["refused_evidence"] == [
-        "a normalized match for 'A-B' is not unique (1 producer record(s), 2 expected page(s))",
-        "a normalized match for 'A_B' is not unique (1 producer record(s), 2 expected page(s))",
-    ]
-
-
-def test_reference_evidence_satisfies_a_page_when_the_normalized_key_is_unique_on_both_sides(
-    tmp_path: Path,
-) -> None:
-    """The normalized fallback is NARROWED, not deleted: one record, one page, one shared key.
-
-    A filesystem or capture tool is allowed to have re-spelled a name. What is not allowed is
-    resolving that re-spelling when more than one thing answers to it.
+    Round 6 narrowed this to a uniqueness-guarded fallback; round 7 removed it. A view name and a
+    page name are BOTH source-owned - they come out of the same Tableau workbook with no filesystem
+    in between - so no mechanism re-spells one into the other, and a guard on a fallback with no
+    mechanism behind it only narrows a match that was never justified.
     """
     _write_spec(tmp_path, ["A-B"])
     _write_report(tmp_path, ["A-B"])
@@ -3220,21 +3206,33 @@ def test_reference_evidence_satisfies_a_page_when_the_normalized_key_is_unique_o
 
     oracle = cu.check_oracle_coverage(tmp_path, None, None)
 
-    assert oracle["status"] == cu.STATUS_PASS
-    assert oracle["visual_present"] == 1
+    assert oracle["status"] == cu.STATUS_NOT_CHECKED
+    assert oracle["visual_present"] == 0
     assert oracle["refused_evidence"] == []
 
 
-def test_exact_reference_evidence_beats_a_shared_normalized_key(tmp_path: Path) -> None:
-    """Exact spelling wins outright, so a same-key sibling neither steals nor blocks the match."""
-    _write_spec(tmp_path, ["A-B", "A B"])
-    _write_report(tmp_path, ["A-B", "A B"])
-    _write_reference_manifest(tmp_path, ["A B"])
+def test_reference_evidence_satisfies_the_page_it_names_exactly(tmp_path: Path) -> None:
+    """The other half: removing the fallback must not stop exact evidence counting."""
+    _write_spec(tmp_path, ["A-B"])
+    _write_report(tmp_path, ["A-B"])
+    _write_reference_manifest(tmp_path, ["A-B"])
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["status"] == cu.STATUS_PASS
+    assert oracle["visual_present"] == 1
+
+
+def test_exact_reference_evidence_beats_a_same_named_sibling(tmp_path: Path) -> None:
+    """A dashboard and a worksheet named alike: evidence certifies the one whose KIND it declares."""
+    _write_full_spec(tmp_path, dashboards=[("Sales", [])], worksheets=[("ws.other", "Other")])
+    _write_report(tmp_path, ["Sales", "Other"])
+    _write_reference_manifest(tmp_path, ["Sales"])
 
     oracle = cu.check_oracle_coverage(tmp_path, None, None)
 
     assert oracle["visual_present"] == 1
-    assert [row["page"]["name"] for row in oracle["rows"] if row["visual"]] == ["A B"]
+    assert [row["page"]["name"] for row in oracle["rows"] if row["visual"]] == ["Sales"]
 
 
 def test_oracle_evidence_from_a_different_workbook_satisfies_nothing(tmp_path: Path) -> None:
@@ -3316,24 +3314,17 @@ def test_one_reference_directory_is_read_once_even_when_named_two_ways(tmp_path:
     assert cu.check_oracle_coverage(tmp_path, None, None)["visual_present"] == 1
 
 
-def test_two_records_sharing_a_normalized_key_satisfy_nothing(tmp_path: Path) -> None:
-    """The producer side of the uniqueness guard, pinned on its own.
-
-    One expected page, no exact spelling match, and TWO producer records answering to the same lossy
-    key. Checking only the expected side would take the first record and report coverage; nothing
-    establishes which of the two is a picture of this page.
-    """
+def test_two_producer_records_naming_one_page_satisfy_nothing(tmp_path: Path) -> None:
+    """Multiplicity is the point of keeping records: two claims about one page settle nothing."""
     _write_spec(tmp_path, ["A-B"])
     _write_report(tmp_path, ["A-B"])
-    _write_reference_manifest(tmp_path, ["A B", "A_B"])
+    _write_reference_manifest(tmp_path, ["A-B", "A-B"])
 
     oracle = cu.check_oracle_coverage(tmp_path, None, None)
 
     assert oracle["status"] == cu.STATUS_NOT_CHECKED
     assert oracle["visual_present"] == 0
-    assert oracle["refused_evidence"] == [
-        "a normalized match for 'A-B' is not unique (2 producer record(s), 1 expected page(s))"
-    ]
+    assert oracle["refused_evidence"] == ["2 producer records are named 'A-B'"]
 
 
 def test_a_relative_target_reads_one_reference_directory_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3369,44 +3360,198 @@ def test_a_report_and_its_model_sharing_a_stem_are_one_owner_not_a_collision(tmp
     (tmp_path / "fabric" / "Book!.SemanticModel" / "definition").mkdir(parents=True)
     _write_viz_fidelity_handover(tmp_path, [_empty_row("B")], workbook_name="Book?")
 
-    exact, slugged = cu._unit_workbook_keys(tmp_path)
+    exact, stem_index = cu._unit_workbook_keys(tmp_path)
 
     assert exact == {"Book!"}
-    assert slugged == ["book"]
+    assert stem_index.unique("Book?") == "Book!"
+    assert stem_index.count("book") == 1
     assert cu.page_drop_explanations(tmp_path)["bound_workbooks"] == ["Book?"]
 
 
-# --- known-gap disclosure (issue #438) --------------------------------------------------------
-# ⚠️ These tests exist BECAUSE the gap is shipped unfixed. They are a tripwire, not a feature: when
-# #438 lands, oracle evidence will carry a kind and the workbook guard will be two-sided, and these
-# tests MUST be deleted along with `_oracle_caveats`. A failing test here after that fix is the
-# expected signal to remove the disclosure - not a regression to work around.
+# --- round 7: kind-bound oracle evidence, two-sided workbook identity -------------------------
 
 
-def test_a_certified_page_carries_the_kind_caveat_naming_it(tmp_path: Path) -> None:
-    """An operator reading a PASS must be told WHICH page's PASS is unconfirmed, by name."""
-    _write_spec(tmp_path, ["Sales"])
+def test_a_worksheet_typed_record_cannot_certify_a_same_named_dashboard(tmp_path: Path) -> None:
+    """Kills: `view_type` present in the manifest and thrown away here.
+
+    Measured: a record explicitly carrying ``view_type: "worksheet"`` for `Sales` gave a full oracle
+    PASS to the DASHBOARD `Sales`. A Tableau dashboard routinely shares its name with its principal
+    worksheet, so this accepts one visual as evidence for a whole page - and that is the ordinary
+    case, not an edge one.
+    """
+    _write_full_spec(tmp_path, dashboards=[("Sales", [])], worksheets=[])
+    _write_report(tmp_path, ["Sales"])
+    _write_oracle_manifest(tmp_path, ["Sales"], view_type="worksheet")
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["status"] == cu.STATUS_NOT_CHECKED
+    assert oracle["visual_present"] == 0
+    assert oracle["numeric_present"] == 0
+
+
+def test_a_dashboard_typed_record_certifies_the_dashboard(tmp_path: Path) -> None:
+    """The kind guard must not reject evidence that DOES declare the right kind."""
+    _write_full_spec(tmp_path, dashboards=[("Sales", [])], worksheets=[])
+    _write_report(tmp_path, ["Sales"])
+    _write_oracle_manifest(tmp_path, ["Sales"], view_type="dashboard")
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["status"] == cu.STATUS_PASS
+    assert oracle["visual_present"] == 1
+    assert oracle["kindless_evidence"] == 0
+
+
+def test_a_worksheet_typed_record_certifies_a_worksheet_page(tmp_path: Path) -> None:
+    """And the other kind, so the guard is not just 'dashboard or nothing'."""
+    _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.sales", "Sales")])
+    _write_report(tmp_path, ["Sales"])
+    _write_oracle_manifest(tmp_path, ["Sales"], view_type="worksheet")
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["status"] == cu.STATUS_PASS
+    assert oracle["visual_present"] == 1
+
+
+@pytest.mark.parametrize("declared", [None, "unknown", "story", ""])
+def test_a_record_whose_kind_is_unestablished_certifies_nothing(tmp_path: Path, declared: str | None) -> None:
+    """`unknown` is a REFUSAL, not a third kind - and neither is an unrecognised string.
+
+    `capture_tableau_oracle.py` writes the literal `"unknown"` when the Metadata API could not be
+    reached or exposed no LUID (#402). Treating it - or any out-of-vocabulary value, or an absent key
+    from a pre-#402 capture - as either kind is exactly the guess the kind guard exists to refuse.
+    """
+    _write_full_spec(tmp_path, dashboards=[("Sales", [])], worksheets=[])
+    _write_report(tmp_path, ["Sales"])
+    _write_oracle_manifest(tmp_path, ["Sales"], view_type=declared)
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["status"] == cu.STATUS_NOT_CHECKED
+    assert oracle["visual_present"] == 0
+    assert oracle["kindless_evidence"] == 1
+    assert oracle["admitted_evidence"] == 0, "a kind-less record must not even enter the index"
+    assert "establish no dashboard/worksheet kind" in oracle["grade"]
+
+
+def test_reference_manifest_entries_are_dashboards_by_construction(tmp_path: Path) -> None:
+    """`capture_tableau_reference.py` builds `dashboards[]` from the spec's dashboards.
+
+    So the kind is structurally known for a reference capture and does not wait on #402 - but it is
+    only ever `dashboard`, which means a worksheet page genuinely has no reference oracle rather than
+    being certified by a dashboard picture.
+    """
+    _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.sales", "Sales")])
     _write_report(tmp_path, ["Sales"])
     _write_reference_manifest(tmp_path, ["Sales"])
+
+    records, _grades = cu._reference_oracles(tmp_path, None)
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert [record.kind for record in records] == ["dashboard"]
+    assert oracle["visual_present"] == 0, "a dashboard capture is not evidence about a worksheet"
+
+
+def test_two_producing_workbooks_slugging_alike_are_both_refused(tmp_path: Path) -> None:
+    """Kills: uniqueness checked among UNIT workbooks only.
+
+    Measured: records declaring `Bo ok` and `Bo-ok` were both admitted to unit workbook `Book`,
+    because the guard asked "is this key unique among my artifacts?" and never "is it unique among
+    the things claiming it?". Uniqueness of a lossy key on one side is not identity.
+    """
+    _write_full_spec(tmp_path, dashboards=[("Sales", []), ("Ops", [])], worksheets=[])
+    _write_report(tmp_path, ["Sales", "Ops"])
+    _write_oracle_manifest(tmp_path, ["Sales"], workbook="Bo ok")
+    manifest = tmp_path / "_oracle" / "oracle-manifest.json"
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    _png(tmp_path / "_oracle" / "images/Ops__1.png")
+    payload["views"].append(
+        {
+            "view_name": "Ops",
+            "view_type": "dashboard",
+            "workbook": "Bo-ok",
+            "image": {"status": "ok", "path": "images/Ops__1.png"},
+            "data": {"status": "failed"},
+        }
+    )
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["visual_present"] == 0
+    assert oracle["foreign_workbook_evidence"] == ["Bo ok", "Bo-ok"]
+
+
+def test_one_producing_workbook_still_binds_through_a_sanitised_spelling(tmp_path: Path) -> None:
+    """The lossy workbook fallback survives its second guard.
+
+    It is justified here and only here: the unit side is a filesystem-sanitised artifact STEM, so
+    something really may have re-spelled it. One producer, one artifact, one key.
+    """
+    _write_full_spec(tmp_path, dashboards=[("Sales", [])], worksheets=[])
+    _write_report(tmp_path, ["Sales"], name="Bo ok")
+    _write_oracle_manifest(tmp_path, ["Sales"], workbook="Bo-ok")
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["visual_present"] == 1
+    assert oracle["foreign_workbook_evidence"] == []
+
+
+def test_the_normalized_index_is_what_bindable_workbooks_consults(tmp_path: Path) -> None:
+    """The round-6 both-sides guard survives the move into `NormalizedIndex`."""
+    _write_full_spec(tmp_path, dashboards=[], worksheets=[("ws.a", "A"), ("ws.b", "B")])
+    _write_report(tmp_path, ["A"], name="Bo ok")
+    _write_report(tmp_path, ["A"], name="Bo-ok")
+    _write_viz_fidelity_handover(tmp_path, [_empty_row("B")], workbook_name="Book")
+
+    explanations = cu.page_drop_explanations(tmp_path)
+
+    assert explanations["available"] is False
+    assert explanations["unbound_workbooks"] == ["Book"]
+
+# --- known-gap disclosure (issue #450) ---------------------------------------------------------
+# ⚠️ What is left of the #438 disclosure after its KIND half was fixed. The two tests that pinned
+# the kind caveat are gone WITH that caveat - a disclosure outliving its gap manufactures doubt as
+# falsely as a missing one manufactures confidence. These two remain because #450 remains: a record
+# admitted on a lossy workbook key rests on a weaker join than an exact match. When #450 lands,
+# delete `_oracle_caveats`, these tests and their two DISCLOSURE mutations together.
+
+
+def test_a_loosely_attributed_workbook_carries_a_caveat_naming_it(tmp_path: Path) -> None:
+    """An operator reading a PASS must be told WHICH producer was matched loosely, by name."""
+    _write_spec(tmp_path, ["Sales"])
+    _write_report(tmp_path, ["Sales"], name="Bo ok")
+    _write_oracle_manifest(tmp_path, ["Sales"], workbook="Bo-ok")
 
     oracle = cu.check_oracle_coverage(tmp_path, None, None)
 
     assert oracle["status"] == cu.STATUS_PASS
     caveats = oracle["known_gap_caveats"]
     assert len(caveats) == 1
-    assert "#438" in caveats[0]
-    assert "KIND NOT ESTABLISHED" in caveats[0]
-    assert "'Sales'" in caveats[0], "the caveat must name the page, not disclaim generically"
+    assert "#450" in caveats[0]
+    assert "WORKBOOK MATCHED LOOSELY" in caveats[0]
+    assert "'Bo-ok'" in caveats[0], "the caveat must name the producer, not disclaim generically"
+
+
+def test_an_exactly_attributed_workbook_prints_no_caveat(tmp_path: Path) -> None:
+    """Kills a generic disclaimer: an exact workbook match is not affected, so nothing is said."""
+    _write_spec(tmp_path, ["Sales"])
+    _write_report(tmp_path, ["Sales"])
+    _write_oracle_manifest(tmp_path, ["Sales"], workbook="Book")
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["visual_present"] == 1
+    assert oracle["known_gap_caveats"] == []
 
 
 def test_a_run_that_certified_nothing_prints_no_caveat(tmp_path: Path) -> None:
-    """Kills a generic disclaimer: with no page certified, nothing is at risk and nothing is said.
-
-    This is the clause that makes the caveat worth reading. A banner on every run - loudest on the
-    runs where no evidence counted - is noise an operator learns to skip past.
-    """
+    """With no page certified, nothing rests on the lossy join and nothing is claimed about it."""
     _write_spec(tmp_path, ["Sales"])
-    _write_report(tmp_path, ["Sales"])
+    _write_report(tmp_path, ["Sales"], name="Bo ok")
 
     oracle = cu.check_oracle_coverage(tmp_path, None, None)
 
@@ -3414,38 +3559,13 @@ def test_a_run_that_certified_nothing_prints_no_caveat(tmp_path: Path) -> None:
     assert oracle["known_gap_caveats"] == []
 
 
-def test_a_loosely_attributed_workbook_adds_its_own_caveat(tmp_path: Path) -> None:
-    """The second half of #438: uniqueness was checked on one side of the workbook join only."""
+def test_the_caveats_reach_the_rendered_cli_output(tmp_path: Path) -> None:
+    """A payload key nobody prints is not a disclosure."""
     _write_spec(tmp_path, ["Sales"])
     _write_report(tmp_path, ["Sales"], name="Bo ok")
     _write_oracle_manifest(tmp_path, ["Sales"], workbook="Bo-ok")
 
-    oracle = cu.check_oracle_coverage(tmp_path, None, None)
-
-    caveats = oracle["known_gap_caveats"]
-    assert len(caveats) == 2
-    assert any("WORKBOOK MATCHED LOOSELY" in caveat and "'Bo-ok'" in caveat for caveat in caveats)
-
-
-def test_an_exactly_attributed_workbook_adds_no_workbook_caveat(tmp_path: Path) -> None:
-    """An exact workbook match is not affected by the one-sided guard, so it must not be flagged."""
-    _write_spec(tmp_path, ["Sales"])
-    _write_report(tmp_path, ["Sales"])
-    _write_oracle_manifest(tmp_path, ["Sales"], workbook="Book")
-
-    caveats = cu.check_oracle_coverage(tmp_path, None, None)["known_gap_caveats"]
-
-    assert len(caveats) == 1
-    assert all("WORKBOOK MATCHED LOOSELY" not in caveat for caveat in caveats)
-
-
-def test_the_caveats_reach_the_rendered_cli_output(tmp_path: Path) -> None:
-    """A payload key nobody prints is not a disclosure."""
-    _write_spec(tmp_path, ["Sales"])
-    _write_report(tmp_path, ["Sales"])
-    _write_reference_manifest(tmp_path, ["Sales"])
-
     rendered = cu.render(cu.run_all(tmp_path, scope=cu.SCOPE_REPORT))
 
-    assert "#438 KIND NOT ESTABLISHED" in rendered
-    assert "'Sales'" in rendered
+    assert "#450 WORKBOOK MATCHED LOOSELY" in rendered
+    assert "'Bo-ok'" in rendered
