@@ -289,10 +289,18 @@ def workbook_identity(entries: list[dict[str, Any]], asset: Path | None) -> dict
             "match": None,
             "workbook_name": None,
             "route": "provenance",
+            "conflict": True,
             "reason": f"source-provenance.json maps this asset's bytes onto {len(luids)} workbook LUIDs",
         }
     if not luids:
-        return {"luid": None, "match": None, "workbook_name": None, "route": None, "reason": "no provenance entry"}
+        return {
+            "luid": None,
+            "match": None,
+            "workbook_name": None,
+            "route": None,
+            "conflict": False,
+            "reason": "no provenance entry",
+        }
 
     luid = next(iter(luids))
     if stamped and stamped.casefold() != luid.casefold():
@@ -301,6 +309,7 @@ def workbook_identity(entries: list[dict[str, Any]], asset: Path | None) -> dict
             "match": None,
             "workbook_name": None,
             "route": "provenance",
+            "conflict": True,
             "reason": (
                 f"asset filename declares workbook LUID {stamped} but source-provenance.json "
                 f"records {luid} for these bytes"
@@ -315,6 +324,7 @@ def workbook_identity(entries: list[dict[str, Any]], asset: Path | None) -> dict
         "match": origin.get("match"),
         "workbook_name": origin.get("workbook_name"),
         "route": "provenance",
+        "conflict": False,
         "reason": None,
     }
 
@@ -329,10 +339,19 @@ def select_views(manifest: Any, identity: dict[str, Any], unit: str) -> tuple[li
 
     Two routes, mirroring `reference_evidence.Evidence.is_for`: a workbook LUID, else an EXACT
     workbook-name match that resolves to exactly one workbook. Anything else attributes nothing.
+
+    ⚠️ A CONFLICTED identity is not a missing one, and must not fall through to the name route. Found
+    by this file's own test: an asset whose filename LUID contradicted its provenance LUID correctly
+    refused to produce a LUID - and then attributed two renders by name anyway, silently downgrading
+    "two sources disagree about which workbook this is" to "I have no idea, so use the name". Two
+    contradictory identities are LESS evidence than none, not the same amount.
     """
     views = [view for view in (manifest or {}).get("views") or [] if isinstance(view, dict)]
     if not views:
         return [], "no views in oracle manifest"
+
+    if identity.get("conflict"):
+        return [], f"workbook identity is contradictory, so no render can be attributed: {identity.get('reason')}"
 
     luid = identity.get("luid")
     if luid:
@@ -627,6 +646,24 @@ and record the ceiling in `limitations_encountered`.
 # --------------------------------------------------------------------------------------------
 
 
+def conflicting_evidence_dirs(out_root: Path) -> list[Path]:
+    """Evidence directories that would SHADOW every package written under ``out_root``.
+
+    `check_reference_readiness._collect_evidence` looks for `reference/`, `_oracle/` and `oracle/`
+    beside the target, beside its parent AND beside its grandparent - so a package at
+    `<out>/<Unit>/` also picks up anything at `<out>/` and `<out>/../`. Writing packages inside the
+    run directory therefore lets the gate see the packaged subset AND the original flat capture at
+    `_runs/<NNN>/oracle/`.
+
+    Measured while writing this file's own fixture: with both visible, every view is matched twice,
+    the gate refuses ("2 records share this name once normalized") and all four pages go from
+    **ready** to **unverifiable**. That is strictly worse than not packaging at all, and it is
+    silent, so it is refused up front rather than documented.
+    """
+    names = ("reference", "oracle", "_oracle")
+    return [base / name for base in (out_root, out_root.parent) for name in names if (base / name).is_dir()]
+
+
 def _copy_fabric(bundle: Path, unit: str, dest: Path) -> tuple[str | None, str | None]:
     """Copy the engine WORKING COPY into `<dest>/fabric/`; `(report name, model name)`.
 
@@ -852,6 +889,14 @@ def main(argv: list[str] | None = None) -> int:
 
     out_root = args.out.resolve()
     out_root.mkdir(parents=True, exist_ok=True)
+    shadowing = conflicting_evidence_dirs(out_root)
+    if shadowing:
+        parser.error(
+            f"--out {args.out} sits beside evidence the gates also scan "
+            f"({', '.join(str(path) for path in shadowing)}). A package there is matched against BOTH "
+            "its own oracle and that one, and every page becomes 'unverifiable' rather than ready. "
+            "Choose an --out outside the capture tree."
+        )
     results = [
         package_unit(bundle, unit, out_root, oracle_dir=oracle_dir, assets_dir=assets_dir) for unit in sorted(units)
     ]
