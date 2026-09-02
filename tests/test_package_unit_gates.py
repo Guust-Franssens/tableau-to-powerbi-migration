@@ -264,3 +264,53 @@ def test_an_out_dir_inside_the_capture_tree_is_refused(tmp_path: Path) -> None:
     assert excinfo.value.code == 2
     assert not any(nested.iterdir())
     assert pkg.conflicting_evidence_dirs(nested) == [oracle]
+
+
+# --------------------------------------------------------------------------------------------
+# the scoped report, against BOTH gates - the positive control for round-1 finding 1
+#
+# `test_package_unit.py` proves the negative half (no foreign unit survives). Scoping can fail the
+# other way too, and that failure is invisible in a leak test: `_engine_report` returns None unless
+# `workbooks` is a LIST, so a scoped report that trimmed one field too many silently costs a
+# datasource-only unit its earned `NOT_APPLICABLE`. Both halves are run here on a report in the real
+# engine's 13-field shape rather than the minimal fixture, because the minimal one has nothing to
+# over-trim.
+# --------------------------------------------------------------------------------------------
+
+
+def _plant_estate_report(bundle: Path, unit: str, *, datasources: list[str]) -> None:
+    """Overwrite the fixture's minimal report with one shaped like a real estate run."""
+    from test_package_unit import _estate_report  # pylint: disable=import-outside-toplevel
+
+    full = _estate_report(unit)
+    full["datasources"] = [{"name": name} for name in datasources] + full["datasources"]
+    (bundle / "report.json").write_text(json.dumps(full), encoding="utf-8")
+
+
+def test_a_scoped_estate_report_still_earns_every_page_ready(tmp_path: Path) -> None:
+    """Positive control: full engine shape in, no flags out, and the verdict is unchanged."""
+    bundle, oracle, objects = _bundle(tmp_path, covered=None)
+    _plant_estate_report(bundle, UNIT, datasources=[])
+    code, payload = _readiness(_package(tmp_path, bundle, oracle), tmp_path)
+    assert (code, payload["status"]) == (0, "READY")
+    assert payload["pages_ready"] == payload["pages_expected"] == len(objects)
+
+
+def test_a_scoped_estate_report_still_earns_a_datasource_unit_its_not_applicable(tmp_path: Path) -> None:
+    """The over-trim control: `NOT_APPLICABLE` is EARNED from `datasources[]`, and can be trimmed away.
+
+    Dropping `workbooks` or `datasources` from the allowlist makes `_engine_report` return None here,
+    and this unit stops being a datasource and starts being a broken workbook - exit 3, not exit 0.
+    """
+    bundle, oracle, _ = _bundle(tmp_path, covered=None, datasource_only=True)
+    _plant_estate_report(bundle, UNIT, datasources=[DS_UNIT])
+    unit = _package(tmp_path, bundle, oracle, unit=DS_UNIT)
+
+    scoped = json.loads((unit / "report.json").read_text(encoding="utf-8"))
+    assert [entry["name"] for entry in scoped["datasources"]] == [DS_UNIT]
+    assert scoped["workbooks"] == []
+    assert crr._engine_report(unit) is not None  # pylint: disable=protected-access
+    assert check_unit._is_engine_report(unit / "report.json")  # pylint: disable=protected-access
+
+    code, payload = _readiness(unit, tmp_path)
+    assert (code, payload["status"]) == (0, "NOT_APPLICABLE")

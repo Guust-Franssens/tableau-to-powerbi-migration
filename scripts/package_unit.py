@@ -166,6 +166,16 @@ KIND_WORKBOOK = "workbook"
 KIND_DATASOURCE = "datasource"
 KIND_UNCLASSIFIED = "unclassified"
 
+#: `report.json` fields the packaged copy carries VERBATIM - engine identity, no estate content.
+#: Measured on the 48-workbook reference bundle: `tool` is `"migrate_estate"` (16 bytes) and
+#: `generated_at` an ISO timestamp (22 bytes). Widening this tuple is how the round-1 leak would
+#: come back, so `test_package_unit.py` pins it against the real engine field set.
+REPORT_VERBATIM_FIELDS = ("tool", "generated_at")
+#: `report.json` fields filtered to this unit's entries. These two ARE the gate surface: both
+#: `check_reference_readiness._engine_report` and `check_unit._is_engine_report` reject the file
+#: unless `workbooks` is a list, and `._unit_names` reads the names of both.
+REPORT_UNIT_LISTS = ("workbooks", "datasources")
+
 
 # --------------------------------------------------------------------------------------------
 # reading the bundle
@@ -741,20 +751,85 @@ def _copy_fabric(bundle: Path, unit: str, dest: Path) -> tuple[str | None, str |
     return report, model
 
 
-def _scope_report(engine_report: Any, unit: str) -> dict[str, Any]:
-    """`report.json` carrying only this unit's entries - the engine's own classification, preserved.
+def _scope_definition_of_done(dod: Any, unit: str) -> dict[str, Any] | None:
+    """`definition_of_done` narrowed to this unit's own row, or None when the engine wrote none.
 
-    Kept as the FULL entry rather than a `{"name": ...}` stub: `check_reference_readiness` reads only
-    the names, but the entry is the engine's own account of what it did with this workbook and a
-    package that dropped it would be lossy for no gain.
+    Its `workbooks[]` is a per-workbook DoD row carrying `workbook`, `pbip_folder`, `bound_model`,
+    `report_bound`, `status` and the failure `reason`. Measured on the reference bundle it holds
+    **48** rows - so it is a second copy of the estate, and copying it whole leaks exactly what
+    filtering `workbooks[]` was meant to stop.
+
+    The estate counters beside it (`status`, `reports_bound`, `reports_failed`, `reports_warned`) are
+    DROPPED rather than carried, and that is a correctness fix as much as a scoping one: measured,
+    the estate's `status` is `"failed"` because 18 of 48 reports failed, and in a one-unit package
+    that reads as this unit's verdict. The unit's real verdict is on its own row.
+    """
+    if not isinstance(dod, dict):
+        return None
+    scoped: dict[str, Any] = {
+        "workbooks": [
+            row for row in dod.get("workbooks") or [] if isinstance(row, dict) and row.get("workbook") == unit
+        ]
+    }
+    if "applicable" in dod:
+        scoped["applicable"] = dod["applicable"]
+    scoped["scoped_by"] = (
+        "package_unit.py: workbooks[] filtered to this unit; the estate's own status/reports_* "
+        "counters dropped, because in a one-unit package they read as this unit's verdict"
+    )
+    return scoped
+
+
+def _scope_report(engine_report: Any, unit: str) -> dict[str, Any]:
+    """A `report.json` BUILT for this unit - never the estate's with two lists filtered.
+
+    ⚠️ **This is an ALLOWLIST, and the direction is the whole point.** It previously copied every
+    key it did not explicitly filter, which is fail-open by construction: any field the engine adds
+    later arrives in every package unnoticed. Round-1 blind review measured the consequence on
+    `HR_Dashboard` in the 48-workbook reference bundle - `workbooks[]` was filtered to 1 entry while
+    **11 of the 13 top-level fields were byte-identical to the whole-estate report**:
+    `input_manifest.assets` still listed **67** assets with absolute staged paths,
+    `openable_outputs` still listed **62** units with absolute `pbip`/`report_folder`/`model_folder`
+    paths, `definition_of_done.workbooks` still held **48** rows, and `Superstore`,
+    `World_Indicators` and `Groups` were all still greppable in a package advertised as one unit.
+    A handover package is a customer deliverable; it must not name another customer's workbooks.
+
+    So an unknown field is now DROPPED, not carried, and its NAME (never its value - names are engine
+    schema, not customer data) is recorded in `scope.dropped_fields` so the omission is discoverable
+    rather than silent. That trade is deliberate: the leak blocks a merge, while a gate that one day
+    wants a dropped field fails closed and says so in the package itself.
+
+    Over-trimming is the opposite failure and is bounded by measurement, not by taste. The gate
+    surface of `report.json` is exactly two fields, read at four sites:
+    `check_reference_readiness._engine_report` (:461-462) rejects the whole file unless `workbooks`
+    is a **list**, `._unit_names` (:478-483) reads `workbooks[].name`/`datasources[].name`, and
+    `check_unit._is_engine_report` (:378-380) again requires `workbooks` to be a list. Both are
+    always written, as lists, even when empty - a datasource unit whose `workbooks` went missing
+    would lose `_datasource_only`'s earned `NOT_APPLICABLE` and read as a broken workbook.
+
+    Entries are kept WHOLE rather than reduced to a `{"name": ...}` stub: the gates read only the
+    name, but the entry is the engine's own account of what it did with *this* unit.
     """
     payload = engine_report if isinstance(engine_report, dict) else {}
-    scoped = {key: value for key, value in payload.items() if key not in ("workbooks", "datasources")}
-    for collection in ("workbooks", "datasources"):
+    scoped: dict[str, Any] = {key: payload[key] for key in REPORT_VERBATIM_FIELDS if key in payload}
+    for collection in REPORT_UNIT_LISTS:
         scoped[collection] = [
             entry for entry in payload.get(collection) or [] if isinstance(entry, dict) and entry.get("name") == unit
         ]
-    scoped["scoped_by"] = "package_unit.py: workbooks[]/datasources[] filtered to this unit"
+    dod = _scope_definition_of_done(payload.get("definition_of_done"), unit)
+    if dod is not None:
+        scoped["definition_of_done"] = dod
+    kept = set(scoped)
+    scoped["scoped_by"] = "package_unit.py: rebuilt for this unit from an allowlist, not filtered"
+    scoped["scope"] = {
+        "unit": unit,
+        "kept_fields": sorted(kept),
+        "dropped_fields": sorted(set(payload) - kept),
+        "reason": (
+            "estate-wide: a one-unit handover package must not carry another unit's names, paths or "
+            "status. Field NAMES are listed (engine schema); values are not."
+        ),
+    }
     return scoped
 
 

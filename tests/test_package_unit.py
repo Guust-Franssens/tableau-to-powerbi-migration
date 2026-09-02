@@ -463,6 +463,185 @@ def test_the_scoped_report_keeps_only_this_units_engine_classification(tmp_path:
     assert scoped["datasources"] == []
 
 
+# --------------------------------------------------------------------------------------------
+# 4a. the scoped report as a DATA-EGRESS boundary (round-1 finding 1)
+#
+# `_scope_report` used to copy every key it did not explicitly filter. Measured by the reviewer on
+# `HR_Dashboard` in the 48-workbook reference bundle: `workbooks[]` held 1 entry while **11 of the 13
+# top-level fields were byte-identical to the whole-estate report** - 67 `input_manifest.assets`, 62
+# `openable_outputs`, and (unnamed in the report, found while fixing it) 48 `definition_of_done`
+# rows. A customer package named other customers' workbooks.
+#
+# ⚠️ Two controls that look adequate and are NOT, both measured while writing these tests:
+#
+# * **`workbooks[] == 1`** passes on the DEFECTIVE code. Every test above section 4a does, which is
+#   why the leak survived a full green suite.
+# * **a whole-file hash diff between two packages** also passes on the defective code - the files
+#   genuinely differ, because `workbooks[]` is filtered. Scoping is only provable FIELD BY FIELD.
+#
+# So the control is a sentinel planted in every aggregate field, asserted absent, plus a per-field
+# identity comparison. The sentinel is a full token rather than a bare word on purpose: probing the
+# real fix for the literal `Groups` reported a leak that was actually `'Age Groups'`, a worksheet
+# INSIDE the unit. A substring sentinel manufactures findings.
+# --------------------------------------------------------------------------------------------
+
+#: Every top-level field of a real engine `report.json`, measured 2026-09-02 on the 48-workbook
+#: reference bundle `_runs/407-dryrun-gates/bundle/report.json` (2,102,605 bytes, N=13). Pinned so
+#: the fixture below cannot silently stop covering a field the engine actually writes.
+ENGINE_REPORT_FIELDS = (
+    "datasources",
+    "definition_of_done",
+    "environment",
+    "fallbacks",
+    "generated_at",
+    "input_manifest",
+    "openable_outputs",
+    "pending_gates",
+    "repair_queue",
+    "source",
+    "summary",
+    "tool",
+    "workbooks",
+)
+
+#: A token no real Tableau object can collide with, and that no substring of this unit's own content
+#: can produce. `_scope_report` must not emit it anywhere.
+FOREIGN = "Zz_Foreign_Unit_Sentinel"
+
+
+def _estate_report(unit: str) -> dict:
+    """A `report.json` in the REAL engine's 13-field shape, sentinel-planted in EVERY aggregate field.
+
+    Shapes are copied from the reference bundle, not invented: `input_manifest.assets[]` entries
+    carry `name`/`staged_input_path`/`sha256`, `openable_outputs[]` carry absolute `pbip`/
+    `model_folder` paths, `definition_of_done.workbooks[]` carry `workbook`/`pbip_folder`/`reason`,
+    and `fallbacks[]` carry `datasource`/`source_id`. A fixture that planted the sentinel only in a
+    field the engine does not really write would prove nothing about a real package.
+    """
+    return {
+        "tool": "migrate_estate",
+        "generated_at": "2026-09-02T07:04:07Z",
+        "workbooks": [
+            {"name": unit, "pbip_status": "ok", "pbip_folder": f"pbip/{unit}/{unit}.pbip"},
+            {"name": FOREIGN, "pbip_status": "failed", "pbip_folder": f"pbip/{FOREIGN}/{FOREIGN}.pbip"},
+        ],
+        "datasources": [{"name": f"{FOREIGN}_ds", "source_id": f"assets/{FOREIGN}.tds"}],
+        "definition_of_done": {
+            "applicable": True,
+            "status": "failed",
+            "reports_bound": 44,
+            "reports_failed": 18,
+            "reports_warned": 14,
+            "workbooks": [
+                {"workbook": unit, "status": "warn", "reason": "1 visual(s) rebuilt with warnings"},
+                {"workbook": FOREIGN, "status": "failed", "pbip_folder": f"pbip/{FOREIGN}", "reason": "it failed"},
+            ],
+        },
+        "environment": {"findings": [f"{FOREIGN}: gateway unreachable"]},
+        "fallbacks": [{"datasource": FOREIGN, "source_id": f"_runs/999-x/assets/{FOREIGN}.tds", "reason": "no schema"}],
+        "input_manifest": {
+            "root": f"C:/estate/{FOREIGN}/assets",
+            "source_kind": "LocalFilesSource",
+            "assets": [{"name": FOREIGN, "staged_input_path": f"C:/estate/assets/{FOREIGN}.tds", "sha256": "0" * 64}],
+        },
+        "openable_outputs": [
+            {"kind": "workbook", "name": FOREIGN, "pbip": f"C:/estate/bundle/pbip/{FOREIGN}/{FOREIGN}.pbip"}
+        ],
+        "pending_gates": [{"gate": "second_compiler", "count": 220, "offer": f"220 stubs, mostly in {FOREIGN}"}],
+        "repair_queue": {"path": "repair-queue.json", "requests": 220, "subjects": 22, "top_subject": FOREIGN},
+        "source": {"kind": "LocalFilesSource", "root": f"C:/estate/{FOREIGN}/assets"},
+        "summary": {"workbooks_total": 48, "connectors_seen": ["snowflake", FOREIGN]},
+    }
+
+
+def _packaged_report(tmp_path: Path, unit: str = UNIT) -> dict:
+    return json.loads((_out(tmp_path) / unit / "report.json").read_text(encoding="utf-8"))
+
+
+def _package_estate_report(tmp_path: Path) -> tuple[dict, dict, str]:
+    """`(full report, packaged report, packaged text)` for one unit of a sentinel-planted estate."""
+    bundle, oracle = _bundle(tmp_path)
+    full = _estate_report(UNIT)
+    (bundle / "report.json").write_text(json.dumps(full), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+    text = (_out(tmp_path) / UNIT / "report.json").read_text(encoding="utf-8")
+    return full, json.loads(text), text
+
+
+def test_the_sentinel_fixture_covers_every_field_the_engine_actually_writes() -> None:
+    """Guards the guard: a fixture that drifted from the engine's shape would test a strawman."""
+    assert tuple(sorted(_estate_report(UNIT))) == ENGINE_REPORT_FIELDS
+
+
+def test_no_foreign_unit_survives_anywhere_in_the_packaged_report(tmp_path: Path) -> None:
+    """The round-1 HIGH finding, as a negative control: ONE unit's package names ONE unit."""
+    _full, scoped, text = _package_estate_report(tmp_path)
+    leaking = [key for key, value in scoped.items() if FOREIGN in json.dumps(value, ensure_ascii=False)]
+    assert leaking == [], f"foreign unit leaked through: {leaking}"
+    assert FOREIGN not in text
+
+
+def test_no_engine_report_field_is_copied_unchanged_from_the_estate(tmp_path: Path) -> None:
+    """Field by field, because a whole-file hash cannot see this: 11 of 13 fields were verbatim."""
+    full, scoped, _text = _package_estate_report(tmp_path)
+    verbatim = [
+        key
+        for key, value in full.items()
+        if key not in pkg.REPORT_VERBATIM_FIELDS
+        and key in scoped
+        and json.dumps(scoped[key], sort_keys=True) == json.dumps(value, sort_keys=True)
+    ]
+    assert verbatim == [], f"copied unchanged from the whole-estate report: {verbatim}"
+    assert set(scoped) - set(full) == {"scoped_by", "scope"}
+
+
+def test_an_unknown_engine_field_is_dropped_rather_than_carried(tmp_path: Path) -> None:
+    """Direction: the allowlist fails CLOSED on a field the engine adds later, and says which."""
+    bundle, oracle = _bundle(tmp_path)
+    full = _estate_report(UNIT)
+    full["some_future_estate_field"] = [{"unit": FOREIGN, "detail": "invented by a later engine"}]
+    (bundle / "report.json").write_text(json.dumps(full), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+    scoped = _packaged_report(tmp_path)
+    assert "some_future_estate_field" not in scoped
+    assert "some_future_estate_field" in scoped["scope"]["dropped_fields"]
+
+
+def test_only_unit_neutral_engine_identity_is_carried_verbatim() -> None:
+    """Widening this tuple is exactly how the leak returns, so the CONTENT is checked, not the name.
+
+    A scalar cannot carry another unit's name, path or status; every field that leaked in round 1 was
+    a list or a dict of per-unit rows.
+    """
+    full = _estate_report(UNIT)
+    assert set(pkg.REPORT_VERBATIM_FIELDS) <= set(full)
+    for key in pkg.REPORT_VERBATIM_FIELDS:
+        assert isinstance(full[key], str), f"{key} is not a scalar - it can carry estate content"
+
+
+def test_the_definition_of_done_is_scoped_and_loses_the_estates_own_verdict(tmp_path: Path) -> None:
+    """48 rows on the reference bundle, and `status: failed` is the ESTATE's, not this unit's."""
+    _full, scoped, _text = _package_estate_report(tmp_path)
+    dod = scoped["definition_of_done"]
+    assert [row["workbook"] for row in dod["workbooks"]] == [UNIT]
+    assert dod["applicable"] is True
+    for estate_only in ("status", "reports_bound", "reports_failed", "reports_warned"):
+        assert estate_only not in dod, f"{estate_only} is an estate aggregate and reads as this unit's verdict"
+
+
+def test_the_scoped_report_still_declares_both_collections_as_lists(tmp_path: Path) -> None:
+    """Over-trimming is the opposite defect: both gates reject the file unless `workbooks` is a list.
+
+    `check_reference_readiness._engine_report` returns None without it - which silently costs a
+    datasource-only unit its earned `NOT_APPLICABLE` - and `check_unit._is_engine_report` stops
+    recognising the package as engine output at all.
+    """
+    _full, scoped, _text = _package_estate_report(tmp_path)
+    assert isinstance(scoped["workbooks"], list)
+    assert isinstance(scoped["datasources"], list)
+    assert [entry["name"] for entry in scoped["workbooks"]] == [UNIT]
+
+
 def test_the_scoped_receipt_names_files_that_exist_in_the_package(tmp_path: Path) -> None:
     """Re-rooted `pbip/<unit>/` -> `fabric/`, so the receipt attests to what is actually here."""
     bundle, oracle = _bundle(tmp_path)
