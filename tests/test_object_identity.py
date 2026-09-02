@@ -13,6 +13,7 @@ not that the next review finds nothing at layer six.
 from __future__ import annotations
 
 import sys
+from dataclasses import astuple, replace
 from pathlib import Path
 
 import pytest
@@ -196,3 +197,56 @@ def test_collisions_and_duplicates_preserve_multiplicity() -> None:
     assert merged == [("Ops  Summary", "Ops Summary")]
     assert oid.duplicates(["WB", "WB", "Other"]) == ["WB"]
     assert oid.duplicates(["WB", "Other"]) == []
+
+
+def test_astuple_hands_out_no_selectable_winner() -> None:
+    """Round 5: a dataclass has a SERIALISATION surface independent of its API.
+
+    Renaming the field to `_matches` hid nothing - `astuple(resolution)` returned both values with
+    `'a'` at an indexable position, invoking no raising mechanism at all. An ambiguous resolution
+    retains no values now, so there is nothing for `astuple` to reach.
+    """
+    resolution = ambiguous_resolution()
+    flattened = astuple(resolution)
+    assert resolution.outcome == oid.AMBIGUOUS
+    assert "a" not in flattened
+    assert "b" not in flattened
+    assert flattened == (("worksheet", "Ops"), 2, ("Ops",), None)
+
+
+def test_vars_hands_out_no_selectable_winner() -> None:
+    """The same probe through `__dict__`, which is the other free serialisation path."""
+    resolution = ambiguous_resolution()
+    state = vars(resolution)
+    assert state["_unique"] is None
+    assert not any(value in ("a", "b") for value in state.values())
+    assert set(state) == {"identity", "count", "contenders", "_unique"}
+
+
+def test_a_unique_resolution_still_carries_its_answer() -> None:
+    """The discriminating twin: retaining nothing when ambiguous must not empty the unique case."""
+    index: oid.CandidateIndex[str] = oid.CandidateIndex()
+    index.add(oid.Candidate(names=("Ops",), kind="worksheet"), "a")
+    resolution = index.resolve(oid.ObjectIdentity("worksheet", "Ops"))
+
+    assert resolution.outcome == oid.UNIQUE
+    assert resolution.value() == "a"
+    assert astuple(resolution)[-1] == "a"
+
+
+def test_the_probed_operations_that_are_safe_stay_safe() -> None:
+    """Four operations round 5 probed and CLEARED, pinned so a later change cannot quietly undo them.
+
+    Recording what held is as useful as recording what broke: it is why round 5 was two narrow holes
+    rather than a re-litigation of the design.
+    """
+    key = oid.ObjectIdentity("worksheet", "Ops")
+    # equality and hash include the kind, so a dashboard and a worksheet never collide
+    assert key != oid.ObjectIdentity("dashboard", "Ops")
+    assert hash(key) != hash(oid.ObjectIdentity("dashboard", "Ops"))
+    # replace() re-runs validation rather than bypassing __post_init__
+    with pytest.raises(oid.IdentityError):
+        replace(key, kind=oid.KIND_UNKNOWN)
+    # iterating a resolution raises rather than yielding a winner
+    with pytest.raises(TypeError):
+        list(ambiguous_resolution())

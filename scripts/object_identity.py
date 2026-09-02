@@ -145,32 +145,50 @@ class Lookalike:
 
 @dataclass(frozen=True)
 class Resolution(Generic[T]):
-    """The result of one identity lookup. Never an implicit winner, and never a condition."""
+    """The result of one identity lookup. Never an implicit winner, and never a condition.
+
+    An AMBIGUOUS resolution **retains no values at all** - only a count and the contender names.
+    Round 5 measured why that is structural rather than cosmetic: renaming a field to ``_matches``
+    does not hide it, because a dataclass has a serialisation surface independent of its API, and
+    ``astuple(resolution)`` and ``vars(resolution)["_matches"][0][1]`` both handed back a selectable
+    winner without invoking a single raising mechanism. There is now nothing to hand back.
+
+    ``_unique`` is populated ONLY when exactly one candidate matched, where it is the legitimate
+    answer that :meth:`value` returns anyway.
+    """
 
     identity: ObjectIdentity
-    _matches: tuple[tuple[Candidate, T], ...] = field(repr=False)
+    count: int
+    contenders: tuple[str, ...]
+    _unique: T | None = None
+
+    @classmethod
+    def of(cls, identity: ObjectIdentity, matches: list[tuple[Candidate, T]]) -> Resolution[T]:
+        """Build a resolution, keeping a value only when it is unambiguously the answer."""
+        names = tuple(sorted({name for candidate, _ in matches for name in candidate.names}))
+        return cls(
+            identity=identity,
+            count=len(matches),
+            contenders=names,
+            _unique=matches[0][1] if len(matches) == 1 else None,
+        )
 
     @property
     def outcome(self) -> str:
         """``ABSENT``, ``UNIQUE`` or ``AMBIGUOUS``. Branch on this - it is the only safe reader."""
-        if not self._matches:
+        if not self.count:
             return ABSENT
-        return UNIQUE if len(self._matches) == 1 else AMBIGUOUS
-
-    @property
-    def count(self) -> int:
-        """How many candidates matched, for reporting."""
-        return len(self._matches)
+        return UNIQUE if self.count == 1 else AMBIGUOUS
 
     def value(self) -> T:
         """The single match. Raises :class:`AmbiguousIdentity` for zero or many."""
-        if self.outcome != UNIQUE:
+        if self.outcome != UNIQUE or self._unique is None:
             raise AmbiguousIdentity(f"{self.identity} resolved to {self.count} candidate(s), not one")
-        return self._matches[0][1]
+        return self._unique
 
     def contender_names(self) -> tuple[str, ...]:
         """The NAMES that matched - descriptions for a report, never the values themselves."""
-        return tuple(sorted({name for candidate, _ in self._matches for name in candidate.names}))
+        return self.contenders
 
     def __bool__(self) -> bool:
         """ALWAYS raises. A resolution is not a condition; branch on :attr:`outcome`.
@@ -194,7 +212,7 @@ class _Index(Generic[T]):
         self._by_key.setdefault(key, []).append((candidate, value))
 
     def _resolve(self, identity: ObjectIdentity, key: tuple[str, str]) -> Resolution[T]:
-        return Resolution(identity=identity, _matches=tuple(self._by_key.get(key, ())))
+        return Resolution.of(identity, list(self._by_key.get(key, ())))
 
 
 @dataclass
@@ -247,15 +265,14 @@ class CandidateIndex(_Index[T]):
         exact = self._resolve(identity, (identity.kind, identity.name))
         if exact.outcome != ABSENT:
             return exact
-        loose = self._resolve(identity, (identity.kind, normalize(identity.name)))
         # An exact key and its normalized twin both index the same entry, so a single record can be
         # stored twice under one lookup. De-duplicate by value identity before judging multiplicity,
         # or every unambiguous match would read as AMBIGUOUS.
         seen: list[tuple[Candidate, T]] = []
-        for entry in loose._matches:  # pylint: disable=protected-access
+        for entry in self._by_key.get((identity.kind, normalize(identity.name)), ()):
             if not any(existing[1] is entry[1] for existing in seen):
                 seen.append(entry)
-        return Resolution(identity=identity, _matches=tuple(seen))
+        return Resolution.of(identity, seen)
 
 
 def name_lookalikes(identity: ObjectIdentity, candidates: list[Candidate]) -> list[Lookalike]:

@@ -48,17 +48,23 @@ COLLIDING_NAMES = ("Collision030344", "Collision079370")
 
 
 def write_png(path: Path, width: int = 320, height: int = 240) -> Path:
-    """A genuine, parseable PNG - not a signature stub.
+    """A genuine, parseable PNG - not a signature stub, and distinct per file.
 
     The round-1 fixtures wrote 8 bytes and asserted READY, so they encoded the very assumption the
     gate was supposed to refuse. Anything claiming to be evidence in this file is a real image.
+
+    ⚠️ The pixels are seeded from the file NAME so two fixture renders are never byte-identical.
+    Round 5 keys exclusivity on the verified content digest, and real captures of two different
+    worksheets do not collide - a fixture that emitted identical bytes for every page would trip
+    exclusivity everywhere and model a situation that does not occur.
     """
 
     def chunk(tag: bytes, data: bytes) -> bytes:
         body = tag + data
         return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
 
-    raw = b"".join(b"\x00" + bytes((x * 7 + y * 13) % 256 for x in range(width * 3)) for y in range(height))
+    seed = zlib.crc32(path.name.encode("utf-8")) & 0xFF
+    raw = b"".join(b"\x00" + bytes((x * 7 + y * 13 + seed) % 256 for x in range(width * 3)) for y in range(height))
     blob = (
         b"\x89PNG\r\n\x1a\n"
         + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
@@ -555,6 +561,7 @@ def test_a_worksheet_scope_can_never_satisfy_a_dashboard_page() -> None:
         workbook_sha="abc",
         workbook_luid=None,
         workbook_name=None,
+        render_digest="deadbeef",
     )
     match, lookalikes = crr.match_evidence(dashboard, [worksheet_render])
     assert match is None
@@ -1029,11 +1036,14 @@ def test_a_single_differently_spelled_evidence_record_still_matches(bundle: Path
 # --------------------------------------------------------------------------------------------
 
 
-def test_the_same_file_under_two_spellings_is_still_one_render(bundle: Path) -> None:
-    """Measured: exclusivity compared `evidence_path` STRINGS, not physical render identity.
+def test_the_same_render_under_two_names_is_still_one_render(bundle: Path) -> None:
+    """Exclusivity keys on the VERIFIED CONTENT DIGEST, so it needs no path and no filesystem trick.
 
-    On Windows the same PNG referenced as `shot.png` and `SHOT.PNG` - `Path.samefile()` True - left
-    both pages ready, because the stored strings differed. `render_key` is filesystem identity now.
+    Round 4 keyed on `evidence_path` text and left both pages ready when one physical PNG was named
+    two ways. Round 5 found the replacement fell back to a resolved path whenever `st_ino` was
+    unavailable - which cannot see a hard link or a drive alias - and, worse, that the covering test
+    SKIPPED on exactly the filesystems where the fallback ran. Content identity has no fallback and
+    no skip: it is the same everywhere.
     """
     sha = build_unit(bundle, "WB", worksheets=["Alpha", "Beta"])
     reference = write_reference(
@@ -1041,21 +1051,37 @@ def test_the_same_file_under_two_spellings_is_still_one_render(bundle: Path) -> 
         [("Alpha", "embedded_thumbnail", ["layout_grade"]), ("Beta", "embedded_thumbnail", ["layout_grade"])],
         source_sha=sha,
     )
+    assert crr.scan(bundle)["status"] == "READY"
+
+    # Two DISTINCT files whose bytes are identical - the case a path can never detect.
     manifest = json.loads((reference / "manifest.json").read_text(encoding="utf-8"))
-    # Point the second entry at the SAME file, spelled differently.
-    (reference / "shot-1.png").unlink()
-    manifest["dashboards"][1]["states"][0]["image"] = "SHOT-0.PNG"
+    (reference / "shot-1.png").write_bytes((reference / "shot-0.png").read_bytes())
     manifest["dashboards"][1]["states"][0]["sha256"] = manifest["dashboards"][0]["states"][0]["sha256"]
     manifest["dashboards"][1]["states"][0]["bytes"] = manifest["dashboards"][0]["states"][0]["bytes"]
     (reference / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-    if not (reference / "SHOT-0.PNG").exists():  # case-insensitive filesystems resolve this already
-        pytest.skip("filesystem is case-sensitive, so the two spellings are genuinely two files")
-    assert (reference / "SHOT-0.PNG").samefile(reference / "shot-0.png")
+    assert not (reference / "shot-0.png").samefile(reference / "shot-1.png")
 
     rows = {page["source_object"]: page for page in crr.scan(bundle)["units"][0]["pages"]}
     assert rows["Alpha"]["readiness"] != "ready"
     assert rows["Beta"]["readiness"] != "ready"
     assert crr.main([str(bundle), "--quiet"]) == 1
+
+
+def test_exclusivity_never_falls_back_to_comparing_paths(bundle: Path) -> None:
+    """The render key must be content, not a path - measured as a property, not read from the code.
+
+    `C:\\Windows\\System32\\notepad.exe` and `C:\\Windows\\notepad.exe` are hard links whose resolved,
+    case-folded paths DIFFER, so any path-derived key splits one physical file into two. The key this
+    gate uses does not contain a path at all.
+    """
+    sha = build_unit(bundle, "WB", worksheets=["Solo"])
+    reference = write_reference(bundle, [("Solo", "embedded_thumbnail", ["layout_grade"])], source_sha=sha)
+    page = crr.scan(bundle)["units"][0]["pages"][0]
+
+    digest = hashlib.sha256((reference / "shot-0.png").read_bytes()).hexdigest()
+    assert page["render_key"] == digest
+    assert "shot-0" not in page["render_key"]
+    assert str(reference).casefold() not in page["render_key"].casefold()
 
 
 def write_manifest_for(directory: Path, name: str, render: Path, source_sha: str) -> None:
@@ -1092,15 +1118,15 @@ def test_one_render_cannot_satisfy_a_page_in_each_of_two_units(bundle: Path) -> 
     """Measured: exclusivity ran independently INSIDE each unit, so the same render satisfied one
     page in each of two units and the bundle reported `READY 2/2`.
 
-    Both manifests are individually valid - correct source sha, honest hash, real image - and each
-    is legitimately attributable to its own unit. Only the CROSS-UNIT view shows that one physical
-    file is being credited twice, which is why the check has to run once over every row.
+    Both manifests are individually valid - correct source sha, honest hash, real image - and each is
+    legitimately attributable to its own unit. Only the CROSS-UNIT view shows one render credited
+    twice, which is why the check runs once over every row.
     """
     first = write_workbook(bundle.parent / "assets" / "One.twb", worksheets=["Shared"])
     second = write_workbook(bundle.parent / "assets" / "Two.twb", worksheets=["Shared"])
     # The two workbooks must genuinely DIFFER, or they hash identically and each manifest attaches to
-    # both units - which makes the pages ambiguous and the test pass without ever reaching
-    # exclusivity. Measured: that is exactly what the first version of this fixture did.
+    # both units - which makes the pages ambiguous and the test pass without reaching exclusivity.
+    # Measured: that is exactly what the first version of this fixture did.
     second.write_text(second.read_text(encoding="utf-8") + "<!-- second -->", encoding="utf-8")
     assert hashlib.sha256(first.read_bytes()).hexdigest() != hashlib.sha256(second.read_bytes()).hexdigest()
     write_engine_report(bundle, workbooks=["One", "Two"])
@@ -1109,18 +1135,14 @@ def test_one_render_cannot_satisfy_a_page_in_each_of_two_units(bundle: Path) -> 
         write_report(bundle, unit, [obj.page_id for obj in crr.source_objects(source) or []])
 
     # `_default_dirs` looks in <bundle>/reference and <bundle>/../reference, so two manifests can
-    # coexist - one per unit - while naming the SAME physical render.
+    # coexist - one per unit - while naming renders with IDENTICAL content.
     render = bundle / "reference" / "shot.png"
     write_png(render, 320, 240)
     write_manifest_for(bundle / "reference", "Shared", render, hashlib.sha256(first.read_bytes()).hexdigest())
     sibling = bundle.parent / "reference"
     sibling.mkdir(parents=True, exist_ok=True)
-    if hasattr(Path, "hardlink_to"):
-        (sibling / "shot.png").hardlink_to(render)
-    if not (sibling / "shot.png").exists():  # pragma: no cover - platform without hard links
-        pytest.skip("hard links unavailable, so the two manifests cannot name one physical file")
+    (sibling / "shot.png").write_bytes(render.read_bytes())
     write_manifest_for(sibling, "Shared", sibling / "shot.png", hashlib.sha256(second.read_bytes()).hexdigest())
-    assert (sibling / "shot.png").samefile(render)
 
     report = crr.scan(bundle)
     rows = {(unit["unit"], page["source_object"]): page for unit in report["units"] for page in unit["pages"]}

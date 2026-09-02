@@ -846,8 +846,8 @@ del oid.Resolution.__bool__
     "the-matches-are-public-again": Mutation(
         code="""
 import object_identity as oid
-# Re-expose the raw collection, which is all `resolution.matches[0]` ever needed.
-oid.Resolution.matches = property(lambda self: tuple(value for _c, value in self._matches))
+# Re-expose a public collection, which is all `resolution.matches[0]` ever needed.
+oid.Resolution.matches = property(lambda self: (self._unique,) if self._unique is not None else ())
 """,
         anchor="test_the_matches_are_not_reachable_as_a_public_collection",
         controls=("test_reading_an_ambiguous_resolution_raises_rather_than_picking",),
@@ -908,7 +908,7 @@ import check_reference_readiness as crr
 # referenced under two spellings that `Path.samefile()` calls identical.
 crr._render_key = lambda path: path
 """,
-        anchor="test_the_same_file_under_two_spellings_is_still_one_render",
+        anchor="test_the_same_render_under_two_names_is_still_one_render",
         controls=("test_one_render_cannot_make_two_pages_ready",),
     ),
     "exclusivity-runs-inside-each-unit": Mutation(
@@ -927,6 +927,59 @@ crr._enforce_exclusivity = lambda rows: None
 """,
         anchor="test_one_render_cannot_satisfy_a_page_in_each_of_two_units",
         controls=("test_one_render_cannot_make_two_pages_ready",),
+    ),
+    # --- round 5: the serialisation surface, and the unsafe render-key fallback -------------------
+    "an-ambiguous-resolution-retains-its-values": Mutation(
+        code="""
+import object_identity as oid
+# Round 5: renaming the field to `_matches` hid nothing - a dataclass has a serialisation surface
+# independent of its API, so astuple() and vars() both handed back a selectable winner without
+# invoking a single raising mechanism. Retaining the values again restores exactly that.
+_orig = oid.Resolution.of.__func__
+def of(cls, identity, matches):
+    built = _orig(cls, identity, matches)
+    object.__setattr__(built, "_unique", matches[0][1] if matches else None)
+    return built
+oid.Resolution.of = classmethod(of)
+""",
+        anchor="test_astuple_hands_out_no_selectable_winner",
+        controls=("test_a_unique_resolution_still_carries_its_answer",),
+    ),
+    "the-render-key-falls-back-to-a-path": Mutation(
+        code="""
+from pathlib import Path
+import check_reference_readiness as crr
+# Round 5: the previous key fell back to a resolved, case-folded PATH when st_ino was unavailable,
+# which cannot identify a hard link or a drive alias - reopening the defect round 4 closed.
+crr._render_key = lambda match: str(Path(match.path).resolve()).casefold()
+""",
+        anchor="test_the_same_render_under_two_names_is_still_one_render",
+        controls=("test_a_worksheet_render_does_satisfy_a_worksheet_page",),
+    ),
+    "the-render-key-contains-a-path": Mutation(
+        code="""
+import check_reference_readiness as crr
+# A key that merely INCLUDES the path is still path-dependent, however much else it carries.
+_orig = crr._render_key
+crr._render_key = lambda match: f"{match.path}|{_orig(match)}"
+""",
+        anchor="test_exclusivity_never_falls_back_to_comparing_paths",
+        controls=("test_one_render_cannot_make_two_pages_ready",),
+    ),
+    "the-render-digest-is-taken-from-the-manifest-unverified": Mutation(
+        code="""
+import reference_evidence as ev
+# The digest is only safe as an identity because `render_facts` has already proven the bytes hash to
+# it. Accepting a mismatched hash turns the verified content identity back into a manifest claim -
+# and then a swapped render keeps its old key.
+_orig = ev._integrity_mismatch
+def _integrity_mismatch(blob, size, recorded):
+    reason = _orig(blob, size, recorded)
+    return None if reason and "recorded sha256" in reason else reason
+ev._integrity_mismatch = _integrity_mismatch
+""",
+        anchor="test_a_swapped_image_no_longer_counts",
+        controls=("test_a_worksheet_render_does_satisfy_a_worksheet_page",),
     ),
     # --- whole-suite discriminating controls ------------------------------------------------------
     "control-cosmetic-reword-of-a-rendered-line": Mutation(

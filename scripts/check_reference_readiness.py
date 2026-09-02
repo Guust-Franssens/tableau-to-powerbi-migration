@@ -346,20 +346,25 @@ def match_evidence(obj: SourceObject, evidence: list[Evidence]) -> tuple[Evidenc
     return (AMBIGUOUS if resolution.outcome == oid.AMBIGUOUS else None), lookalikes
 
 
-def _render_key(path: str) -> str:
-    """A canonical identity for a render file, so exclusivity compares FILES and not strings.
+def _render_key(match: Evidence) -> str:
+    """A canonical identity for a render, so exclusivity compares CONTENT and not strings.
 
-    Round-4 finding: exclusivity compared vidence_path text, so the same physical PNG referenced
-    as 	ableau-dashboard.png and TABLEAU-DASHBOARD.PNG - Path.samefile() True on Windows - left
-    both pages ready. Filesystem identity (st_dev/st_ino) is the real answer; the resolved,
-    case-folded path is the fallback when the file cannot be stat-ed.
+    Round 5: the previous version keyed on filesystem identity (`st_dev`/`st_ino`) and **fell back
+    to a resolved, case-folded path** when `stat()` failed or `st_ino` was zero. That fallback
+    reopened the very defect round 4 closed - it cannot identify hard links, mapped-drive vs UNC
+    aliases, or any other distinct path to one physical file. Measured on this machine:
+    `C:\\Windows\\System32\\notepad.exe` and `C:\\Windows\\notepad.exe` are hard links whose resolved
+    case-folded paths differ, so on any filesystem without stable inodes one render would satisfy
+    several pages again. Worse, the hard-link test SKIPS on exactly those filesystems, so the
+    fallback was not merely unproven - it was untestable where it mattered.
+
+    The digest is the conservative answer and needs no fallback: it is already VERIFIED against the
+    bytes on disk by `Evidence.build`, which refuses a record whose recorded `sha256` does not match
+    what the file actually contains. Two paths to one physical file always agree. Two genuinely
+    different files that happen to be byte-identical also agree - and that direction is safe, because
+    it makes exclusivity fire and the pages fail closed.
     """
-    resolved = Path(path).resolve()
-    try:
-        stat = resolved.stat()
-    except OSError:
-        return str(resolved).casefold()
-    return f"{stat.st_dev}:{stat.st_ino}" if stat.st_ino else str(resolved).casefold()
+    return match.render_digest
 
 
 def _enforce_exclusivity(rows: list[dict[str, Any]]) -> None:
@@ -432,7 +437,7 @@ def _page_row(  # pylint: disable=too-many-arguments,too-many-positional-argumen
                 "grade": match.grade,
                 "matched_by": f"{match.origin}:{match.provider or 'unknown'} (scope={match.kind})",
                 "evidence_path": match.path,
-                "render_key": _render_key(match.path),
+                "render_key": _render_key(match),
                 "readiness": INSUFFICIENT_GRADE if insufficient else READY,
             }
         )

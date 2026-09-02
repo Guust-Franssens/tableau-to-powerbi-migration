@@ -177,6 +177,11 @@ class Evidence:  # pylint: disable=too-many-instance-attributes
     workbook_sha: str | None
     workbook_luid: str | None
     workbook_name: str | None
+    #: sha256 of the render bytes, VERIFIED against the producer's recorded hash by :meth:uild.
+    #: Exclusivity keys on this rather than on a path, because a path cannot identify a hard link or
+    #: a drive alias and a text fallback is what round 5 found reopening the defect (see
+    #: `check_reference_readiness._render_key`).
+    render_digest: str
 
     @classmethod
     def build(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
@@ -214,6 +219,9 @@ class Evidence:  # pylint: disable=too-many-instance-attributes
         if isinstance(facts, str):
             return reject(facts)
         width, height = facts
+        # render_facts has already proven the bytes hash to recorded.sha256, so this is the
+        # VERIFIED content identity rather than a claim taken from the manifest.
+        digest = (recorded.sha256 or "").casefold()
         return cls(
             name=name,
             kind=kind,
@@ -226,6 +234,7 @@ class Evidence:  # pylint: disable=too-many-instance-attributes
             workbook_sha=workbook_sha,
             workbook_luid=workbook_luid,
             workbook_name=workbook_name,
+            render_digest=digest,
         )
 
     def candidate(self) -> Candidate:
