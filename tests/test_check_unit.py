@@ -3418,6 +3418,45 @@ def test_a_reference_manifest_inside_the_unit_is_attributable_by_location(tmp_pa
     assert oracle["unattributed_evidence"] == 0
 
 
+def test_a_non_packaged_unit_still_reads_an_ancestors_oracle_capture(tmp_path: Path) -> None:
+    """The control that makes the package test below meaningful rather than a deletion.
+
+    `_oracle_dirs` looks beside the unit AND beside its parent, because `capture_tableau_oracle.py`
+    writes one flat capture per run while a unit sits under it. Removing that walk-up would make a
+    real capture invisible, which is the defect the `oracle/`-name search was added to fix.
+    """
+    unit = tmp_path / "unit"
+    _write_spec(unit, ["Revenue"])
+    _write_report(unit, ["Revenue"])
+    _write_oracle_manifest(tmp_path, ["Revenue"], workbook="Book")
+
+    assert cu.check_oracle_coverage(unit, None, None)["visual_present"] == 1
+
+
+def test_a_self_contained_package_does_not_also_read_the_runs_flat_capture(tmp_path: Path) -> None:
+    """Issue #451's defect ONE GATE ALONG - found here, not in the brief, and measured before fixing.
+
+    A package at `_runs/<run>/<unit>/` beside the run's flat capture read BOTH manifests, so every
+    view matched twice and this gate refused each page as "2 producer records are named 'Revenue'":
+    0 visual coverage, silently, making packaging strictly worse than not packaging. Same class as
+    the entry gate's "2 records share this name once normalized", so the rule lives once in
+    `bundle_corpus.is_self_contained` rather than being fixed a second time here.
+    """
+    unit = tmp_path / "unit"
+    _write_spec(unit, ["Revenue"])
+    _write_report(unit, ["Revenue"])
+    _write_oracle_manifest(unit, ["Revenue"], workbook="Book")
+    _write_oracle_manifest(tmp_path, ["Revenue"], workbook="Book")
+    assert cu.check_oracle_coverage(unit, None, None)["refused_evidence"] == ["2 producer records are named 'Revenue'"]
+
+    (unit / "package-manifest.json").write_text("{}", encoding="utf-8")
+
+    oracle = cu.check_oracle_coverage(unit, None, None)
+    assert oracle["status"] == cu.STATUS_PASS
+    assert oracle["visual_present"] == 1
+    assert oracle["refused_evidence"] == []
+
+
 def test_two_reference_records_with_one_name_satisfy_nothing_and_say_why(tmp_path: Path) -> None:
     """Multiplicity is the point of keeping records: two claims about one name settle nothing."""
     _write_spec(tmp_path, ["Revenue"])

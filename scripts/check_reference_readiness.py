@@ -67,7 +67,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
-from bundle_corpus import shipping_reports
+from bundle_corpus import is_self_contained, shipping_reports
 import object_identity as oid
 from object_identity import AMBIGUOUS
 from reference_evidence import (
@@ -572,27 +572,16 @@ def resolve_source(root: Path, unit: str, handover: dict[str, Any] | None, expli
     return None
 
 
-#: A self-contained handover package writes this beside the unit (`scripts/package_unit.py`, #446).
-#: Its presence is the marker that a target owns its evidence and must not inherit an ancestor's.
-PACKAGE_MARKER = "package-manifest.json"
-
-
 def _default_dirs(root: Path, name: str) -> list[Path]:
-    """Conventional evidence locations, mirroring `check_unit.py:830-839`.
+    """Conventional evidence locations, mirroring `check_unit._oracle_dirs`.
 
     The walk-up is a UNION, not a fallback, and that is deliberate: an un-packaged unit under
-    `<bundle>/pbip/<Unit>/` finds the run's flat capture two levels up, which is the ordinary case and
-    must keep working.
+    `<bundle>/pbip/<Unit>/` finds the run's flat capture that way, which is the ordinary case.
 
-    ⚠️ **A self-contained package stops the walk.** `package_unit.py` writes a unit-scoped
-    `oracle/oracle-manifest.json` holding THIS unit's views with rewritten paths; a package assembled
-    INSIDE a run directory therefore sees its own copy AND the run's flat capture two levels up, and
-    every view matches twice. The gate then refuses the pair as "2 records share this name once
-    normalized" and every page goes ready -> unverifiable - strictly worse than not packaging, and
-    silent. A `package-manifest.json` beside the target is that package's own declaration that it is
-    complete, so it is taken at its word and no ancestor is consulted.
+    A self-contained package stops the walk - rationale, and why both gates share the one rule:
+    `bundle_corpus.is_self_contained`.
     """
-    bases = [root] if (root / PACKAGE_MARKER).is_file() else [root, root.parent, root.parent.parent]
+    bases = [root] if is_self_contained(root) else [root, root.parent, root.parent.parent]
     seen: list[Path] = []
     for candidate in (base / name for base in bases):
         if candidate.is_dir() and candidate.resolve() not in {path.resolve() for path in seen}:

@@ -37,7 +37,7 @@ from typing import Any, Generic, TypeVar
 import check_desktop_orphans as check_desktop_orphans_module
 import object_identity as oid
 import read_handover
-from bundle_corpus import shipping_models, shipping_reports
+from bundle_corpus import is_self_contained, shipping_models, shipping_reports
 from check_field_bindings import model_for_report
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -1818,12 +1818,19 @@ def _oracle_dirs(target: Path, explicit: Path | None) -> list[Path]:
     AGENTS.md "Canonical work layout"). Looking for only one of the two meant a real capture beside
     a bundle at ``_runs/<NNN>-<slug>/bundle`` was invisible and oracle-coverage reported "no oracle
     manifest found" for evidence that existed.
+
+    ⚠️ A self-contained package stops the walk up to ``target.parent``. Measured: a package at
+    ``_runs/<run>/<unit>/`` beside the run's flat capture read BOTH manifests, every view matched
+    twice, and this gate refused each page as *"2 producer records are named X"* - 0 visual coverage,
+    silently. That is issue #451's defect one gate along, so the rule lives once, in
+    :func:`bundle_corpus.is_self_contained`, rather than being fixed here a second time.
     """
     if explicit:
         candidates: list[Path | None] = [explicit]
     else:
         unit = _unit_dir(target)
-        candidates = [base / name for base in (unit, target, target.parent) for name in ORACLE_DIR_NAMES]
+        bases = (unit, target) if is_self_contained(unit) else (unit, target, target.parent)
+        candidates = [base / name for base in bases for name in ORACLE_DIR_NAMES]
     return _resolved_unique(candidates)
 
 

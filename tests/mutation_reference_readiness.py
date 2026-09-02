@@ -943,9 +943,9 @@ import check_reference_readiness as crr
 # bundle-wide pass is a no-op.
 _enforce = crr._enforce_exclusivity
 _result = crr._readiness_result
-def _readiness_result(unit, report_dir, source, rows):
+def _readiness_result(unit, report_dir, source, rows, attribution):
     _enforce(rows)
-    return _result(unit, report_dir, source, rows)
+    return _result(unit, report_dir, source, rows, attribution)
 crr._readiness_result = _readiness_result
 crr._enforce_exclusivity = lambda rows: None
 """,
