@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 import check_desktop_orphans as check_desktop_orphans_module
+import object_identity as oid
 import read_handover
 from bundle_corpus import shipping_models, shipping_reports
 from check_field_bindings import model_for_report
@@ -70,6 +71,57 @@ EXIT_USAGE = 64
 
 EXEMPTIONS_FILE = "unit-check-exemptions.json"
 VALID_EXEMPTION_CHECKS = frozenset({"stub-measures", "page-parity", "scaffold-partitions"})
+
+# The engine's ZERO-PAGE CRASH GUARD page. When every candidate is dropped, twb_to_pbir.py:14719-14727
+# emits ONE synthetic, visual-less page - `_sanitize("page-empty")` with displayName
+# `_EMPTY_REPORT_PAGE_NAME` (:13091) - because a PBIR with an empty `pageOrder` crashes Power BI
+# Desktop on open. It is a DECLARED extra with no Tableau counterpart, so page parity must not count
+# it as an unexplained extra page. Measured on a real 2.339.0 estate run: 2 of 44 workbooks ship one.
+ENGINE_PLACEHOLDER_PAGE_NAME = "No visuals rebuilt"
+ENGINE_PLACEHOLDER_PAGE_ID_PREFIX = "page-empty"
+
+# Where a dropped page's declared reason is read from. NOT pbip_warnings[]: that list carries bare
+# prefixed strings with no scope/name, so a warning there cannot be attributed to a page.
+DROP_EXPLANATION_SOURCE = "handover viz_fidelity[]"
+
+# The ONLY structured statement that a candidate produced no page, and it DIAGNOSES the omission -
+# it never approves it. migrate_estate._fidelity_tier defines `empty` as "no faithful visual emitted";
+# `degraded` is "a rendered visual whose warning is a genuine degradation" and therefore asserts the
+# OPPOSITE. `status: "warned"` spans both and `evidence: "emitted+linted"` appears on 45 empty-tier
+# rows in one estate run, so neither can decide this.
+DROP_EVIDENCE_TIER = "empty"
+
+# ...and an empty-tier row can only ever be a WORKSHEET. `_fidelity_tier` returns `empty` iff
+# `visual_type in (None, "unsupported")`, and `_viz_fidelity` gives `visual_type` a real visual type
+# only for rows it built from `ir["worksheets"]`; a DASHBOARD-scope row gets `visual_type:
+# "dashboard"` and is never `empty`. Measured across a 2.339.0 estate run: all 46 empty-tier rows
+# carry `visual_type: "unsupported"`, and no dashboard/filter/workbook-scope row ever does. Requiring
+# BOTH is what stops a worksheet's evidence settling a same-named dashboard's absence.
+DROP_EVIDENCE_VISUAL_TYPE = "unsupported"
+
+# How an omission was accounted for. Only ACCEPTED_SIGNED lets the gate pass: engine evidence explains
+# an omission, a human accepts one.
+OMISSION_SIGNED = "accepted-signed"
+OMISSION_SOURCE_EMPTY = "no-source-content"
+OMISSION_DECLARED = "declared-by-engine-unsigned"
+OMISSION_UNEXPLAINED = "unexplained"
+OMISSION_AMBIGUOUS = "cannot-establish"
+
+#: The dispositions that owe no Power BI output - and therefore no oracle evidence either. Named once
+#: so page parity and the oracle denominator cannot disagree about it, which they did in round 4.
+OMISSIONS_OWING_NOTHING = frozenset({OMISSION_SIGNED, OMISSION_SOURCE_EMPTY})
+
+# Exemption dispositions. Only APPLIED is an accepted compromise; the other two did nothing and must
+# not be counted as one.
+EXEMPTION_APPLIED = "applied"
+EXEMPTION_STALE = "stale"
+EXEMPTION_AMBIGUOUS = "ambiguous"
+
+# Oracle capture directory names, both of them documented and both real on disk: the tool's own
+# `--out _oracle` convention (AGENTS.md "capture_tableau_oracle.py --out _oracle";
+# docs/operator-runbook.md) and the canonical per-run layout `_runs/<NNN>-<slug>/oracle/`
+# (scripts/work_dirs.py CANONICAL_SUBDIRS; AGENTS.md "Canonical work layout").
+ORACLE_DIR_NAMES = ("_oracle", "oracle")
 
 SCOPE_MODEL = "model"
 SCOPE_REPORT = "report"
@@ -569,23 +621,505 @@ def _semantic_model_phase(models: list[Path], target: Path, model_loc: ModelLoca
     return _phase_row("semantic models", models, target, "no *.SemanticModel/definition folders found")
 
 
-def expected_pages(target: Path) -> list[dict[str, str]] | None:
-    """Expected Tableau pages: dashboards only, never worksheets."""
-    spec_path = _migration_spec(target)
-    if spec_path is None:
-        return None
+def _zone_worksheet_ids(zone: Any, found: set[str]) -> None:
+    """Collect every worksheet id a dashboard zone tree references, at any nesting depth.
+
+    ``parse_tableau._parse_zone`` stamps ``zone["worksheet_id"]`` from ``{ws["name"]: ws["id"]}``
+    (scripts/parse_tableau.py:1027 + :1096), so the value joins directly to a worksheet's ``id``.
+    """
+    if isinstance(zone, dict):
+        worksheet_id = zone.get("worksheet_id")
+        if isinstance(worksheet_id, str) and worksheet_id:
+            found.add(worksheet_id)
+        _zone_worksheet_ids(zone.get("children"), found)
+    elif isinstance(zone, list):
+        for child in zone:
+            _zone_worksheet_ids(child, found)
+
+
+def _source_content_shape() -> tuple[frozenset[str], frozenset[str]] | None:
+    """``(worksheet keys, encoding channels)`` the COMMITTED spec schema declares, or None.
+
+    Read from ``docs/migration-spec.schema.json`` rather than enumerated here. An open enumeration
+    inside the gate is what makes "is this worksheet empty?" undecidable: a channel nobody listed is
+    silently ignored, and a partial structure reads as proof of emptiness. Deriving the closed set
+    from the schema means a channel added there tightens this rule automatically instead of opening
+    a hole in it.
+    """
     try:
-        payload = _read_json(spec_path)
+        schema = _read_json(REPO_ROOT / "docs" / "migration-spec.schema.json")
     except (OSError, json.JSONDecodeError):
         return None
-    pages = []
-    for item in payload.get("dashboards", []):
+    worksheet = ((schema.get("properties") or {}).get("worksheets") or {}).get("items") or {}
+    worksheet_keys = worksheet.get("properties") or {}
+    encodings = (worksheet_keys.get("encodings") or {}).get("properties") or {}
+    if not worksheet_keys or not encodings:
+        return None
+    return frozenset(worksheet_keys), frozenset(encodings)
+
+
+#: Worksheet properties that describe the sheet rather than anything it draws. Everything else the
+#: schema declares is treated as CONTENT, so a property added upstream makes this rule stricter, not
+#: looser - a new channel is content until someone deliberately says otherwise.
+NON_CONTENT_WORKSHEET_KEYS = frozenset({"id", "name", "mark_type", "data_source_ids", "encodings"})
+
+#: The spec version this classification was derived against. A different version cannot be classified.
+SOURCE_EMPTY_SPEC_VERSION = "1.0"
+
+
+def _source_empty(item: dict[str, Any], shape: tuple[frozenset[str], frozenset[str]] | None) -> bool:
+    """Whether a spec worksheet PROVES it declares nothing to render.
+
+    Proof needs the structure to be COMPLETE, not merely to look empty where it was populated. Round
+    4 measured the weaker predicate accepting three things it should not: a Text worksheet whose
+    ``title_text`` reads "Important instructions" (a visible channel it never inspected), a partial
+    ``encodings: {"rows": []}``, and a worksheet with no ``filters`` key at all. Because this
+    disposition needs no signature, every false positive was a silent PASS.
+
+    So: the worksheet must carry exactly the schema's key set, ``encodings`` must carry exactly the
+    schema's channels, and every content-bearing key must be falsy. Anything else - an unknown key, a
+    missing one, an unreadable schema - is NOT proof, and the omission stays a rebuild gap.
+
+    Measured against the estate: both genuinely-empty sheets (``Meridian Multi-Source (3 systems)``
+    ``/Probe Sheet``, ``vishnu_dashboard/Sheet 3``) carry all eleven schema properties with every
+    content channel falsy, so completeness costs nothing on real parser output.
+    """
+    if shape is None:
+        return False
+    worksheet_keys, encoding_keys = shape
+    if set(item) != worksheet_keys:
+        return False
+    encodings = item.get("encodings")
+    if not isinstance(encodings, dict) or set(encodings) != encoding_keys or any(encodings.values()):
+        return False
+    return not any(item[key] for key in worksheet_keys - NON_CONTENT_WORKSHEET_KEYS)
+
+
+def _named_spec_pages(
+    items: Any, collection: str, kind: str, shape: tuple[frozenset[str], frozenset[str]] | None
+) -> tuple[list[dict[str, Any]] | None, str | None]:
+    """Normalize a required migration-spec collection to identified page rows, or refuse it.
+
+    ``docs/migration-spec.schema.json`` requires ``dashboards`` and ``worksheets`` as ARRAYS whose
+    entries each carry ``id`` and ``name``. A malformed shape is refused rather than skipped: quietly
+    narrowing a required collection produces a SMALLER expected set that the rest of the gate then
+    trusts, which is the circular-denominator defect one layer earlier (a spec whose ``worksheets``
+    was an object graded PASS with ``grade=validation-grade``).
+
+    Each row carries its KIND, because a dashboard and a worksheet can share a name and evidence for
+    one must never settle the other.
+    """
+    if not isinstance(items, list):
+        return None, (
+            f"migration-spec.json '{collection}' is {type(items).__name__}, not the array the schema "
+            "requires (docs/migration-spec.schema.json), so the expected page set cannot be derived"
+        )
+    pages: list[dict[str, Any]] = []
+    for index, item in enumerate(items, 1):
         if not isinstance(item, dict):
-            continue
+            return None, f"migration-spec.json '{collection}' entry #{index} is not an object"
         name = item.get("name") or item.get("title") or item.get("id")
-        if isinstance(name, str) and name.strip():
-            pages.append({"id": str(item.get("id") or name), "name": name.strip()})
-    return pages
+        identity = oid.ObjectIdentity.from_engine(kind, name if isinstance(name, str) else None)
+        if identity is None:
+            return None, f"migration-spec.json '{collection}' entry #{index} has no usable name"
+        pages.append(
+            {
+                "id": str(item.get("id") or identity.name),
+                "name": identity.name,
+                "kind": kind,
+                "source_empty": kind == oid.KIND_WORKSHEET and _source_empty(item, shape),
+            }
+        )
+    return pages, None
+
+
+def _spec_payload(target: Path) -> tuple[dict[str, Any] | None, str | None]:
+    """``(spec object, refusal reason)`` - the file exists, parses, and declares both required arrays."""
+    spec_path = _migration_spec(target)
+    if spec_path is None:
+        return None, (
+            "no migration-spec.json found, so the expected Tableau page set is unknown; "
+            "produce one with scripts/parse_tableau.py <workbook> -o <unit>/migration-spec.json"
+        )
+    try:
+        payload = _read_json(spec_path)
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"migration-spec.json could not be read ({exc})"
+    if not isinstance(payload, dict):
+        return None, "migration-spec.json is not a JSON object"
+    missing = [name for name in ("dashboards", "worksheets") if name not in payload]
+    if missing:
+        return None, (
+            f"migration-spec.json has no {' or '.join(repr(name) for name in missing)} array; the "
+            "schema requires it, so this file cannot be used as the expected page set"
+        )
+    return payload, None
+
+
+def _placed_worksheet_ids(dashboards: list[Any]) -> tuple[set[str], str | None]:
+    """Worksheet ids any dashboard zone tree places, or a refusal when a tree cannot be walked."""
+    placed: set[str] = set()
+    for index, dashboard in enumerate(dashboards, 1):
+        zones = dashboard.get("zones")
+        if zones is not None and not isinstance(zones, (dict, list)):
+            return placed, (
+                f"migration-spec.json dashboard entry #{index} has a '{type(zones).__name__}' zone "
+                "tree, which cannot be walked, so placed worksheets cannot be identified"
+            )
+        _zone_worksheet_ids(zones, placed)
+    return placed, None
+
+
+def _spec_pages(target: Path) -> tuple[list[dict[str, Any]] | None, str | None]:
+    """``(candidate pages, refusal reason)`` from the unit's migration spec.
+
+    Exactly one of the two is ever set. Every refusal path is explicit, because a partial answer here
+    silently becomes a confident verdict downstream.
+    """
+    payload, error = _spec_payload(target)
+    if payload is None:
+        return None, error
+    shape = _source_content_shape() if payload.get("migration_spec_version") == SOURCE_EMPTY_SPEC_VERSION else None
+    dashboards, error = _named_spec_pages(payload["dashboards"], "dashboards", oid.KIND_DASHBOARD, shape)
+    worksheets, worksheet_error = _named_spec_pages(payload["worksheets"], "worksheets", oid.KIND_WORKSHEET, shape)
+    error = error or worksheet_error
+    if error is not None:
+        return None, error
+    placed, error = _placed_worksheet_ids(payload["dashboards"])
+    if error is not None:
+        return None, error
+    orphans = [page for page in (worksheets or []) if page["id"] not in placed]
+    candidates = (dashboards or []) + orphans
+    if not candidates:
+        return None, (
+            "migration-spec.json declares no dashboards and no worksheets, so there is no expected "
+            "page set to grade against"
+        )
+    repeated = oid.duplicates([page["id"] for page in candidates])
+    if repeated:
+        return None, (
+            f"migration-spec.json reuses page id(s) {', '.join(repeated)}. An id is the ONLY way to "
+            "sign one of two objects that share a name, so a colliding id makes every signature "
+            "unattributable and the expected set cannot be graded"
+        )
+    return candidates, None
+
+
+def expected_pages(target: Path) -> list[dict[str, Any]] | None:
+    """Pages the engine could emit: every Tableau dashboard PLUS every ORPHAN worksheet.
+
+    "Dashboards only" was wrong. ``twb_to_pbir.py`` (engine 2.339.0) emits one page per dashboard
+    (:14549 ``_emit_page`` / :14551 ``page_order.append``) and then walks ``ir["worksheets"]`` a
+    second time, emitting a page for each sheet NOT already placed on a dashboard (:14557-14558
+    ``if ws["name"] in placed ... continue`` -> :14709 ``page_order.append``). Measured across the
+    43 workbooks of a real 2.339.0 estate run, 19 have zero dashboards and would have produced an
+    EMPTY expected set here, which is what made ``check_oracle_coverage`` grade an artifact against
+    itself (issue #432, defect 2).
+
+    This is the CANDIDATE set, not the emitted set: the engine legitimately drops a candidate in
+    three declared cases (:14529 dashboard with no supported visuals, :14558 unsupported visual
+    type, :14562 no usable field bindings). Attribution of those drops lives in
+    :func:`page_drop_explanations`; this function deliberately reports what Tableau had.
+
+    ``None`` means the candidate set could not be established - a missing spec, an unreadable one, or
+    any malformed required collection. It NEVER means "no pages"; see :func:`_spec_pages` for the
+    specific reason.
+    """
+    return _spec_pages(target)[0]
+
+
+def _unit_workbook_keys(target: Path) -> tuple[set[str], set[str]]:
+    """``(exact stems, slugged stems)`` of the Tableau workbooks this unit ships artifacts for.
+
+    The engine names a report folder ``<workbook name>.Report`` (verified on all 44 workbooks of a
+    real 2.339.0 estate run), so an artifact stem is a usable binding key back to a handover slice.
+
+    Two collections, because the filesystem is allowed to have changed the spelling: an EXACT match
+    binds, and a slugged match is the fallback for a name a filesystem sanitised.
+
+    ⚠️ The slugged side is a LIST, not a set - but one entry per DISTINCT exact stem. Collapsing it
+    lost the collision it exists to detect: a unit shipping both ``Bo ok.Report`` and ``Bo-ok.Report``
+    produced one key ``book``, and a handover workbook ``Book`` was accepted even though either
+    artifact could own it. The uniqueness guard has to hold on BOTH sides of the join. Keying on
+    distinct stems is equally load-bearing in the other direction: a report and its model share a
+    stem and are one name, not two competing owners, and counting the raw files made every ordinary
+    unit look collided.
+    """
+    stems: set[str] = set()
+    for report in shipping_reports(target):
+        stems.add(report.name.removesuffix(".Report"))
+    for model in shipping_models(target):
+        stems.add(model.name.removesuffix(".SemanticModel"))
+    stems = {stem for stem in stems if stem}
+    return stems, [_slug(stem) for stem in sorted(stems)]
+
+
+def page_drop_explanations(target: Path) -> dict[str, Any]:
+    """Engine statements that a specific object of a specific KIND produced no page.
+
+    Three independent guards, because a page-drop excuse is exactly the kind of evidence that gets
+    borrowed. Each closed a measured fail-open on this PR:
+
+    **Workbook identity.** A handover slice explains pages only for a workbook whose artifacts this
+    unit ships (:func:`_unit_workbook_keys`). Without it, a row from ``"Different Workbook"`` excused
+    a page missing from *this* one.
+
+    **Object identity, kind included.** Evidence is indexed as an :class:`object_identity
+    .ObjectIdentity`, so a WORKSHEET row can never settle a same-named DASHBOARD candidate - measured:
+    a workbook with dashboard ``Sales`` and worksheet ``Sales`` had the worksheet's row excuse the
+    dashboard's absence. The index is built ``normalized=False``: this is an engine-to-engine join,
+    so there is deliberately no lossy key table for it to fall back into.
+
+    **Structured non-emission evidence: ``tier == "empty"`` AND ``visual_type == "unsupported"``.**
+    ``migrate_estate._fidelity_tier`` returns ``empty`` only for ``visual_type in (None,
+    "unsupported")``, and ``_viz_fidelity`` gives a real visual type only to rows built from
+    ``ir["worksheets"]`` - a dashboard-scope row carries ``visual_type: "dashboard"`` and is never
+    ``empty``. Measured on a 2.339.0 estate run: all 46 empty-tier rows carry ``unsupported`` and no
+    dashboard/filter/workbook-scope row ever does. So an empty-tier row identifies a WORKSHEET, and
+    requiring both fields is what stops a forged or mis-scoped row claiming otherwise. Neither
+    ``status: "warned"`` (it spans both outcomes) nor ``evidence: "emitted+linted"`` (present on all
+    45 of those empty rows) nor reason text may decide this.
+
+    ⚠️ This function DIAGNOSES an omission. It never approves one - see :func:`check_page_parity`.
+    """
+    exact_stems, slugged_stems = _unit_workbook_keys(target)
+    workbooks, _unreadable = _handover_workbooks(target)
+    index: oid.EngineIndex[str] = oid.EngineIndex()
+    described: dict[str, list[str]] = {}
+    bound: list[str] = []
+    unbound: list[str] = []
+    for name, workbook in _bindable_workbooks(workbooks, exact_stems, slugged_stems):
+        if workbook is None:
+            unbound.append(name)
+            continue
+        bound.append(name)
+        _collect_drop_rows(workbook.get("viz_fidelity"), index, described)
+    return {
+        "index": index,
+        "described": described,
+        "bound_workbooks": sorted(set(bound)),
+        "unbound_workbooks": sorted(set(unbound)),
+        "available": bool(bound),
+        "source": DROP_EXPLANATION_SOURCE,
+    }
+
+
+def _bindable_workbooks(
+    workbooks: list[tuple[Path, str, dict[str, Any]]], exact_stems: set[str], slugged_stems: list[str]
+) -> list[tuple[str, dict[str, Any] | None]]:
+    """``(name, payload-or-None)`` per handover workbook: None means it does not bind to this unit.
+
+    An EXACT stem match binds. A slugged match is the fallback for a name the filesystem sanitised,
+    and it binds only when it is unique on BOTH sides - exactly one handover workbook AND exactly one
+    shipped artifact carry that key. Either collision alone makes the binding a coin toss, and the
+    target side was unguarded: a unit shipping ``Bo ok.Report`` and ``Bo-ok.Report`` accepted a single
+    handover ``Book`` that either artifact could have owned.
+    """
+    names = [str(workbook.get("name") or slice_name) for _source, slice_name, workbook in workbooks]
+    slugs = [_slug(name) for name in names]
+    bound: list[tuple[str, dict[str, Any] | None]] = []
+    for (_source, _slice_name, workbook), name, slug in zip(workbooks, names, slugs, strict=True):
+        exact = name in exact_stems
+        loose = slugs.count(slug) == 1 and slugged_stems.count(slug) == 1
+        bound.append((name, workbook if exact or loose else None))
+    return bound
+
+
+def _collect_drop_rows(rows: Any, index: oid.EngineIndex[str], described: dict[str, list[str]]) -> None:
+    """Index one workbook's proof-of-non-emission rows; record every other row for reporting only."""
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        name = row.get("worksheet")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        reason = row.get("reason")
+        text = reason.strip() if isinstance(reason, str) and reason.strip() else "(no reason recorded)"
+        identity = _drop_evidence_identity(row)
+        if identity is None:
+            described.setdefault(_slug(name), []).append(f"tier={row.get('tier')!r}, type={row.get('visual_type')!r}")
+            continue
+        index.add(identity, text)
+
+
+def _candidate_index(candidates: list[dict[str, Any]]) -> oid.EngineIndex[dict[str, Any]]:
+    """Expected pages, keyed by their exact ``(kind, name)`` identity."""
+    index: oid.EngineIndex[dict[str, Any]] = oid.EngineIndex()
+    for page in candidates:
+        identity = _candidate_identity(page)
+        if identity is not None:
+            index.add(identity, page)
+    return index
+
+
+@dataclass(frozen=True)
+class NameClaim:
+    """Which expected pages a bare, KIND-LESS name could be referring to.
+
+    A PBIR page's display name, an exemption's ``item`` and an oracle manifest entry all name an
+    object without saying what KIND it is, so none of them can be turned into an
+    :class:`object_identity.ObjectIdentity` by its producer. This is the ONE adapter that crosses
+    that gap: it asks the identity index for every identifiable kind and refuses as soon as more than
+    one expected page answers.
+
+    Keeping it in one place is the point. Measured before it existed: a workbook with dashboard
+    ``Sales`` and worksheet ``Sales`` had one rendered ``Sales`` page satisfy BOTH (PASS, one oracle
+    row counted as 2/2 coverage), and one exemption named ``Sales`` sign BOTH omissions for a single
+    recorded compromise.
+    """
+
+    name: str
+    count: int
+    page: dict[str, Any] | None
+
+    @property
+    def outcome(self) -> str:
+        """``ABSENT``, ``UNIQUE`` or ``AMBIGUOUS`` - the same vocabulary as a ``Resolution``."""
+        if not self.count:
+            return oid.ABSENT
+        return oid.UNIQUE if self.count == 1 else oid.AMBIGUOUS
+
+
+def _claim(index: oid.EngineIndex[dict[str, Any]], name: Any) -> NameClaim:
+    """Resolve a bare name against the expected pages, across every identifiable kind.
+
+    ``Resolution.value()`` stays the only reader of a match and still raises unless that kind resolved
+    uniquely; the total across kinds decides whether the NAME as a whole is attributable. Nothing here
+    reads a resolution's truthiness - the shared type now raises on that, deliberately.
+    """
+    if not isinstance(name, str) or not name.strip():
+        return NameClaim(name=str(name), count=0, page=None)
+    total = 0
+    unique: dict[str, Any] | None = None
+    for kind in sorted(oid.IDENTIFIABLE_KINDS):
+        identity = oid.ObjectIdentity.from_engine(kind, name)
+        if identity is None:
+            continue
+        resolution = index.resolve(identity)
+        total += resolution.count
+        if resolution.outcome == oid.UNIQUE:
+            unique = resolution.value()
+    return NameClaim(name=name, count=total, page=unique if total == 1 else None)
+
+
+def _drop_evidence_identity(row: dict[str, Any]) -> oid.ObjectIdentity | None:
+    """The object a row PROVES produced no page, or None when it proves nothing.
+
+    Built only through ``ObjectIdentity.from_engine``, never the dataclass constructor, so a row can
+    never inject a kind the type refuses.
+    """
+    if row.get("tier") != DROP_EVIDENCE_TIER or row.get("visual_type") != DROP_EVIDENCE_VISUAL_TYPE:
+        return None
+    name = row.get("worksheet")
+    return oid.ObjectIdentity.from_engine(oid.KIND_WORKSHEET, name if isinstance(name, str) else None)
+
+
+def _candidate_identity(page: dict[str, Any]) -> oid.ObjectIdentity | None:
+    """A candidate page's identity, again only via ``from_engine``."""
+    return oid.ObjectIdentity.from_engine(str(page.get("kind") or ""), page.get("name"))
+
+
+def _declared_omission(page: dict[str, str], explanations: dict[str, Any]) -> str | None:
+    """The engine's proof that this exact object produced no page, or None.
+
+    Reads the resolution through ``.value()`` inside ``try``: the outcome check and the raise are
+    two independent refusals of a non-unique match, and neither reads the object's truthiness -
+    ``Resolution`` has no ``__bool__``, so ``if resolution:`` would be True for ABSENT as well.
+    """
+    identity = _candidate_identity(page)
+    if identity is None:
+        return None
+    resolution = explanations["index"].resolve(identity)
+    if resolution.outcome != oid.UNIQUE:
+        return None
+    try:
+        return resolution.value()
+    except oid.AmbiguousIdentity:
+        return None
+
+
+def page_expectation(target: Path) -> dict[str, Any]:
+    """Every expected page, classified as SATISFIED or as an OMISSION, by IDENTITY throughout.
+
+    ``candidates`` = dashboards + orphan worksheets, each carrying its KIND. Pairing runs through the
+    same :class:`object_identity.EngineIndex` as the drop evidence, via :func:`_claim`: a rendered
+    page names an object without saying what kind it is, so a name claimed by more than one expected
+    page attributes to NEITHER. Measured before this, with dashboard ``Sales`` and worksheet
+    ``Sales`` both expected, one rendered ``Sales`` page satisfied both and one oracle row was
+    counted as 2-of-2 coverage.
+
+    A candidate is satisfied only by a RENDERED page - one carrying at least one visual - whose exact
+    name it uniquely claims. ``attribution_ambiguous`` is the rename guard: while a rendered page
+    matches no expected page it might BE a renamed candidate, so no absent candidate is genuinely
+    absent and no name-only signature may be applied.
+
+    ``assessable`` is False when the expected set cannot be established at all. It never degrades
+    into the emitted pages: grading an artifact against itself reports a perfect score regardless of
+    what is missing.
+    """
+    actual = actual_pages(target)
+    rendered = [page for page in actual if page.get("visuals", 0) > 0]
+    candidates, refusal = _spec_pages(target)
+    explanations = page_drop_explanations(target)
+    if candidates is None:
+        return {
+            "assessable": False,
+            "reason": refusal,
+            "candidates": None,
+            "index": None,
+            "actual": actual,
+            "rendered": rendered,
+            "omissions": [],
+            "unmatched_rendered": [],
+            "contested_names": [],
+            "attribution_ambiguous": False,
+            "explanations": explanations,
+        }
+    index = _candidate_index(candidates)
+    rendered_names = [page["name"] for page in rendered]
+    satisfied: set[int] = set()
+    unmatched: list[dict[str, Any]] = []
+    contested: set[str] = set()
+    for page in rendered:
+        claim = _claim(index, page["name"])
+        if claim.outcome == oid.ABSENT:
+            unmatched.append(page)
+        elif claim.outcome == oid.AMBIGUOUS or rendered_names.count(page["name"]) != 1:
+            contested.add(claim.name)
+        else:
+            satisfied.add(id(claim.page))
+    absent = [page for page in candidates if id(page) not in satisfied]
+    return {
+        "assessable": True,
+        "reason": None,
+        "candidates": candidates,
+        "index": index,
+        "actual": actual,
+        "rendered": rendered,
+        "omissions": [{**page, "declared_reason": _declared_omission(page, explanations)} for page in absent],
+        "unmatched_rendered": unmatched,
+        "contested_names": sorted(contested),
+        "explanations": explanations,
+    }
+
+
+def _why_unexplained(page: dict[str, Any], explanations: dict[str, Any]) -> str:
+    """Name the specific gap, so an operator knows whether to fetch evidence or sign an exemption."""
+    described = explanations["described"].get(_slug(page["name"]))
+    if described:
+        return (
+            f"the bound handover mentions this name but proves nothing about a {page.get('kind')} "
+            f"(needs tier={DROP_EVIDENCE_TIER!r} + visual_type={DROP_EVIDENCE_VISUAL_TYPE!r}; "
+            f"got {'; '.join(described[:2])})"
+        )
+    if not explanations["available"]:
+        if explanations["unbound_workbooks"]:
+            return (
+                "no handover slice binds to this unit's artifacts; "
+                f"found instead: {', '.join(explanations['unbound_workbooks'][:3])}"
+            )
+        return f"no handover slice was readable, so {explanations['source']} could not be consulted"
+    return "the bound handover records nothing about this page"
 
 
 def _page_order(report_dir: Path) -> list[str]:
@@ -600,9 +1134,26 @@ def _page_order(report_dir: Path) -> list[str]:
     return [str(item) for item in order] if isinstance(order, list) else []
 
 
-def actual_pages(target: Path) -> list[dict[str, str]]:
-    """PBIR pages from shipping reports, ordered by pages.json where available."""
-    pages: list[dict[str, str]] = []
+def _page_visual_count(page_json: Path) -> int:
+    """How many visuals a PBIR page actually carries.
+
+    A page with zero ``visuals/**/visual.json`` files renders nothing. That is load-bearing: it is
+    the only thing that distinguishes the engine's crash-guard placeholder from a rebuilt page, and
+    without it renaming an empty page to an expected page's title certified it as rebuilt.
+    """
+    visuals_root = page_json.parent / "visuals"
+    if not visuals_root.is_dir():
+        return 0
+    return sum(1 for _ in visuals_root.rglob("visual.json"))
+
+
+def actual_pages(target: Path) -> list[dict[str, Any]]:
+    """PBIR pages from shipping reports, ordered by pages.json where available.
+
+    Each row carries ``visuals``, the page's own visual count, so callers can tell a rebuilt page
+    from one that renders nothing.
+    """
+    pages: list[dict[str, Any]] = []
     for report in shipping_reports(target):
         pages_root = report / "definition" / "pages"
         ordered = _page_order(report)
@@ -624,6 +1175,7 @@ def actual_pages(target: Path) -> list[dict[str, str]]:
                     "name": str(display or internal or page_id),
                     "report": str(report),
                     "path": str(page_json),
+                    "visuals": _page_visual_count(page_json),
                 }
             )
     return pages
@@ -668,19 +1220,52 @@ def load_exemptions(target: Path) -> dict[str, Any]:
     return {"path": str(path), "entries": entries, "invalid": invalid}
 
 
-def _exempted(entries: list[dict[str, str]], check: str, item: str, aliases: set[str] | None = None) -> bool:
-    wanted = {item, *(aliases or set())}
-    normalized = {_slug(value) for value in wanted if value}
-    return any(entry["check"] == check and _slug(entry["item"]) in normalized for entry in entries)
+def resolve_exemptions(
+    entries: list[dict[str, str]], check: str, findings: list[tuple[str, str, set[str]]]
+) -> tuple[set[str], list[str]]:
+    """``(exempted finding keys, entries that matched several findings)``.
+
+    ``findings`` is ``(key, item, aliases)`` per finding. Each raw entry is resolved ONCE against all
+    of them: an exact name or alias match wins outright, and the lossy slug is consulted only when no
+    finding matches exactly. An entry matching more than one finding applies to none - measured, a
+    single ``scaffold-partitions`` signature named ``A-B`` exempted both table ``A-B`` and table
+    ``A B`` and flipped the gate to PASS while reporting two exemptions from one signature.
+    """
+    exempted: set[str] = set()
+    contested: list[str] = []
+    for entry in entries:
+        if entry.get("check") != check:
+            continue
+        item = entry["item"]
+        exact = [key for key, name, aliases in findings if item == name or item in aliases]
+        matched = exact or [
+            key
+            for key, name, aliases in findings
+            if _slug(item) in {_slug(value) for value in {name, *aliases} if value}
+        ]
+        if len(matched) == 1:
+            exempted.add(matched[0])
+        elif matched:
+            contested.append(item)
+    return exempted, contested
 
 
 def _handover_workbooks(target: Path) -> tuple[list[tuple[Path, str, dict[str, Any]]], list[str]]:
-    """Workbook payloads from handover slices/estate reports, using read_handover's resolver."""
-    unit = _unit_dir(target)
-    roots = []
-    for candidate in (unit / "handover", target / "handover"):
-        if candidate.is_dir() and candidate not in roots:
-            roots.append(candidate)
+    """Workbook payloads from handover slices/estate reports, using read_handover's resolver.
+
+    ⚠️ Candidate roots are RESOLVED before they are de-duplicated. ``_unit_dir`` resolves its return
+    value while ``target`` keeps whatever spelling the caller passed, so with the documented relative
+    CLI invocation the two candidates compared unequal, the same directory was scanned twice, and
+    every evidence row was indexed twice - turning each into an AMBIGUOUS resolution and making its
+    declared reason vanish. Absolute invocations happened to work, which is how it survived review.
+    """
+    roots: list[Path] = []
+    for candidate in (_unit_dir(target) / "handover", target / "handover"):
+        if not candidate.is_dir():
+            continue
+        resolved = candidate.resolve()
+        if resolved not in roots:
+            roots.append(resolved)
     workbooks: list[tuple[Path, str, dict[str, Any]]] = []
     unreadable: list[str] = []
     for root in roots:
@@ -709,33 +1294,63 @@ def _scaffold_row_identity(row: dict[str, Any], handover: Path) -> tuple[str, se
     return item, {alias for alias in aliases if alias}
 
 
-def _scaffold_partition_rows(
-    workbooks: list[tuple[Path, str, dict[str, Any]]], entries: list[dict[str, str]]
-) -> tuple[list[dict[str, Any]], list[str], list[str]]:
-    """Classify scaffold rows plus workbook payloads whose key is missing/invalid."""
+def _scaffold_rows_for_workbook(
+    path: Path, handover: str, raw_rows: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[tuple[str, str, set[str]]]]:
+    """``(rows, findings)`` for one handover workbook; the key ties a row to its finding."""
+    rows: list[dict[str, Any]] = []
+    findings: list[tuple[str, str, set[str]]] = []
+    for index, row in enumerate(raw_rows):
+        item, aliases = _scaffold_row_identity(row, path)
+        key = f"{handover}#{index}"
+        findings.append((key, item, aliases))
+        rows.append(
+            {
+                "handover": handover,
+                "table": str(row.get("table") or ""),
+                "reason": str(row.get("reason") or ""),
+                "item": item,
+                "key": key,
+                "exempted": False,
+            }
+        )
+    return rows, findings
+
+
+def _scaffold_scan(
+    workbooks: list[tuple[Path, str, dict[str, Any]]],
+) -> tuple[list[dict[str, Any]], list[str], list[str], list[tuple[str, str, set[str]]]]:
+    """``(rows, missing, invalid, findings)`` across every handover workbook, before any signature."""
     rows: list[dict[str, Any]] = []
     missing: list[str] = []
     invalid: list[str] = []
+    findings: list[tuple[str, str, set[str]]] = []
+    buckets = {read_handover.PARTITION_REVIEW_MISSING: missing, read_handover.PARTITION_REVIEW_INVALID: invalid}
     for path, workbook_name, workbook in workbooks:
         status, raw_rows = read_handover.partitions_needs_review_status(workbook)
         handover = f"{_display_path(path)}::{workbook_name}"
-        if status == read_handover.PARTITION_REVIEW_MISSING:
-            missing.append(handover)
-        elif status == read_handover.PARTITION_REVIEW_INVALID:
-            invalid.append(handover)
+        if status in buckets:
+            buckets[status].append(handover)
         elif status == read_handover.PARTITION_REVIEW_PRESENT:
-            for row in raw_rows:
-                item, aliases = _scaffold_row_identity(row, path)
-                rows.append(
-                    {
-                        "handover": handover,
-                        "table": str(row.get("table") or ""),
-                        "reason": str(row.get("reason") or ""),
-                        "item": item,
-                        "exempted": _exempted(entries, "scaffold-partitions", item, aliases),
-                    }
-                )
-    return rows, missing, invalid
+            found = _scaffold_rows_for_workbook(path, handover, raw_rows)
+            rows.extend(found[0])
+            findings.extend(found[1])
+    return rows, missing, invalid, findings
+
+
+def _scaffold_partition_rows(
+    workbooks: list[tuple[Path, str, dict[str, Any]]], entries: list[dict[str, str]]
+) -> tuple[list[dict[str, Any]], list[str], list[str], list[str]]:
+    """Classify scaffold rows plus workbook payloads whose key is missing/invalid.
+
+    Signatures are resolved GLOBALLY across every row before any row is marked exempt, so a raw entry
+    naming two rows exempts neither and is returned as contested.
+    """
+    rows, missing, invalid, findings = _scaffold_scan(workbooks)
+    exempted, contested = resolve_exemptions(entries, "scaffold-partitions", findings)
+    for row in rows:
+        row["exempted"] = row["key"] in exempted
+    return rows, missing, invalid, contested
 
 
 def check_scaffold_partitions(target: Path, exemptions: dict[str, Any]) -> dict[str, Any] | None:
@@ -759,7 +1374,7 @@ def check_scaffold_partitions(target: Path, exemptions: dict[str, Any]) -> dict[
             "missing_handover_keys": [],
             "invalid_handover_keys": unreadable,
         }
-    rows, missing, invalid = _scaffold_partition_rows(workbooks, exemptions["entries"])
+    rows, missing, invalid, contested = _scaffold_partition_rows(workbooks, exemptions["entries"])
     invalid.extend(unreadable)
     unexempted = [row for row in rows if not row["exempted"]]
     if unexempted or invalid:
@@ -782,69 +1397,386 @@ def check_scaffold_partitions(target: Path, exemptions: dict[str, Any]) -> dict[
         "scaffolds": rows,
         "unexempted_scaffolds": len(unexempted),
         "scaffold_exemptions": len(rows) - len(unexempted),
+        "contested_exemptions": contested,
         "missing_handover_keys": missing,
         "invalid_handover_keys": invalid,
     }
 
 
 def check_page_parity(target: Path, exemptions: dict[str, Any]) -> dict[str, Any]:
-    """Page-count parity precondition: expected Tableau dashboards vs emitted PBIR pages."""
-    expected = expected_pages(target)
-    actual = actual_pages(target)
-    if expected is None:
+    """Page precondition: every expected Tableau page is either rebuilt or SIGNED OFF as omitted.
+
+    The rule this gate got wrong twice, stated plainly: **evidence of an absence is not acceptance of
+    an absence.** ``tier: "empty"`` proves the ENGINE emitted no faithful visual for an object; it
+    says nothing about whether a human accepted shipping without that page. So an engine-declared
+    omission is reported with its proof and still fails the gate until an
+    ``unit-check-exemptions.json`` entry names it. Only that signature makes it an accepted
+    compromise; measured before this, a unit missing a page returned PASS from parity AND
+    validation-grade oracle coverage with ``compromises=0``.
+
+    "Rebuilt" means a rendered page - one carrying at least one visual - bearing the candidate's
+    exact name. Zero-visual pages are split: the engine's crash-guard placeholder is expected; any
+    other is reported as a blank page and fails.
+
+    Exemptions are dispositioned rather than applied blindly. One naming a page that is present is
+    ``stale``; one naming an omission while a rendered page is unaccounted for - so the "omission"
+    may be a rename - is ``ambiguous`` and is NOT applied. Only ``applied`` counts as a compromise.
+    """
+    expectation = page_expectation(target)
+    actual = expectation["actual"]
+    if not expectation["assessable"]:
         return {
             "id": "page-parity",
             "status": STATUS_NOT_CHECKED,
-            "detail": "no migration-spec.json found, so expected Tableau dashboards are unknown",
+            "detail": expectation["reason"],
             "expected_pages": None,
             "actual_pages": actual,
             "exemptions": [],
+            "applied_exemptions": [],
+            "unapplied_exemptions": [],
         }
     entries = exemptions["entries"]
-    dropped = [page for page in expected if _exempted(entries, "page-parity", page["name"], {page["id"]})]
-    effective_expected = [page for page in expected if page not in dropped]
-    extra = max(0, len(actual) - len(effective_expected))
-    extra_pages = actual[-extra:] if extra else []
-    exempted_extra = [page for page in extra_pages if _exempted(entries, "page-parity", f"extra:{page['name']}")]
-    unexempted_extra = [page for page in extra_pages if page not in exempted_extra]
-    missing_count = max(0, len(effective_expected) - len(actual))
-    missing_pages = effective_expected[-missing_count:] if missing_count else []
-    unexempted_missing = [
-        page for page in missing_pages if not _exempted(entries, "page-parity", page["name"], {page["id"]})
+    signatures = _resolve_signatures(expectation, entries)
+    placeholders, blank = _zero_visual_pages(actual, expectation["rendered"])
+    unaccounted_extra = [
+        page for page in expectation["unmatched_rendered"] if id(page) not in signatures.accounted_extra
     ]
-    status = STATUS_PASS if not unexempted_missing and not unexempted_extra else STATUS_PRECONDITION_FAILED
+    ambiguous = _attribution_ambiguous(expectation, signatures)
+    omissions = _disposition_omissions(expectation, signatures, ambiguous)
+    applied = [row for row in omissions if row["disposition"] == OMISSION_SIGNED]
+    unsigned = [row for row in omissions if row["disposition"] not in OMISSIONS_OWING_NOTHING]
+    unapplied = _unapplied_exemptions(expectation, signatures, ambiguous)
+    status = (
+        STATUS_PASS
+        if not unsigned and not unaccounted_extra and not blank and not expectation["contested_names"]
+        else STATUS_PRECONDITION_FAILED
+    )
     return {
         "id": "page-parity",
         "status": status,
-        "expected_count": len(expected),
-        "effective_expected_count": len(effective_expected),
+        "detail": _page_parity_detail(status, unsigned, unaccounted_extra, blank, expectation),
+        "expected_count": len(expectation["candidates"]),
+        "emitted_count": len(expectation["rendered"]),
         "actual_count": len(actual),
-        "expected_pages": expected,
+        "expected_pages": expectation["candidates"],
         "actual_pages": actual,
-        "exemptions": dropped + exempted_extra,
-        "unexempted_missing": unexempted_missing,
-        "unexempted_extra": unexempted_extra,
+        "omissions": omissions,
+        "unsigned_omissions": unsigned,
+        "source_empty_omissions": [row for row in omissions if row["disposition"] == OMISSION_SOURCE_EMPTY],
+        "blank_pages": blank,
+        "engine_placeholder_pages": placeholders,
+        "unaccounted_extra_pages": unaccounted_extra,
+        "contested_names": expectation["contested_names"],
+        "attribution_ambiguous": ambiguous,
+        "exemptions": applied,
+        "applied_exemptions": applied,
+        "unapplied_exemptions": unapplied,
+        "drop_explanations": {key: value for key, value in expectation["explanations"].items() if key not in {"index"}},
     }
+
+
+def _disposition_omissions(
+    expectation: dict[str, Any], signatures: SignatureResolution, ambiguous: bool
+) -> list[dict[str, Any]]:
+    """Classify every omission. Only a signature that can be attributed accepts one.
+
+    ``source-empty`` comes first and is the one disposition that is not a compromise: a worksheet
+    with no encodings and no filters renders blank in Tableau too, so it owes no Power BI page. That
+    is established from the SPEC (see :func:`_source_empty`) and never from an engine tier.
+    """
+    rows = []
+    for page in expectation["omissions"]:
+        signature = signatures.signature_for(page)
+        if page.get("source_empty"):
+            disposition = OMISSION_SOURCE_EMPTY
+        elif signature == SIGNATURE_UNIQUE and not ambiguous:
+            disposition = OMISSION_SIGNED
+        elif ambiguous or signature == SIGNATURE_CONTESTED:
+            disposition = OMISSION_AMBIGUOUS
+        elif page["declared_reason"]:
+            disposition = OMISSION_DECLARED
+        else:
+            disposition = OMISSION_UNEXPLAINED
+        rows.append(
+            {**page, "disposition": disposition, "why": _omission_why(page, disposition, expectation, signature)}
+        )
+    return rows
+
+
+SIGNATURE_UNIQUE = "unique"
+SIGNATURE_CONTESTED = "contested"
+
+#: Prefix marking a signature that declares an EMITTED page the source never had.
+EXTRA_SIGNATURE_PREFIX = "extra:"
+
+
+def _page_key(page: dict[str, Any]) -> tuple[str, str, str]:
+    """A candidate's exact identity as a hashable key: ``(kind, id, name)``.
+
+    Used wherever pages must be compared or removed as a set. ⚠️ Never the display name alone - that
+    is the flattening this gate keeps re-introducing, most recently in the oracle denominator, where
+    one accepted ``Sales`` removed BOTH a dashboard and a worksheet called ``Sales``.
+    """
+    return (str(page.get("kind")), str(page.get("id")), str(page.get("name")))
+
+
+def _page_parity_items(entries: list[dict[str, str]]) -> tuple[list[str], list[str]]:
+    """``(plain items, extra: names)`` from the signed file, as EXACT strings, multiplicity kept.
+
+    ⚠️ Never through :func:`resolve_exemptions`. That helper falls back to slugs, which is right for
+    its own item vocabularies but wrong for an engine identity: one entry named ``A-B`` signed both
+    ``A-B`` and ``A B``, because punctuation vanishes in a slug. A signature applies to an engine
+    object or it does not. Lists, not sets, because two identical entries are two claims.
+    """
+    items = [entry["item"] for entry in entries if entry.get("check") == "page-parity"]
+    return (
+        [item for item in items if not item.startswith(EXTRA_SIGNATURE_PREFIX)],
+        [item[len(EXTRA_SIGNATURE_PREFIX) :] for item in items if item.startswith(EXTRA_SIGNATURE_PREFIX)],
+    )
+
+
+@dataclass(frozen=True)
+class SignatureResolution:
+    """Every page-parity signature resolved ONCE, GLOBALLY, before any page is judged.
+
+    The previous shape asked, per page, whether an item equalled *that* page's id or name. Exactness
+    without globality still lets one item match two objects, because nothing ever asked how many
+    things the item matches in total: an item equal to page A's ID and page B's NAME signed both, and
+    one ``extra:Bonus`` accepted two distinct rendered pages both called ``Bonus``.
+
+    So each raw item is resolved against the whole unit and counted by DISTINCT OBJECT - across the
+    id and name namespaces together, so a cross-namespace collision is contested rather than lucky.
+    An item matching one object applies; an item matching several applies to none.
+    """
+
+    applied: dict[tuple[str, str, str], str]
+    contested_items: tuple[str, ...]
+    accounted_extra: frozenset[int]
+    contested_extra_items: tuple[str, ...]
+
+    def signature_for(self, page: dict[str, Any]) -> str | None:
+        """``SIGNATURE_UNIQUE`` when this page is signed, ``SIGNATURE_CONTESTED`` when a signature
+        names it but cannot be attributed, else ``None``."""
+        if _page_key(page) in self.applied:
+            return SIGNATURE_UNIQUE
+        if any(item in {page["id"], page["name"]} for item in self.contested_items):
+            return SIGNATURE_CONTESTED
+        return None
+
+
+def _resolve_signatures(expectation: dict[str, Any], entries: list[dict[str, str]]) -> SignatureResolution:
+    """Resolve every signature against the whole unit exactly once."""
+    plain, extra = _page_parity_items(entries)
+    applied: dict[tuple[str, str, str], str] = {}
+    contested: list[str] = []
+    for item in plain:
+        matched = {id(page): page for page in expectation["candidates"] if item in {page["id"], page["name"]}}
+        if len(matched) == 1:
+            applied[_page_key(next(iter(matched.values())))] = item
+        elif matched:
+            contested.append(item)
+    accounted: set[int] = set()
+    contested_extra: list[str] = []
+    for item in extra:
+        matched = {id(page): page for page in expectation["rendered"] if page["name"] == item}
+        if len(matched) == 1:
+            accounted.add(next(iter(matched)))
+        elif matched:
+            contested_extra.append(item)
+    return SignatureResolution(
+        applied=applied,
+        contested_items=tuple(contested),
+        accounted_extra=frozenset(accounted),
+        contested_extra_items=tuple(contested_extra),
+    )
+
+
+def _omission_why(page: dict[str, Any], disposition: str, expectation: dict[str, Any], signature: str | None) -> str:
+    """One actionable sentence per omission - what it is, and what would resolve it."""
+    if disposition == OMISSION_SIGNED:
+        return "accepted by a signed page-parity exemption"
+    if disposition == OMISSION_SOURCE_EMPTY:
+        return (
+            "the source worksheet has no encodings and no filters, so it renders blank in Tableau too "
+            "and owes no Power BI page"
+        )
+    if disposition == OMISSION_AMBIGUOUS:
+        if signature == SIGNATURE_CONTESTED:
+            return (
+                f"a signature naming {page['name']!r} cannot be attributed - more than one expected "
+                "page carries that name; sign the page's id instead"
+            )
+        names = ", ".join(row["name"] for row in expectation["unmatched_rendered"][:3])
+        contested = ", ".join(expectation["contested_names"][:3])
+        blocker = f"emitted page(s) {names} match no expected page" if names else f"name(s) {contested} are contested"
+        return (
+            f"cannot establish whether this page was dropped or renamed while {blocker}; "
+            "sign 'extra:<page>' to account for them first"
+        )
+    if disposition == OMISSION_DECLARED:
+        return (
+            f"the engine declared it produced no visual ({page['declared_reason']}) - that explains "
+            "the omission but does not accept it; rebuild the page or sign a page-parity exemption"
+        )
+    return _why_unexplained(page, expectation["explanations"])
+
+
+def _unapplied_exemptions(
+    expectation: dict[str, Any], signatures: SignatureResolution, ambiguous: bool
+) -> list[dict[str, Any]]:
+    """Page-parity signatures that accepted NOTHING, each carrying why.
+
+    A signature naming a page that is present accepted nothing (``stale``); one that could not be
+    attributed accepted nothing either (``ambiguous``) - whether because a rendered page is
+    unaccounted for, because more than one expected page carries the name it uses, or because the
+    item itself matched several objects. Neither may count as a compromise, and both are reported so
+    a reader can see the file promised more than it delivered.
+
+    ⚠️ Omitted pages are compared by :func:`_page_key`, not by display name. A name set here meant a
+    present page whose name matched an omitted one was never reported stale.
+    """
+    omitted = {_page_key(page) for page in expectation["omissions"]}
+    rows = [
+        {**page, "disposition": EXEMPTION_STALE}
+        for page in expectation["candidates"]
+        if _page_key(page) not in omitted and signatures.signature_for(page) is not None
+    ]
+    rows += [
+        {**page, "disposition": EXEMPTION_AMBIGUOUS}
+        for page in expectation["omissions"]
+        if (signature := signatures.signature_for(page)) is not None and (ambiguous or signature == SIGNATURE_CONTESTED)
+    ]
+    return rows + [
+        {"id": item, "name": item, "kind": "extra", "disposition": EXEMPTION_AMBIGUOUS}
+        for item in signatures.contested_extra_items
+    ]
+
+
+def _zero_visual_pages(
+    actual: list[dict[str, Any]], emitted: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split the pages that render nothing into the engine's declared placeholder and the rest.
+
+    A zero-visual page is never evidence that a candidate was rebuilt. Exactly one such page is
+    EXPECTED - the crash-guard placeholder - and every other one is a page that ships and renders
+    nothing, which is a finding in its own right.
+
+    Only zero-visual pages are asked about at all: a page carrying visuals is a rebuilt page by the
+    ``rendered`` split and can never be a placeholder. Enforcing that HERE rather than as a third
+    clause inside :func:`_is_engine_placeholder_page` keeps every clause observable - as a predicate
+    clause it changed no verdict, because a page with visuals is neither blank nor an extra.
+    """
+    blankish = [page for page in actual if page not in emitted]
+    placeholders = [page for page in blankish if _is_engine_placeholder_page(page)]
+    return placeholders, [page for page in blankish if page not in placeholders]
+
+
+def _is_engine_placeholder_page(page: dict[str, Any]) -> bool:
+    """Whether a zero-visual page is the engine's crash-guard placeholder rather than a blank page.
+
+    Both engine constants are required (:13091, :14720) and each has its own reproduction: a real
+    page can be titled "No visuals rebuilt", and a report can carry a ``page-empty*`` id whose author
+    later gave it a different title. Either alone hides a page that ships and renders nothing.
+    """
+    return page.get("name") == ENGINE_PLACEHOLDER_PAGE_NAME and str(page.get("id", "")).startswith(
+        ENGINE_PLACEHOLDER_PAGE_ID_PREFIX
+    )
+
+
+def _page_parity_detail(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    status: str,
+    unsigned: list[dict[str, Any]],
+    unaccounted_extra: list[dict[str, Any]],
+    blank: list[dict[str, Any]],
+    expectation: dict[str, Any],
+) -> str | None:
+    """Name what failed, and for each omission exactly what would resolve it."""
+    if status == STATUS_PASS:
+        return None
+    parts = []
+    if unsigned:
+        parts.append(f"{len(unsigned)} expected page(s) omitted without a signed exemption")
+    if unaccounted_extra:
+        names = ", ".join(page["name"] for page in unaccounted_extra[:3])
+        parts.append(f"{len(unaccounted_extra)} emitted page(s) match no expected page: {names}")
+    if blank:
+        names = ", ".join(page["name"] for page in blank[:3])
+        parts.append(f"{len(blank)} page(s) carry no visuals and so render nothing: {names}")
+    for page in unsigned[:3]:
+        parts.append(f"{page['kind']} {page['name']!r} [{page['disposition']}] - {page['why']}")
+    _ = expectation
+    return "; ".join(parts) or None
+
+
+def _resolved_unique(candidates: list[Path | None]) -> list[Path]:
+    """Existing directories, RESOLVED first and then deduplicated.
+
+    Order matters and this is the third place it has: round 3 measured handover discovery indexing
+    every evidence row twice because ``target`` and ``_unit_dir(target)`` are the same directory
+    under two spellings, and deduplicating before resolving cannot see that. ``_reference_dirs`` was
+    left behind - harmless while records were merged into a ``{slug: bool}`` map, and immediately
+    visible once multiplicity was preserved: one reference manifest produced two records for every
+    dashboard, and the pair then refused itself as "2 producer records are named X".
+    """
+    dirs: list[Path] = []
+    for path in candidates:
+        if not path or not path.exists():
+            continue
+        resolved = path.resolve()
+        if resolved not in dirs:
+            dirs.append(resolved)
+    return dirs
 
 
 def _reference_dirs(target: Path, explicit: Path | None) -> list[Path]:
     unit = _unit_dir(target)
     candidates = [explicit] if explicit else [unit / "reference", target / "reference"]
-    return [path.resolve() for path in candidates if path and path.exists()]
+    return _resolved_unique(candidates)
 
 
 def _oracle_dirs(target: Path, explicit: Path | None) -> list[Path]:
-    unit = _unit_dir(target)
-    candidates = [explicit] if explicit else [unit / "_oracle", target / "_oracle", target.parent / "_oracle"]
-    return [path.resolve() for path in candidates if path and path.exists()]
+    """Oracle capture directories, under BOTH documented names.
+
+    ``capture_tableau_oracle.py`` is run with ``--out _oracle`` (AGENTS.md; docs/operator-runbook.md
+    - ``--out`` is required, it has no default), but the canonical per-run layout puts the same
+    capture at ``_runs/<NNN>-<slug>/oracle/`` (``scripts/work_dirs.py`` ``CANONICAL_SUBDIRS``;
+    AGENTS.md "Canonical work layout"). Looking for only one of the two meant a real capture beside
+    a bundle at ``_runs/<NNN>-<slug>/bundle`` was invisible and oracle-coverage reported "no oracle
+    manifest found" for evidence that existed.
+    """
+    if explicit:
+        candidates: list[Path | None] = [explicit]
+    else:
+        unit = _unit_dir(target)
+        candidates = [base / name for base in (unit, target, target.parent) for name in ORACLE_DIR_NAMES]
+    return _resolved_unique(candidates)
 
 
 def _existing_relative(base: Path, rel: str | None) -> bool:
     return bool(rel) and (base / rel).is_file()
 
 
-def _reference_oracles(target: Path, reference_dir: Path | None) -> tuple[dict[str, dict[str, bool]], set[str]]:
-    found: dict[str, dict[str, bool]] = {}
+@dataclass(frozen=True)
+class OracleRecord:
+    """One producer's claim about one Tableau object, with its identity intact.
+
+    ⚠️ Deliberately NOT collapsed into a ``{slug: bool}`` map. That collapse - which is what this gate
+    did for six rounds - destroys multiplicity, exact spelling and the producing WORKBOOK before
+    coverage is evaluated, and it is what let reference evidence named ``A B`` give a validation-grade
+    PASS to an expected page ``A-B``, and an oracle record for ``Revenue`` belonging to
+    ``"Different Workbook"`` satisfy this unit's ``Revenue`` page. Drop evidence was bound to its
+    workbook in round 2; oracle evidence was never bound at all.
+    """
+
+    name: str
+    workbook: str | None
+    visual: bool
+    numeric: bool
+
+
+def _reference_oracles(target: Path, reference_dir: Path | None) -> tuple[list[OracleRecord], set[str]]:
+    """Reference-capture records, one per dashboard entry, multiplicity preserved."""
+    records: list[OracleRecord] = []
     grades: set[str] = set()
     for directory in _reference_dirs(target, reference_dir):
         manifest = directory / "manifest.json"
@@ -857,25 +1789,38 @@ def _reference_oracles(target: Path, reference_dir: Path | None) -> tuple[dict[s
         for dashboard in payload.get("dashboards", []) if isinstance(payload, dict) else []:
             if not isinstance(dashboard, dict):
                 continue
-            name = str(dashboard.get("name") or "")
-            key = _slug(name)
-            entry = found.setdefault(key, {"visual": False, "numeric": False})
+            visual = numeric = False
             for state in dashboard.get("states", []):
                 if not isinstance(state, dict):
                     continue
                 caps = {str(cap) for cap in state.get("capabilities", []) if isinstance(cap, str)}
                 if caps:
                     grades.add("validation-grade" if "validation_grade" in caps else "/".join(sorted(caps)))
-                entry["visual"] = entry["visual"] or _existing_relative(directory, state.get("image"))
-                numeric = state.get("numeric_oracle")
-                entry["numeric"] = entry["numeric"] or (
-                    isinstance(numeric, str) and _existing_relative(directory, numeric)
+                visual = visual or _existing_relative(directory, state.get("image"))
+                oracle = state.get("numeric_oracle")
+                numeric = numeric or (isinstance(oracle, str) and _existing_relative(directory, oracle))
+            records.append(
+                OracleRecord(
+                    name=str(dashboard.get("name") or ""),
+                    workbook=_declared_workbook(dashboard) or _declared_workbook(payload),
+                    visual=visual,
+                    numeric=numeric,
                 )
-    return found, grades
+            )
+    return records, grades
 
 
-def _oracle_capture_oracles(target: Path, oracle_dir: Path | None) -> tuple[dict[str, dict[str, bool]], set[str]]:
-    found: dict[str, dict[str, bool]] = {}
+def _declared_workbook(payload: Any) -> str | None:
+    """The producing workbook a manifest entry declares, or None when it declares none."""
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("workbook")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _oracle_capture_oracles(target: Path, oracle_dir: Path | None) -> tuple[list[OracleRecord], set[str]]:
+    """Tableau Server oracle-capture records, one per view, multiplicity preserved."""
+    records: list[OracleRecord] = []
     grades: set[str] = set()
     for directory in _oracle_dirs(target, oracle_dir):
         manifest = directory / "oracle-manifest.json"
@@ -888,47 +1833,141 @@ def _oracle_capture_oracles(target: Path, oracle_dir: Path | None) -> tuple[dict
         for record in payload.get("views", []) if isinstance(payload, dict) else []:
             if not isinstance(record, dict):
                 continue
-            name = str(record.get("view_name") or record.get("view_url_name") or "")
-            entry = found.setdefault(_slug(name), {"visual": False, "numeric": False})
             data = record.get("data") if isinstance(record.get("data"), dict) else {}
-            entry["numeric"] = (
-                entry["numeric"] or data.get("status") == "ok" and _existing_relative(directory, data.get("path"))
-            )
+            numeric = data.get("status") == "ok" and _existing_relative(directory, data.get("path"))
             # Any RENDER leg is visual evidence, not just the PNG. `--reference-best` now normally
             # selects SVG on Tableau Cloud (issue #403), and reading only `image` meant a run whose
             # reference was a vector SVG counted as having no visual oracle at all.
+            visual = False
             for leg in ("image", "svg", "pdf"):
                 leg_entry = record.get(leg) if isinstance(record.get(leg), dict) else {}
-                entry["visual"] = entry["visual"] or (
+                visual = visual or (
                     leg_entry.get("status") == "ok" and _existing_relative(directory, leg_entry.get("path"))
                 )
-            if entry["visual"] or entry["numeric"]:
+            if visual or numeric:
                 grades.add("layout/text only (oracle capture, default view state)")
-    return found, grades
+            records.append(
+                OracleRecord(
+                    name=str(record.get("view_name") or record.get("view_url_name") or ""),
+                    workbook=_declared_workbook(record) or _declared_workbook(payload),
+                    visual=bool(visual),
+                    numeric=bool(numeric),
+                )
+            )
+    return records, grades
 
 
-def _merge_oracle_maps(
-    reference: dict[str, dict[str, bool]], oracle: dict[str, dict[str, bool]]
-) -> dict[str, dict[str, bool]]:
-    """Combine reference/ and _oracle coverage without losing either source."""
-    combined: dict[str, dict[str, bool]] = {}
-    for key in set(reference) | set(oracle):
-        combined[key] = {
-            "visual": reference.get(key, {}).get("visual", False) or oracle.get(key, {}).get("visual", False),
-            "numeric": reference.get(key, {}).get("numeric", False) or oracle.get(key, {}).get("numeric", False),
-        }
-    return combined
+@dataclass(frozen=True)
+class OracleEvidence:
+    """Producer records resolved against the expected pages, refusing every ambiguity.
+
+    Three guards, one per measured defect:
+
+    * **Workbook.** A record that DECLARES a producing workbook must declare one this unit ships, or
+      it is discarded. A record that declares none is admissible but counted in ``unattributed`` and
+      surfaced in the grade, because "I cannot tell whose picture this is" is weaker evidence and the
+      reader should see that rather than infer it.
+    * **Exact spelling first.** An exact name match wins outright.
+    * **A normalized fallback only when it is unique on BOTH sides** - exactly one producer record and
+      exactly one expected page share the lossy key. Anything else satisfies nothing.
+    """
+
+    by_exact: dict[str, list[OracleRecord]]
+    by_normalized: dict[str, list[OracleRecord]]
+    expected_normalized: dict[str, int]
+    unattributed: int
+    foreign: tuple[str, ...]
+
+    def evidence_for(self, page: dict[str, Any]) -> tuple[OracleRecord | None, str | None]:
+        """``(record, refusal)`` for one expected page. At most one of the two is ever set."""
+        exact = self.by_exact.get(page["name"], [])
+        if len(exact) == 1:
+            return exact[0], None
+        if exact:
+            return None, f"{len(exact)} producer records are named {page['name']!r}"
+        key = _slug(page["name"])
+        loose = self.by_normalized.get(key, [])
+        if not loose:
+            return None, None
+        if len(loose) != 1 or self.expected_normalized.get(key, 0) != 1:
+            return None, (
+                f"a normalized match for {page['name']!r} is not unique "
+                f"({len(loose)} producer record(s), {self.expected_normalized.get(key, 0)} expected page(s))"
+            )
+        return loose[0], None
+
+
+def _resolve_oracle_evidence(
+    records: list[OracleRecord], candidates: list[dict[str, Any]], unit_workbooks: set[str]
+) -> OracleEvidence:
+    """Index producer records against the expected pages without losing a collision."""
+    admissible: list[OracleRecord] = []
+    foreign: list[str] = []
+    unattributed = 0
+    for record in records:
+        if record.workbook is None:
+            unattributed += 1
+        elif record.workbook not in unit_workbooks:
+            alike = [name for name in unit_workbooks if _slug(name) == _slug(record.workbook)]
+            if len(alike) != 1:
+                foreign.append(record.workbook)
+                continue
+        admissible.append(record)
+    by_exact: dict[str, list[OracleRecord]] = {}
+    by_normalized: dict[str, list[OracleRecord]] = {}
+    for record in admissible:
+        by_exact.setdefault(record.name, []).append(record)
+        by_normalized.setdefault(_slug(record.name), []).append(record)
+    expected_normalized: dict[str, int] = {}
+    for page in candidates:
+        key = _slug(page["name"])
+        expected_normalized[key] = expected_normalized.get(key, 0) + 1
+    return OracleEvidence(
+        by_exact=by_exact,
+        by_normalized=by_normalized,
+        expected_normalized=expected_normalized,
+        unattributed=unattributed,
+        foreign=tuple(sorted(set(foreign))),
+    )
 
 
 def check_oracle_coverage(target: Path, reference_dir: Path | None, oracle_dir: Path | None) -> dict[str, Any]:
-    """Per-page visual/numeric oracle coverage, with grade."""
-    pages = expected_pages(target) or actual_pages(target)
+    """Per-page visual/numeric oracle coverage, with grade.
+
+    The denominator is the expected TABLEAU page set, never the emitted PBIR pages. It used to read
+    ``expected_pages(target) or actual_pages(target)``: whenever the expected set came back
+    empty/falsy - which, before :func:`expected_pages` counted orphan worksheets, was every workbook
+    with no dashboards (19 of 43 in a real 2.339.0 estate run) and is still every engine bundle,
+    since a bundle carries no ``migration-spec.json`` - the denominator silently became the very
+    artifact being graded and coverage reported a perfect score regardless of what was missing.
+    There is no fallback now: an expected set that cannot be established is a blocking
+    ``NOT_CHECKED``, never a PASS.
+
+    Only a page whose omission a HUMAN accepted is removed from the denominator. An engine-declared
+    omission is not: ``tier: "empty"`` reports what the engine did, and letting it shrink this
+    denominator too meant a unit missing a page reported validation-grade coverage of everything it
+    still had. A signed page-parity exemption is the only thing that takes a page out.
+
+    An oracle entry names an object without saying what KIND it is, so it may only satisfy a page
+    whose name exactly ONE expected page claims. Measured before this: with a dashboard ``Sales`` and
+    a worksheet ``Sales`` both expected, one reference row was counted as 2-of-2 coverage.
+    """
+    expectation = page_expectation(target)
     reference, reference_grades = _reference_oracles(target, reference_dir)
     oracle, oracle_grades = _oracle_capture_oracles(target, oracle_dir)
+    if not expectation["assessable"]:
+        return _oracle_not_assessable(f"cannot assess oracle coverage: {expectation['reason']}")
+    accepted = _oracle_excluded_omissions(expectation, load_exemptions(target)["entries"])
+    excluded_keys = {_page_key(page) for page in accepted}
+    pages = [page for page in expectation["candidates"] if _page_key(page) not in excluded_keys]
     if not pages:
-        return {"id": "oracle-coverage", "status": STATUS_NOT_CHECKED, "detail": "no expected or actual pages found"}
-    combined = _merge_oracle_maps(reference, oracle)
-    rows = [{"page": page, **combined.get(_slug(page["name"]), {"visual": False, "numeric": False})} for page in pages]
+        return _oracle_not_assessable(
+            "cannot assess oracle coverage: every expected Tableau page is a signed omission or owes "
+            "no output, so there is no page left to hold against a reference",
+            excluded=accepted,
+        )
+    evidence = _resolve_oracle_evidence(reference + oracle, pages, _unit_workbook_keys(target)[0])
+    rows = [_oracle_row(page, expectation["index"], evidence) for page in pages]
     visual_missing = [row["page"] for row in rows if not row["visual"]]
     numeric_missing = [row["page"] for row in rows if not row["numeric"]]
     return {
@@ -939,8 +1978,93 @@ def check_oracle_coverage(target: Path, reference_dir: Path | None, oracle_dir: 
         "numeric_present": len(rows) - len(numeric_missing),
         "visual_missing": visual_missing,
         "numeric_missing": numeric_missing,
-        "grade": ", ".join(sorted(reference_grades | oracle_grades)) or "not checked (no oracle manifest found)",
+        "contested_names": [row["page"]["name"] for row in rows if row["contested"]],
+        "refused_evidence": [row["refusal"] for row in rows if row["refusal"]],
+        "foreign_workbook_evidence": list(evidence.foreign),
+        "unattributed_evidence": evidence.unattributed,
+        "excluded_omissions": accepted,
+        "grade": _oracle_grade(reference_grades | oracle_grades, evidence),
         "rows": rows,
+    }
+
+
+def _oracle_grade(grades: set[str], evidence: OracleEvidence) -> str:
+    """The grade string, saying plainly when evidence could not be tied to a workbook."""
+    grade = ", ".join(sorted(grades)) or "not checked (no oracle manifest found)"
+    if evidence.unattributed:
+        grade += f" (⚠️ {evidence.unattributed} record(s) declare no producing workbook)"
+    return grade
+
+
+def _oracle_row(page: dict[str, Any], index: Any, evidence: OracleEvidence) -> dict[str, Any]:
+    """Coverage for one expected page. A contested name or an ambiguous match takes no evidence."""
+    contested = _claim(index, page["name"]).outcome != oid.UNIQUE
+    record, refusal = (None, None) if contested else evidence.evidence_for(page)
+    return {
+        "page": page,
+        "contested": contested,
+        "refusal": refusal,
+        "visual": bool(record and record.visual),
+        "numeric": bool(record and record.numeric),
+    }
+
+
+def _attribution_ambiguous(expectation: dict[str, Any], signatures: SignatureResolution) -> bool:
+    """Whether any omission can be attributed at all, computed ONCE for both halves of the gate.
+
+    Page parity subtracted accounted-for ``extra:`` pages before deciding this; the oracle side did
+    not, so the same unit was ambiguous in one half and not in the other and a signed omission was
+    excluded from one denominator but not the other. One predicate, one answer.
+    """
+    unaccounted = [page for page in expectation["unmatched_rendered"] if id(page) not in signatures.accounted_extra]
+    return bool(unaccounted) or bool(expectation["contested_names"])
+
+
+def _oracle_excluded_omissions(expectation: dict[str, Any], entries: list[dict[str, str]]) -> list[dict[str, Any]]:
+    """Omissions that owe no oracle evidence - the SAME dispositions page parity does not fail on.
+
+    Computed from :func:`_disposition_omissions`, deliberately, so the two checks cannot drift apart
+    again. Round 4 measured them disagreeing: page parity accepted a ``no-source-content`` omission
+    while this denominator still demanded a visual and a numeric oracle for it, so a unit could PASS
+    parity and be NOT_CHECKED here for the same page. A page declared to owe no output owes no
+    picture of that output either.
+
+    ⚠️ The caller removes these by :func:`_page_key`, never by display name. Round 5 measured the
+    name set: a SIGNED dashboard ``Sales`` removed the UNSIGNED worksheet ``Sales`` from the
+    denominator too, so the check reported ``pages=0`` and claimed every expected page was accounted
+    for while listing only one exclusion.
+
+    An engine-DECLARED omission is still not here: ``tier: "empty"`` reports what the engine did, not
+    what anyone agreed to ship.
+    """
+    ambiguous = _attribution_ambiguous(expectation, signatures := _resolve_signatures(expectation, entries))
+    return [
+        row
+        for row in _disposition_omissions(expectation, signatures, ambiguous)
+        if row["disposition"] in OMISSIONS_OWING_NOTHING
+    ]
+
+
+def _oracle_not_assessable(detail: str, excluded: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Blocking 'cannot assess' row: an unestablished expected set never reads as coverage.
+
+    ``excluded`` is carried through so the reason a denominator emptied stays visible. Without it the
+    early return dropped the list, and a page correctly accepted by BOTH halves of the gate looked
+    like a disagreement between them - found by the estate cross-check, not by a test.
+    """
+    return {
+        "id": "oracle-coverage",
+        "status": STATUS_NOT_CHECKED,
+        "detail": detail,
+        "pages": 0,
+        "visual_present": 0,
+        "numeric_present": 0,
+        "visual_missing": [],
+        "numeric_missing": [],
+        "contested_names": [],
+        "excluded_omissions": excluded or [],
+        "grade": "not checked (expected page set could not be established)",
+        "rows": [],
     }
 
 
@@ -1025,24 +2149,31 @@ def _run_cli_gate(gate: Gate, target: Path, output_dir: Path) -> dict[str, Any]:
     return _gate_result(gate, target, proc, payload, native_status)
 
 
-def _apply_stub_exemptions(check: dict[str, Any], exemptions: dict[str, Any]) -> dict[str, Any]:
-    payload = check.get("payload") if isinstance(check.get("payload"), dict) else {}
-    entries = exemptions["entries"]
-    stubs = []
-    for model in payload.get("models", []) if isinstance(payload.get("models"), list) else []:
-        for finding in model.get("findings", []) if isinstance(model, dict) else []:
+def _stub_findings(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[tuple[str, str, set[str]]]]:
+    """``(stubs, findings)`` from a stub-measure gate payload; the key ties a stub to its finding."""
+    stubs: list[dict[str, Any]] = []
+    findings: list[tuple[str, str, set[str]]] = []
+    models = payload.get("models", []) if isinstance(payload.get("models"), list) else []
+    for model_index, model in enumerate(models):
+        for finding_index, finding in enumerate(model.get("findings", []) if isinstance(model, dict) else []):
             canonical = f"{finding.get('kind')}:{finding.get('table')}[{finding.get('name')}]"
             aliases = {f"{finding.get('table')}[{finding.get('name')}]", str(finding.get("name") or "")}
-            stubs.append(
-                {
-                    "canonical": canonical,
-                    "finding": finding,
-                    "exempted": _exempted(entries, "stub-measures", canonical, aliases),
-                }
-            )
+            key = f"{model_index}#{finding_index}"
+            findings.append((key, canonical, aliases))
+            stubs.append({"canonical": canonical, "finding": finding, "key": key, "exempted": False})
+    return stubs, findings
+
+
+def _apply_stub_exemptions(check: dict[str, Any], exemptions: dict[str, Any]) -> dict[str, Any]:
+    payload = check.get("payload") if isinstance(check.get("payload"), dict) else {}
+    stubs, findings = _stub_findings(payload)
+    exempted, contested = resolve_exemptions(exemptions["entries"], "stub-measures", findings)
+    for stub in stubs:
+        stub["exempted"] = stub["key"] in exempted
     unexempted = [stub for stub in stubs if not stub["exempted"]]
     check["stub_exemptions"] = len(stubs) - len(unexempted)
     check["unexempted_stubs"] = len(unexempted)
+    check["contested_exemptions"] = contested
     if check["native_status"] == "STUBS":
         check["status"] = STATUS_FINDINGS if unexempted else STATUS_PASS
     return check
@@ -1673,9 +2804,17 @@ def _compromise_not_evaluated_count(report: dict[str, Any]) -> int:
 
 
 def _compromise_count(report: dict[str, Any]) -> int:
-    """Human-accepted deviations that should stay visible even when they do not fail the run."""
+    """Human-accepted deviations that should stay visible even when they do not fail the run.
+
+    A signature that accepted NOTHING is not a compromise. Page-parity dispositions its exemptions
+    (``stale`` names a page that is present, ``ambiguous`` cannot be attributed while a rendered page
+    is unaccounted for), and neither is applied - so both are subtracted here. Measured before this:
+    a stale exemption was correctly not applied and the CLI still printed ``compromises=1``.
+    """
     declared = sum(_declared_downgrade_count(check) for check in report["checks"])
-    return int(report.get("exemptions", {}).get("accepted", 0)) + declared
+    unapplied = sum(len(check.get("unapplied_exemptions") or []) for check in report["checks"])
+    accepted = int(report.get("exemptions", {}).get("accepted", 0))
+    return max(0, accepted - unapplied) + declared
 
 
 def _blocking_count(report: dict[str, Any]) -> int:
@@ -1782,11 +2921,15 @@ def _render_check_headline(check: dict[str, Any]) -> list[str]:  # pylint: disab
         ]
     if check_id == "page-parity" and "expected_count" in check:
         lines = [
-            f"  page-count parity: {check['actual_count']} PBIR page(s) for "
-            f"{check['effective_expected_count']} expected Tableau dashboard(s)  [{status}]"
+            f"  page pairing:      {check['emitted_count']} rebuilt PBIR page(s) for "
+            f"{check['expected_count']} expected Tableau page(s)  [{status}]"
         ]
-        if check.get("exemptions"):
-            lines.append(f"                    exemptions accepted: {len(check['exemptions'])}")
+        for row in check.get("unsigned_omissions", [])[:5]:
+            lines.append(f"                    OMITTED {row['kind']} {row['name']!r} [{row['disposition']}]")
+        if check.get("applied_exemptions"):
+            lines.append(f"                    signed omissions accepted: {len(check['applied_exemptions'])}")
+        for row in check.get("unapplied_exemptions", [])[:3]:
+            lines.append(f"                    exemption for {row['name']!r} accepted nothing [{row['disposition']}]")
         return lines
     native = f"native {check.get('native_status')} exit {check.get('native_exit')}"
     if check_id == "stub-measures" and "stub_exemptions" in check:
@@ -1839,7 +2982,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--scope", choices=SCOPES, default=SCOPE_ALL, help="persona layer to check (default: all)")
     parser.add_argument("--json", type=Path, help="write the normalized unit-check envelope here")
     parser.add_argument("--reference-dir", type=Path, help="override reference/ directory containing manifest.json")
-    parser.add_argument("--oracle-dir", type=Path, help="override _oracle directory containing oracle-manifest.json")
+    parser.add_argument(
+        "--oracle-dir",
+        type=Path,
+        help="override the oracle capture directory holding oracle-manifest.json "
+        "(auto-discovered as _oracle/ or oracle/ beside the unit, target, or its parent)",
+    )
     parser.add_argument("--quiet", action="store_true", help="suppress human-readable output")
     args = parser.parse_args(argv)
 
