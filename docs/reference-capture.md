@@ -497,6 +497,17 @@ written to disk. Probe details are scrubbed through the session's redactor befor
 serialised — while classification still reads the **raw** text, because redaction is handed the
 human-chosen PAT *name* and a short one would rewrite Tableau's own error codes.
 
+⚠️ **That includes `/serverinfo`, and "the request was unauthenticated" is NOT a reason to exempt
+it.** That argument is about the *request*; the hazard is the *speaker*. The same server — or any
+intermediary on the path — watched the PAT sign-in earlier in the run and can echo the credential in
+any later response, authenticated or not. Measured on a 200-shaped `/serverinfo` with a token in
+`productVersion` and its `build` attribute: it reached `assessment.json`, `report.md` and the console
+verbatim, because the redactor in hand was applied to one field out of four. Every **free-form**
+field is now redacted inside `server_info`, at the parse boundary, so a future consumer inherits the
+protection instead of having to remember it. The one field returned untransformed is a **valid**
+`restApiVersion`, and only because `api_tuple` has proved it matches a numeric API-version grammar
+no credential can satisfy — a property of the *value*, never of the request that carried it.
+
 ⚠️ **Redaction happens per value, BEFORE case-folding, splitting, stripping or truncation** — every
 one of those transforms defeats the repo redactor, which matches literals. Four review rounds each
 found one call site that had done them in the other order, so this is no longer a call-site rule but
