@@ -40,9 +40,12 @@ a method is *missing* proves nothing - that is the ninth vacuity mode this repo 
 
 from __future__ import annotations
 
+import hashlib
+import io
 import re
+import zipfile
 from dataclasses import dataclass, field
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any, Generic, TypeVar
 
 KIND_DASHBOARD = "dashboard"
@@ -82,6 +85,10 @@ HARVEST_STEM_RE = re.compile(
 #: Either separator, because a path RECORDED BY ANOTHER HOST is text, not a path. See
 #: :func:`persisted_name`.
 PATH_SEPARATORS = re.compile(r"[\\/]+")
+
+#: A `.twbx`/`.tdsx` is a zip; a `.twb`/`.tds` is XML. The magic decides which revision-key algorithm
+#: applies, rather than a file extension a caller may not have.
+ZIP_MAGIC = b"PK\x03\x04"
 
 #: The only kinds an identity may carry. `KIND_UNKNOWN` is deliberately absent: an object whose kind
 #: is unknown has no identity, which is the whole point.
@@ -579,3 +586,163 @@ def agreed_luid(*claims: str | None) -> str | None:
     """
     seen = {claim.strip().casefold() for claim in claims if isinstance(claim, str) and claim.strip()}
     return seen.pop() if len(seen) == 1 else None
+
+
+# ------------------------------------------------------------------------------------------------
+# REVISION identity - which BUILD of a workbook, as opposed to which workbook
+# ------------------------------------------------------------------------------------------------
+
+#: Content-normalised digest of a Tableau archive: sha256 over the sorted
+#: ``(member name, sha256(normalised member bytes))`` pairs, so neither zip member ORDER and mtimes
+#: nor an XML build-stamp comment can change it. ``v2`` because ``v1`` normalised the zip only - see
+#: :func:`revision_key`.
+REVISION_ALGO_ARCHIVE = "twbx-content-v2"
+
+#: Comment-normalised digest of a flat Tableau XML payload - a `.twb`/`.tds` served whole rather than
+#: inside an archive. Same normalisation as an XML member of an archive, because it is the same file.
+REVISION_ALGO_XML = "tableau-xml-v1"
+
+#: Raw sha256, for a payload that is neither an archive nor XML. Kept as an explicit, named SHAPE so
+#: no payload silently falls through to it - see :func:`revision_key`.
+REVISION_ALGO_FLAT = "raw-sha256-v1"
+
+#: Members whose bytes are Tableau XML, and so carry the build-stamp comment normalised below.
+XML_MEMBER_SUFFIXES = (".twb", ".tds")
+
+#: ``<!-- build 20263.26.0824.1544 -->`` - the TABLEAU SERVER build that serialised the file, stamped
+#: into every `.twb` it hands out. It is not workbook content, and it changes when the SERVER is
+#: upgraded. See :func:`_normalise_xml`.
+XML_COMMENT_RE = re.compile(rb"<!--.*?-->", re.DOTALL)
+
+#: What a Tableau XML payload starts with, after any BOM. Cheap and exact enough to pick the shape.
+XML_PREFIXES = (b"<?xml", b"<workbook", b"<datasource")
+
+
+@dataclass(frozen=True)
+class RevisionKey:
+    """A reproducible digest of WHICH BUILD a Tableau asset is, with the algorithm that made it.
+
+    ⚠️ **Measured 2026-09-03 against the live site, 3 downloads of every item in one run.** A raw
+    ``sha256`` of a `.twbx` download is **not** reproducible: Tableau Server repacks the archive per
+    request, so the same unchanged workbook hashes differently.
+
+    | over 48 workbooks + all datasources | raw sha256 | content digest |
+    |---|---|---|
+    | DIFFERS across downloads in one run | **13 of 48** workbooks | **0** |
+
+    Every repacker had identical byte length and an identical content digest, and the population is
+    itself unstable - ``World Indicators`` differed in one sample and agreed minutes later - so a raw
+    digest does not merely fail for a fixed subset: any ``confirmed`` verdict it produces is luck.
+    That measurement is why the revision key exists rather than a bare ``sha256`` comparison, and why
+    it is **versioned**: a value computed by a different algorithm must read as *cannot compare*, not
+    as *drift*, or every pre-existing capture raises a false alarm.
+
+    ⚠️ ``REVISION_ALGO_FLAT`` is **not a fallback**, and the distinction is the whole safety property.
+    A payload that IS an archive but cannot be read yields **no key at all** (see :func:`revision_key`)
+    - silently re-hashing those bytes raw is exactly what re-opens the defect. A payload that is not
+    an archive is a different SHAPE, whose bytes are already its content: measured, every non-archive
+    item on the site returned a stable raw digest across all three downloads.
+    """
+
+    algo: str
+    value: str
+
+    def as_json(self) -> dict[str, str]:
+        """The persisted form. Both halves, always - a value without its algorithm is uncomparable."""
+        return {"algo": self.algo, "value": self.value}
+
+    @classmethod
+    def from_json(cls, payload: Any) -> RevisionKey | None:
+        """Read a persisted key, or None for anything that is not a complete one."""
+        if not isinstance(payload, dict):
+            return None
+        algo, value = _text(payload.get("algo")), _text(payload.get("value"))
+        return cls(algo=algo, value=value) if algo and value else None
+
+    def agrees_with(self, other: RevisionKey | None) -> bool | None:
+        """``True``/``False`` when the two are comparable, ``None`` when they are NOT.
+
+        ``None`` is the important return. Two keys made by different algorithms say nothing about
+        each other, so the answer is *cannot establish* - never *drift*. An old manifest carrying an
+        earlier algorithm therefore reads ``unconfirmed``, which is the whole reason the key is
+        versioned.
+        """
+        if other is None or self.algo != other.algo:
+            return None
+        return self.value.casefold() == other.value.casefold()
+
+
+def _normalise_xml(data: bytes) -> bytes:
+    """Tableau XML with the SERVER's own nonces removed.
+
+    ⚠️ Measured 2026-09-03, and it is why the archive key is ``v2`` and the flat key exists at all.
+    Normalising the zip alone was not enough: comparing the 78 harvested assets against the site,
+    **28** reported a content difference, and diffing six of them - three inside a `.twbx`, three
+    served flat - showed the ENTIRE difference was one line, every time::
+
+        -<!-- build 20263.26.0824.1544 -->
+        +<!-- build 20263.26.0828.1352 -->
+
+    That is the Tableau **server** build that serialised the file. It moved because the site was
+    upgraded between the harvest and the check, not because any workbook changed - most of those
+    files were byte-identical in length. Left in, it produces a false drift alarm for every asset
+    harvested before a server upgrade: the same false-alarm-at-scale failure the content key exists
+    to remove, one layer further in. With it removed, 28 false ``differs`` became 0.
+
+    Only XML comments are stripped: a comment is not migrated content, and everything that is -
+    marks, calculations, connections, parameters - lives in elements and attributes.
+    """
+    return XML_COMMENT_RE.sub(b"", data)
+
+
+def _is_xml(payload: bytes) -> bool:
+    """Whether a non-archive payload is Tableau XML, so the same normalisation applies."""
+    head = payload.lstrip(b"\xef\xbb\xbf").lstrip()[:16]
+    return head.startswith(XML_PREFIXES)
+
+
+def revision_key(payload: bytes) -> RevisionKey | None:
+    """The reproducible build digest of one Tableau asset, or None when it cannot be computed.
+
+    Three explicit SHAPES, each with its own versioned algorithm, and no silent path between them:
+
+    * an archive -> every member digested, XML members comment-normalised (``twbx-content-v2``);
+    * flat Tableau XML -> comment-normalised (``tableau-xml-v1``);
+    * anything else -> its raw bytes, named as such (``raw-sha256-v1``).
+
+    ⚠️ None means **cannot establish**: the bytes look like an archive but will not open. That case is
+    never quietly downgraded to a raw hash, because a raw hash of a repacked archive is the unstable
+    value this whole type exists to avoid - see :class:`RevisionKey` for the measurement.
+    """
+    if not payload:
+        return None
+    if not payload.startswith(ZIP_MAGIC):
+        if _is_xml(payload):
+            return RevisionKey(algo=REVISION_ALGO_XML, value=hashlib.sha256(_normalise_xml(payload)).hexdigest())
+        return RevisionKey(algo=REVISION_ALGO_FLAT, value=hashlib.sha256(payload).hexdigest())
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            members = sorted(
+                (info.filename, _normalise_member(info.filename, archive.read(info.filename)))
+                for info in archive.infolist()
+            )
+    except (zipfile.BadZipFile, OSError, RuntimeError, ValueError):
+        return None
+    digest = hashlib.sha256()
+    for name, data in members:
+        digest.update(name.encode("utf-8"))
+        digest.update(hashlib.sha256(data).digest())
+    return RevisionKey(algo=REVISION_ALGO_ARCHIVE, value=digest.hexdigest())
+
+
+def _normalise_member(name: str, data: bytes) -> bytes:
+    """One archive member's bytes, comment-normalised when it is Tableau XML. See :func:`_normalise_xml`."""
+    return _normalise_xml(data) if name.lower().endswith(XML_MEMBER_SUFFIXES) else data
+
+
+def revision_key_of(path: Path) -> RevisionKey | None:
+    """:func:`revision_key` for a file on disk, or None when it cannot be read."""
+    try:
+        return revision_key(path.read_bytes())
+    except OSError:
+        return None

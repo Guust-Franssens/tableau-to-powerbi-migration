@@ -51,18 +51,18 @@ UPSTREAM_COMMIT = "0fae0cf75bee7c49489573b4735788106af5d8e0"
 #: Why the pin last moved. An edit to shared surface is a two-gate contract change; this is the
 #: record of the one that was reviewed.
 PIN_PROVENANCE = (
-    "master@0fae0cf7 plus issue #450 and its round-1 safety review: `object_identity.py` carries the "
-    "WORKBOOK-identity join both gates share (WorkbookIdentity/Attribution/harvest_luid/agreed_luid/"
-    "persisted_stem), because each had invented its own key for 'whose workbook is this render of' - "
-    "one fail-closed (23 attributable renders discarded, 0/7 pages ready) and one fail-open (360 of "
-    "360 records ownerless and admitted anyway). Round 1 then found four more fail-opens of ONE "
-    "class and they are closed by ONE rule: a machine identity the unit cannot answer is `unknown`, "
-    "never rescued by a weaker axis. `tests/test_object_identity.py` is UNCHANGED."
+    "master@0fae0cf7 plus issue #450 and its round-1 and round-3 safety reviews: `object_identity.py` "
+    "carries the WORKBOOK-identity join both gates share, closed by ONE rule (a machine identity the "
+    "unit cannot answer is `unknown`, never rescued by a weaker axis), and now the REVISION key too. "
+    "Measured 2026-09-03 on the live site, three downloads of every item in one run: a raw sha256 "
+    "differed for 27 of 49 archives while a content-normalised key differed for 0 of 67; re-stamping "
+    "the reference estate then showed 28 remaining false `differs` were entirely a Tableau SERVER "
+    "build-stamp comment, which the key now normalises. `tests/test_object_identity.py` is UNCHANGED."
 )
 
 #: SHA-256 of each shared file, over LF-normalized bytes.
 PINNED: dict[str, str] = {
-    "scripts/object_identity.py": "fe9b2adbd999cdf48ea4699dfacbafbcc2e13af7b6fb4be95e424fcc1876eeae",
+    "scripts/object_identity.py": "7642b5261c5f15c51061113970b8abf15c609c32aea810b92aec6615eafe8620",
     "tests/test_object_identity.py": "11d6881a960fa3c23beaa6928706de88a83fc1605b051314038ffdc14711c967",
 }
 

@@ -18,7 +18,10 @@ refusal beside it.
 
 from __future__ import annotations
 
+import hashlib
+import io
 import sys
+import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
@@ -343,3 +346,175 @@ def test_agreed_luid_refuses_two_claims_that_disagree() -> None:
     assert oid.agreed_luid(LUID_A, LUID_B) is None
     assert oid.agreed_luid(None, None) is None
     assert oid.agreed_luid("  ", "") is None
+
+
+# ------------------------------------------------------------------------------------------------
+# ROUND 3: the revision key must survive a REPACK, and only a repack
+# ------------------------------------------------------------------------------------------------
+
+
+def _archive(members: list[tuple[str, bytes]], *, date_time: tuple[int, int, int, int, int, int]) -> bytes:
+    """A zip written with an explicit member ORDER and mtime - the two things a repack changes."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, data in members:
+            archive.writestr(zipfile.ZipInfo(name, date_time=date_time), data)
+    return buffer.getvalue()
+
+
+MEMBERS = [("Book.twb", b"<workbook><worksheets/></workbook>"), ("Data/Extracts/x.hyper", b"\x00\x01extract-bytes")]
+
+
+def test_a_repack_changes_the_raw_digest_and_not_the_revision_key() -> None:
+    """THE round-3 test. Kills: reverting the revision key to a raw digest.
+
+    ⚠️ Both halves are asserted, and the first is what makes the second mean anything. Measured
+    2026-09-03 against the live site, three downloads of every item in one run: the RAW digest
+    differed for **27 of 49 archives** (18 of 48 workbooks, 9 of 19 datasources) while the
+    content-normalised key differed for **0 of 67**. This fixture reproduces that mechanism offline -
+    same members, different order and mtimes - so a raw digest MUST differ here or the fixture is not
+    a repack at all and the test would be vacuous.
+    """
+    original = _archive(MEMBERS, date_time=(2026, 1, 1, 0, 0, 0))
+    repacked = _archive(list(reversed(MEMBERS)), date_time=(2026, 9, 3, 11, 22, 33))
+
+    assert hashlib.sha256(original).hexdigest() != hashlib.sha256(repacked).hexdigest(), (
+        "the fixture is not a repack, so this test could not detect a raw digest"
+    )
+    assert oid.revision_key(original) == oid.revision_key(repacked)
+    assert oid.revision_key(original).algo == oid.REVISION_ALGO_ARCHIVE
+
+
+def test_genuinely_different_content_still_differs() -> None:
+    """The negative control: normalisation must not launder a real change into agreement.
+
+    ⚠️ The rename is `Cook.twb`, not `Renamed.twb`, and that is load-bearing. `Renamed.twb` sorts
+    AFTER `Data/Extracts/x.hyper` while `Book.twb` sorts before it, so a renamed-member assertion
+    built that way passes because the member ORDER changed - it would still pass with the member name
+    dropped from the digest entirely. The mutation probe caught exactly that vacuity in an earlier
+    draft of this test. `Cook.twb` keeps the sort position, so only hashing the NAME can detect it.
+    """
+    original = _archive(MEMBERS, date_time=(2026, 1, 1, 0, 0, 0))
+    edited = _archive(
+        [("Book.twb", b"<workbook><worksheets><worksheet/></worksheets></workbook>"), MEMBERS[1]],
+        date_time=(2026, 1, 1, 0, 0, 0),
+    )
+    renamed = _archive([("Cook.twb", MEMBERS[0][1]), MEMBERS[1]], date_time=(2026, 1, 1, 0, 0, 0))
+
+    assert [name for name, _ in sorted(MEMBERS)] != ["Cook.twb", MEMBERS[1][0]], "sanity: the name changed"
+    assert sorted(n for n, _ in MEMBERS).index("Book.twb") == 0, "sanity: the rename keeps sort position"
+    assert oid.revision_key(original).agrees_with(oid.revision_key(edited)) is False
+    assert oid.revision_key(original).agrees_with(oid.revision_key(renamed)) is False, (
+        "a member NAME is part of the content: hashing only the bytes would miss a rename"
+    )
+
+
+def test_a_non_archive_uses_its_own_shape_and_says_so() -> None:
+    """⚠️ Contradicts the round-3 brief's "not a readable zip -> unconfirmed", with a measurement.
+
+    18 of 48 workbooks on the live site download as plain `.twb` XML rather than a zip, and ALL 18
+    returned a stable raw digest across three downloads - zero counter-examples. Refusing to confirm
+    them would make 37% of the estate permanently unconfirmable on the strength of a rule aimed at
+    zip repacking, which does not apply to them.
+
+    This is NOT the silent fallback the brief warns about: the algorithm is chosen by SHAPE, recorded
+    in the key, and compared only against the same algorithm. The dangerous case - bytes that ARE an
+    archive and will not open - is the test below.
+    """
+    key = oid.revision_key(b"<workbook><worksheets/></workbook>")
+
+    assert key.algo == oid.REVISION_ALGO_XML
+    assert key.value == hashlib.sha256(b"<workbook><worksheets/></workbook>").hexdigest(), (
+        "with no comment to strip, the XML key is just the sha of the bytes"
+    )
+
+
+def test_an_unreadable_archive_yields_no_key_rather_than_a_raw_one() -> None:
+    """The silent fallback the brief names, refused: truncated zip bytes must NOT be hashed raw.
+
+    A raw hash of a repacked archive is the unstable value this type exists to avoid, so producing
+    one here would re-open the defect while looking like a fix.
+    """
+    truncated = _archive(MEMBERS, date_time=(2026, 1, 1, 0, 0, 0))[:64]
+
+    assert truncated.startswith(oid.ZIP_MAGIC)
+    assert oid.revision_key(truncated) is None
+    assert oid.revision_key(b"") is None
+
+
+def test_a_key_never_compares_across_algorithms() -> None:
+    """Versioning: an old manifest reads as CANNOT COMPARE, never as drift.
+
+    `agrees_with` returns None rather than False, because a false drift alarm on every pre-existing
+    capture would be a nastier regression than the gap it closes.
+    """
+    archive = oid.RevisionKey(algo=oid.REVISION_ALGO_ARCHIVE, value="a" * 64)
+    flat = oid.RevisionKey(algo=oid.REVISION_ALGO_FLAT, value="a" * 64)
+
+    assert archive.agrees_with(flat) is None, "same value, different algorithm: not comparable"
+    assert archive.agrees_with(None) is None
+    assert archive.agrees_with(oid.RevisionKey(algo=oid.REVISION_ALGO_ARCHIVE, value="a" * 64)) is True
+    assert archive.agrees_with(oid.RevisionKey(algo=oid.REVISION_ALGO_ARCHIVE, value="b" * 64)) is False
+
+
+def test_a_key_round_trips_through_json_with_its_algorithm() -> None:
+    """A value persisted without its algorithm is uncomparable, so both halves always travel."""
+    key = oid.RevisionKey(algo=oid.REVISION_ALGO_ARCHIVE, value="c" * 64)
+
+    assert oid.RevisionKey.from_json(key.as_json()) == key
+    assert oid.RevisionKey.from_json({"value": "c" * 64}) is None, "a bare value is not a key"
+    assert oid.RevisionKey.from_json({"algo": oid.REVISION_ALGO_ARCHIVE}) is None
+    assert oid.RevisionKey.from_json("c" * 64) is None
+
+
+BUILD_STAMP_LOCAL = b"<?xml version='1.0'?>\n<!-- build 20263.26.0824.1544   -->\n<workbook><worksheets/></workbook>"
+BUILD_STAMP_REMOTE = b"<?xml version='1.0'?>\n<!-- build 20263.26.0828.1352   -->\n<workbook><worksheets/></workbook>"
+
+
+def test_the_server_build_stamp_does_not_count_as_a_changed_workbook() -> None:
+    """⚠️ MEASURED, and it is why the archive key is v2 and a flat XML key exists at all.
+
+    Normalising the zip alone was not enough. Re-stamping the 78 harvested assets of the reference
+    estate against the live site, **28 reported a content difference**; diffing six of them - three
+    inside a `.twbx`, three served flat - showed the ENTIRE difference was one line, every time::
+
+        -<!-- build 20263.26.0824.1544 -->
+        +<!-- build 20263.26.0828.1352 -->
+
+    That is the Tableau SERVER build that serialised the file. It moved because the site was upgraded
+    between the harvest and the check; most of those files were byte-identical in length. With it
+    normalised, 28 false `differs` became 0.
+    """
+    assert hashlib.sha256(BUILD_STAMP_LOCAL).hexdigest() != hashlib.sha256(BUILD_STAMP_REMOTE).hexdigest(), (
+        "the fixture must genuinely differ raw, or this test cannot detect the normalisation"
+    )
+    assert oid.revision_key(BUILD_STAMP_LOCAL) == oid.revision_key(BUILD_STAMP_REMOTE)
+    assert oid.revision_key(BUILD_STAMP_LOCAL).algo == oid.REVISION_ALGO_XML
+
+
+def test_the_build_stamp_is_normalised_inside_an_archive_too() -> None:
+    """The same nonce, the same file, one layer in - a `.twb` is XML whether or not it is zipped."""
+    local = _archive([("Book.twb", BUILD_STAMP_LOCAL), MEMBERS[1]], date_time=(2026, 1, 1, 0, 0, 0))
+    remote = _archive([MEMBERS[1], ("Book.twb", BUILD_STAMP_REMOTE)], date_time=(2026, 9, 3, 11, 22, 33))
+
+    assert hashlib.sha256(local).hexdigest() != hashlib.sha256(remote).hexdigest()
+    assert oid.revision_key(local) == oid.revision_key(remote)
+
+
+def test_normalisation_does_not_reach_past_comments_into_content() -> None:
+    """The negative control for the nonce fix: only COMMENTS are stripped.
+
+    Everything a migration cares about - marks, calculations, connections, parameters - lives in
+    elements and attributes, and a change to any of them must still read as a different build.
+    """
+    edited = BUILD_STAMP_LOCAL.replace(b"<worksheets/>", b"<worksheets><worksheet name='New'/></worksheets>")
+
+    assert oid.revision_key(BUILD_STAMP_LOCAL).agrees_with(oid.revision_key(edited)) is False
+
+
+def test_a_non_xml_non_archive_payload_keeps_its_raw_bytes_and_a_distinct_algorithm() -> None:
+    """The third SHAPE, named rather than fallen into - and never comparable with the other two."""
+    key = oid.revision_key(b"\x00\x01not xml and not a zip")
+
+    assert key.algo == oid.REVISION_ALGO_FLAT
+    assert key.agrees_with(oid.RevisionKey(algo=oid.REVISION_ALGO_XML, value=key.value)) is None

@@ -21,6 +21,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
+import object_identity as oid  # noqa: E402  # pylint: disable=wrong-import-position
 import stamp_tableau_provenance as prov  # noqa: E402  # pylint: disable=wrong-import-position
 
 
@@ -35,9 +36,10 @@ def _twbx(tmp_path: Path, name: str = "Superstore", payload: bytes = b"<workbook
 class FakeLookup:
     """A site that answers by name, and hands back whatever content it was told to."""
 
-    def __init__(self, workbooks, remote_sha="deadbeef"):
+    def __init__(self, workbooks, remote_sha="deadbeef", remote_key=None):
         self._workbooks = workbooks
         self._remote_sha = remote_sha
+        self._remote_key = remote_key
         self.base, self.site = "https://x.online.tableau.com", "site"
         self.product_version, self.version = "2026.2.5", "3.29"
         self.signed_out = False
@@ -47,6 +49,9 @@ class FakeLookup:
 
     def content_sha256(self, workbook_id):  # noqa: ARG002
         return self._remote_sha
+
+    def content_revision_key(self, workbook_id):  # noqa: ARG002
+        return self._remote_key
 
     def sign_out(self):
         self.signed_out = True
@@ -80,9 +85,12 @@ def test_a_plain_twb_has_no_members(tmp_path):
 
 def test_matching_bytes_are_recorded_as_a_sha256_match(tmp_path):
     path = _twbx(tmp_path)
-    local = prov.fingerprint(path)["sha256"]
-    lookup = FakeLookup([{"id": "luid-1", "name": "Superstore", "project": {"name": "Samples"}}], remote_sha=local)
-    origin = prov.find_origin(lookup, "Superstore", local)
+    record = prov.fingerprint(path)
+    lookup = FakeLookup(
+        [{"id": "luid-1", "name": "Superstore", "project": {"name": "Samples"}}],
+        remote_sha=record["sha256"],
+    )
+    origin = prov.find_origin(lookup, "Superstore", record)
     assert origin["match"] == "sha256"
     assert origin["workbook_luid"] == "luid-1"
     assert origin["tableau_product_version"] == "2026.2.5"
@@ -94,7 +102,7 @@ def test_a_same_named_but_different_build_is_never_claimed_as_the_source(tmp_pat
     the reader cannot see why."""
     path = _twbx(tmp_path)
     lookup = FakeLookup([{"id": "luid-2", "name": "Superstore"}], remote_sha="a-different-build")
-    origin = prov.find_origin(lookup, "Superstore", prov.fingerprint(path)["sha256"])
+    origin = prov.find_origin(lookup, "Superstore", prov.fingerprint(path))
     assert origin["match"] == "name_only"
     assert origin["remote_sha256"] == "a-different-build"
 
@@ -103,7 +111,7 @@ def test_duplicate_names_on_the_site_are_counted_not_hidden():
     """Tableau permits the same workbook name in different projects. Silently taking the first is how
     a name-keyed join produces a confident wrong answer - a hazard this toolchain has hit four times."""
     lookup = FakeLookup([{"id": "a", "name": "Sales"}, {"id": "b", "name": "Sales"}])
-    assert prov.find_origin(lookup, "Sales", "x")["same_name_count"] == 2
+    assert prov.find_origin(lookup, "Sales", {"sha256": "x"})["same_name_count"] == 2
 
 
 def test_a_workbook_absent_from_the_site_yields_no_origin():
@@ -123,7 +131,7 @@ def test_a_harvested_filename_matches_by_luid_not_by_its_mangled_stem():
     demonstrably existed. The LUID in the filename is exact identity; use it.
     """
     lookup = FakeLookup([{"id": HARVEST_LUID, "name": "Sales - Q3 Review", "project": {"name": "Finance"}}])
-    origin = prov.find_origin(lookup, f"{HARVEST_LUID}_Sales___Q3_Review", "x")
+    origin = prov.find_origin(lookup, f"{HARVEST_LUID}_Sales___Q3_Review", {"sha256": "x"})
     assert origin is not None, "a harvested workbook present on the site must be found"
     assert origin["matched_by"] == "luid"
     assert origin["workbook_name"] == "Sales - Q3 Review"
@@ -133,7 +141,7 @@ def test_luid_match_survives_a_rename_on_the_site():
     """The LUID is stable across renames, which is the whole point of preferring it: the name in our
     filename is a snapshot from harvest time and may be stale."""
     lookup = FakeLookup([{"id": HARVEST_LUID, "name": "Renamed Since Harvest"}])
-    origin = prov.find_origin(lookup, f"{HARVEST_LUID}_Original_Name", "x")
+    origin = prov.find_origin(lookup, f"{HARVEST_LUID}_Original_Name", {"sha256": "x"})
     assert origin["matched_by"] == "luid"
 
 
@@ -141,14 +149,14 @@ def test_luid_matching_is_case_insensitive():
     """REST hands back LUIDs lowercased, but a filename can be round-tripped through tooling that
     upper-cases it; a case difference must not read as 'not on the site'."""
     lookup = FakeLookup([{"id": HARVEST_LUID, "name": "Sales"}])
-    assert prov.find_origin(lookup, f"{HARVEST_LUID.upper()}_Sales", "x")["matched_by"] == "luid"
+    assert prov.find_origin(lookup, f"{HARVEST_LUID.upper()}_Sales", {"sha256": "x"})["matched_by"] == "luid"
 
 
 def test_a_deleted_and_recreated_workbook_falls_back_to_the_sanitized_name():
     """A new LUID for the same name is the shape of a delete-and-republish. Falling back keeps the
     record useful, and `matched_by` says plainly that it was NOT an identity match."""
     lookup = FakeLookup([{"id": "a-brand-new-luid", "name": "Sales / Q3: Review"}])
-    origin = prov.find_origin(lookup, f"{HARVEST_LUID}_Sales___Q3__Review", "x")
+    origin = prov.find_origin(lookup, f"{HARVEST_LUID}_Sales___Q3__Review", {"sha256": "x"})
     assert origin["matched_by"] == "sanitized_name"
 
 
@@ -157,18 +165,18 @@ def test_the_sanitized_fallback_is_NOT_offered_to_hand_placed_files():
     plain `Sales_Q3_Review.twbx` a human dropped in a folder must not fuzzy-match `Sales/Q3 Review`
     - that would be exactly the name-is-not-identity error this module exists to prevent."""
     lookup = FakeLookup([{"id": "a", "name": "Sales/Q3 Review"}])
-    assert prov.find_origin(lookup, "Sales_Q3_Review", "x") is None
+    assert prov.find_origin(lookup, "Sales_Q3_Review", {"sha256": "x"}) is None
 
 
 def test_a_plain_name_still_matches_exactly_as_before():
     """The harvested path must not regress the ordinary one."""
     lookup = FakeLookup([{"id": "a", "name": "Superstore"}])
-    assert prov.find_origin(lookup, "Superstore", "x")["matched_by"] == "name"
+    assert prov.find_origin(lookup, "Superstore", {"sha256": "x"})["matched_by"] == "name"
 
 
 def test_a_luid_prefixed_stem_whose_luid_is_gone_still_matches_the_exact_name():
     lookup = FakeLookup([{"id": "some-other-luid", "name": "Superstore"}])
-    origin = prov.find_origin(lookup, f"{HARVEST_LUID}_Superstore", "x")
+    origin = prov.find_origin(lookup, f"{HARVEST_LUID}_Superstore", {"sha256": "x"})
     assert origin["matched_by"] == "name"
 
 
@@ -189,7 +197,7 @@ def test_same_name_count_still_counts_names_when_matched_by_luid():
     """`same_name_count` answers 'is this name ambiguous on the site', which stays worth knowing even
     when we resolved the file by LUID."""
     lookup = FakeLookup([{"id": HARVEST_LUID, "name": "Sales"}, {"id": "other", "name": "Sales"}])
-    assert prov.find_origin(lookup, f"{HARVEST_LUID}_Sales", "x")["same_name_count"] == 2
+    assert prov.find_origin(lookup, f"{HARVEST_LUID}_Sales", {"sha256": "x"})["same_name_count"] == 2
 
 
 # --------------------------------------------------------------------------- build()
@@ -248,3 +256,80 @@ def test_partial_credentials_do_not_attempt_a_lookup(tmp_path, key):
     _twbx(tmp_path)
     result = prov.build(tmp_path, {key: "present"})
     assert result["inputs"][0].get("origin") is None
+
+
+# --------------------------------------------------------------------------- revision key (round 3)
+
+
+def _repack(path: Path) -> bytes:
+    """The same archive with reversed member ORDER and different mtimes - what the server does."""
+    import io
+    import zipfile
+
+    with zipfile.ZipFile(path) as source:
+        members = [(info.filename, source.read(info.filename)) for info in reversed(source.infolist())]
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as target:
+        for name, data in members:
+            target.writestr(zipfile.ZipInfo(name, date_time=(2026, 9, 3, 11, 22, 33)), data)
+    return buffer.getvalue()
+
+
+def test_fingerprint_records_a_reproducible_revision_key(tmp_path):
+    """The outer hash was already documented here as unstable; nothing acted on it.
+
+    Measured 2026-09-03 against the live site, three downloads of every item in one run: the raw
+    digest differed for 27 of 49 archives while the content-normalised key differed for 0 of 67.
+    """
+    record = prov.fingerprint(_twbx(tmp_path))
+
+    assert record["revision_key"]["algo"] == oid.REVISION_ALGO_ARCHIVE
+    assert record["revision_key"]["value"] != record["sha256"], "the key is not the raw hash"
+
+
+def test_a_repacked_site_copy_is_recorded_as_the_same_revision(tmp_path):
+    """THE round-3 test on the producer side: a repack must read `revision_match: "same"`.
+
+    `match` still says `name_only`, because the raw bytes genuinely differ - and that is exactly why
+    it could never carry the revision claim on its own.
+    """
+    path = _twbx(tmp_path)
+    record = prov.fingerprint(path)
+    lookup = FakeLookup(
+        [{"id": "luid-1", "name": "Superstore"}],
+        remote_sha="a-repacked-blob",
+        remote_key=oid.revision_key(_repack(path)),
+    )
+
+    origin = prov.find_origin(lookup, "Superstore", record)
+
+    assert origin["match"] == "name_only", "the raw bytes DO differ - that is the whole point"
+    assert origin["revision_match"] == "same"
+    assert origin["remote_revision_key"]["algo"] == oid.REVISION_ALGO_ARCHIVE
+
+
+def test_genuinely_different_site_content_is_recorded_as_differs(tmp_path):
+    """The negative control: normalisation must not launder a real change into agreement."""
+    lookup = FakeLookup(
+        [{"id": "luid-1", "name": "Superstore"}],
+        remote_sha="x",
+        remote_key=oid.revision_key(_twbx(tmp_path, name="Other", payload=b"<workbook edited='1'/>").read_bytes()),
+    )
+
+    origin = prov.find_origin(lookup, "Superstore", prov.fingerprint(_twbx(tmp_path)))
+
+    assert origin["revision_match"] == "differs"
+
+
+def test_an_uncomparable_remote_key_is_recorded_as_neither(tmp_path):
+    """A site copy this build cannot key says nothing - `None`, never `"differs"`.
+
+    A false drift alarm on every capture taken before the key existed would be a nastier regression
+    than the gap it closes.
+    """
+    lookup = FakeLookup([{"id": "luid-1", "name": "Superstore"}], remote_sha="x", remote_key=None)
+
+    origin = prov.find_origin(lookup, "Superstore", prov.fingerprint(_twbx(tmp_path)))
+
+    assert origin["revision_match"] is None
+    assert origin["remote_revision_key"] is None

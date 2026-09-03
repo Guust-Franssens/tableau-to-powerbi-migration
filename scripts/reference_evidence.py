@@ -183,18 +183,16 @@ def provenance_origin(root: Path, source_sha: str, source: Path | None = None) -
     * **revision** - THREE-valued, and that is a measured correction rather than a hedge.
 
     ⚠️ **``match: "name_only"`` is NOT by itself evidence of a changed build.** ``find_origin``
-    compares the harvested bytes against ``content_sha256(luid)``, a fresh download. On the 407
-    reference estate that identical request was issued **twice for each of 30 workbooks inside one
-    run** and returned **DIFFERENT digests for 18 of them** - the server repacks a `.twbx` per
-    request, so the comparison cannot be reproduced and ``name_only`` is structurally guaranteed.
-    Reading it as drift marked 18 of 67 units, 246 records and 125 pages unverifiable on an estate
-    where nothing had changed; a gate that refuses correct evidence at that rate gets switched off,
-    which is how a good gate dies.
+    compares the harvested bytes against a fresh download, and a `.twbx` is repacked per request:
+    measured 2026-09-03 on the live site, three downloads of every item in one run, the RAW digest
+    differed for **27 of 49 archives** while the content-normalised key differed for **0 of 67**
+    items. Reading ``name_only`` as drift marked 18 of 67 units and 125 pages unverifiable on an
+    estate where nothing had changed. The reproducible answer is ``origin.revision_match``, from
+    :class:`object_identity.RevisionKey`; see :func:`revision_status`.
 
-    So drift is claimed only when the comparison is REPRODUCIBLE: every ``remote_sha256`` recorded
-    for that LUID agrees. Measured, that flags 0 of 67 units here while still firing on a genuine
-    change. Anything else - including no provenance at all - is ``unconfirmed``, which is admitted
-    and DISCLOSED rather than silently claimed as current (round-1 review of PR #454, blocker 2).
+    Anything with no comparable key - including no provenance at all - is ``unconfirmed``, which is
+    admitted and DISCLOSED rather than silently claimed as current (round-1 review of PR #454,
+    blocker 2).
     """
     stamped = harvest_luid(persisted_stem(source.name if source is not None else None))
     inputs = list((json_object(root / "source-provenance.json") or {}).get("inputs") or [])
@@ -214,22 +212,35 @@ def provenance_origin(root: Path, source_sha: str, source: Path | None = None) -
 
 
 def revision_status(origin: dict[str, Any], inputs: list[Any]) -> str:
-    """``confirmed`` / ``mismatch`` / ``unconfirmed`` for one stamped origin. See :func:`provenance_origin`."""
-    if origin.get("match") == "sha256":
+    """``confirmed`` / ``mismatch`` / ``unconfirmed`` for one stamped origin.
+
+    Reads the REPRODUCIBLE key first. ``stamp_tableau_provenance.find_origin`` records
+    ``revision_match`` from :class:`object_identity.RevisionKey` on both sides, which normalises a
+    `.twbx`/`.tdsx` archive so zip member order and mtimes cannot change it. Measured 2026-09-03
+    against the live site, three downloads of every item in one run:
+
+    | over 48 workbooks + 19 datasources | raw sha256 differs | content key differs |
+    |---|---|---|
+    | archives (49) | **27** | **0** |
+    | non-archives (18, plain `.twb` XML) | **0** | n/a - raw IS the content |
+
+    ⚠️ ``match: "name_only"`` is therefore NOT evidence of a changed build, and round 2 of PR #454
+    was right to refuse to treat it as one - but wrong to conclude that no reproducible comparison
+    existed. It did; the wrong digest was being taken. A raw *match* still implies a content match,
+    so ``match == "sha256"`` remains a valid confirmation; a raw *difference* establishes nothing.
+
+    ⚠️ An origin carrying no comparable key is ``unconfirmed``, never ``mismatch``. That covers a
+    manifest stamped before this key existed, two different key algorithms, and an archive that would
+    not open - the last of which yields NO key at all rather than a raw one, because silently
+    re-hashing those bytes raw is precisely the defect this replaces.
+    """
+    _ = inputs
+    declared = origin.get("revision_match")
+    if declared == "same":
         return REVISION_CONFIRMED
-    if origin.get("match") != "name_only":
-        return REVISION_UNCONFIRMED
-    luid = origin.get("workbook_luid")
-    observed = {
-        (record.get("origin") or {}).get("remote_sha256")
-        for record in inputs
-        if isinstance(record, dict)
-        and isinstance(record.get("origin"), dict)
-        and record["origin"].get("workbook_luid") == luid
-    }
-    # One reproducible answer means the comparison is load-bearing; two mean the download is not
-    # deterministic and the difference is about packaging, not about the workbook.
-    return REVISION_MISMATCH if len(observed) == 1 and None not in observed else REVISION_UNCONFIRMED
+    if declared == "differs":
+        return REVISION_MISMATCH
+    return REVISION_CONFIRMED if origin.get("match") == "sha256" else REVISION_UNCONFIRMED
 
 
 @dataclass(frozen=True)

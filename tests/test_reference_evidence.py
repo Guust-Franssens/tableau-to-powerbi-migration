@@ -257,7 +257,7 @@ def write_provenance(  # pylint: disable=too-many-arguments,too-many-positional-
     match: str,
     matched_by: str | None = None,
     remote_sha: str | None = "aa" * 32,
-    noisy_remote: bool = False,
+    revision_match: str | None = None,
 ) -> None:
     """A `source-provenance.json` as `stamp_tableau_provenance.py` writes it.
 
@@ -266,28 +266,30 @@ def write_provenance(  # pylint: disable=too-many-arguments,too-many-positional-
     were confirmed* in the second. Omitting ``matched_by`` - the default here - is the shape of an
     origin that establishes identity by neither route.
 
-    ``noisy_remote`` writes a SECOND entry for the same LUID with a different ``remote_sha256``,
-    which is what the real estate looks like: ``content_sha256(luid)`` is one request, and on the 407
-    capture it returned different digests for 18 of 30 workbooks inside a single run because the
-    server repacks a `.twbx` per download. A fixture that could not express that could not tell a
-    sound byte comparison from a meaningless one.
+    ``revision_match`` is the REPRODUCIBLE verdict, from a content-normalised
+    `object_identity.RevisionKey` on both sides. Omitting it - also the default - is the shape of a
+    manifest stamped before that key existed, which must read ``unconfirmed`` and never ``mismatch``.
     """
     origin: dict[str, object] = {"workbook_luid": luid, "workbook_name": "Published Name", "match": match}
     if matched_by is not None:
         origin["matched_by"] = matched_by
     if remote_sha is not None:
         origin["remote_sha256"] = remote_sha
-    entry = {
-        "input": {"file": source.name, "sha256": hashlib.sha256(source.read_bytes()).hexdigest()},
-        "origin": origin,
-    }
-    inputs = [entry]
-    if noisy_remote:
-        twin = json.loads(json.dumps(entry))
-        twin["input"] |= {"file": f"{source.stem}.twbx", "sha256": "ff" * 32}
-        twin["origin"]["remote_sha256"] = "ee" * 32
-        inputs.append(twin)
-    (root / "source-provenance.json").write_text(json.dumps({"inputs": inputs}), encoding="utf-8")
+    if revision_match is not None:
+        origin["revision_match"] = revision_match
+    (root / "source-provenance.json").write_text(
+        json.dumps(
+            {
+                "inputs": [
+                    {
+                        "input": {"file": source.name, "sha256": hashlib.sha256(source.read_bytes()).hexdigest()},
+                        "origin": origin,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def test_a_name_only_provenance_luid_is_not_trusted(bundle: Path) -> None:
@@ -323,9 +325,9 @@ def test_a_luid_matched_provenance_still_establishes_identity_but_not_the_revisi
       be of another BUILD read as a clean `READY`, carrying the generic oracle grade and disclosing
       nothing.
 
-    ⚠️ ``noisy_remote`` is the ORDINARY estate shape, not an edge case - see
-    :func:`test_a_reproducible_byte_difference_is_the_only_thing_that_proves_drift`. So this page is
-    admitted with ``revision: "unconfirmed"``, and the report counts and prints it.
+    ⚠️ A manifest stamped before the reproducible key existed carries no ``revision_match`` at all,
+    which is the ordinary shape today and the one this test uses. It is admitted with
+    ``revision: "unconfirmed"``, and the report counts and prints it.
     """
     build_unit(bundle, "WB", worksheets=["Revenue Trend"])
     write_provenance(
@@ -334,7 +336,6 @@ def test_a_luid_matched_provenance_still_establishes_identity_but_not_the_revisi
         luid="luid-1",
         match="name_only",
         matched_by="luid",
-        noisy_remote=True,
     )
     write_oracle(
         bundle,
@@ -358,17 +359,23 @@ def test_a_luid_matched_provenance_still_establishes_identity_but_not_the_revisi
 
 
 def test_a_reproducible_byte_difference_is_the_only_thing_that_proves_drift(bundle: Path) -> None:
-    """The sound half of blocker 2: with ONE reproducible remote digest, `name_only` IS drift.
+    """Drift is claimed from the REPRODUCIBLE key, never from a raw byte difference.
 
-    ⚠️ This distinction is measured, not chosen. `find_origin` compares the harvested bytes against
-    ``content_sha256(luid)``, a fresh download. On the 407 reference estate that identical request
-    was issued **twice for each of 30 workbooks inside one run** and returned **different digests for
-    18 of them** - the server repacks a `.twbx` per request. Reading `name_only` alone as drift
-    marked 18 of 67 units, 246 records and 125 pages unverifiable on an estate where nothing had
-    changed; requiring the comparison to be reproducible flagged **0**, while still firing here.
+    ⚠️ Round 2 of PR #454 got half of this right. `match: "name_only"` is not evidence of drift - a
+    `.twbx` is repacked per download, measured 27 of 49 archives across three downloads in one run -
+    but the conclusion that *no* reproducible comparison existed was wrong: the wrong digest was
+    being taken. `stamp_tableau_provenance` now records a content-normalised
+    `object_identity.RevisionKey` on both sides and writes the verdict as `revision_match`.
     """
     build_unit(bundle, "WB", worksheets=["Revenue Trend"])
-    write_provenance(bundle, bundle.parent / "assets" / "WB.twb", luid="luid-1", match="name_only", matched_by="luid")
+    write_provenance(
+        bundle,
+        bundle.parent / "assets" / "WB.twb",
+        luid="luid-1",
+        match="name_only",
+        matched_by="luid",
+        revision_match="differs",
+    )
     write_oracle(
         bundle,
         [
@@ -388,6 +395,70 @@ def test_a_reproducible_byte_difference_is_the_only_thing_that_proves_drift(bund
     assert report["evidence_attributed"]["stale"] == 1
     assert report["evidence_attributed"]["luid"] == 0, "a stale render is not an admission"
     assert crr.main([str(bundle), "--quiet"]) == 1
+
+
+def test_a_repacked_archive_is_confirmed_rather_than_merely_unconfirmed(bundle: Path) -> None:
+    """Round-3 finding: `unconfirmed` was an artifact of the DIGEST, not a property of the estate.
+
+    `match: "name_only"` with `revision_match: "same"` is the ordinary shape for a `.twbx` - the raw
+    bytes differ because the server repacked the zip, and the content is identical. Reporting that as
+    `unconfirmed` leaves the disclosure note as the only thing between a page and being cited as
+    verified; the evidence supports `confirmed`.
+    """
+    build_unit(bundle, "WB", worksheets=["Revenue Trend"])
+    write_provenance(
+        bundle,
+        bundle.parent / "assets" / "WB.twb",
+        luid="luid-1",
+        match="name_only",
+        matched_by="luid",
+        revision_match="same",
+    )
+    write_oracle(
+        bundle,
+        [
+            {
+                "view_name": "Revenue Trend",
+                "view_type": "worksheet",
+                "workbook_luid": "luid-1",
+                "workbook_name": "Not WB",
+            }
+        ],
+    )
+
+    report = crr.scan(bundle)
+    assert report["units"][0]["pages"][0]["readiness"] == "ready"
+    assert report["units"][0]["pages"][0]["revision"] == "confirmed"
+    assert report["pages_revision_unconfirmed"] == 0
+    assert report["evidence_attributed"]["stale"] == 0
+
+
+def test_a_manifest_stamped_before_the_key_existed_is_unconfirmed_not_drifted(bundle: Path) -> None:
+    """Versioning, in the direction that matters: an old capture must not raise a false alarm.
+
+    A pre-existing `source-provenance.json` carries `match: "name_only"` and no `revision_match` at
+    all. Reading that as drift would mark every capture taken before this change as stale - a nasty
+    regression dressed up as a safety improvement.
+    """
+    build_unit(bundle, "WB", worksheets=["Revenue Trend"])
+    write_provenance(bundle, bundle.parent / "assets" / "WB.twb", luid="luid-1", match="name_only", matched_by="luid")
+    write_oracle(
+        bundle,
+        [
+            {
+                "view_name": "Revenue Trend",
+                "view_type": "worksheet",
+                "workbook_luid": "luid-1",
+                "workbook_name": "Not WB",
+            }
+        ],
+    )
+
+    report = crr.scan(bundle)
+    assert report["units"][0]["pages"][0]["readiness"] == "ready"
+    assert report["units"][0]["pages"][0]["revision"] == "unconfirmed"
+    assert report["pages_revision_unconfirmed"] == 1
+    assert report["evidence_attributed"]["stale"] == 0, "no key is CANNOT COMPARE, never drift"
 
 
 def test_a_byte_confirmed_provenance_luid_certifies_normally(bundle: Path) -> None:
@@ -426,7 +497,14 @@ def test_a_stale_render_cannot_contest_a_legitimate_one_in_another_unit(bundle: 
     have seen two claims on one image.
     """
     build_unit(bundle, "WB", worksheets=["Revenue Trend"])
-    write_provenance(bundle, bundle.parent / "assets" / "WB.twb", luid="luid-1", match="name_only", matched_by="luid")
+    write_provenance(
+        bundle,
+        bundle.parent / "assets" / "WB.twb",
+        luid="luid-1",
+        match="name_only",
+        matched_by="luid",
+        revision_match="differs",
+    )
     write_oracle(bundle, [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_luid": "luid-1"}])
 
     page = crr.scan(bundle)["units"][0]["pages"][0]
