@@ -178,7 +178,7 @@ original dashboards belongs to their respective Tableau Public authors.
 | [`scripts/`](scripts/) | The CLI surface; [`scripts/README.md`](scripts/README.md) is the map. |
 | [`docs/`](docs/) | Start with [`INDEX.md`](docs/INDEX.md), the map of maps. |
 | [`.github/{agents,skills}/`](.github/) | The Copilot agent personas and reusable knowledge bundles. |
-| `_runs/<NNN>-<slug>/` | Per-run working state — the first two phases below. Gitignored by construction (`/_*`) and safe to delete. |
+| `_runs/<NNN>-<slug>/` | Per-run working state — the first two phases below. Gitignored by construction (`/_*`), but **not disposable**: only its `scratch/` subdir is, and a whole run becomes safe to delete only after its units are promoted and verified. |
 
 ## The three-phase pipeline
 
@@ -193,21 +193,27 @@ knowing where to find something. Full explanation, with the measured figures and
 | **3. Ship** | `migrations/{workbooks,datasources}/<slug>/fabric/` | ⚠️ a manual copy — no tool yet (issue [#458](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/458)) | the PBIP project a customer opens in Power BI Desktop |
 
 Two gates sit on phase 2: `check_reference_readiness.py` is the **entry** gate (per report page, is
-there trustworthy Tableau reference evidence to start from — `ready` or `blind`?), and
-`check_unit.py` is the **exit** gate (is this unit done?).
+there trustworthy Tableau reference evidence to start from?) and `check_unit.py` is the **exit** gate
+(is this unit done?). ⚠️ A page the entry gate calls **`blind` is a finding, not a pass** — it means a
+fidelity bug on that page would be structurally unfalsifiable, so it exits non-zero and you deal with
+it before building.
 
 Three things about that flow are worth knowing before you touch it, and each has cost someone real
 work:
 
-- Inside `bundle/`, **`reports/` is the pristine engine-truth baseline and `pbip/` is the working
-  copy** agents edit. There is no `out/` level.
+- Inside `bundle/`, **`reports/` is the pristine engine-truth baseline and `pbip/` is a working
+  copy** agents edit. There is no `out/` level. (It is not the only one — see the third bullet.)
 - **`bundle/semantic_models/` is not a per-workbook guarantee** — on our 62-unit reference run only
   **18** units had a model baseline. A missing counterpart is **BASELINE UNAVAILABLE**, never a
   clean diff.
-- **Phase 2 → 3 is the riskiest hop.** The copy is where `definition.pbir`'s `byPath` stops
-  resolving, and a wrong one opens as *a report with no model* while
-  `powerbi-report-author validate` still returns `errorCount: 0` — it checks reference shape, not
-  target.
+- **Phase 2 → 3 is a high-risk hop**, for two evidenced reasons. The copy is where
+  `definition.pbir`'s `byPath` stops resolving, and a wrong one opens as *a report with no model*
+  while `powerbi-report-author validate` still returns `errorCount: 0` — it checks reference shape,
+  not target. And **which location you copy FROM is currently unsettled**: the phase-2 package's
+  `fabric/` is a physical copy of `bundle/pbip/`, the two diverge as soon as an agent edits either,
+  and the repo documents both as "the working copy"
+  ([#460](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/460)). Promote from
+  whichever one carries the edits, and verify before and after.
 
 Running the pipeline yourself? The command-by-command procedure, with timings, exit codes and a
 failure playbook, is **[`docs/operator-runbook.md`](docs/operator-runbook.md)**.

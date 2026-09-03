@@ -727,7 +727,9 @@ What to check in the output:
   produced no report plus 1 datasource — and they are still packaged for their source, reference and
   handover. Deriving the unit list from `pbip/` alone drops them silently.
 - **`handover.md` is the agent's entry point**, one finding per line with a stable prefix, emptied
-  visuals first: `grep '^EMPTIED_VISUAL' _runs\<NNN>-<slug>\packages\<batch>\<Unit>\handover.md`. They render blank on a report
+  visuals first:
+  `Select-String -Path _runs\<NNN>-<slug>\packages\<batch>\<Unit>\handover.md -Pattern '^EMPTIED_VISUAL'`
+  (this runbook's commands are PowerShell; `grep` is not available there). They render blank on a report
   that validates clean, and nothing else in the toolkit surfaces them.
 - **`package-manifest.json` carries every omission with its reason.** A render is attributed by
   **`workbook_luid` only** — a display name is not an identity, and #450 measured that class failing

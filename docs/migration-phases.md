@@ -30,7 +30,8 @@ The pipeline has three locations, and the direction is one-way:
             │            entry gate: check_reference_readiness.py   (ready / blind)
             │            exit  gate: check_unit.py                  (is this unit done?)
             │
-            │  PHASE 3 — ship   ⚠️ NO TOOL: manual copy today (issue #458)
+            │  PHASE 3 — ship   ⚠️ NO TOOL: manual copy today (issue #458), and the source
+            │                      location is itself unsettled (issue #460)
             ▼
    migrations/{workbooks,datasources}/<slug>/fabric/
        the deliverable a customer opens in Power BI Desktop
@@ -39,6 +40,11 @@ The pipeline has three locations, and the direction is one-way:
 Everything under `_runs/` is gitignored by construction — `.gitignore:162` is a root-anchored `/_*`
 — so phases 1 and 2 never risk a commit. Phase 3 is the only location where committing is possible,
 which is also why it is the one with a privacy footgun (see below).
+
+⚠️ **Gitignored is not the same as disposable.** A run directory holds the agent's editable working
+copy *and* the evidence trail behind every verdict. Only `scratch/` is disposable — `work_dirs.py`
+calls it "the only subdir a future `--prune` may ever delete". A whole run becomes safe to delete
+only **after** its units have been promoted to phase 3 and that promotion has been verified.
 
 Measured figures below come from **one real cold run** against a 48-workbook Tableau Cloud site,
 `_runs/408-…`, 2026-09-03. They are *our* reference estate, not a customer's — never quote them as a
@@ -76,11 +82,13 @@ on" versus "what did we download" — so a mismatch between them is not a defect
 
 ### Two things about `bundle/` that mislead people
 
-**1. `reports/` is the engine-truth BASELINE and must never be edited; `pbip/` is the working copy.**
-There is **no `out/` level** — a bundle is `{pbip,reports,semantic_models,handover,data}`. Agents
-edit `pbip/`; `reports/` stays pristine so the engine-gap delta remains attributable. Compare the
-pair with `git diff --no-index --stat`, never PowerShell's `diff` (which is an alias for
-`Compare-Object` and compares the two path *strings*). Source:
+**1. `reports/` is the engine-truth BASELINE and must never be edited; `pbip/` is a working copy.**
+There is **no `out/` level** — a bundle is `{pbip,reports,semantic_models,handover,data}`. Per
+`AGENTS.md:773` agents edit `pbip/`; `reports/` stays pristine so the engine-gap delta remains
+attributable. ⚠️ It is not the *only* documented working copy — the phase-2 package ships a
+`copytree` of it that its own README also calls the place to edit (#460, phase 3 below). Compare the
+baseline/working pair with `git diff --no-index --stat`, never PowerShell's `diff` (which is an alias
+for `Compare-Object` and compares the two path *strings*). Source:
 [`.github/skills/powerbi-report-gotchas/SKILL.md` §3](../.github/skills/powerbi-report-gotchas/SKILL.md).
 
 **2. `semantic_models/` is NOT a per-workbook guarantee.** ✅ Measured on run 408: **18 model
@@ -114,7 +122,7 @@ Per-unit layout (authoritative list: `package_unit.py`'s module docstring):
     source-provenance.json       SCOPED; the only trusted route to a workbook LUID
     engine-output-receipt.json   what built this, so version drift stays checkable
     assets/<luid>_<Name>.twb(x)  the source, under the name resolve_source() already looks for
-    fabric/<Name>.Report/        the engine WORKING COPY (pbip/), never the reports/ baseline
+    fabric/<Name>.Report/        the engine WORKING COPY (a copytree of pbip/), never the baseline
     fabric/<Model>.SemanticModel/
     handover/<Unit>.json         the engine's per-workbook slice, verbatim
     handover.md                  flat, one finding per line, emptied visuals FIRST
@@ -135,6 +143,12 @@ discriminator and its resolver is non-fatal by design.
 ⚠️ **Attribution is fail-closed and by LUID only.** A render that cannot be tied to a workbook by
 `workbook_luid` is omitted with its reason recorded, never copied in because it was in the same
 capture. A display name is not an identity (#450).
+
+❌ **`fabric/` here is a `shutil.copytree` of `<bundle>/pbip/<unit>/` (`scripts/package_unit.py:847`),
+not a link — so edits made here do NOT appear in the bundle, and vice versa.** The package's own
+README says to edit here; `AGENTS.md:773` says to edit in `<bundle>/pbip/`. Which one is
+authoritative is an open design question, **#460**; it matters most at phase 3, where promoting from
+the wrong one silently ships unedited engine output. See phase 3 below before you copy anything.
 
 ### Where `packages/` goes, and the constraint that decides it
 
@@ -186,23 +200,67 @@ on oracle imagery alone is overstated (issue #194).
 The deliverable lands in `migrations/workbooks/<slug>/fabric/` (a workbook's report + model) or
 `migrations/datasources/<ds-slug>/fabric/` (a shared/published datasource's model).
 
-❌ **There is no tool for the phase 2 → phase 3 hop. It is a manual copy today.** That gap is
-tracked as **#458**. It matters because this is the highest-cost mistake in the pipeline: the copy
-is where `definition.pbir`'s `byPath` stops resolving, and nothing in the toolkit catches it.
+❌ **There is no tool for the phase 2 → phase 3 hop. It is a manual copy today**, tracked as **#458**.
+It is a high-risk hop for two evidenced reasons: the copy is where `definition.pbir`'s `byPath` stops
+resolving, and no gate checks that the *target* resolves (below); and **which location you copy FROM
+is currently unsettled** (below, #460).
 
-Source for everything in this section:
-[`.github/skills/powerbi-report-gotchas/SKILL.md` §3](../.github/skills/powerbi-report-gotchas/SKILL.md)
-(🟢 verified 2026-08-11).
+### ⚠️ First decide WHERE you are promoting from — the repo currently gives two answers
 
-**Model per workbook — plain copy, but copy the CONTENTS.** `<bundle>/pbip/<wb>/` already holds
+❌ **Open design question, tracked as #460 — do not treat either location as settled.** The toolkit
+documents two different places an agent edits, and they are physical copies of each other:
+
+| what says it | where it says agents edit |
+|---|---|
+| `AGENTS.md:773` (shared conventions) | `<bundle>/pbip/` — *"agents edit **here**"* |
+| the package README `package_unit.py` writes (`scripts/package_unit.py:785`) | `<package>/fabric/` — *"the engine WORKING COPY - edit here"* |
+
+The package's `fabric/` is a **`shutil.copytree`** of `<bundle>/pbip/<unit>/`
+(`scripts/package_unit.py:847`), not a link, so an edit in one is invisible in the other. ✅ Proven by
+sentinel edit during review of this document: after editing inside the package,
+`PACKAGE_EDIT_EXISTS=True` / `BUNDLE_EDIT_EXISTS=False`. ✅ Corroborated here — immediately after
+packaging the two trees are byte-identical (`git diff --no-index` exit 0, no output), so they can
+only diverge by someone editing one of them. Promoting from `<bundle>/pbip/` when the agent worked in
+the package ships **unchanged engine output and loses every agent-authored TMDL/PBIR change,
+silently, with no gate firing**.
+
+**Interim instruction until #460 is decided: promote from wherever the edits actually are, and verify
+both before and after.** Do not assume — check:
+
+```powershell
+# BEFORE promoting: which of the two carries the agent's work?
+git diff --no-index --stat <bundle>\reports\<WB>.Report <bundle>\pbip\<WB>\<WB>.Report
+git diff --no-index --stat <bundle>\pbip\<WB> <run>\packages\<batch>\<Unit>\fabric
+# AFTER promoting: the deliverable must match the location you promoted FROM
+git diff --no-index --stat <source-you-chose> migrations\workbooks\<slug>\fabric
+```
+
+Reading it: on the second command, **exit 0 with no output means the two are still identical** — no
+one has edited either since packaging, so the choice does not matter yet. A stat line means they have
+diverged, and the side with the extra insertions is the one holding the agent's work. ✅ Both commands
+run: measured on the reference bundle, the first returned
+`22 files changed, 1807 insertions(+), 194 deletions(-)` and the second exited 0 with no output.
+
+⚠️ Require a real stat line, not just the exit code — `git diff --no-index` exits **1** both when
+trees differ and when a path is wrong. And on Windows use `git diff`, never bare `diff`: that is a
+PowerShell alias for `Compare-Object` and compares the two path *strings*.
+
+### The `byPath` mechanics (still correct, and still necessary)
+
+Source: [`.github/skills/powerbi-report-gotchas/SKILL.md` §3](../.github/skills/powerbi-report-gotchas/SKILL.md)
+(🟢 verified 2026-08-11). These apply whichever source location you promote from.
+
+**Model per workbook — plain copy, but copy the CONTENTS.** The promoted unit folder already holds
 `<Name>.Report/` and `<Name>.SemanticModel/` as **siblings**, with `"path": "../<Name>.SemanticModel"`,
-and the delivery folder has the identical shape. So copy the *contents* of `<bundle>/pbip/<wb>/`, not
-the folder — that folder is named for the **workbook**, the model inside for the **datasource**, so
-copying the folder itself nests them wrongly.
+and the delivery folder has the identical shape. So copy the *contents* of that folder, not the folder
+itself — it is named for the **workbook**, the model inside for the **datasource**, so copying the
+folder nests them wrongly.
 
-**Shared/published datasource — the reference MUST be rewritten.** The model lands once in
-`migrations/datasources/<ds-slug>/fabric/` while each report goes to
-`migrations/workbooks/<slug>/fabric/`. They are no longer siblings, so `definition.pbir` becomes:
+**Shared/published datasource — the reference MUST be rewritten, and the two halves SPLIT UP.**
+⚠️ The report and model do **not** both stay under the workbook's own `fabric/`: the model lands
+**once** in `migrations/datasources/<ds-slug>/fabric/` and is shared, while each downstream report
+goes to its own `migrations/workbooks/<slug>/fabric/`. They are no longer siblings, so
+`definition.pbir` becomes:
 
 ```
 "../../../../datasources/<ds-slug>/fabric/<Name>.SemanticModel"
@@ -211,8 +269,8 @@ copying the folder itself nests them wrongly.
 — four levels up from inside `<Name>.Report/`. **Verify it resolves on disk after writing it.**
 
 ⚠️ **A wrong `byPath` opens as a report with NO MODEL, and `powerbi-report-author validate` returns
-`errorCount: 0` for it** — it checks reference *shape*, not *target*. So the one failure mode that
-matters most here is invisible to the validator you would reach for.
+`errorCount: 0` for it** — it checks reference *shape*, not *target*. So this failure mode is
+invisible to the validator you would reach for.
 
 ⚠️ **Never ship `<bundle>/reports/` itself.** It is a reference-only baseline: `reports/` holds only
 `*.Report` folders, so the `byPath` beside it has no model to point at, and its exact (unresolvable)
@@ -221,7 +279,7 @@ value is engine-version dependent.
 ⚠️ **A shipped deliverable can be structurally present and functionally EMPTY.** Assert the shipped
 `<Name>.Report/definition/pages/` enumerates real pages *with visuals* and the shipped
 `<Name>.SemanticModel/definition/tables/` holds real tables. A folder count is not a content check,
-and verifying a fix in `<bundle>/pbip/` proves nothing about `migrations/**/fabric/`.
+and verifying a fix in one location proves nothing about `migrations/**/fabric/`.
 
 ### What is actually tracked in git here
 
@@ -277,10 +335,11 @@ user, so the rename is cheap today and gets more expensive the moment one appear
 | # | gap | status |
 |---|---|---|
 | 1 | No tool for phase 2 → phase 3; the `byPath` rewrite is manual and a wrong one validates clean | ❌ open, tracked as **#458** |
-| 2 | `semantic_models/` baselines exist for only 18 of 62 units on the reference run, so model churn cannot be measured for the rest | ❌ report as **BASELINE UNAVAILABLE** (#274, #359) |
-| 3 | `deliverables/` is a convention with no writer, and its name collides with phase 3's meaning | ⚠️ documented, not fixed |
-| 4 | Phase 1 stages still default to their own `_assessment*/` / `_oracle*/` / `_bundle*/` paths rather than the `_runs/` layout | ⚠️ deliberate scope limit of issue #234; migrating them is follow-up |
-| 5 | Oracle evidence is layout/text grade only; validation grade requires a render you captured yourself | ⚠️ provider limit, not an oversight (#194) |
+| 2 | Two documented edit locations — `<bundle>/pbip/` (`AGENTS.md:773`) and `<package>/fabric/` (`package_unit.py:785`) — diverge because the package is a `copytree`, so promoting from the wrong one silently loses agent work | ❌ open design question, tracked as **#460**; promote from wherever the edits are and verify both ways |
+| 3 | `semantic_models/` baselines exist for only 18 of 62 units on the reference run, so model churn cannot be measured for the rest | ❌ report as **BASELINE UNAVAILABLE** (#274, #359) |
+| 4 | `deliverables/` is a convention with no writer, and its name collides with phase 3's meaning | ⚠️ documented, not fixed |
+| 5 | Phase 1 stages still default to their own `_assessment*/` / `_oracle*/` / `_bundle*/` paths rather than the `_runs/` layout | ⚠️ deliberate scope limit of issue #234; migrating them is follow-up |
+| 6 | Oracle evidence is layout/text grade only; validation grade requires a render you captured yourself | ⚠️ provider limit, not an oversight (#194) |
 
 ## See also
 
