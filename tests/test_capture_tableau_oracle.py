@@ -758,6 +758,36 @@ def test_the_run_end_block_is_silent_when_nothing_is_empty(tmp_path, caplog):
     assert "ZERO DATA ROWS" not in "\n".join(r.getMessage() for r in caplog.records)
 
 
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ("\r\n", "empty_cannot_classify"),
+        ("Region,Sales\r\n", "empty_query_no_rows"),
+    ],
+)
+def test_a_REAL_empty_export_travels_the_whole_path_from_capture_to_manifest(tmp_path, payload, expected):
+    """End to end over the PRODUCTION path, not a hand-built record.
+
+    ⚠️ Every other test in this section constructs the record itself, which proves the verdict layer
+    and says nothing about whether a real capture can produce its input. This one starts at
+    `capture_view` with a scripted HTTP response, so `_capture_data` -> `summarise_csv` ->
+    `empty_classification` is exercised as a chain. Both fixtures are shapes the reporting site
+    actually returned: a 2-byte CRLF body, and a header with no rows.
+    """
+    session = FakeSession([(200, payload, {"Content-Type": "text/csv"})])
+    view = {"id": "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", "name": "Real Time Availability", "workbook": {"id": "wb"}}
+    record = oracle.capture_view(session, view, tmp_path, frozenset(), None)
+    record["workbook_name"] = "Network Ops"
+
+    assert record["data"]["status"] == "ok", "the export must SUCCEED, or this tests the failure path"
+    assert record["data"]["row_count"] == 0
+    _code, manifest = _named_manifest(tmp_path, [record])
+    assert manifest["data_empty"] == 1
+    assert manifest["data_empty_views"][0]["view_name"] == "Real Time Availability"
+    assert manifest["data_empty_views"][0]["classification"] == expected
+    assert manifest["views"][0]["flags"] == ["data_empty", expected]
+
+
 def test_a_view_name_is_redacted_before_the_empty_diagnostic_prints_it(tmp_path, caplog):
     """⚠️ A view NAME is response data -- a reflected session token has arrived as one.
 

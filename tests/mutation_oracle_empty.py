@@ -278,6 +278,22 @@ m.empty_classification = classify
 """,
     ),
     # ------------------------------------------------------------------ the downstream consumers
+    "the-capture-stops-recording-the-csv-header": (
+        (f"{ORACLE}::test_a_REAL_empty_export_travels_the_whole_path_from_capture_to_manifest",),
+        """
+import capture_tableau_oracle as o
+import tableau_payload_facts as f
+_orig = f.summarise_csv
+def summarise(payload):
+    # The CHAIN, not the verdict layer: `_capture_data` merges `summarise_csv`, and `columns` is the
+    # one recorded fact the classification reads. Drop it and every empty capture is unclassifiable,
+    # which no test built from a hand-written record could observe.
+    out = dict(_orig(payload))
+    out["columns"] = []
+    return out
+o.summarise_csv = summarise
+""",
+    ),
     "the-workbook-subset-counts-but-does-not-name": (
         (f"{GROUP}::test_a_zero_row_view_is_counted_AND_named_in_the_workbook_manifest",),
         """
