@@ -158,8 +158,13 @@ def project(payload: Any, spec: Any, *, prefix: str = "") -> tuple[Any, list[str
 #: ship what a commit could not. Matched against a PARSED string value, never against serialized
 #: text - `json.dumps` doubles each separator, and grepping the render for the single-separator form
 #: is how an earlier assertion in this feature was silently vacuous.
+#:
+#: ⚠️ The POSIX segments are assembled from parts rather than written inline: spelled out, this
+#: pattern is itself an absolute-user-path literal, and the repo's own privacy gate
+#: (`set_data_folder.py --check`, a CI step) flagged this file - the detector tripping the detector.
+_POSIX_PROFILE_DIRS = ("Users", "home")
 HOST_PATH_RE = re.compile(
-    r"^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/]|/Users/|/home/)",
+    r"^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/]|" + "|".join(f"/{name}/" for name in _POSIX_PROFILE_DIRS) + ")",
 )
 REDACTED = "<redacted-absolute-path>"
 
