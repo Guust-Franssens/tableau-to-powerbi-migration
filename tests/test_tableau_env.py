@@ -666,14 +666,18 @@ def test_a_reflected_signin_error_cannot_persist_the_pat(tmp_path):
     ok, detail = h.download("datasource", "luid-1", tmp_path / "out.tdsx", env, tmp_path)
 
     assert ok is False
-    assert secret not in detail
+    assert secret not in detail, "the PAT secret survived into the operator-facing detail"
     assert "probe-name" not in detail, "the PAT NAME is a credential too, and download() redacts it"
     assert secret not in json.dumps([{"download_error": detail}]), "the PAT reached a persisted artifact"
     assert "401" in detail, "redaction must not destroy the diagnostic"
-    # ⚠️ Non-vacuity. Every assertion above also holds for an empty `detail`, which is exactly what
-    # the missing stub produced. This is text only the reflected body carries, so it fails if the
-    # child never ran, never reflected, or its output never reached the redactor.
+    # ⚠️ Non-vacuity, in two steps, because "the secret is not in the text" is equally true of text
+    # that never carried it. The field must be PRESENT (the child ran and its stderr reached the
+    # redactor) and must not be EMPTY (the secret really made the round trip through
+    # `engine_child_env`). A missing stub satisfied every assertion above while proving nothing.
     assert "personalAccessTokenSecret" in detail, "the reflected body never reached the wrapper at all"
+    assert '"personalAccessTokenSecret": ""' not in detail, (
+        "the child was handed no secret, so there was nothing for the redactor to remove"
+    )
 
 
 # --------------------------------------------------------------------------- round 2 of review
@@ -696,10 +700,13 @@ def test_redaction_happens_before_truncation(tmp_path):
 
     _, detail = h.download("datasource", "luid", tmp_path / "o.tdsx", env, tmp_path)
 
-    assert secret not in detail
-    # ⚠️ Non-vacuity: without this the whole test passes on an empty `detail`. 270 B's are the tail
-    # the child wrote AFTER the secret, so they can only be here if the straddling text arrived.
+    assert secret not in detail, "the PAT secret survived into the retained slice"
+    # ⚠️ Non-vacuity: without these the whole test passes on text that never held the secret. The
+    # 270 B's are what the child wrote AFTER it, so they can only be here if the straddling output
+    # arrived; and "AB" can only be absent if something (the marker) still sits between the two
+    # runs, which is what proves the secret itself made the round trip and was replaced.
     assert detail.endswith("B" * 270), "the straddling child output never reached the redactor"
+    assert "AB" not in detail, "nothing was redacted between the two runs, so no secret ever arrived"
     # Only suffixes long enough to matter: a 1-2 char tail matches inside "[REDACTED]" itself, which
     # would fail the assertion without any secret having survived.
     for cut in range(0, len(secret) - 8):

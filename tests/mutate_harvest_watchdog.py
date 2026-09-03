@@ -265,6 +265,63 @@ MUTATIONS: list[tuple[str, str, str, str, str, str]] = [
         node("test_a_clean_sweep_still_says_none"),
         "the orphan finding never reaches parse-sweep.md",
     ),
+    # ---------------------------------------------------------------- #482 CI: the credential gate
+    #
+    # ⚠️ Anchors here deliberately live in OTHER files. The two security gates that went red are in
+    # `tests/test_diagnostic_redaction.py` and `tests/test_tableau_env.py`, and a campaign that only
+    # ever points at its own test file cannot show that a change to this module is observed where it
+    # actually matters. `pytest_node` takes any node id, so no machinery changes.
+    (
+        "no-redaction-of-the-child-stderr",
+        'raw = redact((run.stderr or run.stdout or "").strip(), pat_secret(env), env.get("TABLEAU_PAT_NAME", ""))',
+        'raw = (run.stderr or run.stdout or "").strip()',
+        "tests/test_tableau_env.py::test_a_reflected_signin_error_cannot_persist_the_pat",
+        node("test_a_clean_sweep_still_says_none"),
+        "a reflected PAT reaches the operator and parse-sweep.json in clear",
+    ),
+    (
+        "truncate-before-redacting",
+        'raw = redact((run.stderr or run.stdout or "").strip(), pat_secret(env), env.get("TABLEAU_PAT_NAME", ""))\n'
+        "        return False, raw[-300:]",
+        'raw = redact((run.stderr or run.stdout or "").strip()[-300:], pat_secret(env), '
+        'env.get("TABLEAU_PAT_NAME", ""))\n        return False, raw',
+        "tests/test_tableau_env.py::test_redaction_happens_before_truncation",
+        node("test_a_clean_sweep_still_says_none"),
+        "a secret straddling the 300-char cut leaves its tail in the retained slice",
+    ),
+    (
+        "pat-name-no-longer-redacted",
+        'raw = redact((run.stderr or run.stdout or "").strip(), pat_secret(env), env.get("TABLEAU_PAT_NAME", ""))',
+        'raw = redact((run.stderr or run.stdout or "").strip(), pat_secret(env))',
+        "tests/test_tableau_env.py::test_a_reflected_signin_error_cannot_persist_the_pat",
+        node("test_a_clean_sweep_still_says_none"),
+        "the PAT NAME half of the credential is persisted while the secret is scrubbed",
+    ),
+    (
+        "child-is-handed-no-secret",
+        "    child = engine_child_env(env)",
+        '    child = engine_child_env({k: v for k, v in env.items() if "SECRET" not in k})',
+        "tests/test_tableau_env.py::test_a_reflected_signin_error_cannot_persist_the_pat",
+        node("test_a_clean_sweep_still_says_none"),
+        "MUST BE KILLED BY A NON-VACUITY ASSERTION: no secret reaches the child, so every "
+        "'the secret is not in the output' assertion passes while proving nothing",
+    ),
+    (
+        "prose-retrips-the-credential-detector",
+        "# the same one-shot `urlopen` + `.read()` shape)",
+        "# the same `urlopen(...).read()` shape)",
+        node("test_the_credential_gate_is_not_tripped_by_this_module_s_PROSE"),
+        node("test_a_clean_sweep_still_says_none"),
+        "a COMMENT reclassifies this module as a credentialed HTTP client and fails two gates (#482)",
+    ),
+    (
+        "module-becomes-a-real-http-client",
+        "import subprocess\nimport sys",
+        "import http.client\nimport subprocess\nimport sys",
+        node("test_this_module_still_makes_no_http_call_of_its_own"),
+        node("test_a_clean_sweep_still_says_none"),
+        "the NON_HTTP_CREDENTIAL_SCRIPTS classification becomes false and nothing else notices",
+    ),
     # ---------------------------------------------------------------- discriminating controls
     (
         "control-cosmetic",
