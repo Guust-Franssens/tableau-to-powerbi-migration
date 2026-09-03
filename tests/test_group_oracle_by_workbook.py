@@ -222,6 +222,35 @@ def test_the_workbook_subset_reports_no_unassessable_views_when_every_row_count_
     assert subset["data_unassessable_views"] == []
 
 
+def test_a_legacy_row_count_without_a_certification_is_not_evidence(tmp_path):
+    """#480 round 3 at this level: the per-workbook subset must not copy an uncertified CSV either.
+
+    ⚠️ This is the shape EVERY pre-#480 capture on disk has -- `origin/master` summarised the body of
+    every HTTP 200 and wrote its `row_count`, certifying nothing -- so it is the shape a grouping run
+    over a customer's existing `_oracle/` will actually meet. `copy_view_files` keys on `path` and
+    needs no knowledge of certification; what changes is that the record has no `path` to offer it.
+    """
+    legacy = _view("Sales", "Old", "ccc")
+    del legacy["data"]["certification"]
+    oracle = _capture(tmp_path, [_view("Sales", "Good", "aaa"), legacy])
+    root = _migrations(tmp_path, "sales")
+    assert grp.run(oracle, root, dry_run=False) == 0
+
+    reference = root / "sales" / "reference"
+    subset = json.loads((reference / "oracle-manifest.json").read_text(encoding="utf-8"))
+    by_name = {view["view_name"]: view["data"] for view in subset["views"]}
+    assert "path" not in by_name["Old"], "a legacy row count must not license an evidence path"
+    assert by_name["Old"]["row_count"] == 5, "the number is kept for forensics, not deleted"
+    assert by_name["Good"]["path"], "the certified view is untouched, or this proves only that copying broke"
+
+    assert subset["data_unassessable"] == 1
+    assert [entry["view_name"] for entry in subset["data_unassessable_views"]] == ["Old"]
+    assert subset["data_unassessable_views"][0]["reason"] == "certification_unestablished"
+    copied = sorted(p.name for p in (reference / "data").glob("*")) if (reference / "data").is_dir() else []
+    assert not any("Old" in name for name in copied), "the uncertified bytes must not be copied as data"
+    assert any("Good" in name for name in copied), "the certified bytes must still be copied"
+
+
 def test_a_view_whose_file_vanished_is_reported_and_never_claimed_as_copied(tmp_path):
     """⚠️ This test used to assert exit 0 -- it PINNED the defect. `copy_view_files` warned and moved
     on while `subset_manifest` kept the source manifest's `status: ok`, its `path`, and its place in

@@ -1297,6 +1297,199 @@ def test_a_LEGACY_manifest_naming_uncertified_bytes_under_path_is_demoted_when_i
     assert result["items"] == []
 
 
+def test_a_LEGACY_RECORD_WITH_A_ROW_COUNT_and_no_certification_is_not_evidence(tmp_path):
+    """#480 round 3, finding 1 -- and the ONLY shape that exists on a customer's disk today.
+
+    ⚠️ Round 2's gate returned early on any non-bool integer `row_count`, so it never fired on real
+    data. `git show origin/master:scripts/capture_tableau_oracle.py` called `summarise_csv(payload)`
+    on the body of EVERY HTTP 200 and wrote its `row_count`, recording no certification at all --
+    so a pre-#480 manifest carries a number and no certificate, and a gate that reads the number as
+    proof of measurement is a gate that has never once run.
+
+    The number is not merely unbacked, it is misleading: `summarise_csv` counts LINES, so an HTML
+    error page is one row and a plain-text outage banner is a header with no rows.
+    """
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "view.csv").write_text("Region,Sales\r\nWest,10\r\n", encoding="utf-8")
+    (tmp_path / "oracle-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "tableau-oracle/1",
+                "views": [
+                    {
+                        "view_luid": "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa",
+                        "view_name": "Real Time Availability",
+                        "workbook_name": "Network Ops",
+                        # Exactly what `origin/master` wrote. No `certification` key at all.
+                        "data": {
+                            "status": "ok",
+                            "path": "data/view.csv",
+                            "row_count": 1,
+                            "columns": ["Region", "Sales"],
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    record = json.loads((tmp_path / "oracle-manifest.json").read_text(encoding="utf-8"))["views"][0]
+
+    assert verdict.unassessable_reason(record) == verdict.UNASSESSABLE_NO_CERTIFICATION
+    assert verdict.UNASSESSABLE_NO_CERTIFICATION in verdict.UNASSESSABLE_REASONS
+    assert verdict.UNASSESSABLE_NO_CERTIFICATION != verdict.UNASSESSABLE_NO_ROW_COUNT, (
+        "a record reading `row_count: 1` must not be told its row count is unrecorded"
+    )
+
+    data = verdict.read_manifest(tmp_path / "oracle-manifest.json")["views"][0]["data"]
+    assert "path" not in data, "the legacy shape is the one that MUST be withheld, or this PR fixes nothing"
+    assert data[verdict.RETAINED_PATH_KEY] == "data/view.csv"
+    assert data["row_count"] == 1, "the recorded number is kept for forensics; what is denied is that it is evidence"
+    assert data[verdict.EVIDENCE_WITHHELD_KEY] == verdict.RETAINED_DETAIL_NO_CERTIFICATION
+    assert data[verdict.EVIDENCE_WITHHELD_KEY] != verdict.RETAINED_DETAIL_DEFAULT, (
+        "the default sentence opens `records no row count`, which is false of this record"
+    )
+
+    # ⚠️ The residual, stated rather than hidden: a file already on disk cannot be rewritten
+    # retroactively, so a consumer that opens `oracle-manifest.json` with `json.loads` still sees
+    # `path`. `read_manifest` is the boundary that restores the invariant, and every in-repo consumer
+    # goes through it -- `build_reconcile_items` below is the one the review filed this against.
+    assert _naive_numeric_consumer(tmp_path), "the raw file is unchanged; the boundary that LOADS it is the gate"
+    result = build_reconcile_items.build(tmp_path, {"Network Ops": {"Region": "DIMENSION", "Sales": "MEASURE"}})
+    assert result["item_count"] == 0
+    assert result["items"] == []
+    assert [entry["view"] for entry in result["skipped_views"]] == ["Real Time Availability"]
+
+
+def test_a_record_that_contradicts_itself_is_believed_on_its_REFUSAL_not_on_its_count(tmp_path):
+    """#480 round 3, finding 1's second half: `content_type_absent` WITH a `row_count`.
+
+    A record cannot be both uncertified and measured. Round 2 resolved the contradiction toward the
+    number, which is the fail-open direction -- the count would then have come from the very body
+    the certification says nothing established.
+    """
+    record = {
+        "view_name": "V",
+        "workbook_name": "W",
+        "data": {
+            "status": "ok",
+            "certification": payload_facts.CSV_CONTENT_TYPE_ABSENT,
+            "path": "data/v.csv",
+            "row_count": 1,
+            "columns": ["Region"],
+        },
+    }
+    assert verdict.unassessable_reason(record) == payload_facts.CSV_CONTENT_TYPE_ABSENT, (
+        "the record's own refusal is the more specific true statement, so it is the reason reported"
+    )
+
+    (demoted,) = verdict.withhold_uncertified_evidence([record])
+    assert "path" not in demoted["data"]
+    assert demoted["data"][verdict.RETAINED_PATH_KEY] == "data/v.csv"
+    assert (
+        demoted["data"][verdict.EVIDENCE_WITHHELD_KEY]
+        == payload_facts.CSV_UNCERTIFIED_DETAIL[payload_facts.CSV_CONTENT_TYPE_ABSENT]
+    )
+
+    _code, manifest = _named_manifest(tmp_path, [record])
+    assert manifest["data_unassessable"] == 1
+    assert manifest["captured_complete"] == 0
+    assert [entry["reason"] for entry in manifest["data_unassessable_views"]] == [payload_facts.CSV_CONTENT_TYPE_ABSENT]
+
+
+def test_a_certification_this_module_does_not_recognise_is_unassessable_not_assessable(tmp_path):
+    """A verdict from a NEWER capture, or a corrupted field. Either way nothing here established it.
+
+    The fail-open reading is "unknown string, so fall through to whatever else the record says". A
+    closed vocabulary only protects anything if a value outside it is refused rather than ignored.
+    """
+    record = {
+        "view_name": "V",
+        "workbook_name": "W",
+        "data": {"status": "ok", "certification": "certified_by_a_future_release", "path": "d.csv", "row_count": 5},
+    }
+    assert record["data"]["certification"] not in payload_facts.CSV_VERDICTS, "the control must use an UNKNOWN value"
+    assert verdict.unassessable_reason(record) == verdict.UNASSESSABLE_NO_CERTIFICATION
+
+    _code, manifest = _named_manifest(tmp_path, [record])
+    assert manifest["data_unassessable"] == 1
+    assert "path" not in manifest["views"][0]["data"]
+
+
+def test_a_zero_row_count_on_an_uncertified_body_is_never_reported_as_an_empty_QUERY(tmp_path):
+    """#471's failure 2 with the number kept -- the shape the round-3 review found still surviving.
+
+    `Service temporarily unavailable` exports HTTP 200, parses as one header and no data rows, and
+    `origin/master` recorded `row_count: 0, columns: ["Service temporarily unavailable"]`. Read as
+    `empty_query_no_rows` that sends an operator to look at a Tableau filter for a view whose server
+    returned an error page, so `empty_classification` defers to `unassessable_reason` and the two
+    predicates are mutually exclusive by construction.
+    """
+    record = {
+        "view_name": "V",
+        "workbook_name": "W",
+        "data": {
+            "status": "ok",
+            "path": "data/error.csv",
+            "row_count": 0,
+            "columns": ["Service temporarily unavailable"],
+        },
+    }
+    assert verdict.empty_classification(record) is None, "an uncertified zero is not a measured zero"
+    assert verdict.unassessable_reason(record) == verdict.UNASSESSABLE_NO_CERTIFICATION
+
+    _code, manifest = _named_manifest(tmp_path, [record])
+    assert manifest["data_empty"] == 0
+    assert manifest["data_empty_views"] == []
+    assert manifest["data_unassessable"] == 1
+    assert manifest["views"][0]["flags"] == [verdict.FLAG_DATA_UNASSESSABLE, verdict.UNASSESSABLE_NO_CERTIFICATION]
+
+
+def test_a_CERTIFIED_zero_row_capture_is_still_reported_as_an_empty_query(tmp_path):
+    """⚠️ The matched control for the test above, and it is load-bearing.
+
+    Deferring to `unassessable_reason` could have been implemented as "never classify anything as
+    empty", which passes every assertion above and silently deletes #471's whole feature. A capture
+    that was certified AND measured zero rows is a real measurement and must still be named.
+    """
+    record = {
+        "view_name": "V",
+        "workbook_name": "W",
+        "data": {
+            "status": "ok",
+            "certification": payload_facts.CSV_CERTIFIED,
+            "path": "data/blank.csv",
+            "row_count": 0,
+            "columns": ["Region"],
+        },
+    }
+    assert verdict.empty_classification(record) == verdict.EMPTY_QUERY_NO_ROWS
+    assert verdict.unassessable_reason(record) is None
+
+    _code, manifest = _named_manifest(tmp_path, [record])
+    assert manifest["data_empty"] == 1
+    assert [entry["view_name"] for entry in manifest["data_empty_views"]] == ["V"]
+    assert manifest["data_unassessable"] == 0
+
+
+def test_the_run_end_banner_names_the_certification_reason_too(tmp_path, caplog):
+    """A reason an operator meets in the per-view list and never in the block that explains it reads
+    as an internal code. The banner names all four, and this is the fourth."""
+    caplog.set_level(logging.INFO, logger="tableau-oracle")
+    record = {
+        "view_name": "Metrics",
+        "workbook_name": "W",
+        "data": {"status": "ok", "path": "data/v.csv", "row_count": 900},
+    }
+    _named_manifest(tmp_path, [record])
+    warnings = "\n".join(r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
+    assert "NOT BE ASSESSED" in warnings, "the block did not fire, so this proves nothing"
+    assert verdict.UNASSESSABLE_NO_CERTIFICATION in warnings
+    assert verdict.UNASSESSABLE_NO_ROW_COUNT in warnings, "the other three must not have been dropped"
+    assert payload_facts.CSV_CONTENT_TYPE_ABSENT in warnings
+    assert payload_facts.CSV_CONTENT_TYPE_UNSPECIFIC in warnings
+
+
 def test_withholding_evidence_leaves_a_measured_capture_untouched_and_is_idempotent(tmp_path):
     """Two controls in one: the rule must not fire on a certified record, and applying it twice must
     not shuffle a `retained_path` back and forth or double-stamp anything."""
