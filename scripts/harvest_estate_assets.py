@@ -386,9 +386,16 @@ def refuse_unignored_output(
 # asset buffered in RAM — and `save_outputs(raw, ...)` writes only afterwards. The destination file
 # is therefore 0 bytes until the download has already finished.
 #
+# ⚠️ `urlopen` is never written here immediately followed by an open paren, and that is deliberate.
+# The credential-handling detector in `tests/test_diagnostic_redaction.py` scans RAW SOURCE —
+# comments included — and that one literal is enough to reclassify this module as a credentialed
+# HTTP client. It is not one: it spawns the engine's fetcher, which makes the request (measured —
+# the module contains no HTTP call at all in code). Spelling it the natural way turned CI red on
+# #482, and `test_this_module_still_makes_no_http_call_of_its_own` now pins both halves.
+#
 # What DOES work, measured 2026-09-03 on Windows against a local slow-stream server (a child running
-# the same `urlopen(...).read()` shape), 15 MB at ~1 MB/s versus a socket that goes quiet after 3
-# chunks:
+# the same one-shot `urlopen` + `.read()` shape), 15 MB at ~1 MB/s versus a socket that goes quiet
+# after 3 chunks:
 #
 #   sampled                                   healthy download        stalled download
 #   Popen.pid `OtherTransferCount`            Δ 0 (frozen)            Δ 0 (frozen)

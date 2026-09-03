@@ -625,7 +625,30 @@ def test_the_dotenv_still_supplies_values_the_environment_does_not_have(tmp_path
 # --------------------------------------------------------------------------- the leak, at its boundary
 
 
-def test_a_reflected_signin_error_cannot_persist_the_pat(monkeypatch, tmp_path):
+def _reflecting_fetcher(scripts: Path, before: str = "", after: str = "") -> None:
+    """Write a stand-in ``fetch_tds.py`` that reflects back the PAT we put in its environment.
+
+    ⚠️ The premise these tests rest on is a CHILD PROCESS, and #482 broke the way it was faked.
+    ``download()`` now supervises the fetcher through ``run_watched`` -> ``subprocess.Popen``, so
+    ``monkeypatch.setattr(h.subprocess, "run", ...)`` intercepted nothing: the real path ran and died
+    on a missing ``fetch_tds.py``, which is a file-not-found error dressed up as a security result.
+    A real stub restores the whole chain rather than a layer of it -- our ``engine_child_env`` bridge
+    in, the reflected body out through a real pipe, redaction on the way to the caller.
+
+    It reads the ENGINE's spelling (``TABLEAU_PAT_VALUE``), so a broken bridge reflects nothing; the
+    callers then assert on text that only appears when the secret really made the round trip, which
+    is what stops "no secret in the output" passing because no secret ever moved.
+    """
+    (scripts / "fetch_tds.py").write_text(
+        "import os, sys\n"
+        "secret = os.environ.get('TABLEAU_PAT_VALUE', '')\n"
+        f"sys.stderr.write({before!r} + secret + {after!r})\n"
+        "sys.exit(1)\n",
+        encoding="utf-8",
+    )
+
+
+def test_a_reflected_signin_error_cannot_persist_the_pat(tmp_path):
     """Adversarial: an endpoint that echoes the request body must not put the PAT on disk.
 
     Found in review of #97 with a local echo server. We place the secret in the engine child's
@@ -638,25 +661,25 @@ def test_a_reflected_signin_error_cannot_persist_the_pat(monkeypatch, tmp_path):
 
     secret = "SENTINEL_PAT_abcdefghijklmnop"
     env = {"TABLEAU_SERVER_URL": "https://x.invalid", "TABLEAU_PAT_NAME": "probe-name", "TABLEAU_PAT_SECRET": secret}
+    _reflecting_fetcher(tmp_path, '401: {"credentials": {"personalAccessTokenSecret": "', '", "name": "probe-name"}}')
 
-    class _Reflected:
-        returncode = 1
-        stdout = ""
-        stderr = '401: {"credentials": {"personalAccessTokenSecret": "%s", "name": "probe-name"}}' % secret
-
-    monkeypatch.setattr(h.subprocess, "run", lambda *a, **k: _Reflected())
     ok, detail = h.download("datasource", "luid-1", tmp_path / "out.tdsx", env, tmp_path)
 
     assert ok is False
     assert secret not in detail
+    assert "probe-name" not in detail, "the PAT NAME is a credential too, and download() redacts it"
     assert secret not in json.dumps([{"download_error": detail}]), "the PAT reached a persisted artifact"
     assert "401" in detail, "redaction must not destroy the diagnostic"
+    # ⚠️ Non-vacuity. Every assertion above also holds for an empty `detail`, which is exactly what
+    # the missing stub produced. This is text only the reflected body carries, so it fails if the
+    # child never ran, never reflected, or its output never reached the redactor.
+    assert "personalAccessTokenSecret" in detail, "the reflected body never reached the wrapper at all"
 
 
 # --------------------------------------------------------------------------- round 2 of review
 
 
-def test_redaction_happens_before_truncation(monkeypatch, tmp_path):
+def test_redaction_happens_before_truncation(tmp_path):
     """A secret straddling the 300-char cut must not leave its tail in the retained slice.
 
     Measured in review: truncating first produced full_secret=False but suffix_in_detail=True, and
@@ -668,17 +691,15 @@ def test_redaction_happens_before_truncation(monkeypatch, tmp_path):
 
     secret = "SENTINEL" + ("x" * 40) + "TAILPIECE"
     env = {"TABLEAU_SERVER_URL": "https://x.invalid", "TABLEAU_PAT_NAME": "n", "TABLEAU_PAT_SECRET": secret}
+    # Place the secret so the 300-char tail slice cuts through the middle of it.
+    _reflecting_fetcher(tmp_path, "A" * 500, "B" * 270)
 
-    class _Straddling:
-        returncode = 1
-        stdout = ""
-        # Place the secret so the 300-char tail slice cuts through the middle of it.
-        stderr = ("A" * 500) + secret + ("B" * 270)
-
-    monkeypatch.setattr(h.subprocess, "run", lambda *a, **k: _Straddling())
     _, detail = h.download("datasource", "luid", tmp_path / "o.tdsx", env, tmp_path)
 
     assert secret not in detail
+    # ⚠️ Non-vacuity: without this the whole test passes on an empty `detail`. 270 B's are the tail
+    # the child wrote AFTER the secret, so they can only be here if the straddling text arrived.
+    assert detail.endswith("B" * 270), "the straddling child output never reached the redactor"
     # Only suffixes long enough to matter: a 1-2 char tail matches inside "[REDACTED]" itself, which
     # would fail the assertion without any secret having survived.
     for cut in range(0, len(secret) - 8):

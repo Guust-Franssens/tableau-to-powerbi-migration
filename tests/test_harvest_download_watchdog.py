@@ -13,11 +13,13 @@ the kill path, the pipe drain, or the "never observed" fallback at all.
 from __future__ import annotations
 
 import importlib.util
+import io
 import sqlite3
 import subprocess
 import sys
 import threading
 import time
+import tokenize
 from pathlib import Path
 
 import pytest
@@ -967,3 +969,62 @@ def test_a_failed_download_reaches_parse_sweep_md_through_main(monkeypatch: pyte
     text = (out / "parse-sweep.md").read_text(encoding="utf-8")
     assert "**1 asset(s)** — ours failed 0, his failed 0, both parsed 0, never downloaded 1." in text
     assert "IA Redemptions by Campaign Report" in text.split("## Downloads that never landed", 1)[1]
+
+
+# --- the classification this module carries in the credential gate --------------------------------
+#
+# ⚠️ CI-red on #482, and the obvious diagnosis was the wrong one. `tests/test_diagnostic_redaction.py`
+# records this module in `NON_HTTP_CREDENTIAL_SCRIPTS` — "holds a Tableau credential, makes NO
+# credentialed HTTP request of its own" — and asserts the detector must NOT see it. That detector
+# scans RAW SOURCE for markers, so a comment added by #482 that spelled `urlopen` immediately
+# followed by an open paren reclassified this module as an HTTP client and failed two security gates.
+# Registering it in `GATE_WAIVERS` would have turned both green while recording something false.
+#
+# So the two halves are pinned separately, and each says which one an edit broke: the STRUCTURAL
+# claim (no HTTP client in code) is what the classification actually rests on; the PROSE trap is what
+# breaks CI. `tests/test_diagnostic_redaction.py` remains the authority — this is a local mirror that
+# fails first, with an actionable message, in the file whose change caused it.
+_HTTP_CLIENT_MARKERS = (
+    "urlopen(",
+    "http.client",
+    "requests.",
+    "import tableauserverclient",
+    "from tableauserverclient",
+    "tableau_http",
+    "._request(",
+)
+
+
+def executable_code(source: str) -> str:
+    """`source` with every comment and string literal removed — what the module DOES, not what it says."""
+    return "".join(
+        "" if token.type in (tokenize.STRING, tokenize.COMMENT) else token.string
+        for token in tokenize.generate_tokens(io.StringIO(source).readline)
+    )
+
+
+def test_this_module_still_makes_no_http_call_of_its_own() -> None:
+    """The structural fact behind the classification: the engine child makes the request, we do not."""
+    code = executable_code((REPO_ROOT / "scripts" / "harvest_estate_assets.py").read_text(encoding="utf-8"))
+    found = sorted(marker for marker in _HTTP_CLIENT_MARKERS if marker in code)
+    assert not found, (
+        f"{found} now appear in this module's CODE, so it is a credentialed HTTP client and its "
+        "`NON_HTTP_CREDENTIAL_SCRIPTS` entry in tests/test_diagnostic_redaction.py is false. Bring it "
+        "under the taint gate (MODULES) — do NOT waive it."
+    )
+    # Positive control: an assertion over a marker list that stopped matching anything is not coverage.
+    control = executable_code((REPO_ROOT / "scripts" / "tableau_http.py").read_text(encoding="utf-8"))
+    assert any(marker in control for marker in _HTTP_CLIENT_MARKERS), (
+        "the marker scan no longer recognises a module that IS an HTTP client, so it has gone inert"
+    )
+
+
+def test_the_credential_gate_is_not_tripped_by_this_module_s_PROSE() -> None:
+    """#482's actual CI failure: a comment, not a call, put this module in front of a security gate."""
+    source = (REPO_ROOT / "scripts" / "harvest_estate_assets.py").read_text(encoding="utf-8")
+    prose_only = sorted(m for m in _HTTP_CLIENT_MARKERS if m in source and m not in executable_code(source))
+    assert not prose_only, (
+        f"{prose_only} appear only in comments or string literals here. That is still enough for the "
+        "detector in tests/test_diagnostic_redaction.py to reclassify this module as a credentialed "
+        "HTTP client and fail two security gates. Spell it apart, e.g. `urlopen` + `.read()`."
+    )
