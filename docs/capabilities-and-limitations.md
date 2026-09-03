@@ -114,10 +114,28 @@ a single pass does.
 ## Known limitations and honest gaps
 
 - **Tableau Sets do not translate at all, in any form** (measured on canonical engine **2.339.0**,
-  2026-09-01; ✅ re-verified against upstream issue state 2026-09-03 — [#185](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/185)
-  is **OPEN**, so this still reproduces at our 2.353.0). Every set form we could find is logged as `could not resolve field '<name>' (skipped)`
-  and then **the visual is emitted anyway, without the filter** — so the output renders confidently
-  over an unfiltered superset. Confirmed on a real Tableau training sample (`Section 08 - Organizing
+  2026-09-01; ✅ re-**measured** on **2.356.0**, 2026-09-03 — still true). Every set form we could find
+  is dropped and then **the visual is emitted anyway, without the filter** — so the output renders
+  confidently over an unfiltered superset. ⚠️ **What HAS changed is the disclosure, and it now splits
+  by reference shape** — since engine **2.349.0** (upstream `ca4d672e`, *"a Tableau SET named as a
+  filter column stops vanishing silently"*). Upstream
+  [#185](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/185) is still **OPEN**, but an
+  open issue is not evidence that nothing changed; only running the engine settles it. Measured on
+  two workbooks differing only in how the set is referenced:
+  - a filter naming the **set column directly** now gets a set-specific warning — *"FILTER DROPPED:
+    Tableau set `<name>` ... renders over an UNFILTERED SUPERSET -- it will look complete and show
+    MORE rows than Tableau"* — landing in `remediation_worklist.items[]` as `category:
+    dropped_filter`, `severity: high`, with a remediation naming the Power BI forms to rebuild it as.
+    `twb_to_pbir`'s own warning additionally carries a machine-readable `dropped_set_filter` record
+    (`set`, `caption`, `kind`, `level`, `datasource`, `detail`). ⚠️ That key does **not** survive into
+    the estate `report.json` (0 occurrences bundle-wide), so gate on `category == "dropped_filter"`
+    there, not on the marker.
+  - a filter reaching the set through an **`InOut` column-instance** — Tableau's own authoring shape,
+    and what our committed fixture uses — still falls through to the generic `could not resolve field
+    '<name>' (skipped)`, `category: field_binding`: indistinguishable from a mistyped column, and
+    naming none of the consequence.
+
+  Confirmed on a real Tableau training sample (`Section 08 - Organizing
   Data`) for four distinct forms: a manual/lasso set, a **condition** set (`SUM([Score]) > 400`), a
   **top-N rank** set, and a **combined** set (`intersection` of two set references). A set used as a
   `<color>` encoding is dropped just as silently — the emitted `scatterChart` lost its In/Out series

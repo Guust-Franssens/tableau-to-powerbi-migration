@@ -1153,13 +1153,22 @@ programmatically. That works. It is simply work you pay per workbook, on top of 
 fields x 60 requests down to the one category you are about to author.
 
 The reader also de-duplicates `category_guidance`, which is emitted **per request** rather than per
-category. ⚠️ **FIXED UPSTREAM at 2.328.0 — the engine now emits it per category, so on our 2.353.0
-there is nothing left to de-duplicate.** `Yarbrdab000/tableau-fabric-skills#170` shipped both asks
-(the maintainer reproduced the duplication independently at 2.327.0 first), and its own title records
-that the original *"unreachable"* framing was retracted in its comments. The reader's de-duplication
-is now a no-op on current bundles and remains correct on older ones; the measurement below is kept
-because it is what sized the fix. Verified across all 38 handovers of `_bundle-208`: exactly **one
-distinct guidance string
+category — and still is. ⚠️ **`Yarbrdab000/tableau-fabric-skills#170` (engine 2.328.0) ADDED a
+separately named, de-duplicated artifact; it did not de-duplicate the surfaces this reader reads.**
+`repair-queue.json` hoists the guidance into one `guidance` map keyed by category and ships each
+request slim, while `report.json` and the handover slices keep their inline copy **on purpose**: the
+engine's own docstring calls it *"STRICTLY ADDITIVE ... `requests[]` still carries its inline
+`category_guidance` for every existing consumer"* (`migrate_estate.py`), and its
+`test_repair_queue_artifact.py::test_the_original_handoff_is_untouched` pins that, because removing
+the inline copy would be a schema removal. So the de-duplication is **not** a no-op — it is still
+doing real work on every surface except the queue. Measured on a fresh 2.356.0 conversion of
+`tests/fixtures` (2026-09-03): `report.json` carries **9** handoff requests, **9** of them with
+inline guidance across **3** distinct categories — **6 duplicate copies the reader removes** — while
+the same run's `repair-queue.json` carries **3** guidance keys and **0** requests with inline
+guidance. (`#170` shipped both asks — the maintainer reproduced the duplication independently at
+2.327.0 first — and its own title records that the original *"unreachable"* framing was retracted in
+its comments.) The sizing that motivated it still stands: verified across all 38 handovers of
+`_bundle-208`, exactly **one distinct guidance string
 per category, estate-wide**. In the worked 60-request file, repeated guidance accounts for
 **44,775 bytes (12.6% of the 347 KB file)**. Both the earlier "~53 KB" and "dominant cost" claims
 were overstated: it is a worthwhile saving, not the dominant cost. All seven categories together cost
