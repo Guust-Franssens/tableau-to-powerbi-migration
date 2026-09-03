@@ -1321,7 +1321,7 @@ def _localize_folder_parameters(  # pylint: disable=too-many-arguments,too-many-
             document.write_text(rewritten, encoding="utf-8")
 
 
-def _relocate_folder(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-return-statements
+def _relocate_folder(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     name: str,
     value: str,
     texts: list[str],
@@ -1339,6 +1339,23 @@ def _relocate_folder(  # pylint: disable=too-many-arguments,too-many-positional-
     if readable is None:
         record["omissions"].append({"file": _leaf(value), "reason": refusal})
         return None
+    members = _shippable_members(readable, mode, tails, value, record)
+    if members is None:
+        return None
+    relative = _packaged_data_target(value, taken, keep_leaf_only=True)
+    _ship_folder(readable, dest / DATA_DIR / relative, relative, record, members)
+    return _moved_folder_value(final, relative, value)
+
+
+def _shippable_members(
+    readable: Path, mode: str, tails: set[str], value: str, record: dict[str, Any]
+) -> list[Path] | None:
+    """The files to ship out of a referenced folder, or None when none may be (reason recorded).
+
+    Both refusals live here rather than at the call site so that the ceiling is measured over the
+    SAME list that is copied - a folder whose members are selected in one place and weighed in
+    another is how a size gate stops covering what it was written for.
+    """
     if mode == WHOLE_FOLDER:
         members, problems = sorted(path for path in readable.rglob("*") if path.is_file()), []
     else:
@@ -1353,9 +1370,7 @@ def _relocate_folder(  # pylint: disable=too-many-arguments,too-many-positional-
     if ceiling is not None:
         record["omissions"].append({"file": _leaf(value), "reason": ceiling})
         return None
-    relative = _packaged_data_target(value, taken, keep_leaf_only=True)
-    _ship_folder(readable, dest / DATA_DIR / relative, relative, record, members)
-    return _moved_folder_value(final, relative, value)
+    return members
 
 
 def _parameter_usages(texts: list[str], bare: str) -> tuple[str, set[str], str | None]:
@@ -1634,7 +1649,7 @@ def _handover_workbook(handover: Any, unit: str, dest: Path) -> dict[str, Any] |
     return next((wb for name, wb, _ in found if name == unit), found[0][1] if found else None)
 
 
-def package_unit(
+def package_unit(  # pylint: disable=too-many-arguments
     bundle: Path,
     unit: str,
     out_root: Path,
@@ -1698,6 +1713,7 @@ def package_edits(root: Path) -> tuple[list[str], str | None]:
         return [], (
             f"it carries no {MANIFEST_NAME} content digest, so whether anything was edited in it cannot be established"
         )
+
     current = package_contents(root)
     changed = set(recorded) ^ set(current)
     changed |= {path for path in set(recorded) & set(current) if recorded[path] != current[path]}
@@ -1887,6 +1903,38 @@ def render(results: list[dict[str, Any]], out_root: Path, refused: list[PackageE
     return "\n".join(lines)
 
 
+def _package_each(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    units: list[str],
+    bundle: Path,
+    out_root: Path,
+    oracle_dir: Path | None,
+    assets_dir: Path | None,
+    discard_edits: bool,
+    results: list[dict[str, Any]],
+    refused: list[PackageEditsRefused],
+) -> None:
+    """Package each unit, collecting refusals instead of stopping at the first one.
+
+    One unit's edits must not stop the rest of the estate being packaged; `main` still returns 3 for
+    any refusal, so this cannot pass unnoticed.
+    """
+    for unit in units:
+        try:
+            results.append(
+                package_unit(
+                    bundle,
+                    unit,
+                    out_root,
+                    oracle_dir=oracle_dir,
+                    assets_dir=assets_dir,
+                    discard_edits=discard_edits,
+                )
+            )
+        except PackageEditsRefused as refusal:
+            print(str(refusal), file=sys.stderr)
+            refused.append(refusal)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Package the requested units and report what each one carries."""
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("Attribution", maxsplit=1)[0])
@@ -1928,23 +1976,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     results: list[dict[str, Any]] = []
     refused: list[PackageEditsRefused] = []
-    for unit in sorted(units):
-        try:
-            results.append(
-                package_unit(
-                    bundle,
-                    unit,
-                    out_root,
-                    oracle_dir=oracle_dir,
-                    assets_dir=assets_dir,
-                    discard_edits=args.discard_package_edits,
-                )
-            )
-        except PackageEditsRefused as refusal:
-            # One unit's edits must not stop the rest of the estate being packaged; the exit code
-            # still reports the refusal, so this cannot pass unnoticed.
-            print(str(refusal), file=sys.stderr)
-            refused.append(refusal)
+    _package_each(sorted(units), bundle, out_root, oracle_dir, assets_dir, args.discard_package_edits, results, refused)
 
     payload = {
         "id": "package-unit",

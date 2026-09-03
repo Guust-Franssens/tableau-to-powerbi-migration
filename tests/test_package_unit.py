@@ -1734,8 +1734,29 @@ def test_repackaging_removes_evidence_the_new_input_no_longer_produces(tmp_path:
     assert manifest["oracle"]["objects"] == []
 
 
+def _adopt_as_previously_packaged(root: Path) -> None:
+    """Record the package's CURRENT contents as what packaging wrote, so planted files read as STALE.
+
+    This is the whole distinction the #460 edit guard makes, and it is a distinction about the
+    RECORD, not about the bytes. A file packaging wrote last run and the new input no longer
+    produces is stale; a file no run ever wrote is an addition, and an addition is what an agent
+    editing the canonical `fabric/` tree makes. On disk the two are identical, so a test that plants
+    unrecorded files is testing the guard, not staleness - which is exactly why the version of this
+    test that did so started failing the moment the guard landed.
+    """
+    manifest_path = root / pkg.MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["contents"]["files"] = pkg.package_contents(root)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+
 def test_repackaging_removes_a_stale_file_from_every_copied_tree(tmp_path: Path) -> None:
-    """Not just `oracle/`: stale `assets/` and `fabric/` files persisted the same way."""
+    """Not just `oracle/`: stale `assets/` and `fabric/` files persisted the same way.
+
+    The planted files are made stale by RECORDING them, not merely by writing them - see
+    `_adopt_as_previously_packaged`. Skip that step and this exercises the #460 edit guard instead,
+    and proves nothing at all about replace-not-merge.
+    """
     bundle, oracle = _bundle(tmp_path)
     _package(tmp_path, bundle, oracle)
     root = _out(tmp_path) / UNIT
@@ -1747,10 +1768,87 @@ def test_repackaging_removes_a_stale_file_from_every_copied_tree(tmp_path: Path)
     for path in planted:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("{}", encoding="utf-8")
+    _adopt_as_previously_packaged(root)
+    assert pkg.package_edits(root) == ([], None), "the fixture planted EDITS, so it would test the guard instead"
 
     _package(tmp_path, bundle, oracle)
     survivors = [str(path.relative_to(root)) for path in planted if path.exists()]
     assert survivors == [], f"stale artifacts survived repackaging: {survivors}"
+
+
+# The package is the canonical place to edit (#460), and `replace_dir` above replaces it WHOLE - so
+# re-running the same command silently deleted an agent's work. The guard and the removal contract
+# above pull in opposite directions on the same tree, and both are load-bearing; the seam between
+# them is the digest packaging records of its own output.
+# --------------------------------------------------------------------------------------------
+
+
+def test_repackaging_REFUSES_when_the_package_carries_an_edit(tmp_path: Path) -> None:
+    """Silent loss is the one unacceptable outcome, so an unrecorded change stops the re-run.
+
+    Both shapes an agent makes are asserted, because the guard compares a SET of digests and an
+    added file and a modified file take different branches of it: a new page under the canonical
+    `fabric/` tree, and an appended `limitations_encountered` entry in `migration-spec.json`.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    added = root / "fabric" / f"{UNIT}.Report" / "definition" / "pages" / "agent-authored-page.json"
+    added.parent.mkdir(parents=True, exist_ok=True)
+    added.write_text('{"name": "agent"}', encoding="utf-8")
+    spec = root / "migration-spec.json"
+    spec.write_text(json.dumps({"limitations_encountered": [{"item": "x"}]}), encoding="utf-8")
+
+    with pytest.raises(pkg.PackageEditsRefused) as refusal:
+        _package(tmp_path, bundle, oracle)
+    assert refusal.value.reason is None
+    assert sorted(refusal.value.changed) == [
+        "fabric/Book.Report/definition/pages/agent-authored-page.json",
+        "migration-spec.json",
+    ]
+    assert added.read_text(encoding="utf-8") == '{"name": "agent"}', "the refused run overwrote the edit anyway"
+    assert "--discard-package-edits" in str(refusal.value), "the refusal does not name the way out"
+
+
+def test_a_package_with_no_recorded_digest_is_REFUSED_rather_than_assumed_clean(tmp_path: Path) -> None:
+    """ "I cannot tell whether this was edited" is not "it was not edited" - it is its own answer.
+
+    A package written before the digest existed, or one whose manifest was removed, carries no
+    record to compare against. Treating that as unedited is the collapse this repo keeps re-fixing,
+    so it refuses with a REASON and an empty change list rather than overwriting.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    (root / pkg.MANIFEST_NAME).unlink()
+
+    changed, reason = pkg.package_edits(root)
+    assert changed == []
+    assert reason is not None and "cannot be established" in reason
+    with pytest.raises(pkg.PackageEditsRefused) as refusal:
+        _package(tmp_path, bundle, oracle)
+    assert refusal.value.reason == reason
+
+
+def test_discard_package_edits_overwrites_the_package_deliberately(tmp_path: Path) -> None:
+    """The override exists so the guard costs a flag rather than a wedged estate.
+
+    Asserted through `main`, not `package_unit`, because the flag is the whole user-facing contract:
+    a refusal exits 3 and leaves the package untouched, and the same run with the flag exits 0 and
+    rebuilds it.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    edited = root / "fabric" / f"{UNIT}.Report" / "definition" / "pages" / "agent-authored-page.json"
+    edited.parent.mkdir(parents=True, exist_ok=True)
+    edited.write_text('{"name": "agent"}', encoding="utf-8")
+    argv = ["--bundle", str(bundle), "--out", str(_out(tmp_path)), "--oracle", str(oracle), "--quiet"]
+
+    assert pkg.main([*argv, "--assets", str(bundle.parent / "assets")]) == 3
+    assert edited.is_file(), "a refused run destroyed the edit it refused to overwrite"
+    assert pkg.main([*argv, "--assets", str(bundle.parent / "assets"), "--discard-package-edits"]) == 0
+    assert not edited.exists(), "--discard-package-edits did not rebuild the package"
 
 
 def test_a_failed_repackage_leaves_the_previous_package_intact(tmp_path: Path) -> None:
