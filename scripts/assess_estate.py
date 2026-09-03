@@ -98,6 +98,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import tableau_render_capability as render_capability  # noqa: E402  # pylint: disable=wrong-import-position
 from tableau_env import env_source, pat_secret, redact, require, resolve_env  # noqa: E402  # pylint: disable=wrong-import-position
 
 LOG = logging.getLogger("assess")
@@ -840,6 +841,9 @@ def collect(site: Site, survey: dict | None, checkpoint=None) -> dict[str, Any]:
         "structure_by_name": {w["name"]: w for w in data.get("workbooks") or []},
         "permissions": permissions,
         "survey": survey,
+        # One unauthenticated call, and the only thing in this dict that describes the SERVER rather
+        # than its content. Deliberately not part of any listing: it never degrades the assessment.
+        "server_ceiling": server_ceiling(site),
         "collection_errors": errors,
     }
 
@@ -975,6 +979,9 @@ def assemble(raw: dict[str, Any], target: float) -> dict[str, Any]:
         "dependencies": dep_rows,
         "survey_supplied": survey is not None,
         "iam_hard_cases": iam_hard_cases(raw["permissions"], raw["groups"]),
+        # The site's render ceiling, carried through verbatim so a programmatic consumer reads the
+        # same three numbers the report renders. `None` when the probe was not run at all.
+        "server_ceiling": raw.get("server_ceiling"),
         **_degraded_contract(raw.get("collection_errors") or [], len(curve)),
     }
 
@@ -1175,6 +1182,98 @@ def write_store(out: Path, raw: dict[str, Any], assembled: dict[str, Any]) -> Pa
     return db_path
 
 
+def server_ceiling(site: Site) -> dict[str, Any]:
+    """What reference renders this SITE can export, from the one number an assessment never asked for.
+
+    The render ceiling is a property of the site, so an operator should learn it HERE -- in the first
+    thing they run against a new estate -- rather than discovering it much later as a capture-time
+    warning. Measured customer case (#468): an on-prem Server at ``productVersion 2025.3.3`` advertises
+    ``restApiVersion 3.27``, so SVG (floor 3.29) is unavailable there at any client setting, and the
+    best rung it can reach is PDF. Nothing in the assessment said so.
+
+    Three numbers, and this repo insists they are different things:
+
+    ``client_api_version``      what we SEND -- ``TABLEAU_REST_API_VERSION``, a client preference;
+    ``advertised_api_version``  what ``/serverinfo`` SAYS -- the server's own ceiling;
+    ``expected_reference_render`` what that MEANS for a later ``capture_tableau_oracle.py`` run.
+
+    ⚠️ **Fails soft, and reports the third state rather than guessing.** ``server_info`` is
+    unauthenticated, never raises, is bounded by its own 30 s timeout, and a site that will not answer
+    it is not a reason to degrade an assessment -- so a failure leaves ``established`` false and every
+    derived field ``None``. It is deliberately NOT a ``listing_error``: nothing downstream is computed
+    from it, so calling it a degraded inventory would be a false alarm on the one flag this script
+    asks consumers to trust.
+
+    ⚠️ And ``expected_reference_render`` is an EXPECTATION from an advertised number, never a
+    measurement. Only ``capture_tableau_oracle.py --reference-best`` probes the endpoint, which is
+    the sole authoritative answer -- see ``tableau_render_capability``'s module docstring for why the
+    two disagree often enough to matter.
+    """
+    info = render_capability.server_info(site.base, redactor=site.scrub_text)
+    advertised = info.get("rest_api_version")
+    svg, pdf = render_capability.TIER_BY_NAME["svg"], render_capability.TIER_BY_NAME["pdf"]
+    meets_svg_floor = render_capability.supports(advertised, svg.min_api)
+    return {
+        "client_api_version": site.version,
+        "advertised_api_version": advertised,
+        "advertised_release": render_capability.release_for(advertised) if advertised else None,
+        "product_version": info.get("product_version"),
+        "build": info.get("build"),
+        "established": bool(advertised),
+        "probe_status": info.get("status"),
+        "svg_floor": svg.min_api,
+        "svg_floor_release": svg.min_release,
+        # True/False/None, the same three-valued answer `supports` gives, because "we could not ask"
+        # is not "no".
+        "svg_floor_met": meets_svg_floor,
+        "expected_reference_render": None if meets_svg_floor is None else (svg.name if meets_svg_floor else pdf.name),
+    }
+
+
+def _render_server_ceiling(ceiling: dict[str, Any] | None) -> list[str]:
+    """The three-number reconciliation, rendered so nobody has to hold two of them in their head."""
+    if not ceiling:
+        return []
+    out = ["## Reference renders — what this site can export", ""]
+    svg_floor, svg_release = ceiling["svg_floor"], ceiling["svg_floor_release"]
+    if not ceiling.get("established"):
+        out += [
+            f"⚠️ **The server's advertised REST ceiling was NOT established** (`/serverinfo` answered "
+            f"`{ceiling.get('probe_status')}`). We send `{ceiling['client_api_version']}`; what this "
+            f"site can actually do is unknown, so nothing here says whether a reference render will "
+            f"be SVG or PDF. Establish it before promising a customer a rung: "
+            f"`capture_tableau_oracle.py --reference-best` probes the endpoint, which is the only "
+            f"authoritative answer.",
+            "",
+        ]
+        return out
+    product = f" (product `{ceiling['product_version']}`)" if ceiling.get("product_version") else ""
+    out += [
+        "| number | value | what it is |",
+        "|---|---|---|",
+        f"| we send | `{ceiling['client_api_version']}` | a **client preference** (`TABLEAU_REST_API_VERSION`) |",
+        f"| the server advertises | `{ceiling['advertised_api_version']}` — {ceiling['advertised_release']}"
+        f"{product} | the site's **ceiling**, from `/serverinfo` |",
+        "",
+    ]
+    if ceiling["svg_floor_met"]:
+        out.append(
+            f"**Best rung expected: SVG.** This site advertises at or above the `{svg_floor}` SVG floor "
+            f"({svg_release}). ⚠️ That is what the server *claims*, not a measurement — only "
+            f"`capture_tableau_oracle.py --reference-best` settles it by asking the endpoint."
+        )
+    else:
+        out.append(
+            f"**Best rung expected: PDF.** SVG needs REST `{svg_floor}` ({svg_release}); this site "
+            f"advertises `{ceiling['advertised_api_version']}`, **below** it — so SVG is unavailable "
+            f"here **at any client setting**, and raising `TABLEAU_REST_API_VERSION` cannot change "
+            f"that. PDF reaches back to API `2.8` and is vector with embedded fonts; `resolution=high` "
+            f"PNG reaches back to `2.5`."
+        )
+    out.append("")
+    return out
+
+
 def _render_curve(rows: list[dict], target: float) -> list[str]:
     """Header + the sparse-data caveat + the coverage curve."""
     total_views = sum(r["views_lifetime"] for r in rows)
@@ -1352,6 +1451,7 @@ def render_report(assembled: dict[str, Any], raw: dict[str, Any], target: float)
     out += _render_curve(rows, target)
     out += _render_tiers(rows)
     out += _render_sequencing(assembled, rows)
+    out += _render_server_ceiling(assembled.get("server_ceiling"))
     out += _render_iam(assembled, raw)
     return "\n".join(out) + "\n"
 
@@ -1412,6 +1512,40 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _log_server_ceiling(ceiling: dict[str, Any] | None) -> None:
+    """One console line reconciling the version we SEND with the ceiling the server ADVERTISES.
+
+    Rendered from the same dict the report and ``assessment.json`` read, so an operator who sees only
+    the terminal reaches the same conclusion as one who opens the artifact.
+    """
+    if not ceiling:
+        return
+    if not ceiling.get("established"):
+        LOG.warning(
+            "  render ceiling NOT ESTABLISHED (/serverinfo answered %s); we ask as %s. Whether this "
+            "site can export SVG is unknown -- probe it with capture_tableau_oracle.py --reference-best",
+            ceiling.get("probe_status"),
+            ceiling["client_api_version"],
+        )
+        return
+    LOG.info(
+        "  server advertises REST %s (%s, product %s); we ask as %s -- expected best reference render: %s",
+        ceiling["advertised_api_version"],
+        ceiling["advertised_release"],
+        ceiling.get("product_version"),
+        ceiling["client_api_version"],
+        (ceiling["expected_reference_render"] or "unknown").upper(),
+    )
+    if not ceiling["svg_floor_met"]:
+        LOG.warning(
+            "  SVG is UNAVAILABLE on this site: it needs REST %s (%s) and this server advertises %s. "
+            "Raising TABLEAU_REST_API_VERSION cannot change that -- capture PDF instead",
+            ceiling["svg_floor"],
+            ceiling["svg_floor_release"],
+            ceiling["advertised_api_version"],
+        )
+
+
 def main() -> int:
     """Assess the estate. Exit 1 when nothing could be assessed, 3 when a PRIMARY listing failed."""
     args = _build_parser().parse_args()
@@ -1459,6 +1593,7 @@ def main() -> int:
         site.retries,
     )
     LOG.info("  tiers: %s", ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+    _log_server_ceiling(assembled.get("server_ceiling"))
     LOG.info("  %s", db)
     LOG.info("  %s", report)
     for line in _warn_lines(assembled):

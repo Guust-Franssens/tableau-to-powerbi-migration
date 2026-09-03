@@ -570,6 +570,11 @@ TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
     # Propagation cannot see across a module boundary, so these are irreducible.
     ("scripts/tableau_render_capability.py", "probe_render_capability"): {"views"},
     ("scripts/tableau_render_capability.py", "apply_selected_tier"): {"report"},
+    # The three-state "why was SVG refused" classifier (#468). `gate` carries `/serverinfo`'s own
+    # version strings, so the module boundary re-seeds it here; inside, both of them go straight
+    # through `redacted_note` before anything formats them, which is why that function needs no
+    # certification of its own.
+    ("scripts/tableau_render_capability.py", "svg_gate_advice"): {"gate"},
     # `capture_tableau_oracle.main()` hands `resolve_and_stamp` the `/views` listing it just parsed.
     # ⚠️ Not optional bookkeeping: without it the boundary check fails outright, and `stamp` then
     # writes onto dicts the analyser believes are clean, so the manifest key it stamps arrives
@@ -584,7 +589,7 @@ TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
     # responses, and `log_progress` one record per view. Both cross a module boundary, so propagation
     # cannot carry the taint and the seeds are irreducible -- without them the manifest sink and every
     # console line in that module would be analysed as clean.
-    ("scripts/tableau_oracle_manifest.py", "write_manifest"): {"records", "capability_report"},
+    ("scripts/tableau_oracle_manifest.py", "write_manifest"): {"records", "capability_report", "server_info"},
     ("scripts/tableau_oracle_manifest.py", "log_progress"): {"record", "index", "total"},
     # ⚠️ Seeding `records` WIDENS this gate rather than preserving it. On master the list itself was
     # never tainted: `main` binds it with `records, started = [], time.perf_counter()` and then grows
@@ -685,6 +690,17 @@ _LUID_OK = (
 _INTO_THE_MANIFEST = (
     "SCRUBBED-AT-SINK: Tableau metadata copied into the manifest record; `scrub_tree` covers it, "
     "values and keys, immediately before serialisation -- and it never reaches a path or a raw log line"
+)
+
+_SVG_CAUSE = (
+    "FIXED-VOCABULARY: one of `svg_gate_advice`'s three cause literals -- `server_meets_floor`, "
+    "`server_below_floor`, `ceiling_not_established` -- chosen by comparing two version numbers, "
+    "never composed from any text the server sent"
+)
+_SVG_REMEDY = (
+    "REDACTED-UPSTREAM: composed inside `svg_gate_advice` from this repo's own literals plus the "
+    "`/serverinfo` version strings, and those go through `redacted_note` THERE, on the untransformed "
+    "value, before a single f-string touches them"
 )
 
 CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
@@ -1049,6 +1065,14 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "info.get('rest_api_version')": _SERVERINFO,
         "release_for(info.get('rest_api_version') or '')": _SERVERINFO,
     },
+    ("scripts/tableau_render_capability.py", "_meets_floor_remedy"): {
+        "proof": (
+            "REDACTED-UPSTREAM: either a literal this module authors, or an f-string over "
+            "`advertised`, which is `redacted_note`'s output -- redacted on the untransformed value "
+            "in `svg_gate_advice` before this line can format anything. `proof` is tainted only "
+            "because it is SELECTED by `gate.proved_by_reprobe`, a bool"
+        ),
+    },
     ("scripts/tableau_render_capability.py", "_build_report"): {"info": _SERVERINFO},
     ("scripts/tableau_render_capability.py", "fetcher"): {"view_luid": _LUID_OK},
     ("scripts/tableau_render_capability.py", "apply_selected_tier"): {
@@ -1101,6 +1125,8 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "sum((1 for r in records if r.get('image', {}).get('status') == 'ok'))": _A_COUNT,
         "sum((1 for r in records if r.get('svg', {}).get('status') == 'ok'))": _A_COUNT,
         "sum((1 for r in records if r.get('pdf', {}).get('status') == 'ok'))": _A_COUNT,
+        "gate.advertised": _SERVERINFO,
+        "gate.product_version": _SERVERINFO,
     },
     ("scripts/tableau_oracle_manifest.py", "_render_statuses"): {
         "absent": _A_STATUS_LITERAL,
@@ -1141,6 +1167,12 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "warning": _PROBE_VERDICT,
         "len(blocked)": _A_COUNT,
         "len(stale_api)": _A_COUNT,
+        "advice.cause": _SVG_CAUSE,
+        "advice.remedy": _SVG_REMEDY,
+    },
+    ("scripts/tableau_oracle_manifest.py", "_stamp_svg_gate"): {
+        "advice.cause": _SVG_CAUSE,
+        "advice.remedy": _SVG_REMEDY,
     },
     ("scripts/tableau_http.py", "_read_bounded"): {
         "chunk": (
@@ -2065,7 +2097,27 @@ def test_the_blocked_list_redacts_the_names_it_prints(caplog):
     session.token = token
     blocked = [{"view_name": token, "workbook_name": token, "data": {"status": "source_credential", "detail": token}}]
     with caplog.at_level(logging.WARNING, logger="tableau-oracle"):
-        verdict._log_blocked_and_stale(blocked, blocked, None, session.redact_text)  # pylint: disable=protected-access
+        verdict._log_blocked_and_stale(  # pylint: disable=protected-access
+            blocked, blocked, None, verdict.svg_gate(None, None, "3.21"), session.redact_text
+        )
+    assert longest_surviving_run(token, caplog.text) == ""
+    assert "[REDACTED]" in caplog.text
+
+
+def test_a_reflected_credential_arriving_as_a_SERVER_VERSION_never_reaches_the_svg_advice(caplog):
+    """The version strings quoted by the #468 advice are response-derived like any other.
+
+    `/serverinfo` is unauthenticated, so this is belt on top of braces -- but the braces are an
+    argument about the call site ("it cannot leak here"), and this repo has watched that argument
+    move and stop being true four separate times. The chokepoint is what makes it a property.
+    """
+    token = "SYNTHETIC_SESSION_TOKEN_42_LONG_ENOUGH"
+    session = _Session("an-unrelated-long-pat-secret")
+    session.token = token
+    records = [{"view_name": "v", "svg": {"status": verdict.SVG_UNSUPPORTED_STATUS}}]
+    gate = verdict.svg_gate(None, {"rest_api_version": token, "product_version": token}, "3.21")
+    with caplog.at_level(logging.WARNING, logger="tableau-oracle"):
+        verdict._log_blocked_and_stale(records, [], None, gate, session.redact_text)  # pylint: disable=protected-access
     assert longest_surviving_run(token, caplog.text) == ""
     assert "[REDACTED]" in caplog.text
 

@@ -149,6 +149,7 @@ from tableau_env import (  # noqa: E402  # pylint: disable=wrong-import-position
 from tableau_oracle_manifest import (  # noqa: E402  # pylint: disable=wrong-import-position
     NOT_ATTEMPTED,
     SVG_MIN_API_VERSION,
+    SVG_UNSUPPORTED_STATUS,
     SVG_VERSION_MARKER,
     CaptureRun,
     log_progress,
@@ -934,8 +935,18 @@ def _capture_render(  # pylint: disable=too-many-locals
             # A version gate is a CONFIGURATION fault, not a broken view: retrying cannot fix it and
             # neither can a Tableau-side credential, so say which knob to turn rather than filing it
             # under the generic failure bucket a reader will chase into the data source.
-            record["status"] = "unsupported_api_version"
-            record["remedy"] = f"set TABLEAU_REST_API_VERSION={SVG_MIN_API_VERSION} or later in .env"
+            #
+            # ⚠️ WHICH knob is not decidable here, and pretending otherwise is #468: the server's
+            # advertised ceiling is a property of the SITE, not of this leg, and nothing in scope at
+            # this call carries it. So this records the honest "ceiling not established" form; the
+            # RUN knows better and `_stamp_svg_gate` upgrades every one of these before the manifest
+            # is serialised. Both strings come from the same classifier, so they cannot disagree.
+            record["status"] = SVG_UNSUPPORTED_STATUS
+            advice = capability.svg_gate_advice(
+                capability.SvgGate(configured=session.version), redactor=session.redact_text
+            )
+            record["cause"] = advice.cause
+            record["remedy"] = advice.remedy
         return record
     # HTTP 200 is not proof the requested format came back. An older server that does not recognise
     # `format=svg` can ignore the unknown parameter and return its default PNG -- and writing those
@@ -1135,6 +1146,15 @@ def main() -> int:
     if args.reference_best and views:
         capability_report = capability.probe_render_capability(session, env, views)
         capability.apply_selected_tier(capability_report, wants, api_overrides, env)
+    # The site's ADVERTISED REST ceiling, which decides whether a refused SVG is our client pin or a
+    # server that can never do it (#468). `--reference-best` already has it inside the probe report;
+    # a plain `--svg` run had NOTHING, so its only honest verdict was "cause not established". This
+    # closes that: `/serverinfo` is unauthenticated and costs no metered export call, so establishing
+    # the ceiling is free. It fails soft -- a site that will not answer leaves the run in exactly the
+    # state it was in before, reporting the cause as unestablished rather than guessing.
+    server_info = (capability_report or {}).get("server")
+    if server_info is None and "svg" in wants:
+        server_info = capability.server_info(env["TABLEAU_SERVER_URL"], redactor=session.redact_text)
 
     records, started = [], time.perf_counter()
     # Resolved ONCE for the whole run - one Metadata API call for the site, not one per view - and
@@ -1152,6 +1172,7 @@ def main() -> int:
         records,
         CaptureRun(session, env, out_dir, started, frozenset(wants), bool(args.reference_best)),
         capability_report,
+        server_info,
     )
     session.sign_out()
     return exit_code

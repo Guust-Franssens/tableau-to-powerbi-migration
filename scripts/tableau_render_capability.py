@@ -292,6 +292,135 @@ def supports(available: str | None, required: str) -> bool | None:
     return api_tuple(available) >= api_tuple(required)
 
 
+TIER_BY_NAME: dict[str, RenderTier] = {tier.name: tier for tier in LADDER}
+
+
+# ------------------------------------------------- why one `?format=svg` request came back refused
+
+# The three states any "SVG did not render" message must resolve to. They are the three values of
+# `supports(advertised, svg_floor)` and nothing else, so the partition is total by construction
+# rather than by a chain of `if`s somebody has to keep exhaustive.
+#
+# ⚠️ The middle one is named for the EVIDENCE ("the server advertises at or above the floor"), not
+# for a cause ("the client pin is too low"), and that is deliberate. When the pin is ALSO at or above
+# the floor, "raise TABLEAU_REST_API_VERSION" is itself a remedy that cannot work -- the same defect
+# one step over -- so the state names what was measured and the remedy branches inside it.
+SVG_CAUSE_SERVER_MEETS_FLOOR = "server_meets_floor"
+SVG_CAUSE_SERVER_BELOW_FLOOR = "server_below_floor"
+SVG_CAUSE_CEILING_NOT_ESTABLISHED = "ceiling_not_established"
+
+# Output bound for a version string quoted in one of those messages. Like every other limit in this
+# repo it bounds the OUTPUT of `redacted_note`, never its input.
+_VERSION_CHARS = 40
+
+
+@dataclass(frozen=True)
+class SvgGate:
+    """The numbers that decide WHY ``?format=svg`` was refused, kept together like ``ApiVersions``.
+
+    ``advertised`` is the server's own ceiling from ``/serverinfo``; ``configured`` is the client
+    preference we send. Passing one while forgetting the other is exactly how a remedy gets written
+    that raises a client pin above a ceiling that cannot move, so they travel as one value.
+
+    ``proved_by_reprobe`` is the ONLY thing that licenses saying the tier works on this server: the
+    ladder's floor re-probe actually asked. An advertised number at or above the floor licenses
+    "try raising the pin", never "SVG works here" -- see :func:`_add_pin_warnings`.
+    """
+
+    advertised: str | None = None
+    configured: str | None = None
+    product_version: str | None = None
+    proved_by_reprobe: bool = False
+
+
+@dataclass(frozen=True)
+class SvgGateAdvice:
+    """One classified cause and the ONE remedy that can actually work for it."""
+
+    cause: str
+    remedy: str
+
+
+def svg_gate_advice(gate: SvgGate, *, redactor=None) -> SvgGateAdvice:
+    """Say why SVG was refused **and** what would fix it, without ever naming a knob that cannot.
+
+    Measured on a real customer site (an on-prem Tableau Server, ``productVersion 2025.3.3`` /
+    ``restApiVersion 3.27``): the message this replaces said *"Set TABLEAU_REST_API_VERSION=3.29 in
+    .env and re-run"*, which is arithmetically impossible there -- a client preference cannot lift a
+    server's ceiling. It was also the loudest, most actionable-looking line in the run.
+
+    So the three states below are the three values of :func:`supports`, and the *unknown* one is a
+    first-class outcome rather than a fall-through into either confident branch: with no
+    ``/serverinfo`` answer the cause genuinely is not established, and saying so beats guessing.
+
+    ⚠️ Two things this deliberately does NOT claim. It never says SVG *works* on a server merely
+    because the advertised number clears the floor -- only ``proved_by_reprobe`` licenses that. And
+    it says nothing about what raising the pin above a server's ceiling does to OTHER calls: Tableau
+    documents an unsupported-version error, but nobody here has measured it, and this repo states
+    measurements. What is provable is the only thing asserted -- it cannot enable SVG.
+
+    ``redactor`` is not decoration: every version string quoted below is response-derived (it came
+    back from ``/serverinfo``), so it goes through :func:`tableau_env.redacted_note`, the chokepoint,
+    before anything formats it.
+    """
+    svg, pdf = TIER_BY_NAME["svg"], TIER_BY_NAME["pdf"]
+    advertised = redacted_note(gate.advertised, redactor, limit=_VERSION_CHARS)
+    configured = redacted_note(gate.configured, redactor, limit=_VERSION_CHARS)
+    product = redacted_note(gate.product_version, redactor, limit=_VERSION_CHARS)
+    # Classification reads the RAW value, reporting reads the redacted copy -- never the reverse.
+    meets_floor = supports(gate.advertised, svg.min_api)
+    next_rung = (
+        f"{pdf.name.upper()} -- available from API {pdf.min_api} ({pdf.min_release}), {pdf.note} -- "
+        f"with --pdf or --reference-best"
+    )
+    if meets_floor is None:
+        return SvgGateAdvice(
+            SVG_CAUSE_CEILING_NOT_ESTABLISHED,
+            f"this server's advertised REST ceiling was NOT established on this run, so why it "
+            f"refused is UNKNOWN and there is no single remedy. IF this site advertises "
+            f"{svg.min_api} or later, raising TABLEAU_REST_API_VERSION to {svg.min_api} in .env "
+            f"fixes it; if it advertises less, SVG is unavailable at any client setting and the "
+            f"next rung is {next_rung}. Establish the ceiling first: re-run with --reference-best, "
+            f"or GET /api/{SERVERINFO_PROBE_VERSION}/serverinfo and read <restApiVersion>.",
+        )
+    if meets_floor:
+        return SvgGateAdvice(SVG_CAUSE_SERVER_MEETS_FLOOR, _meets_floor_remedy(gate, svg, advertised, configured))
+    return SvgGateAdvice(
+        SVG_CAUSE_SERVER_BELOW_FLOOR,
+        f"this server advertises REST {advertised}{f' (product {product})' if product else ''}, and "
+        f"SVG needs {svg.min_api} ({svg.min_release}) -- so SVG is UNAVAILABLE on this server at any "
+        f"client setting, and raising TABLEAU_REST_API_VERSION above the server's advertised ceiling "
+        f"is not a fix. Capture the next rung instead: {next_rung}.",
+    )
+
+
+def _meets_floor_remedy(gate: SvgGate, svg: RenderTier, advertised: str, configured: str) -> str:
+    """The remedy when the SERVER clears the floor -- which is not yet a reason to blame the pin."""
+    proof = (
+        f"A floor re-probe at API {svg.min_api} PROVED the tier answers on this server."
+        if gate.proved_by_reprobe
+        else (
+            f"The advertised {advertised} is what the server CLAIMS it can do, not proof that SVG "
+            f"works here; only the request settles that."
+        )
+    )
+    if supports(gate.configured, svg.min_api):
+        # Both numbers already clear the floor, so neither explains the refusal. Printing the .env
+        # knob here would be the same false remedy this function exists to remove, one case over.
+        return (
+            f"this server advertises REST {advertised} and TABLEAU_REST_API_VERSION is already "
+            f"{configured} -- both at or above the {svg.min_api} SVG floor -- so this refusal is NOT "
+            f"explained by either version and raising the pin further will not help. Report it with "
+            f"the response detail recorded beside this leg."
+        )
+    pin = f"pinned to {configured}" if configured else "not recorded on this run"
+    return (
+        f"this server advertises REST {advertised} -- {release_for(advertised)} -- at or above the "
+        f"{svg.min_api} SVG floor, while TABLEAU_REST_API_VERSION is {pin}: set it to "
+        f"{svg.min_api} or later in .env and re-run. {proof}"
+    )
+
+
 def server_info(base: str, *, timeout: int = SERVERINFO_TIMEOUT_SEC, redactor=redact) -> dict[str, Any]:
     """The server's own account of itself. **Unauthenticated** -- callable before any sign-in.
 

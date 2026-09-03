@@ -44,11 +44,18 @@ TRANSPORT_FAILURES = [
 
 
 class _Response:
-    """The slice of ``http.client.HTTPResponse`` that ``Site._raw`` actually touches."""
+    """The slice of ``http.client.HTTPResponse`` that ``Site._raw`` actually touches.
+
+    ⚠️ Plus ``headers``, which ``Site._raw`` does NOT touch and ``tableau_http._request`` does. The
+    assessment probes ``/serverinfo`` through that shared transport (#468), so a double missing the
+    attribute fails the probe with ``AttributeError`` -- a fixture gap that would read as "the
+    fail-soft path works", because a soft failure is exactly what a broken probe produces.
+    """
 
     def __init__(self, status: int, payload: bytes) -> None:
         self.status = status
         self._payload = payload
+        self.headers: dict[str, str] = {}
 
     def read(self) -> bytes:
         return self._payload
@@ -63,15 +70,28 @@ class _Response:
         return False
 
 
+# What a real ``GET /api/<v>/serverinfo`` returns, trimmed to the three elements `server_info` parses.
+# The numbers are the customer site behind #468: an on-prem Server whose ceiling is BELOW the SVG
+# floor, so the assessment must resolve to "best rung is PDF" rather than to an .env remedy.
+SES_SERVERINFO = (
+    b'<?xml version="1.0" encoding="UTF-8"?><tsResponse><serverInfo>'
+    b'<productVersion build="20253.25.0904.1234">2025.3.3</productVersion>'
+    b"<restApiVersion>3.27</restApiVersion></serverInfo></tsResponse>"
+)
+
+
 class FakeTableau:
     """A scripted Tableau site. ``fail`` maps a URL fragment to an exception, a status, or a list
     of those consumed one per call, so a test injects a fault on ONE endpoint and nothing else."""
 
     SIGNIN = {"credentials": {"token": "session-token", "site": {"id": "site-1"}}}
 
-    def __init__(self, fail: dict | None = None) -> None:
+    def __init__(self, fail: dict | None = None, *, serverinfo: bytes | None = SES_SERVERINFO) -> None:
         self.fail = {key: (value if isinstance(value, list) else [value]) for key, value in (fail or {}).items()}
         self.calls: list[tuple[str, float | None]] = []
+        # ``None`` = this site does not answer ``/serverinfo`` at all, which is a real on-prem shape
+        # (a reverse proxy in front of Tableau can refuse it) and the state-C input.
+        self.serverinfo = serverinfo
 
     def urlopen(self, request, timeout=None):
         """Stand-in for ``urllib.request.urlopen``."""
@@ -84,6 +104,11 @@ class FakeTableau:
                     raise outcome
                 if outcome != 200:
                     raise urllib.error.HTTPError(url, outcome, "nope", {}, None)
+        if "/serverinfo" in url:
+            # XML, not JSON, and unauthenticated -- exactly as the real endpoint answers.
+            if self.serverinfo is None:
+                raise urllib.error.HTTPError(url, 404, "nope", {}, None)
+            return _Response(200, self.serverinfo)
         return _Response(200, json.dumps(self._payload(url)).encode())
 
     def paths(self) -> list[str]:
