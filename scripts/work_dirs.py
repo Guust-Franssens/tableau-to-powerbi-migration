@@ -62,10 +62,15 @@ under `allocated_abs_path`, and `check_run_location` (surfaced by `list_runs` an
 is NOT a soft `intact` - see `check_run_location`.
 
 `--verify` is a GATE, not a status query: exit 0 all intact / 1 at least one moved / 3 at least one
-unverifiable. A run directory it cannot read at all - `run.json` missing, empty, truncated,
-malformed, locked, or holding valid JSON that is not an object - is `unverifiable` and exits 3. It
-used to be skipped silently and counted in no bucket at all, which reported a half-written run as a
-clean tree. `list_runs` still skips those, because it is inspection rather than a gate.
+unverifiable. It rests on ONE invariant, implemented in one discovery function and one
+classification function: every child directory of an existing `_runs/` root is a candidate run, any
+candidate whose identity cannot be POSITIVELY established from its own evidence is `unverifiable`,
+and `intact` is only ever returned on positive proof. So a run directory it cannot read at all -
+`run.json` missing, empty, truncated, malformed, locked, holding valid JSON that is not an object,
+carrying a run number that contradicts its own directory, or recording a path that is not absolute
+- is `unverifiable` and exits 3. It used to be skipped silently and counted in no bucket at all,
+which reported a half-written run as a clean tree. `list_runs` still skips those, because it is
+inspection rather than a gate.
 
 Map: `docs/INDEX.md`. The same rule is stated in `docs/migration-phases.md` (Phase 1) and
 `docs/operator-runbook.md` (section 6.4, Scratch).
@@ -84,6 +89,7 @@ import argparse
 import json
 import os
 import re
+import stat
 import sys
 import unicodedata
 from dataclasses import dataclass
@@ -364,15 +370,96 @@ class RunLocationCheck:
         }
 
 
+# --------------------------------------------------------------------------------------------
+# THE ONE INVARIANT - and the two functions that implement it
+# --------------------------------------------------------------------------------------------
+# Every child DIRECTORY of an existing `_runs/` root is a candidate run. Any candidate whose
+# identity cannot be POSITIVELY established from its own evidence is `unverifiable`. `intact` is
+# only ever returned on positive proof.
+#
+# It is implemented at exactly TWO places on purpose, and adding a third is how the defect class
+# comes back:
+#
+#   * `_discover_run_dirs`  decides what a CANDIDATE is. It filters on nothing except "is this
+#     child a directory", and it never turns an error into an empty list.
+#   * `check_run_location`  decides the VERDICT. It is the only function in this module that can
+#     construct `RUN_LOCATION_INTACT`, and it does so on its last line, after every requirement
+#     below has held. Everything it calls computes a FACT (a normalized path, a derived name, a
+#     reason string) and chooses no state.
+#
+# ⚠️ Why the structure rather than more checks. Round 1 of PR #477's review fixed one fail-open
+# site (`list_runs` was the gate's only input, so an unreadable run counted as nothing). Round 2
+# then found the SAME defect class at three MORE sites - the path comparison accepted a relative
+# recorded value completed against the verifier's own CWD; discovery dropped any directory whose
+# name no longer matched `<NNN>` and had no `run.json`, and turned an `OSError` on the root into
+# zero runs; and the run-number check never compared the number against the directory it sits in.
+# Three more local guards would have left a fourth site to find. `tests/test_work_dirs.py` pins the
+# collapse structurally: `intact` may be CONSTRUCTED at exactly one site in this file.
+
+
+#: Two unrelated anchors used to decide whether a RECORDED path names a fixed location at all.
+#: BOTH are required, because neither alone is sufficient on Windows: the driveless `\wd-anchor`
+#: absorbs a drive-relative `\_runs\001-acme` (`ntpath.join` keeps the second operand's root), while
+#: the drive-bearing `Z:\wd-anchor` completes it and so exposes it. On POSIX the first is simply a
+#: relative anchor and the second is `/wd-anchor`; both reject a relative value and accept an
+#: absolute one, so the pair needs no `os.name` branch.
+_LOCATION_ANCHORS: tuple[str, ...] = ("Z:" + os.sep + "wd-anchor", os.sep + "wd-anchor")
+
+
+def _is_location_independent(value: str) -> bool:
+    """True only when `value` names the SAME place no matter where the checking process stands.
+
+    ⚠️ This is NOT `os.path.isabs`, and the difference is a measured fail-open defect (PR #477,
+    review round 2, finding 1). `allocated_abs_path` is *required* to be absolute, but the
+    comparison ran the recorded value through `abspath()`, which happily completes a RELATIVE
+    value against the verifier's current directory. Recording
+    `_review477_round2_attacks\\relative-path\\_runs\\001-acme` and running the CLI from the right
+    directory produced `INTACT 001-acme`, exit 0 - a location verdict that depended on where the
+    operator happened to be standing, in the one module that exists to be CWD-independent.
+
+    `isabs` is also the wrong predicate here and a version-dependent one: on Windows it answered
+    True for the drive-relative `\\_runs\\001-acme` before Python 3.13 and False from 3.13 on, and
+    a drive-relative path still resolves against the CURRENT drive. So the property is tested
+    directly instead, as two facts that are both needed: the value must be rooted within whatever
+    drive it names (`C:001-acme` is not), and it must name a drive or root of its own, which is
+    established by joining it onto unrelated anchors and demanding it come back unchanged.
+    Anything a CWD, or a current drive, would complete fails one of the two.
+    """
+    try:
+        # Fact 1 - the path must be rooted WITHIN whatever drive it names. `C:001-acme` carries a
+        # drive and is still completed against that drive's current directory, and it survives the
+        # anchor test below (`ntpath.join` returns a different-drive operand untouched), so the two
+        # facts are both load-bearing and neither alone is this predicate.
+        _drive, rest = os.path.splitdrive(value)
+        separators = (os.sep,) if os.altsep is None else (os.sep, os.altsep)
+        if not rest.startswith(separators):
+            return False
+        # Fact 2 - and it must name a drive/root of its own. A driveless `\_runs\001-acme` passes
+        # fact 1 and still resolves against the CURRENT drive; joining it onto a drive-bearing
+        # anchor changes it, joining an absolute path onto any anchor does not.
+        plain = os.path.normcase(os.path.normpath(value))
+        return all(
+            os.path.normcase(os.path.normpath(os.path.join(anchor, value))) == plain for anchor in _LOCATION_ANCHORS
+        )
+    except (OSError, ValueError):  # a NUL byte or an otherwise unrepresentable path
+        return False
+
+
 def _normalized_path(path: Any) -> str | None:
-    """One comparable spelling of a path, or None if it cannot be formed. Used on BOTH sides -
-    written into the manifest by `allocate_run` and read back by `check_run_location` - so the
-    normalization rule cannot drift between record and check.
+    """One comparable spelling of a path, or None if it cannot be formed.
 
     `abspath` (not `resolve`) on purpose: it normalizes separators, `..` and case-folding without
     reading the filesystem, which keeps `check_run_location` pure. Returning None on a path that
-    cannot be normalized is fail-safe: None never compares equal to anything, including itself, so a
-    broken value can only ever produce `unverifiable`, never a false `intact`.
+    cannot be normalized is fail-safe: None never compares equal to anything, including itself, so
+    a broken value can only ever produce `unverifiable`, never a false `intact`.
+
+    ⚠️ The two sides are NOT symmetrical, and pretending they were is finding 1. Completing the
+    ACTUAL run directory against the CWD is correct - it is a live path this process just
+    enumerated from a root the caller named, so it really is there. Completing the RECORDED value
+    the same way is not: it was written by a different process, at a different time, from a
+    different directory, and only an absolute value carries any meaning across that gap. The
+    recorded side therefore has to clear `_is_location_independent` BEFORE it reaches this
+    function - see `_recorded_path_problem`.
     """
     try:
         return os.path.normcase(os.path.abspath(str(path)))
@@ -380,11 +467,27 @@ def _normalized_path(path: Any) -> str | None:
         return None
 
 
-def _same_path(recorded: Any, actual: Path) -> bool:
+def _same_path(recorded: str, actual: Path) -> bool:
     """True only when both sides normalize AND are equal. Never true on an unusable value."""
     left = _normalized_path(recorded)
     right = _normalized_path(actual)
     return left is not None and right is not None and left == right
+
+
+def _recorded_path_problem(value: Any) -> str | None:
+    """Why `manifest[RUN_PATH_KEY]` cannot serve as evidence of where a run was allocated, or None.
+
+    A fact, not a verdict - `check_run_location` decides what to do with it.
+    """
+    if not isinstance(value, str) or not value:
+        return f"no usable {RUN_PATH_KEY!r} was recorded ({value!r})"
+    if not _is_location_independent(value):
+        return (
+            f"its recorded {RUN_PATH_KEY!r} ({value!r}) is not an absolute path, so it names no fixed "
+            "location - it would be completed against the VERIFIER's current directory, which makes the "
+            "verdict depend on where the check was run from rather than on where the run is"
+        )
+    return None
 
 
 def _run_number_problem(manifest: dict[str, Any]) -> str | None:
@@ -405,134 +508,114 @@ def _run_number_problem(manifest: dict[str, Any]) -> str | None:
     return None
 
 
-def _unassessable(run_dir: Path, detail: str) -> RunLocationCheck:
-    """The verdict for a run directory whose manifest could not be read or parsed at all."""
-    return RunLocationCheck(
-        state=RUN_LOCATION_UNVERIFIABLE,
-        actual_dir_name=run_dir.name,
-        recorded_dir_name=None,
-        derived_name_check=DERIVED_NAME_UNAVAILABLE,
-        path_check=PATH_CHECK_UNRECORDED,
-        detail=detail,
-    )
+def _name_agreement(manifest: dict[str, Any], actual: str) -> tuple[str, str | None]:
+    """`(derived_name_check, problem_or_None)` for "does this manifest's own identity match the
+    directory it sits in?".
+
+    ⚠️ This is finding 3 of PR #477's second review round, and it is why `_derived_dir_name` is
+    consulted on the healthy path at all. `_run_number_problem` only ever checked that `run` was a
+    non-negative integer, never that it AGREED with the `<NNN>-<slug>` directory. Changing nothing
+    but `"run"` in a freshly allocated `001-acme` - to `2`, or to `10**100` - was reported `1
+    intact`, exit 0. The run number IS the identity in this convention (issue #234), so a manifest
+    claiming a number its own directory does not carry is CONTRADICTORY evidence: `unverifiable`,
+    not healthy, and not `moved` either, because which of the two is wrong is not established.
+    """
+    derived = _derived_dir_name(manifest)
+    if derived is None:
+        return DERIVED_NAME_UNAVAILABLE, "its own 'run'/'unit_key' cannot reconstruct a directory name to check against"
+    if derived != actual:
+        return DERIVED_NAME_MISMATCH, (
+            f"its own 'run'/'unit_key' name {derived!r}, which CONTRADICTS the directory {actual!r} it "
+            "sits in - the run number is the identity of a run, so a manifest claiming a different one "
+            "is contradictory evidence, not a healthy run"
+        )
+    return DERIVED_NAME_MATCHES, None
 
 
-def _check_legacy_name(manifest: dict[str, Any], run_dir: Path, recorded: Any) -> RunLocationCheck:
-    """The `unverifiable` branch for a manifest that records no usable directory NAME - every run
-    allocated before `RUN_LOCATION_KEY` existed, plus any hand-edited or corrupted value.
+def _legacy_name_hint(manifest: dict[str, Any], actual: str, recorded: Any) -> tuple[str, str]:
+    """`(derived_name_check, detail)` for a manifest that records no usable directory NAME - every
+    run allocated before `RUN_LOCATION_KEY` existed, plus any hand-edited or corrupted value.
 
-    A subordinate hint reconstructs the name the manifest's own `run`/`unit_key` IMPLY, but it can
-    never promote the run out of `unverifiable`: an inference is not a record.
+    A subordinate hint reconstructs the name the manifest's own `run`/`unit_key` IMPLY. It can never
+    promote the run out of `unverifiable`: an inference is not a record, and the caller below does
+    not offer it that option.
     """
     if recorded is None:
         missing = f"no {RUN_LOCATION_KEY!r} recorded (allocated before this key existed)"
     else:
         missing = f"{RUN_LOCATION_KEY!r} is present but is not a usable directory name ({recorded!r})"
 
-    derived = _derived_dir_name(manifest)
-    actual = run_dir.name
-    if derived is None:
-        hint, why = DERIVED_NAME_UNAVAILABLE, "and its own run/unit_key cannot reconstruct one either"
-    elif derived == actual:
-        hint, why = DERIVED_NAME_MATCHES, f"its run/unit_key imply {derived!r}, which matches - but that is INFERENCE"
+    hint, problem = _name_agreement(manifest, actual)
+    if hint == DERIVED_NAME_UNAVAILABLE:
+        why = "and its own run/unit_key cannot reconstruct one either"
+    elif hint == DERIVED_NAME_MATCHES:
+        why = f"its run/unit_key imply {_derived_dir_name(manifest)!r}, which matches - but that is INFERENCE"
     else:
-        hint, why = (
-            DERIVED_NAME_MISMATCH,
-            f"its run/unit_key imply {derived!r}, which does NOT match {actual!r} - likely renamed or "
-            "renumbered, but that is INFERENCE, not a record",
-        )
-    return RunLocationCheck(
-        state=RUN_LOCATION_UNVERIFIABLE,
-        actual_dir_name=actual,
-        recorded_dir_name=None,
-        derived_name_check=hint,
-        path_check=PATH_CHECK_NOT_CONSULTED,
-        detail=f"{missing}; {why}",
-    )
+        why = f"{problem} - but that is INFERENCE, not a record"
+    return hint, f"{missing}; {why}"
 
 
-def _check_intact_candidate(manifest: dict[str, Any], run_dir: Path, recorded: str) -> RunLocationCheck:
-    """A run whose recorded NAME matches where it sits. That is necessary for `intact`, never
-    sufficient - the name is a basename, and a basename survives both a run-only move and a copy.
-
-    Three ways it still fails to be `intact`, all `unverifiable` rather than `moved`, because none
-    of them ESTABLISHES corruption:
-
-    * the manifest carries no usable run number, so it is not an assessable manifest at all;
-    * no absolute allocation path was recorded (`RUN_PATH_KEY`), so a move cannot be excluded;
-    * a path was recorded and it is not where the run now sits. This is a relocation - but whether
-      the whole checkout moved (legitimate) or this run alone was moved or copied (corruption)
-      CANNOT be told apart from one run's evidence, and both break the absolute self-paths embedded
-      under `<run>/bundle/` anyway. Reporting `intact` here is the defect being fixed; reporting
-      `moved` would claim a finding that has not been established.
-    """
-    problem = _run_number_problem(manifest)
-    if problem is not None:
-        return RunLocationCheck(
-            state=RUN_LOCATION_UNVERIFIABLE,
-            actual_dir_name=run_dir.name,
-            recorded_dir_name=recorded,
-            derived_name_check=DERIVED_NAME_NOT_CONSULTED,
-            path_check=PATH_CHECK_NOT_CONSULTED,
-            detail=f"its recorded name {recorded!r} matches where it sits, but {problem} - so this is not an "
-            "assessable manifest and its location cannot be confirmed",
-        )
-
-    recorded_path = manifest.get(RUN_PATH_KEY)
-    if not isinstance(recorded_path, str) or not recorded_path:
-        return RunLocationCheck(
-            state=RUN_LOCATION_UNVERIFIABLE,
-            actual_dir_name=run_dir.name,
-            recorded_dir_name=recorded,
-            derived_name_check=DERIVED_NAME_NOT_CONSULTED,
-            path_check=PATH_CHECK_UNRECORDED,
-            detail=f"allocated as {recorded!r} and still named that, but no usable {RUN_PATH_KEY!r} was recorded "
-            "- a basename survives a run-only move and a copy, so 'still there' cannot be confirmed",
-        )
-
-    if _same_path(recorded_path, run_dir):
-        return RunLocationCheck(
-            state=RUN_LOCATION_INTACT,
-            actual_dir_name=run_dir.name,
-            recorded_dir_name=recorded,
-            derived_name_check=DERIVED_NAME_NOT_CONSULTED,
-            path_check=PATH_CHECK_MATCHES,
-            detail=f"allocated as {recorded!r} at {recorded_path} and still there",
-        )
-
+def _unverifiable(
+    run_dir: Path,
+    detail: str,
+    *,
+    recorded_dir_name: str | None = None,
+    derived_name_check: str = DERIVED_NAME_NOT_CONSULTED,
+    path_check: str = PATH_CHECK_NOT_CONSULTED,
+) -> RunLocationCheck:
+    """Construct the fail-closed verdict. Every failing branch of `check_run_location` comes here,
+    so "could not establish" is the DEFAULT shape of a verdict in this module and `intact` is the
+    single exception that has to be earned."""
     return RunLocationCheck(
         state=RUN_LOCATION_UNVERIFIABLE,
         actual_dir_name=run_dir.name,
-        recorded_dir_name=recorded,
-        derived_name_check=DERIVED_NAME_NOT_CONSULTED,
-        path_check=PATH_CHECK_DIFFERS,
-        detail=f"allocated at {recorded_path} but found at {os.path.abspath(str(run_dir))} - the name is "
-        "unchanged, so this is a RELOCATION, not a rename. Moving the whole checkout and moving/copying this "
-        "run alone are indistinguishable from here, and BOTH break the absolute self-paths embedded under "
-        "bundle/, so re-check every bundle under this run rather than reading it as healthy",
+        recorded_dir_name=recorded_dir_name,
+        derived_name_check=derived_name_check,
+        path_check=path_check,
+        detail=detail,
     )
 
 
+def _unassessable(run_dir: Path, detail: str) -> RunLocationCheck:
+    """The verdict for a run directory whose manifest could not be read or parsed at all."""
+    return _unverifiable(
+        run_dir,
+        detail,
+        derived_name_check=DERIVED_NAME_UNAVAILABLE,
+        path_check=PATH_CHECK_UNRECORDED,
+    )
+
+
+# pylint: disable-next=too-many-return-statements
 def check_run_location(manifest: Any, run_dir: Path) -> RunLocationCheck:
     """Compare where a run says it was allocated against where it actually sits. Pure: reads a
     manifest dict and a path, touches no disk, mutates nothing, and never raises (issue #470).
 
+    ⚠️ **This is the module's single classification path, and the eight returns below are one
+    ordered ladder of REQUIREMENTS, not eight independent guards.** Splitting them across helpers
+    that each decided a state is what let three further fail-open sites survive round 1 of PR
+    #477's review (see the invariant block above); keeping the whole sequence here is deliberate,
+    and so is the `too-many-return-statements` waiver. Everything it calls returns a fact.
+
     Three states, and the third is the point:
 
-    * `intact` - the recorded `<NNN>-<slug>` name equals the directory's actual name AND the
-      recorded absolute path equals where the directory actually sits. Both, because a basename
-      survives a run-only move and a copy (see `RUN_PATH_KEY`).
+    * `intact` - EVERY requirement held: `run.json` is an object, it records a `<NNN>-<slug>` name
+      equal to this directory's own, it carries a usable run number, that number and `unit_key`
+      reconstruct the directory it sits in, and it records an absolute allocation path that is
+      where the directory actually is. Reached on the last line and nowhere else.
     * `moved` - the recorded name and the actual name differ. The run has been renamed or
       renumbered since allocation, so generated bundle output beneath it embeds absolute self-paths
-      that no longer resolve. Both names are reported so the damage is locatable.
-    * `unverifiable` - the question cannot be answered from the evidence: no usable manifest, no
-      recorded name, no recorded path, or a recorded path that is not where the run now sits. It is
-      not a pass and it is not a failure; it means the answer is unknown, which is a different
-      thing from answering it "fine".
+      that no longer resolve. Both names are reported so the damage is locatable. It is the ONLY
+      failure that is an established finding rather than an unanswered question.
+    * `unverifiable` - the question cannot be answered from the evidence. Not a pass and not a
+      failure: the answer is unknown, which is a different thing from answering it "fine".
 
     `manifest` is typed `Any` on purpose - a hand-written `run.json` can hold a list, a string or a
     number, and this function must return a verdict for it rather than raise.
     """
+    actual = run_dir.name
+
+    # Requirement 0 - it is a manifest at all.
     if not isinstance(manifest, dict):
         return _unassessable(
             run_dir,
@@ -541,11 +624,9 @@ def check_run_location(manifest: Any, run_dir: Path) -> RunLocationCheck:
         )
 
     recorded = manifest.get(RUN_LOCATION_KEY)
-    if not isinstance(recorded, str) or not recorded:
-        return _check_legacy_name(manifest, run_dir, recorded)
 
-    actual = run_dir.name
-    if recorded != actual:
+    # The one ESTABLISHED finding: a recorded name that differs from the directory's own.
+    if isinstance(recorded, str) and recorded and recorded != actual:
         return RunLocationCheck(
             state=RUN_LOCATION_MOVED,
             actual_dir_name=actual,
@@ -559,7 +640,69 @@ def check_run_location(manifest: Any, run_dir: Path) -> RunLocationCheck:
             ),
         )
 
-    return _check_intact_candidate(manifest, run_dir, recorded)
+    # Requirement 1 - a recorded directory name to compare at all.
+    if not isinstance(recorded, str) or not recorded:
+        hint, detail = _legacy_name_hint(manifest, actual, recorded)
+        return _unverifiable(run_dir, detail, derived_name_check=hint)
+
+    # Requirement 2 - a usable run number, because the number is the identity.
+    problem = _run_number_problem(manifest)
+    if problem is not None:
+        return _unverifiable(
+            run_dir,
+            f"its recorded name {recorded!r} matches where it sits, but {problem} - so this is not an "
+            "assessable manifest and its location cannot be confirmed",
+            recorded_dir_name=recorded,
+        )
+
+    # Requirement 3 - that number and `unit_key` must reconstruct THIS directory (finding 3).
+    hint, disagreement = _name_agreement(manifest, actual)
+    if disagreement is not None:
+        return _unverifiable(
+            run_dir,
+            f"its recorded name {recorded!r} matches where it sits, but {disagreement}",
+            recorded_dir_name=recorded,
+            derived_name_check=hint,
+        )
+
+    # Requirement 4 - an absolute allocation path, because a basename survives a move and a copy.
+    recorded_path = manifest.get(RUN_PATH_KEY)
+    path_problem = _recorded_path_problem(recorded_path)
+    if path_problem is not None:
+        return _unverifiable(
+            run_dir,
+            f"allocated as {recorded!r} and still named that, but {path_problem} - a basename survives a "
+            "run-only move and a copy, so 'still there' cannot be confirmed",
+            recorded_dir_name=recorded,
+            derived_name_check=hint,
+            path_check=PATH_CHECK_UNRECORDED,
+        )
+
+    # Requirement 5 - that path is where the directory actually sits. A relocation is `unverifiable`
+    # rather than `moved`: whether the whole checkout moved (legitimate) or this run alone was moved
+    # or copied (corruption) cannot be told apart from one run's evidence, and both break the
+    # absolute self-paths embedded under `<run>/bundle/` anyway.
+    if not _same_path(recorded_path, run_dir):
+        return _unverifiable(
+            run_dir,
+            f"allocated at {recorded_path} but found at {os.path.abspath(str(run_dir))} - the name is "
+            "unchanged, so this is a RELOCATION, not a rename. Moving the whole checkout and moving/copying "
+            "this run alone are indistinguishable from here, and BOTH break the absolute self-paths embedded "
+            "under bundle/, so re-check every bundle under this run rather than reading it as healthy",
+            recorded_dir_name=recorded,
+            derived_name_check=hint,
+            path_check=PATH_CHECK_DIFFERS,
+        )
+
+    # Every requirement held. This is the ONLY `intact` in the module - see the invariant block.
+    return RunLocationCheck(
+        state=RUN_LOCATION_INTACT,
+        actual_dir_name=actual,
+        recorded_dir_name=recorded,
+        derived_name_check=hint,
+        path_check=PATH_CHECK_MATCHES,
+        detail=f"allocated as {recorded!r} at {recorded_path} and still there",
+    )
 
 
 def allocate_run(
@@ -635,29 +778,61 @@ def allocate_run(
     )
 
 
-def _iter_run_dirs(root: Path) -> list[Path]:
-    """Every child of `_runs/` that is a run DIRECTORY, readable manifest or not.
+def _discover_run_dirs(root: Path) -> tuple[list[Path], str | None]:
+    """`(candidates, root_problem)` - the module's one discovery site. Never raises.
 
-    A child counts if its name matches the `<NNN>[-slug]` allocation pattern (the same rule
-    `_existing_run_numbers` uses, so anything that OCCUPIES a run number is also assessed) or if it
-    holds a `run.json` at all. Sorted by name so the caller starts from a stable order.
+    EVERY child directory of an existing `_runs/` root is a candidate run. There is no name
+    pattern and no "has a `run.json`" precondition, because both were fail-open filters and both
+    are finding 2 of PR #477's second review round: a real allocated run whose directory was
+    renamed to `acme-without-number` and whose manifest was deleted matched neither test, so the
+    CLI printed `(no run directories found)`, `0 run(s): 0 intact, 0 moved, 0 unverifiable`, exit
+    0. Round 1 had stopped `list_runs` from dropping runs it could not read; discovery was dropping
+    them one layer earlier. Deciding whether a directory is a run is exactly the question
+    `check_run_location` exists to answer from evidence - so discovery must not pre-answer it.
+
+    ⚠️ `root_problem` is the other half, and it is why this returns a pair rather than a list. An
+    `OSError` from enumerating the root used to become an empty list, i.e. "zero runs, exit 0",
+    while the runs underneath it still existed and simply could not be assessed. That is NOT the
+    accepted "the run was deleted entirely" residual: the tree is there. The caller turns a
+    `root_problem` into an `unverifiable` entry, so the gate exits 3.
+
+    Only a root that genuinely does not exist yields `([], None)` - nothing has been allocated, and
+    a tree with no runs in it is legitimately clean.
     """
-    if not root.is_dir():
-        return []
-    found: list[Path] = []
+    try:
+        root_mode = os.stat(root).st_mode
+    except FileNotFoundError:
+        return [], None
+    except OSError as exc:
+        return [], (
+            f"the _runs root at {root} exists but could not be examined "
+            f"({exc.__class__.__name__}: {exc}) - any run beneath it is undiscoverable, which is "
+            "not the same as there being none"
+        )
+    if not stat.S_ISDIR(root_mode):
+        return [], f"the _runs root at {root} exists but is not a directory, so no run under it can be discovered"
+
     try:
         children = sorted(root.iterdir())
-    except OSError:  # pragma: no cover - the root vanished or is unreadable mid-scan
-        return []
+    except OSError as exc:
+        return [], (
+            f"the _runs root at {root} could not be listed ({exc.__class__.__name__}: {exc}) - any "
+            "run beneath it is undiscoverable, which is not the same as there being none"
+        )
+
+    found: list[Path] = []
     for child in children:
         try:
-            if not child.is_dir():
-                continue
-            if _RUN_DIR_RE.match(child.name) or (child / "run.json").is_file():
-                found.append(child)
-        except OSError:  # pragma: no cover - a child that cannot be stat'ed is still a directory
+            child_mode = os.stat(child).st_mode
+        except OSError:
+            # Cannot establish that this is NOT a run directory, so it is assessed rather than
+            # skipped. `Path.is_dir()` is unusable here: it swallows OSError and answers False,
+            # which is the fail-open shape - "I could not look" reported as "it is not one".
             found.append(child)
-    return found
+            continue
+        if stat.S_ISDIR(child_mode):
+            found.append(child)
+    return found, None
 
 
 def _read_run_manifest(run_dir: Path) -> tuple[dict[str, Any] | None, str, str]:
@@ -680,12 +855,19 @@ def _read_run_manifest(run_dir: Path) -> tuple[dict[str, Any] | None, str, str]:
                 ),
             )
         raw = manifest_path.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
+        # `ValueError` covers `UnicodeDecodeError` - a `run.json` holding bytes that are not UTF-8
+        # raised it straight out of `read_text`, past a guard that named only `OSError`.
         return None, MANIFEST_UNREADABLE, f"run.json could not be read ({exc.__class__.__name__}: {exc})"
 
     try:
         data = json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+    except (ValueError, RecursionError) as exc:
+        # `ValueError`, not `json.JSONDecodeError`: a JSON integer with more than 4300 digits makes
+        # `json.loads` raise a bare `ValueError` from CPython's int/str conversion limit, which
+        # escaped the narrower guard and exited 1 with a traceback instead of reporting
+        # `unverifiable`. `RecursionError` is the same shape for deeply nested arrays. Both are
+        # fail-CLOSED, but this function documents that it never raises, so it must not.
         empty = " (the file is empty)" if not raw.strip() else ""
         return None, MANIFEST_UNREADABLE, f"run.json is not valid JSON{empty} ({exc.__class__.__name__}: {exc})"
 
@@ -725,14 +907,30 @@ def _run_sort_key(entry: dict[str, Any]) -> tuple[int, int, str]:
     return (0, run_number, name)
 
 
+def _root_problem_entry(root: Path, problem: str) -> dict[str, Any]:
+    """An `unverifiable` entry for the `_runs/` ROOT itself, when the root exists but its children
+    cannot be enumerated. Without it, `_discover_run_dirs`'s `root_problem` would have nowhere to
+    go and the gate would report an unreadable tree as an empty one - exit 0 (finding 2)."""
+    return {
+        "root": str(root),
+        MANIFEST_STATUS_KEY: MANIFEST_UNREADABLE,
+        MANIFEST_DETAIL_KEY: problem,
+        "location_check": _unassessable(root, problem).as_dict(),
+    }
+
+
 def _collect_runs(repo_root: Path | None = None) -> list[dict[str, Any]]:
-    """EVERY run directory under `_runs/`, assessable or not, sorted by `_run_sort_key`.
+    """EVERY candidate run under `_runs/`, assessable or not, sorted by `_run_sort_key`.
 
     This is the discovery primitive both `list_runs` (inspection, which filters) and `verify_runs`
     (the gate, which must not) are built from. Splitting them is the fix for the fail-open defect:
     inspection is entitled to skip a directory it cannot read, a gate never is.
     """
-    entries = [_run_entry(run_dir) for run_dir in _iter_run_dirs(runs_root(repo_root))]
+    root = runs_root(repo_root)
+    candidates, root_problem = _discover_run_dirs(root)
+    entries = [_run_entry(run_dir) for run_dir in candidates]
+    if root_problem is not None:
+        entries.append(_root_problem_entry(root, root_problem))
     entries.sort(key=_run_sort_key)
     return entries
 
@@ -770,6 +968,11 @@ def verify_runs(repo_root: Path | None = None) -> tuple[list[dict[str, Any]], di
     printed `0 run(s): 0 intact, 0 moved, 0 unverifiable`, exit 0 - the `unverifiable` bucket
     sitting at 0 precisely when something was unverifiable. Every discovered directory is counted
     now, and one that cannot be assessed counts as `unverifiable` (exit 3).
+
+    ⚠️ "Discovered" means what `_discover_run_dirs` returns, which is EVERY child directory of the
+    root plus the root itself when the root cannot be enumerated. A directory renamed out of the
+    `<NNN>-` pattern with its manifest deleted, and an `OSError` on the root, both used to produce
+    `0 run(s)`, exit 0, with the tree still sitting on disk.
     """
     runs = _collect_runs(repo_root)
     counts = {state: 0 for state in RUN_LOCATION_STATES}

@@ -1334,15 +1334,23 @@ python scripts/work_dirs.py --verify          # exit 0 all intact / 1 something 
 ```
 
 ⚠️ **Exit 3 is `unverifiable`, and that is NOT a pass.** It means the question could not be answered
-from the evidence — a different thing from answering it "fine". Four ways to land there, and the
-first one is why `--verify` is a gate rather than a status query:
+from the evidence — a different thing from answering it "fine". The gate rests on ONE invariant,
+implemented in one discovery function and one classification function: **every child directory of an
+existing `_runs/` root is a candidate run, any candidate whose identity cannot be positively
+established from its own evidence is `unverifiable`, and `intact` is only ever returned on positive
+proof.** Seven ways to land there, and each of the first five printed **exit 0** before it was
+closed — they were found in two review rounds, one site at a time, which is why the fix collapsed
+the surface rather than adding a guard per site:
 
-| shape | why it is `unverifiable` |
+| shape | why it is `unverifiable`, and what it used to print |
 |---|---|
-| `run.json` missing, empty, truncated, malformed, locked, or valid JSON that is not an object | there is nothing to assess. This used to be skipped in **silence** and counted in no bucket at all: a canonical `_runs/001-acme/` with no manifest printed `0 run(s): 0 intact, 0 moved, 0 unverifiable`, exit 0 — the `unverifiable` bucket sitting at 0 exactly when something was unverifiable. It is also what an allocation interrupted between `mkdir` and the manifest write leaves behind |
+| `run.json` missing, empty, truncated, malformed, locked, or valid JSON that is not an object | there is nothing to assess. Skipped in **silence** and counted in no bucket: a canonical `_runs/001-acme/` with no manifest printed `0 run(s): 0 intact, 0 moved, 0 unverifiable`, exit 0 — the `unverifiable` bucket sitting at 0 exactly when something was unverifiable. It is also what an allocation interrupted between `mkdir` and the manifest write leaves behind |
+| the directory was renamed out of the `<NNN>-` pattern **and** its manifest deleted | discovery reported only children whose *current* name matched `<NNN>` or which still held a `run.json`, so a real run that lost both was invisible: `(no run directories found)`, exit 0. The tree was still on disk — this is **not** the accepted "the run was deleted entirely" residual |
+| the `_runs/` root itself cannot be enumerated (permissions, or it is a file) | the `OSError` became an empty list, i.e. "zero runs, exit 0", while every run beneath it still existed and simply could not be discovered |
+| `run` contradicts the `<NNN>-<slug>` directory it sits in | only the *type* of `run` was checked. Changing nothing but `"run"` in a freshly allocated `001-acme` — to `2`, or to `10**100` — reported `1 intact`, exit 0. The number **is** the identity in this convention, so a manifest claiming a different one is contradictory evidence, not a healthy run |
+| `allocated_abs_path` recorded as a **relative** path | it is *required* to be absolute, but the comparison completed it against the **verifier's** current directory, so a forged relative value reported `INTACT 001-acme`, exit 0 — a location verdict that depended on where the operator was standing |
 | `run.json` parsed but carries no usable `run` number | the run number is the identity; without one it is not an assessable manifest |
-| allocated before the check existed, so no self-path was recorded | nothing to compare against |
-| recorded name matches but the recorded **absolute path** does not | see below |
+| allocated before the check existed, so no self-path was recorded; or the recorded name matches but the recorded **absolute path** does not | nothing to compare against, or see below |
 
 ⚠️ **A relocated run is `unverifiable`, never `intact`.** A basename survives both a run-only move and
 a copy, so the name alone cannot answer "still there": moving `source\_runs\001-acme` to

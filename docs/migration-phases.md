@@ -73,11 +73,19 @@ reports each run as `intact` (exit 0 — recorded name *and* recorded path both 
 (exit 1 — renamed or renumbered since allocation, naming both directories) or `unverifiable`
 (exit 3 — the question cannot be answered from the evidence). **`unverifiable` is not a pass.**
 
-⚠️ **`--verify` is a GATE, so it never silently drops what it cannot assess.** A run directory whose
-`run.json` is missing, empty, truncated, malformed, locked, or holds valid JSON that is not an object
-counts as `unverifiable` and exits 3. It used to be skipped in silence and counted in *no* bucket at
-all, so a half-written run — exactly what an allocation interrupted between `mkdir` and the manifest
-write leaves behind — printed `0 run(s): 0 intact, 0 moved, 0 unverifiable`, exit 0.
+⚠️ **`--verify` is a GATE, so it never silently drops what it cannot assess.** It rests on one
+invariant, implemented in one discovery function and one classification function: **every child
+directory of an existing `_runs/` root is a candidate run, any candidate whose identity cannot be
+positively established from its own evidence is `unverifiable`, and `intact` is only ever returned
+on positive proof.** Five shapes land there, and every one of them used to exit 0:
+
+| shape | what it printed before |
+|---|---|
+| `run.json` missing, empty, truncated, malformed, locked, or valid JSON that is not an object | `0 run(s): 0 intact, 0 moved, 0 unverifiable`, exit 0 — a half-written run, exactly what an allocation interrupted between `mkdir` and the manifest write leaves behind |
+| the directory renamed out of the `<NNN>-` pattern **and** its manifest deleted; or the `_runs/` root itself unreadable | `(no run directories found)`, exit 0 — discovery filtered on the *current* name and turned an `OSError` on the root into an empty list, while the tree was still on disk |
+| `run` contradicts the `<NNN>-<slug>` directory it sits in (`2`, or `10**100`, inside `001-acme`) | `1 intact`, exit 0 — only the *type* of `run` was checked, never its agreement with the directory. The number **is** the identity, so a manifest claiming a different one is contradictory evidence |
+| `allocated_abs_path` recorded as a **relative** path | `1 intact`, exit 0 — it was completed against the *verifier's* current directory, so the verdict depended on where the operator was standing |
+| recorded name matches but the recorded absolute path does not | see below |
 
 ⚠️ **A run that is where it was allocated but at a different absolute path is `unverifiable`, not
 `intact`.** A basename is unchanged by a run-only move *and* by a copy, so the name alone cannot

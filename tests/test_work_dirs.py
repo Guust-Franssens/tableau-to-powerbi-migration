@@ -4,7 +4,9 @@
 Every test uses `tmp_path` as `repo_root` so this suite never touches the real repo's `_runs/`.
 """
 
+import ast
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -31,6 +33,7 @@ from work_dirs import (
     RUN_LOCATION_MOVED,
     RUN_LOCATION_UNVERIFIABLE,
     RUN_PATH_KEY,
+    _is_location_independent,  # the one private helper a test reaches for - see its test below
     allocate_run,
     check_run_location,
     list_runs,
@@ -322,8 +325,11 @@ def test_a_freshly_allocated_run_is_intact_and_is_not_moved_or_unverifiable(tmp_
     assert check["state"] != RUN_LOCATION_MOVED  # negative control
     assert check["state"] != RUN_LOCATION_UNVERIFIABLE  # negative control
     assert check["recorded_dir_name"] == check["actual_dir_name"] == "001-acme"
-    # the verdict must rest on the RECORD, never on the run/unit_key inference
-    assert check["derived_name_check"] == DERIVED_NAME_NOT_CONSULTED
+    # The inference is now CONSULTED on the healthy path - `run`/`unit_key` must reconstruct the
+    # directory the manifest sits in (finding 3), so a contradictory number cannot read as healthy.
+    # It can still only ever DEMOTE: `test_a_legacy_manifest_with_no_recorded_name_is_unverifiable_
+    # never_intact` is the negative control that a matching inference promotes nothing.
+    assert check["derived_name_check"] == DERIVED_NAME_MATCHES
 
 
 def test_a_renumbered_run_reports_moved_and_names_both_directories(tmp_path: Path) -> None:
@@ -741,12 +747,13 @@ def test_verify_exit_code_gates_on_state_never_on_printed_text(counts: dict, exp
     assert verify_exit_code(counts) == expected
 
 
-def _run_verify_cli(repo_root: Path) -> subprocess.CompletedProcess:
+def _run_verify_cli(repo_root: Path, cwd: Path | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, str(REPO_ROOT / "scripts" / "work_dirs.py"), "--verify", "--repo-root", str(repo_root)],
         capture_output=True,
         text=True,
         check=False,
+        cwd=None if cwd is None else str(cwd),
     )
 
 
@@ -870,3 +877,377 @@ def test_the_rename_prohibition_and_its_reason_are_stated_in_work_dirs_itself(tm
     # the granularity their agent got wrong: one run per pipeline run, not one per workbook
     assert "not one per workbook" in module_doc.lower()
     assert "not one per workbook" in allocate_doc.lower()
+
+
+# --------------------------------------------------------------------------------------
+# PR #477, review round 2 - the SAME fail-open class at three more sites, and the residual
+#
+# Round 1 fixed `list_runs` being the gate's only input. Round 2 found the identical defect in the
+# path comparison, in directory discovery and in run-number validation - the signature of a class
+# narrowed one site at a time. The fix collapses discovery and classification onto ONE path each;
+# these tests pin the reproductions AND the collapse, because a passing behaviour test would not
+# stop the next guard being bolted on beside them.
+# --------------------------------------------------------------------------------------
+
+
+def _work_dirs_source() -> str:
+    return (REPO_ROOT / "scripts" / "work_dirs.py").read_text(encoding="utf-8")
+
+
+# --- Finding 1: a relative "absolute" path forges `intact` from the verifier's own CWD ---
+
+
+def test_a_relative_recorded_path_is_unverifiable_not_intact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`allocated_abs_path` is REQUIRED to be absolute, but the comparison ran it through
+    `abspath()`, which completes a relative value against the verifier's current directory. Real
+    CLI, measured: recording `_review477_round2_attacks\\relative-path\\_runs\\001-acme` and
+    checking from the matching directory printed `INTACT 001-acme`, `1 intact`, exit 0.
+
+    The verdict therefore depended on where the operator was standing - in the one module that
+    exists to be CWD-independent (`REPO_ROOT` is resolved from `__file__`, never `Path.cwd()`)."""
+    run = allocate_run("acme", repo_root=tmp_path)
+    manifest = json.loads(run.manifest_path.read_text(encoding="utf-8"))
+    manifest[RUN_PATH_KEY] = str(Path("_runs") / "001-acme")  # resolves to the run dir from tmp_path
+    run.manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    monkeypatch.chdir(tmp_path)  # stand exactly where the forged value resolves
+
+    check = list_runs(tmp_path)[0]["location_check"]
+
+    assert check["state"] == RUN_LOCATION_UNVERIFIABLE
+    assert check["state"] != RUN_LOCATION_INTACT  # negative control: the defect being fixed
+    assert check["path_check"] == PATH_CHECK_UNRECORDED
+    assert "not an absolute path" in check["detail"]
+
+
+def test_verify_cli_exits_3_on_a_relative_recorded_path_even_from_the_matching_cwd(tmp_path: Path) -> None:
+    """The reviewer's reproduction end to end, judged by exit code: the CLI is run FROM the
+    directory the forged relative value resolves against, which is the only place it could ever
+    have looked healthy."""
+    run = allocate_run("acme", repo_root=tmp_path)
+    manifest = json.loads(run.manifest_path.read_text(encoding="utf-8"))
+    manifest[RUN_PATH_KEY] = str(Path("_runs") / "001-acme")
+    run.manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    result = _run_verify_cli(tmp_path, cwd=tmp_path)
+
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "UNVERIFIABLE" in result.stdout
+    assert "INTACT" not in result.stdout
+    assert "1 unverifiable" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("value", "independent"),
+    [
+        # accepted: these name one place wherever the process is standing
+        (str(Path.cwd().resolve()), True),
+        (r"C:\runs\001-acme", os.name == "nt"),
+        ("//server/share/runs/001-acme", True),
+        # rejected: every one of these is completed against the process's CWD or current DRIVE
+        ("001-acme", False),
+        (str(Path("..") / "_runs" / "001-acme"), False),
+        (r"\_runs\001-acme", os.name != "nt"),  # Windows drive-relative; a plain absolute path on POSIX
+        ("C:001-acme", os.name != "nt"),  # drive-relative WITH a drive letter
+        ("", False),
+    ],
+)
+def test_only_a_location_independent_path_counts_as_a_recorded_location(value: str, independent: bool) -> None:
+    """The fact requirement 4 consumes, tested directly - the black-box route can only exercise it
+    from a CWD that happens to match, which is exactly why the defect survived review round 1.
+
+    ⚠️ `os.path.isabs` is not this predicate and would have missed two rows: on Windows it answered
+    True for `\\_runs\\001-acme` before Python 3.13 and False from 3.13 on, and a drive-relative
+    path still resolves against whatever drive the process is on. Both anchors are required - the
+    driveless one absorbs a drive-relative value (`ntpath.join` keeps the second operand's root),
+    the drive-bearing one exposes it."""
+    assert _is_location_independent(value) is independent
+
+
+def test_an_absolute_recorded_path_spelled_awkwardly_is_still_intact(tmp_path: Path) -> None:
+    """The negative control for finding 1, and the one that stops the fix being "reject everything":
+    an absolute path is still absolute after a `..` hop and a case change, and must stay `intact`."""
+    run = allocate_run("acme", repo_root=tmp_path)
+    manifest = json.loads(run.manifest_path.read_text(encoding="utf-8"))
+    awkward = Path(manifest[RUN_PATH_KEY]).parent / "no-such-dir" / ".." / "001-acme"
+    manifest[RUN_PATH_KEY] = str(awkward)
+    run.manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    check = list_runs(tmp_path)[0]["location_check"]
+
+    assert check["state"] == RUN_LOCATION_INTACT
+    assert check["path_check"] == PATH_CHECK_MATCHES
+
+
+# --- Finding 2: discovery silently omitted existing run directories ---
+
+
+def test_a_run_renamed_out_of_the_number_pattern_with_no_manifest_is_still_discovered(tmp_path: Path) -> None:
+    """Discovery reported only children whose CURRENT name matched `<NNN>` or which still held a
+    `run.json`, so a real allocated run that lost both matched neither test. Measured on the real
+    CLI: `(no run directories found)`, `0 run(s): 0 intact, 0 moved, 0 unverifiable`, exit 0.
+
+    ⚠️ This is NOT the accepted "the run was deleted entirely" residual - the tree is still on
+    disk, it just cannot be assessed. Deciding whether a directory is a run is the question
+    `check_run_location` exists to answer from evidence, so discovery must not pre-answer it."""
+    run = allocate_run("acme", repo_root=tmp_path)
+    run.manifest_path.unlink()
+    run.root.rename(run.root.parent / "acme-without-number")
+
+    gated, counts = verify_runs(tmp_path)
+
+    assert [Path(entry["root"]).name for entry in gated] == ["acme-without-number"]
+    assert counts[RUN_LOCATION_UNVERIFIABLE] == 1
+    assert counts[RUN_LOCATION_INTACT] == 0  # negative control
+    assert verify_exit_code(counts) == 3
+    assert not list_runs(tmp_path)  # inspection may still skip it; only the GATE may not
+
+
+def test_verify_cli_exits_3_on_a_run_renamed_out_of_the_number_pattern(tmp_path: Path) -> None:
+    """Finding 2 through the real CLI, where it was reproduced, judged by exit code."""
+    run = allocate_run("acme", repo_root=tmp_path)
+    run.manifest_path.unlink()
+    run.root.rename(run.root.parent / "acme-without-number")
+
+    result = _run_verify_cli(tmp_path)
+
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "no run directories found" not in result.stdout
+    assert "1 run(s)" in result.stdout and "1 unverifiable" in result.stdout
+
+
+def test_a_hand_made_directory_with_no_number_and_no_manifest_is_discovered(tmp_path: Path) -> None:
+    """The same hole reached without a rename: any child directory is a candidate run."""
+    root = runs_root(tmp_path)
+    (root / "scratch-notes").mkdir(parents=True)
+
+    _gated, counts = verify_runs(tmp_path)
+
+    assert counts[RUN_LOCATION_UNVERIFIABLE] == 1
+    assert verify_exit_code(counts) == 3
+
+
+def test_a_regular_file_beside_the_runs_is_not_a_candidate_run(tmp_path: Path) -> None:
+    """The negative control for discovery: unfiltered means every child DIRECTORY, not every child.
+    A future `_runs/INDEX.md` must not turn a healthy tree red."""
+    allocate_run("acme", repo_root=tmp_path)
+    (runs_root(tmp_path) / "INDEX.md").write_text("# runs\n", encoding="utf-8")
+
+    _gated, counts = verify_runs(tmp_path)
+
+    assert counts == {RUN_LOCATION_INTACT: 1, RUN_LOCATION_MOVED: 0, RUN_LOCATION_UNVERIFIABLE: 0}
+    assert verify_exit_code(counts) == 0
+
+
+def test_a_runs_root_that_cannot_be_listed_is_unverifiable_not_zero_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second half of finding 2: an `OSError` from enumerating the root was converted into an
+    empty list, i.e. `0 run(s): 0 intact, 0 moved, 0 unverifiable`, exit 0 - while the runs
+    underneath it still existed and simply could not be discovered."""
+    allocate_run("acme", repo_root=tmp_path)
+    root = runs_root(tmp_path)
+    real_iterdir = Path.iterdir
+
+    def _refuse(self: Path):  # noqa: ANN202 - a generator/iterator, matching Path.iterdir
+        if self == root:
+            raise PermissionError(5, "Access is denied")
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", _refuse)
+
+    gated, counts = verify_runs(tmp_path)
+
+    assert len(gated) == 1, "an unreadable root produced no entry at all"
+    assert counts[RUN_LOCATION_UNVERIFIABLE] == 1
+    assert counts[RUN_LOCATION_INTACT] == 0  # negative control
+    assert verify_exit_code(counts) == 3
+    assert "Access is denied" in gated[0]["location_check"]["detail"]
+
+
+def test_a_runs_root_that_is_a_file_is_unverifiable_not_zero_runs(tmp_path: Path) -> None:
+    """`Path.is_dir()` swallows every error and answers False, so "I could not look" and "it is not
+    a directory" were the same answer - and both meant exit 0."""
+    runs_root(tmp_path).write_text("not a directory", encoding="utf-8")
+
+    _gated, counts = verify_runs(tmp_path)
+
+    assert counts[RUN_LOCATION_UNVERIFIABLE] == 1
+    assert verify_exit_code(counts) == 3
+
+
+def test_a_runs_root_that_was_never_created_is_still_a_clean_zero(tmp_path: Path) -> None:
+    """The negative control for the root probe: "nothing has been allocated" is legitimately clean,
+    and must stay distinguishable from "the root exists and cannot be read"."""
+    _gated, counts = verify_runs(tmp_path)
+
+    assert counts == {RUN_LOCATION_INTACT: 0, RUN_LOCATION_MOVED: 0, RUN_LOCATION_UNVERIFIABLE: 0}
+    assert verify_exit_code(counts) == 0
+
+
+# --- Finding 3: a run number contradicting its own directory read as healthy ---
+
+
+@pytest.mark.parametrize("planted", [2, 0, 10**100])
+def test_a_run_number_that_contradicts_its_own_directory_is_unverifiable(tmp_path: Path, planted: int) -> None:
+    """The number IS the identity in this convention (issue #234), and nothing checked it against
+    the `<NNN>-<slug>` directory it sits in - only that it was a non-negative integer. Changing
+    nothing but `"run"` in a freshly allocated `001-acme` reported `1 intact`, exit 0, for both `2`
+    and `10**100`, while a float or a null correctly reported `1 unverifiable`, exit 3."""
+    run = allocate_run("acme", repo_root=tmp_path)
+    manifest = json.loads(run.manifest_path.read_text(encoding="utf-8"))
+    manifest["run"] = planted
+    run.manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    check = list_runs(tmp_path)[0]["location_check"]
+
+    assert check["state"] == RUN_LOCATION_UNVERIFIABLE
+    assert check["state"] != RUN_LOCATION_INTACT  # negative control: the defect being fixed
+    assert check["derived_name_check"] == DERIVED_NAME_MISMATCH
+    assert "CONTRADICTS" in check["detail"]
+
+
+def test_a_unit_key_that_contradicts_its_own_directory_is_unverifiable(tmp_path: Path) -> None:
+    """The same contradiction reached through the other half of the derived name."""
+    run = allocate_run("acme", repo_root=tmp_path)
+    manifest = json.loads(run.manifest_path.read_text(encoding="utf-8"))
+    manifest["unit_key"] = "something-else"
+    run.manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    assert _state_of(list_runs(tmp_path)[0]) == RUN_LOCATION_UNVERIFIABLE
+
+
+def test_verify_cli_exits_3_on_a_contradictory_run_number(tmp_path: Path) -> None:
+    """Finding 3 through the real CLI, judged by exit code."""
+    run = allocate_run("acme", repo_root=tmp_path)
+    manifest = json.loads(run.manifest_path.read_text(encoding="utf-8"))
+    manifest["run"] = 2
+    run.manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    result = _run_verify_cli(tmp_path)
+
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "INTACT" not in result.stdout
+
+
+def test_an_unusable_run_number_is_reported_before_the_agreement_check(tmp_path: Path) -> None:
+    """Ordering control: `"run": "two"` is not a number at all, so it must be reported as an
+    unusable run number rather than as a name disagreement - the requirements are a ladder, and the
+    detail has to name the first rung that failed or it points at the wrong repair."""
+    run = allocate_run("acme", repo_root=tmp_path)
+    manifest = json.loads(run.manifest_path.read_text(encoding="utf-8"))
+    manifest["run"] = "two"
+    run.manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    check = list_runs(tmp_path)[0]["location_check"]
+
+    assert check["state"] == RUN_LOCATION_UNVERIFIABLE
+    assert check["derived_name_check"] == DERIVED_NAME_NOT_CONSULTED
+    assert "not a usable run number" in check["detail"]
+
+
+def test_a_matching_run_number_is_still_intact(tmp_path: Path) -> None:
+    """The negative control for finding 3: demanding agreement must not make agreement impossible.
+    Rewriting `"run"` to the value it already had leaves the run `intact`."""
+    run = allocate_run("acme", repo_root=tmp_path)
+    manifest = json.loads(run.manifest_path.read_text(encoding="utf-8"))
+    manifest["run"] = 1
+    run.manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    assert _state_of(list_runs(tmp_path)[0]) == RUN_LOCATION_INTACT
+
+
+# --- The residual: a manifest whose bytes make the READER raise, not the checker ---
+
+
+def test_an_oversized_json_integer_is_unverifiable_not_a_traceback(tmp_path: Path) -> None:
+    """A JSON integer over CPython's 4300-digit int/str conversion limit makes `json.loads` raise a
+    bare `ValueError`, which is NOT a `json.JSONDecodeError` and escaped the guard: the CLI exited
+    1 with a traceback instead of reporting `unverifiable`. Fail-closed, but `_read_run_manifest`
+    documents that it never raises, so it must not."""
+    root = runs_root(tmp_path)
+    (root / "001-acme").mkdir(parents=True)
+    (root / "001-acme" / "run.json").write_text('{"run": 1, "big": ' + "9" * 5000 + "}", encoding="utf-8")
+
+    _gated, counts = verify_runs(tmp_path)  # must not raise
+
+    assert counts[RUN_LOCATION_UNVERIFIABLE] == 1
+    assert verify_exit_code(counts) == 3
+
+    result = _run_verify_cli(tmp_path)
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_a_run_json_that_is_not_utf8_is_unverifiable_not_a_traceback(tmp_path: Path) -> None:
+    """The same shape one layer earlier: `read_text` raises `UnicodeDecodeError`, a `ValueError`,
+    past a guard that named only `OSError`."""
+    root = runs_root(tmp_path)
+    (root / "001-acme").mkdir(parents=True)
+    (root / "001-acme" / "run.json").write_bytes(b'{"run": 1, "unit_key": "\xff\xfe acme"}')
+
+    _gated, counts = verify_runs(tmp_path)  # must not raise
+
+    assert counts[RUN_LOCATION_UNVERIFIABLE] == 1
+    assert verify_exit_code(counts) == 3
+
+
+# --- The collapse itself: pin the structure, not only the behaviours ---
+
+
+def _state_keyword_sites(state_constant: str) -> list[str]:
+    """Every place in `work_dirs.py` that CONSTRUCTS a verdict with `state=<constant>`, named by
+    the enclosing function. Parsed, not grepped: the invariant block quotes these literals in
+    prose, and a comment is not a construction site."""
+    tree = ast.parse(_work_dirs_source())
+    sites: list[str] = []
+    for func in ast.walk(tree):
+        if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for node in ast.walk(func):
+            if not isinstance(node, ast.keyword) or node.arg != "state":
+                continue
+            if isinstance(node.value, ast.Name) and node.value.id == state_constant:
+                sites.append(func.name)
+    return sites
+
+
+def test_intact_is_constructed_at_exactly_one_place_in_work_dirs() -> None:
+    """The stop rule this round was given: do not narrow the class one site at a time. Three more
+    local guards would have left a fourth site to find, so `check_run_location` is now the only
+    function that can produce a clean verdict, on its last line, after every requirement held.
+
+    This is what makes "the next unlisted surface cannot exist" checkable rather than asserted: a
+    second `intact` construction anywhere in the module fails here, whatever it is guarded by."""
+    intact_sites = _state_keyword_sites("RUN_LOCATION_INTACT")
+    moved_sites = _state_keyword_sites("RUN_LOCATION_MOVED")
+
+    assert intact_sites == ["check_run_location"], (
+        f"`intact` is constructed in {intact_sites} - the classification surface has re-opened"
+    )
+    assert moved_sites == ["check_run_location"], (
+        f"`moved` is constructed in {moved_sites} - it is likewise a single established finding"
+    )
+
+
+def test_discovery_applies_no_name_pattern_and_no_manifest_precondition() -> None:
+    """Finding 2 pinned structurally. `_discover_run_dirs` filtered on `_RUN_DIR_RE` and on
+    `run.json` existing; both are fail-open pre-answers to the question `check_run_location` exists
+    to answer. Parsed rather than grepped so a renamed regex or a nested helper cannot slip past."""
+    tree = ast.parse(_work_dirs_source())
+    discover = next(
+        node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "_discover_run_dirs"
+    )
+    names = {node.id for node in ast.walk(discover) if isinstance(node, ast.Name)}
+    body = ast.get_source_segment(_work_dirs_source(), discover) or ""
+
+    assert "_RUN_DIR_RE" not in names, "discovery re-acquired a name-pattern filter"
+    assert "run.json" not in body.split('"""')[-1], "discovery re-acquired a 'has a manifest' precondition"
+
+
+def test_the_invariant_is_stated_in_work_dirs_itself() -> None:
+    """The prevention half, same reasoning as the rename prohibition: the rule has to live in the
+    file the next agent opens, or the next local guard gets added beside the last one."""
+    source = _work_dirs_source()
+
+    assert "THE ONE INVARIANT" in source
+    assert "only ever returned on positive proof" in source
