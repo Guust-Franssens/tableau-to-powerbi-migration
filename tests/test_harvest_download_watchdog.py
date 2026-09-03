@@ -518,6 +518,56 @@ def test_nothing_is_reported_when_every_asset_landed(caplog: pytest.LogCaptureFi
 # --- end to end through main() -------------------------------------------------------------------
 
 
+def test_main_forwards_the_operator_s_timeouts_to_every_download(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Parsing a flag and then ignoring it looks exactly like having no flag at all.
+
+    A mutation that replaced `args.download_timeout` with the module default at the call site
+    survived every other test in this file, because they all call `download()` directly.
+    """
+    db = tmp_path / "estate.db"
+    con = sqlite3.connect(db)
+    con.executescript(
+        """
+        CREATE TABLE project (luid TEXT PRIMARY KEY, name TEXT);
+        CREATE TABLE workbook (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        CREATE TABLE datasource (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        CREATE TABLE dependency (workbook_luid TEXT, datasource_luid TEXT, datasource_name TEXT);
+        INSERT INTO workbook VALUES ('wb-ia', 'IA Redemptions', 'p');
+        """
+    )
+    con.commit()
+    con.close()
+
+    seen: list[dict] = []
+    monkeypatch.setattr(harvest, "engine_scripts_dir", lambda: tmp_path / "engine")
+    monkeypatch.setattr(harvest, "resolve_env", lambda path: {"TABLEAU_SERVER_URL": "https://example.invalid"})
+    monkeypatch.setattr(harvest, "require", lambda env: None)
+    monkeypatch.setattr(harvest, "download", lambda *a, **k: (seen.append(k), (False, "nope"))[1])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "harvest_estate_assets.py",
+            "--out",
+            str(tmp_path / "_sweep"),
+            "--db",
+            str(db),
+            "--allow-unignored-out",
+            "--download-timeout",
+            "1234",
+            "--download-stall-timeout",
+            "77",
+        ],
+    )
+    assert harvest.main() == 0
+    assert seen, "no download was attempted at all"
+    assert seen[0]["timeout"] == 1234.0, f"the CLI ceiling never reached download(): {seen[0]}"
+    assert seen[0]["stall_timeout"] == 77.0, f"the CLI stall timeout never reached download(): {seen[0]}"
+    assert seen[0]["timeout"] != harvest.DEFAULT_DOWNLOAD_TIMEOUT, "the test cannot tell the flag from the default"
+
+
 def test_a_failed_download_reaches_parse_sweep_md_through_main(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """The committed artifact, not just the console, has to name the asset that never landed."""
     db = tmp_path / "estate.db"
