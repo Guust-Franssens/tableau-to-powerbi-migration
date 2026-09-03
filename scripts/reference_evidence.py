@@ -21,9 +21,10 @@ import json
 import re
 import struct
 import zlib
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 from xml.etree import ElementTree
 
 from object_identity import (
