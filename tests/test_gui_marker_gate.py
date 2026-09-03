@@ -39,6 +39,7 @@ from __future__ import annotations
 import ast
 import contextlib
 import functools
+import importlib.util
 import os
 import re
 import shlex
@@ -375,6 +376,27 @@ def test_the_root_hook_deselects_a_gui_test_that_is_in_no_bundle() -> None:
         f"is not deselecting it: {sorted(default)}"
     )
     assert opted_in, "the same test could not be selected with the opt-in either, so it is orphaned"
+
+
+def test_the_nested_portability_run_does_not_inherit_an_ambient_gui_opt_in(monkeypatch) -> None:
+    """Kills: `T2P_RUN_GUI=1` left in a shell turning a PORTABILITY check into ten real windows.
+
+    `tests/test_skills.py` copies each bundle out and runs its whole suite. The copied bundle's own
+    conftest honours the portable opt-in - it has to, since no flag survives the copy - so an
+    inherited variable would make an unrelated check hijack the desktop, which is issue #447 by
+    another route. Driven behaviourally, by calling that module's own env builder with the variable
+    set: an assertion on the source text would be satisfied by the comment explaining it.
+    """
+    monkeypatch.setenv(RUN_GUI_ENV, "1")
+    spec = importlib.util.spec_from_file_location("t2p_test_skills_gui_probe", REPO_ROOT / "tests" / "test_skills.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    child = module._repo_free_env()  # noqa: SLF001  # pylint: disable=protected-access
+    assert RUN_GUI_ENV not in child, (
+        f"the nested bundle run inherits {RUN_GUI_ENV}, so a portability check spawns real windows "
+        "whenever an operator has the opt-in exported"
+    )
 
 
 def test_the_opt_in_flag_selects_exactly_the_gui_tests() -> None:
