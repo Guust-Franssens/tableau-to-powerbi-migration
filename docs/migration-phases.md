@@ -60,6 +60,21 @@ One numbered run directory per pipeline run, allocated by
 is decoration for human navigation; nothing may parse it back into a display name (two projects can
 legitimately hold same-named workbooks — issue #234, rule 2).
 
+⚠️ **"Per pipeline run" means per *invocation*, not per workbook.** Run 408 below is **one** run
+covering a 48-workbook site; its per-workbook units live inside that run's `bundle/pbip/`, never in
+48 sibling run directories. `unit_key` names what the run is *about* (a site, a project, or a single
+workbook when that is genuinely the whole job) — it is not a promise that each workbook gets a run.
+A customer's agent read `work_dirs.py`, inferred one-run-per-workbook, and renumbered **14** run
+directories in the resulting reorg, breaking the absolute self-paths inside each one (issue #470).
+
+⚠️ **Renaming an existing run is destructive, and it is now detectable.** `allocate_run` records the
+directory name it allocated, and `python scripts/work_dirs.py --verify` reports each run as
+`intact` (exit 0), `moved` (exit 1 — renamed or renumbered since allocation, naming both directories)
+or `unverifiable` (exit 3 — allocated before the check existed, so the question cannot be answered
+from the manifest). **`unverifiable` is not a pass**; every run predating the change lands there,
+including run 408 below. The comparison is on the directory *name*, so cloning or moving the
+repository — or working in a `git worktree` — does not report `moved`.
+
 `CANONICAL_SUBDIRS` (`scripts/work_dirs.py:72`) is the single source of truth for the layout:
 
 | subdir | produced by | contents | measured on run 408 |

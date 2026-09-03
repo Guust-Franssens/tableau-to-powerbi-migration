@@ -72,10 +72,10 @@ Eligible files: tracked Markdown knowledge/navigation files, `.github/pbi.kb/**/
 | Find migration guidance | [`docs/deterministic-tier-integration.md`](../docs/deterministic-tier-integration.md) | Engine and handoff integration. |
 | Find migration guidance | [`docs/dry-run-findings-2026-08-11.md`](../docs/dry-run-findings-2026-08-11.md) | Durable F00x dry-run findings. |
 | Find migration guidance | [`docs/engine-gap-harvest.md`](../docs/engine-gap-harvest.md) | Attribute and classify the `reports/` vs `pbip/` delta into engine-gap evidence — provenance delegated to the `--tamper` gate's own adjudicator. |
-| Find migration guidance | [`docs/migration-phases.md`](../docs/migration-phases.md) | The three-phase pipeline shape: what each phase produces, where it lands, which gate guards each hop, and the known gaps. |
+| Find migration guidance | [`docs/migration-phases.md`](../docs/migration-phases.md) | The three-phase pipeline shape: what each phase produces, where it lands, which gate guards each hop, the `_runs/<NNN>-<slug>` identity rule (never renamed/renumbered; one run per pipeline run, **not** per workbook), and the known gaps. |
 | Find migration guidance | [`docs/migration-programme.md`](../docs/migration-programme.md) | Programme phases and operating model. |
 | Find migration guidance | [`docs/migration-spec.md`](../docs/migration-spec.md) | `migration-spec.json` contract. |
-| Find migration guidance | [`docs/operator-runbook.md`](../docs/operator-runbook.md) | Manual pipeline operation. |
+| Find migration guidance | [`docs/operator-runbook.md`](../docs/operator-runbook.md) | Manual pipeline operation, the failure playbook, and §4.12 **Windows/PowerShell misreads** — `NativeCommandError` on a command that exited 0, long-path `Remove-Item`, `Start-Process -ArgumentList` mangling a multi-word `--workbook`, and `requests`+certifi failing TLS where the toolkit's `urllib` + Windows certificate store succeeds. |
 | Test the offline deployment rehearsal | [`docs/offline-mock-harness.md`](offline-mock-harness.md) | Offline Tableau-to-Fabric mock harness and fidelity boundary. |
 | Run the test suite | [`docs/parallel-test-loop.md`](parallel-test-loop.md) | Fast parallel loop vs the serial pre-PR gate, and the `serial` marker. |
 | Find migration guidance | [`docs/reference-capture.md`](../docs/reference-capture.md) | Tableau reference capture and evidence grading. |
@@ -84,7 +84,7 @@ Eligible files: tracked Markdown knowledge/navigation files, `.github/pbi.kb/**/
 | Improve review throughput | [`docs/review-throughput-postmortem.md`](../docs/review-throughput-postmortem.md) | Measured 2026-09-01/02 review-round costs, causes, counterexamples, and the replacement brief contract. |
 | Find migration guidance | [`docs/tableau-dax-translation-guide.md`](../docs/tableau-dax-translation-guide.md) | Translate Tableau calcs/LODs/table calcs. |
 | Find migration guidance | [`docs/tableau-map-to-azuremaps.md`](../docs/tableau-map-to-azuremaps.md) | Translate Tableau maps to Azure Maps. |
-| Find migration guidance | [`docs/windows-path-limits.md`](../docs/windows-path-limits.md) | Windows MAX_PATH ceilings a shipped bundle must respect. |
+| Find migration guidance | [`docs/windows-path-limits.md`](../docs/windows-path-limits.md) | Windows MAX_PATH ceilings a shipped bundle must respect — and how to DELETE a tree that is already over one (`\\?\` prefix plus a chmod handler, because git objects are read-only). |
 | Find migration guidance | [`docs/upstream-issue-gate.md`](../docs/upstream-issue-gate.md) | Route engine issues upstream vs local. |
 | Invoke subagent | [`.github/agents/dry-run-operator.agent.md`](../.github/agents/dry-run-operator.agent.md) | Full customer-shaped pipeline dry-run persona; read-only against the toolkit. |
 | Invoke subagent | [`.github/agents/pbi-migration-validator.agent.md`](../.github/agents/pbi-migration-validator.agent.md) | Read-only fidelity validator persona. |
