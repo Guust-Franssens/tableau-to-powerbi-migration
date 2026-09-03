@@ -1333,12 +1333,29 @@ workbook: a 48-workbook estate sweep is a single run whose per-workbook units li
 python scripts/work_dirs.py --verify          # exit 0 all intact / 1 something moved / 3 unverifiable
 ```
 
-⚠️ **Exit 3 is `unverifiable`, and that is NOT a pass.** A run allocated before the check existed
-recorded no self-path, so the question cannot be answered from its manifest — which is a different
-thing from answering it "fine". Measured on this machine: all three runs under `_runs/` report
-`unverifiable`, exit 3. Only `moved` (exit 1) is an established finding, and it names both the
-recorded and the actual directory. The comparison is on the directory **name**, so a repo that has
-been cloned, moved, or checked out as a `git worktree` stays `intact`.
+⚠️ **Exit 3 is `unverifiable`, and that is NOT a pass.** It means the question could not be answered
+from the evidence — a different thing from answering it "fine". Four ways to land there, and the
+first one is why `--verify` is a gate rather than a status query:
+
+| shape | why it is `unverifiable` |
+|---|---|
+| `run.json` missing, empty, truncated, malformed, locked, or valid JSON that is not an object | there is nothing to assess. This used to be skipped in **silence** and counted in no bucket at all: a canonical `_runs/001-acme/` with no manifest printed `0 run(s): 0 intact, 0 moved, 0 unverifiable`, exit 0 — the `unverifiable` bucket sitting at 0 exactly when something was unverifiable. It is also what an allocation interrupted between `mkdir` and the manifest write leaves behind |
+| `run.json` parsed but carries no usable `run` number | the run number is the identity; without one it is not an assessable manifest |
+| allocated before the check existed, so no self-path was recorded | nothing to compare against |
+| recorded name matches but the recorded **absolute path** does not | see below |
+
+⚠️ **A relocated run is `unverifiable`, never `intact`.** A basename survives both a run-only move and
+a copy, so the name alone cannot answer "still there": moving `source\_runs\001-acme` to
+`moved\_runs\001-acme` reported `INTACT 001-acme`, exit 0, and so did a copy of a run into a second
+`_runs\` root. Whether the whole checkout moved (legitimate) or this one run was moved or copied
+(corruption) **cannot be distinguished from a single run's evidence**, and both break the absolute
+self-paths embedded under `bundle/` — so the verdict is "cannot establish", not "fine". This is not a
+fresh-clone false alarm: `_runs/` is git-ignored, so a clone and a fresh `git worktree` carry no runs
+at all (`git check-ignore -v -- _runs/001-acme/run.json` → `.gitignore:162:/_*`).
+
+Only `moved` (exit 1) is an established finding, and it names both the recorded and the actual
+directory. If you did move the whole checkout deliberately, re-verify the bundles under each run
+before trusting them; there is no acknowledge-and-clear switch, on purpose.
 
 The whole tree is ignored by construction (`/_*` in
 `.gitignore`; verify with `git check-ignore -v -- <path>`, **no trailing slash**, before trusting it).

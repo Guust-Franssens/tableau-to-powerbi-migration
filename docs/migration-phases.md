@@ -67,13 +67,26 @@ workbook when that is genuinely the whole job) — it is not a promise that each
 A customer's agent read `work_dirs.py`, inferred one-run-per-workbook, and renumbered **14** run
 directories in the resulting reorg, breaking the absolute self-paths inside each one (issue #470).
 
-⚠️ **Renaming an existing run is destructive, and it is now detectable.** `allocate_run` records the
-directory name it allocated, and `python scripts/work_dirs.py --verify` reports each run as
-`intact` (exit 0), `moved` (exit 1 — renamed or renumbered since allocation, naming both directories)
-or `unverifiable` (exit 3 — allocated before the check existed, so the question cannot be answered
-from the manifest). **`unverifiable` is not a pass**; every run predating the change lands there,
-including run 408 below. The comparison is on the directory *name*, so cloning or moving the
-repository — or working in a `git worktree` — does not report `moved`.
+⚠️ **Renaming an existing run is destructive, and it is now detectable.** `allocate_run` records both
+the directory name and the absolute path it allocated, and `python scripts/work_dirs.py --verify`
+reports each run as `intact` (exit 0 — recorded name *and* recorded path both still match), `moved`
+(exit 1 — renamed or renumbered since allocation, naming both directories) or `unverifiable`
+(exit 3 — the question cannot be answered from the evidence). **`unverifiable` is not a pass.**
+
+⚠️ **`--verify` is a GATE, so it never silently drops what it cannot assess.** A run directory whose
+`run.json` is missing, empty, truncated, malformed, locked, or holds valid JSON that is not an object
+counts as `unverifiable` and exits 3. It used to be skipped in silence and counted in *no* bucket at
+all, so a half-written run — exactly what an allocation interrupted between `mkdir` and the manifest
+write leaves behind — printed `0 run(s): 0 intact, 0 moved, 0 unverifiable`, exit 0.
+
+⚠️ **A run that is where it was allocated but at a different absolute path is `unverifiable`, not
+`intact`.** A basename is unchanged by a run-only move *and* by a copy, so the name alone cannot
+answer "still there": moving `source/_runs/001-acme` to `moved/_runs/001-acme` reported `INTACT`,
+exit 0. Whether the whole checkout moved (legitimate) or this one run was moved or copied
+(corruption) cannot be told apart from a single run's evidence — and **both** break the absolute
+self-paths embedded under `bundle/`, so neither is reported as healthy. Note that a clone and a
+fresh `git worktree` carry no runs at all (`_runs/` is git-ignored: `git check-ignore -v --
+_runs/001-acme/run.json` → `.gitignore:162:/_*`), so this is not a fresh-clone false alarm.
 
 `CANONICAL_SUBDIRS` (`scripts/work_dirs.py:72`) is the single source of truth for the layout:
 
