@@ -837,6 +837,79 @@ def test_the_pat_secret_never_reaches_a_persisted_artifact(monkeypatch, no_sleep
     assert no_sleep == []
 
 
+def test_a_credential_reflected_in_the_SERVERINFO_VERSION_FIELDS_reaches_no_surface(
+    monkeypatch, no_sleep, tmp_path, caplog
+):
+    """The round-2 High finding on #475, across all three surfaces an operator or an artifact sees.
+
+    ``productVersion`` and its ``build`` attribute are **free-form** -- a version number is merely
+    what a well-behaved server puts there -- and `server_info` applied the redactor it was handed to
+    exactly one of its four fields. Measured before the fix, with a token in both: it arrived
+    verbatim in ``assessment.json`` (`server_ceiling.product_version`), in ``report.md`` (the
+    *"what the server advertises"* line) and on the console.
+
+    ⚠️ The justification that hid it was *"`/serverinfo` is unauthenticated, so it cannot reflect a
+    credential"*. That is an argument about the REQUEST, and the hazard is the SPEAKER: the same
+    server -- or any intermediary -- watched the PAT sign-in earlier in this very run and can echo it
+    in any later response. So the credential planted here is the run's OWN configured secret, not a
+    synthetic stand-in, which is what makes this test about a reachable route rather than a shape.
+
+    Three surfaces, deliberately, because the earlier security test covered only the oracle's
+    `svg_gate_advice` warning -- which does its own later redaction, and so was incapable of
+    observing a leak on this path.
+    """
+
+    class Echoing(FakeTableau):
+        """A gateway that reflects the sign-in credential in a perfectly ordinary 200 /serverinfo."""
+
+        def urlopen(self, request, timeout=None):
+            if "/serverinfo" in request.full_url:
+                secret = ENV["TABLEAU_PAT_SECRET"]
+                body = (
+                    b'<?xml version="1.0" encoding="UTF-8"?><tsResponse><serverInfo>'
+                    + f'<productVersion build="{secret}">{secret}</productVersion>'.encode()
+                    + b"<restApiVersion>3.27</restApiVersion></serverInfo></tsResponse>"
+                )
+                return _Response(200, body)
+            return super().urlopen(request, timeout)
+
+    with caplog.at_level("INFO"):
+        code = _run_main(monkeypatch, tmp_path, Echoing())
+    out = tmp_path / "_assessment"
+    written = (out / "assessment.json").read_text(encoding="utf-8")
+    report = (out / "report.md").read_text(encoding="utf-8")
+    secret = ENV["TABLEAU_PAT_SECRET"]
+    assert code == 0
+    assert secret not in written and secret not in report and secret not in caplog.text
+    # `[REDACTED]` on each surface, so this cannot pass by the fields having quietly VANISHED --
+    # which would be a different regression wearing the same green tick.
+    ceiling = json.loads(written)["server_ceiling"]
+    assert "[REDACTED]" in ceiling["product_version"] and "[REDACTED]" in ceiling["build"]
+    assert "[REDACTED]" in report and "[REDACTED]" in caplog.text
+    # ...and the probe still SUCCEEDED: redaction is not refusal, so the ceiling is still established
+    # and the rung table still printed. A fix that dropped the fields would break the assessment.
+    assert ceiling["established"] is True and ceiling["advertised_api_version"] == "3.27"
+    assert "| rung | route |" in report
+    assert no_sleep == []
+
+
+def test_an_ordinary_product_version_survives_the_redaction_unchanged(monkeypatch, no_sleep, tmp_path):
+    """Negative control for the test above: the redactor must not eat a legitimate value.
+
+    Without this, a "fix" that returned `None` for every free-form field, or truncated them to
+    nothing, would pass the leak test while destroying the two numbers a customer conversation
+    actually uses.
+    """
+    code = _run_main(monkeypatch, tmp_path, FakeTableau())
+    out = tmp_path / "_assessment"
+    ceiling = json.loads((out / "assessment.json").read_text(encoding="utf-8"))["server_ceiling"]
+    assert code == 0
+    assert ceiling["product_version"] == "2025.3.3"
+    assert ceiling["build"] == "20253.25.0904.1234"
+    assert "product `2025.3.3`" in (out / "report.md").read_text(encoding="utf-8")
+    assert no_sleep == []
+
+
 # --- 8. #196: scrub the 200-with-`errors` GraphQL body, and mark degradation in estate.db ---------
 
 

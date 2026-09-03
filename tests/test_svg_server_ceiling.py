@@ -417,6 +417,42 @@ def test_the_offending_version_text_goes_through_the_redaction_chokepoint(monkey
     assert "[REDACTED]" in info["invalid_rest_api_version"]
 
 
+def test_the_FREE_FORM_product_and_build_fields_are_redacted_at_the_parse_boundary(monkeypatch):
+    """The round-2 High finding: the redactor was applied to one field out of four.
+
+    `productVersion` and its `build` attribute are unconstrained -- a version number is what a
+    well-behaved server puts there, not what the format requires -- and unlike `restApiVersion` they
+    are never grammar-checked, so nothing else downstream can refuse them. They are redacted HERE
+    rather than at the three places that print them, because a consumer-side fix protects the
+    consumers that exist today and no others.
+    """
+    token = "SYNTHETIC_SESSION_TOKEN_42_LONG_ENOUGH"
+    body = (
+        b'<?xml version="1.0" encoding="UTF-8"?><tsResponse><serverInfo>'
+        + f'<productVersion build="{token}">{token}</productVersion>'.encode()
+        + b"<restApiVersion>3.27</restApiVersion></serverInfo></tsResponse>"
+    )
+    info = _probe(monkeypatch, 200, body, redactor=lambda text: text.replace(token, "[REDACTED]"))
+    assert token not in json.dumps(info)
+    assert info["product_version"] == "[REDACTED]" and info["build"] == "[REDACTED]"
+    # The probe still SUCCEEDS -- redaction is not refusal, and the ceiling is unaffected.
+    assert info["rest_api_version"] == "3.27"
+
+
+def test_an_ABSENT_product_version_stays_None_rather_than_becoming_an_empty_string(monkeypatch):
+    """`redacted_note` maps a missing value onto `""`; "absent" and "empty" are different facts.
+
+    Every consumer tests truthiness, so `""` would render the same -- but `assessment.json` would
+    start claiming the server sent an empty product version, which it did not.
+    """
+    body = (
+        b'<?xml version="1.0"?><tsResponse><serverInfo><restApiVersion>3.27</restApiVersion></serverInfo></tsResponse>'
+    )
+    info = _probe(monkeypatch, 200, body)
+    assert info["product_version"] is None and info["build"] is None
+    assert info["rest_api_version"] == "3.27"
+
+
 # ---------------------------------------------------------------- the three states are a partition
 
 

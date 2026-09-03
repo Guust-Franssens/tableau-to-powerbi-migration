@@ -376,8 +376,10 @@ SVG_CAUSE_SERVER_MEETS_FLOOR = "server_meets_floor"
 SVG_CAUSE_SERVER_BELOW_FLOOR = "server_below_floor"
 SVG_CAUSE_CEILING_NOT_ESTABLISHED = "ceiling_not_established"
 
-# Output bound for a version string quoted in one of those messages. Like every other limit in this
-# repo it bounds the OUTPUT of `redacted_note`, never its input.
+# Output bound for a version string quoted in one of those messages, and for every free-form field
+# `server_info` returns. Like every other limit in this repo it bounds the OUTPUT of `redacted_note`,
+# never its input. 40 is comfortably above a real `productVersion` ("2025.3.3") and its `build`
+# ("20253.25.0904.1234"); a server that sends something longer is not describing itself.
 _VERSION_CHARS = 40
 
 
@@ -516,6 +518,17 @@ def server_info(base: str, *, timeout: int = SERVERINFO_TIMEOUT_SEC, redactor=re
     passes :func:`tableau_env.env_redactor` anyway, because "it cannot leak" is an argument that has
     to be re-made every time the call site moves, and passing the redactor is one line.
 
+    ⚠️ **That argument is not merely fragile, it is WRONG, and this function acted on it.** "This
+    request is unauthenticated, so the response cannot reflect a credential" ignores who is speaking:
+    the same server -- or any intermediary on the path -- already observed the PAT sign-in, and
+    nothing stops it echoing that credential in a later unauthenticated response. Measured on this
+    branch: a synthetic session token placed in ``productVersion`` and its ``build`` attribute of a
+    perfectly ordinary 200 arrived verbatim in ``assessment.json``, in ``report.md`` and on the
+    console, because the redactor in hand was applied to exactly one of the four fields. Every
+    free-form field is therefore redacted at the parse boundary now; the only value returned
+    untransformed is ``rest_api_version``, and only when it has been proved to match a numeric
+    API-version grammar no secret can satisfy.
+
     ⚠️ **A version field is trusted only from a SUCCESSFUL response, and only when it is a version.**
     Both halves were measured missing: the parse ran regardless of HTTP status, so a **500** or a
     **404** whose body happened to carry ``<restApiVersion>3.30</restApiVersion>`` -- the shape a
@@ -525,9 +538,7 @@ def server_info(base: str, *, timeout: int = SERVERINFO_TIMEOUT_SEC, redactor=re
     ``restApiVersion`` fails the grammar returns ``rest_api_version: None`` plus
     ``invalid_rest_api_version`` -- the probe stays diagnostic, the ceiling becomes *unknown*, and
     :func:`supports` marks every rung unknown rather than confidently available or confidently
-    unavailable. The invalid text is response-derived, so it goes through the chokepoint like any
-    other; the valid one is returned untransformed, because it passed a numeric grammar no secret
-    can satisfy.
+    unavailable.
     """
     url = f"{base.rstrip('/')}/api/{SERVERINFO_PROBE_VERSION}/serverinfo"
     status, payload, _headers = _request(urllib.request.Request(url), timeout=timeout, redactor=redactor)
@@ -544,10 +555,31 @@ def server_info(base: str, *, timeout: int = SERVERINFO_TIMEOUT_SEC, redactor=re
         return match.group(1) if match else None
 
     advertised = grab(r"<restApiVersion>([^<]+)<")
+
+    def grab_redacted(pattern: str) -> str | None:
+        """A FREE-FORM ``/serverinfo`` field, redacted at the parse boundary. ``None`` stays ``None``.
+
+        `redacted_note` maps a missing value onto ``""``; keeping ``None`` distinct matters because
+        "the element was absent" and "the server sent an empty string" are different facts, and
+        every consumer here tests truthiness on the result.
+        """
+        raw = grab(pattern)
+        return None if raw is None else redacted_note(raw, redactor, limit=_VERSION_CHARS)
+
     info: dict[str, Any] = {
         "status": status,
-        "product_version": grab(r"<productVersion[^>]*>([^<]+)<"),
-        "build": grab(r'<productVersion[^>]*build="([^"]+)"'),
+        # ⚠️ Redacted HERE, not at the three places that print them. `productVersion` and its `build`
+        # attribute are unconstrained free-form strings -- a version number is merely what a
+        # well-behaved server puts there -- and they reach `assessment.json`, `report.md` and the
+        # console. Measured on this branch before the fix: a session token reflected in BOTH fields
+        # arrived verbatim in all three. Redacting at the consumers instead would leave the next
+        # consumer unprotected, which is how this route stayed open while the neighbouring one was
+        # closed twice.
+        "product_version": grab_redacted(r"<productVersion[^>]*>([^<]+)<"),
+        "build": grab_redacted(r'<productVersion[^>]*build="([^"]+)"'),
+        # The one field returned untransformed, and only because it is SHAPE-VERIFIED: it is returned
+        # solely when `api_tuple` proves it matches a numeric API-version grammar, which no credential
+        # can satisfy. That is a property of the value, not of the request that carried it.
         "rest_api_version": advertised if api_tuple(advertised) is not None else None,
     }
     if advertised is not None and info["rest_api_version"] is None:

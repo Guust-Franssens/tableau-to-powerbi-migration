@@ -635,13 +635,28 @@ CATEGORIES = (
     "SCRUBBED-AT-SINK:",
     "OUTBOUND:",  # our own request, travelling to Tableau -- not a response coming back
     "SHAPE-VERIFIED:",  # response-derived, but constrained to a shape that cannot carry a credential
-    "UNAUTHENTICATED-SOURCE:",  # came from a request that never carried a credential, so cannot reflect one
+    # ⚠️ `UNAUTHENTICATED-SOURCE:` was here and is DELETED, not merely unused. It certified a value as
+    # safe because the REQUEST that fetched it carried no credential -- an argument about the wrong
+    # party. The server, or any intermediary on the path, saw the PAT sign-in earlier in the same run
+    # and can reflect it in any later response, authenticated or not. Its one holder (`/serverinfo`'s
+    # product and build fields) was measured leaking a reflected credential into assessment.json,
+    # report.md and the console. Removing the category is what stops the same reasoning being
+    # reached for again: an unconstrained free-form response string is untrusted, full stop -- earn
+    # SHAPE-VERIFIED by constraining it, or REDACTED-UPSTREAM by scrubbing it.
 )
 
 _SERVERINFO = (
-    "UNAUTHENTICATED-SOURCE: from `/serverinfo`, which `server_info` calls with no auth header and no "
-    "PAT in the body -- it never received a credential, so it cannot reflect one. It still reaches the "
-    "manifest, where `scrub_tree` covers it anyway"
+    "REDACTED-UPSTREAM: every FREE-FORM field of `/serverinfo` -- `productVersion`, its `build` "
+    "attribute, and a `restApiVersion` that failed the version grammar -- goes through "
+    "`redacted_note` inside `server_info`, at the parse boundary, before it is returned. The one "
+    "field returned untransformed is a VALID `restApiVersion`, which is SHAPE-VERIFIED: `api_tuple` "
+    "has proved it matches a numeric API-version grammar that no credential can satisfy. ⚠️ This "
+    "used to read UNAUTHENTICATED-SOURCE -- 'that request carries no credential, so the response "
+    "cannot reflect one' -- and that reasoning is WRONG: it describes the request, while the hazard "
+    "is the speaker. The same server, or any intermediary, observed the PAT sign-in earlier in the "
+    "run and can echo it in a later unauthenticated response. Measured: a token in `productVersion` "
+    "and `build` of an ordinary 200 reached assessment.json, report.md and the console verbatim, "
+    "because the redactor in hand was applied to one field out of four"
 )
 _INTO_THE_MANIFEST_AGGREGATE = (
     "SCRUBBED-AT-SINK: an aggregate on its way to the manifest; `scrub_tree` walks it whole, values "
