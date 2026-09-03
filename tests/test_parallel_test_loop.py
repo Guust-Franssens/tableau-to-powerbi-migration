@@ -300,7 +300,11 @@ def test_the_markers_actually_deselect_those_tests() -> None:
     assert excluded, "nothing derived - this test would pass vacuously"
     target = sorted(excluded)[0].split("::")[0]
     in_target = sorted(node for node in excluded if node.startswith(target + "::"))
-    result = _run_pytest(REPO_ROOT, ["-q", "--collect-only", "-m", "not (serial or timing)", target])
+    # `--run-gui` ISOLATES the mechanism this test names. The root conftest also deselects `gui`
+    # unconditionally (issue #447), and three of those tests carry no contended marker, so without
+    # the opt-in the count here measures two mechanisms at once and drifts whenever either changes.
+    # Opting in leaves `-m "not (serial or timing)"` as the only filter, which is the claim.
+    result = _run_pytest(REPO_ROOT, ["-q", "--collect-only", "--run-gui", "-m", "not (serial or timing)", target])
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
     assert f"{len(in_target)} deselected" in output, (
@@ -476,8 +480,12 @@ def test_xdist_deselects_contended_tests_without_being_asked() -> None:
     """
     contended = {node for node in _contended_nodes() if node.startswith(BUNDLE_TESTS + "::")}
     assert len(contended) >= 13, f"expected the bundle's contended tests to be found, got {sorted(contended)}"
+    # `--run-gui` for the same reason as in `test_the_markers_actually_deselect_those_tests`: the
+    # `gui` exclusion is orthogonal and always on, and three gui tests carry no contended marker, so
+    # leaving it engaged would fold two mechanisms into one count. This test is about the xdist one.
     result = _run_pytest(
-        REPO_ROOT, ["-q", "--collect-only", "-n", "2", "--dist", "loadfile", "-m", "not timing", BUNDLE_TESTS]
+        REPO_ROOT,
+        ["-q", "--collect-only", "--run-gui", "-n", "2", "--dist", "loadfile", "-m", "not timing", BUNDLE_TESTS],
     )
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
@@ -521,14 +529,38 @@ def test_the_opt_out_flag_puts_the_contended_tests_back() -> None:
     )
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
-    assert "deselected" not in output, f"--include-contended did not restore them:\n{output[-1500:]}"
-    for node in sorted(node for node in _contended_nodes() if node.startswith(BUNDLE_TESTS + "::")):
+    # ⚠️ This used to assert `"deselected" not in output`, which was a PROXY for "the contended tests
+    # came back" and became wrong the moment a second, orthogonal deselection existed: `gui` tests
+    # spawn a real top-level window and are deselected by default on purpose (issue #447), and
+    # `--include-contended` is about `serial`/`timing`, not about hijacking someone's desktop. The
+    # per-node loop below is the real check; keep the count assertion so this stays falsifiable
+    # rather than merely relaxed - a NEW unexplained deselection must still fail here.
+    gui_nodes = {node for node in _gui_nodes() if node.startswith(BUNDLE_TESTS + "::")}
+    deselected = re.search(r"\((\d+) deselected\)", output)
+    remaining = int(deselected.group(1)) if deselected else 0
+    assert remaining == len(gui_nodes), (
+        f"--include-contended left {remaining} test(s) deselected but {len(gui_nodes)} carry "
+        f"@pytest.mark.gui; an unexplained deselection means the opt-out no longer restores "
+        f"everything it claims to:\n{output[-1500:]}"
+    )
+    for node in sorted(node for node in _contended_nodes() - gui_nodes if node.startswith(BUNDLE_TESTS + "::")):
         assert node in output, f"{node} missing even with --include-contended"
 
 
 def _contended_nodes() -> set[str]:
     """Every node id that carries a marker the parallel tier excludes."""
     return _marked_tests("serial") | _marked_tests("timing")
+
+
+def _gui_nodes() -> set[str]:
+    """Every node id that spawns a real top-level window, so is deselected by default (issue #447).
+
+    Deliberately NOT folded into `_contended_nodes()`. `serial`/`timing` are excluded from the
+    PARALLEL tier and restored by `--include-contended` for deliberate stress-testing; `gui` is
+    excluded from EVERY tier because it hijacks the operator's desktop, and `--include-contended`
+    must not put it back. Two reasons, two sets.
+    """
+    return _marked_tests("gui")
 
 
 def test_the_loop_doc_documents_both_tiers() -> None:

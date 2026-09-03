@@ -73,6 +73,20 @@ markers = [
     # barrier in test_check_migration_progress.py did. Tests carry the marker in their own source
     # (and the pbip-model-refresh bundle registers it in its own conftest) so it survives a copy.
     "timing: asserts a wall-clock budget, so a saturated box fails it",
+    # A `gui` test SPAWNS A REAL TOP-LEVEL WINDOW, which steals focus on whatever machine runs it.
+    # Reported from the field while the operator was presenting a live demo: the "Fake Desktop"
+    # WinForms app had been "opening and closing for the last 2 days" (issue #447). It must keep
+    # spawning one - UI Automation cannot be exercised against a mock - so the fix is to make it
+    # OPT-IN, not to weaken it. `serial` is not a substitute: that only takes effect under
+    # `-n auto --dist loadfile`, and a plain `pytest` (what an agent runs) executes them anyway.
+    #
+    # ⚠️ The EXCLUSION is not here. It lives in the root `conftest.py`'s `pytest_collection_modifyitems`
+    # and in the bundle's own `tests/conftest.py`, because `addopts = "-m 'not gui'"` was measured
+    # FAIL-OPEN: a command-line `-m` replaces an ini marker expression rather than composing with it,
+    # so `pytest -m "not slow"` - documented in `docs/offline-mock-harness.md` - collected 309/309 of
+    # the bundle's tests, every window-spawning one included. Opt in with `--run-gui` (or
+    # `T2P_RUN_GUI=1` for a nested run that cannot be handed a flag).
+    "gui: spawns a real top-level window; needed for UI-Automation coverage, opt-in only",
 ]
 
 [tool.ruff]

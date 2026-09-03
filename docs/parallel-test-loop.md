@@ -156,8 +156,13 @@ the boundary rather than remove it - they share one mechanism and one singleton 
 deliberately, on their own:
 
 ```bash
-uv run pytest -q -m serial
+uv run pytest -q --run-gui -m serial
 ```
+
+⚠️ `--run-gui` is not optional here, and `-m serial` alone will report *fewer* tests than you expect.
+All seven also carry **`gui`** (issue #447: they open a real top-level window and steal focus), and
+the root `conftest.py` deselects `gui` in every tier unless asked. Leave the flag off and you get the
+`serial` tests that are not `gui` - a green run that ran none of the live UI regressions.
 
 ⚠️ `--dist loadfile` is what keeps them from racing *inside* one run (all seven live in one file, so
 one worker owns them). It cannot help *across* runs, and neither can any scheduler flag. The marker
@@ -271,12 +276,16 @@ them the live WPF/UIA regressions measured above. Run them deliberately, on thei
 touched the credential probe:
 
 ```bash
-uv run pytest -q -m serial
+uv run pytest -q --run-gui -m serial
 ```
 
 That is not part of either tier. Tier 1 excludes them because two agents running tier 1 at once
-raced them; tier 2 includes them, because a serial whole-suite run is the one condition in which they
-were never observed to fail.
+raced them; **tier 2 no longer includes them either.** All seven also carry `gui` (issue #447), and
+the root `conftest.py` deselects `gui` unless `--run-gui` / `T2P_RUN_GUI=1` asks for it - so a plain
+`pytest -q` never opens a window on the machine you are working on, and the command above (or CI's
+Windows leg) is now the only thing that runs them. That is a deliberate trade: the live regressions
+were never observed to fail in a serial whole-suite run, but a serial whole-suite run is also what an
+agent types twenty times a day beside a human who is using the desktop.
 
 ⚠️ **Absence of failure in a short campaign proves nothing here.** Seven runs - including two
 concurrent pairs - found none of it. It took eight concurrent pairs to see three failures. The
@@ -307,3 +316,44 @@ The exclusion no longer depends on anyone typing the right filter - the root `co
 If CI time does become the complaint, the change is one line per job plus a measurement on the
 runners themselves - and the root-`conftest.py` guard already makes it impossible to add `-n` there
 without `--dist loadfile`.
+
+## The `gui` marker — a THIRD exclusion, and it is not part of either tier
+
+`serial` and `timing` are about the **parallel** tier: they are excluded from tier 1 and were
+restored by tier 2. `gui` is different in kind, so it is a different marker and a different
+mechanism. A `gui` test spawns a **real top-level window**, which steals focus on whatever machine
+runs it. Issue #447 is an operator watching the `Fake Desktop` WinForms app "opening and closing for
+the last 2 days" mid-demo, because `testpaths` includes `.github/skills` and a bare `pytest`
+collected it.
+
+Ten tests carry it: the seven live WPF/UIA regressions above, plus three that create native
+`WS_VISIBLE` windows with `CreateWindowExW`. They must keep opening a window - UI Automation cannot
+be exercised against a mock - so the fix is opt-in, not weaker tests:
+
+```bash
+uv run pytest -q --run-gui -m gui     # or T2P_RUN_GUI=1, which a nested pytest can inherit
+```
+
+⚠️ **It is a collection hook, NOT `addopts = "-m 'not gui'"`, and the difference is measured.** A
+command-line `-m` **replaces** an ini marker expression instead of composing with it. Under `addopts`,
+on the bundle's 309 tests:
+
+| command | selected |
+|---|---|
+| default | 302/309 |
+| `-m gui` | 7/309 |
+| `-m "not slow"` | **309/309 — every window back** |
+| `-m "not something_else"` | **309/309** |
+
+`-m "not slow"` is documented in `docs/offline-mock-harness.md`, so following the repo's own
+instructions re-opened the windows. `pytest_collection_modifyitems` runs *after* pytest has applied
+the caller's `-m`, so nothing a caller types can re-enable them; only the opt-in can.
+
+The same hook is duplicated in `.github/skills/pbip-model-refresh/tests/conftest.py`, because
+`tests/test_skills.py` copies that bundle out of the repo and runs a nested pytest where neither the
+root `conftest.py` nor `pyproject.toml` exists. Measured with every spawn site instrumented to raise:
+that nested run reached **all ten** of them, and the outer summary reported **zero** deselections.
+
+CI's `windows-latest` leg runs `uv run pytest -q --run-gui -m gui` with **no path argument**, so
+`testpaths` applies and it covers the whole repository. `tests/test_gui_marker_gate.py` executes that
+very command under `--collect-only` and fails if it does not reach every `gui` test in the repo.
