@@ -336,6 +336,202 @@ def test_content_is_re_checked_at_the_DESTINATION_not_only_at_the_source(
     assert run(package, migrations) == pu.EXIT_PROMOTION_FAILED
 
 
+def _write_partition(model: Path, source_path: str) -> None:
+    """Give the model a real import partition reading from `source_path` - the #461 shape."""
+    table = model / "definition" / "tables" / "Data.tmdl"
+    table.write_text(
+        "table Data\n"
+        "\tlineageTag: data\n\n"
+        "\tcolumn A\n\t\tdataType: string\n\n"
+        "\tpartition 'Data' = m\n"
+        "\t\tmode: import\n"
+        "\t\tsource =\n"
+        "\t\t\tlet\n"
+        f'\t\t\t\tSource = Csv.Document(File.Contents("{source_path}"), [Delimiter=","])\n'
+        "\t\t\tin\n"
+        "\t\t\t\tSource\n",
+        encoding="utf-8",
+    )
+
+
+# --------------------------------------------------------------------------------------
+# Issue #461 - a model that reads data from OUTSIDE the tree it is promoted into
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_an_absolute_data_path_outside_the_deliverable_refuses_and_ships_nothing(
+    package: Path, migrations: Path, tmp_path: Path
+) -> None:
+    """The measured #461 defect: 22 absolute machine-local `File.Contents` references across 17 of
+    62 packaged units, all pointing into the bundle's gitignored, prunable `data/`.
+
+    It gets its own exit code and its own named reason - an operator has to know that THIS is why,
+    because the remedy (carry the extract into the package) is nothing like the remedy for a page
+    -parity finding.
+    """
+    outside = tmp_path / "elsewhere" / "bundle" / "data" / "Extract_Extract.csv"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("A\n1\n", encoding="utf-8")
+    _write_partition(package / "fabric" / "Model.SemanticModel", str(outside))
+
+    envelope_path = tmp_path / "ext.json"
+    assert run(package, migrations, "--json", str(envelope_path)) == pu.EXIT_REFUSED_EXTERNAL_PATH
+    envelope = json.loads(envelope_path.read_text(encoding="utf-8"))
+    assert envelope["status"] == "REFUSED_EXTERNAL_DATA_PATH"
+    assert any("EXTERNAL_DATA_PATH" in finding for finding in envelope["findings"])
+    assert not migrations.exists(), "a refused promotion must ship nothing"
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_the_recorded_external_path_is_redacted_because_it_embeds_a_username(
+    package: Path, migrations: Path, tmp_path: Path
+) -> None:
+    """`migrations/**` is not blanket-gitignored and this repo is PUBLIC. The envelope and the
+    record carry the leaf only; the operator gets the full path on stderr, where it is a terminal
+    line rather than an artifact `scripts/set_data_folder.py --check` would have to catch later."""
+    outside = tmp_path / "elsewhere" / "Extract_Extract.csv"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("A\n", encoding="utf-8")
+    _write_partition(package / "fabric" / "Model.SemanticModel", str(outside))
+
+    envelope_path = tmp_path / "ext.json"
+    run(package, migrations, "--json", str(envelope_path))
+    text = envelope_path.read_text(encoding="utf-8")
+    assert "Extract_Extract.csv" in text, "the leaf is kept so the finding is actionable"
+    assert str(tmp_path / "elsewhere") not in text, "the directory part must never reach an artifact"
+    assert "<absolute-path-redacted>" in text
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_force_overrides_the_external_path_refusal_and_records_it(
+    package: Path, migrations: Path, tmp_path: Path
+) -> None:
+    """Like the `check_unit` override: allowed, but never invisible afterwards."""
+    outside = tmp_path / "elsewhere" / "Extract_Extract.csv"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("A\n", encoding="utf-8")
+    _write_partition(package / "fabric" / "Model.SemanticModel", str(outside))
+
+    assert run(package, migrations, "--force") == pu.EXIT_OK
+    record = json.loads((migrations / "workbooks" / "wb" / "promotion-record.json").read_text(encoding="utf-8"))
+    assert record["external_data_paths"]["forced"] is True
+    assert record["external_data_paths"]["shipped"], (
+        "the shipped model's findings must be recorded, not just the source's"
+    )
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_a_relative_data_path_promotes_successfully(package: Path, migrations: Path) -> None:
+    """POSITIVE CONTROL. A checker that refuses every model passes every negative test above."""
+    _write_partition(package / "fabric" / "Model.SemanticModel", "data/HumanResources.csv")
+    assert run(package, migrations) == pu.EXIT_OK
+    assert (migrations / "workbooks" / "wb" / "fabric" / "Model.SemanticModel").is_dir()
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_an_absolute_path_inside_the_deliverables_own_data_folder_promotes(package: Path, migrations: Path) -> None:
+    """POSITIVE CONTROL, and the one that stops this from breaking an existing convention.
+
+    `scripts/set_data_folder.py --sanitize` rewrites every model's `DataFolder` to an ABSOLUTE
+    `<REPO_ROOT>\\<tree>\\<slug>\\data\\`. The test is *absolute AND outside*, never *absolute*, so
+    that path must keep promoting.
+    """
+    own_data = migrations / "workbooks" / "wb" / "data"
+    own_data.mkdir(parents=True)
+    (own_data / "HumanResources.csv").write_text("A\n", encoding="utf-8")
+    _write_partition(package / "fabric" / "Model.SemanticModel", str(own_data / "HumanResources.csv"))
+    assert run(package, migrations) == pu.EXIT_OK
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_a_url_is_not_treated_as_a_local_path(package: Path, migrations: Path) -> None:
+    """POSITIVE CONTROL: `https://…` is a connection, not a file this promotion could carry.
+
+    There is no explicit URL guard in the production code - a URL is absolute in neither path
+    flavour, so one killed no mutation and was deleted as dead code. This test is what keeps that
+    true: it fails the moment the detector becomes broad enough to need one.
+    """
+    _write_partition(package / "fabric" / "Model.SemanticModel", "https://example.invalid/share/data.csv")
+    assert run(package, migrations) == pu.EXIT_OK
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_a_unc_share_is_treated_as_an_external_path(package: Path, migrations: Path, tmp_path: Path) -> None:
+    """Not keyed on a drive letter: a UNC share is the same defect on a different machine."""
+    _write_partition(package / "fabric" / "Model.SemanticModel", r"\\fileserver\share\Extract.csv")
+    assert run(package, migrations, "--json", str(tmp_path / "unc.json")) == pu.EXIT_REFUSED_EXTERNAL_PATH
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_a_posix_absolute_data_file_is_treated_as_an_external_path(
+    package: Path, migrations: Path, tmp_path: Path
+) -> None:
+    """Measured on the reference estate: one model carries `/Users/<someone>/…/Global Superstore.xlsx`.
+    A Windows-only rule would have shipped it."""
+    _write_partition(package / "fabric" / "Model.SemanticModel", "/Users/<someone>/Datasets/Global Superstore.xlsx")
+    assert run(package, migrations, "--json", str(tmp_path / "posix.json")) == pu.EXIT_REFUSED_EXTERNAL_PATH
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_a_databricks_http_path_is_not_treated_as_a_local_path(package: Path, migrations: Path) -> None:
+    """POSITIVE CONTROL, and a measured false positive this rule had to lose.
+
+    `expression HttpPath = "/sql/1.0/warehouses/<id>"` is a LIVE connection parameter and appears in
+    three units of the reference estate. Refusing it would block every live-Databricks promotion.
+    """
+    _write_partition(package / "fabric" / "Model.SemanticModel", "/sql/1.0/warehouses/764e5801f0e0fac8")
+    assert run(package, migrations) == pu.EXIT_OK
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_a_bare_slash_in_a_formula_is_not_treated_as_a_local_path(package: Path, migrations: Path) -> None:
+    """POSITIVE CONTROL: a `"/"` literal inside a `TableauFormula` annotation is not a data path -
+    also measured on the reference estate, where it accounted for 3 of 9 POSIX-only hits."""
+    model = package / "fabric" / "Model.SemanticModel"
+    (model / "definition" / "tables" / "T0.tmdl").write_text(
+        'table T0\n\tmeasure Ratio = DIVIDE(1, 2)\n\t\tannotation TableauFormula = [a] "/" [b]\n',
+        encoding="utf-8",
+    )
+    assert run(package, migrations) == pu.EXIT_OK
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_the_shipped_model_is_re_scanned_after_the_copy(
+    package: Path, migrations: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifying the working copy proves nothing about `migrations/**/fabric/`.
+
+    The source passes; the copy is then made lossy in exactly the way that matters - an absolute
+    path appears only in the SHIPPED model - and the promotion must still fail.
+    """
+    outside = tmp_path / "elsewhere" / "Extract.csv"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("A\n", encoding="utf-8")
+    real_execute = pu.execute_plan
+
+    def _inject(plan: pu.PromotionPlan) -> None:
+        real_execute(plan)
+        _write_partition(plan.model_destination, str(outside))
+
+    monkeypatch.setattr(pu, "execute_plan", _inject)
+    assert run(package, migrations) == pu.EXIT_PROMOTION_FAILED
+
+
+def external_findings(model: Path, root: Path) -> list:
+    """`external_data_paths` with one allowed root - a thin readability wrapper for the tests."""
+    return pu.external_data_paths(model, (root,))
+
+
+def test_an_absolute_path_that_does_not_exist_is_still_reported(tmp_path: Path) -> None:
+    """Fail closed. The check is about WHERE the model points, not about what is on this disk
+    today: a bundle's `data/` that has already been pruned is the worst case, not an exempt one."""
+    model = tmp_path / "M.SemanticModel"
+    _write_model(model)
+    _write_partition(model, r"C:\does-not-exist\nowhere\Extract.csv")
+    assert external_findings(model, tmp_path), "an absolute path outside the tree must be reported"
+
+
 # --------------------------------------------------------------------------------------
 # Criteria 6-8 - the record, the dry run, and re-runnability
 # --------------------------------------------------------------------------------------

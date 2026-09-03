@@ -26,6 +26,14 @@ Why each guard exists (all of these are measured failures, not hypotheses)
   was supposed to exist did exist. So this asserts real pages carrying real visuals and real tables,
   at the SOURCE (fail before shipping) and again at the DESTINATION (the last hop is the one nobody
   re-checks).
+* **A model may not read data from OUTSIDE the tree it is promoted into (#461).** Measured across
+  the 62 packaged units of estate run 408: **22 absolute machine-local `File.Contents` references
+  across 17 units (27%)**, pointing into the originating bundle's `data/` - gitignored,
+  machine-local, prunable. That deliverable is the same functionally-empty artifact by a different
+  route, and NO existing gate sees it: `check_unit.py` returns its normal verdicts and
+  `powerbi-report-author validate` is clean. The test is *absolute AND outside*, never a match on
+  `_runs` or a drive letter, so an absolute path under the deliverable's own `data/` (the
+  `set_data_folder.py` convention) still promotes.
 * **The model-per-workbook copy is a CONTENTS copy.** `<Unit>/fabric/` holds `<Name>.Report/` and
   `<Model>.SemanticModel/` as siblings and the deliverable has the identical shape, so copying the
   folder itself would nest them wrongly - the folder is named for the WORKBOOK while the model
@@ -47,6 +55,7 @@ Exit codes
 | 2  | CANNOT_ASSESS: the package cannot be read or its shape is ambiguous - never a pass |
 | 3  | REFUSED_CONTENT: the source is structurally present but functionally empty |
 | 4  | PROMOTION_FAILED: the copy, the `byPath` rewrite, or a post-copy verification failed |
+| 5  | REFUSED_EXTERNAL_DATA_PATH: the model reads data from outside the deliverable (#461) |
 | 64 | usage error |
 
 ⚠️ 2 exists so "cannot assess" can never collapse into the clean bucket, which is this repo's most
@@ -57,13 +66,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -77,6 +87,7 @@ EXIT_REFUSED_BY_GATE = 1
 EXIT_CANNOT_ASSESS = 2
 EXIT_REFUSED_CONTENT = 3
 EXIT_PROMOTION_FAILED = 4
+EXIT_REFUSED_EXTERNAL_PATH = 5
 EXIT_USAGE = 64
 
 # check_unit.py's own documented exits, kept here so the record says what the number MEANT rather
@@ -98,6 +109,10 @@ RECORD_VERSION = 1
 
 # A TMDL table declaration is a column-0 `table <name>` line; an indented one is a nested property.
 _TMDL_TABLE_RE = re.compile(r"^table\s+\S", re.MULTILINE)
+
+# Every double-quoted literal in a TMDL/M source block. M has no escaped quote inside a literal -
+# it doubles them - so a non-greedy run between quotes is the right shape here.
+_TMDL_STRING_RE = re.compile(r'"([^"\n]*)"')
 
 
 class UsageErrorParser(argparse.ArgumentParser):
@@ -175,6 +190,19 @@ class PromotionPlan:
     def file_count(self) -> int:
         """How many files the plan copies."""
         return sum(_count_files(step.source) for step in self.steps)
+
+    @property
+    def deliverable_root(self) -> Path:
+        """The `<slug>/` directory the promoted MODEL lands under.
+
+        This, not `migrations/`, is the containment boundary for a model's data references: a
+        deliverable may legitimately carry its own `data/` (the `set_data_folder.py` convention
+        writes `<REPO_ROOT>\\<tree>\\<slug>\\data\\`), but it may not read out of another unit's.
+        """
+        anchor = self.model_destination or self.report_destination
+        if anchor is None:  # unreachable: a plan always promotes at least one artifact
+            raise CannotAssess("plan has no destination")
+        return anchor.parent.parent
 
 
 def _count_files(path: Path) -> int:
@@ -290,6 +318,98 @@ def check_model_content(model: Path) -> ContentCheck:
     if not real:
         check.findings.append(f"{model.name}: definition/tables/ holds {len(tmdl)} file(s) but ZERO table declarations")
     return check
+
+
+def _quoted_strings(text: str) -> list[str]:
+    """Every double-quoted literal in a TMDL/M source block."""
+    return _TMDL_STRING_RE.findall(text)
+
+
+def _is_local_filesystem_path(candidate: str) -> bool:
+    """Whether a literal names a LOCAL filesystem location rather than a server, a URL or a formula.
+
+    Deliberately not keyed on a drive letter: a UNC share and a macOS path are the same defect on a
+    different machine — measured on the reference estate, one workbook's model carries
+    `/Users/<someone>/…/Global Superstore.xlsx`, so a Windows-only rule would have missed a real one.
+
+    ⚠️ **A POSIX-absolute literal is ambiguous in a way a drive-absolute one is not**, and taking it
+    at face value produced real false positives on the same estate: a Databricks
+    `HttpPath = "/sql/1.0/warehouses/<id>"` (a live connection, perfectly promotable) and a bare
+    `"/"` inside a `TableauFormula` annotation — 8 of 9 POSIX-only hits. So a POSIX candidate must
+    also carry a file suffix. ❌ Named residual: a POSIX *folder* parameter is therefore missed;
+    its Windows equivalent (`SourceFolder = "C:\\…\\data\\"`, which the estate does carry) is not.
+
+    ⚠️ There is no URL guard **on purpose**. A `https://…` / `abfss://…` literal is absolute in
+    neither flavour, so an explicit `"://" in candidate` early return killed no mutation: it was
+    dead code that read like protection.
+    """
+    if PureWindowsPath(candidate).is_absolute():  # `C:\…`, `C:/…`, `\\server\share\…`
+        return True
+    if not candidate.startswith("/") or candidate.startswith("//"):
+        return False
+    return bool(PurePosixPath(candidate).suffix)
+
+
+def _redact_path(candidate: str) -> str:
+    """Keep only the leaf, because an absolute path embeds a real USERNAME.
+
+    ⚠️ `migrations/**` is not blanket-gitignored and this repo is public, so the promotion record
+    and the `--json` envelope must not carry the full string - `scripts/set_data_folder.py --check`
+    exists to keep exactly that out of tracked files. The operator still gets the whole path on
+    stderr, where it is a terminal line rather than an artifact.
+    """
+    leaf = PureWindowsPath(candidate.replace("/", "\\")).name
+    return f"<absolute-path-redacted>\\{leaf}" if leaf else "<absolute-path-redacted>"
+
+
+def external_data_paths(model: Path, allowed_roots: tuple[Path, ...]) -> list[dict[str, str]]:
+    """Absolute data references in a model's TMDL that resolve OUTSIDE every allowed root.
+
+    Issue #461, measured across the 62 packaged units of estate run 408: **22 absolute
+    machine-local `File.Contents` references across 17 units (27%)**, all pointing into the
+    originating bundle's `data/` - which is gitignored, machine-local and prunable. A deliverable
+    whose model reads from there is the *"structurally present and functionally EMPTY"* artifact
+    `powerbi-report-gotchas` §3 records from a real 46-asset estate: every folder exists, nothing
+    loads.
+
+    ⚠️ **No existing gate sees this.** `check_unit.py` returns its page-parity and oracle verdicts
+    on such a unit and `powerbi-report-author validate` is clean on it, so this is new coverage
+    rather than a second opinion. It is judged as *absolute AND not under the destination*, never
+    by matching `_runs` or a drive letter - an absolute path under the deliverable's own `data/`
+    (the `set_data_folder.py` convention) is legitimate and must keep promoting.
+    """
+    definition = model / "definition"
+    if not definition.is_dir():
+        return []
+    roots = [root.resolve() for root in allowed_roots]
+    found: list[dict[str, str]] = []
+    for tmdl in sorted(definition.rglob("*.tmdl")):
+        text = tmdl.read_text(encoding="utf-8", errors="replace")
+        for candidate in _quoted_strings(text):
+            if not _is_local_filesystem_path(candidate) or _inside_any(candidate, roots):
+                continue
+            found.append(
+                {
+                    "file": tmdl.relative_to(model).as_posix(),
+                    "redacted": _redact_path(candidate),
+                    "full": candidate,
+                }
+            )
+    return found
+
+
+def _inside_any(candidate: str, roots: list[Path]) -> bool:
+    """Whether an absolute literal lies under one of the allowed roots.
+
+    ⚠️ **Purely lexical - this must never touch the filesystem.** `Path.resolve()` on a UNC literal
+    such as `\\\\fileserver\\share\\x.csv` blocks on SMB name resolution for a host that does not
+    exist; measured here, that turned a millisecond check into a multi-minute stall. It would also
+    make the answer depend on what happens to be mounted, when the question is only *where does
+    this model point*. A path that does not exist is still outside, which is the fail-closed answer
+    a pruned bundle `data/` needs.
+    """
+    normalized = Path(os.path.normpath(candidate))
+    return any(normalized.is_relative_to(root) for root in roots)
 
 
 def content_checks(shape_report: Path | None, shape_model: Path | None, where: str) -> ContentCheck:
@@ -659,6 +779,20 @@ def _promote(args: argparse.Namespace, plan: PromotionPlan, envelope: dict[str, 
     if not shipped.ok:
         raise PromotionFailed("; ".join(shipped.findings))
     extra["shipped_content"] = shipped.counts
+
+    shipped_external = (
+        external_data_paths(plan.model_destination, (plan.deliverable_root,)) if plan.model_destination else []
+    )
+    if shipped_external and not args.force:
+        raise PromotionFailed(
+            "EXTERNAL_DATA_PATH in the SHIPPED model: "
+            + "; ".join(f"{item['file']} reads {item['redacted']}" for item in shipped_external)
+        )
+    extra["external_data_paths"] = {
+        "source": envelope.get("external_data_paths", {}).get("source", []),
+        "shipped": [{"file": item["file"], "path": item["redacted"]} for item in shipped_external],
+        "forced": bool(shipped_external) and bool(args.force),
+    }
     extra["drift"] = envelope["drift"]
 
     record = build_record(args, plan, REPO_ROOT, gate, extra)
@@ -669,6 +803,14 @@ def _promote(args: argparse.Namespace, plan: PromotionPlan, envelope: dict[str, 
     envelope["record_paths"] = [_repo_relative(p, REPO_ROOT)[0] for p in written]
     _emit(envelope, args)
     print(f"PROMOTE: PROMOTED {args.package.name} -> {args.slug} ({plan.file_count} files)")
+    if shipped_external:
+        print(
+            f"  ⚠️ FORCED past {len(shipped_external)} EXTERNAL_DATA_PATH finding(s) (#461): the shipped model reads "
+            "data from outside the deliverable and will not load elsewhere. Recorded in the promotion record.",
+            file=sys.stderr,
+        )
+        for item in shipped_external:
+            print(f"     {item['file']} -> {item['redacted']}", file=sys.stderr)
     for path in written:
         print(f"  record  {_repo_relative(path, REPO_ROOT)[0]}")
     return EXIT_OK
@@ -714,6 +856,41 @@ def _dry_run(args: argparse.Namespace, plan: PromotionPlan, envelope: dict[str, 
     return EXIT_OK
 
 
+def _check_external_paths(args: argparse.Namespace, shape: PackageShape, plan: PromotionPlan, envelope: dict) -> int:
+    """Refuse a model that reads data from outside the tree it is being promoted into (#461).
+
+    Scanned at the SOURCE so a refusal ships nothing at all, and again after the copy in
+    `_promote` - verifying a fix in the working copy proves nothing about `migrations/**/fabric/`.
+    Both the package and the deliverable count as allowed roots: after the packaging half of #461
+    lands, the extract travels INSIDE the package, and `set_data_folder.py`'s convention puts a
+    legitimate absolute path under the deliverable's own `data/`.
+    """
+    if shape.model is None:
+        return EXIT_OK
+    found = external_data_paths(shape.model, (args.package, plan.deliverable_root))
+    envelope["external_data_paths"] = {
+        "source": [{"file": item["file"], "path": item["redacted"]} for item in found],
+        "forced": bool(found) and bool(args.force),
+    }
+    if not found or args.force:
+        return EXIT_OK
+    findings = [
+        f"EXTERNAL_DATA_PATH: {item['file']} reads {item['redacted']}, which is absolute and resolves "
+        f"OUTSIDE both the package and the deliverable"
+        for item in found
+    ]
+    findings.append(
+        "A promoted model that reads from a gitignored, machine-local, prunable location is the "
+        "structurally-present/functionally-EMPTY deliverable (#461). An absolute path also embeds a real "
+        "USERNAME, and this repo gates against that in tracked files (scripts/set_data_folder.py --check). "
+        "Fix the packaging (carry the extract INTO the package) or re-run with --force, which is recorded."
+    )
+    code = _refuse(envelope, args, "REFUSED_EXTERNAL_DATA_PATH", findings, EXIT_REFUSED_EXTERNAL_PATH)
+    for item in found:
+        print(f"  full path (not recorded, terminal only): {item['full']}", file=sys.stderr)
+    return code
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point."""
     args = parse_args(argv)
@@ -733,6 +910,10 @@ def main(argv: list[str] | None = None) -> int:
     envelope["drift"] = tree_drift(shape.fabric, _bundle_unit(args))
     plan = build_plan(shape, args.migrations_root, args.slug, args.datasource_slug)
     envelope["planned_files"] = plan.file_count
+
+    external = _check_external_paths(args, shape, plan, envelope)
+    if external != EXIT_OK:
+        return external
 
     if args.dry_run:
         return _dry_run(args, plan, envelope)
