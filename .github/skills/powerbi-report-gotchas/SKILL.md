@@ -90,7 +90,13 @@ These pass `validate` but render wrong. Only a live Desktop screenshot catches t
   `filterConfig`.** 🟢 render-verified (cold run S19): a `filterConfig`-only Categorical `In [10L]`
   rendered **All**; the byte-identical payload moved to `general.filter` rendered **10**. On a slicer,
   `filterConfig` restricts which items are offered and pre-selects nothing, so engine-emitted defaults
-  there are inert. The filter `name` must be unique report-wide — a duplicate is a `validate`
+    there are inert. ⚠️ **The ENGINE half of this is fixed upstream — do not go hunting for it.**
+    `Yarbrdab000/tableau-fabric-skills#130` shipped in **2.149.0** (we run 2.353.0): the emitter has
+    written the open-on selection into `general.filter` since 2.51.0, and the two residual
+    `filterConfig`-only slicers were both **boolean** columns the pre-selection gate declined; the
+    corpus now emits **zero**. The PBIR rule above is unchanged and still yours to apply when you
+    hand-author a slicer — what is retracted is only the expectation of finding engine-emitted
+    `filterConfig` defaults to clean up. The filter `name` must be unique report-wide — a duplicate is a `validate`
   **warning** (`PBIR_FILTER_NAME_DUPLICATE_GLOBAL`, verified in CLI 0.1.4 `dist/index.js`), so an
   `errorCount`-only gate misses it — and an `Int64` literal needs the `L` suffix (`10L`).
 - **A textbox that mixes a large title run and a small descriptor run in ONE paragraph wraps and
@@ -171,6 +177,11 @@ These pass `validate` but render wrong. Only a live Desktop screenshot catches t
   Fall back to executing the encoded path against the live model.
 
 ### A literal must carry the COLUMN's type — and the same mistake fails two opposite ways
+
+✅ **Re-verified against upstream 2026-09-03: [`Yarbrdab000/tableau-fabric-skills#178`](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/178)
+is OPEN and its own title records "still reproduces at 2.339.0" — this STILL REPRODUCES at our
+2.353.0.** Do not confuse it with #130 (§1's slicer bullet), which fixed the same string-quoted
+boolean in the *slicer pre-selection* path only; the **data-colour** slot below is untouched.
 
 🟢 render-verified (Desktop 2.157.828.0). PBIR encodes a literal's type in the string itself:
 `'x'` = string · `10L` = Int64 · `100D` = Double · bare `true` = boolean. Comparing a **boolean**
@@ -357,7 +368,21 @@ idioms see `.github/pbi.kb/visuals/table-cond-format.md`.
   the wrong fix if the engine's own manifests declare it as `output_folder` — repoint it instead, and
   prefer a relative cross-tree `byPath` (`../../pbip/<name>/<Model>.SemanticModel`), which does resolve.
 - **A missing REQUIRED role in engine output means the measure was STUBBED — bind the stub, do NOT
-  delete the visual.** 🟢 Measured 2026-08-18 on a cold run of engine 2.151.0 (issue #220).
+  delete the visual.** ⚠️ **RETRACTED as a diagnosis, and FIXED upstream — read this before acting on
+  the paragraph below.** Filed as `Yarbrdab000/tableau-fabric-skills#143`, **fixed in 2.166.0** (we
+  run 2.353.0), and the maintainer refuted the stated cause at the source *and asked us to correct it
+  downstream*: probing `_crosscheck_report_refs` with this exact model shape, **an emitted stub binds
+  normally** — `_model_object_names` matches `measure 'X' = BLANK()` fine. A projection reaches the
+  drop branch precisely when the model emitted **nothing** to bind it to, so "bind the stub" could
+  never have applied; binding would mean inventing a measure. His hypothesis for why the stub was
+  invisible is a **datasource-first split** (the measure lives in the standalone
+  `.SemanticModel` while the cross-check ran against the workbook's model parts) — a wiring defect,
+  not stub handling. What shipped is the *opposite* remedy: any **required** role emptied by a drop
+  now empties the whole visual, so at 2.353.0 you should expect a placeholder rather than a partial
+  `queryState`. **Still true and still worth the grep:** a `= BLANK()` stub in the model is the
+  evidence the source had a chart there, so grep for it before concluding a field is missing. The
+  original measurement is kept below unedited.
+  🟢 Measured 2026-08-18 on a cold run of engine 2.151.0 (issue #220).
   `validate` failed with `PBIR_ROLE_REQUIRED_MISSING` — *Required role "Y" missing or has no
   projections for visualType "clusteredColumnChart"* — on the engine's own **pristine** output. Cause:
   that visual's only measure was a Tableau `FIXED` LOD which fell back to an inert stub
@@ -488,6 +513,12 @@ makes the *modern* branch worse than the deprecated one: `filledMap` at least dr
 **Not independently reproduced here** — but it explains why a pristine engine run emits `shapeMap` for
 several worksheets that nobody ever saw rendered, because our tier converts them to `azureMap` first.
 Treat `shapeMap` as unusable rather than merely superseded.
+⚠️ **The engine half is version-stale.** `shapeMap`/`filledMap` emission was the 2.113.0 behaviour;
+`Yarbrdab000/tableau-fabric-skills#112` and **#128 (fixed 2.148.0)** moved location-only maps onto
+`azureMap`, and 2.126.0 onwards was measured emitting `azureMap` throughout (`AGENTS.md`, engine
+source section). At our 2.353.0, expect `azureMap`, not `shapeMap`. The **Desktop** finding — that
+`shapeMap` renders a blank rectangle and validates clean — is unaffected and still holds; what is
+retracted is the expectation that a pristine run hands you `shapeMap` to convert.
 
 **Route/line maps:** azureMap draws true 2-point routes via `PathID` + `PointOrder` + `pathLayer` (a
 fidelity win over the dual-axis workaround) — but it needs **one data row per endpoint**. If the fact
@@ -615,7 +646,19 @@ shelves, tooltips and manual sorts.
   no warning, because stacking is structurally valid. **Never resolve `Automatic` from the XML alone
   when a date is on Columns — check the thumbnail.**
 
-  ⚠️ **This is a KNOWN ENGINE DEFECT with a committed reproduction — recognise it, don't re-derive it.**
+  ⚠️ **FIXED UPSTREAM at engine 2.351.0 — we run 2.353.0, so this defect NO LONGER REPRODUCES.**
+  `Yarbrdab000/tableau-fabric-skills#184` was **closed COMPLETED 2026-09-02**: `_has_continuous_date`
+  is replaced in the Automatic branch by `_has_date_dimension`, which gates on **date-ness** (the doc
+  citation below was the whole fix) and accepts three families — `*-Trunc`, the discrete
+  `_DATE_PARTS`/`_DATE_EXACT_DERIVATIONS` including `MDY`, and a raw date column with **no derivation
+  at all**. Upstream's corpus: 6 worksheets carry Automatic + a discrete date, 3 now flip to
+  `lineChart` (including a bump chart), 3 correctly do not because they route to table/matrix first.
+  **The explicit-`Bar` carve-out below was kept and now has its own test.** So on a 2.353.0 bundle,
+  a `columnChart` under an `Automatic` mark with a date on Columns is **no longer the expected
+  output** — if you still see one, that is a NEW finding worth reporting, not this one. Everything
+  below is retained as the reproduction and the reasoning, not as current engine behaviour.
+
+  ⚠️ **This WAS a KNOWN ENGINE DEFECT with a committed reproduction — recognise it, don't re-derive it.**
   Filed upstream as `Yarbrdab000/tableau-fabric-skills#184`; ours is #424. Two things were previously
   missing from this entry and both cost a cycle: *why* Tableau does it, and *where* in the engine it
   goes wrong.
@@ -729,6 +772,16 @@ They render blank on a report that validates clean, and nothing else ranks them:
 example there were **15**, sitting unremarked beside a 170-item `remediation_worklist`. This is the
 single highest-value thing the reader surfaces, and it is why `--severity` **never hides them** - a
 blank visual outranks any severity band the worklist assigns.
+
+⚠️ **"nothing else ranks them" is true at OUR 2.353.0 and fixed just above it — check your engine
+version before assuming the reader is the only source.** `Yarbrdab000/tableau-fabric-skills#189`
+shipped in **2.355.0**: `pbip_ref_drops[].severity` is now set **structurally at the drop site**
+(`emptied: true` → `severity: "blocking"`), plus a `blocking` worklist rule in the `emptied_visual`
+category. A **partial** drop deliberately stays `high`, not `blocking`. Upstream's own corpus emits
+**zero** `pbip_ref_drops` entries, so this shipped on fixture coverage against *our* estate
+measurements and is not independently confirmed — the maintainer explicitly asked for the number of
+our 23 that carry `blocking` on a 2.355.0 re-run. Until this repo runs on >= 2.355.0 the reader
+remains the only ranking; after that, prefer the engine's own `severity`.
 
 Then `remediation_worklist` grouped by category, with each distinct `remediation` text printed
 **once** rather than repeated per item, then `viz_fidelity` tier counts.
