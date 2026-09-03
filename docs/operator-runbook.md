@@ -691,6 +691,61 @@ Record the withheld unit in the brief: an accepted gap is a decision, an unmenti
 defect. The real run exits **3 / `EXIT_INCOMPLETE`** when the attempted deploy succeeds but a unit
 was withheld (§2 step 6).
 
+#### Package one folder per unit, before you hand any of it to an agent
+
+The bundle is organised for the **engine**, not for whoever picks up one report. Engine output is
+keyed by sanitized workbook name, oracle renders and numbers by **bare view LUID** in a flat tree
+*outside* the bundle, and the source asset is LUID-prefixed in a third place — four naming schemes
+across two trees. So both gates need `--source`/`--oracle` paths that **cannot be derived from the
+unit path**, and getting one wrong is silent: `check_reference_readiness.py` returns
+`CANNOT_ESTABLISH` (exit 3), which reads as *"this unit is broken"* rather than *"you did not tell
+me where the workbook is"* (issue #446).
+
+```powershell
+python scripts\package_unit.py --bundle _bundle --out _packages --json _packages\packaging.json
+# then, per unit, with NO flags at all:
+python scripts\check_reference_readiness.py _packages\<Unit>
+python scripts\check_unit.py _packages\<Unit>
+```
+
+⚠️ **`--out` must sit outside the capture tree.** The readiness gate scans the target's *grandparent*
+for `oracle/` and `reference/`, so a package written beside the flat capture is matched against BOTH
+and every page drops from `ready` to `unverifiable` — worse than not packaging, and silent. That
+layout is refused with exit 2 rather than documented.
+
+What to check in the output:
+
+- **Exit 1 is informative, not a failure.** It means the engine's `report.json` lists a unit with no
+  `pbip/` working copy. On the reference estate that is 5 of 67 — 4 workbooks whose conversion
+  produced no report plus 1 datasource — and they are still packaged for their source, reference and
+  handover. Deriving the unit list from `pbip/` alone drops them silently.
+- **`handover.md` is the agent's entry point**, one finding per line with a stable prefix, emptied
+  visuals first: `grep '^EMPTIED_VISUAL' _packages\<Unit>\handover.md`. They render blank on a report
+  that validates clean, and nothing else in the toolkit surfaces them.
+- **`package-manifest.json` carries every omission with its reason.** A render is attributed by
+  **`workbook_luid` only** — a display name is not an identity, and #450 measured that class failing
+  open in `check_unit` on 360 of 360 real records. A render that cannot be tied to a workbook by LUID
+  is omitted, never copied in because it was in the same capture. On the reference estate that is 4
+  renders belonging to two same-named workbooks the engine disambiguated on disk — real evidence,
+  genuinely unattributable, correctly left out.
+- **`oracle/` is layout/text grade only** — default view state, no `?vf_` pinning. Record that ceiling
+  in `limitations_encountered`; a visual PASS signed off on it alone is overstated.
+- **A `.png` and a `.svg` of the same object are different evidence, not duplicates.** The PNG is the
+  one leg an agent can *look at*; the SVG is a **greppable data oracle** whose `<text>` elements carry
+  the real label and value strings, so exact figures read out with no OCR — measured on this estate's
+  `HR | Summary` dashboard, **122 `<text>` elements** including `Human Resources Dashboard`,
+  `Active Employees` and `7,984`. ⚠️ Not universal: a chart whose labels render as paths carries
+  **zero** — measured, **four** worksheets in that workbook (`Hired By Year`, `Terminated By Year`,
+  `Age Groups`, `Education Levels`) — so absence of text is not absence of content; fall back to the
+  PNG.
+- **Three files in the package are load-bearing rather than incidental**, and the package's own
+  `README.md` now names them: `report.json` (this unit's engine classification — what earns a
+  datasource-only unit its `NOT_APPLICABLE`), `source-provenance.json` (the only trusted route to a
+  workbook LUID; read `origin.match` before trusting a render) and `engine-output-receipt.json`
+  (`engine.version`, so version drift stays checkable). ⚠️ All three are **scoped to this unit**:
+  `report.json` in particular is rebuilt from an allowlist, so a package names one unit and no other
+  — do not read it as an estate census.
+
 ### Step 6 — deploy
 
 ```powershell
