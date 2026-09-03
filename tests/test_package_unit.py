@@ -1184,7 +1184,16 @@ def test_the_packager_does_not_flag_a_view_whose_rows_were_measured(tmp_path: Pa
     """Control: deriving the flag must not mean stamping it on everything that ships."""
     bundle, oracle = _bundle(tmp_path)
     manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
-    manifest["views"][0]["data"] = {"status": "ok", "path": "data/view-0.csv", "row_count": 7, "columns": ["Region"]}
+    manifest["views"][0]["data"] = {
+        "status": "ok",
+        # ⚠️ Certified, because this is the control for "a view whose rows were MEASURED" and
+        # since #480 round 3 the measurement is the certification, not the number: a `row_count`
+        # with no certificate is the shape every pre-#480 capture has, and it is unassessable.
+        "certification": "certified",
+        "path": "data/view-0.csv",
+        "row_count": 7,
+        "columns": ["Region"],
+    }
     (oracle / "data").mkdir(parents=True, exist_ok=True)
     (oracle / "data" / "view-0.csv").write_text("Region\r\nWest\r\n", encoding="utf-8")
     (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")

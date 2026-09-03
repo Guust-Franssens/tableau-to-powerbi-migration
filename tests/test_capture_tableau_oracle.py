@@ -474,7 +474,10 @@ def test_the_double_gate_rejects_a_merely_similar_keyword():
 def _record(status: str, rows: int = 1, image_status: str | None = None, columns: list[str] | None = None) -> dict:
     data = {"status": status}
     if status == "ok":
-        data.update({"row_count": rows, "elapsed_sec": 1.0, "reauths": 0, "retries": 0})
+        # ⚠️ `certification` first, because since #480 round 3 it is what makes this record a
+        # measured one: a `row_count` written without it is the legacy shape, which is unassessable
+        # by construction. A fixture that meant "a normal successful capture" must say so.
+        data.update({"certification": "certified", "row_count": rows, "elapsed_sec": 1.0, "reauths": 0, "retries": 0})
         # ⚠️ Only when asked for. A real `_capture_data` always merges `summarise_csv`, so `columns`
         # is always present in the field -- but an OLDER manifest predates that, and the default
         # here keeps at least one path exercising a record that never recorded a header.

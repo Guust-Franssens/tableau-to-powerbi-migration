@@ -241,7 +241,14 @@ def _manifest(records, tmp_path, run_kwargs=None, capability=None):
 
 
 def _ok_record(**legs):
-    record = {"view_name": "v", "workbook_name": "w", "data": {"status": "ok", "row_count": 1, "elapsed_sec": 0.1}}
+    # ⚠️ `certification` rides with the row count deliberately. Since #480 round 3 a count alone is
+    # the LEGACY shape and is unassessable -- so without this the `captured_complete` assertions
+    # below would be exercising the unassessable path while claiming to measure the clean one.
+    record = {
+        "view_name": "v",
+        "workbook_name": "w",
+        "data": {"status": "ok", "certification": "certified", "row_count": 1, "elapsed_sec": 0.1},
+    }
     record.update(legs)
     return record
 

@@ -107,7 +107,19 @@ def _bundle(tmp_path: Path, *, covered: set[str] | None, datasource_only: bool =
                 "workbook_luid": WB_LUID,
                 "workbook_name": UNIT,
                 "view_type": obj.kind,
-                "data": {"status": "ok", "path": f"data/{index}.csv"},
+                # ⚠️ The shape a CURRENT capture writes, all three fields together (#480 round 3).
+                # `status`+`path` alone was the pre-certification shape, and since certification
+                # became authoritative that record is unassessable: packaging withholds its `path`
+                # and both gates below correctly report NOT_CHECKED. This is the positive end-to-end
+                # control, so it has to be a capture something actually measured; the negative half
+                # is `test_a_legacy_uncertified_capture_earns_no_numeric_evidence_end_to_end`.
+                "data": {
+                    "status": "ok",
+                    "certification": "certified",
+                    "path": f"data/{index}.csv",
+                    "row_count": 1,
+                    "columns": ["a", "b"],
+                },
             }
             for index, obj in enumerate(chosen)
         ],

@@ -32,7 +32,18 @@ def _view(workbook: str, name: str, luid: str, *, data="ok", image="ok", rows: i
         "workbook_name": workbook,
     }
     view["data"] = (
-        {"status": "ok", "path": f"data/{stem}.csv", "row_count": rows, "columns": list(columns)}
+        # ⚠️ `certification` is what makes this a CURRENT capture rather than a legacy one. Since
+        # #480 round 3 a recorded `row_count` alone does not license an evidence `path` -- every
+        # pre-certification manifest has one -- so a fixture that omits it is exercising the
+        # unassessable path, not the happy one. The negative half is asserted deliberately in
+        # `test_a_legacy_row_count_without_a_certification_is_not_evidence`.
+        {
+            "status": "ok",
+            "certification": "certified",
+            "path": f"data/{stem}.csv",
+            "row_count": rows,
+            "columns": list(columns),
+        }
         if data == "ok"
         else {"status": data}
     )

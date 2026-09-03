@@ -36,6 +36,7 @@ from tableau_payload_facts import (
     CSV_CERTIFIED,
     CSV_CONTENT_TYPE_ABSENT,
     CSV_CONTENT_TYPE_UNSPECIFIC,
+    CSV_REFUSAL_DETAIL,
     CSV_REFUSALS,
     CSV_UNCERTIFIED,
     CSV_UNCERTIFIED_DETAIL,
@@ -118,17 +119,34 @@ EMPTY_CANNOT_CLASSIFY = "empty_cannot_classify"
 # would move the exit code for a run whose only fault is that we cannot vouch for what we hold.
 FLAG_DATA_UNASSESSABLE = "data_unassessable"
 
-# The default reason: a record whose data leg recorded no row count at all. An OLDER manifest, or a
-# `certification` this module does not recognise -- either way nothing measured the rows, so nothing
-# may be claimed about them.
+# The reason for a record whose data leg recorded NO row count at all -- an older manifest written
+# before the field, a `certification` this module does not recognise and no count beside it, or a
+# corrupt `row_count`. Nothing measured the rows, so nothing may be claimed about them.
 UNASSESSABLE_NO_ROW_COUNT = "row_count_unrecorded"
+
+# The reason for the shape EVERY pre-#480 manifest on a customer's disk actually has: a row count IS
+# recorded and no certification is (#480 round 3). Distinct from `UNASSESSABLE_NO_ROW_COUNT` because
+# that literal would be a LIE on such a record -- `origin/master`'s producer called `summarise_csv`
+# on every HTTP 200 body and wrote its `row_count`, so a legacy record can say `row_count: 900` while
+# nothing whatsoever established those bytes as CSV. Naming it `row_count_unrecorded` would send an
+# operator looking for a missing number that is right there in the file, and would hide the real
+# question, which is what the number was counted FROM.
+#
+# ⚠️ It covers three routes to the same fact, all of which mean "no certification was established":
+# the key is absent, its value is not one of `certify_csv`'s verdicts, or it is an UNCERTIFIED /
+# REFUSED verdict that nevertheless carries a count. The last one is a self-contradictory record and
+# is named by its own certification instead, because that is the more specific true statement.
+UNASSESSABLE_NO_CERTIFICATION = "certification_unestablished"
 
 # Reasons a CURRENT capture can supply, from `certify_csv`'s closed vocabulary. Only the UNCERTIFIED
 # verdicts (`content_type_absent`, `content_type_unspecific`) can reach a `status: ok` record --
 # every refusal is recorded `format_mismatch` at capture time and never claims to be a successful
 # data leg -- but the whole set is accepted here so a record written by a newer capture is named
 # honestly rather than flattened.
-UNASSESSABLE_REASONS = frozenset({UNASSESSABLE_NO_ROW_COUNT}) | CSV_UNCERTIFIED | CSV_REFUSALS
+CERTIFICATION_REASONS = CSV_UNCERTIFIED | CSV_REFUSALS
+#: Every value :func:`unassessable_reason` can return. A closed set, so a consumer reading a reason
+#: off a manifest can check it rather than trust whatever string is in the field.
+UNASSESSABLE_REASONS = frozenset({UNASSESSABLE_NO_ROW_COUNT, UNASSESSABLE_NO_CERTIFICATION}) | CERTIFICATION_REASONS
 
 # ─────────────────────────────────────────────────────────────────────────────────────────────────
 # WHERE a data leg's bytes are named, which is the difference between evidence and a retained blob.
@@ -163,13 +181,35 @@ EVIDENCE_WITHHELD_KEY = "evidence_withheld"
 #: same fail-open one level down from the manifest.
 RETAINED_DIR = "unassessable"
 RETAINED_SUFFIX = ".bin"
-#: The sentence used when a record gives no verdict of its own -- a manifest written before
-#: `certification` existed, whose rows nothing measured.
+#: The sentence used when a record gives no verdict of its own AND no count -- a manifest written
+#: before `certification` existed whose rows nothing measured, or a corrupt record.
 RETAINED_DETAIL_DEFAULT = (
     "this data leg records no row count and no CSV certification, so nothing established its bytes "
     "as data. They are retained for inspection and are NOT placed where a numeric-oracle consumer "
     "reads evidence; re-capture to obtain assessable numbers."
 )
+#: The sentence for the LEGACY shape: a row count is present and a certification is not. Separate
+#: from the default because the default's first clause is false here, and a withheld-evidence
+#: sentence that misstates the record is worse than none -- an operator who reads "records no row
+#: count" beside `row_count: 900` concludes the tool is confused rather than that the number is
+#: unbacked.
+RETAINED_DETAIL_NO_CERTIFICATION = (
+    "this data leg records a row count that was taken BEFORE anything certified its bytes as CSV -- "
+    "the capture that wrote it summarised every HTTP 200 body, including an error page or a "
+    "plain-text banner, so the number counts lines rather than data rows. The bytes are retained for "
+    "inspection and are NOT placed where a numeric-oracle consumer reads evidence; re-capture to "
+    "obtain a count something stands behind."
+)
+#: Why retained bytes are not evidence, keyed by the reason :func:`unassessable_reason` gives. Keyed
+#: on the REASON and not on the raw `certification`, because two of the four reasons are this
+#: module's own and have no certification to look up -- and because keying on the certification is
+#: how a legacy record came to carry the "records no row count" sentence while recording one.
+UNASSESSABLE_DETAIL = {
+    UNASSESSABLE_NO_ROW_COUNT: RETAINED_DETAIL_DEFAULT,
+    UNASSESSABLE_NO_CERTIFICATION: RETAINED_DETAIL_NO_CERTIFICATION,
+    **CSV_UNCERTIFIED_DETAIL,
+    **CSV_REFUSAL_DETAIL,
+}
 
 
 def data_leg_fields(out_dir: Path, stem: str, certification: str) -> tuple[Path, dict[str, str]]:
@@ -198,15 +238,29 @@ def data_leg_fields(out_dir: Path, stem: str, certification: str) -> tuple[Path,
 def unassessable_reason(record: dict[str, Any]) -> str | None:
     """Why a SUCCESSFUL data leg cannot be assessed for emptiness at all, or ``None``.
 
-    The third state, beside "rows present" and "zero rows". A capture is unassessable when its data
-    leg reports ``status: ok`` and yet carries no measured ``row_count`` -- because the capture
-    predates the field, or because the payload could not be certified as CSV and no shape was
-    therefore taken from it (:data:`tableau_payload_facts.CSV_CONTENT_TYPE_ABSENT`).
+    The third state, beside "rows present" and "zero rows". ⚠️ **Certification is authoritative and a
+    recorded ``row_count`` is not** (#480 round 3): a leg is assessable ONLY when it says
+    :data:`tableau_payload_facts.CSV_CERTIFIED` *and* carries a structurally valid count. Everything
+    else is unassessable, and the reason says which "else" it is.
 
-    ⚠️ **Absence is not a zero, and it is not a non-zero either.** :func:`empty_classification`
-    already refuses to call this empty, which is right; what was missing is that its ``None`` then
-    read as *"not empty"* everywhere downstream. A view nothing measured must say so, in its own
-    flag and its own named list, and must not be counted evidence-complete.
+    ⚠️ **Trusting the count was the whole defect, and it is not a hypothetical.** ``origin/master``'s
+    producer called ``summarise_csv`` on the body of every HTTP 200 and wrote its ``row_count``,
+    certifying nothing -- so EVERY manifest a customer has already captured has a number and no
+    certificate, and a gate that returns early on the number is a gate that has never fired on real
+    data. A row count derived from an uncertified body is a count of the LINES in whatever came back:
+    ``<html>`` parses as a one-column CSV, and a plain-text outage banner parses as one row with a
+    header. That is #471's failure 2 with a number attached, which is worse than no number.
+
+    Four reasons, and the order between them is "the most specific TRUE statement wins":
+
+    * a ``certification`` from :data:`CERTIFICATION_REASONS` -- the record's own verdict, returned
+      verbatim, INCLUDING when it contradicts itself by carrying a count as well. Self-contradiction
+      resolves toward the refusal, never toward the count;
+    * :data:`UNASSESSABLE_NO_CERTIFICATION` -- a valid count and no certification we recognise
+      (absent, or a string outside :data:`tableau_payload_facts.CSV_VERDICTS`). The real legacy shape;
+    * :data:`UNASSESSABLE_NO_ROW_COUNT` -- no usable count either way, which is all that can honestly
+      be said when both are missing;
+    * ``None`` -- certified, and counted.
 
     ``bool`` is excluded explicitly: ``isinstance(True, int)`` is true in Python, and a ``row_count``
     of ``True`` is a corrupt record, not a measurement of one row.
@@ -214,11 +268,14 @@ def unassessable_reason(record: dict[str, Any]) -> str | None:
     data = record.get("data") or {}
     if data.get("status") != "ok":
         return None
-    row_count = data.get("row_count")
-    if isinstance(row_count, int) and not isinstance(row_count, bool):
-        return None
     certification = data.get("certification")
-    return certification if certification in UNASSESSABLE_REASONS else UNASSESSABLE_NO_ROW_COUNT
+    row_count = data.get("row_count")
+    counted = isinstance(row_count, int) and not isinstance(row_count, bool)
+    if certification in CERTIFICATION_REASONS:
+        return certification
+    if certification == CSV_CERTIFIED:
+        return None if counted else UNASSESSABLE_NO_ROW_COUNT
+    return UNASSESSABLE_NO_CERTIFICATION if counted else UNASSESSABLE_NO_ROW_COUNT
 
 
 def withhold_uncertified_evidence(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -242,12 +299,16 @@ def withhold_uncertified_evidence(records: list[dict[str, Any]]) -> list[dict[st
     out = []
     for record in records:
         data = record.get("data") if isinstance(record, dict) else None
-        if not isinstance(data, dict) or EVIDENCE_PATH_KEY not in data or not unassessable_reason(record):
+        if not isinstance(data, dict) or EVIDENCE_PATH_KEY not in data:
+            out.append(record)
+            continue
+        reason = unassessable_reason(record)
+        if not reason:
             out.append(record)
             continue
         demoted = {k: v for k, v in data.items() if k != EVIDENCE_PATH_KEY}
         demoted[RETAINED_PATH_KEY] = data[EVIDENCE_PATH_KEY]
-        demoted[EVIDENCE_WITHHELD_KEY] = CSV_UNCERTIFIED_DETAIL.get(data.get("certification"), RETAINED_DETAIL_DEFAULT)
+        demoted[EVIDENCE_WITHHELD_KEY] = UNASSESSABLE_DETAIL.get(reason, RETAINED_DETAIL_DEFAULT)
         out.append({**record, "data": demoted})
     return out
 
@@ -297,9 +358,15 @@ def empty_classification(record: dict[str, Any]) -> str | None:
     would turn view typing off for every view on the site, and per-field nodes would push a large
     estate at its 32 MiB body bound. Guessing from the byte count would be cheap and wrong. So the
     honest states are two, and the third is named as missing rather than invented.
+    ⚠️ **A zero that nothing certified is not a measurement either** (#480 round 3). ``row_count: 0``
+    on an UNCERTIFIED body is #471's failure 2 exactly: an outage banner exports as HTTP 200, parses
+    as one header row and no data rows, and reads here as "the query returned nothing" -- which sends
+    an operator to look at a Tableau filter for a view whose server returned an error page. So this
+    defers to :func:`unassessable_reason` first, and the two predicates are MUTUALLY EXCLUSIVE by
+    construction rather than by the caller remembering to check both.
     """
     data = record.get("data") or {}
-    if data.get("status") != "ok" or data.get("row_count") != 0:
+    if data.get("status") != "ok" or data.get("row_count") != 0 or unassessable_reason(record):
         return None
     return EMPTY_QUERY_NO_ROWS if data.get("columns") else EMPTY_CANNOT_CLASSIFY
 
@@ -846,28 +913,35 @@ def _log_unassessable(unassessable: list[dict[str, Any]], redactor) -> None:
     one is the absence of a measurement. Folding them together would let a reader take "N empty"
     as the total cost, when the unassessable views are the ones nothing at all is known about.
 
-    Both reasons are actionable and they are actionable DIFFERENTLY: ``row_count_unrecorded`` is an
-    older manifest and re-capturing resolves it, while ``content_type_absent`` and
-    ``content_type_unspecific`` are a live server or proxy that did not declare what it sent, or
-    declared only ``text/plain`` -- re-capturing reproduces both, and the fix is upstream.
+    Every reason is actionable and they are actionable DIFFERENTLY: ``row_count_unrecorded`` is an
+    older manifest and re-capturing resolves it; ``certification_unestablished`` is the OTHER older
+    manifest -- it has a number, taken before anything certified the body, and re-capturing resolves
+    it too but the operator must first be told not to trust the number that is sitting right there;
+    while ``content_type_absent`` and ``content_type_unspecific`` are a live server or proxy that did
+    not declare what it sent, or declared only ``text/plain`` -- re-capturing reproduces both, and
+    the fix is upstream.
     """
     if not unassessable:
         return
     LOG.warning(
         "\n%d view(s) captured data that could NOT BE ASSESSED. The export succeeded, so these are "
-        "recorded status 'ok' and this run's exit code is unaffected -- but no row count was ever "
-        "established for them, so they are NOT counted as captured-complete and a numeric-fidelity "
+        "recorded status 'ok' and this run's exit code is unaffected -- but nothing established a "
+        "row count for them, so they are NOT counted as captured-complete and a numeric-fidelity "
         "finding cannot be made or refuted from them. This is not the same as an empty capture: an "
         "empty one measured zero rows, these measured nothing. Their retained bytes are kept under "
         "'%s/' and named '%s', never as data, so nothing downstream can read them as numbers. '%s' "
-        "means an older manifest that predates the count (re-capture resolves it); '%s' means the "
-        "server or a proxy returned the body with no Content-Type, and '%s' that it declared only "
-        "text/plain, which an error banner is too. A CSV carries no signature, so neither "
-        "establishes those bytes as data -- the fix is upstream of this capture:",
+        "means an older manifest that predates the count (re-capture resolves it); '%s' means an "
+        "older manifest that DOES carry a count, taken before anything certified the body as CSV -- "
+        "an error page counts as one row just as well, so re-capture rather than reading it; '%s' "
+        "means the server or a proxy returned the body with no Content-Type, and '%s' that it "
+        "declared only text/plain, which an error banner is too. A CSV carries no signature, so "
+        "none of these establishes those bytes as data -- for the last two the fix is upstream of "
+        "this capture:",
         len(unassessable),
         RETAINED_DIR,
         RETAINED_PATH_KEY,
         UNASSESSABLE_NO_ROW_COUNT,
+        UNASSESSABLE_NO_CERTIFICATION,
         CSV_CONTENT_TYPE_ABSENT,
         CSV_CONTENT_TYPE_UNSPECIFIC,
     )

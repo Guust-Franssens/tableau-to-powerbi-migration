@@ -231,7 +231,14 @@ def _write_oracle_manifest(  # pylint: disable=too-many-arguments,too-many-posit
             _csv(unit / "_oracle" / data_path)
         record: dict[str, object] = {
             "view_name": name,
-            "data": {"status": "ok", "path": data_path, "row_count": 1} if data else {"status": "failed"},
+            # ⚠️ `certification` is not decoration. Since #480 round 3 a `row_count` alone no longer
+            # licenses an evidence `path` -- every pre-certification manifest carries one, so
+            # trusting it is a gate that never fires on real data -- and this fixture stands for a
+            # CURRENT, certified capture. `test_a_legacy_uncertified_record_is_not_numeric_evidence`
+            # holds the other end.
+            "data": {"status": "ok", "certification": "certified", "path": data_path, "row_count": 1}
+            if data
+            else {"status": "failed"},
             "image": {"status": "ok", "path": image_path} if images else {"status": "failed"},
         }
         if view_type is not None:

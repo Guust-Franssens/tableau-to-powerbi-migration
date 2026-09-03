@@ -1286,10 +1286,13 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
             "sink scrubs the tree whole; on the read side it was already scrubbed when the manifest "
             "it came from was written"
         ),
-        "CSV_UNCERTIFIED_DETAIL.get(data.get('certification'), RETAINED_DETAIL_DEFAULT)": (
-            "FIXED-VOCABULARY: a sentence this repo authors, selected by a `certify_csv` verdict, "
-            "with a module literal as the default -- so an unrecognised `certification` in an older "
-            "record selects our own sentence rather than being echoed"
+        "UNASSESSABLE_DETAIL.get(reason, RETAINED_DETAIL_DEFAULT)": (
+            "FIXED-VOCABULARY: a sentence this repo authors, selected by `unassessable_reason`'s own "
+            "closed return set (UNASSESSABLE_REASONS), with a module literal as the default -- so a "
+            "reason outside that set still selects our own sentence rather than being echoed. Keyed "
+            "on the REASON since #480 round 3, not on the raw `certification`: keying on the "
+            "certification is how a legacy record carrying `row_count: 900` came to be handed the "
+            "'records no row count' sentence"
         ),
     },
     ("scripts/tableau_oracle_manifest.py", "read_manifest"): {
@@ -2293,7 +2296,10 @@ def test_the_progress_line_redacts_a_view_name_before_it_truncates_it(caplog):
     token = "SYNTHETIC_SESSION_TOKEN_42_LONG_ENOUGH_TO_BE_TRUNCATED"
     session = _Session("an-unrelated-long-pat-secret")
     session.token = token
-    record = {"view_name": token, "data": {"status": "ok", "row_count": 1, "elapsed_sec": 0.1}}
+    record = {
+        "view_name": token,
+        "data": {"status": "ok", "certification": "certified", "row_count": 1, "elapsed_sec": 0.1},
+    }
     with caplog.at_level(logging.INFO, logger="tableau-oracle"):
         oracle.log_progress(1, 1, record, session.redact_text)
     assert longest_surviving_run(token, caplog.text) == ""
