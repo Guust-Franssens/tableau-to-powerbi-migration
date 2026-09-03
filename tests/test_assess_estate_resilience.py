@@ -667,11 +667,21 @@ def test_the_render_ceiling_reaches_both_report_md_and_assessment_json(monkeypat
     report = (out / "report.md").read_text(encoding="utf-8")
     ceiling = assessment["server_ceiling"]
     assert code == 0
-    # The three numbers this repo insists are different things.
+    # The three numbers this repo insists are different things...
     assert (ceiling["client_api_version"], ceiling["advertised_api_version"]) == ("3.21", "3.27")
-    assert ceiling["expected_reference_render"] == "pdf"
-    assert "Best rung expected: PDF" in report
+    # ...and, the point of the whole block, the IMPLICATION per rung rather than the arithmetic.
+    assert [(r["tier"], r["verdict"]) for r in ceiling["rungs"]] == [
+        ("svg", "unavailable"),
+        ("pdf", "available"),
+        ("png_high", "available"),
+    ]
+    assert ceiling["best_reference_render"] == "pdf"
+    assert "| rung | route |" in report
+    assert "UNAVAILABLE on this server" in report
+    assert "Bottom line: `--reference-best` should resolve to `pdf`" in report
     assert "at any client setting" in report
+    # The raster ceiling, quoted from this repo's own measurement.
+    assert "1300×1600" in report
     assert no_sleep == []
 
 
@@ -679,17 +689,23 @@ def test_a_site_that_refuses_serverinfo_reports_UNKNOWN_and_still_assesses_clean
     """Fail soft: an unanswered probe is the third state, never a degraded inventory.
 
     Also the negative control for the test above -- a run that cannot establish the ceiling must not
-    name a rung, and must not turn a clean assessment into a degraded one.
+    print per-rung verdicts as if they were known, and must not turn a clean assessment into a
+    degraded one.
     """
     code = _run_main(monkeypatch, tmp_path, FakeTableau(serverinfo=None))
     out = tmp_path / "_assessment"
     assessment = json.loads((out / "assessment.json").read_text(encoding="utf-8"))
     report = (out / "report.md").read_text(encoding="utf-8")
+    ceiling = assessment["server_ceiling"]
     assert code == 0
     assert assessment["degraded"] is False and assessment["listing_errors"] == []
-    assert assessment["server_ceiling"]["established"] is False
+    assert ceiling["established"] is False
+    assert {r["verdict"] for r in ceiling["rungs"]} == {"unknown"}
+    assert ceiling["best_reference_render"] is None
     assert "was NOT established" in report
-    assert "Best rung expected" not in report
+    assert "No per-rung verdict is shown" in report
+    assert "| rung | route |" not in report
+    assert "Bottom line" not in report
     assert no_sleep == []
 
 

@@ -231,11 +231,20 @@ class RenderTier:
     vector: bool
     min_api: str
     note: str
+    # What this rung can RESOLVE to, in one clause -- the other half of "is it available?", and the
+    # half that is easy to over-trust. Kept on the rung so a consumer that reports availability can
+    # report the ceiling from the same object instead of writing the number out a second time.
+    ceiling: str = ""
 
     @property
     def min_release(self) -> str:
         """The Tableau release a customer must be on, derived from the published version table."""
         return release_for(self.min_api)
+
+    @property
+    def route(self) -> str:
+        """The REST route this rung asks for, as an operator would type it."""
+        return f"/{self.endpoint}{self.query}"
 
 
 LADDER: tuple[RenderTier, ...] = (
@@ -247,6 +256,7 @@ LADDER: tuple[RenderTier, ...] = (
         vector=True,
         min_api="3.29",
         note="resolution-independent; <text> elements carry the literal labels",
+        ceiling="unbounded (vector)",
     ),
     RenderTier(
         name="pdf",
@@ -256,6 +266,7 @@ LADDER: tuple[RenderTier, ...] = (
         vector=True,
         min_api="2.8",
         note="vector with embedded fonts; needs a PDF rasteriser to view as an image",
+        ceiling="unbounded (vector)",
     ),
     RenderTier(
         name="png_high",
@@ -265,6 +276,12 @@ LADDER: tuple[RenderTier, ...] = (
         vector=False,
         min_api="2.5",
         note="universal, but capped at 2x a dashboard's declared size",
+        # ⚠️ A DASHBOARD claim, and deliberately worded as one. `docs/reference-capture.md` records
+        # both halves: 2x declared on 52/52 dashboards with `standard`/`veryhigh` returning HTTP 400
+        # and `vizWidth`/`vizHeight` ignored -- but on a WORKSHEET `vizHeight` IS honoured
+        # (361x835 -> 361x1535). The over-general version of this sentence has already been
+        # corrected once in that document; do not reintroduce it here.
+        ceiling="exactly 2x a DASHBOARD's declared size (52/52), and no parameter raises it",
     ),
 )
 

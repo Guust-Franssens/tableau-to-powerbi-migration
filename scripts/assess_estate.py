@@ -1183,7 +1183,7 @@ def write_store(out: Path, raw: dict[str, Any], assembled: dict[str, Any]) -> Pa
 
 
 def server_ceiling(site: Site) -> dict[str, Any]:
-    """What reference renders this SITE can export, from the one number an assessment never asked for.
+    """What reference renders this SITE can actually give an operator, rung by rung.
 
     The render ceiling is a property of the site, so an operator should learn it HERE -- in the first
     thing they run against a new estate -- rather than discovering it much later as a capture-time
@@ -1191,28 +1191,35 @@ def server_ceiling(site: Site) -> dict[str, Any]:
     ``restApiVersion 3.27``, so SVG (floor 3.29) is unavailable there at any client setting, and the
     best rung it can reach is PDF. Nothing in the assessment said so.
 
+    ⚠️ **The point is the IMPLICATION, not two more numbers in a blob.** Reporting "we send 3.21, the
+    server advertises 3.27" leaves the operator to do the arithmetic against a floor table they do not
+    have, which is how the false remedy in #474 survived in the first place. So this returns a
+    **verdict per rung** -- and the raw numbers as the supporting detail underneath.
+
     Three numbers, and this repo insists they are different things:
 
     ``client_api_version``      what we SEND -- ``TABLEAU_REST_API_VERSION``, a client preference;
     ``advertised_api_version``  what ``/serverinfo`` SAYS -- the server's own ceiling;
-    ``expected_reference_render`` what that MEANS for a later ``capture_tableau_oracle.py`` run.
+    ``rungs``                   what that MEANS for a later ``capture_tableau_oracle.py`` run.
 
     ⚠️ **Fails soft, and reports the third state rather than guessing.** ``server_info`` is
     unauthenticated, never raises, is bounded by its own 30 s timeout, and a site that will not answer
     it is not a reason to degrade an assessment -- so a failure leaves ``established`` false and every
-    derived field ``None``. It is deliberately NOT a ``listing_error``: nothing downstream is computed
-    from it, so calling it a degraded inventory would be a false alarm on the one flag this script
-    asks consumers to trust.
+    rung ``unknown``. It is deliberately NOT a ``listing_error``: nothing downstream is computed from
+    it, so calling it a degraded inventory would be a false alarm on the one flag this script asks
+    consumers to trust.
 
-    ⚠️ And ``expected_reference_render`` is an EXPECTATION from an advertised number, never a
-    measurement. Only ``capture_tableau_oracle.py --reference-best`` probes the endpoint, which is
-    the sole authoritative answer -- see ``tableau_render_capability``'s module docstring for why the
-    two disagree often enough to matter.
+    ⚠️ And every rung verdict is an EXPECTATION from an advertised number, never a measurement. Only
+    ``capture_tableau_oracle.py --reference-best`` probes the endpoint, which is the sole
+    authoritative answer -- see ``tableau_render_capability``'s module docstring for why the two
+    disagree often enough to matter. The two verdicts are not equally strong, and the report says so:
+    ``unavailable`` is the site's own ceiling falling below a documented floor, while ``available``
+    is a claim the endpoint has not yet been asked to honour.
     """
     info = render_capability.server_info(site.base, redactor=site.scrub_text)
     advertised = info.get("rest_api_version")
-    svg, pdf = render_capability.TIER_BY_NAME["svg"], render_capability.TIER_BY_NAME["pdf"]
-    meets_svg_floor = render_capability.supports(advertised, svg.min_api)
+    rungs = [_rung_verdict(tier, advertised) for tier in render_capability.LADDER]
+    best = next((r for r in rungs if r["verdict"] == AVAILABLE), None)
     return {
         "client_api_version": site.version,
         "advertised_api_version": advertised,
@@ -1221,57 +1228,150 @@ def server_ceiling(site: Site) -> dict[str, Any]:
         "build": info.get("build"),
         "established": bool(advertised),
         "probe_status": info.get("status"),
-        "svg_floor": svg.min_api,
-        "svg_floor_release": svg.min_release,
-        # True/False/None, the same three-valued answer `supports` gives, because "we could not ask"
-        # is not "no".
-        "svg_floor_met": meets_svg_floor,
-        "expected_reference_render": None if meets_svg_floor is None else (svg.name if meets_svg_floor else pdf.name),
+        # One entry per ladder rung, best-first, each carrying its own floor AND its own verdict, so a
+        # downstream tool consumes the implication without parsing prose or re-deriving it.
+        "rungs": rungs,
+        "best_reference_render": best["tier"] if best else None,
     }
 
 
+# Per-rung verdicts. `UNKNOWN` is a first-class value rather than an absent key: a consumer that reads
+# `verdict != UNAVAILABLE` as "usable" must be made to see the third state in the SAME field, because
+# an unassessable state that reads as a clean one is the defect class this whole change exists for.
+AVAILABLE = "available"
+UNAVAILABLE = "unavailable"
+UNKNOWN = "unknown"
+
+
+def _rung_verdict(tier, advertised: str | None) -> dict[str, Any]:
+    """One ladder rung against this site's advertised ceiling. Three-valued, never two."""
+    meets = render_capability.supports(advertised, tier.min_api)
+    return {
+        "tier": tier.name,
+        "route": tier.route,
+        "min_api": tier.min_api,
+        "min_release": tier.min_release,
+        "vector": tier.vector,
+        "ceiling": tier.ceiling,
+        "verdict": UNKNOWN if meets is None else (AVAILABLE if meets else UNAVAILABLE),
+    }
+
+
+# The measurement behind the PNG rung's ceiling, quoted from `docs/reference-capture.md` (the route
+# survey table and the paragraph under it) rather than restated: `?resolution=high` is exactly 2x the
+# declared size on 52/52 dashboards, `standard`/`veryhigh` are HTTP 400, and `vizWidth`/`vizHeight` are
+# ignored FOR DASHBOARDS. It is stated whenever the rung table is printed because it is the other half
+# of "available" and it is the half operators over-trust.
+#
+# ⚠️ Scoped to dashboards on purpose. That same document records the correction: on a WORKSHEET
+# `vizHeight` IS honoured (361x835 -> 361x1535 at `vizHeight=1500`), and it notes the earlier
+# "silently ignored" phrasing "was over-general". Do not re-generalise it here.
+_PNG_CEILING_NOTE = (
+    "⚠️ **A raster rung has a hard ceiling, and it is set by the dashboard's author, not by the "
+    "caller.** `?resolution=high` returns **exactly 2× the dashboard's declared size** (measured "
+    "52/52; `resolution=standard`/`veryhigh` are HTTP 400 and `vizWidth`/`vizHeight` are ignored *for "
+    "dashboards*), so a **650×800** dashboard tops out at **1300×1600, forever** — a label-dense page "
+    "can be structurally legible and content-illegible at the same time. That is why a vector rung "
+    "matters: it is the only one whose resolution the caller can still choose. (On a *worksheet* "
+    "`vizHeight` **is** honoured, so the 2× ceiling is a dashboard claim.) Numbers measured in this "
+    "repo's `docs/reference-capture.md`."
+)
+
+
 def _render_server_ceiling(ceiling: dict[str, Any] | None) -> list[str]:
-    """The three-number reconciliation, rendered so nobody has to hold two of them in their head."""
+    """The per-rung verdict block: the implication first, the raw numbers as supporting detail."""
     if not ceiling:
         return []
-    out = ["## Reference renders — what this site can export", ""]
-    svg_floor, svg_release = ceiling["svg_floor"], ceiling["svg_floor_release"]
+    out = ["## Reference renders — what this site can actually give you", ""]
     if not ceiling.get("established"):
-        out += [
-            f"⚠️ **The server's advertised REST ceiling was NOT established** (`/serverinfo` answered "
-            f"`{ceiling.get('probe_status')}`). We send `{ceiling['client_api_version']}`; what this "
-            f"site can actually do is unknown, so nothing here says whether a reference render will "
-            f"be SVG or PDF. Establish it before promising a customer a rung: "
-            f"`capture_tableau_oracle.py --reference-best` probes the endpoint, which is the only "
-            f"authoritative answer.",
-            "",
-        ]
-        return out
-    product = f" (product `{ceiling['product_version']}`)" if ceiling.get("product_version") else ""
+        return out + _render_ceiling_unknown(ceiling)
+    product = f", product `{ceiling['product_version']}`" if ceiling.get("product_version") else ""
     out += [
-        "| number | value | what it is |",
-        "|---|---|---|",
-        f"| we send | `{ceiling['client_api_version']}` | a **client preference** (`TABLEAU_REST_API_VERSION`) |",
-        f"| the server advertises | `{ceiling['advertised_api_version']}` — {ceiling['advertised_release']}"
-        f"{product} | the site's **ceiling**, from `/serverinfo` |",
+        f"- **what we send** — `TABLEAU_REST_API_VERSION` = `{ceiling['client_api_version']}` "
+        f"(a *client preference*, not a capability)",
+        f"- **what the server advertises** — REST `{ceiling['advertised_api_version']}` "
+        f"({ceiling['advertised_release']}{product}), from `/serverinfo`",
+        "",
+        "| rung | route | needs | verdict | resolution ceiling |",
+        "|---|---|---|---|---|",
+    ]
+    out += [_rung_row(rung) for rung in ceiling["rungs"]]
+    out += ["", _bottom_line(ceiling), ""]
+    # Only where the raster rung is actually reachable: on a site that cannot reach it either, the
+    # ceiling of a rung nobody can call is noise on top of a worse answer.
+    if any(r["tier"] == "png_high" and r["verdict"] == AVAILABLE for r in ceiling["rungs"]):
+        out += [_PNG_CEILING_NOTE, ""]
+    return out
+
+
+def _rung_row(rung: dict[str, Any]) -> str:
+    """One table row. The verdict is the column an operator reads; the floor explains it."""
+    verdict = {
+        AVAILABLE: "✅ **available**",
+        UNAVAILABLE: "❌ **UNAVAILABLE on this server**",
+        UNKNOWN: "⚠️ **unknown**",
+    }[rung["verdict"]]
+    kind = "vector" if rung["vector"] else "raster"
+    return (
+        f"| `{rung['tier']}` ({kind}) | `{rung['route']}` | REST `{rung['min_api']}` "
+        f"({rung['min_release']}) | {verdict} | {rung['ceiling']} |"
+    )
+
+
+def _bottom_line(ceiling: dict[str, Any]) -> str:
+    """What `--reference-best` should resolve to here, and what that verdict is worth."""
+    best = ceiling["best_reference_render"]
+    if best is None:
+        return (
+            f"**Bottom line: NO reference render rung is reachable.** This site advertises REST "
+            f"`{ceiling['advertised_api_version']}`, below the lowest rung's floor, so "
+            f"`capture_tableau_oracle.py` can obtain no server-side reference at all — the offline "
+            f"192×192 `.twb` thumbnail is the only thing left, and a verdict signed off on it is "
+            f"layout-grade, never validation-grade."
+        )
+    unavailable = [r for r in ceiling["rungs"] if r["verdict"] == UNAVAILABLE]
+    lost = ""
+    if unavailable:
+        names = ", ".join(f"`{r['tier']}`" for r in unavailable)
+        lost = (
+            f" {names} is out of reach here **at any client setting** — its floor is above this "
+            f"site's own ceiling, so raising `TABLEAU_REST_API_VERSION` cannot change it."
+        )
+    vector = next((r for r in ceiling["rungs"] if r["verdict"] == AVAILABLE and r["vector"]), None)
+    why = (
+        f" `{vector['tier']}` is the only **vector** rung available here, which is what makes it worth "
+        f"preferring over the raster one below it."
+        if vector and unavailable
+        else ""
+    )
+    return (
+        f"**Bottom line: `--reference-best` should resolve to `{best}` on this site.**{lost}{why} "
+        f"⚠️ Every verdict above is derived from the **advertised** number: *unavailable* is firm (the "
+        f"site's own ceiling is below that rung's floor), *available* is a claim the endpoint has not "
+        f"been asked to honour. Only `capture_tableau_oracle.py --reference-best` settles it by asking."
+    )
+
+
+def _render_ceiling_unknown(ceiling: dict[str, Any]) -> list[str]:
+    """State C. ⚠️ Emits NO per-rung verdicts -- an unestablished ceiling must not read as a known one.
+
+    This is the highest-value refusal in the block: a rung table printed from a ceiling nobody
+    established is indistinguishable, at a glance, from one that was measured, and it is exactly the
+    unassessable-collapsing-into-a-confident-answer shape the rest of this repo is built to refuse.
+    """
+    return [
+        f"⚠️ **The server's advertised REST ceiling was NOT established** — `/serverinfo` answered "
+        f"`{ceiling.get('probe_status')}`. We send `TABLEAU_REST_API_VERSION` = "
+        f"`{ceiling['client_api_version']}`, which is a client preference and says nothing about what "
+        f"this site can do.",
+        "",
+        "**No per-rung verdict is shown, deliberately.** Which reference renders this site supports is "
+        "**unknown**, not 'probably fine' — printing a rung table from a ceiling nobody established "
+        "would be indistinguishable from a measured one. Establish it before promising a customer a "
+        "rung: `capture_tableau_oracle.py --reference-best` probes the endpoint, which is the only "
+        "authoritative answer, and `GET /api/3.4/serverinfo` returns the advertised ceiling on its own.",
         "",
     ]
-    if ceiling["svg_floor_met"]:
-        out.append(
-            f"**Best rung expected: SVG.** This site advertises at or above the `{svg_floor}` SVG floor "
-            f"({svg_release}). ⚠️ That is what the server *claims*, not a measurement — only "
-            f"`capture_tableau_oracle.py --reference-best` settles it by asking the endpoint."
-        )
-    else:
-        out.append(
-            f"**Best rung expected: PDF.** SVG needs REST `{svg_floor}` ({svg_release}); this site "
-            f"advertises `{ceiling['advertised_api_version']}`, **below** it — so SVG is unavailable "
-            f"here **at any client setting**, and raising `TABLEAU_REST_API_VERSION` cannot change "
-            f"that. PDF reaches back to API `2.8` and is vector with embedded fonts; `resolution=high` "
-            f"PNG reaches back to `2.5`."
-        )
-    out.append("")
-    return out
 
 
 def _render_curve(rows: list[dict], target: float) -> list[str]:
@@ -1513,35 +1613,48 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _log_server_ceiling(ceiling: dict[str, Any] | None) -> None:
-    """One console line reconciling the version we SEND with the ceiling the server ADVERTISES.
+    """The same per-rung verdict on the console, so the terminal and the report agree.
 
-    Rendered from the same dict the report and ``assessment.json`` read, so an operator who sees only
-    the terminal reaches the same conclusion as one who opens the artifact.
+    Rendered from the same dict the report and ``assessment.json`` read. An operator who sees only
+    the terminal must reach the same conclusion as one who opens the artifact -- including the
+    refusal: an unestablished ceiling prints NO rung verdicts here either.
     """
     if not ceiling:
         return
     if not ceiling.get("established"):
         LOG.warning(
-            "  render ceiling NOT ESTABLISHED (/serverinfo answered %s); we ask as %s. Whether this "
-            "site can export SVG is unknown -- probe it with capture_tableau_oracle.py --reference-best",
+            "  render ceiling NOT ESTABLISHED (/serverinfo answered %s); we ask as %s. Which reference "
+            "renders this site supports is UNKNOWN -- no rung verdict is shown. Probe it with "
+            "capture_tableau_oracle.py --reference-best",
             ceiling.get("probe_status"),
             ceiling["client_api_version"],
         )
         return
     LOG.info(
-        "  server advertises REST %s (%s, product %s); we ask as %s -- expected best reference render: %s",
+        "  server advertises REST %s (%s, product %s); we ask as %s",
         ceiling["advertised_api_version"],
         ceiling["advertised_release"],
         ceiling.get("product_version"),
         ceiling["client_api_version"],
-        (ceiling["expected_reference_render"] or "unknown").upper(),
     )
-    if not ceiling["svg_floor_met"]:
+    for rung in ceiling["rungs"]:
+        line = LOG.warning if rung["verdict"] == UNAVAILABLE else LOG.info
+        line(
+            "    %-8s needs REST %-4s (%s) -> %s%s",
+            rung["tier"],
+            rung["min_api"],
+            rung["min_release"],
+            rung["verdict"].upper(),
+            f" -- {rung['ceiling']}" if rung["verdict"] == AVAILABLE else " on this server AT ANY CLIENT SETTING",
+        )
+    best = ceiling["best_reference_render"]
+    if best:
+        LOG.info("  --reference-best should resolve to %s here (expected from the advertised ceiling)", best.upper())
+    else:
         LOG.warning(
-            "  SVG is UNAVAILABLE on this site: it needs REST %s (%s) and this server advertises %s. "
-            "Raising TABLEAU_REST_API_VERSION cannot change that -- capture PDF instead",
-            ceiling["svg_floor"],
-            ceiling["svg_floor_release"],
+            "  NO reference render rung is reachable on this site's advertised ceiling (%s) -- the "
+            "offline 192x192 .twb thumbnail is the only thing left, which is layout-grade, never "
+            "validation-grade",
             ceiling["advertised_api_version"],
         )
 

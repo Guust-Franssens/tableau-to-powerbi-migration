@@ -503,52 +503,173 @@ def _ceiling(monkeypatch, info, version="3.21"):
     return assess_estate.server_ceiling(_Site(version=version))
 
 
+def _rung(ceiling, name):
+    """One rung out of the verdict list, by tier name."""
+    return next(r for r in ceiling["rungs"] if r["tier"] == name)
+
+
 def test_the_assessment_reports_the_three_numbers_it_insists_are_different(monkeypatch):
     ceiling = _ceiling(monkeypatch, dict(SES, status=200))
     assert ceiling["client_api_version"] == "3.21"
     assert ceiling["advertised_api_version"] == "3.27"
-    assert ceiling["expected_reference_render"] == "pdf"
+    assert ceiling["best_reference_render"] == "pdf"
 
 
 def test_the_assessment_translates_the_api_number_into_a_release_a_customer_knows(monkeypatch):
     assert _ceiling(monkeypatch, dict(SES, status=200))["advertised_release"] == "Tableau 2025.3"
 
 
+def test_the_assessment_carries_a_VERDICT_PER_RUNG_not_two_numbers_to_do_arithmetic_on(monkeypatch):
+    """The point of surfacing the version here is the IMPLICATION, read per rung, not the number."""
+    ceiling = _ceiling(monkeypatch, dict(SES, status=200))
+    assert [(r["tier"], r["verdict"]) for r in ceiling["rungs"]] == [
+        ("svg", assess_estate.UNAVAILABLE),
+        ("pdf", assess_estate.AVAILABLE),
+        ("png_high", assess_estate.AVAILABLE),
+    ]
+
+
+def test_every_rung_carries_its_own_floor_and_route_so_a_consumer_never_re_derives_them(monkeypatch):
+    svg = _rung(_ceiling(monkeypatch, dict(SES, status=200)), "svg")
+    assert (svg["min_api"], svg["route"]) == ("3.29", "/image?format=svg")
+    assert "Server 2026.2" in svg["min_release"]
+
+
 def test_the_assessment_expects_svg_only_where_the_server_advertises_it(monkeypatch):
-    """Negative control against the row above -- both directions of the same derivation."""
+    """Negative control against the rung table above -- both directions of the same derivation."""
     ceiling = _ceiling(monkeypatch, dict(CLOUD, status=200))
-    assert ceiling["svg_floor_met"] is True
-    assert ceiling["expected_reference_render"] == "svg"
+    assert _rung(ceiling, "svg")["verdict"] == assess_estate.AVAILABLE
+    assert ceiling["best_reference_render"] == "svg"
 
 
-def test_a_site_that_will_not_answer_serverinfo_does_not_degrade_the_assessment(monkeypatch):
-    """Fail soft, and report the third state -- never a guess, never a listing error."""
+def test_a_site_below_every_rung_reports_no_reachable_render_rather_than_the_lowest_one(monkeypatch):
+    """`best` is the best AVAILABLE rung, not the last one in the ladder."""
+    ceiling = _ceiling(monkeypatch, {"status": 200, "product_version": "10.1", "rest_api_version": "2.4"})
+    assert {r["verdict"] for r in ceiling["rungs"]} == {assess_estate.UNAVAILABLE}
+    assert ceiling["best_reference_render"] is None
+
+
+# ---------------------------------------------- state C in the ASSESSMENT: no rung verdict at all
+
+
+def test_an_unestablished_ceiling_marks_every_rung_UNKNOWN_never_available(monkeypatch):
+    """The highest-value refusal in this change, in the field a consumer actually reads.
+
+    ⚠️ `unknown` is a value, not an absent key. A downstream tool that reads
+    `verdict != "unavailable"` as "usable" must be made to see the third state in the SAME field --
+    an unassessable state that reads as a clean one is the defect class this whole change exists for.
+    """
     ceiling = _ceiling(monkeypatch, {"status": 0, "error": "URLError: unreachable"})
     assert ceiling["established"] is False
-    assert ceiling["svg_floor_met"] is None
-    assert ceiling["expected_reference_render"] is None
+    assert {r["verdict"] for r in ceiling["rungs"]} == {assess_estate.UNKNOWN}
+    assert ceiling["best_reference_render"] is None
 
 
-def test_the_assessment_report_tells_a_below_floor_site_that_pdf_is_its_ceiling(monkeypatch):
-    lines = "\n".join(assess_estate._render_server_ceiling(_ceiling(monkeypatch, dict(SES, status=200))))  # pylint: disable=protected-access
-    assert "Best rung expected: PDF" in lines
-    assert "at any client setting" in lines
-    assert "cannot change that" in lines
+def test_an_ESTABLISHED_ceiling_marks_no_rung_unknown(monkeypatch):
+    """Negative control: a mutation that always returns UNKNOWN fails here."""
+    for server in (SES, CLOUD):
+        ceiling = _ceiling(monkeypatch, dict(server, status=200))
+        assert assess_estate.UNKNOWN not in {r["verdict"] for r in ceiling["rungs"]}
 
 
-def test_the_assessment_report_does_NOT_promise_pdf_to_a_site_that_can_do_svg(monkeypatch):
-    """Negative control."""
-    lines = "\n".join(assess_estate._render_server_ceiling(_ceiling(monkeypatch, dict(CLOUD, status=200))))  # pylint: disable=protected-access
-    assert "Best rung expected: SVG" in lines
-    assert "Best rung expected: PDF" not in lines
-    assert "not a measurement" in lines
-
-
-def test_the_assessment_report_says_UNKNOWN_rather_than_choosing_a_rung(monkeypatch):
+def test_the_report_prints_NO_rung_table_when_the_ceiling_was_not_established(monkeypatch):
+    """A rung table from a ceiling nobody established is indistinguishable from a measured one."""
     ceiling = _ceiling(monkeypatch, {"status": 0, "error": "URLError: unreachable"})
     lines = "\n".join(assess_estate._render_server_ceiling(ceiling))  # pylint: disable=protected-access
     assert "was NOT established" in lines
-    assert "Best rung expected" not in lines
+    assert "No per-rung verdict is shown" in lines
+    # The table header, the verdict vocabulary and the bottom line must ALL be absent -- asserting on
+    # only one of them would pass a renderer that dropped the header and kept the verdicts.
+    assert "| rung | route |" not in lines
+    assert "Bottom line" not in lines
+    for marker in ("available", "UNAVAILABLE on this server", "/image?format=svg", "REST `3.29`"):
+        assert marker not in lines
+
+
+def test_the_report_DOES_print_the_rung_table_when_the_ceiling_IS_established(monkeypatch):
+    """Negative control for the refusal above: it must refuse only the unestablished case."""
+    lines = "\n".join(assess_estate._render_server_ceiling(_ceiling(monkeypatch, dict(SES, status=200))))  # pylint: disable=protected-access
+    assert "| rung | route |" in lines
+    assert "No per-rung verdict is shown" not in lines
+    assert "was NOT established" not in lines
+
+
+def test_the_console_prints_NO_rung_verdict_when_the_ceiling_was_not_established(monkeypatch, caplog):
+    """The terminal is the surface an operator sees first, so the same refusal has to hold there."""
+    ceiling = _ceiling(monkeypatch, {"status": 0, "error": "URLError: unreachable"})
+    with caplog.at_level(logging.INFO, logger="assess"):
+        assess_estate._log_server_ceiling(ceiling)  # pylint: disable=protected-access
+    assert "NOT ESTABLISHED" in caplog.text
+    assert "UNKNOWN -- no rung verdict is shown" in caplog.text
+    for marker in ("AVAILABLE", "needs REST 3.29", "reference-best should resolve to"):
+        assert marker not in caplog.text
+
+
+def test_the_console_DOES_print_a_rung_verdict_once_the_ceiling_is_established(monkeypatch, caplog):
+    """Negative control for the console refusal."""
+    with caplog.at_level(logging.INFO, logger="assess"):
+        assess_estate._log_server_ceiling(_ceiling(monkeypatch, dict(SES, status=200)))  # pylint: disable=protected-access
+    assert "needs REST 3.29" in caplog.text
+    assert "reference-best should resolve to PDF" in caplog.text
+    assert "no rung verdict is shown" not in caplog.text
+
+
+# ------------------------------------------------------------- the report block, rendered per rung
+
+
+def test_the_report_leads_with_the_implication_and_keeps_the_numbers_as_detail(monkeypatch):
+    lines = "\n".join(assess_estate._render_server_ceiling(_ceiling(monkeypatch, dict(SES, status=200))))  # pylint: disable=protected-access
+    assert "what we send" in lines and "what the server advertises" in lines
+    assert "UNAVAILABLE on this server" in lines
+    assert "Bottom line: `--reference-best` should resolve to `pdf`" in lines
+    assert "at any client setting" in lines
+
+
+def test_the_report_says_WHY_pdf_is_worth_preferring_when_svg_is_out_of_reach(monkeypatch):
+    lines = "\n".join(assess_estate._render_server_ceiling(_ceiling(monkeypatch, dict(SES, status=200))))  # pylint: disable=protected-access
+    assert "only **vector** rung available here" in lines
+
+
+def test_the_report_does_NOT_claim_pdf_is_the_only_vector_rung_where_svg_also_works(monkeypatch):
+    """Negative control: on a 3.30 site both vector rungs are reachable, so that claim is false."""
+    lines = "\n".join(assess_estate._render_server_ceiling(_ceiling(monkeypatch, dict(CLOUD, status=200))))  # pylint: disable=protected-access
+    assert "Bottom line: `--reference-best` should resolve to `svg`" in lines
+    assert "only **vector** rung available here" not in lines
+    assert "at any client setting" not in lines
+
+
+def test_the_report_states_the_measured_PNG_CEILING_because_available_is_easy_to_over_trust(monkeypatch):
+    """The other half of the implication, quoting this repo's own measurement, not a new one.
+
+    `docs/reference-capture.md` records `?resolution=high` as **exactly 2x declared, 52/52**, with a
+    650x800 dashboard capped at 1300x1600 forever. Both numbers appear, so a reviewer can trace them.
+    """
+    lines = "\n".join(assess_estate._render_server_ceiling(_ceiling(monkeypatch, dict(SES, status=200))))  # pylint: disable=protected-access
+    assert "exactly 2× the dashboard's declared size" in lines
+    assert "650×800" in lines and "1300×1600" in lines
+    assert "structurally legible and content-illegible" in lines
+
+
+def test_the_PNG_ceiling_is_scoped_to_DASHBOARDS_because_a_worksheet_honours_vizHeight(monkeypatch):
+    """This repo already corrected the over-general version of this claim once; do not reintroduce it."""
+    lines = "\n".join(assess_estate._render_server_ceiling(_ceiling(monkeypatch, dict(SES, status=200))))  # pylint: disable=protected-access
+    assert "worksheet" in lines and "dashboard claim" in lines
+
+
+def test_the_report_grades_its_own_verdicts_rather_than_presenting_them_as_measurements(monkeypatch):
+    """`unavailable` is firm; `available` is a claim the endpoint has not been asked to honour."""
+    lines = "\n".join(assess_estate._render_server_ceiling(_ceiling(monkeypatch, dict(SES, status=200))))  # pylint: disable=protected-access
+    assert "derived from the **advertised** number" in lines
+    assert "has not been asked to honour" in lines
+
+
+def test_a_site_below_every_rung_is_told_no_server_reference_exists_at_all(monkeypatch):
+    ceiling = _ceiling(monkeypatch, {"status": 200, "product_version": "10.1", "rest_api_version": "2.4"})
+    lines = "\n".join(assess_estate._render_server_ceiling(ceiling))  # pylint: disable=protected-access
+    assert "NO reference render rung is reachable" in lines
+    assert "192×192" in lines and "layout-grade, never validation-grade" in lines
+    # The raster ceiling is noise on a site that cannot call the raster rung either.
+    assert "1300×1600" not in lines
 
 
 def test_the_assessment_section_is_absent_when_no_probe_was_run():
@@ -557,7 +678,7 @@ def test_the_assessment_section_is_absent_when_no_probe_was_run():
 
 
 def test_the_ceiling_reaches_assessment_json_not_only_the_report(monkeypatch):
-    """A programmatic consumer never opens report.md."""
+    """A programmatic consumer never opens report.md, so the verdicts have to be structured."""
     raw = {
         "workbooks": [],
         "views": [],
@@ -571,4 +692,7 @@ def test_the_ceiling_reaches_assessment_json_not_only_the_report(monkeypatch):
         "server_ceiling": _ceiling(monkeypatch, dict(SES, status=200)),
     }
     assembled = assess_estate.assemble(raw, 0.99)
-    assert assembled["server_ceiling"]["advertised_api_version"] == "3.27"
+    ceiling = assembled["server_ceiling"]
+    assert ceiling["advertised_api_version"] == "3.27"
+    assert _rung(ceiling, "svg")["verdict"] == assess_estate.UNAVAILABLE
+    assert ceiling["best_reference_render"] == "pdf"

@@ -407,12 +407,39 @@ Three consequences worth stating plainly:
   changing the pin would do.
 
 **The assessment reports the ceiling before anyone captures anything.** `assess_estate.py` is the
-first thing an operator runs against a new site, and the render ceiling is a property of the *site*,
-so `report.md`, `assessment.json` and the console now reconcile the same three numbers — what we
-send, what the server advertises, and what that means (*"Best rung expected: PDF"*). It **fails
-soft**: a site that will not answer `/serverinfo` is reported as *not established* and does **not**
-degrade the assessment, because nothing downstream is computed from it. It is an **expectation from
-an advertised number, never a measurement** — only `--reference-best` probes the endpoint.
+first thing an operator runs against a new site, and the render ceiling is a property of the *site* —
+so `report.md`, `assessment.json` and the console now carry a **verdict per rung**, not two numbers
+to do arithmetic on:
+
+```
+- what we send            TABLEAU_REST_API_VERSION = 3.21   (a client preference)
+- the server advertises   REST 3.27, product 2025.3.3       (from /serverinfo)
+
+| rung     | route                  | needs                       | verdict                     |
+| svg      | /image?format=svg      | REST 3.29 (Server 2026.2)   | ❌ UNAVAILABLE on this server |
+| pdf      | /pdf?type=Unspecified  | REST 2.8  (Server 10.5)     | ✅ available (vector, embedded fonts) |
+| png_high | /image?resolution=high | REST 2.5  (Server 10.2)     | ✅ available |
+
+Bottom line: --reference-best should resolve to `pdf` on this site.
+```
+
+Three properties of that block are load-bearing:
+
+- **It states the raster ceiling, because *available* is the half operators over-trust.**
+  `?resolution=high` is **exactly 2× the dashboard's declared size** (52/52 above), so a **650×800**
+  dashboard tops out at **1300×1600, forever** and a label-dense page can be structurally legible and
+  content-illegible at once. That is *why* PDF matters on a sub-3.29 server: it is the only vector
+  rung left. ⚠️ Scoped to **dashboards** — a worksheet does honour `vizHeight` (see the route survey
+  above); the over-general phrasing was corrected once already and must not come back.
+- **It grades its own verdicts.** `unavailable` is firm — the site's own ceiling is below that rung's
+  documented floor. `available` is a *claim* the endpoint has not been asked to honour. Only
+  `--reference-best` settles it.
+- ⚠️ **State C applies here exactly as it applies to the capture warnings.** If `/serverinfo` did not
+  answer, the block says the ceiling was **not established** and prints **no rung table at all** —
+  every rung's structured `verdict` is `unknown`, in the same field a consumer reads, because a rung
+  table rendered from a ceiling nobody established is indistinguishable at a glance from a measured
+  one. It **fails soft**: it never degrades the assessment, since nothing downstream is computed
+  from it.
 
 **A required reference that never arrived is exit code 5, never 0.** With `--reference-best` and an
 UNDETERMINED probe no render kind is requested at all, every view's data still succeeds, and the run
