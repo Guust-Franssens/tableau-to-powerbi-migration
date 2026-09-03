@@ -50,17 +50,21 @@ fresh-per-asset completed 8/8. Slower, and the only thing that finishes.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import logging
 import os
+import re
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import traceback
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -81,6 +85,12 @@ from engine_source import EngineNotFoundError, engine_scripts_dir  # noqa: E402 
 from tableau_env import engine_child_env, pat_secret, redact, require, resolve_env  # noqa: E402  # pylint: disable=wrong-import-position
 
 LOG = logging.getLogger("harvest_estate_assets")
+
+# The download watchdog (below) pushes this module past pylint's 1200-line limit. The precedent in
+# this repo is a module-level waiver (`assess_estate.py`, `run_estate.py`, `deploy_estate.py` and
+# three others carry the same one) rather than a cosmetic split; the watchdog is nonetheless a
+# genuine seam and would be the thing to lift out if this file grows again.
+# pylint: disable=too-many-lines
 
 # The FILES this script writes under `--out`, probed as files on purpose. Two reasons:
 #   * a directory-only rule (`/_sweep*/`, or a hand-written `_myout/assets/`) is applied by
@@ -361,11 +371,386 @@ def refuse_unignored_output(
     return True
 
 
-def download(kind: str, luid: str, out_file: Path, env: dict[str, str], scripts: Path) -> tuple[bool, str]:
+# --- download watchdog: telling a STALLED download from a merely SLOW one -----------------------
+#
+# There are TWO nested timeouts and they catch opposite failures. The engine's `fetch_tds.py` passes
+# `timeout=300` to `urlopen` (`:407`, `:423`), which is a PER-SOCKET-READ timeout: it fires when a
+# connection goes quiet. Ours was `subprocess.run(..., timeout=600)`, a TOTAL WALL CLOCK: it fires on
+# a download that is progressing perfectly well and merely large. A customer's 47-asset harvest lost
+# `IA Redemptions by Campaign Report` to the second one twice (issue #472) — very likely a healthy
+# download we killed. Raising 600 to 1200 only moves that cliff, so the ceiling is not the fix:
+# knowing whether bytes are still arriving is.
+#
+# ⚠️ A FILE-GROWTH watchdog cannot work here, and this is a property of the engine, not a guess.
+# `_http` ends `return resp.status, dict(resp.headers), resp.read()` — ONE unbounded read, the whole
+# asset buffered in RAM — and `save_outputs(raw, ...)` writes only afterwards. The destination file
+# is therefore 0 bytes until the download has already finished.
+#
+# What DOES work, measured 2026-09-03 on Windows against a local slow-stream server (a child running
+# the same `urlopen(...).read()` shape), 15 MB at ~1 MB/s versus a socket that goes quiet after 3
+# chunks:
+#
+#   sampled                                   healthy download        stalled download
+#   Popen.pid `OtherTransferCount`            Δ 0 (frozen)            Δ 0 (frozen)
+#   real interpreter `ReadTransferCount`      Δ 0 after startup       Δ 0
+#   real interpreter `OtherTransferCount`     moves every second      frozen for 19s
+#   `PagefileUsage`                           frozen after startup    frozen
+#
+# Three things that table settles, each of which would have produced a WRONG fix on its own:
+#
+#  1. Socket bytes land in Windows' OTHER I/O bucket, not Read, and they are counted as per-operation
+#     overhead (~160 B/s observed while ~1 MB/s flowed). So this is a LIVENESS signal, never a byte
+#     count — do not report it as "bytes downloaded".
+#  2. The RAM-footprint half of the hypothesis is UNSOUND: `PagefileUsage` did not move while 15 MB
+#     was buffered. Committed memory is taken in large chunks up front, so it is not a per-byte
+#     signal. Measured, not assumed.
+#  3. **`Popen.pid` is the WRONG PROCESS under a uv venv.** `.venv/Scripts/python.exe` is a
+#     trampoline: measured `Popen.pid = 35152` while the child's own `os.getpid()` reported `20856`.
+#     Sampling the handle Popen hands you measures a stub whose counters never move, so the naive
+#     design would have declared EVERY download stalled and killed all of them. The probe therefore
+#     sums the whole process SUBTREE.
+#
+# And because a signal that can be wrong must fail in the safe direction: a flatline is only ever
+# acted on after movement has been observed AT LEAST ONCE for this child. No movement ever seen
+# (unsupported platform, denied handle, trampoline we could not walk) means no stall verdict — the
+# wall-clock ceiling applies instead, i.e. exactly today's behaviour.
+
+DEFAULT_DOWNLOAD_TIMEOUT = 600.0
+DEFAULT_STALL_TIMEOUT = 120.0
+PROGRESS_POLL_SECONDS = 2.0
+# "NEVER block silently on an external system" (AGENTS.md): anything past a minute reports elapsed
+# time, so a stall is visible as a stall rather than looking like work.
+HEARTBEAT_SECONDS = 60.0
+
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+PROCESS_TERMINATE = 0x0001
+TH32CS_SNAPPROCESS = 0x2
+
+_HANDLE = ctypes.c_void_p
+_DWORD = ctypes.c_uint32
+_BOOL = ctypes.c_int32
+
+
+class IoCounters(ctypes.Structure):  # pylint: disable=too-few-public-methods
+    """`IO_COUNTERS` — cumulative per-process I/O, as `GetProcessIoCounters` fills it in."""
+
+    _fields_ = [
+        ("ReadOperationCount", ctypes.c_ulonglong),
+        ("WriteOperationCount", ctypes.c_ulonglong),
+        ("OtherOperationCount", ctypes.c_ulonglong),
+        ("ReadTransferCount", ctypes.c_ulonglong),
+        ("WriteTransferCount", ctypes.c_ulonglong),
+        ("OtherTransferCount", ctypes.c_ulonglong),
+    ]
+
+
+class ProcessEntry32(ctypes.Structure):  # pylint: disable=too-few-public-methods
+    """`PROCESSENTRY32` — only `th32ProcessID`/`th32ParentProcessID` are read, but the layout must
+    be complete or `Process32First` fills the wrong offsets."""
+
+    _fields_ = [
+        ("dwSize", _DWORD),
+        ("cntUsage", _DWORD),
+        ("th32ProcessID", _DWORD),
+        ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+        ("th32ModuleID", _DWORD),
+        ("cntThreads", _DWORD),
+        ("th32ParentProcessID", _DWORD),
+        ("pcPriClassBase", ctypes.c_long),
+        ("dwFlags", _DWORD),
+        ("szExeFile", ctypes.c_char * 260),
+    ]
+
+
+_KERNEL32: Any = None
+
+
+def kernel32() -> Any:
+    """`kernel32` with `argtypes` SET, or None off Windows.
+
+    ⚠️ The `argtypes` are not decoration. Without them ctypes passes a 64-bit `HANDLE` as `c_int`,
+    and the failure is silent-looking rather than loud: measured, `GetProcessIoCounters` returned 0
+    for `GetCurrentProcess()`'s `-1` pseudo-handle while a small real handle "succeeded" with values
+    that never moved — which reads exactly like a stalled download.
+    """
+    global _KERNEL32  # pylint: disable=global-statement
+    if _KERNEL32 is None:
+        if sys.platform != "win32":
+            return None
+        lib = ctypes.windll.kernel32  # pylint: disable=no-member  # Windows-only, guarded above
+        lib.OpenProcess.argtypes = [_DWORD, _BOOL, _DWORD]
+        lib.OpenProcess.restype = _HANDLE
+        lib.CloseHandle.argtypes = [_HANDLE]
+        lib.CloseHandle.restype = _BOOL
+        lib.TerminateProcess.argtypes = [_HANDLE, ctypes.c_uint32]
+        lib.TerminateProcess.restype = _BOOL
+        lib.GetProcessIoCounters.argtypes = [_HANDLE, ctypes.POINTER(IoCounters)]
+        lib.GetProcessIoCounters.restype = _BOOL
+        lib.CreateToolhelp32Snapshot.argtypes = [_DWORD, _DWORD]
+        lib.CreateToolhelp32Snapshot.restype = _HANDLE
+        lib.Process32First.argtypes = [_HANDLE, ctypes.POINTER(ProcessEntry32)]
+        lib.Process32First.restype = _BOOL
+        lib.Process32Next.argtypes = [_HANDLE, ctypes.POINTER(ProcessEntry32)]
+        lib.Process32Next.restype = _BOOL
+        _KERNEL32 = lib
+    return _KERNEL32
+
+
+def windows_descendants(pid: int) -> list[int]:
+    """Every descendant PID of `pid`, walked from one process snapshot. Empty off Windows."""
+    lib = kernel32()
+    if lib is None:
+        return []
+    snapshot = lib.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if not snapshot or snapshot == -1:
+        return []
+    entry = ProcessEntry32()
+    entry.dwSize = ctypes.sizeof(ProcessEntry32)  # pylint: disable=invalid-name,attribute-defined-outside-init
+    by_parent: dict[int, list[int]] = {}
+    try:
+        found = lib.Process32First(snapshot, ctypes.byref(entry))
+        while found:
+            by_parent.setdefault(int(entry.th32ParentProcessID), []).append(int(entry.th32ProcessID))
+            found = lib.Process32Next(snapshot, ctypes.byref(entry))
+    finally:
+        lib.CloseHandle(snapshot)
+    seen: list[int] = []
+    stack = [pid]
+    while stack:
+        for child in by_parent.get(stack.pop(), []):
+            if child not in seen and child != pid:
+                seen.append(child)
+                stack.append(child)
+    return seen
+
+
+def process_tree(pid: int) -> list[int]:
+    """`pid` and its descendants. The descendants are the point: see the trampoline note above."""
+    if sys.platform == "win32":
+        return [pid, *windows_descendants(pid)]
+    children: dict[int, list[int]] = {}
+    for entry in Path("/proc").glob("*/stat") if Path("/proc").is_dir() else []:
+        try:
+            fields = entry.read_text(encoding="utf-8", errors="replace").rsplit(")", 1)[-1].split()
+            children.setdefault(int(fields[1]), []).append(int(entry.parent.name))
+        except (OSError, ValueError, IndexError):
+            continue
+    seen: list[int] = [pid]
+    stack = [pid]
+    while stack:
+        for child in children.get(stack.pop(), []):
+            if child not in seen:
+                seen.append(child)
+                stack.append(child)
+    return seen
+
+
+def transferred_bytes(pid: int) -> int | None:
+    """A monotonic-ish I/O counter summed over `pid`'s SUBTREE, or None when unobtainable.
+
+    LIVENESS, not volume: on Windows the socket payload is not what moves this (see the measurement
+    table above), so compare it with its own previous value and never report it as bytes downloaded.
+    None means "this platform/process cannot tell us", which is a different answer from 0 and must
+    never be treated as a stall.
+    """
+    if sys.platform == "win32":
+        lib = kernel32()
+        if lib is None:  # pragma: no cover - unreachable while sys.platform is win32
+            return None
+        total: int | None = None
+        for target in process_tree(pid):
+            handle = lib.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, target)
+            if not handle:
+                continue
+            counters = IoCounters()
+            ok = lib.GetProcessIoCounters(handle, ctypes.byref(counters))
+            lib.CloseHandle(handle)
+            if not ok:
+                continue
+            total = (total or 0) + int(
+                counters.ReadTransferCount + counters.WriteTransferCount + counters.OtherTransferCount
+            )
+        return total
+    total = None
+    for target in process_tree(pid):
+        try:
+            io_text = Path(f"/proc/{target}/io").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in io_text.splitlines():
+            key, _, value = line.partition(":")
+            if key in ("rchar", "wchar"):
+                total = (total or 0) + int(value.strip() or 0)
+    return total
+
+
+def terminate_tree(proc: subprocess.Popen[str]) -> None:
+    """Kill the child AND its descendants, deepest first — the trampoline again.
+
+    `Popen.kill()` terminates only the process Popen holds. Under a uv venv that is the trampoline,
+    which would leave the real interpreter running with the socket still open, so the very download
+    we just gave up on would keep consuming the session we are about to re-establish.
+    """
+    descendants = windows_descendants(proc.pid) if sys.platform == "win32" else process_tree(proc.pid)[1:]
+    lib = kernel32()
+    for target in reversed(descendants):
+        if lib is not None:
+            handle = lib.OpenProcess(PROCESS_TERMINATE, False, target)
+            if handle:
+                lib.TerminateProcess(handle, 1)
+                lib.CloseHandle(handle)
+            continue
+        try:
+            os.kill(target, 9)
+        except OSError:
+            pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
+@dataclass
+class WatchedRun:  # pylint: disable=too-few-public-methods
+    """What a watched subprocess did: its result, or WHY we stopped waiting for it."""
+
+    returncode: int | None
+    stdout: str
+    stderr: str
+    elapsed: float
+    verdict: str  # "" (ran to completion), "stalled", or "ceiling"
+    detail: str  # operator-facing failure text; empty unless `verdict` is set
+    progress_observed: bool
+
+
+def run_watched(  # pylint: disable=too-many-locals,too-many-branches,too-many-arguments,too-many-statements
+    cmd: list[str],
+    env: dict[str, str],
+    *,
+    timeout: float = DEFAULT_DOWNLOAD_TIMEOUT,
+    stall_timeout: float = DEFAULT_STALL_TIMEOUT,
+    label: str = "download",
+    probe: Callable[[int], int | None] = transferred_bytes,
+    poll_interval: float = PROGRESS_POLL_SECONDS,
+    heartbeat: float = HEARTBEAT_SECONDS,
+) -> WatchedRun:
+    """Run `cmd`, killing it when it STOPS MAKING PROGRESS rather than when it takes a long time.
+
+    Two deadlines, and which one is armed depends on evidence rather than on configuration:
+
+    * `stall_timeout` — armed only once the probe has been seen to MOVE for this child. A flatline is
+      then a genuine stall and killing is right.
+    * `timeout` — the wall clock, armed only while no movement has ever been observed, i.e. when we
+      cannot tell slow from hung. This is the pre-#472 behaviour, kept for exactly the case that
+      justified it. `0` disables it, leaving a run bounded only by progress.
+
+    A download that keeps progressing past `timeout` is NOT killed; it is announced loudly instead,
+    because "elapsed time is not progress" cuts both ways.
+    """
+    started = time.perf_counter()
+    # pylint: disable-next=consider-using-with  # the whole point is to supervise it while it runs
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+    collected: dict[str, str] = {"out": "", "err": ""}
+
+    def drain() -> None:
+        # communicate() in its own thread: the pipes must be read while the watchdog polls, or a
+        # chatty child fills a pipe buffer and blocks -- which would look exactly like a stall.
+        out, err = proc.communicate()
+        collected["out"], collected["err"] = out or "", err or ""
+
+    reader = threading.Thread(target=drain, name="download-drain", daemon=True)
+    reader.start()
+
+    last_value = probe(proc.pid)
+    progress_observed = False
+    last_change = started
+    last_beat = started
+    announced_over_ceiling = False
+    verdict = ""
+    while True:
+        reader.join(poll_interval)
+        now = time.perf_counter()
+        elapsed = now - started
+        if not reader.is_alive():
+            break
+        value = probe(proc.pid)
+        if value is not None:
+            if last_value is not None and value != last_value:
+                progress_observed = True
+                last_change = now
+            last_value = value
+        since_progress = now - last_change
+        if now - last_beat >= heartbeat:
+            last_beat = now
+            LOG.info(
+                "%s still running: elapsed=%.0fs, %s",
+                label,
+                elapsed,
+                (
+                    f"last progress {since_progress:.0f}s ago"
+                    if progress_observed
+                    else "no progress signal available (wall-clock ceiling applies)"
+                ),
+            )
+        if progress_observed:
+            if since_progress > stall_timeout:
+                verdict = "stalled"
+                break
+            if timeout and elapsed > timeout and not announced_over_ceiling:
+                announced_over_ceiling = True
+                LOG.warning(
+                    "%s has run %.0fs, past --download-timeout %.0fs, but is still transferring — "
+                    "NOT killing it; it will be killed only after %.0fs with no progress.",
+                    label,
+                    elapsed,
+                    timeout,
+                    stall_timeout,
+                )
+        elif timeout and elapsed > timeout:
+            verdict = "ceiling"
+            break
+
+    elapsed = time.perf_counter() - started
+    if verdict:
+        terminate_tree(proc)
+        reader.join(30)
+        detail = (
+            (
+                f"stalled: no progress for {elapsed - (last_change - started):.0f}s "
+                f"(elapsed {elapsed:.0f}s). The download was moving and then stopped, so this is a "
+                f"hung transfer, not a slow one. Raise --download-stall-timeout above "
+                f"{stall_timeout:.0f}s if the source is merely bursty, or retry the asset."
+            )
+            if verdict == "stalled"
+            else (
+                f"timeout after {timeout:.0f}s (elapsed {elapsed:.1f}s); no download-progress signal "
+                f"was available for this process, so a slow-but-healthy transfer cannot be told from "
+                f"a hang. Raise --download-timeout (or pass 0 to remove the ceiling and rely on "
+                f"--download-stall-timeout alone)."
+            )
+        )
+        return WatchedRun(None, collected["out"], collected["err"], elapsed, verdict, detail, progress_observed)
+    return WatchedRun(proc.returncode, collected["out"], collected["err"], elapsed, "", "", progress_observed)
+
+
+def download(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    kind: str,
+    luid: str,
+    out_file: Path,
+    env: dict[str, str],
+    scripts: Path,
+    *,
+    timeout: float = DEFAULT_DOWNLOAD_TIMEOUT,
+    stall_timeout: float = DEFAULT_STALL_TIMEOUT,
+    label: str = "",
+) -> tuple[bool, str]:
     """Fetch one asset BY LUID via the deterministic tier's fetcher. Returns (ok, detail).
 
     By LUID, never by name: Tableau permits duplicate names across projects, and name-keyed identity
     has already produced four separate defects in this codebase.
+
+    `timeout` is no longer a plain wall clock — see `run_watched`. A transfer that keeps moving is
+    left alone however long it takes; one that stops moving is killed after `stall_timeout`.
     """
     flag = "--workbook-luid" if kind == "workbook" else "--datasource-luid"
     cmd = [
@@ -383,17 +768,22 @@ def download(kind: str, luid: str, out_file: Path, env: dict[str, str], scripts:
         str(out_file),
     ]
     child = engine_child_env(env)
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600, check=False, env=child)
-    except subprocess.TimeoutExpired:
-        return False, "timeout after 600s"
-    if proc.returncode != 0:
+    run = run_watched(
+        cmd,
+        child,
+        timeout=timeout,
+        stall_timeout=stall_timeout,
+        label=label or f"{kind} {luid}",
+    )
+    if run.verdict:
+        return False, run.detail
+    if run.returncode != 0:
         # Redact BEFORE truncating. Slicing first can cut through the secret and leave a suffix in
         # the retained text, which is then both logged and persisted -- measured: the full secret was
         # absent while its tail survived at the start of the slice. Order matters more than the
         # scrub itself here, because the wrong order still passes a test whose sentinel happens to
         # fall inside the window.
-        raw = redact((proc.stderr or proc.stdout or "").strip(), pat_secret(env), env.get("TABLEAU_PAT_NAME", ""))
+        raw = redact((run.stderr or run.stdout or "").strip(), pat_secret(env), env.get("TABLEAU_PAT_NAME", ""))
         return False, raw[-300:]
     return True, ""
 
@@ -458,16 +848,60 @@ def parse_theirs(path: Path, scripts: Path) -> dict[str, Any]:
         return {"ok": False, "error": f"harness: {type(exc).__name__}: {exc}"}
 
 
-def summarise(results: list[dict], out: Path) -> str:  # pylint: disable=too-many-locals
+def never_downloaded(results: list[dict]) -> list[dict]:
+    """Rows that never reached a parser at all, i.e. the downloads that did not land.
+
+    They are what `len(results)` counted and no bucket claimed: `r.get("ours", {}).get("ok") is
+    False` is False for a row with NO `ours` key, so a failed download fell out of every heading
+    while still inflating the denominator. A customer read `45/47 succeeded` off a tally whose
+    arithmetic did not close (issue #472).
+    """
+    return [r for r in results if "ours" not in r or "theirs" not in r]
+
+
+def failure_shape(message: str) -> str:
+    """A grouping key for a failure message, with the varying numbers collapsed.
+
+    Digits have to go, or the very failures worth grouping stay apart: two timeouts differing only
+    in `elapsed 601.4s` vs `elapsed 612.9s` are ONE feature request, not two, and the file's own
+    rule is to group by shape.
+    """
+    return re.sub(r"\d+(?:\.\d+)?", "N", str(message)).strip()[:90] or "(no detail)"
+
+
+def grouped_by_shape(rows: list[dict], detail: Callable[[dict], str]) -> list[tuple[str, list[str]]]:
+    """`[(shape, [asset names])]`, most frequent shape first."""
+    by_shape: dict[str, list[str]] = {}
+    for row in rows:
+        by_shape.setdefault(failure_shape(detail(row)), []).append(str(row.get("name", "?")))
+    return sorted(by_shape.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+
+
+def summarise(results: list[dict], out: Path) -> str:  # pylint: disable=too-many-locals,too-many-statements
     """Group failures by SHAPE, because one root cause repeated 12 times is one feature request."""
-    ours_fail = [r for r in results if r.get("ours", {}).get("ok") is False]
-    theirs_fail = [r for r in results if r.get("theirs", {}).get("ok") is False]
-    both_ok = [r for r in results if r.get("ours", {}).get("ok") and r.get("theirs", {}).get("ok")]
+    missing = never_downloaded(results)
+    missing_ids = {id(r) for r in missing}
+    parsed = [r for r in results if id(r) not in missing_ids]
+    ours_fail = [r for r in parsed if r.get("ours", {}).get("ok") is False]
+    theirs_fail = [r for r in parsed if r.get("theirs", {}).get("ok") is False]
+    both_ok = [r for r in parsed if r.get("ours", {}).get("ok") and r.get("theirs", {}).get("ok")]
+    both_fail = [r for r in ours_fail if id(r) in {id(x) for x in theirs_fail}]
 
     lines = ["# Estate parse sweep", ""]
     lines.append(
         f"**{len(results)} asset(s)** — ours failed {len(ours_fail)}, his failed {len(theirs_fail)}, "
-        f"both parsed {len(both_ok)}."
+        f"both parsed {len(both_ok)}, never downloaded {len(missing)}."
+    )
+    lines.append("")
+    # The closure line is the audit: `ours failed`/`his failed` OVERLAP when one asset defeats both
+    # parsers, so those two numbers cannot be added to anything. These five are disjoint and must
+    # sum to the denominator -- which is the property that silently failed before issue #472.
+    lines.append(
+        f"Disjoint buckets, which must add up to the {len(results)} above: "
+        f"{len(both_ok)} parsed by both + {len(ours_fail) - len(both_fail)} ours only + "
+        f"{len(theirs_fail) - len(both_fail)} his only + {len(both_fail)} both parsers + "
+        f"{len(missing)} never downloaded = "
+        f"{len(both_ok) + len(ours_fail) + len(theirs_fail) - len(both_fail) + len(missing)}."
     )
     lines.append("")
     lines.append(
@@ -475,6 +909,22 @@ def summarise(results: list[dict], out: Path) -> str:  # pylint: disable=too-man
         "(`docs/migration-programme.md` §0). A failure on both is a genuinely hard input."
     )
     lines.append("")
+
+    lines.append("## Downloads that never landed")
+    lines.append("")
+    if not missing:
+        lines.append("_none_")
+        lines.append("")
+    else:
+        lines.append(
+            f"**{len(missing)} asset(s) never reached a parser**, so nothing below this heading "
+            "says anything about them. They are not successes."
+        )
+        lines.append("")
+        for shape, names in grouped_by_shape(missing, lambda r: str(r.get("download_error", "?"))):
+            lines.append(f"- **{len(names)}x** `{shape}`")
+            lines.append(f"  - {', '.join(names[:8])}{' …' if len(names) > 8 else ''}")
+        lines.append("")
 
     for title, rows, key in (
         ("## Our parser failed", ours_fail, "ours"),
@@ -693,6 +1143,27 @@ def record_parse(
     )
 
 
+def report_failed_downloads(results: list[dict]) -> list[dict]:
+    """Say out loud, at the END of the run, which assets never landed. Returns those rows.
+
+    The per-asset `DOWNLOAD FAILED` warning has already scrolled past a 47-line run by the time the
+    summary prints, and `download_error` was otherwise written into `parse-sweep.json` and surfaced
+    NOWHERE an operator reads. The closing tally is the last thing they see, so the exceptions have
+    to be beside it or the run reads as clean (issue #472).
+    """
+    missing = never_downloaded(results)
+    if not missing:
+        return []
+    LOG.warning(
+        "%d of %d asset(s) NEVER DOWNLOADED and were not parsed at all — they are not successes:",
+        len(missing),
+        len(results),
+    )
+    for row in missing:
+        LOG.warning("  - %s (%s): %s", row.get("name", "?"), row.get("kind", "?"), row.get("download_error", "?"))
+    return missing
+
+
 def main() -> int:  # pylint: disable=too-many-locals,too-many-statements  # one linear sweep
     """Harvest and sweep. Exit 2 when `--out` is committable, 1 when nothing could be assessed."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -713,6 +1184,21 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-statements  # one
         help="project LUID to harvest (repeatable); same selection as --project, matched exactly",
     )
     ap.add_argument("--limit", type=int, help="stop after N assets (for a quick pass)")
+    ap.add_argument(
+        "--download-timeout",
+        type=float,
+        default=DEFAULT_DOWNLOAD_TIMEOUT,
+        help="wall-clock ceiling per asset, in seconds, applied ONLY while no download-progress "
+        f"signal is available (default {DEFAULT_DOWNLOAD_TIMEOUT:.0f}); 0 removes the ceiling. A "
+        "transfer we can see progressing is never killed by this.",
+    )
+    ap.add_argument(
+        "--download-stall-timeout",
+        type=float,
+        default=DEFAULT_STALL_TIMEOUT,
+        help="seconds a download may make NO observable progress before it is killed as hung "
+        f"(default {DEFAULT_STALL_TIMEOUT:.0f}); armed only after progress has been observed once",
+    )
     ap.add_argument("--skip-download", action="store_true", help="reuse whatever is already in --out/assets")
     ap.add_argument("--workbooks-only", action="store_true", help="skip published datasources; sweep workbooks only")
     ap.add_argument(
@@ -787,7 +1273,16 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-statements  # one
             # fresh sign-in, and after it because the fetcher decides the extension, not us.
             actual = existing_asset(assets_dir, kind, name, luid)
             if not args.skip_download and actual is None:
-                ok, detail = download(kind, luid, target, env, scripts)
+                ok, detail = download(
+                    kind,
+                    luid,
+                    target,
+                    env,
+                    scripts,
+                    timeout=args.download_timeout,
+                    stall_timeout=args.download_stall_timeout,
+                    label=f"[{index}/{len(todo)}] {name[:46]}",
+                )
                 if not ok:
                     row["download_error"] = detail
                     results.append(row)
@@ -815,6 +1310,7 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-statements  # one
     args.out.mkdir(parents=True, exist_ok=True)
     text = summarise(results, args.out)
     LOG.info("\n%s", text[: text.index("## ") if "## " in text else len(text)])
+    report_failed_downloads(results)
     LOG.info(
         "swept %d asset(s) in %.0fs -> %s", len(results), time.perf_counter() - started, args.out / "parse-sweep.md"
     )
