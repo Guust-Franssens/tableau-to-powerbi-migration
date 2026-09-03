@@ -33,6 +33,8 @@ apart.
 
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -53,6 +55,28 @@ from mutation_harness import (  # noqa: E402  # pylint: disable=wrong-import-pos
 ORACLE = "tests/test_capture_tableau_oracle.py"
 GROUP = "tests/test_group_oracle_by_workbook.py"
 PACKAGE = "tests/test_package_unit.py"
+
+# Where a mutation records how many times its patched path actually EXECUTED. A mutation that
+# compiles, applies, and is never reached is scored CAUGHT on its anchor's failure like any other --
+# and proves nothing, because something else made the anchor fail. Round 2 of #480 asks for the hit
+# count explicitly, so it is measured rather than asserted in prose.
+HIT_DIR = ROOT / "_mutation_hits"
+HIT_ENV = "MUTATION_HIT_FILE"
+
+# Prepended to EVERY mutation, so `_hit()` is always callable and an old mutation that never calls it
+# simply records 0. `atexit` rather than a pytest hook: the count must survive `-x` stopping the
+# session early, and a mutation whose plugin dies on import must still leave a readable 0.
+_HIT_PREAMBLE = """
+import atexit as _atexit, os as _os, pathlib as _pathlib
+_HITS = {"n": 0}
+def _hit():
+    _HITS["n"] += 1
+def _write_hits():
+    _target = _os.environ.get("MUTATION_HIT_FILE")
+    if _target:
+        _pathlib.Path(_target).write_text(str(_HITS["n"]), encoding="utf-8")
+_atexit.register(_write_hits)
+"""
 
 # name -> (the test NODE IDs that must observe it, the patch injected as a pytest plugin at startup)
 MUTATIONS: dict[str, tuple[tuple[str, ...], str]] = {
@@ -622,7 +646,206 @@ def subset(manifest, workbook, views):
 g.subset_manifest = subset
 """,
     ),
+    # ---- #480 round 2: an uncertified capture must be UNREADABLE, not merely flagged ------------
+    #
+    # Every mutation below calls `_hit()` on the path it replaces, so the campaign reports how many
+    # times it actually executed. A mutation that applies and is never reached is scored on its
+    # anchor's failure like any other and proves nothing.
+    "the-uncertified-body-goes-back-under-data-slash-csv": (
+        (
+            f"{ORACLE}::test_an_uncertified_capture_is_unreadable_by_a_consumer_that_never_heard_of_certification",
+            f"{ORACLE}::test_text_plain_error_text_is_never_certified_as_CSV",
+        ),
+        """
+import tableau_oracle_manifest as m
+import capture_tableau_oracle as o
+# EXACTLY round 1's shape: the state is still flagged, counted and named -- and the bytes are still
+# at `data/<luid>.csv` under `path`, which is all any numeric consumer reads. This is the mutation
+# the whole change exists to kill, and under round 1 it would have survived every test in the suite.
+def fields(out_dir, stem, certification):
+    _hit()
+    return out_dir / "data" / f"{stem}.csv", {m.EVIDENCE_PATH_KEY: f"data/{stem}.csv"}
+m.data_leg_fields = fields
+# ⚠️ BOTH bindings: `capture_tableau_oracle` does `from tableau_oracle_manifest import
+# data_leg_fields`, so patching the defining module alone works only while this plugin happens to
+# run before the consumer is imported -- the import-order false positive already measured once here.
+o.data_leg_fields = fields
+""",
+    ),
+    "every-body-is-treated-as-uncertified": (
+        (
+            f"{ORACLE}::test_a_certified_capture_is_still_readable_by_that_same_consumer",
+            f"{ORACLE}::test_the_reconcile_items_builder_still_maps_a_certified_capture",
+        ),
+        """
+import tableau_oracle_manifest as m
+import capture_tableau_oracle as o
+# The matched over-correction, and the reason the positive control exists: a rule that withholds
+# EVERY capture passes every "must not be readable" test in this file and destroys the numeric
+# oracle outright. Only a test that reads a CERTIFIED capture can tell the two apart.
+def fields(out_dir, stem, certification):
+    _hit()
+    return out_dir / m.RETAINED_DIR / f"{stem}{m.RETAINED_SUFFIX}", {
+        m.RETAINED_PATH_KEY: f"{m.RETAINED_DIR}/{stem}{m.RETAINED_SUFFIX}",
+        m.EVIDENCE_WITHHELD_KEY: "withheld",
+    }
+m.data_leg_fields = fields
+o.data_leg_fields = fields
+""",
+    ),
+    "the-two-halves-of-the-naming-rule-drift-apart": (
+        (f"{ORACLE}::test_a_200_with_no_Content_Type_is_kept_but_reported_UNASSESSABLE",),
+        """
+import tableau_oracle_manifest as m
+import capture_tableau_oracle as o
+_orig = m.data_leg_fields
+def fields(out_dir, stem, certification):
+    # Half the rule: the bytes move out of `data/` and the KEY stays `path`. That is why the file and
+    # the field it is named by are decided in one function -- either half alone leaves the record
+    # readable by every consumer that asks for a path.
+    #
+    # ⚠️ MEASURED: anchored on a MANIFEST-reading test this mutation SURVIVES, because
+    # `write_manifest`'s own `withhold_uncertified_evidence` call repairs the record before it is
+    # serialised. That is the defence in depth working -- and it is exactly why the anchor has to be
+    # a test that reads `capture_view`'s record directly, or the capture-time half is proved by its
+    # backstop rather than on its own.
+    _hit()
+    path, naming = _orig(out_dir, stem, certification)
+    if m.RETAINED_PATH_KEY in naming:
+        naming = {m.EVIDENCE_PATH_KEY: naming[m.RETAINED_PATH_KEY]}
+    return path, naming
+m.data_leg_fields = fields
+o.data_leg_fields = fields
+""",
+    ),
+    "the-manifest-writer-trusts-the-capture-to-have-done-it": (
+        (f"{ORACLE}::test_a_record_assembled_ELSEWHERE_cannot_reach_the_manifest_with_uncertified_evidence",),
+        """
+import tableau_oracle_manifest as m
+def withhold(records):
+    # The belt-and-braces call in `write_manifest` removed. `_capture_data` is not the only thing
+    # that builds a data leg -- a re-scoped, hand-repaired or older record reaches the writer too --
+    # and without this the manifest can still be written naming uncertified bytes as evidence.
+    _hit()
+    return records
+m.withhold_uncertified_evidence = withhold
+""",
+    ),
+    "withholding-demotes-every-record-it-sees": (
+        (f"{ORACLE}::test_withholding_evidence_leaves_a_measured_capture_untouched_and_is_idempotent",),
+        """
+import tableau_oracle_manifest as m
+def withhold(records):
+    # The over-correction one level up: demote everything, including captures whose rows WERE
+    # measured. It satisfies every "must not be readable" assertion and silently deletes the oracle.
+    _hit()
+    out = []
+    for record in records:
+        data = dict(record.get("data") or {})
+        if m.EVIDENCE_PATH_KEY in data:
+            data[m.RETAINED_PATH_KEY] = data.pop(m.EVIDENCE_PATH_KEY)
+        out.append({**record, "data": data})
+    return out
+m.withhold_uncertified_evidence = withhold
+""",
+    ),
+    "an-older-manifest-is-read-raw": (
+        (f"{ORACLE}::test_a_LEGACY_manifest_naming_uncertified_bytes_under_path_is_demoted_when_it_is_READ",),
+        """
+import json
+import tableau_oracle_manifest as m
+def read_manifest(path):
+    # The half that only covers manifests we WRITE. A file already on disk names uncertified bytes
+    # under `path` and cannot be rewritten retroactively, so a raw read hands the review's second
+    # reproduction straight back to `build_reconcile_items` -- which is where it was found.
+    _hit()
+    return json.loads(path.read_text(encoding="utf-8-sig"))
+m.read_manifest = read_manifest
+""",
+    ),
+    "the-packager-copies-uncertified-bytes-into-its-data-folder": (
+        (f"{PACKAGE}::test_a_packaged_view_whose_row_count_was_never_recorded_says_so",),
+        """
+import package_unit as p
+_orig = p.package_oracle
+def package_oracle(views, manifest, oracle_dir, dest, unit=""):
+    # Normalising AFTER the legs are copied instead of before. The flags still ship, so every
+    # round-1 assertion passes -- and `<kind>/data/<stem>.csv` now holds bytes nothing certified,
+    # inside the handover package an agent is told to trust.
+    _hit()
+    import tableau_oracle_manifest as m
+    _real = m.withhold_uncertified_evidence
+    m.withhold_uncertified_evidence = lambda records: records
+    try:
+        return _orig(views, manifest, oracle_dir, dest, unit)
+    finally:
+        m.withhold_uncertified_evidence = _real
+p.package_oracle = package_oracle
+""",
+    ),
+    # ---- #480 round 2, finding 2: `text/plain` is not a CSV declaration ------------------------
+    "text-plain-is-a-csv-declaration-again": (
+        (
+            f"{ORACLE}::test_text_plain_error_text_is_never_certified_as_CSV",
+            f"{ORACLE}::test_certify_csv_reads_the_declaration_over_a_well_formed_body",
+        ),
+        """
+import tableau_payload_facts as f
+# Exactly the defect: `text/plain` back in the CERTIFYING set, which is how
+# `Service unavailable\\r\\nRetry later\\r\\n` was recorded columns ["Service unavailable"] row_count 1,
+# and how its single-line variant was DIAGNOSED `empty_query_no_rows`.
+_orig = f.certify_csv
+def certify(payload, content_type):
+    _hit()
+    out = _orig(payload, content_type)
+    return f.CSV_CERTIFIED if out == f.CSV_CONTENT_TYPE_UNSPECIFIC else out
+f.certify_csv = certify
+import capture_tableau_oracle as o
+o.certify_csv = certify
+""",
+    ),
+    "text-plain-is-refused-outright": (
+        (f"{ORACLE}::test_text_plain_error_text_is_never_certified_as_CSV",),
+        """
+import tableau_payload_facts as f
+# The over-correction in the other direction: refusing `text/plain` discards the bytes entirely, and
+# a transcoding proxy really does relabel a genuine export. Unassessable keeps the customer's data
+# and refuses only the CLAIM; a refusal keeps neither.
+_orig = f.certify_csv
+def certify(payload, content_type):
+    _hit()
+    out = _orig(payload, content_type)
+    return f.CSV_CONTENT_TYPE_NOT_CSV if out == f.CSV_CONTENT_TYPE_UNSPECIFIC else out
+f.certify_csv = certify
+import capture_tableau_oracle as o
+o.certify_csv = certify
+""",
+    ),
+    "the-unspecific-verdict-is-not-an-unassessable-reason": (
+        (f"{ORACLE}::test_text_plain_error_text_is_never_certified_as_CSV",),
+        """
+import tableau_oracle_manifest as m
+# A new verdict added to the certifier and NOT to the verdict layer's reason set. The view is still
+# flagged -- `row_count` is absent either way -- but it is named `row_count_unrecorded`, which tells
+# an operator to re-capture an old manifest rather than to look at what the server declared.
+m.UNASSESSABLE_REASONS = frozenset(r for r in m.UNASSESSABLE_REASONS if r != "content_type_unspecific")
+""",
+    ),
     # ------------------------------------------------------------- discriminating controls
+    "control-cosmetic-withheld-sentence-wording": (
+        (
+            f"{ORACLE}::test_an_uncertified_capture_is_unreadable_by_a_consumer_that_never_heard_of_certification",
+            f"{ORACLE}::test_the_reconcile_items_builder_emits_no_tableau_value_from_an_uncertified_capture",
+        ),
+        """
+import tableau_payload_facts as f
+# The `evidence_withheld` sentence reworded, keys and behaviour untouched. It MUST survive: a suite
+# that fails here is asserting on prose, and the next honest rewording would read as a defect.
+f.CSV_UNCERTIFIED_DETAIL = {k: "cosmetically reworded sentence nobody asserts on" for k in f.CSV_UNCERTIFIED_DETAIL}
+import tableau_oracle_manifest as m
+m.CSV_UNCERTIFIED_DETAIL = f.CSV_UNCERTIFIED_DETAIL
+""",
+    ),
     "control-cosmetic-unassessable-banner-wording": (
         (f"{ORACLE}::test_a_row_count_that_was_never_recorded_is_UNASSESSABLE_not_clean",),
         """
@@ -661,6 +884,24 @@ EXPECTED = {
     name: ("INVALID" if "absent-anchor" in name else "SURVIVED" if "control-" in name else "CAUGHT")
     for name in MUTATIONS
 }
+
+#: The mutations that call ``_hit()`` and must therefore prove they EXECUTED. Declared rather than
+#: inferred from the code string, so a mutation that loses its ``_hit()`` call in an edit fails the
+#: harness instead of quietly dropping back to an unproven verdict. Every #480 round-2 mutation is
+#: here; the earlier campaigns predate the mechanism and record ``hits=-``.
+HIT_COUNTED = frozenset(
+    {
+        "the-uncertified-body-goes-back-under-data-slash-csv",
+        "every-body-is-treated-as-uncertified",
+        "the-two-halves-of-the-naming-rule-drift-apart",
+        "the-manifest-writer-trusts-the-capture-to-have-done-it",
+        "withholding-demotes-every-record-it-sees",
+        "an-older-manifest-is-read-raw",
+        "the-packager-copies-uncertified-bytes-into-its-data-folder",
+        "text-plain-is-a-csv-declaration-again",
+        "text-plain-is-refused-outright",
+    }
+)
 
 
 def verify_anchors() -> list[str]:
@@ -708,28 +949,50 @@ def baseline(anchors: tuple[str, ...]) -> tuple[int, str]:
     return proc.returncode, last_line(proc)
 
 
-def classify(name: str, code: str, target: tuple[str, ...]) -> tuple[str, str]:
-    """Score one mutation as CAUGHT / SURVIVED / INVALID / HARNESS-ERROR, with a detail line."""
+def classify(name: str, code: str, target: tuple[str, ...]) -> tuple[str, str, int | None]:
+    """Score one mutation as CAUGHT / SURVIVED / INVALID / HARNESS-ERROR, with a detail line.
+
+    The third element is how many times the mutated path EXECUTED, or ``None`` when the mutation
+    does not count (every pre-#480 one). ⚠️ A verdict without it is weaker than it looks: a mutation
+    that applies and is never reached is scored CAUGHT on its anchor's failure exactly like one that
+    was reached, so the count is what separates "this behaviour is pinned" from "something else in
+    the run failed".
+    """
+    HIT_DIR.mkdir(parents=True, exist_ok=True)
+    hit_file = HIT_DIR / f"{name}.txt"
+    hit_file.unlink(missing_ok=True)
+    os.environ[HIT_ENV] = str(hit_file)
     try:
-        _label, returncode, detail, outcomes = run(name, code, target)
+        _label, returncode, detail, outcomes = run(name, _HIT_PREAMBLE + code, target)
     except SystemExit as exc:
         # The shared harness refuses to score a mutation whose plugin failed to import. That is
         # exactly the verdict an absent-anchor control is meant to earn.
-        return "INVALID", str(exc)
+        return "INVALID", str(exc), _read_hits(hit_file)
+    finally:
+        os.environ.pop(HIT_ENV, None)
+    hits = _read_hits(hit_file)
     if observed_mutation(outcomes):
         verdict = "CAUGHT" if outcomes["call_failed"] else "CAUGHT*"
         if session_ended_abnormally(outcomes):
             detail = f"{detail} [session ended abnormally: exit {returncode}]"
-        return verdict, detail
+        return verdict, detail, hits
     if session_is_trustworthy(outcomes):
-        return "SURVIVED", detail
+        return "SURVIVED", detail, hits
     if not outcomes.get("recorded") and not outcomes.get("session_finished"):
         # pytest never started, so the patch never ran and NO verdict about the suite is possible.
         # ⚠️ The shared harness only raises SystemExit for the literal string "Error importing
         # plugin"; an AttributeError inside the plugin exits 1 with no lifecycle record instead, and
         # scoring that as a detection is the exact false-green the shared harness records.
-        return "INVALID", f"mutation never applied - {detail}"
-    return "HARNESS-ERROR", f"exit {returncode}, {detail}"
+        return "INVALID", f"mutation never applied - {detail}", hits
+    return "HARNESS-ERROR", f"exit {returncode}, {detail}", hits
+
+
+def _read_hits(hit_file: Path) -> int | None:
+    """The recorded execution count, or ``None`` when the mutation never wrote one."""
+    try:
+        return int(hit_file.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
 
 
 def main() -> int:
@@ -754,13 +1017,20 @@ def main() -> int:
     print()
     wrong = []
     for name, (anchors, code) in MUTATIONS.items():
-        verdict, detail = classify(name, code, anchors)
+        verdict, detail, hits = classify(name, code, anchors)
         expected = EXPECTED[name]
         ok = verdict.rstrip("*") == expected
-        print(f"{verdict:13s} {'' if ok else f'(EXPECTED {expected}) '}{name:50s} -> {detail}")
+        shown = "hits=-" if hits is None else f"hits={hits}"
+        print(f"{verdict:13s} {'' if ok else f'(EXPECTED {expected}) '}{name:52s} {shown:9s} -> {detail}")
         if not ok:
             wrong.append(f"{name}: expected {expected}, got {verdict}")
+        # A mutation that DECLARES it counts must have executed at least once, whatever its verdict.
+        # Without this, a patch that applies and is never reached is credited with its anchor's
+        # failure -- the same class of false green the shared harness's own first run produced.
+        if name in HIT_COUNTED and not hits:
+            wrong.append(f"{name}: declared a hit count and its patched path never executed (hits={hits})")
     print()
+    shutil.rmtree(HIT_DIR, ignore_errors=True)
     if wrong:
         print("MUTATIONS THAT DID NOT SCORE AS DECLARED:")
         for item in wrong:
@@ -770,7 +1040,8 @@ def main() -> int:
         f"all {len(MUTATIONS)} mutations scored as declared, each against its OWN anchor(s) "
         f"({sum(1 for v in EXPECTED.values() if v == 'CAUGHT')} caught, "
         f"{sum(1 for v in EXPECTED.values() if v == 'SURVIVED')} cosmetic controls survived, "
-        f"{sum(1 for v in EXPECTED.values() if v == 'INVALID')} absent-anchor controls invalid)"
+        f"{sum(1 for v in EXPECTED.values() if v == 'INVALID')} absent-anchor controls invalid; "
+        f"{len(HIT_COUNTED)} of them proved they executed, with a hit count)"
     )
     return 0
 

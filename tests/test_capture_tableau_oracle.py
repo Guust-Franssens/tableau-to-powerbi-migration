@@ -1191,6 +1191,25 @@ def test_an_uncertified_capture_is_unreadable_by_a_consumer_that_never_heard_of_
     assert _naive_numeric_consumer(tmp_path) == [], "a consumer that only knows `path` must find nothing"
 
 
+def test_a_record_assembled_ELSEWHERE_cannot_reach_the_manifest_with_uncertified_evidence(tmp_path):
+    """`_capture_data` is not the only thing that builds a data leg, so the writer enforces it too.
+
+    A re-scoped, hand-repaired or older record reaches `write_manifest` without ever passing through
+    the capture path, and the structural rule has to hold for those as well -- otherwise the
+    invariant is "whatever `_capture_data` happened to do", which is a convention, not a guarantee.
+    """
+    record = _record("ok")
+    record["data"] = {"status": "ok", "path": "data/hand-built.csv"}
+    _code, manifest = _named_manifest(tmp_path, [record])
+
+    data = manifest["views"][0]["data"]
+    assert "path" not in data, "the writer must not serialise uncertified bytes under the evidence key"
+    assert data[verdict.RETAINED_PATH_KEY] == "data/hand-built.csv"
+    assert data[verdict.EVIDENCE_WITHHELD_KEY] == verdict.RETAINED_DETAIL_DEFAULT
+    assert data["status"] == "ok"
+    assert manifest["data_unassessable"] == 1
+
+
 def test_a_certified_capture_is_still_readable_by_that_same_consumer(tmp_path):
     """⚠️ The positive control. A rule that hides EVERY capture passes the test above and destroys
     the numeric oracle, and only this can tell the two apart."""
@@ -1217,9 +1236,12 @@ def test_the_reconcile_items_builder_emits_no_tableau_value_from_an_uncertified_
     assert result["item_count"] == 0, "a fidelity verdict built on an unassessable capture is unfounded"
     assert result["items"] == []
     assert [entry["view"] for entry in result["skipped_views"]] == ["Real Time Availability"]
-    assert (
-        "not evidence" in result["skipped_views"][0]["reason"] or "NOT placed" in (result["skipped_views"][0]["reason"])
-    ), "the skip must say WHY, not report `ok`"
+    # The skip must say WHY, and must not report the transport status as if it were the reason. The
+    # sentence is compared to the manifest's own by identity rather than quoted: asserting on its
+    # wording would make an honest rewording read as a defect.
+    manifest = json.loads((tmp_path / "oracle-manifest.json").read_text(encoding="utf-8"))
+    assert result["skipped_views"][0]["reason"] == manifest["views"][0]["data"][verdict.EVIDENCE_WITHHELD_KEY]
+    assert result["skipped_views"][0]["reason"] != "ok"
 
 
 def test_the_reconcile_items_builder_still_maps_a_certified_capture(tmp_path):
