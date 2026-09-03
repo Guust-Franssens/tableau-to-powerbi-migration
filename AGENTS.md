@@ -326,9 +326,30 @@ subagents**, the CLI host died and wrote a crash dump into the repo root
 { "event": "Allocation failed - JavaScript heap out of memory", "trigger": "OOMError" }
 ```
 
-**Marked observed rather than measured, deliberately.** The dump was read at the time but not
-retained, so this is not reproducible from anything committed here. If it happens again, **keep the
-dump** (it is gitignored, not auto-deleted) and upgrade this claim.
+**The mechanism and its ceiling are now MEASURED; the concurrency that reaches them is still not.**
+The 2026-08-20 dumps were read and discarded, which is why that round stayed "observed". Two more
+crashes on **2026-09-03 (06:00:22 and 19:36:16)** were retained, and they are the reason this entry
+can now carry numbers instead of folklore:
+
+| dump | `header.event` / `trigger` | `javascriptHeap.usedMemory` | `totalMemory` | `resourceUsage.rss` |
+|---|---|---:|---:|---:|
+| `report.20260903.060022.36308.0.001.json` | `Allocation failed …` / `OOMError` | 3,480,865,688 | 3,510,222,848 | 8,844,890,112 |
+| `report.20260903.193616.73536.0.001.json` | `Allocation failed …` / `OOMError` | 3,437,318,968 | 3,466,874,880 | 8,679,428,096 |
+
+Read them with `(Get-Content <dump> -Raw | ConvertFrom-Json).header.event` — the fields are nested
+under `header`, `javascriptHeap` and `resourceUsage`, so a top-level `.trigger` reads empty and looks
+like the dump is malformed when it is merely differently shaped.
+
+Three things follow, and only the first two are established:
+
+- **The wall is the V8 heap at roughly 3.5 GB, and it is hit essentially full** — used/total is 99.2%
+  and 99.1%. This is not gradual degradation with a slow rescue window; it is a hard allocation
+  failure.
+- **RSS is ~2.5× the JS heap** (8.7 GB vs 3.5 GB), so watching total process memory will not warn you:
+  the process can look far from any machine limit while the heap it actually dies on is nearly full.
+- ⚠️ **Concurrency at the moment of these two crashes was NOT recorded**, so they do not bisect the
+  wave size and must not be cited as if they did. They confirm *what* kills the host, not *how many
+  agents* it takes.
 
 Equally, be careful what the number means. **Six failed. Four was run repeatedly the same night
 without incident — which is not the same as four being safe**, and no one has bisected it. Treat
