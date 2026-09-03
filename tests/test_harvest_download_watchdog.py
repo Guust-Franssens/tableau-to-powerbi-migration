@@ -533,6 +533,41 @@ def test_a_watchdog_verdict_reaches_the_caller_as_the_failure_detail(
     assert (ok, detail) == (False, "stalled: no progress")
 
 
+@pytest.mark.parametrize("verdict", ["stalled", "ceiling"])
+def test_a_watchdog_verdict_cannot_carry_the_childs_reflected_pat(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, verdict: str
+) -> None:
+    """⚠️ The PATH #482 ADDED, and the one the credential tests do not reach.
+
+    `download()` redacts on the `returncode != 0` branch, and that branch is what
+    `tests/test_tableau_env.py` exercises. A watchdog verdict returns EARLIER, from `run.detail`,
+    and drops the child's stderr entirely -- which is safe today and is one plausible "let's include
+    what the child said" edit away from not being. The killed child is the likeliest one to have
+    been mid-sign-in, so its stderr is exactly where a reflected PAT would sit.
+    """
+    secret = "SENTINEL_PAT_qrstuvwxyz012345"
+    env = {
+        "TABLEAU_SERVER_URL": "https://example.invalid",
+        "TABLEAU_PAT_NAME": "probe-name",
+        "TABLEAU_PAT_SECRET": secret,
+    }
+    reflected = f'401: {{"credentials": {{"personalAccessTokenSecret": "{secret}"}}}}'
+    monkeypatch.setattr(
+        harvest,
+        "run_watched",
+        lambda cmd, env_, **kwargs: harvest.WatchedRun(
+            None, reflected, reflected, 900.0, verdict, f"{verdict}: no progress for 420s", False
+        ),
+    )
+    ok, detail = harvest.download("workbook", "wb-1", tmp_path / "wb.twbx", env, tmp_path)
+
+    assert ok is False
+    assert secret not in detail, "a killed child's reflected PAT reached the operator-facing detail"
+    assert "probe-name" not in detail, "the PAT name reached the operator-facing detail"
+    # Non-vacuity: the verdict text itself must survive, or this passes on an empty detail.
+    assert detail.startswith(f"{verdict}: no progress"), "the watchdog's own diagnostic was lost"
+
+
 # --- the real probe, on this machine ------------------------------------------------------------
 
 

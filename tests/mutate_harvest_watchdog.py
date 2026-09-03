@@ -322,6 +322,15 @@ MUTATIONS: list[tuple[str, str, str, str, str, str]] = [
         node("test_a_clean_sweep_still_says_none"),
         "the NON_HTTP_CREDENTIAL_SCRIPTS classification becomes false and nothing else notices",
     ),
+    (
+        "verdict-detail-appends-the-child-stderr",
+        "    if run.verdict:\n        return False, run.detail",
+        "    if run.verdict:\n        return False, run.detail + (run.stderr or '')",
+        f"{TESTS}::test_a_watchdog_verdict_cannot_carry_the_childs_reflected_pat",
+        node("test_a_clean_sweep_still_says_none"),
+        "a killed child's reflected PAT rides out on the watchdog verdict, which never reaches the "
+        "redactor on the returncode branch",
+    ),
     # ---------------------------------------------------------------- discriminating controls
     (
         "control-cosmetic",
