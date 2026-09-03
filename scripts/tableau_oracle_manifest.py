@@ -31,6 +31,7 @@ from tableau_env import redacted_note, scrub_tree
 from tableau_payload_facts import (
     CSV_CERTIFIED,
     CSV_CONTENT_TYPE_ABSENT,
+    CSV_CONTENT_TYPE_UNSPECIFIC,
     CSV_REFUSALS,
     CSV_UNCERTIFIED,
     CSV_UNCERTIFIED_DETAIL,
@@ -816,8 +817,9 @@ def _log_unassessable(unassessable: list[dict[str, Any]], redactor) -> None:
     as the total cost, when the unassessable views are the ones nothing at all is known about.
 
     Both reasons are actionable and they are actionable DIFFERENTLY: ``row_count_unrecorded`` is an
-    older manifest and re-capturing resolves it, while ``content_type_absent`` is a live server or
-    proxy that did not declare what it sent -- re-capturing reproduces it, and the fix is upstream.
+    older manifest and re-capturing resolves it, while ``content_type_absent`` and
+    ``content_type_unspecific`` are a live server or proxy that did not declare what it sent, or
+    declared only ``text/plain`` -- re-capturing reproduces both, and the fix is upstream.
     """
     if not unassessable:
         return
@@ -826,13 +828,18 @@ def _log_unassessable(unassessable: list[dict[str, Any]], redactor) -> None:
         "recorded status 'ok' and this run's exit code is unaffected -- but no row count was ever "
         "established for them, so they are NOT counted as captured-complete and a numeric-fidelity "
         "finding cannot be made or refuted from them. This is not the same as an empty capture: an "
-        "empty one measured zero rows, these measured nothing. '%s' means an older manifest that "
-        "predates the count (re-capture resolves it); '%s' means the server or a proxy returned the "
-        "body with no Content-Type, and a CSV carries no signature, so nothing establishes those "
-        "bytes as data -- the fix is upstream of this capture:",
+        "empty one measured zero rows, these measured nothing. Their retained bytes are kept under "
+        "'%s/' and named '%s', never as data, so nothing downstream can read them as numbers. '%s' "
+        "means an older manifest that predates the count (re-capture resolves it); '%s' means the "
+        "server or a proxy returned the body with no Content-Type, and '%s' that it declared only "
+        "text/plain, which an error banner is too. A CSV carries no signature, so neither "
+        "establishes those bytes as data -- the fix is upstream of this capture:",
         len(unassessable),
+        RETAINED_DIR,
+        RETAINED_PATH_KEY,
         UNASSESSABLE_NO_ROW_COUNT,
         CSV_CONTENT_TYPE_ABSENT,
+        CSV_CONTENT_TYPE_UNSPECIFIC,
     )
     for entry in unassessable:
         LOG.warning(
