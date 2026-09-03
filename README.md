@@ -198,10 +198,10 @@ _runs/<NNN>-<slug>/                     ◀── PHASE 1  collect & convert  (g
 │   └── parse-sweep.json  parse-sweep.md      both parsers' failure distribution over them
 ├── oracle/                                 Tableau's OWN renders and numbers
 │   ├── images/  data/                        ⚠️ only for views that captured — 288 of 360 here
-│   └── oracle-manifest.json                  every view: captured, or refused with a reason
+│   └── oracle-manifest.json                  every view: captured, or not — with status and reason
 ├── bundle/                                 the deterministic engine's conversion output
 │   ├── reports/<WB>.Report/                  ⚠️ engine truth — NEVER edit
-│   ├── semantic_models/<Model>.SemanticModel/ ⚠️ engine truth — NEVER edit; conditional, 18 here
+│   ├── semantic_models/<Model>.SemanticModel/ ⚠️ engine truth — NEVER edit; 18 for 62 pbip/ units
 │   ├── pbip/<Unit>/                          the working copy: .Report + .SemanticModel + .pbip
 │   ├── handover/<WB>.json                    the per-workbook remediation queue
 │   ├── data/                                 materialised extract rows
@@ -214,30 +214,34 @@ _runs/<NNN>-<slug>/                     ◀── PHASE 1  collect & convert  (g
 │   │   ├── <WB>.Report/                      PBIR
 │   │   ├── <Model>.SemanticModel/            TMDL
 │   │   └── <WB>.pbip
-│   ├── assets/<luid>_<Unit>.<ext>          the original source, alongside
+│   ├── assets/<luid>_<Unit>.<ext>          the original source, alongside          (65 of 67)
 │   ├── handover/<WB>.json                  this unit's slice of the queue       (46 of 67)
 │   ├── oracle/                             this unit's reference evidence       (46 of 67)
 │   │   ├── worksheet/{images,data}/
-│   │   ├── dashboard/{images,data}/
+│   │   ├── dashboard/{images,data}/          (an `unknown/` tier appears if a view's type is unset)
 │   │   └── oracle-manifest.json
 │   ├── report.json  source-provenance.json   gate input, and source-to-LUID attribution
+│   ├── engine-output-receipt.json            which engine version built this      (67 of 67)
 │   └── package-manifest.json               what was packaged, and every omission with its reason
 │
 ├── deliverables/                           customer-facing outputs — never committed
 └── scratch/                                the ONLY subdir that is safe to delete
 
-migrations/workbooks/<slug>/            ◀── PHASE 3  ship
-├── data/                                   materialised rows — gitignored
-└── fabric/                                 the trackable deliverable
-    ├── <WB>.Report/
-    ├── <Model>.SemanticModel/
-    └── <WB>.pbip                           ← what the customer opens in Power BI Desktop
+migrations/workbooks/<slug>/fabric/      ◀── PHASE 3  ship  (the deliverable only — the unit
+├── <WB>.Report/                                root may also hold source/, data/,
+├── <Model>.SemanticModel/                      reference/ and migration-spec.json)
+└── <WB>.pbip                               ← what the customer opens in Power BI Desktop
 ```
 
-⚠️ **A unit is not uniformly workbook-shaped.** The per-line counts above are from a 67-package
-reference run: a datasource-only unit (`.tds`) ships no report, no PBIP, no handover and no oracle
-evidence, so treat those four as **conditional**. Phase 3 is *trackable*, not automatically
-committed — `data/` and customer-prefixed units are gitignored, so commit only what is public-safe.
+⚠️ **Every counted entry above is conditional — and the rule is NOT the source type.** On the
+67-package reference run, **5 units had no engine working copy** (`Meridian_Calc_Gauntlet`,
+`Meridian_Collision_Alpha`, `Meridian_Trip_Economics`, `RESTAPISample`, `TS_Users`) — four of them
+*workbooks*, so this is a per-unit conversion gap, not "datasources lack a report". 18 of the 19
+`.tds` units **do** ship a report, model and PBIP. Handover and oracle evidence exist for 46 of 67.
+The tree shows selected entries, not an exhaustive listing.
+
+⚠️ **Phase 3 is *trackable*, not automatically committed** — `data/` and customer-prefixed units are
+gitignored, so commit only what is public-safe.
 
 ⚠️ **Which copy to edit is currently unsettled** ([#460](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/460)):
 `AGENTS.md` says `bundle/pbip/`, the generated package README says `<package>/fabric/`, and the
