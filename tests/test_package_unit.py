@@ -31,6 +31,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
+import manifest_scope as ms  # noqa: E402  # pylint: disable=wrong-import-position
 import package_unit as pkg  # noqa: E402  # pylint: disable=wrong-import-position
 import reference_evidence as rev  # noqa: E402  # pylint: disable=wrong-import-position
 from manifest_scope import KEEP, REPORT_ALLOW, Rows, project  # noqa: E402  # pylint: disable=wrong-import-position
@@ -468,7 +469,7 @@ def test_the_scoped_report_keeps_only_this_units_engine_classification(tmp_path:
 # --------------------------------------------------------------------------------------------
 # 4a. the scoped report as a DATA-EGRESS boundary (round-1 finding 1)
 #
-# `_scope_report` used to copy every key it did not explicitly filter. Measured by the reviewer on
+# `scope_report` used to copy every key it did not explicitly filter. Measured by the reviewer on
 # `HR_Dashboard` in the 48-workbook reference bundle: `workbooks[]` held 1 entry while **11 of the 13
 # top-level fields were byte-identical to the whole-estate report** - 67 `input_manifest.assets`, 62
 # `openable_outputs`, and (unnamed in the report, found while fixing it) 48 `definition_of_done`
@@ -507,7 +508,7 @@ ENGINE_REPORT_FIELDS = (
 )
 
 #: A token no real Tableau object can collide with, and that no substring of this unit's own content
-#: can produce. `_scope_report` must not emit it anywhere.
+#: can produce. `scope_report` must not emit it anywhere.
 FOREIGN = "Zz_Foreign_Unit_Sentinel"
 
 #: An absolute host path, ASSEMBLED AT RUNTIME so no tracked file contains the literal.
@@ -666,15 +667,56 @@ def test_a_retained_row_does_not_smuggle_unknown_nested_fields(tmp_path: Path) -
 
     Filtering `workbooks[]` to this unit removes FOREIGN rows whole - which is why the round-1
     fixture, planting only in foreign rows, could never fail. The row this unit KEEPS was still
-    copied wholesale, so `workbooks[0].future_nested` and its `definition_of_done` twin shipped
-    automatically. Only a nested allowlist removes them, and only a retained-row sentinel sees it.
+    copied wholesale, so `workbooks[0].future_nested` shipped automatically.
+
+    Round 3 settled it by DESCOPING: the shipped row is a name and nothing else, so there is no
+    container left to smuggle anything through.
     """
     _full, scoped, text = _package_estate_report(tmp_path)
     assert RETAINED_EXTENSION not in text
-    assert "future_nested" not in scoped["workbooks"][0]
-    assert "future_nested" not in scoped["definition_of_done"]["workbooks"][0]
+    assert list(scoped["workbooks"][0]) == ["name"]
     assert scoped["workbooks"][0]["name"] == UNIT
-    assert scoped["definition_of_done"]["workbooks"][0]["workbook"] == UNIT
+
+
+def test_an_unknown_field_inside_a_RETAINED_container_cannot_ship(tmp_path: Path) -> None:
+    """⚠️ The control round 3 said was missing, and without which any fix here is unfalsifiable.
+
+    Rounds 1-3 each closed one level and were followed by a deeper one, and the 60-test suite plus a
+    17/17 mutation campaign stayed green throughout because **nothing probed an unknown field inside
+    a RETAINED container**. This is that probe, at both depths round 3 exploited:
+    `workbooks[].model_facts.future_install_root` in the report, and
+    `views[].image.future_source_path` in the oracle manifest.
+
+    It is also the reason `KEEP` is now scalar-only: a container arriving at a scalar leaf raises
+    `UnscopedStructure` rather than shipping its grandchildren, so this class fails LOUDLY at
+    packaging time instead of being discovered a round later.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    full = _estate_report(UNIT)
+    full["workbooks"][0]["model_facts"] = {"tables": 3, "future_install_root": RETAINED_EXTENSION}
+    (bundle / "report.json").write_text(json.dumps(full), encoding="utf-8")
+
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    manifest["views"][0].setdefault("image", {"status": "skipped"})["future_source_path"] = RETAINED_EXTENSION
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    for shipped in root.rglob("*.json"):
+        assert RETAINED_EXTENSION not in shipped.read_text(encoding="utf-8"), f"leaked via {shipped.name}"
+    assert "workbooks[].model_facts" in _packaged_report(tmp_path)["scope"]["dropped_fields"]
+
+
+def test_a_container_at_a_scalar_leaf_fails_loudly_rather_than_shipping() -> None:
+    """A structure with no spec must be a hard error at packaging time, never a silent pass-through."""
+    with pytest.raises(ms.UnscopedStructure) as excinfo:
+        project({"name": {"nested": RETAINED_EXTENSION}}, {"name": KEEP})
+    assert "name is a dict" in str(excinfo.value)
+    assert RETAINED_EXTENSION not in str(excinfo.value), "the error must not echo the value it refused"
+
+    with pytest.raises(ms.UnscopedStructure):
+        project({"tiers": [{"tier": "svg"}]}, {"tiers": ms.SCALAR_LIST})
+    assert project({"tiers": ["png", "svg"]}, {"tiers": ms.SCALAR_LIST}) == ({"tiers": ["png", "svg"]}, [])
 
 
 def test_a_dropped_nested_field_is_recorded_by_its_full_path(tmp_path: Path) -> None:
@@ -682,9 +724,8 @@ def test_a_dropped_nested_field_is_recorded_by_its_full_path(tmp_path: Path) -> 
     _full, scoped, _text = _package_estate_report(tmp_path)
     dropped = scoped["scope"]["dropped_fields"]
     assert "workbooks[].future_nested" in dropped
-    assert "definition_of_done.workbooks[].future_nested" in dropped
     assert "input_manifest" in dropped
-    assert "definition_of_done.status" in dropped
+    assert "definition_of_done" in dropped
     assert not any(RETAINED_EXTENSION in entry or FOREIGN in entry for entry in dropped)
 
 
@@ -729,14 +770,18 @@ def test_only_unit_neutral_engine_identity_is_carried_verbatim() -> None:
         assert isinstance(full[key], str), f"{key} is not a scalar - it can carry estate content"
 
 
-def test_the_definition_of_done_is_scoped_and_loses_the_estates_own_verdict(tmp_path: Path) -> None:
-    """48 rows on the reference bundle, and `status: failed` is the ESTATE's, not this unit's."""
+def test_the_report_is_descoped_to_the_classification_the_gates_read(tmp_path: Path) -> None:
+    """Round 3: DELETE the surface rather than enumerate it a fourth time.
+
+    `definition_of_done` was carried in round 2 as "the engine's own verdict on this unit". It is not
+    read by either gate, and on the reference bundle its `workbooks[]` held 48 rows - a second copy
+    of the estate. The same is true of every other field. What the gates read is a NAME, so a name is
+    all that ships, and with it goes every container-valued field this file could hide anything in.
+    """
     _full, scoped, _text = _package_estate_report(tmp_path)
-    dod = scoped["definition_of_done"]
-    assert [row["workbook"] for row in dod["workbooks"]] == [UNIT]
-    assert dod["applicable"] is True
-    for estate_only in ("status", "reports_bound", "reports_failed", "reports_warned"):
-        assert estate_only not in dod, f"{estate_only} is an estate aggregate and reads as this unit's verdict"
+    assert sorted(scoped) == ["datasources", "generated_at", "scope", "scoped_by", "tool", "workbooks"]
+    assert "definition_of_done" not in scoped
+    assert all(list(row) == ["name"] for row in scoped["workbooks"] + scoped["datasources"])
 
 
 def test_the_scoped_report_still_declares_both_collections_as_lists(tmp_path: Path) -> None:
@@ -851,7 +896,7 @@ def test_the_readme_separates_the_png_and_svg_evidence_legs(tmp_path: Path) -> N
 # --------------------------------------------------------------------------------------------
 # 4c. the OTHER shipped manifests (round-2 blocker 2)
 #
-# Round 1 fixed one denylist. `package_oracle()` and `_scope_receipt()` were still denylists in
+# Round 1 fixed one denylist. `package_oracle()` and `scope_receipt()` were still denylists in
 # their own right - measured on the packaged `HR_Dashboard`, the oracle manifest carried **22 fields
 # byte-identical** to the 360-view estate manifest (`view_types` still totalling 360 beside a
 # rewritten `view_count: 23`), and the receipt shipped two absolute `C:\\Users\\<user>\\...` paths.
@@ -992,8 +1037,198 @@ def test_the_absolute_path_walker_can_actually_find_one() -> None:
 
 
 # --------------------------------------------------------------------------------------------
-# 4d. repackaging (round-2 blocker 3) - the worst of the three
+# 4e. the oracle manifest is UNTRUSTED INPUT (round-3 finding 3)
 #
+# `oracle-manifest.json` is written by a separate tool against a live Tableau server, and
+# `_copy_leg` used to join its declared path straight onto the capture root. Round-3 review copied
+# an arbitrary file into the customer package with `"../outside-secret.png"`, and an absolute path
+# both copied the file AND wrote the host path into the packaged manifest.
+#
+# This is deliberately NOT an allowlist problem and is not fixed with one: it is containment.
+# --------------------------------------------------------------------------------------------
+
+
+def _capture_with_leg_path(tmp_path: Path, declared: str) -> tuple[Path, Path, Path]:
+    """`(bundle, oracle, package root)` where this unit's first view declares ``declared``."""
+    bundle, oracle = _bundle(tmp_path)
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    manifest["views"][0]["image"] = {"status": "ok", "path": declared, "sha256": "x", "bytes": 3}
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+    return bundle, oracle, _out(tmp_path) / UNIT
+
+
+def _secret_outside(oracle: Path, name: str) -> Path:
+    target = (oracle / ".." / name).resolve()
+    target.write_bytes(b"\x89PNG\r\n\x1a\nEXFILTRATION-CANARY")
+    return target
+
+
+@pytest.mark.parametrize("declared", ["../outside-secret.png", "sub/../../outside-secret.png"])
+def test_a_relative_path_escaping_the_capture_root_is_refused(tmp_path: Path, declared: str) -> None:
+    """`../` traversal copied an arbitrary file byte-identically into the customer package."""
+    bundle, oracle = _bundle(tmp_path)
+    _secret_outside(oracle, "outside-secret.png")
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    manifest["views"][0]["image"] = {"status": "ok", "path": declared, "sha256": "x", "bytes": 3}
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    assert not [p for p in root.rglob("*") if p.is_file() and b"EXFILTRATION-CANARY" in p.read_bytes()]
+    assert declared not in json.dumps(
+        json.loads((root / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    )
+
+
+def test_an_absolute_path_is_refused_and_never_reaches_the_manifest(tmp_path: Path) -> None:
+    """The absolute form copied the file AND wrote the host path into the packaged manifest.
+
+    ⚠️ The `is_absolute()` guard is defence in depth, not the sole mitigation: the mutation campaign
+    showed that removing it still leaves the file uncopied, because the containment check refuses the
+    resolved path anyway. Keeping it is deliberate - it is a named requirement and it gives a PRECISE
+    diagnosis - so its observable contract is asserted here, otherwise the branch is unfalsifiable
+    and could be lost in a refactor without anything going red.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    secret = tmp_path / "absolute-secret.png"
+    secret.write_bytes(b"\x89PNG\r\n\x1a\nEXFILTRATION-CANARY")
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    manifest["views"][0]["image"] = {"status": "ok", "path": str(secret), "sha256": "x", "bytes": 3}
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    shipped = json.loads((root / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    assert not [p for p in root.rglob("*") if p.is_file() and b"EXFILTRATION-CANARY" in p.read_bytes()]
+    assert absolute_host_paths(shipped) == []
+    leg = shipped["views"][0]["image"]
+    assert leg["status"] == pkg.OMITTED_STATUS
+    assert leg["path"] == pkg.REFUSED_PATH, "the declared path must not be echoed back"
+    assert "non-relative" in leg["packaging_reason"], "an absolute path must be diagnosed as such"
+    assert str(secret) not in json.dumps(shipped)
+
+
+def test_a_symlink_out_of_the_capture_root_is_refused(tmp_path: Path) -> None:
+    """Containment is checked on the RESOLVED path, so a link inside the capture cannot escape it."""
+    bundle, oracle = _bundle(tmp_path)
+    secret = _secret_outside(oracle, "linked-secret.png")
+    link = oracle / "images" / "innocent.png"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        link.symlink_to(secret)
+    except (OSError, NotImplementedError):
+        pytest.skip("this platform/account cannot create symlinks without elevation")
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    manifest["views"][0]["image"] = {"status": "ok", "path": "images/innocent.png", "sha256": "x", "bytes": 3}
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    assert not [p for p in root.rglob("*") if p.is_file() and b"EXFILTRATION-CANARY" in p.read_bytes()]
+
+
+def test_a_legitimate_capture_relative_leg_still_copies(tmp_path: Path) -> None:
+    """The positive control: containment must not break the ordinary path, or it is a fail-closed bug."""
+    bundle, oracle = _bundle(tmp_path)
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    shipped = json.loads((root / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    legs = [view["image"] for view in shipped["views"] if isinstance(view.get("image"), dict)]
+    assert legs and all(leg["status"] == "ok" for leg in legs)
+    assert all("/" in leg["packaged_from"] or leg["packaged_from"] for leg in legs)
+    assert _images(tmp_path)
+
+
+# --------------------------------------------------------------------------------------------
+# 4f. provenance and the handover slice (round-3 finding 2)
+# --------------------------------------------------------------------------------------------
+
+
+def test_a_refused_attribution_ships_no_provenance_entry_at_all(tmp_path: Path) -> None:
+    """⚠️ A refusal that does not suppress the artifact is not a refusal.
+
+    Two entries sharing an asset sha make `workbook_identity` refuse - and the package used to ship
+    BOTH anyway, foreign `workbook_name` and `project` included. `_provenance_luid` returns on the
+    FIRST sha match, so which one a consumer believed was list-order chance.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    payload = json.loads((bundle / "source-provenance.json").read_text(encoding="utf-8"))
+    twin = json.loads(json.dumps(payload["inputs"][0]))
+    twin["origin"] = {
+        "workbook_luid": OTHER_LUID,
+        "workbook_name": f"{FOREIGN} Workbook",
+        "project": f"{FOREIGN} Project",
+        "match": "sha256",
+    }
+    payload["inputs"].append(twin)
+    (bundle / "source-provenance.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    result = _package(tmp_path, bundle, oracle)
+    scoped = json.loads((_out(tmp_path) / UNIT / "source-provenance.json").read_text(encoding="utf-8"))
+    assert result["workbook_identity"].get("luid") is None
+    assert scoped["inputs"] == []
+    assert FOREIGN not in json.dumps(scoped, ensure_ascii=False)
+    assert scoped["scope"]["suppressed_reason"], "the refusal must stay visible, not just silent"
+
+
+def test_the_provenance_carries_only_the_three_fields_the_gate_reads(tmp_path: Path) -> None:
+    """`workbook_name`/`project` are a foreign-identity channel and are not among them."""
+    bundle, oracle = _bundle(tmp_path)
+    payload = json.loads((bundle / "source-provenance.json").read_text(encoding="utf-8"))
+    payload["future_scan_root"] = FOREIGN
+    payload["inputs"][0]["origin"]["future_source_path"] = FOREIGN
+    payload["inputs"][0]["origin"]["project"] = f"{FOREIGN} Project"
+    (bundle / "source-provenance.json").write_text(json.dumps(payload), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+    scoped = json.loads((_out(tmp_path) / UNIT / "source-provenance.json").read_text(encoding="utf-8"))
+    assert FOREIGN not in json.dumps(scoped, ensure_ascii=False)
+    assert sorted(scoped["inputs"][0]["origin"]) == ["match", "workbook_luid"]
+    assert sorted(scoped["inputs"][0]["input"]) == ["file", "sha256"]
+    assert scoped["inputs"][0]["origin"]["workbook_luid"] == WB_LUID
+
+
+def test_the_handover_slice_drops_its_estate_section(tmp_path: Path) -> None:
+    """Measured: all 46 real slices carry `estate`, no consumer reads it, and it is estate-wide.
+
+    It holds `definition_of_done_status` for the whole run and `pending_gates` counting 220 stubbed
+    calcs and 396 warned visuals across ALL 48 workbooks - the same class as `report.json`'s
+    `summary`, shipping in a second place. 94,668 bytes across the reference estate.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    path = bundle / "handover" / f"{UNIT}.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["estate"] = {"pending_gates": [{"gate": "second_compiler", "count": 220}], "source": {"root": FOREIGN}}
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+    shipped = json.loads((_out(tmp_path) / UNIT / "handover" / f"{UNIT}.json").read_text(encoding="utf-8"))
+    assert "estate" not in shipped
+    assert "workbook" in shipped, "the half every consumer reads must survive"
+    assert FOREIGN not in json.dumps(shipped, ensure_ascii=False)
+
+
+def test_an_absolute_path_anywhere_in_the_handover_slice_is_redacted(tmp_path: Path) -> None:
+    """The value-shaped half: a field nobody enumerated cannot smuggle a host path out.
+
+    ⚠️ Named residual, stated rather than implied: this closes the PATH class, not "any unknown
+    field". An unknown non-path field inside `workbook` still ships, because `workbook` is this
+    unit's own work queue and enumerating the engine's volatile schema would be the fourth allowlist
+    in four rounds. Measured on the reference estate: of 46 slices, 0 carry another unit's business;
+    2 contain a string that is also another unit's name, and in both it is this workbook's own
+    datasource/model binding (`Groups` is a datasource at `binding_signal.secondary_published_datasources`;
+    `datasource_test` is `ephemeral_field`'s own `bound_model`).
+    """
+    bundle, oracle = _bundle(tmp_path)
+    path = bundle / "handover" / f"{UNIT}.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["workbook"]["future_install_root"] = f"{HOST_PATH}{_SEP}engine"
+    payload["workbook"]["nested"] = {"deep": [{"also": f"{HOST_PATH_ROOT}{_SEP}x"}]}
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    result = _package(tmp_path, bundle, oracle)
+    shipped = json.loads((_out(tmp_path) / UNIT / "handover" / f"{UNIT}.json").read_text(encoding="utf-8"))
+    assert absolute_host_paths(shipped) == []
+    assert shipped["workbook"]["future_install_root"] == ms.REDACTED
+    assert shipped["workbook"]["nested"]["deep"][0]["also"] == ms.REDACTED
+    assert any("redacted" in note for note in result["notes"]), "a redaction must be reported, not silent"
+
+
 # An existing `<out>/<unit>` was merged into, never rebuilt, so an artifact the new input no longer
 # produces was never removed. Re-running with an EMPTY oracle left the previous capture in place and
 # the entry gate still returned READY - an agent builds against evidence that no longer exists, with
@@ -1054,8 +1289,14 @@ def test_a_failed_repackage_leaves_the_previous_package_intact(tmp_path: Path) -
     assert not [path for path in _out(tmp_path).iterdir() if path.name.startswith(".")], "staging dir left behind"
 
 
-def test_the_scoped_receipt_names_files_that_exist_in_the_package(tmp_path: Path) -> None:
-    """Re-rooted `pbip/<unit>/` -> `fabric/`, so the receipt attests to what is actually here."""
+def test_the_receipt_is_descoped_to_the_engine_version(tmp_path: Path) -> None:
+    """`artifacts[]` is read by nobody in a package, so it is no longer shipped.
+
+    `check_engine_receipts.py:33-35` reads `engine.version` and nothing else;
+    `credential_gate._receipt_artifacts` is only reachable through `_receipt_matches_bundle`, which
+    raises OSError on the package's absent `input_manifest.json` first. On the reference bundle that
+    list held 3,138 entries, 3,135 of which were not in the package.
+    """
     bundle, oracle = _bundle(tmp_path)
     emitted = bundle / "pbip" / UNIT / f"{UNIT}.Report" / "definition" / "report.json"
     emitted.write_text("{}", encoding="utf-8")
@@ -1067,7 +1308,6 @@ def test_the_scoped_receipt_names_files_that_exist_in_the_package(tmp_path: Path
                 "artifacts": [
                     {"path": f"pbip/{UNIT}/{UNIT}.Report/definition/report.json", "size": 1, "sha256": "x"},
                     {"path": "pbip/Other/Other.Report/definition/report.json", "size": 1, "sha256": "y"},
-                    {"path": "reports/Other.Report/definition/report.json", "size": 1, "sha256": "z"},
                 ],
             }
         ),
@@ -1076,8 +1316,9 @@ def test_the_scoped_receipt_names_files_that_exist_in_the_package(tmp_path: Path
     result = _package(tmp_path, bundle, oracle)
     receipt = json.loads((_out(tmp_path) / UNIT / "engine-output-receipt.json").read_text(encoding="utf-8"))
     assert result["engine"] == "2.339.0"
-    assert [entry["path"] for entry in receipt["artifacts"]] == [f"fabric/{UNIT}.Report/definition/report.json"]
-    assert (_out(tmp_path) / UNIT / receipt["artifacts"][0]["path"]).is_file()
+    assert receipt["engine"]["version"] == "2.339.0"
+    assert "artifacts" not in receipt
+    assert "artifacts" in receipt["scope"]["dropped_fields"]
 
 
 def test_the_provenance_is_scoped_by_content_not_by_filename(tmp_path: Path) -> None:

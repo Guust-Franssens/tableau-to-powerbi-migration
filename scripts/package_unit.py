@@ -146,10 +146,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import read_handover  # noqa: E402  # pylint: disable=wrong-import-position
 from manifest_scope import (  # noqa: E402  # pylint: disable=wrong-import-position
     ORACLE_MANIFEST_ALLOW,
-    RECEIPT_ALLOW,
-    REPORT_ALLOW,
-    REPORT_UNIT_LISTS,
     project,
+    scope_handover,
+    scope_receipt,
+    scope_report,
+    shippable_provenance,
+    stamp_scope,
 )
 from object_identity import (  # noqa: E402  # pylint: disable=wrong-import-position
     KIND_DASHBOARD,
@@ -163,6 +165,11 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 RENDER_LEGS = ("image", "svg", "pdf")
 #: Marks a leg the packager refused to copy. Anything other than "ok" makes the gate skip it.
 OMITTED_STATUS = "omitted_by_packager"
+#: What replaces a refused leg's `path`. The declared string is attacker-controlled - the oracle
+#: manifest is written by a separate tool against a live server - so it is never echoed back into the
+#: packaged manifest or into `handover.md`, which would re-open the exfiltration channel one level
+#: down: the bytes would not be copied, but the absolute path would still ship.
+REFUSED_PATH = "<refused-by-packager>"
 KIND_DIRS = (KIND_DASHBOARD, KIND_WORKSHEET, KIND_UNKNOWN)
 _LUID_PREFIX = re.compile(r"^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})_")
 _UNSAFE = re.compile(r"[^A-Za-z0-9._ -]+")
@@ -308,6 +315,17 @@ def scope_provenance(provenance: Any, asset_sha: str | None) -> tuple[dict[str, 
     Scoped by CONTENT, not by filename: `source-provenance.json` is keyed by `input.sha256` and
     `check_reference_readiness._provenance_luid` looks the unit up the same way, so a scoped copy that
     kept the wrong entry would hand the gate a LUID for a different workbook.
+
+    ⚠️ **Round-3 finding: this was still a denylist**, copying every top-level key except `inputs`
+    and every field inside a retained entry - so `future_scan_root` and
+    `inputs[].origin.future_source_path` both shipped. It now goes through the same `project()` as
+    every other manifest, against a spec that is exactly the three fields the gate reads
+    (`input.sha256`, `origin.match`, `origin.workbook_luid`). `workbook_name` and `project` are
+    deliberately NOT carried: on a foreign entry they are the identity channel itself.
+
+    The RETURNED entries are the unprojected ones, because `workbook_identity` adjudicates on
+    `origin.workbook_name` before deciding whether anything may be attributed. What ships is the
+    projected, adjudicated subset - see `shippable_provenance`.
     """
     payload = provenance if isinstance(provenance, dict) else {}
     entries = [
@@ -318,11 +336,7 @@ def scope_provenance(provenance: Any, asset_sha: str | None) -> tuple[dict[str, 
         and asset_sha is not None
         and entry["input"].get("sha256") == asset_sha
     ]
-    scoped = {key: value for key, value in payload.items() if key != "inputs"}
-    scoped["inputs"] = entries
-    scoped["input_count"] = len(entries)
-    scoped["scoped_by"] = "package_unit.py: inputs filtered to this unit's asset sha256"
-    return scoped, entries
+    return payload, entries
 
 
 def filename_luid(asset: Path | None) -> str | None:
@@ -456,6 +470,39 @@ def object_filename(name: str, luid: str, taken: set[str]) -> str:
     return stem
 
 
+def _resolve_capture_file(oracle_root: Path, declared: str) -> tuple[Path | None, str | None]:
+    """`(resolved file, refusal reason)` for a capture-relative path the MANIFEST asked us to copy.
+
+    ⚠️ **The oracle manifest is UNTRUSTED INPUT.** It is written by a separate tool against a live
+    Tableau server, and this function is the boundary where that matters. Round-3 review measured
+    both exploits against the previous `source_dir / leg["path"]`:
+
+    * `"../outside-secret.png"` - copied byte-identically into `oracle/worksheet/images/Sales.png`;
+    * an absolute path - copied, AND written verbatim into the packaged manifest.
+
+    So the check is containment, not sanitisation of the string: reject an absolute or drive-relative
+    path outright, resolve **strictly** (which follows symlinks and normalises `..`), and require the
+    result to stay under the resolved capture root. Resolving both sides is what closes the symlink
+    route - a link inside the capture pointing outside it normalises to an outside path, and
+    comparing unresolved strings would not see that.
+    """
+    if not declared:
+        return None, "capture declares an empty path"
+    candidate = Path(declared)
+    if candidate.is_absolute() or candidate.drive or declared.startswith(("\\\\", "/")):
+        return None, f"capture declares a non-relative path ({REFUSED_PATH}) - refused"
+    try:
+        root = oracle_root.resolve(strict=True)
+        resolved = (root / candidate).resolve(strict=True)
+    except OSError:
+        return None, "capture path does not resolve to a file"
+    if not resolved.is_relative_to(root):
+        return None, f"capture path escapes the capture root ({REFUSED_PATH}) - refused"
+    if not resolved.is_file():
+        return None, "capture path does not resolve to a file"
+    return resolved, None
+
+
 def _copy_leg(
     source_dir: Path, dest_dir: Path, leg: Any, target: Path, rel_prefix: str
 ) -> tuple[dict[str, Any] | None, str | None]:
@@ -464,18 +511,21 @@ def _copy_leg(
         return None, None
     if leg.get("status") != "ok" or not isinstance(leg.get("path"), str):
         return dict(leg), None
-    origin = source_dir / leg["path"]
-    if not origin.is_file():
+    origin, refusal = _resolve_capture_file(source_dir, leg["path"])
+    if origin is None:
         rewritten = dict(leg)
         rewritten["status"] = OMITTED_STATUS
-        rewritten["packaging_reason"] = f"capture claims {leg['path']} but the file is absent"
+        rewritten["packaging_reason"] = refusal or "capture path unusable"
+        rewritten["path"] = REFUSED_PATH
         return rewritten, rewritten["packaging_reason"]
     destination = dest_dir / target
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(origin, destination)
     rewritten = dict(leg)
     rewritten["path"] = f"{rel_prefix}/{target.name}"
-    rewritten["packaged_from"] = leg["path"]
+    # Normalised and capture-RELATIVE, never the declared string: the declared form is attacker-
+    # controlled and was how an absolute host path reached the packaged manifest.
+    rewritten["packaged_from"] = origin.resolve().relative_to(source_dir.resolve()).as_posix()
     return rewritten, None
 
 
@@ -581,7 +631,7 @@ def _scope_oracle_manifest(
         scoped[f"{leg}_ok"] = sum(
             1 for view in shipped if isinstance(view.get(leg), dict) and view[leg].get("status") == "ok"
         )
-    return _stamp_scope(scoped, unit, dropped, "oracle-manifest.json views filtered to this unit, counts recomputed")
+    return stamp_scope(scoped, unit, dropped, "oracle-manifest.json views filtered to this unit, counts recomputed")
 
 
 # --------------------------------------------------------------------------------------------
@@ -731,14 +781,14 @@ against this folder with **no flags**:
 | path | what it is |
 |---|---|
 | `handover.md` | every engine finding, one per line, emptied visuals first. **Start here.** |
-| `handover/{unit}.json` | the engine's full slice; `python scripts/read_handover.py handover/{unit}.json --viz` |
+| `handover/{unit}.json` | the engine's slice for THIS workbook; `python scripts/read_handover.py handover/{unit}.json --viz`. The estate-wide `estate` section is not shipped, and any absolute host path in it is redacted. |
 | `fabric/` | the engine WORKING COPY - edit here. The pristine baseline stays in `<bundle>/reports/`. |
 | `assets/` | the Tableau source this was built from |
 | `migration-spec.json` | the parsed source; the expected page set both gates grade against |
 | `oracle/` | this unit's Tableau reference, split `dashboard/` vs `worksheet/` vs `unknown/` (**singular** - the directory is the object kind, not a plural) |
 | `report.json` | **gate input, and readable.** The engine's own classification of THIS unit - workbook vs datasource - which is what earns a datasource-only unit its `NOT_APPLICABLE` instead of a finding. Scoped: it names this unit and no other. |
-| `source-provenance.json` | **gate input.** The only trusted route from this package's asset to a Tableau workbook LUID, keyed by the asset's sha256. Read `origin.match` before trusting a render: `sha256` means local and server bytes agree, `name_only` means they DIFFER. |
-| `engine-output-receipt.json` | **read `engine.version` when a result looks wrong.** It establishes which engine built this, so version drift stays checkable months later; its `artifacts[]` hashes name files in *this* package. |
+| `source-provenance.json` | **gate input.** The only trusted route from this package's asset to a Tableau workbook LUID, keyed by the asset's sha256. Read `origin.match` before trusting a render: `sha256` means local and server bytes agree, `name_only` means they DIFFER. Descoped to those three fields; an entry is shipped only when attribution was NOT refused - see `scope.suppressed_reason`. |
+| `engine-output-receipt.json` | **read `engine.version` when a result looks wrong.** It establishes which engine built this, so version drift stays checkable months later. Descoped to that: `artifacts[]` and the engine's installation paths are not shipped, because nothing reads them here. |
 | `package-manifest.json` | what was packaged, and every omission with its reason |
 
 `oracle/` is **layout/text grade only**: an oracle capture is taken in the view's default state with
@@ -800,116 +850,6 @@ def _copy_fabric(bundle: Path, unit: str, dest: Path) -> tuple[str | None, str |
         (path.name for path in sorted((dest / "fabric").iterdir()) if path.name.endswith(".SemanticModel")), None
     )
     return report, model
-
-
-def _scope_definition_of_done(dod: Any, unit: str) -> dict[str, Any] | None:
-    """`definition_of_done` narrowed to this unit's own row, before projection.
-
-    Its `workbooks[]` is a per-workbook DoD row carrying `workbook`, `pbip_folder`, `bound_model`,
-    `report_bound`, `status` and the failure `reason`. Measured on the reference bundle it holds
-    **48** rows, so it is a second copy of the estate.
-
-    Filtering happens here; the estate counters beside it are dropped by `REPORT_ALLOW`, which is
-    both a scoping fix and a correctness one - the estate's `status` is `"failed"` because 18 of 48
-    reports failed, and in a one-unit package that reads as this unit's verdict.
-    """
-    if not isinstance(dod, dict):
-        return None
-    return {
-        **dod,
-        "workbooks": [
-            row for row in dod.get("workbooks") or [] if isinstance(row, dict) and row.get("workbook") == unit
-        ],
-    }
-
-
-def _scope_report(engine_report: Any, unit: str) -> dict[str, Any]:
-    """A `report.json` BUILT for this unit - never the estate's with some collections filtered.
-
-    ⚠️ **Projected through `project()` at EVERY level, which is what round 2 fixed.** Round 1
-    replaced a top-level denylist with a top-level allowlist and stopped at the collection boundary:
-    a RETAINED `workbooks[]` or `definition_of_done.workbooks[]` row was still copied wholesale, so
-    an unenumerated nested field shipped automatically. Reproduced by planting a sentinel at
-    `workbooks[0].future_nested` and `definition_of_done.workbooks[0].future_nested` - both survived.
-
-    The original round-1 leak, for the record: measured on `HR_Dashboard` in the 48-workbook
-    reference bundle, **11 of 13** top-level fields were byte-identical to the whole-estate report -
-    `input_manifest.assets` listed **67** assets with absolute staged paths, `openable_outputs`
-    listed **62** units, and the exact scalar `"Groups"` (a FOREIGN workbook) sat at
-    `input_manifest.assets[0].name` and `openable_outputs[44].name`.
-
-    Over-trimming is the opposite failure and is bounded by measurement: `workbooks` and
-    `datasources` are always emitted, always as lists, because
-    `check_reference_readiness._engine_report` (:461) returns None without it - which silently costs
-    a datasource-only unit its earned `NOT_APPLICABLE` - and `check_unit._is_engine_report` (:379)
-    stops recognising the package as engine output at all.
-    """
-    payload = engine_report if isinstance(engine_report, dict) else {}
-    narrowed = dict(payload)
-    # Assigned unconditionally, which is what GUARANTEES both collections exist as lists in the
-    # output - a `setdefault` after projection used to sit below and was dead code, proven by the
-    # mutation campaign: removing it changed nothing, because this loop has already run.
-    for collection in REPORT_UNIT_LISTS:
-        narrowed[collection] = [
-            entry for entry in payload.get(collection) or [] if isinstance(entry, dict) and entry.get("name") == unit
-        ]
-    dod = _scope_definition_of_done(payload.get("definition_of_done"), unit)
-    if dod is not None:
-        narrowed["definition_of_done"] = dod
-
-    scoped, dropped = project(narrowed, REPORT_ALLOW)
-    return _stamp_scope(scoped, unit, dropped, "report.json")
-
-
-def _stamp_scope(scoped: dict[str, Any], unit: str, dropped: list[str], what: str) -> dict[str, Any]:
-    """Record how a manifest was narrowed, so the omission is discoverable rather than silent.
-
-    Field PATHS are recorded, never their values: a path like `workbooks[].future_nested` or
-    `input_manifest` is engine schema, while the value is exactly the estate content being removed.
-    """
-    scoped["scoped_by"] = f"package_unit.py: {what} rebuilt for this unit from an allowlist, at every level"
-    scoped["scope"] = {
-        "unit": unit,
-        "kept_fields": sorted(scoped),
-        "dropped_fields": dropped,
-        "reason": (
-            "estate-wide, or not this unit: a one-unit handover package must not carry another "
-            "unit's names, paths, status or counts. Field PATHS are listed; values are not."
-        ),
-    }
-    return scoped
-
-
-def _scope_receipt(receipt: Any, unit: str) -> dict[str, Any] | None:
-    """The engine receipt, narrowed to the artifacts this package actually contains.
-
-    Copying the bundle receipt verbatim would be 780 KB per unit attesting to 3,138 artifacts, 3,135
-    of which are not here. Scoped, it still answers `check_engine_receipts.py`'s only question -
-    `engine.version` (:33-35) - and its `artifacts[]` hashes now name real files in the package, with
-    the `pbip/<unit>/` prefix rewritten to `fabric/`.
-
-    ⚠️ **Round-2 finding: this was still a denylist**, copying every receipt key except `artifacts`,
-    so it shipped **two absolute `C:\\Users\\<user>\\...` paths** at `engine.root` and
-    `engine.plugin_root`. It is now projected through `RECEIPT_ALLOW` like every other manifest -
-    engine provenance is a VERSION, not a location on the machine that happened to build it.
-
-    It still deliberately does NOT become a credential-gate exemption, and now fails closed one step
-    earlier: `credential_gate._receipt_matches_bundle` raises OSError on the package's absent
-    `input_manifest.json` before it ever reads the hashes this no longer carries.
-    """
-    if not isinstance(receipt, dict):
-        return None
-    prefix = f"pbip/{unit}/"
-    narrowed = dict(receipt)
-    narrowed["artifacts"] = [
-        {**entry, "path": f"fabric/{entry['path'][len(prefix) :]}"}
-        for entry in receipt.get("artifacts") or []
-        if isinstance(entry, dict) and isinstance(entry.get("path"), str) and entry["path"].startswith(prefix)
-    ]
-    scoped, dropped = project(narrowed, RECEIPT_ALLOW)
-    return _stamp_scope(
-        scoped, unit, dropped, f"engine-output-receipt.json artifacts[] re-rooted at fabric/ from {prefix}"
-    )
 
 
 def _write_spec(asset: Path | None, dest: Path) -> tuple[str | None, str | None]:
@@ -1041,8 +981,11 @@ def _assemble_unit(  # pylint: disable=too-many-locals
 
     handover = read_json(bundle / "handover" / f"{unit}.json")
     (dest / "handover").mkdir(parents=True, exist_ok=True)
+    redactions: list[str] = []
     if isinstance(handover, dict):
-        shutil.copy2(bundle / "handover" / f"{unit}.json", dest / "handover" / f"{unit}.json")
+        cleaned, redactions = scope_handover(handover, unit)
+        write_json(dest / "handover" / f"{unit}.json", cleaned)
+        handover = cleaned
     else:
         notes.append(f"no handover slice at handover/{unit}.json")
 
@@ -1054,18 +997,22 @@ def _assemble_unit(  # pylint: disable=too-many-locals
     else:
         notes.append(f"source asset unresolved ({asset_route}); both gates will report CANNOT_ESTABLISH")
 
-    scoped_provenance, entries = scope_provenance(read_json(bundle / "source-provenance.json"), sha256_of(asset))
-    write_json(dest / "source-provenance.json", scoped_provenance)
-    write_json(dest / "report.json", _scope_report(engine_report, unit))
-    receipt = _scope_receipt(read_json(bundle / "engine-output-receipt.json"), unit)
+    _payload, entries = scope_provenance(read_json(bundle / "source-provenance.json"), sha256_of(asset))
+    identity = workbook_identity(entries, asset)
+    write_json(dest / "source-provenance.json", shippable_provenance(entries, identity, unit))
+    write_json(dest / "report.json", scope_report(engine_report, unit))
+    receipt = scope_receipt(read_json(bundle / "engine-output-receipt.json"), unit)
     if receipt is not None:
         write_json(dest / "engine-output-receipt.json", receipt)
 
-    identity = workbook_identity(entries, asset)
     oracle = _attach_oracle(oracle_dir, identity, dest, unit)
     spec, spec_note = _write_spec(asset, dest)
     if spec_note:
         notes.append(spec_note)
+    if redactions:
+        notes.append(
+            f"redacted {len(redactions)} absolute host path(s) from the handover slice: {', '.join(redactions[:5])}"
+        )
 
     result = {
         "unit": unit,
