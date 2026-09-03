@@ -652,6 +652,47 @@ def test_a_clean_run_still_exits_0_with_no_warning(monkeypatch, no_sleep, tmp_pa
     assert "DEGRADED" not in report and no_sleep == []
 
 
+# --- #468: the site's render ceiling is a property of the SITE, so the ASSESSMENT reports it -----
+
+
+def test_the_render_ceiling_reaches_both_report_md_and_assessment_json(monkeypatch, no_sleep, tmp_path):
+    """An operator learns "this site tops out at PDF" HERE, not as a capture-time warning later.
+
+    Driven through the real ``main()`` so a mutation that stops probing in ``collect``, or drops the
+    section from ``render_report``, fails -- both survived a unit-only version of this test.
+    """
+    code = _run_main(monkeypatch, tmp_path, FakeTableau())
+    out = tmp_path / "_assessment"
+    assessment = json.loads((out / "assessment.json").read_text(encoding="utf-8"))
+    report = (out / "report.md").read_text(encoding="utf-8")
+    ceiling = assessment["server_ceiling"]
+    assert code == 0
+    # The three numbers this repo insists are different things.
+    assert (ceiling["client_api_version"], ceiling["advertised_api_version"]) == ("3.21", "3.27")
+    assert ceiling["expected_reference_render"] == "pdf"
+    assert "Best rung expected: PDF" in report
+    assert "at any client setting" in report
+    assert no_sleep == []
+
+
+def test_a_site_that_refuses_serverinfo_reports_UNKNOWN_and_still_assesses_cleanly(monkeypatch, no_sleep, tmp_path):
+    """Fail soft: an unanswered probe is the third state, never a degraded inventory.
+
+    Also the negative control for the test above -- a run that cannot establish the ceiling must not
+    name a rung, and must not turn a clean assessment into a degraded one.
+    """
+    code = _run_main(monkeypatch, tmp_path, FakeTableau(serverinfo=None))
+    out = tmp_path / "_assessment"
+    assessment = json.loads((out / "assessment.json").read_text(encoding="utf-8"))
+    report = (out / "report.md").read_text(encoding="utf-8")
+    assert code == 0
+    assert assessment["degraded"] is False and assessment["listing_errors"] == []
+    assert assessment["server_ceiling"]["established"] is False
+    assert "was NOT established" in report
+    assert "Best rung expected" not in report
+    assert no_sleep == []
+
+
 def test_a_mid_run_abort_removes_previous_final_artifacts(monkeypatch, no_sleep, tmp_path):
     """After an abort, an operator must not read a stale report beside fresh raw checkpoints."""
     out = tmp_path / "_assessment"

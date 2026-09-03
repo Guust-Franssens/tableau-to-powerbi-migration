@@ -220,7 +220,10 @@ class CaptureRun:
     reference_required: bool = False
 
 
-def write_manifest(
+# One local over the limit, and it is `gate` -- the three version numbers that decide WHY a refused
+# SVG leg was refused (#468). It is read by three consumers here (the per-view stamp, two manifest
+# fields, the console verdict), so binding it once is what keeps them from disagreeing.
+def write_manifest(  # pylint: disable=too-many-locals
     records: list[dict[str, Any]],
     run: CaptureRun,
     capability_report: dict[str, Any] | None = None,

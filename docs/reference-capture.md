@@ -246,8 +246,11 @@ values in its own rejection text). Measured on the captured files:
   with no page margin. **No new Python dependency.**
 - **Degrades loudly below 3.29.** On 3.21 / 3.24 / 3.28 the server returns HTTP 400 *"SVG export
   requires API version 3.29 or later"*. It never silently returns a PNG, so a `.svg` file can never
-  contain PNG bytes. ⚠️ `capture_tableau_oracle.py` still defaults to **3.21**; set
-  `TABLEAU_REST_API_VERSION=3.29` in `.env`.
+  contain PNG bytes. ⚠️ `capture_tableau_oracle.py` still defaults to **3.21**, so a site that *can*
+  do SVG still needs `TABLEAU_REST_API_VERSION=3.29` in `.env`. ⚠️⚠️ **But that is only the remedy when
+  the SERVER clears the floor too** — see [Why SVG failed](#why-svg-failed-three-states-never-two)
+  below. Raising a client preference above a server's advertised ceiling cannot make a 3.27 server
+  export SVG, and telling a customer otherwise is issue #468.
 - **It is not free.** SVG bytes ranged 39 KB → 5.0 MB per dashboard (PNG: 48 KB → 897 KB). A
   crosstab-shaped *worksheet* produced a **21 MB** SVG with 37,439 `<text>` elements against a 4.5 MB
   PNG. Prefer `--svg` for dashboards; think before sweeping it across every worksheet in an estate.
@@ -369,6 +372,47 @@ Three rules keep a probe from producing a confident wrong answer:
    `probe_view_luids` names them, so a probe that settled on its first view says `1` and lists one
    LUID. It used to report `min(len(views), 3)` — the number of *eligible* views — which presented a
    single measurement as three independent corroborations.
+
+### Why SVG failed: three states, never two
+
+⚠️ **A customer was told to raise a knob that could not help them.** An on-prem Tableau Server
+reported `productVersion 2025.3.3` / `restApiVersion 3.27`; its SVG legs were refused, and the run's
+loudest, most actionable-looking line said *"Set `TABLEAU_REST_API_VERSION=3.29` in `.env` and
+re-run"*. A **client preference cannot lift a server's ceiling** — this is arithmetic, not judgement —
+so the advice was simply false there. The code that printed it already had the advertised ceiling in
+scope and never looked at it (#468).
+
+Every place we now say why SVG failed resolves through one classifier
+(`tableau_render_capability.svg_gate_advice`) to exactly one of three states — the three values of
+`supports(advertised, 3.29)`, so the partition is total by construction:
+
+| `cause` | when | what it says |
+|---|---|---|
+| `server_meets_floor` | advertised **≥ 3.29** | raise `TABLEAU_REST_API_VERSION`. Where a **floor re-probe proved** the tier, it says so; otherwise it says the advertised number is a *claim*, not proof. If the pin already clears the floor too, it says **that** instead of naming a knob already turned |
+| `server_below_floor` | advertised **< 3.29** (the customer above) | SVG is unavailable **at any client setting**, and raising the pin above the ceiling is **not** a fix. Routes to the next rung: **PDF**, API 2.8, vector with embedded fonts |
+| `ceiling_not_established` | no `/serverinfo` answer | the **conditional**, never a confident instruction — plus how to establish the ceiling |
+
+Three consequences worth stating plainly:
+
+- **A plain `--svg` run now establishes the ceiling too.** `/serverinfo` is unauthenticated and costs
+  no metered export call, so it no longer takes `--reference-best` to know why a refusal happened.
+- **The manifest carries it.** `oracle-manifest.json` gains `advertised_rest_api_version` and
+  `server_product_version` beside the `rest_api_version` it already recorded (which is the *client*
+  preference), and each version-gated `svg` leg carries `cause` plus the same `remedy` the console
+  printed. One wording, two surfaces.
+- **What is NOT claimed.** Tableau documents an unsupported-REST-version error, so pinning *above* a
+  server's ceiling may well break other calls — **nobody here has measured that**, so nothing says
+  it. The only assertion is the provable one: it cannot enable SVG. Equally, "PNG and PDF reach back
+  to API 2.5 and 2.8" is a statement about **those routes' floors**, not a prediction about what
+  changing the pin would do.
+
+**The assessment reports the ceiling before anyone captures anything.** `assess_estate.py` is the
+first thing an operator runs against a new site, and the render ceiling is a property of the *site*,
+so `report.md`, `assessment.json` and the console now reconcile the same three numbers — what we
+send, what the server advertises, and what that means (*"Best rung expected: PDF"*). It **fails
+soft**: a site that will not answer `/serverinfo` is reported as *not established* and does **not**
+degrade the assessment, because nothing downstream is computed from it. It is an **expectation from
+an advertised number, never a measurement** — only `--reference-best` probes the endpoint.
 
 **A required reference that never arrived is exit code 5, never 0.** With `--reference-best` and an
 UNDETERMINED probe no render kind is requested at all, every view's data still succeeds, and the run
