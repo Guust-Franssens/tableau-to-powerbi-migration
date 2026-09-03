@@ -1125,6 +1125,45 @@ def test_a_symlink_out_of_the_capture_root_is_refused(tmp_path: Path) -> None:
     assert not [p for p in root.rglob("*") if p.is_file() and b"EXFILTRATION-CANARY" in p.read_bytes()]
 
 
+def test_the_per_view_empty_flag_survives_packaging(tmp_path: Path) -> None:
+    """#471. A per-view fact must not be dropped silently at the package boundary.
+
+    The estate-wide `data_empty` COUNT is deliberately dropped -- this packager cannot recompute it
+    for one unit -- so if the per-view flag were dropped too, a packaged unit would carry a
+    zero-row capture with nothing anywhere saying so, and the fix would have moved the failure
+    rather than removed it.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    manifest["views"][0]["flags"] = ["data_empty", "empty_cannot_classify"]
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+    shipped = json.loads((_out(tmp_path) / UNIT / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    flagged = [view for view in shipped["views"] if view.get("flags")]
+    assert [view["flags"] for view in flagged] == [["data_empty", "empty_cannot_classify"]]
+
+
+def test_allowlisting_the_flag_did_not_open_the_view_to_unknown_fields(tmp_path: Path) -> None:
+    """Control for the test above: the allowlist must still be an allowlist.
+
+    Naming one new key is a one-key widening; a fix that reached the same green by carrying whatever
+    the capture happened to hold would be the denylist round 2 removed.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    manifest["views"][0]["flags"] = ["data_empty"]
+    manifest["views"][0]["future_field_nobody_enumerated"] = "estate-wide business"
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+    shipped = json.loads((_out(tmp_path) / UNIT / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    assert any(view.get("flags") for view in shipped["views"]), "the positive half must still hold"
+    assert all("future_field_nobody_enumerated" not in view for view in shipped["views"])
+    assert "estate-wide business" not in json.dumps(shipped), "the VALUE must not ship"
+    # The PATH is reported by design -- `scope.reason` says so -- and reading it back is what proves
+    # the field was refused by the allowlist rather than simply absent from the fixture.
+    assert "views[].future_field_nobody_enumerated" in shipped["scope"]["dropped_fields"]
+
+
 def test_a_legitimate_capture_relative_leg_still_copies(tmp_path: Path) -> None:
     """The positive control: containment must not break the ordinary path, or it is a fail-closed bug."""
     bundle, oracle = _bundle(tmp_path)

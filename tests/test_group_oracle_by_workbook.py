@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import group_oracle_by_workbook as grp  # noqa: E402  # pylint: disable=wrong-import-position
 
 
-def _view(workbook: str, name: str, luid: str, *, data="ok", image="ok"):
+def _view(workbook: str, name: str, luid: str, *, data="ok", image="ok", rows: int = 5, columns=("a", "b")):
     stem = f"{name}__{luid}"
     view: dict = {
         "view_luid": luid,
@@ -31,7 +31,11 @@ def _view(workbook: str, name: str, luid: str, *, data="ok", image="ok"):
         "workbook_luid": f"wb-{workbook}",
         "workbook_name": workbook,
     }
-    view["data"] = {"status": "ok", "path": f"data/{stem}.csv", "row_count": 5} if data == "ok" else {"status": data}
+    view["data"] = (
+        {"status": "ok", "path": f"data/{stem}.csv", "row_count": rows, "columns": list(columns)}
+        if data == "ok"
+        else {"status": data}
+    )
     view["image"] = {"status": "ok", "path": f"images/{stem}.png"} if image == "ok" else {"status": image}
     return view
 
@@ -148,6 +152,35 @@ def test_the_workbook_manifest_carries_capture_provenance(tmp_path):
     assert subset["grouped_from"] == "tableau-oracle/1"
     assert subset["captured_at"] == "2026-08-18T00:00:00Z"
     assert subset["workbook_luid"] == "wb-Sales"
+
+
+def test_a_zero_row_view_is_counted_AND_named_in_the_workbook_manifest(tmp_path):
+    """#471 at this level too. A per-workbook subset that only COUNTS empties is the capture-wide
+    defect one folder down: the reviewer working from `migrations/<slug>/reference/` is exactly the
+    reader who has to know which page carries no evidence."""
+    views = [_view("Sales", "Good", "aaa"), _view("Sales", "Blank", "bbb", rows=0, columns=("Region",))]
+    oracle = _capture(tmp_path, views)
+    root = _migrations(tmp_path, "sales")
+    grp.run(oracle, root, dry_run=False)
+    subset = json.loads((root / "sales" / "reference" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    assert subset["data_ok"] == 2, "an empty capture is still a SUCCESSFUL capture"
+    assert subset["data_empty"] == 1
+    assert [entry["view_name"] for entry in subset["data_empty_views"]] == ["Blank"]
+    assert subset["data_empty_views"][0]["classification"] == "empty_query_no_rows"
+
+
+def test_the_workbook_subset_uses_the_SAME_empty_predicate_as_the_capture(tmp_path):
+    """Positive control plus the anti-drift claim. This module used to carry its own copy of
+    `row_count == 0`, which is how a subset and the capture it came from disagree about the same
+    views -- and that copy raised KeyError on a record that never recorded a row count."""
+    no_row_count = _view("Sales", "Old", "ccc")
+    del no_row_count["data"]["row_count"]
+    oracle = _capture(tmp_path, [_view("Sales", "Good", "aaa"), no_row_count])
+    root = _migrations(tmp_path, "sales")
+    assert grp.run(oracle, root, dry_run=False) == 0
+    subset = json.loads((root / "sales" / "reference" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    assert subset["data_empty"] == 0, "absence of a row count is not a zero"
+    assert subset["data_empty_views"] == []
 
 
 def test_a_view_whose_file_vanished_is_reported_and_never_claimed_as_copied(tmp_path):
