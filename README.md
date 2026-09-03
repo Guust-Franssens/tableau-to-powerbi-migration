@@ -193,42 +193,56 @@ _runs/<NNN>-<slug>/                     ◀── PHASE 1  collect & convert  (g
 │   ├── estate_survey.json                    the live-site survey the engine emits
 │   ├── assessment.json  report.md            the decision, and its human-readable form
 │   └── estate.db
-├── assets/                                 the downloaded .twbx / .tdsx
+├── assets/
+│   ├── assets/                             the downloads: .twb(x) workbooks, .tds(x) sources
+│   └── parse-sweep.json  parse-sweep.md      both parsers' failure distribution over them
 ├── oracle/                                 Tableau's OWN renders and numbers
-│   ├── images/  data/                        one render + one CSV per view
-│   └── oracle-manifest.json                  which views captured, which refused, why
+│   ├── images/  data/                        ⚠️ only for views that captured — 288 of 360 here
+│   └── oracle-manifest.json                  every view: captured, or refused with a reason
 ├── bundle/                                 the deterministic engine's conversion output
-│   ├── reports/<WB>.Report/                  ⚠️ engine truth — NEVER edit this
-│   ├── pbip/<WB>/                            working copy: .Report + .SemanticModel + .pbip
-│   ├── semantic_models/                      ⚠️ conditional — 18 of 62 units on our cold run
+│   ├── reports/<WB>.Report/                  ⚠️ engine truth — NEVER edit
+│   ├── semantic_models/<Model>.SemanticModel/ ⚠️ engine truth — NEVER edit; conditional, 18 here
+│   ├── pbip/<Unit>/                          the working copy: .Report + .SemanticModel + .pbip
 │   ├── handover/<WB>.json                    the per-workbook remediation queue
 │   ├── data/                                 materialised extract rows
 │   └── engine-output-receipt.json            which engine version built this, and from where
 │
 ├── packages/<batch>/<Unit>/            ◀── PHASE 2  one self-contained folder per unit
-│   ├── README.md                             what to do — no flags, no paths to work out
-│   ├── migration-spec.json                   the parsed Tableau workbook
-│   ├── fabric/                             ← THE working copy the agent edits
+│   ├── README.md  handover.md              start here — the gate commands, pre-scoped
+│   ├── migration-spec.json                 the parsed source                    (64 of 67)
+│   ├── fabric/                             the packaged copy of bundle/pbip/    (62 of 67)
 │   │   ├── <WB>.Report/                      PBIR
 │   │   ├── <Model>.SemanticModel/            TMDL
 │   │   └── <WB>.pbip
-│   ├── assets/<luid>_<WB>.twbx               the original Tableau source, alongside
-│   ├── handover/<WB>.json                    just this unit's slice of the queue
-│   ├── oracle/                               just this unit's reference evidence
-│   │   ├── worksheet/  dashboard/
+│   ├── assets/<luid>_<Unit>.<ext>          the original source, alongside
+│   ├── handover/<WB>.json                  this unit's slice of the queue       (46 of 67)
+│   ├── oracle/                             this unit's reference evidence       (46 of 67)
+│   │   ├── worksheet/{images,data}/
+│   │   ├── dashboard/{images,data}/
 │   │   └── oracle-manifest.json
-│   └── package-manifest.json                 the inventory: every artifact, and how it was found
+│   ├── report.json  source-provenance.json   gate input, and source-to-LUID attribution
+│   └── package-manifest.json               what was packaged, and every omission with its reason
 │
 ├── deliverables/                           customer-facing outputs — never committed
 └── scratch/                                the ONLY subdir that is safe to delete
 
-migrations/workbooks/<slug>/            ◀── PHASE 3  ship  (committed)
-├── data/                                   materialised extract rows, if the model needs them
-└── fabric/
+migrations/workbooks/<slug>/            ◀── PHASE 3  ship
+├── data/                                   materialised rows — gitignored
+└── fabric/                                 the trackable deliverable
     ├── <WB>.Report/
     ├── <Model>.SemanticModel/
     └── <WB>.pbip                           ← what the customer opens in Power BI Desktop
 ```
+
+⚠️ **A unit is not uniformly workbook-shaped.** The per-line counts above are from a 67-package
+reference run: a datasource-only unit (`.tds`) ships no report, no PBIP, no handover and no oracle
+evidence, so treat those four as **conditional**. Phase 3 is *trackable*, not automatically
+committed — `data/` and customer-prefixed units are gitignored, so commit only what is public-safe.
+
+⚠️ **Which copy to edit is currently unsettled** ([#460](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/460)):
+`AGENTS.md` says `bundle/pbip/`, the generated package README says `<package>/fabric/`, and the
+package is a physical copy, so the two diverge the moment either is edited. Promote from whichever
+one carries the edits, and verify before and after.
 
 A **shared** datasource ships once to `migrations/datasources/<ds-slug>/fabric/` instead, and every
 report that uses it keeps a rewritten `definition.pbir` pointing four levels up at it.
