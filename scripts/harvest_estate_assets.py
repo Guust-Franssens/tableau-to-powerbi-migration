@@ -416,7 +416,18 @@ def refuse_unignored_output(
 # wall-clock ceiling applies instead, i.e. exactly today's behaviour.
 
 DEFAULT_DOWNLOAD_TIMEOUT = 600.0
-DEFAULT_STALL_TIMEOUT = 120.0
+# The engine's own per-socket-read timeout (`fetch_tds.py:407,423` pass `timeout=300` to `urlopen`).
+# It is the contract for how long a HEALTHY transfer is allowed to go quiet between reads: urllib
+# tolerates a 299s gap and raises at 300s.
+ENGINE_READ_TIMEOUT_SECONDS = 300.0
+# ⚠️ This MUST NOT sit below `ENGINE_READ_TIMEOUT_SECONDS`. The first version of this fix defaulted
+# to 120s, by analogy with `refresh_pbip_model.py`'s liveness timer -- but that one WARNS and this
+# one KILLS, which is a different thing entirely. A bursty-but-healthy source pausing 120-300s
+# between chunks satisfies urllib and was killed by us and reported as hung: the wall-clock cliff
+# this whole change exists to remove had become a shorter inactivity cliff (blind review of #482,
+# reproduced: `BURSTY_HEALTHY stalled 0.49`). 300s + a 120s grace, so the child's own read timeout
+# always fires first and reports the real error rather than being pre-empted by ours.
+DEFAULT_STALL_TIMEOUT = ENGINE_READ_TIMEOUT_SECONDS + 120.0
 PROGRESS_POLL_SECONDS = 2.0
 # "NEVER block silently on an external system" (AGENTS.md): anything past a minute reports elapsed
 # time, so a stall is visible as a stall rather than looking like work.
@@ -550,8 +561,12 @@ def transferred_bytes(pid: int) -> int | None:
 
     LIVENESS, not volume: on Windows the socket payload is not what moves this (see the measurement
     table above), so compare it with its own previous value and never report it as bytes downloaded.
-    None means "this platform/process cannot tell us", which is a different answer from 0 and must
-    never be treated as a stall.
+
+    ⚠️ None means "this platform/process cannot tell us", which is a DIFFERENT answer from 0 and must
+    never be treated as a stall. It is returned for a PARTIAL reading too, not only for a total
+    failure: if the descendant carrying the network I/O becomes unreadable while the trampoline
+    stays readable, the sum silently flatlines at the trampoline's constant, which is exactly a
+    stalled download's signature. A sum we cannot vouch for is not a smaller sum; it is no answer.
     """
     if sys.platform == "win32":
         lib = kernel32()
@@ -561,12 +576,12 @@ def transferred_bytes(pid: int) -> int | None:
         for target in process_tree(pid):
             handle = lib.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, target)
             if not handle:
-                continue
+                return None
             counters = IoCounters()
             ok = lib.GetProcessIoCounters(handle, ctypes.byref(counters))
             lib.CloseHandle(handle)
             if not ok:
-                continue
+                return None
             total = (total or 0) + int(
                 counters.ReadTransferCount + counters.WriteTransferCount + counters.OtherTransferCount
             )
@@ -576,7 +591,7 @@ def transferred_bytes(pid: int) -> int | None:
         try:
             io_text = Path(f"/proc/{target}/io").read_text(encoding="utf-8", errors="replace")
         except OSError:
-            continue
+            return None
         for line in io_text.splitlines():
             key, _, value = line.partition(":")
             if key in ("rchar", "wchar"):
@@ -638,11 +653,18 @@ def run_watched(  # pylint: disable=too-many-locals,too-many-branches,too-many-a
 
     Two deadlines, and which one is armed depends on evidence rather than on configuration:
 
-    * `stall_timeout` — armed only once the probe has been seen to MOVE for this child. A flatline is
-      then a genuine stall and killing is right.
-    * `timeout` — the wall clock, armed only while no movement has ever been observed, i.e. when we
-      cannot tell slow from hung. This is the pre-#472 behaviour, kept for exactly the case that
-      justified it. `0` disables it, leaving a run bounded only by progress.
+    * `stall_timeout` — armed only while the probe is CURRENTLY readable AND has been seen to move
+      for this child. A flatline is then a genuine stall and killing is right.
+    * `timeout` — the wall clock, armed whenever we cannot tell slow from hung: never observed, or
+      observed and then LOST. It is measured from the moment we went blind, not from process start,
+      so a transfer that progressed for ten minutes and then lost its probe gets a fresh `timeout`
+      of blindness rather than being killed on the spot. `0` disables it.
+
+    Availability and history are tracked separately on purpose. Treating "cannot read the counter"
+    as "no bytes moved" kills healthy downloads on access denial, on a descendant that exits between
+    enumeration and read, and — the nastiest one — on a PARTIAL subtree read, where the readable
+    trampoline flatlines while the unreadable descendant is the one doing the work (blind review of
+    #482, reproduced: `PROBE_LOST_AFTER_PROGRESS stalled 0.32`).
 
     A download that keeps progressing past `timeout` is NOT killed; it is announced loudly instead,
     because "elapsed time is not progress" cuts both ways.
@@ -662,11 +684,18 @@ def run_watched(  # pylint: disable=too-many-locals,too-many-branches,too-many-a
     reader.start()
 
     last_value = probe(proc.pid)
+    signal_live = last_value is not None
     progress_observed = False
     last_change = started
     last_beat = started
+    # When we last had a trustworthy MOVING signal. None means we have one right now; otherwise the
+    # wall clock is measured from here. It starts at `started`, so a run that never sees a signal
+    # behaves exactly as it did before this whole change.
+    blind_since: float | None = started
     announced_over_ceiling = False
+    announced_signal_lost = False
     verdict = ""
+    since_progress = 0.0
     while True:
         reader.join(poll_interval)
         now = time.perf_counter()
@@ -674,12 +703,36 @@ def run_watched(  # pylint: disable=too-many-locals,too-many-branches,too-many-a
         if not reader.is_alive():
             break
         value = probe(proc.pid)
-        if value is not None:
-            if last_value is not None and value != last_value:
+        if value is None:
+            # Unreadable or partial: we are blind, not stalled. Disarm the stall deadline.
+            signal_live = False
+            last_value = None
+            if blind_since is None:
+                blind_since = now
+            if progress_observed and not announced_signal_lost:
+                announced_signal_lost = True
+                LOG.warning(
+                    "%s: lost the download-progress signal after %.0fs of movement — falling back "
+                    "to the --download-timeout wall clock (%.0fs from now) rather than calling it "
+                    "stalled.",
+                    label,
+                    elapsed,
+                    timeout,
+                )
+        else:
+            if not signal_live:
+                # Re-acquired. The blind window is not evidence of no progress, so the stall
+                # deadline restarts from here rather than counting the gap against the download.
+                signal_live = True
+                last_change = now
+            elif last_value is not None and value != last_value:
                 progress_observed = True
                 last_change = now
+                blind_since = None
             last_value = value
         since_progress = now - last_change
+        stall_armed = progress_observed and signal_live and blind_since is None
+        blind_for = now - (blind_since if blind_since is not None else now)
         if now - last_beat >= heartbeat:
             last_beat = now
             LOG.info(
@@ -688,11 +741,11 @@ def run_watched(  # pylint: disable=too-many-locals,too-many-branches,too-many-a
                 elapsed,
                 (
                     f"last progress {since_progress:.0f}s ago"
-                    if progress_observed
-                    else "no progress signal available (wall-clock ceiling applies)"
+                    if stall_armed
+                    else f"no usable progress signal for {blind_for:.0f}s (wall-clock ceiling applies)"
                 ),
             )
-        if progress_observed:
+        if stall_armed:
             if since_progress > stall_timeout:
                 verdict = "stalled"
                 break
@@ -706,7 +759,7 @@ def run_watched(  # pylint: disable=too-many-locals,too-many-branches,too-many-a
                     timeout,
                     stall_timeout,
                 )
-        elif timeout and elapsed > timeout:
+        elif timeout and blind_for > timeout:
             verdict = "ceiling"
             break
 
@@ -714,19 +767,20 @@ def run_watched(  # pylint: disable=too-many-locals,too-many-branches,too-many-a
     if verdict:
         terminate_tree(proc)
         reader.join(30)
+        blindness = "progress was seen and then the signal was lost" if progress_observed else "blind the whole time"
         detail = (
             (
-                f"stalled: no progress for {elapsed - (last_change - started):.0f}s "
-                f"(elapsed {elapsed:.0f}s). The download was moving and then stopped, so this is a "
-                f"hung transfer, not a slow one. Raise --download-stall-timeout above "
-                f"{stall_timeout:.0f}s if the source is merely bursty, or retry the asset."
+                f"stalled: no progress for {since_progress:.0f}s (elapsed {elapsed:.0f}s). The "
+                f"download was moving, was still observable, and stopped — so this is a hung "
+                f"transfer, not a slow one. Raise --download-stall-timeout above "
+                f"{stall_timeout:g}s if the source is merely bursty, or retry the asset."
             )
             if verdict == "stalled"
             else (
-                f"timeout after {timeout:.0f}s (elapsed {elapsed:.1f}s); no download-progress signal "
-                f"was available for this process, so a slow-but-healthy transfer cannot be told from "
-                f"a hang. Raise --download-timeout (or pass 0 to remove the ceiling and rely on "
-                f"--download-stall-timeout alone)."
+                f"timeout after {timeout:g}s without a usable download-progress signal (elapsed "
+                f"{elapsed:.1f}s, {blindness}); a slow-but-healthy transfer cannot be told from a "
+                f"hang while blind. Raise --download-timeout (or pass 0 to remove the ceiling and "
+                f"rely on --download-stall-timeout alone)."
             )
         )
         return WatchedRun(None, collected["out"], collected["err"], elapsed, verdict, detail, progress_observed)
@@ -1273,7 +1327,9 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-statements,too-ma
         type=float,
         default=DEFAULT_STALL_TIMEOUT,
         help="seconds a download may make NO observable progress before it is killed as hung "
-        f"(default {DEFAULT_STALL_TIMEOUT:.0f}); armed only after progress has been observed once",
+        f"(default {DEFAULT_STALL_TIMEOUT:.0f}); armed only while the signal is readable AND has "
+        f"moved. Below {ENGINE_READ_TIMEOUT_SECONDS:.0f}s it can pre-empt the fetcher's own "
+        "per-read timeout and kill a bursty-but-healthy transfer.",
     )
     ap.add_argument("--skip-download", action="store_true", help="reuse whatever is already in --out/assets")
     ap.add_argument("--workbooks-only", action="store_true", help="skip published datasources; sweep workbooks only")
@@ -1285,6 +1341,14 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-statements,too-ma
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    if 0 < args.download_stall_timeout < ENGINE_READ_TIMEOUT_SECONDS:
+        LOG.warning(
+            "--download-stall-timeout %.0fs is BELOW the fetcher's own %.0fs per-read timeout "
+            "(fetch_tds.py:407,423). urllib tolerates a gap that long on a healthy connection, so "
+            "this can kill a bursty-but-healthy download and report it as hung.",
+            args.download_stall_timeout,
+            ENGINE_READ_TIMEOUT_SECONDS,
+        )
     # Before the engine, the .env, the database and above all the download: a customer's workbooks
     # must never land somewhere this PUBLIC repo would commit them (issue #125). The guard is given
     # `--out` RAW, so it can judge the literal argv form as well as the resolved one; the write then

@@ -181,6 +181,213 @@ def test_the_child_output_is_drained_while_the_watchdog_polls() -> None:
     assert len(run.stdout) == 400000, "the child's output was truncated or the drain deadlocked"
 
 
+# --- blind-review round 2: two ways this could still kill a HEALTHY download --------------------
+
+
+def test_the_stall_default_is_never_stricter_than_the_fetchers_own_read_timeout() -> None:
+    """Finding 1. The fetcher passes `timeout=300` to `urlopen` (`fetch_tds.py:407,423`), which is
+    the contract for how long a healthy transfer may go quiet. A stall deadline below that kills a
+    bursty source urllib is perfectly happy with — the wall-clock cliff turned into a shorter
+    inactivity cliff. The first version of this fix shipped 120s and did exactly that.
+    """
+    assert harvest.DEFAULT_STALL_TIMEOUT >= harvest.ENGINE_READ_TIMEOUT_SECONDS, (
+        f"a {harvest.DEFAULT_STALL_TIMEOUT:.0f}s stall deadline pre-empts the fetcher's own "
+        f"{harvest.ENGINE_READ_TIMEOUT_SECONDS:.0f}s per-read timeout"
+    )
+
+
+def test_a_bursty_but_healthy_transfer_survives_a_gap_the_fetcher_would_tolerate() -> None:
+    """Finding 1, as behaviour rather than as an inequality between two constants.
+
+    Everything is scaled from the REAL constants by the same factor, so the test asks one question:
+    *is our kill threshold generous enough for a gap the downloader itself allows?* A pause is
+    chosen that urllib would tolerate (below its read timeout) but that the old 120s default would
+    not (above its scaled equivalent). Lower `DEFAULT_STALL_TIMEOUT` back under the read timeout and
+    this goes red; the pause and the child's read timeout do not move with it.
+    """
+    read_timeout = 2.0  # stands in for the fetcher's 300s
+    scale = read_timeout / harvest.ENGINE_READ_TIMEOUT_SECONDS
+    pause = 0.9 * read_timeout  # urllib is happy: below its read timeout
+    scaled_stall = harvest.DEFAULT_STALL_TIMEOUT * scale
+    assert pause > 120.0 * scale, "the pause must be one the REJECTED 120s default would have killed"
+
+    probe = Counter(1000, moves=1)  # one movement, then a long quiet gap: the bursty shape
+    run = harvest.run_watched(
+        sleeper(pause + 0.4),
+        env=None,
+        timeout=0,  # the ceiling is not what is under test here
+        stall_timeout=scaled_stall,
+        probe=probe,
+        poll_interval=0.05,
+        heartbeat=1000.0,
+    )
+    assert run.verdict == "", f"killed a healthy transfer during a {pause:.1f}s gap urllib allows: {run.detail}"
+    assert run.progress_observed is True
+
+
+def test_losing_the_probe_after_movement_does_not_kill_a_healthy_download() -> None:
+    """Finding 2, the reviewer's reproduction: probe returns 0, 1, then None forever.
+
+    `None` means "cannot read", never "no bytes moved". Access denial, a descendant exiting between
+    enumeration and counter read, or a PARTIAL subtree read all produce it — and the partial case is
+    the nasty one, because the readable trampoline flatlines while the unreadable descendant is the
+    process actually doing the work.
+    """
+    readings = [0, 1]
+
+    def lost_probe(pid: int) -> int | None:  # pylint: disable=unused-argument
+        return readings.pop(0) if readings else None
+
+    run = harvest.run_watched(
+        sleeper(1.0),
+        env=None,
+        timeout=30,
+        stall_timeout=0.25,  # would fire almost immediately if a lost probe counted as a flatline
+        probe=lost_probe,
+        poll_interval=0.05,
+        heartbeat=1000.0,
+    )
+    assert run.verdict != "stalled", f"a lost probe was reported as a hung transfer: {run.detail}"
+    assert (run.verdict, run.returncode) == ("", 0)
+
+
+def test_a_lost_probe_still_ends_the_run_but_as_a_CEILING_not_a_stall() -> None:
+    """Disarming the stall deadline must not mean waiting forever — just labelling it honestly."""
+    readings = [0, 1]
+
+    def lost_probe(pid: int) -> int | None:  # pylint: disable=unused-argument
+        return readings.pop(0) if readings else None
+
+    run = harvest.run_watched(
+        sleeper(30),
+        env=None,
+        timeout=0.4,
+        stall_timeout=0.05,
+        probe=lost_probe,
+        poll_interval=0.05,
+        heartbeat=1000.0,
+    )
+    assert run.verdict == "ceiling", f"expected an honest ceiling verdict, got {run.verdict!r}"
+    assert "progress was seen and then the signal was lost" in run.detail
+    assert "--download-timeout" in run.detail
+
+
+def test_the_wall_clock_restarts_from_the_MOMENT_the_signal_was_lost() -> None:
+    """A transfer that progressed for a while and then went blind gets a fresh window, not a kill.
+
+    Measured from process start, a download that progressed for 9 minutes and lost its probe would
+    be killed one minute later; measured from the loss, it gets the full ceiling to prove itself.
+    """
+    moving_for = 0.5
+    started = time.perf_counter()
+
+    def probe_that_dies(pid: int) -> int | None:  # pylint: disable=unused-argument
+        elapsed = time.perf_counter() - started
+        return int(elapsed * 1000) if elapsed < moving_for else None
+
+    run = harvest.run_watched(
+        sleeper(30),
+        env=None,
+        timeout=0.4,
+        stall_timeout=60,
+        probe=probe_that_dies,
+        poll_interval=0.05,
+        heartbeat=1000.0,
+    )
+    assert run.verdict == "ceiling"
+    assert run.elapsed >= moving_for + 0.4, (
+        f"the ceiling was measured from process start, not from the loss of the signal "
+        f"(killed after {run.elapsed:.2f}s, expected at least {moving_for + 0.4:.2f}s)"
+    )
+
+
+def test_losing_the_signal_is_announced_once(caplog: pytest.LogCaptureFixture) -> None:
+    readings = [0, 1]
+
+    def lost_probe(pid: int) -> int | None:  # pylint: disable=unused-argument
+        return readings.pop(0) if readings else None
+
+    with caplog.at_level("WARNING", logger="harvest_estate_assets"):
+        harvest.run_watched(
+            sleeper(0.8),
+            env=None,
+            timeout=30,
+            stall_timeout=0.25,
+            probe=lost_probe,
+            poll_interval=0.05,
+            heartbeat=1000.0,
+            label="asset",
+        )
+    lost = [r.getMessage() for r in caplog.records if "lost the download-progress signal" in r.getMessage()]
+    assert len(lost) == 1, f"expected exactly one announcement, got {len(lost)}"
+
+
+def test_a_partial_subtree_reading_is_reported_as_UNAVAILABLE_not_as_a_smaller_sum(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sum of the processes we CAN read is not a smaller answer; it is a different question.
+
+    With the descendant unreadable, the readable trampoline's constant counters look exactly like a
+    stalled download.
+    """
+    child = subprocess.Popen(  # pylint: disable=consider-using-with
+        [sys.executable, "-c", "import time;time.sleep(5)"], stdout=subprocess.PIPE, text=True
+    )
+    try:
+        assert harvest.transferred_bytes(child.pid) is not None, "the readable case must still answer"
+        monkeypatch.setattr(harvest, "process_tree", lambda pid: [pid, 999_999])
+        assert harvest.transferred_bytes(child.pid) is None, "a partial reading was passed off as a total"
+    finally:
+        harvest.terminate_tree(child)
+        child.wait(timeout=30)
+
+
+def test_an_unreadable_process_reports_no_signal_at_all() -> None:
+    assert harvest.transferred_bytes(999_999) is None
+
+
+def test_the_cli_warns_when_the_stall_deadline_undercuts_the_fetcher(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The flag is the operator's to set, but a value below 300s has a consequence worth naming."""
+    db = tmp_path / "estate.db"
+    con = sqlite3.connect(db)
+    con.executescript(
+        """
+        CREATE TABLE project (luid TEXT PRIMARY KEY, name TEXT);
+        CREATE TABLE workbook (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        CREATE TABLE datasource (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        CREATE TABLE dependency (workbook_luid TEXT, datasource_luid TEXT, datasource_name TEXT);
+        INSERT INTO workbook VALUES ('wb-ia', 'IA Redemptions', 'p');
+        """
+    )
+    con.commit()
+    con.close()
+    monkeypatch.setattr(harvest, "engine_scripts_dir", lambda: tmp_path / "engine")
+    monkeypatch.setattr(harvest, "resolve_env", lambda path: {"TABLEAU_SERVER_URL": "https://example.invalid"})
+    monkeypatch.setattr(harvest, "require", lambda env: None)
+    monkeypatch.setattr(harvest, "download", lambda *a, **k: (False, "nope"))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "harvest_estate_assets.py",
+            "--out",
+            str(tmp_path / "_sweep"),
+            "--db",
+            str(db),
+            "--allow-unignored-out",
+            "--download-stall-timeout",
+            "30",
+        ],
+    )
+    with caplog.at_level("WARNING", logger="harvest_estate_assets"):
+        assert harvest.main() == 0
+    warned = [r.getMessage() for r in caplog.records if "BELOW the fetcher's own" in r.getMessage()]
+    assert warned, "an operator undercut the fetcher's read timeout and was told nothing"
+    assert "300s per-read timeout" in warned[0]
+
+
 # --- the failure TEXT: an operator must be able to act on it ------------------------------------
 
 
@@ -207,7 +414,8 @@ def test_the_ceiling_message_distinguishes_itself_from_a_stall() -> None:
     )
     assert "--download-timeout" in run.detail
     assert "elapsed" in run.detail
-    assert "no download-progress signal" in run.detail, f"it does not say WHY it could not tell: {run.detail}"
+    assert "usable download-progress signal" in run.detail, f"it does not say WHY it could not tell: {run.detail}"
+    assert "blind the whole time" in run.detail, f"it does not distinguish never-seen from lost: {run.detail}"
     assert "stalled" not in run.detail, "a ceiling kill must not be reported as a stall"
 
 
