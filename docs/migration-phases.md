@@ -228,18 +228,35 @@ silently, with no gate firing**.
 both before and after.** Do not assume — check:
 
 ```powershell
-# BEFORE promoting: which of the two carries the agent's work?
+# BEFORE promoting — have the two candidate sources diverged at all?
 git diff --no-index --stat <bundle>\reports\<WB>.Report <bundle>\pbip\<WB>\<WB>.Report
 git diff --no-index --stat <bundle>\pbip\<WB> <run>\packages\<batch>\<Unit>\fabric
-# AFTER promoting: the deliverable must match the location you promoted FROM
+
+# AFTER promoting, model per workbook — ONE comparison
 git diff --no-index --stat <source-you-chose> migrations\workbooks\<slug>\fabric
+
+# AFTER promoting, shared datasource — TWO comparisons, because the halves split up
+git diff --no-index --stat <source>\<Name>.Report        migrations\workbooks\<slug>\fabric\<Name>.Report
+git diff --no-index --stat <source>\<Name>.SemanticModel migrations\datasources\<ds-slug>\fabric\<Name>.SemanticModel
 ```
 
-Reading it: on the second command, **exit 0 with no output means the two are still identical** — no
-one has edited either since packaging, so the choice does not matter yet. A stat line means they have
-diverged, and the side with the extra insertions is the one holding the agent's work. ✅ Both commands
-run: measured on the reference bundle, the first returned
-`22 files changed, 1807 insertions(+), 194 deletions(-)` and the second exited 0 with no output.
+⚠️ **`--stat` proves DIVERGENCE ONLY; it cannot establish provenance.** Exit 0 with no output means
+the two are still identical, so the choice does not matter yet — measured on a fresh package. A
+non-empty result means they have diverged, **and nothing more**. In particular the **insertion count
+does not identify the edited side**: ✅ measured, a deletion-only edit *inside the package* reports
+`1 file changed, 9 deletions(-)` — no extra insertions on the edited side at all; a replacement
+yields equal insertions and deletions; and both trees may have been edited. To establish which side
+is authoritative, use the **full diff** (drop `--stat`), the `_build/generated-edit-declarations/`
+records where they exist ([`powerbi-report-gotchas` §3](../.github/skills/powerbi-report-gotchas/SKILL.md)),
+and your own knowledge of where the agent was told to work. **If you cannot establish it, stop and do
+not promote** — an unresolved provenance question is exactly the silent-loss case this section exists
+to prevent.
+
+⚠️ **Never use the whole-tree form on a shared datasource — it calls a correct promotion wrong.**
+✅ Measured on a correctly split promotion: source-unit vs workbook destination exits **1**
+(`20 files changed, 1272 deletions(-)`) *precisely because the model correctly landed under
+`migrations/datasources/`*, while the report half and the model half each exit **0**. The whole-tree
+form is right only for the model-per-workbook case (measured: exit **0**).
 
 ⚠️ Require a real stat line, not just the exit code — `git diff --no-index` exits **1** both when
 trees differ and when a path is wrong. And on Windows use `git diff`, never bare `diff`: that is a
