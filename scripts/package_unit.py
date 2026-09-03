@@ -123,6 +123,9 @@ Exit codes
       the reference and the engine's own handover slice are all there - but there is nothing to build
       on, and `check_reference_readiness.py` reports it as a finding rather than a pass. |
 | 2 | usage error (argparse) |
+| 3 | at least one requested unit already has a package carrying EDITS, and this packager replaces a
+      package whole. Those units were left untouched; every other requested unit was still packaged.
+      `--discard-package-edits` overwrites them deliberately. |
 
 An omission INSIDE a package is not exit 1: a unit whose oracle genuinely has no render for a page is
 the negative control, and it must package successfully and still report that page BLIND.
@@ -188,9 +191,30 @@ SPEC_SCHEMA = SCRIPT_DIR.parent / "docs" / "migration-spec.schema.json"
 #: call", so the general shape is what is targeted.
 ABSOLUTE_LITERAL_RE = re.compile(r'"((?:[A-Za-z]:[\\/]|\\\\|/)[^"]*)"')
 FILE_CONTENTS_RE = re.compile(r'File\.Contents\(\s*"([^"]*)"\s*\)')
-FOLDER_PARAM_RE = re.compile(r'(expression\s+(?:#"[^"]+"|[^\s=]+)\s*=\s*")([^"]*)(")')
+FOLDER_PARAM_RE = re.compile(r'(?P<prefix>expression\s+(?P<name>#"[^"]+"|[^\s=]+)\s*=\s*")(?P<value>[^"]*)(?P<quote>")')
+EXPRESSION_NAME_RE = re.compile(r'expression\s+(#"[^"]+"|[^\s=]+)\s*=')
 WINDOWS_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
 UNC_PATH_RE = re.compile(r"^\\\\")
+
+#: The three verdicts :func:`_path_verdict` may return. The third one is the point: a literal this
+#: packager cannot classify is neither shipped nor cleared, and collapsing it into "not a path" is
+#: how `SourceFolder = "/Users/<person>/Data/"` survived packaging unchanged with NO omission
+#: recorded at all (blind-review finding 5). Unassessable input gets its own bucket and its own
+#: recorded reason; it never joins the clean one.
+PATH_LITERAL = "path"
+NOT_A_PATH = "not-a-path"
+UNCLASSIFIED = "unclassified"
+UNCLASSIFIED_REASON = (
+    "could not be classified as a file-system path or as a non-path, so it was neither shipped "
+    "nor cleared - check it by hand"
+)
+
+#: How a folder PARAMETER is read by the model, which decides what may be copied out of the folder
+#: it names. Anything other than the first two is a refusal - see :func:`_parameter_usages`.
+NAMED_FILES = "named-files"
+WHOLE_FOLDER = "whole-folder"
+UNKNOWN_USAGE = "unknown-usage"
+NO_USAGE = "no-usage"
 
 #: Where a shipped source lands inside the package, and the M parameter a rewritten `File.Contents`
 #: literal reads its folder from. Both the parameter's `meta [...]` tail and the trailing-separator
@@ -207,6 +231,10 @@ DATA_DIR = "data"
 DATA_FOLDER_PARAM = "DataFolder"
 FALLBACK_DATA_FOLDER_PARAM = "PackageDataFolder"
 EXPRESSIONS_TMDL = "expressions.tmdl"
+#: The name of the manifest that records what a package contains, INCLUDING the per-file digest that
+#: makes an agent's edit to the canonical `fabric/` tree detectable on the next run. Excluded from
+#: its own digest, because it is written last and would otherwise never match itself.
+MANIFEST_NAME = "package-manifest.json"
 
 #: Refuse to copy a single source larger than this, rather than silently turning a handover folder
 #: into a data lake. Measured on estate run 408 the largest referenced extract is 1.33 MB and the
@@ -233,6 +261,35 @@ _MAX_OBJECT_NAME = 60
 KIND_WORKBOOK = "workbook"
 KIND_DATASOURCE = "datasource"
 KIND_UNCLASSIFIED = "unclassified"
+
+
+class PackagingError(RuntimeError):
+    """An invariant this packager holds was violated, so nothing is shipped rather than something wrong.
+
+    Every use is a TRIPWIRE behind a rule that already prevents the condition - two sources landing
+    on one packaged path, or a parameter declared twice. Prevention is the fix; this exists so that
+    a future edit which re-opens one fails loudly at packaging time instead of shipping a package
+    whose partitions read another table's rows or whose model AMO refuses to load.
+    """
+
+
+class PackageEditsRefused(PackagingError):
+    """Repackaging would discard edits made in the package - the tree this packager calls canonical.
+
+    Carries the changed paths (or the reason they could not be established) so the CLI can name them
+    rather than saying "something changed".
+    """
+
+    def __init__(self, unit: str, package: Path, changed: list[str], reason: str | None) -> None:
+        self.unit, self.package, self.changed, self.reason = unit, package, changed, reason
+        detail = reason or (
+            f"{len(changed)} file(s) differ from what packaging wrote: {', '.join(changed[:5])}"
+            + (" ..." if len(changed) > 5 else "")
+        )
+        super().__init__(
+            f"refusing to repackage {unit}: {package} is the canonical place to edit, and {detail}. "
+            "Re-run with --discard-package-edits to overwrite it, or move the package aside first."
+        )
 
 
 # --------------------------------------------------------------------------------------------
@@ -840,16 +897,16 @@ expected set is every dashboard PLUS every worksheet not placed on one.
 |---|---|
 | `handover.md` | every engine finding, one per line, emptied visuals first. **Start here.** |
 | `handover/{unit}.json` | the engine's slice for THIS workbook; `python scripts/read_handover.py handover/{unit}.json --viz`. Estate-wide sections are not shipped; absolute host paths are redacted. |
-| `fabric/` | the engine WORKING COPY - **edit here**, and when you work from a package THIS tree is canonical; `<bundle>/pbip/` never promotes over it. Declared-edit tooling (`declare_generated_edit.py`, `--tamper`) is bundle-only. |
+| `fabric/` | the engine WORKING COPY - **edit here**, and when you work from a package THIS tree is canonical; `<bundle>/pbip/` never promotes over it. Re-running `package_unit.py` into this folder REFUSES (exit 3) rather than discarding what you changed - `--discard-package-edits` overrides. Declared-edit tooling (`declare_generated_edit.py`, `--tamper`) is bundle-only. |
 | `assets/` | the Tableau source this was built from |
-| `data/` | the rows the model imports, shipped with it (#461). A folder PARAMETER in `expressions.tmdl` names this directory - that is the ONE line to repoint if you move this folder, and `set_data_folder.py` rewrites it. Absent when the model imports nothing. |
+| `data/` | the rows the model imports, shipped with it (#461). A folder PARAMETER in `expressions.tmdl` names this directory by ABSOLUTE path, because Power Query rejects a relative one - so **moving this folder breaks refresh until you re-point it**: `python scripts/set_data_folder.py --package <path-to-this-folder>` rewrites every such parameter to this package's own `data/` and fails if the directory it then names does not exist. Absent when nothing was shipped - either the model imports nothing, or every source it names was unavailable when this was packaged; `package-manifest.json`'s `data_sources.omissions` says which, one line per source, and `handover.md` repeats it as a `PACKAGE_NOTE`. |
 | `migration-spec.json` | the parsed source; the expected page set both gates grade against |
 | `migration-spec.schema.json` | the CONTRACT `validate_spec.py` enforces. Read it before appending a `limitations_encountered` entry: exactly `item`/`issue`/`severity`/`stage`, `additionalProperties: false`, so one invented field rejects every entry. |
 | `oracle/` | this unit's Tableau reference, split `dashboard/` vs `worksheet/` vs `unknown/` (**singular** - the directory is the object kind, not a plural). **`oracle/*/data/*.csv` is the NUMERIC oracle** - exact labels and figures, no OCR and no judgement. Read it first. |
 | `report.json` | **gate input, and readable.** The engine's classification of THIS unit - workbook vs datasource - which is what earns a datasource-only unit `NOT_APPLICABLE` instead of a finding. Scoped to this unit. |
 | `source-provenance.json` | **gate input.** The only trusted route from this package's asset to a Tableau workbook LUID, keyed by the asset's sha256; `origin.match` decides whether a render can be trusted - see UNFIXABLE below. An entry ships only when attribution was NOT refused (`scope.suppressed_reason`). |
 | `engine-output-receipt.json` | **read `engine.version` when a result looks wrong** - it establishes which engine built this, so version drift stays checkable months later. Install paths are not shipped. |
-| `package-manifest.json` | what was packaged, and every omission with its reason |
+| `package-manifest.json` | what was packaged, and every omission with its reason. Its `contents.files` digest is how a re-run knows this package has been edited and refuses to overwrite it. |
 
 `oracle/` images are **layout/text grade only**: a capture is taken in the view's default state with
 no `?vf_` filter pinning, so a visual PASS signed off on one alone is overstated, and it is no claim
@@ -929,6 +986,15 @@ def _packaged_data_target(source: str, taken: dict[str, str], *, keep_leaf_only:
 
     ``keep_leaf_only`` is the folder-parameter case, where the literal already names a directory and
     its own leaf is the meaningful name (`<Unit>.Data`).
+
+    ⚠️ **Uniqueness is judged over the DESTINATION TREE, not over the reservation string** - a
+    folder claims everything beneath it. Blind-review finding 1: a folder source containing
+    `same/x.csv` reserved `same`, a bare file whose readable home was `same/x.csv` reserved
+    `same/x.csv`, the two strings differed so neither looked taken, and the second copy overwrote
+    the first on disk. The package then exited 0 with TWO manifest entries for one path and one
+    partition reading another table's rows - which `check_datamodel.py` cannot see, because the
+    model is structurally perfect. Comparing whole strings closed the same-shape case only; the
+    ancestor test closes every combination of the two shapes.
     """
     original = PurePosixPath(source.replace("\\", "/").rstrip("/"))
     name = _UNSAFE.sub("_", original.name)[:_MAX_OBJECT_NAME] or "data"
@@ -937,25 +1003,81 @@ def _packaged_data_target(source: str, taken: dict[str, str], *, keep_leaf_only:
     else:
         parent = _UNSAFE.sub("_", original.parent.name)[:_MAX_OBJECT_NAME] or "source"
         candidate = f"{parent}/{name}"
-    if taken.get(candidate, source) != source:
-        candidate = f"{hashlib.sha256(source.encode('utf-8')).hexdigest()[:8]}/{name}"
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    width = 8
+    while _destination_taken(candidate, source, taken):
+        if width > len(digest):
+            raise PackagingError(f"no free packaged destination for {_leaf(source)}")
+        candidate = f"{digest[:width]}/{name}"
+        width += 8
     taken[candidate] = source
     return candidate
 
 
-def _is_path_literal(value: str) -> bool:
-    """Whether an absolute literal is plausibly a FILE SYSTEM path this packager should act on.
+def _destination_taken(candidate: str, source: str, taken: dict[str, str]) -> bool:
+    """Whether ``candidate`` collides with a destination another source already claimed.
+
+    A collision is not only an equal path: a FOLDER destination owns its whole subtree, so
+    `same/x.csv` collides with `same` in both directions. Compared case-insensitively because the
+    package is routinely assembled and opened on Windows, where `Same/X.csv` and `same/x.csv` are
+    one file - a case-sensitive dict would have called them distinct and let one overwrite the other.
+    """
+    key = candidate.casefold()
+    for existing, owner in taken.items():
+        if owner == source:
+            continue
+        claimed = existing.casefold()
+        if key == claimed or key.startswith(f"{claimed}/") or claimed.startswith(f"{key}/"):
+            return True
+    return False
+
+
+def _assert_distinct_destinations(record: dict[str, Any]) -> None:
+    """Tripwire: two shipped entries naming one path means a partition reads another table's rows.
+
+    :func:`_packaged_data_target` makes this unreachable. It is asserted anyway because the failure
+    it guards is invisible downstream - the model loads, `check_datamodel.py` exits 0, and only the
+    NUMBERS are wrong - so a regression must stop packaging rather than be discovered by a customer.
+    """
+    seen: list[str] = [row["path"].casefold() for row in record["shipped"]]
+    duplicates = sorted({row["path"] for row in record["shipped"] if seen.count(row["path"].casefold()) > 1})
+    if duplicates:
+        raise PackagingError(
+            "two sources were packaged onto the same destination, so a partition would read another "
+            f"table's rows: {', '.join(duplicates)}"
+        )
+
+
+def _path_verdict(value: str) -> str:
+    """`PATH_LITERAL` / `NOT_A_PATH` / `UNCLASSIFIED` for one absolute quoted literal.
 
     A Windows drive or UNC prefix is unambiguous. A POSIX-absolute literal mostly is NOT: measured on
     estate run 408, 9 POSIX-absolute literals appear and 8 are false positives - a Databricks
     `HttpPath = "/sql/1.0/warehouses/<id>"` in three units, and a bare `"/"` inside a
-    `TableauFormula` annotation in two more. Requiring a file suffix keeps the one genuine hit (a
-    macOS `.xlsx` baked into a source workbook) and drops all eight. Finding contributed by the
-    promotion-side work in PR #462.
+    `TableauFormula` annotation in two more. A file suffix keeps the one genuine hit (a macOS `.xlsx`
+    baked into a source workbook); a TRAILING SEPARATOR is the directory convention and keeps the
+    other genuine shape, a folder parameter such as `"/Users/<person>/Data/"`.
+
+    ⚠️ **What is left over is UNCLASSIFIED, never clean.** Requiring a suffix and calling everything
+    else "not a path" is what let `SourceFolder = "/Users/<person>/Data/"` through packaging
+    unchanged, with no folder shipped and NO omission recorded (blind-review finding 5). The
+    remaining shape - POSIX-absolute, no suffix, no trailing separator - genuinely cannot be told
+    from a service path without probing, so it gets its own verdict and its own recorded reason.
     """
     if WINDOWS_PATH_RE.match(value) or UNC_PATH_RE.match(value):
-        return True
-    return value.startswith("/") and bool(PurePosixPath(value).suffix)
+        return PATH_LITERAL
+    if not value.startswith("/"):
+        return NOT_A_PATH
+    if value.strip() == "/":
+        return NOT_A_PATH
+    if PurePosixPath(value.rstrip("/")).suffix or value.endswith("/"):
+        return PATH_LITERAL
+    return UNCLASSIFIED
+
+
+def _is_path_literal(value: str) -> bool:
+    """Whether an absolute literal is a FILE SYSTEM path this packager should act on."""
+    return _path_verdict(value) == PATH_LITERAL
 
 
 def _inside(root: Path, value: str) -> bool:
@@ -976,6 +1098,17 @@ def _inside(root: Path, value: str) -> bool:
         return False
 
 
+def _ceiling_refusal(size: int) -> str | None:
+    """The refusal for a source over the package ceiling, or None. ONE comparison site on purpose.
+
+    Both shapes - a bare file and the selected members of a folder - are measured against it here, so
+    the ceiling cannot be enforced for one and forgotten for the other.
+    """
+    if size > MAX_DATA_BYTES:
+        return f"{size / 1048576:.1f} MB exceeds the {MAX_DATA_BYTES / 1048576:.0f} MB package ceiling"
+    return None
+
+
 def _classify_source(value: str, *, expect_dir: bool = False) -> tuple[Path | None, str | None]:
     """`(readable path, refusal)` for one absolute literal, WITHOUT ever probing a UNC host.
 
@@ -983,6 +1116,10 @@ def _classify_source(value: str, *, expect_dir: bool = False) -> tuple[Path | No
     blocks on SMB name resolution for minutes, and packaging must not be able to hang. A UNC source
     is therefore refused unprobed and recorded, which is loud and instant; the promotion gate
     (`promote_unit.py`, exit 5) refuses such a model anyway.
+
+    A directory is only checked for EXISTENCE here. Its size is measured over the members a
+    partition actually names (:func:`_relocate_folder`), because those are the only bytes the
+    package ships - weighing the whole tree would refuse a 300 MB folder for one 4 KB CSV.
     """
     if UNC_PATH_RE.match(value):
         return None, "a UNC path is not probed, because resolving an absent host can block for minutes"
@@ -990,20 +1127,47 @@ def _classify_source(value: str, *, expect_dir: bool = False) -> tuple[Path | No
     if expect_dir:
         if not path.is_dir():
             return None, "the folder it names is not present on the packaging machine"
-        size = sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
-    else:
-        if not path.is_file():
-            return None, "not present on the packaging machine, so its bytes could not be shipped"
-        size = path.stat().st_size
-    if size > MAX_DATA_BYTES:
-        return None, f"{size / 1048576:.1f} MB exceeds the {MAX_DATA_BYTES / 1048576:.0f} MB package ceiling"
-    return path, None
+        return path, None
+    if not path.is_file():
+        return None, "not present on the packaging machine, so its bytes could not be shipped"
+    refusal = _ceiling_refusal(path.stat().st_size)
+    return (None, refusal) if refusal else (path, None)
+
+
+def _declared_expressions(documents: list[Path]) -> set[str]:
+    """Every M expression name the model already declares, case-folded and unquoted."""
+    return {
+        _bare_name(match.group(1))
+        for document in documents
+        for match in EXPRESSION_NAME_RE.finditer(document.read_text(encoding="utf-8"))
+    }
+
+
+def _bare_name(token: str) -> str:
+    """`#"Source Folder"` / `SourceFolder` -> the identifier itself."""
+    token = token.strip()
+    return token[2:-1] if token.startswith('#"') and token.endswith('"') else token
 
 
 def _data_folder_param(documents: list[Path]) -> str:
-    """The parameter name to introduce, avoiding one the model already defines."""
-    existing = "".join(document.read_text(encoding="utf-8") for document in documents)
-    return DATA_FOLDER_PARAM if DATA_FOLDER_PARAM not in existing else FALLBACK_DATA_FOLDER_PARAM
+    """A parameter name the model does NOT already declare.
+
+    ⚠️ **Both preferred names can be taken, and the old check could not even see one of them.**
+    Blind-review finding 4: a model already declaring `DataFolder` AND `PackageDataFolder` loads
+    fine (`check_datamodel.py` exit 0), packaging appended a SECOND `PackageDataFolder`, exited 0,
+    and AMO then refused the model - packaging turned a loadable model into an unloadable one. The
+    substring test made it worse than it looks: `"DataFolder" in text` is TRUE for a model that
+    declares only `PackageDataFolder`, so that model got a duplicate too. Names are now read as
+    DECLARATIONS and the fallback is numbered, so a free name always exists.
+    """
+    declared = {name.casefold() for name in _declared_expressions(documents)}
+    for candidate in (DATA_FOLDER_PARAM, FALLBACK_DATA_FOLDER_PARAM):
+        if candidate.casefold() not in declared:
+            return candidate
+    suffix = 2
+    while f"{FALLBACK_DATA_FOLDER_PARAM}{suffix}".casefold() in declared:
+        suffix += 1
+    return f"{FALLBACK_DATA_FOLDER_PARAM}{suffix}"
 
 
 def _write_data_folder_expression(dest: Path, final: Path, model_name: str, parameter: str) -> None:
@@ -1053,8 +1217,10 @@ def _localize_data_sources(dest: Path, final: Path, model_name: str | None) -> d
 
     Every reference ends in exactly one of two recorded states - shipped, or an omission naming its
     reason. There is no third, silent one: a source that cannot be copied keeps its original literal
-    (so it still resolves wherever it did before) and is reported. Findings carry the LEAF name only,
-    never the absolute path, which embeds a username in a public repo (convention adopted from #462).
+    (so it still resolves wherever it did before) and is reported. That rule now covers the literals
+    this packager cannot even CLASSIFY (:data:`UNCLASSIFIED_REASON`), which used to be the silent
+    third state. Findings carry the LEAF name only, never the absolute path, which embeds a username
+    in a public repo (convention adopted from #462).
     """
     record: dict[str, Any] = {"parameter": None, "shipped": [], "omissions": [], "bytes": 0}
     documents = _model_tmdl(dest, model_name)
@@ -1065,6 +1231,7 @@ def _localize_data_sources(dest: Path, final: Path, model_name: str | None) -> d
     _localize_folder_parameters(documents, dest, final, record, taken, accounted)
     _localize_file_literals(documents, dest, final, record, taken, model_name, accounted)
     record["omissions"].extend(_external_after_rewrite(_model_tmdl(dest, model_name), final, accounted))
+    _assert_distinct_destinations(record)
     return record
 
 
@@ -1076,7 +1243,7 @@ def _localize_folder_parameters(  # pylint: disable=too-many-arguments,too-many-
     taken: dict[str, str],
     accounted: set[str],
 ) -> None:
-    """Move a folder parameter's VALUE into the package, carrying the folder's files with it.
+    """Move a folder parameter's VALUE into the package, carrying the files a partition NAMES.
 
     Measured shape, 9 of the estate's 31 external literals and every datasource-only unit::
 
@@ -1085,25 +1252,141 @@ def _localize_folder_parameters(  # pylint: disable=too-many-arguments,too-many-
 
     The parameter is reused rather than replaced, and the value keeps the original's separator shape,
     because the partitions' concatenation was written against it.
+
+    ⚠️ **Only the members the model reads are copied.** Blind-review finding 2: this used to
+    `copytree` the source folder, so an `unreferenced-secret.txt` sitting beside the extract was
+    copied, listed in the manifest and shipped, exit 0. A package exists to be handed to someone
+    else, so that is a data-leak shape rather than untidiness - and the folder is very often a
+    customer's own working directory. The set of members is derived from the M that reads the
+    parameter (:func:`_parameter_usages`), so it is evidence, not a guess; when the M cannot be
+    enumerated, nothing is copied and the reason is recorded.
     """
-    for document in documents:
-        text = document.read_text(encoding="utf-8")
+    texts = [document.read_text(encoding="utf-8") for document in documents]
+    for document, text in zip(documents, texts, strict=True):
         rewritten = text
         for match in FOLDER_PARAM_RE.finditer(text):
-            value = match.group(2)
-            if not _is_path_literal(value) or _inside(final, value):
+            value = match.group("value")
+            verdict = _path_verdict(value)
+            if verdict == NOT_A_PATH or _inside(final, value):
                 continue
-            readable, refusal = _classify_source(value, expect_dir=True)
             accounted.add(value)
-            if readable is None:
-                record["omissions"].append({"file": _leaf(value), "reason": refusal})
+            if verdict == UNCLASSIFIED:
+                record["omissions"].append({"file": _leaf(value), "reason": UNCLASSIFIED_REASON})
                 continue
-            relative = _packaged_data_target(value, taken, keep_leaf_only=True)
-            _ship_folder(readable, dest / DATA_DIR / relative, relative, record)
-            moved = _moved_folder_value(final, relative, value)
-            rewritten = rewritten.replace(f"{match.group(1)}{value}{match.group(3)}", f'{match.group(1)}{moved}"')
+            moved = _relocate_folder(match.group("name"), value, texts, dest, final, record, taken)
+            if moved is None:
+                continue
+            rewritten = rewritten.replace(
+                f"{match.group('prefix')}{value}{match.group('quote')}", f'{match.group("prefix")}{moved}"'
+            )
         if rewritten != text:
             document.write_text(rewritten, encoding="utf-8")
+
+
+def _relocate_folder(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-return-statements
+    name: str,
+    value: str,
+    texts: list[str],
+    dest: Path,
+    final: Path,
+    record: dict[str, Any],
+    taken: dict[str, str],
+) -> str | None:
+    """`the parameter's new value`, or None when nothing could be shipped for it (reason recorded)."""
+    mode, tails, reason = _parameter_usages(texts, _bare_name(name))
+    if reason is not None:
+        record["omissions"].append({"file": _leaf(value), "reason": reason})
+        return None
+    readable, refusal = _classify_source(value, expect_dir=True)
+    if readable is None:
+        record["omissions"].append({"file": _leaf(value), "reason": refusal})
+        return None
+    if mode == WHOLE_FOLDER:
+        members, problems = sorted(path for path in readable.rglob("*") if path.is_file()), []
+    else:
+        members, problems = _folder_members(readable, tails)
+    record["omissions"].extend(problems)
+    if not members:
+        record["omissions"].append(
+            {"file": _leaf(value), "reason": "no file this parameter names could be shipped from it"}
+        )
+        return None
+    ceiling = _ceiling_refusal(sum(member.stat().st_size for member in members))
+    if ceiling is not None:
+        record["omissions"].append({"file": _leaf(value), "reason": ceiling})
+        return None
+    relative = _packaged_data_target(value, taken, keep_leaf_only=True)
+    _ship_folder(readable, dest / DATA_DIR / relative, relative, record, members)
+    return _moved_folder_value(final, relative, value)
+
+
+def _parameter_usages(texts: list[str], bare: str) -> tuple[str, set[str], str | None]:
+    """`(mode, literal tails, refusal)` - what the model actually reads through a folder parameter.
+
+    Three answers, and the third is why this exists rather than a `copytree`:
+
+    * :data:`NAMED_FILES` - every use is `<param> & "<literal>"`, so the members are enumerable and
+      only those are shipped;
+    * :data:`WHOLE_FOLDER` - a `Folder.Files`/`Folder.Contents` call reads the directory itself, so
+      the whole tree genuinely IS referenced and copying it is evidenced rather than assumed;
+    * a refusal - the parameter is used in a way this cannot enumerate (a computed file name), or is
+      never read at all. Nothing is copied, the literal is left resolving where it did before, and
+      the reason is recorded. Guessing "copy everything" there is exactly the leak.
+
+    Every occurrence of the name is accounted for, not just the ones that match a known shape: an
+    unexplained occurrence is what makes the answer a refusal.
+    """
+    quoted = re.escape(bare)
+    reference = rf'#"{quoted}"|(?<![A-Za-z0-9_]){quoted}(?![A-Za-z0-9_])'
+    token = re.compile(reference)
+    concat = re.compile(rf'(?:{reference})\s*&\s*"([^"]*)"')
+    whole = re.compile(rf"Folder\.(?:Files|Contents)\s*\(\s*(?:{reference})\s*[,)]")
+    declaration = re.compile(rf"expression\s+(?:{reference})\s*=")
+    tails: set[str] = set()
+    whole_folder = False
+    unexplained = 0
+    for text in texts:
+        spans = [match.span() for match in declaration.finditer(text)]
+        for match in concat.finditer(text):
+            tails.add(match.group(1))
+            spans.append(match.span())
+        for match in whole.finditer(text):
+            whole_folder = True
+            spans.append(match.span())
+        for match in token.finditer(text):
+            if not any(start <= match.start() and match.end() <= end for start, end in spans):
+                unexplained += 1
+    if unexplained:
+        return (
+            UNKNOWN_USAGE,
+            tails,
+            "the model reads this folder in a way the packager cannot enumerate, so shipping it "
+            "would mean copying every file in it - nothing was shipped",
+        )
+    if whole_folder:
+        return WHOLE_FOLDER, tails, None
+    if tails:
+        return NAMED_FILES, tails, None
+    return NO_USAGE, tails, "no partition reads a file through this parameter, so nothing was shipped for it"
+
+
+def _folder_members(readable: Path, tails: set[str]) -> tuple[list[Path], list[dict[str, str]]]:
+    """`(files a partition names, omissions)` for the literal tails read through a folder parameter."""
+    members: list[Path] = []
+    problems: list[dict[str, str]] = []
+    for tail in sorted(tails):
+        parts = [part for part in re.split(r"[\\/]+", tail) if part not in ("", ".")]
+        if not parts or ".." in parts:
+            problems.append(
+                {"file": _leaf(tail) or tail, "reason": "the name a partition builds escapes the folder it reads from"}
+            )
+            continue
+        candidate = readable.joinpath(*parts)
+        if candidate.is_file():
+            members.append(candidate)
+        else:
+            problems.append({"file": parts[-1], "reason": "named by a partition but absent from the folder it reads"})
+    return members, problems
 
 
 def _moved_folder_value(final: Path, relative: str, original: str) -> str:
@@ -1117,15 +1400,15 @@ def _moved_folder_value(final: Path, relative: str, original: str) -> str:
     return f"{final}\\{DATA_DIR}\\{relative.replace('/', chr(92))}{trailing}"
 
 
-def _ship_folder(readable: Path, target: Path, relative: str, record: dict[str, Any]) -> None:
-    """Copy a referenced folder into the package and record every file it brought."""
-    shutil.copytree(readable, target, dirs_exist_ok=True)
-    shipped = sorted(path for path in target.rglob("*") if path.is_file())
-    record["shipped"].extend(
-        {"path": f"{DATA_DIR}/{relative}/{path.relative_to(target).as_posix()}", "bytes": path.stat().st_size}
-        for path in shipped
-    )
-    record["bytes"] += sum(path.stat().st_size for path in shipped)
+def _ship_folder(readable: Path, target: Path, relative: str, record: dict[str, Any], members: list[Path]) -> None:
+    """Copy the NAMED members of a referenced folder into the package and record each one."""
+    for member in members:
+        sub = member.relative_to(readable)
+        landing = target / sub
+        landing.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(member, landing)
+        record["shipped"].append({"path": f"{DATA_DIR}/{relative}/{sub.as_posix()}", "bytes": landing.stat().st_size})
+        record["bytes"] += landing.stat().st_size
 
 
 def _localize_file_literals(  # pylint: disable=too-many-arguments,too-many-positional-arguments
@@ -1158,7 +1441,29 @@ def _localize_file_literals(  # pylint: disable=too-many-arguments,too-many-posi
         return
     _rewrite_partitions(documents, shipped, parameter)
     _write_data_folder_expression(dest, final, str(model_name), parameter)
+    _assert_declared_once(_model_tmdl(dest, model_name), parameter)
     record["parameter"] = parameter
+
+
+def _assert_declared_once(documents: list[Path], parameter: str) -> None:
+    """Tripwire: the parameter this packager introduced must be declared exactly once.
+
+    :func:`_data_folder_param` makes a duplicate unreachable. It is asserted anyway because the
+    consequence is invisible here and fatal later: a model with two `expression <name> =` blocks is
+    written happily, packaging exits 0, and AMO refuses to load it (`check_datamodel.py` exit 1) on
+    someone else's machine.
+    """
+    declared = sum(
+        1
+        for document in documents
+        for match in EXPRESSION_NAME_RE.finditer(document.read_text(encoding="utf-8"))
+        if _bare_name(match.group(1)).casefold() == parameter.casefold()
+    )
+    if declared != 1:
+        raise PackagingError(
+            f"the packaged model declares `expression {parameter}` {declared} times; a duplicate makes "
+            "the model unloadable, so nothing is shipped"
+        )
 
 
 def _ship_file(readable: Path, target: Path, relative: str, record: dict[str, Any]) -> None:
@@ -1207,13 +1512,26 @@ def _external_after_rewrite(documents: list[Path], final: Path, accounted: set[s
     ⚠️ An absolute path UNDER the package is legitimate and must not be reported. That is
     `set_data_folder.py`'s existing convention and it is what both repairs above produce; the rule is
     "absolute AND not under the destination", never "absolute" (finding from PR #462).
+
+    ⚠️ **A literal this cannot classify is reported too, in its own words.** Silence was reserved
+    for "definitely not a path", and an unclassifiable literal fell into it - so the escaping
+    `"/Users/<person>/Data/"` of blind-review finding 5 left no trace anywhere. Each distinct
+    literal is reported once however many documents carry it.
     """
-    findings = []
+    findings: list[dict[str, str]] = []
+    seen: set[str] = set()
     for document in documents:
         for match in ABSOLUTE_LITERAL_RE.finditer(document.read_text(encoding="utf-8")):
             value = match.group(1)
-            if value not in accounted and _is_path_literal(value) and not _inside(final, value):
+            if value in accounted or value in seen or _inside(final, value):
+                continue
+            verdict = _path_verdict(value)
+            if verdict == PATH_LITERAL:
+                seen.add(value)
                 findings.append({"file": _leaf(value), "reason": "still points outside the package after packaging"})
+            elif verdict == UNCLASSIFIED:
+                seen.add(value)
+                findings.append({"file": _leaf(value), "reason": UNCLASSIFIED_REASON})
     return findings
 
 
@@ -1271,9 +1589,27 @@ def _handover_workbook(handover: Any, unit: str, dest: Path) -> dict[str, Any] |
 
 
 def package_unit(
-    bundle: Path, unit: str, out_root: Path, *, oracle_dir: Path | None, assets_dir: Path | None
+    bundle: Path,
+    unit: str,
+    out_root: Path,
+    *,
+    oracle_dir: Path | None,
+    assets_dir: Path | None,
+    discard_edits: bool = False,
 ) -> dict[str, Any]:
-    """Assemble one unit's package. Returns the record written to `package-manifest.json`."""
+    """Assemble one unit's package. Returns the record written to `package-manifest.json`.
+
+    ⚠️ **Refuses rather than overwriting a package that has been edited.** This packager declares
+    `<package>/fabric/` the canonical place to work, and `replace_dir` replaces the package whole -
+    so re-running the same command silently deleted an agent's TMDL (blind-review finding 6). Silent
+    loss is the one unacceptable outcome; refusing costs a flag and names the files. ``discard_edits``
+    (`--discard-package-edits`) is the deliberate override.
+    """
+    existing = out_root / unit
+    if existing.is_dir() and not discard_edits:
+        changed, reason = package_edits(existing)
+        if reason is not None or changed:
+            raise PackageEditsRefused(unit, existing, changed, reason)
     staging = out_root / f".{sanitize_staging_name(unit)}.staging"
     shutil.rmtree(staging, ignore_errors=True)
     try:
@@ -1284,6 +1620,42 @@ def package_unit(
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     return result
+
+
+def package_contents(root: Path) -> dict[str, str]:
+    """`{package-relative path: sha256}` for every file in a package except the manifest itself.
+
+    The manifest is excluded because it is written last and CARRIES this map - including it would
+    make every package differ from its own record.
+    """
+    return {
+        path.relative_to(root).as_posix(): sha256_of(path) or ""
+        for path in sorted(root.rglob("*"))
+        if path.is_file() and path.relative_to(root).as_posix() != MANIFEST_NAME
+    }
+
+
+def package_edits(root: Path) -> tuple[list[str], str | None]:
+    """`(paths that differ from what packaging wrote, reason it could not be established)`.
+
+    Whole-package, not just `fabric/`: the package README also tells an agent to append
+    `limitations_encountered` entries to `migration-spec.json`, and losing those silently is the same
+    defect wearing different clothes.
+
+    A package with no recorded digest returns a REASON, never an empty change list. "I cannot tell
+    whether this was edited" is not "it was not edited" - collapsing the two is how unassessable
+    input ends up in the clean bucket, which is the defect class this whole review round is about.
+    """
+    manifest = read_json(root / MANIFEST_NAME)
+    recorded = ((manifest or {}).get("contents") or {}).get("files") if isinstance(manifest, dict) else None
+    if not isinstance(recorded, dict):
+        return [], (
+            f"it carries no {MANIFEST_NAME} content digest, so whether anything was edited in it cannot be established"
+        )
+    current = package_contents(root)
+    changed = set(recorded) ^ set(current)
+    changed |= {path for path in set(recorded) & set(current) if recorded[path] != current[path]}
+    return sorted(changed), None
 
 
 def sanitize_staging_name(unit: str) -> str:
@@ -1427,7 +1799,8 @@ def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
     workbook = _handover_workbook(handover, unit, dest)
     (dest / "handover.md").write_text(render_handover(result, workbook, visual_pages(report_dir)), encoding="utf-8")
     (dest / "README.md").write_text(README.format(unit=unit, kind=result["kind"]), encoding="utf-8")
-    write_json(dest / "package-manifest.json", result)
+    result["contents"] = {"files": package_contents(dest)}
+    write_json(dest / MANIFEST_NAME, result)
     return result
 
 
@@ -1436,7 +1809,7 @@ def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
 # --------------------------------------------------------------------------------------------
 
 
-def render(results: list[dict[str, Any]], out_root: Path) -> str:
+def render(results: list[dict[str, Any]], out_root: Path, refused: list[PackageEditsRefused] | None = None) -> str:
     """The human verdict: one line per unit, then the totals that make an omission visible."""
     lines = [f"package_unit: {len(results)} unit(s) -> {out_root}"]
     for result in sorted(results, key=lambda item: item["unit"]):
@@ -1449,6 +1822,8 @@ def render(results: list[dict[str, Any]], out_root: Path) -> str:
             + (f", {untyped} untyped" if untyped else "")
             + (f"; {len(result['notes'])} note(s)" if result["notes"] else "")
         )
+    for refusal in sorted(refused or [], key=lambda item: item.unit):
+        lines.append(f"  KEPT {refusal.unit} - not repackaged, the existing package carries edits")
     packaged = sum(1 for result in results if result["packaged"])
     with_oracle = sum(1 for result in results if result["oracle"].get("objects"))
     lines.append(f"packaged {packaged}/{len(results)}; {with_oracle} carry oracle evidence")
@@ -1457,6 +1832,11 @@ def render(results: list[dict[str, Any]], out_root: Path) -> str:
         lines.append(
             f"WARN: {len(starved)} unit(s) have NO engine working copy under pbip/ - packaged for their "
             f"source, reference and handover only, with nothing to build on: {', '.join(starved)}"
+        )
+    if refused:
+        lines.append(
+            f"REFUSED: {len(refused)} unit(s) already carry edits in the package, which is the canonical "
+            "place to work - they were left untouched. Re-run with --discard-package-edits to overwrite."
         )
     return "\n".join(lines)
 
@@ -1471,6 +1851,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--assets", type=Path, help="directory holding the harvested .twb/.twbx/.tds assets")
     parser.add_argument("--json", type=Path, help="write the machine-readable packaging report here")
     parser.add_argument("--quiet", action="store_true", help="suppress the rendered summary")
+    parser.add_argument(
+        "--discard-package-edits",
+        action="store_true",
+        help="overwrite an existing package even though it carries edits made since it was written",
+    )
     args = parser.parse_args(argv)
 
     bundle = args.bundle.resolve()
@@ -1495,9 +1880,25 @@ def main(argv: list[str] | None = None) -> int:
             "its own oracle and that one, and every page becomes 'unverifiable' rather than ready. "
             "Choose an --out outside the capture tree."
         )
-    results = [
-        package_unit(bundle, unit, out_root, oracle_dir=oracle_dir, assets_dir=assets_dir) for unit in sorted(units)
-    ]
+    results: list[dict[str, Any]] = []
+    refused: list[PackageEditsRefused] = []
+    for unit in sorted(units):
+        try:
+            results.append(
+                package_unit(
+                    bundle,
+                    unit,
+                    out_root,
+                    oracle_dir=oracle_dir,
+                    assets_dir=assets_dir,
+                    discard_edits=args.discard_package_edits,
+                )
+            )
+        except PackageEditsRefused as refusal:
+            # One unit's edits must not stop the rest of the estate being packaged; the exit code
+            # still reports the refusal, so this cannot pass unnoticed.
+            print(str(refusal), file=sys.stderr)
+            refused.append(refusal)
 
     payload = {
         "id": "package-unit",
@@ -1506,11 +1907,16 @@ def main(argv: list[str] | None = None) -> int:
         "oracle": str(oracle_dir) if oracle_dir else None,
         "assets": str(assets_dir) if assets_dir else None,
         "units": results,
+        "refused": [
+            {"unit": refusal.unit, "changed": refusal.changed, "reason": refusal.reason} for refusal in refused
+        ],
     }
     if args.json:
         write_json(args.json, payload)
     if not args.quiet:
-        print(render(results, out_root))
+        print(render(results, out_root, refused))
+    if refused:
+        return 3
     return 0 if all(result["packaged"] for result in results) else 1
 
 
