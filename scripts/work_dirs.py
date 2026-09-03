@@ -417,13 +417,23 @@ def _is_location_independent(value: str) -> bool:
     directory produced `INTACT 001-acme`, exit 0 - a location verdict that depended on where the
     operator happened to be standing, in the one module that exists to be CWD-independent.
 
-    `isabs` is also the wrong predicate here and a version-dependent one: on Windows it answered
-    True for the drive-relative `\\_runs\\001-acme` before Python 3.13 and False from 3.13 on, and
-    a drive-relative path still resolves against the CURRENT drive. So the property is tested
-    directly instead, as two facts that are both needed: the value must be rooted within whatever
-    drive it names (`C:001-acme` is not), and it must name a drive or root of its own, which is
-    established by joining it onto unrelated anchors and demanding it come back unchanged.
-    Anything a CWD, or a current drive, would complete fails one of the two.
+    ⚠️ `isabs` is a VERSION-DEPENDENT predicate here, which is the reason not to use it - it is not
+    that `isabs` is wrong about every drive-relative shape. Measured, `ntpath.isabs`:
+
+        value                    CPython 3.11.10    CPython 3.13.2
+        '\\_runs\\001-acme'        True  <- the miss   False
+        'C:001-acme'             False              False
+
+    So on 3.13 `isabs` alone would have been enough here, and on 3.11 it would have accepted a path
+    that still resolves against whatever drive the process is on. Exactly one shape, on the older
+    interpreter - an earlier version of this note claimed two, and overstating a justification is
+    how the next reader over-trusts the next claim.
+
+    The property is therefore tested directly, as two facts that are both needed and both
+    interpreter-independent: the value must be rooted within whatever drive it names (`C:001-acme`
+    is not), and it must name a drive or root of its own, established by joining it onto unrelated
+    anchors and demanding it come back unchanged. Anything a CWD, or a current drive, would
+    complete fails one of the two.
     """
     try:
         # Fact 1 - the path must be rooted WITHIN whatever drive it names. `C:001-acme` carries a

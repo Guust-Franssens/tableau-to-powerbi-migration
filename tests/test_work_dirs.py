@@ -946,8 +946,13 @@ def test_verify_cli_exits_3_on_a_relative_recorded_path_even_from_the_matching_c
         # rejected: every one of these is completed against the process's CWD or current DRIVE
         ("001-acme", False),
         (str(Path("..") / "_runs" / "001-acme"), False),
-        (r"\_runs\001-acme", os.name != "nt"),  # Windows drive-relative; a plain absolute path on POSIX
-        ("C:001-acme", os.name != "nt"),  # drive-relative WITH a drive letter
+        # ⚠️ False on EVERY platform, and the reason differs by platform - which is why the earlier
+        # `os.name != "nt"` expectation passed locally and turned Linux CI red (4696 passed, 2
+        # failed at 191d153). On Windows these are drive-relative and resolve against the current
+        # drive; on POSIX they are ordinary RELATIVE filenames that merely contain a backslash and
+        # a colon. Neither names a fixed location anywhere, so the predicate is right in both.
+        (r"\_runs\001-acme", False),
+        ("C:001-acme", False),
         ("", False),
     ],
 )
@@ -955,11 +960,20 @@ def test_only_a_location_independent_path_counts_as_a_recorded_location(value: s
     """The fact requirement 4 consumes, tested directly - the black-box route can only exercise it
     from a CWD that happens to match, which is exactly why the defect survived review round 1.
 
-    ⚠️ `os.path.isabs` is not this predicate and would have missed two rows: on Windows it answered
-    True for `\\_runs\\001-acme` before Python 3.13 and False from 3.13 on, and a drive-relative
-    path still resolves against whatever drive the process is on. Both anchors are required - the
-    driveless one absorbs a drive-relative value (`ntpath.join` keeps the second operand's root),
-    the drive-bearing one exposes it."""
+    ⚠️ `os.path.isabs` misses exactly ONE of these rows, and only on some interpreters - an earlier
+    version of this docstring claimed two, which overstated the justification. Measured on both
+    interpreters this repo can run on Windows:
+
+    | value | `ntpath.isabs` on 3.11.10 | on 3.13.2 |
+    |---|---|---|
+    | `\\_runs\\001-acme` (drive-relative) | **True** - the miss | False |
+    | `C:001-acme` (drive-relative with a drive) | False | False |
+
+    So on 3.13 `isabs` alone would have sufficed here; on 3.11 it would have accepted a path that
+    resolves against whatever drive the process is on. The two-fact predicate is chosen because it
+    does not depend on which CPython runs it - not because `isabs` is wrong about both shapes.
+    Both facts are still individually load-bearing: mutations that drop either one kill this test.
+    """
     assert _is_location_independent(value) is independent
 
 
@@ -1197,18 +1211,47 @@ def test_a_run_json_that_is_not_utf8_is_unverifiable_not_a_traceback(tmp_path: P
 def _state_keyword_sites(state_constant: str) -> list[str]:
     """Every place in `work_dirs.py` that CONSTRUCTS a verdict with `state=<constant>`, named by
     the enclosing function. Parsed, not grepped: the invariant block quotes these literals in
-    prose, and a comment is not a construction site."""
+    prose, and a comment is not a construction site.
+
+    One level of local aliasing is followed, because the reviewer got past the first version of
+    this pin with exactly that: `alias = RUN_LOCATION_INTACT` in the same function, then
+    `state=alias` at a second construction site.
+    """
     tree = ast.parse(_work_dirs_source())
     sites: list[str] = []
     for func in ast.walk(tree):
         if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
+        aliases = {state_constant}
+        for node in ast.walk(func):
+            targets = getattr(node, "targets", None) or ([node.target] if isinstance(node, ast.AnnAssign) else [])
+            value = getattr(node, "value", None)
+            if isinstance(value, ast.Name) and value.id in aliases:
+                aliases.update(target.id for target in targets if isinstance(target, ast.Name))
         for node in ast.walk(func):
             if not isinstance(node, ast.keyword) or node.arg != "state":
                 continue
-            if isinstance(node.value, ast.Name) and node.value.id == state_constant:
+            if isinstance(node.value, ast.Name) and node.value.id in aliases:
                 sites.append(func.name)
     return sites
+
+
+def _constant_load_scopes(constant: str) -> list[str]:
+    """Every scope that LOADS `constant`, named by the innermost enclosing function/class or
+    `<module>`. A construction site elsewhere has to get the value from somewhere, so pinning the
+    reference scopes catches an alias defined in a DIFFERENT function, which `_state_keyword_sites`
+    cannot see."""
+    scopes: list[str] = []
+
+    def walk(node: ast.AST, scope: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.Name) and child.id == constant and isinstance(child.ctx, ast.Load):
+                scopes.append(scope)
+            inner = child.name if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) else scope
+            walk(child, inner)
+
+    walk(ast.parse(_work_dirs_source()), "<module>")
+    return sorted(scopes)
 
 
 def test_intact_is_constructed_at_exactly_one_place_in_work_dirs() -> None:
@@ -1216,32 +1259,59 @@ def test_intact_is_constructed_at_exactly_one_place_in_work_dirs() -> None:
     local guards would have left a fourth site to find, so `check_run_location` is now the only
     function that can produce a clean verdict, on its last line, after every requirement held.
 
-    This is what makes "the next unlisted surface cannot exist" checkable rather than asserted: a
-    second `intact` construction anywhere in the module fails here, whatever it is guarded by."""
-    intact_sites = _state_keyword_sites("RUN_LOCATION_INTACT")
-    moved_sites = _state_keyword_sites("RUN_LOCATION_MOVED")
+    Two independent pins, because the first version of this test was demonstrably weak - a
+    reviewer asked to attack the pin itself got past it by constructing through `state=alias`:
 
-    assert intact_sites == ["check_run_location"], (
-        f"`intact` is constructed in {intact_sites} - the classification surface has re-opened"
+    1. construction sites, following one level of local aliasing;
+    2. the exact set of scopes that so much as LOAD the constant, which catches an alias defined
+       in another function and any second reference added anywhere in the module.
+
+    ⚠️ **Known limitation, stated rather than implied: this catches DIRECT construction and simple
+    local aliasing only.** A value routed through a container, an f-string, a function's return
+    value, or passed in as a parameter would construct `intact` without ever loading the constant
+    in that scope, and both pins would pass. Closing that needs dataflow analysis, which is not
+    worth it here - the behavioural tests above are what actually prove the verdicts, and this pin
+    exists to make an obvious regression noisy, not to be a proof. Production structure was
+    confirmed correct by review; this is a proof weakness, not a defect."""
+    assert _state_keyword_sites("RUN_LOCATION_INTACT") == ["check_run_location"]
+    assert _state_keyword_sites("RUN_LOCATION_MOVED") == ["check_run_location"]
+
+    assert _constant_load_scopes("RUN_LOCATION_INTACT") == ["<module>", "check_run_location", "is_intact"], (
+        "a new scope references `intact` - either the classification surface re-opened, or this "
+        "allowlist needs a deliberate update naming the new consumer"
     )
-    assert moved_sites == ["check_run_location"], (
-        f"`moved` is constructed in {moved_sites} - it is likewise a single established finding"
-    )
+    assert _constant_load_scopes("RUN_LOCATION_MOVED") == ["<module>", "check_run_location", "verify_exit_code"]
 
 
 def test_discovery_applies_no_name_pattern_and_no_manifest_precondition() -> None:
     """Finding 2 pinned structurally. `_discover_run_dirs` filtered on `_RUN_DIR_RE` and on
     `run.json` existing; both are fail-open pre-answers to the question `check_run_location` exists
-    to answer. Parsed rather than grepped so a renamed regex or a nested helper cannot slip past."""
-    tree = ast.parse(_work_dirs_source())
+    to answer. Parsed rather than grepped so a renamed regex or a nested helper cannot slip past.
+
+    The call allowlist is the part that matters, and it is here because the first version of this
+    pin was demonstrably weak: a reviewer asked to attack it got past by moving the filtering into
+    an external helper, which no `_RUN_DIR_RE`-name check can see. Extracting ANY new call out of
+    discovery now fails this test - which is the intended cost, because "discovery consults
+    something else before deciding" is exactly the shape being prohibited.
+
+    ⚠️ Limitation: this pins what discovery may CALL, not what those calls do. Adding a filter
+    inline with no call (e.g. `if child.name.startswith("0")`) would pass both assertions; the
+    behavioural tests above are what catch that."""
+    source = _work_dirs_source()
+    tree = ast.parse(source)
     discover = next(
         node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "_discover_run_dirs"
     )
     names = {node.id for node in ast.walk(discover) if isinstance(node, ast.Name)}
-    body = ast.get_source_segment(_work_dirs_source(), discover) or ""
+    calls = {ast.unparse(node.func) for node in ast.walk(discover) if isinstance(node, ast.Call)}
+    body = ast.get_source_segment(source, discover) or ""
 
     assert "_RUN_DIR_RE" not in names, "discovery re-acquired a name-pattern filter"
     assert "run.json" not in body.split('"""')[-1], "discovery re-acquired a 'has a manifest' precondition"
+    assert calls == {"os.stat", "stat.S_ISDIR", "sorted", "root.iterdir", "found.append"}, (
+        f"discovery calls {sorted(calls)} - it may only stat, list and collect. A new call is how "
+        "a filter gets re-introduced from outside, where a name check cannot see it"
+    )
 
 
 def test_the_invariant_is_stated_in_work_dirs_itself() -> None:
