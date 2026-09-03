@@ -215,7 +215,11 @@ work:
   ([#460](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/460)) — it is the
   tree the package's own README tells an agent to edit, it is what `AGENTS.md`'s working-copy row
   names, and re-running `package_unit.py` over an edited package now refuses (exit 3) rather than
-  quietly replacing it. Promote from `bundle/pbip/` only for a unit that was never packaged.
+  quietly replacing it — `--discard-package-edits` is the deliberate override, and a package with no
+  recorded digest refuses too, because "I cannot tell whether this was edited" is not "it was not
+  edited". A *stale* artifact is a different thing and is still removed silently: the previous run
+  recorded it, the new input no longer produces it, so it never looks like an edit.
+  Promote from `bundle/pbip/` only for a unit that was never packaged.
 
 Running the pipeline yourself? The command-by-command procedure, with timings, exit codes and a
 failure playbook, is **[`docs/operator-runbook.md`](docs/operator-runbook.md)**.
