@@ -237,6 +237,12 @@ def test_evidence_attribution_uses_the_exact_workbook_name(bundle: Path) -> None
     `Ops  Summary` would have been attributed to a unit named `Ops Summary` - the same collapse
     defect, on WORKBOOK identity, at a layer neither the reviewer nor I had enumerated. If a
     published workbook name genuinely differs from the unit name, the LUID route is the answer.
+
+    ⚠️ **Asserting `blind` alone could not kill the mutant this test exists for**, and
+    `mutation_reference_readiness.py` measured it SURVIVING. Since round 3 a matched display name is
+    a refusal too, so both the exact comparison (`foreign` - the names differ) and the lossy one
+    (`name` - they collapse to equal) end in `blind` and exit 1. The census names WHICH guard
+    refused, which is the only assertion that can tell them apart.
     """
     build_unit(bundle, "Ops Summary", worksheets=["Revenue Trend"])
     write_oracle(
@@ -244,7 +250,10 @@ def test_evidence_attribution_uses_the_exact_workbook_name(bundle: Path) -> None
         [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_name": "Ops  Summary"}],
     )
 
-    assert crr.scan(bundle)["units"][0]["pages"][0]["readiness"] == "blind"
+    report = crr.scan(bundle)
+    assert report["units"][0]["pages"][0]["readiness"] == "blind"
+    assert report["evidence_attributed"]["foreign"] == 1, "the names DIFFER; they must not collapse to equal"
+    assert report["evidence_attributed"]["name"] == 0
     assert crr.main([str(bundle), "--quiet"]) == 1
 
 

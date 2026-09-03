@@ -447,6 +447,51 @@ oid.WB_ADMITTING = frozenset({*oid.WB_ROUTES, oid.WB_STALE})
         anchor="test_a_reproducible_byte_difference_is_the_only_thing_that_proves_drift",
         controls=("test_a_byte_confirmed_provenance_luid_certifies_normally",),
     ),
+    # --- round N of PR #454: an unassessable identity must not collapse into READY ---------------
+    "the-first-agreeing-axis-wins-again": Mutation(
+        code="""
+import object_identity as oid
+# BLOCKING FINDING B. `attribute` returned as soon as one machine axis agreed, so a record whose
+# sha256 was this unit's source and whose LUID named ANOTHER workbook was admitted on the sha256:
+# entry gate READY 1/1 exit 0, exit gate PASS visual=1 numeric=1.
+oid.WorkbookIdentity._contradiction = lambda self, record, *, decided: None
+""",
+        anchor="test_a_reference_manifest_whose_luid_contradicts_its_matching_sha_certifies_nothing",
+        controls=("test_a_reference_manifest_whose_luid_agrees_with_its_sha_still_certifies",),
+    ),
+    "the-reference-manifests-luid-is-discarded-again": Mutation(
+        code="""
+import reference_evidence as ev
+# The other half of FINDING B: the entry gate dropped the manifest's `workbook_luid` before building
+# `Evidence`, so by the time the join ran there was nothing left to contradict the matching sha.
+ev._reference_workbook_luid = lambda entry, state, manifest: None
+""",
+        anchor="test_a_reference_manifest_whose_luid_contradicts_its_matching_sha_certifies_nothing",
+        controls=("test_a_reference_manifest_whose_luid_agrees_with_its_sha_still_certifies",),
+    ),
+    "ambiguous-provenance-is-resolved-by-array-order": Mutation(
+        code="""
+import reference_evidence as ev
+# BLOCKING FINDING A. The SHA loop returned on its first hit, so two provenance records for one
+# source digest naming different workbooks resolved by JSON array order - byte-identical evidence
+# read READY/exit 0 one way round and FINDINGS/exit 1 the other.
+_orig = ev._weakest_revision
+def provenance_origin(root, source_sha, source=None):
+    stamped = ev.harvest_luid(ev.persisted_stem(source.name if source is not None else None))
+    inputs = list((ev.json_object(root / "source-provenance.json") or {}).get("inputs") or [])
+    for record in inputs:
+        found = ev._stamped_origin(record)
+        if found is None or found[0] != source_sha:
+            continue
+        return ev.agreed_luid(stamped, ev._identity_claim(found[1])), ev.revision_status(found[1], inputs)
+    return ev.agreed_luid(stamped), ev.REVISION_UNCONFIRMED
+ev.provenance_origin = provenance_origin
+import check_reference_readiness as crr
+crr.provenance_origin = provenance_origin
+""",
+        anchor="test_the_ambiguous_provenance_verdict_does_not_depend_on_the_array_order",
+        controls=("test_a_byte_confirmed_provenance_luid_certifies_normally",),
+    ),
     "a-recorded-path-is-parsed-with-the-running-hosts-flavour": Mutation(
         code="""
 import object_identity as oid

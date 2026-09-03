@@ -540,36 +540,50 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
         ["test_two_producer_records_naming_one_page_satisfy_nothing"],
     ),
     (
-        "ORACLE WORKBOOK: the producing side of the uniqueness guard is dropped",
-        "    if unit_index.unique(name) is None or producer_index.unique(name) is None:",
-        "    if unit_index.unique(name) is None:",
+        # ⚠️ Round-3 B-B DELETED the lossy sanitised-spelling rescue this used to aim at, so the old
+        # snippet (`unit_index.unique(name) or producer_index.unique(name)`) could never apply again.
+        # Re-aimed at the property rather than the vanished code: putting a name rescue BACK must be
+        # caught. A display name is decoration, and two producers slugging alike prove it.
+        "ORACLE WORKBOOK: a lossy display name is allowed to admit again",
+        "    for record in records:\n        verdict = _attribute_record(unit_ids, record)\n        if not verdict.admitted:",
+        "    for record in records:\n        verdict = _attribute_record(unit_ids, record)\n"
+        "        if verdict.route == oid.WB_FOREIGN and verdict.axis == oid.WB_NAME:\n"
+        '            verdict = oid.Attribution(oid.WB_LUID, "lossy name rescue", axis=oid.WB_NAME)\n'
+        "        if not verdict.admitted:",
         ["test_two_producing_workbooks_slugging_alike_are_both_refused"],
     ),
     (
-        "ORACLE WORKBOOK: the unit side of the uniqueness guard is dropped",
-        "    if unit_index.unique(name) is None or producer_index.unique(name) is None:",
-        "    if producer_index.unique(name) is None:",
+        # The LUID twin of "the unit stops hashing its own source" below. A unit that establishes no
+        # LUID cannot call anything foreign - the refusal silently downgrades to `unattributed`.
+        "ORACLE WORKBOOK: the unit stops establishing its own LUID, so nothing is ever foreign",
+        "    luid = oid.agreed_luid(*_unit_source_claims(target)[1])",
+        "    luid = None",
         ["test_oracle_evidence_from_a_different_workbook_satisfies_nothing"],
-    ),
-    (
-        "ORACLE WORKBOOK: the sanitised-spelling fallback is removed entirely",
-        "    if unit_index.unique(name) is None or producer_index.unique(name) is None:",
-        "    if True:",
-        ["test_one_producing_workbook_still_binds_through_a_sanitised_spelling"],
     ),
     (
         # Issue #450: `_declared_workbook` read a `workbook` key no capture producer writes, so on a
         # real 360-view capture EVERY record arrived ownerless and was admitted anyway.
+        # ⚠️ The anchor was `test_the_workbook_name_a_real_capture_writes_is_read`, which does not
+        # exist - so this reported BROKEN (189 deselected, 0 run), not CAUGHT. Re-anchored on the
+        # test that actually asserts the field is read: without `workbook_name`, the record is
+        # ownerless and `name_only_evidence` is empty rather than naming it.
         "ORACLE WORKBOOK: the fields a real capture writes are ignored again (#450)",
         '        name=entry.get("workbook") or outer.get("workbook") or entry.get("workbook_name")'
         ' or outer.get("workbook_name"),',
         '        name=entry.get("workbook") or outer.get("workbook"),',
-        ["test_the_workbook_name_a_real_capture_writes_is_read"],
+        ["test_a_display_name_alone_never_certifies_however_real_the_capture"],
     ),
     (
+        # ⚠️ Re-aimed for the same reason as the first entry: the rescue this guarded
+        # (`verdict.route != oid.WB_FOREIGN or verdict.axis != oid.WB_NAME or not name`) is deleted,
+        # so the snippet was unappliable. The fail-open direction it defended is still worth a
+        # mutant, so the mutant now REINSTATES it - one axis up, where the LUIDs themselves disagree.
         "ORACLE WORKBOOK: a lossy name rescues a LUID disagreement (#450, the fail-open direction)",
-        "    if verdict.route != oid.WB_FOREIGN or verdict.axis != oid.WB_NAME or not name:",
-        "    if not name:",
+        "    compared = (oid.WB_CONFLICT, oid.WB_FOREIGN)\n    return next(",
+        "    compared = (oid.WB_CONFLICT, oid.WB_FOREIGN)\n"
+        "    if any(identity.name and record.workbook.name == identity.name for identity in unit_ids):\n"
+        '        return oid.Attribution(oid.WB_LUID, "lossy name rescue", axis=oid.WB_NAME)\n'
+        "    return next(",
         ["test_a_foreign_luid_is_refused_even_when_the_workbook_name_matches_exactly"],
     ),
     (
@@ -649,14 +663,12 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
         ["test_underscore_oracle_directory_is_still_discovered"],
     ),
     (
-        # The kind half of #438 is fixed on this branch, so the two mutations that defended its
-        # caveat are gone with the caveat. These two survive because #450 does.
-        "DISCLOSURE: loose workbook attribution is no longer tracked, so its caveat never fires",
-        "            loosely_attributed.append(rescued)",
-        "            pass",
-        ["test_a_loosely_attributed_workbook_carries_a_caveat_naming_it"],
-    ),
-    (
+        # ⚠️ The "loose workbook attribution is no longer tracked" mutant that used to sit here is
+        # DELETED, not repaired. Its target (`loosely_attributed.append(rescued)`) and its anchor
+        # (`test_a_loosely_attributed_workbook_carries_a_caveat_naming_it`) both went with round-3's
+        # removal of the lossy rescue, so it could only ever report ANCHOR-SNIPPET x0. A mutation
+        # that cannot apply is not coverage, and re-aiming it would defend a caveat whose gap is
+        # closed - the same reason the #438 KIND caveat and its two mutants were retired together.
         "DISCLOSURE: the caveats never reach the rendered output",
         '        lines.extend(f"                    {caveat}" for caveat in check.get("known_gap_caveats", []))',
         "        pass",
