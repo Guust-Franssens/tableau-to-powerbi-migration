@@ -71,6 +71,30 @@ SOCKET = "tests/test_tableau_http_deadline.py"
 ORACLE = "tests/test_capture_tableau_oracle.py"
 COMPLETE = "tests/test_payload_completeness.py"
 
+# ⚠️ PROBE: proof that the mutated BODY ran, not merely that a test went red.
+#
+# A mutation is only evidence if the replaced behaviour actually executed. A red test can also mean
+# the patch crashed on import, or that a fixture happened to break -- this repository has measured
+# both, and once scored 22/22 "caught" where every one was an import error. `observed_mutation()`
+# answers "did a named test fail in its call phase", which is necessary and not sufficient.
+#
+# So every mutation added for review round 3 calls `_probe("<its own name>")` from INSIDE the branch
+# whose behaviour it changes, and `PROBED` declares the tag that must appear. Absent tag -> the
+# verdict is refused, however red the suite went. The prelude is prepended to EVERY mutation (it is
+# inert if unused), so an older mutation is unaffected and can be probed later without ceremony.
+PROBE = ROOT / "tests" / "_mutation_probe.txt"
+
+PROBE_PRELUDE = f"""
+from pathlib import Path as _ProbePath
+_PROBE_FILE = _ProbePath(r"{PROBE}")
+
+
+def _probe(tag):
+    with _PROBE_FILE.open("a", encoding="utf-8") as _fh:
+        _fh.write(tag + "\\n")
+
+"""
+
 # name -> (the test NODE IDs that must observe it, the patch injected as a pytest plugin at startup)
 #
 # ⚠️ Node IDs, not files, and that is review round 1's finding 6. Mutations run under ``-x``, so a
@@ -523,7 +547,7 @@ def refuse(batches):
     # Treat an absent server/site as a WILDCARD rather than as its own identity -- which lets
     # precisely the batch we know least about merge with anything, the wrong direction for a guard
     # whose failure mode is presenting one customer's data as another's.
-    known = [b for b in batches if any(g._source_identity(b.manifest))]
+    known = [b for b in batches if g._source_identity(b.manifest) is not None]
     return _orig(known) if known else None
 g._refuse_incompatible_sources = refuse
 """,
@@ -1207,6 +1231,312 @@ def connect(self):
 h._DeadlineHTTPSConnection.connect = connect
 """,
     ),
+    # ------------------------------------ review round 3: "CANNOT ESTABLISH" IS ITS OWN STATE.
+    #
+    # ⚠️ Every mutation below calls `_probe(...)` from inside the branch it changes. Its tag must
+    # appear in the probe file or the verdict is refused, however red the suite went -- a red test
+    # proves a test failed, never that the mutated body ran.
+    "two-unknown-sources-compare-equal": (
+        (
+            "tests/test_group_oracle_multi_batch.py"
+            "::test_TWO_anonymous_captures_do_not_merge_just_because_both_are_anonymous",
+        ),
+        """
+import group_oracle_by_workbook as g
+_orig = g._source_identity
+def identity(manifest):
+    # THE blocker, verbatim: map a missing identity onto ("", "") so two anonymous manifests produce
+    # ONE identity, the cardinality check sees no disagreement, and they merge.
+    found = _orig(manifest)
+    if found is None:
+        _probe("two-unknown-sources-compare-equal")
+        return "", ""
+    return found
+g._source_identity = identity
+""",
+    ),
+    "an-empty-site-is-treated-as-unrecorded": (
+        ("tests/test_group_oracle_multi_batch.py::test_a_recorded_but_EMPTY_site_is_the_default_site_not_an_absence",),
+        """
+import group_oracle_by_workbook as g
+_orig = g._source_identity
+def identity(manifest):
+    # The OVER-correction, and the reason the guard tests field PRESENCE rather than truthiness:
+    # `""` is Tableau Server's documented DEFAULT SITE, so treating it as an absence refuses every
+    # legitimate Default-site merge. A rule that fires on everything is as useless as one that never
+    # fires, and only this second mutation can tell the two apart.
+    found = _orig(manifest)
+    if found is not None and not found[1]:
+        _probe("an-empty-site-is-treated-as-unrecorded")
+        return None
+    return found
+g._source_identity = identity
+""",
+    ),
+    "the-two-source-refusals-are-collapsed-into-one-type": (
+        (
+            "tests/test_group_oracle_multi_batch.py"
+            "::test_an_unestablished_source_is_NOT_reported_as_a_tenant_disagreement",
+        ),
+        """
+import group_oracle_by_workbook as g
+_orig = g._refuse_incompatible_sources
+def refuse(batches):
+    # "These are two tenants" and "we cannot tell whether these are two tenants" are different
+    # answers. One shared exception type still blocks, so every exit-code assertion keeps passing --
+    # and the fail-open collapse could return unnoticed, because no test could name which guard fired.
+    try:
+        return _orig(batches)
+    except g.UnestablishedBatchSource as exc:
+        _probe("the-two-source-refusals-are-collapsed-into-one-type")
+        raise g.IncompatibleBatchSources(str(exc)) from None
+g._refuse_incompatible_sources = refuse
+""",
+    ),
+    # ------------------------------------ review round 3: PROMOTION IS RECONCILED, NOT LAYERED.
+    "a-refused-artifact-is-left-on-disk": (
+        (
+            "tests/test_group_oracle_multi_batch.py"
+            "::test_a_REFUSED_old_revision_artifact_does_not_stay_in_reference_images",
+        ),
+        """
+import group_oracle_by_workbook as g
+def reconcile(destination, written, previous, *, dry_run):
+    # THE blocker: copy the winners and reconcile nothing. The manifest still correctly reports the
+    # stale render as unpromoted -- and the old-revision PNG stays in reference/images/, so a
+    # consumer listing the DIRECTORY gets evidence the merge explicitly rejected.
+    _probe("a-refused-artifact-is-left-on-disk")
+    return [], []
+g._reconcile_destination = reconcile
+""",
+    ),
+    "reconciliation-deletes-what-it-cannot-attribute": (
+        ("tests/test_group_oracle_multi_batch.py::test_reconciliation_removes_only_files_a_PREVIOUS_grouping_named",),
+        """
+import group_oracle_by_workbook as g
+from pathlib import Path
+def reconcile(destination, written, previous, *, dry_run):
+    # The OVER-correction: "replace" read as "delete anything I did not write". reference/{images,data}/
+    # is this script's tree, but not everything in it is ours -- silently removing a hand-dropped
+    # reference is a worse failure than the one being fixed.
+    _probe("reconciliation-deletes-what-it-cannot-attribute")
+    on_disk = set()
+    for _kind, sub in g.RENDER_LEGS:
+        folder = destination / sub
+        if folder.is_dir():
+            on_disk |= {f"{sub}/{c.name}" for c in folder.iterdir() if c.is_file()}
+    extra = sorted(on_disk - written)
+    if not dry_run:
+        for relative in extra:
+            (destination / relative).unlink(missing_ok=True)
+    return extra, []
+g._reconcile_destination = reconcile
+""",
+    ),
+    "unattributed-files-are-accepted-silently": (
+        ("tests/test_group_oracle_multi_batch.py::test_reconciliation_removes_only_files_a_PREVIOUS_grouping_named",),
+        """
+import group_oracle_by_workbook as g
+_orig = g._reconcile_destination
+def reconcile(destination, written, previous, *, dry_run):
+    # Keep the removal, drop the report. The dangerous half is quiet: a folder holding bytes no
+    # manifest accounts for reads as a clean promotion, and the exit code says everything landed.
+    _probe("unattributed-files-are-accepted-silently")
+    removed, _unattributed = _orig(destination, written, previous, dry_run=dry_run)
+    return removed, []
+g._reconcile_destination = reconcile
+""",
+    ),
+    "a-dry-run-reconciles-anyway": (
+        ("tests/test_group_oracle_multi_batch.py::test_a_dry_run_reconciles_NOTHING",),
+        """
+import group_oracle_by_workbook as g
+_orig = g._reconcile_destination
+def reconcile(destination, written, previous, *, dry_run):
+    # Deleting IS writing. A dry run that removes files is not a dry run, and this is the one
+    # mutation whose damage is invisible in the manifest it produces.
+    _probe("a-dry-run-reconciles-anyway")
+    return _orig(destination, written, previous, dry_run=False)
+g._reconcile_destination = reconcile
+""",
+    ),
+    # ------------------------------------ review round 3: WORKBOOKS ARE KEYED BY LUID.
+    "views-are-bucketed-by-workbook-NAME": (
+        (
+            "tests/test_group_oracle_multi_batch.py"
+            "::test_two_DIFFERENT_workbooks_normalizing_onto_one_folder_are_both_refused",
+        ),
+        """
+import group_oracle_by_workbook as g
+def group(manifest):
+    # THE blocker, verbatim: bucket by display name. Two distinct LUIDs whose names normalize onto
+    # one key merge into one bucket, and nothing downstream can tell they were ever two workbooks.
+    _probe("views-are-bucketed-by-workbook-NAME")
+    buckets = {}
+    for view in manifest.get("views", []):
+        buckets.setdefault(view.get("workbook_name") or "", []).append(view)
+    return buckets
+g.group_views = group
+""",
+    ),
+    "a-destination-claimed-twice-is-written-anyway": (
+        (
+            "tests/test_group_oracle_multi_batch.py"
+            "::test_two_DIFFERENT_workbooks_normalizing_onto_one_folder_are_both_refused",
+        ),
+        """
+import group_oracle_by_workbook as g
+def contested(resolved):
+    # Keep the LUID keying and lose the collision detection: each folder reports exactly one
+    # claimant, so both workbooks are written in sequence and the second manifest overwrites the
+    # first while both workbooks' files remain. Exit 0, no warning.
+    _probe("a-destination-claimed-twice-is-written-anyway")
+    return {item.folder: [item.luid] for item in resolved}
+g._contested = contested
+""",
+    ),
+    "every-shared-parent-counts-as-a-collision": (
+        ("tests/test_group_oracle_multi_batch.py::test_two_workbooks_with_their_OWN_folders_still_group",),
+        """
+import group_oracle_by_workbook as g
+def contested(resolved):
+    # The OVER-correction: refuse any capture carrying more than one workbook. It passes the
+    # collision test and breaks every ordinary estate -- which is why the negative control exists.
+    _probe("every-shared-parent-counts-as-a-collision")
+    everyone = [item.luid for item in resolved]
+    return {item.folder: everyone for item in resolved}
+g._contested = contested
+""",
+    ),
+    "a-missing-workbook-luid-falls-back-to-the-name": (
+        (
+            "tests/test_group_oracle_multi_batch.py"
+            "::test_a_view_with_NO_workbook_luid_is_refused_rather_than_bucketed_by_name",
+        ),
+        """
+import group_oracle_by_workbook as g
+def group(manifest):
+    # The subtle half: keep LUID keying but let a MISSING LUID fall back to the display name. "We
+    # cannot tell which workbook this is" silently becomes an identity again, which is the whole
+    # defect class -- an unassessable input collapsing into the clean bucket.
+    buckets = {}
+    for view in manifest.get("views", []):
+        key = view.get("workbook_luid")
+        if not key:
+            _probe("a-missing-workbook-luid-falls-back-to-the-name")
+            key = view.get("workbook_name") or ""
+        buckets.setdefault(key, []).append(view)
+    return buckets
+g.group_views = group
+""",
+    ),
+    # ------------------------------------ review round 3: EVERY BATCH ON DISK.
+    "an-unlisted-batch-beside-a-given-one-is-skipped": (
+        ("tests/test_group_oracle_multi_batch.py::test_a_batch_on_disk_that_was_not_passed_is_REFUSED_not_skipped",),
+        """
+import group_oracle_by_workbook as g
+def siblings(listed, excluded):
+    # THE moved boundary: read exactly the arguments the operator remembered. The third retry whose
+    # PNG finally landed stays unread, and the merged manifest reports the earlier failure as current.
+    _probe("an-unlisted-batch-beside-a-given-one-is-skipped")
+    return None
+g._refuse_unlisted_siblings = siblings
+""",
+    ),
+    "any-sibling-directory-blocks-the-listed-mode": (
+        ("tests/test_group_oracle_multi_batch.py::test_a_non_batch_sibling_does_not_block_the_LISTED_mode",),
+        """
+import group_oracle_by_workbook as g
+def siblings(listed, excluded):
+    # The OVER-correction: refuse on ANY sibling directory rather than on an unlisted capture BATCH.
+    # `_runs/<run>/oracle` sits beside assessment/, bundle/ and scratch/, so this makes the listed
+    # mode unusable on the layout this repo actually writes.
+    _probe("any-sibling-directory-blocks-the-listed-mode")
+    for path in {p.resolve().parent for p in listed}:
+        for child in (c for c in path.iterdir() if c.is_dir()):
+            if child.resolve() not in {p.resolve() for p in listed} and child.resolve() not in excluded:
+                raise g.UnlistedBatchOnDisk(str(child))
+g._refuse_unlisted_siblings = siblings
+""",
+    ),
+    "discovery-skips-what-it-cannot-classify": (
+        ("tests/test_group_oracle_multi_batch.py::test_a_directory_under_the_root_that_is_NOT_a_batch_blocks",),
+        """
+import group_oracle_by_workbook as g
+def discover(root, excluded):
+    # The boundary moved a THIRD time: from "every argument you typed" to "every directory I happened
+    # to recognise". A half-written capture is then silently absent, which is the same defect in a
+    # third costume -- and the only difference from the shipped rule is a `continue` instead of a raise.
+    _probe("discovery-skips-what-it-cannot-classify")
+    found = []
+    root_is_batch = g.is_capture_batch(root)
+    if root_is_batch:
+        found.append(root)
+    for child in sorted(p for p in root.iterdir() if p.is_dir()):
+        if child.resolve() in excluded:
+            continue
+        if root_is_batch and child.name in g.CAPTURE_SUBDIRS:
+            continue
+        if g.is_capture_batch(child):
+            found.append(child)
+    return found
+g.discover_batches = discover
+""",
+    ),
+    "any-oracle_manifest_json-counts-as-a-capture-batch": (
+        ("tests/test_group_oracle_multi_batch.py::test_a_GROUPED_manifest_is_not_mistaken_for_a_capture_batch",),
+        """
+import group_oracle_by_workbook as g
+def is_batch(directory):
+    # Match on the FILENAME rather than the schema. `migrations/workbooks/<slug>/reference/` carries a
+    # file with exactly that name -- this script's own OUTPUT -- so discovery would feed output into
+    # input, and a per-workbook subset would be merged as though it were a capture.
+    _probe("any-oracle_manifest_json-counts-as-a-capture-batch")
+    return (directory / g.MANIFEST_NAME).is_file()
+g.is_capture_batch = is_batch
+""",
+    ),
+    "exclude-is-accepted-and-ignored": (
+        ("tests/test_group_oracle_multi_batch.py::test_exclude_is_the_ONE_auditable_escape_and_is_recorded",),
+        """
+import group_oracle_by_workbook as g
+_orig = g.resolve_batch_dirs
+def resolve(oracle, oracle_root, exclude):
+    # The flag parses, the refusal still fires, and nothing an operator excluded is actually excluded.
+    # The auditable escape becomes an unusable one -- fail-CLOSED, but it makes the guard un-shippable.
+    _probe("exclude-is-accepted-and-ignored")
+    return _orig(oracle, oracle_root, ())
+g.resolve_batch_dirs = resolve
+""",
+    ),
+    # ------------------------------------ review round 3, finding 4: THE EXIT CODE.
+    "a-stale-refusal-does-not-reach-the-exit-code": (
+        (
+            "tests/test_group_oracle_multi_batch.py"
+            "::test_a_REFUSED_old_revision_artifact_does_not_stay_in_reference_images",
+        ),
+        """
+import group_oracle_by_workbook as g
+def incomplete(outcomes, manifest):
+    # The shipped behaviour before finding 4: warn about the refused cross-revision leg, persist the
+    # count, and return 0. A gate reading only the exit code is told everything landed.
+    _probe("a-stale-refusal-does-not-reach-the-exit-code")
+    return bool(any(outcomes[b] for b in g.OUTCOME_BUCKETS if b != "grouped"))
+g._incomplete = incomplete
+""",
+    ),
+    "every-run-reports-incomplete": (
+        ("tests/test_group_oracle_multi_batch.py::test_an_UNCHANGED_re_run_removes_nothing",),
+        """
+import group_oracle_by_workbook as g
+def incomplete(outcomes, manifest):
+    # The OVER-correction. An exit code that is always 1 carries no information, and would pass every
+    # single "must not return 0" assertion in this file.
+    _probe("every-run-reports-incomplete")
+    return True
+g._incomplete = incomplete
+""",
+    ),
     # -------------------------------------------------------------- discriminating controls
     "control-cosmetic-log-wording": (
         (
@@ -1226,8 +1556,8 @@ m._log_unestablished = log
         """
 import group_oracle_by_workbook as g
 _orig = g._write_grouping_report
-def report(batches, migrations_root, basis, outcomes, *, dry_run):
-    out = _orig(batches, migrations_root, basis, outcomes, dry_run=dry_run)
+def report(inputs, outcomes):
+    out = _orig(inputs, outcomes)
     g.LOG.info("cosmetic extra line, asserted on by nothing")
     return out
 g._write_grouping_report = report
@@ -1256,6 +1586,65 @@ EXPECTED = {
     name: ("INVALID" if "absent-anchor" in name else "SURVIVED" if "control-" in name else "CAUGHT")
     for name in MUTATIONS
 }
+
+# name -> the tag its mutated body must write. Only the round-3 mutations declare one, because only
+# those were written with a `_probe(...)` call inside the branch they change; an older mutation has
+# no tag and is scored exactly as before. A declared tag that does NOT appear refuses the verdict --
+# which is stronger than "a test went red", the check that once reported 22/22 caught on 22 import
+# errors. A NEGATIVE probe is asserted too, for the absent-anchor controls: they must not run.
+#
+# ⚠️ ENUMERATED, never derived from the code. Deriving it (`"_probe(" in code`) would make the
+# harness's own guard fail open in the most likely way it will ever be attacked: delete the
+# `_probe(...)` line while editing a mutation and the requirement deletes itself with it, silently
+# returning that mutation to red-suite-only scoring. :func:`verify_probes` makes that a hard error in
+# BOTH directions instead -- a probed mutation that lost its call, and a call nobody declared.
+PROBED = frozenset(
+    {
+        "two-unknown-sources-compare-equal",
+        "an-empty-site-is-treated-as-unrecorded",
+        "the-two-source-refusals-are-collapsed-into-one-type",
+        "a-refused-artifact-is-left-on-disk",
+        "reconciliation-deletes-what-it-cannot-attribute",
+        "unattributed-files-are-accepted-silently",
+        "a-dry-run-reconciles-anyway",
+        "views-are-bucketed-by-workbook-NAME",
+        "a-destination-claimed-twice-is-written-anyway",
+        "every-shared-parent-counts-as-a-collision",
+        "a-missing-workbook-luid-falls-back-to-the-name",
+        "an-unlisted-batch-beside-a-given-one-is-skipped",
+        "any-sibling-directory-blocks-the-listed-mode",
+        "discovery-skips-what-it-cannot-classify",
+        "any-oracle_manifest_json-counts-as-a-capture-batch",
+        "exclude-is-accepted-and-ignored",
+        "a-stale-refusal-does-not-reach-the-exit-code",
+        "every-run-reports-incomplete",
+    }
+)
+
+
+def verify_probes() -> list[str]:
+    """The declared probe set and the mutations that actually call ``_probe`` must be the SAME set.
+
+    Both directions are failures, and the first is the one that matters: a mutation listed here whose
+    ``_probe(...)`` call has been edited away would pass every other check while quietly losing the
+    proof that its body ran.
+    """
+    calls = {name for name, (_anchors, code) in MUTATIONS.items() if "_probe(" in code}
+    unknown = sorted(PROBED - set(MUTATIONS))
+    return (
+        [f"{name}: declared probed but never calls _probe()" for name in sorted(PROBED & set(MUTATIONS) - calls)]
+        + [f"{name}: calls _probe() but is not declared in PROBED" for name in sorted(calls - PROBED)]
+        + [f"{name}: declared probed but is not a mutation" for name in unknown]
+    )
+
+
+def probe_tags() -> set[str]:
+    """Every tag written by the mutation that just ran, then reset for the next one."""
+    if not PROBE.is_file():
+        return set()
+    tags = {line.strip() for line in PROBE.read_text(encoding="utf-8").splitlines() if line.strip()}
+    PROBE.unlink(missing_ok=True)
+    return tags
 
 
 def verify_anchors() -> list[str]:
@@ -1313,12 +1702,21 @@ def baseline(anchors: tuple[str, ...]) -> tuple[int, str]:
 
 def classify(name: str, code: str, target: tuple[str, ...]) -> tuple[str, str]:
     """Score one mutation as CAUGHT / SURVIVED / INVALID / HARNESS-ERROR, with a detail line."""
+    PROBE.unlink(missing_ok=True)
     try:
-        _label, returncode, detail, outcomes = run(name, code, target)
+        _label, returncode, detail, outcomes = run(name, PROBE_PRELUDE + code, target)
     except SystemExit as exc:
         # The shared harness refuses to score a mutation whose plugin failed to import. That is
         # exactly the verdict an absent-anchor control is meant to earn.
-        return "INVALID", str(exc)
+        return "INVALID", f"{exc} [probe: {sorted(probe_tags()) or 'nothing ran'}]"
+    tags = probe_tags()
+    expected_tag = name if name in PROBED else None
+    if expected_tag is not None and expected_tag not in tags:
+        # ⚠️ The point of the probe. A red suite proves a test failed; it does not prove the replaced
+        # body ever executed, and this repository has scored 22 import errors as 22 detections.
+        return "NO-PROBE", f"{detail} [mutated body never ran: probe tags {sorted(tags) or 'none'}]"
+    if expected_tag is None and tags:
+        return "HARNESS-ERROR", f"an unprobed mutation wrote probe tags {sorted(tags)}"
     if observed_mutation(outcomes):
         verdict = "CAUGHT" if outcomes["call_failed"] else "CAUGHT*"
         if session_ended_abnormally(outcomes):
@@ -1341,6 +1739,13 @@ def classify(name: str, code: str, target: tuple[str, ...]) -> tuple[str, str]:
 
 def main() -> int:
     """Run every mutation against its own anchors, and fail unless each scored what it declared."""
+    broken = verify_probes()
+    if broken:
+        print("HARNESS ERROR: the declared probe set and the mutations that call _probe() disagree:")
+        for item in broken:
+            print(f"  {item}")
+        return 2
+
     missing = verify_anchors()
     if missing:
         print("HARNESS ERROR: an anchor names a test pytest does not collect, so it proves nothing:")
@@ -1377,7 +1782,8 @@ def main() -> int:
         f"all {len(MUTATIONS)} mutations scored as declared, each against its OWN anchor(s) "
         f"({sum(1 for v in EXPECTED.values() if v == 'CAUGHT')} caught, "
         f"{sum(1 for v in EXPECTED.values() if v == 'SURVIVED')} cosmetic controls survived, "
-        f"{sum(1 for v in EXPECTED.values() if v == 'INVALID')} absent-anchor controls invalid)"
+        f"{sum(1 for v in EXPECTED.values() if v == 'INVALID')} absent-anchor controls invalid); "
+        f"{len(PROBED)} of them additionally PROVED the mutated body ran"
     )
     return 0
 

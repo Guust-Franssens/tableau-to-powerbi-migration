@@ -1217,6 +1217,19 @@ def _resolve_destinations(
     return resolved
 
 
+def _contested(resolved: list[_Resolved]) -> dict[Path, list[str]]:
+    """Which destination folder is claimed by which workbook LUIDs -- the collision test, by itself.
+
+    A separate function because the answer is about the SET: a folder claimed by two distinct LUIDs
+    is a collision no matter what either workbook looks like on its own, and computing it while
+    writing is how the first workbook's manifest got overwritten by the second's.
+    """
+    claimed: dict[Path, list[str]] = {}
+    for item in resolved:
+        claimed.setdefault(item.folder, []).append(item.luid)
+    return claimed
+
+
 def _group_all(buckets: dict[str, list[dict[str, Any]]], ctx: _Context) -> dict[str, list[dict[str, Any]]]:
     """Place every workbook, bucketed by outcome. Two passes, and the first one is the point.
 
@@ -1232,11 +1245,9 @@ def _group_all(buckets: dict[str, list[dict[str, Any]]], ctx: _Context) -> dict[
     """
     outcomes: dict[str, list[dict[str, Any]]] = {bucket: [] for bucket in OUTCOME_BUCKETS}
     resolved = _resolve_destinations(buckets, ctx, outcomes)
-    claimed: dict[Path, list[str]] = {}
+    claimed = _contested(resolved)
     for item in resolved:
-        claimed.setdefault(item.folder, []).append(item.luid)
-    for item in resolved:
-        if len(claimed[item.folder]) > 1:
+        if len(claimed.get(item.folder, [item.luid])) > 1:
             others = [other for other in claimed[item.folder] if other != item.luid]
             LOG.warning(
                 "COLLISION  %-45s -> %s is also claimed by %d other workbook(s): %s",
@@ -1302,6 +1313,24 @@ def _write_grouping_report(inputs: _RunInputs, outcomes: dict[str, list[dict[str
     if not inputs.dry_run:
         (report_dir / UNMATCHED_REPORT).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     return report_dir
+
+
+def _incomplete(outcomes: dict[str, list[dict[str, Any]]], manifest: dict[str, Any]) -> bool:
+    """Did this run fail to establish everything it was asked for? -- the whole exit-code rule.
+
+    One function so the rule is stated once and can be argued with. Two terms:
+
+    * any outcome bucket other than ``grouped`` -- a workbook that did not land, for any of the six
+      reasons this script now distinguishes;
+    * ⚠️ ``merge_stale_candidates`` -- review round 3's finding 4. A refused cross-revision leg used
+      to warn and persist a count while returning 0, so a gate reading only the exit code was told
+      everything landed. The merge is correct; the reference set the operator asked for is not
+      established, and those are different claims.
+    """
+    return bool(
+        any(outcomes[bucket] for bucket in OUTCOME_BUCKETS if bucket != "grouped")
+        or manifest.get("merge_stale_candidates")
+    )
 
 
 def run(  # pylint: disable=too-many-locals
@@ -1429,9 +1458,7 @@ def run(  # pylint: disable=too-many-locals
             "workbook_luid; a display name is not an identity.",
             len(outcomes["unidentified"]),
         )
-    if any(outcomes[bucket] for bucket in OUTCOME_BUCKETS if bucket != "grouped") or manifest.get(
-        "merge_stale_candidates"
-    ):
+    if _incomplete(outcomes, manifest):
         LOG.warning(
             "the capture(s) in %s remain complete and authoritative - only the per-workbook copies are partial",
             ", ".join(str(b.directory) for b in batches),
