@@ -58,10 +58,31 @@ def detect_format(values: list[str]) -> str | None:
     return None
 
 
-# What a `/data` export may DECLARE and still be read as CSV. `text/plain` and `application/csv` are
-# here because a transcoding proxy relabels an export and some servers spell it the second way;
-# anything else is the server positively stating the body is NOT CSV, which is decisive.
-CSV_MIME_TYPES = frozenset({"text/csv", "application/csv", "text/plain"})
+# What a `/data` export may DECLARE and be CERTIFIED as CSV on. Two spellings, because some servers
+# spell it the second way; anything outside the two sets below is the server positively stating the
+# body is NOT CSV, which is decisive.
+CSV_MIME_TYPES = frozenset({"text/csv", "application/csv"})
+
+# ⚠️ **A declaration that is not a REFUSAL and not a CSV DECLARATION either.** `text/plain` says
+# "these bytes are text", which every CSV is and so is every error message, every stack trace and
+# every plain-text maintenance banner a proxy substitutes for an export. Treating it as a positive
+# CSV declaration re-created the exact defect this module's certifier exists to close, under an
+# accepted MIME type: measured on this branch, an HTTP 200 `text/plain` body reading
+# `Service unavailable\r\nRetry later\r\n` was recorded `certification: certified`,
+# `columns: ["Service unavailable"]`, `row_count: 1`, and the single-line variant
+# `Service temporarily unavailable` was recorded `row_count: 0` and then specifically DIAGNOSED
+# `empty_query_no_rows` -- a confident claim that the query ran and returned nothing, about a body
+# nobody established was a query result at all.
+#
+# The structural checks cannot separate the two: arbitrary prose and a valid one-column CSV are the
+# same bytes. So a `text/plain` body is READ AND RETAINED exactly like one with no `Content-Type` at
+# all -- unassessable, never certified -- rather than refused, because a transcoding proxy really
+# does relabel a genuine export and refusing it would lose real data.
+CSV_UNSPECIFIC_MIME_TYPES = frozenset({"text/plain"})
+
+#: Everything a `/data` body may declare and still have its bytes read. The union is what
+#: :func:`certify_csv` admits; which half it landed in then decides whether it is CERTIFIED.
+CSV_READABLE_MIME_TYPES = CSV_MIME_TYPES | CSV_UNSPECIFIC_MIME_TYPES
 
 # The verdicts :func:`certify_csv` may return. A CLOSED vocabulary this repo authors: nothing here is
 # built from the payload or from the received header, so a verdict can be logged, recorded and
@@ -71,6 +92,12 @@ CSV_CERTIFIED = "certified"
 #: byte sequence that PROVES a body is CSV the way `%PDF-` proves a PDF -- so the declaration is the
 #: only certificate available and its absence leaves the payload UNASSESSABLE, never clean.
 CSV_CONTENT_TYPE_ABSENT = "content_type_absent"
+#: A `Content-Type` that is text but does not say CSV -- see :data:`CSV_UNSPECIFIC_MIME_TYPES`. A
+#: SEPARATE literal from :data:`CSV_CONTENT_TYPE_ABSENT` because the two are different facts about
+#: the server (one said nothing, one said something unspecific) and a named reason is what a
+#: re-capture decision is made from. They carry the same CONSEQUENCE, which is why both are
+#: uncertified: nothing establishes those bytes as data.
+CSV_CONTENT_TYPE_UNSPECIFIC = "content_type_unspecific"
 CSV_CONTENT_TYPE_NOT_CSV = "content_type_not_csv"
 CSV_NOT_TABULAR = "payload_not_tabular"
 CSV_MALFORMED = "payload_malformed_csv"
@@ -79,9 +106,15 @@ CSV_RAGGED = "payload_ragged_rows"
 #: A verdict that REFUSES the payload outright: these bytes were never established to be a CSV, so
 #: nothing may be derived from them -- not a row count, not a header, and above all not a diagnosis.
 CSV_REFUSALS = frozenset({CSV_CONTENT_TYPE_NOT_CSV, CSV_NOT_TABULAR, CSV_MALFORMED, CSV_RAGGED})
+#: A verdict that RETAINS the bytes and certifies NOTHING about them. The transport succeeded and the
+#: body may well be a perfect export -- nothing here establishes that it is, so no row count, no
+#: header and no diagnosis may be taken from it, and (see
+#: :data:`tableau_oracle_manifest.RETAINED_PATH_KEY`) it is not written where a numeric-oracle
+#: consumer looks for evidence.
+CSV_UNCERTIFIED = frozenset({CSV_CONTENT_TYPE_ABSENT, CSV_CONTENT_TYPE_UNSPECIFIC})
 #: Every value `certify_csv` can produce, so a consumer reading one off an older manifest can check
 #: it against a closed set instead of trusting whatever string is in the field.
-CSV_VERDICTS = frozenset({CSV_CERTIFIED, CSV_CONTENT_TYPE_ABSENT}) | CSV_REFUSALS
+CSV_VERDICTS = frozenset({CSV_CERTIFIED}) | CSV_UNCERTIFIED | CSV_REFUSALS
 
 #: Why a `/data` body was refused, keyed by :func:`certify_csv`'s verdict. Sentences this repo
 #: authors, so a refusal can be recorded and printed without quoting a single byte the server sent --
@@ -105,6 +138,25 @@ CSV_REFUSAL_DETAIL = {
     CSV_RAGGED: (
         "the export returned HTTP 200 whose rows do not all carry the header's field count, which a "
         "complete Tableau CSV export does. The body was not certified, so no row count was recorded."
+    ),
+}
+
+#: Why RETAINED bytes are nevertheless not evidence, keyed by verdict. Same authored-sentence
+#: property as :data:`CSV_REFUSAL_DETAIL` and beside it for the same reason: a new uncertified
+#: verdict and its explanation must be added together, or the manifest carries a bare literal and the
+#: reader has to guess what it costs them.
+CSV_UNCERTIFIED_DETAIL = {
+    CSV_CONTENT_TYPE_ABSENT: (
+        "the export returned HTTP 200 with no Content-Type at all, and a CSV carries no signature, "
+        "so nothing establishes these bytes as data. They are retained for inspection and are NOT "
+        "placed where a numeric-oracle consumer reads evidence; re-capture from a server or proxy "
+        "that declares what it sent."
+    ),
+    CSV_CONTENT_TYPE_UNSPECIFIC: (
+        "the export returned HTTP 200 declaring text/plain, which is true of a CSV and equally true "
+        "of a plain-text error banner, so it is not a CSV declaration. The bytes are retained for "
+        "inspection and are NOT placed where a numeric-oracle consumer reads evidence; a row count "
+        "or a first-line classification taken from them would be confidently wrong."
     ),
 }
 
@@ -135,29 +187,39 @@ def certify_csv(payload: bytes, content_type: str | None) -> str:
     nothing leaves the body uncertifiable however well-formed it looks, which is
     :data:`CSV_CONTENT_TYPE_ABSENT` -- reported as unassessable rather than waved through.
 
+    ⚠️ **A ``text/plain`` declaration is NOT a CSV declaration** and lands on
+    :data:`CSV_CONTENT_TYPE_UNSPECIFIC`, which is uncertified for exactly the same reason an absent
+    header is: it says the bytes are text, which a plain-text error banner is too. Measured, a 200
+    ``text/plain`` reading ``Service unavailable\\r\\nRetry later\\r\\n`` was certified with
+    ``columns: ["Service unavailable"]`` before this split, and its single-line variant was DIAGNOSED
+    ``empty_query_no_rows``. ``text/csv`` and ``application/csv`` remain explicit declarations and are
+    still certified; this is a narrowing of what counts as a declaration, not a refusal of one.
+
     Never echoes the payload or the received header. The return value is one of this module's own
     literals, which is what lets a caller put it in a manifest and a log line without redaction.
     """
     declared = (content_type or "").split(";")[0].strip().lower()
-    if declared and declared not in CSV_MIME_TYPES:
+    if declared and declared not in CSV_READABLE_MIME_TYPES:
         return CSV_CONTENT_TYPE_NOT_CSV
     text = payload.decode("utf-8-sig", "replace")
     if text.lstrip()[:1] in _NOT_TABULAR_OPENERS:
         return CSV_NOT_TABULAR
-    # An odd number of quotes means one was opened and never closed -- a truncated export, or a body
-    # that is not CSV at all. `csv.reader` does NOT raise for it even under `strict=True`: it reads to
-    # EOF and hands back a field, which is how `Region,Sales\r\nWest,"unterminated` was recorded as
-    # one complete row. CSV escapes a literal quote by doubling it, so a well-formed export always
-    # carries an even count.
-    if text.count('"') % 2:
-        return CSV_MALFORMED
+    # Two ways the same MALFORMED verdict is reached, merged into one exit. An odd number of quotes
+    # means one was opened and never closed -- a truncated export, or a body that is not CSV at all;
+    # `csv.reader` does NOT raise for it even under `strict=True`, it reads to EOF and hands back a
+    # field, which is how `Region,Sales\r\nWest,"unterminated` was recorded as one complete row. CSV
+    # escapes a literal quote by doubling it, so a well-formed export always carries an even count.
     try:
         rows = [row for row in csv.reader(io.StringIO(text), strict=True) if row]
     except csv.Error:
+        rows = None
+    if rows is None or text.count('"') % 2:
         return CSV_MALFORMED
     if rows and any(len(row) != len(rows[0]) for row in rows[1:]):
         return CSV_RAGGED
-    return CSV_CERTIFIED if declared else CSV_CONTENT_TYPE_ABSENT
+    if declared in CSV_MIME_TYPES:
+        return CSV_CERTIFIED
+    return CSV_CONTENT_TYPE_UNSPECIFIC if declared else CSV_CONTENT_TYPE_ABSENT
 
 
 def summarise_csv(payload: bytes) -> dict[str, Any]:

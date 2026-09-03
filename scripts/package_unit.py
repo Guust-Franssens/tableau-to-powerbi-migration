@@ -538,7 +538,14 @@ def package_oracle(  # pylint: disable=too-many-locals
     Bytes are copied verbatim, so every `sha256`/`bytes` the capture recorded still verifies -
     `reference_evidence.render_facts` checks exactly those, and a re-encoded copy would be rejected.
     Only `path` changes.
+
+    ⚠️ An UNASSESSABLE data leg is normalised BEFORE anything is copied (#480). `_copy_leg` keys on
+    `path`, so a leg that still names uncertified bytes there - which is every such leg in a capture
+    written before the rule - would be copied into `<kind>/data/<stem>.csv` and shipped to the
+    consumer as numbers. Demoting first means those bytes simply have no `path` to copy, and the
+    packaged manifest carries `retained_path` plus the reason instead.
     """
+    views = tableau_oracle_manifest.withhold_uncertified_evidence(views)
     taken: set[str] = set()
     packaged: list[dict[str, Any]] = []
     objects: list[dict[str, Any]] = []
@@ -570,8 +577,13 @@ def package_oracle(  # pylint: disable=too-many-locals
             record["data"] = rewritten
         if reason:
             omissions.append({"view_luid": luid, "leg": "data", "reason": reason})
+        # `.get`, not `[...]`: an UNASSESSABLE leg is `status: ok` with NO `path` (#480), and that is
+        # exactly the record that must ship no numbers. Subscripting it raised `KeyError` here, which
+        # is fail-closed but crashes the packager on a capture it is meant to handle.
         numbers = (
-            str(rewritten["path"]) if rewritten is not None and rewritten.get("status") == "ok" and not reason else None
+            str(rewritten.get("path"))
+            if rewritten is not None and rewritten.get("status") == "ok" and rewritten.get("path") and not reason
+            else None
         )
 
         record["packaged_object_stem"] = stem

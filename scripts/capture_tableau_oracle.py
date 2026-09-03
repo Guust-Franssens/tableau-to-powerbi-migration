@@ -155,6 +155,7 @@ from tableau_oracle_manifest import (  # noqa: E402  # pylint: disable=wrong-imp
     SVG_MIN_API_VERSION,
     SVG_VERSION_MARKER,
     CaptureRun,
+    data_leg_fields,
     log_progress,
     write_manifest,
 )
@@ -682,7 +683,7 @@ def capture_view(
         }
         return record
 
-    record["data"] = _capture_data(session, view_luid, out_dir / "data" / f"{stem}.csv", out_dir)
+    record["data"] = _capture_data(session, view_luid, out_dir, stem)
     _capture_renders(session, record, wants, _RenderTargets(out_dir, stem, api_overrides or {}))
     return record
 
@@ -848,16 +849,16 @@ def _salvage_exhausted(deadline: float, timeout: float) -> str:
     )
 
 
-def _capture_data(session: TableauSession, view_luid: str, path: Path, out_dir: Path) -> dict[str, Any]:
+def _capture_data(session: TableauSession, view_luid: str, out_dir: Path, stem: str) -> dict[str, Any]:
     """The numeric oracle for one view: Tableau's own aggregated, display-formatted values.
 
-    ⚠️ **An HTTP 200 is not evidence until the body has been certified as CSV**, and three measured
-    shapes reached this record as data before it was. The argument, the measurements and the three
-    outcomes live in :func:`certify_csv` and :func:`tableau_oracle_manifest.unassessable_reason`;
-    here, a refusal is ``format_mismatch`` with nothing written and no shape recorded, and an
-    uncertifiable-but-successful body keeps ``ok`` and its bytes while recording **no ``row_count``**.
+    ⚠️ **An HTTP 200 is not evidence until the body is certified as CSV** (:func:`certify_csv`): a
+    refusal is ``format_mismatch``, with nothing written and no shape recorded. An uncertified but
+    successful body keeps ``ok`` and its bytes, written to ``unassessable/<stem>.bin`` under
+    :data:`RETAINED_PATH_KEY` -- never ``data/<stem>.csv``, never under ``path``, so no numeric
+    consumer can read it as evidence. Why it is structural, not another flag:
+    :func:`tableau_oracle_manifest.withhold_uncertified_evidence`.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
     try:
         payload, elapsed, stats = session.export(f"/sites/{session.site_id}/views/{view_luid}/data")
     except ExportFailed as exc:
@@ -872,11 +873,13 @@ def _capture_data(session: TableauSession, view_luid: str, path: Path, out_dir: 
             "elapsed_sec": round(elapsed, 2),
             **stats,
         }
+    path, naming = data_leg_fields(out_dir, stem, certification)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(payload)
     record = {
         "status": "ok",
         "certification": certification,
-        "path": str(path.relative_to(out_dir)).replace("\\", "/"),
+        **naming,
         "bytes": len(payload),
         "sha256": hashlib.sha256(payload).hexdigest(),
         "elapsed_sec": round(elapsed, 2),

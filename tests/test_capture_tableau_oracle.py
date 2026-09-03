@@ -31,6 +31,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import capture_tableau_oracle as oracle  # noqa: E402  # pylint: disable=wrong-import-position
+import build_reconcile_items  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_oracle_manifest as verdict  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_view_types as view_types_mod  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_payload_facts as payload_facts  # noqa: E402  # pylint: disable=wrong-import-position
@@ -991,7 +992,8 @@ def test_a_200_with_no_Content_Type_is_kept_but_reported_UNASSESSABLE(tmp_path):
     A CSV carries no signature -- there is no byte sequence that PROVES a body is CSV the way
     `%PDF-` proves a PDF -- so with nothing declared, nothing establishes these bytes as data. The
     transport did succeed, so the bytes are kept and the status stays `ok`; what is refused is the
-    EVIDENCE, so no row count is recorded and the verdict layer reports it rather than counting it.
+    EVIDENCE, so no row count is recorded, the verdict layer reports it rather than counting it, and
+    the bytes are named `retained_path` OUTSIDE `data/` so no consumer can read them as numbers.
     """
     session = FakeSession([(200, "Region,Sales\r\nWest,10\r\n", {})])
     view = {"id": "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", "name": "Real Time Availability", "workbook": {"id": "wb"}}
@@ -1001,7 +1003,10 @@ def test_a_200_with_no_Content_Type_is_kept_but_reported_UNASSESSABLE(tmp_path):
     assert record["data"]["status"] == "ok", "the HTTP call succeeded -- that distinction is kept"
     assert record["data"]["certification"] == payload_facts.CSV_CONTENT_TYPE_ABSENT
     assert "row_count" not in record["data"]
-    assert (tmp_path / record["data"]["path"]).is_file(), "the bytes are the customer's; only the claim is refused"
+    assert "path" not in record["data"], "an uncertified body must not be named where evidence is read"
+    retained = record["data"][verdict.RETAINED_PATH_KEY]
+    assert (tmp_path / retained).is_file(), "the bytes are the customer's; only the claim is refused"
+    assert not retained.startswith("data/") and not retained.endswith(".csv")
 
     code, manifest = _named_manifest(tmp_path, [record])
     assert code == 0, "an unassessable capture is a diagnostic, not a failure"
@@ -1054,7 +1059,8 @@ def test_certify_csv_verdicts(body, expected):
         ("text/csv; charset=utf-8", payload_facts.CSV_CERTIFIED),
         ("TEXT/CSV", payload_facts.CSV_CERTIFIED),
         ("application/csv", payload_facts.CSV_CERTIFIED),
-        ("text/plain", payload_facts.CSV_CERTIFIED),
+        ("text/plain", payload_facts.CSV_CONTENT_TYPE_UNSPECIFIC),
+        ("TEXT/PLAIN; charset=utf-8", payload_facts.CSV_CONTENT_TYPE_UNSPECIFIC),
         (None, payload_facts.CSV_CONTENT_TYPE_ABSENT),
         ("", payload_facts.CSV_CONTENT_TYPE_ABSENT),
         ("text/html", payload_facts.CSV_CONTENT_TYPE_NOT_CSV),
@@ -1109,6 +1115,247 @@ def test_a_view_name_is_redacted_before_the_empty_diagnostic_prints_it(tmp_path,
     assert "NO DATA" in printed, "the per-view line did not fire, so this proves nothing"
     assert token not in printed
     assert token not in (tmp_path / "oracle-manifest.json").read_text(encoding="utf-8")
+
+
+# --- #480 round 2: an uncertified capture must be IMPOSSIBLE to consume, not merely flagged ----
+#
+# Round 1 named the state honestly -- `certification`, `flags`, no `row_count`, a counted-and-named
+# list -- and left the bytes at `data/<luid>.csv` under the same `path` key a certified capture uses.
+# The blind review then found the same fail-open at a FOURTH consumer and under an ACCEPTED MIME
+# type, which is the signature of a fix that flags a bad state and trusts every consumer to check the
+# flag. Measured on the PR tip, through the production export path:
+#
+#   absent Content-Type -> status ok, path data/view.csv, flags [data_unassessable, ...]
+#                          build_reconcile_items.build() -> item_count 1, tableau_value 10.0
+#   200 text/plain      -> certification CERTIFIED, columns ["Service unavailable"], row_count 1
+#   200 text/plain      -> single line: row_count 0 and DIAGNOSED `empty_query_no_rows`
+#
+# So these tests pin the STRUCTURE, not another flag: uncertified bytes are never written under
+# `data/`, never suffixed `.csv`, and never named by `path`. A consumer that wants numbers asks for
+# `path` and finds nothing -- with no knowledge of certification, flags, or this module.
+
+
+def _naive_numeric_consumer(oracle_dir: Path) -> list[dict]:
+    """A consumer written the way the FIFTH one will be, and deliberately not import-coupled to us.
+
+    ⚠️ This is the test that makes the fix durable rather than a fourth patch. It reads the manifest
+    raw, keeps every leg that says `status: ok` and names a `path`, and reads that file as numbers --
+    exactly what `build_reconcile_items.build()`, `check_unit._oracle_capture_oracles`,
+    `package_unit._copy_leg` and `group_oracle_by_workbook.copy_view_files` all do, and exactly what
+    someone writing a new one tomorrow will do. It knows nothing about `certification`, `flags`,
+    `row_count` or `data_unassessable`, and it must STILL find no evidence in an uncertified capture.
+    """
+    manifest = json.loads((oracle_dir / "oracle-manifest.json").read_text(encoding="utf-8"))
+    found = []
+    for view in manifest.get("views", []):
+        data = view.get("data") or {}
+        if data.get("status") != "ok" or not data.get("path"):
+            continue
+        found.append({"view": view.get("view_name"), "rows": (oracle_dir / data["path"]).read_text(encoding="utf-8")})
+    return found
+
+
+def _capture_one(tmp_path: Path, body: str, headers: dict) -> dict:
+    """One view captured through the production chain, written to a real manifest on disk."""
+    session = FakeSession([(200, body, headers)])
+    view = {"id": "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", "name": "Real Time Availability", "workbook": {"id": "wb"}}
+    record = oracle.capture_view(session, view, tmp_path, frozenset(), None)
+    record["workbook_name"] = "Network Ops"
+    _code, manifest = _named_manifest(tmp_path, [record])
+    return manifest
+
+
+@pytest.mark.parametrize(
+    ("headers", "certification"),
+    [
+        ({}, payload_facts.CSV_CONTENT_TYPE_ABSENT),
+        ({"Content-Type": "text/plain"}, payload_facts.CSV_CONTENT_TYPE_UNSPECIFIC),
+    ],
+)
+def test_an_uncertified_capture_is_unreadable_by_a_consumer_that_never_heard_of_certification(
+    tmp_path, headers, certification
+):
+    """Finding 1, structurally: a naive numeric consumer finds NOTHING in an uncertified capture."""
+    manifest = _capture_one(tmp_path, "Region,Sales\r\nWest,10\r\n", headers)
+
+    data = manifest["views"][0]["data"]
+    assert data["status"] == "ok", "the transport succeeded and that distinction survives"
+    assert data["certification"] == certification
+    assert "path" not in data, "an uncertified body named under `path` is the whole fail-open"
+    assert data[verdict.RETAINED_PATH_KEY].startswith(f"{verdict.RETAINED_DIR}/")
+    assert data[verdict.RETAINED_PATH_KEY].endswith(verdict.RETAINED_SUFFIX)
+    assert (tmp_path / data[verdict.RETAINED_PATH_KEY]).is_file(), "the bytes are retained, not deleted"
+    assert not list(tmp_path.rglob("*.csv")), "nothing uncertified may be discoverable as a CSV either"
+    assert data[verdict.EVIDENCE_WITHHELD_KEY], "the manifest must SAY why it is not evidence"
+
+    assert _naive_numeric_consumer(tmp_path) == [], "a consumer that only knows `path` must find nothing"
+
+
+def test_a_certified_capture_is_still_readable_by_that_same_consumer(tmp_path):
+    """⚠️ The positive control. A rule that hides EVERY capture passes the test above and destroys
+    the numeric oracle, and only this can tell the two apart."""
+    manifest = _capture_one(tmp_path, "Region,Sales\r\nWest,10\r\n", {"Content-Type": "text/csv"})
+
+    data = manifest["views"][0]["data"]
+    assert data["certification"] == payload_facts.CSV_CERTIFIED
+    assert data["path"] == "data/aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa.csv"
+    assert verdict.RETAINED_PATH_KEY not in data
+    assert [item["view"] for item in _naive_numeric_consumer(tmp_path)] == ["Real Time Availability"]
+
+
+def test_the_reconcile_items_builder_emits_no_tableau_value_from_an_uncertified_capture(tmp_path):
+    """The review's own reproduction of finding 1, at the consumer it was reported against.
+
+    Before: `item_count 1, skipped_views [], tableau_value 10.0` from a record whose own flags said
+    `data_unassessable`. The builder is unchanged in how it GATES -- `status == ok and path` -- and
+    that is the point: the record no longer has a path to offer it.
+    """
+    _capture_one(tmp_path, "Region,Sales\r\nWest,10\r\n", {})
+    roles = {"Network Ops": {"Region": "DIMENSION", "Sales": "MEASURE"}}
+
+    result = build_reconcile_items.build(tmp_path, roles)
+    assert result["item_count"] == 0, "a fidelity verdict built on an unassessable capture is unfounded"
+    assert result["items"] == []
+    assert [entry["view"] for entry in result["skipped_views"]] == ["Real Time Availability"]
+    assert (
+        "not evidence" in result["skipped_views"][0]["reason"] or "NOT placed" in (result["skipped_views"][0]["reason"])
+    ), "the skip must say WHY, not report `ok`"
+
+
+def test_the_reconcile_items_builder_still_maps_a_certified_capture(tmp_path):
+    """The matched control: the builder must keep working on evidence that IS certified."""
+    _capture_one(tmp_path, "Region,Sales\r\nWest,10\r\n", {"Content-Type": "text/csv"})
+    roles = {"Network Ops": {"Region": "DIMENSION", "Sales": "MEASURE"}}
+
+    result = build_reconcile_items.build(tmp_path, roles)
+    assert result["item_count"] == 1
+    assert result["items"][0]["tableau_value"] == 10.0
+    assert result["skipped_views"] == []
+
+
+def test_a_LEGACY_manifest_naming_uncertified_bytes_under_path_is_demoted_when_it_is_READ(tmp_path):
+    """The review's second reproduction: a record from BEFORE any of this existed.
+
+    `flags=[data_unassessable, row_count_unrecorded]`, no `row_count`, no `certification`, and
+    `data/view.csv` sitting in `path` with real bytes beside it. Such a file cannot be rewritten
+    retroactively, so the boundary that LOADS it restores the invariant -- and the naive consumer
+    above, reading the same file raw, is what shows the residual honestly.
+    """
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "view.csv").write_text("Region,Sales\r\nWest,10\r\n", encoding="utf-8")
+    (tmp_path / "oracle-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "tableau-oracle/1",
+                "views": [
+                    {
+                        "view_luid": "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa",
+                        "view_name": "Real Time Availability",
+                        "workbook_name": "Network Ops",
+                        "flags": ["data_unassessable", "row_count_unrecorded"],
+                        "data": {"status": "ok", "path": "data/view.csv"},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = verdict.read_manifest(tmp_path / "oracle-manifest.json")
+    data = loaded["views"][0]["data"]
+    assert "path" not in data
+    assert data[verdict.RETAINED_PATH_KEY] == "data/view.csv", "the bytes are still findable, just not as evidence"
+    assert data["status"] == "ok"
+
+    result = build_reconcile_items.build(tmp_path, {"Network Ops": {"Region": "DIMENSION", "Sales": "MEASURE"}})
+    assert result["item_count"] == 0
+    assert result["items"] == []
+
+
+def test_withholding_evidence_leaves_a_measured_capture_untouched_and_is_idempotent(tmp_path):
+    """Two controls in one: the rule must not fire on a certified record, and applying it twice must
+    not shuffle a `retained_path` back and forth or double-stamp anything."""
+    good = {"data": {"status": "ok", "path": "data/x.csv", "row_count": 3, "certification": "certified"}}
+    bad = {"data": {"status": "ok", "path": "data/y.csv", "certification": payload_facts.CSV_CONTENT_TYPE_ABSENT}}
+
+    once = verdict.withhold_uncertified_evidence([good, bad])
+    twice = verdict.withhold_uncertified_evidence(once)
+    assert once[0] is good, "a certified record must not even be copied"
+    assert once == twice
+    assert once[1]["data"]["retained_path"] == "data/y.csv"
+    assert "path" not in once[1]["data"]
+    assert bad["data"]["path"] == "data/y.csv", "the caller's own records must not be mutated"
+
+
+@pytest.mark.parametrize(
+    ("body", "misdiagnosis"),
+    [
+        ("Service unavailable\r\nRetry later\r\n", "columns"),
+        ("Service temporarily unavailable", "empty_query_no_rows"),
+    ],
+)
+def test_text_plain_error_text_is_never_certified_as_CSV(tmp_path, body, misdiagnosis):
+    """Finding 2, both measured variants, through the production export path.
+
+    The two-line body was recorded `certified`, `columns: ["Service unavailable"]`, `row_count: 1`.
+    The single-line variant is the worse one: `row_count: 0` and then the SPECIFIC diagnosis
+    `empty_query_no_rows` -- "the query ran and returned nothing" about a maintenance banner, which
+    is precisely the confidently-wrong claim #471 was filed for.
+    """
+    manifest = _capture_one(tmp_path, body, {"Content-Type": "text/plain"})
+    data = manifest["views"][0]["data"]
+
+    assert data["status"] == "ok", "the HTTP call did succeed; only the evidence claim is refused"
+    assert data["certification"] == payload_facts.CSV_CONTENT_TYPE_UNSPECIFIC
+    assert "row_count" not in data and "columns" not in data, f"the {misdiagnosis} claim must not be derivable"
+    assert "path" not in data
+    assert manifest["data_empty"] == 0 and manifest["data_empty_views"] == [], "no empty DIAGNOSIS may be made"
+    assert manifest["data_unassessable"] == 1
+    assert manifest["data_unassessable_views"][0]["reason"] == payload_facts.CSV_CONTENT_TYPE_UNSPECIFIC
+    assert manifest["captured_complete"] == 0
+    assert manifest["views"][0]["flags"] == [
+        verdict.FLAG_DATA_UNASSESSABLE,
+        payload_facts.CSV_CONTENT_TYPE_UNSPECIFIC,
+    ]
+    assert _naive_numeric_consumer(tmp_path) == []
+
+
+def test_text_csv_and_application_csv_remain_explicit_declarations(tmp_path):
+    """⚠️ The over-correction control for finding 2. Narrowing what counts as a CSV declaration must
+    not narrow it to nothing: both real spellings still certify, with rows and columns recorded."""
+    for declared in ("text/csv", "application/csv"):
+        out = Path(tmp_path / declared.replace("/", "-"))
+        out.mkdir()
+        manifest = _capture_one(out, "Region,Sales\r\nWest,10\r\n", {"Content-Type": declared})
+        data = manifest["views"][0]["data"]
+        assert data["certification"] == payload_facts.CSV_CERTIFIED, declared
+        assert data["row_count"] == 1 and data["columns"] == ["Region", "Sales"]
+        assert data["path"].startswith("data/")
+        assert manifest["captured_complete"] == 1
+
+
+def test_a_text_plain_body_that_is_not_even_tabular_is_still_REFUSED_not_retained(tmp_path):
+    """The structural checks still run under `text/plain`, so an HTML error page relabelled by a
+    proxy is refused with no file written -- unspecific is a weaker declaration, not an amnesty."""
+    session = FakeSession([(200, "<html>\n<body>Error</body>\n</html>\n", {"Content-Type": "text/plain"})])
+    view = {"id": "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", "name": "Real Time Availability", "workbook": {"id": "wb"}}
+    record = oracle.capture_view(session, view, tmp_path, frozenset(), None)
+
+    assert record["data"]["status"] == "format_mismatch"
+    assert record["data"]["certification"] == payload_facts.CSV_NOT_TABULAR
+    assert not list(tmp_path.rglob("*.csv")) and not list(tmp_path.rglob(f"*{verdict.RETAINED_SUFFIX}"))
+
+
+def test_every_uncertified_verdict_has_an_authored_reason_and_none_is_a_refusal():
+    """The vocabulary must stay closed and the two halves must stay disjoint: a RETAINED verdict that
+    is also a REFUSAL would mean bytes both written and not written, and a retained verdict with no
+    sentence beside it puts a bare literal in the manifest for a human to guess at."""
+    assert payload_facts.CSV_UNCERTIFIED.isdisjoint(payload_facts.CSV_REFUSALS)
+    assert payload_facts.CSV_UNCERTIFIED <= payload_facts.CSV_VERDICTS
+    assert set(payload_facts.CSV_UNCERTIFIED_DETAIL) == set(payload_facts.CSV_UNCERTIFIED)
+    assert payload_facts.CSV_UNCERTIFIED <= verdict.UNASSESSABLE_REASONS, (
+        "a retained-but-uncertified verdict that is not an unassessable reason reads as a clean capture"
+    )
 
 
 # --- #402: dashboard vs worksheet -------------------------------------------------------------

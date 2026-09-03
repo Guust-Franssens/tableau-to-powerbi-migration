@@ -53,6 +53,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
+# Importable whether this is run as a script (`python scripts/build_reconcile_items.py`, where
+# `scripts/` is already `sys.path[0]`) or imported by a test that put only the repo root on the path.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import tableau_oracle_manifest  # noqa: E402  # pylint: disable=wrong-import-position
+
 # Windows defaults stdout/stderr to the legacy cp1252 codec, which cannot encode the non-ASCII
 # characters (e.g. the warning glyph above) in this module's own docstring -- argparse's --help
 # crashes with UnicodeEncodeError before printing anything. Force UTF-8 so --help and any print()
@@ -154,7 +160,7 @@ def load_roles(path: Path | None) -> dict[str, dict[str, str]]:
 
 def build(oracle_dir: Path, roles_by_workbook: dict[str, dict[str, str]]) -> dict[str, Any]:
     """Map every captured view into reconcile-ready items."""
-    manifest = json.loads((oracle_dir / "oracle-manifest.json").read_text(encoding="utf-8"))
+    manifest = tableau_oracle_manifest.read_manifest(oracle_dir / "oracle-manifest.json")
     items: list[dict] = []
     unmapped: list[dict] = []
     skipped: list[dict] = []
@@ -162,7 +168,18 @@ def build(oracle_dir: Path, roles_by_workbook: dict[str, dict[str, str]]) -> dic
     for view in manifest.get("views", []):
         data = view.get("data") or {}
         if data.get("status") != "ok" or not data.get("path"):
-            skipped.append({"view": view.get("view_name"), "reason": data.get("status", "missing")})
+            # ⚠️ The gate is the ABSENT PATH, not a flag (#480). An uncertified capture -- an export
+            # that arrived with no `Content-Type`, or declaring `text/plain` -- keeps `status: ok`,
+            # because the transport really did succeed, and its retained bytes are named
+            # `retained_path` outside `data/`. So this loop skips it without knowing the rule exists,
+            # which is the property that survives the next consumer nobody has written yet. The
+            # reason below is DIAGNOSTIC only: it reports what happened, it does not decide it.
+            skipped.append(
+                {
+                    "view": view.get("view_name"),
+                    "reason": data.get(tableau_oracle_manifest.EVIDENCE_WITHHELD_KEY) or data.get("status", "missing"),
+                }
+            )
             continue
         roles = roles_by_workbook.get(view.get("workbook_name") or "", {})
         if not roles:

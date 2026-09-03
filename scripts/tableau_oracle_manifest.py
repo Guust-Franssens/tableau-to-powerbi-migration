@@ -28,7 +28,13 @@ from typing import Any
 
 import tableau_view_types
 from tableau_env import redacted_note, scrub_tree
-from tableau_payload_facts import CSV_CONTENT_TYPE_ABSENT, CSV_REFUSALS
+from tableau_payload_facts import (
+    CSV_CERTIFIED,
+    CSV_CONTENT_TYPE_ABSENT,
+    CSV_REFUSALS,
+    CSV_UNCERTIFIED,
+    CSV_UNCERTIFIED_DETAIL,
+)
 
 LOG = logging.getLogger("tableau-oracle")
 
@@ -106,11 +112,76 @@ FLAG_DATA_UNASSESSABLE = "data_unassessable"
 # may be claimed about them.
 UNASSESSABLE_NO_ROW_COUNT = "row_count_unrecorded"
 
-# Reasons a CURRENT capture can supply, from `certify_csv`'s closed vocabulary. Only
-# `content_type_absent` can reach a `status: ok` record -- every other refusal is recorded
-# `format_mismatch` at capture time and never claims to be a successful data leg -- but the whole set
-# is accepted here so a record written by a newer capture is named honestly rather than flattened.
-UNASSESSABLE_REASONS = frozenset({UNASSESSABLE_NO_ROW_COUNT, CSV_CONTENT_TYPE_ABSENT}) | CSV_REFUSALS
+# Reasons a CURRENT capture can supply, from `certify_csv`'s closed vocabulary. Only the UNCERTIFIED
+# verdicts (`content_type_absent`, `content_type_unspecific`) can reach a `status: ok` record --
+# every refusal is recorded `format_mismatch` at capture time and never claims to be a successful
+# data leg -- but the whole set is accepted here so a record written by a newer capture is named
+# honestly rather than flattened.
+UNASSESSABLE_REASONS = frozenset({UNASSESSABLE_NO_ROW_COUNT}) | CSV_UNCERTIFIED | CSV_REFUSALS
+
+# ─────────────────────────────────────────────────────────────────────────────────────────────────
+# WHERE a data leg's bytes are named, which is the difference between evidence and a retained blob.
+#
+# ⚠️ **This is a STRUCTURAL rule, not a flag, and that is the whole point of it (#480 round 2).**
+# Round 1 recorded an uncertified capture honestly -- `certification`, `flags`, no `row_count`, its
+# own counted-and-named list -- and then left the bytes at `data/<luid>.csv` under the same `path`
+# key a certified capture uses. Every consumer that wanted a number therefore kept reading it: the
+# review found `build_reconcile_items.build()` emitting `tableau_value: 10.0` from a record whose own
+# flags said `data_unassessable`, and `check_unit` counting the same record as numeric evidence.
+# Patching each consumer to check the flag cannot terminate -- the next consumer is by definition the
+# one nobody enumerated -- so the invalid state is made UNREPRESENTABLE instead: an uncertified body
+# is never written under `data/`, never named `.csv`, and never named by `path`.
+#
+# The consequence is that a consumer needs no new knowledge to be safe. `build_reconcile_items`
+# requires `status == "ok" and data["path"]`, `check_unit` requires the same, `package_unit._copy_leg`
+# and `group_oracle_by_workbook.copy_view_files` both key on `path` -- and all four skip an
+# uncertified capture without a line of change, because there is nothing there to read.
+#
+#: The key a CERTIFIED data leg names its file with. Unchanged, and named here so the pair reads as
+#: one decision.
+EVIDENCE_PATH_KEY = "path"
+#: The key UNCERTIFIED retained bytes are named with instead. A different key on purpose: a consumer
+#: that reads `path` gets nothing, and a consumer that wants the bytes for forensics has to ask for
+#: them by a name that says what they are.
+RETAINED_PATH_KEY = "retained_path"
+#: Beside it, an authored sentence saying why the bytes are not evidence -- so a manifest answers the
+#: question without the reader having to know this module's vocabulary.
+EVIDENCE_WITHHELD_KEY = "evidence_withheld"
+#: The subdirectory uncertified bytes are retained in, and the suffix they carry. NOT `data/` and NOT
+#: `.csv`: a consumer that lists or globs the capture folder must not find them either, which is the
+#: same fail-open one level down from the manifest.
+RETAINED_DIR = "unassessable"
+RETAINED_SUFFIX = ".bin"
+#: The sentence used when a record gives no verdict of its own -- a manifest written before
+#: `certification` existed, whose rows nothing measured.
+RETAINED_DETAIL_DEFAULT = (
+    "this data leg records no row count and no CSV certification, so nothing established its bytes "
+    "as data. They are retained for inspection and are NOT placed where a numeric-oracle consumer "
+    "reads evidence; re-capture to obtain assessable numbers."
+)
+
+
+def data_leg_fields(out_dir: Path, stem: str, certification: str) -> tuple[Path, dict[str, str]]:
+    """``(file to write, the manifest fields that NAME it)`` -- the ONE place that pair is decided.
+
+    Both halves move together or the rule is only half applied: bytes under ``data/*.csv`` named by
+    ``retained_path`` are still discoverable by anything globbing the capture folder, and bytes in
+    ``unassessable/`` named by ``path`` are still read by every consumer that asks for a path. The
+    withheld-evidence sentence ships in the same breath, so a record can never say "not evidence" in
+    one field and offer a readable ``path`` in another. Kept here, not at the call site, so a second
+    writer cannot invent its own convention.
+
+    The returned paths are relative POSIX strings built from module literals plus ``stem``, which the
+    caller derives from a validated LUID -- nothing a server sent reaches them.
+    """
+    if certification == CSV_CERTIFIED:
+        path = out_dir / "data" / f"{stem}.csv"
+        return path, {EVIDENCE_PATH_KEY: f"data/{path.name}"}
+    path = out_dir / RETAINED_DIR / f"{stem}{RETAINED_SUFFIX}"
+    return path, {
+        RETAINED_PATH_KEY: f"{RETAINED_DIR}/{path.name}",
+        EVIDENCE_WITHHELD_KEY: CSV_UNCERTIFIED_DETAIL[certification],
+    }
 
 
 def unassessable_reason(record: dict[str, Any]) -> str | None:
@@ -137,6 +208,55 @@ def unassessable_reason(record: dict[str, Any]) -> str | None:
         return None
     certification = data.get("certification")
     return certification if certification in UNASSESSABLE_REASONS else UNASSESSABLE_NO_ROW_COUNT
+
+
+def withhold_uncertified_evidence(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Records in which no UNASSESSABLE data leg names a file under the evidence key.
+
+    The enforcement point for the structural rule above, applied both when this repo WRITES a
+    manifest (so a current capture cannot produce the invalid state) and when it READS one (so a
+    manifest written before the rule -- the review's own second reproduction, ``flags=[
+    data_unassessable, row_count_unrecorded]`` with ``data/view.csv`` still under ``path`` -- cannot
+    be consumed as evidence either). A file already on disk cannot be rewritten retroactively, so the
+    boundary that loads it is where the invariant is restored; :func:`read_manifest` is that
+    boundary.
+
+    An already-compliant record is returned untouched, so this is idempotent and cheap to apply more
+    than once along a pipeline.
+
+    ⚠️ The bytes are NOT deleted and ``status`` is NOT changed. The transport genuinely succeeded and
+    the body may well be a perfect export -- what is denied is that anything ESTABLISHED it as one.
+    Copies rather than mutates, for the reason :func:`flag_empty` does.
+    """
+    out = []
+    for record in records:
+        data = record.get("data") if isinstance(record, dict) else None
+        if not isinstance(data, dict) or EVIDENCE_PATH_KEY not in data or not unassessable_reason(record):
+            out.append(record)
+            continue
+        demoted = {k: v for k, v in data.items() if k != EVIDENCE_PATH_KEY}
+        demoted[RETAINED_PATH_KEY] = data[EVIDENCE_PATH_KEY]
+        demoted[EVIDENCE_WITHHELD_KEY] = CSV_UNCERTIFIED_DETAIL.get(data.get("certification"), RETAINED_DETAIL_DEFAULT)
+        out.append({**record, "data": demoted})
+    return out
+
+
+def read_manifest(path: Path) -> Any:
+    """Load an ``oracle-manifest.json`` with the evidence-path rule restored over its views.
+
+    ⚠️ **Read a capture manifest through this, never ``json.loads`` directly.** A manifest written
+    before #480 names uncertified bytes under ``path``, and a consumer reading that file raw reads
+    the exact fail-open shape this change removes. For a manifest THIS repo wrote the guarantee is
+    stronger and needs no cooperation at all, because :func:`write_manifest` already applied the same
+    rule to the bytes on disk; this is what covers the ones it did not write.
+
+    Raises exactly what ``read_text``/``json.loads`` raise -- a caller that wants to tolerate an
+    absent or corrupt manifest must still say so, as it did before.
+    """
+    manifest = json.loads(path.read_text(encoding="utf-8-sig"))
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("views"), list):
+        return manifest
+    return {**manifest, "views": withhold_uncertified_evidence(manifest["views"])}
 
 
 def empty_classification(record: dict[str, Any]) -> str | None:
@@ -504,6 +624,12 @@ def write_manifest(
     # downstream slice of this capture -- the manifest, a per-workbook subset, a packaged unit --
     # carries it without re-deriving the rule.
     records = flag_empty(records)
+    # ...and the STRUCTURAL half beside it (#480 round 2). `_capture_data` already writes an
+    # uncertified body outside `data/`, so this normally changes nothing; it is here because
+    # `write_manifest` is the one place every record must pass through, and a record assembled by
+    # anything other than `_capture_data` must not be able to reach the manifest with uncertified
+    # bytes named as evidence.
+    records = withhold_uncertified_evidence(records)
     sets = _partition(records, run.requested_renders)
     blocked, failed, complete = sets["blocked"], sets["failed"], sets["complete"]
     rendered = sum(1 for r in records if any(r.get(leg, {}).get("status") == "ok" for leg in ("image", "svg", "pdf")))
@@ -566,6 +692,12 @@ def write_manifest(
         "views": records,
     }
     manifest_path = run.out_dir / "oracle-manifest.json"
+    # The manifest's own directory, ensured HERE rather than inherited as a side effect. It used to
+    # exist only because `_capture_data` created `<out>/data/` before every export -- including the
+    # ones it then refused -- and since #480 an uncertified or refused body creates nothing there. A
+    # writer that depends on another function's incidental `mkdir` is one refactor from losing the
+    # whole manifest of a run whose every leg failed, which is the run most worth reading.
+    run.out_dir.mkdir(parents=True, exist_ok=True)
     # THE SINK. Everything above this line is a source, and five review rounds went one source at a
     # time: `raw_get`, the 200-mismatch diagnostic, a case-folded Content-Type, a truncated body quote,
     # a `<detail>` capture group -- and then a field that was never a diagnostic at all, a successful

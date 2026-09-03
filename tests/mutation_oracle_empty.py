@@ -497,15 +497,16 @@ o.certify_csv = lambda payload, content_type: _orig(payload, None)
         (f"{ORACLE}::test_an_uncertifiable_200_is_never_recorded_as_rows",),
         """
 import capture_tableau_oracle as o
-import hashlib
 _orig = o._capture_data
-def capture(session, view_luid, path, out_dir):
+def capture(session, view_luid, out_dir, stem):
     # Refuses the SHAPE but keeps the file, which is the half-fix: `data/<luid>.csv` then exists,
     # named as data, holding an error page -- and a consumer that lists the folder counts it.
-    record = _orig(session, view_luid, path, out_dir)
+    record = _orig(session, view_luid, out_dir, stem)
     if record.get("status") == "format_mismatch":
+        path = out_dir / "data" / (stem + ".csv")
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"whatever arrived")
-        record["path"] = str(path.relative_to(out_dir)).replace("\\\\", "/")
+        record["path"] = "data/" + stem + ".csv"
     return record
 o._capture_data = capture
 """,
@@ -515,11 +516,11 @@ o._capture_data = capture
         """
 import capture_tableau_oracle as o
 _orig = o._capture_data
-def capture(session, view_luid, path, out_dir):
+def capture(session, view_luid, out_dir, stem):
     # "The HTTP call succeeded, so status is ok" applied one step too far. It is true of an
     # unassessable body and false of a refused one: `status` drives the exit code, so this makes an
     # uncertifiable capture exit 0 with the failure recorded nowhere a caller reads.
-    record = _orig(session, view_luid, path, out_dir)
+    record = _orig(session, view_luid, out_dir, stem)
     if record.get("status") == "format_mismatch":
         record["status"] = "ok"
     return record

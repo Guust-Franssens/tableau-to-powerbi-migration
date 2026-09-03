@@ -38,6 +38,7 @@ from typing import Any, Generic, TypeVar
 import check_desktop_orphans as check_desktop_orphans_module
 import object_identity as oid
 import read_handover
+import tableau_oracle_manifest
 from bundle_corpus import evidence_dirs, shipping_models, shipping_reports
 from check_field_bindings import model_for_report
 
@@ -2004,7 +2005,10 @@ def _oracle_capture_oracles(target: Path, oracle_dir: Path | None) -> tuple[list
         if not manifest.is_file():
             continue
         try:
-            payload = _read_json(manifest)
+            # Through the shared loader, never `json.loads`: an OLDER capture names uncertified
+            # bytes under the data leg's `path`, and the `numeric` test below keys on exactly that,
+            # so a raw read would count a body nothing established as CSV as numeric evidence (#480).
+            payload = tableau_oracle_manifest.read_manifest(manifest)
         except (OSError, json.JSONDecodeError):
             continue
         for record in payload.get("views", []) if isinstance(payload, dict) else []:

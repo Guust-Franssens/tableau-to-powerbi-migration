@@ -274,6 +274,11 @@ ORACLE_LEG_ALLOW = _fields(
     # packaged unit carries `status: ok` with no `row_count` and nothing anywhere saying the body
     # was never established as CSV, which is the fail-open this field exists to close.
     "certification",
+    # #480 round 2. WHERE uncertified bytes were retained, and the authored sentence saying why they
+    # are not evidence. They ship together and they ship instead of `path`: a data leg that names a
+    # file here is one no consumer may read as numbers, which is the whole structural point.
+    "retained_path",
+    "evidence_withheld",
     "packaged_from",
     "packaging_reason",
 )

@@ -86,11 +86,17 @@ def index_destinations(migrations_root: Path) -> tuple[dict[str, list[Path]], in
 
 
 def load_manifest(oracle_dir: Path) -> dict[str, Any]:
-    """Read the capture manifest, or raise a message that names the file we wanted."""
+    """Read the capture manifest, or raise a message that names the file we wanted.
+
+    Read through :func:`tableau_oracle_manifest.read_manifest`, not ``json.loads``: an OLDER capture
+    names uncertified bytes under the data leg's ``path``, and ``copy_view_files`` keys on exactly
+    that -- so reading raw would place a body nothing established as CSV at ``<workbook>/data/*.csv``
+    in the grouped folder, which is the shape #480 exists to remove.
+    """
     path = oracle_dir / MANIFEST_NAME
     if not path.is_file():
         raise FileNotFoundError(f"no {MANIFEST_NAME} in {oracle_dir} - run capture_tableau_oracle.py first")
-    return json.loads(path.read_text(encoding="utf-8"))
+    return tableau_oracle_manifest.read_manifest(path)
 
 
 def group_views(manifest: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:

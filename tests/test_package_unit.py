@@ -437,7 +437,15 @@ def test_a_selected_view_with_no_render_is_not_greppable_as_a_render(tmp_path: P
     bundle, oracle = _bundle(tmp_path, views=views)
     manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
     manifest["views"][0]["image"] = {"status": "failed"}
-    manifest["views"][0]["data"] = {"status": "ok", "path": "data/sales.csv"}
+    # `row_count` present: this fixture is a MEASURED capture, and since #480 a data leg with no
+    # measured rows is unassessable and ships no `path` at all -- which would make this test about
+    # the wrong thing.
+    manifest["views"][0]["data"] = {
+        "status": "ok",
+        "path": "data/sales.csv",
+        "row_count": 1,
+        "certification": "certified",
+    }
     (oracle / "data").mkdir(exist_ok=True)
     (oracle / "data" / "sales.csv").write_text("a,b\n1,2\n", encoding="utf-8")
     (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
@@ -1165,6 +1173,11 @@ def test_a_packaged_view_from_an_OLDER_capture_is_flagged_by_the_packager_itself
     shipped = json.loads((_out(tmp_path) / UNIT / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
     flagged = [v for v in shipped["views"] if v.get("flags")]
     assert [v["flags"] for v in flagged] == [["data_unassessable", "row_count_unrecorded"]]
+    # ...and the STRUCTURAL half (#480 round 2): the packager must not copy uncertified bytes into
+    # `<kind>/data/<stem>.csv`, where every numeric consumer reads them as evidence.
+    assert "path" not in flagged[0]["data"]
+    assert flagged[0]["data"]["retained_path"] == "data/view-0.csv"
+    assert not list((_out(tmp_path) / UNIT / "oracle").rglob("*.csv"))
 
 
 def test_the_packager_does_not_flag_a_view_whose_rows_were_measured(tmp_path: Path) -> None:
@@ -1211,6 +1224,13 @@ def test_a_packaged_view_whose_row_count_was_never_recorded_says_so(tmp_path: Pa
     assert unassessable[0]["data"]["certification"] == "content_type_absent"
     assert "row_count" not in unassessable[0]["data"]
     assert unassessable[0]["data"]["status"] == "ok", "the transport succeeded -- keep that distinction"
+    # #480 round 2. Flagging it was necessary and not sufficient: the packaged unit must also not
+    # OFFER the bytes as numbers. `objects[].data` is what the operator's `ORACLE_*` lines and any
+    # numeric consumer read, and it must be empty here.
+    assert "path" not in unassessable[0]["data"]
+    assert unassessable[0]["data"]["retained_path"] == "data/view-0.csv"
+    assert unassessable[0]["data"]["evidence_withheld"]
+    assert not list((_out(tmp_path) / UNIT / "oracle").rglob("*.csv"))
 
 
 def test_allowlisting_the_flag_did_not_open_the_view_to_unknown_fields(tmp_path: Path) -> None:
