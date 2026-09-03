@@ -300,7 +300,11 @@ def test_the_markers_actually_deselect_those_tests() -> None:
     assert excluded, "nothing derived - this test would pass vacuously"
     target = sorted(excluded)[0].split("::")[0]
     in_target = sorted(node for node in excluded if node.startswith(target + "::"))
-    result = _run_pytest(REPO_ROOT, ["-q", "--collect-only", "-m", "not (serial or timing)", target])
+    # `--run-gui` ISOLATES the mechanism this test names. The root conftest also deselects `gui`
+    # unconditionally (issue #447), and three of those tests carry no contended marker, so without
+    # the opt-in the count here measures two mechanisms at once and drifts whenever either changes.
+    # Opting in leaves `-m "not (serial or timing)"` as the only filter, which is the claim.
+    result = _run_pytest(REPO_ROOT, ["-q", "--collect-only", "--run-gui", "-m", "not (serial or timing)", target])
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
     assert f"{len(in_target)} deselected" in output, (
@@ -476,8 +480,12 @@ def test_xdist_deselects_contended_tests_without_being_asked() -> None:
     """
     contended = {node for node in _contended_nodes() if node.startswith(BUNDLE_TESTS + "::")}
     assert len(contended) >= 13, f"expected the bundle's contended tests to be found, got {sorted(contended)}"
+    # `--run-gui` for the same reason as in `test_the_markers_actually_deselect_those_tests`: the
+    # `gui` exclusion is orthogonal and always on, and three gui tests carry no contended marker, so
+    # leaving it engaged would fold two mechanisms into one count. This test is about the xdist one.
     result = _run_pytest(
-        REPO_ROOT, ["-q", "--collect-only", "-n", "2", "--dist", "loadfile", "-m", "not timing", BUNDLE_TESTS]
+        REPO_ROOT,
+        ["-q", "--collect-only", "--run-gui", "-n", "2", "--dist", "loadfile", "-m", "not timing", BUNDLE_TESTS],
     )
     output = result.stdout + result.stderr
     assert result.returncode == 0, output

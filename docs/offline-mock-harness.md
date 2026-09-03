@@ -294,3 +294,10 @@ python -m pytest tests/test_e2e_offline.py -q
 
 The whole thing is ~8 seconds. `tests/test_e2e_offline.py` is marked `slow` (registered in
 `pyproject.toml`) because it binds a loopback socket and spawns a subprocess; nothing else does.
+
+⚠️ `-m "not slow"` above is safe **because the window-spawning tests are excluded by a collection
+hook, not by a marker expression** (issue #447). It was not always: while the exclusion lived in
+`addopts = "-m 'not gui'"`, a command-line `-m` REPLACED it rather than composing with it, and this
+exact documented command collected **309/309** of the `pbip-model-refresh` bundle's tests - every
+one that opens a real top-level window and steals focus. Nothing here needs `--run-gui`; see
+`docs/parallel-test-loop.md` for the tier that does.
