@@ -13,14 +13,17 @@ from __future__ import annotations
 
 import json
 import sys
-import zlib
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import capture_tableau_oracle as oracle  # noqa: E402  # pylint: disable=wrong-import-position
+import tableau_oracle_manifest as verdict  # noqa: E402  # pylint: disable=wrong-import-position
+from png_fixtures import valid_png  # noqa: E402  # pylint: disable=wrong-import-position
+from pdf_fixtures import valid_pdf  # noqa: E402  # pylint: disable=wrong-import-position
 
 # The real root element of a `?format=svg` capture of `HR Dashboard | HR | Summary` (declared
 # 1400x800 px), trimmed to the parts this module reasons about. 370.681mm * 96 / 25.4 == 1400.99,
@@ -50,11 +53,14 @@ SOURCES_DISCONNECTED = (
 
 
 def _png(width: int, height: int) -> bytes:
-    """A minimal but genuinely valid PNG, so the IHDR reader is exercised rather than mocked."""
-    ihdr = b"IHDR" + width.to_bytes(4, "big") + height.to_bytes(4, "big") + bytes([8, 6, 0, 0, 0])
-    chunks = b"\x89PNG\r\n\x1a\n" + len(ihdr[4:]).to_bytes(4, "big") + ihdr
-    chunks += zlib.crc32(ihdr).to_bytes(4, "big")
-    return chunks
+    """A genuinely valid PNG -- shared, because the version that lived here was NOT one.
+
+    ⚠️ Its predecessor carried this same docstring over signature + IHDR + CRC and nothing else: no
+    IDAT, no IEND. It was chunk-correct and structurally incomplete, so it asserted that a truncated
+    render is acceptable evidence -- the precise fail-open `payload_is_complete` now refuses. Kept as
+    a thin alias so the call sites read unchanged; the bytes come from `tests/png_fixtures.py`.
+    """
+    return valid_png(width, height)
 
 
 class _Session(oracle.TableauSession):
@@ -74,7 +80,7 @@ class _Session(oracle.TableauSession):
         self.paths: list[str] = []
         self.token, self.site_id = "tok", "sid"
 
-    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None):  # noqa: ARG002
+    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None, deadline=None):  # noqa: ARG002
         self.paths.append(path)
         for suffix, (status, payload) in self.responses.items():
             if path.endswith(suffix):
@@ -268,10 +274,16 @@ def test_both_legs_ok_counts_once_in_each_column(tmp_path):
 
 # Real bytes from `/pdf?type=Unspecified` on the 1000x800 `Seed - 92 - Viz Gauntlet Dashboard`:
 # 0.75 * 1000 + 72 = 822pt wide, 0.75 * 800 + 72 = 672pt tall.
-PDF_FITTED = b"%PDF-1.4\n/Type/Page /MediaBox [0 0 822.000000 672.000000]\n/FontFile2 /Subtype /Image\n"
+#
+# ⚠️ These are now built by `tests/pdf_fixtures.py` and accepted by STRICT `pypdf`. The previous
+# literals were not PDFs at all -- a MediaBox and a `%%EOF` with no object structure between them --
+# and `pypdf` rejected both with `startxref not found`. They passed only because the completeness
+# check searched the last 2 KiB for `%%EOF` instead of following the trailer, which is the same
+# fail-open one format over: a fixture built to satisfy the check rather than the format.
+PDF_FITTED = valid_pdf(822, 672)
 # What a server that ignored the undocumented `type=Unspecified` falls back to: measured 612x792
 # (US Letter portrait), NOT the 612x1008 Legal the documentation claims is the default.
-PDF_LETTER = b"%PDF-1.4\n/Type/Page /MediaBox [0 0 612.000000 792.000000]\n/FontFile\n"
+PDF_LETTER = valid_pdf(612, 792)
 
 
 def test_pdf_facts_records_the_page_actually_returned_not_the_one_requested():
@@ -366,8 +378,8 @@ def test_raw_get_body_is_only_reported_through_the_session_redactor():
 
 def test_a_requested_render_that_never_arrived_is_a_failure(tmp_path):
     """Absent-because-not-asked-for is fine; absent-when-asked-for is the exit-0-with-nothing hole."""
-    assert oracle._render_statuses(_ok_record()) == ("ok", "ok", "ok")  # pylint: disable=protected-access
-    assert "not_captured" in oracle._render_statuses(_ok_record(), frozenset({"svg"}))  # pylint: disable=protected-access
+    assert verdict._render_statuses(_ok_record()) == ("ok", "ok", "ok")  # pylint: disable=protected-access
+    assert "not_captured" in verdict._render_statuses(_ok_record(), frozenset({"svg"}))  # pylint: disable=protected-access
 
 
 def test_reference_best_that_selected_no_tier_exits_5_rather_than_0(tmp_path):
@@ -467,14 +479,14 @@ def test_a_render_never_attempted_because_its_data_leg_was_blocked_inherits_that
     render, so re-asking three times costs metered calls to learn the same thing. Inventing an
     independent `not_captured` for each made ONE credential fault look like a credential fault AND
     three hard failures."""
-    statuses = oracle._render_statuses(_blocked_record(), frozenset({"svg"}))  # pylint: disable=protected-access
+    statuses = verdict._render_statuses(_blocked_record(), frozenset({"svg"}))  # pylint: disable=protected-access
     assert statuses == ("ok", "source_credential", "ok")
 
 
 def test_a_genuinely_broken_data_leg_still_fails_its_requested_renders():
     """The other half of the same rule: propagation must not turn every absence into 'blocked'."""
     record = {"view_name": "v", "data": {"status": "failed", "detail": "boom"}}
-    statuses = oracle._render_statuses(record, frozenset({"svg", "pdf"}))  # pylint: disable=protected-access
+    statuses = verdict._render_statuses(record, frozenset({"svg", "pdf"}))  # pylint: disable=protected-access
     assert statuses == ("ok", "failed", "failed")
 
 
@@ -545,7 +557,7 @@ class _ProbeSession(oracle.TableauSession):
         self.probed: list[tuple[str, str]] = []
         self.token, self.site_id = "tok", "sid"
 
-    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None):  # noqa: ARG002
+    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None, deadline=None):  # noqa: ARG002
         luid, route = path.split("/views/")[1].split("/", 1)
         self.probed.append((luid, route))
         return (*self.responses[(luid, route)], {})

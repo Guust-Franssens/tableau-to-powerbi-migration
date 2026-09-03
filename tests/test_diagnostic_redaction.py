@@ -54,6 +54,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
+from xml.etree import ElementTree
 
 import pytest
 
@@ -62,6 +63,8 @@ sys.path.insert(0, str(REPO / "scripts"))
 
 import capture_tableau_oracle as oracle  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_http  # noqa: E402  # pylint: disable=wrong-import-position
+import tableau_oracle_manifest as verdict  # noqa: E402  # pylint: disable=wrong-import-position
+import tableau_payload_facts as payload_facts  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_render_capability as cap  # noqa: E402  # pylint: disable=wrong-import-position
 from tableau_env import (  # noqa: E402  # pylint: disable=wrong-import-position
     env_redactor,
@@ -203,7 +206,7 @@ class _Session(oracle.TableauSession):
         self.data_reply = (*data_reply, {}) if data_reply and len(data_reply) == 2 else data_reply
         self.token, self.site_id = "tok", "sid"
 
-    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None):  # noqa: ARG002
+    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None, deadline=None):  # noqa: ARG002
         if path.endswith("/data"):
             return self.data_reply or (200, b"a\n1\n", {})
         return self.reply
@@ -535,6 +538,13 @@ MODULES = (
     # names no credential anywhere in code, so under `HTTP AND credential` it would have been
     # invisible to the inventory exactly as `tableau_view_types.py` was.
     "scripts/tableau_luid_census.py",
+    # ⚠️ Added when the verdict layer was split out of `capture_tableau_oracle.py` (#423). It holds
+    # THE SINK -- `scrub_tree` immediately before `json.dumps` -- plus every console line that quotes
+    # a response-derived view name, so leaving it out would have moved the most sensitive code in the
+    # capture OUT of this gate while every parameterised check kept reporting green. Like
+    # `tableau_payload_facts.py`, it is not detected by `_credential_handling_scripts()` (it makes no
+    # request and names no credential); MODULES is a superset of that detector, never a mirror of it.
+    "scripts/tableau_oracle_manifest.py",
 )
 
 # Where response bytes ENTER, declared per function rather than inferred from a parameter's spelling.
@@ -570,17 +580,31 @@ TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
     # re-implementing them. Both are cross-module, so propagation cannot see them.
     ("scripts/tableau_view_types.py", "parse_payload"): {"payload"},
     ("scripts/tableau_view_types.py", "is_luid"): {"value"},
+    # `capture_tableau_oracle.main()` hands the verdict layer the records it just built from
+    # responses, and `log_progress` one record per view. Both cross a module boundary, so propagation
+    # cannot carry the taint and the seeds are irreducible -- without them the manifest sink and every
+    # console line in that module would be analysed as clean.
+    ("scripts/tableau_oracle_manifest.py", "write_manifest"): {"records", "capability_report"},
+    ("scripts/tableau_oracle_manifest.py", "log_progress"): {"record", "index", "total"},
+    # ⚠️ Seeding `records` WIDENS this gate rather than preserving it. On master the list itself was
+    # never tainted: `main` binds it with `records, started = [], time.perf_counter()` and then grows
+    # it with `records.append(record)`, and `_bind` fires on ASSIGNMENT, not on a container-store call
+    # -- so a list full of response records crossed into `write_manifest` analysed as clean, and only
+    # `capability_report` made the manifest tainted at all. Declaring it here is what puts the
+    # partition, the counts and the census under the certification requirement.
+    ("scripts/tableau_view_types.py", "census"): {"records"},
     # The shared HTTP primitive. `req` and `redactor` are OUTBOUND -- the request we are about to send
     # and the scrubber we hand it -- but they arrive from functions the analyser has already tainted,
     # and declaring them keeps the boundary honest rather than silently permeable. `headers` really is
     # response-derived.
-    ("scripts/tableau_http.py", "_request"): {"req", "redactor"},
+    ("scripts/tableau_http.py", "_request"): {"req", "redactor", "timeout", "deadline"},
     ("scripts/tableau_http.py", "header_value"): {"headers"},
     ("scripts/tableau_payload_facts.py", "detect_format"): {"values"},
     ("scripts/tableau_payload_facts.py", "summarise_csv"): {"payload"},
     ("scripts/tableau_payload_facts.py", "png_dimensions"): {"payload"},
     ("scripts/tableau_payload_facts.py", "svg_facts"): {"payload"},
     ("scripts/tableau_payload_facts.py", "pdf_facts"): {"payload"},
+    ("scripts/tableau_payload_facts.py", "payload_is_complete"): {"payload"},
 }
 
 # Calls whose RESULT is response data.
@@ -588,7 +612,7 @@ TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
 # is: its return IS the response. It became load-bearing when `tableau_luid_census` stopped
 # making its own request -- taint propagation is intra-module, so a cross-module call's result
 # is invisible without this, and the gate went inert on a module that still looked gated.
-TAINTING_CALLS = {"_request", "fetch_payload", "export", "raw_get", "get_json", "read", "decode", "loads"}
+TAINTING_CALLS = {"_request", "fetch_payload", "export", "raw_get", "get_json", "read", "read1", "decode", "loads"}
 # The ONE thing that clears taint. Not "any helper" -- see test_the_chokepoint_is_the_only_...
 UNTAINTING = {"redacted_note", "scrub_tree", "artifact_stem"}
 LOG_AND_RAISE = {"info", "warning", "error", "debug", "exception", "ExportFailed", "RuntimeError", "ValueError"}
@@ -638,6 +662,19 @@ _CENSUS_LABEL = (
 _PROBE_VERDICT = (
     "FIXED-VOCABULARY: one of classify_probe's three verdict literals, a ladder tier name, or an "
     "api-version string this module itself chose"
+)
+
+_A_COUNT = (
+    "NOT-A-STRING: an integer count of records or legs -- the SHAPE of the capture, never any text the server sent"
+)
+_A_STATUS_LITERAL = (
+    "FIXED-VOCABULARY: one of classify_export_error's status literals, `unsupported_api_version`, "
+    "`format_mismatch`, `not_attempted` or `not_captured` -- a closed set this repo authors, and the "
+    "only thing a leg record's `status` key is ever assigned"
+)
+_CENSUS_COUNTS = (
+    "NOT-A-STRING: `tableau_view_types.census` returns integer tallies keyed by its own three module "
+    "constants (dashboard/worksheet/unknown); no response text survives it"
 )
 
 _LUID_OK = (
@@ -826,15 +863,36 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
             "SCRUBBED-AT-SINK: the returned leg record, whose own fields are certified in _capture_data; "
             "the PATH argument is built from `stem`, which comes only from `artifact_stem`"
         ),
-        "_capture_render(session, view_luid, out_dir / 'images' / f'{stem}.{_RENDER_EXTENSIONS[kind]}', kind, api=(api_overrides or {}).get(kind))": (
+    },
+    ("scripts/capture_tableau_oracle.py", "_capture_renders"): {
+        "data_status": _A_STATUS_LITERAL,
+        "refusal": (
+            "FIXED-VOCABULARY: one of exactly two sentences this module authors -- the short-circuit "
+            "note, whose only variable is a leg name read out of the `_LEG_OF` constant, and "
+            "`_salvage_exhausted`'s budget note, whose only variables are two floats. Tainted only "
+            "because it is selected by `salvage`, which is derived from the data leg's status; no "
+            "branch of it interpolates anything that came off the wire"
+        ),
+        "{'status': NOT_ATTEMPTED, 'attempted': False, 'reason': refusal}": (
+            "FIXED-VOCABULARY: a module constant, a bool, and `refusal` -- certified immediately "
+            "above as one of two self-authored sentences"
+        ),
+        "{'status': data_status, 'attempted': False, 'reason': 'the data leg was blocked at the source, and every "
+        "render route comes from the same VizQL render, so no render could have succeeded'}": (
+            "FIXED-VOCABULARY: a status literal, a bool, and a sentence this module authors -- nothing "
+            "in it came off the wire, so the credential-inheriting skip carries no response text"
+        ),
+        "_capture_render(session, record['view_luid'], targets.out_dir / 'images' / "
+        "f'{targets.stem}.{_RENDER_EXTENSIONS[kind]}', kind, _RenderOptions(targets.api_overrides.get(kind), "
+        "SALVAGE_RETRY if salvage else None, deadline if salvage else None))": (
             "SCRUBBED-AT-SINK: the returned leg record, whose own fields are certified in _capture_render; "
-            "the PATH argument is built from `stem`, which comes only from `artifact_stem`"
+            "the PATH argument is built from `targets.stem`, which comes only from `artifact_stem`"
         ),
     },
     ("scripts/capture_tableau_oracle.py", "artifact_stem"): {
         "len(view_luid or '')": "NOT-A-STRING: a character count, reported instead of the rejected identifier",
     },
-    ("scripts/capture_tableau_oracle.py", "log_progress"): {
+    ("scripts/tableau_oracle_manifest.py", "log_progress"): {
         "index": "NOT-A-STRING: an integer position in the loop",
         "total": "NOT-A-STRING: an integer view count",
         "status": "FIXED-VOCABULARY: one of classify_export_error's status literals",
@@ -868,6 +926,12 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
             "echoing the PAT secret or session token before these bytes reach a file"
         ),
         "why": "REDACTED-UPSTREAM: `format_matches` builds it entirely from `redacted_note` output",
+        "why_incomplete": (
+            "FIXED-VOCABULARY: `payload_is_complete` returns one of nine literal reasons, interpolating "
+            "only integers -- chunk counts, a byte cap, and expat's numeric error code and position. It "
+            "never quotes a byte of the payload, which is why it needs no redactor; "
+            "`test_the_completeness_diagnostic_quotes_no_payload_bytes` proves that rather than assuming it"
+        ),
         "stats": "REDACTED-UPSTREAM: counters, plus `retry_reasons` whose entries are redacted details",
         "hashlib.sha256(payload).hexdigest()": "DERIVED-IRREVERSIBLY: a one-way digest, not the payload",
         "len(payload)": "NOT-A-STRING: an integer byte count",
@@ -878,7 +942,6 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
     },
     ("scripts/capture_tableau_oracle.py", "sign_in"): {
         "status": "NOT-A-STRING: an HTTP status integer",
-        "delay": "NOT-A-STRING: a float backoff delay",
     },
     ("scripts/capture_tableau_oracle.py", "get_json"): {
         "status": "NOT-A-STRING: an HTTP status integer",
@@ -887,6 +950,9 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "path": "OUTBOUND: the REST path we are requesting, built from the site id and a verified LUID",
         "status": "NOT-A-STRING: an HTTP status integer",
         "delay": "NOT-A-STRING: a float backoff delay",
+        "attempt": "NOT-A-STRING: an integer loop counter",
+        "policy.max_attempts": "NOT-A-STRING: an integer bound on a frozen RetryPolicy",
+        "policy.budget_sec": "NOT-A-STRING: a float deadline on a frozen RetryPolicy",
         "kind": "FIXED-VOCABULARY: one of classify_export_error's five status literals",
         "reflected": "FIXED-VOCABULARY: one of the two literal labels reflected_credential returns",
         "detail": "REDACTED-UPSTREAM: classify_export_error builds it from `safe`",
@@ -1010,9 +1076,10 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "len(views)": "NOT-A-STRING: an integer view count",
         "workbook_names.get(record['workbook_luid'])": _INTO_THE_MANIFEST,
     },
-    ("scripts/capture_tableau_oracle.py", "write_manifest"): {
+    ("scripts/tableau_oracle_manifest.py", "write_manifest"): {
         "manifest": _INTO_THE_MANIFEST_AGGREGATE,
         "capability_report": _INTO_THE_MANIFEST_AGGREGATE,
+        "records": _INTO_THE_MANIFEST_AGGREGATE,
         "json.dumps(manifest, indent=2)": (
             "SCRUBBED-AT-SINK: `manifest` is the ALREADY-scrubbed tree -- `scrub_tree` runs on the line "
             "above this one, so the serialisation sees only redacted values and keys"
@@ -1021,8 +1088,70 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
             "SCRUBBED-AT-SINK: `manifest` is the ALREADY-scrubbed tree; the concatenation is a newline"
         ),
         "manifest['elapsed_sec']": "NOT-A-STRING: a float duration in seconds",
+        "tableau_view_types.census(records)": _CENSUS_COUNTS,
+        "len(unestablished)": _A_COUNT,
+        "unestablished": _INTO_THE_MANIFEST_AGGREGATE,
+        "len(records)": _A_COUNT,
+        "len(blocked)": _A_COUNT,
+        "len(complete)": _A_COUNT,
+        "len(failed)": _A_COUNT,
+        "len(sets['ok'])": _A_COUNT,
+        "len(sets['empty'])": _A_COUNT,
+        "reference_missing": "NOT-A-STRING: a bool -- rendered==0 AND required AND not credential-only",
+        "sum((1 for r in records if r.get('image', {}).get('status') == 'ok'))": _A_COUNT,
+        "sum((1 for r in records if r.get('svg', {}).get('status') == 'ok'))": _A_COUNT,
+        "sum((1 for r in records if r.get('pdf', {}).get('status') == 'ok'))": _A_COUNT,
     },
-    ("scripts/capture_tableau_oracle.py", "_log_blocked_and_stale"): {"warning": _PROBE_VERDICT},
+    ("scripts/tableau_oracle_manifest.py", "_render_statuses"): {
+        "absent": _A_STATUS_LITERAL,
+        "record[leg].get('status')": _A_STATUS_LITERAL,
+    },
+    ("scripts/tableau_oracle_manifest.py", "_partition"): {
+        "ok": _INTO_THE_MANIFEST_AGGREGATE,
+        "[r for r in ok if r['data']['row_count'] == 0]": _INTO_THE_MANIFEST_AGGREGATE,
+        "[r for r in records if r.get('data', {}).get('status') == 'ok' and all((s == 'ok' for s in "
+        "_render_statuses(r, requested)))]": _INTO_THE_MANIFEST_AGGREGATE,
+        "[r for r in records if 'source_credential' in {r.get('data', {}).get('status'), "
+        "*_render_statuses(r, requested)}]": _INTO_THE_MANIFEST_AGGREGATE,
+        "[r for r in records if any((status not in {'ok', 'source_credential'} for status in "
+        "(r.get('data', {}).get('status'), *_render_statuses(r, requested))))]": _INTO_THE_MANIFEST_AGGREGATE,
+    },
+    ("scripts/tableau_oracle_manifest.py", "render_unestablished"): {
+        "record.get('view_luid')": _INTO_THE_MANIFEST,
+        "record.get('view_name')": _INTO_THE_MANIFEST,
+        "legs": _A_STATUS_LITERAL,
+        "{'view_luid': record.get('view_luid'), 'view_name': record.get('view_name'), 'renders': legs}": (
+            _INTO_THE_MANIFEST_AGGREGATE
+        ),
+    },
+    ("scripts/tableau_oracle_manifest.py", "_log_unestablished"): {
+        "len(unestablished)": _A_COUNT,
+        "kind": (
+            "FIXED-VOCABULARY: a render TIER name -- `render_unestablished` builds these keys from "
+            "`sorted(requested)`, the set this repo authors ('png', 'svg', 'pdf'), never from a response"
+        ),
+        "status or ABSENT_LEG": _A_STATUS_LITERAL,
+        "detail": (
+            "FIXED-VOCABULARY: a join of tier names this repo authors and leg-status literals; the view "
+            "NAME on the same line goes through `redacted_note`, which is the only response-derived "
+            "value in this warning"
+        ),
+    },
+    ("scripts/tableau_oracle_manifest.py", "_log_blocked_and_stale"): {
+        "warning": _PROBE_VERDICT,
+        "len(blocked)": _A_COUNT,
+        "len(stale_api)": _A_COUNT,
+    },
+    ("scripts/tableau_http.py", "_read_bounded"): {
+        "chunk": (
+            "REFUSED-AT-SEAM: the response BODY, which is this round trip's result and passes through "
+            "raw by design (see the module docstring: classification must see unmodified text). "
+            "Accumulating it in chunks changes nothing about what is returned versus the single "
+            "`.read()` it replaces; the reflected-credential refusal and every redaction happen at the "
+            "callers' seams, unchanged"
+        ),
+        "timeout": "NOT-A-STRING: the float socket timeout, quoted so the diagnostic names the bound it is not",
+    },
     ("scripts/tableau_payload_facts.py", "png_dimensions"): {
         "int.from_bytes(payload[16:20], 'big')": "NOT-A-STRING: an integer read from the IHDR",
         "int.from_bytes(payload[20:24], 'big')": "NOT-A-STRING: an integer read from the IHDR",
@@ -1278,12 +1407,21 @@ def test_taint_reaches_capture_view_without_a_hand_written_seed():
     defect. It is now derived -- `get_json` -> `list_views` -> `select_views` -> `main`'s loop ->
     `capture_view` -- because taint propagates through RETURN values. This test fails if that chain
     breaks, which is what would silently push the burden back onto the hand-written table.
+
+    ⚠️ `log_progress` moved to `tableau_oracle_manifest.py` when the verdict layer was split out
+    (#423), and a module boundary is exactly what propagation cannot cross -- so there its `record`
+    IS a declared seed, and the assertion below checks the seed is honoured rather than that the
+    chain still reaches it. Deriving it is not available across modules; asserting it is still
+    coverage, because dropping the seed makes that whole module analyse as clean.
     """
     module = "scripts/capture_tableau_oracle.py"
     assert (module, "capture_view") not in TAINT_SEEDS, "re-seeding by hand would hide a broken chain"
     tainted = taint_module((REPO / module).read_text(encoding="utf-8"), module)
     assert "view" in tainted["capture_view"]
-    assert "record" in tainted["log_progress"]
+    verdict_module = "scripts/tableau_oracle_manifest.py"
+    verdict_taint = taint_module((REPO / verdict_module).read_text(encoding="utf-8"), verdict_module)
+    assert "record" in verdict_taint["log_progress"]
+    assert "records" in verdict_taint["write_manifest"]
 
 
 # ---- module coverage: a credential-handling module may not sit OUTSIDE the gate ------------------
@@ -1557,6 +1695,32 @@ def test_the_shared_request_primitive_keeps_the_name_the_gate_taints():
         )
 
 
+def test_the_body_read_primitive_keeps_the_name_the_gate_taints():
+    """⚠️ The same trap, one layer down, and it FIRED -- this is not a hypothetical.
+
+    ``_read_bounded`` reads a response body in chunks, and the first version hoisted the choice of
+    primitive into a local: ``read_once = getattr(stream, "read1", None) or stream.read``. That is
+    ordinary Python and it silently un-tainted the response body, because ``_called()`` then sees
+    ``read_once`` rather than a name in ``TAINTING_CALLS``. The symptom was a certification going
+    STALE -- which reads as "no longer reaches an exit" and actually meant "no longer tracked at all",
+    the friendlier-sounding of the two by far.
+
+    So both branches must call the primitive BY NAME, and both names must be in the vocabulary.
+    """
+    assert {"read", "read1"} <= TAINTING_CALLS
+    source = (REPO / "scripts" / "tableau_http.py").read_text(encoding="utf-8")
+    assert "def _read_bounded(" in source
+    assert re.search(r"stream\.read1\(", source), (
+        "the bounded read no longer calls `read1` by name -- if it was hoisted into a local, the "
+        "response body is no longer tainted and this gate covers nothing"
+    )
+    assert re.search(r"stream\.read\(", source), "the fallback read must also be called by name"
+    tainted = taint_module(source, "scripts/tableau_http.py")
+    assert "chunk" in tainted["_read_bounded"], (
+        "the accumulated body is not tainted, so nothing stops it reaching an exit uncertified"
+    )
+
+
 def test_no_credential_handling_script_sits_outside_the_gate_unwaived():
     """The class round 7 identified: a fourth module could be added tomorrow and be silently outside.
 
@@ -1762,6 +1926,75 @@ def test_every_certification_names_a_category_rather_than_arguing_in_prose():
             assert len(reason) > 30, f"{module}:{func} {expression!r} is certified with no real reason"
 
 
+def test_no_certification_is_written_in_another_interpreters_unparse_dialect():
+    """⚠️ A certification key must be what `ast.unparse` produces HERE, or the gate is version-local.
+
+    Every lookup in this file compares a hand-written key against `ast.unparse` output, and unparse is
+    NOT stable across Python versions. Measured: an f-string containing a nested string literal
+    unparses as ``f"{kind}={status or 'absent'}"`` on 3.13 and ``f'{kind}={status or 'absent'}'`` on
+    the CI interpreter (PEP 701 quote reuse). One certification was therefore simultaneously VALID
+    locally and both stale AND missing on CI -- the suite was green on the machine that wrote it and
+    red on the machine that gates the merge, which is the worst possible split for a security gate.
+
+    This check is version-symmetric by construction: it re-parses each key and demands the local
+    normal form, so it fails on whichever interpreter the key was NOT written for. The fix is always
+    to make the SOURCE expression unparse identically everywhere -- interpolate names, not nested
+    literals -- rather than to encode one interpreter's quoting habit in this table.
+    """
+    drifted = []
+    for (module, func), entries in CERTIFIED.items():
+        for expression in entries:
+            try:
+                normal = ast.unparse(ast.parse(expression, mode="eval").body)
+            except SyntaxError:
+                drifted.append(f"{module}:{func} {expression!r} is not a parseable expression")
+                continue
+            if normal != expression:
+                drifted.append(f"{module}:{func} {expression!r} unparses HERE as {normal!r}")
+    assert not drifted, (
+        "a certification key is not this interpreter's `ast.unparse` normal form, so it matches on "
+        "some Python versions and not others:\n  " + "\n  ".join(drifted)
+    )
+
+
+def test_the_unparse_dialect_detector_can_actually_fire():
+    """Positive control: an assertion that cannot fail is not coverage.
+
+    ⚠️ And this control's FIRST version was itself dialect-dependent -- the exact defect it exists to
+    guard. It hard-coded the local interpreter's rendering of a nested-literal f-string and asserted
+    the other spelling was non-normal, which is true on 3.13 and false on the CI interpreter, where
+    that spelling IS the normal form. It went red on CI for the opposite reason to the bug it was
+    added for. So the property is asserted RELATIONALLY here, never against a remembered spelling.
+
+    Part 1 holds on every interpreter and is the load-bearing half: `ast.unparse` normalises a
+    double-quoted string to a single-quoted one, so the detector demonstrably separates two spellings
+    of the same expression rather than accepting whatever it is handed.
+
+    Part 2 pins the specific hazard, and is guarded because it cannot be EXPRESSED before 3.12: quote
+    reuse inside an f-string is PEP 701, so on 3.11 the second spelling is a SyntaxError rather than a
+    dialect. Where both spellings parse they must mean the same thing and exactly one must be normal.
+    """
+    assert ast.unparse(ast.parse("'plain'", mode="eval").body) == "'plain'"
+    assert ast.unparse(ast.parse('"plain"', mode="eval").body) != '"plain"', (
+        "unparse no longer normalises quoting, so this detector cannot separate two spellings at all"
+    )
+
+    spellings = ["f\"{k}={s or 'x'}\"", "f'{k}={s or 'x'}'"]
+    parsed = []
+    for spelling in spellings:
+        try:
+            parsed.append((spelling, ast.unparse(ast.parse(spelling, mode="eval").body)))
+        except SyntaxError:  # pre-PEP-701 interpreter: the hazard cannot be written down
+            continue
+    assert parsed, "the double-quoted spelling must parse on every supported interpreter"
+    assert len({normal for _src, normal in parsed}) == 1, "both spellings must denote the same expression"
+    if len(parsed) == 2:
+        assert sum(src == normal for src, normal in parsed) == 1, (
+            "exactly one spelling must be this interpreter's normal form -- if neither or both are, "
+            "the nested-literal hazard has changed shape and the gate above needs re-verifying"
+        )
+
+
 # ---------------------------------------------- the manifest SINK, on the one path that reaches it
 
 
@@ -1832,7 +2065,7 @@ def test_the_blocked_list_redacts_the_names_it_prints(caplog):
     session.token = token
     blocked = [{"view_name": token, "workbook_name": token, "data": {"status": "source_credential", "detail": token}}]
     with caplog.at_level(logging.WARNING, logger="tableau-oracle"):
-        oracle._log_blocked_and_stale(blocked, blocked, None, session.redact_text)  # pylint: disable=protected-access
+        verdict._log_blocked_and_stale(blocked, blocked, None, session.redact_text)  # pylint: disable=protected-access
     assert longest_surviving_run(token, caplog.text) == ""
     assert "[REDACTED]" in caplog.text
 
@@ -2281,6 +2514,113 @@ def test_header_value_is_case_insensitive_like_the_HTTPMessage_it_replaced():
     assert tableau_http.header_value(headers, "retry-after") == "30"
     assert tableau_http.header_value(headers, "Retry-After") == "30"
     assert tableau_http.header_value(headers, "X-Absent") is None
+
+
+@pytest.mark.parametrize("shape", sorted(SHAPES))
+@pytest.mark.parametrize("kind", ["png", "svg", "pdf"])
+def test_the_completeness_diagnostic_quotes_no_payload_bytes(kind, shape):
+    """The `why_incomplete` certification claims FIXED-VOCABULARY. This measures it.
+
+    ⚠️ `payload_is_complete` is the ONE diagnostic on this path that takes no redactor, and the whole
+    justification is that it interpolates integers and never a byte of the payload. That is a claim
+    about code someone will edit later -- the cheapest possible regression is an f-string quoting the
+    root element's tag or expat's message, and `str(ParseError)` for an undefined entity echoes
+    document text verbatim. So the claim is exercised with the same adversarial battery every other
+    site faces, and against the parse-error path specifically, where the temptation lives.
+
+    The decoy subtraction matters as much here as anywhere: a reason string legitimately contains
+    `<svg`, `%%EOF` and digits, and a naive substring search would credit those as a leak.
+    """
+    secret, decoy = SHAPES[shape], DECOYS[shape]
+    bodies = {
+        # Truncated after a good prefix, with the secret in the bytes that never made it out.
+        "png": lambda value: b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + value.encode(),
+        # Reaches the ParseError branch, whose expat message is the one that echoes document text.
+        "svg": lambda value: f'<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" id="{value}">'.encode(),
+        "pdf": lambda value: f"%PDF-1.4\n1 0 obj\n<< /Title ({value}) >>\nendobj\n".encode(),
+    }
+    ok, why = payload_facts.payload_is_complete(kind, bodies[kind](secret))
+    _decoy_ok, decoy_why = payload_facts.payload_is_complete(kind, bodies[kind](decoy))
+
+    assert ok is False, f"the {kind} fixture is meant to be incomplete, so this proves nothing: {why!r}"
+    assert why, "an incomplete payload must say why, or the manifest records a refusal with no reason"
+    leak = longest_surviving_run(secret, why)
+    assert leak == "" or leak in decoy_why, (
+        f"`payload_is_complete({kind!r}, ...)` echoed {leak!r} from the payload into a diagnostic that "
+        f"is persisted UNREDACTED into oracle-manifest.json: {why!r}"
+    )
+
+
+def test_an_undefined_entity_is_the_control_that_makes_that_test_bite():
+    """⚠️ This control FALSIFIED the docstring it was written to confirm. Kept, corrected, not deleted.
+
+    The first version of `_svg_is_complete` justified not forwarding `str(exc)` with "expat's
+    'undefined entity &foo;' message echoes document text". Measured on CPython 3.13 that is **false**:
+    across ten malformed shapes -- undefined entity, mismatched tag, unbound prefix, junk after the
+    root, duplicate attribute, unclosed token, invalid token, an encoding mismatch and a mis-declared
+    UTF-16 document -- every `ParseError` message is fixed vocabulary plus a line/column and quotes
+    nothing.
+
+    ⚠️ What the same probe DID find is a live defect the wrong assumption was hiding: a document
+    declaring an unknown encoding raises `LookupError: unknown encoding: <attacker text>`, which is
+    **not a ParseError**, so `except ElementTree.ParseError` let it out of the module entirely -- into
+    a traceback carrying the document's own bytes, crashing the capture on the way. That is the shape
+    this test now pins, and the `ParseError` half is kept as the negative control: if a future Python
+    starts quoting document text there, this fails and says so.
+    """
+    entity = f'<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg">&{SHAPES["plain"]};</svg>'.encode()
+    encoding = f'<?xml version="1.0" encoding="{SHAPES["plain"]}"?><svg/>'.encode()
+
+    with pytest.raises(ElementTree.ParseError) as parse_error:
+        ElementTree.fromstring(entity)
+    assert longest_surviving_run(SHAPES["plain"], str(parse_error.value)) == "", (
+        f"a ParseError now echoes document text ({str(parse_error.value)!r}); `_svg_is_complete` "
+        "already refuses to forward it, but the module docstring's measured claim is out of date"
+    )
+
+    with pytest.raises(LookupError) as lookup_error:
+        ElementTree.fromstring(encoding)
+    assert longest_surviving_run(SHAPES["plain"], str(lookup_error.value)) != "", (
+        "the unknown-encoding message no longer echoes the document, so the `except LookupError` "
+        "branch is no longer covering the leak it was added for -- re-measure before trusting it"
+    )
+    assert not isinstance(lookup_error.value, ElementTree.ParseError), (
+        "LookupError became a ParseError, so the separate handler is now redundant rather than "
+        "load-bearing; say so in the docstring instead of leaving a claim that no longer bites"
+    )
+
+    for body in (entity, encoding):
+        ok, why = payload_facts.payload_is_complete("svg", body)
+        assert ok is False, why
+        assert longest_surviving_run(SHAPES["plain"], why) == "", why
+
+
+def test_the_entity_refusal_prevents_an_expansion_expat_would_otherwise_perform():
+    """⚠️ A guard that guards nothing reads exactly like one that does. This measures the difference.
+
+    `_svg_is_complete` refuses a DTD rather than parsing it, on the grounds that expat expands
+    internal entities and a nested set is a memory-exhaustion primitive. That is only worth the code
+    if expat really would expand it, so the expansion is demonstrated here on a deliberately small
+    payload -- three levels, not a bomb -- and the refusal is then shown to stop before reaching it.
+    """
+    bomb = (
+        b'<?xml version="1.0"?><!DOCTYPE svg [<!ENTITY a "AAAAAAAAAA">'
+        b'<!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;">'
+        b'<!ENTITY c "&b;&b;&b;&b;&b;&b;&b;&b;&b;&b;">]>'
+        b'<svg xmlns="http://www.w3.org/2000/svg"><text>&c;</text></svg>'
+    )
+    root = ElementTree.fromstring(bomb)
+    expanded = len(root[0].text or "")
+
+    assert expanded == 1000, (
+        f"expat expanded the entity to {expanded} characters from a 3-level declaration; if it has "
+        "stopped expanding at all, the refusal in `_svg_is_complete` is now dead code"
+    )
+
+    ok, why = payload_facts.payload_is_complete("svg", bomb)
+
+    assert ok is False
+    assert why == "the SVG declares XML entities, which this parser refuses to expand", why
 
 
 # ------------------------------------------ round 9: the KNOWN_GAPS classification, as MEASURED

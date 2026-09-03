@@ -101,7 +101,7 @@ class TimedSession(oracle.TableauSession):
         self.calls: list[str] = []
         self.token, self.site_id = "tok", "sid"
 
-    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None):  # noqa: ARG002
+    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None, deadline=None):  # noqa: ARG002
         self.calls.append(path)
         duration, status, payload, headers = self.responses.pop(0)
         self._clock.advance(duration)

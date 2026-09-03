@@ -243,7 +243,7 @@ class _Stub:
     def sign_in(self):
         return None
 
-    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None):  # noqa: ARG002
+    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None, deadline=None):  # noqa: ARG002
         return 200, self.body.encode("utf-8"), {}
 
 
@@ -547,7 +547,7 @@ class _TransportStub:
     def sign_in(self):
         return None
 
-    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None):  # noqa: ARG002
+    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None, deadline=None):  # noqa: ARG002
         if self.raises is not None:
             raise self.raises
         return self.status, self.body, {}
@@ -626,9 +626,9 @@ def test_the_census_makes_exactly_one_request(monkeypatch, capsys):
     calls = []
 
     class _Counting(_TransportStub):
-        def _request(self, method, path, *, body=None, accept=None, authed=True, api=None):  # noqa: ARG002
+        def _request(self, method, path, *, body=None, accept=None, authed=True, api=None, deadline=None):  # noqa: ARG002
             calls.append(path)
-            return super()._request(method, path, body=body, accept=accept, authed=authed, api=api)
+            return super()._request(method, path, body=body, accept=accept, authed=authed, api=api, deadline=deadline)
 
     monkeypatch.setattr(census_mod, "_session", lambda _path: _Counting(body=HEALTHY_BODY))
     assert census_mod.main(["--env", "unused"]) == census_mod.EXIT_OK
@@ -660,7 +660,7 @@ import tableau_luid_census as census
 class _Stub:
     def sign_in(self):
         return None
-    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None):
+    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None, deadline=None):
         return {status}, {body!r}, {{}}
 
 census._session = lambda _p: _Stub()

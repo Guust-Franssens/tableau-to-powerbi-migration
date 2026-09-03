@@ -32,6 +32,14 @@ dev = [
     "pytest-xdist>=3.6",
     "ruff>=0.6",
     "pylint>=3.2",
+    # INDEPENDENT ORACLES for the render fixtures, and dev deps for exactly the reason above. Three
+    # review rounds in a row found a positive fixture that pinned the defect under review - an
+    # incomplete PNG, then an IHDR-only PNG, then four PDFs strict `pypdf` rejects with `startxref
+    # not found`. A fixture certified by the code under test is circular, so the builders in
+    # `tests/{png,pdf}_fixtures.py` are checked by parsers that are not ours. `pillow` is also in the
+    # `showcase` extra; it is repeated here so a `uv sync --group dev` venv has it too.
+    "pypdf>=5.0",
+    "pillow>=10.3",
 ]
 
 # This is a SCRIPT toolkit, not an importable library: everything runs as `python scripts/<x>.py`.
