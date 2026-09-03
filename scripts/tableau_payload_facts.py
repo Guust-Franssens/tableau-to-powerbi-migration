@@ -24,7 +24,7 @@ import io
 import re
 import zlib
 from typing import Any
-from xml.etree import ElementTree
+from xml.parsers import expat
 
 _PERCENT = re.compile(r"^-?[\d,.]+%$")
 _CURRENCY = re.compile(r"^-?[$\u00a3\u20ac\u00a5]\s?[\d,.]+$")
@@ -34,12 +34,12 @@ _SVG_HREF = re.compile(r'(?:xlink:)?href="([^"]{0,120})')
 _PDF_MEDIABOX = re.compile(rb"/MediaBox\s*\[([^\]]*)\]")
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
-# A DTD may only appear before the root element, so the entity scan stops at `<svg` rather than
-# sweeping a 21 MB drawing whose own <text> could legitimately contain the literal string.
-_PROLOG_SCAN_BYTES = 65536
-_ENTITY_DECLARATION = re.compile(rb"<!ENTITY", re.I)
-# `%%EOF` is the last line of a well-formed PDF; the slack absorbs a producer's trailing whitespace.
-_PDF_TAIL_BYTES = 2048
+# The object header of a cross-reference STREAM, which is what `startxref` points at in a PDF 1.5+
+# file that has no `xref` table. Matched at the offset the trailer names, never searched for.
+_PDF_XREF_STREAM = re.compile(rb"\d+\s+\d+\s+obj")
+# How much is read at that offset to identify it. Enough for `<n> <g> obj`, and bounded so a hostile
+# offset cannot make this slice a large buffer.
+_PDF_XREF_PEEK = 64
 
 
 def detect_format(values: list[str]) -> str | None:
@@ -195,59 +195,141 @@ def _png_is_complete(payload: bytes) -> tuple[bool, str]:  # pylint: disable=too
     return True, ""
 
 
-def _svg_is_complete(payload: bytes) -> tuple[bool, str]:
-    """An SVG is whole when the WHOLE document parses and its root really is ``<svg>``.
+class _EntityDeclarationRefused(Exception):
+    """Raised out of an expat handler when the document declares an entity. Never escapes this module.
 
-    ⚠️ A full parse, not a prefix match, and that is the entire point: a truncated SVG still begins
-    with a perfectly good ``<svg ...>`` and only expat can tell you the document never ends.
-
-    ⚠️ Entity declarations are REFUSED rather than expanded. ``xml.etree.ElementTree`` is explicitly
-    not hardened against maliciously constructed data, and a nested-entity payload ("billion laughs")
-    is a memory-exhaustion primitive against any expat parse. A Tableau REST export carries no DTD, so
-    refusing one costs nothing real and removes the class without a new dependency. The scan stops at
-    the root element because a DTD may only appear before it -- sweeping the whole document would
-    misfire on a drawing whose own ``<text>`` happens to contain the literal string.
-
-    ⚠️ **``LookupError`` is caught because it is NOT a ``ParseError``, and it is the one message that
-    echoes the document.** Measured on CPython 3.13 -- and this corrects the assumption the first
-    version of this function was written on. Across ten malformed shapes (undefined entity, mismatched
-    tag, unbound prefix, junk after the root, duplicate attribute, unclosed token, invalid token, an
-    encoding mismatch and a mis-declared UTF-16 document) every ``ParseError`` message is fixed
-    vocabulary plus a line/column: **none quotes document text**, including the undefined-entity case
-    the guard was originally aimed at. But a document declaring
-    ``<?xml version="1.0" encoding="<anything>"?>`` raises ``LookupError: unknown encoding:
-    <anything>`` -- attacker-chosen text, verbatim -- and that is a ``LookupError``, so a bare
-    ``except ElementTree.ParseError`` lets it out of this module entirely, into a traceback carrying
-    the document's own bytes. Neither message is forwarded either way; the numeric code and position
-    say where it broke without repeating a byte of it.
+    ⚠️ Refusing at the DECLARATION, from inside the parser, is the whole point. The previous guard
+    scanned the bytes before the first ``<svg`` for ``<!ENTITY`` -- and an attacker moves the boundary
+    simply by writing ``<svg`` inside a comment or a processing instruction ahead of the DTD.
+    Measured: with ``<!-- harmless <svg decoy> -->`` first, the real ``<!ENTITY`` block sat 45 bytes
+    PAST the boundary, expat expanded the entity to 1000 characters, and the artifact was recorded
+    ``status: ok`` with a digest and a path. The parser knows where the DTD is; a substring search
+    cannot.
     """
-    root_at = payload.find(b"<svg")
-    prolog = payload[: root_at if root_at >= 0 else _PROLOG_SCAN_BYTES]
-    if _ENTITY_DECLARATION.search(prolog):
-        return False, "the SVG declares XML entities, which this parser refuses to expand"
+
+
+def _svg_is_complete(payload: bytes) -> tuple[bool, str]:
+    """An SVG is whole when the WHOLE document parses, declares no entities, and its root is ``<svg>``.
+
+    ⚠️ **Parsed, never scanned.** A truncated SVG still opens with a flawless ``<svg ...>``, and a
+    document that hides its DTD behind a decoy still expands its entities -- neither is visible to a
+    prefix match or a window scan. Expat is asked to consume the buffer to its last byte, which is the
+    only thing that can say the document ENDS where it claims to.
+
+    Three refusals, each structural rather than lexical:
+
+    * **entity declarations** -- :class:`_EntityDeclarationRefused` is raised from ``EntityDeclHandler``,
+      so a declaration is refused wherever it sits and nothing is ever expanded. A Tableau REST export
+      carries no DTD, so this costs nothing real and removes the resource-exhaustion class outright.
+    * **external entity references** -- refused for the same reason. Expat does not fetch external
+      parameter entities by default (``XML_PARAM_ENTITY_PARSING_NEVER``), so this is belt and braces
+      rather than the only guard, and it means no parse of ours can reach the network.
+    * **anything not well-formed to the end** -- truncation, junk after the root element, an undefined
+      entity. All arrive as ``ExpatError``.
+
+    ⚠️ **The encoding exceptions are a SEPARATE family and expat does not unify them** -- an assumption
+    worth measuring rather than believing, because the first draft of this fix assumed it did. Measured
+    on CPython 3.13: an unrecognised ``encoding=`` raises ``LookupError`` **carrying the declared name
+    verbatim**, and ``utf-32``/``utf-7``/``shift_jis``/``big5``/``gb18030`` raise ``ValueError:
+    multi-byte encodings are not supported``. Neither is an ``ExpatError``, so both previously escaped
+    this function and crashed the capture instead of becoming a non-``ok`` leg. Caught here, and
+    neither message is forwarded.
+
+    ⚠️ Namespace processing is deliberately OFF. ``ElementTree.fromstring`` is namespace-aware and
+    rejects an undeclared prefix, so a drawing using ``xlink:href`` without declaring ``xmlns:xlink``
+    would have been refused as broken. Non-namespace parsing accepts it -- measured -- which makes this
+    strictly more permissive than what it replaces on well-formed documents, while being strictly
+    stricter on the two bypasses. The root's prefix is stripped for the ``svg`` comparison.
+    """
+    root: list[str] = []
+
+    # ⚠️ Every handler names its parameters in full rather than taking `*args`: the taint gate in
+    # `tests/test_diagnostic_redaction.py` refuses star-args in a guarded module, because the analyser
+    # cannot follow them and would go silently blind on this function. The signatures are expat's, so
+    # the unused parameters and the arity are dictated rather than chosen -- hence the disables.
+    def start_element(name, attributes):  # pylint: disable=unused-argument
+        if not root:
+            root.append(name)
+
+    def entity_declaration(  # pylint: disable=unused-argument,too-many-arguments,too-many-positional-arguments
+        entity_name,
+        is_parameter_entity,
+        value,
+        base,
+        system_id,
+        public_id,
+        notation_name,
+    ):
+        raise _EntityDeclarationRefused
+
+    def external_entity_reference(context, base, system_id, public_id):  # pylint: disable=unused-argument
+        raise _EntityDeclarationRefused
+
+    parser = expat.ParserCreate()
+    parser.StartElementHandler = start_element
+    parser.EntityDeclHandler = entity_declaration
+    parser.ExternalEntityRefHandler = external_entity_reference
     try:
-        root = ElementTree.fromstring(payload)  # noqa: S314  # entity declarations refused above
-    except ElementTree.ParseError as exc:
-        line, column = exc.position
-        return False, f"the SVG is not well-formed XML (expat error {exc.code} at line {line}, column {column})"
-    except LookupError:
-        return False, "the SVG declares an encoding this parser does not know"
-    if root.tag.rsplit("}", 1)[-1] != "svg":
+        parser.Parse(payload, True)
+    except _EntityDeclarationRefused:
+        return False, "the SVG declares XML entities, which this parser refuses to expand"
+    except expat.ExpatError as exc:
+        # ⚠️ `str(exc)` is NOT quoted. Measured across ten malformed shapes, no `ExpatError` message
+        # echoes document text -- but that is a property of today's expat, not a guarantee, and the
+        # numeric code and position say where it broke without repeating a byte of it either way.
+        return False, f"the SVG is not well-formed XML (expat error {exc.code} at line {exc.lineno})"
+    except (LookupError, ValueError):
+        # The encoding family. `LookupError`'s message quotes the declared encoding verbatim, so it is
+        # replaced rather than forwarded; `ValueError` covers the multibyte codecs expat cannot stream.
+        return False, "the SVG declares an encoding this parser cannot decode"
+    if not root:
+        return False, "the SVG document contains no element at all"
+    if root[0].rpartition(":")[2] != "svg":
         return False, "the SVG document parses but its root element is not <svg>"
     return True, ""
 
 
-def _pdf_is_complete(payload: bytes) -> tuple[bool, str]:
-    """A PDF is whole when the ``%%EOF`` trailer is present in its final bytes.
+def _pdf_is_complete(payload: bytes) -> tuple[bool, str]:  # pylint: disable=too-many-return-statements
+    """A PDF is whole when its FINAL revision's trailer is intact and terminates the file.
 
-    Truncation removes the trailer, which is what makes it the check that matters here. This does not
-    claim the cross-reference table resolves -- that would need a real PDF parser -- so it is stated as
-    the bound it is: it catches a cut-short download, not a semantically broken document.
+    ⚠️ **The final revision, not tail membership.** The previous check accepted any ``%%EOF`` within
+    the last 2 KiB -- and a PDF carries one ``%%EOF`` per incremental revision, so a download cut
+    during a short later revision still held an earlier marker. Measured on a two-revision file cut
+    before the newest ``startxref``: the surviving ``%%EOF`` sat **105 bytes from the end**, this
+    function returned ``(True, "")``, and an independent parser read the file as the PRIOR revision --
+    ``/Title (ORIGINAL)`` where the complete file says ``LATEST-REVISION``. So the bytes were credited
+    as evidence while describing a document the customer no longer has.
+
+    What is checked instead follows the trailer the file itself names:
+
+    1. ``%%EOF`` is the last non-whitespace token -- trailing whitespace is legal, trailing anything
+       else means the file did not end here;
+    2. the ``startxref`` immediately before it carries a numeric byte offset;
+    3. that offset lies inside the file and points at a cross-reference -- the ``xref`` keyword, or an
+       object header for a PDF 1.5+ cross-reference stream.
+
+    Together those say the last thing in the file is a complete pointer to a cross-reference that
+    exists. It is deliberately NOT a claim that the whole reference graph resolves; that needs a real
+    PDF parser, and the failure mode here is a cut-short download, which this does catch.
     """
     if not payload.startswith(b"%PDF-"):
         return False, "the PDF header is missing"
-    if b"%%EOF" not in payload[-_PDF_TAIL_BYTES:]:
-        return False, f"the PDF has no %%EOF trailer in its final {_PDF_TAIL_BYTES} byte(s), so it was cut short"
+    tail = payload.rstrip()
+    if not tail.endswith(b"%%EOF"):
+        return False, "the PDF does not END with %%EOF, so it was cut short"
+    before_eof = tail[: -len(b"%%EOF")]
+    marker = before_eof.rfind(b"startxref")
+    if marker < 0:
+        return False, "the PDF's final revision has no startxref, so its trailer is incomplete"
+    offset_token = before_eof[marker + len(b"startxref") :].strip()
+    if not offset_token.isdigit():
+        return False, "the PDF's final startxref does not carry a byte offset"
+    offset = int(offset_token)
+    if not 0 < offset < len(payload):
+        return False, f"the PDF's final startxref points outside its own {len(payload)} bytes"
+    target = payload[offset : offset + _PDF_XREF_PEEK].lstrip()
+    if not (target.startswith(b"xref") or _PDF_XREF_STREAM.match(target)):
+        return False, "the PDF's final startxref does not point at a cross-reference"
     return True, ""
 
 
@@ -264,6 +346,28 @@ def payload_is_complete(kind: str, payload: bytes) -> tuple[bool, str]:
     SHA-256 beside them and ``render_unestablished == 0``. A capture gap that reports itself as
     evidence is strictly worse than one that reports itself as a gap -- the fidelity bug it hides is
     then not merely unverified but believed verified.
+
+    ⚠️ **THE RULE, because getting it wrong cost three review rounds in three different formats:
+    PARSE the payload and prove it ENDS where it claims to. Never scan for a marker.** A substring or
+    tail search is satisfied by bytes ANYWHERE in the buffer, so it structurally cannot answer the
+    only question being asked. Every instance of the class was the same shape:
+
+    ==========================  ==================================================================
+    the scan                    what it could not tell apart
+    ==========================  ==================================================================
+    PNG signature prefix        an 8-byte truncation from a whole image
+    ``<!ENTITY`` before         a DTD from a DTD hidden behind ``<!-- <svg decoy> -->`` or a
+    the first ``<svg``          processing instruction -- the boundary is attacker-movable
+    ``%%EOF`` in the last       the FINAL revision's trailer from an EARLIER revision's, so a
+    2 KiB                       download cut in a later revision looked complete
+    ==========================  ==================================================================
+
+    So each format is settled by something that consumes the bytes: PNG by a chunk walk with CRCs that
+    must land exactly on the end, SVG by an expat parse to the last byte with entity declarations
+    refused, PDF by following the trailer the file itself names. The cross-format consequence is one
+    property, and it is worth stating because it is testable in one line per format: **appending any
+    non-whitespace byte to a complete payload must make it incomplete.** A marker scan passes that
+    for small suffixes; a parser cannot.
 
     ⚠️ ``why_not`` is FIXED VOCABULARY plus integers, and must stay that way: it is persisted into
     ``oracle-manifest.json``, and every other diagnostic on this path had to be routed through

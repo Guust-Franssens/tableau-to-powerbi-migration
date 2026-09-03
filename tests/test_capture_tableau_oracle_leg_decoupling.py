@@ -39,6 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import capture_tableau_oracle as oracle  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_oracle_manifest as verdict  # noqa: E402  # pylint: disable=wrong-import-position
 from png_fixtures import valid_png  # noqa: E402  # pylint: disable=wrong-import-position
+from pdf_fixtures import valid_pdf  # noqa: E402  # pylint: disable=wrong-import-position
 
 LUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 TIMEOUT_BODY = "TimeoutError: read operation timed out"
@@ -52,7 +53,7 @@ SESSION_LOST = (
 )
 PNG = valid_png(800, 600)
 SVG = b'<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"></svg>'
-PDF = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n%%EOF\n"
+PDF = valid_pdf()
 
 
 def _creds() -> oracle.SiteCredentials:

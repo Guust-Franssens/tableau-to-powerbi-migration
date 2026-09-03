@@ -696,6 +696,156 @@ def svg_complete(payload):
 f._COMPLETENESS_CHECKS["svg"] = svg_complete
 """,
     ),
+    # ------------------------------------- review round 3: a MARKER SCAN standing in for a parser
+    #
+    # ⚠️ One defect class, found three times in three formats. Each mutation restores one instance of
+    # it, and each is killed by a test written against the CLASS rather than the instance -- which is
+    # the point: fixing them one at a time is what produced three review rounds.
+    "pdf-completeness-searches-a-tail-window": (
+        (
+            "tests/test_payload_completeness.py::test_a_pdf_truncated_inside_a_LATER_revision_is_refused",
+            "tests/test_payload_completeness.py::test_no_completeness_check_can_be_satisfied_by_bytes_that_are_not_the_end",
+        ),
+        """
+import tableau_payload_facts as f
+def pdf_complete(payload):
+    # THE round-3 blocker, verbatim: accept any `%%EOF` within the last 2 KiB. A PDF carries one per
+    # incremental revision, so a download cut during a later revision still holds an earlier marker
+    # -- measured 105 bytes from the end -- and an independent parser then reads the PRIOR revision.
+    if not payload.startswith(b"%PDF-"):
+        return False, "the PDF header is missing"
+    if b"%%EOF" not in payload[-2048:]:
+        return False, "the PDF has no %%EOF trailer in its final 2048 byte(s), so it was cut short"
+    return True, ""
+f._COMPLETENESS_CHECKS["pdf"] = pdf_complete
+""",
+    ),
+    "pdf-startxref-is-never-resolved": (
+        ("tests/test_payload_completeness.py::test_a_pdf_whose_startxref_does_not_resolve_is_refused",),
+        """
+import tableau_payload_facts as f
+def pdf_complete(payload):
+    # The half-fix: require `%%EOF` to END the file, but never follow the pointer before it. A file
+    # whose final startxref is missing, non-numeric, or aimed outside itself then reads as complete.
+    if not payload.startswith(b"%PDF-"):
+        return False, "the PDF header is missing"
+    if not payload.rstrip().endswith(b"%%EOF"):
+        return False, "the PDF does not END with %%EOF, so it was cut short"
+    return True, ""
+f._COMPLETENESS_CHECKS["pdf"] = pdf_complete
+""",
+    ),
+    "svg-entity-scan-bounded-by-the-first-svg": (
+        (
+            "tests/test_payload_completeness.py::test_an_entity_declaration_is_refused_WHEREVER_it_sits",
+            "tests/test_payload_completeness.py::test_no_external_entity_can_reach_the_network",
+        ),
+        """
+import re
+from xml.etree import ElementTree
+import tableau_payload_facts as f
+_ENTITY = re.compile(rb"<!ENTITY", re.I)
+def svg_complete(payload):
+    # The round-3 SECURITY blocker: bound the entity scan by the first raw `<svg`. An attacker moves
+    # that boundary with `<!-- <svg -->` or `<?d <svg ?>`, the real DTD falls outside it, and expat
+    # expands the entity -- measured 1000 characters -- while the artifact is credited as evidence.
+    root_at = payload.find(b"<svg")
+    prolog = payload[: root_at if root_at >= 0 else 65536]
+    if _ENTITY.search(prolog):
+        return False, "the SVG declares XML entities, which this parser refuses to expand"
+    try:
+        root = ElementTree.fromstring(payload)
+    except ElementTree.ParseError as exc:
+        return False, f"the SVG is not well-formed XML (expat error {exc.code} at line 1)"
+    except (LookupError, ValueError):
+        return False, "the SVG declares an encoding this parser cannot decode"
+    if root.tag.rsplit("}", 1)[-1] != "svg":
+        return False, "the SVG document parses but its root element is not <svg>"
+    return True, ""
+f._COMPLETENESS_CHECKS["svg"] = svg_complete
+""",
+    ),
+    "svg-encoding-family-is-not-caught": (
+        (
+            "tests/test_payload_completeness.py::test_an_encoding_the_parser_cannot_decode_becomes_a_verdict_not_a_crash",
+        ),
+        """
+from xml.parsers import expat
+import tableau_payload_facts as f
+class _Refused(Exception):
+    pass
+def svg_complete(payload):
+    # The round-3 MEDIUM, verbatim: handle the parser's OWN error family and nothing else. Measured,
+    # `LookupError` (carrying the declared encoding verbatim) and `ValueError: multi-byte encodings
+    # are not supported` are NOT `ExpatError`, so both escape and crash the capture instead of
+    # becoming a non-ok leg.
+    #
+    # ⚠️ Re-implemented rather than wrapped: an earlier version of this mutation delegated to the
+    # FIXED function, which catches the family internally, so the exception never reached the
+    # wrapper's `except` and the mutation SURVIVED while claiming to restore the defect.
+    root = []
+    def start_element(name, attributes):
+        if not root:
+            root.append(name)
+    def entity_declaration(name, is_param, value, base, system_id, public_id, notation):
+        raise _Refused
+    def external_entity_reference(context, base, system_id, public_id):
+        raise _Refused
+    parser = expat.ParserCreate()
+    parser.StartElementHandler = start_element
+    parser.EntityDeclHandler = entity_declaration
+    parser.ExternalEntityRefHandler = external_entity_reference
+    try:
+        parser.Parse(payload, True)
+    except _Refused:
+        return False, "the SVG declares XML entities, which this parser refuses to expand"
+    except expat.ExpatError as exc:
+        return False, f"the SVG is not well-formed XML (expat error {exc.code} at line {exc.lineno})"
+    if not root:
+        return False, "the SVG document contains no element at all"
+    if root[0].rpartition(":")[2] != "svg":
+        return False, "the SVG document parses but its root element is not <svg>"
+    return True, ""
+f._COMPLETENESS_CHECKS["svg"] = svg_complete
+""",
+    ),
+    "svg-parse-is-not-required-to-reach-the-end": (
+        (
+            "tests/test_payload_completeness.py::test_an_svg_cut_short_is_refused_although_its_root_element_is_perfect",
+            "tests/test_payload_completeness.py::test_no_completeness_check_can_be_satisfied_by_bytes_that_are_not_the_end",
+        ),
+        """
+from xml.parsers import expat
+import tableau_payload_facts as f
+def svg_complete(payload):
+    # The subtlest form: parse, but not to the END. `Parse(payload, False)` leaves the document open,
+    # so a truncation is indistinguishable from a well-formed prefix and junk appended after the root
+    # is never reached. Entity refusal still works, so this passes every OTHER svg test in the suite.
+    root = []
+    def start_element(name, attributes):
+        if not root:
+            root.append(name)
+    def entity_declaration(name, is_param, value, base, system_id, public_id, notation):
+        raise ValueError("entity")
+    parser = expat.ParserCreate()
+    parser.StartElementHandler = start_element
+    parser.EntityDeclHandler = entity_declaration
+    try:
+        parser.Parse(payload, False)
+    except ValueError:
+        return False, "the SVG declares XML entities, which this parser refuses to expand"
+    except expat.ExpatError as exc:
+        return False, f"the SVG is not well-formed XML (expat error {exc.code} at line {exc.lineno})"
+    except LookupError:
+        return False, "the SVG declares an encoding this parser cannot decode"
+    if not root:
+        return False, "the SVG document contains no element at all"
+    if root[0].rpartition(":")[2] != "svg":
+        return False, "the SVG document parses but its root element is not <svg>"
+    return True, ""
+f._COMPLETENESS_CHECKS["svg"] = svg_complete
+""",
+    ),
     "tls-handshake-runs-before-the-watchdog-can-reach-it": (
         (
             "tests/test_tableau_http_deadline.py::test_a_trickling_TLS_handshake_is_bounded_by_the_deadline",

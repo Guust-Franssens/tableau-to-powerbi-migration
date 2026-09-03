@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import capture_tableau_oracle as oracle  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_oracle_manifest as verdict  # noqa: E402  # pylint: disable=wrong-import-position
 from png_fixtures import valid_png  # noqa: E402  # pylint: disable=wrong-import-position
+from pdf_fixtures import valid_pdf  # noqa: E402  # pylint: disable=wrong-import-position
 
 # The real root element of a `?format=svg` capture of `HR Dashboard | HR | Summary` (declared
 # 1400x800 px), trimmed to the parts this module reasons about. 370.681mm * 96 / 25.4 == 1400.99,
@@ -274,14 +275,15 @@ def test_both_legs_ok_counts_once_in_each_column(tmp_path):
 # Real bytes from `/pdf?type=Unspecified` on the 1000x800 `Seed - 92 - Viz Gauntlet Dashboard`:
 # 0.75 * 1000 + 72 = 822pt wide, 0.75 * 800 + 72 = 672pt tall.
 #
-# ⚠️ The `%%EOF` trailer is not decoration -- both fixtures lacked it, and once `_capture_render`
-# started checking structural completeness they failed as `truncated`, correctly. A PDF without its
-# trailer is a cut-short download, and a fixture asserting that one is acceptable evidence is the
-# same defect this whole change closes, one format over.
-PDF_FITTED = b"%PDF-1.4\n/Type/Page /MediaBox [0 0 822.000000 672.000000]\n/FontFile2 /Subtype /Image\n%%EOF\n"
+# ⚠️ These are now built by `tests/pdf_fixtures.py` and accepted by STRICT `pypdf`. The previous
+# literals were not PDFs at all -- a MediaBox and a `%%EOF` with no object structure between them --
+# and `pypdf` rejected both with `startxref not found`. They passed only because the completeness
+# check searched the last 2 KiB for `%%EOF` instead of following the trailer, which is the same
+# fail-open one format over: a fixture built to satisfy the check rather than the format.
+PDF_FITTED = valid_pdf(822, 672)
 # What a server that ignored the undocumented `type=Unspecified` falls back to: measured 612x792
 # (US Letter portrait), NOT the 612x1008 Legal the documentation claims is the default.
-PDF_LETTER = b"%PDF-1.4\n/Type/Page /MediaBox [0 0 612.000000 792.000000]\n/FontFile\n%%EOF\n"
+PDF_LETTER = valid_pdf(612, 792)
 
 
 def test_pdf_facts_records_the_page_actually_returned_not_the_one_requested():
