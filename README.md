@@ -186,17 +186,37 @@ A migration moves through **three locations, one direction**. Knowing which is w
 knowing where to find something. Full explanation, with the measured figures and the gates:
 **[`docs/migration-phases.md`](docs/migration-phases.md)**.
 
-| Phase | Where it lands | What produces it | What you get |
-| --- | --- | --- | --- |
-| **1. Collect & convert** | `_runs/<NNN>-<slug>/` | `run_engine_survey.py` → `assess_estate.py` → `harvest_estate_assets.py` → `run_estate.py`, plus `capture_tableau_oracle.py` | `assessment/` (what exists, what is used, migration order), `assets/` (the downloads), `bundle/` (the engine's conversion output), `oracle/` (Tableau's own renders and numbers) |
-| **2. Package for the agent** | `_runs/<NNN>-<slug>/packages/<batch>/<Unit>/` | [`scripts/package_unit.py`](scripts/package_unit.py) | one self-contained folder per migration unit — source, engine output, handover queue and reference evidence together, which **both gates accept with no flags** |
-| **3. Ship** | `migrations/{workbooks,datasources}/<slug>/fabric/` | ⚠️ a manual copy — no tool yet (issue [#458](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/458)) | the PBIP project a customer opens in Power BI Desktop |
+**1. Collect & convert** → `_runs/<NNN>-<slug>/`
+
+Run `run_engine_survey.py` → `assess_estate.py` → `harvest_estate_assets.py` → `run_estate.py`, plus
+`capture_tableau_oracle.py`. You get four subdirectories: `assessment/` (what exists, what is used,
+migration order), `assets/` (the downloads), `bundle/` (the engine's conversion output) and
+`oracle/` (Tableau's own renders and numbers).
+
+**2. Package for the agent** → `_runs/<NNN>-<slug>/packages/<batch>/<Unit>/`
+
+[`scripts/package_unit.py`](scripts/package_unit.py) emits one self-contained folder per migration
+unit — source, engine output, handover queue and reference evidence together — which **both gates
+accept with no flags**.
+
+**3. Ship** → `migrations/{workbooks,datasources}/<slug>/fabric/`
+
+The PBIP project a customer opens in Power BI Desktop.
+⚠️ Still a manual copy — no tool yet (issue
+[#458](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/458)).
 
 Two gates sit on phase 2: `check_reference_readiness.py` is the **entry** gate (per report page, is
 there trustworthy Tableau reference evidence to start from?) and `check_unit.py` is the **exit** gate
 (is this unit done?). ⚠️ A page the entry gate calls **`blind` is a finding, not a pass** — it means a
 fidelity bug on that page would be structurally unfalsifiable, so it exits non-zero and you deal with
 it before building.
+
+⚠️ **Both gates check the phase-2 package, not the phase-3 deliverable.** `check_unit.py` will run
+against a shipped `migrations/` folder, but it checks **less** there: measured on
+`examples/shipping-kpis`, page parity still passes while oracle coverage and the engine receipt both
+degrade to `NOT_CHECKED`, because the oracle and `engine-output-receipt.json` live in the package and
+are not shipped. That is honest rather than a false pass — `NOT_CHECKED` exits non-zero — but it is
+why a unit is verified **before** it is promoted, not after.
 
 Three things about that flow are worth knowing before you touch it, and each has cost someone real
 work:
