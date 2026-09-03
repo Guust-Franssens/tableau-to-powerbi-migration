@@ -550,7 +550,7 @@ Step 1 answers *scope* by investigation, so only these are genuinely questions:
 | 2 | **Autonomy** — see the table below. Default `standard`. | The failure modes are symmetric: too autonomous and a run spends 105 minutes saying nothing; too interactive and an overnight run stops on question 1 and achieves nothing. |
 | 3 | **Fidelity bar** — faithful re-creation, or modernise where Power BI is better? | It decides real translations (a Tableau dual-axis trick → a native combo chart; a `MAKELINE` route map → endpoint bubbles). Both builders need it. |
 | 4 | **If we hit a wall — stop, or degrade?** | Pre-authorising the fallback is what lets an unattended run *survive* one instead of dying at 3 am. |
-| 5 | **Who drives the data refreshes?** — see the table below. Default `scripted`. | A refresh is the one long operation with **no progress signal**, so an agent cannot tell "working" from "hung" *while it is happening*. Only you know how big the source is and whether you will be at the keyboard. |
+| 5 | **Who drives the data refreshes?** — see the table below. Default `scripted`. | A refresh is the one long operation whose progress evidence is **conditional**: with the AMO trace up you get row counts, without it only elapsed time, which cannot tell "working" from "hung". Only you know how big the source is and whether you will be at the keyboard. |
 
 **Autonomy levels, defined by behaviour at a decision point — not by vibe:**
 
@@ -569,7 +569,7 @@ source was reachable.
 
 | strategy | who drives it | ceiling | you can see progress |
 |---|---|---|---|
-| **`scripted`** (default) | `refresh_pbip_model.py` | **3600 s** absolute backstop when the AMO progress trace is up; the legacy **300 s** applies only untraced or `--calculate-only` | ✅ row-count evidence from the AMO trace, plus a non-fatal silence warning at 120 s |
+| **`scripted`** (default) | `refresh_pbip_model.py` | **3600 s** on a default full refresh — whether trace setup succeeds **or fails** — and configurable; the legacy **300 s** (330 s with grace) applies only to explicit `--no-progress` and `--calculate-only`/`--measures-only` | ⚠️ conditional — row counts only once `ProgressReportCurrent` emits them, else an elapsed "waiting for first row-count event" heartbeat; non-fatal silence warning at 120 s |
 | `operator` | the agent prepares everything, stops, and asks **you** to hit Refresh in Desktop | none | ✅ per-table row counts, live in the UI |
 | `xmla` | manual XMLA/TOM against the live instance | none | ⚠️ partial |
 
@@ -578,17 +578,23 @@ source was reachable.
 the prose, so every agent inheriting this file was briefed against a ceiling the code no longer had.
 Re-read `refresh_pbip_model.py`'s constants before quoting a number from here.
 
-**Why it still earns a slot in the intake.** Not because the ceiling is too low any more — it isn't —
-but because the *observability* is conditional. `REFRESH_ABSOLUTE_TIMEOUT_SECONDS = 3600.0` is
-deliberately sized "comfortably above measured 700-750s customer Snowflake refreshes", and
-`REFRESH_PROGRESS_LIVENESS_SECONDS = 120.0` reports silence **without killing** ("Liveness is
-deliberately NON-FATAL ... Killing on this timer would false-positive a healthy slow source"). So a
-slow source no longer loses its refresh. What is conditional is the evidence: the row-count heartbeat
-comes from a **server-level AMO trace**, so it needs the AMO/TOM client assembly on the machine.
-Without it — preflight reports this as RECOMMENDED, not critical — the 3600 s backstop still holds,
-but you are back to an elapsed-time countdown that cannot distinguish "working" from "hung", and
-`ImageSave` persist falls back to the UI path. Check preflight's AMO line before choosing `scripted`
-for a long unattended refresh.
+**Why it still earns a slot in the intake.** The default ceiling no longer kills the measured
+700–750 s Snowflake case: `REFRESH_ABSOLUTE_TIMEOUT_SECONDS = 3600.0` is deliberately sized
+"comfortably above" it, and the 120 s liveness timer reports silence **without killing** ("Killing on
+this timer would false-positive a healthy slow source"). ⚠️ **But three ways to lose a refresh
+remain, so do not read this as "the ceiling is solved":**
+
+- **`--no-progress` and `--calculate-only`/`--measures-only` stay on the legacy 300 s / 330 s path.**
+  That same 700–750 s Snowflake refresh still dies there.
+- **3600 s is still a fatal absolute backstop.** A default full refresh slower than an hour dies.
+- **Row-count evidence is not guaranteed even with the trace up.** Small tables can emit only
+  Begin/End events (#269 measured nine), so a traced refresh can stay elapsed-only for its
+  first-row latency or for its whole duration.
+
+What the **AMO/TOM assembly** changes is *observability*, not the timeout: preflight reports it as
+RECOMMENDED, and on trace-setup failure the 3600 s backstop is retained rather than reverting to
+300 s. Without AMO you keep the ceiling but lose row counts and liveness warnings, and `ImageSave`
+persist falls back to the UI path.
 
 Be precise about what the detector catches either way: a **detected** credential modal does not
 heartbeat on, it aborts with a specific error. What survives is the case the detector cannot see, and
