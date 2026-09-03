@@ -336,6 +336,13 @@ def test_no_marker_expression_a_caller_can_type_re_enables_the_gui_tests() -> No
 def test_the_opt_in_flag_selects_exactly_the_gui_tests() -> None:
     """Kills: orphaning them - marked, deselected everywhere, and selectable by nothing."""
     collected = _collected_node_ids([RUN_GUI_FLAG, "-m", GUI_MARKER])
+    # ⚠️ The non-vacuity assert comes FIRST and is not decoration. Both sides of the equality below
+    # are collected with `--run-gui`, so a mutation that breaks the opt-in outright empties BOTH and
+    # the equality holds - a differential assertion whose arms move together proves nothing.
+    assert collected, (
+        f"`{RUN_GUI_FLAG} -m {GUI_MARKER}` collected NOTHING, so the opt-in no longer works and the "
+        "window-spawning tests are orphaned: excluded from every tier and selectable by nobody"
+    )
     assert collected == set(_gui_node_ids()), (
         f"`{RUN_GUI_FLAG} -m {GUI_MARKER}` collected {sorted(collected)}, expected {sorted(_gui_node_ids())}"
     )
@@ -351,6 +358,7 @@ def test_the_portable_env_var_opts_in_too() -> None:
     env = _repo_free_env()
     env[RUN_GUI_ENV] = "1"
     collected = _collected_node_ids(["-m", GUI_MARKER], env=env)
+    assert collected, f"`{RUN_GUI_ENV}=1` selected nothing, so the copied-out bundle cannot be run at all"
     assert collected == set(_gui_node_ids()), (
         f"`{RUN_GUI_ENV}=1 -m {GUI_MARKER}` collected {sorted(collected)}, expected {sorted(_gui_node_ids())}"
     )
@@ -454,6 +462,12 @@ def test_the_ci_command_reaches_every_gui_test_in_the_repository() -> None:
     narrowing the command's paths, or dropping its `--run-gui`, moves only one of them.
     """
     for argv in _ci_gui_invocations():
+        collected = _collected_node_ids(argv)
+        assert collected, (
+            f"the CI opt-in command `pytest {' '.join(argv)}` collects NOTHING. `-m gui` alone "
+            f"selects the marked tests and the collection hook then deselects them again, so the "
+            f"step reports 'no tests ran' and stays green - it needs `{RUN_GUI_FLAG}` as well"
+        )
         missed = sorted(_gui_tests_missed_by(argv))
         assert not missed, (
             f"the CI opt-in command `pytest {' '.join(argv)}` does not reach these window-spawning "
