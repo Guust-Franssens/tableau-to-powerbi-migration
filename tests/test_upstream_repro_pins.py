@@ -8,6 +8,21 @@ verify the new engine output, then update the expectation and the pinned engine 
 
 The engine is an optional installed Copilot plugin, not a repo dependency, so engine-backed tests use
 the existing ``requires_engine`` skip pattern and skip cleanly when the deterministic tier is absent.
+
+⚠️ **The engine version is a SIGNAL, not a gate — and it used to be a gate, which broke this file.**
+Until 2026-09-03 ``_run_engine_once`` ``assert``\\ ed ``version == PINNED_ENGINE_VERSION``. Because
+every behaviour pin reaches the engine through that one function, a version bump did not merely
+report drift: it made **every** pin in this file fail *before its own assertion ran*, so #166, #168
+and #171 went **entirely unevaluated** from the moment the canonical plugin passed 2.260.0 — while
+still costing three red tests that read as "expected". The failure text compounded it by printing the
+pinned version on both sides of the comparison (*"changed from the expectation pinned at engine
+2.260.0: engine version 2.260.0"*), so it never even disclosed what was actually installed.
+
+That is the mechanism behind the standing "expect exactly six pre-existing engine-pin failures"
+baseline: a version guard that fires on every release converts a designed alarm into background
+noise, and a permanently-red test trains readers to skip the one message that mattered. Version drift
+is now a non-fatal ``UserWarning`` and the observed version is reported in every pin message, so a
+bump is disclosed **and** the behaviour pins still get to speak. Issue #486.
 """
 
 from __future__ import annotations
@@ -17,6 +32,7 @@ import os
 import shutil
 import subprocess
 import sys
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +47,7 @@ import engine_source  # noqa: E402  # pylint: disable=wrong-import-position
 
 FIXTURES = REPO / "fixtures" / "upstream-repros"
 RUN_ROOT = REPO / ".pytest_cache" / "upstream-repro-pins"
-PINNED_ENGINE_VERSION = "2.260.0"
+PINNED_ENGINE_VERSION = "2.356.0"
 SIMULATE_ENGINE_ABSENT = "T2P_SIMULATE_ENGINE_ABSENT_FOR_TESTS"
 
 _ENGINE_RUN: dict[str, Any] | None = None
@@ -50,10 +66,16 @@ def _contract() -> Path | None:
 requires_engine = pytest.mark.skipif(_contract() is None, reason="deterministic tier not installed")
 
 
+def _observed_version() -> str:
+    run = _ENGINE_RUN
+    return str(run["version"]) if run else "unknown"
+
+
 def _pin_message(issue: str, expectation: str, direction: str) -> str:
     return (
         f"Upstream repro pin {issue} changed from the expectation pinned at engine "
-        f"{PINNED_ENGINE_VERSION}: {expectation}. This is a signal, not necessarily a local bug: "
+        f"{PINNED_ENGINE_VERSION}: {expectation}. Observed on canonical engine "
+        f"{_observed_version()}. This is a signal, not necessarily a local bug: "
         f"{direction}. Verify against the current canonical engine, then update this test's expectation "
         "and pinned engine version."
     )
@@ -69,11 +91,16 @@ def _run_engine_once() -> dict[str, Any]:
         pytest.skip("deterministic tier not installed")
 
     version = engine_source.engine_version(engine)
-    assert version == PINNED_ENGINE_VERSION, _pin_message(
-        "fixture harness",
-        f"engine version {PINNED_ENGINE_VERSION}",
-        "the engine version moved; re-run and decide whether the pinned behaviours still describe reality",
-    )
+    if version != PINNED_ENGINE_VERSION:
+        # Deliberately NOT an assert: see the module docstring. Failing here short-circuits every
+        # behaviour pin in this file, which is how #166/#168/#171 went unevaluated for weeks.
+        warnings.warn(
+            f"Canonical engine is {version}, but these pins were last verified at "
+            f"{PINNED_ENGINE_VERSION}. The behaviour assertions below still run and are the real "
+            "signal; re-verify them and update PINNED_ENGINE_VERSION once you have.",
+            UserWarning,
+            stacklevel=2,
+        )
 
     if RUN_ROOT.exists():
         shutil.rmtree(RUN_ROOT)
@@ -151,26 +178,53 @@ def test_engine_absence_contract_returns_none(monkeypatch: pytest.MonkeyPatch) -
 
 
 @requires_engine
-def test_issue_168_pins_current_dispatcher_stub_defect() -> None:
-    """Defect-direction pin: upstream fixing #168 should make this test fail loudly."""
+def test_issue_168_pins_partial_dispatcher_with_disclosure() -> None:
+    """Post-fix regression guard: #168 shipped, so a return to the all-or-nothing stub is a REGRESSION.
+
+    ⚠️ **Direction reversed on 2026-09-03 (issue #486), against measured output at engine 2.356.0.**
+    This was a defect-direction pin asserting ``measure 'Selected KPI' = BLANK()``. It fired exactly
+    as designed — and was then invisible for weeks behind the harness version gate (module docstring).
+    Upstream ``Yarbrdab000/tableau-fabric-skills#168`` is CLOSED COMPLETED, and 2.356.0 emits a
+    **partial** dispatcher plus the disclosure the maintainer said was blocking the fix::
+
+        measure 'Selected KPI' = IF(EXACT([Select KPI Value], "Sales"), SUM('Orders'[SALES]), ...)
+        annotation TranslatedBy = deterministic (parameter dispatcher; 3 of 4 branches live;
+                                  dropped WHEN "Bad Branch")
+
+    So the three live branches are preserved, the unresolvable one is dropped rather than discarding
+    the whole measure, and the drop is stated in the model where a debugger looks. Guarding all three
+    directions: a silent revert to ``BLANK()``, a silent revert to a *complete* translation that
+    invents the bad branch, and a partial that stops disclosing itself.
+    """
     slug = "issue-168-case-one-bad-branch"
     measures = _model_table_text(slug, "_Measures")
     handoff_requests = _workbook(slug)["model_translation_handoff"]["requests"]
 
-    assert "measure 'Selected KPI' = BLANK()" in measures, _pin_message(
+    assert "measure 'Selected KPI' = BLANK()" not in measures, _pin_message(
         "#168",
-        "the dispatcher measure is still stubbed to BLANK() when one CASE branch is unresolved",
-        "this failing may mean upstream #168 is FIXED; check whether valid branches are now preserved",
+        "the dispatcher regressed to the all-or-nothing BLANK() stub that #168 fixed",
+        "this is a REGRESSION direction: 14 working branches were previously discarded with one bad one",
     )
-    assert len(handoff_requests) == 1, _pin_message(
+    for branch in ("'Orders'[SALES]", "'Orders'[PROFIT]", "'Orders'[QUANTITY]"):
+        assert branch in measures, _pin_message(
+            "#168",
+            f"the live dispatcher branch {branch} is no longer preserved",
+            "this failing means partial emission stopped keeping the branches that DO translate",
+        )
+    assert "MISSING_METRIC" not in measures.split("annotation TableauFormula")[0], _pin_message(
         "#168",
-        "exactly one handoff request is emitted for Selected KPI",
-        "this failing may mean upstream changed the #168 remediation surface; verify before editing",
+        "the unresolvable branch leaked into the emitted DAX instead of being dropped",
+        "the source formula is still recorded in the TableauFormula annotation; only the DAX drops it",
     )
-    assert handoff_requests[0]["fallback_reason"] == "unresolved/ambiguous field [MISSING_METRIC]", _pin_message(
+    assert "3 of 4 branches live" in measures and 'dropped WHEN "Bad Branch"' in measures, _pin_message(
         "#168",
-        "the handoff is still attributed to the unresolved [MISSING_METRIC] branch",
-        "this failing may mean upstream #168 is FIXED or classified differently; verify the generated report.json",
+        "the partial dispatcher no longer DISCLOSES which branch it dropped",
+        "silent partial emission is worse than the original stub: it reads as missing data, not a defect",
+    )
+    assert not handoff_requests, _pin_message(
+        "#168",
+        "a handoff request reappeared for a dispatcher that now translates",
+        "this failing may mean the dispatcher stubbed again; read the TMDL before editing this test",
     )
 
 
