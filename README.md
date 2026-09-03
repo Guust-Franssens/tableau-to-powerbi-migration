@@ -186,6 +186,53 @@ A migration moves through **three locations, one direction**. Knowing which is w
 knowing where to find something. Full explanation, with the measured figures and the gates:
 **[`docs/migration-phases.md`](docs/migration-phases.md)**.
 
+```text
+_runs/<NNN>-<slug>/                     ◀── PHASE 1  collect & convert  (gitignored)
+├── run.json                                what ran, against which site, at which SHAs
+├── assessment/                             what exists, what is USED, migration order
+│   ├── estate_survey.json                    the live-site survey the engine emits
+│   ├── assessment.json  report.md            the decision, and its human-readable form
+│   └── estate.db
+├── assets/                                 the downloaded .twbx / .tdsx
+├── oracle/                                 Tableau's OWN renders and numbers
+│   ├── images/  data/                        one render + one CSV per view
+│   └── oracle-manifest.json                  which views captured, which refused, why
+├── bundle/                                 the deterministic engine's conversion output
+│   ├── reports/<WB>.Report/                  ⚠️ engine truth — NEVER edit this
+│   ├── pbip/<WB>/                            working copy: .Report + .SemanticModel + .pbip
+│   ├── semantic_models/                      ⚠️ conditional — 18 of 62 units on our cold run
+│   ├── handover/<WB>.json                    the per-workbook remediation queue
+│   ├── data/                                 materialised extract rows
+│   └── engine-output-receipt.json            which engine version built this, and from where
+│
+├── packages/<batch>/<Unit>/            ◀── PHASE 2  one self-contained folder per unit
+│   ├── README.md                             what to do — no flags, no paths to work out
+│   ├── migration-spec.json                   the parsed Tableau workbook
+│   ├── fabric/                             ← THE working copy the agent edits
+│   │   ├── <WB>.Report/                      PBIR
+│   │   ├── <Model>.SemanticModel/            TMDL
+│   │   └── <WB>.pbip
+│   ├── assets/<luid>_<WB>.twbx               the original Tableau source, alongside
+│   ├── handover/<WB>.json                    just this unit's slice of the queue
+│   ├── oracle/                               just this unit's reference evidence
+│   │   ├── worksheet/  dashboard/
+│   │   └── oracle-manifest.json
+│   └── package-manifest.json                 the inventory: every artifact, and how it was found
+│
+├── deliverables/                           customer-facing outputs — never committed
+└── scratch/                                the ONLY subdir that is safe to delete
+
+migrations/workbooks/<slug>/            ◀── PHASE 3  ship  (committed)
+├── data/                                   materialised extract rows, if the model needs them
+└── fabric/
+    ├── <WB>.Report/
+    ├── <Model>.SemanticModel/
+    └── <WB>.pbip                           ← what the customer opens in Power BI Desktop
+```
+
+A **shared** datasource ships once to `migrations/datasources/<ds-slug>/fabric/` instead, and every
+report that uses it keeps a rewritten `definition.pbir` pointing four levels up at it.
+
 **1. Collect & convert** → `_runs/<NNN>-<slug>/`
 
 Run `run_engine_survey.py` → `assess_estate.py` → `harvest_estate_assets.py` → `run_estate.py`, plus
