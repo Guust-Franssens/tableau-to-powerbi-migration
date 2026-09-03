@@ -67,7 +67,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
-from bundle_corpus import shipping_reports
+from bundle_corpus import evidence_dirs, shipping_reports
 import object_identity as oid
 from object_identity import AMBIGUOUS
 from reference_evidence import (
@@ -81,11 +81,15 @@ from reference_evidence import (
     KIND_WORKSHEET,
     MIN_RENDER_EDGE,
     PROVIDER_CEILING,
+    REVISION_CONFIRMED,
+    REVISION_MISMATCH,
+    REVISION_UNCONFIRMED,
     Evidence,
     RejectedEvidence,
     UnitIdentity,
     json_object,
     oracle_evidence,
+    provenance_origin,
     reference_evidence,
     sha256_of,
 )
@@ -104,6 +108,9 @@ __all__ = [
     "KIND_WORKSHEET",
     "MIN_RENDER_EDGE",
     "PROVIDER_CEILING",
+    "REVISION_CONFIRMED",
+    "REVISION_MISMATCH",
+    "REVISION_UNCONFIRMED",
     "Evidence",
     "RejectedEvidence",
     "UnitIdentity",
@@ -169,6 +176,11 @@ class UnitResult:
     report_dir: str | None = None
     source: str | None = None
     pages: list[dict[str, Any]] = field(default_factory=list)
+    #: How every candidate render was attributed to (or refused for) this unit, keyed by
+    #: `object_identity`'s route vocabulary. A refusal that is not counted is indistinguishable from
+    #: a render that was never captured, which is exactly how issue #450 stayed invisible: a fix that
+    #: only makes `pages_ready` go up cannot be told apart from one that deleted the guard.
+    attribution: dict[str, int] = field(default_factory=dict)
 
 
 def engine_page_id(text: str) -> str:
@@ -394,7 +406,7 @@ def _enforce_exclusivity(rows: list[dict[str, Any]]) -> None:
 def _page_row(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     obj: SourceObject,
     page_status: str,
-    evidence: list[Evidence],
+    scoped: ScopedEvidence,
     reason: str | None,
     require_validation_grade: bool,
 ) -> dict[str, Any]:
@@ -415,7 +427,7 @@ def _page_row(  # pylint: disable=too-many-arguments,too-many-positional-argumen
         # for; an unexplained one is the conversion gap the agent must know about before starting.
         row["readiness"] = READY if page_status == PAGE_DROPPED_EXPLAINED else BLIND
         return row
-    match, name_only = match_evidence(obj, evidence)
+    match, name_only = match_evidence(obj, scoped.admitted)
     if match is AMBIGUOUS:
         row.update(
             {
@@ -438,9 +450,21 @@ def _page_row(  # pylint: disable=too-many-arguments,too-many-positional-argumen
                 "matched_by": f"{match.origin}:{match.provider or 'unknown'} (scope={match.kind})",
                 "evidence_path": match.path,
                 "render_key": _render_key(match),
+                # ⚠️ Round-1 review of PR #454, blocker 2: a page certified through a LUID or name
+                # join says WHICH workbook, never WHICH BUILD of it, and used to read as a clean
+                # READY with nothing disclosing that. Never silently claimed - stated, counted
+                # (`pages_revision_unconfirmed`) and rendered.
+                "revision": match.revision_for(scoped.identity),
                 "readiness": INSUFFICIENT_GRADE if insufficient else READY,
             }
         )
+        return row
+    refusal = _refusal_note(obj, scoped)
+    if refusal is not None:
+        # ⚠️ No `render_key`: a refused render certifies nothing, so it must not contest a legitimate
+        # render of the same bytes in another unit and drag that page down with it.
+        row.update({"evidence": "unverifiable", "matched_by": refusal[1], "readiness": UNVERIFIABLE})
+        row["revision"] = REVISION_UNCONFIRMED if refusal[0] == oid.WB_UNCONFIRMED else row.get("revision")
         return row
     if name_only:
         scopes = sorted({item.kind for item in name_only})
@@ -454,6 +478,56 @@ def _page_row(  # pylint: disable=too-many-arguments,too-many-positional-argumen
         return row
     row["readiness"] = BLIND
     return row
+
+
+#: What to say when a refused render is the only one this page has, per route. Ordered strongest
+#: statement first: a record we could compare and reject says more than one we could not compare.
+REFUSAL_NOTES = {
+    oid.WB_FOREIGN: "a render of ANOTHER workbook carries this name - refused, not credited",
+    oid.WB_CONFLICT: (
+        "CONTRADICTORY IDENTITY: the render's own metadata disagrees with itself about which "
+        "workbook it is of - one machine axis matches this unit and another names a different "
+        "workbook, so neither claim may be believed"
+    ),
+    oid.WB_STALE: (
+        "STALE: the render is of the same workbook at a DIFFERENT build - the local source bytes "
+        "differ from a reproducible content digest of the site copy, so it cannot certify the "
+        "migrated revision"
+    ),
+    oid.WB_UNCONFIRMED: (
+        "REVISION NOT ESTABLISHED: the render is tied to this workbook by LUID, which says WHICH "
+        "workbook a picture is of and never WHICH BUILD, and this unit's provenance carries no "
+        "comparable revision key - re-stamp with scripts/stamp_tableau_provenance.py"
+    ),
+    oid.WB_NAME: (
+        "NAME ONLY: the render declares no machine identity at all, and a display name is not unique "
+        "across projects - it may inform discovery, never certification"
+    ),
+    oid.WB_UNKNOWN: "the render declares an identity this unit cannot answer - refused, not credited",
+}
+
+
+def _refusal_note(obj: SourceObject, scoped: ScopedEvidence) -> tuple[str, str] | None:
+    """``(route, note)`` when a refused render of THIS unit's workbook matches this object, else None.
+
+    ⚠️ Only :data:`WB_STALE` and :data:`WB_UNCONFIRMED` are consulted, and the restriction is
+    load-bearing. Those two are records whose LUID matched this unit - unambiguously a render of this
+    page, of this workbook, at a build we cannot vouch for - so reporting UNVERIFIABLE rather than
+    BLIND tells the operator something true and actionable.
+
+    A ``foreign``, ``name``-only or ``unknown`` record is NOT known to be a render of this page.
+    Letting one turn a page from BLIND to UNVERIFIABLE would credit another workbook's capture with
+    partial coverage here, which is the cross-workbook leak this whole change exists to close, and it
+    would quietly erode the blind count that the estate's 46-render floor is measured against.
+    """
+    for route in (oid.WB_STALE, oid.WB_UNCONFIRMED):
+        candidates = scoped.refused.get(route) or []
+        if not candidates:
+            continue
+        match, _ = match_evidence(obj, candidates)
+        if isinstance(match, Evidence):
+            return route, REFUSAL_NOTES[route]
+    return None
 
 
 def _engine_report(root: Path) -> dict[str, Any] | None:
@@ -486,34 +560,6 @@ def _unit_names(engine_report: dict[str, Any] | None) -> tuple[list[str], list[s
 
 def _handover(root: Path, unit: str) -> dict[str, Any] | None:
     return json_object(root / "handover" / f"{unit}.json")
-
-
-def _provenance_luid(root: Path, source_sha: str) -> str | None:
-    """The published workbook LUID for this source - ONLY when provenance is byte-confirmed.
-
-    Round-2 finding 3: this returned a LUID without consulting `origin.match`.
-    `stamp_tableau_provenance.py:191-192` records `"sha256"` when local and server bytes agree and
-    `"name_only"` when they DIFFER, and its own docstring says figures will not reproduce in that
-    case - yet that LUID was making server oracle evidence ready. The repo's provenance is 26
-    `sha256` / 15 `name_only` / 6 unmatched, so trusting it blindly is the common case.
-
-    Both halves are required: the stamped input hash must be THIS file, and the server comparison
-    must have agreed. Anything else leaves the name as the only usable identity, which `is_for`
-    falls back to.
-    """
-    payload = json_object(root / "source-provenance.json")
-    for record in (payload or {}).get("inputs") or []:
-        if not isinstance(record, dict):
-            continue
-        stamped = record.get("input") if isinstance(record.get("input"), dict) else {}
-        origin = record.get("origin") if isinstance(record.get("origin"), dict) else {}
-        if stamped.get("sha256") != source_sha:
-            continue
-        if origin.get("match") != "sha256":
-            return None
-        luid = origin.get("workbook_luid")
-        return str(luid) if isinstance(luid, str) and luid else None
-    return None
 
 
 def resolve_source(root: Path, unit: str, handover: dict[str, Any] | None, explicit: Path | None) -> Path | None:
@@ -551,12 +597,9 @@ def resolve_source(root: Path, unit: str, handover: dict[str, Any] | None, expli
 
 
 def _default_dirs(root: Path, name: str) -> list[Path]:
-    """Conventional evidence locations, mirroring `check_unit.py:830-839`."""
-    seen: list[Path] = []
-    for candidate in (root / name, root.parent / name, root.parent.parent / name):
-        if candidate.is_dir() and candidate.resolve() not in {path.resolve() for path in seen}:
-            seen.append(candidate)
-    return seen
+    """Conventional evidence locations. The whole rule - walk and stop - is
+    :func:`bundle_corpus.evidence_dirs`, shared with `check_unit._oracle_dirs`."""
+    return evidence_dirs(root, [name])
 
 
 def _cannot(unit: str, detail: str, report_dir: Path | None = None, source: Path | None = None) -> UnitResult:
@@ -570,21 +613,28 @@ def _cannot(unit: str, detail: str, report_dir: Path | None = None, source: Path
     )
 
 
-def _identify(root: Path, unit: str, source: Path) -> UnitIdentity | None:
-    """Unit identity, or None when the source cannot be hashed (so evidence cannot be attributed)."""
+def _identify(root: Path, unit: str, source: Path) -> UnitIdentity | str | None:
+    """Unit identity, the refusal REASON when provenance is ambiguous, or None when unhashable.
+
+    Three outcomes rather than two, because "I could not read the bytes" and "the bytes are stamped
+    twice, for two different workbooks" are different operator actions - re-run the harvest, versus
+    re-stamp provenance. Both are ``CANNOT_ESTABLISH``; neither is a pass.
+    """
     digest = sha256_of(source)
     if digest is None:
         return None
-    return UnitIdentity(
-        name=unit, source_path=source, source_sha256=digest, workbook_luid=_provenance_luid(root, digest)
-    )
+    try:
+        luid, revision = provenance_origin(root, digest, source)
+    except oid.AmbiguousIdentity as ambiguous:
+        return str(ambiguous)
+    return UnitIdentity(name=unit, source_path=source, source_sha256=digest, workbook_luid=luid, revision=revision)
 
 
 def _page_rows(
     objects: list[SourceObject],
     emitted: dict[str, str],
     explained: dict[tuple[str, str], str],
-    scoped: list[Evidence],
+    scoped: ScopedEvidence,
     require_validation_grade: bool,
 ) -> list[dict[str, Any]]:
     """One readiness row per expected page, splitting explained from unexplained drops."""
@@ -665,7 +715,9 @@ def _datasource_only(unit: str, report_dir: Path, engine_report: dict[str, Any] 
     )
 
 
-def _readiness_result(unit: str, report_dir: Path, source: Path, rows: list[dict[str, Any]]) -> UnitResult:
+def _readiness_result(
+    unit: str, report_dir: Path, source: Path, rows: list[dict[str, Any]], attribution: dict[str, int]
+) -> UnitResult:
     """Fold per-page rows into the unit verdict."""
     findings = [row for row in rows if row["readiness"] != READY]
     return UnitResult(
@@ -675,6 +727,7 @@ def _readiness_result(unit: str, report_dir: Path, source: Path, rows: list[dict
         report_dir=str(report_dir),
         source=str(source),
         pages=rows,
+        attribution=attribution,
     )
 
 
@@ -717,6 +770,8 @@ def assess_unit(  # pylint: disable=too-many-arguments,too-many-positional-argum
     identity = _identify(root, unit, source)
     if identity is None:
         return _cannot(unit, f"source workbook could not be hashed, so evidence cannot be attributed: {source}")
+    if isinstance(identity, str):
+        return _cannot(unit, f"this unit's workbook identity is ambiguous: {identity}", report_dir, source)
 
     objects = _expectation(unit, report_dir, source)
     if isinstance(objects, UnitResult):
@@ -725,9 +780,47 @@ def assess_unit(  # pylint: disable=too-many-arguments,too-many-positional-argum
     if isinstance(emitted, UnitResult):
         return emitted
 
-    scoped = [item for item in evidence if item.is_for(identity)]
+    scoped = _scope_evidence(evidence, identity)
     rows = _page_rows(objects, emitted, drop_explanations(handover), scoped, require_validation_grade)
-    return _readiness_result(unit, report_dir, source, rows)
+    return _readiness_result(unit, report_dir, source, rows, scoped.census)
+
+
+@dataclass(frozen=True)
+class ScopedEvidence:
+    """One unit's share of the candidate renders, WITH what was refused and why.
+
+    ``admitted`` may certify a page. ``refused`` holds every record this unit could not certify with,
+    keyed by route, so a page that has a render but cannot use it reports UNVERIFIABLE with the
+    reason rather than BLIND - "nobody captured this" and "the capture cannot certify this" call for
+    different operator actions. Nothing in ``refused`` is ever searched for a match that could reach
+    READY. ``census`` counts every verdict, because a refusal that is dropped instead of counted is
+    indistinguishable from a render nobody ever captured.
+    """
+
+    admitted: list[Evidence]
+    refused: dict[str, list[Evidence]]
+    census: dict[str, int]
+    identity: UnitIdentity
+
+
+def _scope_evidence(evidence: list[Evidence], identity: UnitIdentity) -> ScopedEvidence:
+    """Attribute every candidate render to ``identity``, keeping the ones it may certify.
+
+    Every render is attributed, admitted or not, and the census records which axis decided - so the
+    negative controls ("a foreign, name-only or unconfirmed record is refused, AND counted") are
+    assertable and a change here cannot pass as a fix while actually deleting the guard.
+    """
+    census = dict.fromkeys((*oid.WB_ROUTES, *oid.WB_REFUSALS), 0)
+    admitted: list[Evidence] = []
+    refused: dict[str, list[Evidence]] = {route: [] for route in oid.WB_REFUSALS}
+    for item in evidence:
+        verdict = item.attribution(identity)
+        census[verdict.route] = census.get(verdict.route, 0) + 1
+        if verdict.admitted:
+            admitted.append(item)
+        else:
+            refused[verdict.route].append(item)
+    return ScopedEvidence(admitted=admitted, refused=refused, census=census, identity=identity)
 
 
 def _units_without_reports(engine_report: dict[str, Any] | None, reports: list[Path]) -> list[UnitResult]:
@@ -855,9 +948,20 @@ def _merge(
         "pages_emitted": sum(1 for page in pages if page["page_status"] == PAGE_EMITTED),
         "pages_dropped_explained": sum(1 for page in pages if page["page_status"] == PAGE_DROPPED_EXPLAINED),
         "pages_dropped_unexplained": sum(1 for page in pages if page["page_status"] == PAGE_DROPPED_UNEXPLAINED),
+        # Pages that HAVE a render and cannot use it because its revision was never established.
+        # ⚠️ Counted from the rows that end UNVERIFIABLE for that reason, not from every row carrying
+        # a `revision` field: the earlier version counted four pages that exclusivity had already
+        # turned unverifiable, so a counter describing one population reported another.
+        "pages_revision_unconfirmed": sum(
+            1 for page in pages if page["readiness"] == UNVERIFIABLE and page.get("revision") == REVISION_UNCONFIRMED
+        ),
         "evidence_records": len(evidence),
         "evidence_untyped": sum(1 for item in evidence if item.kind == KIND_UNKNOWN),
         "evidence_untyped_names": sorted({item.name for item in evidence if item.kind == KIND_UNKNOWN}),
+        # The route census, summed over units. Admissions are per-route so "admitted because a LUID
+        # matched" is never confused with "admitted because two display names happened to agree", and
+        # refusals are counted so a foreign render is visibly refused rather than silently absent.
+        "evidence_attributed": _census(units),
         "evidence_rejected": [
             {"name": item.name, "origin": item.origin, "path": item.path, "reason": item.reason} for item in rejected
         ],
@@ -873,10 +977,20 @@ def _merge(
                 "report": unit.report_dir,
                 "source": unit.source,
                 "pages": unit.pages,
+                "attribution": unit.attribution,
             }
             for unit in units
         ],
     }
+
+
+def _census(units: list[UnitResult]) -> dict[str, int]:
+    """Every unit's attribution census, summed. Keys are always present, so a zero is visible."""
+    total = dict.fromkeys((*oid.WB_ROUTES, oid.WB_CONFLICT, oid.WB_FOREIGN, oid.WB_UNKNOWN), 0)
+    for unit in units:
+        for route, count in unit.attribution.items():
+            total[route] = total.get(route, 0) + count
+    return total
 
 
 GRADE_CEILING_NOTE = (
@@ -915,6 +1029,7 @@ def render(report: dict[str, Any], *, verbose: bool = False) -> str:
             f"  [UNTYPED EVIDENCE] {report['evidence_untyped']} render(s) carry no object type "
             f"({', '.join(report['evidence_untyped_names'][:4])}) - {MANUAL_KIND_HINT}"
         )
+    lines.extend(_render_attribution(report))
     if report["status"] == STATUS_CANNOT_ESTABLISH:
         lines.append(
             "  CANNOT_ESTABLISH is NOT a pass: this gate formed no opinion, so an agent starting "
@@ -925,6 +1040,35 @@ def render(report: dict[str, Any], *, verbose: bool = False) -> str:
     if not verbose and report["pages_ready"]:
         lines.append("  Run with --verbose to list the pages that ARE ready and their grades.")
     return "\n".join(lines)
+
+
+def _render_attribution(report: dict[str, Any]) -> list[str]:
+    """Say how evidence was attributed, INCLUDING the refusals.
+
+    Reported unconditionally when any candidate render was seen: a silent refusal is
+    indistinguishable from a render that was never captured, and that ambiguity is what let issue
+    #450's inert guard look like a working one for six review rounds.
+    """
+    census = report.get("evidence_attributed") or {}
+    lines: list[str] = []
+    if sum(census.values()):
+        admitted = ", ".join(f"{route}={census.get(route, 0)}" for route in oid.WB_ROUTES)
+        lines.append(
+            f"  [ATTRIBUTION] admitted by {admitted}; refused {census.get(oid.WB_FOREIGN, 0)} as another "
+            f"workbook's, {census.get(oid.WB_CONFLICT, 0)} whose own machine identities contradict each "
+            f"other, {census.get(oid.WB_STALE, 0)} as a different build and "
+            f"{census.get(oid.WB_UNKNOWN, 0)} with no identity this unit can answer "
+            "(counts are per unit-and-record, so one shared capture is weighed against every unit)."
+        )
+    unconfirmed = report.get("pages_revision_unconfirmed") or 0
+    if unconfirmed:
+        lines.append(
+            f"  [REVISION NOT ESTABLISHED] {unconfirmed} ready page(s) rest on a render tied to this "
+            "workbook by LUID or name, which says WHICH workbook a picture is of and never WHICH "
+            'BUILD. Only a source-sha match, or `source-provenance.json` reporting `match: "sha256"`, '
+            "proves the capture depicts the revision you are migrating."
+        )
+    return lines
 
 
 def _render_page(page: dict[str, Any]) -> str:
@@ -993,30 +1137,30 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _merge_scans(reports: list[dict[str, Any]]) -> dict[str, Any]:
-    """Combine several bundle scans, preserving the per-unit rows and the status precedence."""
+    """Combine several bundle scans, preserving the per-unit rows and the status precedence.
+
+    ⚠️ **Every integer counter is summed BY CONSTRUCTION.** This is the third instance of one class in
+    this PR - `evidence_attributed` zeroed on merge (round-1 MEDIUM 2), then
+    `pages_revision_unconfirmed` did the same because it was added after the hand-written key list
+    (round-3 B-C). Patching a third key by name would guarantee a fourth, so the list is gone: any
+    ``int`` value in a single-scan report is summed, which means a counter added tomorrow is summed
+    tomorrow. ``bool`` is excluded explicitly because it is an ``int`` subclass and
+    ``all_evidence_validation_grade`` must stay a conjunction, not a tally.
+    """
     merged = dict(reports[0])
     merged["target"] = ", ".join(report["target"] for report in reports)
     merged["units"] = [unit for report in reports for unit in report["units"]]
     merged["evidence_rejected"] = [item for report in reports for item in report["evidence_rejected"]]
     merged["evidence_untyped_names"] = sorted({n for r in reports for n in r["evidence_untyped_names"]})
-    for key in (
-        "units_scanned",
-        "units_ready",
-        "units_not_applicable",
-        "units_cannot_establish",
-        "pages_expected",
-        "pages_ready",
-        "pages_blind",
-        "pages_unverifiable",
-        "pages_insufficient_grade",
-        "pages_emitted",
-        "pages_dropped_explained",
-        "pages_dropped_unexplained",
-        "evidence_records",
-        "evidence_untyped",
-    ):
-        merged[key] = sum(report[key] for report in reports)
+    for key, value in reports[0].items():
+        if isinstance(value, bool) or not isinstance(value, int):
+            continue
+        merged[key] = sum(report.get(key, 0) for report in reports)
     merged["grades_present"] = sorted({grade for report in reports for grade in report["grades_present"]})
+    merged["evidence_attributed"] = {
+        route: sum((report.get("evidence_attributed") or {}).get(route, 0) for report in reports)
+        for route in (*oid.WB_ROUTES, *oid.WB_REFUSALS)
+    }
     merged["all_evidence_validation_grade"] = all(report["all_evidence_validation_grade"] for report in reports)
     statuses = {report["status"] for report in reports}
     if STATUS_FINDINGS in statuses:

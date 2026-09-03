@@ -157,6 +157,9 @@ def write_reference(  # pylint: disable=too-many-arguments,too-many-locals
     render_bytes: bytes | None = None,
     record_integrity: bool = True,
     view_type: str | None = None,
+    workbook_luid: str | None = None,
+    entry_luid: str | None = None,
+    state_luid: str | None = None,
 ) -> Path:
     """A `reference/manifest.json`. Each entry is ``(name, provider, capabilities)``.
 
@@ -167,6 +170,15 @@ def write_reference(  # pylint: disable=too-many-arguments,too-many-locals
 
     Note the manifest's top-level key is `dashboards`, but `capture_tableau_reference.py:199` files
     WORKSHEET thumbnails there too - which is why the key cannot be evidence of scope.
+
+    ``workbook_luid`` writes the manifest-level LUID key `check_unit._declared_workbook` already
+    reads. The producer does not write it today; a manifest carrying one is enriched or hand-edited,
+    which is exactly the shape the round-N contradiction finding used.
+
+    ``entry_luid`` and ``state_luid`` write the SAME key at the two narrower scopes both gates also
+    read. They exist because round 2 of PR #454 found the readers selecting one scope's claim by
+    precedence and discarding the others - a fixture that could only write one scope cannot express
+    a multi-scope contradiction, and so could not have caught it.
     """
     reference = root / "reference"
     reference.mkdir(parents=True, exist_ok=True)
@@ -188,17 +200,27 @@ def write_reference(  # pylint: disable=too-many-arguments,too-many-locals
         }
         if view_type is not None:
             state["view_type"] = view_type
+        if state_luid is not None:
+            state["workbook_luid"] = state_luid
         if record_integrity:
             state |= {
                 "sha256": hashlib.sha256(blob).hexdigest(),
                 "bytes": len(blob),
                 "dimensions": {"w": size[0], "h": size[1], "dpr": 2},
             }
-        dashboards.append({"name": name, "states": [state]})
-    (reference / "manifest.json").write_text(
-        json.dumps({"source_workbook_sha256": source_sha, "dashboards": dashboards}), encoding="utf-8"
-    )
+        entry: dict = {"name": name, "states": [state]}
+        if entry_luid is not None:
+            entry["workbook_luid"] = entry_luid
+        dashboards.append(entry)
+    payload: dict = {"source_workbook_sha256": source_sha, "dashboards": dashboards}
+    if workbook_luid is not None:
+        payload["workbook_luid"] = workbook_luid
+    (reference / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
     return reference
+
+
+UNIT_LUID = "adc431bb-aeeb-43fe-8ecb-092d4bae8bfa"
+OTHER_LUID = "007f70ac-bf40-4838-9d73-134d40f504db"
 
 
 def write_oracle(root: Path, views: list[dict], *, size: tuple[int, int] = (320, 240)) -> Path:
@@ -250,6 +272,7 @@ def build_unit(  # pylint: disable=too-many-arguments
     page_ids: list[str] | None = None,
     viz_fidelity: list[dict] | None = None,
     pbip_warnings: list[str] | None = None,
+    luid: str | None = UNIT_LUID,
 ) -> str:
     """Wire a complete workbook unit and return its source sha256, which evidence must carry."""
     source = write_workbook(bundle.parent / "assets" / f"{unit}.twb", worksheets=worksheets, dashboards=dashboards)
@@ -258,7 +281,28 @@ def build_unit(  # pylint: disable=too-many-arguments
     if page_ids is None:
         page_ids = [obj.page_id for obj in crr.source_objects(source) or []]
     write_report(bundle, unit, page_ids)
-    return hashlib.sha256(source.read_bytes()).hexdigest()
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    if luid is not None:
+        (bundle / "source-provenance.json").write_text(
+            json.dumps(
+                {
+                    "inputs": [
+                        {
+                            "input": {"file": source.name, "sha256": digest},
+                            "origin": {
+                                "workbook_luid": luid,
+                                "workbook_name": unit,
+                                "matched_by": "luid",
+                                "match": "name_only",
+                                "revision_match": "same",
+                            },
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+    return digest
 
 
 # --------------------------------------------------------------------------------------------
@@ -604,7 +648,7 @@ def test_a_worksheet_render_does_satisfy_a_worksheet_page(bundle: Path) -> None:
 def test_an_oracle_record_with_no_view_type_cannot_satisfy_a_page(bundle: Path) -> None:
     """PR #422's field absent = cannot establish, never "it could be either"."""
     build_unit(bundle, "WB", worksheets=["Revenue Trend"])
-    write_oracle(bundle, [{"view_name": "Revenue Trend", "workbook_name": "WB"}])
+    write_oracle(bundle, [{"view_name": "Revenue Trend", "workbook_luid": UNIT_LUID}])
 
     page = crr.scan(bundle)["units"][0]["pages"][0]
     assert page["readiness"] == "unverifiable"
@@ -614,7 +658,7 @@ def test_an_oracle_record_with_no_view_type_cannot_satisfy_a_page(bundle: Path) 
 def test_an_oracle_record_typed_unknown_cannot_satisfy_a_page(bundle: Path) -> None:
     """PR #422 fails closed to `unknown` when the Metadata API is disabled; so must this."""
     build_unit(bundle, "WB", worksheets=["Revenue Trend"])
-    write_oracle(bundle, [{"view_name": "Revenue Trend", "view_type": "unknown", "workbook_name": "WB"}])
+    write_oracle(bundle, [{"view_name": "Revenue Trend", "view_type": "unknown", "workbook_luid": UNIT_LUID}])
 
     assert crr.scan(bundle)["units"][0]["pages"][0]["readiness"] == "unverifiable"
 
@@ -622,7 +666,7 @@ def test_an_oracle_record_typed_unknown_cannot_satisfy_a_page(bundle: Path) -> N
 def test_an_oracle_record_typed_worksheet_still_cannot_satisfy_a_dashboard_page(bundle: Path) -> None:
     """The scope join applies to the oracle route too, not only to `reference/`."""
     build_unit(bundle, "WB", worksheets=["Ops"], dashboards={"Ops": ["Ops"]})
-    write_oracle(bundle, [{"view_name": "Ops", "view_type": "worksheet", "workbook_name": "WB"}])
+    write_oracle(bundle, [{"view_name": "Ops", "view_type": "worksheet", "workbook_luid": UNIT_LUID}])
 
     assert crr.scan(bundle)["units"][0]["pages"][0]["readiness"] == "unverifiable"
 
@@ -802,7 +846,7 @@ def test_oracle_grade_is_below_the_validation_bar(bundle: Path) -> None:
     that same mutable constant.
     """
     build_unit(bundle, "WB", worksheets=["Revenue Trend"])
-    write_oracle(bundle, [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_name": "WB"}])
+    write_oracle(bundle, [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_luid": UNIT_LUID}])
 
     strict = crr.scan(bundle, require_validation_grade=True)
     assert strict["pages_insufficient_grade"] == 1
@@ -1150,3 +1194,154 @@ def test_one_render_cannot_satisfy_a_page_in_each_of_two_units(bundle: Path) -> 
     assert rows[("Two", "Shared")]["readiness"] != "ready"
     assert report["pages_ready"] == 0
     assert crr.main([str(bundle), "--quiet"]) == 1
+
+
+# --------------------------------------------------------------------------------------------
+# Evidence discovery: the walk-up is a UNION, and a self-contained package must stop it (#451)
+# --------------------------------------------------------------------------------------------
+
+
+def test_a_non_packaged_target_still_finds_an_ancestors_oracle(tmp_path: Path) -> None:
+    """The control that makes the package test below meaningful rather than a deletion.
+
+    `_default_dirs` looks beside the target, beside its parent AND beside its grandparent, because an
+    un-packaged unit under `<bundle>/pbip/<Unit>/` finds the run's flat capture that way. Removing
+    the walk-up would break the ordinary case, so it has to keep working IN THE SAME RUN as the
+    package that must not inherit.
+    """
+    target = tmp_path / "run" / "bundle" / "unit"
+    target.mkdir(parents=True)
+    (tmp_path / "run" / "_oracle").mkdir()
+
+    assert crr._default_dirs(target, "_oracle") == [tmp_path / "run" / "_oracle"]
+
+
+def test_a_self_contained_package_does_not_inherit_an_ancestors_oracle(tmp_path: Path) -> None:
+    """A `package-manifest.json` beside the target stops the walk (issue #451).
+
+    `package_unit.py` writes a unit-scoped `oracle/oracle-manifest.json` holding THIS unit's views
+    with rewritten paths. A package assembled INSIDE a run directory therefore saw its own copy AND
+    the run's flat capture two levels up, every view matched twice, and the gate refused the pair as
+    "2 records share this name once normalized" - taking every page from ready to unverifiable,
+    silently, so packaging was strictly worse than not packaging.
+    """
+    target = tmp_path / "run" / "packages" / "unit"
+    (target / "oracle").mkdir(parents=True)
+    (target / "package-manifest.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "run" / "oracle").mkdir()
+
+    assert crr._default_dirs(target, "oracle") == [target / "oracle"]
+
+
+def test_a_package_with_no_evidence_of_its_own_still_inherits_nothing(tmp_path: Path) -> None:
+    """Kills: "stop only when the package has its own copy", which re-opens the union by accident.
+
+    A package that omitted a render because it could not attribute it must NOT then pick that render
+    up from the ancestor - that is the omission being undone by the consumer, which is how a
+    fail-closed packaging decision would turn back into a fail-open one.
+    """
+    target = tmp_path / "run" / "packages" / "unit"
+    target.mkdir(parents=True)
+    (target / "package-manifest.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "run" / "oracle").mkdir()
+
+    assert crr._default_dirs(target, "oracle") == []
+
+
+def test_a_packaged_unit_reads_only_its_own_manifest_end_to_end(tmp_path: Path) -> None:
+    """The same defect at gate level: the doubled record must not reach the readiness verdict.
+
+    Both manifests describe the SAME view of the SAME workbook, which is what a package inside a run
+    directory produces; the ancestor copy is the one that must be ignored.
+    """
+    package = tmp_path / "run" / "unit"
+    package.mkdir(parents=True)
+    (tmp_path / "assets").mkdir()
+    sha = build_unit(package, "WB", worksheets=["Revenue Trend"])
+    view = {"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_luid": UNIT_LUID}
+    write_oracle(package, [view])
+    write_oracle(tmp_path / "run", [view])
+    assert crr.scan(package)["units"][0]["pages"][0]["readiness"] == "unverifiable"
+
+    (package / "package-manifest.json").write_text("{}", encoding="utf-8")
+
+    report = crr.scan(package)
+    assert report["units"][0]["pages"][0]["readiness"] == "ready"
+    assert report["evidence_records"] == 1
+    assert sha
+
+
+def test_a_unit_three_levels_below_the_run_still_inherits_the_flat_capture(tmp_path: Path) -> None:
+    """MEDIUM 1 from round-1 review of PR #454, at the canonical depth.
+
+    `capture_tableau_oracle.py` writes `_runs/<NNN>-<slug>/oracle/` while an un-packaged unit sits at
+    `_runs/<NNN>-<slug>/bundle/pbip/<Unit>/` - THREE ancestors below it. Stopping at one (the exit
+    gate) or two (this one) makes a real capture invisible for the ordinary engine-bundle shape, so
+    the depth is part of the shared rule rather than each gate's guess.
+    """
+    unit = tmp_path / "run" / "bundle" / "pbip" / "Unit"
+    unit.mkdir(parents=True)
+    (tmp_path / "run" / "oracle").mkdir()
+
+    assert crr._default_dirs(unit, "oracle") == [tmp_path / "run" / "oracle"]
+
+
+def test_the_attribution_census_survives_a_multi_path_scan(tmp_path: Path) -> None:
+    """MEDIUM 2: `_merge_scans` inherits `dict(reports[0])`, so later refusals used to vanish.
+
+    Measured on two bundles: the second refused 7 records as another workbook's, and the merged
+    report said `foreign=0`. A refusal counter that silently zeroes is worse than none, because it
+    reads as "nothing was refused" exactly where the guard did the most work.
+    """
+    clean, dirty = tmp_path / "clean", tmp_path / "dirty"
+    for root in (clean, dirty):
+        (root / "bundle").mkdir(parents=True)
+        (root / "assets").mkdir(parents=True)
+    build_unit(clean / "bundle", "Book", worksheets=["Revenue"])
+    write_oracle(clean / "bundle", [{"view_name": "Revenue", "view_type": "worksheet", "workbook_name": "Book"}])
+    build_unit(dirty / "bundle", "Other", worksheets=["Revenue"])
+    write_oracle(
+        dirty / "bundle",
+        [{"view_name": f"V{i}", "view_type": "worksheet", "workbook_luid": OTHER_LUID} for i in range(7)],
+    )
+
+    merged = crr._merge_scans([crr.scan(clean / "bundle"), crr.scan(dirty / "bundle")])
+
+    assert merged["evidence_attributed"]["foreign"] == 7
+    assert merged["evidence_attributed"]["name"] == 1
+    assert "refused 7 as another" in crr.render(merged)
+
+
+def test_every_integer_counter_survives_a_merge_by_construction(tmp_path: Path) -> None:
+    """B-C, fixed as a CLASS: the merge must not carry a hand-written list of keys to sum.
+
+    ⚠️ This is the third instance of one shape in PR #454 - `evidence_attributed` zeroed on merge
+    (round-1 MEDIUM 2), then `pages_revision_unconfirmed` did the same because it was added after the
+    list was written. Patching a third key by name would guarantee a fourth, so this asserts the
+    PROPERTY rather than any key: every integer counter in a single scan is summed, whatever it is
+    called and whenever it was added.
+    """
+    first, second = tmp_path / "one", tmp_path / "two"
+    for root, unit in ((first, "One"), (second, "Two")):
+        (root / "bundle").mkdir(parents=True)
+        (root / "assets").mkdir(parents=True)
+        build_unit(root / "bundle", unit, worksheets=["Revenue"])
+        # Strip `revision_match` so the page is REVISION-UNCONFIRMED: the counter this test exists
+        # for must be NON-ZERO, or `0 != 0 + 0` is false and the assertion proves nothing.
+        provenance = root / "bundle" / "source-provenance.json"
+        payload = json.loads(provenance.read_text(encoding="utf-8"))
+        del payload["inputs"][0]["origin"]["revision_match"]
+        provenance.write_text(json.dumps(payload), encoding="utf-8")
+        write_oracle(root / "bundle", [{"view_name": "Revenue", "view_type": "worksheet", "workbook_luid": UNIT_LUID}])
+    reports = [crr.scan(first / "bundle"), crr.scan(second / "bundle")]
+
+    merged = crr._merge_scans(reports)
+
+    counters = {key for key, value in reports[0].items() if isinstance(value, int) and not isinstance(value, bool)}
+    assert reports[0]["pages_revision_unconfirmed"] == 1, "the counter must be non-zero or the check is vacuous"
+    assert "pages_revision_unconfirmed" in counters, "the counter this was written for must be in scope"
+    assert len(counters) > 10, "sanity: the report really does carry a family of counters"
+    unsummed = {key for key in counters if merged[key] != reports[0][key] + reports[1][key]}
+    assert unsummed == set(), f"a counter silently dropped on merge: {sorted(unsummed)}"
+    # `bool` is an `int` subclass, so the conjunction must NOT have been tallied into 2.
+    assert merged["all_evidence_validation_grade"] in (True, False)

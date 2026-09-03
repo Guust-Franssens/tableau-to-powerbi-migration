@@ -9,6 +9,7 @@ exit code and output shape rather than any non-zero result.
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import os
 import time
@@ -25,6 +26,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 import check_unit as cu  # noqa: E402  # pylint: disable=wrong-import-position
 import check_field_bindings  # noqa: E402  # pylint: disable=wrong-import-position
+import object_identity as oid  # noqa: E402  # pylint: disable=wrong-import-position
 import read_handover  # noqa: E402  # pylint: disable=wrong-import-position
 import run_estate  # noqa: E402  # pylint: disable=wrong-import-position
 
@@ -58,12 +60,17 @@ def _freshen_clean_fixture_cache() -> Path:
     return fixture
 
 
+UNIT_LUID = "adc431bb-aeeb-43fe-8ecb-092d4bae8bfa"
+OTHER_LUID = "007f70ac-bf40-4838-9d73-134d40f504db"
+
+
 def _write_spec(unit: Path, names: list[str]) -> None:
     """A dashboards-only migration spec, with the schema-required empty `worksheets` array."""
     unit.mkdir(parents=True, exist_ok=True)
     (unit / "migration-spec.json").write_text(
         json.dumps(
             {
+                "source": {"file_name": f"{UNIT_LUID}_Book.twbx"},
                 "dashboards": [{"id": f"dash.{index}", "name": name} for index, name in enumerate(names)],
                 "worksheets": [],
             }
@@ -118,9 +125,56 @@ def _csv(path: Path) -> None:
     path.write_text("a\n1\n", encoding="utf-8")
 
 
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _write_unit_source(unit: Path, blob: bytes, *, name: str = f"{UNIT_LUID}_Book.twbx", handover: bool = True) -> Path:
+    """The Tableau asset this unit was built from, recorded where BOTH producers record it.
+
+    A handover slice's ``workbook.source_id`` and `migration-spec.json`'s ``source.file_name`` are
+    the two independent claims `check_unit._unit_source_claims` reads, so the fixture writes both -
+    a fixture that recorded only one could not tell a working resolver from one that happened to
+    read the other.
+    """
+    asset = unit / "assets" / name
+    asset.parent.mkdir(parents=True, exist_ok=True)
+    asset.write_bytes(blob)
+    if handover:
+        slices = unit / "handover"
+        slices.mkdir(parents=True, exist_ok=True)
+        (slices / "Book.json").write_text(
+            json.dumps({"estate": {}, "workbook": {"name": "Book", "source_id": f"assets/{name}"}}), encoding="utf-8"
+        )
+    spec = unit / "migration-spec.json"
+    if spec.is_file():
+        payload = json.loads(spec.read_text(encoding="utf-8"))
+        payload["source"] = {"file_name": name}
+        spec.write_text(json.dumps(payload), encoding="utf-8")
+    return asset
+
+
 def _write_reference_manifest(
-    unit: Path, names: list[str], *, numeric: bool = True, workbook: str | None = "Book"
+    unit: Path,
+    names: list[str],
+    *,
+    numeric: bool = True,
+    workbook: str | None = None,
+    source_sha: str | None = "auto",
+    workbook_luid: str | None = None,
 ) -> None:
+    """A `reference/manifest.json`.
+
+    ⚠️ ``source_sha="auto"`` writes the unit's source asset and records ITS hash, which is what
+    `capture_tableau_reference.py:234` does. Round-3 review, B-B: a display name no longer certifies
+    anything, so a fixture identifying a reference record by ``workbook`` alone stopped representing
+    any real capture - it now represents a hand-edited one, which is a different test.
+    """
+    if source_sha == "auto":
+        # No handover slice: the migration spec's `source.file_name` already establishes the
+        # asset, and writing a slice here would put an unrelated check into every test that
+        # merely wanted a reference manifest.
+        source_sha = _sha256(_write_unit_source(unit, b"the workbook this unit was built from", handover=False))
     states = []
     dashboards = []
     for name in names:
@@ -140,10 +194,14 @@ def _write_reference_manifest(
     payload: dict[str, object] = {"dashboards": dashboards}
     if workbook is not None:
         payload["workbook"] = workbook
+    if workbook_luid is not None:
+        payload["workbook_luid"] = workbook_luid
+    if source_sha is not None:
+        payload["source_workbook_sha256"] = source_sha
     (unit / "reference" / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
-def _write_oracle_manifest(
+def _write_oracle_manifest(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     unit: Path,
     names: list[str],
     *,
@@ -151,7 +209,18 @@ def _write_oracle_manifest(
     data: bool = True,
     workbook: str | None = "Book",
     view_type: str | None = "dashboard",
+    workbook_luid: str | None = UNIT_LUID,
+    workbook_name: str | None = None,
 ) -> None:
+    """An oracle manifest.
+
+    ⚠️ ``workbook`` writes a TOP-LEVEL ``workbook`` key, which is a synthetic shape: the real producer
+    writes ``workbook_luid`` and ``workbook_name`` PER VIEW and no ``workbook`` anywhere. That gap is
+    issue #450 - the gate read the key the fixtures wrote instead of the ones the capture writes, so
+    every record on a live capture arrived ownerless (measured 360 of 360) and the guard never fired.
+    ``workbook_luid``/``workbook_name`` write the real shape; both are kept so the synthetic override
+    stays testable too.
+    """
     records = []
     for index, name in enumerate(names):
         image_path = f"images/{name}__{index}.png"
@@ -167,6 +236,10 @@ def _write_oracle_manifest(
         }
         if view_type is not None:
             record["view_type"] = view_type
+        if workbook_luid is not None:
+            record["workbook_luid"] = workbook_luid
+        if workbook_name is not None:
+            record["workbook_name"] = workbook_name
         records.append(record)
     (unit / "_oracle").mkdir(exist_ok=True)
     payload: dict[str, object] = {"views": records}
@@ -292,6 +365,7 @@ def _write_full_spec(
     (unit / "migration-spec.json").write_text(
         json.dumps(
             {
+                "source": {"file_name": f"{UNIT_LUID}_Book.twbx"},
                 "dashboards": spec_dashboards,
                 "worksheets": [{"id": ws_id, "name": name} for ws_id, name in worksheets],
             }
@@ -576,7 +650,14 @@ def _complete_worksheet(ws_id: str, name: str, **overrides: object) -> dict[str,
 def _spec_with_worksheets(unit: Path, worksheets: list[dict[str, object]]) -> None:
     unit.mkdir(parents=True, exist_ok=True)
     (unit / "migration-spec.json").write_text(
-        json.dumps({"migration_spec_version": "1.0", "dashboards": [], "worksheets": worksheets}),
+        json.dumps(
+            {
+                "migration_spec_version": "1.0",
+                "source": {"file_name": f"{UNIT_LUID}_Book.twbx"},
+                "dashboards": [],
+                "worksheets": worksheets,
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -3243,14 +3324,14 @@ def test_oracle_evidence_from_a_different_workbook_satisfies_nothing(tmp_path: P
     """
     _write_spec(tmp_path, ["Revenue"])
     _write_report(tmp_path, ["Revenue"])
-    _write_oracle_manifest(tmp_path, ["Revenue"], workbook="Different Workbook")
+    _write_oracle_manifest(tmp_path, ["Revenue"], workbook=None, workbook_luid=OTHER_LUID)
 
     oracle = cu.check_oracle_coverage(tmp_path, None, None)
 
     assert oracle["status"] == cu.STATUS_NOT_CHECKED
     assert oracle["visual_present"] == 0
     assert oracle["numeric_present"] == 0
-    assert oracle["foreign_workbook_evidence"] == ["Different Workbook"]
+    assert oracle["foreign_workbook_evidence"] == [f"luid='{OTHER_LUID}'"]
 
 
 def test_oracle_evidence_from_this_workbook_still_counts(tmp_path: Path) -> None:
@@ -3265,21 +3346,453 @@ def test_oracle_evidence_from_this_workbook_still_counts(tmp_path: Path) -> None
     assert oracle["foreign_workbook_evidence"] == []
 
 
-def test_oracle_evidence_declaring_no_workbook_is_admitted_but_flagged(tmp_path: Path) -> None:
-    """'I cannot tell whose picture this is' is weaker evidence and the grade must say so.
+# --------------------------------------------------------------------------------------------
+# Issue #450: the workbook guard read a key no capture producer writes, and failed OPEN
+# --------------------------------------------------------------------------------------------
 
-    Real oracle manifests carry no workbook field, so refusing them outright would reject every
-    capture in the estate. They are admitted and counted, and the count is printed.
+
+def test_a_record_whose_workbook_cannot_be_established_certifies_nothing(tmp_path: Path) -> None:
+    """Kills issue #450's fail-open, which is what this test used to ASSERT.
+
+    ⚠️ It previously read *"declaring no workbook is admitted but flagged"*, on the premise that "real
+    oracle manifests carry no workbook field, so refusing them outright would reject every capture in
+    the estate". The premise was false in the only way that mattered: a real manifest carries
+    ``workbook_luid`` and ``workbook_name`` per view - it carries no ``workbook`` key, which is a
+    defect in the READER, not a property of the producer. Measured on a real 360-view capture, every
+    record was therefore "unattributed" and admitted anyway, so the guard advertised in
+    :class:`OracleEvidence` had never once fired and a foreign workbook's render could certify any
+    page whose name it shared.
+
+    A record that establishes no workbook at all now certifies nothing. It is still counted, because
+    a refusal nobody can see is not a guard.
     """
     _write_spec(tmp_path, ["Revenue"])
     _write_report(tmp_path, ["Revenue"])
-    _write_oracle_manifest(tmp_path, ["Revenue"], workbook=None)
+    _write_oracle_manifest(tmp_path, ["Revenue"], workbook=None, workbook_luid=None)
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["status"] == cu.STATUS_NOT_CHECKED
+    assert oracle["visual_present"] == 0
+    assert oracle["unattributed_evidence"] == 1
+    assert oracle["admitted_evidence"] == 0
+    # Counted ONCE, and not as another workbook's: "I cannot tell whose this is" and "I can tell, and
+    # it is not yours" are different operator actions - re-capture with typing vs ignore it - and a
+    # record that lands in both buckets tells the reader neither. It is also the only observable
+    # difference left if the explicit refusal here is deleted, because the lossy rescue below refuses
+    # an unestablished record too; measured by mutation, that deletion is otherwise silent.
+    assert oracle["foreign_workbook_evidence"] == []
+    assert "1 record(s) establish no producing workbook" in oracle["grade"]
+
+
+def test_a_display_name_alone_never_certifies_however_real_the_capture(tmp_path: Path) -> None:
+    """The positive half of #450: `capture_tableau_oracle.py` writes `workbook_name` PER VIEW.
+
+    Without this the fix above is indistinguishable from "refuse everything", which would make the
+    gate report zero coverage on every real capture in the estate.
+    """
+    _write_spec(tmp_path, ["Revenue"])
+    _write_report(tmp_path, ["Revenue"])
+    _write_oracle_manifest(tmp_path, ["Revenue"], workbook=None, workbook_luid=None, workbook_name="Book")
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["visual_present"] == 0, "a display name is decoration, not identity"
+    assert oracle["admitted_evidence"] == 0
+    assert oracle["name_only_evidence"] == ["name='Book'"]
+    assert any("NAME-ONLY EVIDENCE REFUSED" in caveat for caveat in oracle["known_gap_caveats"])
+
+
+def test_a_foreign_display_name_is_refused_too_and_counted_separately(tmp_path: Path) -> None:
+    """The discriminating twin: reading the right field must REFUSE as readily as it admits."""
+    _write_spec(tmp_path, ["Revenue"])
+    _write_report(tmp_path, ["Revenue"])
+    _write_oracle_manifest(tmp_path, ["Revenue"], workbook=None, workbook_luid=None, workbook_name="Different Workbook")
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["visual_present"] == 0
+    # A name that DIFFERS was compared and disagreed, so it is `foreign`; a name that MATCHES is
+    # `name_only`, because agreement on decoration establishes nothing. Both refuse; they are
+    # counted apart because they call for different operator actions.
+    assert oracle["foreign_workbook_evidence"] == ["name='Different Workbook'"]
+    assert oracle["name_only_evidence"] == []
+
+
+def test_a_foreign_luid_is_refused_even_when_the_workbook_name_matches_exactly(tmp_path: Path) -> None:
+    """Kills: a weaker axis rescuing a record a stronger one has already rejected.
+
+    Two projects may hold workbooks with the same display name - the ambiguity `_runs/<NNN>-<slug>/`
+    numbering exists to avoid - so a name that agrees after a LUID that does not is exactly the case
+    where the name must not be consulted. The unit's own LUID comes from its handover slice's
+    `workbook.source_id`, whose basename is `harvest_estate_assets.py`'s `<luid>_<name>`.
+    """
+    _write_spec(tmp_path, ["Revenue"])
+    _write_report(tmp_path, ["Revenue"])
+    _write_handover(tmp_path, {"name": "Book", "source_id": "assets/adc431bb-aeeb-43fe-8ecb-092d4bae8bfa_Book.twbx"})
+    _write_oracle_manifest(
+        tmp_path,
+        ["Revenue"],
+        workbook=None,
+        workbook_luid="007f70ac-bf40-4838-9d73-134d40f504db",
+        workbook_name="Book",
+    )
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["visual_present"] == 0
+    assert oracle["foreign_workbook_evidence"] == ["luid='007f70ac-bf40-4838-9d73-134d40f504db', name='Book'"]
+    assert oracle["known_gap_caveats"] == [], "a LUID disagreement is not rescuable by a lossy name"
+
+
+def test_a_foreign_luid_is_refused_when_this_unit_cannot_establish_a_luid_at_all(tmp_path: Path) -> None:
+    """BLOCKER 1 at the exit gate, and the case the test above structurally cannot reach.
+
+    ⚠️ The negative test beside this one gives the unit a LUID, so it only ever exercises *LUID vs
+    LUID*. Round-1 review of PR #454 measured the gap: with NO unit LUID the guard skipped the
+    record's LUID as "not shared" and admitted it on an equal display name - `PASS`, visual AND
+    numeric, from a foreign workbook. Real oracle records always carry both fields, so this was the
+    ordinary case rather than an edge one.
+    """
+    _write_spec(tmp_path, ["Revenue"])
+    _write_report(tmp_path, ["Revenue"])
+    spec = json.loads((tmp_path / "migration-spec.json").read_text(encoding="utf-8"))
+    del spec["source"]
+    (tmp_path / "migration-spec.json").write_text(json.dumps(spec), encoding="utf-8")
+    _write_oracle_manifest(
+        tmp_path,
+        ["Revenue"],
+        workbook=None,
+        workbook_luid="007f70ac-bf40-4838-9d73-134d40f504db",
+        workbook_name="Book",
+    )
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["status"] == cu.STATUS_NOT_CHECKED
+    assert oracle["visual_present"] == 0
+    assert oracle["numeric_present"] == 0
+    assert oracle["admitted_evidence"] == 0
+    assert oracle["unattributed_evidence"] == 1
+
+
+def test_a_windows_recorded_source_id_still_yields_its_luid(tmp_path: Path) -> None:
+    """BLOCKER 4 at this gate's call site: a handover records a path from ANOTHER host.
+
+    ⚠️ This assertion is a no-op on Windows and load-bearing on Linux, and that asymmetry is the
+    defect rather than a flaw in the test. `WindowsPath` accepts both separators, so a Windows
+    workstation reports the guard working while a Linux CI runner - where those backslashes are
+    ordinary filename characters - gets no LUID at all and falls back to a weaker axis. CI runs on
+    Linux, so this test is exercised exactly where the divergence bites; the flavour-explicit proof
+    that runs anywhere is `test_workbook_identity.test_the_recorded_path_parse_does_not_use_the_running_hosts_flavour`.
+    """
+    _write_spec(tmp_path, ["Revenue"])
+    _write_report(tmp_path, ["Revenue"])
+    _write_handover(
+        tmp_path,
+        {
+            "name": "Book",
+            "source_id": "_runs\\407-dryrun-gates\\assets\\adc431bb-aeeb-43fe-8ecb-092d4bae8bfa_Book.twbx",
+        },
+    )
+
+    assert set(cu._unit_source_claims(tmp_path)[1]) == {"adc431bb-aeeb-43fe-8ecb-092d4bae8bfa"}
+    assert [identity.luid for identity in cu._unit_workbook_identities(tmp_path)] == [
+        "adc431bb-aeeb-43fe-8ecb-092d4bae8bfa"
+    ]
+
+
+def test_a_matching_luid_admits_a_record_whose_display_name_the_filesystem_changed(tmp_path: Path) -> None:
+    """The positive control for the LUID route, and symptom A of #450 in this gate.
+
+    A unit ships `Book.Report` while the site publishes `Bo ok`; the stem is a sanitised spelling, not
+    the name. The LUID is what bridges them, and it is exact.
+    """
+    _write_spec(tmp_path, ["Revenue"])
+    _write_report(tmp_path, ["Revenue"])
+    _write_handover(tmp_path, {"name": "Book", "source_id": "assets/adc431bb-aeeb-43fe-8ecb-092d4bae8bfa_Book.twbx"})
+    _write_oracle_manifest(
+        tmp_path,
+        ["Revenue"],
+        workbook=None,
+        workbook_luid="ADC431BB-AEEB-43FE-8ECB-092D4BAE8BFA",
+        workbook_name="Bo ok",
+    )
 
     oracle = cu.check_oracle_coverage(tmp_path, None, None)
 
     assert oracle["visual_present"] == 1
+    assert oracle["foreign_workbook_evidence"] == []
+    assert oracle["known_gap_caveats"] == [], "an exact LUID match is not a loose attribution"
+
+
+def test_a_unit_local_reference_manifest_is_not_certified_by_its_location(tmp_path: Path) -> None:
+    """BLOCKER 3 from round-1 review of PR #454. This test asserted the OPPOSITE.
+
+    ⚠️ It read *"a reference manifest inside the unit is attributable by location"*, on the argument
+    that `_reference_dirs` never walks up so such a manifest is this unit's by construction. Measured
+    consequence: the guard was SKIPPED for those records, so a manifest with no workbook identity at
+    all was admitted (`admitted_evidence=1`, visual AND numeric certified) - and so was one whose
+    `source_workbook_sha256` named a **different workbook** entirely.
+
+    Location controls DISCOVERY; it never substitutes for identity. A manifest that establishes no
+    workbook now certifies nothing, and is counted.
+    """
+    _write_spec(tmp_path, ["Revenue"])
+    _write_report(tmp_path, ["Revenue"])
+    _write_reference_manifest(tmp_path, ["Revenue"], workbook=None, source_sha=None)
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["status"] == cu.STATUS_NOT_CHECKED
+    assert oracle["visual_present"] == 0
+    assert oracle["numeric_present"] == 0
+    assert oracle["admitted_evidence"] == 0
     assert oracle["unattributed_evidence"] == 1
-    assert "1 record(s) declare no producing workbook" in oracle["grade"]
+
+
+def test_a_unit_local_reference_manifest_certifies_when_its_recorded_sha_is_this_source(tmp_path: Path) -> None:
+    """The positive twin: the identity a reference manifest DOES carry is `source_workbook_sha256`.
+
+    `capture_tableau_reference.py:234` writes it, so the fix for blocker 3 is to hash the unit's own
+    source asset and compare - not to refuse the whole producer. Without this twin, "refuse every
+    reference record" would pass the test above and delete the only validation-grade route in the
+    toolkit.
+    """
+    _write_spec(tmp_path, ["Revenue"])
+    _write_report(tmp_path, ["Revenue"])
+    source = _write_unit_source(tmp_path, b"the workbook this unit was built from")
+    _write_reference_manifest(tmp_path, ["Revenue"], workbook=None, source_sha=_sha256(source))
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["status"] == cu.STATUS_PASS
+    assert oracle["visual_present"] == 1
+    assert oracle["admitted_evidence"] == 1
+    assert oracle["unattributed_evidence"] == 0
+
+
+def test_a_unit_local_reference_manifest_recording_another_workbooks_sha_is_refused(tmp_path: Path) -> None:
+    """The negative twin, and the sharper half of blocker 3: a MISMATCHING sha was admitted too."""
+    _write_spec(tmp_path, ["Revenue"])
+    _write_report(tmp_path, ["Revenue"])
+    _write_unit_source(tmp_path, b"the workbook this unit was built from")
+    _write_reference_manifest(tmp_path, ["Revenue"], workbook=None, source_sha="de" * 32)
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["visual_present"] == 0
+    assert oracle["admitted_evidence"] == 0
+    assert oracle["foreign_workbook_evidence"] == ["sha256=dededededede..."]
+
+
+def test_a_manifest_whose_luid_contradicts_its_matching_sha_certifies_nothing(tmp_path: Path) -> None:
+    """BLOCKING FINDING B at the EXIT gate. Verbatim before this fix::
+
+        CONTRADICTORY_EXIT={"status":"PASS","visual_present":1,"numeric_present":1,
+          "admitted_evidence":1,"foreign_workbook_evidence":[],"unattributed_evidence":0}
+
+    The unit's own LUID comes from its spec's `<luid>_<name>` asset filename and its sha256 from that
+    asset's bytes, so this manifest agrees with one and contradicts the other. `_attribute_record` is
+    asserted directly because it names WHICH guard refused: `visual_present == 0` alone is produced
+    by at least four other guards in this gate, and `unattributed_evidence`/`name_only_evidence` are
+    pinned to zero so an accidental downgrade to a weaker refusal fails here too.
+    """
+    _write_spec(tmp_path, ["Revenue"])
+    _write_report(tmp_path, ["Revenue"])
+    source = _write_unit_source(tmp_path, b"the workbook this unit was built from")
+    _write_reference_manifest(
+        tmp_path,
+        ["Revenue"],
+        workbook=None,
+        source_sha=_sha256(source),
+        workbook_luid="007f70ac-bf40-4838-9d73-134d40f504db",
+    )
+
+    records, _ = cu._reference_oracles(tmp_path, None)
+    verdict = cu._attribute_record(cu._unit_workbook_identities(tmp_path), records[0])
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert verdict.route == oid.WB_CONFLICT
+    assert verdict.admitted is False
+    assert oracle["status"] == cu.STATUS_NOT_CHECKED
+    assert (oracle["visual_present"], oracle["numeric_present"], oracle["admitted_evidence"]) == (0, 0, 0)
+    assert oracle["unattributed_evidence"] == 0 and oracle["name_only_evidence"] == []
+    assert oracle["foreign_workbook_evidence"] != [], "a refusal nobody can see is not a guard"
+
+
+def test_a_manifest_whose_luid_agrees_with_its_matching_sha_still_certifies(tmp_path: Path) -> None:
+    """The positive control: two agreeing machine axes are the STRONGEST evidence, not a conflict."""
+    _write_spec(tmp_path, ["Revenue"])
+    _write_report(tmp_path, ["Revenue"])
+    source = _write_unit_source(tmp_path, b"the workbook this unit was built from")
+    _write_reference_manifest(tmp_path, ["Revenue"], workbook=None, source_sha=_sha256(source), workbook_luid=UNIT_LUID)
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["status"] == cu.STATUS_PASS
+    assert (oracle["visual_present"], oracle["admitted_evidence"]) == (1, 1)
+
+
+# --------------------------------------------------------------------------------------------
+# Round 2 of PR #454: conflicting LUID declarations at different SCOPES were collapsed to one
+# --------------------------------------------------------------------------------------------
+
+
+def _luid_at_scopes(unit: Path, *, entry: str | None = None, state: str | None = None) -> None:
+    """Stamp `workbook_luid` at the dashboard-entry and/or state scope of a written manifest."""
+    manifest = unit / "reference" / "manifest.json"
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    for dashboard in payload["dashboards"]:
+        if entry is not None:
+            dashboard["workbook_luid"] = entry
+        for recorded in dashboard.get("states", []) if state is not None else []:
+            recorded["workbook_luid"] = state
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_an_entry_luid_does_not_silently_supersede_a_contradicting_manifest_luid(tmp_path: Path) -> None:
+    """THE round-2 finding at the EXIT gate. Verbatim before this fix::
+
+        B_EXIT_MULTISCOPE {"status":"PASS","visual_present":1,"numeric_present":1,
+          "admitted_evidence":1,"foreign_workbook_evidence":[]}
+
+    `_declared_workbook` read ``entry.get("workbook_luid") or outer.get("workbook_luid")``, so an
+    entry-level LUID naming this unit discarded a manifest-level LUID naming another workbook and
+    the contradiction never reached `WorkbookIdentity.attribute`. No schema makes the narrower scope
+    an override; every non-blank claim must agree.
+
+    ``_attribute_record`` is asserted directly because it names WHICH guard refused - at least four
+    others in this gate also produce ``visual_present == 0``.
+    """
+    _write_spec(tmp_path, ["Revenue"])
+    _write_report(tmp_path, ["Revenue"])
+    source = _write_unit_source(tmp_path, b"the workbook this unit was built from")
+    _write_reference_manifest(
+        tmp_path, ["Revenue"], workbook=None, source_sha=_sha256(source), workbook_luid=OTHER_LUID
+    )
+    _luid_at_scopes(tmp_path, entry=UNIT_LUID)
+
+    records, _ = cu._reference_oracles(tmp_path, None)
+    verdict = cu._attribute_record(cu._unit_workbook_identities(tmp_path), records[0])
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert verdict.route == oid.WB_CONFLICT
+    assert verdict.admitted is False
+    assert oracle["status"] == cu.STATUS_NOT_CHECKED
+    assert (oracle["visual_present"], oracle["numeric_present"], oracle["admitted_evidence"]) == (0, 0, 0)
+    assert oracle["foreign_workbook_evidence"] != [], "a refusal nobody can see is not a guard"
+
+
+def test_a_state_scope_luid_is_read_at_this_gate_too(tmp_path: Path) -> None:
+    """The near neighbour: the entry gate reads the STATE scope and this one used not to.
+
+    A scope one gate compares while the other ignores it is a hole by construction - measured on this
+    branch before the fix, ``PASS route=sha256 admitted=1`` on a manifest whose only state declared
+    another workbook's LUID. States are collapsed into one record here, so their claims are claims
+    about that record and must agree with the entry's and the manifest's.
+    """
+    _write_spec(tmp_path, ["Revenue"])
+    _write_report(tmp_path, ["Revenue"])
+    source = _write_unit_source(tmp_path, b"the workbook this unit was built from")
+    _write_reference_manifest(tmp_path, ["Revenue"], workbook=None, source_sha=_sha256(source))
+    _luid_at_scopes(tmp_path, state=OTHER_LUID)
+
+    records, _ = cu._reference_oracles(tmp_path, None)
+    verdict = cu._attribute_record(cu._unit_workbook_identities(tmp_path), records[0])
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert verdict.route == oid.WB_CONFLICT
+    assert (oracle["status"], oracle["visual_present"], oracle["admitted_evidence"]) == (cu.STATUS_NOT_CHECKED, 0, 0)
+
+
+def test_scopes_that_agree_or_stay_silent_still_certify_at_the_exit_gate(tmp_path: Path) -> None:
+    """THE positive control: refusing every multi-scope manifest would pass both tests above.
+
+    Every ordinary shape must still PASS on the matching sha256 - all three scopes agreeing, a case
+    difference (a LUID is a machine id), a blank scope beside a real one, and no LUID at all. An
+    absent claim is SILENT; only an actively contradicting one refuses.
+    """
+    for label, luids in (
+        ("all three agree", {"manifest": UNIT_LUID, "entry": UNIT_LUID, "state": UNIT_LUID}),
+        ("case differs only", {"manifest": UNIT_LUID, "state": UNIT_LUID.upper()}),
+        ("blank is absence", {"manifest": UNIT_LUID, "entry": "   ", "state": None}),
+        ("no luid anywhere", {}),
+    ):
+        unit = tmp_path / label.replace(" ", "-")
+        unit.mkdir()
+        _write_spec(unit, ["Revenue"])
+        _write_report(unit, ["Revenue"])
+        source = _write_unit_source(unit, b"the workbook this unit was built from")
+        _write_reference_manifest(
+            unit, ["Revenue"], workbook=None, source_sha=_sha256(source), workbook_luid=luids.get("manifest")
+        )
+        _luid_at_scopes(unit, entry=luids.get("entry"), state=luids.get("state"))
+
+        records, _ = cu._reference_oracles(unit, None)
+        verdict = cu._attribute_record(cu._unit_workbook_identities(unit), records[0])
+        oracle = cu.check_oracle_coverage(unit, None, None)
+
+        assert verdict.route == oid.WB_SHA, label
+        assert oracle["status"] == cu.STATUS_PASS, label
+        assert (oracle["visual_present"], oracle["numeric_present"], oracle["admitted_evidence"]) == (1, 1, 1), label
+
+
+def test_a_sha_bearing_record_is_refused_when_the_unit_cannot_hash_its_source(tmp_path: Path) -> None:
+    """Fail-CLOSED on unknown: no locatable source means the recorded sha cannot be checked.
+
+    This is the cost of blocker 3's fix and it is stated rather than hidden - a unit that ships no
+    resolvable Tableau asset cannot use sha-bearing evidence, and the refusal is disclosed in the
+    grade rather than silently dropped.
+    """
+    _write_spec(tmp_path, ["Revenue"])
+    _write_report(tmp_path, ["Revenue"])
+    _write_reference_manifest(tmp_path, ["Revenue"], workbook=None, source_sha="ab" * 32)
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["visual_present"] == 0
+    assert oracle["unattributed_evidence"] == 1
+    assert "establish no producing workbook" in oracle["grade"]
+
+
+def test_a_non_packaged_unit_still_reads_an_ancestors_oracle_capture(tmp_path: Path) -> None:
+    """The control that makes the package test below meaningful rather than a deletion.
+
+    `_oracle_dirs` looks beside the unit AND beside its parent, because `capture_tableau_oracle.py`
+    writes one flat capture per run while a unit sits under it. Removing that walk-up would make a
+    real capture invisible, which is the defect the `oracle/`-name search was added to fix.
+    """
+    unit = tmp_path / "unit"
+    _write_spec(unit, ["Revenue"])
+    _write_report(unit, ["Revenue"])
+    _write_oracle_manifest(tmp_path, ["Revenue"], workbook="Book")
+
+    assert cu.check_oracle_coverage(unit, None, None)["visual_present"] == 1
+
+
+def test_a_self_contained_package_does_not_also_read_the_runs_flat_capture(tmp_path: Path) -> None:
+    """Issue #451's defect ONE GATE ALONG - found here, not in the brief, and measured before fixing.
+
+    A package at `_runs/<run>/<unit>/` beside the run's flat capture read BOTH manifests, so every
+    view matched twice and this gate refused each page as "2 producer records are named 'Revenue'":
+    0 visual coverage, silently, making packaging strictly worse than not packaging. Same class as
+    the entry gate's "2 records share this name once normalized", so the rule lives once in
+    `bundle_corpus.is_self_contained` rather than being fixed a second time here.
+    """
+    unit = tmp_path / "unit"
+    _write_spec(unit, ["Revenue"])
+    _write_report(unit, ["Revenue"])
+    _write_oracle_manifest(unit, ["Revenue"], workbook="Book")
+    _write_oracle_manifest(tmp_path, ["Revenue"], workbook="Book")
+    assert cu.check_oracle_coverage(unit, None, None)["refused_evidence"] == ["2 producer records are named 'Revenue'"]
+
+    (unit / "package-manifest.json").write_text("{}", encoding="utf-8")
+
+    oracle = cu.check_oracle_coverage(unit, None, None)
+    assert oracle["status"] == cu.STATUS_PASS
+    assert oracle["visual_present"] == 1
+    assert oracle["refused_evidence"] == []
 
 
 def test_two_reference_records_with_one_name_satisfy_nothing_and_say_why(tmp_path: Path) -> None:
@@ -3463,7 +3976,7 @@ def test_two_producing_workbooks_slugging_alike_are_both_refused(tmp_path: Path)
     """
     _write_full_spec(tmp_path, dashboards=[("Sales", []), ("Ops", [])], worksheets=[])
     _write_report(tmp_path, ["Sales", "Ops"])
-    _write_oracle_manifest(tmp_path, ["Sales"], workbook="Bo ok")
+    _write_oracle_manifest(tmp_path, ["Sales"], workbook="Bo ok", workbook_luid=None)
     manifest = tmp_path / "_oracle" / "oracle-manifest.json"
     payload = json.loads(manifest.read_text(encoding="utf-8"))
     _png(tmp_path / "_oracle" / "images/Ops__1.png")
@@ -3481,10 +3994,13 @@ def test_two_producing_workbooks_slugging_alike_are_both_refused(tmp_path: Path)
     oracle = cu.check_oracle_coverage(tmp_path, None, None)
 
     assert oracle["visual_present"] == 0
-    assert oracle["foreign_workbook_evidence"] == ["Bo ok", "Bo-ok"]
+    # ⚠️ Round-3 B-B: the two-sided uniqueness question these were written to pose is moot - the
+    # lossy rescue they guarded is deleted, so a sanitised spelling can no longer admit anything at
+    # all. They are refused for differing from this unit's stem, which is a stronger statement.
+    assert oracle["foreign_workbook_evidence"] == ["name='Bo ok'", "name='Bo-ok'"]
 
 
-def test_one_producing_workbook_still_binds_through_a_sanitised_spelling(tmp_path: Path) -> None:
+def test_a_sanitised_spelling_no_longer_binds_because_a_name_is_not_identity(tmp_path: Path) -> None:
     """The lossy workbook fallback survives its second guard.
 
     It is justified here and only here: the unit side is a filesystem-sanitised artifact STEM, so
@@ -3521,20 +4037,19 @@ def test_the_normalized_index_is_what_bindable_workbooks_consults(tmp_path: Path
 # delete `_oracle_caveats`, these tests and their two DISCLOSURE mutations together.
 
 
-def test_a_loosely_attributed_workbook_carries_a_caveat_naming_it(tmp_path: Path) -> None:
-    """An operator reading a PASS must be told WHICH producer was matched loosely, by name."""
+def test_a_name_only_refusal_carries_a_caveat_naming_it(tmp_path: Path) -> None:
+    """An operator must be told WHICH producer was refused for carrying only a name, by name."""
     _write_spec(tmp_path, ["Sales"])
     _write_report(tmp_path, ["Sales"], name="Bo ok")
-    _write_oracle_manifest(tmp_path, ["Sales"], workbook="Bo-ok")
+    _write_oracle_manifest(tmp_path, ["Sales"], workbook="Bo ok", workbook_luid=None)
 
     oracle = cu.check_oracle_coverage(tmp_path, None, None)
 
-    assert oracle["status"] == cu.STATUS_PASS
+    assert oracle["status"] == cu.STATUS_NOT_CHECKED
     caveats = oracle["known_gap_caveats"]
     assert len(caveats) == 1
-    assert "#450" in caveats[0]
-    assert "WORKBOOK MATCHED LOOSELY" in caveats[0]
-    assert "'Bo-ok'" in caveats[0], "the caveat must name the producer, not disclaim generically"
+    assert "NAME-ONLY EVIDENCE REFUSED" in caveats[0]
+    assert "'Bo ok'" in caveats[0], "the caveat must name the producer, not disclaim generically"
 
 
 def test_an_exactly_attributed_workbook_prints_no_caveat(tmp_path: Path) -> None:
@@ -3564,9 +4079,9 @@ def test_the_caveats_reach_the_rendered_cli_output(tmp_path: Path) -> None:
     """A payload key nobody prints is not a disclosure."""
     _write_spec(tmp_path, ["Sales"])
     _write_report(tmp_path, ["Sales"], name="Bo ok")
-    _write_oracle_manifest(tmp_path, ["Sales"], workbook="Bo-ok")
+    _write_oracle_manifest(tmp_path, ["Sales"], workbook="Bo ok", workbook_luid=None)
 
     rendered = cu.render(cu.run_all(tmp_path, scope=cu.SCOPE_REPORT))
 
-    assert "#450 WORKBOOK MATCHED LOOSELY" in rendered
-    assert "'Bo-ok'" in rendered
+    assert "NAME-ONLY EVIDENCE REFUSED" in rendered
+    assert "'Bo ok'" in rendered
