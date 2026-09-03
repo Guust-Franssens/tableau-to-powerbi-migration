@@ -907,19 +907,28 @@ def test_the_readme_keeps_the_png_and_svg_legs_distinct_with_the_zero_text_cavea
 
 
 def test_the_readme_states_the_page_pairing_contract(tmp_path: Path) -> None:
-    """`check_unit.page_expectation` pairs on the page's exact name, and only a RENDERED page counts.
+    """`check_unit.check_page_parity` pairs on the exact page name, and a zero-visual page FAILS.
 
     The cold-run agent had to read `check_unit.py` to learn this, which is the trip the package
-    exists to remove. Verified against the source rather than the brief: `actual_pages` takes
-    ``displayName`` (falling back to the internal name, then the directory id), ``rendered`` keeps
-    only pages with at least one ``visual.json``, and ``_claim`` attributes a name claimed by two
-    expected objects to NEITHER.
+    exists to remove. Verified against the source rather than the brief, three claims:
+
+    * `actual_pages` (:1244) takes ``displayName``, and `page_expectation` (:1148) pairs only
+      ``rendered`` pages - those `_page_visual_count` (:1213) finds at least one ``visual.json``
+      under. Its docstring names the reason: without it, "renaming an empty page to an expected
+      page's title certified it as rebuilt".
+    * a zero-visual page that is not the engine's crash-guard placeholder is `blank`
+      (`_zero_visual_pages`, :1745), and `blank` is one of the four conditions that force
+      ``STATUS_PRECONDITION_FAILED`` (:1527). So it FAILS rather than merely going uncredited -
+      asserted separately below, because "at least one visual" alone reads as "not counted".
+    * the expected set is dashboards PLUS ORPHAN worksheets (`_spec_pages`, :853-854). Measured in
+      `expected_pages`' own docstring: 19 of 43 workbooks in a real estate have zero dashboards, so
+      "dashboards only" would grade those against an EMPTY expected set.
     """
     readme = " ".join((_package_with_receipt(tmp_path) / "README.md").read_text(encoding="utf-8").split())
     assert "`displayName`" in readme
     assert "at least one visual" in readme, "the README does not say a zero-visual page is not rebuilt"
-    assert "DIRECTORY id is free" in readme, "the README does not free the page directory id"
-    assert "satisfies neither" in readme, "the README does not state the contested-name rule"
+    assert "`blank` and FAILS" in readme, "the README does not say a zero-visual page FAILS the gate"
+    assert "every worksheet not placed on one" in readme, "the README narrows the expected set to dashboards"
 
 
 def test_the_package_ships_the_spec_schema_it_tells_an_agent_to_obey(tmp_path: Path) -> None:

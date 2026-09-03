@@ -787,9 +787,9 @@ verdict:
     python scripts/check_reference_readiness.py <path-to-this-folder>
     python scripts/check_unit.py <path-to-this-folder>
 
-A page counts as REBUILT only when a page carrying at least one visual has a `displayName` EXACTLY
-equal to the expected object's name; the page DIRECTORY id is free (the gates print it), and a name
-two expected objects both claim satisfies neither.
+A page counts as REBUILT only when its `displayName` EXACTLY equals an expected object's name AND it
+ships at least one visual; one that pairs by name with no visual is reported `blank` and FAILS. The
+expected set is every dashboard PLUS every worksheet not placed on one.
 
 | path | what it is |
 |---|---|
@@ -802,7 +802,7 @@ two expected objects both claim satisfies neither.
 | `oracle/` | this unit's Tableau reference, split `dashboard/` vs `worksheet/` vs `unknown/` (**singular** - the directory is the object kind, not a plural). **`oracle/*/data/*.csv` is the NUMERIC oracle** - exact labels and figures, no OCR and no judgement. Read it first. |
 | `report.json` | **gate input, and readable.** The engine's classification of THIS unit - workbook vs datasource - which is what earns a datasource-only unit `NOT_APPLICABLE` instead of a finding. Scoped to this unit. |
 | `source-provenance.json` | **gate input.** The only trusted route from this package's asset to a Tableau workbook LUID, keyed by the asset's sha256; `origin.match` decides whether a render can be trusted - see UNFIXABLE below. An entry ships only when attribution was NOT refused (`scope.suppressed_reason`). |
-| `engine-output-receipt.json` | **read `engine.version` when a result looks wrong** - it establishes which engine built this, so version drift stays checkable months later. `artifacts[]` and the engine's install paths are not shipped. |
+| `engine-output-receipt.json` | **read `engine.version` when a result looks wrong** - it establishes which engine built this, so version drift stays checkable months later. Install paths are not shipped. |
 | `package-manifest.json` | what was packaged, and every omission with its reason |
 
 `oracle/` images are **layout/text grade only**: a capture is taken in the view's default state with

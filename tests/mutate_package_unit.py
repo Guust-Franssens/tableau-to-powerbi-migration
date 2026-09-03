@@ -237,10 +237,24 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
     (
         "README: drop the page-pairing contract an agent otherwise reads check_unit.py for",
         PACKAGER,
-        "A page counts as REBUILT only when a page carrying at least one visual has a `displayName` EXACTLY\n"
-        "equal to the expected object's name; the page DIRECTORY id is free (the gates print it), and a name\n"
-        "two expected objects both claim satisfies neither.",
+        "A page counts as REBUILT only when its `displayName` EXACTLY equals an expected object's name AND it\n"
+        "ships at least one visual; one that pairs by name with no visual is reported `blank` and FAILS. The\n"
+        "expected set is every dashboard PLUS every worksheet not placed on one.",
         "Both gates grade this unit against the pages it is expected to carry.",
+        ["test_the_readme_states_the_page_pairing_contract"],
+    ),
+    (
+        "README: soften the zero-visual page from a FAILURE to an omission",
+        PACKAGER,
+        "ships at least one visual; one that pairs by name with no visual is reported `blank` and FAILS. The",
+        "ships at least one visual; one that pairs by name with no visual is simply not credited. The",
+        ["test_the_readme_states_the_page_pairing_contract"],
+    ),
+    (
+        "README: narrow the expected page set back to dashboards only",
+        PACKAGER,
+        "expected set is every dashboard PLUS every worksheet not placed on one.",
+        "expected set is every dashboard in the workbook.",
         ["test_the_readme_states_the_page_pairing_contract"],
     ),
     (
