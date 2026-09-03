@@ -568,7 +568,7 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
     ),
     (
         "ORACLE WORKBOOK: a lossy name rescues a LUID disagreement (#450, the fail-open direction)",
-        "    if verdict.axis != oid.WB_NAME or not name:",
+        "    if verdict.route != oid.WB_FOREIGN or verdict.axis != oid.WB_NAME or not name:",
         "    if not name:",
         ["test_a_foreign_luid_is_refused_even_when_the_workbook_name_matches_exactly"],
     ),
@@ -583,6 +583,32 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
         "    if evidence.kindless:\n        grade += (",
         "    if False:\n        grade += (",
         ["test_a_record_whose_kind_is_unestablished_certifies_nothing"],
+    ),
+    (
+        "ORACLE WORKBOOK: a unit-local reference manifest skips the guard again (round-2 blocker 3)",
+        "        if not verdict.admitted:",
+        "        if not verdict.admitted and record.workbook.established:",
+        ["test_a_unit_local_reference_manifest_is_not_certified_by_its_location"],
+    ),
+    (
+        "ORACLE WORKBOOK: the unit stops hashing its own source, so a recorded sha is unchecked",
+        "    sha = _unit_source_sha256(target)",
+        "    sha = None",
+        ["test_a_unit_local_reference_manifest_certifies_when_its_recorded_sha_is_this_source"],
+    ),
+    (
+        # ⚠️ There is deliberately NO mutant here for `Path(name).stem` vs `persisted_stem(name)`.
+        # On Windows `WindowsPath` accepts BOTH separators, so no fixture string exists that `Path`
+        # mishandles and the fix handles - the mutant is unkillable on this host BY CONSTRUCTION, and
+        # an entry that can only ever report CAUGHT on Linux is a vacuity, not a guard. The property
+        # is pinned by `test_the_recorded_path_parse_does_not_use_the_running_hosts_flavour`, which
+        # exercises PureWindowsPath and PurePosixPath explicitly on one host, and by
+        # `test_a_windows_recorded_source_id_still_yields_its_luid`, which fails on POSIX CI if the
+        # call site regresses. `mutation_reference_readiness.py` carries the matching mutant.
+        "ORACLE DISCOVERY: the ancestor walk stops one level short of the run root",
+        "    return evidence_dirs(unit, ORACLE_DIR_NAMES, also=[target])",
+        "    return _resolved_unique([base / name for base in (unit, target) for name in ORACLE_DIR_NAMES])",
+        ["test_a_non_packaged_unit_still_reads_an_ancestors_oracle_capture"],
     ),
     (
         "SLUG CENSUS: a brand-new lossy call site outside the index",

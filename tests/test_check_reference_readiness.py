@@ -1225,3 +1225,44 @@ def test_a_packaged_unit_reads_only_its_own_manifest_end_to_end(tmp_path: Path) 
     assert report["units"][0]["pages"][0]["readiness"] == "ready"
     assert report["evidence_records"] == 1
     assert sha
+
+
+def test_a_unit_three_levels_below_the_run_still_inherits_the_flat_capture(tmp_path: Path) -> None:
+    """MEDIUM 1 from round-1 review of PR #454, at the canonical depth.
+
+    `capture_tableau_oracle.py` writes `_runs/<NNN>-<slug>/oracle/` while an un-packaged unit sits at
+    `_runs/<NNN>-<slug>/bundle/pbip/<Unit>/` - THREE ancestors below it. Stopping at one (the exit
+    gate) or two (this one) makes a real capture invisible for the ordinary engine-bundle shape, so
+    the depth is part of the shared rule rather than each gate's guess.
+    """
+    unit = tmp_path / "run" / "bundle" / "pbip" / "Unit"
+    unit.mkdir(parents=True)
+    (tmp_path / "run" / "oracle").mkdir()
+
+    assert crr._default_dirs(unit, "oracle") == [tmp_path / "run" / "oracle"]
+
+
+def test_the_attribution_census_survives_a_multi_path_scan(tmp_path: Path) -> None:
+    """MEDIUM 2: `_merge_scans` inherits `dict(reports[0])`, so later refusals used to vanish.
+
+    Measured on two bundles: the second refused 7 records as another workbook's, and the merged
+    report said `foreign=0`. A refusal counter that silently zeroes is worse than none, because it
+    reads as "nothing was refused" exactly where the guard did the most work.
+    """
+    clean, dirty = tmp_path / "clean", tmp_path / "dirty"
+    for root in (clean, dirty):
+        (root / "bundle").mkdir(parents=True)
+        (root / "assets").mkdir(parents=True)
+    build_unit(clean / "bundle", "Book", worksheets=["Revenue"])
+    write_oracle(clean / "bundle", [{"view_name": "Revenue", "view_type": "worksheet", "workbook_name": "Book"}])
+    build_unit(dirty / "bundle", "Other", worksheets=["Revenue"])
+    write_oracle(
+        dirty / "bundle",
+        [{"view_name": f"V{i}", "view_type": "worksheet", "workbook_name": "Elsewhere"} for i in range(7)],
+    )
+
+    merged = crr._merge_scans([crr.scan(clean / "bundle"), crr.scan(dirty / "bundle")])
+
+    assert merged["evidence_attributed"]["foreign"] == 7
+    assert merged["evidence_attributed"]["name"] == 1
+    assert "refused 7 as another" in crr.render(merged)

@@ -37,7 +37,7 @@ from typing import Any, Generic, TypeVar
 import check_desktop_orphans as check_desktop_orphans_module
 import object_identity as oid
 import read_handover
-from bundle_corpus import is_self_contained, shipping_models, shipping_reports
+from bundle_corpus import evidence_dirs, shipping_models, shipping_reports
 from check_field_bindings import model_for_report
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -1819,19 +1819,15 @@ def _oracle_dirs(target: Path, explicit: Path | None) -> list[Path]:
     a bundle at ``_runs/<NNN>-<slug>/bundle`` was invisible and oracle-coverage reported "no oracle
     manifest found" for evidence that existed.
 
-    ⚠️ A self-contained package stops the walk up to ``target.parent``. Measured: a package at
-    ``_runs/<run>/<unit>/`` beside the run's flat capture read BOTH manifests, every view matched
-    twice, and this gate refused each page as *"2 producer records are named X"* - 0 visual coverage,
-    silently. That is issue #451's defect one gate along, so the rule lives once, in
-    :func:`bundle_corpus.is_self_contained`, rather than being fixed here a second time.
+    ⚠️ The walk itself - how far up, and where it stops - is :func:`bundle_corpus.evidence_dirs`,
+    shared with the entry gate. This function used to stop one level short of it, so a non-packaged
+    unit at ``<bundle>/pbip/<Unit>/`` could not reach the run's flat capture at all (round-1 review
+    of PR #454).
     """
     if explicit:
-        candidates: list[Path | None] = [explicit]
-    else:
-        unit = _unit_dir(target)
-        bases = (unit, target) if is_self_contained(unit) else (unit, target, target.parent)
-        candidates = [base / name for base in bases for name in ORACLE_DIR_NAMES]
-    return _resolved_unique(candidates)
+        return _resolved_unique([explicit])
+    unit = _unit_dir(target)
+    return evidence_dirs(unit, ORACLE_DIR_NAMES, also=[target])
 
 
 def _existing_relative(base: Path, rel: str | None) -> bool:
@@ -1862,11 +1858,13 @@ class OracleRecord:
     producer writes while the sibling gate read a LUID it then distrusted, and one disagreement about
     "what identifies a workbook" produced a fail-open defect here and a fail-closed one there.
 
-    ``unit_local`` records a LOCATION fact, not an identity one: a ``reference/manifest.json`` found
-    INSIDE the unit was captured for that unit by construction (``_reference_dirs`` never walks up,
-    and ``capture_tableau_reference.py`` writes per-unit), and it declares no workbook at all - only
-    the source workbook's sha256. Marking it is what lets an *oracle* record with no establishable
-    identity be refused without also refusing every locally-captured reference render.
+    ⚠️ There is deliberately **no** ``unit_local`` flag. There was: a `reference/manifest.json` found
+    inside the unit skipped the workbook guard entirely, on the argument that its location proved
+    ownership. Round-1 review of PR #454 measured what that bought - a record whose join returned
+    ``unknown`` was admitted anyway (``admitted_evidence=1``, visual AND numeric certified), and so
+    was one whose ``source_workbook_sha256`` named a **different workbook**. Location controls
+    DISCOVERY; it never substitutes for identity. The manifest's ``source_workbook_sha256`` is the
+    identity it actually carries, and it is now compared against the unit's own hashed source asset.
     """
 
     name: str
@@ -1874,7 +1872,6 @@ class OracleRecord:
     workbook: oid.WorkbookIdentity
     visual: bool
     numeric: bool
-    unit_local: bool = False
 
 
 def _declared_kind(record: Any) -> str | None:
@@ -1898,16 +1895,13 @@ def _reference_oracles(target: Path, reference_dir: Path | None) -> tuple[list[O
     from the migration spec's ``dashboards`` (``_dashboard_names``), so the kind is structurally known
     here and does not depend on #402 landing.
 
-    A `reference/manifest.json` declares no producing workbook - it records ``source_workbook_sha256``
-    and nothing else - and :func:`_reference_dirs` only ever looks INSIDE the unit, so such a record
-    is this unit's by LOCATION. That is stated as ``unit_local`` rather than left to look like an
-    unattributed record, because issue #450's fix refuses unattributed ORACLE records and the two
-    cases must not be confused: one is "found in this unit's own folder", the other is "found in a
-    shared capture with nothing saying whose it is".
+    A `reference/manifest.json` declares no producing workbook NAME - it records
+    ``source_workbook_sha256`` (`capture_tableau_reference.py:234`), which is a machine identity and
+    is checked as one against :func:`_unit_source_sha256`. It is deliberately NOT trusted for sitting
+    inside the unit; see :class:`OracleRecord`.
     """
     records: list[OracleRecord] = []
     grades: set[str] = set()
-    unit = _unit_dir(target)
     for directory in _reference_dirs(target, reference_dir):
         manifest = directory / "manifest.json"
         if not manifest.is_file():
@@ -1916,7 +1910,6 @@ def _reference_oracles(target: Path, reference_dir: Path | None) -> tuple[list[O
             payload = _read_json(manifest)
         except (OSError, json.JSONDecodeError):
             continue
-        local = _is_within(directory, unit) or _is_within(directory, target)
         for dashboard in payload.get("dashboards", []) if isinstance(payload, dict) else []:
             if not isinstance(dashboard, dict):
                 continue
@@ -1929,7 +1922,6 @@ def _reference_oracles(target: Path, reference_dir: Path | None) -> tuple[list[O
                     workbook=_declared_workbook(dashboard, payload, sha256=payload.get("source_workbook_sha256")),
                     visual=visual,
                     numeric=numeric,
-                    unit_local=local,
                 )
             )
     return records, grades
@@ -2069,29 +2061,81 @@ class OracleEvidence:
         return None, None
 
 
+def _unit_source_claims(target: Path) -> tuple[list[str], list[str]]:
+    """``(recorded path/name claims, LUID claims)`` about the Tableau source this unit was built from.
+
+    Two independent producers record it, and both are read: the handover slice's
+    ``workbook.source_id`` (a run-root-relative path) and ``migration-spec.json``'s
+    ``source.file_name`` (a bare basename). Every LUID claim must AGREE - see
+    :func:`object_identity.agreed_luid`.
+
+    ⚠️ Both are parsed with :func:`object_identity.persisted_stem`, never ``Path(...).stem``. A real
+    slice records ``_runs\\407-...\\assets\\<luid>_HR_Dashboard.twbx``; on POSIX those backslashes are
+    ordinary characters, so ``Path`` returns the whole string, the LUID prefix is invisible and the
+    unit ends up with no machine identity - on Linux CI only. Round-1 review of PR #454 measured
+    exactly that divergence, which is the worst possible shape for a safety guard.
+    """
+    names: list[str] = []
+    for _path, _name, payload in _handover_workbooks(target)[0]:
+        if isinstance(payload, dict) and payload.get("source_id"):
+            names.append(str(payload["source_id"]))
+    spec = _migration_spec(target)
+    declared = (_json_object(spec) or {}).get("source") if spec is not None else None
+    if isinstance(declared, dict) and declared.get("file_name"):
+        names.append(str(declared["file_name"]))
+    return names, [oid.harvest_luid(oid.persisted_stem(name)) or "" for name in names]
+
+
+def _unit_source_sha256(target: Path) -> str | None:
+    """sha256 of this unit's Tableau source asset, or None when it cannot be located.
+
+    This is the machine identity a `reference/manifest.json` actually carries
+    (``source_workbook_sha256``), so without it such a record could only be admitted on something
+    weaker - which is precisely what round-1 review of PR #454 refused. Returning None is therefore
+    fail-CLOSED by design: an unlocatable source means a sha-bearing record certifies nothing, and
+    the refusal is counted in ``unattributed_evidence`` rather than dropped.
+    """
+    unit = _unit_dir(target)
+    bases = [unit, target, unit.parent, unit.parent.parent]
+    for recorded in _unit_source_claims(target)[0]:
+        basename = oid.persisted_name(recorded)
+        if not basename:
+            continue
+        candidates = [Path(recorded)]
+        candidates += [base / sub / basename for base in bases for sub in ("assets", ".")]
+        for candidate in candidates:
+            try:
+                if candidate.is_file():
+                    return hashlib.sha256(candidate.read_bytes()).hexdigest()
+            except OSError:
+                continue
+    return None
+
+
 def _unit_workbook_identities(target: Path) -> list[oid.WorkbookIdentity]:
-    """This unit's workbook, once per artifact stem, each carrying the unit's LUID when known.
+    """This unit's workbook, once per artifact stem, on every axis it can establish.
 
-    The LUID comes from the handover slice's ``workbook.source_id``, whose basename is
-    ``harvest_estate_assets.py``'s ``<luid>_<sanitized-name>`` - this repo's own record of which
-    published workbook it downloaded, exact and needing neither server nor credentials. Every claim
-    must agree (:func:`object_identity.agreed_luid`): a unit whose slices name two different source
-    workbooks has no single workbook identity, and picking the first would be the #438 coin toss.
+    The LUID comes from ``harvest_estate_assets.py``'s ``<luid>_<sanitized-name>`` filename - this
+    repo's own record of which published workbook it downloaded - as recorded by the handover slice
+    AND the migration spec. Every claim must agree (:func:`object_identity.agreed_luid`): a unit
+    whose records name two different source workbooks has no single workbook identity, and picking
+    the first would be the #438 coin toss.
 
-    One identity PER STEM rather than one identity with several names, so the LUID axis is consulted
-    first for each of them. That ordering is the guard: a record whose LUID disagrees is foreign
-    against every stem, and cannot be re-admitted by a stem whose display name happens to match.
+    The sha256 is the unit's own source bytes, so a `reference/manifest.json`'s
+    ``source_workbook_sha256`` is CHECKED rather than believed - or, when the source cannot be
+    located, refused.
+
+    One identity PER STEM rather than one identity with several names, so the machine axes are
+    consulted first for each of them. That ordering is the guard: a record whose LUID disagrees is
+    foreign against every stem, and cannot be re-admitted by a stem whose display name happens to
+    match.
     """
     stems, _ = _unit_workbook_keys(target)
-    workbooks, _ = _handover_workbooks(target)
-    luid = oid.agreed_luid(
-        *(
-            oid.harvest_luid(Path(str(payload.get("source_id"))).stem)
-            for _path, _name, payload in workbooks
-            if isinstance(payload, dict) and payload.get("source_id")
-        )
-    )
-    return [oid.WorkbookIdentity(luid=luid, name=stem) for stem in sorted(stems)] or [oid.WorkbookIdentity(luid=luid)]
+    luid = oid.agreed_luid(*_unit_source_claims(target)[1])
+    sha = _unit_source_sha256(target)
+    return [oid.WorkbookIdentity(luid=luid, name=stem, sha256=sha) for stem in sorted(stems)] or [
+        oid.WorkbookIdentity(luid=luid, sha256=sha)
+    ]
 
 
 def _attribute_record(unit_ids: list[oid.WorkbookIdentity], record: OracleRecord) -> oid.Attribution:
@@ -2129,13 +2173,16 @@ def _admissible_oracle_records(
     unattributed = kindless = 0
     for record in records:
         verdict = _attribute_record(unit_ids, record)
-        if not record.unit_local and not verdict.admitted:
+        if not verdict.admitted:
             if verdict.route == oid.WB_UNKNOWN:
                 # ⚠️ Issue #450: this used to `unattributed += 1` and then FALL THROUGH to
                 # `admissible`, so a record whose producing workbook could not be established was
                 # admitted anyway - and because the field this gate read was one no producer writes,
-                # that was every record on a real capture (360 of 360). Refusing is the fix; the
-                # count stays, because a refusal nobody can see is not a guard.
+                # that was every record on a real capture (360 of 360). Round-1 review of PR #454
+                # found the same shape once more, wearing a different hat: a `reference/` manifest
+                # inside the unit skipped this guard entirely on the strength of its LOCATION.
+                # Refusing is the fix in both cases; the count stays, because a refusal nobody can
+                # see is not a guard.
                 unattributed += 1
                 continue
             rescued = _lossy_workbook_rescue(verdict, record, unit_index, producer_index)
@@ -2164,13 +2211,14 @@ def _lossy_workbook_rescue(
     uniqueness was checked among unit workbooks only. Uniqueness of a lossy key on one side is not
     identity.
 
-    ⚠️ **Only a NAME disagreement is rescuable.** If the LUIDs or the source hashes were compared and
-    disagreed, this returns None unconditionally: a stronger axis that has already answered must not
-    be overridden by a weaker one, which is the identity-loss join
+    ⚠️ **Only a NAME disagreement is rescuable.** If a MACHINE axis - the LUID or the source hash -
+    was compared and disagreed, or was claimed by the record and unanswerable by the unit, this
+    returns None unconditionally: a stronger axis that has already answered must not be overridden by
+    a weaker one, which is the identity-loss join
     (:meth:`object_identity.WorkbookIdentity.attribute`) that both halves of #450 grew out of.
     """
     name = record.workbook.name
-    if verdict.axis != oid.WB_NAME or not name:
+    if verdict.route != oid.WB_FOREIGN or verdict.axis != oid.WB_NAME or not name:
         return None
     if unit_index.unique(name) is None or producer_index.unique(name) is None:
         return None

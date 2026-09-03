@@ -67,7 +67,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
-from bundle_corpus import is_self_contained, shipping_reports
+from bundle_corpus import evidence_dirs, shipping_reports
 import object_identity as oid
 from object_identity import AMBIGUOUS
 from reference_evidence import (
@@ -81,11 +81,15 @@ from reference_evidence import (
     KIND_WORKSHEET,
     MIN_RENDER_EDGE,
     PROVIDER_CEILING,
+    REVISION_CONFIRMED,
+    REVISION_MISMATCH,
+    REVISION_UNCONFIRMED,
     Evidence,
     RejectedEvidence,
     UnitIdentity,
     json_object,
     oracle_evidence,
+    provenance_origin,
     reference_evidence,
     sha256_of,
 )
@@ -104,6 +108,9 @@ __all__ = [
     "KIND_WORKSHEET",
     "MIN_RENDER_EDGE",
     "PROVIDER_CEILING",
+    "REVISION_CONFIRMED",
+    "REVISION_MISMATCH",
+    "REVISION_UNCONFIRMED",
     "Evidence",
     "RejectedEvidence",
     "UnitIdentity",
@@ -399,7 +406,7 @@ def _enforce_exclusivity(rows: list[dict[str, Any]]) -> None:
 def _page_row(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     obj: SourceObject,
     page_status: str,
-    evidence: list[Evidence],
+    scoped: ScopedEvidence,
     reason: str | None,
     require_validation_grade: bool,
 ) -> dict[str, Any]:
@@ -420,7 +427,7 @@ def _page_row(  # pylint: disable=too-many-arguments,too-many-positional-argumen
         # for; an unexplained one is the conversion gap the agent must know about before starting.
         row["readiness"] = READY if page_status == PAGE_DROPPED_EXPLAINED else BLIND
         return row
-    match, name_only = match_evidence(obj, evidence)
+    match, name_only = match_evidence(obj, scoped.admitted)
     if match is AMBIGUOUS:
         row.update(
             {
@@ -443,9 +450,20 @@ def _page_row(  # pylint: disable=too-many-arguments,too-many-positional-argumen
                 "matched_by": f"{match.origin}:{match.provider or 'unknown'} (scope={match.kind})",
                 "evidence_path": match.path,
                 "render_key": _render_key(match),
+                # ⚠️ Round-1 review of PR #454, blocker 2: a page certified through a LUID or name
+                # join says WHICH workbook, never WHICH BUILD of it, and used to read as a clean
+                # READY with nothing disclosing that. Never silently claimed - stated, counted
+                # (`pages_revision_unconfirmed`) and rendered.
+                "revision": match.revision_for(scoped.identity),
                 "readiness": INSUFFICIENT_GRADE if insufficient else READY,
             }
         )
+        return row
+    stale = _stale_note(obj, scoped)
+    if stale is not None:
+        # ⚠️ No `render_key`: a stale render certifies nothing, so it must not contest a legitimate
+        # render of the same bytes in another unit and drag that page down with it.
+        row.update({"evidence": "unverifiable", "matched_by": stale, "readiness": UNVERIFIABLE})
         return row
     if name_only:
         scopes = sorted({item.kind for item in name_only})
@@ -459,6 +477,25 @@ def _page_row(  # pylint: disable=too-many-arguments,too-many-positional-argumen
         return row
     row["readiness"] = BLIND
     return row
+
+
+def _stale_note(obj: SourceObject, scoped: ScopedEvidence) -> str | None:
+    """Why a render of this object exists but is of a DIFFERENT build of this workbook, or None.
+
+    Kept distinct from BLIND on purpose: "nobody captured this page" and "the capture is of another
+    revision" call for different operator actions - capture it, versus re-harvest or re-capture
+    against the migrated build.
+    """
+    if not scoped.stale:
+        return None
+    match, _ = match_evidence(obj, scoped.stale)
+    if not isinstance(match, Evidence):
+        return None
+    return (
+        f"STALE: {match.origin}:{match.provider or 'unknown'} render is of the same workbook at a "
+        "DIFFERENT build - the local source bytes differ from a REPRODUCIBLE download of the site "
+        "copy, so this cannot certify the migrated revision"
+    )
 
 
 def _engine_report(root: Path) -> dict[str, Any] | None:
@@ -491,51 +528,6 @@ def _unit_names(engine_report: dict[str, Any] | None) -> tuple[list[str], list[s
 
 def _handover(root: Path, unit: str) -> dict[str, Any] | None:
     return json_object(root / "handover" / f"{unit}.json")
-
-
-#: Provenance ``origin`` shapes that ESTABLISH which published workbook a local file is. See
-#: :func:`_provenance_luid` - deliberately distinct from ``origin.match``, which answers a revision
-#: question and was read as if it were this one (issue #450).
-IDENTITY_MATCHED_BY = frozenset({"luid"})
-
-
-def _provenance_luid(root: Path, source_sha: str, source: Path | None = None) -> str | None:
-    """The published workbook LUID for this source, from every offline route that ESTABLISHES one.
-
-    Two routes, and they must agree:
-
-    * ``source-provenance.json``'s ``origin.workbook_luid`` for the entry whose stamped input hash is
-      THIS file - trusted when ``matched_by == "luid"`` (the harvested filename's LUID was found on
-      the site, so it is provably that item) **or** when ``match == "sha256"`` (the bytes are
-      identical to the site copy, which confirms identity by content). A ``matched_by`` of ``name``
-      or ``sanitized_name`` with differing bytes is a name collision, not an identity.
-    * the asset filename's own ``<luid>_`` prefix, which is `harvest_estate_assets.py`'s record of
-      what it downloaded.
-
-    ⚠️ This used to require ``origin.match == "sha256"`` and nothing else, which read the REVISION
-    axis as if it were the IDENTITY axis. ``stamp_tableau_provenance.find_origin`` documents them as
-    "two independent axes"; on the reference estate 48 of 78 inputs are ``name_only`` while matched
-    ``by luid``, so the common case discarded a proven LUID and fell back to comparing the artifact
-    stem ``HR_Dashboard`` against the published name ``HR Dashboard``. That fallback is weaker on
-    identity AND carries no revision guarantee, so the trade bought nothing.
-
-    Disagreement between the two routes returns None: two identities that contradict each other are
-    less evidence than none, and the name axis then has to carry it.
-    """
-    stamped = oid.harvest_luid(source.stem if source is not None else None)
-    payload = json_object(root / "source-provenance.json")
-    for record in (payload or {}).get("inputs") or []:
-        if not isinstance(record, dict):
-            continue
-        stamped_input = record.get("input") if isinstance(record.get("input"), dict) else {}
-        origin = record.get("origin") if isinstance(record.get("origin"), dict) else {}
-        if stamped_input.get("sha256") != source_sha:
-            continue
-        if origin.get("matched_by") not in IDENTITY_MATCHED_BY and origin.get("match") != "sha256":
-            return oid.agreed_luid(stamped)
-        luid = origin.get("workbook_luid")
-        return oid.agreed_luid(stamped, luid if isinstance(luid, str) else None)
-    return oid.agreed_luid(stamped)
 
 
 def resolve_source(root: Path, unit: str, handover: dict[str, Any] | None, explicit: Path | None) -> Path | None:
@@ -573,20 +565,9 @@ def resolve_source(root: Path, unit: str, handover: dict[str, Any] | None, expli
 
 
 def _default_dirs(root: Path, name: str) -> list[Path]:
-    """Conventional evidence locations, mirroring `check_unit._oracle_dirs`.
-
-    The walk-up is a UNION, not a fallback, and that is deliberate: an un-packaged unit under
-    `<bundle>/pbip/<Unit>/` finds the run's flat capture that way, which is the ordinary case.
-
-    A self-contained package stops the walk - rationale, and why both gates share the one rule:
-    `bundle_corpus.is_self_contained`.
-    """
-    bases = [root] if is_self_contained(root) else [root, root.parent, root.parent.parent]
-    seen: list[Path] = []
-    for candidate in (base / name for base in bases):
-        if candidate.is_dir() and candidate.resolve() not in {path.resolve() for path in seen}:
-            seen.append(candidate)
-    return seen
+    """Conventional evidence locations. The whole rule - walk and stop - is
+    :func:`bundle_corpus.evidence_dirs`, shared with `check_unit._oracle_dirs`."""
+    return evidence_dirs(root, [name])
 
 
 def _cannot(unit: str, detail: str, report_dir: Path | None = None, source: Path | None = None) -> UnitResult:
@@ -605,16 +586,15 @@ def _identify(root: Path, unit: str, source: Path) -> UnitIdentity | None:
     digest = sha256_of(source)
     if digest is None:
         return None
-    return UnitIdentity(
-        name=unit, source_path=source, source_sha256=digest, workbook_luid=_provenance_luid(root, digest, source)
-    )
+    luid, revision = provenance_origin(root, digest, source)
+    return UnitIdentity(name=unit, source_path=source, source_sha256=digest, workbook_luid=luid, revision=revision)
 
 
 def _page_rows(
     objects: list[SourceObject],
     emitted: dict[str, str],
     explained: dict[tuple[str, str], str],
-    scoped: list[Evidence],
+    scoped: ScopedEvidence,
     require_validation_grade: bool,
 ) -> list[dict[str, Any]]:
     """One readiness row per expected page, splitting explained from unexplained drops."""
@@ -759,38 +739,46 @@ def assess_unit(  # pylint: disable=too-many-arguments,too-many-positional-argum
         return emitted
 
     scoped = _scope_evidence(evidence, identity)
-    rows = _page_rows(objects, emitted, drop_explanations(handover), scoped.admitted, require_validation_grade)
+    rows = _page_rows(objects, emitted, drop_explanations(handover), scoped, require_validation_grade)
     return _readiness_result(unit, report_dir, source, rows, scoped.census)
 
 
 @dataclass(frozen=True)
 class ScopedEvidence:
-    """One unit's share of the candidate renders, WITH the census of what was refused.
+    """One unit's share of the candidate renders, WITH what was refused and why.
 
-    The two travel together on purpose. A refusal that is dropped instead of counted is
-    indistinguishable from a render nobody ever captured, and that ambiguity is exactly how issue
-    #450's inert guard read as a working one for six review rounds.
+    ``admitted`` may certify a page; ``stale`` is the right workbook at a build this gate can prove
+    is different, and may only make a page UNVERIFIABLE - it is never in the list `match_evidence`
+    searches, so it cannot reach READY by any path. ``census`` counts every verdict, including the
+    refusals, because a refusal that is dropped instead of counted is indistinguishable from a render
+    nobody ever captured. ``identity`` travels with them so a row can report what the admitted render
+    establishes about the REVISION as well as the workbook.
     """
 
     admitted: list[Evidence]
+    stale: list[Evidence]
     census: dict[str, int]
+    identity: UnitIdentity
 
 
 def _scope_evidence(evidence: list[Evidence], identity: UnitIdentity) -> ScopedEvidence:
     """Attribute every candidate render to ``identity``, keeping the ones it may certify.
 
     Every render is attributed, admitted or not, and the census records which axis decided - so the
-    negative control ("a different workbook's render is refused, AND counted") is assertable and a
-    change here cannot pass as a fix while actually deleting the guard.
+    negative controls ("a foreign or unestablished record is refused, AND counted") are assertable
+    and a change here cannot pass as a fix while actually deleting the guard.
     """
-    census = dict.fromkeys((*oid.WB_ROUTES, oid.WB_FOREIGN, oid.WB_UNKNOWN), 0)
-    admitted = []
+    census = dict.fromkeys((*oid.WB_ROUTES, *oid.WB_REFUSALS), 0)
+    admitted: list[Evidence] = []
+    stale: list[Evidence] = []
     for item in evidence:
         verdict = item.attribution(identity)
         census[verdict.route] = census.get(verdict.route, 0) + 1
         if verdict.admitted:
             admitted.append(item)
-    return ScopedEvidence(admitted=admitted, census=census)
+        elif verdict.route == oid.WB_STALE:
+            stale.append(item)
+    return ScopedEvidence(admitted=admitted, stale=stale, census=census, identity=identity)
 
 
 def _units_without_reports(engine_report: dict[str, Any] | None, reports: list[Path]) -> list[UnitResult]:
@@ -918,6 +906,13 @@ def _merge(
         "pages_emitted": sum(1 for page in pages if page["page_status"] == PAGE_EMITTED),
         "pages_dropped_explained": sum(1 for page in pages if page["page_status"] == PAGE_DROPPED_EXPLAINED),
         "pages_dropped_unexplained": sum(1 for page in pages if page["page_status"] == PAGE_DROPPED_UNEXPLAINED),
+        # Pages certified by a render whose REVISION this gate could not establish. Not a refusal -
+        # the evidence is real and attributed - but never a silent claim either: the gate's contract
+        # is "THIS workbook, at THIS revision", and this is the count of pages where only the first
+        # half was proven (round-1 review of PR #454, blocker 2).
+        "pages_revision_unconfirmed": sum(
+            1 for page in pages if page.get("revision") and page["revision"] != REVISION_CONFIRMED
+        ),
         "evidence_records": len(evidence),
         "evidence_untyped": sum(1 for item in evidence if item.kind == KIND_UNKNOWN),
         "evidence_untyped_names": sorted({item.name for item in evidence if item.kind == KIND_UNKNOWN}),
@@ -1013,14 +1008,24 @@ def _render_attribution(report: dict[str, Any]) -> list[str]:
     #450's inert guard look like a working one for six review rounds.
     """
     census = report.get("evidence_attributed") or {}
-    if not sum(census.values()):
-        return []
-    admitted = ", ".join(f"{route}={census.get(route, 0)}" for route in oid.WB_ROUTES)
-    return [
-        f"  [ATTRIBUTION] admitted by {admitted}; refused {census.get(oid.WB_FOREIGN, 0)} as another "
-        f"workbook's and {census.get(oid.WB_UNKNOWN, 0)} with no shared identity axis "
-        "(counts are per unit-and-record, so one shared capture is weighed against every unit)."
-    ]
+    lines: list[str] = []
+    if sum(census.values()):
+        admitted = ", ".join(f"{route}={census.get(route, 0)}" for route in oid.WB_ROUTES)
+        lines.append(
+            f"  [ATTRIBUTION] admitted by {admitted}; refused {census.get(oid.WB_FOREIGN, 0)} as another "
+            f"workbook's, {census.get(oid.WB_STALE, 0)} as a different build and "
+            f"{census.get(oid.WB_UNKNOWN, 0)} with no identity this unit can answer "
+            "(counts are per unit-and-record, so one shared capture is weighed against every unit)."
+        )
+    unconfirmed = report.get("pages_revision_unconfirmed") or 0
+    if unconfirmed:
+        lines.append(
+            f"  [REVISION NOT ESTABLISHED] {unconfirmed} ready page(s) rest on a render tied to this "
+            "workbook by LUID or name, which says WHICH workbook a picture is of and never WHICH "
+            'BUILD. Only a source-sha match, or `source-provenance.json` reporting `match: "sha256"`, '
+            "proves the capture depicts the revision you are migrating."
+        )
+    return lines
 
 
 def _render_page(page: dict[str, Any]) -> str:
@@ -1113,6 +1118,14 @@ def _merge_scans(reports: list[dict[str, Any]]) -> dict[str, Any]:
     ):
         merged[key] = sum(report[key] for report in reports)
     merged["grades_present"] = sorted({grade for report in reports for grade in report["grades_present"]})
+    # ⚠️ `merged = dict(reports[0])` inherits the FIRST report's census verbatim, so without this the
+    # refusals of every later path vanish - measured `foreign=7` merged down to `foreign=0`. A
+    # refusal counter that silently zeroes is worse than none, because it reads as "nothing was
+    # refused" exactly where the guard did the most work.
+    merged["evidence_attributed"] = {
+        route: sum((report.get("evidence_attributed") or {}).get(route, 0) for report in reports)
+        for route in (*oid.WB_ROUTES, *oid.WB_REFUSALS)
+    }
     merged["all_evidence_validation_grade"] = all(report["all_evidence_validation_grade"] for report in reports)
     statuses = {report["status"] for report in reports}
     if STATUS_FINDINGS in statuses:

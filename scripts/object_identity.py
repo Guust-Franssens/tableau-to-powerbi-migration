@@ -42,23 +42,34 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 from typing import Any, Generic, TypeVar
 
 KIND_DASHBOARD = "dashboard"
 KIND_WORKSHEET = "worksheet"
 KIND_UNKNOWN = "unknown"
 
-#: How a render was tied to a unit's workbook. The first three ADMIT; the last two REFUSE.
+#: How a render was tied to a unit's workbook. The first three ADMIT; the rest REFUSE.
 WB_SHA = "sha256"
 WB_LUID = "luid"
 WB_NAME = "name"
+WB_STALE = "stale"
 WB_FOREIGN = "foreign"
 WB_UNKNOWN = "unknown"
 
-#: Routes that admit. Ordered strongest-first, which is also the order :meth:`WorkbookIdentity.attribute`
-#: consults them - a stronger axis, once BOTH sides carry it, is decisive and is never re-litigated by
-#: a weaker one.
+#: The axes that identify a workbook to a MACHINE. A record that claims one of these has told us how
+#: it must be checked, and a unit that cannot answer on that axis has not established anything - see
+#: :meth:`WorkbookIdentity.attribute`. ``WB_NAME`` is deliberately absent: a display name is not
+#: unique across projects.
+WB_MACHINE_AXES = (WB_SHA, WB_LUID)
+
+#: Routes that admit, strongest first - also the order :meth:`WorkbookIdentity.attribute` consults
+#: them.
 WB_ROUTES = (WB_SHA, WB_LUID, WB_NAME)
+
+#: Every refusal, so a census can carry them all and a refusal is never silently absent.
+WB_REFUSALS = (WB_STALE, WB_FOREIGN, WB_UNKNOWN)
+
 WB_ADMITTING = frozenset(WB_ROUTES)
 
 #: `harvest_estate_assets.py` names every download `<luid>_<sanitized-name><ext>`, which is the only
@@ -67,6 +78,10 @@ WB_ADMITTING = frozenset(WB_ROUTES)
 HARVEST_STEM_RE = re.compile(
     r"^(?P<luid>[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})_(?P<rest>.+)$"
 )
+
+#: Either separator, because a path RECORDED BY ANOTHER HOST is text, not a path. See
+#: :func:`persisted_name`.
+PATH_SEPARATORS = re.compile(r"[\\/]+")
 
 #: The only kinds an identity may carry. `KIND_UNKNOWN` is deliberately absent: an object whose kind
 #: is unknown has no identity, which is the whole point.
@@ -439,27 +454,46 @@ class WorkbookIdentity:
         return ", ".join(parts) or "no workbook identity"
 
     def attribute(self, record: WorkbookIdentity) -> Attribution:
-        """Tie ``record`` to this unit, on the STRONGEST axis both sides carry.
+        """Tie ``record`` to this unit. **A machine identity the unit cannot answer is ``unknown``.**
 
-        ⚠️ **The first shared axis is decisive.** A mismatch there returns ``foreign`` and never falls
-        through to a weaker one - otherwise a foreign workbook that happens to share a display name
-        would be admitted on the name axis after its LUID had already said no. That fall-through is
-        the identity-loss join this module exists to make unrepresentable.
+        This is the one rule, and it replaced four separate fail-open patches (round-1 review of PR
+        #454). Read it as a single sentence:
 
-        ⚠️ **The name axis is EXACT.** A normalized comparison would attribute one workbook's captures
-        to another whose name differs only by case or spacing. If a published display name genuinely
-        differs from the local artifact stem - `HR Dashboard` vs `HR_Dashboard` - the LUID is the
-        answer, and guessing across the difference is not.
+            *If a record carries a machine identity - a source sha256 or a workbook LUID - that this
+            unit cannot establish or compare, the result is ``unknown``. There is no fall-through to a
+            weaker axis, and location never substitutes for a failed or unestablished join.*
 
-        No shared axis at all is ``unknown``: **cannot establish**, never "belongs to this unit".
+        Concretely, walking :data:`WB_MACHINE_AXES` strongest-first:
+
+        * the record makes no claim on this axis -> try the next one;
+        * the record claims it and the unit cannot answer -> **``unknown``**, stop. ⚠️ This is the
+          half that was missing. A real oracle record carries ``workbook_luid`` AND ``workbook_name``,
+          so skipping an *unshared* LUID and admitting on an equal display name let a FOREIGN
+          workbook certify a page in both gates - measured, `READY 1/1` and `PASS visual+numeric`,
+          on a record whose LUID belonged to another workbook entirely;
+        * both sides answer -> that axis is **decisive**: equal admits, unequal is ``foreign``, and
+          neither is ever re-litigated by a weaker axis.
+
+        Only when the record claims **no** machine axis at all does the display name decide, and then
+        exactly: a normalized comparison would attribute one workbook's captures to another whose
+        name differs only by case or spacing.
+
+        ⚠️ The rule is deliberately one-directional, and the asymmetry is a known residual: a record
+        carrying ONLY a display name is still admitted against a unit that does have a LUID, because
+        nothing stronger is on offer from the producer. That route is the weakest one and every
+        admission through it is counted separately (``census["name"]``) so a reader can see it.
         """
-        for axis, mine, theirs in (
-            (WB_SHA, self.sha256, record.sha256),
-            (WB_LUID, self.luid, record.luid),
-            (WB_NAME, self.name, record.name),
-        ):
-            if mine is None or theirs is None:
+        for axis in WB_MACHINE_AXES:
+            mine, theirs = getattr(self, _FIELD[axis]), getattr(record, _FIELD[axis])
+            if theirs is None:
                 continue
+            if mine is None:
+                return Attribution(
+                    WB_UNKNOWN,
+                    f"the record is identified by {axis} ({record.describe()}) and this unit "
+                    f"establishes none, so nothing can be compared - unit {self.describe()}",
+                    axis=axis,
+                )
             if _axis_equal(axis, mine, theirs):
                 return Attribution(axis, f"{axis} matches ({self.describe()})", axis=axis)
             return Attribution(
@@ -467,10 +501,23 @@ class WorkbookIdentity:
                 f"{axis} differs: unit {self.describe()} vs record {record.describe()}",
                 axis=axis,
             )
+        if self.name is not None and record.name is not None:
+            if _axis_equal(WB_NAME, self.name, record.name):
+                return Attribution(WB_NAME, f"name matches ({self.describe()})", axis=WB_NAME)
+            return Attribution(
+                WB_FOREIGN,
+                f"name differs: unit {self.describe()} vs record {record.describe()}",
+                axis=WB_NAME,
+            )
         return Attribution(
             WB_UNKNOWN,
             f"no shared identity axis: unit {self.describe()} vs record {record.describe()}",
         )
+
+
+#: Which field each axis reads. A mapping rather than a tuple of triples so the axis names in
+#: :data:`WB_MACHINE_AXES` and the fields cannot drift apart.
+_FIELD = {WB_SHA: "sha256", WB_LUID: "luid", WB_NAME: "name"}
 
 
 def _text(value: Any) -> str | None:
@@ -490,9 +537,37 @@ def harvest_luid(stem: str | None) -> str | None:
     across projects), so the prefix is this repo's own record of which published workbook it
     downloaded - exact, and available with no server and no credentials. A hand-placed or renamed
     workbook simply yields None and keeps the weaker routes, gaining nothing it did not ask for.
+
+    ⚠️ Feed this :func:`persisted_stem`, never ``Path(...).stem``. See that function.
     """
     found = HARVEST_STEM_RE.match(stem or "")
     return found.group("luid") if found else None
+
+
+def persisted_name(text: str | None) -> str:
+    """The final segment of a path RECORDED BY ANOTHER HOST, on either host.
+
+    ⚠️ ``pathlib.Path`` is the *running* host's flavour, and that is a safety bug rather than a
+    portability nicety. A real handover slice records
+    ``_runs\\407-dryrun-gates\\assets\\<luid>_HR_Dashboard.twbx``; on POSIX those backslashes are
+    ordinary filename characters, so ``Path(...).stem`` returns the whole string, `harvest_luid` sees
+    no prefix, and the unit ends up with **no LUID** - which is exactly the state that used to let a
+    weaker axis admit a foreign record. Measured: the same input yields the LUID under
+    ``PureWindowsPath`` and ``None`` under ``PurePosixPath``, so a guard behaved differently in the
+    two places we look (a Windows workstation and a Linux CI runner).
+
+    Splitting on BOTH separators is host-independent by construction. It is safe for this data
+    because these paths are written by `harvest_estate_assets.safe_component`, which rewrites every
+    character outside ``[A-Za-z0-9-_]`` - a literal backslash can never appear inside a name.
+    """
+    raw = (text or "").strip()
+    stripped = PATH_SEPARATORS.sub("/", raw).rstrip("/")
+    return stripped.rsplit("/", 1)[-1] if stripped else ""
+
+
+def persisted_stem(text: str | None) -> str:
+    """:func:`persisted_name` without its extension - what :func:`harvest_luid` expects."""
+    return PurePosixPath(persisted_name(text)).stem
 
 
 def agreed_luid(*claims: str | None) -> str | None:

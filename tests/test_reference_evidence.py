@@ -249,30 +249,45 @@ def test_evidence_attribution_uses_the_exact_workbook_name(bundle: Path) -> None
 # --------------------------------------------------------------------------------------------
 
 
-def write_provenance(root: Path, source: Path, *, luid: str, match: str, matched_by: str | None = None) -> None:
+def write_provenance(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    root: Path,
+    source: Path,
+    *,
+    luid: str,
+    match: str,
+    matched_by: str | None = None,
+    remote_sha: str | None = "aa" * 32,
+    noisy_remote: bool = False,
+) -> None:
     """A `source-provenance.json` as `stamp_tableau_provenance.py` writes it.
 
     ``matched_by`` and ``match`` are two INDEPENDENT axes and the fixture keeps them separate:
     ``find_origin`` records *how the workbook was found* in the first and *how strongly the bytes
     were confirmed* in the second. Omitting ``matched_by`` - the default here - is the shape of an
     origin that establishes identity by neither route.
+
+    ``noisy_remote`` writes a SECOND entry for the same LUID with a different ``remote_sha256``,
+    which is what the real estate looks like: ``content_sha256(luid)`` is one request, and on the 407
+    capture it returned different digests for 18 of 30 workbooks inside a single run because the
+    server repacks a `.twbx` per download. A fixture that could not express that could not tell a
+    sound byte comparison from a meaningless one.
     """
     origin: dict[str, object] = {"workbook_luid": luid, "workbook_name": "Published Name", "match": match}
     if matched_by is not None:
         origin["matched_by"] = matched_by
-    (root / "source-provenance.json").write_text(
-        json.dumps(
-            {
-                "inputs": [
-                    {
-                        "input": {"file": source.name, "sha256": hashlib.sha256(source.read_bytes()).hexdigest()},
-                        "origin": origin,
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
+    if remote_sha is not None:
+        origin["remote_sha256"] = remote_sha
+    entry = {
+        "input": {"file": source.name, "sha256": hashlib.sha256(source.read_bytes()).hexdigest()},
+        "origin": origin,
+    }
+    inputs = [entry]
+    if noisy_remote:
+        twin = json.loads(json.dumps(entry))
+        twin["input"] |= {"file": f"{source.stem}.twbx", "sha256": "ff" * 32}
+        twin["origin"]["remote_sha256"] = "ee" * 32
+        inputs.append(twin)
+    (root / "source-provenance.json").write_text(json.dumps({"inputs": inputs}), encoding="utf-8")
 
 
 def test_a_name_only_provenance_luid_is_not_trusted(bundle: Path) -> None:
@@ -294,14 +309,63 @@ def test_a_name_only_provenance_luid_is_not_trusted(bundle: Path) -> None:
     assert crr.main([str(bundle), "--quiet"]) == 1
 
 
-def test_a_luid_matched_provenance_survives_a_changed_revision(bundle: Path) -> None:
-    """Issue #450, symptom A: `matched_by: "luid"` establishes identity even when the bytes differ.
+def test_a_luid_matched_provenance_still_establishes_identity_but_not_the_revision(bundle: Path) -> None:
+    """Issue #450 symptom A, and round-1 review of PR #454's blocker 2, in one test.
 
     ``find_origin``'s own docstring: "a LUID match with ``name_only`` means 'this is provably the same
     item on the site, and it has changed since we harvested it', which is a different and more useful
-    statement than a name collision". Measured on the reference estate, 48 of 78 inputs are
-    ``name_only`` while matched BY LUID - the common case - and every one of them lost its identity
-    and fell back to comparing an artifact stem against a published display name.
+    statement than a name collision". Both halves are load-bearing, and each was got wrong once:
+
+    * **identity** must resolve, or the artifact stem ``HR_Dashboard`` gets compared against the
+      published name ``HR Dashboard`` and 23 attributable renders are discarded (issue #450). The
+      record's ``workbook_name`` here is deliberately ``Not WB``, so only the LUID can match it.
+    * **the revision must NOT be claimed.** Reading these pages as current made a capture that might
+      be of another BUILD read as a clean `READY`, carrying the generic oracle grade and disclosing
+      nothing.
+
+    ⚠️ ``noisy_remote`` is the ORDINARY estate shape, not an edge case - see
+    :func:`test_a_reproducible_byte_difference_is_the_only_thing_that_proves_drift`. So this page is
+    admitted with ``revision: "unconfirmed"``, and the report counts and prints it.
+    """
+    build_unit(bundle, "WB", worksheets=["Revenue Trend"])
+    write_provenance(
+        bundle,
+        bundle.parent / "assets" / "WB.twb",
+        luid="luid-1",
+        match="name_only",
+        matched_by="luid",
+        noisy_remote=True,
+    )
+    write_oracle(
+        bundle,
+        [
+            {
+                "view_name": "Revenue Trend",
+                "view_type": "worksheet",
+                "workbook_luid": "luid-1",
+                "workbook_name": "Not WB",
+            }
+        ],
+    )
+
+    report = crr.scan(bundle)
+    page = report["units"][0]["pages"][0]
+    assert page["readiness"] == "ready", "identity resolved by LUID"
+    assert page["revision"] == "unconfirmed", "and the revision did NOT"
+    assert report["pages_revision_unconfirmed"] == 1
+    assert "[REVISION NOT ESTABLISHED]" in crr.render(report)
+    assert report["evidence_attributed"]["luid"] == 1
+
+
+def test_a_reproducible_byte_difference_is_the_only_thing_that_proves_drift(bundle: Path) -> None:
+    """The sound half of blocker 2: with ONE reproducible remote digest, `name_only` IS drift.
+
+    ⚠️ This distinction is measured, not chosen. `find_origin` compares the harvested bytes against
+    ``content_sha256(luid)``, a fresh download. On the 407 reference estate that identical request
+    was issued **twice for each of 30 workbooks inside one run** and returned **different digests for
+    18 of them** - the server repacks a `.twbx` per request. Reading `name_only` alone as drift
+    marked 18 of 67 units, 246 records and 125 pages unverifiable on an estate where nothing had
+    changed; requiring the comparison to be reproducible flagged **0**, while still firing here.
     """
     build_unit(bundle, "WB", worksheets=["Revenue Trend"])
     write_provenance(bundle, bundle.parent / "assets" / "WB.twb", luid="luid-1", match="name_only", matched_by="luid")
@@ -317,9 +381,57 @@ def test_a_luid_matched_provenance_survives_a_changed_revision(bundle: Path) -> 
         ],
     )
 
+    report = crr.scan(bundle)
+    page = report["units"][0]["pages"][0]
+    assert page["readiness"] == "unverifiable"
+    assert "DIFFERENT build" in page["matched_by"]
+    assert report["evidence_attributed"]["stale"] == 1
+    assert report["evidence_attributed"]["luid"] == 0, "a stale render is not an admission"
+    assert crr.main([str(bundle), "--quiet"]) == 1
+
+
+def test_a_byte_confirmed_provenance_luid_certifies_normally(bundle: Path) -> None:
+    """The discriminating twin: identity AND revision both established must still reach READY.
+
+    Without it, "call everything stale" passes the tests above and the LUID route - the whole point
+    of issue #450 - is dead.
+    """
+    build_unit(bundle, "WB", worksheets=["Revenue Trend"])
+    write_provenance(bundle, bundle.parent / "assets" / "WB.twb", luid="luid-1", match="sha256", matched_by="luid")
+    write_oracle(
+        bundle,
+        [
+            {
+                "view_name": "Revenue Trend",
+                "view_type": "worksheet",
+                "workbook_luid": "luid-1",
+                "workbook_name": "Not WB",
+            }
+        ],
+    )
+
+    report = crr.scan(bundle)
+    assert report["units"][0]["pages"][0]["readiness"] == "ready"
+    assert report["units"][0]["pages"][0]["revision"] == "confirmed"
+    assert report["pages_revision_unconfirmed"] == 0
+    assert report["evidence_attributed"]["luid"] == 1
+    assert report["evidence_attributed"]["stale"] == 0
+
+
+def test_a_stale_render_cannot_contest_a_legitimate_one_in_another_unit(bundle: Path) -> None:
+    """A stale render takes no `render_key`, so exclusivity does not drag a good page down with it.
+
+    Admitting it "but marking it" would have been the easy shape; it is also how a refusal becomes a
+    second-order fail-closed bug, because cross-unit exclusivity keys on the render digest and would
+    have seen two claims on one image.
+    """
+    build_unit(bundle, "WB", worksheets=["Revenue Trend"])
+    write_provenance(bundle, bundle.parent / "assets" / "WB.twb", luid="luid-1", match="name_only", matched_by="luid")
+    write_oracle(bundle, [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_luid": "luid-1"}])
+
     page = crr.scan(bundle)["units"][0]["pages"][0]
-    assert page["readiness"] == "ready"
-    assert crr.scan(bundle)["evidence_attributed"]["luid"] == 1
+    assert page["readiness"] == "unverifiable"
+    assert "render_key" not in page
 
 
 def test_a_luid_matched_provenance_still_refuses_another_workbooks_render(bundle: Path) -> None:
@@ -400,7 +512,7 @@ def test_every_refusal_is_counted_so_it_can_be_told_from_a_missing_capture(bundl
     )
 
     census = crr.scan(bundle)["evidence_attributed"]
-    assert census == {"sha256": 0, "luid": 0, "name": 1, "foreign": 1, "unknown": 1}
+    assert census == {"sha256": 0, "luid": 0, "name": 1, "stale": 0, "foreign": 1, "unknown": 1}
 
 
 def test_a_sha256_confirmed_provenance_luid_is_trusted(bundle: Path) -> None:
@@ -412,11 +524,18 @@ def test_a_sha256_confirmed_provenance_luid_is_trusted(bundle: Path) -> None:
     assert crr.scan(bundle)["units"][0]["pages"][0]["readiness"] == "ready"
 
 
-def test_a_record_carrying_both_luid_and_name_can_still_fall_back_to_the_name(bundle: Path) -> None:
-    """Round-2 finding 3, mirror image: carrying a LUID used to DISCARD the name.
+def test_a_record_whose_luid_this_unit_cannot_answer_is_not_rescued_by_its_name(bundle: Path) -> None:
+    """BLOCKER 1 from round-1 review of PR #454. This test asserted the OPPOSITE.
 
-    Removing source provenance then made correctly-named records return `0/3 blind`, so the
-    documented name fallback could not be reached by any record a real capture produces.
+    ⚠️ It read *"a record carrying both LUID and name can still fall back to the name"*, pinning
+    round-2's mirror-image fix (carrying a LUID used to DISCARD the name). That fix was right about
+    the record and wrong about the unit: a real oracle record ALWAYS carries both, so skipping an
+    *unshared* LUID and admitting on an equal display name let a **foreign workbook** certify a page.
+    Measured on this fixture: `READY 1/1`, `pages_blind=0`, and the exit gate certified visual AND
+    numeric from the same record.
+
+    The rule is now: a machine identity the unit cannot answer is ``unknown``, full stop. The name is
+    reached only when the record claims no machine identity at all - which is the twin below.
     """
     build_unit(bundle, "WB", worksheets=["Revenue Trend"])
     write_oracle(
@@ -424,7 +543,26 @@ def test_a_record_carrying_both_luid_and_name_can_still_fall_back_to_the_name(bu
         [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_luid": "luid-1", "workbook_name": "WB"}],
     )
 
-    assert crr.scan(bundle)["units"][0]["pages"][0]["readiness"] == "ready"
+    report = crr.scan(bundle)
+    assert report["units"][0]["pages"][0]["readiness"] == "blind"
+    assert report["evidence_attributed"]["unknown"] == 1
+    assert report["evidence_attributed"]["name"] == 0
+    assert crr.main([str(bundle), "--quiet"]) == 1
+
+
+def test_a_record_claiming_no_machine_identity_at_all_may_still_match_on_the_name(bundle: Path) -> None:
+    """The twin: the name route must survive, or a hand-written manifest can never be used.
+
+    `capture_tableau_reference.py` and hand-maintained manifests carry no LUID, so refusing on the
+    name axis outright would delete the only route those producers have. This is the weakest
+    admitting route and every admission through it is counted separately.
+    """
+    build_unit(bundle, "WB", worksheets=["Revenue Trend"])
+    write_oracle(bundle, [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_name": "WB"}])
+
+    report = crr.scan(bundle)
+    assert report["units"][0]["pages"][0]["readiness"] == "ready"
+    assert report["evidence_attributed"]["name"] == 1
 
 
 # --------------------------------------------------------------------------------------------

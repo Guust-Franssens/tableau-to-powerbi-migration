@@ -9,6 +9,7 @@ exit code and output shape rather than any non-zero result.
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import os
 import time
@@ -118,8 +119,41 @@ def _csv(path: Path) -> None:
     path.write_text("a\n1\n", encoding="utf-8")
 
 
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _write_unit_source(unit: Path, blob: bytes, *, name: str = "Book.twbx") -> Path:
+    """The Tableau asset this unit was built from, recorded where BOTH producers record it.
+
+    A handover slice's ``workbook.source_id`` and `migration-spec.json`'s ``source.file_name`` are
+    the two independent claims `check_unit._unit_source_claims` reads, so the fixture writes both -
+    a fixture that recorded only one could not tell a working resolver from one that happened to
+    read the other.
+    """
+    asset = unit / "assets" / name
+    asset.parent.mkdir(parents=True, exist_ok=True)
+    asset.write_bytes(blob)
+    handover = unit / "handover"
+    handover.mkdir(parents=True, exist_ok=True)
+    (handover / "Book.json").write_text(
+        json.dumps({"estate": {}, "workbook": {"name": "Book", "source_id": f"assets/{name}"}}), encoding="utf-8"
+    )
+    spec = unit / "migration-spec.json"
+    if spec.is_file():
+        payload = json.loads(spec.read_text(encoding="utf-8"))
+        payload["source"] = {"file_name": name}
+        spec.write_text(json.dumps(payload), encoding="utf-8")
+    return asset
+
+
 def _write_reference_manifest(
-    unit: Path, names: list[str], *, numeric: bool = True, workbook: str | None = "Book"
+    unit: Path,
+    names: list[str],
+    *,
+    numeric: bool = True,
+    workbook: str | None = "Book",
+    source_sha: str | None = None,
 ) -> None:
     states = []
     dashboards = []
@@ -140,6 +174,8 @@ def _write_reference_manifest(
     payload: dict[str, object] = {"dashboards": dashboards}
     if workbook is not None:
         payload["workbook"] = workbook
+    if source_sha is not None:
+        payload["source_workbook_sha256"] = source_sha
     (unit / "reference" / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
@@ -3374,6 +3410,60 @@ def test_a_foreign_luid_is_refused_even_when_the_workbook_name_matches_exactly(t
     assert oracle["known_gap_caveats"] == [], "a LUID disagreement is not rescuable by a lossy name"
 
 
+def test_a_foreign_luid_is_refused_when_this_unit_cannot_establish_a_luid_at_all(tmp_path: Path) -> None:
+    """BLOCKER 1 at the exit gate, and the case the test above structurally cannot reach.
+
+    ⚠️ The negative test beside this one gives the unit a LUID, so it only ever exercises *LUID vs
+    LUID*. Round-1 review of PR #454 measured the gap: with NO unit LUID the guard skipped the
+    record's LUID as "not shared" and admitted it on an equal display name - `PASS`, visual AND
+    numeric, from a foreign workbook. Real oracle records always carry both fields, so this was the
+    ordinary case rather than an edge one.
+    """
+    _write_spec(tmp_path, ["Revenue"])
+    _write_report(tmp_path, ["Revenue"])
+    _write_oracle_manifest(
+        tmp_path,
+        ["Revenue"],
+        workbook=None,
+        workbook_luid="007f70ac-bf40-4838-9d73-134d40f504db",
+        workbook_name="Book",
+    )
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["status"] == cu.STATUS_NOT_CHECKED
+    assert oracle["visual_present"] == 0
+    assert oracle["numeric_present"] == 0
+    assert oracle["admitted_evidence"] == 0
+    assert oracle["unattributed_evidence"] == 1
+
+
+def test_a_windows_recorded_source_id_still_yields_its_luid(tmp_path: Path) -> None:
+    """BLOCKER 4 at this gate's call site: a handover records a path from ANOTHER host.
+
+    ⚠️ This assertion is a no-op on Windows and load-bearing on Linux, and that asymmetry is the
+    defect rather than a flaw in the test. `WindowsPath` accepts both separators, so a Windows
+    workstation reports the guard working while a Linux CI runner - where those backslashes are
+    ordinary filename characters - gets no LUID at all and falls back to a weaker axis. CI runs on
+    Linux, so this test is exercised exactly where the divergence bites; the flavour-explicit proof
+    that runs anywhere is `test_workbook_identity.test_the_recorded_path_parse_does_not_use_the_running_hosts_flavour`.
+    """
+    _write_spec(tmp_path, ["Revenue"])
+    _write_report(tmp_path, ["Revenue"])
+    _write_handover(
+        tmp_path,
+        {
+            "name": "Book",
+            "source_id": "_runs\\407-dryrun-gates\\assets\\adc431bb-aeeb-43fe-8ecb-092d4bae8bfa_Book.twbx",
+        },
+    )
+
+    assert cu._unit_source_claims(tmp_path)[1] == ["adc431bb-aeeb-43fe-8ecb-092d4bae8bfa"]
+    assert [identity.luid for identity in cu._unit_workbook_identities(tmp_path)] == [
+        "adc431bb-aeeb-43fe-8ecb-092d4bae8bfa"
+    ]
+
+
 def test_a_matching_luid_admits_a_record_whose_display_name_the_filesystem_changed(tmp_path: Path) -> None:
     """The positive control for the LUID route, and symptom A of #450 in this gate.
 
@@ -3398,14 +3488,17 @@ def test_a_matching_luid_admits_a_record_whose_display_name_the_filesystem_chang
     assert oracle["known_gap_caveats"] == [], "an exact LUID match is not a loose attribution"
 
 
-def test_a_reference_manifest_inside_the_unit_is_attributable_by_location(tmp_path: Path) -> None:
-    """A real `reference/manifest.json` declares NO producing workbook, and does not need to.
+def test_a_unit_local_reference_manifest_is_not_certified_by_its_location(tmp_path: Path) -> None:
+    """BLOCKER 3 from round-1 review of PR #454. This test asserted the OPPOSITE.
 
-    `capture_tableau_reference.py:234` writes `source_workbook_sha256` and `dashboards[]` - there is
-    no workbook name anywhere - and `_reference_dirs` only ever looks inside the unit. So such a
-    record is this unit's by LOCATION, and refusing it for "no workbook identity" would delete the
-    only validation-grade capture route in the toolkit. Stated as its own test because the #450 fix
-    refuses ORACLE records on exactly that ground, and the two must not be confused.
+    ⚠️ It read *"a reference manifest inside the unit is attributable by location"*, on the argument
+    that `_reference_dirs` never walks up so such a manifest is this unit's by construction. Measured
+    consequence: the guard was SKIPPED for those records, so a manifest with no workbook identity at
+    all was admitted (`admitted_evidence=1`, visual AND numeric certified) - and so was one whose
+    `source_workbook_sha256` named a **different workbook** entirely.
+
+    Location controls DISCOVERY; it never substitutes for identity. A manifest that establishes no
+    workbook now certifies nothing, and is counted.
     """
     _write_spec(tmp_path, ["Revenue"])
     _write_report(tmp_path, ["Revenue"])
@@ -3413,9 +3506,64 @@ def test_a_reference_manifest_inside_the_unit_is_attributable_by_location(tmp_pa
 
     oracle = cu.check_oracle_coverage(tmp_path, None, None)
 
+    assert oracle["status"] == cu.STATUS_NOT_CHECKED
+    assert oracle["visual_present"] == 0
+    assert oracle["numeric_present"] == 0
+    assert oracle["admitted_evidence"] == 0
+    assert oracle["unattributed_evidence"] == 1
+
+
+def test_a_unit_local_reference_manifest_certifies_when_its_recorded_sha_is_this_source(tmp_path: Path) -> None:
+    """The positive twin: the identity a reference manifest DOES carry is `source_workbook_sha256`.
+
+    `capture_tableau_reference.py:234` writes it, so the fix for blocker 3 is to hash the unit's own
+    source asset and compare - not to refuse the whole producer. Without this twin, "refuse every
+    reference record" would pass the test above and delete the only validation-grade route in the
+    toolkit.
+    """
+    _write_spec(tmp_path, ["Revenue"])
+    _write_report(tmp_path, ["Revenue"])
+    source = _write_unit_source(tmp_path, b"the workbook this unit was built from")
+    _write_reference_manifest(tmp_path, ["Revenue"], workbook=None, source_sha=_sha256(source))
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
     assert oracle["status"] == cu.STATUS_PASS
     assert oracle["visual_present"] == 1
+    assert oracle["admitted_evidence"] == 1
     assert oracle["unattributed_evidence"] == 0
+
+
+def test_a_unit_local_reference_manifest_recording_another_workbooks_sha_is_refused(tmp_path: Path) -> None:
+    """The negative twin, and the sharper half of blocker 3: a MISMATCHING sha was admitted too."""
+    _write_spec(tmp_path, ["Revenue"])
+    _write_report(tmp_path, ["Revenue"])
+    _write_unit_source(tmp_path, b"the workbook this unit was built from")
+    _write_reference_manifest(tmp_path, ["Revenue"], workbook=None, source_sha="de" * 32)
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["visual_present"] == 0
+    assert oracle["admitted_evidence"] == 0
+    assert oracle["foreign_workbook_evidence"] == ["sha256=dededededede..."]
+
+
+def test_a_sha_bearing_record_is_refused_when_the_unit_cannot_hash_its_source(tmp_path: Path) -> None:
+    """Fail-CLOSED on unknown: no locatable source means the recorded sha cannot be checked.
+
+    This is the cost of blocker 3's fix and it is stated rather than hidden - a unit that ships no
+    resolvable Tableau asset cannot use sha-bearing evidence, and the refusal is disclosed in the
+    grade rather than silently dropped.
+    """
+    _write_spec(tmp_path, ["Revenue"])
+    _write_report(tmp_path, ["Revenue"])
+    _write_reference_manifest(tmp_path, ["Revenue"], workbook=None, source_sha="ab" * 32)
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["visual_present"] == 0
+    assert oracle["unattributed_evidence"] == 1
+    assert "establish no producing workbook" in oracle["grade"]
 
 
 def test_a_non_packaged_unit_still_reads_an_ancestors_oracle_capture(tmp_path: Path) -> None:

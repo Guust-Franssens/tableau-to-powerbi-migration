@@ -90,6 +90,7 @@ TARGETS = (
     "tests/test_check_reference_readiness.py",
     "tests/test_reference_evidence.py",
     "tests/test_object_identity.py",
+    "tests/test_workbook_identity.py",
     "tests/test_identity_normalization.py",
 )
 #: `mutation_harness.run` passes its target as ONE argv element, so a whole-suite control names the
@@ -321,15 +322,16 @@ ev.Evidence.build = classmethod(build)
 import check_reference_readiness as crr
 # An origin that establishes identity by NEITHER route - no `matched_by: "luid"` and unconfirmed
 # bytes - must yield no LUID. This mutant trusts one anyway, which is the name-collision hole.
-def _provenance_luid(root, source_sha, source=None):
+_orig = crr.provenance_origin
+def _provenance_origin(root, source_sha, source=None):
+    _luid, revision = _orig(root, source_sha, source)
     payload = crr.json_object(root / "source-provenance.json")
     for record in (payload or {}).get("inputs") or []:
-        origin = record.get("origin") or {}
-        luid = origin.get("workbook_luid")
+        luid = (record.get("origin") or {}).get("workbook_luid")
         if isinstance(luid, str) and luid:
-            return luid
-    return None
-crr._provenance_luid = _provenance_luid
+            return luid, revision
+    return None, revision
+crr.provenance_origin = _provenance_origin
 """,
         anchor="test_a_name_only_provenance_luid_is_not_trusted",
         controls=("test_a_sha256_confirmed_provenance_luid_is_trusted",),
@@ -340,35 +342,141 @@ import check_reference_readiness as crr
 # Issue #450, symptom A: `origin.match` answers a REVISION question and was read as if it were the
 # identity one, so a LUID-matched workbook whose bytes had since changed lost its identity entirely
 # and fell back to comparing an artifact stem against a published display name.
-_orig = crr._provenance_luid
-def _provenance_luid(root, source_sha, source=None):
+_orig = crr.provenance_origin
+def _provenance_origin(root, source_sha, source=None):
+    luid, revision = _orig(root, source_sha, source)
     payload = crr.json_object(root / "source-provenance.json")
     for record in (payload or {}).get("inputs") or []:
         stamped = record.get("input") or {}
         origin = record.get("origin") or {}
-        if stamped.get("sha256") != source_sha:
-            continue
-        if origin.get("match") != "sha256":
-            return None
-        luid = origin.get("workbook_luid")
-        return luid if isinstance(luid, str) and luid else None
-    return None
-crr._provenance_luid = _provenance_luid
+        if stamped.get("sha256") == source_sha and origin.get("match") != "sha256":
+            return None, revision
+    return luid, revision
+crr.provenance_origin = _provenance_origin
 """,
-        anchor="test_a_luid_matched_provenance_survives_a_changed_revision",
+        anchor="test_a_luid_matched_provenance_still_establishes_identity_but_not_the_revision",
         controls=("test_a_name_only_provenance_luid_is_not_trusted",),
     ),
-    "a-luid-record-discards-its-workbook-name": Mutation(
+    "an-oracle-record-discards-its-workbook-name": Mutation(
         code="""
 import reference_evidence as ev
+# Round-2 finding 3 shipped as "a LUID-bearing record discarded its name". Since round-2 review of
+# PR #454 a LUID-bearing record never REACHES the name axis - an unanswerable LUID is `unknown` - so
+# that mutant became inert and is re-aimed: the name must still be read for a record that carries no
+# machine identity at all, which is the only route a hand-written or reference manifest has.
 _orig = ev._oracle_workbook_ids
 def _oracle_workbook_ids(record):
-    luid, name = _orig(record)
-    return (luid, None) if luid else (None, name)
+    luid, _name = _orig(record)
+    return luid, None
 ev._oracle_workbook_ids = _oracle_workbook_ids
 """,
-        anchor="test_a_record_carrying_both_luid_and_name_can_still_fall_back_to_the_name",
+        anchor="test_a_record_claiming_no_machine_identity_at_all_may_still_match_on_the_name",
         controls=("test_a_sha256_confirmed_provenance_luid_is_trusted",),
+    ),
+    # --- round-2 review of PR #454: one rule for an unanswerable machine identity ----------------
+    "an-unanswerable-luid-falls-through-to-the-name": Mutation(
+        code="""
+import object_identity as oid
+# BLOCKER 1. A real oracle record carries BOTH workbook_luid and workbook_name, so skipping an
+# UNSHARED luid and admitting on an equal display name let a foreign workbook certify a page.
+def attribute(self, record):
+    for axis in oid.WB_MACHINE_AXES:
+        mine, theirs = getattr(self, oid._FIELD[axis]), getattr(record, oid._FIELD[axis])
+        if mine is None or theirs is None:
+            continue
+        if oid._axis_equal(axis, mine, theirs):
+            return oid.Attribution(axis, "match", axis=axis)
+        return oid.Attribution(oid.WB_FOREIGN, "differs", axis=axis)
+    if self.name is not None and record.name is not None:
+        if oid._axis_equal(oid.WB_NAME, self.name, record.name):
+            return oid.Attribution(oid.WB_NAME, "match", axis=oid.WB_NAME)
+        return oid.Attribution(oid.WB_FOREIGN, "differs", axis=oid.WB_NAME)
+    return oid.Attribution(oid.WB_UNKNOWN, "none")
+oid.WorkbookIdentity.attribute = attribute
+""",
+        anchor="test_a_record_whose_luid_this_unit_cannot_answer_is_not_rescued_by_its_name",
+        controls=("test_a_record_claiming_no_machine_identity_at_all_may_still_match_on_the_name",),
+    ),
+    "an-unanswerable-machine-axis-is-simply-skipped": Mutation(
+        code="""
+import object_identity as oid
+_orig = oid.WorkbookIdentity.attribute
+def attribute(self, record):
+    verdict = _orig(self, record)
+    if verdict.route == oid.WB_UNKNOWN and self.name and record.name and self.name == record.name:
+        return oid.Attribution(oid.WB_NAME, "rescued", axis=oid.WB_NAME)
+    return verdict
+oid.WorkbookIdentity.attribute = attribute
+""",
+        anchor="test_a_record_whose_luid_this_unit_cannot_answer_is_not_rescued_by_its_name",
+        controls=("test_a_byte_confirmed_provenance_luid_certifies_normally",),
+    ),
+    "the-revision-axis-is-discarded-again": Mutation(
+        code="""
+import check_reference_readiness as crr
+import reference_evidence as ev
+# BLOCKER 2: separating identity from revision is right; DROPPING the revision made a capture of a
+# possibly-different build read as a clean READY with nothing saying so.
+ev.revision_status = lambda origin, inputs: crr.REVISION_CONFIRMED
+""",
+        anchor="test_a_luid_matched_provenance_still_establishes_identity_but_not_the_revision",
+        controls=("test_a_byte_confirmed_provenance_luid_certifies_normally",),
+    ),
+    "a-non-reproducible-byte-difference-is-called-drift": Mutation(
+        code="""
+import check_reference_readiness as crr
+import reference_evidence as ev
+# The other direction, and the reason the rule is measured rather than chosen: content_sha256(luid)
+# returned DIFFERENT digests for 18 of 30 workbooks inside one run, so `name_only` alone marked 125
+# pages unverifiable on an estate where nothing had changed.
+def _revision_status(origin, inputs):
+    if origin.get("match") == "sha256":
+        return crr.REVISION_CONFIRMED
+    return crr.REVISION_MISMATCH if origin.get("match") == "name_only" else crr.REVISION_UNCONFIRMED
+ev.revision_status = _revision_status
+""",
+        anchor="test_a_luid_matched_provenance_still_establishes_identity_but_not_the_revision",
+        controls=("test_a_reproducible_byte_difference_is_the_only_thing_that_proves_drift",),
+    ),
+    "a-stale-render-is-admitted-anyway": Mutation(
+        code="""
+import object_identity as oid
+oid.WB_ADMITTING = frozenset({*oid.WB_ROUTES, oid.WB_STALE})
+""",
+        anchor="test_a_reproducible_byte_difference_is_the_only_thing_that_proves_drift",
+        controls=("test_a_byte_confirmed_provenance_luid_certifies_normally",),
+    ),
+    "a-recorded-path-is-parsed-with-the-running-hosts-flavour": Mutation(
+        code="""
+import object_identity as oid
+from pathlib import PurePosixPath
+# BLOCKER 4: `Path` is the running host's flavour, so a Windows-recorded handover path loses its
+# LUID prefix on Linux CI - the guard behaved differently in the two places we look.
+oid.persisted_stem = lambda text: PurePosixPath(text or "").stem
+""",
+        anchor="test_the_recorded_path_parse_does_not_use_the_running_hosts_flavour",
+        controls=("test_agreed_luid_refuses_two_claims_that_disagree",),
+    ),
+    "the-merged-census-keeps-only-the-first-scan": Mutation(
+        code="""
+import check_reference_readiness as crr
+_orig = crr._merge_scans
+def _merge_scans(reports):
+    merged = _orig(reports)
+    merged["evidence_attributed"] = reports[0].get("evidence_attributed")
+    return merged
+crr._merge_scans = _merge_scans
+""",
+        anchor="test_the_attribution_census_survives_a_multi_path_scan",
+        controls=("test_every_refusal_is_counted_so_it_can_be_told_from_a_missing_capture",),
+    ),
+    "the-ancestor-walk-stops-one-level-short": Mutation(
+        code="""
+import bundle_corpus
+bundle_corpus.ANCESTOR_LEVELS = 2
+""",
+        anchor="test_a_unit_three_levels_below_the_run_still_inherits_the_flat_capture",
+        controls=("test_a_non_packaged_target_still_finds_an_ancestors_oracle",),
     ),
     # --- completeness needs a readable, unique mapping --------------------------------------------
     "unreadable-page-json-falls-back-to-the-directory-name": Mutation(

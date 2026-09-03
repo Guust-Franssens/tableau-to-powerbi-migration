@@ -30,9 +30,16 @@ from object_identity import (
     KIND_DASHBOARD,
     KIND_UNKNOWN,
     KIND_WORKSHEET,
+    WB_LUID,
+    WB_NAME,
+    WB_SHA,
+    WB_STALE,
     Attribution,
     Candidate,
     WorkbookIdentity,
+    agreed_luid,
+    harvest_luid,
+    persisted_stem,
 )
 
 
@@ -109,6 +116,14 @@ MANUAL_KIND_HINT = (
 )
 
 
+#: What is known about the REVISION the evidence depicts, as distinct from which workbook it is of.
+#: Three values, because two were not enough: "I proved the bytes are the site copy", "I proved they
+#: are not", and "I could not tell" are different claims, and only the middle one may refuse a page.
+REVISION_CONFIRMED = "confirmed"
+REVISION_UNCONFIRMED = "unconfirmed"
+REVISION_MISMATCH = "mismatch"
+
+
 @dataclass(frozen=True)
 class UnitIdentity:
     """Who a unit is, for attributing evidence to it.
@@ -117,22 +132,22 @@ class UnitIdentity:
     name is not unique across projects, and the local artifact stem is a filesystem-sanitised
     spelling of one (`HR_Dashboard` for `HR Dashboard`), so the name axis cannot bridge harvest.
 
-    ⚠️ Round-2 review gated this LUID on ``origin.match == "sha256"`` and issue #450's fix removed
-    that gate, because ``match`` answers a different question. ``stamp_tableau_provenance.find_origin``
-    says so itself: ``matched_by`` records *how the workbook was found* (``luid``/``name``/
-    ``sanitized_name``) and ``match`` records *how strongly the bytes were confirmed* (``sha256`` vs
-    ``name_only``), and they are "two independent axes: a LUID match with ``name_only`` means 'this is
-    provably the same item on the site, and it has changed since we harvested it'". Reading the
-    REVISION axis as if it were the IDENTITY axis discarded a proven LUID and fell back to exact-name
-    equality - a join that is weaker on identity **and** carries no revision guarantee either, so it
-    traded nothing for the 23 renders it threw away. Freshness is disclosed by the grade, which for an
-    oracle capture is already "layout/text only"; it is not an identity question.
+    ⚠️ Round-2 review gated this LUID on ``origin.match == "sha256"``; issue #450 removed that gate
+    because ``match`` answers a different question. ``stamp_tableau_provenance.find_origin`` says so
+    itself: ``matched_by`` records *how the workbook was found* and ``match`` records *how strongly
+    the bytes were confirmed*, and they are "two independent axes".
+
+    ``revision`` is that second axis, kept and reported rather than discarded - round-1 review of PR
+    #454 found dropping it made a capture of a different BUILD read as current. It is THREE-valued
+    on measured grounds; see :func:`check_reference_readiness._provenance_origin` for why
+    ``name_only`` alone is not evidence of a changed build.
     """
 
     name: str
     source_path: Path
     source_sha256: str
     workbook_luid: str | None = None
+    revision: str = REVISION_UNCONFIRMED
 
     def workbook(self) -> WorkbookIdentity:
         """This unit's workbook, on the axes it can establish.
@@ -140,9 +155,81 @@ class UnitIdentity:
         The unit's ``name`` is an ARTIFACT STEM, not a published display name. It is offered on the
         name axis anyway because that is the only axis a locally-captured `reference/` manifest and a
         server oracle can share when no LUID is available - but it is the weakest route, and
-        :meth:`WorkbookIdentity.attribute` consults it last.
+        :meth:`WorkbookIdentity.attribute` reaches it only when the record claims no machine identity
+        at all.
         """
         return WorkbookIdentity.of(luid=self.workbook_luid, name=self.name, sha256=self.source_sha256)
+
+
+#: Provenance ``origin`` shapes that ESTABLISH which published workbook a local file is. Deliberately
+#: distinct from ``origin.match``, which answers a REVISION question and was read as if it were this
+#: one (issue #450).
+IDENTITY_MATCHED_BY = frozenset({"luid"})
+
+
+def provenance_origin(root: Path, source_sha: str, source: Path | None = None) -> tuple[str | None, str]:
+    """``(workbook LUID, revision status)`` for one source, from every offline route.
+
+    Lives beside :class:`UnitIdentity` because it builds one. Two INDEPENDENT answers -
+    `stamp_tableau_provenance.find_origin` calls them "two independent axes" - and reading either as
+    the other has now caused a defect in each direction:
+
+    * **identity** - ``origin.workbook_luid``, trusted when ``matched_by == "luid"`` (the harvested
+      filename's LUID was found on the site, so it is provably that item) **or** when
+      ``match == "sha256"``. Reading ``match`` alone discarded a proven LUID and fell back to
+      comparing the artifact stem ``HR_Dashboard`` against the published name ``HR Dashboard``
+      (issue #450). The asset filename's own ``<luid>_`` prefix is a second claim and the two must
+      agree: contradictory identities are less evidence than none.
+    * **revision** - THREE-valued, and that is a measured correction rather than a hedge.
+
+    ⚠️ **``match: "name_only"`` is NOT by itself evidence of a changed build.** ``find_origin``
+    compares the harvested bytes against ``content_sha256(luid)``, a fresh download. On the 407
+    reference estate that identical request was issued **twice for each of 30 workbooks inside one
+    run** and returned **DIFFERENT digests for 18 of them** - the server repacks a `.twbx` per
+    request, so the comparison cannot be reproduced and ``name_only`` is structurally guaranteed.
+    Reading it as drift marked 18 of 67 units, 246 records and 125 pages unverifiable on an estate
+    where nothing had changed; a gate that refuses correct evidence at that rate gets switched off,
+    which is how a good gate dies.
+
+    So drift is claimed only when the comparison is REPRODUCIBLE: every ``remote_sha256`` recorded
+    for that LUID agrees. Measured, that flags 0 of 67 units here while still firing on a genuine
+    change. Anything else - including no provenance at all - is ``unconfirmed``, which is admitted
+    and DISCLOSED rather than silently claimed as current (round-1 review of PR #454, blocker 2).
+    """
+    stamped = harvest_luid(persisted_stem(source.name if source is not None else None))
+    inputs = list((json_object(root / "source-provenance.json") or {}).get("inputs") or [])
+    for record in inputs:
+        if not isinstance(record, dict):
+            continue
+        stamped_input = record.get("input") if isinstance(record.get("input"), dict) else {}
+        origin = record.get("origin") if isinstance(record.get("origin"), dict) else {}
+        if stamped_input.get("sha256") != source_sha:
+            continue
+        revision = revision_status(origin, inputs)
+        if origin.get("matched_by") not in IDENTITY_MATCHED_BY and origin.get("match") != "sha256":
+            return agreed_luid(stamped), revision
+        luid = origin.get("workbook_luid")
+        return agreed_luid(stamped, luid if isinstance(luid, str) else None), revision
+    return agreed_luid(stamped), REVISION_UNCONFIRMED
+
+
+def revision_status(origin: dict[str, Any], inputs: list[Any]) -> str:
+    """``confirmed`` / ``mismatch`` / ``unconfirmed`` for one stamped origin. See :func:`provenance_origin`."""
+    if origin.get("match") == "sha256":
+        return REVISION_CONFIRMED
+    if origin.get("match") != "name_only":
+        return REVISION_UNCONFIRMED
+    luid = origin.get("workbook_luid")
+    observed = {
+        (record.get("origin") or {}).get("remote_sha256")
+        for record in inputs
+        if isinstance(record, dict)
+        and isinstance(record.get("origin"), dict)
+        and record["origin"].get("workbook_luid") == luid
+    }
+    # One reproducible answer means the comparison is load-bearing; two mean the download is not
+    # deterministic and the difference is about packaging, not about the workbook.
+    return REVISION_MISMATCH if len(observed) == 1 and None not in observed else REVISION_UNCONFIRMED
 
 
 @dataclass(frozen=True)
@@ -284,23 +371,44 @@ class Evidence:  # pylint: disable=too-many-instance-attributes
     def attribution(self, unit: UnitIdentity) -> Attribution:
         """Why this render does or does not belong to ``unit``, naming the axis that decided.
 
-        The whole join is :meth:`WorkbookIdentity.attribute`, shared with ``check_unit.py`` - see
+        The identity half is :meth:`WorkbookIdentity.attribute`, shared with ``check_unit.py`` - see
         issue #450, where the two gates disagreed about how a workbook is identified and produced one
         fail-closed and one fail-open defect from that single disagreement.
 
-        Reference evidence carries the source SHA, so it is matched revision-first: a capture taken
-        against an older revision of the workbook does not silently remain valid, because a stale
-        picture is worse than a missing one - it looks like evidence. Oracle evidence carries a LUID
-        and a display name, and the LUID is decisive whenever the unit has one.
+        The REVISION half is here, because it is this gate's contract rather than a property of
+        identity: evidence must be for "THIS workbook, at THIS revision". A sha256 join is
+        revision-bound by construction, so it passes through confirmed. A LUID or name join says
+        *which* workbook, never *which build of it*, so it inherits the unit's revision status:
 
-        ⚠️ There is deliberately **no** ``is_for()`` boolean beside this. There was, as a one-line
-        delegate, and the mutation runner measured what that cost: two mutants pinning the old
-        boolean went on reporting CAUGHT while patching a method the gate no longer called. A second
-        reader of one contract is a place for two answers to diverge, which is the whole shape of
-        #450. Callers read ``.admitted``, which :class:`object_identity.Attribution` makes the only
-        legal reader.
+        * :data:`REVISION_MISMATCH` - drift is SOUNDLY established, so the render is
+          :data:`object_identity.WB_STALE` and certifies nothing;
+        * :data:`REVISION_UNCONFIRMED` - the render is admitted, and the caller MUST disclose that
+          the revision was not established (:func:`check_reference_readiness._page_row` writes
+          ``row["revision"]``). Round-1 review of PR #454's blocker 2 was exactly that a page in this
+          state read as a clean `READY` with nothing saying so.
+
+        ⚠️ Absence of provenance, and a byte comparison that could not be made soundly, are both
+        UNCONFIRMED rather than mismatched. "I cannot tell whether the bytes moved" and "I can tell,
+        and they did" are different statements, and only the second may refuse a page.
         """
-        return unit.workbook().attribute(self.workbook())
+        verdict = unit.workbook().attribute(self.workbook())
+        if verdict.route in (WB_LUID, WB_NAME) and unit.revision == REVISION_MISMATCH:
+            return Attribution(
+                WB_STALE,
+                "the same workbook, a DIFFERENT build: this unit's source bytes differ from a "
+                f"REPRODUCIBLE download of the site copy, and a {verdict.axis} join says which "
+                "workbook a render is of, never which revision",
+                axis=verdict.axis,
+            )
+        return verdict
+
+    def revision_for(self, unit: UnitIdentity) -> str:
+        """What this render establishes about the REVISION, once it has been admitted.
+
+        A sha256 join pins the bytes, so it is confirmed whatever provenance says. Anything weaker
+        inherits the unit's status, which is why an admitted render can still be UNCONFIRMED.
+        """
+        return REVISION_CONFIRMED if self.attribution(unit).route == WB_SHA else unit.revision
 
 
 def sha256_of(path: Path) -> str | None:

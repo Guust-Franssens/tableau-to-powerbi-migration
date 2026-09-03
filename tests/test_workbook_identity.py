@@ -19,7 +19,7 @@ refusal beside it.
 from __future__ import annotations
 
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
 
@@ -40,14 +40,74 @@ def test_the_workbook_route_vocabulary_is_pinned_to_its_literal_values() -> None
     reason.
     """
     assert (oid.WB_SHA, oid.WB_LUID, oid.WB_NAME) == ("sha256", "luid", "name")
-    assert (oid.WB_FOREIGN, oid.WB_UNKNOWN) == ("foreign", "unknown")
+    assert (oid.WB_STALE, oid.WB_FOREIGN, oid.WB_UNKNOWN) == ("stale", "foreign", "unknown")
     assert oid.WB_ROUTES == ("sha256", "luid", "name")
+    assert oid.WB_REFUSALS == ("stale", "foreign", "unknown")
+    assert oid.WB_MACHINE_AXES == ("sha256", "luid")
     assert oid.WB_ADMITTING == frozenset({"sha256", "luid", "name"})
-    # The two refusals are NOT admitting routes. Stated separately because `WB_ADMITTING` above is
-    # the thing under test everywhere else, and a mutation that added "foreign" to it would
-    # otherwise only be caught by the equality above.
-    assert oid.WB_FOREIGN not in oid.WB_ADMITTING
-    assert oid.WB_UNKNOWN not in oid.WB_ADMITTING
+    # Every refusal is NOT an admitting route. Stated separately because `WB_ADMITTING` above is the
+    # thing under test everywhere else, and a mutation that added one to it would otherwise only be
+    # caught by the equality above.
+    assert not oid.WB_ADMITTING & set(oid.WB_REFUSALS)
+    # ⚠️ The name axis is deliberately NOT a machine axis: a display name is not unique across
+    # projects, so it can never be the thing that makes a record's identity "answerable".
+    assert oid.WB_NAME not in oid.WB_MACHINE_AXES
+
+
+# ------------------------------------------------------------------------------------------------
+# THE ONE RULE (round-1 review of PR #454): a machine identity the unit cannot answer is `unknown`
+# ------------------------------------------------------------------------------------------------
+
+
+def test_a_luid_the_unit_cannot_answer_is_unknown_and_the_name_never_rescues_it() -> None:
+    """BLOCKER 1: the single highest-value assertion in this file.
+
+    A real oracle record ALWAYS carries ``workbook_luid`` AND ``workbook_name``. Skipping an
+    *unshared* LUID - because the unit could not establish one - and then admitting on an equal
+    display name let a FOREIGN workbook certify a page in both gates. The record has told us how it
+    must be checked; a unit that cannot check it has established nothing.
+    """
+    unit = oid.WorkbookIdentity(name="Book")
+    record = oid.WorkbookIdentity(luid=LUID_B, name="Book")
+
+    verdict = unit.attribute(record)
+    assert verdict.route == oid.WB_UNKNOWN
+    assert verdict.axis == oid.WB_LUID
+    assert verdict.admitted is False
+
+
+def test_a_sha_the_unit_cannot_answer_is_unknown_too() -> None:
+    """BLOCKER 3, at the type level: a `reference/manifest.json` carries `source_workbook_sha256`.
+
+    A unit that cannot hash its own source asset cannot check that claim, so location - the only
+    thing left - must not stand in for it.
+    """
+    unit = oid.WorkbookIdentity(luid=LUID_A, name="Book")
+    record = oid.WorkbookIdentity(sha256="ab" * 32)
+
+    verdict = unit.attribute(record)
+    assert (verdict.route, verdict.axis) == (oid.WB_UNKNOWN, oid.WB_SHA)
+
+
+def test_the_unanswerable_rule_does_not_swallow_a_record_that_claims_no_machine_identity() -> None:
+    """The twin that stops the rule collapsing into "refuse everything".
+
+    A hand-written or `capture_tableau_reference.py` manifest carries no LUID at all, so the name is
+    the only axis on offer and it must still work - it is simply the weakest, and it is counted
+    separately wherever a gate reports a census.
+    """
+    unit = oid.WorkbookIdentity(luid=LUID_A, name="Book", sha256="ab" * 32)
+    record = oid.WorkbookIdentity(name="Book")
+
+    assert unit.attribute(record).route == oid.WB_NAME
+
+
+def test_a_machine_axis_the_record_does_not_claim_falls_through_to_the_next_one() -> None:
+    """An oracle record carries a LUID and no sha; that must reach the LUID axis, not stop at sha."""
+    unit = oid.WorkbookIdentity(luid=LUID_A, name="Book", sha256="ab" * 32)
+    record = oid.WorkbookIdentity(luid=LUID_A, name="Not Book")
+
+    assert unit.attribute(record).route == oid.WB_LUID
 
 
 # ------------------------------------------------------------------------------------------------
@@ -209,6 +269,65 @@ def test_harvest_luid_reads_the_prefix_and_refuses_every_other_shape() -> None:
     assert oid.harvest_luid(f"{LUID_A}") is None  # a bare LUID with no `_<name>` is not the shape
     assert oid.harvest_luid("not-a-luid_HR_Dashboard") is None
     assert oid.harvest_luid(None) is None
+
+
+# ------------------------------------------------------------------------------------------------
+# BLOCKER 4: a path recorded by ANOTHER host is text, not a Path
+# ------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "recorded",
+    [
+        r"_runs\407-dryrun-gates\assets\adc431bb-aeeb-43fe-8ecb-092d4bae8bfa_HR_Dashboard.twbx",
+        "_runs/407-dryrun-gates/assets/adc431bb-aeeb-43fe-8ecb-092d4bae8bfa_HR_Dashboard.twbx",
+        r"C:\Users\x\_runs\407\assets\adc431bb-aeeb-43fe-8ecb-092d4bae8bfa_HR_Dashboard.twb",
+        "/home/runner/work/_runs/407/assets/adc431bb-aeeb-43fe-8ecb-092d4bae8bfa_HR_Dashboard.twb",
+        "adc431bb-aeeb-43fe-8ecb-092d4bae8bfa_HR_Dashboard.twbx",
+    ],
+)
+def test_a_recorded_path_yields_its_luid_on_either_host(recorded: str) -> None:
+    """Kills blocker 4, ON ANY HOST - which is the whole point, since the hosts disagreed.
+
+    ``pathlib.Path`` is the RUNNING host's flavour. A real handover slice records
+    ``_runs\\407-...\\assets\\<luid>_HR_Dashboard.twbx``; on POSIX those backslashes are ordinary
+    filename characters, so ``Path(...).stem`` returns the whole string, `harvest_luid` sees no
+    prefix, and the unit ends up with NO machine identity - on Linux CI only, while a Windows
+    workstation reports the guard working. A safety guard that behaves differently in the two places
+    we look is the worst possible shape.
+
+    This test needs no POSIX host: it asserts the parse is separator-agnostic, and
+    :func:`test_the_recorded_path_parse_does_not_use_the_running_hosts_flavour` proves the same input
+    under BOTH flavours explicitly.
+    """
+    assert oid.harvest_luid(oid.persisted_stem(recorded)) == LUID_A
+
+
+def test_the_recorded_path_parse_does_not_use_the_running_hosts_flavour() -> None:
+    """The controlled experiment behind the parametrised test above, runnable anywhere.
+
+    ``PureWindowsPath`` and ``PurePosixPath`` are pure classes, so both flavours can be exercised on
+    one host. The measurement that made this a blocker: the SAME input yields the LUID under one and
+    ``None`` under the other, and the shipped code must agree with neither host's accident.
+    """
+    recorded = r"_runs\407\assets\adc431bb-aeeb-43fe-8ecb-092d4bae8bfa_HR_Dashboard.twbx"
+
+    assert oid.harvest_luid(PureWindowsPath(recorded).stem) == LUID_A
+    assert oid.harvest_luid(PurePosixPath(recorded).stem) is None, "this is the defect, reproduced"
+    assert oid.harvest_luid(oid.persisted_stem(recorded)) == LUID_A, "the fix must agree with neither"
+
+
+def test_persisted_name_and_stem_are_separator_agnostic_and_keep_dots_in_names() -> None:
+    """The parse is a filename split, not a heuristic: pin the edges it has to get right."""
+    assert oid.persisted_name(r"a\b\c.twbx") == "c.twbx"
+    assert oid.persisted_name("a/b/c.twbx") == "c.twbx"
+    assert oid.persisted_name(r"a/b\c.twbx") == "c.twbx"
+    assert oid.persisted_name("c.twbx") == "c.twbx"
+    assert oid.persisted_name("a\\b\\") == "b"
+    assert oid.persisted_name("") == ""
+    assert oid.persisted_name(None) == ""
+    assert oid.persisted_stem("Q1.2026 Sales.twbx") == "Q1.2026 Sales"
+    assert oid.persisted_stem(r"a\b\c.tar.gz") == "c.tar"
 
 
 def test_agreed_luid_refuses_two_claims_that_disagree() -> None:
