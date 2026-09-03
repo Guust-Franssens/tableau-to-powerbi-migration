@@ -80,18 +80,37 @@ SES_SERVERINFO = (
 )
 
 
+def serverinfo_reporting(version: str) -> bytes:
+    """The same body with an arbitrary ``restApiVersion`` -- including one that is not a version.
+
+    ⚠️ ``<restApiVersion>`` is response text, and before #475's review it was trusted whatever it
+    said and whatever status carried it. Both halves are exercised end to end below.
+    """
+    return SES_SERVERINFO.replace(b"<restApiVersion>3.27<", f"<restApiVersion>{version}<".encode())
+
+
 class FakeTableau:
     """A scripted Tableau site. ``fail`` maps a URL fragment to an exception, a status, or a list
     of those consumed one per call, so a test injects a fault on ONE endpoint and nothing else."""
 
     SIGNIN = {"credentials": {"token": "session-token", "site": {"id": "site-1"}}}
 
-    def __init__(self, fail: dict | None = None, *, serverinfo: bytes | None = SES_SERVERINFO) -> None:
+    def __init__(
+        self,
+        fail: dict | None = None,
+        *,
+        serverinfo: bytes | None = SES_SERVERINFO,
+        serverinfo_status: int = 200,
+    ) -> None:
         self.fail = {key: (value if isinstance(value, list) else [value]) for key, value in (fail or {}).items()}
         self.calls: list[tuple[str, float | None]] = []
         # ``None`` = this site does not answer ``/serverinfo`` at all, which is a real on-prem shape
         # (a reverse proxy in front of Tableau can refuse it) and the state-C input.
         self.serverinfo = serverinfo
+        # ⚠️ A non-200 that still carries a BODY -- a proxy error page, a cached response. Distinct
+        # from ``serverinfo=None`` (no body at all), because the defect being pinned is that the body
+        # was parsed anyway (#475 review, finding 2).
+        self.serverinfo_status = serverinfo_status
 
     def urlopen(self, request, timeout=None):
         """Stand-in for ``urllib.request.urlopen``."""
@@ -108,6 +127,10 @@ class FakeTableau:
             # XML, not JSON, and unauthenticated -- exactly as the real endpoint answers.
             if self.serverinfo is None:
                 raise urllib.error.HTTPError(url, 404, "nope", {}, None)
+            if self.serverinfo_status != 200:
+                raise urllib.error.HTTPError(
+                    url, self.serverinfo_status, "nope", {}, _Response(self.serverinfo_status, self.serverinfo)
+                )
             return _Response(200, self.serverinfo)
         return _Response(200, json.dumps(self._payload(url)).encode())
 
@@ -706,6 +729,54 @@ def test_a_site_that_refuses_serverinfo_reports_UNKNOWN_and_still_assesses_clean
     assert "No per-rung verdict is shown" in report
     assert "| rung | route |" not in report
     assert "Bottom line" not in report
+    assert no_sleep == []
+
+
+def test_a_serverinfo_that_reports_a_NON_VERSION_leaves_the_ceiling_unknown_end_to_end(monkeypatch, no_sleep, tmp_path):
+    """#475 review, finding 2, through the real ``main()``: nonempty is not the same as assessable.
+
+    Measured before the fix: ``garbage-999`` was reported as this site's advertised ceiling, every
+    rung came out ``available``, and the report told the operator ``--reference-best`` would resolve
+    to ``svg`` -- a promise derived from a digit run inside a string the server should never have
+    sent. The state is ``unknown``, and the report says which failure it was rather than only that
+    ``/serverinfo`` answered 200, which beside "not established" would read as a bug in this tool.
+    """
+    code = _run_main(monkeypatch, tmp_path, FakeTableau(serverinfo=serverinfo_reporting("garbage-999")))
+    out = tmp_path / "_assessment"
+    assessment = json.loads((out / "assessment.json").read_text(encoding="utf-8"))
+    report = (out / "report.md").read_text(encoding="utf-8")
+    ceiling = assessment["server_ceiling"]
+    assert code == 0
+    assert assessment["degraded"] is False and assessment["listing_errors"] == []
+    assert ceiling["established"] is False and ceiling["advertised_api_version"] is None
+    assert {r["verdict"] for r in ceiling["rungs"]} == {"unknown"}
+    assert ceiling["best_reference_render"] is None
+    assert "was NOT established" in report
+    assert "garbage-999" in report and "is not a REST API version" in report
+    assert "| rung | route |" not in report and "Bottom line" not in report
+    assert no_sleep == []
+
+
+def test_a_version_carried_by_an_ERROR_PAGE_never_becomes_the_sites_ceiling_end_to_end(monkeypatch, no_sleep, tmp_path):
+    """The other half of finding 2: the parse ran regardless of HTTP status.
+
+    A 500 whose body carries ``<restApiVersion>3.30</restApiVersion>`` was read as REST 3.30 -- so a
+    site whose probe FAILED was reported as the most capable kind there is, with SVG available.
+    """
+    server = FakeTableau(serverinfo=serverinfo_reporting("3.30"), serverinfo_status=500)
+    code = _run_main(monkeypatch, tmp_path, server)
+    out = tmp_path / "_assessment"
+    assessment = json.loads((out / "assessment.json").read_text(encoding="utf-8"))
+    report = (out / "report.md").read_text(encoding="utf-8")
+    ceiling = assessment["server_ceiling"]
+    assert code == 0
+    assert ceiling["established"] is False and ceiling["advertised_api_version"] is None
+    assert ceiling["probe_status"] == 500
+    assert {r["verdict"] for r in ceiling["rungs"]} == {"unknown"}
+    assert "3.30" not in report
+    assert "was NOT established" in report and "| rung | route |" not in report
+    # Nothing was rejected as unparsable here -- the status is the whole diagnosis.
+    assert "is not a REST API version" not in report
     assert no_sleep == []
 
 

@@ -221,8 +221,17 @@ def format_matches(kind: str, body: bytes, content_type: str | None, *, redactor
 
 
 @dataclass(frozen=True)
-class RenderTier:
-    """One rung of the reference-render ladder, with the evidence grade it can support."""
+class RenderTier:  # pylint: disable=too-many-instance-attributes
+    """One rung of the reference-render ladder, with the evidence grade it can support.
+
+    ⚠️ The ``too-many-instance-attributes`` suppression is scoped to this class and is the right
+    answer rather than a raised global ceiling: this is a frozen RECORD describing one rung of a
+    published capability table (route, floor, payload kind, and what the rung resolves to), not an
+    object accumulating state. Splitting eight related constants across two dataclasses to satisfy a
+    default of seven would put a rung's floor and a rung's ceiling in different objects, which is
+    exactly the separation that let #474 happen. Raising ``max-attributes`` in ``pyproject.toml``
+    would instead loosen the check for every class in the repo.
+    """
 
     name: str
     endpoint: str
@@ -286,9 +295,36 @@ LADDER: tuple[RenderTier, ...] = (
 )
 
 
-def api_tuple(version: str) -> tuple[int, ...]:
-    """Comparable form of a REST version. Never compare these as strings: ``"3.9" > "3.10"``."""
-    return tuple(int(part) for part in re.findall(r"\d+", version)) or (0,)
+# A REST API version is numeric and at least ``MAJOR.MINOR`` -- Tableau has published exactly that
+# shape from 2.0 to 3.30. The trailing group tolerates a hypothetical third component rather than
+# rejecting a real future server; nothing else is admitted.
+#
+# ⚠️ This is a GRAMMAR, not a membership test, and the difference is load-bearing. `API_RELEASE` is a
+# release-name lookup table that stops at 3.29, so requiring membership would classify a real 3.30
+# Cloud site -- measured on 2026-08-30 -- as unassessable. A numeric but unpublished version is
+# established and compares normally; only text that is not a version at all is refused.
+_API_VERSION_RE = re.compile(r"\d+\.\d+(?:\.\d+)*")
+
+
+def api_tuple(version: str | None) -> tuple[int, ...] | None:
+    """Comparable form of a REST version, or ``None`` when ``version`` is not one.
+
+    Never compare these as strings: ``"3.9" > "3.10"``.
+
+    ⚠️ ``None`` rather than a best-effort tuple, because the best effort was measurably worse than
+    no answer. This used to pull *arbitrary digit runs* out of whatever it was handed, which turned
+    unassessable text into a confident bucket in both directions: ``"garbage-999"`` became ``(999,)``
+    and therefore "this server clears the SVG floor, best rung SVG", while ``"not-a-version"`` became
+    ``(0,)`` and therefore "below every floor, no reference render is reachable at all". Neither
+    server said either thing. A value that is not a version cannot be compared against a floor, and
+    :func:`supports` turns that into the ``unknown`` third state instead of guessing.
+    """
+    if not version:
+        return None
+    candidate = version.strip()
+    if not _API_VERSION_RE.fullmatch(candidate):
+        return None
+    return tuple(int(part) for part in candidate.split("."))
 
 
 def tier_priority(name: str | None, tiers: tuple[RenderTier, ...] = LADDER) -> int:
@@ -303,10 +339,24 @@ def tier_priority(name: str | None, tiers: tuple[RenderTier, ...] = LADDER) -> i
 
 
 def supports(available: str | None, required: str) -> bool | None:
-    """Is ``available`` at or above ``required``? ``None`` when the server did not say."""
-    if not available:
+    """Is ``available`` at or above ``required``? ``None`` when the server did not say.
+
+    "Did not say" now covers three inputs that are the same thing to a caller and were not the same
+    thing here: absent, empty, **and present but not an API version**. A ``restApiVersion`` of
+    ``garbage-999`` is not evidence that a server clears the SVG floor, and the third state exists so
+    that it does not have to be pretended into one of the other two.
+
+    ``required`` is always one of this module's own ladder floors, so an unparsable one is a bug in
+    the ladder rather than a fact about a server -- it raises instead of silently marking every rung
+    unknown, which is how a broken ladder would otherwise ship looking merely cautious.
+    """
+    floor = api_tuple(required)
+    if floor is None:
+        raise ValueError(f"not a REST API version: {required!r}")
+    reached = api_tuple(available)
+    if reached is None:
         return None
-    return api_tuple(available) >= api_tuple(required)
+    return reached >= floor
 
 
 TIER_BY_NAME: dict[str, RenderTier] = {tier.name: tier for tier in LADDER}
@@ -412,7 +462,16 @@ def svg_gate_advice(gate: SvgGate, *, redactor=None) -> SvgGateAdvice:
 
 
 def _meets_floor_remedy(gate: SvgGate, svg: RenderTier, advertised: str, configured: str) -> str:
-    """The remedy when the SERVER clears the floor -- which is not yet a reason to blame the pin."""
+    """The remedy when the SERVER clears the floor -- which is not yet a reason to blame the pin.
+
+    ⚠️ **The invariant is that no remedy may ever name a version the advertised ceiling cannot
+    serve**, and "at or above the floor" is not the same as "unbounded". This said *"set it to 3.29
+    or later"*, which on a server advertising **exactly** 3.29 -- a real shape, that is precisely what
+    Server 2026.2 reports -- makes every "later" value the same impossible configuration #474 exists
+    to remove, one case in from the edge. Naming the floor itself is the only number that is safe for
+    every server in this branch: ``meets_floor`` is true, so ``advertised >= svg.min_api``, so the
+    floor is at or below this server's ceiling by construction.
+    """
     proof = (
         f"A floor re-probe at API {svg.min_api} PROVED the tier answers on this server."
         if gate.proved_by_reprobe
@@ -433,8 +492,9 @@ def _meets_floor_remedy(gate: SvgGate, svg: RenderTier, advertised: str, configu
     pin = f"pinned to {configured}" if configured else "not recorded on this run"
     return (
         f"this server advertises REST {advertised} -- {release_for(advertised)} -- at or above the "
-        f"{svg.min_api} SVG floor, while TABLEAU_REST_API_VERSION is {pin}: set it to "
-        f"{svg.min_api} or later in .env and re-run. {proof}"
+        f"{svg.min_api} SVG floor, while TABLEAU_REST_API_VERSION is {pin}: set it to exactly "
+        f"{svg.min_api} in .env and re-run -- the SVG floor itself, which is the highest number this "
+        f"remedy can name without possibly exceeding the server's own ceiling. {proof}"
     )
 
 
@@ -455,23 +515,46 @@ def server_info(base: str, *, timeout: int = SERVERINFO_TIMEOUT_SEC, redactor=re
     nothing of ours *can* be reflected here -- but every caller in this module has an env in hand and
     passes :func:`tableau_env.env_redactor` anyway, because "it cannot leak" is an argument that has
     to be re-made every time the call site moves, and passing the redactor is one line.
+
+    ⚠️ **A version field is trusted only from a SUCCESSFUL response, and only when it is a version.**
+    Both halves were measured missing: the parse ran regardless of HTTP status, so a **500** or a
+    **404** whose body happened to carry ``<restApiVersion>3.30</restApiVersion>`` -- the shape a
+    proxy error page or a cached body can have -- was reported as this server's advertised ceiling;
+    and any nonempty text was accepted, so ``garbage-999`` became a ceiling that clears the SVG
+    floor. A non-200 therefore returns the status and **no** version fields, and a 200 whose
+    ``restApiVersion`` fails the grammar returns ``rest_api_version: None`` plus
+    ``invalid_rest_api_version`` -- the probe stays diagnostic, the ceiling becomes *unknown*, and
+    :func:`supports` marks every rung unknown rather than confidently available or confidently
+    unavailable. The invalid text is response-derived, so it goes through the chokepoint like any
+    other; the valid one is returned untransformed, because it passed a numeric grammar no secret
+    can satisfy.
     """
     url = f"{base.rstrip('/')}/api/{SERVERINFO_PROBE_VERSION}/serverinfo"
     status, payload, _headers = _request(urllib.request.Request(url), timeout=timeout, redactor=redactor)
     if status == NETWORK_ERROR_STATUS:
         return {"status": 0, "error": payload.decode("utf-8", "replace")}
+    if status != http.HTTPStatus.OK:
+        # An unsuccessful response's body is not the server's account of itself. Keep the status --
+        # that IS the diagnostic, and it is what the "not established" wording quotes.
+        return {"status": status, "product_version": None, "build": None, "rest_api_version": None}
     body = payload.decode("utf-8", "replace")
 
     def grab(pattern: str) -> str | None:
         match = re.search(pattern, body)
         return match.group(1) if match else None
 
-    return {
+    advertised = grab(r"<restApiVersion>([^<]+)<")
+    info: dict[str, Any] = {
         "status": status,
         "product_version": grab(r"<productVersion[^>]*>([^<]+)<"),
         "build": grab(r'<productVersion[^>]*build="([^"]+)"'),
-        "rest_api_version": grab(r"<restApiVersion>([^<]+)<"),
+        "rest_api_version": advertised if api_tuple(advertised) is not None else None,
     }
+    if advertised is not None and info["rest_api_version"] is None:
+        # Kept, redacted, as the reason the ceiling is unknown -- an operator who is told only
+        # "unknown" re-runs the same probe; one who is told WHAT came back stops guessing.
+        info["invalid_rest_api_version"] = redacted_note(advertised, redactor, limit=_VERSION_CHARS)
+    return info
 
 
 def classify_probe(
@@ -683,8 +766,8 @@ def _add_pin_warnings(report, verdicts, tiers, versions: ApiVersions) -> None:
         if reprobe["verdict"] == "available":
             report["warnings"].append(
                 f"tier '{tier.name}' WORKS on this server -- proved by re-probing at API {tier.min_api} -- "
-                f"but TABLEAU_REST_API_VERSION is pinned to {versions.configured}; set it to "
-                f"{tier.min_api} or later to use it"
+                f"but TABLEAU_REST_API_VERSION is pinned to {versions.configured}; set it to exactly "
+                f"{tier.min_api} to use it"
             )
         else:
             report["warnings"].append(

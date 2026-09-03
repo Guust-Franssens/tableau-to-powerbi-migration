@@ -25,7 +25,10 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -43,6 +46,10 @@ import tableau_render_capability as capability  # noqa: E402  # pylint: disable=
 SES = {"product_version": "2025.3.3", "rest_api_version": "3.27"}
 # The Cloud site this repo measured on 2026-08-30. Above the floor.
 CLOUD = {"product_version": "2026.3.0", "rest_api_version": "3.30"}
+# A server sitting EXACTLY on the SVG floor -- Tableau Server 2026.2, which advertises 3.29 and
+# nothing higher. Its ceiling and the floor are the same number, so it is the site where "3.29 or
+# later" and "3.29" stop being the same instruction (#475 review, finding 1).
+EXACT_FLOOR = {"product_version": "2026.2.0", "rest_api_version": "3.29"}
 
 # The server's own refusal text below 3.29, verbatim.
 SVG_TOO_OLD = (
@@ -54,7 +61,15 @@ SVG_TOO_OLD = (
 # Substrings that identify ONE branch each. Asserting on these rather than on "a warning fired" is the
 # measured countermeasure in this repo: a broad assertion is satisfied by whichever guard happens to
 # run first, so a collapsed branch still reads green.
-RAISE_THE_PIN = "set it to 3.29 or later in .env"
+#
+# ⚠️ `RAISE_THE_PIN` names the FLOOR EXACTLY, and that literal is the fix for the #475 review's first
+# finding. It used to read "set it to 3.29 or later in .env", which on a server advertising exactly
+# 3.29 -- what Server 2026.2 reports -- recommends a range whose every other member is above that
+# server's own ceiling: the impossible configuration #474 exists to remove, one case in from the edge.
+RAISE_THE_PIN = "set it to exactly 3.29 in .env"
+# The wording that was wrong. Kept as an explicit forbidden marker rather than deleted, because "the
+# new phrase is present" does not by itself exclude the old one coming back beside it.
+UNBOUNDED_PIN = "or later in .env"
 SERVER_CANNOT = "at any client setting"
 NOT_ESTABLISHED = "was NOT established on this run"
 ALREADY_PINNED = "raising the pin further will not help"
@@ -113,11 +128,68 @@ def test_a_server_at_or_above_the_floor_names_the_env_knob():
     result = advice(CLOUD)
     assert result.cause == capability.SVG_CAUSE_SERVER_MEETS_FLOOR
     assert RAISE_THE_PIN in result.remedy
+    assert UNBOUNDED_PIN not in result.remedy
 
 
 def test_exactly_at_the_floor_counts_as_meeting_it():
-    """`supports` is >=, and an off-by-one here silently demotes every 2026.2 on-prem site."""
-    assert advice({"rest_api_version": "3.29"}).cause == capability.SVG_CAUSE_SERVER_MEETS_FLOOR
+    """`supports` is >=, and an off-by-one here silently demotes every 2026.2 on-prem site.
+
+    ⚠️ This test asserted ONLY the cause, and that was the hole. The #475 blind reviewer mutated the
+    exact-floor arm's remedy text, watched the mutation execute (HITS=1), and watched this test and
+    the above-floor one both stay green -- because neither could see a remedy. The cause is the
+    classification; the remedy is what a customer acts on, and a suite that gates one and not the
+    other is credited for coverage it does not have. Both are asserted here now.
+    """
+    result = advice(EXACT_FLOOR)
+    assert result.cause == capability.SVG_CAUSE_SERVER_MEETS_FLOOR
+    assert RAISE_THE_PIN in result.remedy
+
+
+def test_an_exact_floor_server_is_NEVER_advised_above_its_own_advertised_ceiling():
+    """Finding 1, in one assertion. `3.29` is the ceiling AND the floor -- every "later" is impossible.
+
+    Reproduced by the reviewer against the production classifier: ``advertised="3.29"``,
+    ``configured="3.21"`` returned *"set it to 3.29 or later in .env and re-run"*. Every value that
+    phrase licenses above 3.29 exceeds what this server advertises, which is the same defect #474
+    exists to eliminate -- it merely stopped being visible once the server met the floor.
+    """
+    remedy = advice(EXACT_FLOOR).remedy
+    assert UNBOUNDED_PIN not in remedy
+    assert "or later" not in remedy
+    assert RAISE_THE_PIN in remedy
+
+
+@pytest.mark.parametrize("advertised", ["3.29", "3.30", "9.99"])
+def test_no_remedy_names_a_REST_VERSION_the_advertised_ceiling_cannot_serve(advertised):
+    """The invariant behind finding 1, checked as a relationship rather than as a literal.
+
+    A literal assertion ("says 3.29") is satisfied by a message that ALSO says something impossible;
+    this extracts every REST-version-shaped token the remedy names and holds each one against the
+    ceiling. It is scoped to `server_meets_floor` deliberately: that is the only state that issues a
+    pin INSTRUCTION. State B names 3.29 too, but as the floor this server misses -- the opposite of a
+    recommendation -- and state C names it inside an `if`.
+
+    Release NAMES are excluded before scanning, because they are version-shaped and are not REST API
+    versions: `release_for("3.29")` is *"Tableau Cloud June 2026 / Server 2026.2"*, whose `2026.2`
+    would otherwise read as a REST version far above any ceiling.
+    """
+    result = advice({"rest_api_version": advertised}, configured="3.21")
+    assert result.cause == capability.SVG_CAUSE_SERVER_MEETS_FLOOR
+    named = _rest_versions_named(result.remedy, exclude=[capability.release_for(advertised)])
+    ceiling = capability.api_tuple(advertised)
+    assert named, "a remedy that names no version at all cannot be instructing anyone"
+    for token in named:
+        assert capability.api_tuple(token) <= ceiling, f"{token} is above the advertised ceiling {advertised}"
+    # ...and the floor is actually recommended, so a mutation that simply stops naming a version
+    # cannot satisfy the loop above by vacuity.
+    assert RAISE_THE_PIN in result.remedy
+
+
+def _rest_versions_named(text: str, *, exclude: list[str]) -> set[str]:
+    """Every REST-API-version-shaped token in ``text``, minus phrases that merely look like one."""
+    for phrase in exclude:
+        text = text.replace(phrase, " ")
+    return set(re.findall(r"\b\d+\.\d+\b", text))
 
 
 def test_the_advertised_number_alone_never_claims_the_tier_WORKS():
@@ -185,6 +257,164 @@ def test_the_unknown_state_does_NOT_fire_once_a_ceiling_is_known():
 def test_an_empty_string_ceiling_is_unknown_rather_than_below_the_floor():
     """`server_info` returns None for an unparsable body; a caller may hand through ''."""
     assert advice({"rest_api_version": ""}).cause == capability.SVG_CAUSE_CEILING_NOT_ESTABLISHED
+
+
+# ------------------------- #475 review finding 2: a "version" that is not a version at all --------
+
+# Every one of these produced a CONFIDENT verdict from the production functions before the fix,
+# because `api_tuple` pulled arbitrary digit runs out of whatever it was handed. The first two are
+# the reviewer's own rows and they failed in OPPOSITE directions -- `garbage-999` became `(999,)` and
+# therefore "clears the SVG floor, best rung SVG", while `not-a-version` became `(0,)` and therefore
+# "below every floor, no reference render reachable at all". "It fails safe" was never available as a
+# defence: the same input class produced both the most optimistic and the most pessimistic answer.
+NOT_A_VERSION = ["not-a-version", "garbage-999", "3.x", "3", "v3.29", "3.29-beta", "3.", ".29", "", "   "]
+
+
+@pytest.mark.parametrize("value", NOT_A_VERSION)
+def test_api_tuple_refuses_anything_that_is_not_an_api_version(value):
+    assert capability.api_tuple(value) is None
+
+
+def test_api_tuple_refuses_None_as_well_as_junk():
+    assert capability.api_tuple(None) is None
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("3.29", (3, 29)), ("2.8", (2, 8)), ("3.30", (3, 30)), ("9.99", (9, 99)), ("3.29.1", (3, 29, 1))],
+)
+def test_api_tuple_accepts_a_real_version_including_one_the_published_table_never_heard_of(value, expected):
+    """Negative control for the refusals above: a mutation that refuses everything fails here."""
+    assert capability.api_tuple(value) == expected
+
+
+def test_api_tuple_still_orders_numerically_rather_than_lexicographically():
+    """The original reason this function exists -- `"3.9" > "3.10"` as strings -- must survive."""
+    assert capability.api_tuple("3.9") < capability.api_tuple("3.10")
+
+
+@pytest.mark.parametrize("value", NOT_A_VERSION)
+def test_supports_reports_the_UNKNOWN_third_state_for_a_non_version(value):
+    assert capability.supports(value, "3.29") is None
+
+
+def test_supports_raises_when_OUR_OWN_floor_is_not_a_version():
+    """A bad floor is a bug in the ladder, not a fact about a server, so it must not fail quiet.
+
+    Returning `None` here would mark every rung unknown on every site and read as caution.
+    """
+    with pytest.raises(ValueError):
+        capability.supports("3.29", "not-a-floor")
+
+
+def test_a_numeric_but_UNPUBLISHED_future_version_stays_established_and_above_the_floor():
+    """⚠️ The one way finding 2 must NOT be fixed: by requiring membership in `API_RELEASE`.
+
+    That table is a release-NAME lookup, not the capability boundary, and it stops at 3.29 -- while a
+    live Cloud site measured on 2026-08-30 already advertised 3.30. A membership test would classify
+    every real server past the documentation as unassessable.
+    """
+    assert "9.99" not in capability.API_RELEASE
+    assert capability.supports("9.99", "3.29") is True
+    assert advice({"rest_api_version": "9.99"}).cause == capability.SVG_CAUSE_SERVER_MEETS_FLOOR
+
+
+@pytest.mark.parametrize("value", ["not-a-version", "garbage-999", "3.x"])
+def test_a_ceiling_that_is_not_a_version_is_the_unknown_state_never_a_confident_one(value):
+    """The reviewer's three classifier rows, which used to land on two different confident causes."""
+    result = advice({"rest_api_version": value})
+    assert result.cause == capability.SVG_CAUSE_CEILING_NOT_ESTABLISHED
+    assert NOT_ESTABLISHED in result.remedy
+    assert RAISE_THE_PIN not in result.remedy
+    # ...and the junk is never quoted back at the operator as though it were this site's ceiling.
+    assert value not in result.remedy
+
+
+# ------------------------------------------------- `/serverinfo` itself: status, then grammar
+
+
+class _Serverinfo:
+    """The slice of `http.client.HTTPResponse` that `tableau_http._request` touches."""
+
+    def __init__(self, status: int, payload: bytes) -> None:
+        self.status = status
+        self._payload = payload
+        self.headers: dict[str, str] = {}
+
+    def read(self) -> bytes:
+        return self._payload
+
+    def close(self) -> None:
+        """`urllib.error.HTTPError` closes the body it was handed."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc) -> bool:
+        return False
+
+
+def _serverinfo_xml(version: str) -> bytes:
+    """A real `/serverinfo` body, trimmed to the three elements `server_info` parses."""
+    return (
+        b'<?xml version="1.0" encoding="UTF-8"?><tsResponse><serverInfo>'
+        b'<productVersion build="20253.25.0904.1234">2025.3.3</productVersion>'
+        + f"<restApiVersion>{version}</restApiVersion>".encode()
+        + b"</serverInfo></tsResponse>"
+    )
+
+
+def _probe(monkeypatch, status: int, body: bytes, redactor=None) -> dict:
+    """`server_info` over a scripted transport -- the real parse, the real status handling."""
+
+    def fake_urlopen(request, timeout=None):  # noqa: ARG001
+        if status == 200:
+            return _Serverinfo(200, body)
+        raise urllib.error.HTTPError(request.full_url, status, "nope", {}, _Serverinfo(status, body))
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    return capability.server_info("https://s", timeout=1, redactor=redactor or (lambda text: text))
+
+
+@pytest.mark.parametrize(("status", "version"), [(500, "3.30"), (404, "3.27")])
+def test_a_version_carried_by_an_UNSUCCESSFUL_serverinfo_is_not_a_ceiling(monkeypatch, status, version):
+    """The parse used to run regardless of HTTP status, so an error page's body became the ceiling.
+
+    Both rows were reproduced by the reviewer against the production function: a 500 body carrying
+    `<restApiVersion>3.30</restApiVersion>` was read as REST 3.30, and a 404 carrying 3.27 as 3.27.
+    A proxy error page and a cached body can both have that shape; neither is the server's own
+    account of itself.
+    """
+    info = _probe(monkeypatch, status, _serverinfo_xml(version))
+    assert info["rest_api_version"] is None
+    assert info["product_version"] is None
+    # The status IS the diagnostic and must survive -- that is what "NOT established" quotes.
+    assert info["status"] == status
+
+
+def test_a_SUCCESSFUL_serverinfo_is_still_read_normally(monkeypatch):
+    """Negative control: a mutation that drops every version fails here rather than reading green."""
+    info = _probe(monkeypatch, 200, _serverinfo_xml("3.27"))
+    assert (info["rest_api_version"], info["product_version"]) == ("3.27", "2025.3.3")
+    assert info["build"] == "20253.25.0904.1234"
+    assert "invalid_rest_api_version" not in info
+
+
+def test_a_200_reporting_something_that_is_not_a_version_yields_no_ceiling_but_keeps_the_evidence(monkeypatch):
+    """Unknown, and it says WHAT came back -- an operator told only "unknown" re-runs the same probe."""
+    info = _probe(monkeypatch, 200, _serverinfo_xml("garbage-999"))
+    assert info["rest_api_version"] is None
+    assert info["invalid_rest_api_version"] == "garbage-999"
+    assert info["status"] == 200
+
+
+def test_the_offending_version_text_goes_through_the_redaction_chokepoint(monkeypatch):
+    """It is response-derived like every other quoted value, and it lands in a customer artifact."""
+    token = "SYNTHETIC_SESSION_TOKEN_42_LONG_ENOUGH"
+    info = _probe(monkeypatch, 200, _serverinfo_xml(token), redactor=lambda text: text.replace(token, "[REDACTED]"))
+    assert info["rest_api_version"] is None
+    assert token not in info["invalid_rest_api_version"]
+    assert "[REDACTED]" in info["invalid_rest_api_version"]
 
 
 # ---------------------------------------------------------------- the three states are a partition
@@ -570,6 +800,76 @@ def test_an_ESTABLISHED_ceiling_marks_no_rung_unknown(monkeypatch):
     for server in (SES, CLOUD):
         ceiling = _ceiling(monkeypatch, dict(server, status=200))
         assert assess_estate.UNKNOWN not in {r["verdict"] for r in ceiling["rungs"]}
+
+
+@pytest.mark.parametrize("value", ["not-a-version", "garbage-999", "3.x"])
+def test_a_ceiling_that_is_not_a_version_is_UNKNOWN_in_the_assessment_too(monkeypatch, value):
+    """Finding 2 where an operator reads it. Before the fix these three disagreed with each other.
+
+    Measured against the production path: `garbage-999` reported `established: True`, every rung
+    `available` and `best_reference_render: "svg"`; `not-a-version` reported `established: True` and
+    every rung `unavailable`; `3.x` reported `best_reference_render: "pdf"`. Three confident,
+    mutually contradictory answers from three strings that are all simply not versions.
+
+    `server_ceiling` is asserted here with a hand-assembled `info`, which is deliberate: it proves
+    the assessment layer classifies for itself rather than inheriting `server_info`'s refusal, so a
+    future caller cannot reintroduce the collapse by assembling the dict some other way.
+    """
+    ceiling = _ceiling(monkeypatch, {"status": 200, "rest_api_version": value, "product_version": "x"})
+    assert ceiling["established"] is False
+    assert ceiling["advertised_api_version"] is None
+    assert {r["verdict"] for r in ceiling["rungs"]} == {assess_estate.UNKNOWN}
+    assert ceiling["best_reference_render"] is None
+
+
+def test_a_ceiling_from_an_UNSUCCESSFUL_probe_is_UNKNOWN_in_the_assessment_too(monkeypatch):
+    """The other half of finding 2, end to end through the real transport rather than a stub info."""
+
+    def fake_urlopen(request, timeout=None):  # noqa: ARG001
+        raise urllib.error.HTTPError(request.full_url, 500, "boom", {}, _Serverinfo(500, _serverinfo_xml("3.30")))
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    ceiling = assess_estate.server_ceiling(_Site())
+    assert ceiling["established"] is False
+    assert ceiling["advertised_api_version"] is None
+    assert ceiling["probe_status"] == 500
+    assert {r["verdict"] for r in ceiling["rungs"]} == {assess_estate.UNKNOWN}
+
+
+def test_a_future_unpublished_version_is_still_ESTABLISHED_in_the_assessment(monkeypatch):
+    """Negative control for both tests above, and the deliberate non-goal restated at this layer."""
+    ceiling = _ceiling(monkeypatch, {"status": 200, "rest_api_version": "9.99", "product_version": "2099.1"})
+    assert ceiling["established"] is True
+    assert ceiling["best_reference_render"] == "svg"
+    assert assess_estate.UNKNOWN not in {r["verdict"] for r in ceiling["rungs"]}
+
+
+def test_the_report_says_the_reported_version_was_not_a_version_rather_than_only_the_status(monkeypatch):
+    """ "`/serverinfo` answered 200" beside "ceiling not established" reads as a bug in THIS tool."""
+    ceiling = _ceiling(monkeypatch, {"status": 200, "invalid_rest_api_version": "garbage-999"})
+    lines = "\n".join(assess_estate._render_server_ceiling(ceiling))  # pylint: disable=protected-access
+    assert "was NOT established" in lines
+    assert "garbage-999" in lines and "is not a REST API version" in lines
+    assert "| rung | route |" not in lines
+
+
+def test_the_report_does_NOT_invent_that_clause_when_the_probe_simply_did_not_answer(monkeypatch):
+    """Negative control: a 0/404 says only what it knows -- there was no version to reject."""
+    lines = "\n".join(
+        assess_estate._render_server_ceiling(_ceiling(monkeypatch, {"status": 0, "error": "URLError"}))  # pylint: disable=protected-access
+    )
+    assert "is not a REST API version" not in lines
+    assert "`/serverinfo` answered `0`" in lines
+
+
+def test_the_console_also_names_the_value_that_was_not_a_version(monkeypatch, caplog):
+    """One wording, two surfaces -- the console must not be the vaguer of the two."""
+    ceiling = _ceiling(monkeypatch, {"status": 200, "invalid_rest_api_version": "garbage-999"})
+    with caplog.at_level(logging.INFO, logger="assess"):
+        assess_estate._log_server_ceiling(ceiling)  # pylint: disable=protected-access
+    assert "NOT ESTABLISHED" in caplog.text
+    assert "garbage-999" in caplog.text and "not a REST API version" in caplog.text
+    assert "AVAILABLE" not in caplog.text
 
 
 def test_the_report_prints_NO_rung_table_when_the_ceiling_was_not_established(monkeypatch):

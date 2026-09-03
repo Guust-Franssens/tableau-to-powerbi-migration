@@ -1209,6 +1209,15 @@ def server_ceiling(site: Site) -> dict[str, Any]:
     it, so calling it a degraded inventory would be a false alarm on the one flag this script asks
     consumers to trust.
 
+    ⚠️ **"Answered" is not "established", and three failures land in the same state.** No answer at
+    all, an unsuccessful answer (a proxy's 404, the server's own 500) whose body may still contain a
+    ``<restApiVersion>`` element, and a 200 reporting something that is not a version -- all three are
+    ``unknown`` here, because none of them is a number that can be compared against a rung's floor.
+    Measured before the fix (#475 review): a 500 carrying ``3.30`` was reported as this site's ceiling
+    with SVG available, and an advertised ``garbage-999`` did the same; ``not-a-version`` went the
+    other way and reported that NO reference render was reachable at all. ``advertised_api_version_invalid``
+    carries the offending text, redacted, so the report can say which failure this was.
+
     ⚠️ And every rung verdict is an EXPECTATION from an advertised number, never a measurement. Only
     ``capture_tableau_oracle.py --reference-best`` probes the endpoint, which is the sole
     authoritative answer -- see ``tableau_render_capability``'s module docstring for why the two
@@ -1218,12 +1227,25 @@ def server_ceiling(site: Site) -> dict[str, Any]:
     """
     info = render_capability.server_info(site.base, redactor=site.scrub_text)
     advertised = info.get("rest_api_version")
-    rungs = [_rung_verdict(tier, advertised) for tier in render_capability.LADDER]
+    # Defence in depth, and cheap: `server_info` already refuses a version that is not one, but this
+    # function is also called with a hand-assembled `info` in tests and by any future caller, and a
+    # nonempty string is exactly what used to be trusted. The grammar decides `established`; bare
+    # truthiness does not. ⚠️ The offending text is taken ONLY from `invalid_rest_api_version`, which
+    # was redacted at the parse boundary -- never re-derived from `advertised` here, which on that
+    # hypothetical path would be unredacted response text on its way into a customer-facing report.
+    if render_capability.api_tuple(advertised) is None:
+        advertised = None
+    rungs = [_rung_verdict(rung, advertised) for rung in render_capability.LADDER]
     best = next((r for r in rungs if r["verdict"] == AVAILABLE), None)
     return {
         "client_api_version": site.version,
         "advertised_api_version": advertised,
         "advertised_release": render_capability.release_for(advertised) if advertised else None,
+        # ⚠️ Present ONLY when `/serverinfo` answered 200 with a `restApiVersion` that is not a REST
+        # API version at all. It is why the ceiling is unknown, and it is already redacted at the
+        # parse boundary. `established` stays false: text that cannot be compared against a floor is
+        # not a ceiling, however confidently it was returned (#475 review).
+        "advertised_api_version_invalid": info.get("invalid_rest_api_version"),
         "product_version": info.get("product_version"),
         "build": info.get("build"),
         "established": bool(advertised),
@@ -1243,16 +1265,21 @@ UNAVAILABLE = "unavailable"
 UNKNOWN = "unknown"
 
 
-def _rung_verdict(tier, advertised: str | None) -> dict[str, Any]:
-    """One ladder rung against this site's advertised ceiling. Three-valued, never two."""
-    meets = render_capability.supports(advertised, tier.min_api)
+def _rung_verdict(rung, advertised: str | None) -> dict[str, Any]:
+    """One ladder rung against this site's advertised ceiling. Three-valued, never two.
+
+    The parameter is ``rung``, not ``tier``: this module already has a module-level ``tier()`` that
+    scores a workbook, and shadowing it here made pylint's ``redefined-outer-name`` the difference
+    between exit 0 and exit 12 on the required gate.
+    """
+    meets = render_capability.supports(advertised, rung.min_api)
     return {
-        "tier": tier.name,
-        "route": tier.route,
-        "min_api": tier.min_api,
-        "min_release": tier.min_release,
-        "vector": tier.vector,
-        "ceiling": tier.ceiling,
+        "tier": rung.name,
+        "route": rung.route,
+        "min_api": rung.min_api,
+        "min_release": rung.min_release,
+        "vector": rung.vector,
+        "ceiling": rung.ceiling,
         "verdict": UNKNOWN if meets is None else (AVAILABLE if meets else UNAVAILABLE),
     }
 
@@ -1352,6 +1379,25 @@ def _bottom_line(ceiling: dict[str, Any]) -> str:
     )
 
 
+def _why_not_established(ceiling: dict[str, Any]) -> str:
+    """The one clause that says WHICH way the probe failed to establish a ceiling.
+
+    Three failures land here and they are not interchangeable to whoever has to act: no answer at all
+    (``probe_status`` 0), an unsuccessful answer (404 from a proxy in front of Tableau, 500 from the
+    server itself), and a 200 whose ``restApiVersion`` is not a version. Printing only "answered 200"
+    for the third would read as a contradiction -- a successful probe with no ceiling -- and send the
+    reader hunting for a bug in this tool instead of at the value the server actually returned.
+    """
+    invalid = ceiling.get("advertised_api_version_invalid")
+    status = ceiling.get("probe_status")
+    if invalid:
+        return (
+            f"`/serverinfo` answered `{status}`, but the version it reported (`{invalid}`) is not a "
+            f"REST API version, so it cannot be compared against any rung's floor"
+        )
+    return f"`/serverinfo` answered `{status}`"
+
+
 def _render_ceiling_unknown(ceiling: dict[str, Any]) -> list[str]:
     """State C. ⚠️ Emits NO per-rung verdicts -- an unestablished ceiling must not read as a known one.
 
@@ -1360,8 +1406,8 @@ def _render_ceiling_unknown(ceiling: dict[str, Any]) -> list[str]:
     unassessable-collapsing-into-a-confident-answer shape the rest of this repo is built to refuse.
     """
     return [
-        f"⚠️ **The server's advertised REST ceiling was NOT established** — `/serverinfo` answered "
-        f"`{ceiling.get('probe_status')}`. We send `TABLEAU_REST_API_VERSION` = "
+        f"⚠️ **The server's advertised REST ceiling was NOT established** — {_why_not_established(ceiling)}. "
+        f"We send `TABLEAU_REST_API_VERSION` = "
         f"`{ceiling['client_api_version']}`, which is a client preference and says nothing about what "
         f"this site can do.",
         "",
@@ -1622,11 +1668,13 @@ def _log_server_ceiling(ceiling: dict[str, Any] | None) -> None:
     if not ceiling:
         return
     if not ceiling.get("established"):
+        invalid = ceiling.get("advertised_api_version_invalid")
         LOG.warning(
-            "  render ceiling NOT ESTABLISHED (/serverinfo answered %s); we ask as %s. Which reference "
+            "  render ceiling NOT ESTABLISHED (/serverinfo answered %s%s); we ask as %s. Which reference "
             "renders this site supports is UNKNOWN -- no rung verdict is shown. Probe it with "
             "capture_tableau_oracle.py --reference-best",
             ceiling.get("probe_status"),
+            f", reporting {invalid!r}, which is not a REST API version" if invalid else "",
             ceiling["client_api_version"],
         )
         return
