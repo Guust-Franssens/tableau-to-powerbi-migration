@@ -150,7 +150,7 @@ import subprocess
 import sys
 import time
 import uuid
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -1208,6 +1208,38 @@ def _data_folder_param(documents: list[Path]) -> str:
     return f"{FALLBACK_DATA_FOLDER_PARAM}{suffix}"
 
 
+def _path_separator(base: str) -> str:
+    """The separator ``base`` already uses, so a path EXTENDED from it stays internally consistent.
+
+    ⚠️ **This is the fix for a Linux-only defect that Windows structurally cannot see.** Every one of
+    these values was composed with a literal ``\\``, which on Windows is right and on Linux produces
+    ``/tmp/.../out/Book\\data\\`` - one path segment with backslashes inside it, naming a directory
+    that does not exist. Both separators resolve on Windows, so the bug was invisible in every local
+    run and only ubuntu CI failed (PR #463).
+
+    Derived from the VALUE rather than from ``os.sep`` on purpose. What matters is not the platform
+    doing the composing, it is that the finished literal - which Power Query parses as ONE path - is
+    not half Windows and half POSIX. Taking it from the base also makes the rule testable on either
+    platform: pass a POSIX base on Windows and the answer must still be ``/``, which is what lets a
+    Windows-only run demonstrate this failing.
+    """
+    if "\\" in base:
+        return "\\"
+    if "/" in base:
+        return "/"
+    return os.sep
+
+
+def _package_data_folder(final: PurePath) -> str:
+    """The `DataFolder` parameter's value: the package's own `data/`, with a TRAILING separator.
+
+    The trailing separator is load-bearing - :func:`_rewrite_partitions` concatenates a relative tail
+    straight onto it - so it is produced here, once, in the same flavour as the rest of the value.
+    """
+    separator = _path_separator(str(final))
+    return f"{final}{separator}{DATA_DIR}{separator}"
+
+
 def _write_data_folder_expression(dest: Path, final: Path, model_name: str, parameter: str) -> None:
     """Declare the folder parameter, in the exact shape this repo's committed models already use.
 
@@ -1223,7 +1255,7 @@ def _write_data_folder_expression(dest: Path, final: Path, model_name: str, para
     path = dest / "fabric" / model_name / "definition" / EXPRESSIONS_TMDL
     lineage = uuid.uuid5(uuid.NAMESPACE_URL, f"package_unit:{model_name}:{parameter}")
     block = (
-        f'expression {parameter} = "{final}\\{DATA_DIR}\\" '
+        f'expression {parameter} = "{_package_data_folder(final)}" '
         'meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]\n'
         f"\tlineageTag: {lineage}\n\n"
         "\tannotation PBI_ResultType = Text\n\n"
@@ -1448,9 +1480,13 @@ def _moved_folder_value(final: Path, relative: str, original: str) -> str:
     Partitions concatenate onto this value - `File.Contents(#"SourceFolder" & "\\Sample -
     Superstore.xlsx")` - so adding or dropping a separator here silently breaks every path built
     from it, in a way no structural check can see.
+
+    The separator itself comes from the destination (:func:`_path_separator`), not from a literal
+    backslash: only whether a trailing one is present is copied from the original.
     """
-    trailing = "\\" if original.endswith(("\\", "/")) else ""
-    return f"{final}\\{DATA_DIR}\\{relative.replace('/', chr(92))}{trailing}"
+    separator = _path_separator(str(final))
+    trailing = separator if original.endswith(("\\", "/")) else ""
+    return f"{_package_data_folder(final)}{relative.replace('/', separator)}{trailing}"
 
 
 def _ship_folder(readable: Path, target: Path, relative: str, record: dict[str, Any], members: list[Path]) -> None:
@@ -1492,7 +1528,7 @@ def _localize_file_literals(  # pylint: disable=too-many-arguments,too-many-posi
 
     if not shipped:
         return
-    _rewrite_partitions(documents, shipped, parameter)
+    _rewrite_partitions(documents, shipped, parameter, _path_separator(str(final)))
     _write_data_folder_expression(dest, final, str(model_name), parameter)
     _assert_declared_once(_model_tmdl(dest, model_name), parameter)
     record["parameter"] = parameter
@@ -1536,16 +1572,20 @@ def _leaf(value: str) -> str:
     return value.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1] or value
 
 
-def _rewrite_partitions(documents: list[Path], shipped: dict[str, str], parameter: str) -> None:
-    """Point each shipped reference at the package's own copy, through the folder parameter."""
+def _rewrite_partitions(documents: list[Path], shipped: dict[str, str], parameter: str, separator: str) -> None:
+    """Point each shipped reference at the package's own copy, through the folder parameter.
+
+    ``separator`` is the parameter value's own, not a literal backslash: the tail written here is
+    concatenated straight onto that value, so the two halves of one path must agree.
+    """
     for document in documents:
         text = document.read_text(encoding="utf-8")
 
-        def _sub(match: re.Match[str], _shipped: dict[str, str] = shipped) -> str:
+        def _sub(match: re.Match[str], _shipped: dict[str, str] = shipped, _sep: str = separator) -> str:
             relative = _shipped.get(match.group(1))
             if relative is None:
                 return match.group(0)
-            return f'File.Contents({parameter} & "{relative.replace("/", chr(92))}")'
+            return f'File.Contents({parameter} & "{relative.replace("/", _sep)}")'
 
         rewritten = FILE_CONTENTS_RE.sub(_sub, text)
         if rewritten != text:

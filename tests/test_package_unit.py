@@ -23,10 +23,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
 
@@ -1223,7 +1224,7 @@ def test_the_rows_the_model_imports_are_shipped_and_the_partition_reads_them(tmp
         shipped = root / row["path"]
         assert shipped.is_file(), f"the manifest claims {row['path']} but nothing is there"
         assert shipped.stat().st_size == row["bytes"]
-        relative = row["path"].split(f"{pkg.DATA_DIR}/", 1)[1].replace("/", "\\")
+        relative = row["path"].split(f"{pkg.DATA_DIR}/", 1)[1].replace("/", os.sep)
         assert f'{pkg.DATA_FOLDER_PARAM} & "{relative}"' in partitions, "no partition reads the shipped copy"
 
 
@@ -1242,6 +1243,34 @@ def test_the_data_folder_parameter_names_the_FINAL_package_not_its_staging_dir(t
     assert ".staging" not in str(named), f"the parameter names the staging directory: {named}"
     assert named.is_dir(), f"the parameter names a directory that does not exist: {named}"
     assert named.resolve() == (root / pkg.DATA_DIR).resolve()
+    foreign = "/" if os.sep == "\\" else "\\"
+    assert foreign not in value.group(1), f"the parameter mixes path separators: {value.group(1)}"
+
+
+@pytest.mark.parametrize(
+    ("base", "expected"),
+    [
+        (PureWindowsPath(r"C:\runs\packages\out\Book"), "C:\\runs\\packages\\out\\Book\\data\\"),
+        (PurePosixPath("/tmp/pytest-0/packages/out/Book"), "/tmp/pytest-0/packages/out/Book/data/"),
+    ],
+)
+def test_the_data_folder_value_never_mixes_separators_on_EITHER_platform(base: Path, expected: str) -> None:
+    """The Linux-only defect that ubuntu CI caught and every Windows run structurally could not.
+
+    The value was composed with a literal ``\\``, so on Linux it read
+    ``/tmp/.../out/Book\\data\\`` - ONE path segment with backslashes inside it, naming a directory
+    that does not exist. On Windows both separators resolve, so no local run, no Desktop check and
+    no artifact-level assertion could see it: the composition has to be exercised against a base of
+    the OTHER flavour, which is what this does.
+
+    ``_path_separator`` is asserted directly as well, because it is the whole rule and reading it
+    off a composed string would let a half-correct answer pass.
+    """
+    assert pkg._path_separator(str(base)) == ("\\" if isinstance(base, PureWindowsPath) else "/")  # noqa: SLF001
+    assert pkg._package_data_folder(base) == expected  # noqa: SLF001
+    assert pkg._moved_folder_value(base, "SharedSource.Data", "/some/where/") == (  # noqa: SLF001
+        expected + "SharedSource.Data" + ("\\" if isinstance(base, PureWindowsPath) else "/")
+    )
 
 
 def test_a_source_that_cannot_be_shipped_is_a_LOUD_omission_not_a_silent_skip(tmp_path: Path) -> None:
