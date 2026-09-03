@@ -1915,6 +1915,7 @@ def test_an_unresolvable_owner_chain_fails_closed() -> None:
     assert _credential_modal.main_frame([left, right]) is None, "a cycle leaves the root unknown"
 
 
+@pytest.mark.gui
 @pytest.mark.skipif(sys.platform != "win32", reason="creates real Win32 windows")
 def test_the_win32_harvest_reads_real_ownership_and_owner_enabled_state() -> None:
     """The modality facts must come from Win32, not from a dataclass default (#400 review round 3).
@@ -2142,6 +2143,7 @@ def _dotnet_main_window_handle(pid: int) -> int:
     return int((proc.stdout or "0").strip() or 0)
 
 
+@pytest.mark.gui
 @pytest.mark.skipif(sys.platform != "win32", reason="creates real Win32 windows")
 def test_a_native_unowned_credential_host_owning_a_tooltip_is_not_the_application() -> None:
     """Round 5's reproduction, built natively - the fourth topology to defeat frame identity.
@@ -2186,6 +2188,7 @@ def test_a_native_unowned_credential_host_owning_a_tooltip_is_not_the_applicatio
         probe.close()
 
 
+@pytest.mark.gui
 @pytest.mark.skipif(sys.platform != "win32", reason="creates real Win32 windows and shells out to PowerShell")
 def test_the_process_main_window_handle_is_a_z_order_answer_not_an_identity() -> None:
     """MEASURED, because "ask the authority" was the obvious fix and it does not work (#400 round 5).

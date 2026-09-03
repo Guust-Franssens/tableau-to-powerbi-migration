@@ -71,14 +71,15 @@ markers = [
     # spawning one - UI Automation cannot be exercised against a mock - so the fix is to make it
     # OPT-IN, not to weaken it. `serial` is not a substitute: that only takes effect under
     # `-n auto --dist loadfile`, and a plain `pytest` (what an agent runs) executes them anyway.
+    #
+    # ⚠️ The EXCLUSION is not here. It lives in the root `conftest.py`'s `pytest_collection_modifyitems`
+    # and in the bundle's own `tests/conftest.py`, because `addopts = "-m 'not gui'"` was measured
+    # FAIL-OPEN: a command-line `-m` replaces an ini marker expression rather than composing with it,
+    # so `pytest -m "not slow"` - documented in `docs/offline-mock-harness.md` - collected 309/309 of
+    # the bundle's tests, every window-spawning one included. Opt in with `--run-gui` (or
+    # `T2P_RUN_GUI=1` for a nested run that cannot be handed a flag).
     "gui: spawns a real top-level window; needed for UI-Automation coverage, opt-in only",
 ]
-
-# Deselect `gui` by default so an ordinary run never steals focus. ⚠️ CI MUST run `-m gui`
-# explicitly (see `.github/workflows/checks.yml`), or this trades a focus-stealing window for
-# silently-lost coverage of a fail-open credential guard - which is issue #435's failure exactly
-# ("CI runs none of the 15 engine-dependent tests - they SKIP silently, and a skip is not a pass").
-addopts = "-m 'not gui'"
 
 [tool.ruff]
 exclude = [
