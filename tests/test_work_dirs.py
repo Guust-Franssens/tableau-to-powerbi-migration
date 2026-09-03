@@ -23,10 +23,14 @@ from work_dirs import (
     DERIVED_NAME_MISMATCH,
     DERIVED_NAME_NOT_CONSULTED,
     DERIVED_NAME_UNAVAILABLE,
+    PATH_CHECK_DIFFERS,
+    PATH_CHECK_MATCHES,
+    PATH_CHECK_UNRECORDED,
     RUN_LOCATION_INTACT,
     RUN_LOCATION_KEY,
     RUN_LOCATION_MOVED,
     RUN_LOCATION_UNVERIFIABLE,
+    RUN_PATH_KEY,
     allocate_run,
     check_run_location,
     list_runs,
@@ -249,6 +253,8 @@ def test_list_runs_skips_a_run_directory_with_no_manifest(tmp_path: Path) -> Non
     (root / "001-half-written").mkdir()  # no run.json inside
 
     assert not list_runs(tmp_path)
+    # ...but `verify_runs` is a GATE and must still see it - see the block at the end of this file.
+    assert verify_runs(tmp_path)[1][RUN_LOCATION_UNVERIFIABLE] == 1
 
 
 # --------------------------------------------------------------------------------------
@@ -415,32 +421,118 @@ def test_an_unusable_recorded_name_is_unverifiable_never_intact_and_never_crashe
     assert check["state"] != RUN_LOCATION_INTACT  # negative control
 
 
-def test_a_relocated_repository_is_still_intact_not_moved(tmp_path: Path) -> None:
-    """The brittleness trap this design exists to avoid: a repo that is cloned, moved, or checked
-    out as a `git worktree` is legitimately somewhere else, and its runs are NOT corrupt.
+def test_a_copied_run_is_unverifiable_never_intact_and_the_original_is_untouched(tmp_path: Path) -> None:
+    """Finding 2's reproduction, and the negative control is the whole point: the copy moves, the
+    original does not, so exactly ONE side of the relationship changes.
 
-    Recording an ABSOLUTE path would report all of them `moved` here, and a check that fires on
-    every clone is one people learn to ignore. Recording the directory NAME does not."""
+    ⚠️ This test previously asserted the OPPOSITE - that a `shutil.copytree`d tree is still
+    `INTACT` - on the premise that "a repo that is cloned, moved, or checked out as a `git worktree`
+    is legitimately somewhere else". That premise is false and checkable in one command: `_runs/` is
+    git-ignored (`git check-ignore -v -- _runs/001-acme/run.json` -> `.gitignore:162:/_*`), so a
+    clone and a fresh worktree carry no runs at all. What the old test actually fixtured was a COPY
+    of a run into a second location, which is corruption, and it asserted the fail-open verdict."""
     original_repo = tmp_path / "repo-here"
-    relocated_repo = tmp_path / "some" / "deeper" / "repo-there"
-    relocated_repo.parent.mkdir(parents=True)
+    copied_repo = tmp_path / "some" / "deeper" / "repo-there"
+    copied_repo.parent.mkdir(parents=True)
     allocate_run("acme", repo_root=original_repo)
     allocate_run("beta", repo_root=original_repo)
 
-    shutil.copytree(original_repo, relocated_repo)
+    shutil.copytree(original_repo, copied_repo)
 
-    states = [_state_of(run) for run in list_runs(relocated_repo)]
-    assert states == [RUN_LOCATION_INTACT, RUN_LOCATION_INTACT]
+    copied = list_runs(copied_repo)
+    assert [_state_of(run) for run in copied] == [RUN_LOCATION_UNVERIFIABLE, RUN_LOCATION_UNVERIFIABLE]
+    assert all(run["location_check"]["path_check"] == PATH_CHECK_DIFFERS for run in copied)
+    # not `moved` either: a whole-checkout move and a run-only copy are indistinguishable from here
+    assert all(_state_of(run) != RUN_LOCATION_MOVED for run in copied)
+    # the ORIGINAL is the negative control - the copy moved, it did not
+    assert [_state_of(run) for run in list_runs(original_repo)] == [RUN_LOCATION_INTACT, RUN_LOCATION_INTACT]
     # and the absolute paths really did change, or this test proves nothing
-    roots = [run["root"] for run in list_runs(relocated_repo)]
-    assert all(str(relocated_repo) in root for root in roots)
+    assert all(str(copied_repo) in run["root"] for run in copied)
+
+
+def test_a_run_moved_alone_to_a_second_runs_root_is_unverifiable_never_intact(tmp_path: Path) -> None:
+    """The reviewer's exact reproduction: allocate under `source/`, move that ONE run to
+    `moved/_runs/`, and the destination used to report `INTACT 001-acme` exit 0 because the
+    basename never changed. A run-only move breaks every absolute self-path embedded under
+    `<run>/bundle/`."""
+    source = tmp_path / "source"
+    destination = tmp_path / "moved"
+    runs_root(destination).mkdir(parents=True)
+    run = allocate_run("acme", repo_root=source)
+
+    shutil.move(str(run.root), str(runs_root(destination) / "001-acme"))
+
+    check = list_runs(destination)[0]["location_check"]
+    assert check["state"] == RUN_LOCATION_UNVERIFIABLE
+    assert check["state"] != RUN_LOCATION_INTACT  # negative control: the defect being fixed
+    assert check["path_check"] == PATH_CHECK_DIFFERS
+    assert str(source) in check["detail"] and str(destination) in check["detail"]
+
+
+def test_a_run_still_where_it_was_allocated_reports_path_check_matches(tmp_path: Path) -> None:
+    """The positive control for the path half: `intact` must rest on a RECORDED path comparison,
+    not on the name having matched."""
+    allocate_run("acme", repo_root=tmp_path)
+
+    check = list_runs(tmp_path)[0]["location_check"]
+
+    assert check["state"] == RUN_LOCATION_INTACT
+    assert check["path_check"] == PATH_CHECK_MATCHES
+
+
+def test_allocate_run_records_the_absolute_path_it_allocated_and_reserves_the_key(tmp_path: Path) -> None:
+    """Without a recorded absolute path there is nothing to compare, and a caller must not be able
+    to plant a false one - that would forge an `intact` verdict for a moved run."""
+    run = allocate_run("acme", repo_root=tmp_path, extra_manifest={RUN_PATH_KEY: r"D:\somewhere\else\001-acme"})
+
+    manifest = json.loads(run.manifest_path.read_text(encoding="utf-8"))
+    assert Path(manifest[RUN_PATH_KEY]).is_absolute()
+    assert Path(manifest[RUN_PATH_KEY]).samefile(run.root)
+    assert _state_of(list_runs(tmp_path)[0]) == RUN_LOCATION_INTACT
+
+
+def test_a_run_with_no_recorded_absolute_path_is_unverifiable_never_intact(tmp_path: Path) -> None:
+    """A manifest carrying only the NAME cannot establish `intact`, because a basename is unchanged
+    by both a run-only move and a copy."""
+    run = allocate_run("acme", repo_root=tmp_path)
+    manifest = json.loads(run.manifest_path.read_text(encoding="utf-8"))
+    del manifest[RUN_PATH_KEY]
+    run.manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    check = list_runs(tmp_path)[0]["location_check"]
+
+    assert check["state"] == RUN_LOCATION_UNVERIFIABLE
+    assert check["state"] != RUN_LOCATION_INTACT  # negative control
+    assert check["path_check"] == PATH_CHECK_UNRECORDED
+
+
+@pytest.mark.parametrize("planted", [42, ["a"], {"p": "x"}, "", None])
+def test_an_unusable_recorded_absolute_path_is_unverifiable_never_intact(tmp_path: Path, planted: object) -> None:
+    """A hand-edited or corrupted `allocated_abs_path` must not be compared as if it were a path."""
+    run = allocate_run("acme", repo_root=tmp_path)
+    manifest = json.loads(run.manifest_path.read_text(encoding="utf-8"))
+    manifest[RUN_PATH_KEY] = planted
+    run.manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    check = list_runs(tmp_path)[0]["location_check"]
+
+    assert check["state"] == RUN_LOCATION_UNVERIFIABLE
+    assert check["state"] != RUN_LOCATION_INTACT  # negative control
 
 
 def test_check_run_location_is_pure_and_needs_no_directory_on_disk(tmp_path: Path) -> None:
-    """`list_runs` is documented as pure inspection, so its helper must not mutate or touch disk."""
-    manifest = {"run": 7, "unit_key": "acme", RUN_LOCATION_KEY: "007-acme"}
-    before = json.dumps(manifest, sort_keys=True)
+    """`list_runs` is documented as pure inspection, so its helper must not mutate or touch disk.
+
+    The path comparison uses `abspath`, never `resolve`, for exactly this reason: it normalizes
+    separators, `..` and case without a filesystem read."""
     nonexistent = tmp_path / "no" / "such" / "007-acme"
+    manifest = {
+        "run": 7,
+        "unit_key": "acme",
+        RUN_LOCATION_KEY: "007-acme",
+        RUN_PATH_KEY: str(nonexistent),
+    }
+    before = json.dumps(manifest, sort_keys=True)
 
     check = check_run_location(manifest, nonexistent)
 
@@ -459,7 +551,13 @@ def test_check_run_location_is_pure_and_needs_no_directory_on_disk(tmp_path: Pat
 def test_list_runs_never_raises_on_a_run_json_that_is_not_a_manifest(tmp_path: Path, payload: str) -> None:
     """`list_runs` promises it "never raises on a hand-created or half-written run directory". Valid
     JSON that is not an object used to break that promise: `.setdefault` on a list raises
-    `AttributeError`, which escaped the `json.JSONDecodeError`/`OSError` guard entirely."""
+    `AttributeError`, which escaped the `json.JSONDecodeError`/`OSError` guard entirely.
+
+    ⚠️ This test used to assert the run was OMITTED, full stop - and `verify_runs` was built on
+    `list_runs`, so that omission WAS the fail-open gate (finding 1). The never-raises contract is
+    the legitimate half and is kept; the visibility half now belongs to
+    `test_verify_runs_never_drops_a_run_directory_it_cannot_assess`, which asserts the same
+    directory is `unverifiable` rather than invisible. Inspection may skip; a gate may not."""
     root = runs_root(tmp_path)
     root.mkdir(parents=True)
     (root / "001-half-written").mkdir()
@@ -467,7 +565,11 @@ def test_list_runs_never_raises_on_a_run_json_that_is_not_a_manifest(tmp_path: P
 
     runs = list_runs(tmp_path)
 
-    assert isinstance(runs, list) and not runs
+    assert isinstance(runs, list) and not runs  # inspection skips it - and never raises
+    # ...but the GATE must still see it. This pairing is the fix; asserting only the line above is
+    # what let a half-written run count as a clean tree.
+    _gate_runs, counts = verify_runs(tmp_path)
+    assert counts[RUN_LOCATION_UNVERIFIABLE] == 1
 
 
 def test_list_runs_reports_the_actual_location_not_a_stale_recorded_one(tmp_path: Path) -> None:
@@ -496,6 +598,116 @@ def test_list_runs_attaches_a_location_check_to_every_run(tmp_path: Path) -> Non
 # --------------------------------------------------------------------------------------
 # verify_runs / verify_exit_code / the --verify CLI
 # --------------------------------------------------------------------------------------
+
+
+_UNASSESSABLE_SHAPES = {
+    "missing": None,
+    "empty": "",
+    "truncated": '{"run": 1, "unit_key": "acme"',
+    "malformed": "not json at all",
+    "non_object_list": '["001-acme"]',
+    "non_object_scalar": "42",
+}
+
+
+def _plant_unassessable_run(tmp_path: Path, shape: str, dir_name: str = "001-acme") -> Path:
+    """A canonical `_runs/<NNN>-<slug>/` directory whose manifest cannot be assessed. `missing` is
+    not an exotic input: it is exactly what an allocation interrupted between `mkdir` and the
+    manifest write leaves behind."""
+    run_dir = runs_root(tmp_path) / dir_name
+    run_dir.mkdir(parents=True)
+    payload = _UNASSESSABLE_SHAPES[shape]
+    if payload is not None:
+        (run_dir / "run.json").write_text(payload, encoding="utf-8")
+    return run_dir
+
+
+@pytest.mark.parametrize("shape", sorted(_UNASSESSABLE_SHAPES))
+def test_verify_runs_never_drops_a_run_directory_it_cannot_assess(tmp_path: Path, shape: str) -> None:
+    """Finding 1. `verify_runs` used to be built on `list_runs`, so it inherited inspection's right
+    to skip: a run directory that exists but cannot be read contributed ZERO to every bucket, and
+    the CLI printed `0 run(s): 0 intact, 0 moved, 0 unverifiable`, exit 0 - the `unverifiable`
+    bucket sitting at 0 exactly when something was unverifiable."""
+    _plant_unassessable_run(tmp_path, shape)
+
+    runs, counts = verify_runs(tmp_path)
+
+    assert len(runs) == 1, "the gate dropped a run directory it could not assess"
+    assert counts[RUN_LOCATION_UNVERIFIABLE] == 1
+    assert counts[RUN_LOCATION_INTACT] == 0  # negative control: it must not land in the clean bucket
+    assert counts[RUN_LOCATION_MOVED] == 0  # negative control: nor be reported as an established finding
+    assert verify_exit_code(counts) == 3
+
+
+@pytest.mark.parametrize("shape", sorted(_UNASSESSABLE_SHAPES))
+def test_the_gate_sees_exactly_the_run_inspection_omits(tmp_path: Path, shape: str) -> None:
+    """The relationship the split exists to create, with only ONE side moving: a healthy run is in
+    both, an unassessable one is in the gate only. Asserting `len(verify) > len(list)` alone would
+    pass on a gate that invented an entry, so both halves are pinned."""
+    allocate_run("healthy", repo_root=tmp_path)
+    _plant_unassessable_run(tmp_path, shape, dir_name="002-half-written")
+
+    inspected = list_runs(tmp_path)
+    gated, counts = verify_runs(tmp_path)
+
+    assert [run["root"] for run in inspected] == [str(runs_root(tmp_path) / "001-healthy")]
+    assert [Path(run["root"]).name for run in gated] == ["001-healthy", "002-half-written"]
+    assert counts == {RUN_LOCATION_INTACT: 1, RUN_LOCATION_MOVED: 0, RUN_LOCATION_UNVERIFIABLE: 1}
+
+
+def test_a_run_json_that_cannot_be_read_at_all_is_unverifiable_not_invisible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reviewer's sixth shape: a manifest held open with Windows `FileShare.None`, i.e. a read
+    that raises `OSError`. Forced here through `Path.read_text` so the branch is exercised on any
+    platform rather than only where an exclusive share mode exists."""
+    run = allocate_run("acme", repo_root=tmp_path)
+    real_read_text = Path.read_text
+
+    def _refuse(self: Path, *args: object, **kwargs: object) -> str:
+        if self == run.manifest_path:
+            raise PermissionError(32, "The process cannot access the file because it is being used by another process")
+        return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", _refuse)
+
+    _runs, counts = verify_runs(tmp_path)
+
+    assert counts[RUN_LOCATION_UNVERIFIABLE] == 1
+    assert counts[RUN_LOCATION_INTACT] == 0  # negative control
+    assert verify_exit_code(counts) == 3
+
+
+def test_a_mixed_run_number_tree_does_not_raise_and_keeps_the_invalid_manifest(tmp_path: Path) -> None:
+    """Finding 3. `manifests.sort(key=lambda m: m.get("run", 0))` sorted an unvalidated value, so a
+    tree holding both `{"run": 1}` and `{"run": "two"}` raised `TypeError: '<' not supported between
+    instances of 'str' and 'int'` - breaking the documented never-raises contract AND preventing any
+    `unverifiable` verdict from ever being reached."""
+    root = runs_root(tmp_path)
+    for name, run_number in (("001-a", 1), ("002-b", "two"), ("003-c", 3)):
+        (root / name).mkdir(parents=True)
+        (root / name / "run.json").write_text(
+            json.dumps({"run": run_number, "unit_key": name[4:], RUN_LOCATION_KEY: name}), encoding="utf-8"
+        )
+
+    runs, counts = verify_runs(tmp_path)  # must not raise
+
+    assert [Path(run["root"]).name for run in runs] == ["001-a", "003-c", "002-b"]
+    assert counts[RUN_LOCATION_UNVERIFIABLE] == 3  # none of the three recorded an absolute path either
+    assert any("'two'" in run["location_check"]["detail"] for run in runs), "the invalid manifest was not retained"
+    assert not any(_state_of(run) == RUN_LOCATION_INTACT for run in runs)  # negative control
+
+
+def test_a_verified_tree_of_freshly_allocated_runs_is_still_clean(tmp_path: Path) -> None:
+    """The positive control for the whole gate: making "cannot assess" blocking must not make a
+    healthy tree blocking too, or the gate is just an always-red light."""
+    allocate_run("acme", repo_root=tmp_path)
+    allocate_run("beta", repo_root=tmp_path)
+
+    _runs, counts = verify_runs(tmp_path)
+
+    assert counts == {RUN_LOCATION_INTACT: 2, RUN_LOCATION_MOVED: 0, RUN_LOCATION_UNVERIFIABLE: 0}
+    assert verify_exit_code(counts) == 0
 
 
 def test_verify_runs_counts_each_state_separately(tmp_path: Path) -> None:
@@ -574,6 +786,50 @@ def test_verify_cli_exits_3_on_a_legacy_run_and_says_it_is_not_intact(tmp_path: 
     assert result.returncode == 3, result.stdout + result.stderr
     assert "UNVERIFIABLE" in result.stdout
     assert "is NOT 'intact'" in result.stdout
+
+
+def test_verify_cli_exits_3_on_a_run_directory_it_cannot_assess(tmp_path: Path) -> None:
+    """Finding 1 through the REAL CLI, which is where it was reproduced: a canonical
+    `_runs/001-acme/` with no `run.json` printed `0 run(s): 0 intact, 0 moved, 0 unverifiable`,
+    exit 0. Judged by exit code, never by the printed text."""
+    _plant_unassessable_run(tmp_path, "missing")
+
+    result = _run_verify_cli(tmp_path)
+
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "UNVERIFIABLE" in result.stdout
+    assert "0 intact, 0 moved, 1 unverifiable" in result.stdout
+    assert "1 run(s)" in result.stdout, "the run directory was counted as nothing at all"
+
+
+def test_verify_cli_exits_3_on_a_run_moved_alone_to_another_root(tmp_path: Path) -> None:
+    """Finding 2 through the real CLI. It reported `INTACT 001-acme`, exit 0."""
+    source = tmp_path / "source"
+    destination = tmp_path / "moved"
+    runs_root(destination).mkdir(parents=True)
+    run = allocate_run("acme", repo_root=source)
+    shutil.move(str(run.root), str(runs_root(destination) / "001-acme"))
+
+    result = _run_verify_cli(destination)
+
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "UNVERIFIABLE" in result.stdout
+    assert "INTACT" not in result.stdout  # negative control: the defect being fixed
+
+
+def test_verify_cli_does_not_crash_on_a_mixed_run_number_tree(tmp_path: Path) -> None:
+    """Finding 3 through the real CLI: it exited 1 with an uncaught `TypeError` traceback, which is
+    indistinguishable from a legitimate `moved` finding by exit code alone."""
+    root = runs_root(tmp_path)
+    for name, run_number in (("001-a", 1), ("002-b", "two")):
+        (root / name).mkdir(parents=True)
+        (root / name / "run.json").write_text(json.dumps({"run": run_number, RUN_LOCATION_KEY: name}), encoding="utf-8")
+
+    result = _run_verify_cli(tmp_path)
+
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "Traceback" not in result.stderr
+    assert "TypeError" not in result.stderr
 
 
 def test_verify_cli_needs_no_unit_argument_but_allocation_still_does(tmp_path: Path) -> None:
