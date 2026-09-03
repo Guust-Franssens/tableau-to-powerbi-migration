@@ -183,6 +183,34 @@ def test_the_workbook_subset_uses_the_SAME_empty_predicate_as_the_capture(tmp_pa
     assert subset["data_empty_views"] == []
 
 
+def test_a_view_with_no_row_count_is_counted_AND_named_UNASSESSABLE_in_the_workbook_manifest(tmp_path):
+    """#480 finding 1, at this level. The reviewer ran their record through `subset_manifest()` and
+    got `data_ok=1 data_empty=0 data_empty_views=[] failed=0` -- which is what a good capture looks
+    like. "Not empty" was being read as "fine", so a per-workbook reader saw four clean captures
+    where nothing had measured the rows of one of them.
+
+    `data_ok` deliberately stays as it was: the export DID succeed, and the new pair beside it is
+    what stops that number being read as evidence."""
+    no_row_count = _view("Sales", "Old", "ccc")
+    del no_row_count["data"]["row_count"]
+    subset = grp.subset_manifest({"schema": "tableau-oracle/1"}, "Sales", [_view("Sales", "Good", "aaa"), no_row_count])
+    assert subset["data_ok"] == 2
+    assert subset["data_empty"] == 0
+    assert subset["data_empty_views"] == []
+    assert subset["data_unassessable"] == 1
+    assert [entry["view_name"] for entry in subset["data_unassessable_views"]] == ["Old"]
+    assert subset["data_unassessable_views"][0]["reason"] == "row_count_unrecorded"
+
+
+def test_the_workbook_subset_reports_no_unassessable_views_when_every_row_count_was_measured(tmp_path):
+    """Control for the test above: a list that names every view is a view count renamed."""
+    subset = grp.subset_manifest(
+        {"schema": "tableau-oracle/1"}, "Sales", [_view("Sales", "Good", "aaa"), _view("Sales", "Blank", "bbb", rows=0)]
+    )
+    assert subset["data_unassessable"] == 0
+    assert subset["data_unassessable_views"] == []
+
+
 def test_a_view_whose_file_vanished_is_reported_and_never_claimed_as_copied(tmp_path):
     """⚠️ This test used to assert exit 0 -- it PINNED the defect. `copy_view_files` warned and moved
     on while `subset_manifest` kept the source manifest's `status: ok`, its `path`, and its place in

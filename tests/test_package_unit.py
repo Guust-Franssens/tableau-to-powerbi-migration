@@ -1143,6 +1143,38 @@ def test_the_per_view_empty_flag_survives_packaging(tmp_path: Path) -> None:
     assert [view["flags"] for view in flagged] == [["data_empty", "empty_cannot_classify"]]
 
 
+def test_a_packaged_view_whose_row_count_was_never_recorded_says_so(tmp_path: Path) -> None:
+    """#480 finding 1, at the package boundary -- the third consumer the reviewer named.
+
+    Their observation was `data_ok=1 status=ok row_count absent flags absent`: a packaged unit
+    shipping a view nothing had measured, with nothing anywhere saying so. The estate-wide counts are
+    deliberately dropped here (this packager cannot recompute them for one unit), so the per-view
+    flag is the ONLY channel the fact has -- and `certification` is now allowlisted beside it so a
+    reader knows WHY, not merely that something is off.
+
+    ⚠️ `data_ok` staying 1 is not the defect and must not be "fixed": the export genuinely succeeded.
+    What was missing is everything else on the row.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    view = manifest["views"][0]
+    # The shape `_capture_data` writes when it cannot certify the body: a successful transport, the
+    # bytes kept, and NO row count -- which is exactly the record the reviewer drove through here.
+    view["data"] = {"status": "ok", "path": "data/view-0.csv", "certification": "content_type_absent"}
+    view["flags"] = ["data_unassessable", "content_type_absent"]
+    (oracle / "data").mkdir(parents=True, exist_ok=True)
+    (oracle / "data" / "view-0.csv").write_text("Region,Sales\r\nWest,10\r\n", encoding="utf-8")
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+
+    shipped = json.loads((_out(tmp_path) / UNIT / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    unassessable = [v for v in shipped["views"] if v.get("flags") == ["data_unassessable", "content_type_absent"]]
+    assert len(unassessable) == 1, "the per-view flag is the only channel this fact has after packaging"
+    assert unassessable[0]["data"]["certification"] == "content_type_absent"
+    assert "row_count" not in unassessable[0]["data"]
+    assert unassessable[0]["data"]["status"] == "ok", "the transport succeeded -- keep that distinction"
+
+
 def test_allowlisting_the_flag_did_not_open_the_view_to_unknown_fields(tmp_path: Path) -> None:
     """Control for the test above: the allowlist must still be an allowlist.
 

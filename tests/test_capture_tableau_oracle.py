@@ -732,6 +732,119 @@ def test_a_failed_data_leg_is_not_ALSO_reported_as_empty(tmp_path):
     assert manifest["data_empty_views"] == []
 
 
+# --- #480 finding 1: a missing `row_count` must not be clean evidence -------------------------
+#
+# The blind review's reproduction record, verbatim, driven through the capture manifest. The other
+# two consumers it names are covered where they live: `subset_manifest()` in
+# `test_group_oracle_by_workbook.py` and `_scope_oracle_manifest()` in `test_package_unit.py`.
+#
+# ⚠️ The defect is one level UP from #471, and that is the whole point: this PR fixed "a zero-row
+# capture reads as ok" and introduced "an UNASSESSABLE capture reads as ok". Before the fix this
+# record produced `exit=0 status=ok data_ok=1 captured_complete=1 data_empty=0 data_empty_views=[]`
+# with no flags -- byte for byte what a 900,000-row capture produces.
+
+REVIEW_RECORD = {"view_name": "V", "workbook_name": "W", "data": {"status": "ok", "columns": ["Region"]}}
+
+
+def test_a_row_count_that_was_never_recorded_is_UNASSESSABLE_not_clean(tmp_path):
+    """The reproduction record. Every observed value in the reviewer's table, asserted."""
+    code, manifest = _named_manifest(tmp_path, [dict(REVIEW_RECORD)])
+    assert code == 0, "the transport succeeded, so this is a diagnostic and not a failure"
+    assert manifest["views"][0]["data"]["status"] == "ok", "the HTTP call DID succeed -- keep that distinction"
+    assert manifest["data_ok"] == 1
+    assert manifest["captured_complete"] == 0, "was 1 -- an unmeasured view was counted evidence-complete"
+    assert manifest["data_empty"] == 0, "absence is not a zero; it must not be claimed empty either"
+    assert manifest["data_empty_views"] == []
+    assert manifest["data_unassessable"] == 1
+    assert manifest["views"][0]["flags"] == [verdict.FLAG_DATA_UNASSESSABLE, verdict.UNASSESSABLE_NO_ROW_COUNT]
+    named = manifest["data_unassessable_views"]
+    assert [entry["view_name"] for entry in named] == ["V"]
+    assert named[0]["reason"] == verdict.UNASSESSABLE_NO_ROW_COUNT
+
+
+def test_a_capture_with_rows_is_never_called_unassessable(tmp_path):
+    """Positive control: the third state must be able to come back EMPTY, or it names every view."""
+    _code, manifest = _manifest(tmp_path, [_record("ok", rows=5), _record("ok", rows=0, columns=["c"])])
+    assert manifest["data_unassessable"] == 0
+    assert manifest["data_unassessable_views"] == []
+    assert manifest["captured_complete"] == 2, "a measured zero is still a measurement"
+
+
+def test_a_failed_data_leg_is_not_reported_unassessable_either(tmp_path):
+    """Same one-root-cause rule as the empty half: a failure explains its own missing row count."""
+    _code, manifest = _manifest(tmp_path, [_record("failed"), _record("source_credential")])
+    assert manifest["data_unassessable"] == 0
+    assert manifest["data_unassessable_views"] == []
+
+
+def test_an_unassessable_capture_never_moves_the_exit_code(tmp_path):
+    """It is a DIAGNOSTIC, exactly like an empty capture: legibility and exit status are separate."""
+    assert _write(tmp_path, [_record("ok")]) == 0, "the baseline moved -- this test proves nothing"
+    assert _write(tmp_path, [_record("ok"), dict(REVIEW_RECORD)]) == 0
+
+
+def test_the_per_view_line_for_an_unassessable_capture_is_a_WARNING_and_does_not_raise(caplog):
+    """⚠️ The ordinary line interpolates `data["row_count"]`, which this record does not have.
+
+    So this is two claims at once: the line must be a WARNING naming the reason, and printing it
+    must not raise the `KeyError` that would take the whole run down at the console.
+    """
+    caplog.set_level(logging.INFO, logger="tableau-oracle")
+    verdict.log_progress(3, 94, dict(REVIEW_RECORD))
+    (line,) = caplog.records
+    assert line.levelno == logging.WARNING
+    assert verdict.UNASSESSABLE_NO_ROW_COUNT in line.getMessage()
+    assert "0 rows" not in line.getMessage(), "printing a zero here is the invented measurement, again"
+
+
+def test_the_run_end_block_names_the_unassessable_views_and_what_they_cost(tmp_path, caplog):
+    """A count says how much evidence is missing, never which page a reviewer must open by hand."""
+    caplog.set_level(logging.INFO, logger="tableau-oracle")
+    record = {**REVIEW_RECORD, "view_name": "Metrics Dictionary"}
+    _named_manifest(tmp_path, [record])
+    warnings = "\n".join(r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
+    assert "Metrics Dictionary" in warnings
+    assert "NOT BE ASSESSED" in warnings
+
+
+def test_the_unassessable_run_end_block_is_silent_when_everything_was_measured(tmp_path, caplog):
+    """Control: a diagnostic that fires on a clean run is one an operator learns to skip."""
+    caplog.set_level(logging.INFO, logger="tableau-oracle")
+    _write(tmp_path, [_record("ok", rows=7)])
+    assert "NOT BE ASSESSED" not in "\n".join(r.getMessage() for r in caplog.records)
+
+
+def test_a_view_name_is_redacted_before_the_unassessable_diagnostic_prints_it(tmp_path, caplog):
+    """The same seam as the empty block: a view NAME is response data and CI keeps its logs."""
+    token = "tableau-session-token-value-that-must-not-print"
+    session = oracle.TableauSession(
+        oracle.SiteCredentials(
+            base="https://x", site="s", pat_name="pat-name-here", pat_secret="pat-secret-here", version="3.29"
+        )
+    )
+    session.token = token
+    record = {**REVIEW_RECORD, "view_name": token, "workbook_name": token}
+    caplog.set_level(logging.INFO, logger="tableau-oracle")
+
+    verdict.log_progress(1, 1, record, session.redact_text)
+    env = {"TABLEAU_SERVER_URL": "https://x", "TABLEAU_SITE": "s", "TABLEAU_REST_API_VERSION": "3.29"}
+    verdict.write_manifest([record], verdict.CaptureRun(session, env, tmp_path, 0.0))
+
+    printed = "\n".join(r.getMessage() for r in caplog.records)
+    assert "NOT BE ASSESSED" in printed, "the run-end block did not fire, so this proves nothing"
+    assert "UNASSESSABLE" in printed, "the per-view line did not fire, so this proves nothing"
+    assert token not in printed
+    assert token not in (tmp_path / "oracle-manifest.json").read_text(encoding="utf-8")
+
+
+def test_a_row_count_of_True_is_a_corrupt_record_not_a_measurement_of_one_row(tmp_path):
+    """`isinstance(True, int)` is true in Python, so the bool exclusion is load-bearing, not style."""
+    record = {"view_name": "V", "workbook_name": "W", "data": {"status": "ok", "row_count": True}}
+    _code, manifest = _named_manifest(tmp_path, [record])
+    assert manifest["data_unassessable"] == 1
+    assert manifest["captured_complete"] == 0
+
+
 def test_the_per_view_line_for_an_empty_capture_is_a_WARNING(caplog):
     """`0 rows` inside an INFO line among 94 is technically visible and practically invisible."""
     caplog.set_level(logging.INFO, logger="tableau-oracle")
@@ -797,6 +910,176 @@ def test_a_REAL_empty_export_travels_the_whole_path_from_capture_to_manifest(tmp
     assert manifest["data_empty_views"][0]["view_name"] == "Real Time Availability"
     assert manifest["data_empty_views"][0]["classification"] == expected
     assert manifest["views"][0]["flags"] == ["data_empty", expected]
+
+
+# --- #480 finding 2: an HTTP 200 body is not evidence until it is certified as CSV ------------
+#
+# Every row of the blind review's second reproduction table, driven through the SAME production
+# chain as the test above -- `capture_view` -> `export` -> `_capture_data` -> `certify_csv` -- with
+# only the HTTP response scripted. Measured on this branch BEFORE the certification existed:
+#
+#   200 text/html  `<html>\n<body>Error</body>\n</html>\n`  -> ok, columns ["<html>"], row_count 2
+#   200 text/csv   `Region,Sales\r\nWest,"unterminated`     -> ok, columns [Region, Sales], row_count 1
+#   200 octet      `not CSV at all`                         -> ok, row_count 0, empty_query_no_rows
+#
+# The third is the worst of the three and the reason this is a certification rather than a sniff: it
+# is not merely wrong, it is CONFIDENTLY wrong -- a specific diagnosis ("the query ran and returned
+# no rows") about a payload never established to be CSV at all.
+
+_UNCERTIFIABLE = [
+    ("text/html", "<html>\n<body>Error</body>\n</html>\n", "content_type_not_csv"),
+    ("text/csv", 'Region,Sales\r\nWest,"unterminated', "payload_malformed_csv"),
+    ("application/octet-stream", "not CSV at all", "content_type_not_csv"),
+]
+
+
+@pytest.mark.parametrize(("content_type", "body", "certification"), _UNCERTIFIABLE)
+def test_an_uncertifiable_200_is_never_recorded_as_rows(tmp_path, content_type, body, certification):
+    """No row count, no header, no classification, and no file on disk claiming to be data."""
+    session = FakeSession([(200, body, {"Content-Type": content_type})])
+    view = {"id": "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", "name": "Real Time Availability", "workbook": {"id": "wb"}}
+    record = oracle.capture_view(session, view, tmp_path, frozenset(), None)
+
+    data = record["data"]
+    assert data["status"] == "format_mismatch"
+    assert data["certification"] == certification
+    assert "row_count" not in data, "a row count read off an uncertified body is fiction with a number attached"
+    assert "columns" not in data
+    assert "path" not in data and not list((tmp_path / "data").glob("*.csv")), (
+        "persisting a non-CSV body to data/<luid>.csv manufactures the evidence this capture prevents"
+    )
+    assert data["bytes"] == len(body.encode()), "the refusal must still say how much arrived"
+
+
+@pytest.mark.parametrize(("content_type", "body", "_certification"), _UNCERTIFIABLE)
+def test_an_uncertifiable_200_is_never_classified_from_its_first_line(tmp_path, content_type, body, _certification):
+    """The manifest half: no empty classification, no clean bucket, and a LOUD verdict."""
+    session = FakeSession([(200, body, {"Content-Type": content_type})])
+    view = {"id": "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", "name": "Real Time Availability", "workbook": {"id": "wb"}}
+    record = oracle.capture_view(session, view, tmp_path, frozenset(), None)
+    record["workbook_name"] = "Network Ops"
+
+    code, manifest = _named_manifest(tmp_path, [record])
+    assert manifest["data_empty"] == 0
+    assert manifest["data_empty_views"] == [], "the octet-stream row diagnosed `empty_query_no_rows` here"
+    assert "flags" not in manifest["views"][0]
+    assert manifest["data_ok"] == 0
+    assert manifest["captured_complete"] == 0
+    assert manifest["failed"] == 1
+    assert code == 3, "an uncertifiable body is a failed capture, not a legible one"
+
+
+def test_a_real_CSV_declared_as_CSV_is_still_certified_and_still_counted(tmp_path):
+    """⚠️ The positive control. A gate that refuses everything is as useless as one that refuses
+    nothing, and it would be invisible in the three tests above."""
+    session = FakeSession([(200, "Region,Sales\r\nWest,10\r\nEast,20\r\n", {"Content-Type": "text/csv;charset=utf-8"})])
+    view = {"id": "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", "name": "Real Time Availability", "workbook": {"id": "wb"}}
+    record = oracle.capture_view(session, view, tmp_path, frozenset(), None)
+
+    assert record["data"]["status"] == "ok"
+    assert record["data"]["certification"] == payload_facts.CSV_CERTIFIED
+    assert record["data"]["row_count"] == 2
+    assert record["data"]["columns"] == ["Region", "Sales"]
+    assert (tmp_path / record["data"]["path"]).is_file()
+    _code, manifest = _named_manifest(tmp_path, [record])
+    assert manifest["captured_complete"] == 1
+
+
+def test_a_200_with_no_Content_Type_is_kept_but_reported_UNASSESSABLE(tmp_path):
+    """The seam between the two findings, and the honest answer to "we cannot certify this".
+
+    A CSV carries no signature -- there is no byte sequence that PROVES a body is CSV the way
+    `%PDF-` proves a PDF -- so with nothing declared, nothing establishes these bytes as data. The
+    transport did succeed, so the bytes are kept and the status stays `ok`; what is refused is the
+    EVIDENCE, so no row count is recorded and the verdict layer reports it rather than counting it.
+    """
+    session = FakeSession([(200, "Region,Sales\r\nWest,10\r\n", {})])
+    view = {"id": "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", "name": "Real Time Availability", "workbook": {"id": "wb"}}
+    record = oracle.capture_view(session, view, tmp_path, frozenset(), None)
+    record["workbook_name"] = "Network Ops"
+
+    assert record["data"]["status"] == "ok", "the HTTP call succeeded -- that distinction is kept"
+    assert record["data"]["certification"] == payload_facts.CSV_CONTENT_TYPE_ABSENT
+    assert "row_count" not in record["data"]
+    assert (tmp_path / record["data"]["path"]).is_file(), "the bytes are the customer's; only the claim is refused"
+
+    code, manifest = _named_manifest(tmp_path, [record])
+    assert code == 0, "an unassessable capture is a diagnostic, not a failure"
+    assert manifest["data_ok"] == 1
+    assert manifest["captured_complete"] == 0
+    assert manifest["data_unassessable"] == 1
+    assert manifest["data_unassessable_views"][0]["reason"] == payload_facts.CSV_CONTENT_TYPE_ABSENT
+    assert manifest["views"][0]["flags"] == [verdict.FLAG_DATA_UNASSESSABLE, payload_facts.CSV_CONTENT_TYPE_ABSENT]
+
+
+def test_an_error_page_with_the_Content_Type_STRIPPED_is_still_refused(tmp_path):
+    """The header-stripping proxy, which is the one case Content-Type alone cannot answer.
+
+    A body opening a tag is a document, not a table -- and `<html>` otherwise parses as a one-column
+    CSV with two rows, which is exactly how the reviewer's first row was recorded as data.
+    """
+    session = FakeSession([(200, "<html>\n<body>Error</body>\n</html>\n", {})])
+    view = {"id": "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", "name": "Real Time Availability", "workbook": {"id": "wb"}}
+    record = oracle.capture_view(session, view, tmp_path, frozenset(), None)
+    assert record["data"]["status"] == "format_mismatch"
+    assert record["data"]["certification"] == payload_facts.CSV_NOT_TABULAR
+    assert "row_count" not in record["data"]
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        (b"Region,Sales\r\nWest,10\r\n", payload_facts.CSV_CERTIFIED),
+        (b"", payload_facts.CSV_CERTIFIED),
+        (b"\r\n", payload_facts.CSV_CERTIFIED),
+        (b'Region,Sales\r\nWest,"quoted, value"\r\n', payload_facts.CSV_CERTIFIED),
+        (b'Size\r\n"5"" pipe"\r\n', payload_facts.CSV_CERTIFIED),
+        (b"<html><body>Error</body></html>", payload_facts.CSV_NOT_TABULAR),
+        (b'{"error": {"code": "401002"}}', payload_facts.CSV_NOT_TABULAR),
+        (b'Region,Sales\r\nWest,"unterminated', payload_facts.CSV_MALFORMED),
+        (b"Region,Sales\r\nWest,10,EXTRA\r\n", payload_facts.CSV_RAGGED),
+    ],
+)
+def test_certify_csv_verdicts(body, expected):
+    """The certifier alone, over the shapes that decide it. `text/csv` throughout, so this isolates
+    the STRUCTURAL half from the declaration half -- an empty body and a bare CRLF are the two real
+    zero-row exports and must stay certifiable, or #471's own fixtures become unreachable."""
+    assert payload_facts.certify_csv(body, "text/csv") == expected
+
+
+@pytest.mark.parametrize(
+    ("declared", "expected"),
+    [
+        ("text/csv", payload_facts.CSV_CERTIFIED),
+        ("text/csv; charset=utf-8", payload_facts.CSV_CERTIFIED),
+        ("TEXT/CSV", payload_facts.CSV_CERTIFIED),
+        ("application/csv", payload_facts.CSV_CERTIFIED),
+        ("text/plain", payload_facts.CSV_CERTIFIED),
+        (None, payload_facts.CSV_CONTENT_TYPE_ABSENT),
+        ("", payload_facts.CSV_CONTENT_TYPE_ABSENT),
+        ("text/html", payload_facts.CSV_CONTENT_TYPE_NOT_CSV),
+        ("application/json", payload_facts.CSV_CONTENT_TYPE_NOT_CSV),
+        ("application/octet-stream", payload_facts.CSV_CONTENT_TYPE_NOT_CSV),
+        ("application/pdf", payload_facts.CSV_CONTENT_TYPE_NOT_CSV),
+    ],
+)
+def test_certify_csv_reads_the_declaration_over_a_well_formed_body(declared, expected):
+    """The declaration half, isolated: the SAME well-formed CSV body under every declaration.
+
+    ⚠️ This is the opposite ordering from `format_matches`, deliberately. There the payload is
+    decisive because a PNG/PDF/SVG carries a signature; here it cannot be, so a server saying
+    `text/html` is the strongest evidence available and is believed.
+    """
+    assert payload_facts.certify_csv(b"Region,Sales\r\nWest,10\r\n", declared) == expected
+
+
+def test_certify_csv_never_echoes_the_payload_or_the_header():
+    """The verdict is a closed vocabulary this repo authors, which is what makes it loggable."""
+    secret = "SYNTHETIC_SECRET_42"
+    for declared in (f"text/{secret}", None):
+        verdict_out = payload_facts.certify_csv(f"{secret}\n{secret}\n".encode(), declared)
+        assert verdict_out in payload_facts.CSV_VERDICTS
+        assert secret not in verdict_out
 
 
 def test_a_view_name_is_redacted_before_the_empty_diagnostic_prints_it(tmp_path, caplog):
