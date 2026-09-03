@@ -25,6 +25,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 import time
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -35,7 +36,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import manifest_scope as ms  # noqa: E402  # pylint: disable=wrong-import-position
 import package_unit as pkg  # noqa: E402  # pylint: disable=wrong-import-position
+import path_flavour as pf  # noqa: E402  # pylint: disable=wrong-import-position
 import reference_evidence as rev  # noqa: E402  # pylint: disable=wrong-import-position
+import set_data_folder as sdf  # noqa: E402  # pylint: disable=wrong-import-position
 from manifest_scope import KEEP, REPORT_ALLOW, Rows, project  # noqa: E402  # pylint: disable=wrong-import-position
 from test_check_reference_readiness import (  # noqa: E402  # pylint: disable=wrong-import-position
     write_engine_report,
@@ -1076,18 +1079,31 @@ def _absolute_literals(root: Path) -> list[tuple[str, str]]:
 
 
 def test_no_packaged_tmdl_points_at_an_absolute_path_OUTSIDE_the_package(tmp_path: Path) -> None:
-    """Issue #461's acceptance criterion, and the only gate that observes it.
+    """Issue #461's acceptance criterion, tightened by round-2 finding 1.
 
-    Every absolute literal that survives must resolve INSIDE the package. Some do by design - a
-    folder parameter names the package's own `data/`, because `File.Contents` does not accept a
-    relative argument at all, so a "relative rewrite" would produce a model that refreshes nowhere
-    rather than one that refreshes on a single machine.
+    The rule used to be "every absolute literal that survives must resolve INSIDE the package", which
+    a package satisfied by naming its own build-time location - so it was true on the builder's
+    machine and false everywhere the package was actually used. The rule is now stronger and does not
+    depend on where the package is: a shipped `.tmdl` names NO absolute path on any machine's
+    filesystem at all. Rows are reached through a `<PACKAGE_ROOT>` placeholder the recipient binds.
+
+    The positive control is the bundle the package was built FROM: it must still carry the absolute
+    literal, or this asserts nothing about a packager that simply had nothing to repair.
     """
-    root = _package_with_receipt(tmp_path)
-    literals = _absolute_literals(root)
-    assert literals, "the fixture produced no absolute literal at all, so this test proves nothing"
-    outside = [(name, value) for name, value in literals if not pkg._inside(root, value)]  # noqa: SLF001
-    assert outside == [], f"packaged TMDL points outside the package: {outside}"
+    bundle, oracle = _bundle(tmp_path)
+    payload = tmp_path / "extract" / "federated_abc" / "Extract_Extract.csv"
+    payload.parent.mkdir(parents=True, exist_ok=True)
+    payload.write_text("Employee_ID,Salary\n1,100\n", encoding="utf-8")
+    _point_partition_at(bundle, str(payload))
+    before = _absolute_literals(bundle / "pbip" / UNIT)
+    assert [value for _name, value in before] == [str(payload)], (
+        f"the fixture bundle carries no absolute literal to repair, so this proves nothing: {before}"
+    )
+
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    assert _absolute_literals(root) == [], "the packaged model still names a path on this machine"
+    assert pkg.PACKAGE_ROOT_TOKEN in (_model_definition(root) / pkg.EXPRESSIONS_TMDL).read_text(encoding="utf-8")
 
 
 def test_a_folder_PARAMETER_pointing_out_of_the_package_is_moved_with_its_files(tmp_path: Path) -> None:
@@ -1099,7 +1115,9 @@ def test_a_folder_PARAMETER_pointing_out_of_the_package_is_moved_with_its_files(
     ``File.Contents("<absolute>")`` closed 17 of 26 affected units; this shape is the other 9.
 
     The parameter is REUSED, not replaced - the partitions' concatenation was written against its
-    separator convention - so the assertion is that its value moved and the files came with it.
+    separator convention - so the assertion is that its value moved and the files came with it. Since
+    round-2 finding 1 the moved value is placeholder-rooted, so "moved" is asserted against the
+    package's own `data/` tail rather than against a machine path.
     """
     bundle, oracle = _bundle(tmp_path)
     folder = tmp_path / "SharedSource.Data"
@@ -1110,7 +1128,8 @@ def test_a_folder_PARAMETER_pointing_out_of_the_package_is_moved_with_its_files(
     root = _out(tmp_path) / UNIT
 
     value = _folder_parameter(root)
-    assert pkg._inside(root, value), f"the folder parameter still points outside the package: {value}"  # noqa: SLF001
+    assert value.startswith(pkg.PACKAGE_ROOT_TOKEN), f"the folder parameter names a machine: {value}"
+    assert "SharedSource.Data" in value, f"the parameter lost the tail its partitions read: {value}"
     assert (root / "data" / "SharedSource.Data" / "Sample - Superstore.xlsx").is_file()
     shipped = json.loads((root / "package-manifest.json").read_text(encoding="utf-8"))["data_sources"]["shipped"]
     assert [row["path"] for row in shipped] == ["data/SharedSource.Data/Sample - Superstore.xlsx"]
@@ -1141,7 +1160,16 @@ def test_a_POSIX_literal_with_no_file_suffix_is_left_alone(tmp_path: Path) -> No
     _point_partition_at(bundle, http_path="/sql/1.0/warehouses/764e5801f0e0fac8")
     _package(tmp_path, bundle, oracle)
     record = json.loads(((_out(tmp_path) / UNIT) / "package-manifest.json").read_text(encoding="utf-8"))
-    assert record["data_sources"] == {"parameter": None, "shipped": [], "omissions": [], "bytes": 0}
+    assert record["data_sources"] == {
+        "parameter": None,
+        "shipped": [],
+        "omissions": [],
+        "bytes": 0,
+        "neutralized": [],
+        "retained_network": [],
+        "binding": None,
+        "self_contained": True,
+    }
 
 
 def test_an_unassessable_POSIX_literal_is_RECORDED_not_silently_cleared(tmp_path: Path) -> None:
@@ -1180,7 +1208,89 @@ def test_a_UNC_literal_is_refused_WITHOUT_being_probed(tmp_path: Path) -> None:
     assert elapsed < 5, f"the UNC literal was probed: {elapsed:.1f}s"
 
 
-def test_an_absolute_path_under_the_packages_own_data_is_NOT_a_violation(tmp_path: Path) -> None:
+def test_containment_is_judged_in_the_LITERALS_OWN_flavour_including_its_case_rules() -> None:
+    """Round-2 finding 2: `_inside` answered every question through `PureWindowsPath`.
+
+    That class compares case-INSENSITIVELY, which is right for `C:\\Pkg` and wrong for `/pkg`. On
+    Linux an external `/data/Extract.csv` was therefore judged INSIDE a package at `/DATA`, and
+    "inside the package" is the one verdict that produces total silence: localization skips it,
+    the post-rewrite scan skips it, nothing is shipped, nothing is recorded, nothing is rewritten.
+    The reviewer measured exactly that - `record={'parameter': None, 'shipped': [], 'omissions': [],
+    'bytes': 0}` with `post_scan=[] writes=0`.
+
+    Both directions are asserted from one pair, because a fix that simply made everything
+    case-sensitive would break the Windows half, where `C:\\PKG` and `c:\\pkg` ARE one directory.
+    """
+    assert pkg._inside(PureWindowsPath(r"C:\PKG"), r"c:\pkg\data\x.csv")  # noqa: SLF001
+    assert not pkg._inside(PurePosixPath("/DATA"), "/data/Extract.csv")  # noqa: SLF001
+    assert pkg._inside(PurePosixPath("/data"), "/data/Extract.csv")  # noqa: SLF001
+
+    # A literal of the other flavour is never contained, whichever way round it is asked.
+    assert not pkg._inside(PurePosixPath("/tmp/out/Book"), r"C:\tmp\out\Book\data\x.csv")  # noqa: SLF001
+    assert not pkg._inside(PureWindowsPath(r"C:\out\Book"), "/out/Book/data/x.csv")  # noqa: SLF001
+    # ... and `..` is still collapsed, so escaping through the package root is not "inside" it.
+    assert not pkg._inside(PurePosixPath("/pkg"), "/pkg/../etc/shadow")  # noqa: SLF001
+    assert not pkg._inside(PureWindowsPath(r"C:\pkg"), r"C:\pkg\..\Windows\x.csv")  # noqa: SLF001
+
+
+def test_a_foreign_flavour_source_is_REFUSED_rather_than_reinterpreted_by_the_host() -> None:
+    """Round-2 finding 2: `Path` is the host's, and a foreign literal is not refused by it - it is
+    RESOLVED, against the current drive.
+
+    On Windows `Path("/Users/<person>/Data/x.xlsx").is_file()` asks about
+    `C:\\Users\\<person>\\Data\\x.xlsx`. The reviewer measured a foreign macOS literal being
+    `accepted_as` a local path with `refusal=None`, which is not a near miss: whatever bytes happen
+    to sit there are packaged as the customer's data source, and the manifest says the source was
+    shipped.
+    """
+    foreign = "/opt/data/customer.xlsx" if os.name == "nt" else r"C:\opt\data\customer.xlsx"
+    readable, refusal = pkg._classify_source(foreign)  # noqa: SLF001
+    assert readable is None
+    assert refusal is not None and "cannot resolve" in refusal
+    readable, refusal = pkg._classify_source(foreign, expect_dir=True)  # noqa: SLF001
+    assert readable is None and refusal is not None
+
+
+@pytest.mark.skipif(os.name != "nt", reason="reproduces the WINDOWS half: Path resolves / against the current drive")
+def test_a_posix_literal_on_windows_cannot_package_unrelated_local_bytes(tmp_path: Path) -> None:
+    """The reviewer's experiment, run on a file that really exists.
+
+    A real local file is addressed by its drive-less, POSIX-slashed form. The host would resolve
+    that to the same file and package it as the source the model named; the packager must not.
+    """
+    local = tmp_path / "unrelated.csv"
+    local.write_text("local,bytes\n1,2\n", encoding="utf-8")
+    posix_form = str(local).split(":", 1)[1].replace("\\", "/")
+    assert Path(posix_form).is_file(), "the host does resolve this, which is the whole hazard"
+
+    readable, refusal = pkg._classify_source(posix_form)  # noqa: SLF001
+    assert readable is None, f"unrelated local bytes were accepted as {posix_form}"
+    assert refusal is not None
+
+
+def test_a_source_id_written_with_the_OTHER_separator_still_resolves_its_asset(tmp_path: Path) -> None:
+    """Round-2 finding 2: `resolve_asset` split the source id with `Path(...).name`.
+
+    A `source_id` is written by whichever machine ran the harvest, so
+    `_runs\\999-x\\assets\\Book.twb` reaching a POSIX packaging host has, to `Path`, no separators
+    at all: its `.name` is the whole string, no asset matches, and the unit packages with no source
+    - both gates then report CANNOT_ESTABLISH on a unit whose asset was sitting right there.
+
+    ⚠️ This can only FAIL on POSIX (on Windows `Path` reads both separators), which is why it
+    asserts the flavour-free helper directly as well - that assertion fails on either platform.
+    """
+    assert pf.leaf(r"_runs\999-x\assets\Book.twb") == "Book.twb"
+    assert pf.leaf("_runs/999-x/assets/Book.twb") == "Book.twb"
+
+    bundle, _oracle = _bundle(tmp_path)
+    asset_name = f"{WB_LUID}_{UNIT}.twb"
+    for source_id in (f"_runs\\999-x\\assets\\{asset_name}", f"_runs/999-x/assets/{asset_name}"):
+        resolved, route = pkg.resolve_asset(
+            bundle, UNIT, {"workbook": {"source_id": source_id}}, bundle.parent / "assets"
+        )
+        assert resolved is not None and resolved.name == asset_name, f"{source_id} did not resolve"
+        assert route == "handover.workbook.source_id"
+
     """ "Absolute AND not under the destination", never "absolute" (finding from PR #462).
 
     `set_data_folder.py`'s existing convention is an absolute `DataFolder` under the deliverable, and
@@ -1228,30 +1338,74 @@ def test_the_rows_the_model_imports_are_shipped_and_the_partition_reads_them(tmp
         assert f'{pkg.DATA_FOLDER_PARAM} & "{relative}"' in partitions, "no partition reads the shipped copy"
 
 
-def test_the_data_folder_parameter_names_the_FINAL_package_not_its_staging_dir(tmp_path: Path) -> None:
-    """Assembly runs in `.<unit>.staging`, which stops existing the moment packaging succeeds.
+def test_the_data_folder_parameter_names_a_PLACEHOLDER_not_the_machine_that_built_it(tmp_path: Path) -> None:
+    """Round-2 finding 1: the value used to be the package's absolute build-time location.
 
-    A parameter written from the staging path looks correct in the file and resolves to nothing, so
-    this asserts the directory the value names is one that EXISTS - the failure is otherwise
-    invisible until a refresh.
+    Two failures in one value. It named the STAGING directory in the original defect - a path that
+    stops existing the moment packaging succeeds - and, once that was fixed to ``final``, it named
+    the builder's own output folder, so moving the handover package left its rows present on disk
+    and unreachable, and shipped a `C:\\Users\\<name>\\...` to a customer.
+
+    The shipped value is a placeholder; binding resolves it, and that is asserted here end to end
+    rather than trusted, because a placeholder nobody can resolve is not an improvement.
     """
     root = _package_with_receipt(tmp_path)
     expressions = (_model_definition(root) / pkg.EXPRESSIONS_TMDL).read_text(encoding="utf-8")
     value = re.search(rf'expression {pkg.DATA_FOLDER_PARAM} = "([^"]+)"', expressions)
     assert value is not None, expressions
-    named = Path(value.group(1))
-    assert ".staging" not in str(named), f"the parameter names the staging directory: {named}"
-    assert named.is_dir(), f"the parameter names a directory that does not exist: {named}"
-    assert named.resolve() == (root / pkg.DATA_DIR).resolve()
+    assert value.group(1).startswith(pkg.PACKAGE_ROOT_TOKEN), value.group(1)
+    assert ".staging" not in value.group(1)
+    assert str(root) not in value.group(1), "the package names the machine that built it"
+    assert str(tmp_path) not in expressions, "some other build-time path survived into the model"
     foreign = "/" if os.sep == "\\" else "\\"
     assert foreign not in value.group(1), f"the parameter mixes path separators: {value.group(1)}"
+
+    binding = json.loads((root / "package-manifest.json").read_text(encoding="utf-8"))["data_sources"]["binding"]
+    assert binding["state"] == "unbound" and binding["token"] == pkg.PACKAGE_ROOT_TOKEN
+    assert sdf._package(root) == 0, "the package could not be bound to its own location"  # noqa: SLF001
+    bound = re.search(
+        rf'expression {pkg.DATA_FOLDER_PARAM} = "([^"]+)"',
+        (_model_definition(root) / pkg.EXPRESSIONS_TMDL).read_text(encoding="utf-8"),
+    )
+    assert bound is not None
+    named = Path(bound.group(1))
+    assert named.is_dir(), f"binding named a directory that does not exist: {named}"
+    assert named.resolve() == (root / pkg.DATA_DIR).resolve()
+
+
+def test_a_moved_package_still_reaches_its_rows_once_it_is_BOUND(tmp_path: Path) -> None:
+    """The acceptance test for the design decision, and the one the old value could not pass.
+
+    Round-2 finding 1 measured `embedded_path_exists_after_move=False` beside
+    `packaged_data_exists_after_move=True`: the rows moved with the folder, and the model kept
+    naming where they used to be. A handover package exists to be handed over, so this walks the
+    whole route - package here, MOVE the folder, bind it there, and read the file the partition now
+    names off disk.
+    """
+    root = _package_with_receipt(tmp_path)
+    moved = tmp_path / "customer" / "delivered" / UNIT
+    moved.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(root), str(moved))
+
+    assert sdf._package(moved) == 0  # noqa: SLF001
+    text = (_model_definition(moved) / pkg.EXPRESSIONS_TMDL).read_text(encoding="utf-8")
+    value = re.search(rf'expression {pkg.DATA_FOLDER_PARAM} = "([^"]+)"', text)
+    assert value is not None and Path(value.group(1)).is_dir()
+    tail = re.search(
+        rf'{pkg.DATA_FOLDER_PARAM} & "([^"]+)"',
+        "".join(path.read_text(encoding="utf-8") for path in _model_definition(moved).rglob("*.tmdl")),
+    )
+    assert tail is not None, "no partition reads the shipped copy through the parameter"
+    reached = Path(value.group(1) + tail.group(1))
+    assert reached.is_file(), f"the bound model names rows that are not there: {reached}"
+    assert reached.read_text(encoding="utf-8").startswith("Employee_ID")
 
 
 @pytest.mark.parametrize(
     ("base", "expected"),
     [
-        (PureWindowsPath(r"C:\runs\packages\out\Book"), "C:\\runs\\packages\\out\\Book\\data\\"),
-        (PurePosixPath("/tmp/pytest-0/packages/out/Book"), "/tmp/pytest-0/packages/out/Book/data/"),
+        (PureWindowsPath(r"C:\runs\packages\out\Book"), "<PACKAGE_ROOT>\\data\\"),
+        (PurePosixPath("/tmp/pytest-0/packages/out/Book"), "<PACKAGE_ROOT>/data/"),
     ],
 )
 def test_the_data_folder_value_never_mixes_separators_on_EITHER_platform(base: Path, expected: str) -> None:
@@ -1264,12 +1418,33 @@ def test_the_data_folder_value_never_mixes_separators_on_EITHER_platform(base: P
     the OTHER flavour, which is what this does.
 
     ``_path_separator`` is asserted directly as well, because it is the whole rule and reading it
-    off a composed string would let a half-correct answer pass.
+    off a composed string would let a half-correct answer pass. The base supplies the FLAVOUR only -
+    the value itself is placeholder-rooted since round-2 finding 1 - so the assertion is that none
+    of the base's own path survives into it.
     """
     assert pkg._path_separator(str(base)) == ("\\" if isinstance(base, PureWindowsPath) else "/")  # noqa: SLF001
     assert pkg._package_data_folder(base) == expected  # noqa: SLF001
+    assert str(base) not in pkg._package_data_folder(base)  # noqa: SLF001
     assert pkg._moved_folder_value(base, "SharedSource.Data", "/some/where/") == (  # noqa: SLF001
         expected + "SharedSource.Data" + ("\\" if isinstance(base, PureWindowsPath) else "/")
+    )
+
+
+def test_a_path_written_in_the_OTHER_flavour_is_still_composed_consistently() -> None:
+    """`C:/runs/out` is a Windows path spelled with forward slashes, and the old rule got it wrong.
+
+    "Does the string contain a backslash" was a proxy for flavour, and it fails in both directions:
+    a Windows path written with `/` answered `/`, and a POSIX directory whose NAME contains a
+    backslash - `/var/tmp/customer\\name/Book`, the reviewer's own case - answered `\\` and produced
+    a value that is half one flavour and half the other. Flavour is decided by the ROOT.
+    """
+    assert pkg._path_separator("C:/runs/out") == "\\"  # noqa: SLF001
+    assert pkg._path_separator("/var/tmp/customer\\name/Book") == "/"  # noqa: SLF001
+    assert pf.flavour("C:/runs/out") == pf.WINDOWS
+    assert pf.flavour("/var/tmp/customer\\name/Book") == pf.POSIX
+    assert pf.flavour("relative/path") is None
+    assert pf.join("/var/tmp/customer\\name/Book", "data", "Shared.Data", trailing=True) == (
+        "/var/tmp/customer\\name/Book/data/Shared.Data/"
     )
 
 
@@ -1278,13 +1453,18 @@ def test_a_source_that_cannot_be_shipped_is_a_LOUD_omission_not_a_silent_skip(tm
     machine, so "copy it" is not always available and the unshippable case is real rather than
     hypothetical.
 
-    Such a reference keeps its original literal - it still resolves wherever it did before - and is
-    recorded twice over: as a manifest omission carrying its reason, and as a package note, which is
-    what `handover.md` renders. Asserting the reason too, because an omission with no cause is the
-    silent skip wearing a different name.
+    Such a reference is recorded twice over - as a manifest omission carrying its reason, and as a
+    package note, which is what `handover.md` renders. Asserting the reason too, because an omission
+    with no cause is the silent skip wearing a different name.
+
+    ⚠️ It used to KEEP its original literal, on the argument that the path "still resolves wherever
+    it did before". Round-2 finding 1: wherever that was, it was not the customer's machine, and the
+    literal carried a user-profile directory into a deliverable while `package_unit.py` exited 0. The
+    literal is now neutralized and the run reports exit 4.
     """
     bundle, oracle = _bundle(tmp_path)
-    _point_partition_at(bundle, r"C:\definitely-not-here\Extract_Extract.csv")
+    absent = tmp_path / "definitely-not-here" / "Extract_Extract.csv"
+    _point_partition_at(bundle, str(absent))
     _package(tmp_path, bundle, oracle)
     root = _out(tmp_path) / UNIT
 
@@ -1293,8 +1473,35 @@ def test_a_source_that_cannot_be_shipped_is_a_LOUD_omission_not_a_silent_skip(tm
     assert [row["file"] for row in omissions] == ["Extract_Extract.csv"]
     assert "not present on the packaging machine" in omissions[0]["reason"]
     assert record["data_sources"]["shipped"] == []
+    assert record["data_sources"]["neutralized"] == ["Extract_Extract.csv"]
+    assert record["data_sources"]["self_contained"] is False
     assert any("Extract_Extract.csv" in note for note in record["notes"]), record["notes"]
     assert "Extract_Extract.csv" in (root / "handover.md").read_text(encoding="utf-8")
+
+    partitions = "".join(path.read_text(encoding="utf-8") for path in _model_definition(root).rglob("*.tmdl"))
+    assert str(absent) not in partitions, "the shipped model still names a directory on this machine"
+    assert str(absent.parent) not in partitions
+    assert pkg.UNAVAILABLE_TOKEN in partitions
+    assert _absolute_literals(root) == []
+
+
+def test_a_unit_shipping_without_its_rows_is_a_NONZERO_verdict(tmp_path: Path) -> None:
+    """Round-2 finding 1: `package_unit_exit=0` while the package could not refresh a partition.
+
+    Exit 0 is the only signal an automated caller reads, so a package that is missing the rows its
+    own model names must not earn it. Both directions from one fixture: the same bundle with the
+    source PRESENT exits 0, so this cannot pass by refusing everything.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    payload = tmp_path / "extract" / "Extract_Extract.csv"
+    payload.parent.mkdir(parents=True, exist_ok=True)
+    payload.write_text("a,b\n1,2\n", encoding="utf-8")
+    _point_partition_at(bundle, str(payload))
+    argv = ["--bundle", str(bundle), "--out", str(_out(tmp_path)), "--oracle", str(oracle), "--quiet"]
+    assert pkg.main(argv) == pkg.EXIT_OK
+
+    payload.unlink()
+    assert pkg.main([*argv, "--discard-package-edits"]) == pkg.EXIT_NOT_SELF_CONTAINED
 
 
 def test_an_oversized_source_is_refused_by_the_ceiling_rather_than_copied(tmp_path: Path) -> None:
@@ -1837,6 +2044,70 @@ def test_repackaging_REFUSES_when_the_package_carries_an_edit(tmp_path: Path) ->
     ]
     assert added.read_text(encoding="utf-8") == '{"name": "agent"}', "the refused run overwrote the edit anyway"
     assert "--discard-package-edits" in str(refusal.value), "the refusal does not name the way out"
+
+
+def test_an_edit_made_DURING_assembly_is_not_overwritten_by_the_swap(tmp_path: Path) -> None:
+    """Round-2 finding 3: the #460 guard checked the digest ONCE, before assembly began.
+
+    Assembly is not instant - it copies a render tree and shells out to `parse_tableau.py` - and
+    nothing re-read the package before `replace_dir` deleted it. An edit made anywhere in that
+    window was accepted by the filesystem and then destroyed by the swap, with the guard already
+    "passed": the reviewer measured `edit_survived_repackage=False`.
+
+    The window is simulated the way the reviewer did, by editing the canonical package from inside
+    `_assemble_unit` - that is the only way to land a write in a window that is otherwise a race.
+    What is asserted is not the timing but the OUTCOME: the edit is still on disk, and the run
+    refused rather than reporting success.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    marker = '{"name": "written while packaging was running"}'
+    edited = root / "fabric" / f"{UNIT}.Report" / "definition" / "pages" / "agent-page.json"
+
+    original = pkg._assemble_unit  # noqa: SLF001
+
+    def _assemble_then_edit(*args: object, **kwargs: object) -> dict:
+        result = original(*args, **kwargs)
+        edited.parent.mkdir(parents=True, exist_ok=True)
+        edited.write_text(marker, encoding="utf-8")
+        return result
+
+    pkg._assemble_unit = _assemble_then_edit  # noqa: SLF001
+    try:
+        with pytest.raises(pkg.PackageEditsRefused) as refusal:
+            _package(tmp_path, bundle, oracle)
+    finally:
+        pkg._assemble_unit = original  # noqa: SLF001
+
+    assert edited.is_file(), "the edit made during assembly was destroyed by the swap"
+    assert edited.read_text(encoding="utf-8") == marker
+    assert "fabric/Book.Report/definition/pages/agent-page.json" in refusal.value.changed
+    assert (root / pkg.MANIFEST_NAME).is_file(), "the package was left half-replaced"
+    assert not list(_out(tmp_path).glob(".*.replaced")), "the retired copy was not restored"
+
+
+def test_the_second_digest_check_does_not_refuse_an_UNEDITED_package(tmp_path: Path) -> None:
+    """The negative control for the re-check: a clean re-run must still replace the package.
+
+    A guard that refuses everything would pass the test above and make the tool useless, and the
+    check now runs at a moment - after the existing package has been renamed aside - where getting
+    the path wrong would refuse every single run.
+
+    ⚠️ It asserts the file SET, not the digests: `migration-spec.json` is not byte-stable between
+    runs, which is precisely why the guard compares a package against the digest THAT run recorded
+    rather than against a previous run's.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    first = set(json.loads((root / pkg.MANIFEST_NAME).read_text(encoding="utf-8"))["contents"]["files"])
+
+    _package(tmp_path, bundle, oracle)
+    assert set(json.loads((root / pkg.MANIFEST_NAME).read_text(encoding="utf-8"))["contents"]["files"]) == first
+    assert pkg.package_edits(root) == ([], None), "the re-run left the package disagreeing with its own record"
+    assert not list(_out(tmp_path).glob(".*.replaced"))
+    assert not list(_out(tmp_path).glob(".*.staging"))
 
 
 def test_a_package_with_no_recorded_digest_is_REFUSED_rather_than_assumed_clean(tmp_path: Path) -> None:

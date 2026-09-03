@@ -118,7 +118,8 @@ render leg.
 
 Exit codes
 ----------
-| 0 | every requested unit was packaged, engine output included |
+| 0 | every requested unit was packaged, engine output included, and every source its model names is
+      IN the package |
 | 1 | at least one unit has NO engine working copy under `pbip/`. It is still packaged - the source,
       the reference and the engine's own handover slice are all there - but there is nothing to build
       on, and `check_reference_readiness.py` reports it as a finding rather than a pass. |
@@ -126,9 +127,15 @@ Exit codes
 | 3 | at least one requested unit already has a package carrying EDITS, and this packager replaces a
       package whole. Those units were left untouched; every other requested unit was still packaged.
       `--discard-package-edits` overwrites them deliberately. |
+| 4 | at least one unit ships WITHOUT a source its model names - the bytes could not be copied, or a
+      literal could not be classified. The package is still written (it carries everything else) but
+      it is not complete, and the shipped model cannot refresh that partition from the package
+      alone. Ranked above 1 because 1 is already visible in every gate's verdict while this is not:
+      a model missing its rows loads, validates and passes `check_datamodel.py`. |
 
-An omission INSIDE a package is not exit 1: a unit whose oracle genuinely has no render for a page is
-the negative control, and it must package successfully and still report that page BLIND.
+An oracle omission INSIDE a package is not exit 1 or 4: a unit whose oracle genuinely has no render
+for a page is the negative control, and it must package successfully and still report that page
+BLIND. Exit 4 is about the model's own rows, nothing else.
 """
 
 from __future__ import annotations
@@ -143,14 +150,15 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import re
 import shutil
 import subprocess
 import sys
 import time
 import uuid
-from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
+from collections.abc import Callable
+from functools import partial
+from pathlib import Path, PurePath, PurePosixPath
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -170,6 +178,13 @@ from object_identity import (  # noqa: E402  # pylint: disable=wrong-import-posi
     KIND_UNKNOWN,
     KIND_WORKSHEET,
 )
+from path_flavour import (  # noqa: E402  # pylint: disable=wrong-import-position
+    flavour,
+    is_host_native,
+    leaf,
+)
+from path_flavour import separator as flavour_separator  # noqa: E402  # pylint: disable=wrong-import-position
+from path_flavour import inside as inside_lexically  # noqa: E402  # pylint: disable=wrong-import-position
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -242,6 +257,49 @@ DATA_DIR = "data"
 DATA_FOLDER_PARAM = "DataFolder"
 FALLBACK_DATA_FOLDER_PARAM = "PackageDataFolder"
 EXPRESSIONS_TMDL = "expressions.tmdl"
+
+#: What a data-folder parameter names in the SHIPPED artifact, instead of wherever this packager
+#: happened to be run. Blind-review round-2 finding 1: the value used to be the package's absolute
+#: build-time location, so a handover folder that anybody moved - which is the entire point of a
+#: handover folder - kept its rows on disk and unreachable, and the deliverable carried a real
+#: `C:\\Users\\<name>\\...` into a customer's hands.
+#:
+#: ⚠️ **This is a DESIGN DECISION, not a workaround, and it costs something: the package does not
+#: refresh until it is BOUND.** Power Query rejects a relative `File.Contents` argument outright, so
+#: there is no portable literal that refreshes anywhere; the three available designs were (a) embed
+#: the builder's path - rejected, that is the defect, (b) embed the DESTINATION's path, which the
+#: builder does not know, or (c) ship a placeholder and make binding a step of CONSUMING the
+#: package. (c) is chosen, and it is this repo's own committed convention already - `<REPO_ROOT>` in
+#: `set_data_folder.py`, localized after clone, CI-gated by `--check`. The binder is the same script
+#: (`--package`), the README leads with it, and `package-manifest.json` records `binding.state`, so
+#: an unbound package is a LOUD, machine-checkable state rather than a plausible-looking path that
+#: silently resolves to nothing on the recipient's machine.
+PACKAGE_ROOT_TOKEN = "<PACKAGE_ROOT>"
+
+#: What replaces a source literal this packager could not ship. A handover package is handed to a
+#: customer, so leaving `C:\\Users\\<builder>\\...` in the shipped TMDL is both a privacy leak and a
+#: lie - those bytes are not in the package and that path names nobody's machine but the builder's.
+#: The token cannot resolve anywhere, which is the honest state, and it is greppable.
+#:
+#: ⚠️ **A UNC literal is deliberately NOT neutralized** (:func:`_host_local`). It names a share on a
+#: network, not a directory on the packaging host, so the recipient may well be able to read it -
+#: and this packager never probed it (see :func:`_classify_source`), so it has no evidence that it is
+#: unavailable. Destroying a configuration that works at the customer is not an improvement on
+#: shipping one that does not. Those are recorded as `data_sources.retained_network` instead.
+UNAVAILABLE_TOKEN = "<UNAVAILABLE_SOURCE>"
+
+#: The command that binds a package to wherever it now lives. Written into the README and into
+#: `package-manifest.json` so the state and its remedy travel with the artifact.
+BIND_COMMAND = "python scripts/set_data_folder.py --package <path-to-this-folder>"
+
+#: This script's exit codes, named so a caller never has to read a bare integer. The table in the
+#: module docstring is the contract; these are the same numbers.
+EXIT_OK = 0
+EXIT_NO_WORKING_COPY = 1
+EXIT_USAGE = 2
+EXIT_EDITS_REFUSED = 3
+EXIT_NOT_SELF_CONTAINED = 4
+
 #: The name of the manifest that records what a package contains, INCLUDING the per-file digest that
 #: makes an agent's edit to the canonical `fabric/` tree detectable on the next run. Excluded from
 #: its own digest, because it is written last and would otherwise never match itself.
@@ -403,11 +461,17 @@ def resolve_asset(bundle: Path, unit: str, handover: Any, assets_dir: Path | Non
     Order mirrors `check_reference_readiness.resolve_source`: the handover slice's
     `workbook.source_id` (a run-root-relative path, so only its basename is portable), then
     `input_manifest.json`'s staged asset whose stem matches the unit name.
+
+    ⚠️ **The basename is extracted with BOTH separators, never `Path(...).name`.** A `source_id` is
+    written by whichever machine ran the harvest, so a Windows-separated
+    `_runs\\999-x\\assets\\minimal.twb` reaching a POSIX packaging host has no separators `Path`
+    recognises: its "name" is the whole string, nothing matches, and a source asset that IS present
+    resolves to `unresolved` - both gates then report CANNOT_ESTABLISH (round-2 finding 2).
     """
     workbook = handover.get("workbook") if isinstance(handover, dict) else None
     source_id = workbook.get("source_id") if isinstance(workbook, dict) else None
     if isinstance(source_id, str) and source_id.strip():
-        name = Path(source_id).name
+        name = leaf(source_id)
         for base in (assets_dir, bundle / "assets", bundle.parent / "assets"):
             if base is not None and (base / name).is_file():
                 return (base / name), "handover.workbook.source_id"
@@ -415,7 +479,7 @@ def resolve_asset(bundle: Path, unit: str, handover: Any, assets_dir: Path | Non
     manifest = read_json(bundle / "input_manifest.json")
     staged_assets = manifest.get("assets") or [] if isinstance(manifest, dict) else []
     for asset in staged_assets:
-        if not isinstance(asset, dict) or Path(str(asset.get("name") or "")).stem != unit:
+        if not isinstance(asset, dict) or PurePosixPath(leaf(str(asset.get("name") or ""))).stem != unit:
             continue
         staged = asset.get("staged_input_path")
         candidates = [Path(str(staged))] if staged else []
@@ -893,12 +957,22 @@ def render_handover(result: dict[str, Any], workbook: dict[str, Any] | None, pag
 
 README = """# {unit}
 
-Self-contained handover package for one migration unit ({kind}). Both entry and exit gates take
-THIS FOLDER'S PATH as their only argument - a bare unit name is an argparse error (exit 2), never a
-verdict:
+Handover package for one migration unit ({kind}). It carries its own rows, its own reference and its
+own source - but it is **not bound to a location**, so do this FIRST, wherever this folder now is,
+before opening the model. Then the two gates, each of which takes THIS FOLDER'S PATH as its only
+argument - a bare unit name is a usage error, never a verdict (exit 2 from
+`check_reference_readiness.py`, exit 64 from `check_unit.py`, both with a message on stderr):
 
+    python scripts/set_data_folder.py --package <path-to-this-folder>
     python scripts/check_reference_readiness.py <path-to-this-folder>
     python scripts/check_unit.py <path-to-this-folder>
+
+Why binding is a step rather than something already done for you: Power Query rejects a relative
+`File.Contents` argument outright, so a folder parameter has to name an ABSOLUTE directory, and the
+machine that built this package cannot know where you will put it. Baking in the builder's own path
+is what made a moved package silently unable to reach rows that were sitting right beside it. So the
+model reads `{package_root}` and the command above resolves it here; `package-manifest.json`'s
+`data_sources.binding` records the state, and re-run it after every move.
 
 A page counts as REBUILT only when its `displayName` EXACTLY equals an expected object's name AND it
 ships at least one visual; one that pairs by name with no visual is reported `blank` and FAILS. The
@@ -910,7 +984,7 @@ expected set is every dashboard PLUS every worksheet not placed on one.
 | `handover/{unit}.json` | the engine's slice for THIS workbook; `python scripts/read_handover.py handover/{unit}.json --viz`. Estate-wide sections are not shipped; absolute host paths are redacted. |
 | `fabric/` | the engine WORKING COPY - **edit here**, and when you work from a package THIS tree is canonical; `<bundle>/pbip/` never promotes over it. Re-running `package_unit.py` into this folder REFUSES (exit 3) rather than discarding what you changed - `--discard-package-edits` overrides. Declared-edit tooling (`declare_generated_edit.py`, `--tamper`) is bundle-only. |
 | `assets/` | the Tableau source this was built from |
-| `data/` | the rows the model imports, shipped with it (#461). A folder PARAMETER in `expressions.tmdl` names this directory by ABSOLUTE path, because Power Query rejects a relative one - so **moving this folder breaks refresh until you re-point it**: `python scripts/set_data_folder.py --package <path-to-this-folder>` rewrites every such parameter to this package's own `data/` and fails if the directory it then names does not exist. Absent when nothing was shipped - either the model imports nothing, or every source it names was unavailable when this was packaged; `package-manifest.json`'s `data_sources.omissions` says which, one line per source, and `handover.md` repeats it as a `PACKAGE_NOTE`. |
+| `data/` | the rows the model imports, shipped with it (#461), reached through a `{package_root}` folder parameter in `expressions.tmdl` - see the binding command above. Absent when nothing was shipped - either the model imports nothing, or a source it names was unavailable when this was packaged, in which case that literal now reads `{unavailable}` rather than a path on the builder's machine and `package-manifest.json`'s `data_sources` says which, one line per source, repeated in `handover.md` as a `PACKAGE_NOTE`. |
 | `migration-spec.json` | the parsed source; the expected page set both gates grade against |
 | `migration-spec.schema.json` | the CONTRACT `validate_spec.py` enforces. Read it before appending a `limitations_encountered` entry: exactly `item`/`issue`/`severity`/`stage`, `additionalProperties: false`, so one invented field rejects every entry. |
 | `oracle/` | this unit's Tableau reference, split `dashboard/` vs `worksheet/` vs `unknown/` (**singular** - the directory is the object kind, not a plural). **`oracle/*/data/*.csv` is the NUMERIC oracle** - exact labels and figures, no OCR and no judgement. Read it first. |
@@ -1119,21 +1193,21 @@ def _service_routes(text: str) -> set[str]:
 
 
 def _inside(root: Path, value: str) -> bool:
-    """Whether an absolute literal points INSIDE ``root``, judged LEXICALLY.
+    """Whether an absolute literal points INSIDE ``root``, judged LEXICALLY and PER FLAVOUR.
 
     ⚠️ **Never `Path.resolve()` one of these literals.** A UNC literal naming a host that does not
     exist blocks on SMB name resolution: measured by PR #462, that took one test module from 30
-    seconds to **52 minutes** and starved a subprocess into its 600 s timeout. `normpath` answers the
-    containment question without touching the network, and containment is a question about the
-    STRING, not about what happens to be mounted.
+    seconds to **52 minutes** and starved a subprocess into its 600 s timeout. Containment is a
+    question about the STRING, not about what happens to be mounted.
+
+    ⚠️ **It is also a question about the literal's OWN flavour, not the host's.** This used to
+    answer through `PureWindowsPath` unconditionally, whose comparison is case-INSENSITIVE, so on
+    Linux an external `/data/Extract.csv` was judged to be inside a package at `/DATA`: skipped by
+    localization AND by the post-rewrite scan, it reached the clean bucket with no shipment, no
+    omission and no rewrite (blind-review round-2 finding 2). :func:`path_flavour.inside` decides
+    flavour lexically first and then compares with that flavour's case rules.
     """
-    try:
-        candidate = PureWindowsPath(os.path.normpath(value))
-        return candidate == PureWindowsPath(os.path.normpath(str(root))) or candidate.is_relative_to(
-            PureWindowsPath(os.path.normpath(str(root)))
-        )
-    except (TypeError, ValueError):
-        return False
+    return inside_lexically(root, value)
 
 
 def _ceiling_refusal(size: int) -> str | None:
@@ -1155,12 +1229,24 @@ def _classify_source(value: str, *, expect_dir: bool = False) -> tuple[Path | No
     is therefore refused unprobed and recorded, which is loud and instant; the promotion gate
     (`promote_unit.py`, exit 5) refuses such a model anyway.
 
+    ⚠️ **A FOREIGN-flavour literal is refused unprobed too, and for a worse reason than hanging.**
+    `Path` is the host's, so on Windows `Path("/Users/<person>/Data/x.xlsx").is_file()` is resolved
+    against the CURRENT DRIVE: a macOS literal matched `C:\\Users\\<person>\\Data\\x.xlsx` and
+    unrelated local bytes were packaged as the customer's source, silently and with a clean exit
+    (blind-review round-2 finding 2). Letting the host reinterpret a path it cannot own is not a
+    fallback, it is a wrong answer, so the flavour is checked before anything is probed.
+
     A directory is only checked for EXISTENCE here. Its size is measured over the members a
     partition actually names (:func:`_relocate_folder`), because those are the only bytes the
     package ships - weighing the whole tree would refuse a 300 MB folder for one 4 KB CSV.
     """
     if UNC_PATH_RE.match(value):
         return None, "a UNC path is not probed, because resolving an absent host can block for minutes"
+    if not is_host_native(value):
+        return None, (
+            f"names a {flavour(value) or 'relative'} path, which this machine cannot resolve without "
+            "reinterpreting it as a local one"
+        )
     path = Path(value)
     if expect_dir:
         if not path.is_dir():
@@ -1222,31 +1308,56 @@ def _path_separator(base: str) -> str:
     not half Windows and half POSIX. Taking it from the base also makes the rule testable on either
     platform: pass a POSIX base on Windows and the answer must still be ``/``, which is what lets a
     Windows-only run demonstrate this failing.
+
+    ⚠️ It reads the base's FLAVOUR first (:func:`path_flavour.separator`), so `C:/runs/out` - a
+    Windows path written with forward slashes - still answers ``\\``. "Does the string contain a
+    backslash" was only ever a proxy for the question, and `set_data_folder.py` shares this one
+    composer rather than re-deriving it (round-2 finding 4).
     """
-    if "\\" in base:
-        return "\\"
-    if "/" in base:
-        return "/"
-    return os.sep
+    return flavour_separator(base)
 
 
 def _package_data_folder(final: PurePath) -> str:
-    """The `DataFolder` parameter's value: the package's own `data/`, with a TRAILING separator.
+    """The folder parameter's value: the package's own `data/`, PLACEHOLDER-rooted, trailing separator.
+
+    ⚠️ **``final`` supplies the SEPARATOR only - never the path.** Writing the package's absolute
+    build-time location here is blind-review round-2 finding 1: the rows then have exactly one
+    reachable address, the one the builder's machine had, and moving the handover folder leaves them
+    present and unreachable. See :data:`PACKAGE_ROOT_TOKEN` for the design and what it costs.
 
     The trailing separator is load-bearing - :func:`_rewrite_partitions` concatenates a relative tail
     straight onto it - so it is produced here, once, in the same flavour as the rest of the value.
     """
-    separator = _path_separator(str(final))
-    return f"{final}{separator}{DATA_DIR}{separator}"
+    sep = _path_separator(str(final))
+    return f"{PACKAGE_ROOT_TOKEN}{sep}{DATA_DIR}{sep}"
+
+
+def _host_local(value: str) -> bool:
+    """Whether a literal is rooted in ONE MACHINE's own filesystem, so it means nothing anywhere else.
+
+    A drive letter and a POSIX root are machine-bound; `C:\\Users\\<builder>\\...` names the
+    packaging host and nothing else, which is why an unshippable one is neutralized rather than
+    shipped (:data:`UNAVAILABLE_TOKEN`). A UNC literal is not: it names a share on a network that the
+    recipient may share, and this packager deliberately never probed it, so it has no evidence to
+    destroy a working configuration with.
+    """
+    return flavour(value) is not None and not UNC_PATH_RE.match(value)
+
+
+def _neutralized(value: str, final: Path) -> str:
+    """What replaces an unshippable host-rooted literal: a token that resolves nowhere, plus its leaf."""
+    return f"{UNAVAILABLE_TOKEN}{_path_separator(str(final))}{_leaf(value)}"
 
 
 def _write_data_folder_expression(dest: Path, final: Path, model_name: str, parameter: str) -> None:
     """Declare the folder parameter, in the exact shape this repo's committed models already use.
 
-    ⚠️ The value is the FINAL package path, not ``dest``. Assembly runs in a
+    ⚠️ The value is the FINAL package's own separator flavour, and a PLACEHOLDER root - never
+    ``dest``, and since round-2 finding 1 never ``final`` either. Assembly runs in a
     ``.<unit>.staging`` directory that `replace_dir` renames afterwards, so writing ``dest`` here
     bakes a path that stops existing the moment packaging succeeds - and it would still LOOK right
-    in the file.
+    in the file. Writing ``final`` bakes the builder's own location into a deliverable that exists
+    to be moved. See :data:`PACKAGE_ROOT_TOKEN`.
 
     Appended rather than overwritten: `expressions.tmdl` is a list of expression objects, and an
     engine model that grows one later must not have it silently replaced. The `lineageTag` is a
@@ -1283,16 +1394,29 @@ def _localize_data_sources(dest: Path, final: Path, model_name: str | None) -> d
     What this does NOT do, deliberately: rewrite a literal to a relative path. Power Query rejects a
     relative `File.Contents` argument outright, so that would produce a model refreshing NOWHERE -
     strictly worse than one refreshing on a single machine. A folder PARAMETER is the documented
-    workaround and is already this repo's committed convention; see :data:`DATA_FOLDER_PARAM`.
+    workaround and is already this repo's committed convention; see :data:`DATA_FOLDER_PARAM`. What
+    it also does not do, since round-2 finding 1, is name the BUILDER's location in that parameter:
+    the value is placeholder-rooted and the package is BOUND on consumption
+    (:data:`PACKAGE_ROOT_TOKEN`).
 
-    Every reference ends in exactly one of two recorded states - shipped, or an omission naming its
-    reason. There is no third, silent one: a source that cannot be copied keeps its original literal
-    (so it still resolves wherever it did before) and is reported. That rule now covers the literals
-    this packager cannot even CLASSIFY (:data:`UNCLASSIFIED_REASON`), which used to be the silent
-    third state. Findings carry the LEAF name only, never the absolute path, which embeds a username
-    in a public repo (convention adopted from #462).
+    Every reference ends in exactly one of three recorded states - shipped, an omission naming its
+    reason, or (for a network share this packager may not probe) retained and recorded. There is no
+    silent fourth one: that rule covers the literals this packager cannot even CLASSIFY
+    (:data:`UNCLASSIFIED_REASON`), which used to be the silent state. A host-rooted literal that
+    could not be shipped is NEUTRALIZED rather than left in place: it named the builder's machine,
+    so leaving it ships a username to a customer and promises rows the package does not carry.
+    Findings carry the LEAF name only, never the absolute path (convention adopted from #462).
     """
-    record: dict[str, Any] = {"parameter": None, "shipped": [], "omissions": [], "bytes": 0}
+    record: dict[str, Any] = {
+        "parameter": None,
+        "shipped": [],
+        "omissions": [],
+        "bytes": 0,
+        "neutralized": [],
+        "retained_network": [],
+        "binding": None,
+        "self_contained": True,
+    }
     documents = _model_tmdl(dest, model_name)
     if not documents:
         return record
@@ -1300,9 +1424,95 @@ def _localize_data_sources(dest: Path, final: Path, model_name: str | None) -> d
     accounted: set[str] = set()
     _localize_folder_parameters(documents, dest, final, record, taken, accounted)
     _localize_file_literals(documents, dest, final, record, taken, model_name, accounted)
-    record["omissions"].extend(_external_after_rewrite(_model_tmdl(dest, model_name), final, accounted))
+    written = _model_tmdl(dest, model_name)
+    record["omissions"].extend(_external_after_rewrite(written, final, accounted))
+    record["neutralized"], record["retained_network"] = _neutralize_unshipped(written, final)
+    _assert_no_host_path_survives(written, final)
     _assert_distinct_destinations(record)
+    record["binding"] = _binding_state(written)
+    record["self_contained"] = not (record["omissions"] or record["neutralized"] or record["retained_network"])
     return record
+
+
+def _binding_state(documents: list[Path]) -> dict[str, str] | None:
+    """How the shipped model finds its rows, or None when it reads no packaged folder at all.
+
+    Recorded in `package-manifest.json` so "this package has not been bound to where it now lives" is
+    a machine-readable state travelling WITH the artifact, rather than something a recipient learns
+    from a refresh error.
+    """
+    if not any(PACKAGE_ROOT_TOKEN in document.read_text(encoding="utf-8") for document in documents):
+        return None
+    return {
+        "state": "unbound",
+        "token": PACKAGE_ROOT_TOKEN,
+        "command": BIND_COMMAND,
+        "reason": (
+            "Power Query rejects a relative File.Contents argument, so a folder parameter must name an "
+            "absolute directory; this package names a placeholder instead of the machine that built it, "
+            "and binding resolves it wherever the package now lives"
+        ),
+    }
+
+
+def _neutralize_unshipped(documents: list[Path], final: Path) -> tuple[list[str], list[str]]:
+    """Rewrite every HOST-ROOTED literal still escaping the package to :data:`UNAVAILABLE_TOKEN`.
+
+    `(neutralized leaves, retained network leaves)`.
+
+    Blind-review round-2 finding 1, second half: a source that could not be copied used to keep its
+    original literal, on the argument that it "still resolves wherever it did before". For a
+    deliverable that is exactly wrong twice over - the path names the BUILDER's machine, so it
+    resolves for nobody the package is handed to, and it carries a user-profile directory into a
+    customer's artifact. The honest shipped state is a token that resolves nowhere and says why.
+
+    A UNC literal is retained instead (:func:`_host_local`), and recorded, because it names a network
+    share rather than this host - refusing to probe it is a hang-avoidance measure, not evidence that
+    it is unreachable, so destroying it would break a configuration that may work at the customer.
+
+    Only a definite :data:`PATH_LITERAL` is touched. An UNCLASSIFIED literal is reported and left
+    alone: it may be a service route, and rewriting a Databricks endpoint into a file-system token
+    would break a model that was never broken.
+    """
+    neutralized: list[str] = []
+    retained: list[str] = []
+    for document in documents:
+        text = document.read_text(encoding="utf-8")
+        routes = _service_routes(text)
+        rewritten = text
+        for value in sorted({match.group(1) for match in ABSOLUTE_LITERAL_RE.finditer(text)}):
+            if value in routes or _inside(final, value) or _path_verdict(value) != PATH_LITERAL:
+                continue
+            if not _host_local(value):
+                retained.append(_leaf(value))
+                continue
+            rewritten = rewritten.replace(f'"{value}"', f'"{_neutralized(value, final)}"')
+            neutralized.append(_leaf(value))
+        if rewritten != text:
+            document.write_text(rewritten, encoding="utf-8")
+    return sorted(set(neutralized)), sorted(set(retained))
+
+
+def _assert_no_host_path_survives(documents: list[Path], final: Path) -> None:
+    """Tripwire: no shipped `.tmdl` may name a directory on the machine that built the package.
+
+    :func:`_neutralize_unshipped` makes this unreachable, and it is asserted anyway for the same
+    reason as :func:`_assert_distinct_destinations`: the consequence is invisible here and lands on
+    someone else. A leaked absolute path is what `set_data_folder.py --check` fails the repo for, and
+    a package is handed to a customer where no CI gate runs at all.
+    """
+    for document in documents:
+        text = document.read_text(encoding="utf-8")
+        routes = _service_routes(text)
+        for match in ABSOLUTE_LITERAL_RE.finditer(text):
+            value = match.group(1)
+            if value in routes or _inside(final, value) or not _host_local(value):
+                continue
+            if _path_verdict(value) == PATH_LITERAL:
+                raise PackagingError(
+                    f"the packaged model still names a path on this machine ({_leaf(value)}), which "
+                    "resolves for nobody the package is handed to; nothing is shipped"
+                )
 
 
 def _localize_folder_parameters(  # pylint: disable=too-many-arguments,too-many-positional-arguments
@@ -1567,9 +1777,10 @@ def _leaf(value: str) -> str:
     """The last segment of a path literal - all a finding may carry.
 
     An absolute path embeds a real username and this repo is public, so artifacts get the leaf and
-    nothing else. Split lexically for the same reason :func:`_inside` is lexical: no probing.
+    nothing else. Split lexically, with BOTH separators, for the same reason :func:`_inside` is
+    lexical: no probing, and no host semantics (:func:`path_flavour.leaf`).
     """
-    return value.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1] or value
+    return leaf(value)
 
 
 def _rewrite_partitions(documents: list[Path], shipped: dict[str, str], parameter: str, separator: str) -> None:
@@ -1705,22 +1916,42 @@ def package_unit(  # pylint: disable=too-many-arguments
     so re-running the same command silently deleted an agent's TMDL (blind-review finding 6). Silent
     loss is the one unacceptable outcome; refusing costs a flag and names the files. ``discard_edits``
     (`--discard-package-edits`) is the deliberate override.
+
+    ⚠️ **The digest is checked TWICE, and the second time is the one that matters.** Checking only
+    before assembly leaves the whole assembly window - copying a 51 MB render tree, running
+    `parse_tableau.py` on the source - during which an edit to the canonical package is accepted by
+    the filesystem and then destroyed by the swap: exactly the loss #460 exists to prevent, with the
+    guard already "passed" (blind-review round-2 finding 3, reproduced: `edit_survived_repackage=False`).
+    The re-check runs INSIDE `replace_dir`, after the existing package has been renamed out of the
+    way, which is what makes it a check under the lock rather than one more racing read: once the
+    directory is retired, nothing can reach it by the path a writer would use, and if it changed it
+    is renamed straight back.
     """
     existing = out_root / unit
     if existing.is_dir() and not discard_edits:
-        changed, reason = package_edits(existing)
-        if reason is not None or changed:
-            raise PackageEditsRefused(unit, existing, changed, reason)
+        _refuse_if_edited(unit, existing)
     staging = out_root / f".{sanitize_staging_name(unit)}.staging"
     shutil.rmtree(staging, ignore_errors=True)
     try:
         result = _assemble_unit(
             bundle, unit, staging, final=out_root / unit, oracle_dir=oracle_dir, assets_dir=assets_dir
         )
-        replace_dir(staging, out_root / unit)
+        replace_dir(staging, out_root / unit, verify=None if discard_edits else partial(_refuse_if_edited, unit))
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     return result
+
+
+def _refuse_if_edited(unit: str, package: Path) -> None:
+    """Raise :class:`PackageEditsRefused` unless ``package`` still matches the digest it recorded.
+
+    One site, called from both ends of the assembly window, so the two checks can never drift into
+    asking different questions - which is how a "guard" ends up protecting only the cheap half of an
+    operation.
+    """
+    changed, reason = package_edits(package)
+    if reason is not None or changed:
+        raise PackageEditsRefused(unit, package, changed, reason)
 
 
 def package_contents(root: Path) -> dict[str, str]:
@@ -1765,7 +1996,7 @@ def sanitize_staging_name(unit: str) -> str:
     return _UNSAFE.sub("_", unit)[:_MAX_OBJECT_NAME] or "unit"
 
 
-def replace_dir(staged: Path, final: Path) -> None:
+def replace_dir(staged: Path, final: Path, verify: Callable[[Path], None] | None = None) -> None:
     """Put ``staged`` at ``final``, REPLACING whatever was there - never merging into it.
 
     ⚠️ **Round-2 blocker: packaging used to merge into an existing `<out>/<unit>`**, because every
@@ -1782,6 +2013,12 @@ def replace_dir(staged: Path, final: Path) -> None:
     a good one. The retired directory is moved aside before the swap and only deleted once the new
     one has landed, and it is restored if the rename fails - on Windows a directory rename onto an
     existing target fails outright, so the move-aside is required rather than defensive.
+
+    ``verify`` is called with the RETIRED directory after it has been renamed aside and before the
+    new one lands. Raising from it restores the retired directory and aborts the swap. That ordering
+    is the whole point: the check happens when nothing can still be written to the package through
+    its own path, so "unchanged since I looked" is established rather than assumed (round-2 finding
+    3). It is also why the deletion of the retired tree is the LAST thing that happens.
     """
     final.parent.mkdir(parents=True, exist_ok=True)
     if not final.exists():
@@ -1790,11 +2027,15 @@ def replace_dir(staged: Path, final: Path) -> None:
     retired = final.with_name(f".{final.name}.replaced")
     shutil.rmtree(retired, ignore_errors=True)
     _rename_retrying(final, retired)
+    swapped = False
     try:
+        if verify is not None:
+            verify(retired)
         _rename_retrying(staged, final)
-    except OSError:
-        _rename_retrying(retired, final)
-        raise
+        swapped = True
+    finally:
+        if not swapped:
+            _rename_retrying(retired, final)
     shutil.rmtree(retired, ignore_errors=True)
 
 
@@ -1819,14 +2060,39 @@ def _rename_retrying(src: Path, dst: Path) -> None:
             time.sleep(_SWAP_BACKOFF_SEC)
 
 
+def _data_source_notes(data_sources: dict[str, Any]) -> list[str]:
+    """One `PACKAGE_NOTE` line per way a source did not end up in the package, plus the bind reminder.
+
+    `handover.md` renders these, so every state `_localize_data_sources` records is readable by an
+    agent that never opens `package-manifest.json` - which is the file it is told to start from.
+    """
+    notes = [f"data source {row['file']} not shipped: {row['reason']}" for row in data_sources["omissions"]]
+    notes += [
+        f"data source {name} could not be shipped, so the model no longer names it: its literal was "
+        f"replaced with {UNAVAILABLE_TOKEN} because the original named the packaging machine only"
+        for name in data_sources["neutralized"]
+    ]
+    notes += [
+        f"data source {name} is a network share this packager does not probe, so it was left in the "
+        "model verbatim and its bytes are NOT in this package"
+        for name in data_sources["retained_network"]
+    ]
+    if data_sources["binding"]:
+        notes.append(
+            f"this package is UNBOUND: its folder parameter reads {PACKAGE_ROOT_TOKEN}, so run "
+            f"`{BIND_COMMAND}` before opening the model"
+        )
+    return notes
+
+
 def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-many-positional-arguments
     bundle: Path, unit: str, dest: Path, *, final: Path, oracle_dir: Path | None, assets_dir: Path | None
 ) -> dict[str, Any]:
     """Build one unit's package into ``dest``, which is always a fresh, empty directory.
 
-    ``final`` is where ``dest`` will be renamed to. Anything that must record its OWN location -
-    only the data-folder parameter today - has to use it, because ``dest`` stops existing the
-    moment packaging succeeds.
+    ``final`` is where ``dest`` will be renamed to. Anything that must record its OWN separator
+    flavour - only the data-folder parameter today - has to use it, because ``dest`` stops existing
+    the moment packaging succeeds. Neither path is written INTO the package (round-2 finding 1).
     """
     engine_report = read_json(bundle / "report.json")
     workbooks, datasources = engine_unit_names(engine_report)
@@ -1837,8 +2103,7 @@ def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
     if report_name is None and model_name is None:
         notes.append(f"no engine working copy at pbip/{unit} - nothing to build on")
     data_sources = _localize_data_sources(dest, final, model_name)
-    for omission in data_sources["omissions"]:
-        notes.append(f"data source {omission['file']} not shipped: {omission['reason']}")
+    notes.extend(_data_source_notes(data_sources))
 
     handover = read_json(bundle / "handover" / f"{unit}.json")
     (dest / "handover").mkdir(parents=True, exist_ok=True)
@@ -1900,7 +2165,10 @@ def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
     report_dir = dest / "fabric" / report_name if report_name else None
     workbook = _handover_workbook(handover, unit, dest)
     (dest / "handover.md").write_text(render_handover(result, workbook, visual_pages(report_dir)), encoding="utf-8")
-    (dest / "README.md").write_text(README.format(unit=unit, kind=result["kind"]), encoding="utf-8")
+    (dest / "README.md").write_text(
+        README.format(unit=unit, kind=result["kind"], package_root=PACKAGE_ROOT_TOKEN, unavailable=UNAVAILABLE_TOKEN),
+        encoding="utf-8",
+    )
     result["contents"] = {"files": package_contents(dest)}
     write_json(dest / MANIFEST_NAME, result)
     return result
@@ -1939,6 +2207,19 @@ def render(results: list[dict[str, Any]], out_root: Path, refused: list[PackageE
         lines.append(
             f"REFUSED: {len(refused)} unit(s) already carry edits in the package, which is the canonical "
             "place to work - they were left untouched. Re-run with --discard-package-edits to overwrite."
+        )
+    incomplete = sorted(result["unit"] for result in results if not result["data_sources"].get("self_contained", True))
+    if incomplete:
+        lines.append(
+            f"NOT SELF-CONTAINED: {len(incomplete)} unit(s) ship without a source their model names, so "
+            "that partition cannot refresh from the package - see data_sources in each "
+            f"{MANIFEST_NAME}: {', '.join(incomplete)}"
+        )
+    unbound = sorted(result["unit"] for result in results if result["data_sources"].get("binding"))
+    if unbound:
+        lines.append(
+            f"UNBOUND: {len(unbound)} unit(s) read their rows through a {PACKAGE_ROOT_TOKEN} placeholder. "
+            f"Wherever a package ends up, run `{BIND_COMMAND}` there before opening the model."
         )
     return "\n".join(lines)
 
@@ -2034,8 +2315,10 @@ def main(argv: list[str] | None = None) -> int:
     if not args.quiet:
         print(render(results, out_root, refused))
     if refused:
-        return 3
-    return 0 if all(result["packaged"] for result in results) else 1
+        return EXIT_EDITS_REFUSED
+    if any(not result["data_sources"].get("self_contained", True) for result in results):
+        return EXIT_NOT_SELF_CONTAINED
+    return EXIT_OK if all(result["packaged"] for result in results) else EXIT_NO_WORKING_COPY
 
 
 if __name__ == "__main__":

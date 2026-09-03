@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -260,17 +261,35 @@ def test_the_documented_check_unit_command_runs_on_a_package(tmp_path: Path) -> 
 #: So a package on which check_unit legitimately reported NOT_CHECKED was read as a usage error and
 #: failed this test, with an empty stderr as the only clue. Windows local runs happened to land on a
 #: different verdict, so nothing but CI saw it.
+#:
+#: ⚠️ **`check_unit.py` emits BOTH.** 64 is its own refusal for a directory it cannot use; 2 is what
+#: argparse emits for malformed SYNTAX - measured, `check_unit.py --bogus` exits 2 with a message on
+#: stderr - and dropping 2 from its map classified a real usage error as a verdict (round-2 finding
+#: 5). Both are mapped, and :func:`_rejected_the_argument` requires stderr, which is what separates
+#: argparse's 2 from `EXIT_NOT_CHECKED`'s silent 2. That distinction is asserted directly by
+#: `test_the_usage_map_separates_argparses_2_from_check_units_NOT_CHECKED`, because a mapping nobody
+#: exercises is how the wrong one survived a round.
 USAGE_EXITS = {
     "scripts/check_reference_readiness.py": (crr.EXIT_USAGE,),
-    "scripts/check_unit.py": (check_unit.EXIT_USAGE,),
+    "scripts/check_unit.py": (2, check_unit.EXIT_USAGE),
 }
+
+#: The one placeholder the package README puts where a caller must substitute the package's path.
+#: The command is executed with ONLY this token replaced, so any other malformed argument the README
+#: might grow is executed AS PRINTED and fails.
+PATH_PLACEHOLDER = "<path-to-this-folder>"
+
+#: The command the package README leads with. Not a gate - it has no verdict and no usage-exit map -
+#: so it is checked by RUNNING it and reading its effect, not by its exit classification.
+BIND_SCRIPT = "scripts/set_data_folder.py"
 
 
 def _rejected_the_argument(script: str, proc: subprocess.CompletedProcess[str]) -> bool:
     """Whether the gate refused the ARGUMENT, as opposed to returning a verdict about a package.
 
     Both halves are required. The exit code alone conflates a verdict with a refusal on any gate
-    whose codes overlap, and stderr alone would accept a gate that grumbles and still reports.
+    whose codes overlap - `check_unit.py` returns 2 for both argparse and `NOT_CHECKED` - and stderr
+    alone would accept a gate that grumbles and still reports.
     """
     return proc.returncode in USAGE_EXITS[script] and bool(proc.stderr.strip())
 
@@ -285,9 +304,13 @@ def test_every_command_the_readme_prints_produces_a_verdict_not_a_usage_error(tm
         error: HR_Dashboard is not a directory                       # exit 2
 
     An argparse usage error is not a verdict, so an agent following the package's own map learned
-    nothing about its package. The guard RUNS what the README prints rather than pattern-matching the
-    prose, and carries its own negative control: the bare unit name must STILL be a usage error, or
-    the assertion proves nothing about which argument the README chose.
+    nothing about its package.
+
+    ⚠️ **The DOCUMENTED argument is what runs.** Round-2 finding 5: this used to parse the argument
+    out of the README, throw it away, and run the gate on a path it had constructed itself - so any
+    malformed argument other than the exact bare unit name passed, and the test could not fail for
+    the defect it was written for (`mutation_survived=True`). Only the recognized
+    `<path-to-this-folder>` placeholder is substituted; everything else is executed as printed.
 
     ⚠️ A *verdict* is any exit the gate reaches after reading the package, INCLUDING
     `check_unit.EXIT_NOT_CHECKED` (2). "I looked and could not check it" is an opinion about the
@@ -297,26 +320,101 @@ def test_every_command_the_readme_prints_produces_a_verdict_not_a_usage_error(tm
     unit = _package(tmp_path, bundle, oracle)
     readme = (unit / "README.md").read_text(encoding="utf-8")
     commands = [line.split() for line in readme.splitlines() if line.startswith("    python scripts/")]
-    assert len(commands) == 2, f"expected both gate commands in the package README, got {commands}"
+    unmapped = [command[1] for command in commands if command[1] not in {*USAGE_EXITS, BIND_SCRIPT}]
+    assert not unmapped, f"the README prints a command whose usage exit is unknown here: {unmapped}"
+    gates = [command for command in commands if command[1] in USAGE_EXITS]
+    assert len(gates) == 2, f"expected both gate commands in the package README, got {commands}"
 
-    for _python, script, argument in commands:
-        assert script in USAGE_EXITS, f"the README prints an unmapped gate, so its usage exit is unknown: {script}"
-        assert argument != unit.name, f"the README passes a bare unit name to {script}, which is a usage error"
-        by_path = _run_gate(script, str(unit), tmp_path)
-        by_name = _run_gate(script, unit.name, tmp_path)
-        assert not _rejected_the_argument(script, by_path), (
-            f"{script} {unit} returned no verdict: exit {by_path.returncode}, stderr {by_path.stderr.strip()!r}"
+    for _python, script, *arguments in gates:
+        as_printed = [argument.replace(PATH_PLACEHOLDER, str(unit)) for argument in arguments]
+        by_doc = _run_gate(script, as_printed, tmp_path)
+        assert not _rejected_the_argument(script, by_doc), (
+            f"the README's own command `{script} {' '.join(arguments)}` returned no verdict: "
+            f"exit {by_doc.returncode}, stderr {by_doc.stderr.strip()!r}"
         )
+        by_name = _run_gate(script, [unit.name], tmp_path)
         assert _rejected_the_argument(script, by_name), (
             f"negative control failed: {script} accepted the bare unit name {unit.name!r} "
             f"(exit {by_name.returncode}), so this test could not have caught the defect it exists for"
         )
 
 
-def _run_gate(script: str, argument: str, cwd: Path) -> subprocess.CompletedProcess[str]:
+@pytest.mark.slow
+def test_the_usage_map_separates_argparses_2_from_check_units_NOT_CHECKED(tmp_path: Path) -> None:
+    """Round-2 finding 5: `check_unit.py`'s map omitted argparse's own 2, so a usage error read as a verdict.
+
+    Three measured cases, and each one is a different cell of the table:
+
+    * `check_unit.py --bogus`   -> 2, stderr  -> a USAGE error (argparse), not a verdict
+    * `check_unit.py <not-a-dir>` -> 64, stderr -> the gate's own refusal
+    * `check_unit.py <package>` -> a verdict, whatever it is, and NEVER classified as usage
+
+    The third is what stops the fix for the first from swallowing `EXIT_NOT_CHECKED`, which is also
+    2 and is a genuine opinion about the package.
+    """
+    script = "scripts/check_unit.py"
+    bogus = _run_gate(script, ["--definitely-not-a-flag"], tmp_path)
+    assert (bogus.returncode, bool(bogus.stderr.strip())) == (2, True)
+    assert _rejected_the_argument(script, bogus), "an argparse usage error is being read as a verdict"
+
+    missing = _run_gate(script, ["definitely-not-a-directory"], tmp_path)
+    assert missing.returncode == check_unit.EXIT_USAGE
+    assert _rejected_the_argument(script, missing)
+
+    bundle, oracle, _ = _bundle(tmp_path, covered=None)
+    unit = _package(tmp_path, bundle, oracle)
+    real = _run_gate(script, [str(unit)], tmp_path)
+    assert not _rejected_the_argument(script, real), (
+        f"a verdict on a real package was classified as a usage error: exit {real.returncode}, "
+        f"stderr {real.stderr.strip()!r}"
+    )
+
+
+@pytest.mark.slow
+def test_the_readme_command_that_BINDS_the_package_actually_binds_it(tmp_path: Path) -> None:
+    """The package is not runnable until it is bound, so the README's first command has to work.
+
+    Round-2 finding 4 measured the documented relocation command writing `/tmp/package\\data\\...`
+    on POSIX, reporting the folder missing, exiting 1 - and leaving the file rewritten to that
+    invalid value. Round-2 finding 1 makes binding load-bearing rather than a repair, so it is run
+    exactly as printed and its effect is read off disk.
+
+    ⚠️ This fixture's unit is report-only, so what it proves is that the README's own first command
+    RUNS and succeeds on a package this packager actually produced - including the model-less shape,
+    which is a whole class of units and used to be answered with "is this a package folder?". The
+    row-level proof (placeholder in, real directory out, partition reads the file) needs a model with
+    imported data and lives in `test_package_unit.py`:
+    `test_a_moved_package_still_reaches_its_rows_once_it_is_BOUND`.
+    """
+    bundle, oracle, _ = _bundle(tmp_path, covered=None)
+    unit = _package(tmp_path, bundle, oracle)
+    readme = (unit / "README.md").read_text(encoding="utf-8")
+    printed = [line.split() for line in readme.splitlines() if line.startswith(f"    python {BIND_SCRIPT}")]
+    assert len(printed) == 1, f"the package README no longer prints the binding command: {readme[:400]}"
+
+    _python, script, *arguments = printed[0]
+    proc = subprocess.run(  # noqa: S603
+        [sys.executable, str(SCRIPTS.parent / script), *[a.replace(PATH_PLACEHOLDER, str(unit)) for a in arguments]],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=str(tmp_path),
+        timeout=900,
+    )
+    assert proc.returncode == 0, f"the documented binding command failed: {proc.stdout}\n{proc.stderr}"
+    expressions = list(unit.glob("fabric/*.SemanticModel/definition/expressions.tmdl"))
+    for path in expressions:
+        text = path.read_text(encoding="utf-8")
+        assert pkg.PACKAGE_ROOT_TOKEN not in text, "binding left the placeholder in place"
+        for value in re.findall(r'expression\s+(?:#"[^"]+"|[^\s=]+)\s*=\s*"([^"]*)"', text):
+            if value.startswith(str(unit)):
+                assert Path(value.rstrip("\\/")).is_dir(), f"binding wrote a directory that is not there: {value}"
+
+
+def _run_gate(script: str, arguments: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     """Run one README command line, from a directory where the bare unit name resolves to nothing."""
     return subprocess.run(  # noqa: S603
-        [sys.executable, str(SCRIPTS.parent / script), argument, "--quiet"],
+        [sys.executable, str(SCRIPTS.parent / script), *arguments, "--quiet"],
         capture_output=True,
         text=True,
         check=False,

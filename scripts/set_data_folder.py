@@ -3,13 +3,14 @@ purpose: Manage the per-model folder M-parameter that each generated Fabric sema
          locate its imported data. The value committed to git is a portable placeholder
          (`<REPO_ROOT>\\<tree>\\<slug>\\data\\`) so no contributor's absolute machine path (and
          username) ever ships in the repo. Run this once after cloning to point every model at your
-         local checkout so Power BI Desktop can refresh with real data. `--package` does the same job
-         for ONE handover package that has been moved: `scripts/package_unit.py` writes the parameter
-         as an absolute path into the package, so moving the folder breaks refresh until it is reset.
+         local checkout so Power BI Desktop can refresh with real data. `--package` is the same idea
+         for ONE handover package: `scripts/package_unit.py` writes `<PACKAGE_ROOT>` rather than the
+         machine that built the package, so BINDING it to wherever it now lives is a step of using
+         it - run this before opening the model, and again after every move.
 usage:   python scripts/set_data_folder.py            # localize: set every model to THIS checkout's absolute path
          python scripts/set_data_folder.py --sanitize # restore the <REPO_ROOT> placeholder (run before committing)
          python scripts/set_data_folder.py --check     # CI gate: fail if any tracked file leaks an absolute user path
-         python scripts/set_data_folder.py --package <dir>  # re-point ONE moved package at its own data/
+         python scripts/set_data_folder.py --package <dir>  # bind ONE package to its own data/
 """
 
 import argparse
@@ -19,8 +20,17 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from path_flavour import join as flavour_join  # noqa: E402  # pylint: disable=wrong-import-position
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PLACEHOLDER = "<REPO_ROOT>"
+#: The placeholder `package_unit.py` writes into a handover package instead of the machine that
+#: built it. Rooting the value here is what makes a package movable at all: the builder cannot know
+#: where the package will end up, and Power Query rejects a relative `File.Contents` argument, so
+#: binding is a step of CONSUMING the package rather than something baked into it (issue #461).
+PACKAGE_PLACEHOLDER = "<PACKAGE_ROOT>"
 #: Matches ANY `expression <name> = "<value>"` declaration, capturing the quoted value.
 #:
 #: ⚠️ **Matching by NAME was a blind spot, not a shortcut.** The old pattern accepted
@@ -45,6 +55,11 @@ ABSOLUTE_USER_PATH_RE = re.compile(
 #: and this script re-roots onto. It is the segment the rewrite pivots on, never a whole value.
 DATA_SEGMENT = "data"
 EXPRESSIONS_TMDL = "expressions.tmdl"
+#: What proves a directory IS a handover package even when it has no model to bind. A report-only
+#: unit ships no `expressions.tmdl` at all, and the README prints the binding command in every
+#: package, so treating "no model" as "you pointed me at the wrong folder" would make the package's
+#: own first documented command fail for a whole class of units. The manifest tells the two apart.
+PACKAGE_MANIFEST = "package-manifest.json"
 
 
 def _model_expression_files() -> list[Path]:
@@ -70,29 +85,34 @@ def _tree_and_slug_for(expr_file: Path) -> tuple[str, str]:
 
 
 def _is_pathish(value: str) -> bool:
-    """Whether a parameter value looks like a filesystem path at all (absolute, or the placeholder)."""
-    return value.startswith(PLACEHOLDER) or bool(re.match(r"^(?:[A-Za-z]:[\\/]|\\\\|/)", value))
+    """Whether a parameter value looks like a filesystem path at all (absolute, or a placeholder)."""
+    return value.startswith((PLACEHOLDER, PACKAGE_PLACEHOLDER)) or bool(re.match(r"^(?:[A-Za-z]:[\\/]|\\\\|/)", value))
 
 
 def _data_tail(value: str) -> str | None:
     """What a data-folder value names BELOW its `data` segment, or None when it has no such segment.
 
     ⚠️ **Dropping this tail is what made the relocation guidance produce a broken path.** A package's
-    folder parameter is `<package>\\data\\<Unit>.Data\\` - the rows live in a SUBDIRECTORY of `data/`,
-    because `package_unit._packaged_data_target` keeps the source folder's own leaf name so two
-    sources cannot collide on one destination. Rewriting the whole value to `...\\data\\` therefore
-    pointed the partition at a directory that merely CONTAINS the one it needs, and the file it reads
-    is not there. Nothing downstream can see that: the model stays structurally perfect and fails at
-    refresh, on someone else's machine.
+    folder parameter is `<PACKAGE_ROOT>\\data\\<Unit>.Data\\` - the rows live in a SUBDIRECTORY of
+    `data/`, because `package_unit._packaged_data_target` keeps the source folder's own leaf name so
+    two sources cannot collide on one destination. Rewriting the whole value to `...\\data\\`
+    therefore pointed the partition at a directory that merely CONTAINS the one it needs, and the
+    file it reads is not there. Nothing downstream can see that: the model stays structurally perfect
+    and fails at refresh, on someone else's machine.
 
     Read from the LAST `data` segment, so a checkout that itself lives under a folder called `data`
     cannot truncate the tail in the wrong place.
+
+    ⚠️ Returned `/`-joined and SEPARATOR-FREE of intent: the caller composes it onto the destination
+    with that destination's own separator (:func:`path_flavour.join`). Joining it here with a literal
+    backslash is what wrote `/tmp/package\\data\\...` on POSIX - one path segment with backslashes
+    inside it - and then reported the directory missing (round-2 finding 4).
     """
     parts = [part for part in re.split(r"[\\/]", value) if part]
     lowered = [part.casefold() for part in parts]
     if DATA_SEGMENT not in lowered:
         return None
-    return "\\".join(parts[len(lowered) - lowered[::-1].index(DATA_SEGMENT) :])
+    return "/".join(parts[len(lowered) - lowered[::-1].index(DATA_SEGMENT) :])
 
 
 def _rewritten(text: str, base: str) -> tuple[str, int, list[str]]:
@@ -102,6 +122,13 @@ def _rewritten(text: str, base: str) -> tuple[str, int, list[str]]:
     `data` and its trailing-separator convention are BOTH preserved: partitions concatenate a file
     name onto this value (`#"SourceFolder" & "\\Sample.xlsx"`), so adding or dropping a separator
     silently breaks every path built from it.
+
+    ⚠️ **The separator comes from ``base``'s FLAVOUR, through the one composer both scripts share**
+    (:func:`path_flavour.join`), never from a literal backslash and never from "does the string
+    contain one". A POSIX directory whose name legitimately contains a backslash -
+    `/var/tmp/customer\\name/Book` - reads as Windows to that heuristic and gets a mixed value back
+    (round-2 finding 4); flavour is decided by the ROOT of the path, which is the only part of it
+    that carries the answer.
 
     A path-shaped value with no `data` segment is returned as a finding rather than skipped - this
     script cannot tell where such a parameter should point, and saying nothing is how a model drifts
@@ -119,9 +146,9 @@ def _rewritten(text: str, base: str) -> tuple[str, int, list[str]]:
         if tail is None:
             untouched.append(value)
             return match.group(0)
-        trailing = "\\" if value.endswith(("\\", "/")) else ""
         rewrites += 1
-        rerooted = "\\".join([base, DATA_SEGMENT] + ([tail] if tail else [])) + trailing
+        segments = [DATA_SEGMENT, tail] if tail else [DATA_SEGMENT]
+        rerooted = flavour_join(base, *segments, trailing=value.endswith(("\\", "/")))
         return f"{match.group(1)}{rerooted}{match.group(3)}"
 
     return EXPRESSION_RE.sub(_sub, text), rewrites, untouched
@@ -130,7 +157,13 @@ def _rewritten(text: str, base: str) -> tuple[str, int, list[str]]:
 def _rewrite(expr_file: Path, sanitize: bool) -> bool:
     text = expr_file.read_text(encoding="utf-8")
     tree, slug = _tree_and_slug_for(expr_file)
-    base = f"{PLACEHOLDER if sanitize else REPO_ROOT}\\{tree}\\{slug}"
+    segments = [*tree.split("\\"), slug]
+    # The SANITIZED value is pinned to backslashes deliberately: it is the byte-identical placeholder
+    # this repo commits, and the deliverable it lives in is opened in Power BI Desktop, which is
+    # Windows-only. Composing it with the host separator would make `--sanitize` rewrite every
+    # committed model differently depending on who ran it. The LOCALIZED value is the opposite case -
+    # it names this machine, so it takes this machine's flavour, through the shared composer.
+    base = "\\".join([PLACEHOLDER, *segments]) if sanitize else flavour_join(str(REPO_ROOT), *segments)
 
     new_text, rewrites, untouched = _rewritten(text, base)
     for value in untouched:
@@ -142,20 +175,25 @@ def _rewrite(expr_file: Path, sanitize: bool) -> bool:
         return False
     if new_text != text:
         expr_file.write_text(new_text, encoding="utf-8")
-        print(f"  set {slug} -> {base}\\{DATA_SEGMENT}\\")
+        print(f"  set {slug} -> {flavour_join(base, DATA_SEGMENT, trailing=True)}")
         return True
     return False
 
 
 def _package(root: Path) -> int:
-    """Re-point ONE moved handover package's model at the package's own `data/`. 0 ok / 1 findings.
+    """Re-point ONE handover package's model at the package's own `data/`. 0 ok / 1 findings.
 
-    `package_unit.py` writes the folder parameter as an ABSOLUTE path (Power Query rejects a relative
-    `File.Contents` argument outright), so the value stops resolving the moment the package is moved
-    or handed to someone else - which is exactly when a package is used. The package README names
-    this command; the check below is what makes it trustworthy rather than merely plausible: every
-    value written is asserted to name a directory that EXISTS, so a rewrite that looks right and
-    resolves to nothing is reported here instead of at refresh time.
+    `package_unit.py` writes the folder parameter as :data:`PACKAGE_PLACEHOLDER` (Power Query rejects
+    a relative `File.Contents` argument outright, and the builder cannot know where the package will
+    end up), so a package does not resolve its own rows until it is BOUND - which is what this does,
+    and what the package README leads with. Re-run it after every move.
+
+    ⚠️ **Every value is computed and validated BEFORE anything is written.** The old order wrote each
+    file as it went and only then checked what it had produced, so a package that failed the check
+    had already been modified - on POSIX it was left holding `/tmp/package\\data\\...`, an invalid
+    value, with exit 1 as the only sign (round-2 finding 4). A relocation that cannot succeed must
+    leave the package exactly as it found it, because the alternative is a customer artifact in a
+    state neither this script nor its README describes.
     """
     root = root.resolve()
     if not root.is_dir():
@@ -163,9 +201,13 @@ def _package(root: Path) -> int:
         return 1
     expr_files = sorted(root.glob(f"fabric/*.SemanticModel/definition/{EXPRESSIONS_TMDL}"))
     if not expr_files:
+        if (root / PACKAGE_MANIFEST).is_file():
+            print(f"OK - nothing to bind: no model in {root.name} declares a data-folder parameter")
+            return 0
         print(f"no fabric/*.SemanticModel/definition/{EXPRESSIONS_TMDL} under {root} - is this a package folder?")
         return 1
     findings: list[str] = []
+    planned: list[tuple[Path, str, int]] = []
     for expr_file in expr_files:
         text = expr_file.read_text(encoding="utf-8")
         new_text, rewrites, untouched = _rewritten(text, str(root))
@@ -173,16 +215,21 @@ def _package(root: Path) -> int:
         if rewrites == 0:
             print(f"  none {expr_file.relative_to(root)} declares no data-folder parameter")
             continue
-        if new_text != text:
-            expr_file.write_text(new_text, encoding="utf-8")
-        print(f"  set  {expr_file.relative_to(root)} -> {root}\\{DATA_SEGMENT}\\ ({rewrites} parameter(s))")
         findings += _unresolved(new_text)
+        planned.append((expr_file, new_text, rewrites))
     if findings:
-        print("PACKAGE NOT USABLE - the model still names something that is not there:")
+        print("PACKAGE NOT USABLE - nothing was written, the model would still name something that is not there:")
         for finding in findings:
             print(f"  {finding}")
         return 1
-    print(f"OK - {len(expr_files)} model(s) re-pointed at {root}\\{DATA_SEGMENT}\\")
+    for expr_file, new_text, rewrites in planned:
+        if new_text != expr_file.read_text(encoding="utf-8"):
+            expr_file.write_text(new_text, encoding="utf-8")
+        print(
+            f"  set  {expr_file.relative_to(root)} -> {flavour_join(str(root), DATA_SEGMENT, trailing=True)}"
+            f" ({rewrites} parameter(s))"
+        )
+    print(f"OK - {len(expr_files)} model(s) re-pointed at {flavour_join(str(root), DATA_SEGMENT, trailing=True)}")
     return 0
 
 
@@ -247,7 +294,7 @@ def main() -> None:
         "--package",
         type=Path,
         metavar="DIR",
-        help="re-point ONE handover package's model at its own data/ after the package has been moved",
+        help="bind ONE handover package's model to its own data/, wherever the package now lives",
     )
     args = parser.parse_args()
 
