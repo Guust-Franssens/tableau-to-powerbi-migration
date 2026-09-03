@@ -873,24 +873,147 @@ def test_the_module_layout_comment_names_the_oracle_kinds_the_code_emits() -> No
         assert f"{kind}/{{images,data}}" in doc, f"the layout comment does not name {kind}/"
 
 
-def test_the_readme_separates_the_png_and_svg_evidence_legs(tmp_path: Path) -> None:
-    """They are different evidence, not duplicates: the PNG is looked at, the SVG is grepped.
+def test_the_readme_leads_with_the_csv_numeric_oracle_before_any_image(tmp_path: Path) -> None:
+    """The CSVs are the numeric oracle, and the README used to bury them in a table cell.
 
-    ⚠️ Round-2 review: this asserted only "not duplicates", the two extensions and `122`, so
-    **deleting the entire zero-text caveat left it green**. The caveat is the half an agent acts on -
-    it is what stops "the SVG has no text" being read as "the object has no content" - so it is
-    asserted here explicitly, by the worksheets it names.
-
-    The count was also wrong: **four** worksheets in that workbook carry zero `<text>` elements, not
-    three. `Terminated By Year` was omitted when the finding was first written up.
+    Measured on the 2026-09-03 cold run, by the agent that worked from the package: two of its three
+    targets would have been near-useless as SVG data oracles (`Cities` carries 9 `<text>` elements,
+    `States` 24), while `oracle/worksheet/data/States.csv` handed over `New York 6,270 /
+    Michigan 976` plus the `Rank Top 2` boolean with no OCR and no judgement. So the ORDER is the
+    finding: whichever evidence the README names first is the one an agent reaches for.
     """
     readme = (_package_with_receipt(tmp_path) / "README.md").read_text(encoding="utf-8")
-    assert "not duplicates" in readme
+    csv_at = readme.find("`oracle/*/data/*.csv`")
+    assert csv_at != -1, "the README does not name the CSV oracle by its glob"
+    assert "NUMERIC oracle" in readme[csv_at : csv_at + 120]
+    first_image = min(readme.find("`.png`"), readme.find("`.svg`"))
+    assert first_image != -1
+    assert csv_at < first_image, "the README still introduces the image legs before the numeric oracle"
+
+
+def test_the_readme_keeps_the_png_and_svg_legs_distinct_with_the_zero_text_caveat(tmp_path: Path) -> None:
+    """They are different evidence: the PNG is looked at, the SVG is grepped - and may be empty.
+
+    ⚠️ Round-2 review of the original guard: it asserted only "not duplicates", the two extensions
+    and a measured count, so **deleting the entire zero-text caveat left it green**. The caveat is
+    the half an agent acts on - it is what stops "the SVG has no text" being read as "the object has
+    no content" - so both halves are asserted, and neither is a count that a re-measurement retires.
+    """
+    readme = " ".join((_package_with_receipt(tmp_path) / "README.md").read_text(encoding="utf-8").split())
     assert "`.png`" in readme and "`.svg`" in readme
-    assert "122" in readme
-    assert "zero" in readme
-    for silent in ("Hired By Year", "Terminated By Year", "Age Groups", "Education Levels"):
-        assert silent in readme, f"the zero-text caveat does not name {silent}"
+    assert "LOOK at" in readme, "the README no longer says what the PNG leg is FOR"
+    assert "`<text>`" in readme, "the README no longer says what the SVG leg is FOR"
+    assert "zero text is not zero content" in readme, "the zero-text caveat has been deleted"
+
+
+def test_the_readme_states_the_page_pairing_contract(tmp_path: Path) -> None:
+    """`check_unit.page_expectation` pairs on the page's exact name, and only a RENDERED page counts.
+
+    The cold-run agent had to read `check_unit.py` to learn this, which is the trip the package
+    exists to remove. Verified against the source rather than the brief: `actual_pages` takes
+    ``displayName`` (falling back to the internal name, then the directory id), ``rendered`` keeps
+    only pages with at least one ``visual.json``, and ``_claim`` attributes a name claimed by two
+    expected objects to NEITHER.
+    """
+    readme = " ".join((_package_with_receipt(tmp_path) / "README.md").read_text(encoding="utf-8").split())
+    assert "`displayName`" in readme
+    assert "at least one visual" in readme, "the README does not say a zero-visual page is not rebuilt"
+    assert "DIRECTORY id is free" in readme, "the README does not free the page directory id"
+    assert "satisfies neither" in readme, "the README does not state the contested-name rule"
+
+
+def test_the_package_ships_the_spec_schema_it_tells_an_agent_to_obey(tmp_path: Path) -> None:
+    """Shipping the contract beats describing it: the cold-run agent invented a shape and lost six entries.
+
+    The file is asserted to be byte-identical to `docs/migration-spec.schema.json`, because a scoped
+    extract is a copy, and a copy of a contract drifts from the contract `validate_spec.py` enforces.
+    """
+    root = _package_with_receipt(tmp_path)
+    shipped = root / "migration-spec.schema.json"
+    assert shipped.is_file(), "the package does not ship the spec contract"
+    assert shipped.read_bytes() == pkg.SPEC_SCHEMA.read_bytes()
+    manifest = json.loads((root / "package-manifest.json").read_text(encoding="utf-8"))
+    assert manifest["artifacts"]["migration_spec_schema"] == "migration-spec.schema.json"
+
+    schema = json.loads(shipped.read_text(encoding="utf-8"))
+    limitation = schema["properties"]["limitations_encountered"]["items"]
+    assert limitation["additionalProperties"] is False
+    assert sorted(limitation["required"]) == ["issue", "item", "severity", "stage"]
+
+
+def test_the_readme_names_the_provenance_ceiling_it_cannot_lift(tmp_path: Path) -> None:
+    """An agent must learn up front which finding it can NEVER clear from inside the package.
+
+    Measured on the shipped `HR_Dashboard` package: `origin.match` is `name_only`, every emitted page
+    reports `UNVERIFIABLE - REVISION NOT ESTABLISHED`, and the gate exits 1. The remedy needs Tableau
+    Server credentials AND the three `origin` fields `scope.dropped_fields` strips, so it is not
+    reachable from here - which is worth a few lines and is otherwise a whole budget spent finding
+    out.
+    """
+    readme = " ".join((_package_with_receipt(tmp_path) / "README.md").read_text(encoding="utf-8").split())
+    section = readme.split("## UNFIXABLE FROM THIS PACKAGE", 1)
+    assert len(section) == 2, "the README has no UNFIXABLE section"
+    body = section[1]
+    assert '`origin.match: "name_only"`' in body
+    for stripped in ("origin.remote_sha256", "origin.server", "origin.site"):
+        assert stripped in body, f"the ceiling does not name the dropped field {stripped}"
+    assert "stamp_tableau_provenance.py" in body
+    assert "NEVER exit 0" in body, "the consequence is not stated plainly"
+
+
+def test_AGENTS_md_and_the_package_readme_agree_on_where_an_agent_edits(tmp_path: Path) -> None:
+    """Issue #460: two shipped documents named two different canonical edit locations.
+
+    `AGENTS.md`'s three-locations table said `<bundle>/pbip/`; the generated package README said
+    `<package>/fabric/` - and `_copy_fabric` makes the second a `shutil.copytree` of the first, so
+    they are byte-identical until one is edited and diverge silently thereafter. Promoting from the
+    wrong one discards every agent edit.
+
+    The guard is a CROSS-DOCUMENT derivation, not two copies of a string: it reads which row the
+    README marks `**edit here**`, takes that row's own path, and requires `AGENTS.md`'s working-copy
+    row to name it under `<package>/`. Change either side alone and this fails.
+    """
+    agents_row = _agents_working_copy_row()
+    readme = (_package_with_receipt(tmp_path) / "README.md").read_text(encoding="utf-8")
+    edit_rows = [line for line in readme.splitlines() if "**edit here**" in line]
+    assert len(edit_rows) == 1, f"the README must mark exactly one tree as the edit location: {edit_rows}"
+    edit_path = edit_rows[0].split("|")[1].strip().strip("`")
+
+    assert f"<package>/{edit_path}" in agents_row, (
+        f"the package README tells an agent to edit `{edit_path}`, but AGENTS.md's working-copy row "
+        f"does not name <package>/{edit_path}: {agents_row.strip()}"
+    )
+    assert "CANONICAL" in agents_row, "AGENTS.md does not say which tree wins when both exist"
+    assert "canonical" in edit_rows[0], "the README does not say the package tree wins"
+
+
+def test_declared_edit_tooling_is_scoped_to_bundle_work_in_BOTH_documents(tmp_path: Path) -> None:
+    """The cheap half of #460: `declare_generated_edit.py` cannot run on package work at all.
+
+    The cold-run agent reported its edits were "undeclarable by construction", so the tamper
+    machinery that argued for keeping the bundle canonical was not protecting the package path
+    anyway. Both documents must say so, or one of them sends an agent to run a tool that cannot run.
+    """
+    agents_row = _agents_working_copy_row()
+    readme = (_package_with_receipt(tmp_path) / "README.md").read_text(encoding="utf-8")
+    for text, where in ((agents_row, "AGENTS.md"), (readme, "the package README")):
+        assert "declare_generated_edit.py" in text, f"{where} does not name the declared-edit tool"
+        assert "--tamper" in text, f"{where} does not name the tamper check"
+        assert "bundle" in text.lower(), f"{where} does not scope the declared-edit tooling to bundle work"
+
+
+def _agents_working_copy_row() -> str:
+    """The one `working copy` row of AGENTS.md's synced three-locations table.
+
+    Read from inside `<!-- BEGIN:shared-conventions -->` on purpose: that block is what
+    `sync_agent_conventions.py` copies into every persona, so a row asserted here is a row every
+    subagent actually receives.
+    """
+    text = (Path(__file__).resolve().parents[1] / "AGENTS.md").read_text(encoding="utf-8")
+    block = text.split("<!-- BEGIN:shared-conventions -->")[1].split("<!-- END:shared-conventions -->")[0]
+    rows = [line for line in block.splitlines() if line.strip().startswith("| working copy |")]
+    assert len(rows) == 1, f"expected exactly one working-copy row in the synced block, got {len(rows)}"
+    return rows[0]
 
 
 # --------------------------------------------------------------------------------------------

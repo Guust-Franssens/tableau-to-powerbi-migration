@@ -251,6 +251,55 @@ def test_the_documented_check_unit_command_runs_on_a_package(tmp_path: Path) -> 
     assert checks["oracle-coverage"]["status"] == check_unit.STATUS_PASS
 
 
+#: Every usage exit either gate can return. `check_reference_readiness.py` uses argparse's 2 and
+#: `check_unit.py` uses 64; both mean "I have no opinion about this package", which is precisely what
+#: a README command must never produce.
+USAGE_EXITS = (2, check_unit.EXIT_USAGE)
+
+
+@pytest.mark.slow
+def test_every_command_the_readme_prints_produces_a_verdict_not_a_usage_error(tmp_path: Path) -> None:
+    """The README showed the unit NAME where both gates require a PATH (2026-09-03 cold run).
+
+    Measured against the shipped `HR_Dashboard` package before this fix::
+
+        $ python scripts/check_reference_readiness.py HR_Dashboard
+        error: HR_Dashboard is not a directory                       # exit 2
+
+    An argparse usage error is not a verdict, so an agent following the package's own map learned
+    nothing about its package. The guard RUNS what the README prints rather than pattern-matching the
+    prose, and carries its own negative control: the bare unit name must STILL be a usage error, or
+    the assertion proves nothing about which argument the README chose.
+    """
+    bundle, oracle, _ = _bundle(tmp_path, covered=None)
+    unit = _package(tmp_path, bundle, oracle)
+    readme = (unit / "README.md").read_text(encoding="utf-8")
+    commands = [line.split() for line in readme.splitlines() if line.startswith("    python scripts/")]
+    assert len(commands) == 2, f"expected both gate commands in the package README, got {commands}"
+
+    for _python, script, argument in commands:
+        assert argument != unit.name, f"the README passes a bare unit name to {script}, which is a usage error"
+        by_path = _run_gate(script, str(unit), tmp_path)
+        by_name = _run_gate(script, unit.name, tmp_path)
+        assert by_path.returncode not in USAGE_EXITS, f"{script} {unit}: {by_path.stderr}"
+        assert by_name.returncode in USAGE_EXITS, (
+            f"negative control failed: {script} accepted the bare unit name {unit.name!r}, so this "
+            "test could not have caught the defect it exists for"
+        )
+
+
+def _run_gate(script: str, argument: str, cwd: Path) -> subprocess.CompletedProcess[str]:
+    """Run one README command line, from a directory where the bare unit name resolves to nothing."""
+    return subprocess.run(  # noqa: S603
+        [sys.executable, str(SCRIPTS.parent / script), argument, "--quiet"],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=str(cwd),
+        timeout=900,
+    )
+
+
 def test_an_out_dir_inside_the_capture_tree_is_refused(tmp_path: Path) -> None:
     """The silent downgrade this fixture layout produced: BOTH oracles visible, every page unverifiable.
 

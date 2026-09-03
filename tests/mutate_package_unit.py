@@ -221,12 +221,67 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
     (
         "README: delete the zero-text SVG caveat (survived round-1's assertion)",
         PACKAGER,
-        "* ⚠️ but an SVG is not universally a data oracle: a chart whose labels render as paths carries\n"
-        "  **zero** `<text>` elements. Measured on the same workbook, **four** of its worksheets do -\n"
-        "  `Hired By Year`, `Terminated By Year`, `Age Groups` and `Education Levels`. Absence of text is not\n"
-        "  absence of content - fall back to the PNG.",
-        "* the SVG and the PNG are both renders of the same object.",
-        ["test_the_readme_separates_the_png_and_svg_evidence_legs"],
+        "values as greppable `<text>` elements, except where labels render as paths - zero text is not zero\ncontent.",
+        "values as greppable `<text>` elements, and both are renders of the same object.",
+        ["test_the_readme_keeps_the_png_and_svg_legs_distinct_with_the_zero_text_caveat"],
+    ),
+    # ---- the 2026-09-03 cold-run findings, each a prose or shipping guard ----------------------
+    (
+        "README: demote the CSV oracle back below the image legs",
+        PACKAGER,
+        "**`oracle/*/data/*.csv` is the NUMERIC oracle** - exact labels and figures, "
+        "no OCR and no judgement. Read it first.",
+        "it also carries this unit's exported numbers.",
+        ["test_the_readme_leads_with_the_csv_numeric_oracle_before_any_image"],
+    ),
+    (
+        "README: drop the page-pairing contract an agent otherwise reads check_unit.py for",
+        PACKAGER,
+        "A page counts as REBUILT only when a page carrying at least one visual has a `displayName` EXACTLY\n"
+        "equal to the expected object's name; the page DIRECTORY id is free (the gates print it), and a name\n"
+        "two expected objects both claim satisfies neither.",
+        "Both gates grade this unit against the pages it is expected to carry.",
+        ["test_the_readme_states_the_page_pairing_contract"],
+    ),
+    (
+        "README: put the bare unit NAME back on the documented gate commands",
+        PACKAGER,
+        "    python scripts/check_reference_readiness.py <path-to-this-folder>\n"
+        "    python scripts/check_unit.py <path-to-this-folder>",
+        "    python scripts/check_reference_readiness.py {unit}\n    python scripts/check_unit.py {unit}",
+        ["test_every_command_the_readme_prints_produces_a_verdict_not_a_usage_error"],
+    ),
+    (
+        "README: delete the provenance ceiling an agent cannot lift from inside the package",
+        PACKAGER,
+        "## UNFIXABLE FROM THIS PACKAGE",
+        "## Notes",
+        ["test_the_readme_names_the_provenance_ceiling_it_cannot_lift"],
+    ),
+    (
+        "README: send the agent back to the bundle to edit (issue #460's silent-discard shape)",
+        PACKAGER,
+        "| `fabric/` | the engine WORKING COPY - **edit here**, and when you work from a package THIS tree "
+        "is canonical; `<bundle>/pbip/` never promotes over it.",
+        "| `fabric/` | a copy of the engine working copy; edit `<bundle>/pbip/` instead.",
+        [
+            "test_AGENTS_md_and_the_package_readme_agree_on_where_an_agent_edits",
+            "test_declared_edit_tooling_is_scoped_to_bundle_work_in_BOTH_documents",
+        ],
+    ),
+    (
+        "README: drop the bundle-only scope from the declared-edit tooling note",
+        PACKAGER,
+        " Declared-edit tooling (`declare_generated_edit.py`, `--tamper`) is bundle-only.",
+        "",
+        ["test_declared_edit_tooling_is_scoped_to_bundle_work_in_BOTH_documents"],
+    ),
+    (
+        "packager: stop shipping the spec contract, leaving the README to describe it",
+        PACKAGER,
+        "    shutil.copy2(SPEC_SCHEMA, dest / SPEC_SCHEMA.name)\n    return SPEC_SCHEMA.name, None",
+        "    return None, None",
+        ["test_the_package_ships_the_spec_schema_it_tells_an_agent_to_obey"],
     ),
     (
         f"{NEGATIVE_CONTROL}: a comment-only edit that must change no verdict",

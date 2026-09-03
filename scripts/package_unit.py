@@ -161,6 +161,14 @@ from object_identity import (  # noqa: E402  # pylint: disable=wrong-import-posi
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
+#: The migration-spec CONTRACT, shipped INTO each package rather than described in its README.
+#: Measured on the 2026-09-03 cold run: an agent given nothing but a package invented a plausible
+#: `limitations_encountered` shape (`{id, category, objects, detail, owner, status}`) and
+#: `validate_spec.py` rejected all six entries, because the real item is exactly
+#: `item`/`issue`/`severity`/`stage` under `additionalProperties: false`. Learning that cost a trip
+#: outside the package. Prose restating a schema is a copy that drifts; the schema itself cannot.
+SPEC_SCHEMA = SCRIPT_DIR.parent / "docs" / "migration-spec.schema.json"
+
 #: The render legs an oracle view may claim, in the order `reference_evidence._oracle_leg` reads them.
 RENDER_LEGS = ("image", "svg", "pdf")
 #: Marks a leg the packager refused to copy. Anything other than "ok" makes the gate skip it.
@@ -772,42 +780,46 @@ def render_handover(result: dict[str, Any], workbook: dict[str, Any] | None, pag
 
 README = """# {unit}
 
-Self-contained handover package for one migration unit ({kind}). Both entry and exit gates run
-against this folder with **no flags**:
+Self-contained handover package for one migration unit ({kind}). Both entry and exit gates take
+THIS FOLDER'S PATH as their only argument - a bare unit name is an argparse error (exit 2), never a
+verdict:
 
-    python scripts/check_reference_readiness.py {unit}
-    python scripts/check_unit.py {unit}
+    python scripts/check_reference_readiness.py <path-to-this-folder>
+    python scripts/check_unit.py <path-to-this-folder>
+
+A page counts as REBUILT only when a page carrying at least one visual has a `displayName` EXACTLY
+equal to the expected object's name; the page DIRECTORY id is free (the gates print it), and a name
+two expected objects both claim satisfies neither.
 
 | path | what it is |
 |---|---|
 | `handover.md` | every engine finding, one per line, emptied visuals first. **Start here.** |
-| `handover/{unit}.json` | the engine's slice for THIS workbook; `python scripts/read_handover.py handover/{unit}.json --viz`. The estate-wide `estate` section is not shipped, and any absolute host path in it is redacted. |
-| `fabric/` | the engine WORKING COPY - edit here. The pristine baseline stays in `<bundle>/reports/`. |
+| `handover/{unit}.json` | the engine's slice for THIS workbook; `python scripts/read_handover.py handover/{unit}.json --viz`. Estate-wide sections are not shipped; absolute host paths are redacted. |
+| `fabric/` | the engine WORKING COPY - **edit here**, and when you work from a package THIS tree is canonical; `<bundle>/pbip/` never promotes over it. Declared-edit tooling (`declare_generated_edit.py`, `--tamper`) is bundle-only. |
 | `assets/` | the Tableau source this was built from |
 | `migration-spec.json` | the parsed source; the expected page set both gates grade against |
-| `oracle/` | this unit's Tableau reference, split `dashboard/` vs `worksheet/` vs `unknown/` (**singular** - the directory is the object kind, not a plural) |
-| `report.json` | **gate input, and readable.** The engine's own classification of THIS unit - workbook vs datasource - which is what earns a datasource-only unit its `NOT_APPLICABLE` instead of a finding. Scoped: it names this unit and no other. |
-| `source-provenance.json` | **gate input.** The only trusted route from this package's asset to a Tableau workbook LUID, keyed by the asset's sha256. Read `origin.match` before trusting a render: `sha256` means local and server bytes agree, `name_only` means they DIFFER. Descoped to those three fields; an entry is shipped only when attribution was NOT refused - see `scope.suppressed_reason`. |
-| `engine-output-receipt.json` | **read `engine.version` when a result looks wrong.** It establishes which engine built this, so version drift stays checkable months later. Descoped to that: `artifacts[]` and the engine's installation paths are not shipped, because nothing reads them here. |
+| `migration-spec.schema.json` | the CONTRACT `validate_spec.py` enforces. Read it before appending a `limitations_encountered` entry: exactly `item`/`issue`/`severity`/`stage`, `additionalProperties: false`, so one invented field rejects every entry. |
+| `oracle/` | this unit's Tableau reference, split `dashboard/` vs `worksheet/` vs `unknown/` (**singular** - the directory is the object kind, not a plural). **`oracle/*/data/*.csv` is the NUMERIC oracle** - exact labels and figures, no OCR and no judgement. Read it first. |
+| `report.json` | **gate input, and readable.** The engine's classification of THIS unit - workbook vs datasource - which is what earns a datasource-only unit `NOT_APPLICABLE` instead of a finding. Scoped to this unit. |
+| `source-provenance.json` | **gate input.** The only trusted route from this package's asset to a Tableau workbook LUID, keyed by the asset's sha256; `origin.match` decides whether a render can be trusted - see UNFIXABLE below. An entry ships only when attribution was NOT refused (`scope.suppressed_reason`). |
+| `engine-output-receipt.json` | **read `engine.version` when a result looks wrong** - it establishes which engine built this, so version drift stays checkable months later. `artifacts[]` and the engine's install paths are not shipped. |
 | `package-manifest.json` | what was packaged, and every omission with its reason |
 
-`oracle/` is **layout/text grade only**: an oracle capture is taken in the view's default state with
-no `?vf_` filter pinning, so a visual PASS signed off on it alone is overstated. Renders present here
-are not a claim of byte-faithfulness either - see `ORACLE_ATTRIBUTION ... match=` in `handover.md`,
-and record the ceiling in `limitations_encountered`.
+`oracle/` images are **layout/text grade only**: a capture is taken in the view's default state with
+no `?vf_` filter pinning, so a visual PASS signed off on one alone is overstated, and it is no claim
+of byte-faithfulness - see `ORACLE_ATTRIBUTION ... match=` in `handover.md`, and log the ceiling in
+`limitations_encountered`. The `.png` is the only leg you can LOOK at; the `.svg` carries labels and
+values as greppable `<text>` elements, except where labels render as paths - zero text is not zero
+content.
 
-⚠️ **A PNG and an SVG of the same object are DIFFERENT EVIDENCE, not duplicates - do not pick one.**
+## UNFIXABLE FROM THIS PACKAGE
 
-* the **`.png` is the visual oracle**: the only leg an agent can actually look at to judge layout,
-  colour and chart type.
-* the **`.svg` is a greppable DATA oracle**: its `<text>` elements carry the real label and value
-  strings, so exact figures are readable with no OCR and no judgement. Measured on this estate's
-  `HR | Summary` dashboard - **122 `<text>` elements**, including `Human Resources Dashboard`,
-  `Active Employees` and `7,984`.
-* ⚠️ but an SVG is not universally a data oracle: a chart whose labels render as paths carries
-  **zero** `<text>` elements. Measured on the same workbook, **four** of its worksheets do -
-  `Hired By Year`, `Terminated By Year`, `Age Groups` and `Education Levels`. Absence of text is not
-  absence of content - fall back to the PNG.
+`source-provenance.json` can report `origin.match: "name_only"` - local and server bytes may DIFFER,
+so an oracle render may depict a different build than `assets/`. Re-stamping needs
+`stamp_tableau_provenance.py`, Tableau Server credentials AND the fields `scope.dropped_fields`
+strips here: `origin.remote_sha256`, `origin.server`, `origin.site`. Measured consequence: every
+emitted page then reads `UNVERIFIABLE - REVISION NOT ESTABLISHED`, so `check_reference_readiness.py`
+can NEVER exit 0 from this package alone. Log it and build anyway.
 """
 
 
@@ -867,6 +879,18 @@ def _write_spec(asset: Path | None, dest: Path) -> tuple[str | None, str | None]
         detail = (proc.stderr or proc.stdout or "").strip().splitlines()
         return None, f"parse_tableau.py failed (exit {proc.returncode}): {detail[-1] if detail else 'no output'}"
     return "migration-spec.json", None
+
+
+def _write_spec_schema(dest: Path) -> tuple[str | None, str | None]:
+    """`(relative schema path, failure note)` - the spec CONTRACT, shipped rather than described.
+
+    Copied verbatim from `docs/migration-spec.schema.json` so it can never drift from the schema
+    `validate_spec.py` actually enforces; see :data:`SPEC_SCHEMA` for what an extract cost.
+    """
+    if not SPEC_SCHEMA.is_file():
+        return None, f"no {SPEC_SCHEMA.name}: the spec contract could not be shipped from {SPEC_SCHEMA.parent.name}/"
+    shutil.copy2(SPEC_SCHEMA, dest / SPEC_SCHEMA.name)
+    return SPEC_SCHEMA.name, None
 
 
 def _attach_oracle(oracle_dir: Path | None, identity: dict[str, Any], dest: Path, unit: str = "") -> dict[str, Any]:
@@ -1009,6 +1033,9 @@ def _assemble_unit(  # pylint: disable=too-many-locals
     spec, spec_note = _write_spec(asset, dest)
     if spec_note:
         notes.append(spec_note)
+    schema, schema_note = _write_spec_schema(dest)
+    if schema_note:
+        notes.append(schema_note)
     if redactions:
         notes.append(
             f"redacted {len(redactions)} absolute host path(s) from the handover slice: {', '.join(redactions[:5])}"
@@ -1021,6 +1048,7 @@ def _assemble_unit(  # pylint: disable=too-many-locals
         "packaged": report_name is not None or model_name is not None,
         "artifacts": {
             "migration_spec": spec,
+            "migration_spec_schema": schema,
             "asset": f"assets/{asset.name}" if asset else None,
             "asset_route": asset_route,
             "report": f"fabric/{report_name}" if report_name else None,

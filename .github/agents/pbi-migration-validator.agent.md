@@ -69,18 +69,17 @@ reasoning or self-report of success.
   | stage | location | rule |
   |---|---|---|
   | engine truth | `<bundle>/reports/`; `<bundle>/semantic_models/` (if emitted) | **NEVER edit an existing baseline** |
-  | working copy | `<bundle>/pbip/` | agents edit **here**; every edit re-runnable from `_build/` and declared |
+  | working copy | `<bundle>/pbip/`, or `<package>/fabric/` when you were handed a PACKAGE | agents edit **here**; whichever tree you were handed is CANONICAL. `declare_generated_edit.py` / `--tamper` cover BUNDLE work only (#460) |
   | deliverable | `migrations/{workbooks,datasources}/<slug>/fabric/` | **COPIED at sign-off**, so the bundle survives as evidence |
 
   A bundle may contain `<bundle>/{pbip,reports,semantic_models,handover,data}` — **no `out/` level**;
   `<bundle>/semantic_models/` is conditional (absent for 8/12 workbooks), and absent baseline ≠ no
-  changes — see `AGENTS.md`. Keep `<bundle>/reports/` pristine and compare it with git
-  (`powerbi-report-gotchas` §3).
+  changes — see `AGENTS.md`.
 
   ⚠️ **The copy must keep
   `definition.pbir`'s `byPath` resolving** — plain copy for a per-workbook model, path rewrite for a
-  shared datasource; never ship `<bundle>/reports/` (reference-only: no model beside it). Mechanics:
-  `powerbi-report-gotchas` §3.
+  shared datasource; never ship `<bundle>/reports/` (reference-only: no model beside it) and never
+  edit it - keep it pristine and diff it with git. Mechanics: `powerbi-report-gotchas` §3.
 
 - **Structural validation is necessary, not sufficient.** A clean parse/validate proves shape, not
   correctness: TMDL deserialization and `powerbi-report-author validate` both pass defects that only
