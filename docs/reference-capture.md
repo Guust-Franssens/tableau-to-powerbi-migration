@@ -523,6 +523,25 @@ builder might then bake `Year=2020` in to match. Therefore:
   `row_count=0, columns=[]`, differing only in `bytes`, which is **not** used as the discriminator).
   Separating those two needs field-level metadata the capture does not hold. The re-runnable cause and
   the one that needs `?vf_` pinning (#194) are likewise not separable from a default-state capture.
+  ⚠️⚠️ **"A header proves a query ran" holds only for a payload already CERTIFIED as CSV, and the
+  qualifier is not pedantry — without it the sentence was false (#480).** The parser had established
+  neither that the body was CSV nor that its first row was a header: measured on a real HTTP 200, a
+  `text/html` error page produced `columns: ["<html>"]` with `row_count: 2`, and an
+  `application/octet-stream` body reading `not CSV at all` was *classified* `empty_query_no_rows` —
+  a specific diagnosis about bytes never shown to be a table. `certify_csv` now decides that first:
+  a declared non-CSV type, a markup/JSON opener, an unterminated quote, a strict-parse error or
+  ragged rows are recorded `status: "format_mismatch"` with **no** row count, **no** header and no
+  file written, so nothing downstream can classify them.
+- **A capture we cannot ASSESS is a third state, and it is not the clean one (#480).** Rows present,
+  zero rows and *unassessable* are three outcomes, not two. A CSV carries no signature — nothing in
+  the bytes proves a body is CSV the way `%PDF-` proves a PDF — so a 200 that arrives with **no
+  `Content-Type` at all** cannot be certified however well-formed it looks: the transport succeeded,
+  the bytes are kept, and **no `row_count` is recorded**. Such a view carries
+  `flags: ["data_unassessable", …]`, is counted and named in `data_unassessable` /
+  `data_unassessable_views`, warns per view and at the end, and — the load-bearing part — is **not
+  counted in `captured_complete`**. The same applies to an older manifest that predates the row count
+  (`row_count_unrecorded`). `data_ok` deliberately still counts it, because the HTTP call genuinely
+  succeeded; that is why the pair beside it exists, so `data_ok` is never read as evidence.
 - **Bind numeric truth to the workbook's source file, never the estate.** List the bundle's `data/`
   directory before reusing an estate-wide constant. In the measured estate, most workbooks bound the
   9,994-row source (`SUM(Sales) = 2,297,200.8603`), but `book_7-3-LOWESS-Python` bound

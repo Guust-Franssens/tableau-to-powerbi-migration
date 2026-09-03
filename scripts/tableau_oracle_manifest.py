@@ -513,7 +513,6 @@ def write_manifest(
     reference_missing = run.reference_required and rendered == 0 and not credential_only
     unestablished = render_unestablished(records, run.requested_renders)
     empty_views = data_empty_views(records)
-    unassessable_views = data_unassessable_views(records)
     manifest = {
         "schema": "tableau-oracle/1",
         "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -542,7 +541,7 @@ def write_manifest(
         # the HTTP call DID succeed, and collapsing that into the numeric verdict would destroy a
         # real distinction -- so this pair is what stops `data_ok` being read as evidence.
         "data_unassessable": len(sets["unassessable"]),
-        "data_unassessable_views": unassessable_views,
+        "data_unassessable_views": data_unassessable_views(records),
         "image_ok": sum(1 for r in records if r.get("image", {}).get("status") == "ok"),
         "svg_ok": sum(1 for r in records if r.get("svg", {}).get("status") == "ok"),
         "pdf_ok": sum(1 for r in records if r.get("pdf", {}).get("status") == "ok"),
@@ -607,7 +606,7 @@ def write_manifest(
     _log_blocked_and_stale(records, blocked, capability_report, run.session.redact_text)
     _log_unestablished(unestablished, run.session.redact_text)
     _log_empty(empty_views, run.session.redact_text)
-    _log_unassessable(unassessable_views, run.session.redact_text)
+    _log_unassessable(data_unassessable_views(records), run.session.redact_text)
     if reference_missing:
         LOG.error(
             "\nA reference render was REQUIRED (--reference-best) but NONE was captured across %d "

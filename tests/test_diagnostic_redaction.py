@@ -935,11 +935,12 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
             "authors. `certify_csv` is documented never to echo the payload or the received header, "
             "and it returns a verdict ABOUT them rather than any part of either"
         ),
-        "_CSV_REFUSAL_DETAIL[certification]": (
-            "FIXED-VOCABULARY: a sentence this module authors, selected by a `certify_csv` verdict. "
-            "The mapping's keys are that closed vocabulary and its values are module literals, so "
-            "nothing the server sent can reach the message -- which is the point: a refusal that "
-            "quoted the body it refused would put the refused bytes in the manifest"
+        "CSV_REFUSAL_DETAIL[certification]": (
+            "FIXED-VOCABULARY: a sentence `tableau_payload_facts` authors, selected by a "
+            "`certify_csv` verdict. The mapping's keys are that closed vocabulary and its values are "
+            "module literals, so nothing the server sent can reach the message -- which is the "
+            "point: a refusal that quoted the body it refused would put the refused bytes in the "
+            "manifest"
         ),
         "hashlib.sha256(payload).hexdigest()": "DERIVED-IRREVERSIBLY: a one-way digest, not the payload",
         "len(payload)": "NOT-A-STRING: an integer byte count",
@@ -1126,7 +1127,7 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "len(unestablished)": _A_COUNT,
         "unestablished": _INTO_THE_MANIFEST_AGGREGATE,
         "empty_views": _INTO_THE_MANIFEST_AGGREGATE,
-        "unassessable_views": _INTO_THE_MANIFEST_AGGREGATE,
+        "data_unassessable_views(records)": _INTO_THE_MANIFEST_AGGREGATE,
         "len(sets['unassessable'])": _A_COUNT,
         "len(records)": _A_COUNT,
         "len(blocked)": _A_COUNT,

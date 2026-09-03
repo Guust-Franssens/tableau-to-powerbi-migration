@@ -83,6 +83,31 @@ CSV_REFUSALS = frozenset({CSV_CONTENT_TYPE_NOT_CSV, CSV_NOT_TABULAR, CSV_MALFORM
 #: it against a closed set instead of trusting whatever string is in the field.
 CSV_VERDICTS = frozenset({CSV_CERTIFIED, CSV_CONTENT_TYPE_ABSENT}) | CSV_REFUSALS
 
+#: Why a `/data` body was refused, keyed by :func:`certify_csv`'s verdict. Sentences this repo
+#: authors, so a refusal can be recorded and printed without quoting a single byte the server sent --
+#: which is the same property that makes the verdict itself safe to log. Beside the vocabulary rather
+#: than beside the caller, because a new verdict and its explanation must be added together.
+CSV_REFUSAL_DETAIL = {
+    CSV_CONTENT_TYPE_NOT_CSV: (
+        "the export returned HTTP 200 but declared a Content-Type that is not CSV, so the body is "
+        "not data. Nothing was recorded from it: a row count read off a non-CSV payload is fiction "
+        "with a number attached, and a classification read off its first line is confidently wrong."
+    ),
+    CSV_NOT_TABULAR: (
+        "the export returned HTTP 200 whose body opens a tag or a JSON object rather than a table -- "
+        "an error page or an API envelope, not data. No row count or header was taken from it."
+    ),
+    CSV_MALFORMED: (
+        "the export returned HTTP 200 whose body does not parse as CSV -- an unterminated quoted "
+        "field or a strict-parse error, both of which a truncated export produces. A non-strict "
+        "reader would have reported the surviving prefix as complete rows."
+    ),
+    CSV_RAGGED: (
+        "the export returned HTTP 200 whose rows do not all carry the header's field count, which a "
+        "complete Tableau CSV export does. The body was not certified, so no row count was recorded."
+    ),
+}
+
 # A body whose first non-space byte opens a tag or a JSON object is a document, not a table. Checked
 # because Content-Type is the only positive CSV certificate and a proxy can strip it: `<html>` then
 # parses as a one-column CSV with two "rows", which is how an error page came to be recorded as data.

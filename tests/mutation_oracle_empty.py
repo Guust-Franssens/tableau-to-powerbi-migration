@@ -333,7 +333,279 @@ import manifest_scope
 manifest_scope.ORACLE_VIEW_ALLOW.pop("flags", None)
 """,
     ),
+    # ------------------------------------------------------- #480: the THIRD state must not be silent
+    #
+    # This PR's own review found it had fixed "a zero-row capture reads as ok" and introduced "an
+    # UNASSESSABLE capture reads as ok". These mutations exist so that boundary cannot move back: each
+    # one is a plausible implementation that returns to reporting an unmeasured view as a clean one.
+    "an-absent-row-count-goes-back-to-reading-as-CLEAN": (
+        (f"{ORACLE}::test_a_row_count_that_was_never_recorded_is_UNASSESSABLE_not_clean",),
+        """
+import tableau_oracle_manifest as m
+# Exactly the round-1 behaviour: the predicate exists, and answers None for everything -- so every
+# consumer reads "not empty" as "fine" and the view is reported successful, evidence-complete,
+# unflagged and unnamed. Identical to a capture that returned 900,000 rows.
+m.unassessable_reason = lambda record: None
+""",
+    ),
+    "every-view-is-called-unassessable": (
+        (f"{ORACLE}::test_a_capture_with_rows_is_never_called_unassessable",),
+        """
+import tableau_oracle_manifest as m
+# The over-correction, and the matched pair the empty census already has: a list naming all 94 views
+# is a view count wearing a different name, and it also drives `captured_complete` to zero on a
+# perfectly good run.
+m.unassessable_reason = lambda record: m.UNASSESSABLE_NO_ROW_COUNT
+""",
+    ),
+    "an-unassessable-view-is-still-counted-evidence-complete": (
+        (f"{ORACLE}::test_a_row_count_that_was_never_recorded_is_UNASSESSABLE_not_clean",),
+        """
+import tableau_oracle_manifest as m
+_orig = m._partition
+def partition(records, requested=frozenset()):
+    # The narrowest possible regression, and the one most likely to be written by accident: the flag
+    # and the named list are kept, and `complete` stops consulting them. `captured_complete` is what
+    # a run REPORTS as captured, so this alone puts an unmeasured view back in the clean bucket.
+    sets = _orig(records, requested)
+    sets["complete"] = [
+        r for r in records
+        if r.get("data", {}).get("status") == "ok"
+        and all(s == "ok" for s in m._render_statuses(r, requested))
+    ]
+    return sets
+m._partition = partition
+""",
+    ),
+    "an-unassessable-capture-is-promoted-to-a-failure": (
+        (f"{ORACLE}::test_an_unassessable_capture_never_moves_the_exit_code",),
+        """
+import tableau_oracle_manifest as m
+_orig = m.flag_empty
+def flag(records):
+    # The opposite over-correction to the one above, and the same regression the empty half is
+    # guarded against: `status` drives the exit code AND the blocked/failed partitions, so a run
+    # whose only fault is that we cannot VOUCH for a body becomes a failed run.
+    out = _orig(records)
+    for record in out:
+        if m.FLAG_DATA_UNASSESSABLE in (record.get("flags") or []):
+            record["data"] = {**record["data"], "status": "failed"}
+    return out
+m.flag_empty = flag
+""",
+    ),
+    "an-absent-row-count-is-flagged-but-never-named": (
+        (f"{ORACLE}::test_the_run_end_block_names_the_unassessable_views_and_what_they_cost",),
+        """
+import tableau_oracle_manifest as m
+# The #471 defect in its new home: counted, flagged, and not NAMED. A count cannot tell a reviewer
+# which page carries no evidence, which is the entire reason the empty census was written.
+m.data_unassessable_views = lambda records: []
+""",
+    ),
+    "the-unassessable-run-end-block-fires-on-a-clean-run": (
+        (f"{ORACLE}::test_the_unassessable_run_end_block_is_silent_when_everything_was_measured",),
+        """
+import tableau_oracle_manifest as m
+_orig = m._log_unassessable
+def log(unassessable, redactor):
+    # A diagnostic that fires when there is nothing to report is one an operator learns to skip.
+    m.LOG.warning("0 view(s) captured data that could NOT BE ASSESSED.")
+    return _orig(unassessable, redactor)
+m._log_unassessable = log
+""",
+    ),
+    "the-unassessable-run-end-block-prints-the-raw-view-name": (
+        (f"{ORACLE}::test_a_view_name_is_redacted_before_the_unassessable_diagnostic_prints_it",),
+        """
+import tableau_oracle_manifest as m
+def log(unassessable, redactor):
+    # ⚠️ A view NAME is response data on this line too -- a reflected SESSION TOKEN has arrived as
+    # one from an authenticated metadata call. A second console surface is a second leak.
+    if not unassessable:
+        return
+    m.LOG.warning("%d view(s) captured data that could NOT BE ASSESSED.", len(unassessable))
+    for entry in unassessable:
+        m.LOG.warning("  - %s: %s", entry.get("view_name"), entry.get("reason"))
+m._log_unassessable = log
+""",
+    ),
+    "the-per-view-line-prints-an-invented-zero": (
+        (f"{ORACLE}::test_the_per_view_line_for_an_unassessable_capture_is_a_WARNING_and_does_not_raise",),
+        """
+import tableau_oracle_manifest as m
+from tableau_env import redacted_note
+def progress(index, total, record, redactor=None):
+    # `data.get("row_count", 0)` -- the fix that makes the KeyError go away and invents the
+    # measurement instead. The line then reads "0 rows", which is the one thing this module refuses
+    # to say about a capture that measured nothing.
+    data = record.get("data", {})
+    name = redacted_note(record.get("view_name"), redactor, limit=34)
+    if data.get("status") == "ok":
+        m.LOG.warning(
+            "  %2d/%d  %-34s %5d rows  %6.1fs  <- UNASSESSABLE (%s)",
+            index, total, name, data.get("row_count", 0), data.get("elapsed_sec", 0.0),
+            m.unassessable_reason(record) or m.empty_classification(record),
+        )
+m.log_progress = progress
+""",
+    ),
+    "a-bool-row-count-is-accepted-as-a-measurement": (
+        (f"{ORACLE}::test_a_row_count_of_True_is_a_corrupt_record_not_a_measurement_of_one_row",),
+        """
+import tableau_oracle_manifest as m
+def reason(record):
+    # `isinstance(True, int)` is True in Python, so dropping the bool exclusion is a one-token edit
+    # that silently accepts a corrupt record as a measurement of one row.
+    data = record.get("data") or {}
+    if data.get("status") != "ok":
+        return None
+    if isinstance(data.get("row_count"), int):
+        return None
+    certification = data.get("certification")
+    return certification if certification in m.UNASSESSABLE_REASONS else m.UNASSESSABLE_NO_ROW_COUNT
+m.unassessable_reason = reason
+""",
+    ),
+    # -------------------------------------------- #480: an HTTP 200 is not evidence until certified
+    "any-200-is-accepted-as-CSV": (
+        (
+            f"{ORACLE}::test_an_uncertifiable_200_is_never_recorded_as_rows",
+            f"{ORACLE}::test_an_uncertifiable_200_is_never_classified_from_its_first_line",
+        ),
+        """
+import tableau_payload_facts as f
+import capture_tableau_oracle as o
+# The master behaviour: every 200 certifies, whatever it declared and whatever is in it. That is how
+# an HTML error page was recorded `columns: ["<html>"], row_count: 2` and an octet-stream body was
+# DIAGNOSED `empty_query_no_rows`.
+o.certify_csv = lambda payload, content_type: f.CSV_CERTIFIED
+""",
+    ),
+    "the-declared-content-type-is-ignored": (
+        (f"{ORACLE}::test_an_uncertifiable_200_is_never_recorded_as_rows",),
+        """
+import tableau_payload_facts as f
+import capture_tableau_oracle as o
+_orig = f.certify_csv
+# Structure only -- "the payload is decisive", which is right for a PNG and wrong for a CSV, because
+# a CSV has no signature. `not CSV at all` parses as a one-column table and would be certified.
+o.certify_csv = lambda payload, content_type: _orig(payload, None)
+""",
+    ),
+    "an-uncertified-body-is-still-written-to-disk-as-data": (
+        (f"{ORACLE}::test_an_uncertifiable_200_is_never_recorded_as_rows",),
+        """
+import capture_tableau_oracle as o
+import hashlib
+_orig = o._capture_data
+def capture(session, view_luid, path, out_dir):
+    # Refuses the SHAPE but keeps the file, which is the half-fix: `data/<luid>.csv` then exists,
+    # named as data, holding an error page -- and a consumer that lists the folder counts it.
+    record = _orig(session, view_luid, path, out_dir)
+    if record.get("status") == "format_mismatch":
+        path.write_bytes(b"whatever arrived")
+        record["path"] = str(path.relative_to(out_dir)).replace("\\\\", "/")
+    return record
+o._capture_data = capture
+""",
+    ),
+    "a-refused-body-is-recorded-status-ok": (
+        (f"{ORACLE}::test_an_uncertifiable_200_is_never_classified_from_its_first_line",),
+        """
+import capture_tableau_oracle as o
+_orig = o._capture_data
+def capture(session, view_luid, path, out_dir):
+    # "The HTTP call succeeded, so status is ok" applied one step too far. It is true of an
+    # unassessable body and false of a refused one: `status` drives the exit code, so this makes an
+    # uncertifiable capture exit 0 with the failure recorded nowhere a caller reads.
+    record = _orig(session, view_luid, path, out_dir)
+    if record.get("status") == "format_mismatch":
+        record["status"] = "ok"
+    return record
+o._capture_data = capture
+""",
+    ),
+    "an-absent-content-type-is-waved-through-as-certified": (
+        (f"{ORACLE}::test_a_200_with_no_Content_Type_is_kept_but_reported_UNASSESSABLE",),
+        """
+import tableau_payload_facts as f
+import capture_tableau_oracle as o
+_orig = f.certify_csv
+def certify(payload, content_type):
+    # The tempting leniency: "a proxy stripped the header, the body looks fine, call it CSV". It is
+    # the fail-open this whole change exists to close -- nothing establishes those bytes as data.
+    out = _orig(payload, content_type)
+    return f.CSV_CERTIFIED if out == f.CSV_CONTENT_TYPE_ABSENT else out
+f.certify_csv = certify
+# ⚠️ BOTH bindings, and measured: `capture_tableau_oracle` does `from tableau_payload_facts import
+# certify_csv`, so patching only the defining module works ONLY while this plugin happens to run
+# before the consumer is imported. Under a runner that imports the consumer first the mutation
+# silently did nothing and its anchor PASSED -- a survived mutation scored as caught by import order.
+o.certify_csv = certify
+""",
+    ),
+    "the-certifier-refuses-a-real-CSV-too": (
+        (f"{ORACLE}::test_a_real_CSV_declared_as_CSV_is_still_certified_and_still_counted",),
+        """
+import tableau_payload_facts as f
+import capture_tableau_oracle as o
+# The negative direction, and the reason the positive control exists: a gate that refuses everything
+# passes every "must not be recorded as rows" test in this file and breaks every real capture.
+o.certify_csv = lambda payload, content_type: f.CSV_CONTENT_TYPE_NOT_CSV
+""",
+    ),
+    "an-empty-body-stops-being-certifiable": (
+        (f"{ORACLE}::test_certify_csv_verdicts",),
+        """
+import tableau_payload_facts as f
+_orig = f.certify_csv
+def certify(payload, content_type):
+    # #471's own two fixtures are a 0-byte body and a bare CRLF. Refusing them would make the
+    # zero-row diagnostic unreachable -- the new gate silently deleting the old feature.
+    if not payload.strip():
+        return f.CSV_MALFORMED
+    return _orig(payload, content_type)
+f.certify_csv = certify
+""",
+    ),
+    "the-packager-drops-the-certification": (
+        (f"{PACKAGE}::test_a_packaged_view_whose_row_count_was_never_recorded_says_so",),
+        """
+import manifest_scope
+# The allowlist DROPS an unenumerated key rather than raising, so this is silent: a packaged unit
+# ships `status: ok` with no row count and nothing saying the body was never established as CSV.
+manifest_scope.ORACLE_LEG_ALLOW.pop("certification", None)
+manifest_scope.ORACLE_LEG_SPEC.pop("certification", None)
+""",
+    ),
+    "the-workbook-subset-drops-the-unassessable-pair": (
+        (f"{GROUP}::test_a_view_with_no_row_count_is_counted_AND_named_UNASSESSABLE_in_the_workbook_manifest",),
+        """
+import group_oracle_by_workbook as g
+_orig = g.subset_manifest
+def subset(manifest, workbook, views):
+    # The per-workbook reader is the one who acts on this, and a subset reporting `data_ok: 2` with
+    # nothing beside it says "two good captures" about a view nothing measured.
+    out = _orig(manifest, workbook, views)
+    out.pop("data_unassessable", None)
+    out.pop("data_unassessable_views", None)
+    return out
+g.subset_manifest = subset
+""",
+    ),
     # ------------------------------------------------------------- discriminating controls
+    "control-cosmetic-unassessable-banner-wording": (
+        (f"{ORACLE}::test_a_row_count_that_was_never_recorded_is_UNASSESSABLE_not_clean",),
+        """
+import tableau_oracle_manifest as m
+_orig = m._log_unassessable
+def log(unassessable, redactor):
+    m.LOG.warning("cosmetically reworded unassessable banner nobody asserts on")
+    return _orig(unassessable, redactor)
+m._log_unassessable = log
+""",
+    ),
     "control-cosmetic-empty-banner-wording": (
         (f"{ORACLE}::test_an_empty_capture_is_named_not_merely_counted",),
         """

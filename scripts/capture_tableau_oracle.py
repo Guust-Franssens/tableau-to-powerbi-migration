@@ -130,6 +130,7 @@ import tableau_render_capability as capability  # noqa: E402  # pylint: disable=
 import tableau_view_types  # noqa: E402  # pylint: disable=wrong-import-position
 from tableau_payload_facts import (  # noqa: E402  # pylint: disable=wrong-import-position
     CSV_CERTIFIED,
+    CSV_REFUSAL_DETAIL,
     CSV_REFUSALS,
     certify_csv,
     payload_is_complete,
@@ -500,8 +501,7 @@ class TableauSession:
         Recovery is deliberately **recorded, not silent**: a capture that quietly healed itself looks
         identical to one that never had a problem, which is exactly how a partially-truncated result
         comes to be trusted. ``content_type`` rides here because a CSV carries no signature, so the
-        declaration is the only thing that can certify a ``/data`` body as data at all; both callers
-        POP it before merging the rest of ``stats`` into a leg record.
+        declaration is the only thing that can certify a ``/data`` body as data.
 
         Raises :class:`ExportFailed` for anything not worth retrying, so a genuinely broken view is
         never recorded as an empty success.
@@ -532,21 +532,11 @@ class TableauSession:
                         f"between this process and Tableau is reflecting request data -- investigate "
                         f"the proxy/WAF in front of the site, and rotate the credential.",
                     )
-                return (
-                    payload,
-                    elapsed,
-                    {
-                        "reauths": reauths,
-                        "retries": len(retries),
-                        "retry_reasons": retries,
-                        # The declared type of the body we are handing back. Carried in `stats` rather
-                        # than returned as a fourth value so every existing caller keeps unpacking three,
-                        # and POPPED by both callers before the rest of `stats` is merged into a record:
-                        # a received header is response data and belongs in a verdict, not in a manifest
-                        # field nobody enumerated.
-                        "content_type": header_value(headers, "Content-Type"),
-                    },
-                )
+                stats = {"reauths": reauths, "retries": len(retries), "retry_reasons": retries}
+                # Response data, so both callers POP it before merging the rest into a leg record.
+                # It rides in `stats` so every caller keeps unpacking three values.
+                stats["content_type"] = header_value(headers, "Content-Type")
+                return payload, elapsed, stats
             raw = payload.decode("utf-8", "replace")
             # ONE call, with the redactor inside. `classify_export_error` classifies on the raw text
             # -- redaction is handed the human-chosen PAT NAME, and a short one mangles `401002` into
@@ -858,51 +848,14 @@ def _salvage_exhausted(deadline: float, timeout: float) -> str:
     )
 
 
-#: Why a `/data` body was refused, keyed by `certify_csv`'s verdict. Sentences this repo authors, so
-#: a refusal can be recorded and printed without quoting a single byte the server sent.
-_CSV_REFUSAL_DETAIL = {
-    "content_type_not_csv": (
-        "the export returned HTTP 200 but declared a Content-Type that is not CSV, so the body is "
-        "not data. Nothing was recorded from it: a row count read off a non-CSV payload is fiction "
-        "with a number attached, and a classification read off its first line is confidently wrong."
-    ),
-    "payload_not_tabular": (
-        "the export returned HTTP 200 whose body opens a tag or a JSON object rather than a table -- "
-        "an error page or an API envelope, not data. No row count or header was taken from it."
-    ),
-    "payload_malformed_csv": (
-        "the export returned HTTP 200 whose body does not parse as CSV -- an unterminated quoted "
-        "field or a strict-parse error, both of which a truncated export produces. A non-strict "
-        "reader would have reported the surviving prefix as complete rows."
-    ),
-    "payload_ragged_rows": (
-        "the export returned HTTP 200 whose rows do not all carry the header's field count, which a "
-        "complete Tableau CSV export does. The body was not certified, so no row count was recorded."
-    ),
-}
-
-
 def _capture_data(session: TableauSession, view_luid: str, path: Path, out_dir: Path) -> dict[str, Any]:
     """The numeric oracle for one view: Tableau's own aggregated, display-formatted values.
 
-    ⚠️ **An HTTP 200 is not evidence until the body has been certified as CSV.** Three measured
-    shapes reached this record as data before the certification below existed, all on real 200s:
-    a ``text/html`` error page recorded ``columns: ["<html>"], row_count: 2``; a truncated
-    ``text/csv`` body (``West,"unterminated``) recorded as one complete row; and an
-    ``application/octet-stream`` body recorded ``row_count: 0`` and then *classified*
-    ``empty_query_no_rows`` -- a specific diagnosis about a payload never shown to be CSV.
-
-    So there are three outcomes here, not two, and the third is the point:
-
-    * **certified** -- write the file, record the row count, exactly as before;
-    * **refused** (:data:`CSV_REFUSALS`) -- ``format_mismatch``, the same verdict a render leg gets
-      for a 200 in the wrong format. Nothing is written and no shape is recorded, because persisting
-      a non-CSV body to ``data/<luid>.csv`` manufactures the evidence this capture exists to prevent;
-    * **unassessable** (:data:`CSV_CONTENT_TYPE_ABSENT`) -- the transport genuinely succeeded, so the
-      status stays ``ok`` and the bytes are kept, but **no ``row_count`` is recorded**. A CSV has no
-      signature, so with no declared type nothing establishes this body as data; the verdict layer
-      reads the absent count plus ``certification`` and reports the view as unassessable rather than
-      clean.
+    ⚠️ **An HTTP 200 is not evidence until the body has been certified as CSV**, and three measured
+    shapes reached this record as data before it was. The argument, the measurements and the three
+    outcomes live in :func:`certify_csv` and :func:`tableau_oracle_manifest.unassessable_reason`;
+    here, a refusal is ``format_mismatch`` with nothing written and no shape recorded, and an
+    uncertifiable-but-successful body keeps ``ok`` and its bytes while recording **no ``row_count``**.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -914,7 +867,7 @@ def _capture_data(session: TableauSession, view_luid: str, path: Path, out_dir: 
         return {
             "status": "format_mismatch",
             "certification": certification,
-            "detail": _CSV_REFUSAL_DETAIL[certification],
+            "detail": CSV_REFUSAL_DETAIL[certification],
             "bytes": len(payload),
             "elapsed_sec": round(elapsed, 2),
             **stats,
@@ -1014,10 +967,8 @@ def _capture_render(  # pylint: disable=too-many-locals
             record["status"] = "unsupported_api_version"
             record["remedy"] = f"set TABLEAU_REST_API_VERSION={SVG_MIN_API_VERSION} or later in .env"
         return record
-    # Dropped rather than merged, and deliberately not consulted: for a RENDER the payload settles the
-    # question by itself -- `%PDF-`, the PNG signature, an `<svg>` root -- which is why
-    # `format_matches` documents the payload as decisive and the header as a fallback. The data leg
-    # is the opposite case (a CSV has no signature), so that is where the declaration is load-bearing.
+    # Dropped, not merged, and deliberately not consulted: for a RENDER the payload settles the
+    # question by itself (`%PDF-`, the PNG signature, an `<svg>` root). The data leg is the opposite.
     stats.pop("content_type", None)
     # HTTP 200 is not proof the requested format came back. An older server that does not recognise
     # `format=svg` can ignore the unknown parameter and return its default PNG -- and writing those
