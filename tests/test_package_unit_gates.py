@@ -251,10 +251,28 @@ def test_the_documented_check_unit_command_runs_on_a_package(tmp_path: Path) -> 
     assert checks["oracle-coverage"]["status"] == check_unit.STATUS_PASS
 
 
-#: Every usage exit either gate can return. `check_reference_readiness.py` uses argparse's 2 and
-#: `check_unit.py` uses 64; both mean "I have no opinion about this package", which is precisely what
-#: a README command must never produce.
-USAGE_EXITS = (2, check_unit.EXIT_USAGE)
+#: The usage exit each gate returns for an argument it cannot use, keyed by the command the README
+#: prints. Deliberately PER SCRIPT rather than one shared tuple.
+#:
+#: ⚠️ A shared `(2, check_unit.EXIT_USAGE)` was wrong, and it took ubuntu CI to show it: exit 2 is
+#: argparse's usage code in `check_reference_readiness.py` (`EXIT_USAGE = 2`, verdicts 0/1/3) but it
+#: is `check_unit.EXIT_NOT_CHECKED` - a genuine VERDICT - in `check_unit.py`, whose usage code is 64.
+#: So a package on which check_unit legitimately reported NOT_CHECKED was read as a usage error and
+#: failed this test, with an empty stderr as the only clue. Windows local runs happened to land on a
+#: different verdict, so nothing but CI saw it.
+USAGE_EXITS = {
+    "scripts/check_reference_readiness.py": (crr.EXIT_USAGE,),
+    "scripts/check_unit.py": (check_unit.EXIT_USAGE,),
+}
+
+
+def _rejected_the_argument(script: str, proc: subprocess.CompletedProcess[str]) -> bool:
+    """Whether the gate refused the ARGUMENT, as opposed to returning a verdict about a package.
+
+    Both halves are required. The exit code alone conflates a verdict with a refusal on any gate
+    whose codes overlap, and stderr alone would accept a gate that grumbles and still reports.
+    """
+    return proc.returncode in USAGE_EXITS[script] and bool(proc.stderr.strip())
 
 
 @pytest.mark.slow
@@ -270,6 +288,10 @@ def test_every_command_the_readme_prints_produces_a_verdict_not_a_usage_error(tm
     nothing about its package. The guard RUNS what the README prints rather than pattern-matching the
     prose, and carries its own negative control: the bare unit name must STILL be a usage error, or
     the assertion proves nothing about which argument the README chose.
+
+    ⚠️ A *verdict* is any exit the gate reaches after reading the package, INCLUDING
+    `check_unit.EXIT_NOT_CHECKED` (2). "I looked and could not check it" is an opinion about the
+    package; "I cannot use this argument" is not. See :data:`USAGE_EXITS`.
     """
     bundle, oracle, _ = _bundle(tmp_path, covered=None)
     unit = _package(tmp_path, bundle, oracle)
@@ -278,13 +300,16 @@ def test_every_command_the_readme_prints_produces_a_verdict_not_a_usage_error(tm
     assert len(commands) == 2, f"expected both gate commands in the package README, got {commands}"
 
     for _python, script, argument in commands:
+        assert script in USAGE_EXITS, f"the README prints an unmapped gate, so its usage exit is unknown: {script}"
         assert argument != unit.name, f"the README passes a bare unit name to {script}, which is a usage error"
         by_path = _run_gate(script, str(unit), tmp_path)
         by_name = _run_gate(script, unit.name, tmp_path)
-        assert by_path.returncode not in USAGE_EXITS, f"{script} {unit}: {by_path.stderr}"
-        assert by_name.returncode in USAGE_EXITS, (
-            f"negative control failed: {script} accepted the bare unit name {unit.name!r}, so this "
-            "test could not have caught the defect it exists for"
+        assert not _rejected_the_argument(script, by_path), (
+            f"{script} {unit} returned no verdict: exit {by_path.returncode}, stderr {by_path.stderr.strip()!r}"
+        )
+        assert _rejected_the_argument(script, by_name), (
+            f"negative control failed: {script} accepted the bare unit name {unit.name!r} "
+            f"(exit {by_name.returncode}), so this test could not have caught the defect it exists for"
         )
 
 
