@@ -44,10 +44,11 @@ def test_the_workbook_route_vocabulary_is_pinned_to_its_literal_values() -> None
     """
     assert (oid.WB_SHA, oid.WB_LUID, oid.WB_NAME) == ("sha256", "luid", "name")
     assert (oid.WB_STALE, oid.WB_FOREIGN, oid.WB_UNKNOWN) == ("stale", "foreign", "unknown")
-    assert oid.WB_ROUTES == ("sha256", "luid", "name")
-    assert oid.WB_REFUSALS == ("stale", "foreign", "unknown")
+    assert oid.WB_UNCONFIRMED == "revision-unconfirmed"
+    assert oid.WB_ROUTES == ("sha256", "luid"), "a display NAME is not an admitting route"
+    assert oid.WB_REFUSALS == ("name", "revision-unconfirmed", "stale", "foreign", "unknown")
     assert oid.WB_MACHINE_AXES == ("sha256", "luid")
-    assert oid.WB_ADMITTING == frozenset({"sha256", "luid", "name"})
+    assert oid.WB_ADMITTING == frozenset({"sha256", "luid"})
     # Every refusal is NOT an admitting route. Stated separately because `WB_ADMITTING` above is the
     # thing under test everywhere else, and a mutation that added one to it would otherwise only be
     # caught by the equality above.
@@ -92,17 +93,21 @@ def test_a_sha_the_unit_cannot_answer_is_unknown_too() -> None:
     assert (verdict.route, verdict.axis) == (oid.WB_UNKNOWN, oid.WB_SHA)
 
 
-def test_the_unanswerable_rule_does_not_swallow_a_record_that_claims_no_machine_identity() -> None:
-    """The twin that stops the rule collapsing into "refuse everything".
+def test_a_record_carrying_only_a_display_name_is_refused_and_named() -> None:
+    """Round-3 review, B-B. This assertion used to read ``== WB_NAME`` and call it an admission.
 
-    A hand-written or `capture_tableau_reference.py` manifest carries no LUID at all, so the name is
-    the only axis on offer and it must still work - it is simply the weakest, and it is counted
-    separately wherever a gate reports a census.
+    A record claiming NO machine identity is the case where a name is LEAST trustworthy, because
+    nothing corroborates it - a workbook of the same display name in another project is
+    indistinguishable from it. The route is still REPORTED, because "a name matched, and a name is
+    not identity" is a different operator action from "nothing matched".
     """
     unit = oid.WorkbookIdentity(luid=LUID_A, name="Book", sha256="ab" * 32)
     record = oid.WorkbookIdentity(name="Book")
 
-    assert unit.attribute(record).route == oid.WB_NAME
+    verdict = unit.attribute(record)
+    assert verdict.route == oid.WB_NAME
+    assert verdict.admitted is False
+    assert "not identity" in verdict.detail
 
 
 def test_a_machine_axis_the_record_does_not_claim_falls_through_to_the_next_one() -> None:

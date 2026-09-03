@@ -360,17 +360,18 @@ crr.provenance_origin = _provenance_origin
     "an-oracle-record-discards-its-workbook-name": Mutation(
         code="""
 import reference_evidence as ev
-# Round-2 finding 3 shipped as "a LUID-bearing record discarded its name". Since round-2 review of
-# PR #454 a LUID-bearing record never REACHES the name axis - an unanswerable LUID is `unknown` - so
-# that mutant became inert and is re-aimed: the name must still be read for a record that carries no
-# machine identity at all, which is the only route a hand-written or reference manifest has.
+# Round-2 finding 3 shipped as "a LUID-bearing record discarded its name". A LUID-bearing record has
+# not reached the name axis since round 2 - an unanswerable LUID is `unknown` - and since round-3
+# B-B a name never ADMITS at all. Re-aimed a second time, at what the name still does: DISCLOSURE.
+# Dropping it turns a `name` refusal into `unknown`, and those are different operator actions -
+# "something claimed to be this workbook by its display name" vs "nothing identified it at all".
 _orig = ev._oracle_workbook_ids
 def _oracle_workbook_ids(record):
     luid, _name = _orig(record)
     return luid, None
 ev._oracle_workbook_ids = _oracle_workbook_ids
 """,
-        anchor="test_a_record_claiming_no_machine_identity_at_all_may_still_match_on_the_name",
+        anchor="test_a_record_claiming_no_machine_identity_at_all_is_refused_and_counted",
         controls=("test_a_sha256_confirmed_provenance_luid_is_trusted",),
     ),
     # --- round-2 review of PR #454: one rule for an unanswerable machine identity ----------------
@@ -395,7 +396,7 @@ def attribute(self, record):
 oid.WorkbookIdentity.attribute = attribute
 """,
         anchor="test_a_record_whose_luid_this_unit_cannot_answer_is_not_rescued_by_its_name",
-        controls=("test_a_record_claiming_no_machine_identity_at_all_may_still_match_on_the_name",),
+        controls=("test_a_record_claiming_no_machine_identity_at_all_is_refused_and_counted",),
     ),
     "an-unanswerable-machine-axis-is-simply-skipped": Mutation(
         code="""

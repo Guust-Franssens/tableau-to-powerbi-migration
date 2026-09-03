@@ -56,22 +56,38 @@ KIND_UNKNOWN = "unknown"
 WB_SHA = "sha256"
 WB_LUID = "luid"
 WB_NAME = "name"
+WB_UNCONFIRMED = "revision-unconfirmed"
 WB_STALE = "stale"
 WB_FOREIGN = "foreign"
 WB_UNKNOWN = "unknown"
 
-#: The axes that identify a workbook to a MACHINE. A record that claims one of these has told us how
-#: it must be checked, and a unit that cannot answer on that axis has not established anything - see
-#: :meth:`WorkbookIdentity.attribute`. ``WB_NAME`` is deliberately absent: a display name is not
-#: unique across projects.
+#: The axes that identify a workbook to a MACHINE, and the ONLY ones that may certify a page. A
+#: record that claims one has told us how it must be checked; a unit that cannot answer it has
+#: established nothing.
 WB_MACHINE_AXES = (WB_SHA, WB_LUID)
 
-#: Routes that admit, strongest first - also the order :meth:`WorkbookIdentity.attribute` consults
-#: them.
-WB_ROUTES = (WB_SHA, WB_LUID, WB_NAME)
+#: Routes that ADMIT, strongest first.
+#:
+#: ⚠️ ``WB_NAME`` is deliberately NOT here, and that is round-3's correction to the one rule. The rule
+#: as first written handled "the record claims a machine identity this unit cannot answer" and left
+#: the opposite case credited: a record claiming NO machine identity at all was admitted on an exact
+#: display name, which is the case where the name is LEAST trustworthy because nothing corroborates
+#: it. Measured by the reviewer::
+#:
+#:     unit:   luid=A, sha=AA, name=Book
+#:     record: name=Book only
+#:     -> route=name, admitted -> entry gate READY exit 0; exit gate PASS visual=1 numeric=1
+#:
+#: A workbook of the same display name in another project is indistinguishable from that record. A
+#: name is decoration - two projects may hold one, which is the ambiguity `_runs/<NNN>-<slug>/`
+#: numbering exists to avoid - so it may inform DISCOVERY and never certification. Measured cost on
+#: the 407 reference estate: ``census["name"] == 0``, i.e. nothing was being admitted this way.
+WB_ROUTES = (WB_SHA, WB_LUID)
 
-#: Every refusal, so a census can carry them all and a refusal is never silently absent.
-WB_REFUSALS = (WB_STALE, WB_FOREIGN, WB_UNKNOWN)
+#: Every refusal, so a census can carry them all and a refusal is never silently absent. ``WB_NAME``
+#: is a refusal that is REPORTED rather than discarded: "a name matched, and a name is not identity"
+#: is a different operator action from "nothing matched".
+WB_REFUSALS = (WB_NAME, WB_UNCONFIRMED, WB_STALE, WB_FOREIGN, WB_UNKNOWN)
 
 WB_ADMITTING = frozenset(WB_ROUTES)
 
@@ -481,14 +497,11 @@ class WorkbookIdentity:
         * both sides answer -> that axis is **decisive**: equal admits, unequal is ``foreign``, and
           neither is ever re-litigated by a weaker axis.
 
-        Only when the record claims **no** machine axis at all does the display name decide, and then
-        exactly: a normalized comparison would attribute one workbook's captures to another whose
-        name differs only by case or spacing.
-
-        ⚠️ The rule is deliberately one-directional, and the asymmetry is a known residual: a record
-        carrying ONLY a display name is still admitted against a unit that does have a LUID, because
-        nothing stronger is on offer from the producer. That route is the weakest one and every
-        admission through it is counted separately (``census["name"]``) so a reader can see it.
+        Only when the record claims **no** machine axis at all is the display name consulted, and
+        then it is reported as :data:`WB_NAME` - a REFUSAL that names what it saw. ⚠️ Round 3: it used
+        to be an admission, which is the moved-boundary shape. Machine-bearing records were made
+        safe while records carrying only the non-unique decoration stayed credited, and that is the
+        case where a name is least trustworthy because nothing corroborates it.
         """
         for axis in WB_MACHINE_AXES:
             mine, theirs = getattr(self, _FIELD[axis]), getattr(record, _FIELD[axis])
@@ -510,7 +523,12 @@ class WorkbookIdentity:
             )
         if self.name is not None and record.name is not None:
             if _axis_equal(WB_NAME, self.name, record.name):
-                return Attribution(WB_NAME, f"name matches ({self.describe()})", axis=WB_NAME)
+                return Attribution(
+                    WB_NAME,
+                    f"only a display NAME matches ({self.describe()}), and a name is not identity - "
+                    "another project may hold a workbook of the same name, so this certifies nothing",
+                    axis=WB_NAME,
+                )
             return Attribution(
                 WB_FOREIGN,
                 f"name differs: unit {self.describe()} vs record {record.describe()}",
@@ -592,11 +610,10 @@ def agreed_luid(*claims: str | None) -> str | None:
 # REVISION identity - which BUILD of a workbook, as opposed to which workbook
 # ------------------------------------------------------------------------------------------------
 
-#: Content-normalised digest of a Tableau archive: sha256 over the sorted
-#: ``(member name, sha256(normalised member bytes))`` pairs, so neither zip member ORDER and mtimes
-#: nor an XML build-stamp comment can change it. ``v2`` because ``v1`` normalised the zip only - see
-#: :func:`revision_key`.
-REVISION_ALGO_ARCHIVE = "twbx-content-v2"
+#: Content-normalised digest of a Tableau archive: sha256 over the sorted, LENGTH-PREFIXED
+#: ``(member name, sha256(normalised member bytes))`` pairs, read entry-by-entry from ``infolist()``.
+#: ``v3`` because the method has been corrected twice - see :func:`revision_key`.
+REVISION_ALGO_ARCHIVE = "twbx-content-v3"
 
 #: Comment-normalised digest of a flat Tableau XML payload - a `.twb`/`.tds` served whole rather than
 #: inside an archive. Same normalisation as an XML member of an archive, because it is the same file.
@@ -706,13 +723,25 @@ def revision_key(payload: bytes) -> RevisionKey | None:
 
     Three explicit SHAPES, each with its own versioned algorithm, and no silent path between them:
 
-    * an archive -> every member digested, XML members comment-normalised (``twbx-content-v2``);
+    * an archive -> every member digested, XML members comment-normalised (``twbx-content-v3``);
     * flat Tableau XML -> comment-normalised (``tableau-xml-v1``);
     * anything else -> its raw bytes, named as such (``raw-sha256-v1``).
 
-    ⚠️ None means **cannot establish**: the bytes look like an archive but will not open. That case is
-    never quietly downgraded to a raw hash, because a raw hash of a repacked archive is the unstable
-    value this whole type exists to avoid - see :class:`RevisionKey` for the measurement.
+    ⚠️ **The archive method is corrected, and the corrections are the point.** An earlier version read
+    members with ``ZipFile.read(name)``, which resolves a NAME: a zip carrying two entries with the
+    same filename would have had the first one read twice, so a change to it alone left the digest
+    identical. Entries are now read from :meth:`ZipFile.infolist` through :meth:`ZipFile.open`, which
+    addresses the entry itself. Names and digests are LENGTH-PREFIXED before hashing, so no two
+    different member lists can serialise to the same byte stream.
+
+    ⚠️ **Duplicate member names, an archive comment and member extra fields are REFUSED, not
+    ignored.** Each is a place to hide bytes that the digest would not cover, and refusing yields no
+    key at all - which reads as *cannot establish*, never as agreement. Measured on the 407 reference
+    estate: 49 of 49 archives carry none of the three, so the strict rule refuses nothing real.
+
+    ⚠️ None also means the bytes look like an archive but will not open. That case is never quietly
+    downgraded to a raw hash, because a raw hash of a repacked archive is the unstable value this
+    whole type exists to avoid - see :class:`RevisionKey` for the measurement.
     """
     if not payload:
         return None
@@ -722,17 +751,33 @@ def revision_key(payload: bytes) -> RevisionKey | None:
         return RevisionKey(algo=REVISION_ALGO_FLAT, value=hashlib.sha256(payload).hexdigest())
     try:
         with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            if archive.comment:
+                return None
+            entries = archive.infolist()
+            if len({info.filename for info in entries}) != len(entries):
+                return None
+            if any(info.extra for info in entries):
+                return None
             members = sorted(
-                (info.filename, _normalise_member(info.filename, archive.read(info.filename)))
-                for info in archive.infolist()
+                (info.filename, _normalise_member(info.filename, _read_entry(archive, info))) for info in entries
             )
     except (zipfile.BadZipFile, OSError, RuntimeError, ValueError):
         return None
     digest = hashlib.sha256()
     for name, data in members:
-        digest.update(name.encode("utf-8"))
+        encoded = name.encode("utf-8")
+        # Length-prefixed, so `("ab", X) ("c", Y)` and `("a", X') ("bc", Y')` cannot serialise alike.
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+        digest.update(len(data).to_bytes(8, "big"))
         digest.update(hashlib.sha256(data).digest())
     return RevisionKey(algo=REVISION_ALGO_ARCHIVE, value=digest.hexdigest())
+
+
+def _read_entry(archive: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes:
+    """One member's bytes, addressed by ENTRY rather than by name. See :func:`revision_key`."""
+    with archive.open(info) as handle:
+        return handle.read()
 
 
 def _normalise_member(name: str, data: bytes) -> bytes:

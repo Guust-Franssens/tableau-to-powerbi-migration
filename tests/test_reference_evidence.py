@@ -24,6 +24,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import check_reference_readiness as crr  # noqa: E402  # pylint: disable=wrong-import-position
 
 from test_check_reference_readiness import (  # noqa: E402  # pylint: disable=wrong-import-position
+    OTHER_LUID,
+    UNIT_LUID,
     build_unit,
     bundle_fixture,
     write_engine_report,
@@ -135,8 +137,8 @@ def test_a_stale_capture_stops_counting_when_the_source_changes(bundle: Path) ->
     assert crr.scan(bundle)["units"][0]["pages"][0]["readiness"] == "blind"
 
 
-def test_oracle_evidence_is_scoped_by_workbook_name(bundle: Path) -> None:
-    """Oracle records carry `workbook_name`/`workbook_luid`; one for another workbook must not count."""
+def test_oracle_evidence_is_scoped_by_workbook(bundle: Path) -> None:
+    """Oracle records carry `workbook_luid`; one for another workbook must not count."""
     build_unit(bundle, "WB", worksheets=["Revenue Trend"])
     write_oracle(bundle, [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_name": "Other Book"}])
 
@@ -144,9 +146,9 @@ def test_oracle_evidence_is_scoped_by_workbook_name(bundle: Path) -> None:
 
 
 def test_oracle_evidence_for_this_workbook_does_count(bundle: Path) -> None:
-    """Discriminating twin of the scoping test above."""
+    """Discriminating twin of the scoping test above - now on the LUID axis, as a real capture is."""
     build_unit(bundle, "WB", worksheets=["Revenue Trend"])
-    write_oracle(bundle, [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_name": "WB"}])
+    write_oracle(bundle, [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_luid": UNIT_LUID}])
 
     page = crr.scan(bundle)["units"][0]["pages"][0]
     assert page["readiness"] == "ready"
@@ -219,7 +221,9 @@ def test_a_manifest_with_no_recorded_hash_cannot_be_trusted(bundle: Path) -> Non
 def test_oracle_evidence_is_integrity_checked_too(bundle: Path) -> None:
     """The oracle route records `sha256`/`bytes`/`dimensions_px` and they are checked identically."""
     build_unit(bundle, "WB", worksheets=["Revenue Trend"])
-    oracle = write_oracle(bundle, [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_name": "WB"}])
+    oracle = write_oracle(
+        bundle, [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_luid": UNIT_LUID}]
+    )
     assert crr.scan(bundle)["status"] == "READY"
 
     write_png(oracle / "images" / "view-0.png", 400, 300)
@@ -351,11 +355,13 @@ def test_a_luid_matched_provenance_still_establishes_identity_but_not_the_revisi
 
     report = crr.scan(bundle)
     page = report["units"][0]["pages"][0]
-    assert page["readiness"] == "ready", "identity resolved by LUID"
-    assert page["revision"] == "unconfirmed", "and the revision did NOT"
+    assert page["readiness"] == "unverifiable", "identity resolved by LUID; the REVISION did not"
+    assert page["revision"] == "unconfirmed"
+    assert "REVISION NOT ESTABLISHED" in page["matched_by"]
+    assert report["pages_ready"] == 0
     assert report["pages_revision_unconfirmed"] == 1
-    assert "[REVISION NOT ESTABLISHED]" in crr.render(report)
-    assert report["evidence_attributed"]["luid"] == 1
+    assert report["evidence_attributed"]["revision-unconfirmed"] == 1
+    assert report["evidence_attributed"]["luid"] == 0, "an unconfirmed render is not an admission"
 
 
 def test_a_reproducible_byte_difference_is_the_only_thing_that_proves_drift(bundle: Path) -> None:
@@ -455,7 +461,7 @@ def test_a_manifest_stamped_before_the_key_existed_is_unconfirmed_not_drifted(bu
     )
 
     report = crr.scan(bundle)
-    assert report["units"][0]["pages"][0]["readiness"] == "ready"
+    assert report["units"][0]["pages"][0]["readiness"] == "unverifiable"
     assert report["units"][0]["pages"][0]["revision"] == "unconfirmed"
     assert report["pages_revision_unconfirmed"] == 1
     assert report["evidence_attributed"]["stale"] == 0, "no key is CANNOT COMPARE, never drift"
@@ -590,7 +596,16 @@ def test_every_refusal_is_counted_so_it_can_be_told_from_a_missing_capture(bundl
     )
 
     census = crr.scan(bundle)["evidence_attributed"]
-    assert census == {"sha256": 0, "luid": 0, "name": 1, "stale": 0, "foreign": 1, "unknown": 1}
+    assert census == {
+        "sha256": 0,
+        "luid": 0,
+        "name": 1,
+        "revision-unconfirmed": 0,
+        "stale": 0,
+        # Two foreign: a differing display name, and a LUID this unit CAN answer and that disagrees.
+        "foreign": 2,
+        "unknown": 0,
+    }
 
 
 def test_a_sha256_confirmed_provenance_luid_is_trusted(bundle: Path) -> None:
@@ -615,7 +630,9 @@ def test_a_record_whose_luid_this_unit_cannot_answer_is_not_rescued_by_its_name(
     The rule is now: a machine identity the unit cannot answer is ``unknown``, full stop. The name is
     reached only when the record claims no machine identity at all - which is the twin below.
     """
-    build_unit(bundle, "WB", worksheets=["Revenue Trend"])
+    # No provenance and no harvest prefix, so this unit establishes NO machine identity of its own -
+    # which is the precondition for the defect: the record's LUID has nothing to be compared against.
+    build_unit(bundle, "WB", worksheets=["Revenue Trend"], luid=None)
     write_oracle(
         bundle,
         [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_luid": "luid-1", "workbook_name": "WB"}],
@@ -628,19 +645,28 @@ def test_a_record_whose_luid_this_unit_cannot_answer_is_not_rescued_by_its_name(
     assert crr.main([str(bundle), "--quiet"]) == 1
 
 
-def test_a_record_claiming_no_machine_identity_at_all_may_still_match_on_the_name(bundle: Path) -> None:
-    """The twin: the name route must survive, or a hand-written manifest can never be used.
+def test_a_record_claiming_no_machine_identity_at_all_is_refused_and_counted(bundle: Path) -> None:
+    """Round-3 review, B-B. This test asserted the OPPOSITE, and that was the moved boundary.
 
-    `capture_tableau_reference.py` and hand-maintained manifests carry no LUID, so refusing on the
-    name axis outright would delete the only route those producers have. This is the weakest
-    admitting route and every admission through it is counted separately.
+    ⚠️ It read "the name route must survive, or a hand-written manifest can never be used". The
+    premise is false for every real producer: `capture_tableau_reference.py` writes
+    ``source_workbook_sha256`` and `capture_tableau_oracle.py` writes ``workbook_luid``, so both have
+    a machine axis. What the name route actually served was a record with NO corroboration at all -
+    the case where a display name is least trustworthy, because a workbook of the same name in
+    another project is indistinguishable from it. Measured on the 407 estate: ``census["name"] == 0``,
+    so nothing real was relying on it.
+
+    The route is still COUNTED, because "a name matched and a name is not identity" is a different
+    operator action from "nothing matched at all".
     """
     build_unit(bundle, "WB", worksheets=["Revenue Trend"])
     write_oracle(bundle, [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_name": "WB"}])
 
     report = crr.scan(bundle)
-    assert report["units"][0]["pages"][0]["readiness"] == "ready"
+    assert report["units"][0]["pages"][0]["readiness"] == "blind"
+    assert report["pages_ready"] == 0
     assert report["evidence_attributed"]["name"] == 1
+    assert crr.main([str(bundle), "--quiet"]) == 1
 
 
 # --------------------------------------------------------------------------------------------

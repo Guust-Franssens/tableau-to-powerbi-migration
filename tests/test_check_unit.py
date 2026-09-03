@@ -59,12 +59,17 @@ def _freshen_clean_fixture_cache() -> Path:
     return fixture
 
 
+UNIT_LUID = "adc431bb-aeeb-43fe-8ecb-092d4bae8bfa"
+OTHER_LUID = "007f70ac-bf40-4838-9d73-134d40f504db"
+
+
 def _write_spec(unit: Path, names: list[str]) -> None:
     """A dashboards-only migration spec, with the schema-required empty `worksheets` array."""
     unit.mkdir(parents=True, exist_ok=True)
     (unit / "migration-spec.json").write_text(
         json.dumps(
             {
+                "source": {"file_name": f"{UNIT_LUID}_Book.twbx"},
                 "dashboards": [{"id": f"dash.{index}", "name": name} for index, name in enumerate(names)],
                 "worksheets": [],
             }
@@ -123,7 +128,7 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _write_unit_source(unit: Path, blob: bytes, *, name: str = "Book.twbx") -> Path:
+def _write_unit_source(unit: Path, blob: bytes, *, name: str = f"{UNIT_LUID}_Book.twbx", handover: bool = True) -> Path:
     """The Tableau asset this unit was built from, recorded where BOTH producers record it.
 
     A handover slice's ``workbook.source_id`` and `migration-spec.json`'s ``source.file_name`` are
@@ -134,11 +139,12 @@ def _write_unit_source(unit: Path, blob: bytes, *, name: str = "Book.twbx") -> P
     asset = unit / "assets" / name
     asset.parent.mkdir(parents=True, exist_ok=True)
     asset.write_bytes(blob)
-    handover = unit / "handover"
-    handover.mkdir(parents=True, exist_ok=True)
-    (handover / "Book.json").write_text(
-        json.dumps({"estate": {}, "workbook": {"name": "Book", "source_id": f"assets/{name}"}}), encoding="utf-8"
-    )
+    if handover:
+        slices = unit / "handover"
+        slices.mkdir(parents=True, exist_ok=True)
+        (slices / "Book.json").write_text(
+            json.dumps({"estate": {}, "workbook": {"name": "Book", "source_id": f"assets/{name}"}}), encoding="utf-8"
+        )
     spec = unit / "migration-spec.json"
     if spec.is_file():
         payload = json.loads(spec.read_text(encoding="utf-8"))
@@ -152,9 +158,21 @@ def _write_reference_manifest(
     names: list[str],
     *,
     numeric: bool = True,
-    workbook: str | None = "Book",
-    source_sha: str | None = None,
+    workbook: str | None = None,
+    source_sha: str | None = "auto",
 ) -> None:
+    """A `reference/manifest.json`.
+
+    ⚠️ ``source_sha="auto"`` writes the unit's source asset and records ITS hash, which is what
+    `capture_tableau_reference.py:234` does. Round-3 review, B-B: a display name no longer certifies
+    anything, so a fixture identifying a reference record by ``workbook`` alone stopped representing
+    any real capture - it now represents a hand-edited one, which is a different test.
+    """
+    if source_sha == "auto":
+        # No handover slice: the migration spec's `source.file_name` already establishes the
+        # asset, and writing a slice here would put an unrelated check into every test that
+        # merely wanted a reference manifest.
+        source_sha = _sha256(_write_unit_source(unit, b"the workbook this unit was built from", handover=False))
     states = []
     dashboards = []
     for name in names:
@@ -187,7 +205,7 @@ def _write_oracle_manifest(  # pylint: disable=too-many-arguments,too-many-posit
     data: bool = True,
     workbook: str | None = "Book",
     view_type: str | None = "dashboard",
-    workbook_luid: str | None = None,
+    workbook_luid: str | None = UNIT_LUID,
     workbook_name: str | None = None,
 ) -> None:
     """An oracle manifest.
@@ -343,6 +361,7 @@ def _write_full_spec(
     (unit / "migration-spec.json").write_text(
         json.dumps(
             {
+                "source": {"file_name": f"{UNIT_LUID}_Book.twbx"},
                 "dashboards": spec_dashboards,
                 "worksheets": [{"id": ws_id, "name": name} for ws_id, name in worksheets],
             }
@@ -627,7 +646,14 @@ def _complete_worksheet(ws_id: str, name: str, **overrides: object) -> dict[str,
 def _spec_with_worksheets(unit: Path, worksheets: list[dict[str, object]]) -> None:
     unit.mkdir(parents=True, exist_ok=True)
     (unit / "migration-spec.json").write_text(
-        json.dumps({"migration_spec_version": "1.0", "dashboards": [], "worksheets": worksheets}),
+        json.dumps(
+            {
+                "migration_spec_version": "1.0",
+                "source": {"file_name": f"{UNIT_LUID}_Book.twbx"},
+                "dashboards": [],
+                "worksheets": worksheets,
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -3294,14 +3320,14 @@ def test_oracle_evidence_from_a_different_workbook_satisfies_nothing(tmp_path: P
     """
     _write_spec(tmp_path, ["Revenue"])
     _write_report(tmp_path, ["Revenue"])
-    _write_oracle_manifest(tmp_path, ["Revenue"], workbook="Different Workbook")
+    _write_oracle_manifest(tmp_path, ["Revenue"], workbook=None, workbook_luid=OTHER_LUID)
 
     oracle = cu.check_oracle_coverage(tmp_path, None, None)
 
     assert oracle["status"] == cu.STATUS_NOT_CHECKED
     assert oracle["visual_present"] == 0
     assert oracle["numeric_present"] == 0
-    assert oracle["foreign_workbook_evidence"] == ["name='Different Workbook'"]
+    assert oracle["foreign_workbook_evidence"] == [f"luid='{OTHER_LUID}'"]
 
 
 def test_oracle_evidence_from_this_workbook_still_counts(tmp_path: Path) -> None:
@@ -3338,7 +3364,7 @@ def test_a_record_whose_workbook_cannot_be_established_certifies_nothing(tmp_pat
     """
     _write_spec(tmp_path, ["Revenue"])
     _write_report(tmp_path, ["Revenue"])
-    _write_oracle_manifest(tmp_path, ["Revenue"], workbook=None)
+    _write_oracle_manifest(tmp_path, ["Revenue"], workbook=None, workbook_luid=None)
 
     oracle = cu.check_oracle_coverage(tmp_path, None, None)
 
@@ -3355,7 +3381,7 @@ def test_a_record_whose_workbook_cannot_be_established_certifies_nothing(tmp_pat
     assert "1 record(s) establish no producing workbook" in oracle["grade"]
 
 
-def test_the_workbook_name_a_real_capture_writes_is_read(tmp_path: Path) -> None:
+def test_a_display_name_alone_never_certifies_however_real_the_capture(tmp_path: Path) -> None:
     """The positive half of #450: `capture_tableau_oracle.py` writes `workbook_name` PER VIEW.
 
     Without this the fix above is indistinguishable from "refuse everything", which would make the
@@ -3363,25 +3389,30 @@ def test_the_workbook_name_a_real_capture_writes_is_read(tmp_path: Path) -> None
     """
     _write_spec(tmp_path, ["Revenue"])
     _write_report(tmp_path, ["Revenue"])
-    _write_oracle_manifest(tmp_path, ["Revenue"], workbook=None, workbook_name="Book")
+    _write_oracle_manifest(tmp_path, ["Revenue"], workbook=None, workbook_luid=None, workbook_name="Book")
 
     oracle = cu.check_oracle_coverage(tmp_path, None, None)
 
-    assert oracle["visual_present"] == 1
-    assert oracle["unattributed_evidence"] == 0
-    assert oracle["foreign_workbook_evidence"] == []
+    assert oracle["visual_present"] == 0, "a display name is decoration, not identity"
+    assert oracle["admitted_evidence"] == 0
+    assert oracle["name_only_evidence"] == ["name='Book'"]
+    assert any("NAME-ONLY EVIDENCE REFUSED" in caveat for caveat in oracle["known_gap_caveats"])
 
 
-def test_a_foreign_workbook_name_a_real_capture_writes_is_refused(tmp_path: Path) -> None:
+def test_a_foreign_display_name_is_refused_too_and_counted_separately(tmp_path: Path) -> None:
     """The discriminating twin: reading the right field must REFUSE as readily as it admits."""
     _write_spec(tmp_path, ["Revenue"])
     _write_report(tmp_path, ["Revenue"])
-    _write_oracle_manifest(tmp_path, ["Revenue"], workbook=None, workbook_name="Different Workbook")
+    _write_oracle_manifest(tmp_path, ["Revenue"], workbook=None, workbook_luid=None, workbook_name="Different Workbook")
 
     oracle = cu.check_oracle_coverage(tmp_path, None, None)
 
     assert oracle["visual_present"] == 0
+    # A name that DIFFERS was compared and disagreed, so it is `foreign`; a name that MATCHES is
+    # `name_only`, because agreement on decoration establishes nothing. Both refuse; they are
+    # counted apart because they call for different operator actions.
     assert oracle["foreign_workbook_evidence"] == ["name='Different Workbook'"]
+    assert oracle["name_only_evidence"] == []
 
 
 def test_a_foreign_luid_is_refused_even_when_the_workbook_name_matches_exactly(tmp_path: Path) -> None:
@@ -3421,6 +3452,9 @@ def test_a_foreign_luid_is_refused_when_this_unit_cannot_establish_a_luid_at_all
     """
     _write_spec(tmp_path, ["Revenue"])
     _write_report(tmp_path, ["Revenue"])
+    spec = json.loads((tmp_path / "migration-spec.json").read_text(encoding="utf-8"))
+    del spec["source"]
+    (tmp_path / "migration-spec.json").write_text(json.dumps(spec), encoding="utf-8")
     _write_oracle_manifest(
         tmp_path,
         ["Revenue"],
@@ -3458,7 +3492,7 @@ def test_a_windows_recorded_source_id_still_yields_its_luid(tmp_path: Path) -> N
         },
     )
 
-    assert cu._unit_source_claims(tmp_path)[1] == ["adc431bb-aeeb-43fe-8ecb-092d4bae8bfa"]
+    assert set(cu._unit_source_claims(tmp_path)[1]) == {"adc431bb-aeeb-43fe-8ecb-092d4bae8bfa"}
     assert [identity.luid for identity in cu._unit_workbook_identities(tmp_path)] == [
         "adc431bb-aeeb-43fe-8ecb-092d4bae8bfa"
     ]
@@ -3502,7 +3536,7 @@ def test_a_unit_local_reference_manifest_is_not_certified_by_its_location(tmp_pa
     """
     _write_spec(tmp_path, ["Revenue"])
     _write_report(tmp_path, ["Revenue"])
-    _write_reference_manifest(tmp_path, ["Revenue"], workbook=None)
+    _write_reference_manifest(tmp_path, ["Revenue"], workbook=None, source_sha=None)
 
     oracle = cu.check_oracle_coverage(tmp_path, None, None)
 
@@ -3786,7 +3820,7 @@ def test_two_producing_workbooks_slugging_alike_are_both_refused(tmp_path: Path)
     """
     _write_full_spec(tmp_path, dashboards=[("Sales", []), ("Ops", [])], worksheets=[])
     _write_report(tmp_path, ["Sales", "Ops"])
-    _write_oracle_manifest(tmp_path, ["Sales"], workbook="Bo ok")
+    _write_oracle_manifest(tmp_path, ["Sales"], workbook="Bo ok", workbook_luid=None)
     manifest = tmp_path / "_oracle" / "oracle-manifest.json"
     payload = json.loads(manifest.read_text(encoding="utf-8"))
     _png(tmp_path / "_oracle" / "images/Ops__1.png")
@@ -3804,12 +3838,13 @@ def test_two_producing_workbooks_slugging_alike_are_both_refused(tmp_path: Path)
     oracle = cu.check_oracle_coverage(tmp_path, None, None)
 
     assert oracle["visual_present"] == 0
-    # Reported as the identity that was compared, not as a bare name: since #450 a refusal may turn
-    # on a LUID rather than a name, and a reader deciding what to re-capture needs to see which.
+    # ⚠️ Round-3 B-B: the two-sided uniqueness question these were written to pose is moot - the
+    # lossy rescue they guarded is deleted, so a sanitised spelling can no longer admit anything at
+    # all. They are refused for differing from this unit's stem, which is a stronger statement.
     assert oracle["foreign_workbook_evidence"] == ["name='Bo ok'", "name='Bo-ok'"]
 
 
-def test_one_producing_workbook_still_binds_through_a_sanitised_spelling(tmp_path: Path) -> None:
+def test_a_sanitised_spelling_no_longer_binds_because_a_name_is_not_identity(tmp_path: Path) -> None:
     """The lossy workbook fallback survives its second guard.
 
     It is justified here and only here: the unit side is a filesystem-sanitised artifact STEM, so
@@ -3846,20 +3881,19 @@ def test_the_normalized_index_is_what_bindable_workbooks_consults(tmp_path: Path
 # delete `_oracle_caveats`, these tests and their two DISCLOSURE mutations together.
 
 
-def test_a_loosely_attributed_workbook_carries_a_caveat_naming_it(tmp_path: Path) -> None:
-    """An operator reading a PASS must be told WHICH producer was matched loosely, by name."""
+def test_a_name_only_refusal_carries_a_caveat_naming_it(tmp_path: Path) -> None:
+    """An operator must be told WHICH producer was refused for carrying only a name, by name."""
     _write_spec(tmp_path, ["Sales"])
     _write_report(tmp_path, ["Sales"], name="Bo ok")
-    _write_oracle_manifest(tmp_path, ["Sales"], workbook="Bo-ok")
+    _write_oracle_manifest(tmp_path, ["Sales"], workbook="Bo ok", workbook_luid=None)
 
     oracle = cu.check_oracle_coverage(tmp_path, None, None)
 
-    assert oracle["status"] == cu.STATUS_PASS
+    assert oracle["status"] == cu.STATUS_NOT_CHECKED
     caveats = oracle["known_gap_caveats"]
     assert len(caveats) == 1
-    assert "#450" in caveats[0]
-    assert "WORKBOOK MATCHED LOOSELY" in caveats[0]
-    assert "'Bo-ok'" in caveats[0], "the caveat must name the producer, not disclaim generically"
+    assert "NAME-ONLY EVIDENCE REFUSED" in caveats[0]
+    assert "'Bo ok'" in caveats[0], "the caveat must name the producer, not disclaim generically"
 
 
 def test_an_exactly_attributed_workbook_prints_no_caveat(tmp_path: Path) -> None:
@@ -3889,9 +3923,9 @@ def test_the_caveats_reach_the_rendered_cli_output(tmp_path: Path) -> None:
     """A payload key nobody prints is not a disclosure."""
     _write_spec(tmp_path, ["Sales"])
     _write_report(tmp_path, ["Sales"], name="Bo ok")
-    _write_oracle_manifest(tmp_path, ["Sales"], workbook="Bo-ok")
+    _write_oracle_manifest(tmp_path, ["Sales"], workbook="Bo ok", workbook_luid=None)
 
     rendered = cu.render(cu.run_all(tmp_path, scope=cu.SCOPE_REPORT))
 
-    assert "#450 WORKBOOK MATCHED LOOSELY" in rendered
-    assert "'Bo-ok'" in rendered
+    assert "NAME-ONLY EVIDENCE REFUSED" in rendered
+    assert "'Bo ok'" in rendered

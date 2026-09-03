@@ -2039,16 +2039,18 @@ class OracleEvidence:
     record arrived ownerless (measured 360 of 360) and was **admitted anyway**. It now reads the
     fields the producers do write - ``workbook_luid``/``workbook_name`` for an oracle capture,
     ``source_workbook_sha256`` for a reference one - and an unestablished workbook is a refusal.
-    ``loosely_attributed`` and :func:`_oracle_caveats` remain, because the lossy NAME route is still
-    reachable for a unit whose LUID cannot be established.
+    ⚠️ Round-3 review, B-B: the lossy NAME rescue is GONE, not further guarded. A display name -
+    exact or normalised - can no longer admit anything, so the rescue had nothing left to rescue.
+    ``name_only`` counts what it refuses, because that is a different operator action from
+    ``foreign``: re-capture with view typing, versus ignore another workbook's render.
     """
 
     by_exact: dict[tuple[str, str], list[OracleRecord]]
     unattributed: int
     kindless: int
     admitted: int
-    #: Records admitted on a LOSSY workbook key rather than an exact one (issue #450).
-    loosely_attributed: list[str]
+    #: Records refused because a display NAME was their only identity (round-3 review, B-B).
+    name_only: list[str]
     foreign: tuple[str, ...]
 
     def evidence_for(self, page: dict[str, Any]) -> tuple[OracleRecord | None, str | None]:
@@ -2158,18 +2160,10 @@ def _attribute_record(unit_ids: list[oid.WorkbookIdentity], record: OracleRecord
 def _admissible_oracle_records(
     records: list[OracleRecord], unit_ids: list[oid.WorkbookIdentity]
 ) -> tuple[list[OracleRecord], list[str], int, int, list[str]]:
-    """``(admissible, foreign, unattributed, kindless, loosely_attributed)`` after both guards."""
-    unit_index: NormalizedIndex[str] = NormalizedIndex()
-    for identity in unit_ids:
-        if identity.name:
-            unit_index.add(identity.name, identity.name)
-    producer_index: NormalizedIndex[str] = NormalizedIndex()
-    for declared in sorted({record.workbook.name for record in records if record.workbook.name}):
-        producer_index.add(declared, declared)
-
+    """``(admissible, foreign, unattributed, kindless, name_only)`` after both guards."""
     admissible: list[OracleRecord] = []
     foreign: list[str] = []
-    loosely_attributed: list[str] = []
+    name_only: list[str] = []
     unattributed = kindless = 0
     for record in records:
         verdict = _attribute_record(unit_ids, record)
@@ -2184,45 +2178,21 @@ def _admissible_oracle_records(
                 # Refusing is the fix in both cases; the count stays, because a refusal nobody can
                 # see is not a guard.
                 unattributed += 1
-                continue
-            rescued = _lossy_workbook_rescue(verdict, record, unit_index, producer_index)
-            if rescued is None:
+            elif verdict.route == oid.WB_NAME:
+                # ⚠️ Round-3 review, B-B. A record carrying ONLY a display name used to be admitted
+                # here, and this gate added no caveat for it - measured `PASS, visual=1, numeric=1`
+                # from a bare name that a workbook in another project is indistinguishable from. It
+                # is refused, and counted SEPARATELY from `foreign`: "a name matched, and a name is
+                # not identity" is a different operator action from "this is another workbook's".
+                name_only.append(record.workbook.describe())
+            else:
                 foreign.append(record.workbook.describe())
-                continue
-            loosely_attributed.append(rescued)
+            continue
         if record.kind is None:
             kindless += 1
             continue
         admissible.append(record)
-    return admissible, foreign, unattributed, kindless, loosely_attributed
-
-
-def _lossy_workbook_rescue(
-    verdict: oid.Attribution,
-    record: OracleRecord,
-    unit_index: NormalizedIndex[str],
-    producer_index: NormalizedIndex[str],
-) -> str | None:
-    """The declared name a LOSSY workbook key may still admit, or None to refuse.
-
-    The unit side is a filesystem-sanitised artifact stem, so a lossy fallback is legitimate on the
-    NAME axis - but only when the key resolves uniquely on **BOTH** sides. Measured before that:
-    records declaring ``Bo ok`` and ``Bo-ok`` were both admitted to unit workbook ``Book``, because
-    uniqueness was checked among unit workbooks only. Uniqueness of a lossy key on one side is not
-    identity.
-
-    ⚠️ **Only a NAME disagreement is rescuable.** If a MACHINE axis - the LUID or the source hash -
-    was compared and disagreed, or was claimed by the record and unanswerable by the unit, this
-    returns None unconditionally: a stronger axis that has already answered must not be overridden by
-    a weaker one, which is the identity-loss join
-    (:meth:`object_identity.WorkbookIdentity.attribute`) that both halves of #450 grew out of.
-    """
-    name = record.workbook.name
-    if verdict.route != oid.WB_FOREIGN or verdict.axis != oid.WB_NAME or not name:
-        return None
-    if unit_index.unique(name) is None or producer_index.unique(name) is None:
-        return None
-    return name
+    return admissible, foreign, unattributed, kindless, name_only
 
 
 def _resolve_oracle_evidence(
@@ -2230,7 +2200,7 @@ def _resolve_oracle_evidence(
 ) -> OracleEvidence:
     """Index producer records against the expected pages without losing a collision."""
     _ = candidates
-    admissible, foreign, unattributed, kindless, loosely = _admissible_oracle_records(records, unit_ids)
+    admissible, foreign, unattributed, kindless, named = _admissible_oracle_records(records, unit_ids)
     by_exact: dict[tuple[str, str], list[OracleRecord]] = {}
     for record in admissible:
         by_exact.setdefault((str(record.kind), record.name), []).append(record)
@@ -2239,7 +2209,7 @@ def _resolve_oracle_evidence(
         unattributed=unattributed,
         kindless=kindless,
         admitted=len(admissible),
-        loosely_attributed=loosely,
+        name_only=named,
         foreign=tuple(sorted(set(foreign))),
     )
 
@@ -2295,6 +2265,7 @@ def check_oracle_coverage(target: Path, reference_dir: Path | None, oracle_dir: 
         "refused_evidence": [row["refusal"] for row in rows if row["refusal"]],
         "foreign_workbook_evidence": list(evidence.foreign),
         "unattributed_evidence": evidence.unattributed,
+        "name_only_evidence": list(evidence.name_only),
         "kindless_evidence": evidence.kindless,
         # ⚠️ Reported because the kind guard is otherwise UNKILLABLE: dropping the record would also
         # be masked by the `(kind, name)` lookup key never matching a kind-less record, so a test
@@ -2331,13 +2302,17 @@ def _oracle_caveats(rows: list[dict[str, Any]], evidence: OracleEvidence) -> lis
     """
     certified = [row["page"]["name"] for row in rows if row["visual"] or row["numeric"]]
     caveats: list[str] = []
-    if evidence.loosely_attributed and certified:
-        workbooks = ", ".join(repr(name) for name in sorted(set(evidence.loosely_attributed)))
+    if evidence.name_only:
+        workbooks = ", ".join(sorted(set(evidence.name_only)))
         caveats.append(
-            f"⚠️ #450 WORKBOOK MATCHED LOOSELY: {len(evidence.loosely_attributed)} record(s) were "
-            f"admitted on a normalized workbook name rather than a LUID or an exact name, so "
-            f"{len(certified)} certified page(s) rest on a lossier join than an exact workbook "
-            f"match: {workbooks}"
+            f"⚠️ NAME-ONLY EVIDENCE REFUSED: {len(evidence.name_only)} record(s) declared a display "
+            "name and no machine identity, so they certify nothing - a workbook of the same name in "
+            f"another project is indistinguishable from them: {workbooks}"
+        )
+    if evidence.unattributed and certified:
+        caveats.append(
+            f"⚠️ {evidence.unattributed} record(s) establish no producing workbook at all and were "
+            f"refused, so {len(certified)} certified page(s) rest only on the records that did"
         )
     return caveats
 

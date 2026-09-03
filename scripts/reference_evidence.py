@@ -31,9 +31,9 @@ from object_identity import (
     KIND_UNKNOWN,
     KIND_WORKSHEET,
     WB_LUID,
-    WB_NAME,
     WB_SHA,
     WB_STALE,
+    WB_UNCONFIRMED,
     Attribution,
     Candidate,
     WorkbookIdentity,
@@ -388,27 +388,39 @@ class Evidence:  # pylint: disable=too-many-instance-attributes
 
         The REVISION half is here, because it is this gate's contract rather than a property of
         identity: evidence must be for "THIS workbook, at THIS revision". A sha256 join is
-        revision-bound by construction, so it passes through confirmed. A LUID or name join says
-        *which* workbook, never *which build of it*, so it inherits the unit's revision status:
+        revision-bound by construction, so it passes through confirmed. A LUID join says *which*
+        workbook, never *which build of it*, so it inherits the unit's revision status:
 
-        * :data:`REVISION_MISMATCH` - drift is SOUNDLY established, so the render is
-          :data:`object_identity.WB_STALE` and certifies nothing;
-        * :data:`REVISION_UNCONFIRMED` - the render is admitted, and the caller MUST disclose that
-          the revision was not established (:func:`check_reference_readiness._page_row` writes
-          ``row["revision"]``). Round-1 review of PR #454's blocker 2 was exactly that a page in this
-          state read as a clean `READY` with nothing saying so.
+        * :data:`REVISION_MISMATCH` -> :data:`object_identity.WB_STALE`;
+        * :data:`REVISION_UNCONFIRMED` -> :data:`object_identity.WB_UNCONFIRMED`.
+
+        ⚠️ Round 3: ``unconfirmed`` used to be ADMITTED with a note, and that was fail-open. The human
+        output's first line said `READY` and the caveat came later, which is not disclosure a
+        consumer acts on. Neither refusal certifies anything now; both are counted, and
+        :func:`check_reference_readiness._page_row` reports the page UNVERIFIABLE with the reason.
 
         ⚠️ Absence of provenance, and a byte comparison that could not be made soundly, are both
         UNCONFIRMED rather than mismatched. "I cannot tell whether the bytes moved" and "I can tell,
-        and they did" are different statements, and only the second may refuse a page.
+        and they did" are different statements, and they call for different operator actions -
+        re-stamp provenance versus re-capture against the migrated build.
         """
         verdict = unit.workbook().attribute(self.workbook())
-        if verdict.route in (WB_LUID, WB_NAME) and unit.revision == REVISION_MISMATCH:
+        if verdict.route != WB_LUID:
+            return verdict
+        if unit.revision == REVISION_MISMATCH:
             return Attribution(
                 WB_STALE,
                 "the same workbook, a DIFFERENT build: this unit's source bytes differ from a "
-                f"REPRODUCIBLE download of the site copy, and a {verdict.axis} join says which "
-                "workbook a render is of, never which revision",
+                "REPRODUCIBLE content digest of the site copy, and a luid join says which workbook a "
+                "render is of, never which revision",
+                axis=verdict.axis,
+            )
+        if unit.revision != REVISION_CONFIRMED:
+            return Attribution(
+                WB_UNCONFIRMED,
+                "the right workbook, at an UNESTABLISHED build: a luid join says which workbook a "
+                "render is of, never which revision, and this unit's provenance carries no "
+                "comparable revision key - re-stamp it with scripts/stamp_tableau_provenance.py",
                 axis=verdict.axis,
             )
         return verdict
@@ -417,7 +429,9 @@ class Evidence:  # pylint: disable=too-many-instance-attributes
         """What this render establishes about the REVISION, once it has been admitted.
 
         A sha256 join pins the bytes, so it is confirmed whatever provenance says. Anything weaker
-        inherits the unit's status, which is why an admitted render can still be UNCONFIRMED.
+        inherits the unit's status - and since round 3 an admitted render is always CONFIRMED,
+        because everything else is refused. The field stays because a reader should see the claim
+        stated rather than inferred from its absence.
         """
         return REVISION_CONFIRMED if self.attribution(unit).route == WB_SHA else unit.revision
 

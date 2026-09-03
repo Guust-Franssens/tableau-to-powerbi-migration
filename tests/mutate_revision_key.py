@@ -21,12 +21,8 @@ MUTATIONS: list[tuple[str, str, str, str, str, str, str]] = [
     (
         "revision_key: hash the container raw instead of its contents",
         "scripts/object_identity.py",
-        "    digest = hashlib.sha256()\n"
-        "    for name, data in members:\n"
-        '        digest.update(name.encode("utf-8"))\n'
-        "        digest.update(hashlib.sha256(data).digest())\n"
-        "    return RevisionKey(algo=REVISION_ALGO_ARCHIVE, value=digest.hexdigest())",
-        "    return RevisionKey(algo=REVISION_ALGO_ARCHIVE, value=hashlib.sha256(payload).hexdigest())",
+        '        digest.update(len(encoded).to_bytes(8, "big"))',
+        "        return RevisionKey(algo=REVISION_ALGO_ARCHIVE, value=hashlib.sha256(payload).hexdigest())  # noqa",
         # A repacked archive must now produce a DIFFERENT key - which is the defect being re-created.
         "probe_repack_now_differs",
         "tests/test_workbook_identity.py::test_a_repack_changes_the_raw_digest_and_not_the_revision_key",
@@ -35,8 +31,8 @@ MUTATIONS: list[tuple[str, str, str, str, str, str, str]] = [
     (
         "revision_key: drop the member NAME from the digest",
         "scripts/object_identity.py",
-        '        digest.update(name.encode("utf-8"))\n        digest.update(hashlib.sha256(data).digest())',
-        "        digest.update(hashlib.sha256(data).digest())",
+        "        digest.update(encoded)\n",
+        "",
         "probe_rename_now_agrees",
         "tests/test_workbook_identity.py::test_genuinely_different_content_still_differs",
         "tests/test_workbook_identity.py::test_a_repack_changes_the_raw_digest_and_not_the_revision_key",
@@ -105,6 +101,33 @@ MUTATIONS: list[tuple[str, str, str, str, str, str, str]] = [
         "tests/test_workbook_identity.py::test_a_non_archive_uses_its_own_shape_and_says_so",
         "tests/test_workbook_identity.py::test_a_repack_changes_the_raw_digest_and_not_the_revision_key",
     ),
+    (
+        "B-B: a display name admits again",
+        "scripts/object_identity.py",
+        "WB_ROUTES = (WB_SHA, WB_LUID)",
+        "WB_ROUTES = (WB_SHA, WB_LUID, WB_NAME)",
+        "probe_name_admits",
+        "tests/test_reference_evidence.py::test_a_record_claiming_no_machine_identity_at_all_is_refused_and_counted",
+        "tests/test_workbook_identity.py::test_a_matching_luid_admits_and_names_the_luid_axis",
+    ),
+    (
+        "B-A: an unconfirmed revision is admitted again",
+        "scripts/reference_evidence.py",
+        "        if unit.revision != REVISION_CONFIRMED:",
+        "        if False:",
+        "probe_unconfirmed_admits",
+        "tests/test_reference_evidence.py::test_a_manifest_stamped_before_the_key_existed_is_unconfirmed_not_drifted",
+        "tests/test_reference_evidence.py::test_a_byte_confirmed_provenance_luid_certifies_normally",
+    ),
+    (
+        "B-C: the merge goes back to a hand-written key list",
+        "scripts/check_reference_readiness.py",
+        "        if isinstance(value, bool) or not isinstance(value, int):",
+        '        if isinstance(value, bool) or not isinstance(value, int) or key == "pages_revision_unconfirmed":',
+        "probe_merge_drops_a_counter",
+        "tests/test_check_reference_readiness.py::test_every_integer_counter_survives_a_merge_by_construction",
+        "tests/test_check_reference_readiness.py::test_the_attribution_census_survives_a_multi_path_scan",
+    ),
 ]
 
 PROBES = r"""
@@ -161,6 +184,32 @@ def probe_build_stamp_now_differs():
 
 def probe_flat_xml_now_raw():
     return oid.revision_key(LOCAL).algo == oid.REVISION_ALGO_FLAT
+
+def probe_name_admits():
+    unit = oid.WorkbookIdentity(luid="a" * 8, name="Book")
+    return unit.attribute(oid.WorkbookIdentity(name="Book")).admitted is True
+
+def probe_unconfirmed_admits():
+    return oid.WB_UNCONFIRMED not in [
+        ev.Evidence.attribution.__doc__ and oid.WB_UNCONFIRMED
+    ] or _unconfirmed_now_admits()
+
+def _unconfirmed_now_admits():
+    import reference_evidence as _ev
+    from pathlib import Path as _P
+    unit = _ev.UnitIdentity(name="WB", source_path=_P("x"), source_sha256="a" * 64, workbook_luid="L", revision="unconfirmed")
+    rec = _ev.Evidence(name="v", kind="worksheet", grade="g", origin="oracle", provider="oracle_capture",
+                       path="p", width=1, height=1, workbook_sha=None, workbook_luid="L", workbook_name=None,
+                       render_digest="d")
+    return rec.attribution(unit).route == oid.WB_LUID
+
+def probe_merge_drops_a_counter():
+    import check_reference_readiness as _crr
+    base = {"target": "a", "units": [], "evidence_rejected": [], "evidence_untyped_names": [],
+            "grades_present": [], "status": "READY", "pages_revision_unconfirmed": 1, "pages_ready": 1,
+            "all_evidence_validation_grade": True, "evidence_attributed": {}}
+    merged = _crr._merge_scans([dict(base), dict(base)])
+    return merged["pages_revision_unconfirmed"] == 1 and merged["pages_ready"] == 2
 
 print("PROBE_RESULT", bool(globals()[sys.argv[1]]()))
 """

@@ -201,6 +201,10 @@ def write_reference(  # pylint: disable=too-many-arguments,too-many-locals
     return reference
 
 
+UNIT_LUID = "adc431bb-aeeb-43fe-8ecb-092d4bae8bfa"
+OTHER_LUID = "007f70ac-bf40-4838-9d73-134d40f504db"
+
+
 def write_oracle(root: Path, views: list[dict], *, size: tuple[int, int] = (320, 240)) -> Path:
     """An `_oracle/oracle-manifest.json`. Each view dict may carry `view_type` (PR #422).
 
@@ -250,6 +254,7 @@ def build_unit(  # pylint: disable=too-many-arguments
     page_ids: list[str] | None = None,
     viz_fidelity: list[dict] | None = None,
     pbip_warnings: list[str] | None = None,
+    luid: str | None = UNIT_LUID,
 ) -> str:
     """Wire a complete workbook unit and return its source sha256, which evidence must carry."""
     source = write_workbook(bundle.parent / "assets" / f"{unit}.twb", worksheets=worksheets, dashboards=dashboards)
@@ -258,7 +263,28 @@ def build_unit(  # pylint: disable=too-many-arguments
     if page_ids is None:
         page_ids = [obj.page_id for obj in crr.source_objects(source) or []]
     write_report(bundle, unit, page_ids)
-    return hashlib.sha256(source.read_bytes()).hexdigest()
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    if luid is not None:
+        (bundle / "source-provenance.json").write_text(
+            json.dumps(
+                {
+                    "inputs": [
+                        {
+                            "input": {"file": source.name, "sha256": digest},
+                            "origin": {
+                                "workbook_luid": luid,
+                                "workbook_name": unit,
+                                "matched_by": "luid",
+                                "match": "name_only",
+                                "revision_match": "same",
+                            },
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+    return digest
 
 
 # --------------------------------------------------------------------------------------------
@@ -604,7 +630,7 @@ def test_a_worksheet_render_does_satisfy_a_worksheet_page(bundle: Path) -> None:
 def test_an_oracle_record_with_no_view_type_cannot_satisfy_a_page(bundle: Path) -> None:
     """PR #422's field absent = cannot establish, never "it could be either"."""
     build_unit(bundle, "WB", worksheets=["Revenue Trend"])
-    write_oracle(bundle, [{"view_name": "Revenue Trend", "workbook_name": "WB"}])
+    write_oracle(bundle, [{"view_name": "Revenue Trend", "workbook_luid": UNIT_LUID}])
 
     page = crr.scan(bundle)["units"][0]["pages"][0]
     assert page["readiness"] == "unverifiable"
@@ -614,7 +640,7 @@ def test_an_oracle_record_with_no_view_type_cannot_satisfy_a_page(bundle: Path) 
 def test_an_oracle_record_typed_unknown_cannot_satisfy_a_page(bundle: Path) -> None:
     """PR #422 fails closed to `unknown` when the Metadata API is disabled; so must this."""
     build_unit(bundle, "WB", worksheets=["Revenue Trend"])
-    write_oracle(bundle, [{"view_name": "Revenue Trend", "view_type": "unknown", "workbook_name": "WB"}])
+    write_oracle(bundle, [{"view_name": "Revenue Trend", "view_type": "unknown", "workbook_luid": UNIT_LUID}])
 
     assert crr.scan(bundle)["units"][0]["pages"][0]["readiness"] == "unverifiable"
 
@@ -622,7 +648,7 @@ def test_an_oracle_record_typed_unknown_cannot_satisfy_a_page(bundle: Path) -> N
 def test_an_oracle_record_typed_worksheet_still_cannot_satisfy_a_dashboard_page(bundle: Path) -> None:
     """The scope join applies to the oracle route too, not only to `reference/`."""
     build_unit(bundle, "WB", worksheets=["Ops"], dashboards={"Ops": ["Ops"]})
-    write_oracle(bundle, [{"view_name": "Ops", "view_type": "worksheet", "workbook_name": "WB"}])
+    write_oracle(bundle, [{"view_name": "Ops", "view_type": "worksheet", "workbook_luid": UNIT_LUID}])
 
     assert crr.scan(bundle)["units"][0]["pages"][0]["readiness"] == "unverifiable"
 
@@ -802,7 +828,7 @@ def test_oracle_grade_is_below_the_validation_bar(bundle: Path) -> None:
     that same mutable constant.
     """
     build_unit(bundle, "WB", worksheets=["Revenue Trend"])
-    write_oracle(bundle, [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_name": "WB"}])
+    write_oracle(bundle, [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_luid": UNIT_LUID}])
 
     strict = crr.scan(bundle, require_validation_grade=True)
     assert strict["pages_insufficient_grade"] == 1
@@ -1214,7 +1240,7 @@ def test_a_packaged_unit_reads_only_its_own_manifest_end_to_end(tmp_path: Path) 
     package.mkdir(parents=True)
     (tmp_path / "assets").mkdir()
     sha = build_unit(package, "WB", worksheets=["Revenue Trend"])
-    view = {"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_name": "WB"}
+    view = {"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_luid": UNIT_LUID}
     write_oracle(package, [view])
     write_oracle(tmp_path / "run", [view])
     assert crr.scan(package)["units"][0]["pages"][0]["readiness"] == "unverifiable"
@@ -1258,7 +1284,7 @@ def test_the_attribution_census_survives_a_multi_path_scan(tmp_path: Path) -> No
     build_unit(dirty / "bundle", "Other", worksheets=["Revenue"])
     write_oracle(
         dirty / "bundle",
-        [{"view_name": f"V{i}", "view_type": "worksheet", "workbook_name": "Elsewhere"} for i in range(7)],
+        [{"view_name": f"V{i}", "view_type": "worksheet", "workbook_luid": OTHER_LUID} for i in range(7)],
     )
 
     merged = crr._merge_scans([crr.scan(clean / "bundle"), crr.scan(dirty / "bundle")])
@@ -1266,3 +1292,38 @@ def test_the_attribution_census_survives_a_multi_path_scan(tmp_path: Path) -> No
     assert merged["evidence_attributed"]["foreign"] == 7
     assert merged["evidence_attributed"]["name"] == 1
     assert "refused 7 as another" in crr.render(merged)
+
+
+def test_every_integer_counter_survives_a_merge_by_construction(tmp_path: Path) -> None:
+    """B-C, fixed as a CLASS: the merge must not carry a hand-written list of keys to sum.
+
+    ⚠️ This is the third instance of one shape in PR #454 - `evidence_attributed` zeroed on merge
+    (round-1 MEDIUM 2), then `pages_revision_unconfirmed` did the same because it was added after the
+    list was written. Patching a third key by name would guarantee a fourth, so this asserts the
+    PROPERTY rather than any key: every integer counter in a single scan is summed, whatever it is
+    called and whenever it was added.
+    """
+    first, second = tmp_path / "one", tmp_path / "two"
+    for root, unit in ((first, "One"), (second, "Two")):
+        (root / "bundle").mkdir(parents=True)
+        (root / "assets").mkdir(parents=True)
+        build_unit(root / "bundle", unit, worksheets=["Revenue"])
+        # Strip `revision_match` so the page is REVISION-UNCONFIRMED: the counter this test exists
+        # for must be NON-ZERO, or `0 != 0 + 0` is false and the assertion proves nothing.
+        provenance = root / "bundle" / "source-provenance.json"
+        payload = json.loads(provenance.read_text(encoding="utf-8"))
+        del payload["inputs"][0]["origin"]["revision_match"]
+        provenance.write_text(json.dumps(payload), encoding="utf-8")
+        write_oracle(root / "bundle", [{"view_name": "Revenue", "view_type": "worksheet", "workbook_luid": UNIT_LUID}])
+    reports = [crr.scan(first / "bundle"), crr.scan(second / "bundle")]
+
+    merged = crr._merge_scans(reports)
+
+    counters = {key for key, value in reports[0].items() if isinstance(value, int) and not isinstance(value, bool)}
+    assert reports[0]["pages_revision_unconfirmed"] == 1, "the counter must be non-zero or the check is vacuous"
+    assert "pages_revision_unconfirmed" in counters, "the counter this was written for must be in scope"
+    assert len(counters) > 10, "sanity: the report really does carry a family of counters"
+    unsummed = {key for key in counters if merged[key] != reports[0][key] + reports[1][key]}
+    assert unsummed == set(), f"a counter silently dropped on merge: {sorted(unsummed)}"
+    # `bool` is an `int` subclass, so the conjunction must NOT have been tallied into 2.
+    assert merged["all_evidence_validation_grade"] in (True, False)

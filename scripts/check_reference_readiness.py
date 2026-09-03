@@ -459,11 +459,12 @@ def _page_row(  # pylint: disable=too-many-arguments,too-many-positional-argumen
             }
         )
         return row
-    stale = _stale_note(obj, scoped)
-    if stale is not None:
-        # ⚠️ No `render_key`: a stale render certifies nothing, so it must not contest a legitimate
+    refusal = _refusal_note(obj, scoped)
+    if refusal is not None:
+        # ⚠️ No `render_key`: a refused render certifies nothing, so it must not contest a legitimate
         # render of the same bytes in another unit and drag that page down with it.
-        row.update({"evidence": "unverifiable", "matched_by": stale, "readiness": UNVERIFIABLE})
+        row.update({"evidence": "unverifiable", "matched_by": refusal[1], "readiness": UNVERIFIABLE})
+        row["revision"] = REVISION_UNCONFIRMED if refusal[0] == oid.WB_UNCONFIRMED else row.get("revision")
         return row
     if name_only:
         scopes = sorted({item.kind for item in name_only})
@@ -479,23 +480,49 @@ def _page_row(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     return row
 
 
-def _stale_note(obj: SourceObject, scoped: ScopedEvidence) -> str | None:
-    """Why a render of this object exists but is of a DIFFERENT build of this workbook, or None.
+#: What to say when a refused render is the only one this page has, per route. Ordered strongest
+#: statement first: a record we could compare and reject says more than one we could not compare.
+REFUSAL_NOTES = {
+    oid.WB_FOREIGN: "a render of ANOTHER workbook carries this name - refused, not credited",
+    oid.WB_STALE: (
+        "STALE: the render is of the same workbook at a DIFFERENT build - the local source bytes "
+        "differ from a reproducible content digest of the site copy, so it cannot certify the "
+        "migrated revision"
+    ),
+    oid.WB_UNCONFIRMED: (
+        "REVISION NOT ESTABLISHED: the render is tied to this workbook by LUID, which says WHICH "
+        "workbook a picture is of and never WHICH BUILD, and this unit's provenance carries no "
+        "comparable revision key - re-stamp with scripts/stamp_tableau_provenance.py"
+    ),
+    oid.WB_NAME: (
+        "NAME ONLY: the render declares no machine identity at all, and a display name is not unique "
+        "across projects - it may inform discovery, never certification"
+    ),
+    oid.WB_UNKNOWN: "the render declares an identity this unit cannot answer - refused, not credited",
+}
 
-    Kept distinct from BLIND on purpose: "nobody captured this page" and "the capture is of another
-    revision" call for different operator actions - capture it, versus re-harvest or re-capture
-    against the migrated build.
+
+def _refusal_note(obj: SourceObject, scoped: ScopedEvidence) -> tuple[str, str] | None:
+    """``(route, note)`` when a refused render of THIS unit's workbook matches this object, else None.
+
+    ⚠️ Only :data:`WB_STALE` and :data:`WB_UNCONFIRMED` are consulted, and the restriction is
+    load-bearing. Those two are records whose LUID matched this unit - unambiguously a render of this
+    page, of this workbook, at a build we cannot vouch for - so reporting UNVERIFIABLE rather than
+    BLIND tells the operator something true and actionable.
+
+    A ``foreign``, ``name``-only or ``unknown`` record is NOT known to be a render of this page.
+    Letting one turn a page from BLIND to UNVERIFIABLE would credit another workbook's capture with
+    partial coverage here, which is the cross-workbook leak this whole change exists to close, and it
+    would quietly erode the blind count that the estate's 46-render floor is measured against.
     """
-    if not scoped.stale:
-        return None
-    match, _ = match_evidence(obj, scoped.stale)
-    if not isinstance(match, Evidence):
-        return None
-    return (
-        f"STALE: {match.origin}:{match.provider or 'unknown'} render is of the same workbook at a "
-        "DIFFERENT build - the local source bytes differ from a REPRODUCIBLE download of the site "
-        "copy, so this cannot certify the migrated revision"
-    )
+    for route in (oid.WB_STALE, oid.WB_UNCONFIRMED):
+        candidates = scoped.refused.get(route) or []
+        if not candidates:
+            continue
+        match, _ = match_evidence(obj, candidates)
+        if isinstance(match, Evidence):
+            return route, REFUSAL_NOTES[route]
+    return None
 
 
 def _engine_report(root: Path) -> dict[str, Any] | None:
@@ -747,16 +774,16 @@ def assess_unit(  # pylint: disable=too-many-arguments,too-many-positional-argum
 class ScopedEvidence:
     """One unit's share of the candidate renders, WITH what was refused and why.
 
-    ``admitted`` may certify a page; ``stale`` is the right workbook at a build this gate can prove
-    is different, and may only make a page UNVERIFIABLE - it is never in the list `match_evidence`
-    searches, so it cannot reach READY by any path. ``census`` counts every verdict, including the
-    refusals, because a refusal that is dropped instead of counted is indistinguishable from a render
-    nobody ever captured. ``identity`` travels with them so a row can report what the admitted render
-    establishes about the REVISION as well as the workbook.
+    ``admitted`` may certify a page. ``refused`` holds every record this unit could not certify with,
+    keyed by route, so a page that has a render but cannot use it reports UNVERIFIABLE with the
+    reason rather than BLIND - "nobody captured this" and "the capture cannot certify this" call for
+    different operator actions. Nothing in ``refused`` is ever searched for a match that could reach
+    READY. ``census`` counts every verdict, because a refusal that is dropped instead of counted is
+    indistinguishable from a render nobody ever captured.
     """
 
     admitted: list[Evidence]
-    stale: list[Evidence]
+    refused: dict[str, list[Evidence]]
     census: dict[str, int]
     identity: UnitIdentity
 
@@ -765,20 +792,20 @@ def _scope_evidence(evidence: list[Evidence], identity: UnitIdentity) -> ScopedE
     """Attribute every candidate render to ``identity``, keeping the ones it may certify.
 
     Every render is attributed, admitted or not, and the census records which axis decided - so the
-    negative controls ("a foreign or unestablished record is refused, AND counted") are assertable
-    and a change here cannot pass as a fix while actually deleting the guard.
+    negative controls ("a foreign, name-only or unconfirmed record is refused, AND counted") are
+    assertable and a change here cannot pass as a fix while actually deleting the guard.
     """
     census = dict.fromkeys((*oid.WB_ROUTES, *oid.WB_REFUSALS), 0)
     admitted: list[Evidence] = []
-    stale: list[Evidence] = []
+    refused: dict[str, list[Evidence]] = {route: [] for route in oid.WB_REFUSALS}
     for item in evidence:
         verdict = item.attribution(identity)
         census[verdict.route] = census.get(verdict.route, 0) + 1
         if verdict.admitted:
             admitted.append(item)
-        elif verdict.route == oid.WB_STALE:
-            stale.append(item)
-    return ScopedEvidence(admitted=admitted, stale=stale, census=census, identity=identity)
+        else:
+            refused[verdict.route].append(item)
+    return ScopedEvidence(admitted=admitted, refused=refused, census=census, identity=identity)
 
 
 def _units_without_reports(engine_report: dict[str, Any] | None, reports: list[Path]) -> list[UnitResult]:
@@ -906,12 +933,12 @@ def _merge(
         "pages_emitted": sum(1 for page in pages if page["page_status"] == PAGE_EMITTED),
         "pages_dropped_explained": sum(1 for page in pages if page["page_status"] == PAGE_DROPPED_EXPLAINED),
         "pages_dropped_unexplained": sum(1 for page in pages if page["page_status"] == PAGE_DROPPED_UNEXPLAINED),
-        # Pages certified by a render whose REVISION this gate could not establish. Not a refusal -
-        # the evidence is real and attributed - but never a silent claim either: the gate's contract
-        # is "THIS workbook, at THIS revision", and this is the count of pages where only the first
-        # half was proven (round-1 review of PR #454, blocker 2).
+        # Pages that HAVE a render and cannot use it because its revision was never established.
+        # ⚠️ Counted from the rows that end UNVERIFIABLE for that reason, not from every row carrying
+        # a `revision` field: the earlier version counted four pages that exclusivity had already
+        # turned unverifiable, so a counter describing one population reported another.
         "pages_revision_unconfirmed": sum(
-            1 for page in pages if page.get("revision") and page["revision"] != REVISION_CONFIRMED
+            1 for page in pages if page["readiness"] == UNVERIFIABLE and page.get("revision") == REVISION_UNCONFIRMED
         ),
         "evidence_records": len(evidence),
         "evidence_untyped": sum(1 for item in evidence if item.kind == KIND_UNKNOWN),
@@ -1094,34 +1121,26 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _merge_scans(reports: list[dict[str, Any]]) -> dict[str, Any]:
-    """Combine several bundle scans, preserving the per-unit rows and the status precedence."""
+    """Combine several bundle scans, preserving the per-unit rows and the status precedence.
+
+    ⚠️ **Every integer counter is summed BY CONSTRUCTION.** This is the third instance of one class in
+    this PR - `evidence_attributed` zeroed on merge (round-1 MEDIUM 2), then
+    `pages_revision_unconfirmed` did the same because it was added after the hand-written key list
+    (round-3 B-C). Patching a third key by name would guarantee a fourth, so the list is gone: any
+    ``int`` value in a single-scan report is summed, which means a counter added tomorrow is summed
+    tomorrow. ``bool`` is excluded explicitly because it is an ``int`` subclass and
+    ``all_evidence_validation_grade`` must stay a conjunction, not a tally.
+    """
     merged = dict(reports[0])
     merged["target"] = ", ".join(report["target"] for report in reports)
     merged["units"] = [unit for report in reports for unit in report["units"]]
     merged["evidence_rejected"] = [item for report in reports for item in report["evidence_rejected"]]
     merged["evidence_untyped_names"] = sorted({n for r in reports for n in r["evidence_untyped_names"]})
-    for key in (
-        "units_scanned",
-        "units_ready",
-        "units_not_applicable",
-        "units_cannot_establish",
-        "pages_expected",
-        "pages_ready",
-        "pages_blind",
-        "pages_unverifiable",
-        "pages_insufficient_grade",
-        "pages_emitted",
-        "pages_dropped_explained",
-        "pages_dropped_unexplained",
-        "evidence_records",
-        "evidence_untyped",
-    ):
-        merged[key] = sum(report[key] for report in reports)
+    for key, value in reports[0].items():
+        if isinstance(value, bool) or not isinstance(value, int):
+            continue
+        merged[key] = sum(report.get(key, 0) for report in reports)
     merged["grades_present"] = sorted({grade for report in reports for grade in report["grades_present"]})
-    # ⚠️ `merged = dict(reports[0])` inherits the FIRST report's census verbatim, so without this the
-    # refusals of every later path vanish - measured `foreign=7` merged down to `foreign=0`. A
-    # refusal counter that silently zeroes is worse than none, because it reads as "nothing was
-    # refused" exactly where the guard did the most work.
     merged["evidence_attributed"] = {
         route: sum((report.get("evidence_attributed") or {}).get(route, 0) for report in reports)
         for route in (*oid.WB_ROUTES, *oid.WB_REFUSALS)
