@@ -40,8 +40,8 @@ TRACKED. Per-run scratch is the reverse (nothing under it is tracked), so it liv
 instead - a root-anchored `/_*` rule already covers it (verified: `git check-ignore -v -- _runs`
 reports `.gitignore:127:/_*`), same as every other top-level scratch root in this repo.
 
-⚠️ The run NUMBER is identity: never renamed, never renumbered, never reused
------------------------------------------------------------------------------
+WARNING - the run NUMBER is identity: never renamed, never renumbered, never reused
+------------------------------------------------------------------------------------
 Renaming or renumbering an ALREADY-ALLOCATED run directory is destructive, not tidying. Generated
 bundle output under `<run>/bundle/` embeds ABSOLUTE self-paths, so moving a run after the fact
 breaks every bundle beneath it - PBIP refresh, the report's `byPath` model binding, and `_build/`
@@ -61,8 +61,15 @@ records the directory name it allocated under the `allocated_dir_name` key, and 
 `unverifiable`. `unverifiable` is NOT a soft `intact` - see `check_run_location`.
 
 Map: `docs/INDEX.md`. The same rule is stated in `docs/migration-phases.md` (Phase 1) and
-`docs/operator-runbook.md` (§6.4 Scratch).
+`docs/operator-runbook.md` (section 6.4, Scratch).
 """
+
+# ⚠️ This module docstring is argparse's `description`, and Windows defaults stdout to cp1252, so it
+# must stay ASCII-ONLY or `--help` dies before printing anything - measured: adding one "warning
+# sign + variation-selector-16" glyph to it turned
+# `tests/test_scripts_help.py::test_help_exits_zero_on_a_cp1252_stdout[work_dirs.py]` red (F003 in
+# `docs/dry-run-findings-2026-08-11.md`). Glyphs are fine HERE, in a comment, and in every other
+# docstring in this file - only the module docstring is printed by `--help`.
 
 from __future__ import annotations
 
