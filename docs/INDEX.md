@@ -12,6 +12,7 @@ Map of maps for agent-facing knowledge. Start here, then open the matching index
    credential-gate routing, `powerbi-semantic-model-gotchas` for TMDL/DAX,
    `powerbi-report-gotchas` for PBIR/visuals, `pbip-model-refresh` for cache/refresh, and
    `powerbi-ai-readiness` for Copilot/Q&A metadata.
+6. `python scripts/promote_unit.py --package <package> --slug <slug> [--datasource-slug <ds>]` — **the last hop**: ship the finished unit from its phase-2 package to `migrations/{workbooks,datasources}/<slug>/fabric/`. It re-runs `check_unit.py` and refuses on a non-zero exit (`--force` overrides, and the override plus the observed exit code land in the promotion record), rewrites `definition.pbir` for a shared datasource, and then **resolves that `byPath` on disk** — `powerbi-report-author validate` returns `errorCount: 0` for a reference whose target exists nowhere. Exit 0 promoted / 1 refused by the gate / 2 CANNOT_ASSESS / 3 refused on content / 4 promotion failed / 64 usage. Shape rules: [`docs/migration-phases.md`](migration-phases.md) phase 3.
 
 After a machine-wide Power BI sign-in, resume every still-blocked unit at once with `python scripts/reprobe_blocked.py` (dry-run by default; `--apply` to run). It re-probes each BLOCKED credential-gate unit and lets the gate earn its own `probe-cleared` where the probe now passes — it **never authorizes**, so it is the agent-safe counterpart to the human-only `credential_gate.py authorize`.
 
