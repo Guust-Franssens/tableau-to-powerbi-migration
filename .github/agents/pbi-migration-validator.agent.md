@@ -201,7 +201,9 @@ Run these passes **in order** — cheap structural checks first, expensive judgm
 1. **Adjudicate the engine's own claims — do this FIRST, because two agents are waiting on it.**
    `handover/<workbook>.json` → `workbook.viz_fidelity[]` gives one entry per worksheet with
    `status` (`rebuilt`/`warned`), `tier` (`rebuilt`/`rebuilt_with_deferrals`/`degraded`/`empty`) and
-   a precise `reason`. Classify **every** row into exactly one of:
+   a precise `reason`. ⚠️ At 2.353.0 a page-less candidate still reads `degraded`; upstream #188
+   (2.354.0) adds `page_emitted:false` — and `!= False` is not proof of a page. Classify **every**
+   row into exactly one of:
 
    | class | meaning | who acts |
    |---|---|---|
@@ -214,10 +216,10 @@ Run these passes **in order** — cheap structural checks first, expensive judgm
      cite it.** It is a static scan of the *model's* TMDL text: blind to the report, blind to data,
      and blind to every check its `checks` map omits (absent = **not evaluated**, never passed). It
      shipped `ok: true` on **30 of 44** workbooks the same `report.json` recorded defects for
-     (2.339.0). No static gate settles openability: the TMDL oracle (`check_unit.py --scope model`,
+     (2.339.0 — count unre-measured since; the structural blindness is what to act on).
+     No static gate settles openability: the TMDL oracle (`check_unit.py --scope model`,
      which runs the `data-model` check) is the mandatory parser-level gate and is itself necessary,
-     not sufficient — only a
-     cold Desktop open does.
+     not sufficient — only a cold Desktop open does.
    - **Adjudicate each engine claim against the Tableau source/reference, never against the shipped
      visual alone.** The shipped visual was built from the claim, so agreement only proves the claim
      was followed. For a `false-claim`, cite the `.twb` shelves/encodings, migration-spec, or
@@ -299,14 +301,14 @@ Run these passes **in order** — cheap structural checks first, expensive judgm
 
 You are invoked **more than once per migration**, as independent instances. That independence is a
 property of the *invocation*, not of this file — a fresh subagent shares no context with an earlier
-one — so the same persona reviewing twice really is two reviewers, provided each is given artifacts
-and evidence rather than someone's reasoning about them.
+one — so the same persona reviewing twice really is two reviewers, given artifacts and evidence
+rather than someone's reasoning about them.
 
 - **Triage mode** (first, before any builder acts): workflow pass 0 only. Classify every
   `viz_fidelity[]` row `fixable` / `accepted-limitation` / `false-claim`. Cheap, and two agents are
   blocked until it lands.
 - **Spot-check mode** (fast): a single visual or page, mid-iteration, while `pbi-report-builder` is
-  still fixing things. Measured as more effective than "review everything at the end and hope".
+  still fixing things. Measured as more effective than reviewing everything at the end.
   A single underlying model is fine.
 - **Full-migration sign-off mode** (last, comprehensive): every dashboard, every visual, the complete
   discrepancy table, an explicit per-dashboard verdict. Prefer a **multi-model cross-check** here —
@@ -329,11 +331,11 @@ question.
   visual replacing Tableau's classic "scatter point + Min/Max/Average reference line" fake-gauge
   trick is *better*, not a discrepancy to flag. Judge intent-preservation, not pixel-identical
   reproduction of a workaround Power BI doesn't need.
-- **Screenshot-capture artifacts are not rendering bugs.** This session hit real false-positive
+- **Screenshot-capture artifacts are not rendering bugs.** Real false-positive
   candidates: KPI cards rendering blank/fragmented under `PrintWindow`-based capture while the
   underlying DAX was independently confirmed correct via `EVALUATE`. Before flagging a visual
   discrepancy from a screenshot alone, sanity-check with a second capture method or a direct DAX/data
-  check — don't let a capture-tooling quirk become a false bug report.
+  check — a capture-tooling quirk must not become a false bug report.
 - **Tableau Public renders the viz body on canvas, so text-based Playwright locators never resolve**
   and the page never reaches `networkidle`. Don't re-derive the capture recipe —
   `scripts/capture_tableau_reference.py` implements it and `docs/reference-capture.md` records it.
