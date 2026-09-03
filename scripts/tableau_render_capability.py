@@ -362,6 +362,32 @@ def supports(available: str | None, required: str) -> bool | None:
 TIER_BY_NAME: dict[str, RenderTier] = {tier.name: tier for tier in LADDER}
 
 
+def rung_support(ceiling: tuple[int, ...] | None, tiers: tuple[RenderTier, ...] = LADDER) -> dict[str, bool | None]:
+    """What a comparable ceiling MEANS per rung -- the capability, separated from the version text.
+
+    ⚠️ **This exists so that a derived capability can be published when the value it came from
+    cannot.** ``restApiVersion`` is a server-controlled string, and the previous exemption for it
+    ("returned untransformed, because it matched a numeric grammar no credential can satisfy") was an
+    *unenforced assumption*, not an enforced property: nothing validates the shape of a Tableau
+    session token -- ``assess_estate.Site`` takes ``creds["token"]`` as-is -- so a server or an
+    intermediary can issue a token that is literally ``3.27`` and reflect it back here. It satisfies
+    the grammar, and it used to be published as this site's advertised ceiling in
+    ``assessment.json``, ``report.md`` and the console. Measured.
+
+    The lesson is the same one that retired the ``UNAUTHENTICATED-SOURCE`` category: an exemption may
+    rest only on something the code ENFORCES. So the raw string is compared inside
+    :func:`server_info` and left there, and this -- three booleans against three published,
+    repo-authored floors -- is what travels.
+
+    ⚠️ **Residual, stated rather than hidden.** These booleans do narrow a suppressed version to an
+    interval (``svg: False, pdf: True`` places it in ``[2.8, 3.29)``). That is unavoidable for any
+    honest report: the operator's question *is* "which rungs can this site reach", and answering it
+    at all constrains the value when the value and the credential are the same string. An interval
+    across a documented range is not a credential; the exact string was.
+    """
+    return {tier.name: None if ceiling is None else ceiling >= api_tuple(tier.min_api) for tier in tiers}
+
+
 # ------------------------------------------------- why one `?format=svg` request came back refused
 
 # The three states any "SVG did not render" message must resolve to. They are the three values of
@@ -524,10 +550,22 @@ def server_info(base: str, *, timeout: int = SERVERINFO_TIMEOUT_SEC, redactor=re
     nothing stops it echoing that credential in a later unauthenticated response. Measured on this
     branch: a synthetic session token placed in ``productVersion`` and its ``build`` attribute of a
     perfectly ordinary 200 arrived verbatim in ``assessment.json``, in ``report.md`` and on the
-    console, because the redactor in hand was applied to exactly one of the four fields. Every
-    free-form field is therefore redacted at the parse boundary now; the only value returned
-    untransformed is ``rest_api_version``, and only when it has been proved to match a numeric
-    API-version grammar no secret can satisfy.
+    console, because the redactor in hand was applied to one of the four fields.
+
+    ⚠️ **NO response string returned by this function escapes the redactor -- including the version.**
+    The second attempt exempted ``restApiVersion`` on the grounds that a numeric API-version grammar
+    is a shape "no credential can satisfy". Nothing enforces that: a Tableau session token has no
+    validated shape at all (``assess_estate.Site`` accepts ``creds["token"]`` as-is), so a token that
+    is literally ``3.27`` passes the grammar and was published as the site's advertised ceiling on
+    all three surfaces. Measured, and it is the same defect class as the ``UNAUTHENTICATED-SOURCE``
+    exemption that preceded it: an assumption standing where an enforced property was needed.
+
+    So the raw value is compared **inside this function** and never leaves it. What leaves is a
+    redacted display string plus a *derived* capability -- :func:`rung_support` and
+    ``ceiling_established``, computed from the raw -- so a reflected credential costs the operator
+    the printed NUMBER and nothing else: the ceiling is still established and every rung verdict is
+    still correct. ``rest_api_version_reflected`` says which happened, so a report can state that the
+    number was suppressed instead of printing a redaction marker where a version belongs.
 
     ⚠️ **A version field is trusted only from a SUCCESSFUL response, and only when it is a version.**
     Both halves were measured missing: the parse ran regardless of HTTP status, so a **500** or a
@@ -566,6 +604,11 @@ def server_info(base: str, *, timeout: int = SERVERINFO_TIMEOUT_SEC, redactor=re
         raw = grab(pattern)
         return None if raw is None else redacted_note(raw, redactor, limit=_VERSION_CHARS)
 
+    # The derived capability is computed from the RAW value and travels on its own; the raw value
+    # itself never leaves this function. See :func:`rung_support` for why.
+    ceiling = api_tuple(advertised)
+    shown = None if advertised is None else redacted_note(advertised, redactor, limit=_VERSION_CHARS)
+    reflected = advertised is not None and shown != advertised
     info: dict[str, Any] = {
         "status": status,
         # ⚠️ Redacted HERE, not at the three places that print them. `productVersion` and its `build`
@@ -577,15 +620,24 @@ def server_info(base: str, *, timeout: int = SERVERINFO_TIMEOUT_SEC, redactor=re
         # closed twice.
         "product_version": grab_redacted(r"<productVersion[^>]*>([^<]+)<"),
         "build": grab_redacted(r'<productVersion[^>]*build="([^"]+)"'),
-        # The one field returned untransformed, and only because it is SHAPE-VERIFIED: it is returned
-        # solely when `api_tuple` proves it matches a numeric API-version grammar, which no credential
-        # can satisfy. That is a property of the value, not of the request that carried it.
-        "rest_api_version": advertised if api_tuple(advertised) is not None else None,
+        # ⚠️ The DISPLAY value, and nothing else -- it has been through the redactor exactly like the
+        # two above. In every ordinary case the redactor changes nothing and this IS the advertised
+        # version, byte for byte. When it does change something, that is the redactor telling us the
+        # server just quoted a configured credential back at us, and the number is suppressed while
+        # the capability below survives.
+        "rest_api_version": shown if ceiling is not None else None,
+        # The redactor rewrote the advertised version, i.e. the server reported a value that matches
+        # a credential we hold. Kept as a first-class fact so a report can SAY the number was
+        # suppressed rather than silently print a redaction marker where a version belongs.
+        "rest_api_version_reflected": reflected,
+        # Derived from the raw value, so it stays true even when the number cannot be shown.
+        "ceiling_established": ceiling is not None,
+        "rung_support": rung_support(ceiling),
     }
-    if advertised is not None and info["rest_api_version"] is None:
+    if advertised is not None and ceiling is None:
         # Kept, redacted, as the reason the ceiling is unknown -- an operator who is told only
         # "unknown" re-runs the same probe; one who is told WHAT came back stops guessing.
-        info["invalid_rest_api_version"] = redacted_note(advertised, redactor, limit=_VERSION_CHARS)
+        info["invalid_rest_api_version"] = shown
     return info
 
 

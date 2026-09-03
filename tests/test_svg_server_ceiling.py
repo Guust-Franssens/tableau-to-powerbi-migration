@@ -453,6 +453,89 @@ def test_an_ABSENT_product_version_stays_None_rather_than_becoming_an_empty_stri
     assert info["rest_api_version"] == "3.27"
 
 
+def test_a_NUMERIC_credential_reflected_as_the_VERSION_is_redacted_but_still_yields_a_CEILING(monkeypatch):
+    """The exemption that had to go: no response string leaves `server_info` unredacted, version included.
+
+    `restApiVersion` used to be returned untransformed because it had passed a numeric grammar "no
+    credential can satisfy". Nothing enforces that -- a Tableau session token has **no** validated
+    shape (`assess_estate.Site` binds `creds["token"]` as it arrives) -- so a token that is literally
+    `3.27` satisfies the grammar and was published as the site's ceiling on three surfaces.
+
+    The fix is NOT a tighter grammar: that would narrow the overlap between credential shapes and
+    version shapes while leaving the assumption in place. The raw value is compared **inside**
+    `server_info` and the derived capability travels separately from the displayable text, so
+    suppressing the number costs the printed digits and nothing else.
+    """
+    info = _probe(monkeypatch, 200, _serverinfo_xml("3.27"), redactor=lambda text: text.replace("3.27", "[REDACTED]"))
+    assert info["rest_api_version"] == "[REDACTED]"
+    assert info["rest_api_version_reflected"] is True
+    # The capability is intact, and was derived from the RAW value rather than from the string above.
+    assert info["ceiling_established"] is True
+    assert info["rung_support"] == {"svg": False, "pdf": True, "png_high": True}
+
+
+def test_the_SAME_probe_with_no_credential_to_reflect_is_untouched(monkeypatch):
+    """Negative control: suppression fires only when the REDACTOR says so.
+
+    A mutation that always redacts the version, or always sets `reflected`, fails here -- and so
+    would a "fix" that suppressed the number unconditionally, which would cost every honest run the
+    one number this block exists to report.
+    """
+    info = _probe(monkeypatch, 200, _serverinfo_xml("3.27"))
+    assert info["rest_api_version"] == "3.27"
+    assert info["rest_api_version_reflected"] is False
+    assert info["rung_support"] == {"svg": False, "pdf": True, "png_high": True}
+
+
+def test_the_derived_capability_never_carries_the_version_STRING(monkeypatch):
+    """`rung_support` is what may be published when the value it came from may not be.
+
+    Three booleans against three published floors: a consumer cannot reconstruct `3.27` from them.
+    The residual -- that they narrow a suppressed version to `[2.8, 3.29)` -- is stated in
+    `rung_support`'s docstring and in its redaction certification rather than hidden.
+    """
+    info = _probe(monkeypatch, 200, _serverinfo_xml("3.27"), redactor=lambda text: text.replace("3.27", "[REDACTED]"))
+    support = info["rung_support"]
+    assert set(support) == {tier.name for tier in capability.LADDER}
+    assert all(isinstance(value, bool) for value in support.values())
+    assert "3.27" not in json.dumps(info)
+
+
+@pytest.mark.parametrize(
+    ("ceiling", "expected"),
+    [
+        (None, {"svg": None, "pdf": None, "png_high": None}),
+        ((2, 4), {"svg": False, "pdf": False, "png_high": False}),
+        ((3, 29), {"svg": True, "pdf": True, "png_high": True}),
+    ],
+)
+def test_rung_support_is_three_valued_exactly_like_supports(ceiling, expected):
+    """An unknown ceiling stays unknown per rung -- the third state, carried in the new channel."""
+    assert capability.rung_support(ceiling) == expected
+
+
+def test_the_assessment_suppresses_the_RELEASE_NAME_with_the_number_it_names(monkeypatch):
+    """`API_RELEASE` is a bijection, so a release name hands back the digits redaction removed."""
+    ceiling = _ceiling(
+        monkeypatch,
+        {
+            "status": 200,
+            "rest_api_version": "[REDACTED]",
+            "rest_api_version_reflected": True,
+            "ceiling_established": True,
+            "rung_support": {"svg": False, "pdf": True, "png_high": True},
+            "product_version": "2025.3.3",
+        },
+    )
+    lines = "\n".join(assess_estate._render_server_ceiling(ceiling))  # pylint: disable=protected-access
+    assert ceiling["advertised_release"] is None
+    assert "Tableau 2025.3" not in lines
+    assert "matched a credential this run holds" in lines
+    # The verdicts survive: this is a redaction, not a refusal.
+    assert ceiling["established"] is True and ceiling["best_reference_render"] == "pdf"
+    assert "| rung | route |" in lines
+
+
 # ---------------------------------------------------------------- the three states are a partition
 
 

@@ -1065,6 +1065,25 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
             "exception TYPE name (Python's, not the server's) plus a message already put through "
             "`redacted_note`. Reached only when status is 0, i.e. no HTTP response arrived at all"
         ),
+        "shown if ceiling is not None else None": (
+            "REDACTED-UPSTREAM: `shown` is `redacted_note(advertised, redactor, ...)` -- the whole "
+            "raw value through the chokepoint before anything selects or truncates it. The RAW "
+            "`advertised` is compared inside this function and never returned, because a Tableau "
+            "session token has no enforced shape and one that is literally `3.27` satisfies the "
+            "version grammar (measured: it reached assessment.json, report.md and the console)"
+        ),
+        "ceiling is not None": (
+            "NOT-A-STRING: a boolean -- whether `api_tuple` could parse the advertised value at all. "
+            "It carries one bit ('the server reported something version-shaped'), never the value"
+        ),
+        "rung_support(ceiling)": (
+            "DERIVED-IRREVERSIBLY: three booleans, one per PUBLISHED ladder floor, computed from the "
+            "comparable tuple. The string cannot be reconstructed from them. ⚠️ Residual, stated "
+            "rather than hidden: they do narrow a suppressed version to an interval (`svg: False, "
+            "pdf: True` places it in [2.8, 3.29)), which is unavoidable for any honest report -- the "
+            "operator's question IS which rungs the site reaches. An interval across a documented "
+            "range is not a credential; the exact string was"
+        ),
     },
     ("scripts/tableau_render_capability.py", "_cli_fetch"): {
         "site_id": (

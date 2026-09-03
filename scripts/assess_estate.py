@@ -1226,21 +1226,36 @@ def server_ceiling(site: Site) -> dict[str, Any]:
     is a claim the endpoint has not yet been asked to honour.
     """
     info = render_capability.server_info(site.base, redactor=site.scrub_text)
-    advertised = info.get("rest_api_version")
-    # Defence in depth, and cheap: `server_info` already refuses a version that is not one, but this
-    # function is also called with a hand-assembled `info` in tests and by any future caller, and a
-    # nonempty string is exactly what used to be trusted. The grammar decides `established`; bare
-    # truthiness does not. ⚠️ The offending text is taken ONLY from `invalid_rest_api_version`, which
-    # was redacted at the parse boundary -- never re-derived from `advertised` here, which on that
-    # hypothetical path would be unredacted response text on its way into a customer-facing report.
-    if render_capability.api_tuple(advertised) is None:
-        advertised = None
-    rungs = [_rung_verdict(rung, advertised) for rung in render_capability.LADDER]
+    shown = info.get("rest_api_version")
+    reflected = bool(info.get("rest_api_version_reflected"))
+    # ⚠️ **The verdicts come from the DERIVED capability, the display from the redacted text, and the
+    # two are never the same value.** `rung_support` is computed inside `server_info` from the raw
+    # `restApiVersion`, which does not leave that function -- so a server that reflects a
+    # credential shaped like a version (`3.27`; nothing validates a Tableau token's shape) costs the
+    # operator the printed NUMBER and nothing else. `established` stays true and every rung verdict
+    # stays correct, because neither is computed from the string on its way to the report.
+    support = info.get("rung_support")
+    established = info.get("ceiling_established")
+    # Defence in depth for a hand-assembled `info` -- tests, and any future caller: derive from the
+    # display-safe value, which is exactly the value it is safe to derive AND display from. A
+    # nonempty string is what used to be trusted; the grammar decides, bare truthiness does not.
+    if support is None:
+        support = render_capability.rung_support(render_capability.api_tuple(shown))
+    if established is None:
+        established = render_capability.api_tuple(shown) is not None
+    # Junk that is neither a version nor a reflected credential is no ceiling at all. A reflected one
+    # keeps its redaction marker, so a reader can tell "suppressed" from "never answered".
+    if not reflected and render_capability.api_tuple(shown) is None:
+        shown = None
+    rungs = [_rung_verdict(rung, support.get(rung.name)) for rung in render_capability.LADDER]
     best = next((r for r in rungs if r["verdict"] == AVAILABLE), None)
     return {
         "client_api_version": site.version,
-        "advertised_api_version": advertised,
-        "advertised_release": render_capability.release_for(advertised) if advertised else None,
+        "advertised_api_version": shown,
+        # Suppressed with the number it names: `API_RELEASE` is a bijection, so printing the release
+        # of a redacted version would hand back the digits the redaction removed.
+        "advertised_release": None if reflected or not shown else render_capability.release_for(shown),
+        "advertised_api_version_reflected": reflected,
         # ⚠️ Present ONLY when `/serverinfo` answered 200 with a `restApiVersion` that is not a REST
         # API version at all. It is why the ceiling is unknown, and it is already redacted at the
         # parse boundary. `established` stays false: text that cannot be compared against a floor is
@@ -1248,7 +1263,7 @@ def server_ceiling(site: Site) -> dict[str, Any]:
         "advertised_api_version_invalid": info.get("invalid_rest_api_version"),
         "product_version": info.get("product_version"),
         "build": info.get("build"),
-        "established": bool(advertised),
+        "established": bool(established),
         "probe_status": info.get("status"),
         # One entry per ladder rung, best-first, each carrying its own floor AND its own verdict, so a
         # downstream tool consumes the implication without parsing prose or re-deriving it.
@@ -1265,14 +1280,18 @@ UNAVAILABLE = "unavailable"
 UNKNOWN = "unknown"
 
 
-def _rung_verdict(rung, advertised: str | None) -> dict[str, Any]:
+def _rung_verdict(rung, meets: bool | None) -> dict[str, Any]:
     """One ladder rung against this site's advertised ceiling. Three-valued, never two.
+
+    ``meets`` is the DERIVED capability -- ``render_capability.rung_support``'s answer for this rung,
+    computed from the raw advertised version inside ``server_info`` and never from the string that
+    reaches the report. That separation is what lets a suppressed (credential-shaped) version still
+    produce correct verdicts; see :func:`server_ceiling`.
 
     The parameter is ``rung``, not ``tier``: this module already has a module-level ``tier()`` that
     scores a workbook, and shadowing it here made pylint's ``redefined-outer-name`` the difference
     between exit 0 and exit 12 on the required gate.
     """
-    meets = render_capability.supports(advertised, rung.min_api)
     return {
         "tier": rung.name,
         "route": rung.route,
@@ -1313,11 +1332,22 @@ def _render_server_ceiling(ceiling: dict[str, Any] | None) -> list[str]:
     if not ceiling.get("established"):
         return out + _render_ceiling_unknown(ceiling)
     product = f", product `{ceiling['product_version']}`" if ceiling.get("product_version") else ""
+    release = f" ({ceiling['advertised_release']}{product})" if ceiling.get("advertised_release") else product
     out += [
         f"- **what we send** — `TABLEAU_REST_API_VERSION` = `{ceiling['client_api_version']}` "
         f"(a *client preference*, not a capability)",
-        f"- **what the server advertises** — REST `{ceiling['advertised_api_version']}` "
-        f"({ceiling['advertised_release']}{product}), from `/serverinfo`",
+        f"- **what the server advertises** — REST `{ceiling['advertised_api_version']}`{release}, from `/serverinfo`",
+    ]
+    if ceiling.get("advertised_api_version_reflected"):
+        # ⚠️ Say WHY the number is missing. A bare redaction marker where a version belongs reads as
+        # a bug in this tool, and the operator needs to know their server echoed a credential.
+        out.append(
+            "- ⚠️ **the version this server reported matched a credential this run holds, so it has "
+            "been redacted.** The rung verdicts below are still derived from it and are unaffected — "
+            "what is lost is the printed number, not the assessment. A server echoing a credential "
+            "back in an unauthenticated response is worth raising with whoever operates it."
+        )
+    out += [
         "",
         "| rung | route | needs | verdict | resolution ceiling |",
         "|---|---|---|---|---|",
@@ -1681,10 +1711,15 @@ def _log_server_ceiling(ceiling: dict[str, Any] | None) -> None:
     LOG.info(
         "  server advertises REST %s (%s, product %s); we ask as %s",
         ceiling["advertised_api_version"],
-        ceiling["advertised_release"],
+        ceiling["advertised_release"] or "release not shown",
         ceiling.get("product_version"),
         ceiling["client_api_version"],
     )
+    if ceiling.get("advertised_api_version_reflected"):
+        LOG.warning(
+            "  ⚠️ that version matched a credential this run holds and was REDACTED; the rung "
+            "verdicts below are derived from it and are unaffected"
+        )
     for rung in ceiling["rungs"]:
         line = LOG.warning if rung["verdict"] == UNAVAILABLE else LOG.info
         line(

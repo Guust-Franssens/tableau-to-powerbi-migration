@@ -89,6 +89,13 @@ def serverinfo_reporting(version: str) -> bytes:
     return SES_SERVERINFO.replace(b"<restApiVersion>3.27<", f"<restApiVersion>{version}<".encode())
 
 
+# ⚠️ A session token that is ALSO a valid REST API version. Nothing in this repo -- or in Tableau's
+# API -- constrains a token's shape: ``Site`` binds ``creds["token"]`` exactly as it arrives. So this
+# is not a contrived string, it is the shape that defeats any "a credential cannot look like a
+# version" argument, and it is deliberately equal to the version ``SES_SERVERINFO`` reports.
+NUMERIC_SECRET = "3.27"
+
+
 class FakeTableau:
     """A scripted Tableau site. ``fail`` maps a URL fragment to an exception, a status, or a list
     of those consumed one per call, so a test injects a fault on ONE endpoint and nothing else."""
@@ -893,13 +900,85 @@ def test_a_credential_reflected_in_the_SERVERINFO_VERSION_FIELDS_reaches_no_surf
     assert no_sleep == []
 
 
-def test_an_ordinary_product_version_survives_the_redaction_unchanged(monkeypatch, no_sleep, tmp_path):
-    """Negative control for the test above: the redactor must not eat a legitimate value.
+def test_a_NUMERIC_credential_reflected_as_the_REST_VERSION_reaches_no_surface(monkeypatch, no_sleep, tmp_path, caplog):
+    """`NUMERIC_REST_TOKEN_200`. The exemption that survived round 2, and why it had to go.
 
-    Without this, a "fix" that returned `None` for every free-form field, or truncated them to
-    nothing, would pass the leak test while destroying the two numbers a customer conversation
-    actually uses.
+    `restApiVersion` was returned untransformed on the grounds that it had been proved to match a
+    numeric API-version grammar "no credential can satisfy". Nothing enforces that: `Site` accepts
+    `creds["token"]` with **no shape validation at all**, so a server -- or an intermediary -- can
+    issue a session token that is literally `3.27` and reflect it here. It passes the grammar, takes
+    the untransformed branch, and lands in `assessment.json`, `report.md` and the console. Measured;
+    the redactor knew it was a credential and the code went around it.
+
+    ⚠️ This is the same defect class as the `UNAUTHENTICATED-SOURCE` exemption retired one round
+    earlier -- an assumption standing where an enforced property was needed -- which is why the fix
+    is NOT a tighter grammar. A tighter grammar narrows the overlap between credential shapes and
+    version shapes without removing the assumption, and the next token shape walks through it.
     """
+
+    class Echoing(FakeTableau):
+        """The site's `/serverinfo` reports a version that IS this run's credential."""
+
+        def urlopen(self, request, timeout=None):
+            if "/serverinfo" in request.full_url:
+                return _Response(200, serverinfo_reporting(NUMERIC_SECRET))
+            return super().urlopen(request, timeout)
+
+    monkeypatch.setitem(ENV, "TABLEAU_PAT_SECRET", NUMERIC_SECRET)
+    with caplog.at_level("INFO"):
+        code = _run_main(monkeypatch, tmp_path, Echoing())
+    out = tmp_path / "_assessment"
+    written = (out / "assessment.json").read_text(encoding="utf-8")
+    report = (out / "report.md").read_text(encoding="utf-8")
+    ceiling = json.loads(written)["server_ceiling"]
+    assert code == 0
+    # ⚠️ A bare `NUMERIC_SECRET not in written` is worthless here -- `3.27` is a plausible substring
+    # of a floor, a release name or a date. The claim is that the value is never PRESENTED as this
+    # site's advertised ceiling, so each assertion names the field or the rendered phrase.
+    assert ceiling["advertised_api_version"] != NUMERIC_SECRET
+    assert f'"advertised_api_version": "{NUMERIC_SECRET}"' not in written
+    assert f"REST `{NUMERIC_SECRET}`" not in report
+    assert f"advertises REST {NUMERIC_SECRET}" not in caplog.text
+    # The release name is suppressed WITH the number: `API_RELEASE` is a bijection, so printing
+    # "Tableau 2025.3" would hand back the digits the redaction just removed.
+    assert ceiling["advertised_release"] is None
+    assert "Tableau 2025.3" not in report
+    # ...and the capability survives, which is the whole point of separating it from the text.
+    assert ceiling["established"] is True and ceiling["advertised_api_version_reflected"] is True
+    assert [(r["tier"], r["verdict"]) for r in ceiling["rungs"]] == [
+        ("svg", "unavailable"),
+        ("pdf", "available"),
+        ("png_high", "available"),
+    ]
+    assert ceiling["best_reference_render"] == "pdf"
+    assert "| rung | route |" in report
+    # The operator is TOLD the number was suppressed -- a bare marker where a version belongs reads
+    # as a bug in this tool, and a server echoing a credential is itself worth escalating.
+    assert "matched a credential this run holds" in report
+    assert "was REDACTED" in caplog.text
+    assert no_sleep == []
+
+
+def test_an_ordinary_product_version_survives_the_redaction_unchanged(monkeypatch, no_sleep, tmp_path):
+    """Negative control for both tests above: the redactor must not eat a legitimate value.
+
+    Without this, a "fix" that returned `None` for every field, or suppressed the version
+    unconditionally, would pass both leak tests while destroying the numbers a customer conversation
+    actually uses. `advertised_release` is asserted too, since it is now suppressed conditionally.
+    """
+    code = _run_main(monkeypatch, tmp_path, FakeTableau())
+    out = tmp_path / "_assessment"
+    report = (out / "report.md").read_text(encoding="utf-8")
+    ceiling = json.loads((out / "assessment.json").read_text(encoding="utf-8"))["server_ceiling"]
+    assert code == 0
+    assert ceiling["product_version"] == "2025.3.3"
+    assert ceiling["build"] == "20253.25.0904.1234"
+    assert ceiling["advertised_api_version"] == "3.27"
+    assert ceiling["advertised_release"] == "Tableau 2025.3"
+    assert ceiling["advertised_api_version_reflected"] is False
+    assert "product `2025.3.3`" in report and "REST `3.27`" in report
+    assert "matched a credential this run holds" not in report
+    assert no_sleep == []
     code = _run_main(monkeypatch, tmp_path, FakeTableau())
     out = tmp_path / "_assessment"
     ceiling = json.loads((out / "assessment.json").read_text(encoding="utf-8"))["server_ceiling"]
