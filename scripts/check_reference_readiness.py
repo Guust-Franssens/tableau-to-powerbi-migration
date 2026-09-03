@@ -484,6 +484,11 @@ def _page_row(  # pylint: disable=too-many-arguments,too-many-positional-argumen
 #: statement first: a record we could compare and reject says more than one we could not compare.
 REFUSAL_NOTES = {
     oid.WB_FOREIGN: "a render of ANOTHER workbook carries this name - refused, not credited",
+    oid.WB_CONFLICT: (
+        "CONTRADICTORY IDENTITY: the render's own metadata disagrees with itself about which "
+        "workbook it is of - one machine axis matches this unit and another names a different "
+        "workbook, so neither claim may be believed"
+    ),
     oid.WB_STALE: (
         "STALE: the render is of the same workbook at a DIFFERENT build - the local source bytes "
         "differ from a reproducible content digest of the site copy, so it cannot certify the "
@@ -608,12 +613,20 @@ def _cannot(unit: str, detail: str, report_dir: Path | None = None, source: Path
     )
 
 
-def _identify(root: Path, unit: str, source: Path) -> UnitIdentity | None:
-    """Unit identity, or None when the source cannot be hashed (so evidence cannot be attributed)."""
+def _identify(root: Path, unit: str, source: Path) -> UnitIdentity | str | None:
+    """Unit identity, the refusal REASON when provenance is ambiguous, or None when unhashable.
+
+    Three outcomes rather than two, because "I could not read the bytes" and "the bytes are stamped
+    twice, for two different workbooks" are different operator actions - re-run the harvest, versus
+    re-stamp provenance. Both are ``CANNOT_ESTABLISH``; neither is a pass.
+    """
     digest = sha256_of(source)
     if digest is None:
         return None
-    luid, revision = provenance_origin(root, digest, source)
+    try:
+        luid, revision = provenance_origin(root, digest, source)
+    except oid.AmbiguousIdentity as ambiguous:
+        return str(ambiguous)
     return UnitIdentity(name=unit, source_path=source, source_sha256=digest, workbook_luid=luid, revision=revision)
 
 
@@ -757,6 +770,8 @@ def assess_unit(  # pylint: disable=too-many-arguments,too-many-positional-argum
     identity = _identify(root, unit, source)
     if identity is None:
         return _cannot(unit, f"source workbook could not be hashed, so evidence cannot be attributed: {source}")
+    if isinstance(identity, str):
+        return _cannot(unit, f"this unit's workbook identity is ambiguous: {identity}", report_dir, source)
 
     objects = _expectation(unit, report_dir, source)
     if isinstance(objects, UnitResult):
@@ -971,7 +986,7 @@ def _merge(
 
 def _census(units: list[UnitResult]) -> dict[str, int]:
     """Every unit's attribution census, summed. Keys are always present, so a zero is visible."""
-    total = dict.fromkeys((*oid.WB_ROUTES, oid.WB_FOREIGN, oid.WB_UNKNOWN), 0)
+    total = dict.fromkeys((*oid.WB_ROUTES, oid.WB_CONFLICT, oid.WB_FOREIGN, oid.WB_UNKNOWN), 0)
     for unit in units:
         for route, count in unit.attribution.items():
             total[route] = total.get(route, 0) + count
@@ -1040,7 +1055,8 @@ def _render_attribution(report: dict[str, Any]) -> list[str]:
         admitted = ", ".join(f"{route}={census.get(route, 0)}" for route in oid.WB_ROUTES)
         lines.append(
             f"  [ATTRIBUTION] admitted by {admitted}; refused {census.get(oid.WB_FOREIGN, 0)} as another "
-            f"workbook's, {census.get(oid.WB_STALE, 0)} as a different build and "
+            f"workbook's, {census.get(oid.WB_CONFLICT, 0)} whose own machine identities contradict each "
+            f"other, {census.get(oid.WB_STALE, 0)} as a different build and "
             f"{census.get(oid.WB_UNKNOWN, 0)} with no identity this unit can answer "
             "(counts are per unit-and-record, so one shared capture is weighed against every unit)."
         )

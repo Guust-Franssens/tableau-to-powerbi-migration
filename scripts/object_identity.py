@@ -61,6 +61,17 @@ WB_STALE = "stale"
 WB_FOREIGN = "foreign"
 WB_UNKNOWN = "unknown"
 
+#: Two MACHINE axes both answered and CONTRADICTED each other - the record's bytes are this unit's
+#: source but its LUID names another workbook, or the reverse. Its own route, not folded into
+#: ``WB_FOREIGN``, because it is a different operator action: `foreign` says "this is someone else's
+#: capture, ignore it", `conflicting-identity` says "this record's own metadata disagrees with
+#: itself, so one of the two claims is wrong and neither can be believed". Round-N review of PR #454
+#: measured what folding it into the winning axis costs: a record whose sha256 matched and whose LUID
+#: belonged to another workbook reached `READY 1/1` at the entry gate and `PASS visual=1 numeric=1` at
+#: the exit gate, because the walk returned on the first axis that agreed and never looked at the one
+#: that did not. Conflicting machine identities are LESS evidence than none.
+WB_CONFLICT = "conflicting-identity"
+
 #: The axes that identify a workbook to a MACHINE, and the ONLY ones that may certify a page. A
 #: record that claims one has told us how it must be checked; a unit that cannot answer it has
 #: established nothing.
@@ -87,7 +98,7 @@ WB_ROUTES = (WB_SHA, WB_LUID)
 #: Every refusal, so a census can carry them all and a refusal is never silently absent. ``WB_NAME``
 #: is a refusal that is REPORTED rather than discarded: "a name matched, and a name is not identity"
 #: is a different operator action from "nothing matched".
-WB_REFUSALS = (WB_NAME, WB_UNCONFIRMED, WB_STALE, WB_FOREIGN, WB_UNKNOWN)
+WB_REFUSALS = (WB_NAME, WB_UNCONFIRMED, WB_STALE, WB_CONFLICT, WB_FOREIGN, WB_UNKNOWN)
 
 WB_ADMITTING = frozenset(WB_ROUTES)
 
@@ -476,8 +487,14 @@ class WorkbookIdentity:
             parts.append(f"sha256={self.sha256[:12]}...")
         return ", ".join(parts) or "no workbook identity"
 
-    def attribute(self, record: WorkbookIdentity) -> Attribution:
+    def attribute(self, record: WorkbookIdentity) -> Attribution:  # pylint: disable=too-many-return-statements
         """Tie ``record`` to this unit. **A machine identity the unit cannot answer is ``unknown``.**
+
+        ⚠️ ``too-many-return-statements`` is disabled deliberately, for the same reason as
+        :func:`revision_key`: all seven returns are *distinct verdicts*, each carrying the ``detail``
+        string an operator acts on, and this whole file exists so a caller can tell one refusal from
+        another. Funnelling them through shared exits would satisfy the checker by making "which
+        guard refused" unreadable in the one place this repo most needs it legible.
 
         This is the one rule, and it replaced four separate fail-open patches (round-1 review of PR
         #454). Read it as a single sentence:
@@ -502,6 +519,16 @@ class WorkbookIdentity:
         to be an admission, which is the moved-boundary shape. Machine-bearing records were made
         safe while records carrying only the non-unique decoration stayed credited, and that is the
         case where a name is least trustworthy because nothing corroborates it.
+
+        ⚠️ **Round N: an axis that agrees does not end the walk.** "Decisive" above was read as
+        "returns", so the FIRST agreeing axis won and the rest were never consulted - and a record
+        whose sha256 matched this unit while its LUID named another workbook was admitted on the
+        sha256 and reached `READY 1/1` / `PASS visual=1 numeric=1`. Every machine axis both sides can
+        answer is now compared before anything is admitted, and an active CONTRADICTION between two
+        of them is :data:`WB_CONFLICT`: a refusal in its own right, never resolved by axis priority.
+        Note the asymmetry that :meth:`_contradiction` keeps: an axis the unit *cannot answer* is
+        silent, an axis that *disagrees* is fatal, and collapsing the two would either re-open the
+        fall-through above or refuse every record whose producer wrote fewer fields than ours.
         """
         for axis in WB_MACHINE_AXES:
             mine, theirs = getattr(self, _FIELD[axis]), getattr(record, _FIELD[axis])
@@ -515,6 +542,12 @@ class WorkbookIdentity:
                     axis=axis,
                 )
             if _axis_equal(axis, mine, theirs):
+                # ⚠️ `or` is unavailable here: `Attribution.__bool__` RAISES on purpose, so a
+                # truthiness shortcut would blow up on exactly the contradictory records this guard
+                # exists to catch. Compare against None explicitly.
+                conflict = self._contradiction(record, decided=axis)
+                if conflict is not None:
+                    return conflict
                 return Attribution(axis, f"{axis} matches ({self.describe()})", axis=axis)
             return Attribution(
                 WB_FOREIGN,
@@ -538,6 +571,29 @@ class WorkbookIdentity:
             WB_UNKNOWN,
             f"no shared identity axis: unit {self.describe()} vs record {record.describe()}",
         )
+
+    def _contradiction(self, record: WorkbookIdentity, *, decided: str) -> Attribution | None:
+        """A machine axis OTHER than ``decided`` that both sides answer and that DISAGREES, or None.
+
+        Only a disagreement counts. An axis the record does not claim, or one this unit cannot
+        answer, is silent here: those are "less evidence", and the walk in :meth:`attribute` already
+        decides what they mean. This function answers only the narrower question the axis-priority
+        return used to skip - *does anything the record says contradict the axis that just agreed?*
+        """
+        for axis in WB_MACHINE_AXES:
+            if axis == decided:
+                continue
+            mine, theirs = getattr(self, _FIELD[axis]), getattr(record, _FIELD[axis])
+            if mine is None or theirs is None or _axis_equal(axis, mine, theirs):
+                continue
+            return Attribution(
+                WB_CONFLICT,
+                f"the record's {decided} matches this unit but its {axis} does not: unit "
+                f"{self.describe()} vs record {record.describe()} - contradictory machine "
+                "identities are less evidence than none, so neither claim may certify anything",
+                axis=axis,
+            )
+        return None
 
 
 #: Which field each axis reads. A mapping rather than a tuple of triples so the axis names in
@@ -718,8 +774,15 @@ def _is_xml(payload: bytes) -> bool:
     return head.startswith(XML_PREFIXES)
 
 
-def revision_key(payload: bytes) -> RevisionKey | None:
+def revision_key(payload: bytes) -> RevisionKey | None:  # pylint: disable=too-many-return-statements
     """The reproducible build digest of one Tableau asset, or None when it cannot be computed.
+
+    ⚠️ ``too-many-return-statements`` is disabled ON PURPOSE rather than refactored away. All eight
+    returns are distinct verdicts this function exists to make - three payload SHAPES and four named
+    REFUSALS, each with its own comment saying what it refuses and why - and this repo's rule is that
+    a fail-closed guard must be identifiable, not merely present. Merging them behind shared exit
+    points would satisfy the checker by making "which guard refused" unreadable, which is the wrong
+    trade in exactly the code where it matters most.
 
     Three explicit SHAPES, each with its own versioned algorithm, and no silent path between them:
 

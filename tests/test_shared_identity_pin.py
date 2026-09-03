@@ -51,18 +51,24 @@ UPSTREAM_COMMIT = "0fae0cf75bee7c49489573b4735788106af5d8e0"
 #: Why the pin last moved. An edit to shared surface is a two-gate contract change; this is the
 #: record of the one that was reviewed.
 PIN_PROVENANCE = (
-    "master@0fae0cf7 plus issue #450 and its round-1 and round-3 safety reviews: `object_identity.py` "
-    "carries the WORKBOOK-identity join both gates share, closed by ONE rule (a machine identity the "
-    "unit cannot answer is `unknown`, never rescued by a weaker axis), and now the REVISION key too. "
-    "Measured 2026-09-03 on the live site, three downloads of every item in one run: a raw sha256 "
-    "differed for 27 of 49 archives while a content-normalised key differed for 0 of 67; re-stamping "
-    "the reference estate then showed 28 remaining false `differs` were entirely a Tableau SERVER "
-    "build-stamp comment, which the key now normalises. `tests/test_object_identity.py` is UNCHANGED."
+    "master@0fae0cf7 plus issue #450 and its round-1, round-3 and round-N safety reviews: "
+    "`object_identity.py` carries the WORKBOOK-identity join both gates share, closed by ONE rule (a "
+    "machine identity the unit cannot answer is `unknown`, never rescued by a weaker axis), and now "
+    "the REVISION key too. Measured 2026-09-03 on the live site, three downloads of every item in one "
+    "run: a raw sha256 differed for 27 of 49 archives while a content-normalised key differed for 0 "
+    "of 67. ⚠️ The pin was ALREADY stale before this change and that was a lost pin update, not a "
+    "surprise edit: digest 7642b526 is object_identity.py as of ca4d395, and the salvage commit "
+    "b9ef38e (+76/-31, recovered after a host crash) made WB_NAME a refusal, added WB_UNCONFIRMED and "
+    "moved the revision key to v3 without re-deriving it. This pin additionally covers round N's "
+    "blocking finding B: two MACHINE axes that both answer and DISAGREE are `WB_CONFLICT`, a refusal "
+    "in its own right, because `attribute` used to return on the first axis that agreed and admitted "
+    "a record whose sha256 matched this unit while its LUID named another workbook. "
+    "`tests/test_object_identity.py` is UNCHANGED."
 )
 
 #: SHA-256 of each shared file, over LF-normalized bytes.
 PINNED: dict[str, str] = {
-    "scripts/object_identity.py": "7642b5261c5f15c51061113970b8abf15c609c32aea810b92aec6615eafe8620",
+    "scripts/object_identity.py": "63c18e143ff35174827bcc2a9f6acf0de89ad18d46bf05793d155a0b0f230452",
     "tests/test_object_identity.py": "11d6881a960fa3c23beaa6928706de88a83fc1605b051314038ffdc14711c967",
 }
 

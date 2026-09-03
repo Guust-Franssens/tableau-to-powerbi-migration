@@ -2144,16 +2144,18 @@ def _attribute_record(unit_ids: list[oid.WorkbookIdentity], record: OracleRecord
     """How ``record`` ties to this unit: the first admission, else the strongest refusal.
 
     A unit may ship artifacts under several stems, so every candidate identity is tried. Ordering the
-    result - admission, then ``foreign``, then ``unknown`` - matters because ``unknown`` against one
-    stem must never mask a ``foreign`` verdict reached against another: a record we could compare and
-    reject is a stronger statement than one we could not compare at all.
+    result - admission, then a CONTRADICTION or ``foreign``, then ``unknown`` - matters because
+    ``unknown`` against one stem must never mask the stronger verdict reached against another: a
+    record we could compare and reject says more than one we could not compare at all, and a record
+    whose own machine identities disagree says more still.
     """
     verdicts = [identity.attribute(record.workbook) for identity in unit_ids]
     if not verdicts:
         verdicts = [oid.WorkbookIdentity().attribute(record.workbook)]
+    compared = (oid.WB_CONFLICT, oid.WB_FOREIGN)
     return next(
         (verdict for verdict in verdicts if verdict.admitted),
-        next((verdict for verdict in verdicts if verdict.route == oid.WB_FOREIGN), verdicts[0]),
+        next((verdict for verdict in verdicts if verdict.route in compared), verdicts[0]),
     )
 
 

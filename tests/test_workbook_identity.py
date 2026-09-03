@@ -45,8 +45,16 @@ def test_the_workbook_route_vocabulary_is_pinned_to_its_literal_values() -> None
     assert (oid.WB_SHA, oid.WB_LUID, oid.WB_NAME) == ("sha256", "luid", "name")
     assert (oid.WB_STALE, oid.WB_FOREIGN, oid.WB_UNKNOWN) == ("stale", "foreign", "unknown")
     assert oid.WB_UNCONFIRMED == "revision-unconfirmed"
+    assert oid.WB_CONFLICT == "conflicting-identity"
     assert oid.WB_ROUTES == ("sha256", "luid"), "a display NAME is not an admitting route"
-    assert oid.WB_REFUSALS == ("name", "revision-unconfirmed", "stale", "foreign", "unknown")
+    assert oid.WB_REFUSALS == (
+        "name",
+        "revision-unconfirmed",
+        "stale",
+        "conflicting-identity",
+        "foreign",
+        "unknown",
+    )
     assert oid.WB_MACHINE_AXES == ("sha256", "luid")
     assert oid.WB_ADMITTING == frozenset({"sha256", "luid"})
     # Every refusal is NOT an admitting route. Stated separately because `WB_ADMITTING` above is the
@@ -116,6 +124,91 @@ def test_a_machine_axis_the_record_does_not_claim_falls_through_to_the_next_one(
     record = oid.WorkbookIdentity(luid=LUID_A, name="Not Book")
 
     assert unit.attribute(record).route == oid.WB_LUID
+
+
+# ------------------------------------------------------------------------------------------------
+# Round-N review of PR #454: two machine axes that DISAGREE are a refusal, not a race
+# ------------------------------------------------------------------------------------------------
+
+
+def test_a_matching_sha_does_not_admit_a_record_whose_luid_names_another_workbook() -> None:
+    """BLOCKING FINDING B. The walk returned on the first axis that agreed and never saw the other.
+
+    Measured by the reviewer on a record whose sha256 WAS this unit's source and whose declared LUID
+    belonged to a different workbook::
+
+        entry gate: {"status":"READY","pages_ready":1,"attribution":{"sha256":1,"luid":0}}
+        exit  gate: {"status":"PASS","visual_present":1,"numeric_present":1,"admitted_evidence":1}
+
+    Conflicting machine identities are LESS evidence than none - one of the two claims is wrong and
+    the record itself does not say which - so this is its own refusal, named, rather than a win for
+    whichever axis happens to be consulted first.
+    """
+    unit = oid.WorkbookIdentity(luid=LUID_A, name="WB", sha256="a" * 64)
+    record = oid.WorkbookIdentity(luid=LUID_B, name="WB", sha256="a" * 64)
+
+    verdict = unit.attribute(record)
+    assert verdict.route == oid.WB_CONFLICT
+    assert verdict.axis == oid.WB_LUID
+    assert verdict.admitted is False
+    assert "contradictory machine identities" in verdict.detail
+
+
+def test_a_matching_luid_does_not_admit_a_record_whose_sha_is_another_workbooks() -> None:
+    """The same defect from the other side, so the fix cannot be one-directional.
+
+    ⚠️ Ordering alone would have hidden this one: sha256 is consulted FIRST, so a disagreeing sha is
+    already refused as ``foreign`` before the LUID is reached. It is asserted anyway because the fix
+    must be a property of the pair, not of the walk order - reordering
+    :data:`object_identity.WB_MACHINE_AXES` must not turn a refusal into an admission.
+    """
+    unit = oid.WorkbookIdentity(luid=LUID_A, name="WB", sha256="a" * 64)
+    record = oid.WorkbookIdentity(luid=LUID_A, name="WB", sha256="b" * 64)
+
+    assert unit.attribute(record).admitted is False
+
+
+def test_an_axis_the_unit_cannot_answer_is_not_the_same_as_one_that_contradicts() -> None:
+    """The asymmetry the fix must keep, and the over-strict direction it must not fall into.
+
+    A machine axis the record does not CLAIM is silent - "less evidence" - so an agreeing LUID still
+    admits even though the unit knows a sha256 the record never mentions. Collapsing "absent" into
+    "contradictory" would refuse almost every real oracle capture, whose producer writes
+    ``workbook_luid``/``workbook_name`` and no source digest at all.
+    """
+    unit = oid.WorkbookIdentity(luid=LUID_A, name="WB", sha256="a" * 64)
+    record = oid.WorkbookIdentity(luid=LUID_A, name="WB")
+
+    verdict = unit.attribute(record)
+    assert verdict.route == oid.WB_LUID
+    assert verdict.admitted is True
+
+
+def test_a_luid_the_unit_cannot_answer_is_still_unknown_rather_than_a_contradiction() -> None:
+    """The other half of the asymmetry: unanswerable is not contradictory, and stays ``unknown``.
+
+    ⚠️ The two states call for different operator actions - re-stamp this unit's provenance, versus
+    throw the capture away because its own metadata disagrees with itself - so the contradiction
+    route must not swallow the older, weaker one.
+    """
+    unit = oid.WorkbookIdentity(name="WB", sha256="a" * 64)
+    record = oid.WorkbookIdentity(luid=LUID_B, name="WB")
+
+    verdict = unit.attribute(record)
+    assert (verdict.route, verdict.axis) == (oid.WB_UNKNOWN, oid.WB_LUID)
+
+
+def test_a_display_name_that_disagrees_never_contradicts_a_machine_axis() -> None:
+    """The other over-strict direction: a NAME is decoration and may not veto a proven identity.
+
+    The artifact stem ``HR_Dashboard`` is a filesystem-sanitised spelling of the published name
+    ``HR Dashboard``, so a name disagreement is the NORMAL state of a harvested unit. Treating it as
+    a contradiction would refuse every unit this toolkit downloads.
+    """
+    unit = oid.WorkbookIdentity(luid=LUID_A, name="HR_Dashboard", sha256="a" * 64)
+    record = oid.WorkbookIdentity(luid=LUID_A, name="HR Dashboard", sha256="a" * 64)
+
+    assert unit.attribute(record).route == oid.WB_SHA
 
 
 # ------------------------------------------------------------------------------------------------

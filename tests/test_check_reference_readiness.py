@@ -157,6 +157,7 @@ def write_reference(  # pylint: disable=too-many-arguments,too-many-locals
     render_bytes: bytes | None = None,
     record_integrity: bool = True,
     view_type: str | None = None,
+    workbook_luid: str | None = None,
 ) -> Path:
     """A `reference/manifest.json`. Each entry is ``(name, provider, capabilities)``.
 
@@ -167,6 +168,10 @@ def write_reference(  # pylint: disable=too-many-arguments,too-many-locals
 
     Note the manifest's top-level key is `dashboards`, but `capture_tableau_reference.py:199` files
     WORKSHEET thumbnails there too - which is why the key cannot be evidence of scope.
+
+    ``workbook_luid`` writes the manifest-level LUID key `check_unit._declared_workbook` already
+    reads. The producer does not write it today; a manifest carrying one is enriched or hand-edited,
+    which is exactly the shape the round-N contradiction finding used.
     """
     reference = root / "reference"
     reference.mkdir(parents=True, exist_ok=True)
@@ -195,9 +200,10 @@ def write_reference(  # pylint: disable=too-many-arguments,too-many-locals
                 "dimensions": {"w": size[0], "h": size[1], "dpr": 2},
             }
         dashboards.append({"name": name, "states": [state]})
-    (reference / "manifest.json").write_text(
-        json.dumps({"source_workbook_sha256": source_sha, "dashboards": dashboards}), encoding="utf-8"
-    )
+    payload: dict = {"source_workbook_sha256": source_sha, "dashboards": dashboards}
+    if workbook_luid is not None:
+        payload["workbook_luid"] = workbook_luid
+    (reference / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
     return reference
 
 

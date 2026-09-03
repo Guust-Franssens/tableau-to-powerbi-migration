@@ -26,6 +26,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 import check_unit as cu  # noqa: E402  # pylint: disable=wrong-import-position
 import check_field_bindings  # noqa: E402  # pylint: disable=wrong-import-position
+import object_identity as oid  # noqa: E402  # pylint: disable=wrong-import-position
 import read_handover  # noqa: E402  # pylint: disable=wrong-import-position
 import run_estate  # noqa: E402  # pylint: disable=wrong-import-position
 
@@ -160,6 +161,7 @@ def _write_reference_manifest(
     numeric: bool = True,
     workbook: str | None = None,
     source_sha: str | None = "auto",
+    workbook_luid: str | None = None,
 ) -> None:
     """A `reference/manifest.json`.
 
@@ -192,6 +194,8 @@ def _write_reference_manifest(
     payload: dict[str, object] = {"dashboards": dashboards}
     if workbook is not None:
         payload["workbook"] = workbook
+    if workbook_luid is not None:
+        payload["workbook_luid"] = workbook_luid
     if source_sha is not None:
         payload["source_workbook_sha256"] = source_sha
     (unit / "reference" / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
@@ -3580,6 +3584,54 @@ def test_a_unit_local_reference_manifest_recording_another_workbooks_sha_is_refu
     assert oracle["visual_present"] == 0
     assert oracle["admitted_evidence"] == 0
     assert oracle["foreign_workbook_evidence"] == ["sha256=dededededede..."]
+
+
+def test_a_manifest_whose_luid_contradicts_its_matching_sha_certifies_nothing(tmp_path: Path) -> None:
+    """BLOCKING FINDING B at the EXIT gate. Verbatim before this fix::
+
+        CONTRADICTORY_EXIT={"status":"PASS","visual_present":1,"numeric_present":1,
+          "admitted_evidence":1,"foreign_workbook_evidence":[],"unattributed_evidence":0}
+
+    The unit's own LUID comes from its spec's `<luid>_<name>` asset filename and its sha256 from that
+    asset's bytes, so this manifest agrees with one and contradicts the other. `_attribute_record` is
+    asserted directly because it names WHICH guard refused: `visual_present == 0` alone is produced
+    by at least four other guards in this gate, and `unattributed_evidence`/`name_only_evidence` are
+    pinned to zero so an accidental downgrade to a weaker refusal fails here too.
+    """
+    _write_spec(tmp_path, ["Revenue"])
+    _write_report(tmp_path, ["Revenue"])
+    source = _write_unit_source(tmp_path, b"the workbook this unit was built from")
+    _write_reference_manifest(
+        tmp_path,
+        ["Revenue"],
+        workbook=None,
+        source_sha=_sha256(source),
+        workbook_luid="007f70ac-bf40-4838-9d73-134d40f504db",
+    )
+
+    records, _ = cu._reference_oracles(tmp_path, None)
+    verdict = cu._attribute_record(cu._unit_workbook_identities(tmp_path), records[0])
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert verdict.route == oid.WB_CONFLICT
+    assert verdict.admitted is False
+    assert oracle["status"] == cu.STATUS_NOT_CHECKED
+    assert (oracle["visual_present"], oracle["numeric_present"], oracle["admitted_evidence"]) == (0, 0, 0)
+    assert oracle["unattributed_evidence"] == 0 and oracle["name_only_evidence"] == []
+    assert oracle["foreign_workbook_evidence"] != [], "a refusal nobody can see is not a guard"
+
+
+def test_a_manifest_whose_luid_agrees_with_its_matching_sha_still_certifies(tmp_path: Path) -> None:
+    """The positive control: two agreeing machine axes are the STRONGEST evidence, not a conflict."""
+    _write_spec(tmp_path, ["Revenue"])
+    _write_report(tmp_path, ["Revenue"])
+    source = _write_unit_source(tmp_path, b"the workbook this unit was built from")
+    _write_reference_manifest(tmp_path, ["Revenue"], workbook=None, source_sha=_sha256(source), workbook_luid=UNIT_LUID)
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["status"] == cu.STATUS_PASS
+    assert (oracle["visual_present"], oracle["admitted_evidence"]) == (1, 1)
 
 
 def test_a_sha_bearing_record_is_refused_when_the_unit_cannot_hash_its_source(tmp_path: Path) -> None:

@@ -23,7 +23,7 @@ import struct
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 from xml.etree import ElementTree
 
 from object_identity import (
@@ -34,6 +34,7 @@ from object_identity import (
     WB_SHA,
     WB_STALE,
     WB_UNCONFIRMED,
+    AmbiguousIdentity,
     Attribution,
     Candidate,
     WorkbookIdentity,
@@ -193,22 +194,72 @@ def provenance_origin(root: Path, source_sha: str, source: Path | None = None) -
     Anything with no comparable key - including no provenance at all - is ``unconfirmed``, which is
     admitted and DISCLOSED rather than silently claimed as current (round-1 review of PR #454,
     blocker 2).
+
+    ⚠️ **Every record matching ``source_sha`` is read, and the verdict does not depend on their
+    order.** This used to ``return`` on the first SHA hit, so two provenance records carrying the
+    same source digest and DIFFERENT ``workbook_luid`` values resolved to whichever came first in the
+    JSON. Measured by the round-N reviewer on byte-identical evidence, reversing only the array
+    order::
+
+        AMBIGUOUS_FIRST    = {"status":"READY",   "pages_ready":1, "luid":1,    "exit":0}
+        AMBIGUOUS_REVERSED = {"status":"FINDINGS","pages_ready":0, "foreign":1, "exit":1}
+
+    One of those records is about another workbook and nothing here says which, so this raises
+    :class:`object_identity.AmbiguousIdentity` - a *cannot establish*, which
+    `check_reference_readiness.assess_unit` turns into ``CANNOT_ESTABLISH`` and which is explicitly
+    never a pass. Where the records merely disagree about the REVISION they are folded to the
+    weakest claim they support, which is likewise order-free and fails closed.
     """
     stamped = harvest_luid(persisted_stem(source.name if source is not None else None))
     inputs = list((json_object(root / "source-provenance.json") or {}).get("inputs") or [])
-    for record in inputs:
-        if not isinstance(record, dict):
-            continue
-        stamped_input = record.get("input") if isinstance(record.get("input"), dict) else {}
-        origin = record.get("origin") if isinstance(record.get("origin"), dict) else {}
-        if stamped_input.get("sha256") != source_sha:
-            continue
-        revision = revision_status(origin, inputs)
-        if origin.get("matched_by") not in IDENTITY_MATCHED_BY and origin.get("match") != "sha256":
-            return agreed_luid(stamped), revision
-        luid = origin.get("workbook_luid")
-        return agreed_luid(stamped, luid if isinstance(luid, str) else None), revision
-    return agreed_luid(stamped), REVISION_UNCONFIRMED
+    origins = [origin for origin in map(_stamped_origin, inputs) if origin is not None and origin[0] == source_sha]
+    if not origins:
+        return agreed_luid(stamped), REVISION_UNCONFIRMED
+    claimed = {luid for _, luid in ((sha, _identity_claim(origin)) for sha, origin in origins) if luid}
+    if len(claimed) > 1:
+        raise AmbiguousIdentity(
+            f"source-provenance.json carries {len(origins)} record(s) for source sha256 "
+            f"{source_sha[:12]}... claiming {len(claimed)} different workbook LUIDs "
+            f"({', '.join(sorted(claimed))}). One of them is about a different workbook and nothing "
+            "here says which, so this unit has no workbook identity - re-stamp with "
+            "scripts/stamp_tableau_provenance.py rather than letting array order decide"
+        )
+    return agreed_luid(stamped, *claimed), _weakest_revision(revision_status(origin, inputs) for _, origin in origins)
+
+
+def _stamped_origin(record: Any) -> tuple[Any, dict[str, Any]] | None:
+    """``(recorded input sha256, origin)`` for one `source-provenance.json` entry, or None."""
+    if not isinstance(record, dict):
+        return None
+    stamped_input = record.get("input") if isinstance(record.get("input"), dict) else {}
+    origin = record.get("origin") if isinstance(record.get("origin"), dict) else {}
+    return stamped_input.get("sha256"), origin
+
+
+def _identity_claim(origin: dict[str, Any]) -> str | None:
+    """The workbook LUID this origin ESTABLISHES, or None when it establishes none.
+
+    ``matched_by``/``match`` decide whether the recorded LUID may be believed at all; see
+    :func:`provenance_origin`. Case-folded, so two spellings of one LUID are one claim rather than an
+    ambiguity.
+    """
+    if origin.get("matched_by") not in IDENTITY_MATCHED_BY and origin.get("match") != "sha256":
+        return None
+    luid = origin.get("workbook_luid")
+    return luid.strip().casefold() if isinstance(luid, str) and luid.strip() else None
+
+
+def _weakest_revision(claims: Iterable[str]) -> str:
+    """The least that every one of ``claims`` supports - order-free, and fails closed.
+
+    Two records for one source that disagree about the build settle nothing between them, so the
+    weakest claim stands: a single ``mismatch`` refuses, a single ``unconfirmed`` withholds, and only
+    unanimous confirmation confirms.
+    """
+    seen = set(claims)
+    if REVISION_MISMATCH in seen:
+        return REVISION_MISMATCH
+    return REVISION_CONFIRMED if seen == {REVISION_CONFIRMED} else REVISION_UNCONFIRMED
 
 
 def revision_status(origin: dict[str, Any], inputs: list[Any]) -> str:
@@ -633,9 +684,29 @@ def provider_grade(provider: str, capabilities: Any) -> str:
     return GRADE_VALIDATION if CAP_VALIDATION in caps else "/".join(sorted(caps))
 
 
-def _reference_states(directory: Path, entry: dict[str, Any], workbook_sha: Any) -> list[Evidence | RejectedEvidence]:
+def _reference_workbook_luid(entry: dict[str, Any], state: dict[str, Any], manifest: dict[str, Any]) -> str | None:
+    """The workbook LUID a `reference/manifest.json` declares, on the state, entry or manifest.
+
+    ⚠️ **This used to be thrown away**, and that is the entry-gate half of the round-N contradiction
+    finding: only ``source_workbook_sha256`` was carried into :class:`Evidence`, so a manifest whose
+    sha256 matched this unit while its ``workbook_luid`` named another workbook had nothing left to
+    contradict with by the time :meth:`WorkbookIdentity.attribute` saw it - `READY 1/1`, exit 0,
+    ``attribution.luid == 0``. Key names mirror `check_unit._declared_workbook`, so one vocabulary
+    describes a manifest at both gates.
+    """
+    for source in (state, entry, manifest):
+        luid = source.get("workbook_luid") or source.get("source_workbook_luid")
+        if isinstance(luid, str) and luid.strip():
+            return luid.strip()
+    return None
+
+
+def _reference_states(
+    directory: Path, entry: dict[str, Any], manifest: dict[str, Any]
+) -> list[Evidence | RejectedEvidence]:
     """Build every state of one `reference/manifest.json` entry."""
     name = str(entry.get("name") or "")
+    workbook_sha = manifest.get("source_workbook_sha256")
     built: list[Evidence | RejectedEvidence] = []
     for state in entry.get("states") or []:
         if not isinstance(state, dict):
@@ -660,6 +731,7 @@ def _reference_states(directory: Path, entry: dict[str, Any], workbook_sha: Any)
                     height=dims.get("h") if isinstance(dims.get("h"), int) else None,
                 ),
                 workbook_sha=str(workbook_sha) if isinstance(workbook_sha, str) and workbook_sha else None,
+                workbook_luid=_reference_workbook_luid(entry, state, manifest),
             )
         )
     return built
@@ -679,11 +751,11 @@ def reference_evidence(reference_dirs: list[Path]) -> tuple[list[Evidence], list
     """
     built: list[Evidence | RejectedEvidence] = []
     for directory in reference_dirs:
-        payload = json_object(directory / "manifest.json")
-        entries = (payload or {}).get("dashboards")
+        payload = json_object(directory / "manifest.json") or {}
+        entries = payload.get("dashboards")
         for entry in entries if isinstance(entries, list) else []:
             if isinstance(entry, dict):
-                built.extend(_reference_states(directory, entry, (payload or {}).get("source_workbook_sha256")))
+                built.extend(_reference_states(directory, entry, payload))
     return _split(built)
 
 

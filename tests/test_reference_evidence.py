@@ -602,10 +602,162 @@ def test_every_refusal_is_counted_so_it_can_be_told_from_a_missing_capture(bundl
         "name": 1,
         "revision-unconfirmed": 0,
         "stale": 0,
+        # No record here claims two machine axes at once, so nothing contradicts itself.
+        "conflicting-identity": 0,
         # Two foreign: a differing display name, and a LUID this unit CAN answer and that disagrees.
         "foreign": 2,
         "unknown": 0,
     }
+
+
+# --------------------------------------------------------------------------------------------
+# Round-N review of PR #454, BLOCKING FINDING A: ambiguous provenance selected the first SHA hit
+# --------------------------------------------------------------------------------------------
+
+
+def write_ambiguous_provenance(root: Path, source: Path, luids: list[str]) -> None:
+    """A `source-provenance.json` stamping ONE source sha256 against several workbook LUIDs.
+
+    A real stamp run can produce this: `stamp_tableau_provenance.py` writes one input record per
+    harvested asset, and two assets whose bytes are identical - a workbook copied between projects,
+    or re-published under a second name - hash the same while matching different site items.
+    """
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    (root / "source-provenance.json").write_text(
+        json.dumps(
+            {
+                "inputs": [
+                    {
+                        "input": {"file": source.name, "sha256": digest},
+                        "origin": {
+                            "workbook_luid": luid,
+                            "workbook_name": "Published Name",
+                            "matched_by": "luid",
+                            "match": "name_only",
+                            "revision_match": "same",
+                        },
+                    }
+                    for luid in luids
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_provenance_naming_two_workbooks_for_one_source_cannot_establish_an_identity(bundle: Path) -> None:
+    """BLOCKING FINDING A: the SHA loop returned on its first hit and never looked for a second.
+
+    One of those two records is about a different workbook and nothing in the file says which, so
+    this unit has no workbook identity. `CANNOT_ESTABLISH` is explicitly not a pass.
+    """
+    build_unit(bundle, "WB", worksheets=["Revenue Trend"])
+    write_ambiguous_provenance(bundle, bundle.parent / "assets" / "WB.twb", [UNIT_LUID, OTHER_LUID])
+    write_oracle(bundle, [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_luid": UNIT_LUID}])
+
+    unit = crr.scan(bundle)["units"][0]
+    assert unit["status"] == "CANNOT_ESTABLISH"
+    assert "workbook identity is ambiguous" in unit["detail"]
+    assert UNIT_LUID in unit["detail"] and OTHER_LUID in unit["detail"]
+    # 3, not 1: `CANNOT_ESTABLISH` has its own exit code precisely so "I formed no opinion" cannot be
+    # read as "I looked and found problems".
+    assert crr.main([str(bundle), "--quiet"]) == crr.EXIT_CANNOT_ESTABLISH
+
+
+def test_the_ambiguous_provenance_verdict_does_not_depend_on_the_array_order(bundle: Path) -> None:
+    """The PROPERTY, tested as a property: byte-identical evidence, two orderings, one verdict.
+
+    Verbatim before this fix, reversing only the two records in the JSON array::
+
+        AMBIGUOUS_FIRST    = {"status":"READY",   "pages_ready":1, "luid":1,    "exit":0}
+        AMBIGUOUS_REVERSED = {"status":"FINDINGS","pages_ready":0, "foreign":1, "exit":1}
+
+    Asserting only "it refuses" would not have caught that: one ORDER already refused. The whole unit
+    result is compared, so nothing - not the census, not the detail string, not the page rows - may
+    differ between the two readings.
+    """
+    build_unit(bundle, "WB", worksheets=["Revenue Trend"])
+    source = bundle.parent / "assets" / "WB.twb"
+    write_oracle(bundle, [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_luid": UNIT_LUID}])
+
+    write_ambiguous_provenance(bundle, source, [UNIT_LUID, OTHER_LUID])
+    forward = crr.scan(bundle)
+    forward_exit = crr.main([str(bundle), "--quiet"])
+    write_ambiguous_provenance(bundle, source, [OTHER_LUID, UNIT_LUID])
+    reversed_ = crr.scan(bundle)
+    reversed_exit = crr.main([str(bundle), "--quiet"])
+
+    assert forward["units"] == reversed_["units"]
+    assert (forward["status"], forward_exit) == (reversed_["status"], reversed_exit)
+    assert forward["status"] == "CANNOT_ESTABLISH" and forward_exit == crr.EXIT_CANNOT_ESTABLISH
+
+
+def test_two_provenance_records_agreeing_on_one_workbook_still_establish_it(bundle: Path) -> None:
+    """The discriminating control: DUPLICATION is not ambiguity, so the fix is not "refuse two rows".
+
+    Without this, deleting the identity join entirely - or refusing whenever more than one record
+    matches - would pass the two tests above and quietly blind every unit whose provenance was
+    stamped twice.
+    """
+    build_unit(bundle, "WB", worksheets=["Revenue Trend"])
+    write_ambiguous_provenance(bundle, bundle.parent / "assets" / "WB.twb", [UNIT_LUID, UNIT_LUID.upper()])
+    write_oracle(bundle, [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_luid": UNIT_LUID}])
+
+    report = crr.scan(bundle)
+    assert report["units"][0]["status"] == "READY"
+    assert report["evidence_attributed"]["luid"] == 1
+
+
+# --------------------------------------------------------------------------------------------
+# Round-N review of PR #454, BLOCKING FINDING B: a contradictory machine identity was admitted
+# --------------------------------------------------------------------------------------------
+
+
+def test_a_reference_manifest_whose_luid_contradicts_its_matching_sha_certifies_nothing(bundle: Path) -> None:
+    """BLOCKING FINDING B at the entry gate. Verbatim before this fix::
+
+        CONTRADICTORY_ENTRY={"status":"READY","pages_ready":1,
+          "attribution":{"sha256":1,"luid":0,"foreign":0},"page":"ready"}
+
+    Two causes, both closed here: `WorkbookIdentity.attribute` returned on the first agreeing axis,
+    and `reference_evidence._reference_states` discarded the manifest's LUID before building
+    `Evidence`, so there was nothing left to contradict with. The route is asserted, not merely the
+    refusal - a dozen other guards in this gate also produce `blind`.
+    """
+    sha = build_unit(bundle, "WB", worksheets=["Revenue Trend"])
+    write_reference(
+        bundle,
+        [("Revenue Trend", "embedded_thumbnail", ["layout_grade"])],
+        source_sha=sha,
+        workbook_luid=OTHER_LUID,
+    )
+
+    report = crr.scan(bundle)
+    assert report["units"][0]["pages"][0]["readiness"] == "blind"
+    assert report["evidence_attributed"]["conflicting-identity"] == 1
+    assert report["evidence_attributed"]["sha256"] == 0, "the matching axis must not have won"
+    assert crr.main([str(bundle), "--quiet"]) == 1
+
+
+def test_a_reference_manifest_whose_luid_agrees_with_its_sha_still_certifies(bundle: Path) -> None:
+    """The positive control for reading the manifest LUID at all.
+
+    Carrying a second machine axis into `Evidence` must strengthen the check, not break the ordinary
+    case: a manifest whose sha256 AND LUID both name this unit is the strongest evidence this gate
+    can be handed, and it must still reach READY.
+    """
+    sha = build_unit(bundle, "WB", worksheets=["Revenue Trend"])
+    write_reference(
+        bundle,
+        [("Revenue Trend", "embedded_thumbnail", ["layout_grade"])],
+        source_sha=sha,
+        workbook_luid=UNIT_LUID,
+    )
+
+    report = crr.scan(bundle)
+    assert report["units"][0]["pages"][0]["readiness"] == "ready"
+    assert report["evidence_attributed"]["sha256"] == 1
+    assert report["evidence_attributed"]["conflicting-identity"] == 0
 
 
 def test_a_sha256_confirmed_provenance_luid_is_trusted(bundle: Path) -> None:
