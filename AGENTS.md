@@ -569,33 +569,40 @@ source was reachable.
 
 | strategy | who drives it | ceiling | you can see progress |
 |---|---|---|---|
-| **`scripted`** (default) | `refresh_pbip_model.py` | **hard 300 s** (330 s with grace), not configurable | ⚠️ an elapsed-time heartbeat only — `still refreshing, 42s / 330s` |
+| **`scripted`** (default) | `refresh_pbip_model.py` | **3600 s** absolute backstop when the AMO progress trace is up; the legacy **300 s** applies only untraced or `--calculate-only` | ✅ row-count evidence from the AMO trace, plus a non-fatal silence warning at 120 s |
 | `operator` | the agent prepares everything, stops, and asks **you** to hit Refresh in Desktop | none | ✅ per-table row counts, live in the UI |
 | `xmla` | manual XMLA/TOM against the live instance | none | ⚠️ partial |
 
-**Why it earns a slot in the intake instead of being discovered mid-run.** A refresh is the only
-routine step where *"still working"* and *"hung"* produce an identical signal — the scripted path's
-heartbeat reports **elapsed time, not work done** (`print_refresh_heartbeat` is documented as
-printing "an elapsed/total countdown *without claiming progress*"), so a slow refresh and a stuck one
-print the same line. Be precise about what it does catch: a **detected** credential modal does not
-heartbeat on, it aborts with a specific error. What survives is the case the detector cannot see —
-and the script says so itself on timeout: *"CAUSE UNKNOWN - this script cannot distinguish these two,
-and they need opposite responses"* — so the decision lands at the worst possible
-moment: mid-flight, under uncertainty, on the
-agent. Worse, the two governing rules **point in opposite directions** there. The general rule says
-time-box an unresponsive external system at ~2 minutes or 3 attempts; the carve-out says *don't*, if
-the tool announces its own deadline — and `refresh_pbip_model.py` is exactly such a tool. An agent
-that resolves that tension wrongly either kills a legitimately-running refresh (recording **no
-verdict at all** — measured) or waits indefinitely (129 minutes / 298 tool calls — also measured).
+⚠️ **This table was stale for two weeks and said the opposite** — "hard 300 s, not configurable" and
+"an elapsed-time heartbeat only". Both were fixed on 2026-08-21 (#253, #269, #283) and nobody updated
+the prose, so every agent inheriting this file was briefed against a ceiling the code no longer had.
+Re-read `refresh_pbip_model.py`'s constants before quoting a number from here.
 
-And the default's ceiling is **known to be too low for real sources**: measured against Snowflake,
-one table family took **~700–750 s** and another **~452 s**, both over the 330 s ceiling. Narrowing
-with `--tables` does **not** rescue it when a *single table* is the bottleneck rather than cumulative
-cost (proven twice, identical timeout both times). See #253.
+**Why it still earns a slot in the intake.** Not because the ceiling is too low any more — it isn't —
+but because the *observability* is conditional. `REFRESH_ABSOLUTE_TIMEOUT_SECONDS = 3600.0` is
+deliberately sized "comfortably above measured 700-750s customer Snowflake refreshes", and
+`REFRESH_PROGRESS_LIVENESS_SECONDS = 120.0` reports silence **without killing** ("Liveness is
+deliberately NON-FATAL ... Killing on this timer would false-positive a healthy slow source"). So a
+slow source no longer loses its refresh. What is conditional is the evidence: the row-count heartbeat
+comes from a **server-level AMO trace**, so it needs the AMO/TOM client assembly on the machine.
+Without it — preflight reports this as RECOMMENDED, not critical — the 3600 s backstop still holds,
+but you are back to an elapsed-time countdown that cannot distinguish "working" from "hung", and
+`ImageSave` persist falls back to the UI path. Check preflight's AMO line before choosing `scripted`
+for a long unattended refresh.
 
-So: if the source is large or the run is unattended, say so **now**. `operator` trades start-latency
-for a refresh that cannot silently time out and that you can watch. Picking it up front costs one
-line in the brief; discovering it at 330 s costs the refresh.
+Be precise about what the detector catches either way: a **detected** credential modal does not
+heartbeat on, it aborts with a specific error. What survives is the case the detector cannot see, and
+on a genuine timeout the script says so itself — *"CAUSE UNKNOWN - this script cannot distinguish
+these two, and they need opposite responses"*. The two governing rules also **point in opposite
+directions** there: the general rule says time-box an unresponsive external system at ~2 minutes or 3
+attempts; the carve-out says *don't*, if the tool announces its own deadline — and
+`refresh_pbip_model.py` is exactly such a tool. An agent that resolves that tension wrongly either
+kills a legitimately-running refresh (recording **no verdict at all** — measured) or waits
+indefinitely (129 minutes / 298 tool calls — also measured).
+
+So: if the source is large or the run is unattended, say so **now** — and say whether AMO is present.
+`operator` remains the choice that trades start-latency for a refresh you can watch in the UI with no
+dependency on the trace at all.
 
 ⚠️ `xmla` has a scope constraint worth stating in the brief: it must be **whole-database** scope if a
 calculated table depends on a refreshed table (e.g. a `Date` table built with
