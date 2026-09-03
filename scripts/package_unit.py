@@ -196,6 +196,17 @@ EXPRESSION_NAME_RE = re.compile(r'expression\s+(#"[^"]+"|[^\s=]+)\s*=')
 WINDOWS_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
 UNC_PATH_RE = re.compile(r"^\\\\")
 
+#: M record fields whose value is a SERVICE ROUTE and can never be a file-system path, so a literal
+#: found in one is definitively a non-path rather than something this packager cannot classify.
+#:
+#: Only `HttpPath` is listed, because it is the only such field MEASURED in the estate: run 408's
+#: `"/sql/1.0/warehouses/<id>"` in three units is a Databricks SQL-warehouse endpoint, passed as
+#: `Databricks.Catalogs(server, httpPath, ...)` / `[HttpPath="..."]`. Shape alone cannot tell it from
+#: `/mnt/lake/warehouse`, and that is the point of the distinction: the ROLE can. Adding a field here
+#: on speculation would widen the silent bucket, which is the defect class this module is built
+#: against - so a new entry needs a literal that was actually observed in a packaged model.
+SERVICE_ROUTE_RE = re.compile(r'\bHttpPath\s*=\s*"([^"]*)"', re.IGNORECASE)
+
 #: The three verdicts :func:`_path_verdict` may return. The third one is the point: a literal this
 #: packager cannot classify is neither shipped nor cleared, and collapsing it into "not a path" is
 #: how `SourceFolder = "/Users/<person>/Data/"` survived packaging unchanged with NO omission
@@ -1063,6 +1074,13 @@ def _path_verdict(value: str) -> str:
     unchanged, with no folder shipped and NO omission recorded (blind-review finding 5). The
     remaining shape - POSIX-absolute, no suffix, no trailing separator - genuinely cannot be told
     from a service path without probing, so it gets its own verdict and its own recorded reason.
+
+    ⚠️ **This answers the question from the STRING ALONE, so it can only ever return UNCLASSIFIED
+    for the Databricks shape above.** The role a literal plays in the surrounding M is a second,
+    stronger source of evidence, and callers that have the document text consult it first - see
+    :data:`SERVICE_ROUTE_RE` and :func:`_service_routes`. Do not fold that into this function by
+    pattern-matching `/sql/`: what makes the endpoint a non-path is the field it is assigned to,
+    not the letters in it.
     """
     if WINDOWS_PATH_RE.match(value) or UNC_PATH_RE.match(value):
         return PATH_LITERAL
@@ -1076,8 +1094,28 @@ def _path_verdict(value: str) -> str:
 
 
 def _is_path_literal(value: str) -> bool:
-    """Whether an absolute literal is a FILE SYSTEM path this packager should act on."""
+    """Whether an absolute literal is a FILE SYSTEM path this packager should ACT on.
+
+    ⚠️ **False here means "do not act on it", NOT "definitely not a path".** It collapses
+    :data:`NOT_A_PATH` and :data:`UNCLASSIFIED` into one answer because the two callers that use it
+    both ask the same narrow question - "should I ship this?" - and the answer is no either way. A
+    caller that has to distinguish *reported* from *silent* must call :func:`_path_verdict`; reading
+    a False here as a clean bill of health is exactly how the unassessable bucket gets emptied.
+    """
     return _path_verdict(value) == PATH_LITERAL
+
+
+def _service_routes(text: str) -> set[str]:
+    """Literals in ``text`` whose ROLE proves they are not file-system paths.
+
+    Shape-only classification cannot separate a Databricks warehouse endpoint from a mount point:
+    `"/sql/1.0/warehouses/<id>"` and `"/mnt/lake/warehouse"` are the same string shape, so
+    :func:`_path_verdict` returns UNCLASSIFIED for both, and the packager would ask a human to check
+    an endpoint by hand in three of estate run 408's units. The field it is assigned to settles it -
+    `HttpPath` takes a route and cannot take a path - so this is evidence, not a guess, and it is
+    read from the document the literal actually lives in.
+    """
+    return {match.group(1) for match in SERVICE_ROUTE_RE.finditer(text)}
 
 
 def _inside(root: Path, value: str) -> bool:
@@ -1517,13 +1555,21 @@ def _external_after_rewrite(documents: list[Path], final: Path, accounted: set[s
     for "definitely not a path", and an unclassifiable literal fell into it - so the escaping
     `"/Users/<person>/Data/"` of blind-review finding 5 left no trace anywhere. Each distinct
     literal is reported once however many documents carry it.
+
+    ⚠️ **A literal whose ROLE proves it is not a path is silent, and only that.** A Databricks
+    `HttpPath` endpoint is definitively a non-path (:func:`_service_routes`), so reporting it would
+    put three of estate run 408's units into "check it by hand" for something no hand-check can
+    change. That is the narrow carve-out: role-proven non-paths leave, shape-unassessable literals
+    stay reported.
     """
     findings: list[dict[str, str]] = []
     seen: set[str] = set()
     for document in documents:
-        for match in ABSOLUTE_LITERAL_RE.finditer(document.read_text(encoding="utf-8")):
+        text = document.read_text(encoding="utf-8")
+        routes = _service_routes(text)
+        for match in ABSOLUTE_LITERAL_RE.finditer(text):
             value = match.group(1)
-            if value in accounted or value in seen or _inside(final, value):
+            if value in accounted or value in seen or value in routes or _inside(final, value):
                 continue
             verdict = _path_verdict(value)
             if verdict == PATH_LITERAL:

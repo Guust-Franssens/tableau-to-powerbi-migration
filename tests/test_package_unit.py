@@ -1122,17 +1122,44 @@ def test_a_POSIX_literal_with_no_file_suffix_is_left_alone(tmp_path: Path) -> No
     ``HttpPath = "/sql/1.0/warehouses/<id>"`` in three units, and a bare ``"/"`` inside a
     ``TableauFormula`` annotation in two more. Requiring a file suffix keeps the one genuine hit (a
     macOS ``.xlsx``) and drops all eight, so both halves are asserted here from one fixture.
+
+    ⚠️ ``_is_path_literal`` being False is "do not ACT on it", not "definitely not a path": it
+    collapses ``NOT_A_PATH`` and ``UNCLASSIFIED``. The endpoint is cleared by its ROLE, in the
+    fixture's measured shape - a ``HttpPath`` field, never a ``File.Contents`` argument, which no
+    Databricks model writes. The same string in a filesystem position is still reported, and
+    ``test_an_unassessable_POSIX_literal_is_RECORDED_not_silently_cleared`` pins that.
     """
     for value in ("/sql/1.0/warehouses/764e5801f0e0fac8", "/", "/mnt/lake/warehouse"):
         assert not pkg._is_path_literal(value), f"{value} would be treated as a file path"  # noqa: SLF001
     for value in ("/Users/<person>/Data/Global Superstore.xlsx", r"C:\data\x.csv", r"\\host\share\x.csv"):
         assert pkg._is_path_literal(value), f"{value} would be ignored"  # noqa: SLF001
+    assert pkg._path_verdict("/") == pkg.NOT_A_PATH  # noqa: SLF001
+    assert pkg._path_verdict("/mnt/lake/warehouse") == pkg.UNCLASSIFIED  # noqa: SLF001
 
     bundle, oracle = _bundle(tmp_path)
-    _point_partition_at(bundle, "/sql/1.0/warehouses/764e5801f0e0fac8")
+    _point_partition_at(bundle, http_path="/sql/1.0/warehouses/764e5801f0e0fac8")
     _package(tmp_path, bundle, oracle)
     record = json.loads(((_out(tmp_path) / UNIT) / "package-manifest.json").read_text(encoding="utf-8"))
     assert record["data_sources"] == {"parameter": None, "shipped": [], "omissions": [], "bytes": 0}
+
+
+def test_an_unassessable_POSIX_literal_is_RECORDED_not_silently_cleared(tmp_path: Path) -> None:
+    """The bucket the endpoint carve-out must not empty (blind-review finding 5).
+
+    ``/mnt/lake/warehouse`` is the SAME shape as the Databricks endpoint cleared above - POSIX
+    absolute, no suffix, no trailing separator - and nothing in the string separates them. What
+    separates them is the role: here it is the argument of ``File.Contents``, which reads files and
+    nothing else, so the literal is a path this packager could not ship and the run must say so.
+    Delete the ``UNCLASSIFIED`` branch of ``_external_after_rewrite`` and this goes red while the
+    test above stays green - that pairing is the whole contract.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    _point_partition_at(bundle, "/mnt/lake/warehouse")
+    _package(tmp_path, bundle, oracle)
+    record = json.loads(((_out(tmp_path) / UNIT) / "package-manifest.json").read_text(encoding="utf-8"))
+    assert record["data_sources"]["shipped"] == []
+    assert [row["file"] for row in record["data_sources"]["omissions"]] == ["warehouse"]
+    assert record["data_sources"]["omissions"][0]["reason"] == pkg.UNCLASSIFIED_REASON
 
 
 def test_a_UNC_literal_is_refused_WITHOUT_being_probed(tmp_path: Path) -> None:
@@ -1295,15 +1322,29 @@ def _resolves_inside(root: Path, value: str) -> bool:
     return pkg._inside(root, value)  # noqa: SLF001  # pylint: disable=protected-access
 
 
-def _point_partition_at(bundle: Path, *sources: str, folder: str = "", leaf: str = "") -> None:
+def _point_partition_at(bundle: Path, *sources: str, folder: str = "", leaf: str = "", http_path: str = "") -> None:
     """Give the fixture model import partitions shaped as the engine actually emits them.
 
-    Two shapes, because the packager must repair two: a bare `File.Contents("<absolute>")`, and the
-    folder PARAMETER that every datasource-only unit in the estate uses.
+    Three shapes, because the packager must tell three apart: a bare `File.Contents("<absolute>")`,
+    the folder PARAMETER that every datasource-only unit in the estate uses, and a Databricks
+    `HttpPath` - a POSIX-absolute literal that is NOT a path at all and must stay silent.
     """
     definition = bundle / "pbip" / UNIT / f"{UNIT}.SemanticModel" / "definition"
     (definition / "tables").mkdir(parents=True, exist_ok=True)
     (definition / "model.tmdl").write_text("model Model\n\tculture: en-US\n\n", encoding="utf-8")
+    if http_path:
+        (definition / "tables" / "Warehouse.tmdl").write_text(
+            "table Warehouse\n"
+            "\tpartition 'Warehouse' = m\n"
+            "\t\tmode: import\n"
+            "\t\tsource =\n"
+            "\t\t\tlet\n"
+            '\t\t\t\tSource = Databricks.Catalogs("adb-1.azuredatabricks.net", '
+            f'[HttpPath = "{http_path}", Catalog = null])\n'
+            "\t\t\tin\n"
+            "\t\t\t\tSource\n",
+            encoding="utf-8",
+        )
     if folder:
         (definition / "expressions.tmdl").write_text(
             f'expression SourceFolder = "{folder}" meta [IsParameterQuery=true, Type="Text",'
