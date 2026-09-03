@@ -3,7 +3,7 @@ purpose: single source of truth for the canonical PRE-BUNDLE work layout - resol
          expose per-unit, per-run scratch/output paths so scripts stop inventing their own
          (`_assessment`, `_sweep`, `_oracle`, an ad hoc `_work/<name>`, or a stray `fabric/` from a
          CWD-relative path). See issue #291 (gaps 1 and 3) and issue #234, whose corrected design
-         this module implements: `_runs/<NNN>-<slug>/{assessment,assets,bundle,oracle,
+         this module implements: `_runs/<NNN>-<slug>/{assessment,assets,bundle,oracle,packages,
          deliverables,scratch}/`.
 usage:   python scripts/work_dirs.py <unit-name> [--repo-root PATH] [--json]
          from work_dirs import allocate_run, sanitize_unit_key, runs_root, list_runs
@@ -61,9 +61,23 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 #   assets/       harvest_estate_assets.py-shaped downloads (.twbx / .tdsx)
 #   bundle/       run_estate.py-shaped conversion output (report.json, pbip/, handover/)
 #   oracle/       capture_tableau_oracle.py-shaped visual + numeric reference capture
+#   packages/     package_unit.py-shaped per-unit, agent-facing handover packages (issue #446).
+#                 ⚠️ `--out` must name a subdirectory INSIDE this one (one per packaging batch,
+#                 e.g. `packages/<bundle-name>/<Unit>/`), never `packages/` itself:
+#                 `package_unit.conflicting_evidence_dirs` refuses an `--out` whose parent holds
+#                 `oracle/`, and this run root always does. Measured: `--out <run>/packages` exits
+#                 2, `--out <run>/packages/<batch>` exits 0. See `tests/test_work_dirs.py`.
 #   deliverables/ operator-facing outputs meant for the customer, never for git (issue #322)
 #   scratch/      disposable, run-owned - the only subdir a future `--prune` may ever delete
-CANONICAL_SUBDIRS: tuple[str, ...] = ("assessment", "assets", "bundle", "oracle", "deliverables", "scratch")
+CANONICAL_SUBDIRS: tuple[str, ...] = (
+    "assessment",
+    "assets",
+    "bundle",
+    "oracle",
+    "packages",
+    "deliverables",
+    "scratch",
+)
 
 _RUN_DIR_RE = re.compile(r"^(\d+)(?:-.*)?$")
 # Matches the Fabric artifact-name ceiling used elsewhere in this org's conventions (table names
@@ -142,6 +156,15 @@ class RunPaths:
     def oracle(self) -> Path:
         """`capture_tableau_oracle.py`-shaped visual + numeric reference capture for this run."""
         return self.subdir("oracle")
+
+    @property
+    def packages(self) -> Path:
+        """`package_unit.py`-shaped per-unit, agent-facing handover packages (issue #446).
+
+        Point `--out` at a subdirectory of this, never at this directory itself - see the
+        `CANONICAL_SUBDIRS` comment for the measured reason.
+        """
+        return self.subdir("packages")
 
     @property
     def deliverables(self) -> Path:
