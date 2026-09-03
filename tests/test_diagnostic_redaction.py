@@ -570,7 +570,7 @@ TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
     # Propagation cannot see across a module boundary, so these are irreducible.
     ("scripts/tableau_render_capability.py", "probe_render_capability"): {"views"},
     ("scripts/tableau_render_capability.py", "apply_selected_tier"): {"report"},
-    # The three-state "why was SVG refused" classifier (#468). `gate` carries `/serverinfo`'s own
+    # The three-state "why was SVG refused" classifier (#474). `gate` carries `/serverinfo`'s own
     # version strings, so the module boundary re-seeds it here; inside, both of them go straight
     # through `redacted_note` before anything formats them, which is why that function needs no
     # certification of its own.
@@ -2105,7 +2105,7 @@ def test_the_blocked_list_redacts_the_names_it_prints(caplog):
 
 
 def test_a_reflected_credential_arriving_as_a_SERVER_VERSION_never_reaches_the_svg_advice(caplog):
-    """The version strings quoted by the #468 advice are response-derived like any other.
+    """The version strings quoted by the #474 advice are response-derived like any other.
 
     `/serverinfo` is unauthenticated, so this is belt on top of braces -- but the braces are an
     argument about the call site ("it cannot leak here"), and this repo has watched that argument

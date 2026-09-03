@@ -47,7 +47,7 @@ class _Response:
     """The slice of ``http.client.HTTPResponse`` that ``Site._raw`` actually touches.
 
     ⚠️ Plus ``headers``, which ``Site._raw`` does NOT touch and ``tableau_http._request`` does. The
-    assessment probes ``/serverinfo`` through that shared transport (#468), so a double missing the
+    assessment probes ``/serverinfo`` through that shared transport (#474), so a double missing the
     attribute fails the probe with ``AttributeError`` -- a fixture gap that would read as "the
     fail-soft path works", because a soft failure is exactly what a broken probe produces.
     """
@@ -71,7 +71,7 @@ class _Response:
 
 
 # What a real ``GET /api/<v>/serverinfo`` returns, trimmed to the three elements `server_info` parses.
-# The numbers are the customer site behind #468: an on-prem Server whose ceiling is BELOW the SVG
+# The numbers are the customer site behind #474: an on-prem Server whose ceiling is BELOW the SVG
 # floor, so the assessment must resolve to "best rung is PDF" rather than to an .env remedy.
 SES_SERVERINFO = (
     b'<?xml version="1.0" encoding="UTF-8"?><tsResponse><serverInfo>'
@@ -652,7 +652,7 @@ def test_a_clean_run_still_exits_0_with_no_warning(monkeypatch, no_sleep, tmp_pa
     assert "DEGRADED" not in report and no_sleep == []
 
 
-# --- #468: the site's render ceiling is a property of the SITE, so the ASSESSMENT reports it -----
+# --- #474: the site's render ceiling is a property of the SITE, so the ASSESSMENT reports it -----
 
 
 def test_the_render_ceiling_reaches_both_report_md_and_assessment_json(monkeypatch, no_sleep, tmp_path):

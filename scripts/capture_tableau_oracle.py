@@ -936,7 +936,7 @@ def _capture_render(  # pylint: disable=too-many-locals
             # neither can a Tableau-side credential, so say which knob to turn rather than filing it
             # under the generic failure bucket a reader will chase into the data source.
             #
-            # ⚠️ WHICH knob is not decidable here, and pretending otherwise is #468: the server's
+            # ⚠️ WHICH knob is not decidable here, and pretending otherwise is #474: the server's
             # advertised ceiling is a property of the SITE, not of this leg, and nothing in scope at
             # this call carries it. So this records the honest "ceiling not established" form; the
             # RUN knows better and `_stamp_svg_gate` upgrades every one of these before the manifest
@@ -1116,7 +1116,7 @@ def _advertised_ceiling(session, env: dict[str, str], capability_report: dict[st
 
     ``--reference-best`` already has it: its probe report carries the same ``/serverinfo`` answer. A
     plain ``--svg`` run had NOTHING, so the only honest verdict available to it was "cause not
-    established" (#468). This closes that, and the call is free rather than merely cheap:
+    established" (#474). This closes that, and the call is free rather than merely cheap:
     ``/serverinfo`` is unauthenticated and costs no metered export call. It also fails soft, so a site
     that will not answer leaves the run exactly where it was -- reporting the cause as unestablished
     rather than guessing at one.

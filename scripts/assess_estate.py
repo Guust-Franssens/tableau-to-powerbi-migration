@@ -1187,7 +1187,7 @@ def server_ceiling(site: Site) -> dict[str, Any]:
 
     The render ceiling is a property of the site, so an operator should learn it HERE -- in the first
     thing they run against a new estate -- rather than discovering it much later as a capture-time
-    warning. Measured customer case (#468): an on-prem Server at ``productVersion 2025.3.3`` advertises
+    warning. Measured customer case (#474): an on-prem Server at ``productVersion 2025.3.3`` advertises
     ``restApiVersion 3.27``, so SVG (floor 3.29) is unavailable there at any client setting, and the
     best rung it can reach is PDF. Nothing in the assessment said so.
 

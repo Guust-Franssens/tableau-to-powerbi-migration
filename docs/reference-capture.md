@@ -250,7 +250,7 @@ values in its own rejection text). Measured on the captured files:
   do SVG still needs `TABLEAU_REST_API_VERSION=3.29` in `.env`. ⚠️⚠️ **But that is only the remedy when
   the SERVER clears the floor too** — see [Why SVG failed](#why-svg-failed-three-states-never-two)
   below. Raising a client preference above a server's advertised ceiling cannot make a 3.27 server
-  export SVG, and telling a customer otherwise is issue #468.
+  export SVG, and telling a customer otherwise is issue #474.
 - **It is not free.** SVG bytes ranged 39 KB → 5.0 MB per dashboard (PNG: 48 KB → 897 KB). A
   crosstab-shaped *worksheet* produced a **21 MB** SVG with 37,439 `<text>` elements against a 4.5 MB
   PNG. Prefer `--svg` for dashboards; think before sweeping it across every worksheet in an estate.
@@ -380,7 +380,7 @@ reported `productVersion 2025.3.3` / `restApiVersion 3.27`; its SVG legs were re
 loudest, most actionable-looking line said *"Set `TABLEAU_REST_API_VERSION=3.29` in `.env` and
 re-run"*. A **client preference cannot lift a server's ceiling** — this is arithmetic, not judgement —
 so the advice was simply false there. The code that printed it already had the advertised ceiling in
-scope and never looked at it (#468).
+scope and never looked at it (#474).
 
 Every place we now say why SVG failed resolves through one classifier
 (`tableau_render_capability.svg_gate_advice`) to exactly one of three states — the three values of

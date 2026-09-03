@@ -1,5 +1,5 @@
 """
-purpose: gate the three-state contract for "why did `?format=svg` fail" (#468) -- the message this
+purpose: gate the three-state contract for "why did `?format=svg` fail" (#474) -- the message this
          repo prints, the `remedy` it persists per view, and the render ceiling the ASSESSMENT now
          reports before anyone captures anything.
 usage:   pytest tests/test_svg_server_ceiling.py -q
@@ -38,7 +38,7 @@ import capture_tableau_oracle as oracle  # noqa: E402  # pylint: disable=wrong-i
 import tableau_oracle_manifest as verdict  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_render_capability as capability  # noqa: E402  # pylint: disable=wrong-import-position
 
-# The customer site behind #468: below the SVG floor, and by only two minor versions -- which is the
+# The customer site behind #474: below the SVG floor, and by only two minor versions -- which is the
 # point. It is not an ancient server, it is a current on-prem one.
 SES = {"product_version": "2025.3.3", "rest_api_version": "3.27"}
 # The Cloud site this repo measured on 2026-08-30. Above the floor.
@@ -415,7 +415,7 @@ def test_the_capture_time_record_admits_the_ceiling_is_not_in_scope_there(tmp_pa
 
 
 def test_the_capture_time_record_does_NOT_carry_a_confident_env_instruction(tmp_path):
-    """Negative control: the pre-#468 record said "set TABLEAU_REST_API_VERSION=3.29 ... in .env"."""
+    """Negative control: the pre-#474 record said "set TABLEAU_REST_API_VERSION=3.29 ... in .env"."""
     session = _Session({"/data": (200, b"a\n1\n"), "image?format=svg": (400, SVG_TOO_OLD.encode())})
     record = oracle.capture_view(session, VIEW, tmp_path, frozenset({"svg"}))
     assert RAISE_THE_PIN not in record["svg"]["remedy"]

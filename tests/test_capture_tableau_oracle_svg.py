@@ -189,7 +189,7 @@ def test_a_failed_png_no_longer_swallows_the_svg_leg(tmp_path):
 
 
 def test_a_pre_329_site_is_reported_as_a_configuration_fault_not_a_broken_view(tmp_path):
-    """⚠️ The remedy is deliberately the CONDITIONAL one at capture time (#468).
+    """⚠️ The remedy is deliberately the CONDITIONAL one at capture time (#474).
 
     ``_capture_render`` cannot know the site's advertised ceiling -- it is a property of the SITE and
     nothing at that call carries it -- so it must not print the confident ``.env`` instruction, which

@@ -221,7 +221,7 @@ class CaptureRun:
 
 
 # One local over the limit, and it is `gate` -- the three version numbers that decide WHY a refused
-# SVG leg was refused (#468). It is read by three consumers here (the per-view stamp, two manifest
+# SVG leg was refused (#474). It is read by three consumers here (the per-view stamp, two manifest
 # fields, the console verdict), so binding it once is what keeps them from disagreeing.
 def write_manifest(  # pylint: disable=too-many-locals
     records: list[dict[str, Any]],
@@ -402,7 +402,7 @@ def _stamp_svg_gate(records: list[dict[str, Any]], gate: capability.SvgGate, red
     """Replace each version-gated SVG leg's capture-time remedy with the RUN-level verdict.
 
     ⚠️ This mutates the records in place, deliberately: they are what ``manifest["views"]`` serialises,
-    and the whole point of #468 is that the remedy written into the evidence file must be the one that
+    and the whole point of #474 is that the remedy written into the evidence file must be the one that
     can actually work. ``_capture_render`` cannot compute it -- the advertised ceiling is a property
     of the SITE and is simply not in scope down there -- so it writes the honest "not established"
     form and this is where it is upgraded once the run knows better.
@@ -477,7 +477,7 @@ def _log_blocked_and_stale(
         # Loud and separate from `blocked`: this one is never fixed by a human reauthorizing a data
         # source in Tableau, and conflating the two sends the reader hunting in the wrong system.
         #
-        # ⚠️ It is not always fixed by an .env line either, which is the whole of #468. `svg_gate_advice`
+        # ⚠️ It is not always fixed by an .env line either, which is the whole of #474. `svg_gate_advice`
         # is the ONE place that decides which of the three states this is, and the per-view `remedy`
         # in the manifest is the same function's output on the same gate -- so the console and the
         # evidence file cannot disagree.
