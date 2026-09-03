@@ -601,6 +601,7 @@ TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
     ("scripts/tableau_http.py", "header_value"): {"headers"},
     ("scripts/tableau_payload_facts.py", "detect_format"): {"values"},
     ("scripts/tableau_payload_facts.py", "summarise_csv"): {"payload"},
+    ("scripts/tableau_payload_facts.py", "certify_csv"): {"payload", "content_type"},
     ("scripts/tableau_payload_facts.py", "png_dimensions"): {"payload"},
     ("scripts/tableau_payload_facts.py", "svg_facts"): {"payload"},
     ("scripts/tableau_payload_facts.py", "pdf_facts"): {"payload"},
@@ -902,7 +903,17 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
             "FIXED-VOCABULARY: one of `empty_classification`'s two EMPTY_* literals, chosen by "
             "whether the recorded CSV header was empty -- never built from the header's contents"
         ),
+        "unassessable": (
+            "FIXED-VOCABULARY: one of `UNASSESSABLE_REASONS`, a closed set this repo authors. "
+            "`unassessable_reason` returns a recorded `certification` only after checking membership, "
+            "so an unrecognised string in an older manifest is replaced by the module's own default "
+            "rather than printed"
+        ),
         "data['elapsed_sec']": "NOT-A-STRING: a float duration in seconds",
+        "data.get('elapsed_sec', 0.0)": (
+            "NOT-A-STRING: the same float duration, defaulted -- an unassessable record may predate "
+            "the field, and this line must not raise the KeyError the row-count line did"
+        ),
         "data['reauths']": "NOT-A-STRING: an integer counter",
         "data['retries']": "NOT-A-STRING: an integer counter",
     },
@@ -919,6 +930,17 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
             "the residual PAT-name case in both the values and the `format_hints` KEYS"
         ),
         "stats": "REDACTED-UPSTREAM: counters, plus `retry_reasons` whose entries are redacted details",
+        "certification": (
+            "FIXED-VOCABULARY: one of `tableau_payload_facts.CSV_VERDICTS` -- six literals that module "
+            "authors. `certify_csv` is documented never to echo the payload or the received header, "
+            "and it returns a verdict ABOUT them rather than any part of either"
+        ),
+        "_CSV_REFUSAL_DETAIL[certification]": (
+            "FIXED-VOCABULARY: a sentence this module authors, selected by a `certify_csv` verdict. "
+            "The mapping's keys are that closed vocabulary and its values are module literals, so "
+            "nothing the server sent can reach the message -- which is the point: a refusal that "
+            "quoted the body it refused would put the refused bytes in the manifest"
+        ),
         "hashlib.sha256(payload).hexdigest()": "DERIVED-IRREVERSIBLY: a one-way digest, not the payload",
         "len(payload)": "NOT-A-STRING: an integer byte count",
         "round(elapsed, 2)": "NOT-A-STRING: a float duration in seconds",
@@ -964,6 +986,14 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "detail[:80]": "REDACTED-UPSTREAM: classify_export_error builds it from `safe`; the slice is after",
         "detail or redacted_note(payload, self._redact_response, limit=200)": (
             "REDACTED-UPSTREAM: both arms are redacted -- `detail` from `safe`, the fallback by the chokepoint"
+        ),
+        "header_value(headers, 'Content-Type')": (
+            "SCRUBBED-AT-SINK: #480. The response's DECLARED Content-Type, returned in `stats` so the "
+            "data leg can certify a CSV that carries no signature of its own. It is response-derived "
+            "and is treated as such: both callers POP it before merging `stats` into a leg record, so "
+            "it never reaches a file, a path or a log line, and only the closed-vocabulary VERDICT "
+            "derived from it is recorded. Were a caller ever to keep it, `scrub_tree` covers the "
+            "manifest whole immediately before serialisation"
         ),
     },
     ("scripts/tableau_render_capability.py", "format_matches"): {
@@ -1096,6 +1126,8 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "len(unestablished)": _A_COUNT,
         "unestablished": _INTO_THE_MANIFEST_AGGREGATE,
         "empty_views": _INTO_THE_MANIFEST_AGGREGATE,
+        "unassessable_views": _INTO_THE_MANIFEST_AGGREGATE,
+        "len(sets['unassessable'])": _A_COUNT,
         "len(records)": _A_COUNT,
         "len(blocked)": _A_COUNT,
         "len(complete)": _A_COUNT,
@@ -1114,8 +1146,9 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
     ("scripts/tableau_oracle_manifest.py", "_partition"): {
         "ok": _INTO_THE_MANIFEST_AGGREGATE,
         "[r for r in ok if empty_classification(r)]": _INTO_THE_MANIFEST_AGGREGATE,
-        "[r for r in records if r.get('data', {}).get('status') == 'ok' and all((s == 'ok' for s in "
-        "_render_statuses(r, requested)))]": _INTO_THE_MANIFEST_AGGREGATE,
+        "[r for r in ok if unassessable_reason(r)]": _INTO_THE_MANIFEST_AGGREGATE,
+        "[r for r in records if r.get('data', {}).get('status') == 'ok' and (not unassessable_reason(r)) and "
+        "all((s == 'ok' for s in _render_statuses(r, requested)))]": _INTO_THE_MANIFEST_AGGREGATE,
         "[r for r in records if 'source_credential' in {r.get('data', {}).get('status'), "
         "*_render_statuses(r, requested)}]": _INTO_THE_MANIFEST_AGGREGATE,
         "[r for r in records if any((status not in {'ok', 'source_credential'} for status in "
@@ -1133,7 +1166,10 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         ),
         "{**record, 'flags': flags}": _INTO_THE_MANIFEST_AGGREGATE,
     },
-    ("scripts/tableau_oracle_manifest.py", "data_empty_views"): {
+    # #480. The shared projection behind every counted-AND-named list. One certification, because one
+    # function: `data_empty_views` and `data_unassessable_views` differ only in which predicate they
+    # pass and what the reason field is called.
+    ("scripts/tableau_oracle_manifest.py", "_named_views"): {
         "record.get('view_luid')": _INTO_THE_MANIFEST,
         "record.get('view_name')": _INTO_THE_MANIFEST,
         "record.get('workbook_name')": _INTO_THE_MANIFEST,
@@ -1143,12 +1179,15 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
             "`mapping.get(luid, UNKNOWN)`, so no response text can arrive here; and it reaches the "
             "manifest, where `scrub_tree` covers it anyway"
         ),
-        "classification": (
-            "FIXED-VOCABULARY: one of this module's two EMPTY_* literals, chosen by whether the "
-            "recorded CSV header was empty -- never built from the header's contents"
+        "reason": (
+            "FIXED-VOCABULARY: whatever the predicate returned, and both predicates return only "
+            "module literals -- `empty_classification` one of two EMPTY_* values chosen by whether "
+            "the recorded CSV header was empty, `unassessable_reason` one of `UNASSESSABLE_REASONS`, "
+            "a closed set checked by membership before it is returned so an unrecognised string in "
+            "an older record is replaced rather than echoed"
         ),
         "{'view_luid': record.get('view_luid'), 'view_name': record.get('view_name'), 'workbook_name': "
-        "record.get('workbook_name'), 'view_type': record.get('view_type'), 'classification': classification}": (
+        "record.get('workbook_name'), 'view_type': record.get('view_type'), key: reason}": (
             _INTO_THE_MANIFEST_AGGREGATE
         ),
     },
@@ -1158,6 +1197,14 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
             "FIXED-VOCABULARY: one of this module's two EMPTY_* literals; the view and workbook NAMES "
             "on the same line go through `redacted_note`, which is the only response-derived value "
             "in this warning"
+        ),
+    },
+    ("scripts/tableau_oracle_manifest.py", "_log_unassessable"): {
+        "len(unassessable)": _A_COUNT,
+        "entry.get('reason')": (
+            "FIXED-VOCABULARY: one of `UNASSESSABLE_REASONS`, checked by membership in "
+            "`unassessable_reason` before it is ever recorded; the view and workbook NAMES on the "
+            "same line go through `redacted_note`, which is the only response-derived value here"
         ),
     },
     ("scripts/tableau_oracle_manifest.py", "render_unestablished"): {
@@ -2045,7 +2092,11 @@ def test_the_unparse_dialect_detector_can_actually_fire():
 def _pat_name_capture(planted, tmp_path, wants=frozenset()):
     """A capture whose PAT NAME appears in a SUCCESSFUL CSV. Returns (manifest dict, csv text)."""
     session = _Session("an-unrelated-long-pat-secret", (200, b""), pat_name=planted)
-    session.data_reply = (200, f"{planted}\nvalue\n".encode(), {})
+    # ⚠️ The Content-Type is not decoration and this fixture stops working without it (#480): a
+    # `/data` body with no declared type is no longer certifiable as CSV, so no `columns` would be
+    # recorded and the leak this test drives through the sink would never be created. A real Tableau
+    # `/views/<luid>/data` response declares `text/csv`, so the fixture is now the honest shape.
+    session.data_reply = (200, f"{planted}\nvalue\n".encode(), {"Content-Type": "text/csv"})
     record = oracle.capture_view(session, VIEW, tmp_path, wants)
     record["workbook_name"] = "W"
     counter = _Counter()

@@ -28,6 +28,7 @@ from typing import Any
 
 import tableau_view_types
 from tableau_env import redacted_note, scrub_tree
+from tableau_payload_facts import CSV_CONTENT_TYPE_ABSENT, CSV_REFUSALS
 
 LOG = logging.getLogger("tableau-oracle")
 
@@ -87,6 +88,56 @@ FLAG_DATA_EMPTY = "data_empty"
 EMPTY_QUERY_NO_ROWS = "empty_query_no_rows"
 EMPTY_CANNOT_CLASSIFY = "empty_cannot_classify"
 
+# A view whose `/data` export succeeded and whose evidence CANNOT BE ASSESSED AT ALL -- the third
+# state, and the one this layer used to be missing. Before it, `empty_classification` returned `None`
+# for a record with no `row_count`, and every consumer read that `None` as "not empty": the view was
+# reported successful, evidence-complete, unflagged and unnamed, indistinguishable from one that
+# returned 900,000 rows. That is the #471 defect one level up -- "a zero-row capture reads as ok"
+# fixed, "an UNASSESSABLE capture reads as ok" introduced -- and it is strictly worse than the
+# `KeyError` it replaced, because a crash is fail-closed and a clean bucket is not.
+#
+# ⚠️ It is a FLAG and not a status, for the same reason `data_empty` is: the transport genuinely
+# succeeded. Collapsing it into `status` would destroy a real distinction (the HTTP call worked) and
+# would move the exit code for a run whose only fault is that we cannot vouch for what we hold.
+FLAG_DATA_UNASSESSABLE = "data_unassessable"
+
+# The default reason: a record whose data leg recorded no row count at all. An OLDER manifest, or a
+# `certification` this module does not recognise -- either way nothing measured the rows, so nothing
+# may be claimed about them.
+UNASSESSABLE_NO_ROW_COUNT = "row_count_unrecorded"
+
+# Reasons a CURRENT capture can supply, from `certify_csv`'s closed vocabulary. Only
+# `content_type_absent` can reach a `status: ok` record -- every other refusal is recorded
+# `format_mismatch` at capture time and never claims to be a successful data leg -- but the whole set
+# is accepted here so a record written by a newer capture is named honestly rather than flattened.
+UNASSESSABLE_REASONS = frozenset({UNASSESSABLE_NO_ROW_COUNT, CSV_CONTENT_TYPE_ABSENT}) | CSV_REFUSALS
+
+
+def unassessable_reason(record: dict[str, Any]) -> str | None:
+    """Why a SUCCESSFUL data leg cannot be assessed for emptiness at all, or ``None``.
+
+    The third state, beside "rows present" and "zero rows". A capture is unassessable when its data
+    leg reports ``status: ok`` and yet carries no measured ``row_count`` -- because the capture
+    predates the field, or because the payload could not be certified as CSV and no shape was
+    therefore taken from it (:data:`tableau_payload_facts.CSV_CONTENT_TYPE_ABSENT`).
+
+    ⚠️ **Absence is not a zero, and it is not a non-zero either.** :func:`empty_classification`
+    already refuses to call this empty, which is right; what was missing is that its ``None`` then
+    read as *"not empty"* everywhere downstream. A view nothing measured must say so, in its own
+    flag and its own named list, and must not be counted evidence-complete.
+
+    ``bool`` is excluded explicitly: ``isinstance(True, int)`` is true in Python, and a ``row_count``
+    of ``True`` is a corrupt record, not a measurement of one row.
+    """
+    data = record.get("data") or {}
+    if data.get("status") != "ok":
+        return None
+    row_count = data.get("row_count")
+    if isinstance(row_count, int) and not isinstance(row_count, bool):
+        return None
+    certification = data.get("certification")
+    return certification if certification in UNASSESSABLE_REASONS else UNASSESSABLE_NO_ROW_COUNT
+
 
 def empty_classification(record: dict[str, Any]) -> str | None:
     """Why this view's data leg is empty, or ``None`` when it is not empty at all.
@@ -100,6 +151,12 @@ def empty_classification(record: dict[str, Any]) -> str | None:
     record whose data leg failed (its emptiness is explained by the failure, not by the view) and an
     older record that carries no ``row_count`` at all (absence is not a zero -- claiming one would
     invent a diagnostic about a manifest that never measured it).
+
+    ⚠️ **That ``None`` is NOT "this capture is fine", and reading it as one is a fail-open defect in
+    its own right.** It answers a single question -- "is this an established zero-row capture" -- and
+    a record with no ``row_count`` answers it "no" for the opposite reason a 900,000-row capture
+    does. :func:`unassessable_reason` is the other half, and every consumer that partitions, counts
+    or flags must consult both; the count is not evidence-complete without it.
 
     ⚠️ **The glossary case is left OPEN on purpose.** ``EMPTY_CANNOT_CLASSIFY`` means the export
     returned no header, which a fieldless sheet and a genuinely empty query produce identically; the
@@ -117,7 +174,17 @@ def empty_classification(record: dict[str, Any]) -> str | None:
 
 
 def flag_empty(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Records with the per-view ``flags`` key added to every established zero-row capture.
+    """Records with the per-view ``flags`` key added to every capture whose numbers are not clean.
+
+    Two flags, because there are three states and only one of them is silent. An established
+    zero-row capture gets :data:`FLAG_DATA_EMPTY` plus its classification; a capture nothing could
+    measure gets :data:`FLAG_DATA_UNASSESSABLE` plus its reason. A capture that returned rows gets
+    no flag at all, which is what keeps the flag worth reading.
+
+    ⚠️ The unassessable half is the fail-open fix: without it a record with no ``row_count`` came
+    through here untouched, and "no flags" is exactly what a clean capture looks like. Every
+    consumer -- the packaged unit, the per-workbook subset, a human reading one view -- then read
+    silence as evidence.
 
     Copies rather than mutates: the caller's records are its own, and a function that silently
     rewrites the list it was handed is the shape that makes a second call to it wrong.
@@ -129,12 +196,60 @@ def flag_empty(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out = []
     for record in records:
         classification = empty_classification(record)
-        if not classification:
+        unassessable = unassessable_reason(record)
+        if classification:
+            added = [FLAG_DATA_EMPTY, classification]
+        elif unassessable:
+            added = [FLAG_DATA_UNASSESSABLE, unassessable]
+        else:
             out.append(record)
             continue
-        flags = list(dict.fromkeys([*record.get("flags", []), FLAG_DATA_EMPTY, classification]))
+        flags = list(dict.fromkeys([*record.get("flags", []), *added]))
         out.append({**record, "flags": flags})
     return out
+
+
+def _named_views(records: list[dict[str, Any]], reason_of, key: str) -> list[dict[str, Any]]:
+    """The shared projection behind every "counted AND named" list in this module.
+
+    One function so a count and its list cannot describe different views, and so a new diagnostic
+    ships the same identity fields as the ones before it. ``reason_of`` is the predicate --
+    :func:`empty_classification` or :func:`unassessable_reason` -- and ``key`` names what the reason
+    is called in the entry, since "why is this empty" and "why can this not be assessed" are
+    different questions and must not share a field name.
+    """
+    out = []
+    for record in records:
+        reason = reason_of(record)
+        if not reason:
+            continue
+        out.append(
+            {
+                "view_luid": record.get("view_luid"),
+                "view_name": record.get("view_name"),
+                "workbook_name": record.get("workbook_name"),
+                "view_type": record.get("view_type"),
+                key: reason,
+            }
+        )
+    return out
+
+
+def data_unassessable_views(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Views whose data leg SUCCEEDED and whose evidence could not be assessed. Counted AND named.
+
+    The same shape as :func:`data_empty_views` and for the same reason, applied to the state that
+    had no reporting at all. A reviewer needs "on WHICH views is a numeric-fidelity finding
+    impossible" answered identically whether the cause is a measured zero or an unmeasurable body --
+    and the second used to answer "none", silently, which is worse than the first because it looks
+    like good news.
+
+    Each entry carries its REASON, not a verdict: ``row_count_unrecorded`` is a manifest written
+    before the count existed (re-capture and it resolves), while ``content_type_absent`` is a live
+    server or proxy that did not declare what it sent (the payload may be perfect data -- nothing
+    here establishes that it is, which is exactly the point).
+    """
+    return _named_views(records, unassessable_reason, "reason")
 
 
 def data_empty_views(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -155,21 +270,7 @@ def data_empty_views(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ``EMPTY_QUERY_NO_ROWS`` -- because nothing on hand describes a view's filters, and inventing the
     distinction from a rendered image would be a guess.
     """
-    out = []
-    for record in records:
-        classification = empty_classification(record)
-        if not classification:
-            continue
-        out.append(
-            {
-                "view_luid": record.get("view_luid"),
-                "view_name": record.get("view_name"),
-                "workbook_name": record.get("workbook_name"),
-                "view_type": record.get("view_type"),
-                "classification": classification,
-            }
-        )
-    return out
+    return _named_views(records, empty_classification, "classification")
 
 
 def log_progress(index: int, total: int, record: dict[str, Any], redactor=None) -> None:
@@ -184,6 +285,12 @@ def log_progress(index: int, total: int, record: dict[str, Any], redactor=None) 
     ordinary progress line is technically visible and practically invisible: the reporting site had
     12 of them among 91 INFO lines and found them by opening PNGs by hand. The line keeps its
     columns so the run still reads as a table, and gains the classification and a marker.
+
+    ⚠️ An UNASSESSABLE capture is a WARNING for the same reason and a separate branch for a stronger
+    one: the ordinary line interpolates ``data["row_count"]``, which a record without one does not
+    have, so printing it here raised ``KeyError`` and took the whole run down at the console. It
+    reports no row count, because there is none to report -- printing ``0`` would be the invented
+    zero this module refuses everywhere else.
     """
     data = record.get("data", {})
     name = redacted_note(record.get("view_name"), redactor, limit=34)
@@ -196,7 +303,18 @@ def log_progress(index: int, total: int, record: dict[str, Any], redactor=None) 
             marks.append(f"retry x{data['retries']}")
         suffix = f"  ({', '.join(marks)})" if marks else ""
         empty = empty_classification(record)
-        if empty:
+        unassessable = unassessable_reason(record)
+        if unassessable:
+            LOG.warning(
+                "  %2d/%d  %-34s     ? rows  %6.1fs%s  <- UNASSESSABLE (%s)",
+                index,
+                total,
+                name,
+                data.get("elapsed_sec", 0.0),
+                suffix,
+                unassessable,
+            )
+        elif empty:
             LOG.warning(
                 "  %2d/%d  %-34s %5d rows  %6.1fs%s  <- NO DATA (%s)",
                 index,
@@ -270,10 +388,19 @@ def _partition(
         # which is how a count and a list come to disagree about the same views -- and it raised
         # KeyError on an older record whose data leg recorded no row count at all.
         "empty": [r for r in ok if empty_classification(r)],
+        # The third state. Separate from `empty` because they need opposite readings: an empty
+        # capture MEASURED nothing there, an unassessable one measured NOTHING AT ALL.
+        "unassessable": [r for r in ok if unassessable_reason(r)],
+        # ⚠️ `not unassessable_reason(r)` is the fail-open fix. `complete` is what the run reports as
+        # "captured", and a record whose rows were never measured used to satisfy every clause here:
+        # data status ok, renders ok, nothing to say otherwise. Evidence-complete has to mean the
+        # evidence was established, not that nothing objected.
         "complete": [
             r
             for r in records
-            if r.get("data", {}).get("status") == "ok" and all(s == "ok" for s in _render_statuses(r, requested))
+            if r.get("data", {}).get("status") == "ok"
+            and not unassessable_reason(r)
+            and all(s == "ok" for s in _render_statuses(r, requested))
         ],
         "blocked": [
             r
@@ -386,6 +513,7 @@ def write_manifest(
     reference_missing = run.reference_required and rendered == 0 and not credential_only
     unestablished = render_unestablished(records, run.requested_renders)
     empty_views = data_empty_views(records)
+    unassessable_views = data_unassessable_views(records)
     manifest = {
         "schema": "tableau-oracle/1",
         "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -408,6 +536,13 @@ def write_manifest(
         # views among 94 were countable and unfindable, indistinguishable per view from a capture
         # that returned 900,000 rows.
         "data_empty_views": empty_views,
+        # The third state, counted AND named beside the other two. A capture whose rows were never
+        # measured is not a clean capture and not an empty one; before this it was reported as
+        # neither, which meant it was reported as fine. `data_ok` deliberately still counts it --
+        # the HTTP call DID succeed, and collapsing that into the numeric verdict would destroy a
+        # real distinction -- so this pair is what stops `data_ok` being read as evidence.
+        "data_unassessable": len(sets["unassessable"]),
+        "data_unassessable_views": unassessable_views,
         "image_ok": sum(1 for r in records if r.get("image", {}).get("status") == "ok"),
         "svg_ok": sum(1 for r in records if r.get("svg", {}).get("status") == "ok"),
         "pdf_ok": sum(1 for r in records if r.get("pdf", {}).get("status") == "ok"),
@@ -456,10 +591,12 @@ def write_manifest(
         )
 
     LOG.info(
-        "\n%d/%d captured (%d empty), %d credential-blocked, %d failed, %d re-auth(s), %d retr(ies), %.0fs -> %s",
+        "\n%d/%d captured (%d empty, %d unassessable), %d credential-blocked, %d failed, %d re-auth(s), "
+        "%d retr(ies), %.0fs -> %s",
         len(complete),
         len(records),
         len(sets["empty"]),
+        len(sets["unassessable"]),
         len(blocked),
         len(failed),
         run.session.reauth_count,
@@ -470,6 +607,7 @@ def write_manifest(
     _log_blocked_and_stale(records, blocked, capability_report, run.session.redact_text)
     _log_unestablished(unestablished, run.session.redact_text)
     _log_empty(empty_views, run.session.redact_text)
+    _log_unassessable(unassessable_views, run.session.redact_text)
     if reference_missing:
         LOG.error(
             "\nA reference render was REQUIRED (--reference-best) but NONE was captured across %d "
@@ -535,6 +673,42 @@ def _log_empty(empty: list[dict[str, Any]], redactor) -> None:
             "defects; %s is the class that is certainly a real query with a real header.",
             EMPTY_CANNOT_CLASSIFY,
             EMPTY_QUERY_NO_ROWS,
+        )
+
+
+def _log_unassessable(unassessable: list[dict[str, Any]], redactor) -> None:
+    """Name every view whose data leg succeeded and whose evidence could not be assessed at all.
+
+    A separate block from :func:`_log_empty`, and the separation is the whole point: an empty
+    capture is a MEASUREMENT (zero rows came back, which a numeric review can act on), while this
+    one is the absence of a measurement. Folding them together would let a reader take "N empty"
+    as the total cost, when the unassessable views are the ones nothing at all is known about.
+
+    Both reasons are actionable and they are actionable DIFFERENTLY: ``row_count_unrecorded`` is an
+    older manifest and re-capturing resolves it, while ``content_type_absent`` is a live server or
+    proxy that did not declare what it sent -- re-capturing reproduces it, and the fix is upstream.
+    """
+    if not unassessable:
+        return
+    LOG.warning(
+        "\n%d view(s) captured data that could NOT BE ASSESSED. The export succeeded, so these are "
+        "recorded status 'ok' and this run's exit code is unaffected -- but no row count was ever "
+        "established for them, so they are NOT counted as captured-complete and a numeric-fidelity "
+        "finding cannot be made or refuted from them. This is not the same as an empty capture: an "
+        "empty one measured zero rows, these measured nothing. '%s' means an older manifest that "
+        "predates the count (re-capture resolves it); '%s' means the server or a proxy returned the "
+        "body with no Content-Type, and a CSV carries no signature, so nothing establishes those "
+        "bytes as data -- the fix is upstream of this capture:",
+        len(unassessable),
+        UNASSESSABLE_NO_ROW_COUNT,
+        CSV_CONTENT_TYPE_ABSENT,
+    )
+    for entry in unassessable:
+        LOG.warning(
+            "  - %s (%s): %s",
+            redacted_note(entry.get("view_name"), redactor, limit=60),
+            redacted_note(entry.get("workbook_name"), redactor, limit=60),
+            entry.get("reason"),
         )
 
 

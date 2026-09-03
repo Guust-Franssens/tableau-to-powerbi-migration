@@ -9,12 +9,14 @@ this is where #405 round 5's leak lived: ``summarise_csv`` copies a CSV's first 
 diagnostic. Keeping the parsers in one small module makes that surface enumerable; the taint gate in
 ``tests/test_diagnostic_redaction.py`` covers this file for exactly that reason.
 
-⚠️ **Describing a payload is not the same as certifying it, and :func:`payload_is_complete` is the
-only function here that certifies.** Everything else is best-effort: ``png_dimensions`` reads an IHDR
-that may be the only chunk present, ``svg_facts`` counts ``<text`` in a string that need not be
-well-formed, ``pdf_facts`` regex-scans for a ``/MediaBox`` that may never be closed. That is right for
-a *description* and fatal for a *verdict*, which is exactly how a truncated render came to be recorded
-as ``status: ok`` with a SHA-256 beside it.
+⚠️ **Describing a payload is not the same as certifying it, and :func:`payload_is_complete` and
+:func:`certify_csv` are the only functions here that certify.** Everything else is best-effort:
+``png_dimensions`` reads an IHDR that may be the only chunk present, ``svg_facts`` counts ``<text`` in
+a string that need not be well-formed, ``pdf_facts`` regex-scans for a ``/MediaBox`` that may never be
+closed -- and ``summarise_csv`` will happily report a row count for an HTML error page. That is right
+for a *description* and fatal for a *verdict*, which is exactly how a truncated render came to be
+recorded as ``status: ok`` with a SHA-256 beside it, and how a 200 ``text/html`` body came to be
+recorded as two rows of data.
 """
 
 from __future__ import annotations
@@ -56,8 +58,90 @@ def detect_format(values: list[str]) -> str | None:
     return None
 
 
+# What a `/data` export may DECLARE and still be read as CSV. `text/plain` and `application/csv` are
+# here because a transcoding proxy relabels an export and some servers spell it the second way;
+# anything else is the server positively stating the body is NOT CSV, which is decisive.
+CSV_MIME_TYPES = frozenset({"text/csv", "application/csv", "text/plain"})
+
+# The verdicts :func:`certify_csv` may return. A CLOSED vocabulary this repo authors: nothing here is
+# built from the payload or from the received header, so a verdict can be logged, recorded and
+# branched on without any of it being response text.
+CSV_CERTIFIED = "certified"
+#: No `Content-Type` at all. The structure passed every check, but CSV has no signature -- there is no
+#: byte sequence that PROVES a body is CSV the way `%PDF-` proves a PDF -- so the declaration is the
+#: only certificate available and its absence leaves the payload UNASSESSABLE, never clean.
+CSV_CONTENT_TYPE_ABSENT = "content_type_absent"
+CSV_CONTENT_TYPE_NOT_CSV = "content_type_not_csv"
+CSV_NOT_TABULAR = "payload_not_tabular"
+CSV_MALFORMED = "payload_malformed_csv"
+CSV_RAGGED = "payload_ragged_rows"
+
+#: A verdict that REFUSES the payload outright: these bytes were never established to be a CSV, so
+#: nothing may be derived from them -- not a row count, not a header, and above all not a diagnosis.
+CSV_REFUSALS = frozenset({CSV_CONTENT_TYPE_NOT_CSV, CSV_NOT_TABULAR, CSV_MALFORMED, CSV_RAGGED})
+#: Every value `certify_csv` can produce, so a consumer reading one off an older manifest can check
+#: it against a closed set instead of trusting whatever string is in the field.
+CSV_VERDICTS = frozenset({CSV_CERTIFIED, CSV_CONTENT_TYPE_ABSENT}) | CSV_REFUSALS
+
+# A body whose first non-space byte opens a tag or a JSON object is a document, not a table. Checked
+# because Content-Type is the only positive CSV certificate and a proxy can strip it: `<html>` then
+# parses as a one-column CSV with two "rows", which is how an error page came to be recorded as data.
+# `[` is deliberately NOT here -- a Tableau field name can legitimately be bracketed.
+_NOT_TABULAR_OPENERS = ("<", "{")
+
+
+def certify_csv(payload: bytes, content_type: str | None) -> str:
+    """May these bytes be read as CSV rows at all? One value from :data:`CSV_VERDICTS`.
+
+    ⚠️ **This is the only function here that CERTIFIES a `/data` payload, and it exists because
+    describing one is not the same as establishing it.** ``summarise_csv`` decodes with ``replace``
+    and reads a non-strict ``csv.reader``, so *any* first line becomes a "header" and *any* further
+    line becomes a "row". Measured on this branch before the check existed: an HTTP 200 ``text/html``
+    error page (``<html>/<body>Error</body>/</html>``) was recorded ``status: ok`` with
+    ``columns: ["<html>"]`` and **``row_count: 2``**; and a 200 ``application/octet-stream`` body
+    reading ``not CSV at all`` was recorded ``row_count: 0`` and then classified
+    ``empty_query_no_rows`` -- a *specific diagnosis* ("the query ran and returned nothing") about a
+    payload never shown to be CSV at all. Confidently wrong is worse than unknown.
+
+    The order is deliberate. The DECLARATION is decisive first, unlike
+    :func:`tableau_render_capability.format_matches` where the payload is: a PNG or a PDF carries a
+    signature that settles the question whatever the header says, and **a CSV carries nothing**. So a
+    server saying ``text/html`` is the strongest evidence available and is believed; a server saying
+    nothing leaves the body uncertifiable however well-formed it looks, which is
+    :data:`CSV_CONTENT_TYPE_ABSENT` -- reported as unassessable rather than waved through.
+
+    Never echoes the payload or the received header. The return value is one of this module's own
+    literals, which is what lets a caller put it in a manifest and a log line without redaction.
+    """
+    declared = (content_type or "").split(";")[0].strip().lower()
+    if declared and declared not in CSV_MIME_TYPES:
+        return CSV_CONTENT_TYPE_NOT_CSV
+    text = payload.decode("utf-8-sig", "replace")
+    if text.lstrip()[:1] in _NOT_TABULAR_OPENERS:
+        return CSV_NOT_TABULAR
+    # An odd number of quotes means one was opened and never closed -- a truncated export, or a body
+    # that is not CSV at all. `csv.reader` does NOT raise for it even under `strict=True`: it reads to
+    # EOF and hands back a field, which is how `Region,Sales\r\nWest,"unterminated` was recorded as
+    # one complete row. CSV escapes a literal quote by doubling it, so a well-formed export always
+    # carries an even count.
+    if text.count('"') % 2:
+        return CSV_MALFORMED
+    try:
+        rows = [row for row in csv.reader(io.StringIO(text), strict=True) if row]
+    except csv.Error:
+        return CSV_MALFORMED
+    if rows and any(len(row) != len(rows[0]) for row in rows[1:]):
+        return CSV_RAGGED
+    return CSV_CERTIFIED if declared else CSV_CONTENT_TYPE_ABSENT
+
+
 def summarise_csv(payload: bytes) -> dict[str, Any]:
-    """Row/column shape plus per-column format hints, so a capture can be proven non-empty."""
+    """Row/column shape plus per-column format hints, so a capture can be proven non-empty.
+
+    ⚠️ **Describes; does not certify.** Call :func:`certify_csv` first and do not call this at all on
+    a payload it refused -- every field below is derived from whatever bytes arrived, and on a
+    non-CSV body they are fiction with a number attached.
+    """
     text = payload.decode("utf-8-sig", "replace")
     rows = list(csv.reader(io.StringIO(text)))
     if not rows:

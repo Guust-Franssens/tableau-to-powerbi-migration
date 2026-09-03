@@ -269,6 +269,11 @@ ORACLE_LEG_ALLOW = _fields(
     "image_elements",
     "external_refs",
     "row_count",
+    # #480. The data leg's CSV certification verdict -- one of `tableau_payload_facts.CSV_VERDICTS`,
+    # this repo's own closed vocabulary. It ships for the same reason `flags` does: without it a
+    # packaged unit carries `status: ok` with no `row_count` and nothing anywhere saying the body
+    # was never established as CSV, which is the fail-open this field exists to close.
+    "certification",
     "packaged_from",
     "packaging_reason",
 )

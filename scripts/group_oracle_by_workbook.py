@@ -204,6 +204,11 @@ def subset_manifest(manifest: dict[str, Any], workbook: str, views: list[dict[st
         # `data_empty_views` exists at all: a count cannot tell a reviewer which page to open.
         "data_empty": len([v for v in ok if tableau_oracle_manifest.empty_classification(v)]),
         "data_empty_views": tableau_oracle_manifest.data_empty_views(ok),
+        # The third state, carried at the same grade as the other two. A per-workbook reader is the
+        # one who acts on this, and a subset that reported `data_ok: 4` with nothing beside it said
+        # "four good captures" about views whose rows were never measured.
+        "data_unassessable": len([v for v in ok if tableau_oracle_manifest.unassessable_reason(v)]),
+        "data_unassessable_views": tableau_oracle_manifest.data_unassessable_views(ok),
         "credential_blocked": len(blocked),
         "failed": len(failed),
         # Legs the CAPTURE obtained but this grouping could not place. Separate from `failed` so a

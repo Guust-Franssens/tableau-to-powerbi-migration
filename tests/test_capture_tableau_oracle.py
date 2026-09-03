@@ -705,13 +705,24 @@ def test_an_older_record_with_no_row_count_is_not_claimed_empty(tmp_path):
 
     A record whose data leg recorded no `row_count` never measured emptiness, so claiming it as an
     empty capture would invent a diagnostic. The predicate this replaces raised `KeyError` on it.
+
+    ⚠️ **Not claimed empty is not the same as claimed clean, and PR #480 round 1 shipped the second.**
+    Returning `None` here was read downstream as "not empty", so the view was reported successful,
+    evidence-complete, unflagged and unnamed -- identical to a capture that returned 900,000 rows.
+    The `KeyError` this replaced was at least fail-closed. So the assertions below are in two halves:
+    it must not be counted EMPTY, and it must not be counted CLEAN either.
     """
     old = {"view_name": "V", "workbook_name": "W", "data": {"status": "ok"}}
-    code, manifest = _manifest(tmp_path, [old])
+    code, manifest = _named_manifest(tmp_path, [old])
     assert code == 0
     assert manifest["data_empty"] == 0
     assert manifest["data_empty_views"] == []
-    assert "flags" not in manifest["views"][0]
+    assert manifest["views"][0]["flags"] == [verdict.FLAG_DATA_UNASSESSABLE, verdict.UNASSESSABLE_NO_ROW_COUNT]
+    assert manifest["data_unassessable"] == 1
+    assert [entry["view_name"] for entry in manifest["data_unassessable_views"]] == ["V"]
+    assert manifest["data_unassessable_views"][0]["reason"] == verdict.UNASSESSABLE_NO_ROW_COUNT
+    assert manifest["captured_complete"] == 0, "a view nothing measured is not evidence-complete"
+    assert manifest["data_ok"] == 1, "the transport DID succeed -- collapsing that loses a real distinction"
 
 
 def test_a_failed_data_leg_is_not_ALSO_reported_as_empty(tmp_path):
