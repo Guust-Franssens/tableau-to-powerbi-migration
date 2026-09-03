@@ -140,13 +140,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
 import time
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -177,18 +178,23 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 #: outside the package. Prose restating a schema is a copy that drifts; the schema itself cannot.
 SPEC_SCHEMA = SCRIPT_DIR.parent / "docs" / "migration-spec.schema.json"
 
-#: Every `File.Contents("<literal>")` in a packaged model's M, and what counts as an ABSOLUTE one.
-#: The engine writes a machine-local path here pointing back into `<bundle>/data/`, so a package
-#: whose whole purpose is to be self-contained (#446) is not - issue #461. Measured across the 67
-#: packaged units of estate run 408: **23** such references in **17** units, 11.2 MB of extracts the
-#: package did not carry, one of them a `/Users/...` macOS path baked into the source workbook and
-#: absent from this machine entirely.
+#: Every quoted ABSOLUTE path literal in a `.tmdl`, and the two enclosing shapes that carry one.
+#: Scanning for `File.Contents` alone closed less than half of issue #461: re-measured across the 67
+#: packaged units of estate run 408, `File.Contents` accounts for 22 of the 31 Windows/UNC literals,
+#: and the other 9 are a FOLDER PARAMETER - `expression SourceFolder = "<bundle>\pbip\<Unit>\
+#: <Unit>.Data"` with partitions doing `File.Contents(#"SourceFolder" & "\Sample - Superstore.xlsx")`.
+#: Those 9 are every datasource-only unit in the estate, which the narrower scan missed entirely
+#: (17 units -> 25). The defect is "an absolute path escaping the package", not "a `File.Contents`
+#: call", so the general shape is what is targeted.
+ABSOLUTE_LITERAL_RE = re.compile(r'"((?:[A-Za-z]:[\\/]|\\\\|/)[^"]*)"')
 FILE_CONTENTS_RE = re.compile(r'File\.Contents\(\s*"([^"]*)"\s*\)')
-ABSOLUTE_PATH_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\|/)")
+FOLDER_PARAM_RE = re.compile(r'(expression\s+(?:#"[^"]+"|[^\s=]+)\s*=\s*")([^"]*)(")')
+WINDOWS_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
+UNC_PATH_RE = re.compile(r"^\\\\")
 
-#: Where a shipped source lands inside the package, and the M parameter the rewritten partitions
-#: read their folder from. Both the parameter's `meta [...]` tail and the trailing-separator value
-#: shape are copied from this repo's OWN committed, Desktop-verified models
+#: Where a shipped source lands inside the package, and the M parameter a rewritten `File.Contents`
+#: literal reads its folder from. Both the parameter's `meta [...]` tail and the trailing-separator
+#: value shape are copied from this repo's OWN committed, Desktop-verified models
 #: (`examples/*/fabric/*.SemanticModel/definition/expressions.tmdl`) rather than invented.
 #:
 #: The name matters twice over. `File.Contents` does **not** accept a relative path - Power Query
@@ -836,7 +842,7 @@ expected set is every dashboard PLUS every worksheet not placed on one.
 | `handover/{unit}.json` | the engine's slice for THIS workbook; `python scripts/read_handover.py handover/{unit}.json --viz`. Estate-wide sections are not shipped; absolute host paths are redacted. |
 | `fabric/` | the engine WORKING COPY - **edit here**, and when you work from a package THIS tree is canonical; `<bundle>/pbip/` never promotes over it. Declared-edit tooling (`declare_generated_edit.py`, `--tamper`) is bundle-only. |
 | `assets/` | the Tableau source this was built from |
-| `data/` | the rows the model imports, shipped with it (#461). Partitions read `DataFolder & "<relative>"`; `DataFolder`, in `expressions.tmdl`, is the ONE line to repoint if you move this folder, and `set_data_folder.py` rewrites it. Absent when the model imports nothing. |
+| `data/` | the rows the model imports, shipped with it (#461). A folder PARAMETER in `expressions.tmdl` names this directory - that is the ONE line to repoint if you move this folder, and `set_data_folder.py` rewrites it. Absent when the model imports nothing. |
 | `migration-spec.json` | the parsed source; the expected page set both gates grade against |
 | `migration-spec.schema.json` | the CONTRACT `validate_spec.py` enforces. Read it before appending a `limitations_encountered` entry: exactly `item`/`issue`/`severity`/`stage`, `additionalProperties: false`, so one invented field rejects every entry. |
 | `oracle/` | this unit's Tableau reference, split `dashboard/` vs `worksheet/` vs `unknown/` (**singular** - the directory is the object kind, not a plural). **`oracle/*/data/*.csv` is the NUMERIC oracle** - exact labels and figures, no OCR and no judgement. Read it first. |
@@ -912,7 +918,7 @@ def _model_tmdl(dest: Path, model_name: str | None) -> list[Path]:
     return sorted(definition.rglob("*.tmdl")) if definition.is_dir() else []
 
 
-def _packaged_data_target(source: str, taken: dict[str, str]) -> str:
+def _packaged_data_target(source: str, taken: dict[str, str], *, keep_leaf_only: bool = False) -> str:
     """A stable, package-relative home for one referenced source, unique within this package.
 
     Readable first - `data/<parent folder>/<file name>` keeps a handover folder browsable - but two
@@ -920,23 +926,75 @@ def _packaged_data_target(source: str, taken: dict[str, str]) -> str:
     (`.../<table>/federated_<hash>/Extract_Extract.csv`). A collision is therefore resolved by
     digesting the FULL original path, never by overwriting: two sources landing on one file would
     silently repoint one partition at the other's rows.
+
+    ``keep_leaf_only`` is the folder-parameter case, where the literal already names a directory and
+    its own leaf is the meaningful name (`<Unit>.Data`).
     """
-    original = Path(source.replace("\\", "/"))
-    parent = _UNSAFE.sub("_", original.parent.name)[:_MAX_OBJECT_NAME] or "source"
+    original = PurePosixPath(source.replace("\\", "/").rstrip("/"))
     name = _UNSAFE.sub("_", original.name)[:_MAX_OBJECT_NAME] or "data"
-    candidate = f"{parent}/{name}"
+    if keep_leaf_only:
+        candidate = name
+    else:
+        parent = _UNSAFE.sub("_", original.parent.name)[:_MAX_OBJECT_NAME] or "source"
+        candidate = f"{parent}/{name}"
     if taken.get(candidate, source) != source:
         candidate = f"{hashlib.sha256(source.encode('utf-8')).hexdigest()[:8]}/{name}"
     taken[candidate] = source
     return candidate
 
 
-def _classify_source(source: str) -> tuple[Path | None, str | None]:
-    """`(readable file, refusal)` for one absolute `File.Contents` literal."""
-    path = Path(source)
-    if not path.is_file():
-        return None, "not present on the packaging machine, so its bytes could not be shipped"
-    size = path.stat().st_size
+def _is_path_literal(value: str) -> bool:
+    """Whether an absolute literal is plausibly a FILE SYSTEM path this packager should act on.
+
+    A Windows drive or UNC prefix is unambiguous. A POSIX-absolute literal mostly is NOT: measured on
+    estate run 408, 9 POSIX-absolute literals appear and 8 are false positives - a Databricks
+    `HttpPath = "/sql/1.0/warehouses/<id>"` in three units, and a bare `"/"` inside a
+    `TableauFormula` annotation in two more. Requiring a file suffix keeps the one genuine hit (a
+    macOS `.xlsx` baked into a source workbook) and drops all eight. Finding contributed by the
+    promotion-side work in PR #462.
+    """
+    if WINDOWS_PATH_RE.match(value) or UNC_PATH_RE.match(value):
+        return True
+    return value.startswith("/") and bool(PurePosixPath(value).suffix)
+
+
+def _inside(root: Path, value: str) -> bool:
+    """Whether an absolute literal points INSIDE ``root``, judged LEXICALLY.
+
+    ⚠️ **Never `Path.resolve()` one of these literals.** A UNC literal naming a host that does not
+    exist blocks on SMB name resolution: measured by PR #462, that took one test module from 30
+    seconds to **52 minutes** and starved a subprocess into its 600 s timeout. `normpath` answers the
+    containment question without touching the network, and containment is a question about the
+    STRING, not about what happens to be mounted.
+    """
+    try:
+        candidate = PureWindowsPath(os.path.normpath(value))
+        return candidate == PureWindowsPath(os.path.normpath(str(root))) or candidate.is_relative_to(
+            PureWindowsPath(os.path.normpath(str(root)))
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def _classify_source(value: str, *, expect_dir: bool = False) -> tuple[Path | None, str | None]:
+    """`(readable path, refusal)` for one absolute literal, WITHOUT ever probing a UNC host.
+
+    The UNC carve-out is the same hazard as :func:`_inside`: `Path.is_file()` on `\\\\nowhere\\share`
+    blocks on SMB name resolution for minutes, and packaging must not be able to hang. A UNC source
+    is therefore refused unprobed and recorded, which is loud and instant; the promotion gate
+    (`promote_unit.py`, exit 5) refuses such a model anyway.
+    """
+    if UNC_PATH_RE.match(value):
+        return None, "a UNC path is not probed, because resolving an absent host can block for minutes"
+    path = Path(value)
+    if expect_dir:
+        if not path.is_dir():
+            return None, "the folder it names is not present on the packaging machine"
+        size = sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+    else:
+        if not path.is_file():
+            return None, "not present on the packaging machine, so its bytes could not be shipped"
+        size = path.stat().st_size
     if size > MAX_DATA_BYTES:
         return None, f"{size / 1048576:.1f} MB exceeds the {MAX_DATA_BYTES / 1048576:.0f} MB package ceiling"
     return path, None
@@ -974,55 +1032,150 @@ def _write_data_folder_expression(dest: Path, final: Path, model_name: str, para
 
 
 def _localize_data_sources(dest: Path, final: Path, model_name: str | None) -> dict[str, Any]:
-    """Ship every absolute `File.Contents` source INTO the package and repoint the model at it (#461).
+    """Ship every externally-referenced source INTO the package and repoint the model at it (#461).
 
-    The defect: `_copy_fabric` copies the engine's working copy verbatim, and the engine writes an
-    absolute machine-local path into each import partition's M, pointing back into the originating
-    `<bundle>/data/`. So a "self-contained" package (#446) carried none of its own rows, opened
-    empty in Desktop with no `.pbi/cache.abf` to fall back on, could not refresh on any other
-    machine, and embedded a real username in a public repo's deliverable-to-be.
+    The defect: `_copy_fabric` copies the engine's working copy verbatim, and the engine writes
+    absolute machine-local paths into the model, pointing back into the originating bundle. So a
+    "self-contained" package (#446) carried none of its own rows, opened empty in Desktop with no
+    `.pbi/cache.abf` to fall back on, could not refresh on any other machine, and embedded a real
+    username in a public repo's deliverable-to-be.
 
-    What this does NOT do, deliberately: rewrite the literal to a relative path. Power Query rejects
-    a relative `File.Contents` argument outright, so that would produce a model refreshing NOWHERE -
+    TWO shapes, because one of them is every datasource-only unit in the estate (see
+    :data:`ABSOLUTE_LITERAL_RE`): a bare `File.Contents("<file>")`, and a folder PARAMETER whose
+    value is a directory the partitions concatenate a file name onto. They are repaired
+    differently - the first is repointed at a new parameter, the second keeps its own parameter and
+    has only its VALUE moved - but both end with every literal resolving inside the package.
+
+    What this does NOT do, deliberately: rewrite a literal to a relative path. Power Query rejects a
+    relative `File.Contents` argument outright, so that would produce a model refreshing NOWHERE -
     strictly worse than one refreshing on a single machine. A folder PARAMETER is the documented
     workaround and is already this repo's committed convention; see :data:`DATA_FOLDER_PARAM`.
 
     Every reference ends in exactly one of two recorded states - shipped, or an omission naming its
     reason. There is no third, silent one: a source that cannot be copied keeps its original literal
-    (so it still resolves wherever it did before) and is reported.
+    (so it still resolves wherever it did before) and is reported. Findings carry the LEAF name only,
+    never the absolute path, which embeds a username in a public repo (convention adopted from #462).
     """
     record: dict[str, Any] = {"parameter": None, "shipped": [], "omissions": [], "bytes": 0}
     documents = _model_tmdl(dest, model_name)
     if not documents:
         return record
-    parameter = _data_folder_param(documents)
     taken: dict[str, str] = {}
-    shipped: dict[str, str] = {}
+    accounted: set[str] = set()
+    _localize_folder_parameters(documents, dest, final, record, taken, accounted)
+    _localize_file_literals(documents, dest, final, record, taken, model_name, accounted)
+    record["omissions"].extend(_external_after_rewrite(_model_tmdl(dest, model_name), final, accounted))
+    return record
 
+
+def _localize_folder_parameters(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    documents: list[Path],
+    dest: Path,
+    final: Path,
+    record: dict[str, Any],
+    taken: dict[str, str],
+    accounted: set[str],
+) -> None:
+    """Move a folder parameter's VALUE into the package, carrying the folder's files with it.
+
+    Measured shape, 9 of the estate's 31 external literals and every datasource-only unit::
+
+        expression SourceFolder = "<bundle>\\pbip\\<Unit>\\<Unit>.Data" meta [IsParameterQuery=...]
+        ... File.Contents(#"SourceFolder" & "\\Sample - Superstore.xlsx")
+
+    The parameter is reused rather than replaced, and the value keeps the original's separator shape,
+    because the partitions' concatenation was written against it.
+    """
     for document in documents:
         text = document.read_text(encoding="utf-8")
-        for source in {match.group(1) for match in FILE_CONTENTS_RE.finditer(text)}:
-            if not ABSOLUTE_PATH_RE.match(source) or source in shipped:
+        rewritten = text
+        for match in FOLDER_PARAM_RE.finditer(text):
+            value = match.group(2)
+            if not _is_path_literal(value) or _inside(final, value):
+                continue
+            readable, refusal = _classify_source(value, expect_dir=True)
+            accounted.add(value)
+            if readable is None:
+                record["omissions"].append({"file": _leaf(value), "reason": refusal})
+                continue
+            relative = _packaged_data_target(value, taken, keep_leaf_only=True)
+            _ship_folder(readable, dest / DATA_DIR / relative, relative, record)
+            moved = _moved_folder_value(final, relative, value)
+            rewritten = rewritten.replace(f"{match.group(1)}{value}{match.group(3)}", f'{match.group(1)}{moved}"')
+        if rewritten != text:
+            document.write_text(rewritten, encoding="utf-8")
+
+
+def _moved_folder_value(final: Path, relative: str, original: str) -> str:
+    """The parameter's new value, keeping the ORIGINAL's trailing-separator convention.
+
+    Partitions concatenate onto this value - `File.Contents(#"SourceFolder" & "\\Sample -
+    Superstore.xlsx")` - so adding or dropping a separator here silently breaks every path built
+    from it, in a way no structural check can see.
+    """
+    trailing = "\\" if original.endswith(("\\", "/")) else ""
+    return f"{final}\\{DATA_DIR}\\{relative.replace('/', chr(92))}{trailing}"
+
+
+def _ship_folder(readable: Path, target: Path, relative: str, record: dict[str, Any]) -> None:
+    """Copy a referenced folder into the package and record every file it brought."""
+    shutil.copytree(readable, target, dirs_exist_ok=True)
+    shipped = sorted(path for path in target.rglob("*") if path.is_file())
+    record["shipped"].extend(
+        {"path": f"{DATA_DIR}/{relative}/{path.relative_to(target).as_posix()}", "bytes": path.stat().st_size}
+        for path in shipped
+    )
+    record["bytes"] += sum(path.stat().st_size for path in shipped)
+
+
+def _localize_file_literals(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    documents: list[Path],
+    dest: Path,
+    final: Path,
+    record: dict[str, Any],
+    taken: dict[str, str],
+    model_name: str | None,
+    accounted: set[str],
+) -> None:
+    """Ship each bare `File.Contents("<absolute file>")` source and repoint it at a new parameter."""
+    parameter = _data_folder_param(documents)
+    shipped: dict[str, str] = {}
+    for document in documents:
+        text = document.read_text(encoding="utf-8")
+        for source in sorted({match.group(1) for match in FILE_CONTENTS_RE.finditer(text)}):
+            if not _is_path_literal(source) or _inside(final, source) or source in shipped:
                 continue
             readable, refusal = _classify_source(source)
+            accounted.add(source)
             if readable is None:
-                record["omissions"].append({"file": Path(source.replace("\\", "/")).name, "reason": refusal})
+                record["omissions"].append({"file": _leaf(source), "reason": refusal})
                 continue
             relative = _packaged_data_target(source, taken)
-            target = dest / DATA_DIR / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(readable, target)
+            _ship_file(readable, dest / DATA_DIR / relative, relative, record)
             shipped[source] = relative
-            record["shipped"].append({"path": f"{DATA_DIR}/{relative}", "bytes": target.stat().st_size})
-            record["bytes"] += target.stat().st_size
 
     if not shipped:
-        return record
+        return
     _rewrite_partitions(documents, shipped, parameter)
     _write_data_folder_expression(dest, final, str(model_name), parameter)
     record["parameter"] = parameter
-    record["omissions"].extend(_unresolved_after_rewrite(dest, _model_tmdl(dest, model_name), record, shipped))
-    return record
+
+
+def _ship_file(readable: Path, target: Path, relative: str, record: dict[str, Any]) -> None:
+    """Copy one referenced file into the package and record it."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(readable, target)
+    record["shipped"].append({"path": f"{DATA_DIR}/{relative}", "bytes": target.stat().st_size})
+    record["bytes"] += target.stat().st_size
+
+
+def _leaf(value: str) -> str:
+    """The last segment of a path literal - all a finding may carry.
+
+    An absolute path embeds a real username and this repo is public, so artifacts get the leaf and
+    nothing else. Split lexically for the same reason :func:`_inside` is lexical: no probing.
+    """
+    return value.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1] or value
 
 
 def _rewrite_partitions(documents: list[Path], shipped: dict[str, str], parameter: str) -> None:
@@ -1041,35 +1194,26 @@ def _rewrite_partitions(documents: list[Path], shipped: dict[str, str], paramete
             document.write_text(rewritten, encoding="utf-8")
 
 
-def _unresolved_after_rewrite(
-    dest: Path, documents: list[Path], record: dict[str, Any], shipped: dict[str, str]
-) -> list[dict[str, str]]:
-    """Verify, on the written files, that every shipped reference now resolves INSIDE the package.
+def _external_after_rewrite(documents: list[Path], final: Path, accounted: set[str]) -> list[dict[str, str]]:
+    """Read the WRITTEN files back and report every literal still pointing outside the package.
 
-    Step 3 of the fix, and the one that makes the other two checkable: a rewrite that pointed at a
-    path the copy never landed on would look identical in a diff and fail only at refresh time,
-    months later, on someone else's machine. Only SHIPPED references are asked about - a reference
-    that was refused already carries its original literal by design, and is recorded as an omission
-    rather than counted twice.
+    This is the verification step, and it is deliberately the general question - "is any absolute
+    path escaping the package?" - rather than "did my rewrite fire?". Scoping it to the constructs
+    the rewriter understands is exactly how the first version of this fix closed less than half of
+    #461: it could not see what it did not already look for. ``accounted`` holds the literals the
+    repairs already reported with a SPECIFIC reason, so a known-unshippable source is named once
+    rather than twice.
+
+    ⚠️ An absolute path UNDER the package is legitimate and must not be reported. That is
+    `set_data_folder.py`'s existing convention and it is what both repairs above produce; the rule is
+    "absolute AND not under the destination", never "absolute" (finding from PR #462).
     """
-    findings = [
-        {"file": row["path"], "reason": "shipped copy is missing after packaging"}
-        for row in record["shipped"]
-        if not (dest / row["path"]).is_file()
-    ]
-    remaining = {
-        match.group(1)
-        for document in documents
-        for match in FILE_CONTENTS_RE.finditer(document.read_text(encoding="utf-8"))
-    }
-    findings.extend(
-        {
-            "file": Path(source.replace("\\", "/")).name,
-            "reason": "shipped, but its partition still carries the original absolute path",
-        }
-        for source in sorted(shipped)
-        if source in remaining
-    )
+    findings = []
+    for document in documents:
+        for match in ABSOLUTE_LITERAL_RE.finditer(document.read_text(encoding="utf-8")):
+            value = match.group(1)
+            if value not in accounted and _is_path_literal(value) and not _inside(final, value):
+                findings.append({"file": _leaf(value), "reason": "still points outside the package after packaging"})
     return findings
 
 

@@ -311,8 +311,8 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
     (
         "packager: rewrite the partitions but ship none of the bytes",
         PACKAGER,
-        "            shutil.copy2(readable, target)",
-        "            pass",
+        "    shutil.copy2(readable, target)",
+        "    pass",
         ["test_the_rows_the_model_imports_are_shipped_and_the_partition_reads_them"],
     ),
     (
@@ -332,8 +332,7 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
     (
         "packager: skip an unshippable source SILENTLY instead of recording why",
         PACKAGER,
-        '                record["omissions"].append({"file": Path(source.replace("\\\\", "/")).name, '
-        '"reason": refusal})',
+        '                record["omissions"].append({"file": _leaf(source), "reason": refusal})',
         "                pass",
         ["test_a_source_that_cannot_be_shipped_is_a_LOUD_omission_not_a_silent_skip"],
     ),
@@ -350,6 +349,37 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
         "| `data/` | the rows the model imports",
         "| `unmentioned/` | the rows the model imports",
         ["test_the_generated_readme_names_every_file_the_package_contains"],
+    ),
+    (
+        "packager: scan only File.Contents, missing every datasource-only unit's folder parameter",
+        PACKAGER,
+        "    _localize_folder_parameters(documents, dest, final, record, taken, accounted)",
+        "    pass",
+        ["test_a_folder_PARAMETER_pointing_out_of_the_package_is_moved_with_its_files"],
+    ),
+    (
+        "packager: treat ANY POSIX-absolute literal as a file path (8 of 9 are false positives)",
+        PACKAGER,
+        'return value.startswith("/") and bool(PurePosixPath(value).suffix)',
+        'return value.startswith("/")',
+        ["test_a_POSIX_literal_with_no_file_suffix_is_left_alone"],
+    ),
+    (
+        "packager: PROBE a UNC literal, which blocks on SMB name resolution for minutes",
+        PACKAGER,
+        '        return None, "a UNC path is not probed, because resolving an absent host can block for minutes"',
+        "        pass",
+        ["test_a_UNC_literal_is_refused_WITHOUT_being_probed"],
+    ),
+    (
+        "packager: report EVERY absolute path, condemning the package's own legitimate DataFolder",
+        PACKAGER,
+        "            if value not in accounted and _is_path_literal(value) and not _inside(final, value):",
+        "            if value not in accounted and _is_path_literal(value):",
+        [
+            "test_an_absolute_path_under_the_packages_own_data_is_NOT_a_violation",
+            "test_the_rows_the_model_imports_are_shipped_and_the_partition_reads_them",
+        ],
     ),
     (
         f"{NEGATIVE_CONTROL}: a comment-only edit that must change no verdict",

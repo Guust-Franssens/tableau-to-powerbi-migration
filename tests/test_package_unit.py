@@ -25,6 +25,7 @@ import hashlib
 import json
 import re
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -1076,16 +1077,104 @@ def _absolute_literals(root: Path) -> list[tuple[str, str]]:
 def test_no_packaged_tmdl_points_at_an_absolute_path_OUTSIDE_the_package(tmp_path: Path) -> None:
     """Issue #461's acceptance criterion, and the only gate that observes it.
 
-    Every absolute literal that survives must resolve INSIDE the package. One does by design - the
-    `DataFolder` parameter names the package's own `data/` directory, because `File.Contents` does
-    not accept a relative argument at all, so a "relative rewrite" would produce a model that
-    refreshes nowhere rather than one that refreshes on a single machine.
+    Every absolute literal that survives must resolve INSIDE the package. Some do by design - a
+    folder parameter names the package's own `data/`, because `File.Contents` does not accept a
+    relative argument at all, so a "relative rewrite" would produce a model that refreshes nowhere
+    rather than one that refreshes on a single machine.
     """
     root = _package_with_receipt(tmp_path)
     literals = _absolute_literals(root)
     assert literals, "the fixture produced no absolute literal at all, so this test proves nothing"
-    outside = [(name, value) for name, value in literals if not _resolves_inside(root, value)]
+    outside = [(name, value) for name, value in literals if not pkg._inside(root, value)]  # noqa: SLF001
     assert outside == [], f"packaged TMDL points outside the package: {outside}"
+
+
+def test_a_folder_PARAMETER_pointing_out_of_the_package_is_moved_with_its_files(tmp_path: Path) -> None:
+    """The shape a `File.Contents`-only scan cannot see, and it is 9 of the estate's 31 literals.
+
+    Measured on estate run 408: every datasource-only unit carries
+    ``expression SourceFolder = "<bundle>\\pbip\\<Unit>\\<Unit>.Data"`` with partitions doing
+    ``File.Contents(#"SourceFolder" & "\\Sample - Superstore.xlsx")``. Scanning only for
+    ``File.Contents("<absolute>")`` closed 17 of 26 affected units; this shape is the other 9.
+
+    The parameter is REUSED, not replaced - the partitions' concatenation was written against its
+    separator convention - so the assertion is that its value moved and the files came with it.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    folder = tmp_path / "SharedSource.Data"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "Sample - Superstore.xlsx").write_text("workbook bytes", encoding="utf-8")
+    _point_partition_at(bundle, folder=str(folder), leaf="Sample - Superstore.xlsx")
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+
+    value = _folder_parameter(root)
+    assert pkg._inside(root, value), f"the folder parameter still points outside the package: {value}"  # noqa: SLF001
+    assert (root / "data" / "SharedSource.Data" / "Sample - Superstore.xlsx").is_file()
+    shipped = json.loads((root / "package-manifest.json").read_text(encoding="utf-8"))["data_sources"]["shipped"]
+    assert [row["path"] for row in shipped] == ["data/SharedSource.Data/Sample - Superstore.xlsx"]
+
+
+def test_a_POSIX_literal_with_no_file_suffix_is_left_alone(tmp_path: Path) -> None:
+    """At face value a POSIX-absolute literal is mostly a FALSE POSITIVE, and acting on one is a bug.
+
+    Measured on estate run 408: 9 POSIX-absolute literals, 8 of them false - a Databricks
+    ``HttpPath = "/sql/1.0/warehouses/<id>"`` in three units, and a bare ``"/"`` inside a
+    ``TableauFormula`` annotation in two more. Requiring a file suffix keeps the one genuine hit (a
+    macOS ``.xlsx``) and drops all eight, so both halves are asserted here from one fixture.
+    """
+    for value in ("/sql/1.0/warehouses/764e5801f0e0fac8", "/", "/mnt/lake/warehouse"):
+        assert not pkg._is_path_literal(value), f"{value} would be treated as a file path"  # noqa: SLF001
+    for value in ("/Users/<person>/Data/Global Superstore.xlsx", r"C:\data\x.csv", r"\\host\share\x.csv"):
+        assert pkg._is_path_literal(value), f"{value} would be ignored"  # noqa: SLF001
+
+    bundle, oracle = _bundle(tmp_path)
+    _point_partition_at(bundle, "/sql/1.0/warehouses/764e5801f0e0fac8")
+    _package(tmp_path, bundle, oracle)
+    record = json.loads(((_out(tmp_path) / UNIT) / "package-manifest.json").read_text(encoding="utf-8"))
+    assert record["data_sources"] == {"parameter": None, "shipped": [], "omissions": [], "bytes": 0}
+
+
+def test_a_UNC_literal_is_refused_WITHOUT_being_probed(tmp_path: Path) -> None:
+    """Probing a UNC host that does not exist blocks on SMB name resolution, for MINUTES.
+
+    Measured by PR #462: it took one test module from 30 seconds to **52 minutes** and starved a
+    subprocess into its 600 s timeout. So containment is judged lexically and a UNC source is
+    refused unprobed - loud and instant. The test is time-boxed, because the whole failure mode is
+    that it does not come back: a wall-clock assertion is the only one that can observe it.
+    """
+    started = time.monotonic()
+    assert not pkg._inside(tmp_path, r"\\no-such-host-461\share\data.csv")  # noqa: SLF001
+    readable, refusal = pkg._classify_source(r"\\no-such-host-461\share\data.csv")  # noqa: SLF001
+    elapsed = time.monotonic() - started
+    assert readable is None
+    assert "UNC" in refusal and "block" in refusal
+    assert elapsed < 5, f"the UNC literal was probed: {elapsed:.1f}s"
+
+
+def test_an_absolute_path_under_the_packages_own_data_is_NOT_a_violation(tmp_path: Path) -> None:
+    """ "Absolute AND not under the destination", never "absolute" (finding from PR #462).
+
+    `set_data_folder.py`'s existing convention is an absolute `DataFolder` under the deliverable, and
+    it is exactly what both repairs here produce - so a rule that flagged every absolute path would
+    condemn its own output and, worse, make the legitimate convention look like a regression.
+    """
+    root = _package_with_receipt(tmp_path)
+    inside = str(root / "data" / "federated_abc" / "Extract_Extract.csv")
+    assert pkg._is_path_literal(inside)  # noqa: SLF001
+    assert pkg._inside(root, inside)  # noqa: SLF001
+    assert pkg._inside(root, str(root / "data") + "\\")  # noqa: SLF001
+    assert not pkg._inside(root, str(root.parent / "elsewhere" / "x.csv"))  # noqa: SLF001
+    record = json.loads((root / "package-manifest.json").read_text(encoding="utf-8"))
+    assert record["data_sources"]["omissions"] == [], "the packager reported its own legitimate output"
+
+
+def _folder_parameter(root: Path) -> str:
+    """The value of the model's own folder parameter, whichever name the engine gave it."""
+    text = "".join(path.read_text(encoding="utf-8") for path in _model_definition(root).rglob("*.tmdl"))
+    match = re.search(r'expression\s+(?:#"[^"]+"|[^\s=]+)\s*=\s*"([^"]*)"\s*meta', text)
+    assert match is not None, text
+    return match.group(1)
 
 
 def test_the_rows_the_model_imports_are_shipped_and_the_partition_reads_them(tmp_path: Path) -> None:
@@ -1202,17 +1291,36 @@ def test_two_sources_sharing_a_file_name_do_not_overwrite_each_other(tmp_path: P
 
 
 def _resolves_inside(root: Path, value: str) -> bool:
-    try:
-        return Path(value).resolve().is_relative_to(root.resolve())
-    except (OSError, ValueError):
-        return False
+    """Lexical containment, never `Path.resolve()` - see `package_unit._inside` for the 52-minute UNC hang."""
+    return pkg._inside(root, value)  # noqa: SLF001  # pylint: disable=protected-access
 
 
-def _point_partition_at(bundle: Path, *sources: str) -> None:
-    """Give the fixture model one import partition per source, shaped as the engine emits them."""
+def _point_partition_at(bundle: Path, *sources: str, folder: str = "", leaf: str = "") -> None:
+    """Give the fixture model import partitions shaped as the engine actually emits them.
+
+    Two shapes, because the packager must repair two: a bare `File.Contents("<absolute>")`, and the
+    folder PARAMETER that every datasource-only unit in the estate uses.
+    """
     definition = bundle / "pbip" / UNIT / f"{UNIT}.SemanticModel" / "definition"
     (definition / "tables").mkdir(parents=True, exist_ok=True)
     (definition / "model.tmdl").write_text("model Model\n\tculture: en-US\n\n", encoding="utf-8")
+    if folder:
+        (definition / "expressions.tmdl").write_text(
+            f'expression SourceFolder = "{folder}" meta [IsParameterQuery=true, Type="Text",'
+            " IsParameterQueryRequired=true]\n\n",
+            encoding="utf-8",
+        )
+        (definition / "tables" / "Shared.tmdl").write_text(
+            "table Shared\n"
+            "\tpartition 'Shared' = m\n"
+            "\t\tmode: import\n"
+            "\t\tsource =\n"
+            "\t\t\tlet\n"
+            f'\t\t\t\tSource = Excel.Workbook(File.Contents(#"SourceFolder" & "\\{leaf}"), null, true)\n'
+            "\t\t\tin\n"
+            "\t\t\t\tSource\n",
+            encoding="utf-8",
+        )
     for index, source in enumerate(sources):
         (definition / "tables" / f"Imported{index}.tmdl").write_text(
             f"table Imported{index}\n"
