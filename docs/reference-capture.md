@@ -388,9 +388,41 @@ Every place we now say why SVG failed resolves through one classifier
 
 | `cause` | when | what it says |
 |---|---|---|
-| `server_meets_floor` | advertised **≥ 3.29** | raise `TABLEAU_REST_API_VERSION`. Where a **floor re-probe proved** the tier, it says so; otherwise it says the advertised number is a *claim*, not proof. If the pin already clears the floor too, it says **that** instead of naming a knob already turned |
+| `server_meets_floor` | advertised **≥ 3.29** | set `TABLEAU_REST_API_VERSION` to **exactly `3.29`** — see the exact-floor rule below. Where a **floor re-probe proved** the tier, it says so; otherwise it says the advertised number is a *claim*, not proof. If the pin already clears the floor too, it says **that** instead of naming a knob already turned |
 | `server_below_floor` | advertised **< 3.29** (the customer above) | SVG is unavailable **at any client setting**, and raising the pin above the ceiling is **not** a fix. Routes to the next rung: **PDF**, API 2.8, vector with embedded fonts |
-| `ceiling_not_established` | no `/serverinfo` answer | the **conditional**, never a confident instruction — plus how to establish the ceiling |
+| `ceiling_not_established` | the ceiling was not **established** — see the three ways below | the **conditional**, never a confident instruction — plus how to establish the ceiling |
+
+⚠️ **The remedy names the floor EXACTLY, never "3.29 or later".** That phrasing survived the first
+fix and was caught in review of the fix (#475): on a server advertising **exactly 3.29** — which is
+what Server 2026.2 reports — every value "or later" licenses is above that server's own ceiling, so
+the message still contained the impossible configuration #474 exists to remove, one case in from the
+edge. The invariant is now stated as a relationship rather than as a literal: **no remedy may name a
+REST version the advertised ceiling cannot serve.** The floor is the highest number that is safe for
+every server in this state, because `server_meets_floor` means `advertised >= 3.29` by construction.
+The same "or later" wording in the capability probe's pin warning went with it.
+
+⚠️ **"`/serverinfo` answered" is not "the ceiling was established", and THREE different failures land
+in `ceiling_not_established`** (also #475's review, and each was measured producing a confident
+verdict beforehand):
+
+| what came back | what it used to be read as | what it is |
+|---|---|---|
+| no answer at all (`probe_status` 0) | unknown ✅ | unknown |
+| an **unsuccessful** answer whose body still carries `<restApiVersion>` — a proxy's 404, the server's own 500 | **the site's ceiling**: a 500 carrying `3.30` was read as REST 3.30, SVG *available* | unknown; the status is the diagnosis |
+| a **200** reporting something that is not a version (`garbage-999`, `not-a-version`, `3.x`) | a ceiling, in *both* directions: `garbage-999` → `(999,)` → best rung **SVG**; `not-a-version` → `(0,)` → **no rung reachable at all** | unknown; the report quotes what came back |
+
+The same input class produced both the most optimistic and the most pessimistic answer, so *"it fails
+safe"* was never available as a defence. A version field is now trusted only from a **successful**
+response and only when it matches a numeric API-version grammar; the offending text is kept —
+redacted at the parse boundary — as `invalid_rest_api_version`, so the report says *which* failure
+this was rather than only *"`/serverinfo` answered 200"*, which beside "not established" reads as a
+bug in this tool.
+
+⚠️ **The grammar is NOT membership in the version→release table.** `API_RELEASE` stops at 3.29 and a
+live Cloud site measured on 2026-08-30 already advertised **3.30**, so requiring membership would
+classify every real server past the documentation as unassessable. A numeric but unpublished version
+(`9.99`) stays **established and above the floor**; only text that is not a version at all is
+refused.
 
 Three consequences worth stating plainly:
 
@@ -434,8 +466,10 @@ Three properties of that block are load-bearing:
 - **It grades its own verdicts.** `unavailable` is firm — the site's own ceiling is below that rung's
   documented floor. `available` is a *claim* the endpoint has not been asked to honour. Only
   `--reference-best` settles it.
-- ⚠️ **State C applies here exactly as it applies to the capture warnings.** If `/serverinfo` did not
-  answer, the block says the ceiling was **not established** and prints **no rung table at all** —
+- ⚠️ **State C applies here exactly as it applies to the capture warnings.** If the ceiling was not
+  established — `/serverinfo` did not answer, answered **unsuccessfully**, or answered 200 with
+  something that is not a version — the block says the ceiling was **not established**, names which
+  of those it was, and prints **no rung table at all** —
   every rung's structured `verdict` is `unknown`, in the same field a consumer reads, because a rung
   table rendered from a ceiling nobody established is indistinguishable at a glance from a measured
   one. It **fails soft**: it never degrades the assessment, since nothing downstream is computed
