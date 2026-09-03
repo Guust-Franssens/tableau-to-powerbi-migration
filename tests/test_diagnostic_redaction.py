@@ -2110,6 +2110,16 @@ def test_a_reflected_credential_arriving_as_a_SERVER_VERSION_never_reaches_the_s
     `/serverinfo` is unauthenticated, so this is belt on top of braces -- but the braces are an
     argument about the call site ("it cannot leak here"), and this repo has watched that argument
     move and stop being true four separate times. The chokepoint is what makes it a property.
+
+    ⚠️ **The advice now refuses this input one step EARLIER, and the assertions moved with it.** Since
+    #475's review, a `restApiVersion` that is not a REST API version establishes no ceiling at all,
+    so a reflected token arriving in that field resolves to `ceiling_not_established` and the remedy
+    never quotes it -- there is nothing left on this path for the chokepoint to redact. The security
+    property STRENGTHENED: the token is refused rather than redacted. But `"[REDACTED]" in caplog`
+    was only ever a *proxy* for `longest_surviving_run(token) == ""`, and the proxy stopped applying
+    while the real property still holds, so it moved to the sibling test below where the value IS
+    still quoted. Asserting a marker the code no longer has occasion to emit would be a test passing
+    on a coincidence -- and one that would then fail for a reason unrelated to any leak.
     """
     token = "SYNTHETIC_SESSION_TOKEN_42_LONG_ENOUGH"
     session = _Session("an-unrelated-long-pat-secret")
@@ -2119,7 +2129,32 @@ def test_a_reflected_credential_arriving_as_a_SERVER_VERSION_never_reaches_the_s
     with caplog.at_level(logging.WARNING, logger="tableau-oracle"):
         verdict._log_blocked_and_stale(records, [], None, gate, session.redact_text)  # pylint: disable=protected-access
     assert longest_surviving_run(token, caplog.text) == ""
+    # WHICH state fired, not merely that something was said: a token is not a ceiling, so neither
+    # confident cause may be reachable from it.
+    assert cap.SVG_CAUSE_CEILING_NOT_ESTABLISHED in caplog.text
+    for confident in (cap.SVG_CAUSE_SERVER_MEETS_FLOOR, cap.SVG_CAUSE_SERVER_BELOW_FLOOR):
+        assert confident not in caplog.text
+
+
+def test_a_reflected_credential_arriving_as_a_PRODUCT_VERSION_reaches_the_log_only_redacted(caplog):
+    """The `[REDACTED]` half, kept on the path where the advice still quotes the value.
+
+    `productVersion` has no grammar to fail -- it is a free-form marketing string (`2025.3.3`), and a
+    reflecting proxy can put anything in it -- so it is quoted whenever the ceiling IS established.
+    Here the ceiling is a real `3.27`, below the SVG floor, and state B's message names the product
+    beside it. This is the case that proves the chokepoint FIRED, rather than that the run happened
+    to have nothing to say.
+    """
+    token = "SYNTHETIC_SESSION_TOKEN_42_LONG_ENOUGH"
+    session = _Session("an-unrelated-long-pat-secret")
+    session.token = token
+    records = [{"view_name": "v", "svg": {"status": verdict.SVG_UNSUPPORTED_STATUS}}]
+    gate = verdict.svg_gate(None, {"rest_api_version": "3.27", "product_version": token}, "3.21")
+    with caplog.at_level(logging.WARNING, logger="tableau-oracle"):
+        verdict._log_blocked_and_stale(records, [], None, gate, session.redact_text)  # pylint: disable=protected-access
+    assert longest_surviving_run(token, caplog.text) == ""
     assert "[REDACTED]" in caplog.text
+    assert cap.SVG_CAUSE_SERVER_BELOW_FLOOR in caplog.text
 
 
 # --------------------------------------------- round 6: key scrubbing, collisions, and hit paths
