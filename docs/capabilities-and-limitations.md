@@ -114,7 +114,8 @@ a single pass does.
 ## Known limitations and honest gaps
 
 - **Tableau Sets do not translate at all, in any form** (measured on canonical engine **2.339.0**,
-  2026-09-01). Every set form we could find is logged as `could not resolve field '<name>' (skipped)`
+  2026-09-01; ✅ re-verified against upstream issue state 2026-09-03 — [#185](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/185)
+  is **OPEN**, so this still reproduces at our 2.353.0). Every set form we could find is logged as `could not resolve field '<name>' (skipped)`
   and then **the visual is emitted anyway, without the filter** — so the output renders confidently
   over an unfiltered superset. Confirmed on a real Tableau training sample (`Section 08 - Organizing
   Data`) for four distinct forms: a manual/lasso set, a **condition** set (`SUM([Score]) > 400`), a
@@ -177,11 +178,36 @@ a single pass does.
   mean "the visuals can be seen", but the gap is specifically *chart* visuals, not visuals in general.
   This is the concrete, named instance of the general rule that structural validation is necessary but
   not sufficient. Reported upstream on
-  [#186](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/186); related to
-  [#180](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/180) (slicers regressed to 57/62px
-  against a 76px floor).
+  [#186](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/186) — ✅ **still OPEN as of
+  2026-09-03, so this chart-height gap still reproduces**; related to
+  [#180](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/180).
+
+  ⚠️ **The "#180 slicers *regressed*" framing is RETRACTED — the engine is not wrong here, and the
+  correction matters because it changes who you report the next instance to.** #180 was closed
+  COMPLETED on 2026-09-02 with the maintainer's verdict that *"this was not a regression, and my
+  attempt to fix it was the actual defect. The engine is correct; the validator rule cannot see what
+  the engine emits."* The 57px floor was lowered deliberately in **2.295.0** and is render-verified;
+  a 76px re-clamp shipped in 2.342.0 and was reverted in 2.344.0 after the probe justifying it was
+  found to search for `fontSize` when the emitted property is `textSize`.
+
+  **But do not read that as "the heights went away" — they did not.** Re-measured by us on
+  2026-09-03 against a fresh 48-workbook Tableau Cloud estate on canonical engine **2.353.0**,
+  pristine `pbip/`: of 168 slicers, `100px` x79, **`57px` x78**, **`62px` x6**, `95px` x2, and one
+  each at 50/87/71 — **86 of 168 (51%) below the documented 80px floor**, and
+  `PBIR_SLICER_HEIGHT_BELOW_FLOOR` is still the single most common `powerbi-report-author` 0.1.4
+  failure code across the bundle (8 of 62 reports, including stock Superstore x16). ⚠️ We have **not**
+  established whether that is the same emission path or a second one reaching the same heights — the
+  bimodal 100/57 split within one estate suggests two paths. So the *validator will still fail your
+  bundle*; what is retracted is only the claim that the engine regressed.
 - **An explicit `mark class='Bar'` supports strictly fewer shelf layouts than `mark class='Automatic'`**
-  (engine 2.339.0). `twb_to_pbir.py::_visual_type` accepts `bar` for exactly two layouts
+  (engine 2.339.0). ⚠️ **NEEDS A MEASURED RE-CHECK at 2.353.0 (issue #486): the `automatic` branch
+  this compares against was CHANGED by the fix for
+  [#184](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/184) in 2.351.0**, which replaced
+  `_has_continuous_date` with `_has_date_dimension`. The **`bar` half is safe** — upstream kept the
+  explicit-`bar` carve-out deliberately and added a test pinning it — so the *direction* of the claim
+  (Bar is narrower) still holds; what is unverified is the enumeration of what `automatic` now
+  reaches. Re-measure before quoting the fallback list.
+  `twb_to_pbir.py::_visual_type` accepts `bar` for exactly two layouts
   (dimension-on-cols + measure-on-rows, or dimension-on-rows + measure-on-cols); `automatic` reaches
   five further fallbacks (scatter, matrix, table, column, continuous-date line). So changing a mark
   from Automatic to Bar in Tableau — cosmetic there — can silently cost the whole visual here
