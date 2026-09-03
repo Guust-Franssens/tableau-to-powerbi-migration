@@ -702,16 +702,23 @@ unit path**, and getting one wrong is silent: `check_reference_readiness.py` ret
 me where the workbook is"* (issue #446).
 
 ```powershell
-python scripts\package_unit.py --bundle _bundle --out _packages --json _packages\packaging.json
+python scripts\package_unit.py --bundle _bundle --out _runs\<NNN>-<slug>\packages\<batch> `
+    --json _runs\<NNN>-<slug>\packages\<batch>\packaging.json
 # then, per unit, with NO flags at all:
-python scripts\check_reference_readiness.py _packages\<Unit>
-python scripts\check_unit.py _packages\<Unit>
+python scripts\check_reference_readiness.py _runs\<NNN>-<slug>\packages\<batch>\<Unit>
+python scripts\check_unit.py _runs\<NNN>-<slug>\packages\<batch>\<Unit>
 ```
 
-⚠️ **`--out` must sit outside the capture tree.** The readiness gate scans the target's *grandparent*
-for `oracle/` and `reference/`, so a package written beside the flat capture is matched against BOTH
-and every page drops from `ready` to `unverifiable` — worse than not packaging, and silent. That
-layout is refused with exit 2 rather than documented.
+⚠️ **`--out` must sit outside the capture tree — so name a subdirectory INSIDE `packages/`, never
+`packages/` itself.** The readiness gate scans the target's *grandparent* for `oracle/` and
+`reference/`, so a package written beside the flat capture is matched against BOTH and every page
+drops from `ready` to `unverifiable` — worse than not packaging, and silent. That layout is refused
+with exit 2 rather than documented (`package_unit.conflicting_evidence_dirs`,
+`scripts/package_unit.py:819`). ✅ Measured 2026-09-03: `--out _runs\<NNN>-<slug>\packages` exits
+**2**, `--out _runs\<NNN>-<slug>\packages\<batch>` exits **0** and the readiness gate then reports 0
+unverifiable. `packages/` is a canonical run subdir (`scripts/work_dirs.py:72`), which is what makes
+`<batch>` the right depth; the shape is explained in
+[`docs/migration-phases.md`](migration-phases.md).
 
 What to check in the output:
 
@@ -720,7 +727,7 @@ What to check in the output:
   produced no report plus 1 datasource — and they are still packaged for their source, reference and
   handover. Deriving the unit list from `pbip/` alone drops them silently.
 - **`handover.md` is the agent's entry point**, one finding per line with a stable prefix, emptied
-  visuals first: `grep '^EMPTIED_VISUAL' _packages\<Unit>\handover.md`. They render blank on a report
+  visuals first: `grep '^EMPTIED_VISUAL' _runs\<NNN>-<slug>\packages\<batch>\<Unit>\handover.md`. They render blank on a report
   that validates clean, and nothing else in the toolkit surfaces them.
 - **`package-manifest.json` carries every omission with its reason.** A render is attributed by
   **`workbook_luid` only** — a display name is not an identity, and #450 measured that class failing
@@ -1240,13 +1247,16 @@ deliverables and the re-runnable `_build/` scripts. Confirm nothing scratch leak
 reporting done.
 
 **Canonical pre-bundle layout (issue #291/#234):** new work allocates a numbered, per-run home under
-`_runs/<NNN>-<slug>/{assessment,assets,bundle,oracle,deliverables,scratch}/` via
+`_runs/<NNN>-<slug>/{assessment,assets,bundle,oracle,packages,deliverables,scratch}/` via
 `python scripts/work_dirs.py <unit-name> --json`, rather than inventing another `_*` root. The number
 is the identity — never renamed or reused — and the whole tree is ignored by construction (`/_*` in
 `.gitignore`; verify with `git check-ignore -v -- <path>`, **no trailing slash**, before trusting it).
 `deliverables/` is specifically for operator-facing outputs that name real customer infrastructure
 (e.g. `connections_manifest.py`'s `connections.json`/`.md`) — the `ses-prep/` near-miss (#322) landed
-exactly that kind of output unprefixed and unignored at the repo root.
+exactly that kind of output unprefixed and unignored at the repo root. `packages/` holds
+`package_unit.py`'s per-unit agent-facing packages, one subdirectory per packaging batch (§ *Package
+one folder per unit*); the whole shape is explained in
+[`docs/migration-phases.md`](migration-phases.md).
 
 ⚠️ **Today's tools have not been migrated onto this yet.** `assess_estate.py --out _assessment`,
 `harvest_estate_assets.py --out _sweep`, `capture_tableau_oracle.py --out _oracle` and

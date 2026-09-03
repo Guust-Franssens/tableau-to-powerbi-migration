@@ -722,6 +722,11 @@ _runs/<NNN>-<slug>/
     assets/             harvest_estate_assets.py-shaped downloads
     bundle/              run_estate.py-shaped conversion output
     oracle/               capture_tableau_oracle.py-shaped reference capture
+    packages/              package_unit.py's per-unit, agent-facing handover packages — ⚠️ `--out`
+                            names a subdirectory INSIDE this one (`packages/<batch>/<Unit>/`), never
+                            `packages/` itself: `conflicting_evidence_dirs` refuses an `--out` whose
+                            parent holds `oracle/`, and a run root always does (measured: bare exits
+                            2, one level deeper exits 0). See `docs/migration-phases.md`
     deliverables/          operator-facing outputs meant for the CUSTOMER, never for git —
                             the `ses-prep/` near-miss (issue #322): a `connections.json`/`.md`
                             naming 17 real customer servers landed unprefixed, unignored, at the
@@ -736,7 +741,7 @@ ignored, which proves nothing; see `harvest_estate_assets.py`'s own guard for th
 
 **`scripts/work_dirs.py`** is the single source of truth for these paths — `sanitize_unit_key`,
 `allocate_run` (atomic `mkdir`-exclusive, retry on collision, never a read-then-write race),
-`RunPaths` (the six subdirs above as properties), and `list_runs`. It resolves the repo root from
+`RunPaths` (the seven subdirs above as properties), and `list_runs`. It resolves the repo root from
 its **own file location**, never from `Path.cwd()` — an empty stray `fabric/` was once written at
 the repo root by a script that resolved a relative path against whatever CWD an agent happened to
 invoke it from, which is exactly the failure a single importable resolver removes.

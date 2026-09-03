@@ -14,7 +14,7 @@
 &nbsp;![Migrations](https://img.shields.io/badge/migrations-16-2ea44f)
 &nbsp;![Parser tests](https://img.shields.io/badge/parser_tests-48%2F48-2ea44f)
 
-**[TL;DR](#tldr)** &nbsp;·&nbsp; **[Quickstart](#quickstart)** &nbsp;·&nbsp; **[What you get](#what-you-get)** &nbsp;·&nbsp; **[Repo layout](#repo-layout)** &nbsp;·&nbsp; **[How it works](#how-it-works)** &nbsp;·&nbsp; **[Prerequisites](#prerequisites)** &nbsp;·&nbsp; **[Capabilities &amp; limits](docs/capabilities-and-limitations.md)**
+**[TL;DR](#tldr)** &nbsp;·&nbsp; **[Quickstart](#quickstart)** &nbsp;·&nbsp; **[What you get](#what-you-get)** &nbsp;·&nbsp; **[Repo layout](#repo-layout)** &nbsp;·&nbsp; **[Three phases](#the-three-phase-pipeline)** &nbsp;·&nbsp; **[How it works](#how-it-works)** &nbsp;·&nbsp; **[Prerequisites](#prerequisites)** &nbsp;·&nbsp; **[Capabilities &amp; limits](docs/capabilities-and-limitations.md)**
 
 </div>
 
@@ -178,7 +178,39 @@ original dashboards belongs to their respective Tableau Public authors.
 | [`scripts/`](scripts/) | The CLI surface; [`scripts/README.md`](scripts/README.md) is the map. |
 | [`docs/`](docs/) | Start with [`INDEX.md`](docs/INDEX.md), the map of maps. |
 | [`.github/{agents,skills}/`](.github/) | The Copilot agent personas and reusable knowledge bundles. |
-| `_runs/<NNN>-<slug>/` | Per-run working state. Gitignored by construction (`/_*`) and safe to delete. |
+| `_runs/<NNN>-<slug>/` | Per-run working state — the first two phases below. Gitignored by construction (`/_*`) and safe to delete. |
+
+## The three-phase pipeline
+
+A migration moves through **three locations, one direction**. Knowing which is which is most of
+knowing where to find something. Full explanation, with the measured figures and the gates:
+**[`docs/migration-phases.md`](docs/migration-phases.md)**.
+
+| Phase | Where it lands | What produces it | What you get |
+| --- | --- | --- | --- |
+| **1. Collect & convert** | `_runs/<NNN>-<slug>/` | `run_engine_survey.py` → `assess_estate.py` → `harvest_estate_assets.py` → `run_estate.py`, plus `capture_tableau_oracle.py` | `assessment/` (what exists, what is used, migration order), `assets/` (the downloads), `bundle/` (the engine's conversion output), `oracle/` (Tableau's own renders and numbers) |
+| **2. Package for the agent** | `_runs/<NNN>-<slug>/packages/<batch>/<Unit>/` | [`scripts/package_unit.py`](scripts/package_unit.py) | one self-contained folder per migration unit — source, engine output, handover queue and reference evidence together, which **both gates accept with no flags** |
+| **3. Ship** | `migrations/{workbooks,datasources}/<slug>/fabric/` | ⚠️ a manual copy — no tool yet (issue [#458](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/458)) | the PBIP project a customer opens in Power BI Desktop |
+
+Two gates sit on phase 2: `check_reference_readiness.py` is the **entry** gate (per report page, is
+there trustworthy Tableau reference evidence to start from — `ready` or `blind`?), and
+`check_unit.py` is the **exit** gate (is this unit done?).
+
+Three things about that flow are worth knowing before you touch it, and each has cost someone real
+work:
+
+- Inside `bundle/`, **`reports/` is the pristine engine-truth baseline and `pbip/` is the working
+  copy** agents edit. There is no `out/` level.
+- **`bundle/semantic_models/` is not a per-workbook guarantee** — on our 62-unit reference run only
+  **18** units had a model baseline. A missing counterpart is **BASELINE UNAVAILABLE**, never a
+  clean diff.
+- **Phase 2 → 3 is the riskiest hop.** The copy is where `definition.pbir`'s `byPath` stops
+  resolving, and a wrong one opens as *a report with no model* while
+  `powerbi-report-author validate` still returns `errorCount: 0` — it checks reference shape, not
+  target.
+
+Running the pipeline yourself? The command-by-command procedure, with timings, exit codes and a
+failure playbook, is **[`docs/operator-runbook.md`](docs/operator-runbook.md)**.
 
 ## How it works
 
