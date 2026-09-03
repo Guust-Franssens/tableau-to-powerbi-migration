@@ -568,6 +568,164 @@ def test_main_forwards_the_operator_s_timeouts_to_every_download(
     assert seen[0]["timeout"] != harvest.DEFAULT_DOWNLOAD_TIMEOUT, "the test cannot tell the flag from the default"
 
 
+# --- leg 4: a failed datasource does not fail alone ----------------------------------------------
+
+
+def estate_with_a_binding(path: Path) -> Path:
+    """`IA IFC Sessions` binds to `DS_Sessions_by_Product`; `Standalone` binds to nothing."""
+    con = sqlite3.connect(path)
+    con.executescript(
+        """
+        CREATE TABLE project (luid TEXT PRIMARY KEY, name TEXT);
+        CREATE TABLE workbook (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        CREATE TABLE datasource (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        CREATE TABLE dependency (workbook_luid TEXT, datasource_luid TEXT, datasource_name TEXT);
+        INSERT INTO workbook VALUES ('wb-ifc', 'IA IFC Sessions', 'p');
+        INSERT INTO workbook VALUES ('wb-solo', 'Standalone', 'p');
+        INSERT INTO datasource VALUES ('ds-sessions', 'DS_Sessions_by_Product', 'p');
+        INSERT INTO dependency VALUES ('wb-ifc', 'ds-sessions', 'DS_Sessions_by_Product');
+        """
+    )
+    con.commit()
+    con.close()
+    return path
+
+
+def binding_rows() -> list[dict]:
+    """The datasource failed; both workbooks landed. Only one of them is affected."""
+    return [
+        {"name": "DS_Sessions_by_Product", "kind": "datasource", "luid": "ds-sessions", "download_error": "500"},
+        {"name": "IA IFC Sessions", "kind": "workbook", "luid": "wb-ifc", "ours": {"ok": True}, "theirs": {"ok": True}},
+        {"name": "Standalone", "kind": "workbook", "luid": "wb-solo", "ours": {"ok": True}, "theirs": {"ok": True}},
+    ]
+
+
+def edges_from(db: Path) -> list[tuple[str, str, str, str]]:
+    con = sqlite3.connect(db)
+    try:
+        return harvest.dependency_edges(con)
+    finally:
+        con.close()
+
+
+def test_a_failed_datasource_names_the_workbooks_it_orphans(tmp_path: Path) -> None:
+    """Their agent worked this out BY HAND; the harvester already resolves the edge."""
+    edges = edges_from(estate_with_a_binding(tmp_path / "estate.db"))
+    assert harvest.orphaned_dependents(binding_rows(), edges) == [("DS_Sessions_by_Product", ["IA IFC Sessions"])]
+
+
+def test_a_workbook_bound_to_NOTHING_that_failed_is_not_flagged(tmp_path: Path) -> None:
+    """Flagging every workbook would make the warning worthless."""
+    edges = edges_from(estate_with_a_binding(tmp_path / "estate.db"))
+    orphans = harvest.orphaned_dependents(binding_rows(), edges)
+    assert "Standalone" not in [name for _, workbooks in orphans for name in workbooks]
+
+
+def test_a_workbook_that_ITSELF_failed_is_not_listed_as_an_orphan(tmp_path: Path) -> None:
+    """It is already in the never-landed list and is not about to be converted."""
+    rows = binding_rows()
+    rows[1] = {"name": "IA IFC Sessions", "kind": "workbook", "luid": "wb-ifc", "download_error": "timeout"}
+    edges = edges_from(estate_with_a_binding(tmp_path / "estate.db"))
+    assert harvest.orphaned_dependents(rows, edges) == []
+
+
+def test_nothing_is_orphaned_when_the_datasource_landed(tmp_path: Path) -> None:
+    rows = binding_rows()
+    rows[0] = {
+        "name": "DS_Sessions_by_Product",
+        "kind": "datasource",
+        "luid": "ds-sessions",
+        "ours": {"ok": True},
+        "theirs": {"ok": True},
+    }
+    edges = edges_from(estate_with_a_binding(tmp_path / "estate.db"))
+    assert harvest.orphaned_dependents(rows, edges) == []
+
+
+def test_an_edge_resolved_only_by_NAME_still_finds_the_dependent(tmp_path: Path) -> None:
+    """A survey that could not resolve the LUID must not silently drop the binding."""
+    db = estate_with_a_binding(tmp_path / "estate.db")
+    con = sqlite3.connect(db)
+    con.execute("DELETE FROM dependency")
+    con.execute("INSERT INTO dependency VALUES ('wb-ifc', '', ' ds_sessions_by_product ')")
+    con.commit()
+    con.close()
+    assert harvest.orphaned_dependents(binding_rows(), edges_from(db)) == [
+        ("DS_Sessions_by_Product", ["IA IFC Sessions"])
+    ]
+
+
+def test_the_orphans_reach_the_report_and_the_operator(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    orphans = harvest.orphaned_dependents(binding_rows(), edges_from(estate_with_a_binding(tmp_path / "estate.db")))
+    text = harvest.summarise(binding_rows(), tmp_path, orphans)
+    with caplog.at_level("WARNING", logger="harvest_estate_assets"):
+        harvest.report_failed_downloads(binding_rows(), orphans)
+    messages = "\n".join(r.getMessage() for r in caplog.records)
+    assert "## Do not convert yet" in text
+    assert "IA IFC Sessions" in text.split("## Do not convert yet", 1)[1]
+    assert "DO NOT CONVERT YET" in messages
+    assert "IA IFC Sessions" in messages
+
+
+def test_the_section_is_absent_when_nothing_is_orphaned(tmp_path: Path) -> None:
+    assert "## Do not convert yet" not in harvest.summarise(binding_rows(), tmp_path, [])
+
+
+def test_an_estate_db_without_a_dependency_table_still_harvests(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An older database cannot answer the orphan question; that is not a reason to fail the run."""
+    db = tmp_path / "estate.db"
+    con = sqlite3.connect(db)
+    con.executescript(
+        """
+        CREATE TABLE project (luid TEXT PRIMARY KEY, name TEXT);
+        CREATE TABLE workbook (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        CREATE TABLE datasource (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        INSERT INTO workbook VALUES ('wb-ia', 'IA Redemptions', 'p');
+        """
+    )
+    con.commit()
+    con.close()
+    monkeypatch.setattr(harvest, "engine_scripts_dir", lambda: tmp_path / "engine")
+    monkeypatch.setattr(harvest, "resolve_env", lambda path: {"TABLEAU_SERVER_URL": "https://example.invalid"})
+    monkeypatch.setattr(harvest, "require", lambda env: None)
+    monkeypatch.setattr(harvest, "download", lambda *a, **k: (False, "nope"))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["harvest_estate_assets.py", "--out", str(tmp_path / "_sweep"), "--db", str(db), "--allow-unignored-out"],
+    )
+    assert harvest.main() == 0
+
+
+def test_main_end_to_end_names_the_orphaned_workbook(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The whole leg, through the CLI: datasource fails, workbooks land, the report says so."""
+    db = estate_with_a_binding(tmp_path / "estate.db")
+    out = tmp_path / "_sweep"
+
+    def selective_download(kind, luid, target, env, scripts, **kwargs):  # pylint: disable=unused-argument
+        if kind == "datasource":
+            return False, "download failed (500)"
+        Path(target).write_text("<workbook/>", encoding="utf-8")
+        return True, ""
+
+    monkeypatch.setattr(harvest, "engine_scripts_dir", lambda: tmp_path / "engine")
+    monkeypatch.setattr(harvest, "resolve_env", lambda path: {"TABLEAU_SERVER_URL": "https://example.invalid"})
+    monkeypatch.setattr(harvest, "require", lambda env: None)
+    monkeypatch.setattr(harvest, "download", selective_download)
+    monkeypatch.setattr(harvest, "parse_asset", lambda path, scripts: ({"ok": True}, {"ok": True}))
+    monkeypatch.setattr(
+        sys, "argv", ["harvest_estate_assets.py", "--out", str(out), "--db", str(db), "--allow-unignored-out"]
+    )
+    assert harvest.main() == 0
+
+    text = (out / "parse-sweep.md").read_text(encoding="utf-8")
+    blocked = text.split("## Do not convert yet", 1)[1]
+    assert "IA IFC Sessions" in blocked
+    assert "Standalone" not in blocked, "a workbook bound to nothing that failed was flagged"
+
+
 def test_a_failed_download_reaches_parse_sweep_md_through_main(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """The committed artifact, not just the console, has to name the asset that never landed."""
     db = tmp_path / "estate.db"

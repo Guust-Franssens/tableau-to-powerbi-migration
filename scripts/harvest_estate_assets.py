@@ -848,6 +848,60 @@ def parse_theirs(path: Path, scripts: Path) -> dict[str, Any]:
         return {"ok": False, "error": f"harness: {type(exc).__name__}: {exc}"}
 
 
+def dependency_edges(con: sqlite3.Connection) -> list[tuple[str, str, str, str]]:
+    """Every `(workbook_luid, workbook_name, datasource_luid, datasource_name)` binding on the site.
+
+    Same join as `dependency_datasources` — LUID first, normalized name as the fallback an
+    unresolved survey edge needs — but it keeps the WORKBOOK end too, which is the end that matters
+    once a datasource has failed to download.
+    """
+    return list(
+        con.execute(
+            """
+            SELECT DISTINCT workbook.luid, workbook.name, datasource.luid, datasource.name
+            FROM dependency
+            JOIN workbook ON workbook.luid = dependency.workbook_luid
+            JOIN datasource ON dependency.datasource_luid = datasource.luid
+                OR (
+                    COALESCE(dependency.datasource_luid, '') = ''
+                    AND LOWER(TRIM(dependency.datasource_name)) = LOWER(TRIM(datasource.name))
+                )
+            ORDER BY datasource.name, workbook.name
+            """
+        )
+    )
+
+
+def orphaned_dependents(results: list[dict], edges: list[tuple[str, str, str, str]]) -> list[tuple[str, list[str]]]:
+    """`[(failed datasource name, [workbooks that DID land and bind to it])]`.
+
+    A datasource that never downloaded does not fail alone: every workbook bound to it converts to
+    an incomplete model, and a report against a model nobody migrated is the documented "empty
+    report". The harvester already resolves exactly these edges to DECIDE what to fetch
+    (`dependency_datasources`) and then never looked at them again once one had failed, so catching
+    it depended on the operator noticing (issue #472). A workbook that itself failed to download is
+    left out: it is already in the never-landed list and is not about to be converted.
+    """
+    missing_ids = {id(r) for r in never_downloaded(results)}
+    failed_datasources = {
+        str(r.get("luid", "")): str(r.get("name", "?"))
+        for r in results
+        if id(r) in missing_ids and r.get("kind") == "datasource"
+    }
+    landed_workbooks = {
+        str(r.get("luid", "")): str(r.get("name", "?"))
+        for r in results
+        if id(r) not in missing_ids and r.get("kind") == "workbook"
+    }
+    by_datasource: dict[str, set[str]] = {}
+    for workbook_luid, workbook_name, datasource_luid, datasource_name in edges:
+        if datasource_luid in failed_datasources and workbook_luid in landed_workbooks:
+            by_datasource.setdefault(datasource_name or failed_datasources[datasource_luid], set()).add(
+                workbook_name or landed_workbooks[workbook_luid]
+            )
+    return [(name, sorted(workbooks)) for name, workbooks in sorted(by_datasource.items())]
+
+
 def never_downloaded(results: list[dict]) -> list[dict]:
     """Rows that never reached a parser at all, i.e. the downloads that did not land.
 
@@ -877,7 +931,9 @@ def grouped_by_shape(rows: list[dict], detail: Callable[[dict], str]) -> list[tu
     return sorted(by_shape.items(), key=lambda kv: (-len(kv[1]), kv[0]))
 
 
-def summarise(results: list[dict], out: Path) -> str:  # pylint: disable=too-many-locals,too-many-statements
+def summarise(  # pylint: disable=too-many-locals,too-many-statements,too-many-branches
+    results: list[dict], out: Path, orphans: list[tuple[str, list[str]]] | None = None
+) -> str:
     """Group failures by SHAPE, because one root cause repeated 12 times is one feature request."""
     missing = never_downloaded(results)
     missing_ids = {id(r) for r in missing}
@@ -924,6 +980,19 @@ def summarise(results: list[dict], out: Path) -> str:  # pylint: disable=too-man
         for shape, names in grouped_by_shape(missing, lambda r: str(r.get("download_error", "?"))):
             lines.append(f"- **{len(names)}x** `{shape}`")
             lines.append(f"  - {', '.join(names[:8])}{' …' if len(names) > 8 else ''}")
+        lines.append("")
+
+    if orphans:
+        lines.append("## Do not convert yet — a datasource they bind to never landed")
+        lines.append("")
+        lines.append(
+            "These workbooks downloaded fine, so nothing else here flags them. They would each "
+            "convert against a model nobody migrated, which is the documented **empty report**."
+        )
+        lines.append("")
+        for datasource, workbooks in orphans:
+            lines.append(f"- `{datasource}` (failed) blocks **{len(workbooks)}** workbook(s):")
+            lines.append(f"  - {', '.join(workbooks[:8])}{' …' if len(workbooks) > 8 else ''}")
         lines.append("")
 
     for title, rows, key in (
@@ -1143,7 +1212,7 @@ def record_parse(
     )
 
 
-def report_failed_downloads(results: list[dict]) -> list[dict]:
+def report_failed_downloads(results: list[dict], orphans: list[tuple[str, list[str]]] | None = None) -> list[dict]:
     """Say out loud, at the END of the run, which assets never landed. Returns those rows.
 
     The per-asset `DOWNLOAD FAILED` warning has already scrolled past a 47-line run by the time the
@@ -1152,19 +1221,26 @@ def report_failed_downloads(results: list[dict]) -> list[dict]:
     to be beside it or the run reads as clean (issue #472).
     """
     missing = never_downloaded(results)
-    if not missing:
-        return []
-    LOG.warning(
-        "%d of %d asset(s) NEVER DOWNLOADED and were not parsed at all — they are not successes:",
-        len(missing),
-        len(results),
-    )
-    for row in missing:
-        LOG.warning("  - %s (%s): %s", row.get("name", "?"), row.get("kind", "?"), row.get("download_error", "?"))
+    if missing:
+        LOG.warning(
+            "%d of %d asset(s) NEVER DOWNLOADED and were not parsed at all — they are not successes:",
+            len(missing),
+            len(results),
+        )
+        for row in missing:
+            LOG.warning("  - %s (%s): %s", row.get("name", "?"), row.get("kind", "?"), row.get("download_error", "?"))
+    for datasource, workbooks in orphans or []:
+        LOG.warning(
+            "DO NOT CONVERT YET: '%s' never downloaded, so %d workbook(s) that DID land would "
+            "convert against a model nobody migrated: %s",
+            datasource,
+            len(workbooks),
+            ", ".join(workbooks[:8]) + (" …" if len(workbooks) > 8 else ""),
+        )
     return missing
 
 
-def main() -> int:  # pylint: disable=too-many-locals,too-many-statements  # one linear sweep
+def main() -> int:  # pylint: disable=too-many-locals,too-many-statements,too-many-branches  # one sweep
     """Harvest and sweep. Exit 2 when `--out` is committable, 1 when nothing could be assessed."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", required=True, type=Path, help="output directory (must be git-ignored, see below)")
@@ -1241,6 +1317,15 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-statements  # one
         con.close()
         LOG.error("%s; run assess_estate.py with --survey again before using project scoping", exc)
         return 1
+    # Captured while the connection is open, and used only at the END: a datasource that fails to
+    # download orphans every workbook bound to it, and the edges are the only thing that knows which.
+    try:
+        edges = dependency_edges(con)
+    except sqlite3.OperationalError as exc:
+        # An older estate.db with no dependency/workbook table still harvests fine; it just cannot
+        # answer the orphan question, and saying so is better than failing the run over it.
+        LOG.warning("cannot read dependency edges (%s); a failed datasource will not be traced to its workbooks", exc)
+        edges = []
     con.close()
     if selected:
         LOG.info(
@@ -1308,9 +1393,10 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-statements  # one
             record_parse(pending.popleft(), results, len(todo), started)
 
     args.out.mkdir(parents=True, exist_ok=True)
-    text = summarise(results, args.out)
+    orphans = orphaned_dependents(results, edges)
+    text = summarise(results, args.out, orphans)
     LOG.info("\n%s", text[: text.index("## ") if "## " in text else len(text)])
-    report_failed_downloads(results)
+    report_failed_downloads(results, orphans)
     LOG.info(
         "swept %d asset(s) in %.0fs -> %s", len(results), time.perf_counter() - started, args.out / "parse-sweep.md"
     )
