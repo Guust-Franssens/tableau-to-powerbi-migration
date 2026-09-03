@@ -26,6 +26,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+# The capability ladder, for the SVG floor and the three-state "why was SVG refused" verdict. It
+# imports nothing from here, so the pair stays acyclic -- and nothing imported is a request: only the
+# ladder's own numbers and the pure classifier that reads them.
+import tableau_render_capability as capability
 import tableau_view_types
 from tableau_env import redacted_note, scrub_tree
 from tableau_payload_facts import (
@@ -44,8 +48,14 @@ LOG = logging.getLogger("tableau-oracle")
 # constants live HERE rather than beside the transport because both exist to CLASSIFY a failure and
 # to name the knob that fixes it: `_capture_render` relabels the failure `unsupported_api_version`,
 # and `_log_blocked_and_stale` prints the remedy. That is verdict vocabulary, not transport.
-SVG_MIN_API_VERSION = "3.29"
+#
+# ⚠️ The NUMBER is read off the ladder rather than written again. Two literals for one floor is how a
+# rung gets raised in the capability module and left stale in the message that quotes it.
+SVG_MIN_API_VERSION = capability.TIER_BY_NAME["svg"].min_api
 SVG_VERSION_MARKER = "SVG export requires API version"
+# What a version-gated SVG leg is stamped with. A constant because three modules and the manifest
+# schema all key on it.
+SVG_UNSUPPORTED_STATUS = "unsupported_api_version"
 
 # What a per-tier status reads as when a leg carries no record at all. A module constant rather than
 # an inline literal, and that is not style: `tests/test_diagnostic_redaction.py` keys its
@@ -593,10 +603,14 @@ class CaptureRun:
     reference_required: bool = False
 
 
-def write_manifest(
+# One local over the limit, and it is `gate` -- the three version numbers that decide WHY a refused
+# SVG leg was refused (#474). It is read by three consumers here (the per-view stamp, two manifest
+# fields, the console verdict), so binding it once is what keeps them from disagreeing.
+def write_manifest(  # pylint: disable=too-many-locals
     records: list[dict[str, Any]],
     run: CaptureRun,
     capability_report: dict[str, Any] | None = None,
+    server_info: dict[str, Any] | None = None,
 ) -> int:
     """Write the manifest and return the process exit code.
 
@@ -620,6 +634,14 @@ def write_manifest(
     failure would make an operator debug the transport for a view whose filter is simply pointed at
     a day with no data. Legibility and exit status are different questions, and conflating them is
     what "do not overload ``status``" means in practice.
+
+    ``server_info`` is :func:`tableau_render_capability.server_info`'s answer -- the site's ADVERTISED
+    REST ceiling. It is a separate parameter rather than a seventh field on ``CaptureRun`` on purpose:
+    it is the only response-derived value in that bundle, and folding it in would taint the whole
+    provenance object in ``tests/test_diagnostic_redaction.py``, marking our own ``.env`` values as
+    response-derived and forcing certifications that would simply not be true. ``None`` is a real
+    state, not a default nobody thought about: the ceiling was not established, and the verdict below
+    says exactly that instead of guessing.
     """
     # Before anything partitions or counts them: the per-view fact rides ON the record, so every
     # downstream slice of this capture -- the manifest, a per-workbook subset, a packaged unit --
@@ -640,12 +662,20 @@ def write_manifest(
     reference_missing = run.reference_required and rendered == 0 and not credential_only
     unestablished = render_unestablished(records, run.requested_renders)
     empty_views = data_empty_views(records)
+    gate = svg_gate(capability_report, server_info, run.env.get("TABLEAU_REST_API_VERSION"))
+    _stamp_svg_gate(records, gate, run.session.redact_text)
     manifest = {
         "schema": "tableau-oracle/1",
         "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "server": run.env["TABLEAU_SERVER_URL"],
         "site": run.env["TABLEAU_SITE"],
         "rest_api_version": run.env.get("TABLEAU_REST_API_VERSION"),
+        # The OTHER two numbers of the three-number reconciliation, so the evidence file answers
+        # "could this site have done SVG at all?" on its own. `rest_api_version` above is the CLIENT
+        # preference we sent; this is the ceiling the SERVER advertises, and `null` means it was not
+        # established on this run -- never that the server is old.
+        "advertised_rest_api_version": gate.advertised,
+        "server_product_version": gate.product_version,
         "view_count": len(records),
         # #402: a per-run census of what the capture could DISCRIMINATE, so a consumer reads it once
         # instead of tallying `view_type` itself and guessing what a zero means. `unknown` is the
@@ -736,7 +766,7 @@ def write_manifest(
         manifest["elapsed_sec"],
         manifest_path,
     )
-    _log_blocked_and_stale(records, blocked, capability_report, run.session.redact_text)
+    _log_blocked_and_stale(records, blocked, capability_report, gate, run.session.redact_text)
     _log_unestablished(unestablished, run.session.redact_text)
     _log_empty(empty_views, run.session.redact_text)
     _log_unassessable(data_unassessable_views(records), run.session.redact_text)
@@ -850,6 +880,48 @@ def _log_unassessable(unassessable: list[dict[str, Any]], redactor) -> None:
         )
 
 
+def svg_gate(
+    capability_report: dict[str, Any] | None,
+    server_info: dict[str, Any] | None,
+    configured: str | None,
+) -> capability.SvgGate:
+    """Assemble the three numbers that decide WHY an SVG leg was refused, from whichever source has them.
+
+    Two sources can carry the server's advertised ceiling and they do not always both exist: a
+    ``--reference-best`` run has a full capability report (whose ``server`` block is the same
+    ``/serverinfo`` answer), while a plain ``--svg`` run has only the bare probe. Either is enough;
+    **neither** is the third state, and that state is real rather than defensive -- see
+    :func:`tableau_render_capability.svg_gate_advice`.
+    """
+    report = capability_report or {}
+    info = server_info or report.get("server") or {}
+    entry = next((t for t in report.get("tiers") or [] if t.get("tier") == "svg"), {})
+    return capability.SvgGate(
+        advertised=report.get("advertised_api_version") or info.get("rest_api_version"),
+        configured=configured,
+        product_version=info.get("product_version"),
+        # Only a floor re-probe that actually ANSWERED licenses "this works on your server".
+        proved_by_reprobe=(entry.get("floor_reprobe") or {}).get("verdict") == "available",
+    )
+
+
+def _stamp_svg_gate(records: list[dict[str, Any]], gate: capability.SvgGate, redactor) -> list[dict[str, Any]]:
+    """Replace each version-gated SVG leg's capture-time remedy with the RUN-level verdict.
+
+    ⚠️ This mutates the records in place, deliberately: they are what ``manifest["views"]`` serialises,
+    and the whole point of #474 is that the remedy written into the evidence file must be the one that
+    can actually work. ``_capture_render`` cannot compute it -- the advertised ceiling is a property
+    of the SITE and is simply not in scope down there -- so it writes the honest "not established"
+    form and this is where it is upgraded once the run knows better.
+    """
+    advice = capability.svg_gate_advice(gate, redactor=redactor)
+    stale = [r for r in records if (r.get("svg") or {}).get("status") == SVG_UNSUPPORTED_STATUS]
+    for record in stale:
+        record["svg"]["cause"] = advice.cause
+        record["svg"]["remedy"] = advice.remedy
+    return stale
+
+
 def _log_unestablished(unestablished: list[dict[str, Any]], redactor) -> None:
     """Name every view whose reference render could not be established, and say what that costs.
 
@@ -874,7 +946,11 @@ def _log_unestablished(unestablished: list[dict[str, Any]], redactor) -> None:
 
 
 def _log_blocked_and_stale(
-    records: list[dict[str, Any]], blocked: list[dict[str, Any]], capability_report: dict[str, Any] | None, redactor
+    records: list[dict[str, Any]],
+    blocked: list[dict[str, Any]],
+    capability_report: dict[str, Any] | None,
+    gate: capability.SvgGate,
+    redactor,
 ) -> None:
     """The two loud, differently-actionable warning classes, plus the probe's own warnings.
 
@@ -903,18 +979,24 @@ def _log_blocked_and_stale(
                 redacted_note(record.get("workbook_name"), redactor, limit=60),
                 redacted_note(detail, redactor, limit=200),
             )
-    stale_api = [r for r in records if r.get("svg", {}).get("status") == "unsupported_api_version"]
+    stale_api = [r for r in records if (r.get("svg") or {}).get("status") == SVG_UNSUPPORTED_STATUS]
     if stale_api:
-        # Loud and separate from `blocked`: this one is fixed by an .env line, not by a human
-        # reauthorizing a data source in Tableau, and conflating the two sends the reader hunting
-        # in the wrong system.
+        # Loud and separate from `blocked`: this one is never fixed by a human reauthorizing a data
+        # source in Tableau, and conflating the two sends the reader hunting in the wrong system.
+        #
+        # ⚠️ It is not always fixed by an .env line either, which is the whole of #474. `svg_gate_advice`
+        # is the ONE place that decides which of the three states this is, and the per-view `remedy`
+        # in the manifest is the same function's output on the same gate -- so the console and the
+        # evidence file cannot disagree.
+        advice = capability.svg_gate_advice(gate, redactor=redactor)
         LOG.warning(
-            "\n%d view(s) could not produce SVG: this site's REST API version is below %s. "
-            "Set TABLEAU_REST_API_VERSION=%s in .env and re-run; the PNG and PDF captures are "
-            "unaffected (they reach back to API 2.5 and 2.8 respectively).",
+            "\n%d view(s) could not produce SVG [%s]: %s\nPNG and PDF do not depend on the SVG floor "
+            "at all -- they reach back to API 2.5 and 2.8 respectively -- so this gate never explains "
+            "a missing PNG or PDF, and that is a statement about those routes' floors rather than a "
+            "prediction about what changing the client pin would do.",
             len(stale_api),
-            SVG_MIN_API_VERSION,
-            SVG_MIN_API_VERSION,
+            advice.cause,
+            advice.remedy,
         )
     for warning in (capability_report or {}).get("warnings", []):
         LOG.warning("! %s", warning)

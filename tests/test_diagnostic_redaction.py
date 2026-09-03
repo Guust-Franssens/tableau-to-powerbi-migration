@@ -570,6 +570,11 @@ TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
     # Propagation cannot see across a module boundary, so these are irreducible.
     ("scripts/tableau_render_capability.py", "probe_render_capability"): {"views"},
     ("scripts/tableau_render_capability.py", "apply_selected_tier"): {"report"},
+    # The three-state "why was SVG refused" classifier (#474). `gate` carries `/serverinfo`'s own
+    # version strings, so the module boundary re-seeds it here; inside, both of them go straight
+    # through `redacted_note` before anything formats them, which is why that function needs no
+    # certification of its own.
+    ("scripts/tableau_render_capability.py", "svg_gate_advice"): {"gate"},
     # `capture_tableau_oracle.main()` hands `resolve_and_stamp` the `/views` listing it just parsed.
     # ⚠️ Not optional bookkeeping: without it the boundary check fails outright, and `stamp` then
     # writes onto dicts the analyser believes are clean, so the manifest key it stamps arrives
@@ -584,7 +589,7 @@ TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
     # responses, and `log_progress` one record per view. Both cross a module boundary, so propagation
     # cannot carry the taint and the seeds are irreducible -- without them the manifest sink and every
     # console line in that module would be analysed as clean.
-    ("scripts/tableau_oracle_manifest.py", "write_manifest"): {"records", "capability_report"},
+    ("scripts/tableau_oracle_manifest.py", "write_manifest"): {"records", "capability_report", "server_info"},
     ("scripts/tableau_oracle_manifest.py", "log_progress"): {"record", "index", "total"},
     # `_capture_data` hands the verdict layer the `certify_csv` result -- a closed vocabulary, but it
     # crosses a module boundary, so it is declared rather than assumed. ⚠️ `stem` is deliberately NOT
@@ -636,13 +641,28 @@ CATEGORIES = (
     "SCRUBBED-AT-SINK:",
     "OUTBOUND:",  # our own request, travelling to Tableau -- not a response coming back
     "SHAPE-VERIFIED:",  # response-derived, but constrained to a shape that cannot carry a credential
-    "UNAUTHENTICATED-SOURCE:",  # came from a request that never carried a credential, so cannot reflect one
+    # ⚠️ `UNAUTHENTICATED-SOURCE:` was here and is DELETED, not merely unused. It certified a value as
+    # safe because the REQUEST that fetched it carried no credential -- an argument about the wrong
+    # party. The server, or any intermediary on the path, saw the PAT sign-in earlier in the same run
+    # and can reflect it in any later response, authenticated or not. Its one holder (`/serverinfo`'s
+    # product and build fields) was measured leaking a reflected credential into assessment.json,
+    # report.md and the console. Removing the category is what stops the same reasoning being
+    # reached for again: an unconstrained free-form response string is untrusted, full stop -- earn
+    # SHAPE-VERIFIED by constraining it, or REDACTED-UPSTREAM by scrubbing it.
 )
 
 _SERVERINFO = (
-    "UNAUTHENTICATED-SOURCE: from `/serverinfo`, which `server_info` calls with no auth header and no "
-    "PAT in the body -- it never received a credential, so it cannot reflect one. It still reaches the "
-    "manifest, where `scrub_tree` covers it anyway"
+    "REDACTED-UPSTREAM: every FREE-FORM field of `/serverinfo` -- `productVersion`, its `build` "
+    "attribute, and a `restApiVersion` that failed the version grammar -- goes through "
+    "`redacted_note` inside `server_info`, at the parse boundary, before it is returned. The one "
+    "field returned untransformed is a VALID `restApiVersion`, which is SHAPE-VERIFIED: `api_tuple` "
+    "has proved it matches a numeric API-version grammar that no credential can satisfy. ⚠️ This "
+    "used to read UNAUTHENTICATED-SOURCE -- 'that request carries no credential, so the response "
+    "cannot reflect one' -- and that reasoning is WRONG: it describes the request, while the hazard "
+    "is the speaker. The same server, or any intermediary, observed the PAT sign-in earlier in the "
+    "run and can echo it in a later unauthenticated response. Measured: a token in `productVersion` "
+    "and `build` of an ordinary 200 reached assessment.json, report.md and the console verbatim, "
+    "because the redactor in hand was applied to one field out of four"
 )
 _INTO_THE_MANIFEST_AGGREGATE = (
     "SCRUBBED-AT-SINK: an aggregate on its way to the manifest; `scrub_tree` walks it whole, values "
@@ -691,6 +711,17 @@ _LUID_OK = (
 _INTO_THE_MANIFEST = (
     "SCRUBBED-AT-SINK: Tableau metadata copied into the manifest record; `scrub_tree` covers it, "
     "values and keys, immediately before serialisation -- and it never reaches a path or a raw log line"
+)
+
+_SVG_CAUSE = (
+    "FIXED-VOCABULARY: one of `svg_gate_advice`'s three cause literals -- `server_meets_floor`, "
+    "`server_below_floor`, `ceiling_not_established` -- chosen by comparing two version numbers, "
+    "never composed from any text the server sent"
+)
+_SVG_REMEDY = (
+    "REDACTED-UPSTREAM: composed inside `svg_gate_advice` from this repo's own literals plus the "
+    "`/serverinfo` version strings, and those go through `redacted_note` THERE, on the untransformed "
+    "value, before a single f-string touches them"
 )
 
 CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
@@ -1089,6 +1120,25 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
             "exception TYPE name (Python's, not the server's) plus a message already put through "
             "`redacted_note`. Reached only when status is 0, i.e. no HTTP response arrived at all"
         ),
+        "shown if ceiling is not None else None": (
+            "REDACTED-UPSTREAM: `shown` is `redacted_note(advertised, redactor, ...)` -- the whole "
+            "raw value through the chokepoint before anything selects or truncates it. The RAW "
+            "`advertised` is compared inside this function and never returned, because a Tableau "
+            "session token has no enforced shape and one that is literally `3.27` satisfies the "
+            "version grammar (measured: it reached assessment.json, report.md and the console)"
+        ),
+        "ceiling is not None": (
+            "NOT-A-STRING: a boolean -- whether `api_tuple` could parse the advertised value at all. "
+            "It carries one bit ('the server reported something version-shaped'), never the value"
+        ),
+        "rung_support(ceiling)": (
+            "DERIVED-IRREVERSIBLY: three booleans, one per PUBLISHED ladder floor, computed from the "
+            "comparable tuple. The string cannot be reconstructed from them. ⚠️ Residual, stated "
+            "rather than hidden: they do narrow a suppressed version to an interval (`svg: False, "
+            "pdf: True` places it in [2.8, 3.29)), which is unavoidable for any honest report -- the "
+            "operator's question IS which rungs the site reaches. An interval across a documented "
+            "range is not a credential; the exact string was"
+        ),
     },
     ("scripts/tableau_render_capability.py", "_cli_fetch"): {
         "site_id": (
@@ -1103,6 +1153,14 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "info.get('build')": _SERVERINFO,
         "info.get('rest_api_version')": _SERVERINFO,
         "release_for(info.get('rest_api_version') or '')": _SERVERINFO,
+    },
+    ("scripts/tableau_render_capability.py", "_meets_floor_remedy"): {
+        "proof": (
+            "REDACTED-UPSTREAM: either a literal this module authors, or an f-string over "
+            "`advertised`, which is `redacted_note`'s output -- redacted on the untransformed value "
+            "in `svg_gate_advice` before this line can format anything. `proof` is tainted only "
+            "because it is SELECTED by `gate.proved_by_reprobe`, a bool"
+        ),
     },
     ("scripts/tableau_render_capability.py", "_build_report"): {"info": _SERVERINFO},
     ("scripts/tableau_render_capability.py", "fetcher"): {"view_luid": _LUID_OK},
@@ -1159,6 +1217,8 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "sum((1 for r in records if r.get('image', {}).get('status') == 'ok'))": _A_COUNT,
         "sum((1 for r in records if r.get('svg', {}).get('status') == 'ok'))": _A_COUNT,
         "sum((1 for r in records if r.get('pdf', {}).get('status') == 'ok'))": _A_COUNT,
+        "gate.advertised": _SERVERINFO,
+        "gate.product_version": _SERVERINFO,
     },
     ("scripts/tableau_oracle_manifest.py", "_render_statuses"): {
         "absent": _A_STATUS_LITERAL,
@@ -1287,6 +1347,12 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "warning": _PROBE_VERDICT,
         "len(blocked)": _A_COUNT,
         "len(stale_api)": _A_COUNT,
+        "advice.cause": _SVG_CAUSE,
+        "advice.remedy": _SVG_REMEDY,
+    },
+    ("scripts/tableau_oracle_manifest.py", "_stamp_svg_gate"): {
+        "advice.cause": _SVG_CAUSE,
+        "advice.remedy": _SVG_REMEDY,
     },
     ("scripts/tableau_http.py", "_read_bounded"): {
         "chunk": (
@@ -2242,9 +2308,64 @@ def test_the_blocked_list_redacts_the_names_it_prints(caplog):
     session.token = token
     blocked = [{"view_name": token, "workbook_name": token, "data": {"status": "source_credential", "detail": token}}]
     with caplog.at_level(logging.WARNING, logger="tableau-oracle"):
-        verdict._log_blocked_and_stale(blocked, blocked, None, session.redact_text)  # pylint: disable=protected-access
+        verdict._log_blocked_and_stale(  # pylint: disable=protected-access
+            blocked, blocked, None, verdict.svg_gate(None, None, "3.21"), session.redact_text
+        )
     assert longest_surviving_run(token, caplog.text) == ""
     assert "[REDACTED]" in caplog.text
+
+
+def test_a_reflected_credential_arriving_as_a_SERVER_VERSION_never_reaches_the_svg_advice(caplog):
+    """The version strings quoted by the #474 advice are response-derived like any other.
+
+    `/serverinfo` is unauthenticated, so this is belt on top of braces -- but the braces are an
+    argument about the call site ("it cannot leak here"), and this repo has watched that argument
+    move and stop being true four separate times. The chokepoint is what makes it a property.
+
+    ⚠️ **The advice now refuses this input one step EARLIER, and the assertions moved with it.** Since
+    #475's review, a `restApiVersion` that is not a REST API version establishes no ceiling at all,
+    so a reflected token arriving in that field resolves to `ceiling_not_established` and the remedy
+    never quotes it -- there is nothing left on this path for the chokepoint to redact. The security
+    property STRENGTHENED: the token is refused rather than redacted. But `"[REDACTED]" in caplog`
+    was only ever a *proxy* for `longest_surviving_run(token) == ""`, and the proxy stopped applying
+    while the real property still holds, so it moved to the sibling test below where the value IS
+    still quoted. Asserting a marker the code no longer has occasion to emit would be a test passing
+    on a coincidence -- and one that would then fail for a reason unrelated to any leak.
+    """
+    token = "SYNTHETIC_SESSION_TOKEN_42_LONG_ENOUGH"
+    session = _Session("an-unrelated-long-pat-secret")
+    session.token = token
+    records = [{"view_name": "v", "svg": {"status": verdict.SVG_UNSUPPORTED_STATUS}}]
+    gate = verdict.svg_gate(None, {"rest_api_version": token, "product_version": token}, "3.21")
+    with caplog.at_level(logging.WARNING, logger="tableau-oracle"):
+        verdict._log_blocked_and_stale(records, [], None, gate, session.redact_text)  # pylint: disable=protected-access
+    assert longest_surviving_run(token, caplog.text) == ""
+    # WHICH state fired, not merely that something was said: a token is not a ceiling, so neither
+    # confident cause may be reachable from it.
+    assert cap.SVG_CAUSE_CEILING_NOT_ESTABLISHED in caplog.text
+    for confident in (cap.SVG_CAUSE_SERVER_MEETS_FLOOR, cap.SVG_CAUSE_SERVER_BELOW_FLOOR):
+        assert confident not in caplog.text
+
+
+def test_a_reflected_credential_arriving_as_a_PRODUCT_VERSION_reaches_the_log_only_redacted(caplog):
+    """The `[REDACTED]` half, kept on the path where the advice still quotes the value.
+
+    `productVersion` has no grammar to fail -- it is a free-form marketing string (`2025.3.3`), and a
+    reflecting proxy can put anything in it -- so it is quoted whenever the ceiling IS established.
+    Here the ceiling is a real `3.27`, below the SVG floor, and state B's message names the product
+    beside it. This is the case that proves the chokepoint FIRED, rather than that the run happened
+    to have nothing to say.
+    """
+    token = "SYNTHETIC_SESSION_TOKEN_42_LONG_ENOUGH"
+    session = _Session("an-unrelated-long-pat-secret")
+    session.token = token
+    records = [{"view_name": "v", "svg": {"status": verdict.SVG_UNSUPPORTED_STATUS}}]
+    gate = verdict.svg_gate(None, {"rest_api_version": "3.27", "product_version": token}, "3.21")
+    with caplog.at_level(logging.WARNING, logger="tableau-oracle"):
+        verdict._log_blocked_and_stale(records, [], None, gate, session.redact_text)  # pylint: disable=protected-access
+    assert longest_surviving_run(token, caplog.text) == ""
+    assert "[REDACTED]" in caplog.text
+    assert cap.SVG_CAUSE_SERVER_BELOW_FLOOR in caplog.text
 
 
 # --------------------------------------------- round 6: key scrubbing, collisions, and hit paths

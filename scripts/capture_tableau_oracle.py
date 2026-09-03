@@ -111,6 +111,16 @@ requested render was obtained (``render_unestablished``), because an unassessabl
 a clean one is the failure mode this whole capture exists to prevent.
 """
 
+# This module went over the 1200-line cap at the merge of #475 (the SVG version gate) and #480 (CSV
+# certification), not in either change alone: master sat at 1195 lines, five short of the cap, so the
+# first branch to integrate pays for both. The cap is a proxy for "this module does too much" and
+# that reading is fair here -- it carries a near-duplicate of the Tableau REST client
+# `assess_estate.py` also carries, and extracting that shared transport is the real fix. It is a
+# refactor of two files that four branches are editing concurrently, so it must not ride along with a
+# customer-defect fix. Trimming the explanatory comments to squeeze back under would trade documented
+# knowledge for a number, which is the wrong trade in this codebase. Suppressed deliberately.
+# pylint: disable=too-many-lines
+
 from __future__ import annotations
 
 import argparse
@@ -153,6 +163,7 @@ from tableau_env import (  # noqa: E402  # pylint: disable=wrong-import-position
 from tableau_oracle_manifest import (  # noqa: E402  # pylint: disable=wrong-import-position
     NOT_ATTEMPTED,
     SVG_MIN_API_VERSION,
+    SVG_UNSUPPORTED_STATUS,
     SVG_VERSION_MARKER,
     CaptureRun,
     data_leg_fields,
@@ -967,8 +978,18 @@ def _capture_render(  # pylint: disable=too-many-locals
             # A version gate is a CONFIGURATION fault, not a broken view: retrying cannot fix it and
             # neither can a Tableau-side credential, so say which knob to turn rather than filing it
             # under the generic failure bucket a reader will chase into the data source.
-            record["status"] = "unsupported_api_version"
-            record["remedy"] = f"set TABLEAU_REST_API_VERSION={SVG_MIN_API_VERSION} or later in .env"
+            #
+            # ⚠️ WHICH knob is not decidable here, and pretending otherwise is #474: the server's
+            # advertised ceiling is a property of the SITE, not of this leg, and nothing in scope at
+            # this call carries it. So this records the honest "ceiling not established" form; the
+            # RUN knows better and `_stamp_svg_gate` upgrades every one of these before the manifest
+            # is serialised. Both strings come from the same classifier, so they cannot disagree.
+            record["status"] = SVG_UNSUPPORTED_STATUS
+            advice = capability.svg_gate_advice(
+                capability.SvgGate(configured=session.version), redactor=session.redact_text
+            )
+            record["cause"] = advice.cause
+            record["remedy"] = advice.remedy
         return record
     # Dropped, not merged, and deliberately not consulted: for a RENDER the payload settles the
     # question by itself (`%PDF-`, the PNG signature, an `<svg>` root). The data leg is the opposite.
@@ -1062,7 +1083,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             f"also capture /image?format=svg per view -- resolution-independent, and its <text> "
-            f"elements carry the dashboard's literal labels. Requires REST API >= {SVG_MIN_API_VERSION}"
+            f"elements carry the dashboard's literal labels. Requires REST API >= "
+            f"{SVG_MIN_API_VERSION} ON THE SERVER (Cloud June 2026 / Server 2026.2) as well as in "
+            f"TABLEAU_REST_API_VERSION: an on-prem site below that floor cannot export SVG at any "
+            f"client setting, and this run says so rather than naming an .env knob that cannot help"
         ),
     )
     parser.add_argument(
@@ -1133,6 +1157,25 @@ def select_views(
     return views, names
 
 
+def _advertised_ceiling(session, env: dict[str, str], capability_report: dict[str, Any] | None, wants: set[str]):
+    """The site's ADVERTISED REST ceiling -- the number that decides WHY a refused SVG was refused.
+
+    ``--reference-best`` already has it: its probe report carries the same ``/serverinfo`` answer. A
+    plain ``--svg`` run had NOTHING, so the only honest verdict available to it was "cause not
+    established" (#474). This closes that, and the call is free rather than merely cheap:
+    ``/serverinfo`` is unauthenticated and costs no metered export call. It also fails soft, so a site
+    that will not answer leaves the run exactly where it was -- reporting the cause as unestablished
+    rather than guessing at one.
+
+    Not asked for at all when no SVG was requested: free is not weightless, and no other leg has a
+    version floor a customer can miss.
+    """
+    server = (capability_report or {}).get("server")
+    if server is not None or "svg" not in wants:
+        return server
+    return capability.server_info(env["TABLEAU_SERVER_URL"], redactor=session.redact_text)
+
+
 def main() -> int:
     """Capture the oracle for every selected view.
 
@@ -1188,6 +1231,7 @@ def main() -> int:
         records,
         CaptureRun(session, env, out_dir, started, frozenset(wants), bool(args.reference_best)),
         capability_report,
+        _advertised_ceiling(session, env, capability_report, wants),
     )
     session.sign_out()
     return exit_code

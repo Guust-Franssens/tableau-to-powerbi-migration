@@ -1088,6 +1088,75 @@ signal is missing; that assessment is usable, with the retire tier flagged as un
 The pass-1 inventory is written to `_assessment/raw/` **before** the flakier passes run, so even a
 later failure leaves the expensive part on disk.
 
+### 4.12 Windows and PowerShell misreads — four ways the shell lies to you
+
+All four are self-reported time sinks from a real customer engagement (issue #470), and none of them
+is a defect in this toolkit. They are here because each one *looks* like one.
+
+**① A succeeding command that looks failed: `NativeCommandError`.** PowerShell turns anything a
+native process writes to **stderr** into an error record, and plenty of healthy tools report
+*progress* on stderr — `git clone`'s `Receiving objects: …`, `pip`/`uv` progress bars, and any Python
+script using `print(..., file=sys.stderr)` (which this repo does deliberately, so progress never
+contaminates a `--json` stdout payload). Under `$ErrorActionPreference = 'Stop'` a red
+`NativeCommandError` therefore appears for a command that **exited 0**.
+
+> **Judge a native command by `$LASTEXITCODE`, never by whether red text appeared.** Capture it
+> immediately, and never through a truncating pipe — `... | Select-Object -First 5` sets
+> `$LASTEXITCODE` from the *pipeline*, not from your program:
+>
+> ```powershell
+> git clone <url> <dir> 2>&1 | Out-String   # red output here means nothing on its own
+> $code = $LASTEXITCODE                     # <- this is the verdict
+> ```
+>
+> The same rule is why every gate in this repo is specified by exit code: `pylint` has been measured
+> printing *"rated at 10.00/10"* while exiting 16.
+
+**② `Remove-Item` cannot delete a bundle you were able to write.** Python is long-path aware, so the
+pipeline can create paths that Explorer and `Remove-Item` refuse. The fix is documented — the `\\?\`
+prefix **plus** a chmod handler, because a git repo inside the tree has read-only objects:
+
+```python
+shutil.rmtree("\\\\?\\" + str(root), onexc=lambda f, p, e: (os.chmod(p, stat.S_IWRITE), f(p)))
+```
+
+Full context, and why the ceiling bites in the first place:
+[`docs/windows-path-limits.md`](windows-path-limits.md) (§5 *Reproducing it*).
+
+**③ `Start-Process -ArgumentList` silently mangles a multi-word argument.** `-ArgumentList` joins its
+elements with spaces and passes the result to the OS, so a display name containing a space is split
+into two arguments. Measured cost: a whole `capture_tableau_oracle.py --workbook "Some Long Name"`
+launch that matched **zero** views and reported no error, because `--workbook` is an exact,
+case-insensitive published-name filter and the mangled value simply matched nothing.
+
+> Do not hand-quote your way out of it. Put the command in a `.ps1`/`.py` file and launch **that**,
+> or call the executable directly (`python scripts\capture_tableau_oracle.py --workbook "Some Long
+> Name" --out _oracle`) where PowerShell's own parser handles the quoting. If you must use
+> `Start-Process`, verify the child actually received the argument before trusting the run.
+
+**④ An SSL probe fails where the toolkit succeeds — `requests` vs the Windows certificate store.**
+✅ Verified 2026-09-03 against this repo: **`scripts/` contains no `requests` import at all.** Every
+Tableau call goes through `urllib.request` (`scripts/tableau_http.py`, `capture_tableau_oracle.py`,
+`assess_estate.py`, `tableau_render_capability.py`, `deploy_estate.py`, …), which uses CPython's
+default `SSLContext`. On Windows that context is populated from the **Windows certificate store** via
+`ssl.enum_certificates`, so an enterprise private CA or a TLS-inspecting proxy that an admin has
+installed machine-wide is trusted automatically.
+
+`requests` does not do this: it verifies against **certifi**'s static bundled PEM, which contains only
+public roots. So an ad-hoc `requests.get(...)` probe raises `SSLCertVerificationError` against a
+server the toolkit talks to happily — and the probe, not the server, is what is wrong.
+
+Measured on the machine that wrote this:
+
+```powershell
+python -c "import ssl; print(len(ssl.create_default_context().get_ca_certs()), len(ssl.enum_certificates('ROOT')))"
+# 98 69   -> the default context carries 98 CAs, 69 of them from the Windows ROOT store
+```
+
+> **Probe with the same transport the toolkit uses.** If you must use `requests`, point it at the
+> Windows store (`pip install truststore` and `truststore.inject_into_ssl()`), and **never** reach
+> for `verify=False` — that turns a diagnostic into a silent downgrade of every later call.
+
 ---
 
 ## 5. Verification checklist
@@ -1251,7 +1320,52 @@ reporting done.
 **Canonical pre-bundle layout (issue #291/#234):** new work allocates a numbered, per-run home under
 `_runs/<NNN>-<slug>/{assessment,assets,bundle,oracle,packages,deliverables,scratch}/` via
 `python scripts/work_dirs.py <unit-name> --json`, rather than inventing another `_*` root. The number
-is the identity — never renamed or reused — and the whole tree is ignored by construction (`/_*` in
+is the identity — **never renamed, never renumbered, never reused**, because generated bundle output
+embeds absolute self-paths, so renaming a run afterwards breaks every bundle beneath it (refresh, the
+report's `byPath` model binding, `_build/` replay). One run per **pipeline run**, not one per
+workbook: a 48-workbook estate sweep is a single run whose per-workbook units live inside its
+`bundle/pbip/`. A real customer reorg renumbered **14** run directories on that misunderstanding
+(issue #470) — allocate a new run instead; numbering is cheap and gaps are expected.
+
+**Check it, don't assume it:**
+
+```powershell
+python scripts/work_dirs.py --verify          # exit 0 all intact / 1 something moved / 3 unverifiable
+```
+
+⚠️ **Exit 3 is `unverifiable`, and that is NOT a pass.** It means the question could not be answered
+from the evidence — a different thing from answering it "fine". The gate rests on ONE invariant,
+implemented in one discovery function and one classification function: **every child directory of an
+existing `_runs/` root is a candidate run, any candidate whose identity cannot be positively
+established from its own evidence is `unverifiable`, and `intact` is only ever returned on positive
+proof.** Seven ways to land there, and each of the first five printed **exit 0** before it was
+closed — they were found in two review rounds, one site at a time, which is why the fix collapsed
+the surface rather than adding a guard per site:
+
+| shape | why it is `unverifiable`, and what it used to print |
+|---|---|
+| `run.json` missing, empty, truncated, malformed, locked, or valid JSON that is not an object | there is nothing to assess. Skipped in **silence** and counted in no bucket: a canonical `_runs/001-acme/` with no manifest printed `0 run(s): 0 intact, 0 moved, 0 unverifiable`, exit 0 — the `unverifiable` bucket sitting at 0 exactly when something was unverifiable. It is also what an allocation interrupted between `mkdir` and the manifest write leaves behind |
+| the directory was renamed out of the `<NNN>-` pattern **and** its manifest deleted | discovery reported only children whose *current* name matched `<NNN>` or which still held a `run.json`, so a real run that lost both was invisible: `(no run directories found)`, exit 0. The tree was still on disk — this is **not** the accepted "the run was deleted entirely" residual |
+| the `_runs/` root itself cannot be enumerated (permissions, or it is a file) | the `OSError` became an empty list, i.e. "zero runs, exit 0", while every run beneath it still existed and simply could not be discovered |
+| `run` contradicts the `<NNN>-<slug>` directory it sits in | only the *type* of `run` was checked. Changing nothing but `"run"` in a freshly allocated `001-acme` — to `2`, or to `10**100` — reported `1 intact`, exit 0. The number **is** the identity in this convention, so a manifest claiming a different one is contradictory evidence, not a healthy run |
+| `allocated_abs_path` recorded as a **relative** path | it is *required* to be absolute, but the comparison completed it against the **verifier's** current directory, so a forged relative value reported `INTACT 001-acme`, exit 0 — a location verdict that depended on where the operator was standing |
+| `run.json` parsed but carries no usable `run` number | the run number is the identity; without one it is not an assessable manifest |
+| allocated before the check existed, so no self-path was recorded; or the recorded name matches but the recorded **absolute path** does not | nothing to compare against, or see below |
+
+⚠️ **A relocated run is `unverifiable`, never `intact`.** A basename survives both a run-only move and
+a copy, so the name alone cannot answer "still there": moving `source\_runs\001-acme` to
+`moved\_runs\001-acme` reported `INTACT 001-acme`, exit 0, and so did a copy of a run into a second
+`_runs\` root. Whether the whole checkout moved (legitimate) or this one run was moved or copied
+(corruption) **cannot be distinguished from a single run's evidence**, and both break the absolute
+self-paths embedded under `bundle/` — so the verdict is "cannot establish", not "fine". This is not a
+fresh-clone false alarm: `_runs/` is git-ignored, so a clone and a fresh `git worktree` carry no runs
+at all (`git check-ignore -v -- _runs/001-acme/run.json` → `.gitignore:162:/_*`).
+
+Only `moved` (exit 1) is an established finding, and it names both the recorded and the actual
+directory. If you did move the whole checkout deliberately, re-verify the bundles under each run
+before trusting them; there is no acknowledge-and-clear switch, on purpose.
+
+The whole tree is ignored by construction (`/_*` in
 `.gitignore`; verify with `git check-ignore -v -- <path>`, **no trailing slash**, before trusting it).
 `deliverables/` is specifically for operator-facing outputs that name real customer infrastructure
 (e.g. `connections_manifest.py`'s `connections.json`/`.md`) — the `ses-prep/` near-miss (#322) landed
