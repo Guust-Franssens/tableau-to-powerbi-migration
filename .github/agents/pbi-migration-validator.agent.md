@@ -201,8 +201,8 @@ Run these passes **in order** — cheap structural checks first, expensive judgm
 1. **Adjudicate the engine's own claims — do this FIRST, because two agents are waiting on it.**
    `handover/<workbook>.json` → `workbook.viz_fidelity[]` gives one entry per worksheet with
    `status` (`rebuilt`/`warned`), `tier` (`rebuilt`/`rebuilt_with_deferrals`/`degraded`/`empty`) and
-   a precise `reason`. ⚠️ At 2.353.0 a page-less candidate still reads `degraded`; upstream #188
-   (2.354.0) adds `page_emitted:false` — and `!= False` is not proof of a page. Classify **every**
+   a precise `reason`. ⚠️ #188 (2.354.0, so live in our 2.356.0) adds `page_emitted:false` at the
+   drop sites; `!= False` is still never proof of a page. Classify **every**
    row into exactly one of:
 
    | class | meaning | who acts |

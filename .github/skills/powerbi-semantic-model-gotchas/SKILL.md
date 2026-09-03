@@ -19,7 +19,7 @@ only at query time. Every section below is a defect class that survived a clean 
 
 > **Engine-version provenance — read before acting on any entry that names the deterministic engine.**
 > Audited 2026-09-03 (issue #486) against upstream `Yarbrdab000/tableau-fabric-skills` issue state,
-> with our canonical plugin at **2.353.0** and upstream at **2.356.0**. Entries whose defect was fixed
+> on canonical plugin **2.353.0**, then re-verified 2026-09-03 after the plugin was upgraded to **2.356.0** (upstream `main`). Entries whose defect was fixed
 > upstream now carry a ⚠️ retraction or version-qualification **in place**, with the original
 > measurement kept visible. Two things that audit could **not** settle, so do not read silence as
 > currency: (a) claims naming an engine **source line** (`storage_mode.py:99`, `connection_to_m.py:2869`,
@@ -1328,6 +1328,29 @@ type** as the cause, and points at something order- or run-state-dependent inste
 independently rules out branch *count*: the engine author probed 15 identical branches directly at
 2.260.0 and they translate (`Yarbrdab000/tableau-fabric-skills#168`).
 
+⚠️ **#168's REMEDY has since shipped, and it changes what a stub looks like — 🟢 measured here on
+canonical 2.356.0, not inferred.** The all-or-nothing behaviour is gone: the engine now emits a
+**partial** dispatcher and *discloses* the drop in the TMDL, where a debugger looks. On the committed
+`issue-168-case-one-bad-branch` fixture (one unresolvable branch of four):
+
+```
+measure 'Selected KPI' = IF(EXACT([Select KPI Value], "Sales"), SUM('Orders'[SALES]), ...)
+annotation TranslatedBy = deterministic (parameter dispatcher; 3 of 4 branches live;
+                          dropped WHEN "Bad Branch")
+```
+
+`model_translation_handoff.requests` is now **0** for that workbook — so a dispatcher that used to
+arrive as a `BLANK()` stub *plus* a handover request now arrives as working DAX with a named gap and
+**no request at all**. ⚠️ **Consequence for triage:** counting handover requests no longer finds these.
+Read the `TranslatedBy` annotation. Pinned by
+`tests/test_upstream_repro_pins.py::test_issue_168_pins_partial_dispatcher_with_disclosure`, which
+now guards the *fixed* direction.
+
+⚠️ **This does NOT explain the three field cases above, and must not be read as closing them.**
+Those were built on 2.146.0, long before the remedy; #168 answered *"why does one bad branch discard
+the good ones"*, never *"why does an identical formula stub in one workbook and translate in
+another"*. That remains unknown and still needs a measured re-check (issue #486).
+
 ⚠️ **But it contradicts this section's own record**, which lists ACMU's `'Selected Measure'` among the
 three that *shipped a stub*. Both cannot be true of the same artifact. Unresolved as of writing —
 plausibly a version difference (the field bundle is 2.146.0; the entry above predates it and names
@@ -1347,7 +1370,12 @@ Y-axis swaps with a slicer.
 ⚠️ **`_GUIDANCE[MODEL_OBJECT_PARAMETER]` routes to field parameters, and for this shape that is
 usually the heavier answer.** When every branch is **already a working measure** - the normal case,
 because the engine translates the branches fine and refuses only the dispatcher - a plain `SWITCH` is
-the lighter, faithful fix and needs no new model object:
+the lighter, faithful fix and needs no new model object.
+⚠️ **The premise "refuses only the dispatcher" is stale at >= 2.356.0** (measured, see the #168 entry
+above): the engine now emits a *partial* dispatcher itself and names the dropped branch in a
+`TranslatedBy` annotation. So check the emitted measure **before** hand-authoring a `SWITCH` — you may
+be rewriting DAX that already works, and the only thing genuinely missing is the one branch the
+annotation names.
 
 ```dax
 Selected Measure =

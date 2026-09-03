@@ -26,7 +26,7 @@ raises an error dialog on open) or an offline `ajv` harness against the real 2.9
 
 > **Engine-version provenance — read before acting on any entry that names the deterministic engine.**
 > Audited 2026-09-03 (issue #486) against upstream `Yarbrdab000/tableau-fabric-skills` issue state,
-> with our canonical plugin at **2.353.0** and upstream at **2.356.0**. Entries whose defect was fixed
+> on canonical plugin **2.353.0**, then re-verified 2026-09-03 after the plugin was upgraded to **2.356.0** (upstream `main`). Entries whose defect was fixed
 > upstream now carry a ⚠️ retraction or version-qualification **in place**, with the original
 > measurement kept visible. Two things that audit could **not** settle, so do not read silence as
 > currency: (a) claims naming an engine **source line** (`twb_to_pbir.py:2366`, `:14280`,
@@ -659,14 +659,28 @@ shelves, tooltips and manual sorts.
   no warning, because stacking is structurally valid. **Never resolve `Automatic` from the XML alone
   when a date is on Columns — check the thumbnail.**
 
-  ⚠️ **FIXED UPSTREAM at engine 2.351.0 — we run 2.353.0, so this defect NO LONGER REPRODUCES.**
-  `Yarbrdab000/tableau-fabric-skills#184` was **closed COMPLETED 2026-09-02**: `_has_continuous_date`
-  is replaced in the Automatic branch by `_has_date_dimension`, which gates on **date-ness** (the doc
-  citation below was the whole fix) and accepts three families — `*-Trunc`, the discrete
-  `_DATE_PARTS`/`_DATE_EXACT_DERIVATIONS` including `MDY`, and a raw date column with **no derivation
-  at all**. Upstream's corpus: 6 worksheets carry Automatic + a discrete date, 3 now flip to
-  `lineChart` (including a bump chart), 3 correctly do not because they route to table/matrix first.
-  **The explicit-`Bar` carve-out below was kept and now has its own test.** So on a 2.353.0 bundle,
+  ⚠️ **FIXED UPSTREAM at engine 2.351.0 — and CONFIRMED BY MEASUREMENT at 2.356.0, so this defect NO
+  LONGER REPRODUCES.** `Yarbrdab000/tableau-fabric-skills#184` was **closed COMPLETED 2026-09-02**:
+  `_has_continuous_date` is replaced in the Automatic branch by `_has_date_dimension`, which gates on
+  **date-ness** (the doc citation below was the whole fix) and accepts three families — `*-Trunc`, the
+  discrete `_DATE_PARTS`/`_DATE_EXACT_DERIVATIONS` including `MDY`, and a raw date column with **no
+  derivation at all**. 🟢 **Measured here on canonical 2.356.0** over the committed A–H fixture set —
+  not inferred from the issue being closed:
+
+  ```
+  A  Automatic + discrete date PART (Year)      columnChart -> lineChart     FIXED
+  E  Automatic + discrete EXACT date (MDY)      columnChart -> lineChart     FIXED
+  F  Automatic + date PART over a datetime      columnChart -> lineChart     FIXED
+  G  Automatic + date-valued CALCULATED field   columnChart -> lineChart     FIXED
+  D  explicit Bar mark                          columnChart (UNCHANGED)      carve-out held
+  H  non-date string dimension                  columnChart (UNCHANGED)      control held
+  ```
+
+  `tests/test_issue_424_chart_type_pin.py::test_variant_a_emits_a_line_and_keeps_the_reproduction_binding`
+  now asserts the corrected type, and the engine's own `viz_fidelity` agrees (`visual_type: "line"`,
+  `status: "rebuilt"`). **D and H holding is the load-bearing part**: they are the two fixtures that
+  kill an over-broad remedy, so their survival is the evidence that #184's fix is the *correct* one
+  rather than the mark-agnostic or any-discrete remedy warned about below. So on a >= 2.351.0 bundle,
   a `columnChart` under an `Automatic` mark with a date on Columns is **no longer the expected
   output** — if you still see one, that is a NEW finding worth reporting, not this one. Everything
   below is retained as the reproduction and the reasoning, not as current engine behaviour.
@@ -786,15 +800,15 @@ example there were **15**, sitting unremarked beside a 170-item `remediation_wor
 single highest-value thing the reader surfaces, and it is why `--severity` **never hides them** - a
 blank visual outranks any severity band the worklist assigns.
 
-⚠️ **"nothing else ranks them" is true at OUR 2.353.0 and fixed just above it — check your engine
-version before assuming the reader is the only source.** `Yarbrdab000/tableau-fabric-skills#189`
-shipped in **2.355.0**: `pbip_ref_drops[].severity` is now set **structurally at the drop site**
-(`emptied: true` → `severity: "blocking"`), plus a `blocking` worklist rule in the `emptied_visual`
-category. A **partial** drop deliberately stays `high`, not `blocking`. Upstream's own corpus emits
-**zero** `pbip_ref_drops` entries, so this shipped on fixture coverage against *our* estate
-measurements and is not independently confirmed — the maintainer explicitly asked for the number of
-our 23 that carry `blocking` on a 2.355.0 re-run. Until this repo runs on >= 2.355.0 the reader
-remains the only ranking; after that, prefer the engine's own `severity`.
+⚠️ **"nothing else ranks them" is now FALSE at our engine — #189 shipped in 2.355.0 and we run
+2.356.0.** `Yarbrdab000/tableau-fabric-skills#189` sets `pbip_ref_drops[].severity` **structurally at
+the drop site** (`emptied: true` → `severity: "blocking"`), plus a `blocking` worklist rule in the
+`emptied_visual` category. A **partial** drop deliberately stays `high`, not `blocking`. **Prefer the
+engine's own `severity` now**; the reader still ranks them and remains correct on older bundles.
+⚠️ Two caveats worth keeping: upstream's own corpus emits **zero** `pbip_ref_drops` entries, so this
+shipped on fixture coverage against *our* estate measurements and the maintainer explicitly asked how
+many of our 23 now carry `blocking` — **that number is still unmeasured here**; and `emptied` is set
+by two paths (losing every role, and losing a *required* role), both of which render blank.
 
 Then `remediation_worklist` grouped by category, with each distinct `remediation` text printed
 **once** rather than repeated per item, then `viz_fidelity` tier counts.

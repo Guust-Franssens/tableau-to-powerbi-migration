@@ -200,13 +200,15 @@ a single pass does.
   bimodal 100/57 split within one estate suggests two paths. So the *validator will still fail your
   bundle*; what is retracted is only the claim that the engine regressed.
 - **An explicit `mark class='Bar'` supports strictly fewer shelf layouts than `mark class='Automatic'`**
-  (engine 2.339.0). ⚠️ **NEEDS A MEASURED RE-CHECK at 2.353.0 (issue #486): the `automatic` branch
-  this compares against was CHANGED by the fix for
-  [#184](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/184) in 2.351.0**, which replaced
-  `_has_continuous_date` with `_has_date_dimension`. The **`bar` half is safe** — upstream kept the
-  explicit-`bar` carve-out deliberately and added a test pinning it — so the *direction* of the claim
-  (Bar is narrower) still holds; what is unverified is the enumeration of what `automatic` now
-  reaches. Re-measure before quoting the fallback list.
+  (engine 2.339.0). ⚠️ **Partly re-measured 2026-09-03 at engine 2.356.0 (issue #486).** The **`bar`
+  half is confirmed** — the committed `issue-424-d-explicit-bar-mark` fixture still emits
+  `columnChart` across
+  [#184](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/184)'s fix, and upstream kept the
+  explicit-`bar` carve-out with its own test — so the *direction* of this claim (Bar is narrower)
+  holds. What **changed** is the `automatic` branch it is compared against: `_has_continuous_date` was
+  replaced by `_has_date_dimension` in 2.351.0, so an Automatic mark over a *discrete* date now
+  reaches the **line** path rather than the column one. Re-measure before quoting the fallback
+  enumeration below as current.
   `twb_to_pbir.py::_visual_type` accepts `bar` for exactly two layouts
   (dimension-on-cols + measure-on-rows, or dimension-on-rows + measure-on-cols); `automatic` reaches
   five further fallbacks (scatter, matrix, table, column, continuous-date line). So changing a mark
