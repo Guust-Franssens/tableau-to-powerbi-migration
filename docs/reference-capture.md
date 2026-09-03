@@ -502,11 +502,37 @@ it.** That argument is about the *request*; the hazard is the *speaker*. The sam
 intermediary on the path — watched the PAT sign-in earlier in the run and can echo the credential in
 any later response, authenticated or not. Measured on a 200-shaped `/serverinfo` with a token in
 `productVersion` and its `build` attribute: it reached `assessment.json`, `report.md` and the console
-verbatim, because the redactor in hand was applied to one field out of four. Every **free-form**
-field is now redacted inside `server_info`, at the parse boundary, so a future consumer inherits the
-protection instead of having to remember it. The one field returned untransformed is a **valid**
-`restApiVersion`, and only because `api_tuple` has proved it matches a numeric API-version grammar
-no credential can satisfy — a property of the *value*, never of the request that carried it.
+verbatim, because the redactor in hand was applied to one field out of four.
+
+⚠️⚠️ **Nor is "it matched a version grammar", and that second exemption is the more instructive one.**
+`restApiVersion` was then kept exempt because `api_tuple` had proved it numeric — a shape *"no
+credential can satisfy"*. **Nothing enforces that.** A Tableau session token has no validated shape at
+all (`assess_estate.Site` binds `creds["token"]` exactly as it arrives), so a server can issue a token
+that is literally `3.27`, reflect it as its own version, and be published as this site's advertised
+ceiling on all three surfaces. Measured. It is the same defect one layer down: **an assumption
+standing where an enforced property was needed.** The fix is deliberately *not* a tighter grammar —
+that narrows the overlap between credential shapes and version shapes and leaves the assumption in
+place for the next token shape.
+
+So **no response string leaves `server_info` unredacted**, and the capability is separated from the
+text that displays it:
+
+| what leaves | what it is |
+|---|---|
+| `rest_api_version` | the **redacted display** string — byte-identical to the advertised value in every run where the redactor finds nothing, i.e. every honest one |
+| `rest_api_version_reflected` | the redactor rewrote it, i.e. the server quoted a credential we hold back at us |
+| `ceiling_established`, `rung_support` | the **derived capability**, computed from the raw value inside the function: one boolean per *published* ladder floor |
+
+A reflected credential therefore costs the operator **the printed number and nothing else** — the
+ceiling is still established, every rung verdict is still correct, and `--reference-best` still
+resolves. The **release name is suppressed with the number** (`API_RELEASE` is a bijection, so
+printing *"Tableau 2025.3"* would hand back the digits redaction removed), and both `report.md` and
+the console **say** the number was suppressed and why: a bare redaction marker where a version belongs
+reads as a bug in this tool, and a server echoing a credential is worth raising with whoever operates
+it. ⚠️ Residual, stated rather than hidden: three booleans against documented floors do narrow a
+suppressed version to an *interval* (`svg: False, pdf: True` ⇒ `[2.8, 3.29)`). That is unavoidable for
+any honest report — the operator's question *is* which rungs the site reaches — and an interval across
+a published range is not a credential; the exact string was.
 
 ⚠️ **Redaction happens per value, BEFORE case-folding, splitting, stripping or truncation** — every
 one of those transforms defeats the repo redactor, which matches literals. Four review rounds each
