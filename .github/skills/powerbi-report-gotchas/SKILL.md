@@ -24,6 +24,19 @@ raises an error dialog on open) or an offline `ajv` harness against the real 2.9
 > (Tableau shelves, `MAKELINE`); read those as examples, not as prerequisites. Cross-references to
 > `.github/pbi.kb/` and `.github/agents/` are paths in the host migration repo.
 
+> **Engine-version provenance — read before acting on any entry that names the deterministic engine.**
+> Audited 2026-09-03 (issue #486) against upstream `Yarbrdab000/tableau-fabric-skills` issue state,
+> with our canonical plugin at **2.353.0** and upstream at **2.356.0**. Entries whose defect was fixed
+> upstream now carry a ⚠️ retraction or version-qualification **in place**, with the original
+> measurement kept visible. Two things that audit could **not** settle, so do not read silence as
+> currency: (a) claims naming an engine **source line** (`twb_to_pbir.py:2366`, `:14280`,
+> `_constant_mark_color_objects`) were pinned at 2.146.0–2.339.0 and the line numbers have certainly
+> moved — treat them as *where to look*, never as a citation; (b) an engine claim with **no upstream
+> issue** was left standing, because absence of an issue is not evidence of a fix. Neither was
+> re-measured — the audit was deliberately documentation-only, since re-measuring means running the
+> engine. Anything about **Power BI Desktop**, PBIR schemas or `powerbi-report-author` is unaffected
+> by engine drift and was out of scope.
+
 ## 1. Validation-invisible rendering bugs
 
 These pass `validate` but render wrong. Only a live Desktop screenshot catches them.

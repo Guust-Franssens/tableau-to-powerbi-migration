@@ -575,7 +575,17 @@ over its own output.** Measured 2026-08-18 on engine 2.151.0: a report that fail
 `PBIR_ROLE_REQUIRED_MISSING` was graded `definition_of_done: warn`, `0 error`, `Viz=built`. The
 engine's always-on linter (`pbir_lint.py`) is hand-rolled and has no required-role rule, and its real
 `--validate` pre-gate is default-off *and* explicitly "never changes the structural aggregate" when
-enabled (filed upstream as #220 / #221). `check_pbir_valid.py` delegates to the first-party CLI and
+enabled. ⚠️ **Two corrections from the 2026-09-03 audit (issue #486).** (1) An earlier version of
+this paragraph said *"filed upstream as #220 / #221"* — **those are OUR issue numbers, not
+upstream's**, and this is exactly the two-ranges trap `AGENTS.md` warns about (a bare `#220` reads as
+plausible in either tracker). The upstream counterparts are
+[`Yarbrdab000/tableau-fabric-skills#143`](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/143)
+(fixed 2.166.0) and
+[`#144`](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/144). (2) **#144 is CLOSED
+COMPLETED but carries ZERO comments** — no fix version, no evidence — so this claim is
+**NOT retracted**: keep exit 7 and `check_pbir_valid.py` binding until someone measures whether the
+DoD now runs `validate`. A comment-free closure is not a measurement.
+`check_pbir_valid.py` delegates to the first-party CLI and
 makes the verdict bind. It degrades to `SKIPPED` (never blocks) when that CLI is not on PATH, and
 reports `ERROR` — also non-blocking — when the validator itself cannot form an opinion.
 The empty-model block *is* printed — deliberately before the verdict, and on a pass as well as a

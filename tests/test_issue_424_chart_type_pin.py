@@ -15,10 +15,23 @@ on all three. So the set was extended until each candidate remedy is killed by s
 ``DEFECT_PINS`` — currently wrong, must FLIP to ``lineChart`` when upstream fixes it. A failure here
 is the signal to verify the new output and retire the pin.
 
+⚠️ **Upstream HAS now fixed it, so expect that flip — this is notice, not a surprise.** The 2026-09-03
+documentation audit (issue #486) found ``Yarbrdab000/tableau-fabric-skills#184`` closed COMPLETED on
+2026-09-02, fixed in engine **2.351.0**; the canonical plugin is **2.353.0**, i.e. already past it.
+``_has_continuous_date`` was replaced in the Automatic branch by ``_has_date_dimension``, which gates
+on date-ness and accepts ``*-Trunc``, the discrete ``_DATE_PARTS``/``_DATE_EXACT_DERIVATIONS``
+(including ``MDY``), and a raw date column with no derivation at all. So the ``A_AUTO_*`` /
+``E_AUTO_MDY`` / ``F_AUTO_DATETIME`` / ``G_AUTO_CALCDATE`` expectations below are **expected to be
+stale**. The audit deliberately did **not** re-measure them — that means running the engine, and PRs
+were in flight — so retiring the pins is scheduled follow-up work, not something to do from this
+docstring. Verify the new output first; the failure text reports the observed version.
+
 ``PERMANENT_INVARIANTS`` — currently RIGHT. ⚠️ **Do not retire these with the rest of the pin.** They
 are what stops the fix from being over-broad: an explicit ``Bar`` mark stacks in Tableau too, so its
 ``columnChart`` is faithful, and a non-date discrete dimension is a genuine bar chart. A remedy that
 rewrites every date-on-Columns chart — or every discrete-dimension chart — to a line breaks these.
+Upstream kept the explicit-``bar`` carve-out deliberately and added its own test for it, so these
+should still hold at 2.353.0.
 
 It deliberately does NOT assert an engine version. The shared harness in
 ``tests/test_upstream_repro_pins.py`` pins one, which makes every test in that file fail the moment
