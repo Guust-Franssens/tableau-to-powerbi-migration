@@ -151,7 +151,7 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 b3c2aa345d1b8d639097efa86ae7ea0fac3e658a794cefd696367779a9c32585  Run these passes **in order** ~ cheap structural checks firs
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 edf6a52d97ea821349e96a37db5329b2e83ce12806925e4bc5d79e18f4c7fe5d  0. **Run the all-scope automated inventory first:** `python 
-3902456092091c9cf5cbd8f4c174cb059d8ca83411152ce3b8d83fc924b36e30  1. **Adjudicate the engine's own claims ~ do this FIRST, bec
+cc1779409aa05853ec58aa89ed79d4c6c622d78de40746e9f48efd89642b2ff4  1. **Adjudicate the engine's own claims ~ do this FIRST, bec
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 ab07428a9f303fd58ac99d4a29b5763c53902419a88d22c4e187b4059d17110e  | class | meaning | who acts |
 0c682a30035b30429e568a101ce206a10f0889a2a0d738d36002ae23e261453e  |---|---|---|
@@ -160,7 +160,7 @@ ab07428a9f303fd58ac99d4a29b5763c53902419a88d22c4e187b4059d17110e  | class | mean
 452adb1f4860d164511b56e4ab0ffae699b73bda8286d8f257dce25351e5753c  | `false-claim` | the engine's own description of what it di
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 864a6f4a8409f274684466918fe218079a6572aac22f86ece151dd7edc54a8a7  What makes this load-bearing rather than bookkeeping:
-6565d664facb237fa1c8e07ce15931fe44464ab35b8ac6fb2ed398f8e2e04af3  - **`openability_selfcheck.ok` is a claim too ~ the narrowes
+a8ba94b9f8f4076f13ddf3906335ce9328da8e449e597491206eeaeedb31dfaa  - **`openability_selfcheck.ok` is a claim too ~ the narrowes
 5c0a4a5498a8ddfae818f2ceda1f3dadff98816f394e359a48bdb4fb8d8e167d  - **Adjudicate each engine claim against the Tableau source/
 5235bfa8ea1f6e0454ad9ba4689f6e7c5ec6b4cd477e4d329c1372adc9cde325  - **Check the `status: "rebuilt"` rows too, not just the war
 4e671069c760a61d02e17107768f0ddfd97e50808076c037419df62854b96618  - **Some deferrals must NOT be reversed**, and only you can 
@@ -189,10 +189,10 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 90e48a7f751783169d5e801f211330144685188ec27ea465b4e6e633a858f180  ## Operating modes
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-6141e13fdf2ad53122c704d115ddb0624e46198b4ffc09a3e0e6a15c9c6c1095  You are invoked **more than once per migration**, as indepen
+a8cbc7857ef21c672e2506ecc95e50a5e684abcbe8669946ffc9508e2a051ce0  You are invoked **more than once per migration**, as indepen
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 6890115f821e4877e690901e7e91459cfcee6f5d76a46e15e7d8ed9c404648c4  - **Triage mode** (first, before any builder acts): workflow
-0257e3d09e3392102e1068f258808d56f83b52ce12132d3881c1076230d6e3c3  - **Spot-check mode** (fast): a single visual or page, mid-i
+80da5e03e98e950d7452adc42b19eff1e290f6561366803783813254f0783e5f  - **Spot-check mode** (fast): a single visual or page, mid-i
 cdec4fb6a97d509656a48952dfe2b8eee60a38c821bb4829d5714758def84b75  - **Full-migration sign-off mode** (last, comprehensive): ev
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 a8e38bd471cf4f477c5c7462fc813890e7ebfb05bd8d87b6b0d9856d34315f12  ~~ **At sign-off, treat the triage classifications as CLAIMS
@@ -200,7 +200,7 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 b6b35f02e0cde87fbb098396fde2ebb44cc33b7d82e173a84948ba42d3386245  ## Gotchas
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 bac556cf7513a670d6e26bd2a807e3ea2546c13ed911f53858d1ba32edd770fa  - **Distinguish a deliberate fidelity *improvement* from a r
-63a98686e5969aa1b2a1fd59517083109d087ea776daf364cfc48a17b676301e  - **Screenshot-capture artifacts are not rendering bugs.** T
+934b97a7bec7c5d132f54b4e8a335318c6c26b4691c7a52fd1b2262d45b9e33f  - **Screenshot-capture artifacts are not rendering bugs.** R
 b1036eb17e8bd82385f1121bf99a074eb0995f9ac4a47dd13c704ae5b2b3a144  - **Tableau Public renders the viz body on canvas, so text-b
 9de99334b1b424ff6a644ce567ec7ab4a7a7055ee6a2e7408c2e67df8ce68a7c  - **Never grade a report you just helped build in the same c
 2d95ddf918ef8018a0fdf0a636fe2950254958c44367569bed0bf90e2ff10c83  - **Cap the validator~builder loop.** Two or three rounds is
@@ -239,7 +239,7 @@ b53fe2f350b914308dc5c8bf2ff5900cae4cb2c7e9a666701e1fd0521fb1cf7c  The determinis
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 d3ce3b3a53d505370a0fad36ccf06be322a3ff490512ef8553dce9ad889d0a18  | source | what it gives you |
 4199ba454d6d3ae83657120c2bb6bd674eefc0dd7d3cd4cc844171dc6725135b  |---|---|
-88bde10739dc8cb69ae59e8384a735fa8c17c9c63c638c781e92a795c78fe44a  | `read_handover.py <bundle> --workbook <name> --viz [--seve
+51a07d06a76b5f810c8394ab0a8386d05ae6d259bbd1f58939e49b179e8b216c  | `read_handover.py <bundle> --workbook <name> --viz [--seve
 1967f5d6a135a8d4d7d7057f38771fd5c00a242f5edf115c139360d8b5dd9e98  | `estate.pending_gates[]` | which gates must be OFFERED (e.
 e27366c2b7da8cfb3440a33003343413d20067e7731fe7d2751f397183eea523  | `migration-spec.json` | source intent the engine's input f
 6550e412015eb1a6fc3f30016eda027d92c77f7942f5c0f591214398a31fb966  | `migrations/<name>/reference/` | the Tableau screenshots ~
@@ -291,7 +291,7 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 7136000e494604c07769c55da3f0ec4ea85eef9508d8840bc71ec8a6e745b742  ## Workflow
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 9909baf2c222d9ab0024446e28482048ca3493baba013497a92e6f7a7b921b50  0. Invoke `powerbi-report-gotchas` (step 0, before touching 
-3f89c58fdf01c7a02bd0027287504d6f4893b907db4b4cded6635bfa09bdfc4d  1. **Assert the model is WARM before you open Desktop ~ and 
+2facdfb05207bf23c5174f02fe7f1e43c4c7a425ae1deeeae8dab9ec00bf9280  1. **Assert the model is WARM before you open Desktop ~ and 
 db0ae7b6a60d293456e056cef29ca02600a7465a2c2898a5154adf212dd57f9d  2. **Take the validator's classification of `viz_fidelity`, 
 796adaccea473b36792884172f70b4c2579642b76e24188d059147534dfc6ba4  3. **Fix with the smallest blast radius first.** Prefer form
 969d6461b699351b84ca5d8a60599bde7dc11b71afd6847677237eed075e1c70  4. Wire the source intent the engine's input format cannot c
@@ -400,7 +400,7 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 e209ae9bb98f30ed66fb95643609e9131c15f2adf8f3e6a37f00f9f5ced13d87  1. Invoke `powerbi-semantic-model-gotchas` before touching T
 c51b41e87515c03b8c765fc5c34209f3e33b760cddc2f3c227b01252506232dc  1. **Read the queue with `python scripts/read_handover.py <b
 e73e6b2dfa2051f5da33bc1c032e399c84bf62b207f1a6df8699c83b9beaf0d3  2. **PROVE the live source is reachable BEFORE you change an
-d6cf6127a5c038e0880b55fb1c71f994c2b8a91b9bd6fadd4293658b7667b77b  3. **VERIFY the connection rather than choose it.** `connect
+bbd66416e6329cc88048d2f52ecfbfa89bc1f73acf4654efb7a2b189a1062ce7  3. **VERIFY the connection rather than choose it.** `connect
 ab55a7fabe54328e030880136f962fc6fd8dfeeb946644f9727ea187cb185323  4. **Author the residual DAX from `requests[]`** ~ each carr
 26f7e31edb95434e68b41ec1019026d958f2001017b038bb1dbac51797243f17  - ~~ **For a table calc, PREFER the engine's visual-calculat
 fd95c24aa53993d780991a6455a4a226e7c7faa13b694409d73c0a8ce2051ad9  - For `category: missing_addressing_intent` the partition/or
