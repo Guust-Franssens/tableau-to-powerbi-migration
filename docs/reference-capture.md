@@ -510,6 +510,19 @@ builder might then bake `Year=2020` in to match. Therefore:
 - **Separate the oracles.** The image is the **visual oracle**; a CSV/crosstab exported *at the same
   state* is the **numeric oracle** (the validator already prefers exported CSV for numbers). Never read
   numbers off pixels.
+- **A ZERO-ROW capture is a state, and the manifest names it (#471).** Tableau answers `/data` with a
+  200 and no rows for a view whose default state has nothing to show — a relative-date filter whose
+  window has not landed yet, or a required filter defaulting to None — so the export *succeeds* and
+  the evidence is empty. Measured in the field: 12 of 91 views on one site, every one recorded
+  `status: "ok"`. `data_empty_views` names them with a classification, each record carries
+  `flags: ["data_empty", …]`, and the run warns per view and at the end; the exit code is deliberately
+  unchanged, because this is a legibility fact and not a transport failure. ⚠️ The classification stops
+  where the evidence does: a CSV that returns a HEADER proves a query ran (`empty_query_no_rows`), but
+  a payload with no header at all is `empty_cannot_classify` — a glossary/reference sheet with no
+  underlying query and a real query returning nothing are indistinguishable from the payload (both are
+  `row_count=0, columns=[]`, differing only in `bytes`, which is **not** used as the discriminator).
+  Separating those two needs field-level metadata the capture does not hold. The re-runnable cause and
+  the one that needs `?vf_` pinning (#194) are likewise not separable from a default-state capture.
 - **Bind numeric truth to the workbook's source file, never the estate.** List the bundle's `data/`
   directory before reusing an estate-wide constant. In the measured estate, most workbooks bound the
   9,994-row source (`SUM(Sales) = 2,297,200.8603`), but `book_7-3-LOWESS-Python` bound
