@@ -72,6 +72,17 @@ WB_UNKNOWN = "unknown"
 #: that did not. Conflicting machine identities are LESS evidence than none.
 WB_CONFLICT = "conflicting-identity"
 
+#: What :func:`agreed_luid` returns when two non-blank claims DISAGREE, and what :meth:`
+#: WorkbookIdentity.attribute` reads as :data:`WB_CONFLICT` on whichever side declared it. It is a
+#: VALUE rather than an exception because the contradiction has to survive being stored on the
+#: identity: round-2 review of PR #454 measured both readers collapsing several declared LUIDs to
+#: the first one by SCOPE PRECEDENCE, so a contradicting manifest-level LUID vanished before
+#: :meth:`WorkbookIdentity.attribute` ever saw the record - entry gate `READY 1/1 exit 0`, exit gate
+#: `PASS visual=1 numeric=1`, `conflicting-identity` 0. Returning None would have re-armed exactly
+#: that, because an absent LUID is deliberately SILENT. No LUID can equal it: `<` never appears in
+#: one, and every claim is case-folded before comparison.
+LUID_CONTRADICTED = "<contradicted-luid-declarations>"
+
 #: The axes that identify a workbook to a MACHINE, and the ONLY ones that may certify a page. A
 #: record that claims one has told us how it must be checked; a unit that cannot answer it has
 #: established nothing.
@@ -529,7 +540,26 @@ class WorkbookIdentity:
         Note the asymmetry that :meth:`_contradiction` keeps: an axis the unit *cannot answer* is
         silent, an axis that *disagrees* is fatal, and collapsing the two would either re-open the
         fall-through above or refuse every record whose producer wrote fewer fields than ours.
+
+        ⚠️ **Round 2 of PR #454: a side may also contradict ITSELF, before any comparison happens.**
+        A manifest declares a LUID at several SCOPES (state, entry, manifest) and a unit at several
+        producers (handover slice, migration spec), and both readers used to take the first non-blank
+        one by scope precedence - so a contradicting claim was discarded before this method saw it.
+        :func:`agreed_luid` now folds every claim into one value and marks a disagreement with
+        :data:`LUID_CONTRADICTED`, which is read here, first, as :data:`WB_CONFLICT`. It is checked
+        before the axis walk because a self-contradicted LUID is not a claim that could match or
+        differ; there is nothing left to compare it against.
         """
+        if LUID_CONTRADICTED in (self.luid, record.luid):
+            side = "this unit" if self.luid == LUID_CONTRADICTED else "the record"
+            return Attribution(
+                WB_CONFLICT,
+                f"{side} declares two different workbook LUIDs at different scopes, so which "
+                f"workbook it is about is unanswerable: unit {self.describe()} vs record "
+                f"{record.describe()} - contradictory machine identities are less evidence than "
+                "none, and scope order is not a verdict",
+                axis=WB_LUID,
+            )
         for axis in WB_MACHINE_AXES:
             mine, theirs = getattr(self, _FIELD[axis]), getattr(record, _FIELD[axis])
             if theirs is None:
@@ -651,15 +681,25 @@ def persisted_stem(text: str | None) -> str:
     return PurePosixPath(persisted_name(text)).stem
 
 
-def agreed_luid(*claims: str | None) -> str | None:
-    """The one LUID every non-blank claim agrees on, or None when they disagree.
+def agreed_luid(*claims: Any) -> str | None:
+    """The one LUID every non-blank claim agrees on; :data:`LUID_CONTRADICTED` when two disagree.
+
+    **This is the single place any number of LUID claims become one.** Blank, whitespace and
+    non-string claims are ABSENT and stay silent; equal claims (case-insensitively, since a LUID is a
+    machine id) are one claim; two that differ are a contradiction.
 
     Two identities that disagree are LESS evidence than none: a filename prefix that contradicts the
-    stamped provenance means one of them is about a different workbook, and picking whichever was
-    read first is exactly how a foreign render gets admitted. Disagreement therefore fails closed.
+    stamped provenance, or a manifest-level LUID that contradicts the state-level one, means one of
+    them is about a different workbook, and picking whichever was read first is exactly how a foreign
+    render gets admitted. Disagreement therefore fails closed - and it does so by returning a value
+    that :meth:`WorkbookIdentity.attribute` refuses as :data:`WB_CONFLICT`, never None. Round 2 of PR
+    #454 measured why the distinction is load-bearing: an absent LUID is deliberately silent, so
+    reporting a contradiction as absence re-opens the fail-open one layer earlier.
     """
     seen = {claim.strip().casefold() for claim in claims if isinstance(claim, str) and claim.strip()}
-    return seen.pop() if len(seen) == 1 else None
+    if len(seen) > 1:
+        return LUID_CONTRADICTED
+    return seen.pop() if seen else None
 
 
 # ------------------------------------------------------------------------------------------------

@@ -30,6 +30,7 @@ import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Generic, TypeVar
@@ -1913,13 +1914,15 @@ def _reference_oracles(target: Path, reference_dir: Path | None) -> tuple[list[O
         for dashboard in payload.get("dashboards", []) if isinstance(payload, dict) else []:
             if not isinstance(dashboard, dict):
                 continue
-            visual, numeric, caps = _reference_states(directory, dashboard)
+            visual, numeric, caps, state_luids = _reference_states(directory, dashboard)
             grades |= caps
             records.append(
                 OracleRecord(
                     name=str(dashboard.get("name") or ""),
                     kind="dashboard",
-                    workbook=_declared_workbook(dashboard, payload, sha256=payload.get("source_workbook_sha256")),
+                    workbook=_declared_workbook(
+                        dashboard, payload, sha256=payload.get("source_workbook_sha256"), extra_luids=state_luids
+                    ),
                     visual=visual,
                     numeric=numeric,
                 )
@@ -1927,10 +1930,19 @@ def _reference_oracles(target: Path, reference_dir: Path | None) -> tuple[list[O
     return records, grades
 
 
-def _reference_states(directory: Path, dashboard: dict[str, Any]) -> tuple[bool, bool, set[str]]:
-    """``(visual, numeric, grades)`` across one dashboard entry's captured states."""
+def _reference_states(directory: Path, dashboard: dict[str, Any]) -> tuple[bool, bool, set[str], list[Any]]:
+    """``(visual, numeric, grades, per-state LUID claims)`` across one dashboard entry's states.
+
+    The LUID claims are returned rather than resolved here because this gate collapses every state
+    of an entry into ONE record, so they are claims about that record and must agree with the entry's
+    and the manifest's (:func:`_declared_workbook`). The entry gate reads the state scope
+    (`reference_evidence._reference_workbook_luid`); a scope one gate reads and the other ignores is
+    a hole by construction - measured on this branch, a state declaring another workbook's LUID
+    reached ``PASS route=sha256 admitted=1`` here.
+    """
     visual = numeric = False
     grades: set[str] = set()
+    luids: list[Any] = []
     for state in dashboard.get("states", []):
         if not isinstance(state, dict):
             continue
@@ -1940,7 +1952,8 @@ def _reference_states(directory: Path, dashboard: dict[str, Any]) -> tuple[bool,
         visual = visual or _existing_relative(directory, state.get("image"))
         oracle = state.get("numeric_oracle")
         numeric = numeric or (isinstance(oracle, str) and _existing_relative(directory, oracle))
-    return visual, numeric, grades
+        luids.append(state.get("workbook_luid"))
+    return visual, numeric, grades, luids
 
 
 def _is_within(directory: Path, base: Path) -> bool:
@@ -1951,7 +1964,9 @@ def _is_within(directory: Path, base: Path) -> bool:
         return False
 
 
-def _declared_workbook(payload: Any, container: Any = None, *, sha256: Any = None) -> oid.WorkbookIdentity:
+def _declared_workbook(
+    payload: Any, container: Any = None, *, sha256: Any = None, extra_luids: Iterable[Any] = ()
+) -> oid.WorkbookIdentity:
     """The producing workbook a manifest entry declares, on whichever axes it wrote.
 
     ⚠️ **Issue #450 was exactly this function reading a key nobody writes.** It read ``workbook``;
@@ -1960,11 +1975,21 @@ def _declared_workbook(payload: Any, container: Any = None, *, sha256: Any = Non
     real 360-view capture, every single record therefore arrived ownerless, and the foreign-workbook
     guard that this gate advertises had never once fired. ``workbook`` is still read, first, because
     it is the documented override a hand-written manifest may carry.
+
+    ⚠️ **The LUID is no longer SELECTED by scope.** ``entry.get(...) or outer.get(...)`` took the
+    entry's claim and dropped the manifest's, so an entry-level LUID matching this unit silently
+    superseded a manifest-level one naming another workbook - measured by round-2 review as
+    ``PASS visual=1 numeric=1 admitted=1``, with the contradiction gone before
+    :meth:`object_identity.WorkbookIdentity.attribute` could see it. Every non-blank claim must AGREE
+    (:func:`object_identity.agreed_luid`), which is the same one rule the entry gate's
+    `reference_evidence._reference_workbook_luid` applies. The NAME axis keeps its precedence
+    deliberately: since round-3 B-B a display name never admits, so no ordering of names can fail
+    open, and a name that DIFFERS from the unit's is already ``foreign``.
     """
     entry = payload if isinstance(payload, dict) else {}
     outer = container if isinstance(container, dict) else {}
     return oid.WorkbookIdentity.of(
-        luid=entry.get("workbook_luid") or outer.get("workbook_luid"),
+        luid=oid.agreed_luid(entry.get("workbook_luid"), outer.get("workbook_luid"), *extra_luids),
         name=entry.get("workbook") or outer.get("workbook") or entry.get("workbook_name") or outer.get("workbook_name"),
         sha256=sha256,
     )

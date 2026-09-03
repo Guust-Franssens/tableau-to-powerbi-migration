@@ -51,7 +51,8 @@ UPSTREAM_COMMIT = "0fae0cf75bee7c49489573b4735788106af5d8e0"
 #: Why the pin last moved. An edit to shared surface is a two-gate contract change; this is the
 #: record of the one that was reviewed.
 PIN_PROVENANCE = (
-    "master@0fae0cf7 plus issue #450 and its round-1, round-3 and round-N safety reviews: "
+    "master@0fae0cf7 plus issue #450 and its round-1, round-3, round-N and round-2-of-#454 safety "
+    "reviews: "
     "`object_identity.py` carries the WORKBOOK-identity join both gates share, closed by ONE rule (a "
     "machine identity the unit cannot answer is `unknown`, never rescued by a weaker axis), and now "
     "the REVISION key too. Measured 2026-09-03 on the live site, three downloads of every item in one "
@@ -63,12 +64,23 @@ PIN_PROVENANCE = (
     "blocking finding B: two MACHINE axes that both answer and DISAGREE are `WB_CONFLICT`, a refusal "
     "in its own right, because `attribute` used to return on the first axis that agreed and admitted "
     "a record whose sha256 matched this unit while its LUID named another workbook. "
+    "⚠️ The pin moved from 63c18e14 for a THIRD, deliberate reason, and it is a two-gate contract "
+    "change by construction: round 2 of PR #454 found that both readers folded several DECLARED "
+    "LUIDs into one claim by SCOPE PRECEDENCE, so a contradicting manifest-level LUID vanished "
+    "before `attribute` was ever called (entry gate READY/ready/sha256=1/conflicting-identity=0/exit "
+    "0; exit gate PASS visual=1 numeric=1 admitted=1). `agreed_luid` therefore now returns the new "
+    "`LUID_CONTRADICTED` sentinel instead of None when claims disagree - None is indistinguishable "
+    "from absence, and absence is deliberately SILENT - and `attribute` reads that sentinel on "
+    "EITHER side as `WB_CONFLICT` before the axis walk. Consequence to review: a UNIT whose own two "
+    "source claims name different workbooks is now `conflicting-identity` where it was `unknown`, "
+    "which is the more honest verdict (it established two identities, not none) and does not change "
+    "any readiness or PASS/FAIL outcome. "
     "`tests/test_object_identity.py` is UNCHANGED."
 )
 
 #: SHA-256 of each shared file, over LF-normalized bytes.
 PINNED: dict[str, str] = {
-    "scripts/object_identity.py": "63c18e143ff35174827bcc2a9f6acf0de89ad18d46bf05793d155a0b0f230452",
+    "scripts/object_identity.py": "20a83cfb433afca42ff6aeb6049ed90643be6c58237d305e5d367447885acb31",
     "tests/test_object_identity.py": "11d6881a960fa3c23beaa6928706de88a83fc1605b051314038ffdc14711c967",
 }
 

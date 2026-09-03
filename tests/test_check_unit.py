@@ -3634,6 +3634,110 @@ def test_a_manifest_whose_luid_agrees_with_its_matching_sha_still_certifies(tmp_
     assert (oracle["visual_present"], oracle["admitted_evidence"]) == (1, 1)
 
 
+# --------------------------------------------------------------------------------------------
+# Round 2 of PR #454: conflicting LUID declarations at different SCOPES were collapsed to one
+# --------------------------------------------------------------------------------------------
+
+
+def _luid_at_scopes(unit: Path, *, entry: str | None = None, state: str | None = None) -> None:
+    """Stamp `workbook_luid` at the dashboard-entry and/or state scope of a written manifest."""
+    manifest = unit / "reference" / "manifest.json"
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    for dashboard in payload["dashboards"]:
+        if entry is not None:
+            dashboard["workbook_luid"] = entry
+        for recorded in dashboard.get("states", []) if state is not None else []:
+            recorded["workbook_luid"] = state
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_an_entry_luid_does_not_silently_supersede_a_contradicting_manifest_luid(tmp_path: Path) -> None:
+    """THE round-2 finding at the EXIT gate. Verbatim before this fix::
+
+        B_EXIT_MULTISCOPE {"status":"PASS","visual_present":1,"numeric_present":1,
+          "admitted_evidence":1,"foreign_workbook_evidence":[]}
+
+    `_declared_workbook` read ``entry.get("workbook_luid") or outer.get("workbook_luid")``, so an
+    entry-level LUID naming this unit discarded a manifest-level LUID naming another workbook and
+    the contradiction never reached `WorkbookIdentity.attribute`. No schema makes the narrower scope
+    an override; every non-blank claim must agree.
+
+    ``_attribute_record`` is asserted directly because it names WHICH guard refused - at least four
+    others in this gate also produce ``visual_present == 0``.
+    """
+    _write_spec(tmp_path, ["Revenue"])
+    _write_report(tmp_path, ["Revenue"])
+    source = _write_unit_source(tmp_path, b"the workbook this unit was built from")
+    _write_reference_manifest(
+        tmp_path, ["Revenue"], workbook=None, source_sha=_sha256(source), workbook_luid=OTHER_LUID
+    )
+    _luid_at_scopes(tmp_path, entry=UNIT_LUID)
+
+    records, _ = cu._reference_oracles(tmp_path, None)
+    verdict = cu._attribute_record(cu._unit_workbook_identities(tmp_path), records[0])
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert verdict.route == oid.WB_CONFLICT
+    assert verdict.admitted is False
+    assert oracle["status"] == cu.STATUS_NOT_CHECKED
+    assert (oracle["visual_present"], oracle["numeric_present"], oracle["admitted_evidence"]) == (0, 0, 0)
+    assert oracle["foreign_workbook_evidence"] != [], "a refusal nobody can see is not a guard"
+
+
+def test_a_state_scope_luid_is_read_at_this_gate_too(tmp_path: Path) -> None:
+    """The near neighbour: the entry gate reads the STATE scope and this one used not to.
+
+    A scope one gate compares while the other ignores it is a hole by construction - measured on this
+    branch before the fix, ``PASS route=sha256 admitted=1`` on a manifest whose only state declared
+    another workbook's LUID. States are collapsed into one record here, so their claims are claims
+    about that record and must agree with the entry's and the manifest's.
+    """
+    _write_spec(tmp_path, ["Revenue"])
+    _write_report(tmp_path, ["Revenue"])
+    source = _write_unit_source(tmp_path, b"the workbook this unit was built from")
+    _write_reference_manifest(tmp_path, ["Revenue"], workbook=None, source_sha=_sha256(source))
+    _luid_at_scopes(tmp_path, state=OTHER_LUID)
+
+    records, _ = cu._reference_oracles(tmp_path, None)
+    verdict = cu._attribute_record(cu._unit_workbook_identities(tmp_path), records[0])
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert verdict.route == oid.WB_CONFLICT
+    assert (oracle["status"], oracle["visual_present"], oracle["admitted_evidence"]) == (cu.STATUS_NOT_CHECKED, 0, 0)
+
+
+def test_scopes_that_agree_or_stay_silent_still_certify_at_the_exit_gate(tmp_path: Path) -> None:
+    """THE positive control: refusing every multi-scope manifest would pass both tests above.
+
+    Every ordinary shape must still PASS on the matching sha256 - all three scopes agreeing, a case
+    difference (a LUID is a machine id), a blank scope beside a real one, and no LUID at all. An
+    absent claim is SILENT; only an actively contradicting one refuses.
+    """
+    for label, luids in (
+        ("all three agree", {"manifest": UNIT_LUID, "entry": UNIT_LUID, "state": UNIT_LUID}),
+        ("case differs only", {"manifest": UNIT_LUID, "state": UNIT_LUID.upper()}),
+        ("blank is absence", {"manifest": UNIT_LUID, "entry": "   ", "state": None}),
+        ("no luid anywhere", {}),
+    ):
+        unit = tmp_path / label.replace(" ", "-")
+        unit.mkdir()
+        _write_spec(unit, ["Revenue"])
+        _write_report(unit, ["Revenue"])
+        source = _write_unit_source(unit, b"the workbook this unit was built from")
+        _write_reference_manifest(
+            unit, ["Revenue"], workbook=None, source_sha=_sha256(source), workbook_luid=luids.get("manifest")
+        )
+        _luid_at_scopes(unit, entry=luids.get("entry"), state=luids.get("state"))
+
+        records, _ = cu._reference_oracles(unit, None)
+        verdict = cu._attribute_record(cu._unit_workbook_identities(unit), records[0])
+        oracle = cu.check_oracle_coverage(unit, None, None)
+
+        assert verdict.route == oid.WB_SHA, label
+        assert oracle["status"] == cu.STATUS_PASS, label
+        assert (oracle["visual_present"], oracle["numeric_present"], oracle["admitted_evidence"]) == (1, 1, 1), label
+
+
 def test_a_sha_bearing_record_is_refused_when_the_unit_cannot_hash_its_source(tmp_path: Path) -> None:
     """Fail-CLOSED on unknown: no locatable source means the recorded sha cannot be checked.
 

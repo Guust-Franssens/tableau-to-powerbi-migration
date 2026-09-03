@@ -686,7 +686,7 @@ def provider_grade(provider: str, capabilities: Any) -> str:
 
 
 def _reference_workbook_luid(entry: dict[str, Any], state: dict[str, Any], manifest: dict[str, Any]) -> str | None:
-    """The workbook LUID a `reference/manifest.json` declares, on the state, entry or manifest.
+    """The workbook LUID a `reference/manifest.json` declares, on the state, entry AND manifest.
 
     ⚠️ **This used to be thrown away**, and that is the entry-gate half of the round-N contradiction
     finding: only ``source_workbook_sha256`` was carried into :class:`Evidence`, so a manifest whose
@@ -694,12 +694,18 @@ def _reference_workbook_luid(entry: dict[str, Any], state: dict[str, Any], manif
     contradict with by the time :meth:`WorkbookIdentity.attribute` saw it - `READY 1/1`, exit 0,
     ``attribution.luid == 0``. Key names mirror `check_unit._declared_workbook`, so one vocabulary
     describes a manifest at both gates.
+
+    ⚠️ **Round 2 then found the same fail-open one layer earlier: this SELECTED by scope.** It
+    returned the first non-blank claim - state, then entry, then manifest - so a state-level LUID
+    matching this unit silently superseded a manifest-level one naming a different workbook, and the
+    contradiction was gone before anything could compare it (`READY`, `ready`, `sha256=1`,
+    `conflicting-identity=0`, exit 0). Nothing in the manifest schema makes a narrower scope an
+    override, so every non-blank claim must AGREE: :func:`object_identity.agreed_luid` is the one
+    place that is decided, for this reader and `check_unit._declared_workbook` alike.
     """
-    for source in (state, entry, manifest):
-        luid = source.get("workbook_luid") or source.get("source_workbook_luid")
-        if isinstance(luid, str) and luid.strip():
-            return luid.strip()
-    return None
+    return agreed_luid(
+        *(source.get(key) for source in (state, entry, manifest) for key in ("workbook_luid", "source_workbook_luid"))
+    )
 
 
 def _reference_states(
@@ -799,8 +805,16 @@ def _oracle_leg(directory: Path, record: dict[str, Any]) -> tuple[Path, Recorded
     return None
 
 
-def _oracle_record(directory: Path, record: dict[str, Any]) -> Evidence | RejectedEvidence:
-    """Build one oracle view record."""
+def _oracle_record(directory: Path, record: dict[str, Any], manifest: dict[str, Any]) -> Evidence | RejectedEvidence:
+    """Build one oracle view record.
+
+    The LUID is joined across the view record AND the manifest, by the same rule as a reference
+    manifest's scopes (:func:`_reference_workbook_luid`): every non-blank claim must agree. The
+    top-level key is read because `check_unit._declared_workbook` reads it, and a scope one gate
+    honours while the other ignores it is a hole by construction - measured on this branch, an
+    oracle manifest whose top-level ``workbook_luid`` named another workbook reached
+    `READY / ready / luid=1 / conflicting-identity=0 / exit 0` here while the exit gate compared it.
+    """
     name = str(record.get("view_name") or record.get("view_url_name") or "")
     leg = _oracle_leg(directory, record)
     if leg is None:
@@ -815,7 +829,7 @@ def _oracle_record(directory: Path, record: dict[str, Any]) -> Evidence | Reject
         provider="oracle_capture",
         render_path=render_path,
         recorded=recorded,
-        workbook_luid=luid,
+        workbook_luid=agreed_luid(luid, manifest.get("workbook_luid")),
         workbook_name=workbook_name,
     )
 
@@ -831,10 +845,10 @@ def oracle_evidence(oracle_dirs: list[Path]) -> tuple[list[Evidence], list[Rejec
     """
     built: list[Evidence | RejectedEvidence] = []
     for directory in oracle_dirs:
-        payload = json_object(directory / "oracle-manifest.json")
+        payload = json_object(directory / "oracle-manifest.json") or {}
         built.extend(
-            _oracle_record(directory, record)
-            for record in (payload or {}).get("views") or []
+            _oracle_record(directory, record, payload)
+            for record in payload.get("views") or []
             if isinstance(record, dict)
         )
     return _split(built)

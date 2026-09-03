@@ -569,6 +569,12 @@ def test_a_filename_luid_that_contradicts_provenance_establishes_nothing(bundle:
 
     Picking whichever was read first is the coin toss issue #438 named; here the render is refused
     and the page reports blind rather than being certified on a contested identity.
+
+    ⚠️ Round 2 of PR #454 re-aimed the census assertion, deliberately. This used to be counted as
+    ``unknown`` - "the render declares an identity this unit cannot answer" - which was not true: the
+    unit answered twice, with two different LUIDs. Now that a contradiction is a VALUE rather than
+    silence (:data:`object_identity.LUID_CONTRADICTED`) the refusal names itself, and ``unknown`` is
+    pinned to 0 so a regression to the vaguer route fails here. The readiness verdict is unchanged.
     """
     luid = "adc431bb-aeeb-43fe-8ecb-092d4bae8bfa"
     other = "007f70ac-bf40-4838-9d73-134d40f504db"
@@ -584,7 +590,8 @@ def test_a_filename_luid_that_contradicts_provenance_establishes_nothing(bundle:
 
     report = crr.scan(bundle)
     assert report["units"][0]["pages"][0]["readiness"] == "blind"
-    assert report["evidence_attributed"]["unknown"] == 1
+    assert report["evidence_attributed"]["conflicting-identity"] == 1
+    assert report["evidence_attributed"]["unknown"] == 0
 
 
 def test_every_refusal_is_counted_so_it_can_be_told_from_a_missing_capture(bundle: Path) -> None:
@@ -767,6 +774,140 @@ def test_a_reference_manifest_whose_luid_agrees_with_its_sha_still_certifies(bun
     assert report["units"][0]["pages"][0]["readiness"] == "ready"
     assert report["evidence_attributed"]["sha256"] == 1
     assert report["evidence_attributed"]["conflicting-identity"] == 0
+
+
+# --------------------------------------------------------------------------------------------
+# Round 2 of PR #454: the same fail-open, one layer earlier - conflicting SCOPES were collapsed
+# --------------------------------------------------------------------------------------------
+
+
+def test_a_manifest_scope_that_contradicts_a_narrower_one_is_not_silently_superseded(bundle: Path) -> None:
+    """THE round-2 finding at the entry gate. Verbatim before this fix::
+
+        B_ENTRY_MULTISCOPE_CONFLICT {"status":"READY","page":"ready","pages_ready":1,
+          "sha256":1,"conflicting-identity":0,"exit":0}
+
+    A `reference/manifest.json` may declare `workbook_luid` at three scopes, and
+    `_reference_workbook_luid` returned the FIRST non-blank one - state, then entry, then manifest.
+    So a state-level LUID naming this unit discarded a manifest-level LUID naming another workbook,
+    and the contradiction was gone before `WorkbookIdentity.attribute` could see it. No schema makes
+    a narrower scope an override; every non-blank claim must agree.
+
+    The route is asserted rather than the readiness alone: `blind` is produced by a dozen guards in
+    this gate, and `sha256 == 0` pins that the matching axis did not quietly win instead.
+    """
+    sha = build_unit(bundle, "WB", worksheets=["Revenue Trend"])
+    write_reference(
+        bundle,
+        [("Revenue Trend", "embedded_thumbnail", ["layout_grade"])],
+        source_sha=sha,
+        state_luid=UNIT_LUID,
+        workbook_luid=OTHER_LUID,
+    )
+
+    report = crr.scan(bundle)
+    assert report["units"][0]["pages"][0]["readiness"] == "blind"
+    assert report["evidence_attributed"]["conflicting-identity"] == 1
+    assert report["evidence_attributed"]["sha256"] == 0, "the agreeing scope must not have won"
+    assert crr.main([str(bundle), "--quiet"]) == 1
+
+
+def test_an_entry_scope_that_contradicts_the_manifest_is_refused_too(bundle: Path) -> None:
+    """The middle scope, because a fix aimed at ONE pair of scopes is not the rule.
+
+    ``state`` beats ``entry`` beats ``manifest`` in the old precedence, so a fix that only compared
+    the state against the manifest would leave the entry level selecting exactly as before.
+    """
+    sha = build_unit(bundle, "WB", worksheets=["Revenue Trend"])
+    write_reference(
+        bundle,
+        [("Revenue Trend", "embedded_thumbnail", ["layout_grade"])],
+        source_sha=sha,
+        entry_luid=UNIT_LUID,
+        workbook_luid=OTHER_LUID,
+    )
+
+    report = crr.scan(bundle)
+    assert report["evidence_attributed"]["conflicting-identity"] == 1
+    assert report["units"][0]["pages"][0]["readiness"] == "blind"
+
+
+def test_three_scopes_of_which_two_agree_are_still_a_contradiction(bundle: Path) -> None:
+    """A majority is not a verdict: one dissenting scope is enough, and agreement is not a vote."""
+    sha = build_unit(bundle, "WB", worksheets=["Revenue Trend"])
+    write_reference(
+        bundle,
+        [("Revenue Trend", "embedded_thumbnail", ["layout_grade"])],
+        source_sha=sha,
+        state_luid=UNIT_LUID,
+        entry_luid=UNIT_LUID,
+        workbook_luid=OTHER_LUID,
+    )
+
+    report = crr.scan(bundle)
+    assert report["evidence_attributed"]["conflicting-identity"] == 1
+    assert report["units"][0]["pages"][0]["readiness"] == "blind"
+
+
+def test_scopes_that_agree_or_stay_silent_still_certify(bundle: Path) -> None:
+    """THE positive control: refusing every multi-scope manifest would pass all three tests above.
+
+    Four ordinary shapes must still reach READY on the matching sha256 - three scopes agreeing, two
+    agreeing but for CASE (a LUID is a machine id, so case is not a disagreement), a blank scope
+    beside a real one, and no LUID at all. The asymmetry this pins is the one round 3 established:
+    an absent claim is SILENT, only an actively contradicting one refuses.
+    """
+    for label, luids in (
+        ("all three agree", {"state_luid": UNIT_LUID, "entry_luid": UNIT_LUID, "workbook_luid": UNIT_LUID}),
+        ("case differs only", {"state_luid": UNIT_LUID.upper(), "workbook_luid": UNIT_LUID}),
+        ("blank is absence", {"state_luid": "   ", "workbook_luid": UNIT_LUID}),
+        ("no luid anywhere", {}),
+    ):
+        root = bundle / label
+        (root.parent.parent / "assets").mkdir(parents=True, exist_ok=True)
+        sha = build_unit(root, "WB", worksheets=["Revenue Trend"])
+        write_reference(root, [("Revenue Trend", "embedded_thumbnail", ["layout_grade"])], source_sha=sha, **luids)
+
+        report = crr.scan(root)
+        assert report["units"][0]["pages"][0]["readiness"] == "ready", label
+        assert report["evidence_attributed"]["sha256"] == 1, label
+        assert report["evidence_attributed"]["conflicting-identity"] == 0, label
+        assert crr.main([str(root), "--quiet"]) == 0, label
+
+
+def test_an_oracle_manifests_own_luid_is_read_at_this_gate_too(bundle: Path) -> None:
+    """The near neighbour: the SAME conflict arriving through the oracle reader.
+
+    `check_unit._declared_workbook` has always read an oracle manifest's top-level ``workbook_luid``
+    (it is the ``container`` argument), while this gate read only the view record - so a scope one
+    gate compares and the other ignores was a hole by construction. Measured on this branch before
+    the fix: ``READY / ready / luid=1 / conflicting-identity=0 / exit 0``.
+    """
+    build_unit(bundle, "WB", worksheets=["Revenue Trend"])
+    write_oracle(bundle, [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_luid": UNIT_LUID}])
+    manifest = bundle / "_oracle" / "oracle-manifest.json"
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["workbook_luid"] = OTHER_LUID
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    report = crr.scan(bundle)
+    assert report["units"][0]["pages"][0]["readiness"] == "blind"
+    assert report["evidence_attributed"]["conflicting-identity"] == 1
+    assert report["evidence_attributed"]["luid"] == 0, "the view-level claim must not have won"
+
+
+def test_an_oracle_manifest_agreeing_with_its_views_still_certifies(bundle: Path) -> None:
+    """The control for the reader above: reading a second scope must not break the ordinary one."""
+    build_unit(bundle, "WB", worksheets=["Revenue Trend"])
+    write_oracle(bundle, [{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_luid": UNIT_LUID}])
+    manifest = bundle / "_oracle" / "oracle-manifest.json"
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["workbook_luid"] = UNIT_LUID.upper()
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    report = crr.scan(bundle)
+    assert report["units"][0]["pages"][0]["readiness"] == "ready"
+    assert report["evidence_attributed"]["luid"] == 1
 
 
 def test_a_sha256_confirmed_provenance_luid_is_trusted(bundle: Path) -> None:

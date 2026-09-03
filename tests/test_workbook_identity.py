@@ -46,6 +46,8 @@ def test_the_workbook_route_vocabulary_is_pinned_to_its_literal_values() -> None
     assert (oid.WB_STALE, oid.WB_FOREIGN, oid.WB_UNKNOWN) == ("stale", "foreign", "unknown")
     assert oid.WB_UNCONFIRMED == "revision-unconfirmed"
     assert oid.WB_CONFLICT == "conflicting-identity"
+    assert oid.LUID_CONTRADICTED == "<contradicted-luid-declarations>"
+    assert oid.LUID_CONTRADICTED != oid.agreed_luid(), "a contradiction must not be spelled as absence"
     assert oid.WB_ROUTES == ("sha256", "luid"), "a display NAME is not an admitting route"
     assert oid.WB_REFUSALS == (
         "name",
@@ -436,14 +438,78 @@ def test_agreed_luid_refuses_two_claims_that_disagree() -> None:
 
     A filename prefix that disagrees with the stamped provenance means one of them is about a
     different workbook, and picking whichever was read first is the coin toss issue #438 named.
+
+    ⚠️ **Round 2 of PR #454 changed what a disagreement RETURNS, and the change is the fix.** It used
+    to be ``None``, which is indistinguishable from "nobody declared a LUID" - and absence is
+    deliberately SILENT, so both readers went on to admit the record on a weaker axis. A
+    contradiction now returns :data:`object_identity.LUID_CONTRADICTED`, which
+    :meth:`WorkbookIdentity.attribute` refuses as ``conflicting-identity``. The two are asserted to
+    be DIFFERENT values here, because collapsing them again is precisely the fail-open.
     """
     assert oid.agreed_luid(LUID_A, LUID_A) == LUID_A
     assert oid.agreed_luid(LUID_A, None) == LUID_A
     assert oid.agreed_luid(None, LUID_A) == LUID_A
     assert oid.agreed_luid(LUID_A.upper(), LUID_A) == LUID_A  # case is not a disagreement
-    assert oid.agreed_luid(LUID_A, LUID_B) is None
+    assert oid.agreed_luid(LUID_A, LUID_B) == oid.LUID_CONTRADICTED
+    assert oid.agreed_luid(LUID_A, LUID_B, LUID_A) == oid.LUID_CONTRADICTED, "one dissenter is enough"
+    assert oid.LUID_CONTRADICTED is not None, "absence is silent; a contradiction must not be"
     assert oid.agreed_luid(None, None) is None
     assert oid.agreed_luid("  ", "") is None
+    # Absence stays absence however it is spelled, including through the values a JSON reader hands
+    # over: a blank LUID must never become a refusal (`WorkbookIdentity.of` normalises the same way).
+    assert oid.agreed_luid(" \t ", None, LUID_A) == LUID_A
+    assert oid.agreed_luid(0, [], {}, LUID_A) == LUID_A
+
+
+def test_a_self_contradicted_luid_is_refused_by_name_whichever_side_declared_it() -> None:
+    """Round 2 of PR #454: a side may contradict ITSELF, before any comparison happens.
+
+    Both gates read a LUID from several scopes - a reference manifest's state/entry/manifest, a
+    unit's handover slice and migration spec - and both took the first non-blank one. So a
+    contradicting claim was discarded before :meth:`WorkbookIdentity.attribute` saw the record, and
+    the sha256 that DID match was allowed to certify it.
+
+    The route is asserted, not merely ``admitted is False``: this file's whole point is that one
+    refusal can be told from another, and at least four other guards in each gate also produce
+    "not admitted". A contradiction is ``conflicting-identity`` on the LUID axis - never ``foreign``
+    (someone else's capture, ignore it) and never ``unknown`` (nothing identified it).
+    """
+    contradicted = oid.WorkbookIdentity.of(luid=oid.agreed_luid(LUID_A, LUID_B), sha256="a" * 64)
+    unit = oid.WorkbookIdentity(luid=LUID_A, name="WB", sha256="a" * 64)
+
+    from_record = unit.attribute(contradicted)
+    assert (from_record.route, from_record.axis, from_record.admitted) == (oid.WB_CONFLICT, oid.WB_LUID, False)
+    assert "the record declares two different workbook LUIDs" in from_record.detail
+
+    from_unit = contradicted.attribute(oid.WorkbookIdentity(luid=LUID_A, sha256="a" * 64))
+    assert (from_unit.route, from_unit.admitted) == (oid.WB_CONFLICT, False)
+    assert "this unit declares two different workbook LUIDs" in from_unit.detail
+
+
+def test_a_contradicted_luid_refuses_even_the_axis_that_would_otherwise_admit() -> None:
+    """The discriminating twin: without it, "refuse everything" would pass the test above.
+
+    A record whose LUID declarations contradict each other is refused even when its sha256 IS this
+    unit's source bytes - that is the whole finding - while the same record with agreeing (or absent)
+    LUID declarations still certifies on that same sha256. Both halves are asserted here so a fix
+    that simply stopped admitting sha-bearing records cannot pass.
+    """
+    unit = oid.WorkbookIdentity(luid=LUID_A, name="WB", sha256="a" * 64)
+
+    def record(*claims: str | None, sha256: str | None = "a" * 64) -> oid.WorkbookIdentity:
+        return oid.WorkbookIdentity.of(luid=oid.agreed_luid(*claims), sha256=sha256)
+
+    # sha256 is the first machine axis, so an agreeing record is admitted BY IT - with the LUID
+    # compared rather than skipped (`_contradiction`). The route is named so "it refused" and "it
+    # admitted for the wrong reason" cannot both satisfy this.
+    assert unit.attribute(record(LUID_A, LUID_B)).route == oid.WB_CONFLICT
+    assert unit.attribute(record(LUID_A, LUID_A)).route == oid.WB_SHA
+    assert unit.attribute(record(LUID_A.upper(), LUID_A)).route == oid.WB_SHA
+    assert unit.attribute(record(None, "  ")).route == oid.WB_SHA
+    assert unit.attribute(record()).route == oid.WB_SHA
+    # LUID-only records, so the luid route itself is exercised rather than inferred.
+    assert unit.attribute(record(LUID_A, LUID_A, sha256=None)).route == oid.WB_LUID
+    assert unit.attribute(record(LUID_A, LUID_B, sha256=None)).route == oid.WB_CONFLICT
 
 
 # ------------------------------------------------------------------------------------------------

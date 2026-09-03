@@ -158,6 +158,8 @@ def write_reference(  # pylint: disable=too-many-arguments,too-many-locals
     record_integrity: bool = True,
     view_type: str | None = None,
     workbook_luid: str | None = None,
+    entry_luid: str | None = None,
+    state_luid: str | None = None,
 ) -> Path:
     """A `reference/manifest.json`. Each entry is ``(name, provider, capabilities)``.
 
@@ -172,6 +174,11 @@ def write_reference(  # pylint: disable=too-many-arguments,too-many-locals
     ``workbook_luid`` writes the manifest-level LUID key `check_unit._declared_workbook` already
     reads. The producer does not write it today; a manifest carrying one is enriched or hand-edited,
     which is exactly the shape the round-N contradiction finding used.
+
+    ``entry_luid`` and ``state_luid`` write the SAME key at the two narrower scopes both gates also
+    read. They exist because round 2 of PR #454 found the readers selecting one scope's claim by
+    precedence and discarding the others - a fixture that could only write one scope cannot express
+    a multi-scope contradiction, and so could not have caught it.
     """
     reference = root / "reference"
     reference.mkdir(parents=True, exist_ok=True)
@@ -193,13 +200,18 @@ def write_reference(  # pylint: disable=too-many-arguments,too-many-locals
         }
         if view_type is not None:
             state["view_type"] = view_type
+        if state_luid is not None:
+            state["workbook_luid"] = state_luid
         if record_integrity:
             state |= {
                 "sha256": hashlib.sha256(blob).hexdigest(),
                 "bytes": len(blob),
                 "dimensions": {"w": size[0], "h": size[1], "dpr": 2},
             }
-        dashboards.append({"name": name, "states": [state]})
+        entry: dict = {"name": name, "states": [state]}
+        if entry_luid is not None:
+            entry["workbook_luid"] = entry_luid
+        dashboards.append(entry)
     payload: dict = {"source_workbook_sha256": source_sha, "dashboards": dashboards}
     if workbook_luid is not None:
         payload["workbook_luid"] = workbook_luid
