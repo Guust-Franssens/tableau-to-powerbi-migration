@@ -290,13 +290,20 @@ def test_a_report_with_pages_but_no_visuals_is_refused(package: Path, migrations
 
 
 @pytest.mark.usefixtures("pass_gate")
-def test_a_report_with_no_pages_at_all_is_refused(package: Path, migrations: Path) -> None:
-    """Desktop-local settings and an empty `pages/` is the exact shape that passed a sign-off."""
+def test_a_report_with_no_pages_at_all_is_refused(package: Path, migrations: Path, tmp_path: Path) -> None:
+    """Desktop-local settings and an empty `pages/` is the exact shape that passed a sign-off.
+
+    The finding must name the MISSING PAGES, not the (also absent) visuals: refusing with the wrong
+    reason sends the next person to look at the wrong thing.
+    """
     pages = package / "fabric" / "Wb.Report" / "definition" / "pages"
     for page in pages.iterdir():
         if page.is_dir():
             shutil.rmtree(page)
-    assert run(package, migrations) == pu.EXIT_REFUSED_CONTENT
+    envelope_path = tmp_path / "nopages.json"
+    assert run(package, migrations, "--json", str(envelope_path)) == pu.EXIT_REFUSED_CONTENT
+    findings = json.loads(envelope_path.read_text(encoding="utf-8"))["findings"]
+    assert any("enumerates no page" in finding for finding in findings), findings
     assert not migrations.exists()
 
 
