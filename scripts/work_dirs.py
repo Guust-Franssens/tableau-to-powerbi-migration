@@ -6,7 +6,9 @@ purpose: single source of truth for the canonical PRE-BUNDLE work layout - resol
          this module implements: `_runs/<NNN>-<slug>/{assessment,assets,bundle,oracle,packages,
          deliverables,scratch}/`.
 usage:   python scripts/work_dirs.py <unit-name> [--repo-root PATH] [--json]
+         python scripts/work_dirs.py --verify [--repo-root PATH] [--json]
          from work_dirs import allocate_run, sanitize_unit_key, runs_root, list_runs
+         from work_dirs import check_run_location
 
 Scope of THIS module - deliberately narrow (see the PR that landed it, Refs #291)
 ----------------------------------------------------------------------------------
@@ -37,6 +39,29 @@ meaning: the re-runnable `*.py` transform scripts inside an existing `_work/` tr
 TRACKED. Per-run scratch is the reverse (nothing under it is tracked), so it lives under `_runs/`
 instead - a root-anchored `/_*` rule already covers it (verified: `git check-ignore -v -- _runs`
 reports `.gitignore:127:/_*`), same as every other top-level scratch root in this repo.
+
+⚠️ The run NUMBER is identity: never renamed, never renumbered, never reused
+-----------------------------------------------------------------------------
+Renaming or renumbering an ALREADY-ALLOCATED run directory is destructive, not tidying. Generated
+bundle output under `<run>/bundle/` embeds ABSOLUTE self-paths, so moving a run after the fact
+breaks every bundle beneath it - PBIP refresh, the report's `byPath` model binding, and `_build/`
+replay all resolve against a path that no longer exists. A reorg that renumbers 14 run directories
+therefore breaks 14 bundles. That is not hypothetical: it happened on a real customer engagement
+whose agent read THIS FILE, pattern-matched the naming rules below, and never opened the two
+documents that carried the prohibition (issue #470).
+
+**Granularity: one run per PIPELINE RUN, not one per workbook.** A 48-workbook estate sweep is ONE
+run; its per-workbook units live inside that run's `bundle/pbip/`. `unit_key` names what the run is
+*about* (a site, a project, or a single workbook when that is genuinely the whole job) - it is not a
+promise that every workbook gets a run of its own.
+
+Prevention is only advice, so this module also makes a rename DETECTABLE afterwards: `allocate_run`
+records the directory name it allocated under the `allocated_dir_name` key, and `check_run_location`
+(surfaced by `list_runs` and by `python scripts/work_dirs.py --verify`) reports `intact`, `moved` or
+`unverifiable`. `unverifiable` is NOT a soft `intact` - see `check_run_location`.
+
+Map: `docs/INDEX.md`. The same rule is stated in `docs/migration-phases.md` (Phase 1) and
+`docs/operator-runbook.md` (§6.4 Scratch).
 """
 
 from __future__ import annotations
@@ -85,6 +110,33 @@ _RUN_DIR_RE = re.compile(r"^(\d+)(?:-.*)?$")
 _MAX_UNIT_KEY_LEN = 60
 _MAX_ALLOCATION_ATTEMPTS = 50  # generous; a genuine collision only ever needs one retry
 
+#: Manifest key under which `allocate_run` records the directory NAME (`<NNN>-<slug>`) it allocated.
+#: Reserved exactly like `run`/`unit_key`/`created`/`status`: written AFTER `extra_manifest` is
+#: merged, so a caller can neither supply nor clobber it.
+#:
+#: Why the NAME and not an absolute path: the name is what a renumber/rename changes, and it is
+#: invariant under every LEGITIMATE relocation - cloning the repo, moving the checkout, or working
+#: in a `git worktree` all change the absolute path while the run keeps its identity. A check that
+#: fired on a fresh clone would be noise, and a noisy check is one people learn to ignore. See
+#: `check_run_location`.
+RUN_LOCATION_KEY = "allocated_dir_name"
+
+#: The three states `check_run_location` reports. They are mutually exclusive and a caller must be
+#: able to tell them apart: `UNVERIFIABLE` is NOT a soft `INTACT`. Collapsing unassessable input
+#: into the clean bucket is this repo's dominant defect class, and it is precisely the defect issue
+#: #470 is about - a renumbered run that read back as healthy.
+RUN_LOCATION_INTACT = "intact"
+RUN_LOCATION_MOVED = "moved"
+RUN_LOCATION_UNVERIFIABLE = "unverifiable"
+RUN_LOCATION_STATES: tuple[str, ...] = (RUN_LOCATION_INTACT, RUN_LOCATION_MOVED, RUN_LOCATION_UNVERIFIABLE)
+
+#: Values of `RunLocationCheck.derived_name_check` - a strictly SUBORDINATE hint, only ever set on an
+#: `UNVERIFIABLE` run, and never able to promote one to `INTACT`. See `check_run_location`.
+DERIVED_NAME_MATCHES = "matches"
+DERIVED_NAME_MISMATCH = "mismatch"
+DERIVED_NAME_UNAVAILABLE = "unavailable"
+DERIVED_NAME_NOT_CONSULTED = "not_consulted"
+
 
 def sanitize_unit_key(name: str) -> str:
     """Turn an arbitrary unit name (a Tableau workbook/site/project display name) into a
@@ -117,7 +169,7 @@ class RunPaths:
     """Everything about one allocated run. `root` is the ONLY thing on disk that identifies it -
     every other accessor is derived, never stored twice. Never rename `root` after allocation
     (issue #234, rule 1): generated bundle output embeds absolute self-paths, so moving a run after
-    the fact breaks refresh.
+    the fact breaks refresh. `check_run_location` is what detects it if someone does anyway.
     """
 
     root: Path
@@ -194,6 +246,130 @@ def _existing_run_numbers(root: Path) -> list[int]:
     return numbers
 
 
+def _run_dir_name(run_number: int, unit_key: str) -> str:
+    """The one place the `<NNN>-<slug>` directory name is formed. `allocate_run` uses it to create
+    the directory and `_derived_dir_name` uses it to reconstruct one, so the zero-padding rule
+    cannot drift between the two.
+    """
+    width = max(3, len(str(run_number)))
+    return f"{run_number:0{width}d}-{unit_key}"
+
+
+def _derived_dir_name(manifest: dict[str, Any]) -> str | None:
+    """Reconstruct the directory name a manifest's own `run`/`unit_key` IMPLY, or None if they
+    cannot. This is inference, never evidence - it depends on `_run_dir_name`'s padding rule holding
+    for the life of the run, which a recorded name does not. Its only job is to give a LEGACY
+    manifest (one written before `RUN_LOCATION_KEY` existed) a subordinate hint; it may never
+    promote such a run out of `unverifiable`.
+    """
+    run_number = manifest.get("run")
+    unit_key = manifest.get("unit_key")
+    # `isinstance(True, int)` is True in Python, so booleans have to be excluded explicitly.
+    if isinstance(run_number, bool) or not isinstance(run_number, int) or run_number < 0:
+        return None
+    if not isinstance(unit_key, str) or not unit_key:
+        return None
+    return _run_dir_name(run_number, unit_key)
+
+
+@dataclass(frozen=True)
+class RunLocationCheck:
+    """Whether a run directory is still where it was allocated. Read `state` - never `detail`.
+
+    `derived_name_check` is deliberately not part of `state`: it is a hint, it is only ever set on
+    an `unverifiable` run, and a `matches` hint does NOT mean intact.
+    """
+
+    state: str
+    actual_dir_name: str
+    recorded_dir_name: str | None
+    derived_name_check: str
+    detail: str
+
+    @property
+    def is_intact(self) -> bool:
+        """True only for a run whose RECORDED name matches where it actually sits."""
+        return self.state == RUN_LOCATION_INTACT
+
+    def as_dict(self) -> dict[str, Any]:
+        """JSON-serializable form, as attached by `list_runs` and printed by `--verify --json`."""
+        return {
+            "state": self.state,
+            "actual_dir_name": self.actual_dir_name,
+            "recorded_dir_name": self.recorded_dir_name,
+            "derived_name_check": self.derived_name_check,
+            "detail": self.detail,
+        }
+
+
+def check_run_location(manifest: dict[str, Any], run_dir: Path) -> RunLocationCheck:
+    """Compare where a run says it was allocated against where it actually sits. Pure: reads a
+    manifest dict and a path, touches no disk, mutates nothing, and never raises (issue #470).
+
+    Three states, and the third is the point:
+
+    * `intact` - the recorded `<NNN>-<slug>` name equals the directory's actual name.
+    * `moved` - they differ. The run has been renamed or renumbered since allocation, so generated
+      bundle output beneath it embeds absolute self-paths that no longer resolve. Both names are
+      reported so the damage is locatable.
+    * `unverifiable` - the manifest records no usable name. EVERY run allocated before this key
+      existed lands here, including the live `_runs/408-*` on the machine that shipped this change.
+      It is not a pass and it is not a failure; it means the question cannot be answered from the
+      evidence, which is a different thing from answering it "fine".
+
+    Comparison is on the directory NAME only, never on an absolute path: a repository that has been
+    cloned, moved or checked out as a `git worktree` is legitimately somewhere else and must not
+    report `moved` (see `RUN_LOCATION_KEY`).
+    """
+    actual = run_dir.name
+    recorded = manifest.get(RUN_LOCATION_KEY)
+
+    if isinstance(recorded, str) and recorded:
+        if recorded == actual:
+            return RunLocationCheck(
+                state=RUN_LOCATION_INTACT,
+                actual_dir_name=actual,
+                recorded_dir_name=recorded,
+                derived_name_check=DERIVED_NAME_NOT_CONSULTED,
+                detail=f"allocated as {recorded!r} and still there",
+            )
+        return RunLocationCheck(
+            state=RUN_LOCATION_MOVED,
+            actual_dir_name=actual,
+            recorded_dir_name=recorded,
+            derived_name_check=DERIVED_NAME_NOT_CONSULTED,
+            detail=(
+                f"allocated as {recorded!r} but found as {actual!r} - renamed or renumbered since "
+                "allocation; generated bundle output embeds absolute self-paths, so treat every "
+                "bundle under this run as broken until re-checked"
+            ),
+        )
+
+    if recorded is None:
+        missing = f"no {RUN_LOCATION_KEY!r} recorded (allocated before this key existed)"
+    else:
+        missing = f"{RUN_LOCATION_KEY!r} is present but is not a usable directory name ({recorded!r})"
+
+    derived = _derived_dir_name(manifest)
+    if derived is None:
+        hint, why = DERIVED_NAME_UNAVAILABLE, "and its own run/unit_key cannot reconstruct one either"
+    elif derived == actual:
+        hint, why = DERIVED_NAME_MATCHES, f"its run/unit_key imply {derived!r}, which matches - but that is INFERENCE"
+    else:
+        hint, why = (
+            DERIVED_NAME_MISMATCH,
+            f"its run/unit_key imply {derived!r}, which does NOT match {actual!r} - likely renamed or "
+            "renumbered, but that is INFERENCE, not a record",
+        )
+    return RunLocationCheck(
+        state=RUN_LOCATION_UNVERIFIABLE,
+        actual_dir_name=actual,
+        recorded_dir_name=None,
+        derived_name_check=hint,
+        detail=f"{missing}; {why}",
+    )
+
+
 def allocate_run(
     unit_key: str,
     *,
@@ -209,8 +385,22 @@ def allocate_run(
     candidate. The directory name is `<NNN>-<slug>`, zero-padded to at least 3 digits; the slug is
     decoration only (never parsed back - see `sanitize_unit_key`), the number is the identity.
 
+    ⚠️ **The directory this returns must never be renamed, renumbered or reused.** Generated bundle
+    output under `<run>/bundle/` embeds ABSOLUTE self-paths, so renaming a run afterwards breaks
+    every bundle beneath it (refresh, `byPath` report-to-model binding, `_build/` replay). A real
+    customer reorg renumbered 14 run directories on exactly this misunderstanding - see the module
+    docstring, `docs/migration-phases.md` (Phase 1) and `docs/operator-runbook.md` (§6.4), and issue
+    #470. Allocate a NEW run instead; numbering is cheap and gaps are expected.
+
+    One run per PIPELINE RUN, not one per workbook: a 48-workbook estate sweep is a single run whose
+    per-workbook units live inside its `bundle/pbip/`.
+
+    So that a rename is at least DETECTABLE afterwards, the directory name is also written into the
+    manifest under `RUN_LOCATION_KEY`; `check_run_location` compares the two.
+
     `extra_manifest` is merged in FIRST, so a caller cannot accidentally clobber the reserved
-    `run` / `unit_key` / `created` / `status` keys this function itself writes.
+    `run` / `unit_key` / `created` / `status` / `allocated_dir_name` keys this function itself
+    writes.
     """
     root = runs_root(repo_root)
     root.mkdir(parents=True, exist_ok=True)
@@ -219,8 +409,7 @@ def allocate_run(
     existing = _existing_run_numbers(root)
     candidate = (max(existing) + 1) if existing else 1
     for _ in range(_MAX_ALLOCATION_ATTEMPTS):
-        width = max(3, len(str(candidate)))
-        run_dir = root / f"{candidate:0{width}d}-{slug}"
+        run_dir = root / _run_dir_name(candidate, slug)
         try:
             run_dir.mkdir(parents=False, exist_ok=False)
         except FileExistsError:
@@ -239,6 +428,7 @@ def allocate_run(
                 "unit_key": slug,
                 "created": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "status": "active",
+                RUN_LOCATION_KEY: run_dir.name,
             }
         )
         run.manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
@@ -254,6 +444,15 @@ def list_runs(repo_root: Path | None = None) -> list[dict[str, Any]]:
     """Read back every run's manifest, sorted by run number. Pure inspection - never mutates, and
     never raises on a hand-created or half-written run directory; it just skips one with no
     readable `run.json` rather than crashing a status query over it.
+
+    Two keys are DERIVED and overwrite anything of the same name in the manifest, because both
+    describe where the run is *now* and a stale recorded value silently presented as current is the
+    failure this whole function is being audited for:
+
+    * `root` - the directory it was actually found in.
+    * `location_check` - `check_run_location(...).as_dict()`, i.e. `intact` / `moved` /
+      `unverifiable`. Read `location_check["state"]`; never infer health from `root` alone, which is
+      derived from wherever the directory sits and so is true by construction (issue #470).
     """
     root = runs_root(repo_root)
     if not root.is_dir():
@@ -267,19 +466,83 @@ def list_runs(repo_root: Path | None = None) -> list[dict[str, Any]]:
             data = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             continue
-        data.setdefault("root", str(child))
+        # A `run.json` holding valid JSON that is not an object (a list, a bare string, a number) is
+        # not a manifest. Skipping it keeps the "never raises" promise literally true - `.get` and
+        # `.setdefault` on a list raise `AttributeError`, which used to escape this function.
+        if not isinstance(data, dict):
+            continue
+        data["root"] = str(child)
+        data["location_check"] = check_run_location(data, child).as_dict()
         manifests.append(data)
     manifests.sort(key=lambda m: m.get("run", 0))
     return manifests
 
 
+def verify_runs(repo_root: Path | None = None) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Every run plus a count per `RUN_LOCATION_STATES` entry. Pure inspection, like `list_runs`."""
+    runs = list_runs(repo_root)
+    counts = {state: 0 for state in RUN_LOCATION_STATES}
+    for run in runs:
+        state = run.get("location_check", {}).get("state", RUN_LOCATION_UNVERIFIABLE)
+        counts[state] = counts.get(state, 0) + 1
+    return runs, counts
+
+
+def verify_exit_code(counts: dict[str, int]) -> int:
+    """Gate semantics, matching `check_reference_readiness.py`: 0 clean, 1 findings, 3 cannot
+    establish - and neither 1 nor 3 is a pass. A `moved` run outranks an `unverifiable` one because
+    it is an established finding rather than an unanswered question.
+    """
+    if counts.get(RUN_LOCATION_MOVED):
+        return 1
+    if counts.get(RUN_LOCATION_UNVERIFIABLE):
+        return 3
+    return 0
+
+
+def _print_verify_text(runs: list[dict[str, Any]], counts: dict[str, int], root: Path) -> None:
+    """Human-readable `--verify` report. The STATE is printed in caps and first on every line, so a
+    subordinate `derived name check` hint can never be mistaken for the verdict.
+    """
+    print(f"_runs/ location check: {root}")
+    if not runs:
+        print("  (no runs with a readable run.json)")
+    for run in runs:
+        check = run.get("location_check", {})
+        print(f"  {check.get('state', '?').upper():<13} {check.get('actual_dir_name', '?')}")
+        print(f"                {check.get('detail', '')}")
+    summary = ", ".join(f"{counts.get(state, 0)} {state}" for state in RUN_LOCATION_STATES)
+    print(f"{len(runs)} run(s): {summary}")
+    if counts.get(RUN_LOCATION_UNVERIFIABLE):
+        print("  'unverifiable' is NOT 'intact' - those runs predate path recording and cannot be checked.")
+
+
 def main() -> int:
-    """CLI: allocate one run for `unit` and print its canonical paths."""
+    """CLI: allocate one run for `unit` and print its canonical paths, or `--verify` the tree."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("unit", help="unit name/key to allocate a run for (e.g. a workbook or site slug)")
+    parser.add_argument("unit", nargs="?", help="unit name/key to allocate a run for (e.g. a workbook or site slug)")
     parser.add_argument("--repo-root", type=Path, default=None)
     parser.add_argument("--json", action="store_true", help="print the allocated paths as JSON")
+    parser.add_argument(
+        "--verify",
+        action="store_true",
+        help=(
+            "allocate nothing; report whether every run is still where it was allocated. "
+            "Exit 0 all intact / 1 at least one moved / 3 at least one unverifiable"
+        ),
+    )
     args = parser.parse_args()
+
+    if args.verify:
+        runs, counts = verify_runs(args.repo_root)
+        if args.json:
+            print(json.dumps({"runs_root": str(runs_root(args.repo_root)), "counts": counts, "runs": runs}, indent=2))
+        else:
+            _print_verify_text(runs, counts, runs_root(args.repo_root))
+        return verify_exit_code(counts)
+
+    if not args.unit:
+        parser.error("unit is required unless --verify is given")
 
     run = allocate_run(args.unit, repo_root=args.repo_root)
     subdirs = {name: str(run.subdir(name)) for name in CANONICAL_SUBDIRS}
