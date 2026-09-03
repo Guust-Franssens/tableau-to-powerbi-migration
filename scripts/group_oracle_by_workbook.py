@@ -1,6 +1,7 @@
 """
 purpose: group flat `capture_tableau_oracle.py` captures into per-workbook reference folders
-usage:   python scripts/group_oracle_by_workbook.py --oracle _oracle [--oracle _oracle-retry ...]
+usage:   python scripts/group_oracle_by_workbook.py --oracle-root _oracle
+         python scripts/group_oracle_by_workbook.py --oracle _oracle [--oracle _oracle-retry ...]
                                                     [--migrations migrations/workbooks] [--dry-run]
 
 `capture_tableau_oracle.py` writes every view flat into `<oracle>/data/` and `<oracle>/images/`,
@@ -66,9 +67,50 @@ WARNING: "Newest" is the view record's `captured_at`, falling back to the batch 
   when the arguments were reversed while the manifest still claimed time had decided it. The tied
   legs are named in `merge_order_ties`;
 * `argument order` -- a batch carries no timestamp anywhere, so nothing can be dated.
+
+EVERY BATCH ON DISK, and the four things that must be true for that to be safe (#423 criterion 3)
+--------------------------------------------------------------------------------------------------
+Reading only the directories somebody typed does not merge "every batch on disk" -- it merges every
+argument the operator remembered, and the difference is invisible in the output. Measured: a third
+retry whose PNG had finally landed sat unread on disk while the merged manifest reported
+`image: transient` and listed only the two batches it was given, exit 0.
+
+* `--oracle-root DIR` DISCOVERS batches instead of listing them. Discovery needs a defined ROOT --
+  there is no filesystem-wide answer to "where are my captures" -- and a defined SHAPE: a directory
+  holding an `oracle-manifest.json` whose `schema` is `tableau-oracle/1`. The root may itself be a
+  batch, which is the ordinary `_oracle/` layout.
+* Anything else under that root is a BLOCKING answer, never a skip: an unclassifiable directory means
+  either the root is wrong or a capture is damaged, and skipping it would move the boundary a third
+  time, to "every directory I recognised".
+* With `--oracle`, a capture batch sitting UNLISTED beside a given one is refused rather than
+  silently omitted, so the listing mode cannot quietly under-merge either.
+* `--exclude DIR` is the one auditable escape from both refusals, and is recorded in the merged
+  manifest as `excluded_paths` -- an exclusion nothing records is indistinguishable from an omission.
+
+WORKBOOKS ARE KEYED BY LUID, AND A DESTINATION COLLISION IS REFUSED
+-------------------------------------------------------------------
+Views are bucketed by `workbook_luid`, never by display name. Two DIFFERENT workbooks whose names
+normalize onto one key used to target one folder, the second manifest overwriting the first while
+both workbooks' files stayed on disk -- and on the real 48-workbook reference estate that is not
+hypothetical: `Seed - R&D`, `Seed - R+D` and `Seed - R/D` are three distinct LUIDs and ONE normalized
+key. Neither side of a collision is written; both are reported. A view with no `workbook_luid` is
+refused for the same reason: a display name is not an identity.
+
+PROMOTION IS RECONCILED, NOT LAYERED
+-------------------------------------
+Copying the selected artifacts is only half of promotion. An artifact an earlier run promoted and
+this one REFUSES (a stale cross-revision render, say) stays physically in `reference/images/` unless
+something removes it, and a consumer that reads the directory rather than the manifest then gets
+evidence this merge explicitly rejected. Files a previous grouped manifest named are removed; files
+nothing accounts for are REPORTED and left alone, because they may not be ours to delete.
 """
 
 from __future__ import annotations
+
+# The module is long because the rules are: nine short functions carry ~400 lines of measured
+# provenance for the guards below, and splitting the merge from the placement would put a shared
+# invariant in two files. Same waiver as `assess_estate.py`, `check_unit.py` and `run_estate.py`.
+# pylint: disable=too-many-lines
 
 import argparse
 import json
@@ -91,6 +133,13 @@ LOG = logging.getLogger("group-oracle")
 
 MANIFEST_NAME = "oracle-manifest.json"
 UNMATCHED_REPORT = "oracle-grouping-report.json"
+# The `schema` a CAPTURE manifest carries (`tableau_oracle_manifest.py`). Discovery matches on it
+# rather than on the filename, because this script's own per-workbook output uses the same filename
+# with schema `tableau-oracle-workbook/1` -- accepting that as a batch would feed output into input.
+CAPTURE_SCHEMA = "tableau-oracle/1"
+# The subdirectories a capture writes beside its manifest. Under `--oracle-root`, when the root is
+# itself a batch, these are its structure rather than candidate batches.
+CAPTURE_SUBDIRS = frozenset({"images", "data"})
 
 
 @dataclass(frozen=True)
@@ -129,7 +178,7 @@ class DuplicateBatchLabel(ValueError):
 
 
 class IncompatibleBatchSources(ValueError):
-    """Two capture directories describe DIFFERENT Tableau sources. Refused, never merged.
+    """Two capture directories record DIFFERENT Tableau sources. Refused, never merged.
 
     ⚠️ Cross-tenant evidence mixing, and the reason this is a hard refusal rather than a warning.
     Measured before this existed: two batches from different servers and different sites, sharing only
@@ -141,6 +190,166 @@ class IncompatibleBatchSources(ValueError):
     A caption collision across tenants is not exotic -- "Sales Dashboard" and "HR Dashboard" exist
     everywhere -- and the consequence is one customer's data presented as another's reference evidence.
     """
+
+
+class UnestablishedBatchSource(ValueError):
+    """A batch does not record its source at all, so sameness CANNOT BE ESTABLISHED. Refused.
+
+    Deliberately a different type from :class:`IncompatibleBatchSources`: "these are two tenants" and
+    "we cannot tell whether these are two tenants" are different answers, and a test that can only
+    assert *something* refused cannot tell which guard it exercised. Both block; only one of them is a
+    statement about the data.
+    """
+
+
+class UnlistedBatchOnDisk(ValueError):
+    """A capture batch sits beside the ones that were listed and was not passed. Refused.
+
+    ⚠️ Review round 3, finding 5. Merging "every batch the operator remembered to type" is not the
+    same promise as merging every batch on disk, and the difference is invisible in the output:
+    measured, a third retry whose PNG had finally landed sat unread while the merged manifest reported
+    ``image: transient`` and listed only the two batches it was given. Passing the directory, or
+    ``--oracle-root``, or an explicit ``--exclude``, are all fine; silently proceeding is not.
+    """
+
+
+class UnclassifiedCaptureDirectory(ValueError):
+    """A directory under ``--oracle-root`` is neither a capture batch nor excluded. Refused.
+
+    Discovery only means "every batch on disk" if the shape of a batch is defined AND anything not
+    matching it is a blocking answer. Skipping the unrecognised directory would move the boundary a
+    third time -- from "every argument you typed" to "every directory I happened to recognise".
+    """
+
+
+def _capture_schema(directory: Path) -> str | None:
+    """The ``schema`` of ``directory``'s capture manifest, or ``None`` when there is no readable one.
+
+    Read defensively on purpose: discovery must classify a directory without trusting its contents,
+    and an unreadable or non-JSON manifest is "not a batch I can recognise", which the caller turns
+    into a blocking answer rather than a skip.
+    """
+    path = directory / MANIFEST_NAME
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return None
+    return payload.get("schema") if isinstance(payload, dict) else None
+
+
+def is_capture_batch(directory: Path) -> bool:
+    """Is this directory a CAPTURE batch -- the defined shape discovery is allowed to accept?
+
+    ⚠️ The schema check is not decoration. ``migrations/workbooks/<slug>/reference/`` also holds a
+    file called ``oracle-manifest.json``, and it is a GROUPED subset (``tableau-oracle-workbook/1``),
+    not a capture. Accepting one as a batch would feed this script's own output back into its input.
+    """
+    return _capture_schema(directory) == CAPTURE_SCHEMA
+
+
+def discover_batches(root: Path, excluded: frozenset[Path]) -> list[Path]:
+    """Every capture batch under ``root`` -- the on-disk reading of #423's acceptance criterion 3.
+
+    "Every batch on disk" needs two definitions before it can be safe, and this supplies both:
+
+    * a DEFINED ROOT. There is no filesystem-wide answer to "where are my captures", so the operator
+      still names the tree. What discovery adds -- and what listing directories cannot -- is that a
+      batch under that root which nobody typed IS found.
+    * a DEFINED SHAPE. A batch is a directory holding an ``oracle-manifest.json`` whose ``schema`` is
+      :data:`CAPTURE_SCHEMA`. ``root`` ITSELF may be a batch (the ordinary ``_oracle/`` layout), in
+      which case its structural subdirectories are expected rather than candidates.
+
+    ⚠️ Anything else under ``root`` is a BLOCKING answer, never a skip. A directory that cannot be
+    classified means either the root is wrong or a capture is damaged, and both need the operator --
+    silently ignoring it would move the boundary from "every argument you typed" to "every directory
+    I recognised", which is the same defect wearing different clothes. ``--exclude`` is the explicit,
+    recorded way to say "I have seen this and it is not evidence".
+    """
+    if not root.is_dir():
+        raise FileNotFoundError(f"--oracle-root {root} is not a directory")
+    found: list[Path] = []
+    root_is_batch = is_capture_batch(root)
+    if root_is_batch:
+        found.append(root)
+    unclassified: list[Path] = []
+    for child in sorted(p for p in root.iterdir() if p.is_dir()):
+        if child.resolve() in excluded:
+            continue
+        if root_is_batch and child.name in CAPTURE_SUBDIRS:
+            continue
+        if is_capture_batch(child):
+            found.append(child)
+            continue
+        unclassified.append(child)
+    if unclassified:
+        raise UnclassifiedCaptureDirectory(
+            f"{len(unclassified)} director(ies) under {root} are not capture batches and were not "
+            f"excluded: {', '.join(str(p) for p in unclassified)}. A discovery root means every batch "
+            f"beneath it is merged, so a directory that cannot be classified is a blocking answer, "
+            f"not something to skip -- either --oracle-root names the wrong tree, or one of these is "
+            f"a damaged capture. Pass --exclude <dir> for each one that is deliberately not evidence."
+        )
+    if not found:
+        raise FileNotFoundError(
+            f"no capture batch under {root}: nothing there holds an {MANIFEST_NAME} with "
+            f"schema {CAPTURE_SCHEMA!r}. Run capture_tableau_oracle.py first."
+        )
+    return found
+
+
+def _refuse_unlisted_siblings(listed: list[Path], excluded: frozenset[Path]) -> None:
+    """Refuse when a capture batch sits beside a listed one and was not given (#423, criterion 3).
+
+    ⚠️ This is what stops ``--oracle`` from quietly meaning "every batch you remembered". The scan is
+    narrow on purpose -- only the immediate parents of the directories actually named, and only
+    siblings that ARE capture batches by :func:`is_capture_batch`. A non-batch sibling is not blocking
+    here, unlike under ``--oracle-root``: naming a batch does not declare its parent to be a tree of
+    captures, so this cannot object to whatever else happens to live in ``_runs/<run>/``.
+
+    The remedy is in the message and all three options are legitimate: pass it, switch to
+    ``--oracle-root``, or ``--exclude`` it -- the last being recorded in the merged manifest, so an
+    excluded batch is an auditable decision rather than an omission nothing can see.
+    """
+    listed_resolved = {path.resolve() for path in listed}
+    unlisted: list[Path] = []
+    for parent in sorted({path.resolve().parent for path in listed}):
+        if not parent.is_dir():
+            continue
+        for child in sorted(p for p in parent.iterdir() if p.is_dir()):
+            resolved = child.resolve()
+            if resolved in listed_resolved or resolved in excluded or resolved in unlisted:
+                continue
+            if is_capture_batch(child):
+                unlisted.append(resolved)
+    if unlisted:
+        raise UnlistedBatchOnDisk(
+            f"{len(unlisted)} capture batch(es) sit beside the ones given and were not passed: "
+            f"{', '.join(str(p) for p in unlisted)}. Promotion must consider every batch on disk -- a "
+            f"retry that finally succeeded is exactly the batch an operator forgets, and merging "
+            f"without it reports the earlier failure as the current state. Pass each one with "
+            f"--oracle, use --oracle-root to discover them, or --exclude the ones that are "
+            f"deliberately not part of this merge."
+        )
+
+
+def resolve_batch_dirs(
+    oracle: Path | list[Path] | None, oracle_root: Path | None, exclude: list[Path] | tuple[Path, ...]
+) -> tuple[list[Path], frozenset[Path]]:
+    """Turn the CLI's three path arguments into the batch list this run will merge.
+
+    ``--oracle-root`` discovers; ``--oracle`` lists and is then checked against its own siblings. Both
+    honour ``--exclude``, which is the single auditable escape from either refusal.
+    """
+    excluded = frozenset(path.resolve() for path in exclude)
+    if oracle_root is not None:
+        return discover_batches(oracle_root, excluded), excluded
+    listed = [oracle] if isinstance(oracle, Path) else list(oracle or [])
+    if not listed:
+        raise FileNotFoundError("no capture directory given: pass --oracle DIR or --oracle-root DIR")
+    _refuse_unlisted_siblings(listed, excluded)
+    return listed, excluded
 
 
 def _batch_labels(oracle_dirs: list[Path]) -> list[str]:
@@ -252,35 +461,77 @@ def _revision(view: dict[str, Any]) -> str:
     return view.get("updated_at") or ""
 
 
-def _source_identity(manifest: dict[str, Any]) -> tuple[str, str]:
-    """``(server, site)``, normalized for comparison. ``""`` means the manifest does not record it.
+def _source_identity(manifest: dict[str, Any]) -> tuple[str, str] | None:
+    """``(server, site)`` normalized for comparison, or ``None`` when it CANNOT BE ESTABLISHED.
 
     Case and a trailing slash are cosmetic -- ``https://Example.online.tableau.com/`` and
     ``https://example.online.tableau.com`` are one server. Nothing else is normalized away: a
     different host or a different site content-URL IS a different source, and a merge across one is
     the cross-tenant defect.
+
+    ⚠️ ``None`` is NOT a value that compares equal to itself, and that distinction is review round 3's
+    first blocker. This used to map an unrecorded source onto ``("", "")``, so two anonymous manifests
+    produced ONE identity, the cardinality check saw no disagreement, and they merged -- measured,
+    exit 0 with tenant B's image promoted beside tenant A's data and ``server``/``site`` both ``null``.
+    Sameness was never established; it was assumed from a shared absence.
+
+    ⚠️ An EMPTY ``site`` is a recorded value, not an absence: ``tableau_env`` canonicalises
+    ``TABLEAU_SITE`` to ``""`` because *"an empty site IS the documented Default site"* on Tableau
+    Server. So the test is whether the manifest CARRIES the field, never whether it is truthy --
+    treating ``""`` as unrecorded would refuse every legitimate Default-site merge.
     """
-    server = (manifest.get("server") or "").strip().rstrip("/").casefold()
-    site = (manifest.get("site") or "").strip().casefold()
-    return server, site
+    server_raw = manifest.get("server")
+    site_raw = manifest.get("site")
+    if not isinstance(server_raw, str) or not server_raw.strip():
+        return None
+    if not isinstance(site_raw, str):
+        return None
+    return server_raw.strip().rstrip("/").casefold(), site_raw.strip().casefold()
+
+
+def _describe_identity(batch: _Batch) -> str:
+    """One batch's source, for a refusal message -- naming WHICH half is missing when it is."""
+    identity = _source_identity(batch.manifest)
+    if identity is not None:
+        server, site = identity
+        return f"{batch.label}: server={server} site={site or '<default site>'}"
+    server_raw, site_raw = batch.manifest.get("server"), batch.manifest.get("site")
+    server = server_raw if isinstance(server_raw, str) and server_raw.strip() else "<not recorded>"
+    site = site_raw if isinstance(site_raw, str) else "<not recorded>"
+    return f"{batch.label}: server={server} site={site}"
 
 
 def _refuse_incompatible_sources(batches: list[_Batch]) -> None:
-    """Refuse a merge whose batches do not provably describe the SAME Tableau server and site.
+    """Refuse a merge whose batches do not PROVABLY describe the SAME Tableau server and site.
 
-    ⚠️ An ABSENT identity is treated as its own value rather than as a wildcard, and that is the
-    fail-closed half. "This manifest does not say which server it came from" is not evidence that it
-    came from the same one; a wildcard would let exactly the batch we know least about merge with
-    anything. A single batch that records nothing still merges fine -- there is only one identity --
-    so this costs nothing except in the case where it is doing real work.
+    Two refusals, and they are deliberately separate exception types so a test can assert WHICH one
+    fired rather than merely that something did:
+
+    * :class:`UnestablishedBatchSource` -- at least one batch does not record its source at all. "We
+      cannot tell which tenant this came from" is its own blocking state, never a value that compares
+      equal to another unknown. Before this existed, two anonymous manifests merged silently.
+    * :class:`IncompatibleBatchSources` -- every batch records a source and they disagree.
+
+    A SINGLE batch that records nothing still merges fine: there is nothing to establish sameness
+    against, no artifact crosses a boundary, and refusing it would break every anonymous capture for
+    no gain. The refusal exists precisely where a claim of sameness is being made.
     """
-    identities = {_source_identity(batch.manifest): batch.label for batch in batches}
+    if len(batches) < 2:
+        return
+    unestablished = [batch for batch in batches if _source_identity(batch.manifest) is None]
+    if unestablished:
+        raise UnestablishedBatchSource(
+            f"{len(unestablished)} of {len(batches)} captures do not record which Tableau server and "
+            f"site they came from ({', '.join(_describe_identity(b) for b in unestablished)}), so "
+            f"these batches CANNOT BE SHOWN to describe the same source. A shared absence is not "
+            f"evidence of sameness -- merging them could present one tenant's artifacts as another's "
+            f"reference evidence. Re-capture with capture_tableau_oracle.py (which records both), or "
+            f"group each capture on its own."
+        )
+    identities = {_source_identity(batch.manifest) for batch in batches}
     if len(identities) < 2:
         return
-    described = ", ".join(
-        f"{label}: server={server or '<not recorded>'} site={site or '<not recorded>'}"
-        for (server, site), label in sorted(identities.items())
-    )
+    described = ", ".join(_describe_identity(batch) for batch in batches)
     raise IncompatibleBatchSources(
         f"these captures describe {len(identities)} different Tableau sources and cannot be merged "
         f"into one manifest ({described}). Merging them would present one tenant's artifacts as "
@@ -522,11 +773,30 @@ def merge_batches(batches: list[_Batch]) -> tuple[dict[str, Any], dict[str, Path
 
 
 def group_views(manifest: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
-    """Bucket the manifest's views by workbook name, preserving capture order within each bucket."""
+    """Bucket the manifest's views by workbook **LUID**, preserving capture order within each bucket.
+
+    ⚠️ By IDENTITY, not by display name, and that is review round 3's third blocker. Bucketing by
+    ``workbook_name`` merged two genuinely different workbooks whenever their names matched, and the
+    normalizer made that far more likely than an exact collision: measured on the real 48-workbook
+    reference estate, ``Seed - R&D``, ``Seed - R+D`` and ``Seed - R/D`` are three distinct LUIDs that
+    normalize onto ONE key. The name route is the same class ``package_unit.py`` deleted rather than
+    guarded (#450 measured it failing open on 360 of 360 real records).
+
+    A view carrying no ``workbook_luid`` is bucketed under ``""`` and refused downstream: "we cannot
+    tell which workbook this belongs to" is a blocking state, not a bucket to merge things into.
+    """
     buckets: dict[str, list[dict[str, Any]]] = {}
     for view in manifest.get("views", []):
-        buckets.setdefault(view.get("workbook_name") or "", []).append(view)
+        buckets.setdefault(view.get("workbook_luid") or "", []).append(view)
     return buckets
+
+
+def workbook_names(views: list[dict[str, Any]]) -> list[str]:
+    """The distinct display names one workbook's views carry, in first-seen order."""
+    seen: dict[str, None] = {}
+    for view in views:
+        seen.setdefault(view.get("workbook_name") or "", None)
+    return list(seen)
 
 
 RENDER_LEGS: tuple[tuple[str, str], ...] = (("data", "data"), ("image", "images"), ("svg", "images"), ("pdf", "images"))
@@ -659,6 +929,7 @@ def subset_manifest(manifest: dict[str, Any], workbook: str, views: list[dict[st
         "reference_required",
         "reference_missing",
         "batches",
+        "excluded_paths",
         "merge_order_basis",
         "merge_order_ties",
         "merge_stale_candidates",
@@ -669,11 +940,11 @@ def subset_manifest(manifest: dict[str, Any], workbook: str, views: list[dict[st
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """CLI surface: which capture to read, which folder tree to group it into."""
+    """CLI surface: which captures to read, which folder tree to group them into."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument(
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument(
         "--oracle",
-        required=True,
         action="append",
         type=Path,
         metavar="DIR",
@@ -681,9 +952,32 @@ def build_parser() -> argparse.ArgumentParser:
             "a capture directory holding oracle-manifest.json. WARNING: REPEATABLE, and normally should be: "
             "a metered capture is re-run in batches, and the same view can succeed in a later one "
             "having failed earlier. Every batch given is merged newest-successful-wins per view and "
-            "per LEG, and each promoted artifact records the batch it came from. Grouping one "
-            "directory at a time strands a later good image -- or overwrites a good manifest with a "
-            "partial re-run's failure"
+            "per LEG, and each promoted artifact records the batch it came from. A capture batch "
+            "sitting BESIDE the ones given and not passed is REFUSED, not skipped -- 'every batch you "
+            "remembered' is not the promise. Prefer --oracle-root"
+        ),
+    )
+    source.add_argument(
+        "--oracle-root",
+        type=Path,
+        metavar="DIR",
+        help=(
+            "discover and merge EVERY capture batch under DIR, including ones nobody listed (#423). "
+            "A batch is a directory holding an oracle-manifest.json with schema "
+            f"{CAPTURE_SCHEMA!r}; DIR itself may be one. Any other directory under DIR is a blocking "
+            "error rather than a skip -- pass --exclude for each one that is not evidence"
+        ),
+    )
+    parser.add_argument(
+        "--exclude",
+        action="append",
+        type=Path,
+        default=[],
+        metavar="DIR",
+        help=(
+            "a directory that is deliberately NOT part of this merge. The single auditable escape "
+            "from the unlisted-batch and unclassified-directory refusals; recorded in every merged "
+            "manifest as excluded_paths, so an omission is a decision a reader can see"
         ),
     )
     parser.add_argument(
@@ -696,25 +990,131 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# Why a workbook was refused, as recorded in the grouping report and asserted by name in the tests.
+# Named constants rather than prose because this script now has several fail-closed guards and a test
+# that can only assert "it refused" cannot say WHICH one it exercised.
+REFUSAL_NO_LUID = "workbook_luid_missing"
+REFUSAL_NAME_AMBIGUOUS = "source_name_ambiguous"
+REFUSAL_DESTINATION_AMBIGUOUS = "destination_ambiguous"
+REFUSAL_DESTINATION_COLLISION = "destination_collision"
+REFUSAL_UNATTRIBUTED = "unattributed_reference_files"
+
+OUTCOME_BUCKETS = ("grouped", "incomplete", "unmatched", "ambiguous", "collision", "unidentified", "unreconciled")
+
+
+def _previously_grouped_files(destination: Path) -> set[str] | None:
+    """The artifact paths the destination's EXISTING grouped manifest names, or ``None`` if there is none.
+
+    This is the attribution half of reconciliation: it says which files under ``reference/{images,data}/``
+    THIS script put there on a previous run, so removing them is undoing our own work rather than
+    deleting somebody else's evidence. A file under those directories that no previous grouped manifest
+    named is not ours to delete, and :func:`_reconcile_destination` reports it instead.
+    """
+    path = destination / MANIFEST_NAME
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return None
+    if not isinstance(payload, dict) or payload.get("schema") != "tableau-oracle-workbook/1":
+        return None
+    named: set[str] = set()
+    for view in payload.get("views") or []:
+        for kind, sub in RENDER_LEGS:
+            relative = (view.get(kind) or {}).get("path")
+            if relative:
+                named.add(f"{sub}/{Path(relative).name}")
+    return named
+
+
+def _reconcile_destination(
+    destination: Path, written: set[str], previous: set[str] | None, *, dry_run: bool
+) -> tuple[list[str], list[str]]:
+    """Make ``reference/{images,data}/`` hold what this run promoted -- and nothing it refused.
+
+    ⚠️ Review round 3's second blocker. Copying the selected artifacts is only half of promotion: an
+    artifact an EARLIER run promoted and this one REFUSES stays physically on disk unless something
+    removes it. Measured before this existed: a render refused by the cross-revision gate was correctly
+    marked ``transient`` with no ``path`` in the manifest, and the old-revision PNG was still sitting
+    in ``reference/images/`` -- so any consumer that reads the directory rather than the manifest got
+    evidence the merge had explicitly rejected. #451 fixed the sibling shape in ``package_unit.py`` the
+    same way: a re-run REPLACES staged content instead of layering over the previous run's.
+
+    Removal is by ATTRIBUTION, never by "everything I did not write". ``previous`` is the set of paths
+    the destination's own grouped manifest named, i.e. what this script put there; anything else under
+    those two directories was placed by someone else and is REPORTED rather than deleted -- silently
+    removing a hand-dropped reference would be a worse failure than the one being fixed.
+
+    Returns ``(removed, unattributed)`` as relative ``<sub>/<name>`` paths.
+    """
+    on_disk: set[str] = set()
+    for _kind, sub in RENDER_LEGS:
+        folder = destination / sub
+        if folder.is_dir():
+            on_disk |= {f"{sub}/{child.name}" for child in folder.iterdir() if child.is_file()}
+    extra = on_disk - written
+    mine = previous or set()
+    removed = sorted(extra & mine)
+    unattributed = sorted(extra - mine)
+    if not dry_run:
+        for relative in removed:
+            (destination / relative).unlink(missing_ok=True)
+    return removed, unattributed
+
+
+def _destination_of(views: list[dict[str, Any]], ctx: _Context) -> tuple[Path | None, str, dict[str, Any] | None]:
+    """Resolve one workbook's destination folder, or say why it cannot be resolved.
+
+    Returns ``(folder, display name, refusal record)``; exactly one of folder/refusal is set.
+    Split out of :func:`_group_one` because :func:`_group_all` must resolve EVERY workbook's
+    destination before it writes ANY of them -- a collision is a property of the set, and detecting
+    it while writing is how the first workbook's manifest got overwritten by the second's.
+    """
+    names = workbook_names(views)
+    display = names[0] if names else ""
+    keys = {normalize(name) for name in names}
+    if len(keys) > 1:
+        return (
+            None,
+            display,
+            {"refusal": REFUSAL_NAME_AMBIGUOUS, "workbook": display, "names": names, "views": len(views)},
+        )
+    matches = ctx.destinations.get(normalize(display), [])
+    if len(matches) > 1:
+        return (
+            None,
+            display,
+            {
+                "refusal": REFUSAL_DESTINATION_AMBIGUOUS,
+                "workbook": display,
+                "folders": [str(m) for m in matches],
+                "views": len(views),
+            },
+        )
+    if not matches:
+        return (
+            None,
+            display,
+            {"workbook": display, "normalized": normalize(display), "views": len(views)},
+        )
+    return matches[0], display, None
+
+
 def _group_one(
     workbook: str,
     views: list[dict[str, Any]],
+    folder: Path,
     ctx: _Context,
 ) -> tuple[str, dict[str, Any]]:
-    """Place one workbook's views. Returns its outcome bucket and the record to report."""
-    matches = ctx.destinations.get(normalize(workbook), [])
-    if len(matches) > 1:
-        LOG.warning("AMBIGUOUS  %-45s -> %s", workbook[:45], ", ".join(p.name for p in matches))
-        return "ambiguous", {
-            "workbook": workbook,
-            "folders": [str(m) for m in matches],
-            "views": len(views),
-        }
-    if not matches:
-        LOG.warning("NO FOLDER  %-45s (normalized: %s)", workbook[:45], normalize(workbook))
-        return "unmatched", {"workbook": workbook, "normalized": normalize(workbook), "views": len(views)}
+    """Copy one workbook's views into an already-resolved destination folder.
 
-    destination = matches[0] / "reference"
+    Reconciliation runs AFTER the copies and is part of promotion, not cleanup: the folder must end up
+    holding what this run promoted, so an artifact the merge refused cannot survive there from an
+    earlier run (review round 3, finding 2).
+    """
+    destination = folder / "reference"
+    previous = _previously_grouped_files(destination)
     files: list[str] = []
     grouped_views: list[dict[str, Any]] = []
     for view in views:
@@ -722,16 +1122,40 @@ def _group_one(
         files.extend(written)
         grouped_views.append(grouped)
     subset = subset_manifest(ctx.manifest, workbook, grouped_views)
+    removed, unattributed = _reconcile_destination(destination, set(files), previous, dry_run=ctx.dry_run)
     if not ctx.dry_run:
         destination.mkdir(parents=True, exist_ok=True)
         (destination / MANIFEST_NAME).write_text(json.dumps(subset, indent=2) + "\n", encoding="utf-8")
     record = {
         "workbook": workbook,
-        "folder": str(matches[0]),
+        "folder": str(folder),
         "views": len(views),
         "files": len(files),
         "not_copied": subset["not_copied"],
+        "removed": removed,
+        "unattributed": unattributed,
     }
+    if removed:
+        LOG.info(
+            "  reconciled %s: removed %d artifact(s) this merge does not promote (%s)",
+            folder.name,
+            len(removed),
+            ", ".join(removed[:4]),
+        )
+    if unattributed:
+        # NOT deleted and NOT accepted. These sit under `reference/{images,data}/`, which is this
+        # script's tree, but no grouped manifest ever named them -- so we cannot say they are ours to
+        # remove, and we cannot say the folder holds only promoted evidence either.
+        record["refusal"] = REFUSAL_UNATTRIBUTED
+        LOG.warning(
+            "UNRECONCILED %-43s -> %s holds %d file(s) no grouped manifest names: %s. They were NOT "
+            "removed (they may not be ours) and are NOT promoted evidence -- move or delete them.",
+            workbook[:43],
+            folder.name,
+            len(unattributed),
+            ", ".join(unattributed[:4]),
+        )
+        return "unreconciled", record
     if subset["not_copied"]:
         # NOT "grouped". The folder exists and holds some evidence, but the capture manifest named
         # artifacts that are not on disk, so this workbook's reference set is incomplete and the
@@ -739,80 +1163,184 @@ def _group_one(
         LOG.warning(
             "INCOMPLETE %-45s -> %s (%d view(s), %d file(s), %d artifact(s) missing from the capture)",
             workbook[:45],
-            matches[0].name,
+            folder.name,
             len(views),
             len(files),
             subset["not_copied"],
         )
         return "incomplete", record
-    LOG.info("ok         %-45s -> %s (%d view(s), %d file(s))", workbook[:45], matches[0].name, len(views), len(files))
+    LOG.info("ok         %-45s -> %s (%d view(s), %d file(s))", workbook[:45], folder.name, len(views), len(files))
     return "grouped", record
 
 
+@dataclass(frozen=True)
+class _Resolved:
+    """One workbook that HAS a destination -- the input to the collision pass and then to copying."""
+
+    luid: str
+    display: str
+    views: list[dict[str, Any]]
+    folder: Path
+
+
+def _resolve_destinations(
+    buckets: dict[str, list[dict[str, Any]]], ctx: _Context, outcomes: dict[str, list[dict[str, Any]]]
+) -> list[_Resolved]:
+    """Pass one: turn LUID buckets into destinations, bucketing everything that cannot resolve.
+
+    Nothing is written here. A collision is a property of the SET of workbooks, so every destination
+    has to be known before any of them is copied into.
+    """
+    resolved: list[_Resolved] = []
+    for luid, views in sorted(buckets.items(), key=lambda item: (workbook_names(item[1]) or [""])[0]):
+        names = workbook_names(views)
+        if not luid:
+            LOG.warning("NO LUID    %-45s (%d view(s) carry no workbook_luid)", (names[0] or "?")[:45], len(views))
+            outcomes["unidentified"].append(
+                {"refusal": REFUSAL_NO_LUID, "workbook": names[0] if names else "", "names": names, "views": len(views)}
+            )
+            continue
+        folder, display, refusal = _destination_of(views, ctx)
+        if refusal is None:
+            resolved.append(_Resolved(luid, display, views, folder))
+            continue
+        refusal["workbook_luid"] = luid
+        if refusal.get("refusal") == REFUSAL_NAME_AMBIGUOUS:
+            LOG.warning("RENAMED    %-45s -> %s", display[:45], ", ".join(refusal["names"]))
+            outcomes["ambiguous"].append(refusal)
+        elif refusal.get("refusal") == REFUSAL_DESTINATION_AMBIGUOUS:
+            LOG.warning("AMBIGUOUS  %-45s -> %s", display[:45], ", ".join(Path(f).name for f in refusal["folders"]))
+            outcomes["ambiguous"].append(refusal)
+        else:
+            LOG.warning("NO FOLDER  %-45s (normalized: %s)", display[:45], normalize(display))
+            outcomes["unmatched"].append(refusal)
+    return resolved
+
+
 def _group_all(buckets: dict[str, list[dict[str, Any]]], ctx: _Context) -> dict[str, list[dict[str, Any]]]:
-    """Place every workbook, bucketed by outcome. Split out of ``run`` to keep it readable."""
-    outcomes: dict[str, list[dict[str, Any]]] = {"grouped": [], "incomplete": [], "unmatched": [], "ambiguous": []}
-    for workbook, views in sorted(buckets.items()):
-        bucket, record = _group_one(workbook, views, ctx)
+    """Place every workbook, bucketed by outcome. Two passes, and the first one is the point.
+
+    ⚠️ Every destination is resolved BEFORE anything is written, because a collision is a property of
+    the SET of workbooks, not of any one of them (review round 3, finding 3). Writing as it went, two
+    distinct workbook LUIDs whose display names normalize identically both targeted one folder: the
+    second manifest overwrote the first, both workbooks' image files stayed on disk, and the surviving
+    manifest reported one view while the folder held two -- exit 0, no warning, one workbook's
+    evidence silently attributed to another.
+
+    Neither side of a collision is written. Picking a winner would be resolving an ambiguity this
+    script exists not to resolve; the folder keeps whatever it held, and both workbooks are reported.
+    """
+    outcomes: dict[str, list[dict[str, Any]]] = {bucket: [] for bucket in OUTCOME_BUCKETS}
+    resolved = _resolve_destinations(buckets, ctx, outcomes)
+    claimed: dict[Path, list[str]] = {}
+    for item in resolved:
+        claimed.setdefault(item.folder, []).append(item.luid)
+    for item in resolved:
+        if len(claimed[item.folder]) > 1:
+            others = [other for other in claimed[item.folder] if other != item.luid]
+            LOG.warning(
+                "COLLISION  %-45s -> %s is also claimed by %d other workbook(s): %s",
+                item.display[:45],
+                item.folder.name,
+                len(others),
+                ", ".join(others),
+            )
+            outcomes["collision"].append(
+                {
+                    "refusal": REFUSAL_DESTINATION_COLLISION,
+                    "workbook": item.display,
+                    "workbook_luid": item.luid,
+                    "folder": str(item.folder),
+                    "colliding_workbook_luids": sorted(claimed[item.folder]),
+                    "views": len(item.views),
+                }
+            )
+            continue
+        bucket, record = _group_one(item.display, item.views, item.folder, ctx)
+        record["workbook_luid"] = item.luid
         outcomes[bucket].append(record)
     return outcomes
 
 
-def _write_grouping_report(
-    batches: list[_Batch],
-    migrations_root: Path,
-    basis: str,
-    outcomes: dict[str, list[dict[str, Any]]],
-    *,
-    dry_run: bool,
-) -> Path:
+@dataclass(frozen=True)
+class _RunInputs:
+    """How this run was ASKED for, as opposed to what it found. Written into the grouping report.
+
+    Kept together because the three provenance answers -- discovered under a root or listed, which
+    directories were deliberately excluded, and on what evidence "newest" was decided -- are only
+    meaningful side by side. An exclusion nothing records is indistinguishable from an omission.
+    """
+
+    batches: list[_Batch]
+    migrations_root: Path
+    basis: str
+    dry_run: bool
+    excluded: frozenset[Path] = frozenset()
+    oracle_root: Path | None = None
+
+
+def _write_grouping_report(inputs: _RunInputs, outcomes: dict[str, list[dict[str, Any]]]) -> Path:
     """Write the run report beside the LAST capture given, and return that directory.
 
     ``oracle_dirs`` and ``merge_order_basis`` are new (#423): with several batches folded together,
     "which captures produced this" and "on what evidence was newest decided" are the two questions a
     reader of a merged reference folder actually has. ``oracle_dir`` is kept for callers that read it.
     """
-    report_dir = batches[-1].directory
+    report_dir = inputs.batches[-1].directory
     report = {
         "schema": "tableau-oracle-grouping/1",
         "oracle_dir": str(report_dir),
-        "oracle_dirs": [str(b.directory) for b in batches],
-        "merge_order_basis": basis,
-        "migrations_root": str(migrations_root),
-        "dry_run": dry_run,
-        "workbooks_grouped": len(outcomes["grouped"]),
-        "workbooks_incomplete": len(outcomes["incomplete"]),
-        "workbooks_unmatched": len(outcomes["unmatched"]),
-        "workbooks_ambiguous": len(outcomes["ambiguous"]),
+        "oracle_dirs": [str(b.directory) for b in inputs.batches],
+        "oracle_root": str(inputs.oracle_root) if inputs.oracle_root is not None else None,
+        "excluded_paths": sorted(str(path) for path in inputs.excluded),
+        "merge_order_basis": inputs.basis,
+        "migrations_root": str(inputs.migrations_root),
+        "dry_run": inputs.dry_run,
+        **{f"workbooks_{bucket}": len(outcomes[bucket]) for bucket in OUTCOME_BUCKETS},
         **outcomes,
     }
-    if not dry_run:
+    if not inputs.dry_run:
         (report_dir / UNMATCHED_REPORT).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     return report_dir
 
 
-def run(oracle: Path | list[Path], migrations_root: Path, *, dry_run: bool) -> int:
-    """Group one or more captures. Returns 0 when every workbook landed, 1 when some could not.
+def run(  # pylint: disable=too-many-locals
+    oracle: Path | list[Path] | None,
+    migrations_root: Path,
+    *,
+    dry_run: bool,
+    oracle_root: Path | None = None,
+    exclude: list[Path] | tuple[Path, ...] = (),
+) -> int:
+    """Group every capture on disk. Returns 0 when every workbook landed, 1 when some could not.
 
-    "Could not" covers three things, and the third used to be invisible: no destination folder, an
-    ambiguous destination, and a destination that was reached but did **not** receive every artifact
-    the capture manifest named. All three mean the same to a caller gating on the exit code -- the
+    "Could not" now covers seven outcomes, each with its own bucket in the report: no destination
+    folder; an ambiguous destination; one workbook whose views disagree on their own name; two
+    workbooks colliding onto one folder; a view carrying no workbook LUID; a destination holding files
+    no grouped manifest accounts for; and a destination that was reached but did **not** receive every
+    artifact the capture manifest named. All mean the same to a caller gating on the exit code -- the
     per-workbook copies are partial and the flat capture remains the authoritative one.
 
+    A refused cross-revision leg (``merge_stale_candidates``) is ALSO non-zero, which review round 3's
+    finding 4 found missing: the merge is correct, but the reference set the operator asked for was
+    not fully established, and a gate reading only the exit code was told everything landed.
+
     ``oracle`` accepts a single ``Path`` as well as a list, deliberately: the single-capture call is
-    the common one and is what every existing caller writes. A list is folded newest-successful-wins
-    by :func:`merge_batches` before anything is copied (#423), which is what stops an operator's
-    third, finally-successful retry batch from being stranded on disk -- or, worse, a partial re-run
-    from OVERWRITING a good per-workbook manifest with a failure.
+    what every existing caller writes. ``oracle_root`` DISCOVERS batches instead of listing them, and
+    is the reading of #423's criterion 3 that finds a batch nobody typed; with ``oracle`` a capture
+    batch sitting unlisted beside a given one is refused rather than silently omitted.
     """
-    batches = load_batches([oracle] if isinstance(oracle, Path) else list(oracle))
+    batch_dirs, excluded = resolve_batch_dirs(oracle, oracle_root, exclude)
+    batches = load_batches(batch_dirs)
     manifest, roots, basis = merge_batches(batches)
+    manifest["excluded_paths"] = sorted(str(path) for path in excluded)
     destinations, folder_count = index_destinations(migrations_root)
     buckets = group_views(manifest)
     LOG.info(
-        "%d workbook(s) across %d capture(s), %d candidate folder(s) under %s%s",
+        "%d workbook(s) across %d capture(s)%s, %d candidate folder(s) under %s%s",
         len(buckets),
         len(batches),
+        f" discovered under {oracle_root}" if oracle_root is not None else "",
         folder_count,
         migrations_root,
         " [DRY RUN]" if dry_run else "",
@@ -869,14 +1397,13 @@ def run(oracle: Path | list[Path], migrations_root: Path, *, dry_run: bool) -> i
 
     ctx = _Context(manifest=manifest, destinations=destinations, roots=roots, dry_run=dry_run)
     outcomes = _group_all(buckets, ctx)
-    report_dir = _write_grouping_report(batches, migrations_root, basis, outcomes, dry_run=dry_run)
+    report_dir = _write_grouping_report(
+        _RunInputs(batches, migrations_root, basis, dry_run, excluded, oracle_root), outcomes
+    )
 
     LOG.info(
-        "\n%d grouped, %d incomplete, %d without a folder, %d ambiguous%s",
-        len(outcomes["grouped"]),
-        len(outcomes["incomplete"]),
-        len(outcomes["unmatched"]),
-        len(outcomes["ambiguous"]),
+        "\n%s%s",
+        ", ".join(f"{len(outcomes[bucket])} {bucket}" for bucket in OUTCOME_BUCKETS),
         "" if dry_run else f" -> {report_dir / UNMATCHED_REPORT}",
     )
     if outcomes["incomplete"]:
@@ -887,7 +1414,24 @@ def run(oracle: Path | list[Path], migrations_root: Path, *, dry_run: bool) -> i
             len(outcomes["incomplete"]),
             NOT_COPIED_STATUS,
         )
-    if outcomes["unmatched"] or outcomes["ambiguous"] or outcomes["incomplete"]:
+    if outcomes["collision"]:
+        LOG.warning(
+            "%d workbook(s) target a destination folder another workbook also claims, and NEITHER was "
+            "written -- their names normalize onto one key while their LUIDs differ, so grouping them "
+            "would attribute one workbook's evidence to another. Give each its own folder (the "
+            "normalizer drops punctuation and case, so 'R&D' and 'R+D' collide).",
+            len(outcomes["collision"]),
+        )
+    if outcomes["unidentified"]:
+        LOG.warning(
+            "%d workbook bucket(s) carry no workbook_luid, so which workbook their views belong to "
+            "cannot be established and they were not grouped. Re-capture with a manifest that records "
+            "workbook_luid; a display name is not an identity.",
+            len(outcomes["unidentified"]),
+        )
+    if any(outcomes[bucket] for bucket in OUTCOME_BUCKETS if bucket != "grouped") or manifest.get(
+        "merge_stale_candidates"
+    ):
         LOG.warning(
             "the capture(s) in %s remain complete and authoritative - only the per-workbook copies are partial",
             ", ".join(str(b.directory) for b in batches),
@@ -896,13 +1440,30 @@ def run(oracle: Path | list[Path], migrations_root: Path, *, dry_run: bool) -> i
     return 0
 
 
+REFUSALS = (
+    FileNotFoundError,
+    json.JSONDecodeError,
+    DuplicateBatchLabel,
+    IncompatibleBatchSources,
+    UnestablishedBatchSource,
+    UnlistedBatchOnDisk,
+    UnclassifiedCaptureDirectory,
+)
+
+
 def main() -> int:
-    """Entry point: parse arguments, group the capture, map failures onto an exit code."""
+    """Entry point: parse arguments, group every capture on disk, map failures onto an exit code."""
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     args = build_parser().parse_args()
     try:
-        return run(args.oracle, args.migrations, dry_run=args.dry_run)
-    except (FileNotFoundError, json.JSONDecodeError, DuplicateBatchLabel, IncompatibleBatchSources) as exc:
+        return run(
+            args.oracle,
+            args.migrations,
+            dry_run=args.dry_run,
+            oracle_root=args.oracle_root,
+            exclude=args.exclude,
+        )
+    except REFUSALS as exc:
         LOG.error("%s", exc)
         return 2
 

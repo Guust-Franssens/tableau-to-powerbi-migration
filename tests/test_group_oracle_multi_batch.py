@@ -33,6 +33,8 @@ CSV = "region,sales\nEast,12\n"
 # batches describe the same thing. Shared by default so the existing scenarios below keep testing what
 # they were written for -- two captures of ONE revision, which is the ordinary case.
 REVISION = "2026-07-01T00:00:00Z"
+# The `_batch` default capture stamp, named so a test that only needs "some consistent time" says so.
+STAMP = "2026-08-18T14:46:00Z"
 
 
 def _view(
@@ -784,10 +786,21 @@ def test_the_oracle_flag_is_repeatable():
 
 def test_a_single_path_still_works_unchanged(tmp_path):
     """Every existing caller passes one `Path`. Breaking that to add a list would be a migration this
-    change does not need -- and `main()` always hands over a list, so both shapes are exercised."""
-    batches = _three_batches(tmp_path)
+    change does not need -- and `main()` always hands over a list, so both shapes are exercised.
+
+    ⚠️ The batch lives in a parent of its own now, deliberately. Passing `_three_batches()[2]` alone
+    is no longer "one capture": its two siblings are on disk, and merging without them is exactly the
+    silent under-merge finding 5 refuses. That the old form of this test broke is the guard working.
+    """
+    oracle = tmp_path / "_oracle"
+    only = _batch(
+        oracle,
+        "airborne-services",
+        [_view(LUID, "Daily Monitoring", data="ok", image="ok", captured_at="2026-08-18T14:46:00Z")],
+        captured_at="2026-08-18T14:46:00Z",
+    )
     migrations = _migrations(tmp_path)
-    assert grp.run(batches[2], migrations, dry_run=False) == 0
+    assert grp.run(only, migrations, dry_run=False) == 0
     assert _grouped(migrations)["views"][0]["image"]["status"] == "ok"
 
 
@@ -892,9 +905,10 @@ def test_the_same_tenant_spelled_differently_is_still_one_tenant(tmp_path):
 def test_a_manifest_that_records_NO_source_cannot_be_merged_with_one_that_does(tmp_path):
     """⚠️ Fail-closed on the ambiguous case, deliberately, because "unknown" is not "the same".
 
-    An absent server/site is treated as its own identity rather than as a wildcard. A wildcard would
-    let precisely the batch we know least about merge with anything, which is the wrong direction for
-    a guard whose failure mode is presenting one customer's data as another's.
+    An absent server/site cannot establish sameness, so it blocks -- and it blocks under its OWN
+    exception type. `IncompatibleBatchSources` is a statement about the data ("these are two
+    tenants"); this is a statement about our knowledge ("we cannot tell"), and a test that could only
+    assert *something* refused would not notice the two being collapsed back together.
     """
     known = _batch(
         tmp_path,
@@ -911,12 +925,115 @@ def test_a_manifest_that_records_NO_source_cannot_be_merged_with_one_that_does(t
         site=None,
     )
 
-    with pytest.raises(grp.IncompatibleBatchSources):
+    with pytest.raises(grp.UnestablishedBatchSource):
         grp.merge_batches(grp.load_batches([known, anonymous]))
 
     # ...but ONE such batch on its own is not ambiguous, and must still group.
     merged, _roots, _basis = grp.merge_batches(grp.load_batches([anonymous]))
     assert merged["views"][0]["data"]["status"] == "ok"
+
+
+# --------------------------------------------------------- review round 3: "cannot establish" is a
+# STATE, not a value. Each of the three blockers below reported exit 0 while doing the thing the
+# guard beside it was supposed to prevent, and each closed a different way of collapsing an
+# unassessable input into the clean bucket.
+
+
+def test_TWO_anonymous_captures_do_not_merge_just_because_both_are_anonymous(tmp_path):
+    """⚠️ Blocker 1: two UNKNOWN sources were treated as ONE source.
+
+    `_source_identity` mapped a missing identity onto `("", "")` and the refusal counted DISTINCT
+    identities, so two manifests that each recorded nothing produced one identity, the cardinality
+    check saw no disagreement, and they merged. Measured before the fix: exit 0, `server`/`site` both
+    `null`, and `anonymous-b`'s image promoted beside `anonymous-a`'s data -- sameness assumed from a
+    shared absence, which is the single most common defect class in this repo's gates.
+
+    The assertion is on the GUARD, by name: `UnestablishedBatchSource`, not merely "it raised".
+    """
+    first = _batch(
+        tmp_path,
+        "anonymous-a",
+        [_view(LUID, "Daily Monitoring", data="ok", image="transient", captured_at="2026-08-17T20:17:00Z")],
+        captured_at="2026-08-17T20:17:00Z",
+        server=None,
+        site=None,
+    )
+    second = _batch(
+        tmp_path,
+        "anonymous-b",
+        [_view(LUID, "Daily Monitoring", data="ok", image="ok", captured_at="2026-08-18T14:46:00Z")],
+        captured_at="2026-08-18T14:46:00Z",
+        server=None,
+        site=None,
+    )
+    with pytest.raises(grp.UnestablishedBatchSource) as excinfo:
+        grp.merge_batches(grp.load_batches([first, second]))
+    assert "anonymous-a" in str(excinfo.value) and "anonymous-b" in str(excinfo.value)
+
+
+def test_an_unestablished_source_is_NOT_reported_as_a_tenant_disagreement(tmp_path):
+    """The two refusals must stay distinguishable, in both directions.
+
+    A single broad "sources incompatible" type would let the fail-open collapse return unnoticed: the
+    anonymous pair would raise the same thing the tenant pair does, and every test would still pass.
+    """
+    anonymous = _batch(
+        tmp_path,
+        "anonymous",
+        [_view(LUID, "Summary", data="ok", image="ok", captured_at="2026-08-01T00:00:00Z")],
+        server=None,
+        site=None,
+    )
+    other = _batch(
+        tmp_path,
+        "other",
+        [_view(LUID, "Summary", data="ok", image="ok", captured_at="2026-08-02T00:00:00Z")],
+        server=None,
+        site=None,
+    )
+    assert not issubclass(grp.UnestablishedBatchSource, grp.IncompatibleBatchSources)
+    with pytest.raises(grp.UnestablishedBatchSource):
+        grp.merge_batches(grp.load_batches([anonymous, other]))
+
+
+def test_a_recorded_but_EMPTY_site_is_the_default_site_not_an_absence(tmp_path):
+    """⚠️ The fail-CLOSED half, and it is not hypothetical: `""` is Tableau Server's Default site.
+
+    `tableau_env` canonicalises `TABLEAU_SITE` to `""` precisely because "an empty site IS the
+    documented Default site", so a guard that tested truthiness rather than PRESENCE would refuse
+    every legitimate Default-site merge -- trading one fail-open for a fail-closed that makes the
+    tool unusable on Tableau Server.
+    """
+    first = _batch(
+        tmp_path,
+        "default-a",
+        [_view(LUID, "Summary", data="ok", image="transient", captured_at="2026-08-01T00:00:00Z")],
+        captured_at="2026-08-01T00:00:00Z",
+        site="",
+    )
+    second = _batch(
+        tmp_path,
+        "default-b",
+        [_view(LUID, "Summary", data="ok", image="ok", captured_at="2026-08-02T00:00:00Z")],
+        captured_at="2026-08-02T00:00:00Z",
+        site="",
+    )
+    merged, _roots, _basis = grp.merge_batches(grp.load_batches([first, second]))
+    assert merged["views"][0]["image"]["source_batch"] == "default-b"
+
+
+def test_a_single_anonymous_capture_still_groups(tmp_path):
+    """One batch establishes nothing about sameness because it claims nothing. It must not be refused."""
+    only = _batch(
+        tmp_path / "_oracle",
+        "anonymous",
+        [_view(LUID, "Daily Monitoring", data="ok", image="ok", captured_at="2026-08-18T14:46:00Z")],
+        server=None,
+        site=None,
+    )
+    migrations = _migrations(tmp_path)
+    assert grp.run([only], migrations, dry_run=False) == 0
+    assert _grouped(migrations)["views"][0]["image"]["status"] == "ok"
 
 
 def test_an_older_render_of_a_DIFFERENT_revision_is_not_promoted_beside_newer_data(tmp_path):
@@ -1064,3 +1181,356 @@ def test_the_stale_refusal_is_warned_about_on_the_console(tmp_path, caplog):
 
     assert "DIFFERENT revision" in caplog.text, caplog.text
     assert "old" in caplog.text and "2026-07-01Z" in caplog.text, caplog.text
+
+
+# --------------------------------------------------------- review round 3, blocker 2: PROMOTION IS
+# RECONCILED. Copying the selected artifacts is only half of it -- an artifact a previous run
+# promoted and this one REFUSES stays physically on disk unless something removes it.
+
+
+def _one_view_batch(root: Path, name: str, *, image: str, stamp: str, revision: str) -> Path:
+    return _batch(
+        root,
+        name,
+        [_view(LUID, "Daily Monitoring", data="ok", image=image, captured_at=stamp, updated_at=revision)],
+        captured_at=stamp,
+    )
+
+
+def test_a_REFUSED_old_revision_artifact_does_not_stay_in_reference_images(tmp_path):
+    """⚠️ The measured blocker, reproduced exactly: manifest right, directory wrong.
+
+    Run 1 promotes an image. The workbook is then edited and run 2 sees `image: transient` for the new
+    revision, so the cross-revision gate correctly refuses the old render -- the merged manifest says
+    `transient` with no `path`. Measured before the fix: `file_after_refusal: true`. The old-revision
+    PNG was still sitting in `reference/images/`, so any consumer that reads the DIRECTORY rather than
+    the manifest got evidence the merge had explicitly rejected.
+    """
+    oracle = tmp_path / "_oracle"
+    old = _one_view_batch(oracle, "old-revision", image="ok", stamp="2026-08-17T20:17:00Z", revision="2026-07-01Z")
+    migrations = _migrations(tmp_path)
+    image = migrations / "airborne-services" / "reference" / "images" / f"{LUID}.png"
+
+    assert grp.run([old], migrations, dry_run=False) == 0
+    assert image.is_file(), "fixture precondition: run 1 must actually promote the image"
+
+    new = _one_view_batch(
+        oracle, "new-revision", image="transient", stamp="2026-08-18T14:46:00Z", revision="2026-08-18T09:00Z"
+    )
+    exit_code = grp.run([old, new], migrations, dry_run=False)
+
+    entry = _grouped(migrations)["views"][0]["image"]
+    assert entry["status"] == "transient" and "path" not in entry, entry
+    assert not image.is_file(), (
+        "the manifest refused the stale render and the file stayed on disk anyway -- a consumer "
+        "listing reference/images/ gets refused evidence"
+    )
+    assert exit_code == 1, "a refused cross-revision leg must reach the exit code (finding 4)"
+
+
+def test_reconciliation_removes_only_files_a_PREVIOUS_grouping_named(tmp_path):
+    """⚠️ Removal is by ATTRIBUTION. `reference/images/` is our tree, but not everything in it is ours.
+
+    A hand-dropped file no grouped manifest names must NOT be deleted -- silently removing somebody
+    else's reference would be a worse failure than the one being fixed -- and must not be accepted
+    either, because the folder then holds bytes the manifest does not account for.
+    """
+    oracle = tmp_path / "_oracle"
+    old = _one_view_batch(oracle, "old-revision", image="ok", stamp="2026-08-17T20:17:00Z", revision="2026-07-01Z")
+    migrations = _migrations(tmp_path)
+    grp.run([old], migrations, dry_run=False)
+
+    reference = migrations / "airborne-services" / "reference"
+    foreign = reference / "images" / "hand-dropped.png"
+    foreign.write_bytes(PNG)
+
+    new = _one_view_batch(
+        oracle, "new-revision", image="transient", stamp="2026-08-18T14:46:00Z", revision="2026-08-18T09:00Z"
+    )
+    exit_code = grp.run([old, new], migrations, dry_run=False)
+
+    assert foreign.is_file(), "a file we cannot attribute to ourselves must not be deleted"
+    assert not (reference / "images" / f"{LUID}.png").is_file(), "our own refused artifact must still go"
+    report = json.loads((new / grp.UNMATCHED_REPORT).read_text(encoding="utf-8"))
+    assert [r["refusal"] for r in report["unreconciled"]] == [grp.REFUSAL_UNATTRIBUTED], report["unreconciled"]
+    assert report["unreconciled"][0]["unattributed"] == ["images/hand-dropped.png"]
+    assert exit_code == 1
+
+
+def test_a_dry_run_reconciles_NOTHING(tmp_path):
+    """`--dry-run` writes nothing, and deleting is writing. Reporting the removal is fine; doing it is not."""
+    oracle = tmp_path / "_oracle"
+    old = _one_view_batch(oracle, "old-revision", image="ok", stamp="2026-08-17T20:17:00Z", revision="2026-07-01Z")
+    migrations = _migrations(tmp_path)
+    grp.run([old], migrations, dry_run=False)
+    image = migrations / "airborne-services" / "reference" / "images" / f"{LUID}.png"
+
+    new = _one_view_batch(
+        oracle, "new-revision", image="transient", stamp="2026-08-18T14:46:00Z", revision="2026-08-18T09:00Z"
+    )
+    grp.run([old, new], migrations, dry_run=True)
+
+    assert image.is_file(), "a dry run deleted a file"
+
+
+def test_an_UNCHANGED_re_run_removes_nothing(tmp_path):
+    """Reconciliation must be a no-op when the merge promotes what is already there.
+
+    The negative control for the removal: a rule that deleted on every run would still pass the
+    blocker test above while destroying a good reference folder on the next re-group.
+    """
+    oracle = tmp_path / "_oracle"
+    only = _one_view_batch(oracle, "capture", image="ok", stamp="2026-08-17T20:17:00Z", revision="2026-07-01Z")
+    migrations = _migrations(tmp_path)
+    assert grp.run([only], migrations, dry_run=False) == 0
+    image = migrations / "airborne-services" / "reference" / "images" / f"{LUID}.png"
+    assert image.is_file()
+
+    assert grp.run([only], migrations, dry_run=False) == 0
+    assert image.is_file(), "a re-run that promotes the same artifact deleted it"
+    report = json.loads((only / grp.UNMATCHED_REPORT).read_text(encoding="utf-8"))
+    assert report["grouped"][0]["removed"] == []
+
+
+# --------------------------------------------------------- review round 3, blocker 3: WORKBOOKS ARE
+# KEYED BY LUID. Two DIFFERENT source workbooks whose names normalize identically both targeted one
+# destination folder; the last manifest overwrote the first and both workbooks' files remained.
+
+RND_AMP = "wb-rnd-amp"
+RND_PLUS = "wb-rnd-plus"
+
+
+def _collision_batch(root: Path) -> Path:
+    """One capture holding two DISTINCT workbooks whose display names normalize onto one key.
+
+    Not invented: on the real 48-workbook reference estate, `Seed - R&D`, `Seed - R+D` and
+    `Seed - R/D` are three distinct workbook LUIDs and ONE normalized key -- which is why the estate
+    has 48 LUIDs and 46 name keys.
+    """
+    first = _view("aaaaaaaa-1111-2222-3333-444444444444", "Sheet A", data="ok", image="ok", captured_at=STAMP)
+    second = _view("bbbbbbbb-1111-2222-3333-444444444444", "Sheet B", data="ok", image="ok", captured_at=STAMP)
+    first["workbook_name"], first["workbook_luid"] = "Seed - R&D", RND_AMP
+    second["workbook_name"], second["workbook_luid"] = "Seed - R+D", RND_PLUS
+    return _batch(root, "one-capture", [first, second], captured_at=STAMP)
+
+
+def test_two_DIFFERENT_workbooks_normalizing_onto_one_folder_are_both_refused(tmp_path):
+    """⚠️ The measured blocker: exit 0, one manifest, two workbooks' images, one view reported.
+
+    Destination AMBIGUITY (one name, two folders) was detected; the source side was not. `_group_all`
+    wrote them in sequence, the second manifest overwrote the first, and `seed-rd/reference/images/`
+    ended up holding two files while the surviving manifest named one -- one workbook's evidence
+    silently attributed to another, with nothing in the output saying so.
+    """
+    capture = _collision_batch(tmp_path / "_oracle")
+    migrations = tmp_path / "migrations" / "workbooks"
+    (migrations / "seed-rd").mkdir(parents=True)
+
+    exit_code = grp.run([capture], migrations, dry_run=False)
+
+    reference = migrations / "seed-rd" / "reference"
+    assert exit_code == 1
+    assert not (reference / grp.MANIFEST_NAME).is_file(), "neither side of a collision may be written"
+    assert not list((reference / "images").glob("*")) if (reference / "images").is_dir() else True
+
+    report = json.loads((capture / grp.UNMATCHED_REPORT).read_text(encoding="utf-8"))
+    assert report["workbooks_collision"] == 2, report
+    assert {r["refusal"] for r in report["collision"]} == {grp.REFUSAL_DESTINATION_COLLISION}
+    assert sorted(report["collision"][0]["colliding_workbook_luids"]) == sorted([RND_AMP, RND_PLUS])
+
+
+def test_the_collision_refusal_is_not_the_ambiguous_destination_one(tmp_path):
+    """Two guards, two names. A test asserting only "exit 1" cannot tell them apart -- and this file
+    now has five fail-closed guards that would all satisfy a bare `!= 0`."""
+    capture = _collision_batch(tmp_path / "_oracle")
+    migrations = tmp_path / "migrations" / "workbooks"
+    (migrations / "seed-rd").mkdir(parents=True)
+    grp.run([capture], migrations, dry_run=False)
+    report = json.loads((capture / grp.UNMATCHED_REPORT).read_text(encoding="utf-8"))
+    assert report["workbooks_ambiguous"] == 0 and report["workbooks_unmatched"] == 0, report
+
+
+def test_two_workbooks_with_their_OWN_folders_still_group(tmp_path):
+    """The negative control. A guard that refused any two workbooks sharing a normalized prefix -- or
+    simply refused pairs -- would pass the collision test and break every ordinary estate."""
+    capture = _collision_batch(tmp_path / "_oracle")
+    migrations = tmp_path / "migrations" / "workbooks"
+    (migrations / "seed-rd").mkdir(parents=True)
+    (migrations / "seed-rplusd").mkdir(parents=True)
+    # Rename one workbook so the two names no longer normalize onto one key.
+    manifest = json.loads((capture / grp.MANIFEST_NAME).read_text(encoding="utf-8"))
+    manifest["views"][1]["workbook_name"] = "Seed - RplusD"
+    (capture / grp.MANIFEST_NAME).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    assert grp.run([capture], migrations, dry_run=False) == 0
+    assert (migrations / "seed-rd" / "reference" / grp.MANIFEST_NAME).is_file()
+    assert (migrations / "seed-rplusd" / "reference" / grp.MANIFEST_NAME).is_file()
+
+
+def test_a_view_with_NO_workbook_luid_is_refused_rather_than_bucketed_by_name(tmp_path):
+    """ "Which workbook is this?" has no name-shaped answer. A display name is not an identity."""
+    orphan = _view(LUID, "Daily Monitoring", data="ok", image="ok", captured_at=STAMP)
+    orphan["workbook_luid"] = None
+    capture = _batch(tmp_path / "_oracle", "capture", [orphan], captured_at=STAMP)
+    migrations = _migrations(tmp_path)
+
+    assert grp.run([capture], migrations, dry_run=False) == 1
+    report = json.loads((capture / grp.UNMATCHED_REPORT).read_text(encoding="utf-8"))
+    assert [r["refusal"] for r in report["unidentified"]] == [grp.REFUSAL_NO_LUID], report
+    assert not (migrations / "airborne-services" / "reference" / grp.MANIFEST_NAME).is_file()
+
+
+def test_two_workbooks_sharing_an_EXACT_name_are_kept_apart_by_luid(tmp_path):
+    """Normalization is not the only way names collide -- two workbooks can simply share one.
+
+    Bucketing by name merged them into a single manifest with no collision detectable at all; keying
+    by LUID turns the same input into a reported destination collision.
+    """
+    first = _view("aaaaaaaa-1111-2222-3333-444444444444", "Sheet A", data="ok", image="ok", captured_at=STAMP)
+    second = _view("bbbbbbbb-1111-2222-3333-444444444444", "Sheet B", data="ok", image="ok", captured_at=STAMP)
+    first["workbook_luid"], second["workbook_luid"] = "wb-one", "wb-two"
+    capture = _batch(tmp_path / "_oracle", "capture", [first, second], captured_at=STAMP)
+    migrations = _migrations(tmp_path)
+
+    assert grp.run([capture], migrations, dry_run=False) == 1
+    report = json.loads((capture / grp.UNMATCHED_REPORT).read_text(encoding="utf-8"))
+    assert report["workbooks_collision"] == 2, report
+
+
+def test_a_workbook_RENAMED_between_batches_is_reported_not_guessed(tmp_path):
+    """One LUID, two normalized names: which folder is the destination is unanswerable.
+
+    ⚠️ It takes two DIFFERENT views to reach this, and that is not a fixture convenience -- it is what
+    the shape actually is. A merged record for ONE view takes its identity from the newest batch, so a
+    rename seen twice for the same view leaves no disagreement behind. The disagreement survives only
+    across views, which is exactly the partial-retry pattern: batch 1 captured `Daily Monitoring`
+    while the workbook was called one thing, batch 2 captured a different view after the rename.
+    """
+    early = _view(LUID, "Daily Monitoring", data="ok", image="ok", captured_at="2026-08-01T00:00:00Z")
+    late = _view(OTHER, "Availability Summary", data="ok", image="ok", captured_at="2026-08-02T00:00:00Z")
+    early["workbook_name"], late["workbook_name"] = "airborne services", "airborne services EMEA"
+    first = _batch(tmp_path / "_oracle", "first", [early], captured_at="2026-08-01T00:00:00Z")
+    second = _batch(tmp_path / "_oracle", "second", [late], captured_at="2026-08-02T00:00:00Z")
+    migrations = _migrations(tmp_path)
+
+    assert grp.run([first, second], migrations, dry_run=False) == 1
+    report = json.loads((second / grp.UNMATCHED_REPORT).read_text(encoding="utf-8"))
+    assert [r["refusal"] for r in report["ambiguous"]] == [grp.REFUSAL_NAME_AMBIGUOUS], report
+    assert not (migrations / "airborne-services" / "reference" / grp.MANIFEST_NAME).is_file(), (
+        "half a workbook's views were grouped under a name the other half disputes"
+    )
+
+
+# --------------------------------------------------------- review round 3, blocker 5: EVERY BATCH ON
+# DISK. Reading only the directories somebody typed moves the boundary from one batch to "every
+# argument the operator remembered" -- narrower, and invisible in the output.
+
+
+def test_a_batch_on_disk_that_was_not_passed_is_REFUSED_not_skipped(tmp_path):
+    """⚠️ The measured shape: `retry2` present, not listed, and its good render never read.
+
+    Before: exit 0, `image: transient` from `airborne-services-retry`, `batches` listing the two that
+    were given -- and the PNG that would have answered the question sitting unopened on disk.
+    """
+    batches = _three_batches(tmp_path)
+    with pytest.raises(grp.UnlistedBatchOnDisk) as excinfo:
+        grp.run(batches[:2], _migrations(tmp_path), dry_run=False)
+    assert "airborne-services-retry2" in str(excinfo.value)
+
+
+def test_oracle_root_DISCOVERS_the_batch_nobody_listed(tmp_path):
+    """AC#3 as implemented: a defined root, a defined batch shape, and an UNLISTED batch found there.
+
+    Nothing is passed at all -- the root is the only argument -- and the promoted image comes from the
+    third retry, which is the batch the listing mode could not see.
+    """
+    _three_batches(tmp_path)
+    migrations = _migrations(tmp_path)
+
+    assert grp.run(None, migrations, dry_run=False, oracle_root=tmp_path / "_oracle") == 0
+
+    grouped = _grouped(migrations)
+    assert grouped["views"][0]["image"]["status"] == "ok"
+    assert grouped["views"][0]["image"]["source_batch"] == "airborne-services-retry2"
+    assert set(grouped["batches"]) == {"airborne-services", "airborne-services-retry", "airborne-services-retry2"}
+
+
+def test_a_root_that_is_ITSELF_a_capture_is_the_ordinary_layout(tmp_path):
+    """`_oracle/` with `images/`, `data/` and a manifest is one batch. Its own subdirs are structure."""
+    oracle = tmp_path / "_oracle"
+    _batch(oracle.parent, oracle.name, [_view(LUID, "Daily Monitoring", data="ok", image="ok", captured_at=STAMP)])
+    migrations = _migrations(tmp_path)
+
+    assert grp.run(None, migrations, dry_run=False, oracle_root=oracle) == 0
+    assert _grouped(migrations)["views"][0]["image"]["status"] == "ok"
+
+
+def test_a_directory_under_the_root_that_is_NOT_a_batch_blocks(tmp_path):
+    """⚠️ Otherwise the boundary moves a third time -- to "every directory I happened to recognise"."""
+    _three_batches(tmp_path)
+    (tmp_path / "_oracle" / "half-written-capture").mkdir()
+    with pytest.raises(grp.UnclassifiedCaptureDirectory) as excinfo:
+        grp.run(None, _migrations(tmp_path), dry_run=False, oracle_root=tmp_path / "_oracle")
+    assert "half-written-capture" in str(excinfo.value)
+
+
+def test_a_GROUPED_manifest_is_not_mistaken_for_a_capture_batch(tmp_path):
+    """`reference/` carries a file with the same NAME. Accepting it would feed output back into input."""
+    reference = tmp_path / "reference"
+    reference.mkdir()
+    (reference / grp.MANIFEST_NAME).write_text(json.dumps({"schema": "tableau-oracle-workbook/1"}), encoding="utf-8")
+    assert not grp.is_capture_batch(reference)
+
+
+def test_exclude_is_the_ONE_auditable_escape_and_is_recorded(tmp_path):
+    """An exclusion nothing records is indistinguishable from an omission."""
+    batches = _three_batches(tmp_path)
+    migrations = _migrations(tmp_path)
+
+    assert grp.run(batches[:2], migrations, dry_run=False, exclude=[batches[2]]) == 0
+
+    grouped = _grouped(migrations)
+    assert grouped["views"][0]["image"]["status"] != "ok", "the excluded batch's render must not be promoted"
+    assert [Path(p).name for p in grouped["excluded_paths"]] == ["airborne-services-retry2"]
+
+
+def test_a_non_batch_sibling_does_not_block_the_LISTED_mode(tmp_path):
+    """Naming a batch does not declare its parent a tree of captures.
+
+    `_runs/<run>/oracle` sits beside `assessment/`, `bundle/`, `scratch/` -- none of them captures.
+    Refusing those would make the listed mode unusable on the layout this repo actually writes.
+    """
+    oracle = tmp_path / "_oracle"
+    only = _batch(oracle, "capture", [_view(LUID, "Daily Monitoring", data="ok", image="ok", captured_at=STAMP)])
+    (oracle / "bundle").mkdir()
+    (oracle / "scratch").mkdir()
+
+    assert grp.run([only], _migrations(tmp_path), dry_run=False) == 0
+
+
+def test_the_source_flags_are_mutually_exclusive_and_one_is_required():
+    parser = grp.build_parser()
+    args = parser.parse_args(["--oracle-root", "_oracle", "--exclude", "x", "--exclude", "y"])
+    assert args.oracle_root.name == "_oracle" and [p.name for p in args.exclude] == ["x", "y"]
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--oracle", "a", "--oracle-root", "b"])
+    with pytest.raises(SystemExit):
+        parser.parse_args([])
+
+
+def test_an_empty_discovery_root_says_so_rather_than_grouping_nothing(tmp_path):
+    root = tmp_path / "_oracle"
+    root.mkdir()
+    with pytest.raises(FileNotFoundError) as excinfo:
+        grp.run(None, _migrations(tmp_path), dry_run=False, oracle_root=root)
+    assert "no capture batch" in str(excinfo.value)
+
+
+def test_every_refusal_reaches_exit_2_through_main(tmp_path, monkeypatch, capsys):
+    """The guards are only worth what the CLI does with them. Exit code, never printed text."""
+    batches = _three_batches(tmp_path)
+    migrations = _migrations(tmp_path)
+    argv = ["group", "--oracle", str(batches[0]), "--oracle", str(batches[1]), "--migrations", str(migrations)]
+    monkeypatch.setattr(sys, "argv", argv)
+    assert grp.main() == 2
+    capsys.readouterr()
