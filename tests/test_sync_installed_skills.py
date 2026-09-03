@@ -2024,3 +2024,175 @@ def test_an_already_absent_bundle_is_still_retirable(estate: Estate, capsys: pyt
     capsys.readouterr()
     recorded = json.loads((estate.plugin / sync.OWNER_MARKER_NAME).read_text(encoding="utf-8"))["bundles"]
     assert retired not in recorded
+
+
+# --------------------------------------------------------------------------------------------
+# Round-7 finding 1 - CONTAINMENT AT EVERY DEPTH.
+#
+# Rounds 4-6 closed the marker-level escapes: an absolute path, a `..`, a Windows alias, an
+# outward junction, an exact-named junction to a sibling. Every one of them is a TOP-LEVEL bundle
+# name, and the boundary they built is a prefix test on `rel.parts[0]`.
+#
+# A prefix test is not containment when any component of the path can be a reparse point. Measured
+# here on Python 3.13.2, with a junction one level DEEPER than anything those rounds probed:
+#
+#     rglob descends:   ['bundle', 'bundle/SKILL.md', 'bundle/nested', 'bundle/nested/keep.txt']
+#     keep after unlink:   False        <- an EXTERNAL file, deleted
+#     sentinel after copy2: 'published' <- an EXTERNAL file, overwritten
+#
+# `dst.rglob("*")` walks straight through the junction, the resulting relative path still begins
+# with an owned bundle name, and `unlink()`/`copy2()` then follow it out of the plugin. The
+# boundary had merely moved one directory deeper.
+# --------------------------------------------------------------------------------------------
+
+
+def _ship_nested_file(estate: Estate, rel: str, text: str) -> None:
+    """Commit a file at `.github/skills/<FIRST_BUNDLE>/<rel>` on the MERGED ref, and fetch it."""
+    target = estate.seed / ".github" / "skills" / FIRST_BUNDLE / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, encoding="utf-8")
+    _git(estate.seed, "add", "-A")
+    _git(estate.seed, "commit", "-m", f"ship {rel}")
+    _git(estate.seed, "push", "origin", "master")
+    _git(estate.clone, "fetch", "origin")
+
+
+def test_a_nested_junction_under_an_owned_bundle_carries_no_DELETE(
+    estate: Estate, tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """The deletion half: a file under the junction is `extra`, and `unlink()` follows it out.
+
+    The relative path is `<owned bundle>/nested-junction/keep.txt`, so `rel.parts[0]` is genuinely
+    an owned bundle and the scope check passes. Nothing below that first component was ever looked
+    at, which is why five rounds of top-level containment work could not see this.
+    """
+    assert _run(estate) == sync.EXIT_OK
+    capsys.readouterr()
+    outside = tmp_path / "outside-the-plugin"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("not ours to delete\n", encoding="utf-8")
+    if not _junction(estate.plugin / "skills" / FIRST_BUNDLE / "nested-junction", outside):
+        pytest.skip("this platform cannot create a junction")
+    _make_stale(estate)
+
+    code = _run(estate)
+    capsys.readouterr()
+
+    assert (outside / "keep.txt").exists(), "a junction BELOW a bundle must not carry a delete either"
+    assert (outside / "keep.txt").read_text(encoding="utf-8") == "not ours to delete\n"
+    assert code == sync.EXIT_UNSAFE_INSTALL, "and the refusal must name THIS guard, not some other"
+
+
+def test_a_nested_junction_under_an_owned_bundle_carries_no_COPY(
+    estate: Estate, tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """The copy half, which the deletion fix alone does not touch.
+
+    `changed` comes from the SOURCE tree, so scoping the destination walk cannot reach it: the
+    merged build legitimately ships `<bundle>/nested/PAGE.md`, and if `nested` is a junction in the
+    install then `shutil.copy2` writes the published bytes over whatever the junction points at.
+    """
+    _ship_nested_file(estate, "nested/PAGE.md", "# merged page\n")
+    assert _run(estate) == sync.EXIT_OK
+    capsys.readouterr()
+    outside = tmp_path / "outside-the-plugin"
+    outside.mkdir()
+    (outside / "PAGE.md").write_text("external sentinel\n", encoding="utf-8")
+
+    shutil.rmtree(estate.plugin / "skills" / FIRST_BUNDLE / "nested")
+    if not _junction(estate.plugin / "skills" / FIRST_BUNDLE / "nested", outside):
+        pytest.skip("this platform cannot create a junction")
+    _make_stale(estate)
+
+    code = _run(estate)
+    capsys.readouterr()
+
+    assert (outside / "PAGE.md").read_text(encoding="utf-8") == "external sentinel\n", (
+        "a junction BELOW a bundle must not carry a WRITE out of the plugin either"
+    )
+    assert code == sync.EXIT_UNSAFE_INSTALL
+
+
+# --------------------------------------------------------------------------------------------
+# Round-7 finding 2 - A RECORD IS NOT A CONFIRMATION.
+#
+# Round 2 made the run ASK the remote rather than trust the local `origin/HEAD` marker, and round 3
+# made it fetch the exact advertised refspec. Both fixes live on the ONLINE path. Offline, the run
+# falls back to the branch a previous run recorded - and then reported `default_verified: true`
+# about it, which preflight reads as `merged_ok`.
+#
+# The reviewer's reproduction, verbatim: an online run recorded `master`, the remote's HEAD then
+# moved to `main` with different content, and the clone went offline:
+#
+#     offline_exit=0  status=in_sync  default_proof=recorded  default_verified=True
+#     installed_has_old=True  installed_has_new=False  remote_actual_head=refs/heads/main
+#     preflight_merged_ok=True
+#
+# A recorded default is evidence of what the remote said LAST TIME. It cannot certify what the
+# remote says NOW, and "cannot assess" must be its own state rather than collapsing into the clean
+# bucket.
+# --------------------------------------------------------------------------------------------
+
+
+def _record_then_go_offline(estate: Estate, capsys: pytest.CaptureFixture) -> None:
+    """One online run (records `master`), then a remote rename to `main`, then no network at all."""
+    assert _run(estate) == sync.EXIT_OK
+    capsys.readouterr()
+    _rename_remote_default(estate, "new default branch content")
+    _git(estate.clone, "remote", "set-url", "origin", str(estate.origin.parent / "gone.git"))
+
+
+def test_a_recorded_default_is_reported_as_UNCONFIRMED_not_verified(
+    estate: Estate, capsys: pytest.CaptureFixture
+) -> None:
+    """The offline fallback must publish, and must NOT certify. Those are different questions."""
+    _record_then_go_offline(estate, capsys)
+
+    code = _run(estate, "--check", "--json")
+    verdict = json.loads(capsys.readouterr().out)
+
+    assert code == sync.EXIT_OK, "offline is not a hard failure - preflight must still run without a network"
+    assert verdict["status"] == "in_sync", "the CONTENT genuinely matches the recorded branch"
+    assert verdict["default_proof"] == "recorded"
+    assert verdict["default_verified"] is False, "a record cannot certify what the remote says NOW"
+    assert verdict["default_unconfirmed"], "and the reason must be stated, not merely flagged"
+    assert "merged" in _read_installed(estate.plugin), "the OLD content is what is installed"
+    assert "new default branch content" not in _read_installed(estate.plugin)
+
+
+def test_preflight_shows_a_recorded_default_as_CANNOT_ESTABLISH_and_warns(
+    estate: Estate, capsys: pytest.CaptureFixture
+) -> None:
+    """Explicitly non-clean, explicitly not `stale`, and explicitly not a session-start blocker.
+
+    Severity is a judgement, and both directions are failures. Green certifies old content as
+    merged - the defect. Critical fails EVERY offline session start, and a gate that fires
+    routinely for a benign reason gets bypassed, which is the same false green by another route.
+    So: never green, never silent, and WARN rather than halt.
+    """
+    _record_then_go_offline(estate, capsys)
+    _run(estate, "--check", "--json")
+    reported = capsys.readouterr().out
+
+    assert _skill_verdict(reported, "$v.Mode") == "compared"
+    assert _skill_verdict(reported, "$v.Merged.Ok") == "False", "a recorded default must never read as merged_ok"
+    assert _skill_verdict(reported, "$v.Merged.Tier") == "recommended"
+    assert "CANNOT ESTABLISH" in _skill_verdict(reported, "$v.Merged.Detail")
+
+
+def test_a_recorded_default_does_not_downgrade_a_genuinely_stale_install(
+    estate: Estate, capsys: pytest.CaptureFixture
+) -> None:
+    """The control: the warn applies ONLY when the recorded proof is the sole reason it is not green.
+
+    Without this, "offline must not halt the session" would be a licence to downgrade real drift to
+    a warning as well, which is a bigger hole than the one being closed.
+    """
+    _record_then_go_offline(estate, capsys)
+    _make_stale(estate)
+
+    assert _run(estate, "--check", "--json") == sync.EXIT_DRIFT
+    reported = capsys.readouterr().out
+
+    assert _skill_verdict(reported, "$v.Merged.Ok") == "False"
+    assert _skill_verdict(reported, "$v.Merged.Tier") == "critical", "stale content still halts, offline or not"

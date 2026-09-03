@@ -58,6 +58,44 @@ a bundle removed from `SHIPPED_SKILLS` stopped being "owned", stayed installed f
 still said `in_sync`. The ownership marker records the inventory each publish installed, so a bundle
 that has since left it is reported as drift and removed. Bundles that were never ours stay untouched.
 
+Containment is a RESOLVED question, at every depth (round-7 finding 1)
+----------------------------------------------------------------------
+Rounds 2-6 built the destination boundary out of top-level bundle NAMES: an absolute path, a `..`, a
+Windows alias, an outward junction and a same-named junction to a sibling are all refused. Every one
+of those is depth 0, and what enforces the boundary for file operations is a prefix test on
+`rel.parts[0]`.
+
+A prefix test is not containment when any component of the path can be a reparse point. Measured on
+Python 3.13.2 with a junction ONE level deeper than any of those rounds probed::
+
+    rglob descends:       ['bundle', 'bundle/SKILL.md', 'bundle/nested', 'bundle/nested/keep.txt']
+    keep after unlink:    False        <- an EXTERNAL file, deleted
+    sentinel after copy2: 'published'  <- an EXTERNAL file, overwritten
+
+`rglob` walks straight through the junction; the relative path still starts with an owned bundle; and
+`unlink()`/`copy2()` then follow it out of the plugin, with the run reporting `updated` and exit 0.
+
+Three things now close the CLASS rather than that one depth:
+
+* `walk_files` replaces `rglob` on both sides and does not descend into a reparse point, so what
+  lies under a junction is never a deletion candidate;
+* `install_reparse_points` REPORTS what the walk refused to enter - silently skipping would move the
+  fail-open from "it deleted the wrong thing" to "it reported in_sync about a tree it could not
+  fully read", which is the same defect wearing the fix's clothes;
+* `contained_target` re-resolves every copy and every delete target immediately before the operation
+  and refuses anything landing outside the RESOLVED install. The copy set comes from the SOURCE
+  tree, so no amount of destination scoping can reach it - only resolution can.
+
+Offline, a RECORD is not a CONFIRMATION (round-7 finding 2)
+-----------------------------------------------------------
+Finding 2 above made the ONLINE path ask the remote. Offline the run falls back to the branch a
+previous run recorded - and used to report `default_verified: true` about it, which preflight read as
+`merged_ok`. Measured: an online run recorded `master`, the remote's HEAD then moved to `main` with
+different content, and offline the tool certified the OLD content as merged. A recorded default is
+evidence of what the remote said LAST TIME; it cannot certify what the remote says NOW. It is now
+reported as `default_verified: false` with `default_unconfirmed` naming the reason, and preflight
+carries it as an explicit CANNOT-ESTABLISH row that is never green.
+
 Network cost, deliberately re-decided: the default run now makes ONE `ls-remote --symref` call
 (bounded, ~1s) because there is no offline way to detect a default-branch rename, and a false
 `in_sync` is the failure this whole design exists to prevent. It still never runs a full `git fetch`
@@ -82,7 +120,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -91,6 +129,7 @@ from skill_plugin_source import (
     DEFAULT_INSTALL_HINT,
     OWNER_MARKER_NAME,
     PLUGIN_ROOT_ENV,
+    _is_link as is_reparse_point,  # the ONE measured answer to "symlink, junction, or neither"
     discover_skill_plugin,
     marker_bundle_problems,
     marker_bundle_target,
@@ -124,6 +163,7 @@ EXIT_NO_REF = 5
 EXIT_UNPROVEN_PLUGIN = 6
 EXIT_UNVERIFIED_DEFAULT = 7
 EXIT_UNSAFE_MARKER = 8
+EXIT_UNSAFE_INSTALL = 9
 
 
 class PublishRefError(RuntimeError):
@@ -136,6 +176,10 @@ class UnverifiedDefaultError(RuntimeError):
 
 class UnsafeMarkerError(RuntimeError):
     """The ownership marker's recorded inventory could name a deletion target outside the plugin."""
+
+
+class UnsafeInstallError(RuntimeError):
+    """A reparse point inside an owned bundle would carry a write or a delete out of the plugin."""
 
 
 @dataclass(frozen=True)
@@ -151,6 +195,10 @@ class PublishSource:  # pylint: disable=too-many-instance-attributes
     default_verified_at: str | None = None
     alternatives: tuple[str, ...] = ()
     advertised_commit: str | None = None
+    # Why `default_verified` is false when the run still produced a usable ref. It is a distinct
+    # field rather than an overload of `detail` because the two states need OPPOSITE handling:
+    # "cannot establish" still publishes and still compares, "unverified_default" refuses outright.
+    default_unconfirmed: str | None = None
 
     @property
     def from_worktree(self) -> bool:
@@ -388,16 +436,35 @@ def resolve_publish_ref(
             f"{ref} advertises {advertised[:12]} but this clone still resolves it to {commit[:12]} "
             "after fetching that exact refspec, so the authoritative content is UNKNOWN"
         )
+    # A RECORD is not a CONFIRMATION (round-7 finding 2). `recorded` means origin did not answer
+    # just now and this run reused the branch an earlier run confirmed. That is enough to publish
+    # something rather than nothing, and it is NOT enough to certify: measured, an online run
+    # recorded `master`, the remote's HEAD then moved to `main` with different content, and offline
+    # the tool reported `default_verified: true` - which preflight reads as `merged_ok` - about
+    # bytes from the branch the remote had abandoned.
+    #
+    # Deliberately NOT an error, and deliberately not `unverified_default`. Refusing here would make
+    # every offline session start a hard failure and would strand the only machines that cannot
+    # re-confirm; the honest verdict is "compared, and the authority behind the comparison could not
+    # be re-established", which is a third state rather than either of the two that existed.
+    unconfirmed = None
+    if proof == "recorded":
+        unconfirmed = (
+            f"origin did not answer `ls-remote --symref`, so {ref} is the default a previous run "
+            f"verified at {verified_at or 'an unrecorded time'}, not one confirmed now; a rename or a "
+            "new commit on the remote since then is invisible from here"
+        )
     return PublishSource(
         kind="ref",
         ref=ref,
         commit=commit,
         described=f"{ref} @ {commit[:12]}",
-        default_verified=True,
+        default_verified=unconfirmed is None,
         default_proof=proof,
         default_verified_at=verified_at,
         alternatives=_default_alternatives(commit, repo),
         advertised_commit=advertised,
+        default_unconfirmed=unconfirmed,
     )
 
 
@@ -473,6 +540,103 @@ def build_reference_copy(workdir: Path, source_root: Path) -> Path:
     return built[0]
 
 
+def walk_files(root: Path) -> Iterator[Path]:
+    """Every regular file under `root`, WITHOUT descending into a reparse point.
+
+    `Path.rglob` follows junctions. Measured here on Python 3.13.2, with a junction one level below
+    an owned bundle::
+
+        rglob descends:   ['bundle', 'bundle/SKILL.md', 'bundle/nested', 'bundle/nested/keep.txt']
+
+    That last path is the whole of round-7 finding 1: it is relative to the install, its first
+    component is a genuinely owned bundle, so the `scope` prefix test passes - and `unlink()` then
+    deletes a file that was never in the plugin at all.
+
+    Stopping the walk is the primitive that says "the plugin's own file set ends HERE", and it is
+    the right one for both sides. What lies under a junction belongs to the junction's TARGET, so
+    those files are not the install's content: they must never become deletion candidates, and the
+    walk must not spend a `realpath` per file to work that out. Validating after resolution instead
+    would answer the same question one step too late - the candidate would already be in the plan,
+    and every later consumer would have to remember to re-check it.
+
+    A prefix test on `rel.parts[0]` is not containment when ANY component can be a reparse point, so
+    this is paired with two other things rather than trusted alone: `install_reparse_points` reports
+    what the walk refused to enter (silently skipping is how "cannot assess" collapses into the
+    clean bucket), and `_apply` re-resolves every target immediately before it writes.
+    """
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        try:
+            entries = sorted(current.iterdir())
+        except OSError:  # pragma: no cover - an unreadable directory contributes no files
+            continue
+        for entry in entries:
+            if is_reparse_point(entry):
+                continue
+            if entry.is_dir():
+                stack.append(entry)
+            elif entry.is_file():
+                yield entry
+
+
+def install_reparse_points(installed: Path | None, owned: Sequence[str]) -> list[str]:
+    """Reparse points at ANY depth inside the OWNED bundle directories, as `/`-joined relatives.
+
+    Depth 0 is included deliberately: a bundle directory that is ITSELF a junction carries the copy
+    out of the plugin just as surely as one nested below it, and the marker rules that already
+    refuse such a name only ever run on RETIRED names (`marker_bundle_problems`), never on the
+    bundles currently being published into.
+    """
+    if installed is None or not installed.is_dir():
+        return []
+    found: list[str] = []
+    for name in owned:
+        bundle = installed / name
+        if is_reparse_point(bundle):
+            found.append(name)
+            continue
+        stack = [bundle]
+        while stack:
+            current = stack.pop()
+            try:
+                entries = sorted(current.iterdir())
+            except OSError:  # pragma: no cover - nothing to descend into
+                continue
+            for entry in entries:
+                if is_reparse_point(entry):
+                    found.append(entry.relative_to(installed).as_posix())
+                elif entry.is_dir():
+                    stack.append(entry)
+    return sorted(found)
+
+
+def contained_target(installed: Path, installed_real: Path, rel: Path) -> Path:
+    """`installed / rel`, proven to still be inside the RESOLVED install - or raise.
+
+    The belt to `walk_files`'s braces, and it is aimed at the operation rather than at the plan:
+    `shutil.copy2` and `Path.unlink` both follow a junction in the path they are handed, and the
+    plan is built from the SOURCE tree, so scoping the destination walk cannot reach the copy side
+    at all. Resolution is the only thing that answers "where will this write actually land".
+
+    ⚠️ Resolve, then compare RESOLVED against RESOLVED. `Path.resolve()` is non-strict, so a leaf
+    that does not exist yet still resolves its existing prefix - measured, `<skills>/b/nested/new.md`
+    with `nested` a junction resolves to `<outside>/new.md` and `is_relative_to(<skills>)` is False,
+    which is exactly the discrimination this needs.
+    """
+    target = installed / rel
+    try:
+        real = target.resolve()
+    except OSError as exc:  # pragma: no cover - an unresolvable path is refused, not guessed
+        raise UnsafeInstallError(f"{rel.as_posix()} could not be resolved under {installed}: {exc}") from exc
+    if not real.is_relative_to(installed_real):
+        raise UnsafeInstallError(
+            f"{rel.as_posix()} resolves to {real}, which is OUTSIDE {installed_real} - a reparse point in "
+            "the path would carry this operation out of the plugin"
+        )
+    return target
+
+
 def diff_tree(src: Path, dst: Path, scope: Sequence[str] | None = None) -> tuple[list[Path], list[Path]]:
     """Return (files needing copy, files present in dst but not src), as paths relative to src.
 
@@ -480,9 +644,13 @@ def diff_tree(src: Path, dst: Path, scope: Sequence[str] | None = None) -> tuple
     swept the whole destination, so a plugin carrying bundles of its own lost them. `scope` is the
     OWNED inventory - what the merged tree ships plus what this tool's own marker records having
     installed before - so a retired bundle is cleaned up while a stranger's is never touched.
+
+    Both walks are `walk_files`, not `rglob`, so neither side descends into a reparse point: `scope`
+    is a prefix test on the first component, and a prefix test cannot contain a path whose LATER
+    components are pointers elsewhere (round-7 finding 1).
     """
     changed: list[Path] = []
-    for path in sorted(p for p in src.rglob("*") if p.is_file()):
+    for path in sorted(walk_files(src)):
         rel = path.relative_to(src)
         target = dst / rel
         # shallow=False: compare CONTENT, not size+mtime. An install copies files with fresh
@@ -494,10 +662,10 @@ def diff_tree(src: Path, dst: Path, scope: Sequence[str] | None = None) -> tuple
     extra: list[Path] = []
     if dst.is_dir():
         owned = set(scope) if scope is not None else None
-        src_files = {p.relative_to(src) for p in src.rglob("*") if p.is_file()}
+        src_files = {p.relative_to(src) for p in walk_files(src)}
         extra = sorted(
             rel
-            for rel in (p.relative_to(dst) for p in dst.rglob("*") if p.is_file())
+            for rel in (p.relative_to(dst) for p in walk_files(dst))
             if rel not in src_files and (owned is None or (rel.parts and rel.parts[0] in owned))
         )
     return changed, extra
@@ -715,6 +883,7 @@ def _plan(args: argparse.Namespace, source: PublishSource, workdir: Path, fetch_
         "default_verified": source.default_verified,
         "default_proof": source.default_proof,
         "default_verified_at": source.default_verified_at,
+        "default_unconfirmed": source.default_unconfirmed,
         "default_alternatives": list(source.alternatives),
         "advertised_commit": source.advertised_commit,
         "fetch": fetch_note,
@@ -755,6 +924,16 @@ def _recorded_inventory(marker: dict | None, skills_dir: Path | None, publish_re
 def _notes(plan: SyncPlan, unmerged: list[str], unmerged_error: str | None) -> list[str]:
     """The informational lines: unmerged local edits, and any bundle this tool must now retire."""
     lines: list[str] = []
+    if plan.source.default_unconfirmed:
+        # Loud in the HUMAN output too, not only in the JSON preflight parses. A person running this
+        # by hand offline gets `SYNC: IN_SYNC` and exit 0, and without this line nothing on screen
+        # says the branch behind that verdict was never re-confirmed.
+        lines += [
+            "SYNC: CANNOT ESTABLISH - the merged default branch was not confirmed on this run:",
+            f"        {plan.source.default_unconfirmed}",
+            "      The content comparison above is still real; what is unverified is WHICH branch",
+            "      it compared against. Reconnect and re-run, or pin it with --ref <ref>.",
+        ]
     if plan.formerly_owned:
         lines += [
             f"SYNC: NOTE - {len(plan.formerly_owned)} bundle(s) this tool installed are no longer shipped "
@@ -792,20 +971,33 @@ def _record_ownership(plan: SyncPlan) -> None:
 def _apply(plan: SyncPlan, changed: list[Path], extra: list[Path]) -> list[Path]:
     """Copy the reference files in, remove the OWNED files that are no longer shipped, and re-verify."""
     installed = plan.discovery.skills_dir
-    # Resolve and RE-VALIDATE every deletion target BEFORE anything is written. Two reasons: the
-    # raw recorded string must never reach the filesystem (Windows aliases `FOREIGN`, `foreign.`
-    # and `foreign ` onto a real `foreign/`), and a marker that became unsafe between planning and
-    # applying must abort while the install is still untouched rather than half-published.
+    # Resolve and RE-VALIDATE every target BEFORE anything is written. Three reasons, in order of
+    # how they were measured: the raw recorded string must never reach the filesystem (Windows
+    # aliases `FOREIGN`, `foreign.` and `foreign ` onto a real `foreign/`); a marker that became
+    # unsafe between planning and applying must abort while the install is still untouched rather
+    # than half-published; and a reparse point ANYWHERE in a target's path silently redirects the
+    # operation out of the plugin, which no name-level rule can see (round-7 finding 1).
+    installed_real = installed.resolve()
     try:
         retire = [marker_bundle_target(installed, name) for name in plan.formerly_owned]
     except ValueError as exc:
         raise UnsafeMarkerError(str(exc)) from exc
-    for rel in changed:
-        target = installed / rel
+    copies = [(plan.src / rel, contained_target(installed, installed_real, rel)) for rel in changed]
+    removals = [contained_target(installed, installed_real, rel) for rel in extra]
+    # `shutil.rmtree` is measured NOT to follow a junction on Python 3.13.2 - but it did on older
+    # interpreters, and this repo's floor is 3.11, so the tree is proved link-free rather than the
+    # behaviour assumed. Scanning is cheap; a wrong answer here deletes someone else's directory.
+    nested = install_reparse_points(installed, [target.name for target in retire])
+    if nested:
+        raise UnsafeInstallError(
+            f"a bundle being RETIRED contains a reparse point ({', '.join(nested)}), and a recursive "
+            "delete that follows it leaves the plugin"
+        )
+    for source, target in copies:
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(plan.src / rel, target)
-    for rel in extra:
-        (installed / rel).unlink()
+        shutil.copy2(source, target)
+    for target in removals:
+        target.unlink()
     for target in retire:
         shutil.rmtree(target, ignore_errors=True)
     # Re-diff rather than trusting the copies. The whole reason this script exists is a lock that
@@ -817,12 +1009,21 @@ def _apply(plan: SyncPlan, changed: list[Path], extra: list[Path]) -> list[Path]
 def _report(args: argparse.Namespace, plan: SyncPlan) -> int:  # pylint: disable=too-many-locals
     """Compare, then either report drift (`--check`) or publish and verify."""
     installed = plan.discovery.skills_dir
+    # BEFORE the comparison, not after: `walk_files` refuses to descend into a reparse point, so
+    # without this the escaping files would simply be absent from the diff and `--check` would
+    # report `in_sync` off a tree it could not fully assess - the "unassessable input lands in the
+    # clean bucket" shape, arriving by way of the very fix that removed the deletion (round 7).
+    escapes = install_reparse_points(installed, plan.owned)
+    if escapes:
+        raise UnsafeInstallError(
+            f"{len(escapes)} reparse point(s) inside owned bundle(s): {', '.join(escapes)}"
+        )
     changed, extra = diff_tree(plan.src, installed, scope=plan.owned)
     missing = [name for name in plan.bundles if not (installed / name / "SKILL.md").is_file()]
     unmerged, unmerged_error = ([], None) if plan.source.from_worktree else local_divergence(plan.src, plan.workdir)
     note = _notes(plan, unmerged, unmerged_error)
     inventory = (
-        [f"  in build: {p.relative_to(plan.src).as_posix()}" for p in sorted(plan.src.rglob("*")) if p.is_file()]
+        [f"  in build: {p.relative_to(plan.src).as_posix()}" for p in sorted(walk_files(plan.src))]
         if args.verbose
         else []
     )
@@ -1001,6 +1202,23 @@ def main(argv: list[str] | None = None) -> int:
                     f"      Delete or repair {OWNER_MARKER_NAME} in the plugin root, then re-run.",
                 ],
                 EXIT_UNSAFE_MARKER,
+            )
+        except UnsafeInstallError as exc:
+            return _emit(
+                args,
+                {"status": "unsafe_install", "detail": str(exc), "default_verified": source.default_verified},
+                [
+                    "SYNC: ERROR - a reparse point (junction or symlink) sits inside a bundle this",
+                    "      tool owns, so NOTHING was copied or removed.",
+                    f"      {exc}",
+                    "      Every write and every delete here is `<skills>/<owned bundle>/...`, and a",
+                    "      junction ANYWHERE along that path silently redirects it out of the plugin:",
+                    "      measured, `unlink()` deleted an external file and `copy2` overwrote an",
+                    "      external one, both while the run reported `updated` and exited 0.",
+                    "      Remove the link (`rmdir <path>` for a junction) and re-run; if the content",
+                    "      really belongs in the bundle, copy it in rather than pointing at it.",
+                ],
+                EXIT_UNSAFE_INSTALL,
             )
     finally:
         shutil.rmtree(workdir, ignore_errors=True)

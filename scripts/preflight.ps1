@@ -341,9 +341,37 @@ function Get-SkillBundleVerdict($Sync) {
                               Hint = 'Every bundle the marker records must be a single directory name inside the plugin''s skills/ folder, because `installed / <name>` is passed to shutil.rmtree. Delete or repair .skill-sync-owner.json in the plugin root, then re-run python scripts\sync_installed_skills.py --check.' } }
     }
 
+    if ($Sync.status -eq 'unsafe_install') {
+        # Round-7 finding 1: a reparse point inside an owned bundle redirects `copy2`/`unlink` out
+        # of the plugin. Measured on Python 3.13.2, an external file was DELETED and another
+        # OVERWRITTEN while the run reported `updated` and exited 0. The sync now refuses (exit 9)
+        # having written nothing, and this needs its own branch for the same reason `unsafe_marker`
+        # does: the payload carries no inventory, so the generic rows below would read GREEN off
+        # evidence that is simply absent.
+        return @{ Mode = 'unsafe_install'
+                  Plugin = @{ Ok = $false; Detail = "install tree REFUSED, nothing was written: $($Sync.detail)"
+                              Hint = 'A junction or symlink inside a bundle this tool owns makes every write and delete under it land somewhere else. Remove the link (rmdir <path> for a junction) and re-run python scripts\sync_installed_skills.py --check.' } }
+    }
+
     $missing = @($Sync.missing) | Where-Object { $_ }
     $stale = @($Sync.changed) + @($Sync.extra) | Where-Object { $_ }
     $localEdits = @($Sync.local_unmerged) | Where-Object { $_ }
+    # Round-7 finding 2. `recorded` means origin did not answer on THIS run and the tool reused the
+    # branch an earlier run confirmed. Measured: an online run recorded `master`, the remote's HEAD
+    # then moved to `main` with different content, and offline this row reported merged_ok about
+    # bytes from the abandoned branch - a false CERTIFICATION, not merely a stale comparison.
+    #
+    # Severity is a judgement and both directions fail. Green certifies old content as merged.
+    # Critical fails EVERY offline session start - and preflight is documented as not requiring the
+    # network by default - so the row would fire routinely for a benign reason, get bypassed, and
+    # stop being read at all: the same false green by a slower route. So: never green, never
+    # silent, WARN rather than halt, and worded CANNOT ESTABLISH so it can never be mistaken for
+    # STALE, which is a different state with a different fix.
+    #
+    # The downgrade is deliberately narrow: it applies only when the recorded proof is the SOLE
+    # reason the row is not green. Anything genuinely stale or unreconciled stays critical.
+    $recordedOnly = ($Sync.default_verified -ne $true) -and ($Sync.default_proof -eq 'recorded') `
+                    -and ($Sync.status -eq 'in_sync') -and ($stale.Count -eq 0)
     return @{
         Mode = 'compared'
         Identity = $Sync.identity
@@ -360,7 +388,8 @@ function Get-SkillBundleVerdict($Sync) {
         # as an "alternative" nobody read. In sync with the WRONG branch is not in sync.
         Merged = @{
             Ok = (($Sync.status -eq 'in_sync') -and ($Sync.default_verified -eq $true))
-            Detail = if ($stale.Count) { "STALE in plugin vs $($Sync.described): $($stale -join ', ')" } elseif ($Sync.status -eq 'ownership_drift') { "ownership RECORD does not match $($Sync.described), though no file differs" } elseif ($Sync.default_verified -ne $true) { "UNVERIFIED default branch, so `"$($Sync.described)`" may not be the merged one" } else { "in sync with $($Sync.described)" }
+            Tier = if ($recordedOnly) { 'recommended' } else { 'critical' }
+            Detail = if ($stale.Count) { "STALE in plugin vs $($Sync.described): $($stale -join ', ')" } elseif ($Sync.status -eq 'ownership_drift') { "ownership RECORD does not match $($Sync.described), though no file differs" } elseif ($recordedOnly) { "CANNOT ESTABLISH the merged default branch: content matches `"$($Sync.described)`", but origin did not answer on this run - that branch is what a PREVIOUS run verified at $($Sync.default_verified_at), not one confirmed now" } elseif ($Sync.default_verified -ne $true) { "UNVERIFIED default branch, so `"$($Sync.described)`" may not be the merged one" } else { "in sync with $($Sync.described)" }
             Hint = 'The plugin copy SHADOWS .github/skills, so agents run bytes that differ from the MERGED repo. FIX IT NOW, mid-session: python scripts/sync_installed_skills.py (the lock behind "os error 5" only blocks renaming the plugin dir - files inside stay writable). Then publish so other machines get it: python scripts/build_plugin.py --out <clone of the marketplace repo>, commit+push. Do not trust a measurement taken against a stale bundle.'
         }
         # Informational, deliberately NOT a failure. Your unmerged skill edits are not what a subagent
