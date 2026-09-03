@@ -1143,6 +1143,44 @@ def test_the_per_view_empty_flag_survives_packaging(tmp_path: Path) -> None:
     assert [view["flags"] for view in flagged] == [["data_empty", "empty_cannot_classify"]]
 
 
+def test_a_packaged_view_from_an_OLDER_capture_is_flagged_by_the_packager_itself(tmp_path: Path) -> None:
+    """The legacy half of #480 finding 1, and the reviewer's actual reproduction input.
+
+    A capture written by a current run flags its own views, so carrying the flag is enough for
+    those. An older `oracle-manifest.json` predates the flag entirely -- and that record is what the
+    review drove through `_scope_oracle_manifest()`, getting `data_ok=1 status=ok row_count absent
+    flags absent`, which is what a clean capture looks like. So the per-view rule is DERIVED here
+    from the shared predicate, not merely carried; the estate-wide counts stay dropped, because
+    those genuinely cannot be reconstructed for one unit.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    # No `flags` key anywhere: exactly a manifest written before the diagnostic existed.
+    manifest["views"][0]["data"] = {"status": "ok", "path": "data/view-0.csv", "columns": ["Region"]}
+    (oracle / "data").mkdir(parents=True, exist_ok=True)
+    (oracle / "data" / "view-0.csv").write_text("Region\r\n", encoding="utf-8")
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+
+    shipped = json.loads((_out(tmp_path) / UNIT / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    flagged = [v for v in shipped["views"] if v.get("flags")]
+    assert [v["flags"] for v in flagged] == [["data_unassessable", "row_count_unrecorded"]]
+
+
+def test_the_packager_does_not_flag_a_view_whose_rows_were_measured(tmp_path: Path) -> None:
+    """Control: deriving the flag must not mean stamping it on everything that ships."""
+    bundle, oracle = _bundle(tmp_path)
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    manifest["views"][0]["data"] = {"status": "ok", "path": "data/view-0.csv", "row_count": 7, "columns": ["Region"]}
+    (oracle / "data").mkdir(parents=True, exist_ok=True)
+    (oracle / "data" / "view-0.csv").write_text("Region\r\nWest\r\n", encoding="utf-8")
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+
+    shipped = json.loads((_out(tmp_path) / UNIT / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    assert [v for v in shipped["views"] if v.get("flags")] == []
+
+
 def test_a_packaged_view_whose_row_count_was_never_recorded_says_so(tmp_path: Path) -> None:
     """#480 finding 1, at the package boundary -- the third consumer the reviewer named.
 

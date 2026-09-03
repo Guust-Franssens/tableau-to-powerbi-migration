@@ -144,6 +144,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import read_handover  # noqa: E402  # pylint: disable=wrong-import-position
+import tableau_oracle_manifest  # noqa: E402  # pylint: disable=wrong-import-position
 from manifest_scope import (  # noqa: E402  # pylint: disable=wrong-import-position
     ORACLE_MANIFEST_ALLOW,
     project,
@@ -618,7 +619,13 @@ def _scope_oracle_manifest(
       omitting it.
     """
     narrowed = dict(manifest if isinstance(manifest, dict) else {})
-    narrowed["views"] = packaged
+    # ⚠️ DERIVED here, not merely carried (#480). A capture written by a current run already flags
+    # its own views, but an OLDER `oracle-manifest.json` predates the flag entirely -- and that is
+    # exactly the input the review's reproduction used: a `status: ok` data leg with no `row_count`,
+    # shipped with `flags` absent, which is what a clean capture looks like. The estate-wide COUNTS
+    # stay dropped because this packager cannot reconstruct them, but the per-view rule needs no
+    # estate context, so it is applied from the SHARED predicate rather than re-implemented.
+    narrowed["views"] = tableau_oracle_manifest.flag_empty(packaged)
     scoped, dropped = project(narrowed, ORACLE_MANIFEST_ALLOW)
 
     shipped = scoped.get("views") or []

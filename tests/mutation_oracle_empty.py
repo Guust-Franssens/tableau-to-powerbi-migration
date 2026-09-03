@@ -579,6 +579,33 @@ manifest_scope.ORACLE_LEG_ALLOW.pop("certification", None)
 manifest_scope.ORACLE_LEG_SPEC.pop("certification", None)
 """,
     ),
+    "the-packager-carries-the-flag-but-never-derives-it": (
+        (f"{PACKAGE}::test_a_packaged_view_from_an_OLDER_capture_is_flagged_by_the_packager_itself",),
+        """
+import package_unit as p
+import tableau_oracle_manifest as m
+_orig = p._scope_oracle_manifest
+def scope(manifest, packaged, objects, unit):
+    # The half-fix: carry a flag the capture already wrote, and derive nothing. Correct for a
+    # manifest written by a current run, and silent for every older one -- which is the input the
+    # review actually used, and where "flags absent" reads as a clean capture.
+    return _orig(manifest, [dict(v) for v in packaged], objects, unit)
+p._scope_oracle_manifest = scope
+m.flag_empty = lambda records: records
+""",
+    ),
+    "the-packager-flags-every-view-it-ships": (
+        (f"{PACKAGE}::test_the_packager_does_not_flag_a_view_whose_rows_were_measured",),
+        """
+import tableau_oracle_manifest as m
+_orig = m.flag_empty
+def flag(records):
+    # The matched over-correction: a flag on all of them is a view list wearing a diagnostic, and a
+    # reader learns to ignore the field within a week.
+    return [{**r, "flags": [m.FLAG_DATA_UNASSESSABLE, m.UNASSESSABLE_NO_ROW_COUNT]} for r in records]
+m.flag_empty = flag
+""",
+    ),
     "the-workbook-subset-drops-the-unassessable-pair": (
         (f"{GROUP}::test_a_view_with_no_row_count_is_counted_AND_named_UNASSESSABLE_in_the_workbook_manifest",),
         """
