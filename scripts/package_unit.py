@@ -130,6 +130,13 @@ the negative control, and it must package successfully and still report that pag
 
 from __future__ import annotations
 
+# The assembler, its scoping helpers and the CLI intentionally live together: the module IS the
+# packaging contract, and the numbered join table above only reads as one document while the code it
+# describes is one file. Extracting the data-source localizer (#461) into a sibling module was
+# considered and rejected on the same grounds - it is a step of the assembly, not a separate concern
+# like `manifest_scope.py`'s allowlists.
+# pylint: disable=too-many-lines
+
 import argparse
 import hashlib
 import json
@@ -138,6 +145,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -168,6 +176,37 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 #: `item`/`issue`/`severity`/`stage` under `additionalProperties: false`. Learning that cost a trip
 #: outside the package. Prose restating a schema is a copy that drifts; the schema itself cannot.
 SPEC_SCHEMA = SCRIPT_DIR.parent / "docs" / "migration-spec.schema.json"
+
+#: Every `File.Contents("<literal>")` in a packaged model's M, and what counts as an ABSOLUTE one.
+#: The engine writes a machine-local path here pointing back into `<bundle>/data/`, so a package
+#: whose whole purpose is to be self-contained (#446) is not - issue #461. Measured across the 67
+#: packaged units of estate run 408: **23** such references in **17** units, 11.2 MB of extracts the
+#: package did not carry, one of them a `/Users/...` macOS path baked into the source workbook and
+#: absent from this machine entirely.
+FILE_CONTENTS_RE = re.compile(r'File\.Contents\(\s*"([^"]*)"\s*\)')
+ABSOLUTE_PATH_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\|/)")
+
+#: Where a shipped source lands inside the package, and the M parameter the rewritten partitions
+#: read their folder from. Both the parameter's `meta [...]` tail and the trailing-separator value
+#: shape are copied from this repo's OWN committed, Desktop-verified models
+#: (`examples/*/fabric/*.SemanticModel/definition/expressions.tmdl`) rather than invented.
+#:
+#: The name matters twice over. `File.Contents` does **not** accept a relative path - Power Query
+#: rejects it outright, so "rewrite it to a relative path" would produce a model that refreshes
+#: NOWHERE, which is worse than one that refreshes on a single machine. A parameter is the
+#: documented workaround. And `DataFolder` is one of the two names `scripts/set_data_folder.py`
+#: already localizes, sanitizes and CI-gates, so a unit promoted to `migrations/<slug>/fabric/` is
+#: covered by the existing privacy gate with no new code and no new script.
+DATA_DIR = "data"
+DATA_FOLDER_PARAM = "DataFolder"
+FALLBACK_DATA_FOLDER_PARAM = "PackageDataFolder"
+EXPRESSIONS_TMDL = "expressions.tmdl"
+
+#: Refuse to copy a single source larger than this, rather than silently turning a handover folder
+#: into a data lake. Measured on estate run 408 the largest referenced extract is 1.33 MB and the
+#: whole estate is 11.2 MB, so nothing observed comes close - the ceiling exists so that an
+#: unbounded case becomes a LOUD, recorded omission instead of an unnoticed multi-GB copy.
+MAX_DATA_BYTES = 256 * 1024 * 1024
 
 #: The render legs an oracle view may claim, in the order `reference_evidence._oracle_leg` reads them.
 RENDER_LEGS = ("image", "svg", "pdf")
@@ -797,6 +836,7 @@ expected set is every dashboard PLUS every worksheet not placed on one.
 | `handover/{unit}.json` | the engine's slice for THIS workbook; `python scripts/read_handover.py handover/{unit}.json --viz`. Estate-wide sections are not shipped; absolute host paths are redacted. |
 | `fabric/` | the engine WORKING COPY - **edit here**, and when you work from a package THIS tree is canonical; `<bundle>/pbip/` never promotes over it. Declared-edit tooling (`declare_generated_edit.py`, `--tamper`) is bundle-only. |
 | `assets/` | the Tableau source this was built from |
+| `data/` | the rows the model imports, shipped with it (#461). Partitions read `DataFolder & "<relative>"`; `DataFolder`, in `expressions.tmdl`, is the ONE line to repoint if you move this folder, and `set_data_folder.py` rewrites it. Absent when the model imports nothing. |
 | `migration-spec.json` | the parsed source; the expected page set both gates grade against |
 | `migration-spec.schema.json` | the CONTRACT `validate_spec.py` enforces. Read it before appending a `limitations_encountered` entry: exactly `item`/`issue`/`severity`/`stage`, `additionalProperties: false`, so one invented field rejects every entry. |
 | `oracle/` | this unit's Tableau reference, split `dashboard/` vs `worksheet/` vs `unknown/` (**singular** - the directory is the object kind, not a plural). **`oracle/*/data/*.csv` is the NUMERIC oracle** - exact labels and figures, no OCR and no judgement. Read it first. |
@@ -864,6 +904,175 @@ def _copy_fabric(bundle: Path, unit: str, dest: Path) -> tuple[str | None, str |
     return report, model
 
 
+def _model_tmdl(dest: Path, model_name: str | None) -> list[Path]:
+    """Every `.tmdl` document of the packaged model, or an empty list when there is no model."""
+    if not model_name:
+        return []
+    definition = dest / "fabric" / model_name / "definition"
+    return sorted(definition.rglob("*.tmdl")) if definition.is_dir() else []
+
+
+def _packaged_data_target(source: str, taken: dict[str, str]) -> str:
+    """A stable, package-relative home for one referenced source, unique within this package.
+
+    Readable first - `data/<parent folder>/<file name>` keeps a handover folder browsable - but two
+    different sources can share both, and the engine's extract paths are exactly that shape
+    (`.../<table>/federated_<hash>/Extract_Extract.csv`). A collision is therefore resolved by
+    digesting the FULL original path, never by overwriting: two sources landing on one file would
+    silently repoint one partition at the other's rows.
+    """
+    original = Path(source.replace("\\", "/"))
+    parent = _UNSAFE.sub("_", original.parent.name)[:_MAX_OBJECT_NAME] or "source"
+    name = _UNSAFE.sub("_", original.name)[:_MAX_OBJECT_NAME] or "data"
+    candidate = f"{parent}/{name}"
+    if taken.get(candidate, source) != source:
+        candidate = f"{hashlib.sha256(source.encode('utf-8')).hexdigest()[:8]}/{name}"
+    taken[candidate] = source
+    return candidate
+
+
+def _classify_source(source: str) -> tuple[Path | None, str | None]:
+    """`(readable file, refusal)` for one absolute `File.Contents` literal."""
+    path = Path(source)
+    if not path.is_file():
+        return None, "not present on the packaging machine, so its bytes could not be shipped"
+    size = path.stat().st_size
+    if size > MAX_DATA_BYTES:
+        return None, f"{size / 1048576:.1f} MB exceeds the {MAX_DATA_BYTES / 1048576:.0f} MB package ceiling"
+    return path, None
+
+
+def _data_folder_param(documents: list[Path]) -> str:
+    """The parameter name to introduce, avoiding one the model already defines."""
+    existing = "".join(document.read_text(encoding="utf-8") for document in documents)
+    return DATA_FOLDER_PARAM if DATA_FOLDER_PARAM not in existing else FALLBACK_DATA_FOLDER_PARAM
+
+
+def _write_data_folder_expression(dest: Path, final: Path, model_name: str, parameter: str) -> None:
+    """Declare the folder parameter, in the exact shape this repo's committed models already use.
+
+    ⚠️ The value is the FINAL package path, not ``dest``. Assembly runs in a
+    ``.<unit>.staging`` directory that `replace_dir` renames afterwards, so writing ``dest`` here
+    bakes a path that stops existing the moment packaging succeeds - and it would still LOOK right
+    in the file.
+
+    Appended rather than overwritten: `expressions.tmdl` is a list of expression objects, and an
+    engine model that grows one later must not have it silently replaced. The `lineageTag` is a
+    uuid5 of the model and parameter names so repackaging the same unit is byte-stable.
+    """
+    path = dest / "fabric" / model_name / "definition" / EXPRESSIONS_TMDL
+    lineage = uuid.uuid5(uuid.NAMESPACE_URL, f"package_unit:{model_name}:{parameter}")
+    block = (
+        f'expression {parameter} = "{final}\\{DATA_DIR}\\" '
+        'meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]\n'
+        f"\tlineageTag: {lineage}\n\n"
+        "\tannotation PBI_ResultType = Text\n\n"
+    )
+    existing = path.read_text(encoding="utf-8") if path.is_file() else ""
+    separator = "\n" if existing and not existing.endswith("\n\n") else ""
+    path.write_text(existing + separator + block, encoding="utf-8")
+
+
+def _localize_data_sources(dest: Path, final: Path, model_name: str | None) -> dict[str, Any]:
+    """Ship every absolute `File.Contents` source INTO the package and repoint the model at it (#461).
+
+    The defect: `_copy_fabric` copies the engine's working copy verbatim, and the engine writes an
+    absolute machine-local path into each import partition's M, pointing back into the originating
+    `<bundle>/data/`. So a "self-contained" package (#446) carried none of its own rows, opened
+    empty in Desktop with no `.pbi/cache.abf` to fall back on, could not refresh on any other
+    machine, and embedded a real username in a public repo's deliverable-to-be.
+
+    What this does NOT do, deliberately: rewrite the literal to a relative path. Power Query rejects
+    a relative `File.Contents` argument outright, so that would produce a model refreshing NOWHERE -
+    strictly worse than one refreshing on a single machine. A folder PARAMETER is the documented
+    workaround and is already this repo's committed convention; see :data:`DATA_FOLDER_PARAM`.
+
+    Every reference ends in exactly one of two recorded states - shipped, or an omission naming its
+    reason. There is no third, silent one: a source that cannot be copied keeps its original literal
+    (so it still resolves wherever it did before) and is reported.
+    """
+    record: dict[str, Any] = {"parameter": None, "shipped": [], "omissions": [], "bytes": 0}
+    documents = _model_tmdl(dest, model_name)
+    if not documents:
+        return record
+    parameter = _data_folder_param(documents)
+    taken: dict[str, str] = {}
+    shipped: dict[str, str] = {}
+
+    for document in documents:
+        text = document.read_text(encoding="utf-8")
+        for source in {match.group(1) for match in FILE_CONTENTS_RE.finditer(text)}:
+            if not ABSOLUTE_PATH_RE.match(source) or source in shipped:
+                continue
+            readable, refusal = _classify_source(source)
+            if readable is None:
+                record["omissions"].append({"file": Path(source.replace("\\", "/")).name, "reason": refusal})
+                continue
+            relative = _packaged_data_target(source, taken)
+            target = dest / DATA_DIR / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(readable, target)
+            shipped[source] = relative
+            record["shipped"].append({"path": f"{DATA_DIR}/{relative}", "bytes": target.stat().st_size})
+            record["bytes"] += target.stat().st_size
+
+    if not shipped:
+        return record
+    _rewrite_partitions(documents, shipped, parameter)
+    _write_data_folder_expression(dest, final, str(model_name), parameter)
+    record["parameter"] = parameter
+    record["omissions"].extend(_unresolved_after_rewrite(dest, _model_tmdl(dest, model_name), record, shipped))
+    return record
+
+
+def _rewrite_partitions(documents: list[Path], shipped: dict[str, str], parameter: str) -> None:
+    """Point each shipped reference at the package's own copy, through the folder parameter."""
+    for document in documents:
+        text = document.read_text(encoding="utf-8")
+
+        def _sub(match: re.Match[str], _shipped: dict[str, str] = shipped) -> str:
+            relative = _shipped.get(match.group(1))
+            if relative is None:
+                return match.group(0)
+            return f'File.Contents({parameter} & "{relative.replace("/", chr(92))}")'
+
+        rewritten = FILE_CONTENTS_RE.sub(_sub, text)
+        if rewritten != text:
+            document.write_text(rewritten, encoding="utf-8")
+
+
+def _unresolved_after_rewrite(
+    dest: Path, documents: list[Path], record: dict[str, Any], shipped: dict[str, str]
+) -> list[dict[str, str]]:
+    """Verify, on the written files, that every shipped reference now resolves INSIDE the package.
+
+    Step 3 of the fix, and the one that makes the other two checkable: a rewrite that pointed at a
+    path the copy never landed on would look identical in a diff and fail only at refresh time,
+    months later, on someone else's machine. Only SHIPPED references are asked about - a reference
+    that was refused already carries its original literal by design, and is recorded as an omission
+    rather than counted twice.
+    """
+    findings = [
+        {"file": row["path"], "reason": "shipped copy is missing after packaging"}
+        for row in record["shipped"]
+        if not (dest / row["path"]).is_file()
+    ]
+    remaining = {
+        match.group(1)
+        for document in documents
+        for match in FILE_CONTENTS_RE.finditer(document.read_text(encoding="utf-8"))
+    }
+    findings.extend(
+        {
+            "file": Path(source.replace("\\", "/")).name,
+            "reason": "shipped, but its partition still carries the original absolute path",
+        }
+        for source in sorted(shipped)
+        if source in remaining
+    )
+    return findings
+
+
 def _write_spec(asset: Path | None, dest: Path) -> tuple[str | None, str | None]:
     """`(relative spec path, failure note)` - `check_unit.py` cannot grade a unit without one (#443)."""
     if asset is None:
@@ -924,7 +1133,9 @@ def package_unit(
     staging = out_root / f".{sanitize_staging_name(unit)}.staging"
     shutil.rmtree(staging, ignore_errors=True)
     try:
-        result = _assemble_unit(bundle, unit, staging, oracle_dir=oracle_dir, assets_dir=assets_dir)
+        result = _assemble_unit(
+            bundle, unit, staging, final=out_root / unit, oracle_dir=oracle_dir, assets_dir=assets_dir
+        )
         replace_dir(staging, out_root / unit)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
@@ -990,10 +1201,15 @@ def _rename_retrying(src: Path, dst: Path) -> None:
             time.sleep(_SWAP_BACKOFF_SEC)
 
 
-def _assemble_unit(  # pylint: disable=too-many-locals
-    bundle: Path, unit: str, dest: Path, *, oracle_dir: Path | None, assets_dir: Path | None
+def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-many-positional-arguments
+    bundle: Path, unit: str, dest: Path, *, final: Path, oracle_dir: Path | None, assets_dir: Path | None
 ) -> dict[str, Any]:
-    """Build one unit's package into ``dest``, which is always a fresh, empty directory."""
+    """Build one unit's package into ``dest``, which is always a fresh, empty directory.
+
+    ``final`` is where ``dest`` will be renamed to. Anything that must record its OWN location -
+    only the data-folder parameter today - has to use it, because ``dest`` stops existing the
+    moment packaging succeeds.
+    """
     engine_report = read_json(bundle / "report.json")
     workbooks, datasources = engine_unit_names(engine_report)
     dest.mkdir(parents=True, exist_ok=True)
@@ -1002,6 +1218,9 @@ def _assemble_unit(  # pylint: disable=too-many-locals
     report_name, model_name = _copy_fabric(bundle, unit, dest)
     if report_name is None and model_name is None:
         notes.append(f"no engine working copy at pbip/{unit} - nothing to build on")
+    data_sources = _localize_data_sources(dest, final, model_name)
+    for omission in data_sources["omissions"]:
+        notes.append(f"data source {omission['file']} not shipped: {omission['reason']}")
 
     handover = read_json(bundle / "handover" / f"{unit}.json")
     (dest / "handover").mkdir(parents=True, exist_ok=True)
@@ -1056,6 +1275,7 @@ def _assemble_unit(  # pylint: disable=too-many-locals
             "handover": f"handover/{unit}.json" if isinstance(handover, dict) else None,
         },
         "workbook_identity": identity,
+        "data_sources": data_sources,
         "oracle": oracle,
         "notes": notes,
     }

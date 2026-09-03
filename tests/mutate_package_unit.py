@@ -297,6 +297,60 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
         "    return None, None",
         ["test_the_package_ships_the_spec_schema_it_tells_an_agent_to_obey"],
     ),
+    # ---- issue #461: the package carrying its own rows ----------------------------------------
+    (
+        "packager: skip localization, leaving every partition pointing into the bundle",
+        PACKAGER,
+        "    data_sources = _localize_data_sources(dest, final, model_name)",
+        '    data_sources = {"parameter": None, "shipped": [], "omissions": [], "bytes": 0}',
+        [
+            "test_no_packaged_tmdl_points_at_an_absolute_path_OUTSIDE_the_package",
+            "test_the_rows_the_model_imports_are_shipped_and_the_partition_reads_them",
+        ],
+    ),
+    (
+        "packager: rewrite the partitions but ship none of the bytes",
+        PACKAGER,
+        "            shutil.copy2(readable, target)",
+        "            pass",
+        ["test_the_rows_the_model_imports_are_shipped_and_the_partition_reads_them"],
+    ),
+    (
+        "packager: write the data-folder parameter from the STAGING dir that is about to vanish",
+        PACKAGER,
+        "f'expression {parameter} = \"{final}\\\\{DATA_DIR}\\\\\" '",
+        "f'expression {parameter} = \"{dest}\\\\{DATA_DIR}\\\\\" '",
+        ["test_the_data_folder_parameter_names_the_FINAL_package_not_its_staging_dir"],
+    ),
+    (
+        "packager: drop the size ceiling, so an unbounded source is copied unnoticed",
+        PACKAGER,
+        "    if size > MAX_DATA_BYTES:",
+        "    if False:  # noqa",
+        ["test_an_oversized_source_is_refused_by_the_ceiling_rather_than_copied"],
+    ),
+    (
+        "packager: skip an unshippable source SILENTLY instead of recording why",
+        PACKAGER,
+        '                record["omissions"].append({"file": Path(source.replace("\\\\", "/")).name, '
+        '"reason": refusal})',
+        "                pass",
+        ["test_a_source_that_cannot_be_shipped_is_a_LOUD_omission_not_a_silent_skip"],
+    ),
+    (
+        "packager: resolve a packaged-name collision by overwriting the first source",
+        PACKAGER,
+        "        candidate = f\"{hashlib.sha256(source.encode('utf-8')).hexdigest()[:8]}/{name}\"",
+        "        candidate = candidate",
+        ["test_two_sources_sharing_a_file_name_do_not_overwrite_each_other"],
+    ),
+    (
+        "README: drop the data/ row, so the shipped rows are unmentioned in the package map",
+        PACKAGER,
+        "| `data/` | the rows the model imports",
+        "| `unmentioned/` | the rows the model imports",
+        ["test_the_generated_readme_names_every_file_the_package_contains"],
+    ),
     (
         f"{NEGATIVE_CONTROL}: a comment-only edit that must change no verdict",
         PACKAGER,

@@ -828,7 +828,13 @@ def test_the_scoped_report_still_declares_both_collections_as_lists(tmp_path: Pa
 
 
 def _package_with_receipt(tmp_path: Path) -> Path:
-    """A package carrying every artifact the packager can emit, including the engine receipt."""
+    """A package carrying every artifact the packager can emit: receipt, model, and imported rows.
+
+    The imported CSV is part of the SHARED fixture rather than a private one, because the package
+    map guard below is derived from what the packager actually writes - so a fixture whose model
+    imports nothing makes `data/` invisible to it. Measured: with a data-less fixture the mutation
+    "drop the data/ row from the README" SURVIVED the whole campaign.
+    """
     bundle, oracle = _bundle(tmp_path)
     emitted = bundle / "pbip" / UNIT / f"{UNIT}.Report" / "definition" / "report.json"
     emitted.parent.mkdir(parents=True, exist_ok=True)
@@ -836,18 +842,29 @@ def _package_with_receipt(tmp_path: Path) -> Path:
     (bundle / "engine-output-receipt.json").write_text(
         json.dumps({"version": 1, "engine": {"version": "2.339.0"}, "artifacts": []}), encoding="utf-8"
     )
+    payload = tmp_path / "extract" / "federated_abc" / "Extract_Extract.csv"
+    payload.parent.mkdir(parents=True, exist_ok=True)
+    payload.write_text("Employee_ID,Salary\n1,100\n", encoding="utf-8")
+    _point_partition_at(bundle, str(payload))
     _package(tmp_path, bundle, oracle)
     return _out(tmp_path) / UNIT
 
 
 def test_the_generated_readme_names_every_file_the_package_contains(tmp_path: Path) -> None:
-    """Finding 3: three files shipped in every package and appeared nowhere in its own map."""
+    """Finding 3: three files shipped in every package and appeared nowhere in its own map.
+
+    ⚠️ The membership test is a backticked TABLE KEY, not a bare substring. Measured while adding
+    the `data/` row for #461: with a substring check, replacing that row's key survived the whole
+    mutation campaign, because the README says `oracle/*/data/*.csv` elsewhere and `"data" in
+    readme` was true either way. A short shipped name is exactly the case a substring check cannot
+    decide, and every shipped name here is short.
+    """
     root = _package_with_receipt(tmp_path)
     readme = (root / "README.md").read_text(encoding="utf-8")
     shipped = sorted(path.name for path in root.iterdir() if path.name != "README.md")
-    missing = [name for name in shipped if name not in readme]
+    missing = [name for name in shipped if not re.search(rf"`{re.escape(name)}[/`]", readme)]
     assert missing == [], f"shipped but unnamed in the package's own README: {missing}"
-    for load_bearing in ("report.json", "source-provenance.json", "engine-output-receipt.json"):
+    for load_bearing in ("report.json", "source-provenance.json", "engine-output-receipt.json", "data"):
         assert load_bearing in shipped
 
 
@@ -1023,6 +1040,191 @@ def _agents_working_copy_row() -> str:
     rows = [line for line in block.splitlines() if line.strip().startswith("| working copy |")]
     assert len(rows) == 1, f"expected exactly one working-copy row in the synced block, got {len(rows)}"
     return rows[0]
+
+
+# --------------------------------------------------------------------------------------------
+# 4b-2. self-containment: the model's own rows (issue #461)
+#
+# `_copy_fabric` copies the engine's working copy verbatim, and the engine writes an ABSOLUTE,
+# machine-local path into every import partition, pointing back into the originating
+# `<bundle>/data/`. Measured across the 67 packaged units of estate run 408: 23 such references in
+# 17 units, 11.2 MB of extracts the package did not carry. No existing gate saw it - `check_unit.py`
+# passed page parity and oracle coverage on `HR_Dashboard`, and `powerbi-report-author validate` was
+# clean - so these tests are the only thing standing between that defect and its return.
+# --------------------------------------------------------------------------------------------
+
+
+def _model_definition(root: Path) -> Path:
+    """The packaged model's `definition/` directory, asserted to exist so a typo cannot vacate a test."""
+    models = [path for path in (root / "fabric").iterdir() if path.name.endswith(".SemanticModel")]
+    assert len(models) == 1, f"expected exactly one packaged model, got {[path.name for path in models]}"
+    definition = models[0] / "definition"
+    assert definition.is_dir(), f"no definition/ under {models[0]}"
+    return definition
+
+
+def _absolute_literals(root: Path) -> list[tuple[str, str]]:
+    """Every quoted absolute path in every packaged `.tmdl`, as `(file name, literal)`."""
+    quoted = re.compile(r"\"([A-Za-z]:[\\/][^\"]*|\\\\[^\"]*|/[A-Za-z][^\"]*)\"")
+    return [
+        (path.name, match.group(1))
+        for path in root.rglob("*.tmdl")
+        for match in quoted.finditer(path.read_text(encoding="utf-8"))
+    ]
+
+
+def test_no_packaged_tmdl_points_at_an_absolute_path_OUTSIDE_the_package(tmp_path: Path) -> None:
+    """Issue #461's acceptance criterion, and the only gate that observes it.
+
+    Every absolute literal that survives must resolve INSIDE the package. One does by design - the
+    `DataFolder` parameter names the package's own `data/` directory, because `File.Contents` does
+    not accept a relative argument at all, so a "relative rewrite" would produce a model that
+    refreshes nowhere rather than one that refreshes on a single machine.
+    """
+    root = _package_with_receipt(tmp_path)
+    literals = _absolute_literals(root)
+    assert literals, "the fixture produced no absolute literal at all, so this test proves nothing"
+    outside = [(name, value) for name, value in literals if not _resolves_inside(root, value)]
+    assert outside == [], f"packaged TMDL points outside the package: {outside}"
+
+
+def test_the_rows_the_model_imports_are_shipped_and_the_partition_reads_them(tmp_path: Path) -> None:
+    """Self-containment is bytes AND wiring: either half alone leaves the package unusable.
+
+    A copy nothing points at is dead weight; a rewritten partition with no copy behind it fails only
+    at refresh time, on someone else's machine, months later. So the shipped file is asserted to
+    exist on disk, the partition is asserted to read it through the parameter, and the two are
+    joined by the manifest rather than by two independent string checks.
+    """
+    root = _package_with_receipt(tmp_path)
+    record = json.loads((root / "package-manifest.json").read_text(encoding="utf-8"))["data_sources"]
+    assert record["shipped"], "no data source was shipped, so the fixture does not exercise #461"
+    assert record["omissions"] == []
+    assert record["parameter"] == pkg.DATA_FOLDER_PARAM
+
+    partitions = "".join(path.read_text(encoding="utf-8") for path in _model_definition(root).rglob("*.tmdl"))
+    for row in record["shipped"]:
+        shipped = root / row["path"]
+        assert shipped.is_file(), f"the manifest claims {row['path']} but nothing is there"
+        assert shipped.stat().st_size == row["bytes"]
+        relative = row["path"].split(f"{pkg.DATA_DIR}/", 1)[1].replace("/", "\\")
+        assert f'{pkg.DATA_FOLDER_PARAM} & "{relative}"' in partitions, "no partition reads the shipped copy"
+
+
+def test_the_data_folder_parameter_names_the_FINAL_package_not_its_staging_dir(tmp_path: Path) -> None:
+    """Assembly runs in `.<unit>.staging`, which stops existing the moment packaging succeeds.
+
+    A parameter written from the staging path looks correct in the file and resolves to nothing, so
+    this asserts the directory the value names is one that EXISTS - the failure is otherwise
+    invisible until a refresh.
+    """
+    root = _package_with_receipt(tmp_path)
+    expressions = (_model_definition(root) / pkg.EXPRESSIONS_TMDL).read_text(encoding="utf-8")
+    value = re.search(rf'expression {pkg.DATA_FOLDER_PARAM} = "([^"]+)"', expressions)
+    assert value is not None, expressions
+    named = Path(value.group(1))
+    assert ".staging" not in str(named), f"the parameter names the staging directory: {named}"
+    assert named.is_dir(), f"the parameter names a directory that does not exist: {named}"
+    assert named.resolve() == (root / pkg.DATA_DIR).resolve()
+
+
+def test_a_source_that_cannot_be_shipped_is_a_LOUD_omission_not_a_silent_skip(tmp_path: Path) -> None:
+    """Measured on estate run 408: one unit references a `/Users/...` macOS path absent from this
+    machine, so "copy it" is not always available and the unshippable case is real rather than
+    hypothetical.
+
+    Such a reference keeps its original literal - it still resolves wherever it did before - and is
+    recorded twice over: as a manifest omission carrying its reason, and as a package note, which is
+    what `handover.md` renders. Asserting the reason too, because an omission with no cause is the
+    silent skip wearing a different name.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    _point_partition_at(bundle, r"C:\definitely-not-here\Extract_Extract.csv")
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+
+    record = json.loads((root / "package-manifest.json").read_text(encoding="utf-8"))
+    omissions = record["data_sources"]["omissions"]
+    assert [row["file"] for row in omissions] == ["Extract_Extract.csv"]
+    assert "not present on the packaging machine" in omissions[0]["reason"]
+    assert record["data_sources"]["shipped"] == []
+    assert any("Extract_Extract.csv" in note for note in record["notes"]), record["notes"]
+    assert "Extract_Extract.csv" in (root / "handover.md").read_text(encoding="utf-8")
+
+
+def test_an_oversized_source_is_refused_by_the_ceiling_rather_than_copied(tmp_path: Path) -> None:
+    """The ceiling exists so an unbounded case is loud, and it must not fire on a normal one.
+
+    Both directions are asserted from ONE fixture by moving the ceiling, not the data: a test that
+    only proves the refusal cannot tell a working ceiling from one set to zero.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    payload = tmp_path / "big.csv"
+    payload.write_text("a,b\n1,2\n" * 500, encoding="utf-8")
+    _point_partition_at(bundle, str(payload))
+
+    _package(tmp_path, bundle, oracle)
+    generous = json.loads(((_out(tmp_path) / UNIT) / "package-manifest.json").read_text(encoding="utf-8"))
+    assert generous["data_sources"]["shipped"], "the ceiling refused a source it should have shipped"
+
+    original = pkg.MAX_DATA_BYTES
+    try:
+        pkg.MAX_DATA_BYTES = 16
+        _package(tmp_path, bundle, oracle)
+    finally:
+        pkg.MAX_DATA_BYTES = original
+    refused = json.loads(((_out(tmp_path) / UNIT) / "package-manifest.json").read_text(encoding="utf-8"))
+    assert refused["data_sources"]["shipped"] == []
+    assert "exceeds the" in refused["data_sources"]["omissions"][0]["reason"]
+
+
+def test_two_sources_sharing_a_file_name_do_not_overwrite_each_other(tmp_path: Path) -> None:
+    """The engine's extract paths are `.../<table>/federated_<hash>/Extract_Extract.csv`.
+
+    Parent folder plus file name is readable but not unique, and two sources landing on one packaged
+    file would silently repoint one partition at the other's ROWS - a wrong-numbers defect no
+    structural check can see.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    first = tmp_path / "one" / "federated" / "Extract_Extract.csv"
+    second = tmp_path / "two" / "federated" / "Extract_Extract.csv"
+    for path, body in ((first, "a\n1\n"), (second, "a\n2\n")):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+    _point_partition_at(bundle, str(first), str(second))
+
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    shipped = json.loads((root / "package-manifest.json").read_text(encoding="utf-8"))["data_sources"]["shipped"]
+    assert len(shipped) == 2, shipped
+    bodies = sorted((root / row["path"]).read_text(encoding="utf-8") for row in shipped)
+    assert bodies == ["a\n1\n", "a\n2\n"], "one packaged copy overwrote the other"
+
+
+def _resolves_inside(root: Path, value: str) -> bool:
+    try:
+        return Path(value).resolve().is_relative_to(root.resolve())
+    except (OSError, ValueError):
+        return False
+
+
+def _point_partition_at(bundle: Path, *sources: str) -> None:
+    """Give the fixture model one import partition per source, shaped as the engine emits them."""
+    definition = bundle / "pbip" / UNIT / f"{UNIT}.SemanticModel" / "definition"
+    (definition / "tables").mkdir(parents=True, exist_ok=True)
+    (definition / "model.tmdl").write_text("model Model\n\tculture: en-US\n\n", encoding="utf-8")
+    for index, source in enumerate(sources):
+        (definition / "tables" / f"Imported{index}.tmdl").write_text(
+            f"table Imported{index}\n"
+            f"\tpartition 'Imported{index}' = m\n"
+            "\t\tmode: import\n"
+            "\t\tsource =\n"
+            "\t\t\tlet\n"
+            f'\t\t\t\tSource = Csv.Document(File.Contents("{source}"), [Delimiter=","])\n'
+            "\t\t\tin\n"
+            "\t\t\t\tSource\n",
+            encoding="utf-8",
+        )
 
 
 # --------------------------------------------------------------------------------------------
