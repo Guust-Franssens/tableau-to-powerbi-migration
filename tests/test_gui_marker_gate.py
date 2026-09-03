@@ -37,6 +37,7 @@ window.
 from __future__ import annotations
 
 import ast
+import contextlib
 import functools
 import os
 import re
@@ -331,6 +332,49 @@ def test_no_marker_expression_a_caller_can_type_re_enables_the_gui_tests() -> No
         if collected:
             leaked[expression] = sorted(collected)
     assert not leaked, f"these marker expressions re-enabled the window-spawning tests: {leaked}"
+
+
+@contextlib.contextmanager
+def _gui_test_outside_every_bundle():
+    """A synthetic `gui` test placed INSIDE the repo but outside every bundle, then removed.
+
+    It has to be inside the repo: pytest only loads a `conftest.py` for paths beneath it, so a file
+    in the OS temp directory is judged by neither hook and proves nothing about either. The `_`
+    prefix is what keeps it out of git (`.gitignore` has `/_*`) and out of `testpaths`, so no other
+    run can collect it.
+    """
+    folder = REPO_ROOT / f"_gui_gate_probe_{os.getpid()}"
+    folder.mkdir(exist_ok=True)
+    probe = folder / "test_root_hook_probe.py"
+    probe.write_text(
+        "import pytest\n\n\n@pytest.mark.gui\ndef test_root_hook_probe() -> None:\n"
+        '    raise AssertionError("this synthetic test must never be executed")\n',
+        encoding="utf-8",
+    )
+    try:
+        yield probe
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def test_the_root_hook_deselects_a_gui_test_that_is_in_no_bundle() -> None:
+    """Kills: deleting the ROOT hook's gui branch - which nothing else here can see.
+
+    Measured, and it is the reason this control exists: every gui test in the repository today lives
+    in ONE bundle, and that bundle's own `conftest.py` deselects them as well. So disabling the root
+    hook's gui branch left the bundle collecting 299/309 exactly as before and every other control
+    passed - a guard with no observable failure mode. A gui test added anywhere else would have run,
+    with windows, and nothing would have said so. This puts one there, transiently, and requires the
+    root hook to deselect it by default and the opt-in to bring it back.
+    """
+    with _gui_test_outside_every_bundle() as probe:
+        default = _collected_node_ids([str(probe)])
+        opted_in = _collected_node_ids([RUN_GUI_FLAG, str(probe)])
+    assert not default, (
+        "a gui test outside every bundle was collected by a default run, so the root conftest hook "
+        f"is not deselecting it: {sorted(default)}"
+    )
+    assert opted_in, "the same test could not be selected with the opt-in either, so it is orphaned"
 
 
 def test_the_opt_in_flag_selects_exactly_the_gui_tests() -> None:
