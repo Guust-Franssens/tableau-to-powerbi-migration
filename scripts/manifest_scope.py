@@ -290,6 +290,13 @@ ORACLE_VIEW_ALLOW: dict[str, Any] = {
         "updated_at",
         "packaged_object_stem",
     ),
+    # #471. A PER-VIEW fact, which is why it ships where the estate-wide `data_empty` count is
+    # dropped: this packager cannot honestly recompute "how much of the capture was empty" for one
+    # unit, but "this view returned no rows" is true of the view regardless of which unit ships it.
+    # The values are `tableau_oracle_manifest`'s own literals -- no foreign identity, no free text --
+    # and without this line the diagnostic would be silently dropped at the package boundary, which
+    # is moving the failure rather than fixing it.
+    "flags": SCALAR_LIST,
     **{leg: ORACLE_LEG_SPEC for leg in ("image", "svg", "pdf", "data")},
 }
 

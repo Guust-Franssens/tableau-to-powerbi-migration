@@ -58,14 +58,132 @@ NOT_ATTEMPTED = "not_attempted"
 # the only render there was, and renaming the key now would orphan every manifest already captured.
 _LEG_KEY = {"png": "image", "svg": "svg", "pdf": "pdf"}
 
+# A view whose `/data` export SUCCEEDED and carried no data rows (#471). A per-view flag and NOT a
+# status: the HTTP call genuinely succeeded, and `status` drives the exit code plus the
+# `blocked`/`failed` partitions, so overloading it would turn a legible run into a failed one. The
+# fact is a DIAGNOSTIC -- an otherwise-clean run still exits 0 -- exactly as `render_unestablished`
+# is a diagnostic rather than a failure.
+FLAG_DATA_EMPTY = "data_empty"
+
+# ...and WHY it is empty, as far as the capture can honestly tell. Two values, because there are
+# three real causes and the payload can only separate one of them:
+#
+#   * a real query that returned nothing -- the field defect (#471): a relative-date filter whose
+#     window has no data yet, or a required filter defaulting to None;
+#   * a sheet with no underlying query at all -- a glossary/reference sheet, where an empty `/data`
+#     is CORRECT behaviour and counting it as a defect overstates the finding (14 -> 12 on the
+#     reporting site) and trains the reader to discount the whole list.
+#
+# ⚠️ **The tempting discriminators do not work, and this was MEASURED rather than reasoned.** Over
+# `summarise_csv`: a 0-byte body (glossary) and a 2-byte CRLF body (blank data) BOTH land on
+# `row_count=0, columns=[]`, differing only in `bytes`. "Glossary means 0 bytes" is one site's
+# observation at n=14, not a documented Tableau contract, so the byte count is deliberately NOT
+# consulted. What a payload CAN establish is that a header came back at all: a CSV naming its
+# columns proves a query ran and returned a shape, which no fieldless sheet can produce. The
+# converse does not hold -- a real query can also return nothing at all -- so an absent header is
+# reported as UNCLASSIFIABLE rather than assigned to either cause. Resolving it needs field-level
+# metadata (`Sheet.sheetFieldInstances`, or the workbook XML `parse_tableau.py` reads) that this
+# capture does not hold; see the module note in :func:`empty_classification`.
+EMPTY_QUERY_NO_ROWS = "empty_query_no_rows"
+EMPTY_CANNOT_CLASSIFY = "empty_cannot_classify"
+
+
+def empty_classification(record: dict[str, Any]) -> str | None:
+    """Why this view's data leg is empty, or ``None`` when it is not empty at all.
+
+    The ONE predicate for "this capture carries no rows", shared by the per-view console line, the
+    per-view flag, the manifest's count and the manifest's named list -- for the same reason
+    :func:`_partition` is one function: three copies of a rule is three chances for a count and a
+    list to disagree about the same views.
+
+    ``None`` is returned for anything that is not an ESTABLISHED zero-row capture, which includes a
+    record whose data leg failed (its emptiness is explained by the failure, not by the view) and an
+    older record that carries no ``row_count`` at all (absence is not a zero -- claiming one would
+    invent a diagnostic about a manifest that never measured it).
+
+    ⚠️ **The glossary case is left OPEN on purpose.** ``EMPTY_CANNOT_CLASSIFY`` means the export
+    returned no header, which a fieldless sheet and a genuinely empty query produce identically; the
+    only thing that separates them is field-level metadata, and the capture holds none. The Metadata
+    API call this run already makes asks for ``luid`` and nothing else, and widening it is not free:
+    ``tableau_view_types`` refuses a partial answer WHOLE, so a field this server spells differently
+    would turn view typing off for every view on the site, and per-field nodes would push a large
+    estate at its 32 MiB body bound. Guessing from the byte count would be cheap and wrong. So the
+    honest states are two, and the third is named as missing rather than invented.
+    """
+    data = record.get("data") or {}
+    if data.get("status") != "ok" or data.get("row_count") != 0:
+        return None
+    return EMPTY_QUERY_NO_ROWS if data.get("columns") else EMPTY_CANNOT_CLASSIFY
+
+
+def flag_empty(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Records with the per-view ``flags`` key added to every established zero-row capture.
+
+    Copies rather than mutates: the caller's records are its own, and a function that silently
+    rewrites the list it was handed is the shape that makes a second call to it wrong.
+
+    The flag is what a CONSUMER reads -- ``package_unit.py`` ships it per view, and a per-workbook
+    subset carries it along -- so the fact survives every slice of the capture, not just the
+    capture-wide manifest.
+    """
+    out = []
+    for record in records:
+        classification = empty_classification(record)
+        if not classification:
+            out.append(record)
+            continue
+        flags = list(dict.fromkeys([*record.get("flags", []), FLAG_DATA_EMPTY, classification]))
+        out.append({**record, "flags": flags})
+    return out
+
+
+def data_empty_views(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Views whose data leg SUCCEEDED and returned zero rows. Counted AND named (#471).
+
+    The same argument :func:`render_unestablished` already makes, applied to the numeric half: the
+    count answers "how much of my oracle is evidentially empty" and the list answers "for which
+    views is a NUMERIC-fidelity finding currently impossible to make". Before this the count was the
+    only thing that escaped -- ``empty`` was computed as a list and immediately reduced to its
+    ``len()`` -- so a reviewer holding a 94-view capture with 12 blank ones had to open every PNG by
+    hand to find them (SES, 2026-09-03).
+
+    Each entry carries its CLASSIFICATION rather than a verdict, for the reason
+    :func:`render_unestablished` carries per-tier statuses rather than one: the causes need opposite
+    remedies. A relative-date filter whose window has not landed yet is re-runnable; a required
+    filter defaulting to None never resolves from a default-state capture and needs ``?vf_`` state
+    pinning (#194). This capture cannot tell those two apart either -- both are
+    ``EMPTY_QUERY_NO_ROWS`` -- because nothing on hand describes a view's filters, and inventing the
+    distinction from a rendered image would be a guess.
+    """
+    out = []
+    for record in records:
+        classification = empty_classification(record)
+        if not classification:
+            continue
+        out.append(
+            {
+                "view_luid": record.get("view_luid"),
+                "view_name": record.get("view_name"),
+                "workbook_name": record.get("workbook_name"),
+                "view_type": record.get("view_type"),
+                "classification": classification,
+            }
+        )
+    return out
+
 
 def log_progress(index: int, total: int, record: dict[str, Any], redactor=None) -> None:
-    """One line per view: proof of rows captured, or a loud, classified failure.
+    """One line per view: proof of rows captured, a loud zero, or a loud, classified failure.
 
     ⚠️ The console is the THIRD artifact, after the manifest and the files. A view NAME is response
     data -- a reflected token can arrive as one -- and this line used to slice it to 34 characters
     before anything scrubbed it, which is the round-4 defect at a boundary round 4 never looked at.
     CI keeps its logs, so "only the terminal" is not a mitigation.
+
+    ⚠️ A zero-row capture is a WARNING, not an INFO carrying a zero (#471). ``0 rows`` inside the
+    ordinary progress line is technically visible and practically invisible: the reporting site had
+    12 of them among 91 INFO lines and found them by opening PNGs by hand. The line keeps its
+    columns so the run still reads as a table, and gains the classification and a marker.
     """
     data = record.get("data", {})
     name = redacted_note(record.get("view_name"), redactor, limit=34)
@@ -77,9 +195,22 @@ def log_progress(index: int, total: int, record: dict[str, Any], redactor=None) 
         if data.get("retries"):
             marks.append(f"retry x{data['retries']}")
         suffix = f"  ({', '.join(marks)})" if marks else ""
-        LOG.info(
-            "  %2d/%d  %-34s %5d rows  %6.1fs%s", index, total, name, data["row_count"], data["elapsed_sec"], suffix
-        )
+        empty = empty_classification(record)
+        if empty:
+            LOG.warning(
+                "  %2d/%d  %-34s %5d rows  %6.1fs%s  <- NO DATA (%s)",
+                index,
+                total,
+                name,
+                data["row_count"],
+                data["elapsed_sec"],
+                suffix,
+                empty,
+            )
+        else:
+            LOG.info(
+                "  %2d/%d  %-34s %5d rows  %6.1fs%s", index, total, name, data["row_count"], data["elapsed_sec"], suffix
+            )
     elif status == "source_credential":
         LOG.warning("  %2d/%d  %-34s NEEDS CREDENTIAL: %s", index, total, name, data.get("detail"))
     else:
@@ -134,7 +265,11 @@ def _partition(
     ok = [r for r in records if r.get("data", {}).get("status") == "ok"]
     return {
         "ok": ok,
-        "empty": [r for r in ok if r["data"]["row_count"] == 0],
+        # ONE predicate, shared with the named list and the per-view flag (#471). It used to be an
+        # inline `r["data"]["row_count"] == 0` here and a second copy in `group_oracle_by_workbook`,
+        # which is how a count and a list come to disagree about the same views -- and it raised
+        # KeyError on an older record whose data leg recorded no row count at all.
+        "empty": [r for r in ok if empty_classification(r)],
         "complete": [
             r
             for r in records
@@ -231,7 +366,17 @@ def write_manifest(
     reauthorize the source in Tableau" -- code 2. Code 5 there points the operator at our capability
     probe instead: the same debug-the-wrong-system cost that made 3 wrong for the same input. A
     *partial* block still yields 5, because the absence is then not explained by the credential.
+
+    ⚠️ **A zero-row capture is NOT one of these codes** (#471). It is recorded, flagged, named and
+    warned about, and an otherwise-clean run still exits 0: the export succeeded, so calling it a
+    failure would make an operator debug the transport for a view whose filter is simply pointed at
+    a day with no data. Legibility and exit status are different questions, and conflating them is
+    what "do not overload ``status``" means in practice.
     """
+    # Before anything partitions or counts them: the per-view fact rides ON the record, so every
+    # downstream slice of this capture -- the manifest, a per-workbook subset, a packaged unit --
+    # carries it without re-deriving the rule.
+    records = flag_empty(records)
     sets = _partition(records, run.requested_renders)
     blocked, failed, complete = sets["blocked"], sets["failed"], sets["complete"]
     rendered = sum(1 for r in records if any(r.get(leg, {}).get("status") == "ok" for leg in ("image", "svg", "pdf")))
@@ -240,6 +385,7 @@ def write_manifest(
     credential_only = rendered == 0 and bool(blocked) and len(blocked) == len(records)
     reference_missing = run.reference_required and rendered == 0 and not credential_only
     unestablished = render_unestablished(records, run.requested_renders)
+    empty_views = data_empty_views(records)
     manifest = {
         "schema": "tableau-oracle/1",
         "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -255,6 +401,13 @@ def write_manifest(
         "captured_complete": len(complete),
         "data_ok": len(sets["ok"]),
         "data_empty": len(sets["empty"]),
+        # #471: the same counted-AND-named shape as `render_unestablished_views`, and for the same
+        # reason: the count answers "how much of this oracle is evidentially empty", the list answers
+        # "on WHICH views can a numeric-fidelity finding not be made". The count already existed and
+        # the list did not -- `empty` was built and immediately reduced to its `len()` -- so 12 blank
+        # views among 94 were countable and unfindable, indistinguishable per view from a capture
+        # that returned 900,000 rows.
+        "data_empty_views": empty_views,
         "image_ok": sum(1 for r in records if r.get("image", {}).get("status") == "ok"),
         "svg_ok": sum(1 for r in records if r.get("svg", {}).get("status") == "ok"),
         "pdf_ok": sum(1 for r in records if r.get("pdf", {}).get("status") == "ok"),
@@ -316,6 +469,7 @@ def write_manifest(
     )
     _log_blocked_and_stale(records, blocked, capability_report, run.session.redact_text)
     _log_unestablished(unestablished, run.session.redact_text)
+    _log_empty(empty_views, run.session.redact_text)
     if reference_missing:
         LOG.error(
             "\nA reference render was REQUIRED (--reference-best) but NONE was captured across %d "
@@ -341,6 +495,47 @@ def write_manifest(
     if failed:
         return 1 if complete else 3
     return 2 if blocked else 0
+
+
+def _log_empty(empty: list[dict[str, Any]], redactor) -> None:
+    """Name every view whose capture carries no data rows, and say what that costs.
+
+    Separate from ``_log_unestablished`` for the same reason that one is separate from
+    ``_log_blocked_and_stale``: the remedies differ, and they differ WITHIN this class too. A
+    relative-date filter whose window has no data yet is re-runnable tomorrow; a required filter
+    defaulting to None never resolves from a default-state capture and needs ``?vf_`` state pinning
+    (#194). So the actionable statement is about the CONSEQUENCE, which is what a fidelity reviewer
+    would otherwise discover by opening 94 PNGs by hand.
+    """
+    if not empty:
+        return
+    LOG.warning(
+        "\n%d view(s) captured ZERO DATA ROWS. The export SUCCEEDED, so these are recorded "
+        "status 'ok' and this run's exit code is unaffected -- but a NUMERIC-fidelity finding "
+        "cannot be made or refuted from an empty capture, exactly as a missing render makes a "
+        "visual one impossible. Two field causes need OPPOSITE remedies: a relative-date filter "
+        "whose window has not landed yet is re-runnable, while a required filter defaulting to "
+        "None can never resolve from a default-state capture (it needs ?vf_ pinning, #194):",
+        len(empty),
+    )
+    for entry in empty:
+        LOG.warning(
+            "  - %s (%s): %s",
+            redacted_note(entry.get("view_name"), redactor, limit=60),
+            redacted_note(entry.get("workbook_name"), redactor, limit=60),
+            entry.get("classification"),
+        )
+    if any(entry.get("classification") == EMPTY_CANNOT_CLASSIFY for entry in empty):
+        LOG.warning(
+            "  %s means the export returned NO HEADER at all. A sheet with no underlying query "
+            "(a glossary or reference sheet, where empty is CORRECT) and a real query that "
+            "returned nothing are indistinguishable from that payload, and this capture holds no "
+            "field-level metadata to separate them -- so it is reported unclassified rather than "
+            "guessed from the byte count. Check those views by hand before counting them as "
+            "defects; %s is the class that is certainly a real query with a real header.",
+            EMPTY_CANNOT_CLASSIFY,
+            EMPTY_QUERY_NO_ROWS,
+        )
 
 
 def _log_unestablished(unestablished: list[dict[str, Any]], redactor) -> None:

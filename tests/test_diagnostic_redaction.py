@@ -898,6 +898,10 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "status": "FIXED-VOCABULARY: one of classify_export_error's status literals",
         "data.get('detail')": "REDACTED-UPSTREAM: classify_export_error builds every detail from `safe`",
         "data['row_count']": "NOT-A-STRING: an integer row count",
+        "empty": (
+            "FIXED-VOCABULARY: one of `empty_classification`'s two EMPTY_* literals, chosen by "
+            "whether the recorded CSV header was empty -- never built from the header's contents"
+        ),
         "data['elapsed_sec']": "NOT-A-STRING: a float duration in seconds",
         "data['reauths']": "NOT-A-STRING: an integer counter",
         "data['retries']": "NOT-A-STRING: an integer counter",
@@ -1091,6 +1095,7 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "tableau_view_types.census(records)": _CENSUS_COUNTS,
         "len(unestablished)": _A_COUNT,
         "unestablished": _INTO_THE_MANIFEST_AGGREGATE,
+        "empty_views": _INTO_THE_MANIFEST_AGGREGATE,
         "len(records)": _A_COUNT,
         "len(blocked)": _A_COUNT,
         "len(complete)": _A_COUNT,
@@ -1108,13 +1113,52 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
     },
     ("scripts/tableau_oracle_manifest.py", "_partition"): {
         "ok": _INTO_THE_MANIFEST_AGGREGATE,
-        "[r for r in ok if r['data']['row_count'] == 0]": _INTO_THE_MANIFEST_AGGREGATE,
+        "[r for r in ok if empty_classification(r)]": _INTO_THE_MANIFEST_AGGREGATE,
         "[r for r in records if r.get('data', {}).get('status') == 'ok' and all((s == 'ok' for s in "
         "_render_statuses(r, requested)))]": _INTO_THE_MANIFEST_AGGREGATE,
         "[r for r in records if 'source_credential' in {r.get('data', {}).get('status'), "
         "*_render_statuses(r, requested)}]": _INTO_THE_MANIFEST_AGGREGATE,
         "[r for r in records if any((status not in {'ok', 'source_credential'} for status in "
         "(r.get('data', {}).get('status'), *_render_statuses(r, requested))))]": _INTO_THE_MANIFEST_AGGREGATE,
+    },
+    # #471. `flag_empty` copies a record and adds a per-view flag; `data_empty_views` names the
+    # views a numeric-fidelity finding cannot be made from. Both build values that land in the
+    # manifest, so `scrub_tree` covers them -- and neither reaches a path or a raw log line.
+    ("scripts/tableau_oracle_manifest.py", "flag_empty"): {
+        "record": _INTO_THE_MANIFEST_AGGREGATE,
+        "flags": (
+            "SCRUBBED-AT-SINK: this module's own two flag literals, plus any flag a record already "
+            "carried, on their way into the manifest record; `scrub_tree` walks the tree whole, "
+            "values and keys, immediately before serialisation"
+        ),
+        "{**record, 'flags': flags}": _INTO_THE_MANIFEST_AGGREGATE,
+    },
+    ("scripts/tableau_oracle_manifest.py", "data_empty_views"): {
+        "record.get('view_luid')": _INTO_THE_MANIFEST,
+        "record.get('view_name')": _INTO_THE_MANIFEST,
+        "record.get('workbook_name')": _INTO_THE_MANIFEST,
+        "record.get('view_type')": (
+            "FIXED-VOCABULARY: exactly one of tableau_view_types' three module constants - "
+            "'dashboard', 'worksheet' or 'unknown'. `tableau_view_types.stamp` writes only "
+            "`mapping.get(luid, UNKNOWN)`, so no response text can arrive here; and it reaches the "
+            "manifest, where `scrub_tree` covers it anyway"
+        ),
+        "classification": (
+            "FIXED-VOCABULARY: one of this module's two EMPTY_* literals, chosen by whether the "
+            "recorded CSV header was empty -- never built from the header's contents"
+        ),
+        "{'view_luid': record.get('view_luid'), 'view_name': record.get('view_name'), 'workbook_name': "
+        "record.get('workbook_name'), 'view_type': record.get('view_type'), 'classification': classification}": (
+            _INTO_THE_MANIFEST_AGGREGATE
+        ),
+    },
+    ("scripts/tableau_oracle_manifest.py", "_log_empty"): {
+        "len(empty)": _A_COUNT,
+        "entry.get('classification')": (
+            "FIXED-VOCABULARY: one of this module's two EMPTY_* literals; the view and workbook NAMES "
+            "on the same line go through `redacted_note`, which is the only response-derived value "
+            "in this warning"
+        ),
     },
     ("scripts/tableau_oracle_manifest.py", "render_unestablished"): {
         "record.get('view_luid')": _INTO_THE_MANIFEST,

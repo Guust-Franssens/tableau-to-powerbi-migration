@@ -44,6 +44,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import tableau_oracle_manifest
+
 LOG = logging.getLogger("group-oracle")
 
 MANIFEST_NAME = "oracle-manifest.json"
@@ -195,7 +197,13 @@ def subset_manifest(manifest: dict[str, Any], workbook: str, views: list[dict[st
         "workbook_luid": next((v.get("workbook_luid") for v in views if v.get("workbook_luid")), None),
         "view_count": len(views),
         "data_ok": len(ok),
-        "data_empty": len([v for v in ok if (v.get("data") or {}).get("row_count") == 0]),
+        # ⚠️ IMPORTED, not re-implemented (#471). This was a second copy of "row_count == 0", and a
+        # second copy of a rule is how a per-workbook subset comes to disagree with the capture it
+        # was sliced from. The count is unchanged; what is new is that it is now the SAME predicate
+        # the capture-wide manifest counts with -- and the views are NAMED here too, for the reason
+        # `data_empty_views` exists at all: a count cannot tell a reviewer which page to open.
+        "data_empty": len([v for v in ok if tableau_oracle_manifest.empty_classification(v)]),
+        "data_empty_views": tableau_oracle_manifest.data_empty_views(ok),
         "credential_blocked": len(blocked),
         "failed": len(failed),
         # Legs the CAPTURE obtained but this grouping could not place. Separate from `failed` so a

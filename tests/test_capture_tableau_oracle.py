@@ -20,6 +20,7 @@ from __future__ import annotations
 import ast
 import inspect
 import json
+import logging
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -30,6 +31,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import capture_tableau_oracle as oracle  # noqa: E402  # pylint: disable=wrong-import-position
+import tableau_oracle_manifest as verdict  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_view_types as view_types_mod  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_payload_facts as payload_facts  # noqa: E402  # pylint: disable=wrong-import-position
 
@@ -468,10 +470,15 @@ def test_the_double_gate_rejects_a_merely_similar_keyword():
 # --------------------------------------------------------------------------- manifest contract
 
 
-def _record(status: str, rows: int = 1, image_status: str | None = None) -> dict:
+def _record(status: str, rows: int = 1, image_status: str | None = None, columns: list[str] | None = None) -> dict:
     data = {"status": status}
     if status == "ok":
         data.update({"row_count": rows, "elapsed_sec": 1.0, "reauths": 0, "retries": 0})
+        # ⚠️ Only when asked for. A real `_capture_data` always merges `summarise_csv`, so `columns`
+        # is always present in the field -- but an OLDER manifest predates that, and the default
+        # here keeps at least one path exercising a record that never recorded a header.
+        if columns is not None:
+            data["columns"] = columns
     else:
         data["detail"] = "adb.example.net: Tableau needs an unexpired OAuth refresh token"
     record = {"view_name": "V", "workbook_name": "W", "data": data}
@@ -531,6 +538,253 @@ def test_manifest_records_recovery_counts(tmp_path):
     assert "total_reauths" in manifest
     assert "total_retries" in manifest
     assert manifest["credential_blocked"] == 0
+
+
+# --- #471: a zero-row capture is COUNTED, NAMED, FLAGGED and WARNED -- and is not a failure ------
+#
+# Reported by SES from a live run against a 94-view site: 12 views came back with no data rows, every
+# one recorded `status: "ok"`, indistinguishable in the manifest from a view that returned 900,000.
+# The count already existed; the LIST was built and immediately reduced to its `len()`, so a fidelity
+# reviewer could learn that twelve views were empty and never which twelve.
+#
+# The tests below pin four separable properties, because a fix could satisfy any one and miss the
+# others: the views are NAMED, the fact is on the RECORD, the console is LOUD, and none of it moves
+# the EXIT CODE. The last is the regression risk: `status` drives the exit code and the
+# blocked/failed partitions, and "just mark it failed" would turn a legible run into a broken one.
+
+
+def _manifest(tmp_path, records) -> tuple[int, dict]:
+    """Both halves of the contract at once: the exit code AND the manifest that explains it."""
+    code = _write(tmp_path, records)
+    return code, json.loads((tmp_path / "oracle-manifest.json").read_text(encoding="utf-8"))
+
+
+def _named_manifest(tmp_path, records) -> tuple[int, dict]:
+    """As above, but through a session whose credentials cannot collide with a manifest field NAME.
+
+    ⚠️ Not fussiness. The shared `_creds()` sets ``pat_name="name"``, and the sink redacts dict KEYS
+    as well as values -- so with that session every ``view_name`` key comes back as
+    ``view_[REDACTED]`` and any assertion about a NAMED view silently tests the redactor instead of
+    the feature. Measured while writing these tests, on the first assertion that read a name back.
+    """
+    session = oracle.TableauSession(
+        oracle.SiteCredentials(
+            base="https://example.online.tableau.com",
+            site="site",
+            pat_name="oracle-empty-pat-name",
+            pat_secret="oracle-empty-pat-secret",
+            version="3.29",
+        )
+    )
+    env = {"TABLEAU_SERVER_URL": "https://x", "TABLEAU_SITE": "s", "TABLEAU_REST_API_VERSION": "3.29"}
+    code = verdict.write_manifest(records, verdict.CaptureRun(session, env, tmp_path, 0.0))
+    manifest = json.loads((tmp_path / "oracle-manifest.json").read_text(encoding="utf-8"))
+    assert manifest["credential_scrubbed_at_sink"] == [], "the sink fired, so a name assertion below proves nothing"
+    return code, manifest
+
+
+def test_an_empty_capture_is_named_not_merely_counted(tmp_path):
+    """The defect itself. `data_empty: 12` is unactionable; a reviewer needs the twelve NAMES.
+
+    Same shape as `render_unestablished_views`, and for the same stated reason: the count answers
+    "how much of my oracle is empty", the list answers "on which views can I not make a finding".
+    """
+    empty = _record("ok", rows=0, columns=["Region", "Sales"])
+    empty["view_name"] = "Real Time Availability"
+    empty["workbook_name"] = "Network Ops"
+    _code, manifest = _named_manifest(tmp_path, [_record("ok"), empty, _record("ok")])
+
+    assert manifest["data_empty"] == 1
+    named = manifest["data_empty_views"]
+    assert [entry["view_name"] for entry in named] == ["Real Time Availability"]
+    assert named[0]["workbook_name"] == "Network Ops"
+    assert named[0]["classification"] == verdict.EMPTY_QUERY_NO_ROWS
+
+
+def test_a_capture_with_rows_is_never_named_empty(tmp_path):
+    """Positive control: the list must be able to come back EMPTY, or it is a view count renamed."""
+    _code, manifest = _manifest(tmp_path, [_record("ok", rows=5), _record("ok", rows=1)])
+    assert manifest["data_empty"] == 0
+    assert manifest["data_empty_views"] == []
+
+
+def test_the_named_list_and_the_count_describe_the_same_views(tmp_path):
+    """One predicate, or a count and a list eventually disagree about the same capture."""
+    records = [_record("ok", rows=n, columns=["c"] if n else []) for n in (0, 3, 0, 0, 7)]
+    _code, manifest = _manifest(tmp_path, records)
+    assert manifest["data_empty"] == 3
+    assert len(manifest["data_empty_views"]) == manifest["data_empty"]
+
+
+def test_a_header_with_no_rows_is_classified_as_a_real_query(tmp_path):
+    """A CSV that names its columns PROVES a query ran and returned a shape. No fieldless sheet can."""
+    _code, manifest = _manifest(tmp_path, [_record("ok", rows=0, columns=["Region", "Sales", "Profit"])])
+    assert manifest["data_empty_views"][0]["classification"] == verdict.EMPTY_QUERY_NO_ROWS
+
+
+def test_a_payload_with_no_header_at_all_reads_as_CANNOT_CLASSIFY(tmp_path):
+    """The correction that narrows the defect: 2 of the 14 flagged views were glossary sheets.
+
+    ⚠️ Measured over `summarise_csv`, a 0-byte body (a sheet with no underlying query) and a 2-byte
+    CRLF body (a real query returning nothing) BOTH land on `row_count=0, columns=[]` -- they differ
+    only in `bytes`, and "glossary means 0 bytes" is one site's observation at n=14, not a Tableau
+    contract. So this case must read as UNCLASSIFIED, never as either cause.
+    """
+    _code, manifest = _manifest(tmp_path, [_record("ok", rows=0, columns=[])])
+    assert manifest["data_empty_views"][0]["classification"] == verdict.EMPTY_CANNOT_CLASSIFY
+
+
+def test_the_byte_count_is_not_consulted_as_the_discriminator(tmp_path):
+    """The forbidden heuristic, pinned: 0 bytes and 2 bytes must reach the SAME verdict.
+
+    Both are `row_count=0, columns=[]` in a real capture. A fix that separated them by `bytes` would
+    look right against the reporting site and be wrong at the first site with a different export.
+    """
+    glossary = _record("ok", rows=0, columns=[])
+    glossary["data"]["bytes"] = 0
+    blank = _record("ok", rows=0, columns=[])
+    blank["data"]["bytes"] = 2
+    _code, manifest = _manifest(tmp_path, [glossary, blank])
+    classes = {entry["classification"] for entry in manifest["data_empty_views"]}
+    assert classes == {verdict.EMPTY_CANNOT_CLASSIFY}
+
+
+def test_an_empty_capture_keeps_status_ok_and_does_not_move_the_exit_code(tmp_path):
+    """⚠️ The regression risk. `status` drives the exit code AND the blocked/failed partitions.
+
+    The HTTP call succeeded, so an empty capture is a DIAGNOSTIC. A run that is otherwise clean must
+    still exit 0 -- overloading `status` would make an operator debug the transport for a view whose
+    filter is simply pointed at a day with no data.
+    """
+    code, manifest = _manifest(tmp_path, [_record("ok", rows=0, columns=[]), _record("ok", rows=0, columns=["c"])])
+    assert code == 0
+    assert [view["data"]["status"] for view in manifest["views"]] == ["ok", "ok"]
+    assert manifest["failed"] == 0
+    assert manifest["credential_blocked"] == 0
+    assert manifest["data_ok"] == 2
+    assert manifest["captured_complete"] == 2
+
+
+@pytest.mark.parametrize(
+    ("sibling", "expected"),
+    [(None, 0), ("source_credential", 2), ("failed", 1)],
+)
+def test_an_empty_capture_never_changes_the_code_a_run_would_otherwise_exit(tmp_path, sibling, expected):
+    """Before/after, across every code an empty view could plausibly disturb.
+
+    Each pair is the SAME run with and without an empty view beside it, so the assertion is about the
+    empty view's contribution rather than about the codes themselves.
+    """
+    others = [_record("ok")] + ([_record(sibling)] if sibling else [])
+    assert _write(tmp_path, others) == expected, "the baseline moved -- this test proves nothing"
+    assert _write(tmp_path, [*others, _record("ok", rows=0, columns=[])]) == expected
+
+
+def test_the_empty_fact_rides_on_the_view_record_as_a_flag(tmp_path):
+    """A per-view flag, so every downstream SLICE of the capture carries it, not just the manifest.
+
+    Deliberately not a new `status` value and not a mutation of the leg record: a consumer asking
+    "did this view's export succeed" and one asking "does this view carry evidence" are two
+    questions, and this answers the second without corrupting the first.
+    """
+    _code, manifest = _manifest(tmp_path, [_record("ok", rows=0, columns=["c"]), _record("ok", rows=4)])
+    empty_view, full_view = manifest["views"]
+    assert empty_view["flags"] == [verdict.FLAG_DATA_EMPTY, verdict.EMPTY_QUERY_NO_ROWS]
+    assert "flags" not in full_view
+
+
+def test_flagging_does_not_mutate_the_caller_s_records(tmp_path):
+    """`write_manifest` is handed the live list the capture loop built; it does not own it."""
+    records = [_record("ok", rows=0, columns=["c"])]
+    _write(tmp_path, records)
+    assert "flags" not in records[0]
+
+
+def test_an_older_record_with_no_row_count_is_not_claimed_empty(tmp_path):
+    """Backwards compatibility, and the reason it matters: absence is not a zero.
+
+    A record whose data leg recorded no `row_count` never measured emptiness, so claiming it as an
+    empty capture would invent a diagnostic. The predicate this replaces raised `KeyError` on it.
+    """
+    old = {"view_name": "V", "workbook_name": "W", "data": {"status": "ok"}}
+    code, manifest = _manifest(tmp_path, [old])
+    assert code == 0
+    assert manifest["data_empty"] == 0
+    assert manifest["data_empty_views"] == []
+    assert "flags" not in manifest["views"][0]
+
+
+def test_a_failed_data_leg_is_not_ALSO_reported_as_empty(tmp_path):
+    """One root cause, counted once. A failed export's emptiness is explained by the failure."""
+    _code, manifest = _manifest(tmp_path, [_record("failed"), _record("source_credential")])
+    assert manifest["data_empty"] == 0
+    assert manifest["data_empty_views"] == []
+
+
+def test_the_per_view_line_for_an_empty_capture_is_a_WARNING(caplog):
+    """`0 rows` inside an INFO line among 94 is technically visible and practically invisible."""
+    caplog.set_level(logging.INFO, logger="tableau-oracle")
+    verdict.log_progress(3, 94, _record("ok", rows=0, columns=[]))
+    (line,) = caplog.records
+    assert line.levelno == logging.WARNING
+    assert verdict.EMPTY_CANNOT_CLASSIFY in line.getMessage()
+
+
+def test_the_per_view_line_for_a_normal_capture_stays_an_INFO(caplog):
+    """Control for the line above: a WARN on every view is a WARN nobody reads."""
+    caplog.set_level(logging.INFO, logger="tableau-oracle")
+    verdict.log_progress(3, 94, _record("ok", rows=900_000))
+    (line,) = caplog.records
+    assert line.levelno == logging.INFO
+
+
+def test_the_run_end_block_names_the_empty_views_and_what_they_cost(tmp_path, caplog):
+    """A count in the summary line says how much evidence is missing, never which page to open."""
+    caplog.set_level(logging.INFO, logger="tableau-oracle")
+    empty = _record("ok", rows=0, columns=[])
+    empty["view_name"] = "Metrics Dictionary"
+    _named_manifest(tmp_path, [empty])
+    warnings = "\n".join(r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
+    assert "Metrics Dictionary" in warnings
+    assert "ZERO DATA ROWS" in warnings
+    # The unclassifiable case must SAY it is unclassifiable, rather than landing silently in a bucket.
+    assert "NO HEADER" in warnings
+
+
+def test_the_run_end_block_is_silent_when_nothing_is_empty(tmp_path, caplog):
+    """Control: a diagnostic that fires on a clean run is one an operator learns to skip."""
+    caplog.set_level(logging.INFO, logger="tableau-oracle")
+    _write(tmp_path, [_record("ok", rows=7)])
+    assert "ZERO DATA ROWS" not in "\n".join(r.getMessage() for r in caplog.records)
+
+
+def test_a_view_name_is_redacted_before_the_empty_diagnostic_prints_it(tmp_path, caplog):
+    """⚠️ A view NAME is response data -- a reflected session token has arrived as one.
+
+    Both new console surfaces are covered: the per-view WARN and the run-end block. The manifest sink
+    scrubs the file; the console is the third artifact and CI keeps its logs.
+    """
+    token = "tableau-session-token-value-that-must-not-print"
+    session = oracle.TableauSession(
+        oracle.SiteCredentials(
+            base="https://x", site="s", pat_name="pat-name-here", pat_secret="pat-secret-here", version="3.29"
+        )
+    )
+    session.token = token
+    record = _record("ok", rows=0, columns=[])
+    record["view_name"] = token
+    record["workbook_name"] = token
+    caplog.set_level(logging.INFO, logger="tableau-oracle")
+
+    verdict.log_progress(1, 1, record, session.redact_text)
+    env = {"TABLEAU_SERVER_URL": "https://x", "TABLEAU_SITE": "s", "TABLEAU_REST_API_VERSION": "3.29"}
+    verdict.write_manifest([record], verdict.CaptureRun(session, env, tmp_path, 0.0))
+
+    printed = "\n".join(r.getMessage() for r in caplog.records)
+    assert "ZERO DATA ROWS" in printed, "the run-end block did not fire, so this proves nothing"
+    assert "NO DATA" in printed, "the per-view line did not fire, so this proves nothing"
+    assert token not in printed
+    assert token not in (tmp_path / "oracle-manifest.json").read_text(encoding="utf-8")
 
 
 # --- #402: dashboard vs worksheet -------------------------------------------------------------
