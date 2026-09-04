@@ -12,9 +12,9 @@ Why this module exists at all, measured (blind review of PR #463, round 2):
   On Linux a source at `/data/Extract.csv` was therefore judged to be inside a package at
   `/DATA`, was skipped by localization AND by the post-rewrite scan, and landed in the clean
   bucket - no shipment, no omission, no rewrite. Silence, on a data-loss-shaped question.
-* `_classify_source()` used the host's `Path`. On Windows `Path("/Users/x/README.md").is_file()`
+* `_classify_source()` used the host's `Path`. On Windows `Path("/Users/<name>/README.md").is_file()`
   is resolved against the CURRENT DRIVE, so a foreign macOS literal happily matched
-  `C:\\Users\\x\\README.md` and unrelated local bytes were packaged as the customer's source.
+  `C:\\Users\\<name>\\README.md` and unrelated local bytes were packaged as the customer's source.
 * `set_data_folder.py` composed every rewritten value with a literal backslash, so on POSIX it
   wrote `/tmp/package\\data\\...` - one path segment with backslashes inside it - reported the
   folder missing, exited 1, and left the file already rewritten to that invalid value.
@@ -71,7 +71,7 @@ def is_host_native(value: str) -> bool:
     """Whether ``value`` may safely be handed to `Path` on THIS machine.
 
     False for a foreign-flavour literal, which the host would silently reinterpret rather than
-    refuse: on Windows `Path("/Users/x/f.csv")` resolves against the current drive.
+    refuse: on Windows `Path("/Users/<name>/f.csv")` resolves against the current drive.
     """
     return flavour(value) == host_flavour()
 
