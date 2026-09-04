@@ -120,10 +120,16 @@ def test_allocate_run_does_not_eagerly_create_deliverables(tmp_path: Path) -> No
     is an always-empty folder that reads to an operator as a failed or skipped step. It must not
     exist on disk right after allocation, even though `subdir("deliverables")` still resolves a
     path for it (the concept - operator-facing, customer-bound output, separate from `scratch/` -
-    is preserved; only the eager, empty folder is not)."""
+    is preserved; only the eager, empty folder is not).
+
+    Self-validating (PR review, tip 3145dfc7): asserts a sibling canonical subdir DOES exist in the
+    same breath, so a mutation that disables ALL eager subdir creation (not just `deliverables/`)
+    cannot leave this test green while everything else fails - it must fail on its own premise.
+    """
     run = allocate_run("acme", repo_root=tmp_path)
 
     assert "deliverables" in CANONICAL_SUBDIRS, "the concept must survive - see issue #322"
+    assert run.subdir("scratch").is_dir(), "premise failed: a sibling canonical subdir must exist"
     assert not run.subdir("deliverables").exists(), "deliverables/ must not be created eagerly"
     assert not (run.root / "deliverables").exists()
 
@@ -140,6 +146,36 @@ def test_deliverables_property_creates_the_directory_lazily_on_first_access(tmp_
     assert path.is_dir()
     (path / "connections.md").write_text("customer server names go here\n", encoding="utf-8")
     assert (path / "connections.md").is_file()
+
+
+def test_deliverables_property_access_is_idempotent(tmp_path: Path) -> None:
+    """PR review, tip 3145dfc7: a mutation flipping the property's `mkdir(exist_ok=True)` to
+    `exist_ok=False` left the full suite green, because nothing exercised a SECOND access. Repeated
+    access (e.g. two separate scripts writing to `run.deliverables` in the same run) must never
+    raise."""
+    run = allocate_run("acme", repo_root=tmp_path)
+
+    first = run.deliverables
+    second = run.deliverables  # must not raise FileExistsError
+
+    assert first == second
+    assert second.is_dir()
+
+
+def test_deliverables_property_never_clobbers_existing_customer_output(tmp_path: Path) -> None:
+    """PR review, tip 3145dfc7: a mutation that deleted and recreated `deliverables/` on every
+    property access left the full suite green, because nothing asserted survival of prior content.
+    `deliverables/` holds operator-facing CUSTOMER output (issue #322) - a second access (from a
+    second script, or the same script re-reading `run.deliverables`) must never wipe it."""
+    run = allocate_run("acme", repo_root=tmp_path)
+    written = run.deliverables / "connections.md"
+    written.write_text("acme-prod-sql-01.internal\n", encoding="utf-8")
+
+    accessed_again = run.deliverables
+
+    assert accessed_again == written.parent
+    assert written.is_file(), "an existing populated deliverables/ must survive re-access"
+    assert written.read_text(encoding="utf-8") == "acme-prod-sql-01.internal\n"
 
 
 def test_other_six_canonical_subdirs_are_unaffected_by_the_lazy_deliverables_change(tmp_path: Path) -> None:

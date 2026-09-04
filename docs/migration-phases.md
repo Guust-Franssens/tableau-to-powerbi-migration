@@ -372,6 +372,9 @@ comes into being: `RunPaths.deliverables` now creates it **lazily, on first acce
 `allocate_run` creating it up front for every run whether or not anything ever writes there. An
 absent folder in a run that never used it says nothing; an empty one made a false claim.
 
+⚠️ **This fixes the always-empty folder, not the underlying "no writer" gap.** Nothing in
+`scripts/` writes to `run.deliverables` today — see the Known gaps table below.
+
 | | `packages/` | `deliverables/` |
 |---|---|---|
 | consumer | the **agent** (machine-read) | a **human / the customer** |
@@ -395,7 +398,7 @@ user, so the rename is cheap today and gets more expensive the moment one appear
 | 1 | No tool for phase 2 → phase 3; the `byPath` rewrite is manual and a wrong one validates clean | ❌ open, tracked as **#458** |
 | 2 | Two documented edit locations — `<bundle>/pbip/` (`AGENTS.md:773`) and `<package>/fabric/` (`package_unit.py:785`) — diverge because the package is a `copytree`, so promoting from the wrong one silently loses agent work | ❌ open design question, tracked as **#460**; promote from wherever the edits are and verify both ways |
 | 3 | `semantic_models/` baselines exist for only 18 of 62 units on the reference run, so model churn cannot be measured for the rest | ❌ report as **BASELINE UNAVAILABLE** (#274, #359) |
-| 4 | `deliverables/` is a convention with no writer, and its name collides with phase 3's meaning | ✅ fixed (#481) — no longer eagerly created; the name collision is unchanged and still open |
+| 4 | `deliverables/` is a convention with no writer, and its name collides with phase 3's meaning | ⚠️ partially addressed (#481) — the always-empty eager folder is fixed (now created lazily, on first access); it still has **no production writer** and the name collision with phase 3's "deliverable" is unchanged, both still open |
 | 5 | Phase 1 stages still default to their own `_assessment*/` / `_oracle*/` / `_bundle*/` paths rather than the `_runs/` layout | ⚠️ deliberate scope limit of issue #234; migrating them is follow-up |
 | 6 | Oracle evidence is layout/text grade only; validation grade requires a render you captured yourself | ⚠️ provider limit, not an oversight (#194) |
 
