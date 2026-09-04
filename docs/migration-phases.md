@@ -60,6 +60,42 @@ One numbered run directory per pipeline run, allocated by
 is decoration for human navigation; nothing may parse it back into a display name (two projects can
 legitimately hold same-named workbooks — issue #234, rule 2).
 
+⚠️ **"Per pipeline run" means per *invocation*, not per workbook.** Run 408 below is **one** run
+covering a 48-workbook site; its per-workbook units live inside that run's `bundle/pbip/`, never in
+48 sibling run directories. `unit_key` names what the run is *about* (a site, a project, or a single
+workbook when that is genuinely the whole job) — it is not a promise that each workbook gets a run.
+A customer's agent read `work_dirs.py`, inferred one-run-per-workbook, and renumbered **14** run
+directories in the resulting reorg, breaking the absolute self-paths inside each one (issue #470).
+
+⚠️ **Renaming an existing run is destructive, and it is now detectable.** `allocate_run` records both
+the directory name and the absolute path it allocated, and `python scripts/work_dirs.py --verify`
+reports each run as `intact` (exit 0 — recorded name *and* recorded path both still match), `moved`
+(exit 1 — renamed or renumbered since allocation, naming both directories) or `unverifiable`
+(exit 3 — the question cannot be answered from the evidence). **`unverifiable` is not a pass.**
+
+⚠️ **`--verify` is a GATE, so it never silently drops what it cannot assess.** It rests on one
+invariant, implemented in one discovery function and one classification function: **every child
+directory of an existing `_runs/` root is a candidate run, any candidate whose identity cannot be
+positively established from its own evidence is `unverifiable`, and `intact` is only ever returned
+on positive proof.** Five shapes land there, and every one of them used to exit 0:
+
+| shape | what it printed before |
+|---|---|
+| `run.json` missing, empty, truncated, malformed, locked, or valid JSON that is not an object | `0 run(s): 0 intact, 0 moved, 0 unverifiable`, exit 0 — a half-written run, exactly what an allocation interrupted between `mkdir` and the manifest write leaves behind |
+| the directory renamed out of the `<NNN>-` pattern **and** its manifest deleted; or the `_runs/` root itself unreadable | `(no run directories found)`, exit 0 — discovery filtered on the *current* name and turned an `OSError` on the root into an empty list, while the tree was still on disk |
+| `run` contradicts the `<NNN>-<slug>` directory it sits in (`2`, or `10**100`, inside `001-acme`) | `1 intact`, exit 0 — only the *type* of `run` was checked, never its agreement with the directory. The number **is** the identity, so a manifest claiming a different one is contradictory evidence |
+| `allocated_abs_path` recorded as a **relative** path | `1 intact`, exit 0 — it was completed against the *verifier's* current directory, so the verdict depended on where the operator was standing |
+| recorded name matches but the recorded absolute path does not | see below |
+
+⚠️ **A run that is where it was allocated but at a different absolute path is `unverifiable`, not
+`intact`.** A basename is unchanged by a run-only move *and* by a copy, so the name alone cannot
+answer "still there": moving `source/_runs/001-acme` to `moved/_runs/001-acme` reported `INTACT`,
+exit 0. Whether the whole checkout moved (legitimate) or this one run was moved or copied
+(corruption) cannot be told apart from a single run's evidence — and **both** break the absolute
+self-paths embedded under `bundle/`, so neither is reported as healthy. Note that a clone and a
+fresh `git worktree` carry no runs at all (`_runs/` is git-ignored: `git check-ignore -v --
+_runs/001-acme/run.json` → `.gitignore:162:/_*`), so this is not a fresh-clone false alarm.
+
 `CANONICAL_SUBDIRS` (`scripts/work_dirs.py:72`) is the single source of truth for the layout:
 
 | subdir | produced by | contents | measured on run 408 |

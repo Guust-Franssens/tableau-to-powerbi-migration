@@ -171,7 +171,10 @@ enrich it, and hand it over refreshed.
    to fewer, which refreshes cleanly and returns the **wrong** data. The engine's own
    `endpoints_distinct` (2.75.0+) checks the same invariant but counts against **its own** parse, so
    it cannot see a mis-parse and it stays silent when it cannot derive an endpoint count at all
-   (flat-file islands). Ours counts against `migration-spec.json`, parsed independently — that is why
+   (flat-file islands). ⚠️ The *silence* half is narrowed: upstream #141 made a not-evaluated
+   `endpoints_distinct` say so, and #183 (2.340.0, below our 2.353.0) restored the `not_evaluated`
+   key the post-wrap re-check had been dropping — so read that key, do not infer from absence.
+   Ours counts against `migration-spec.json`, parsed independently — that is why
    both run, and why agreeing with it is a result rather than a formality. Never silently rewrite his
    M; a wrong connector is a finding to route, not a fix to apply.
 4. **Author the residual DAX from `requests[]`** — each carries `name`, `formula`, `role`,

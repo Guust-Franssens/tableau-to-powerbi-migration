@@ -102,6 +102,7 @@ must appear below unless the script docstring marks it `internal: true` with an 
 | `scripts/probe_bundle.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/probe_desktop_query.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/probe_live_source.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
+| `scripts/promote_unit.py` | `agent-facing` | Named in `scripts/README.md` and routed from `docs/INDEX.md` as the last step for a migration unit. |
 | `scripts/provision_tableau_estate.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/published_datasource_registry.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/read_handover.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |

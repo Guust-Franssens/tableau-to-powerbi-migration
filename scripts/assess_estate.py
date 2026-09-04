@@ -98,6 +98,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import tableau_render_capability as render_capability  # noqa: E402  # pylint: disable=wrong-import-position
 from tableau_env import env_source, pat_secret, redact, require, resolve_env  # noqa: E402  # pylint: disable=wrong-import-position
 
 LOG = logging.getLogger("assess")
@@ -840,6 +841,9 @@ def collect(site: Site, survey: dict | None, checkpoint=None) -> dict[str, Any]:
         "structure_by_name": {w["name"]: w for w in data.get("workbooks") or []},
         "permissions": permissions,
         "survey": survey,
+        # One unauthenticated call, and the only thing in this dict that describes the SERVER rather
+        # than its content. Deliberately not part of any listing: it never degrades the assessment.
+        "server_ceiling": server_ceiling(site),
         "collection_errors": errors,
     }
 
@@ -975,6 +979,9 @@ def assemble(raw: dict[str, Any], target: float) -> dict[str, Any]:
         "dependencies": dep_rows,
         "survey_supplied": survey is not None,
         "iam_hard_cases": iam_hard_cases(raw["permissions"], raw["groups"]),
+        # The site's render ceiling, carried through verbatim so a programmatic consumer reads the
+        # same three numbers the report renders. `None` when the probe was not run at all.
+        "server_ceiling": raw.get("server_ceiling"),
         **_degraded_contract(raw.get("collection_errors") or [], len(curve)),
     }
 
@@ -1175,6 +1182,274 @@ def write_store(out: Path, raw: dict[str, Any], assembled: dict[str, Any]) -> Pa
     return db_path
 
 
+def server_ceiling(site: Site) -> dict[str, Any]:
+    """What reference renders this SITE can actually give an operator, rung by rung.
+
+    The render ceiling is a property of the site, so an operator should learn it HERE -- in the first
+    thing they run against a new estate -- rather than discovering it much later as a capture-time
+    warning. Measured customer case (#474): an on-prem Server at ``productVersion 2025.3.3`` advertises
+    ``restApiVersion 3.27``, so SVG (floor 3.29) is unavailable there at any client setting, and the
+    best rung it can reach is PDF. Nothing in the assessment said so.
+
+    ⚠️ **The point is the IMPLICATION, not two more numbers in a blob.** Reporting "we send 3.21, the
+    server advertises 3.27" leaves the operator to do the arithmetic against a floor table they do not
+    have, which is how the false remedy in #474 survived in the first place. So this returns a
+    **verdict per rung** -- and the raw numbers as the supporting detail underneath.
+
+    Three numbers, and this repo insists they are different things:
+
+    ``client_api_version``      what we SEND -- ``TABLEAU_REST_API_VERSION``, a client preference;
+    ``advertised_api_version``  what ``/serverinfo`` SAYS -- the server's own ceiling;
+    ``rungs``                   what that MEANS for a later ``capture_tableau_oracle.py`` run.
+
+    ⚠️ **Fails soft, and reports the third state rather than guessing.** ``server_info`` is
+    unauthenticated, never raises, is bounded by its own 30 s timeout, and a site that will not answer
+    it is not a reason to degrade an assessment -- so a failure leaves ``established`` false and every
+    rung ``unknown``. It is deliberately NOT a ``listing_error``: nothing downstream is computed from
+    it, so calling it a degraded inventory would be a false alarm on the one flag this script asks
+    consumers to trust.
+
+    ⚠️ **"Answered" is not "established", and three failures land in the same state.** No answer at
+    all, an unsuccessful answer (a proxy's 404, the server's own 500) whose body may still contain a
+    ``<restApiVersion>`` element, and a 200 reporting something that is not a version -- all three are
+    ``unknown`` here, because none of them is a number that can be compared against a rung's floor.
+    Measured before the fix (#475 review): a 500 carrying ``3.30`` was reported as this site's ceiling
+    with SVG available, and an advertised ``garbage-999`` did the same; ``not-a-version`` went the
+    other way and reported that NO reference render was reachable at all. ``advertised_api_version_invalid``
+    carries the offending text, redacted, so the report can say which failure this was.
+
+    ⚠️ And every rung verdict is an EXPECTATION from an advertised number, never a measurement. Only
+    ``capture_tableau_oracle.py --reference-best`` probes the endpoint, which is the sole
+    authoritative answer -- see ``tableau_render_capability``'s module docstring for why the two
+    disagree often enough to matter. The two verdicts are not equally strong, and the report says so:
+    ``unavailable`` is the site's own ceiling falling below a documented floor, while ``available``
+    is a claim the endpoint has not yet been asked to honour.
+    """
+    info = render_capability.server_info(site.base, redactor=site.scrub_text)
+    shown = info.get("rest_api_version")
+    reflected = bool(info.get("rest_api_version_reflected"))
+    # ⚠️ **The verdicts come from the DERIVED capability, the display from the redacted text, and the
+    # two are never the same value.** `rung_support` is computed inside `server_info` from the raw
+    # `restApiVersion`, which does not leave that function -- so a server that reflects a
+    # credential shaped like a version (`3.27`; nothing validates a Tableau token's shape) costs the
+    # operator the printed NUMBER and nothing else. `established` stays true and every rung verdict
+    # stays correct, because neither is computed from the string on its way to the report.
+    support = info.get("rung_support")
+    established = info.get("ceiling_established")
+    # Defence in depth for a hand-assembled `info` -- tests, and any future caller: derive from the
+    # display-safe value, which is exactly the value it is safe to derive AND display from. A
+    # nonempty string is what used to be trusted; the grammar decides, bare truthiness does not.
+    if support is None:
+        support = render_capability.rung_support(render_capability.api_tuple(shown))
+    if established is None:
+        established = render_capability.api_tuple(shown) is not None
+    # Junk that is neither a version nor a reflected credential is no ceiling at all. A reflected one
+    # keeps its redaction marker, so a reader can tell "suppressed" from "never answered".
+    if not reflected and render_capability.api_tuple(shown) is None:
+        shown = None
+    rungs = [_rung_verdict(rung, support.get(rung.name)) for rung in render_capability.LADDER]
+    best = next((r for r in rungs if r["verdict"] == AVAILABLE), None)
+    return {
+        "client_api_version": site.version,
+        "advertised_api_version": shown,
+        # Suppressed with the number it names: `API_RELEASE` is a bijection, so printing the release
+        # of a redacted version would hand back the digits the redaction removed.
+        "advertised_release": None if reflected or not shown else render_capability.release_for(shown),
+        "advertised_api_version_reflected": reflected,
+        # ⚠️ Present ONLY when `/serverinfo` answered 200 with a `restApiVersion` that is not a REST
+        # API version at all. It is why the ceiling is unknown, and it is already redacted at the
+        # parse boundary. `established` stays false: text that cannot be compared against a floor is
+        # not a ceiling, however confidently it was returned (#475 review).
+        "advertised_api_version_invalid": info.get("invalid_rest_api_version"),
+        "product_version": info.get("product_version"),
+        "build": info.get("build"),
+        "established": bool(established),
+        "probe_status": info.get("status"),
+        # One entry per ladder rung, best-first, each carrying its own floor AND its own verdict, so a
+        # downstream tool consumes the implication without parsing prose or re-deriving it.
+        "rungs": rungs,
+        "best_reference_render": best["tier"] if best else None,
+    }
+
+
+# Per-rung verdicts. `UNKNOWN` is a first-class value rather than an absent key: a consumer that reads
+# `verdict != UNAVAILABLE` as "usable" must be made to see the third state in the SAME field, because
+# an unassessable state that reads as a clean one is the defect class this whole change exists for.
+AVAILABLE = "available"
+UNAVAILABLE = "unavailable"
+UNKNOWN = "unknown"
+
+
+def _rung_verdict(rung, meets: bool | None) -> dict[str, Any]:
+    """One ladder rung against this site's advertised ceiling. Three-valued, never two.
+
+    ``meets`` is the DERIVED capability -- ``render_capability.rung_support``'s answer for this rung,
+    computed from the raw advertised version inside ``server_info`` and never from the string that
+    reaches the report. That separation is what lets a suppressed (credential-shaped) version still
+    produce correct verdicts; see :func:`server_ceiling`.
+
+    The parameter is ``rung``, not ``tier``: this module already has a module-level ``tier()`` that
+    scores a workbook, and shadowing it here made pylint's ``redefined-outer-name`` the difference
+    between exit 0 and exit 12 on the required gate.
+    """
+    return {
+        "tier": rung.name,
+        "route": rung.route,
+        "min_api": rung.min_api,
+        "min_release": rung.min_release,
+        "vector": rung.vector,
+        "ceiling": rung.ceiling,
+        "verdict": UNKNOWN if meets is None else (AVAILABLE if meets else UNAVAILABLE),
+    }
+
+
+# The measurement behind the PNG rung's ceiling, quoted from `docs/reference-capture.md` (the route
+# survey table and the paragraph under it) rather than restated: `?resolution=high` is exactly 2x the
+# declared size on 52/52 dashboards, `standard`/`veryhigh` are HTTP 400, and `vizWidth`/`vizHeight` are
+# ignored FOR DASHBOARDS. It is stated whenever the rung table is printed because it is the other half
+# of "available" and it is the half operators over-trust.
+#
+# ⚠️ Scoped to dashboards on purpose. That same document records the correction: on a WORKSHEET
+# `vizHeight` IS honoured (361x835 -> 361x1535 at `vizHeight=1500`), and it notes the earlier
+# "silently ignored" phrasing "was over-general". Do not re-generalise it here.
+_PNG_CEILING_NOTE = (
+    "⚠️ **A raster rung has a hard ceiling, and it is set by the dashboard's author, not by the "
+    "caller.** `?resolution=high` returns **exactly 2× the dashboard's declared size** (measured "
+    "52/52; `resolution=standard`/`veryhigh` are HTTP 400 and `vizWidth`/`vizHeight` are ignored *for "
+    "dashboards*), so a **650×800** dashboard tops out at **1300×1600, forever** — a label-dense page "
+    "can be structurally legible and content-illegible at the same time. That is why a vector rung "
+    "matters: it is the only one whose resolution the caller can still choose. (On a *worksheet* "
+    "`vizHeight` **is** honoured, so the 2× ceiling is a dashboard claim.) Numbers measured in this "
+    "repo's `docs/reference-capture.md`."
+)
+
+
+def _render_server_ceiling(ceiling: dict[str, Any] | None) -> list[str]:
+    """The per-rung verdict block: the implication first, the raw numbers as supporting detail."""
+    if not ceiling:
+        return []
+    out = ["## Reference renders — what this site can actually give you", ""]
+    if not ceiling.get("established"):
+        return out + _render_ceiling_unknown(ceiling)
+    product = f", product `{ceiling['product_version']}`" if ceiling.get("product_version") else ""
+    release = f" ({ceiling['advertised_release']}{product})" if ceiling.get("advertised_release") else product
+    out += [
+        f"- **what we send** — `TABLEAU_REST_API_VERSION` = `{ceiling['client_api_version']}` "
+        f"(a *client preference*, not a capability)",
+        f"- **what the server advertises** — REST `{ceiling['advertised_api_version']}`{release}, from `/serverinfo`",
+    ]
+    if ceiling.get("advertised_api_version_reflected"):
+        # ⚠️ Say WHY the number is missing. A bare redaction marker where a version belongs reads as
+        # a bug in this tool, and the operator needs to know their server echoed a credential.
+        out.append(
+            "- ⚠️ **the version this server reported matched a credential this run holds, so it has "
+            "been redacted.** The rung verdicts below are still derived from it and are unaffected — "
+            "what is lost is the printed number, not the assessment. A server echoing a credential "
+            "back in an unauthenticated response is worth raising with whoever operates it."
+        )
+    out += [
+        "",
+        "| rung | route | needs | verdict | resolution ceiling |",
+        "|---|---|---|---|---|",
+    ]
+    out += [_rung_row(rung) for rung in ceiling["rungs"]]
+    out += ["", _bottom_line(ceiling), ""]
+    # Only where the raster rung is actually reachable: on a site that cannot reach it either, the
+    # ceiling of a rung nobody can call is noise on top of a worse answer.
+    if any(r["tier"] == "png_high" and r["verdict"] == AVAILABLE for r in ceiling["rungs"]):
+        out += [_PNG_CEILING_NOTE, ""]
+    return out
+
+
+def _rung_row(rung: dict[str, Any]) -> str:
+    """One table row. The verdict is the column an operator reads; the floor explains it."""
+    verdict = {
+        AVAILABLE: "✅ **available**",
+        UNAVAILABLE: "❌ **UNAVAILABLE on this server**",
+        UNKNOWN: "⚠️ **unknown**",
+    }[rung["verdict"]]
+    kind = "vector" if rung["vector"] else "raster"
+    return (
+        f"| `{rung['tier']}` ({kind}) | `{rung['route']}` | REST `{rung['min_api']}` "
+        f"({rung['min_release']}) | {verdict} | {rung['ceiling']} |"
+    )
+
+
+def _bottom_line(ceiling: dict[str, Any]) -> str:
+    """What `--reference-best` should resolve to here, and what that verdict is worth."""
+    best = ceiling["best_reference_render"]
+    if best is None:
+        return (
+            f"**Bottom line: NO reference render rung is reachable.** This site advertises REST "
+            f"`{ceiling['advertised_api_version']}`, below the lowest rung's floor, so "
+            f"`capture_tableau_oracle.py` can obtain no server-side reference at all — the offline "
+            f"192×192 `.twb` thumbnail is the only thing left, and a verdict signed off on it is "
+            f"layout-grade, never validation-grade."
+        )
+    unavailable = [r for r in ceiling["rungs"] if r["verdict"] == UNAVAILABLE]
+    lost = ""
+    if unavailable:
+        names = ", ".join(f"`{r['tier']}`" for r in unavailable)
+        lost = (
+            f" {names} is out of reach here **at any client setting** — its floor is above this "
+            f"site's own ceiling, so raising `TABLEAU_REST_API_VERSION` cannot change it."
+        )
+    vector = next((r for r in ceiling["rungs"] if r["verdict"] == AVAILABLE and r["vector"]), None)
+    why = (
+        f" `{vector['tier']}` is the only **vector** rung available here, which is what makes it worth "
+        f"preferring over the raster one below it."
+        if vector and unavailable
+        else ""
+    )
+    return (
+        f"**Bottom line: `--reference-best` should resolve to `{best}` on this site.**{lost}{why} "
+        f"⚠️ Every verdict above is derived from the **advertised** number: *unavailable* is firm (the "
+        f"site's own ceiling is below that rung's floor), *available* is a claim the endpoint has not "
+        f"been asked to honour. Only `capture_tableau_oracle.py --reference-best` settles it by asking."
+    )
+
+
+def _why_not_established(ceiling: dict[str, Any]) -> str:
+    """The one clause that says WHICH way the probe failed to establish a ceiling.
+
+    Three failures land here and they are not interchangeable to whoever has to act: no answer at all
+    (``probe_status`` 0), an unsuccessful answer (404 from a proxy in front of Tableau, 500 from the
+    server itself), and a 200 whose ``restApiVersion`` is not a version. Printing only "answered 200"
+    for the third would read as a contradiction -- a successful probe with no ceiling -- and send the
+    reader hunting for a bug in this tool instead of at the value the server actually returned.
+    """
+    invalid = ceiling.get("advertised_api_version_invalid")
+    status = ceiling.get("probe_status")
+    if invalid:
+        return (
+            f"`/serverinfo` answered `{status}`, but the version it reported (`{invalid}`) is not a "
+            f"REST API version, so it cannot be compared against any rung's floor"
+        )
+    return f"`/serverinfo` answered `{status}`"
+
+
+def _render_ceiling_unknown(ceiling: dict[str, Any]) -> list[str]:
+    """State C. ⚠️ Emits NO per-rung verdicts -- an unestablished ceiling must not read as a known one.
+
+    This is the highest-value refusal in the block: a rung table printed from a ceiling nobody
+    established is indistinguishable, at a glance, from one that was measured, and it is exactly the
+    unassessable-collapsing-into-a-confident-answer shape the rest of this repo is built to refuse.
+    """
+    return [
+        f"⚠️ **The server's advertised REST ceiling was NOT established** — {_why_not_established(ceiling)}. "
+        f"We send `TABLEAU_REST_API_VERSION` = "
+        f"`{ceiling['client_api_version']}`, which is a client preference and says nothing about what "
+        f"this site can do.",
+        "",
+        "**No per-rung verdict is shown, deliberately.** Which reference renders this site supports is "
+        "**unknown**, not 'probably fine' — printing a rung table from a ceiling nobody established "
+        "would be indistinguishable from a measured one. Establish it before promising a customer a "
+        "rung: `capture_tableau_oracle.py --reference-best` probes the endpoint, which is the only "
+        "authoritative answer, and `GET /api/3.4/serverinfo` returns the advertised ceiling on its own.",
+        "",
+    ]
+
+
 def _render_curve(rows: list[dict], target: float) -> list[str]:
     """Header + the sparse-data caveat + the coverage curve."""
     total_views = sum(r["views_lifetime"] for r in rows)
@@ -1352,6 +1627,7 @@ def render_report(assembled: dict[str, Any], raw: dict[str, Any], target: float)
     out += _render_curve(rows, target)
     out += _render_tiers(rows)
     out += _render_sequencing(assembled, rows)
+    out += _render_server_ceiling(assembled.get("server_ceiling"))
     out += _render_iam(assembled, raw)
     return "\n".join(out) + "\n"
 
@@ -1412,6 +1688,60 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _log_server_ceiling(ceiling: dict[str, Any] | None) -> None:
+    """The same per-rung verdict on the console, so the terminal and the report agree.
+
+    Rendered from the same dict the report and ``assessment.json`` read. An operator who sees only
+    the terminal must reach the same conclusion as one who opens the artifact -- including the
+    refusal: an unestablished ceiling prints NO rung verdicts here either.
+    """
+    if not ceiling:
+        return
+    if not ceiling.get("established"):
+        invalid = ceiling.get("advertised_api_version_invalid")
+        LOG.warning(
+            "  render ceiling NOT ESTABLISHED (/serverinfo answered %s%s); we ask as %s. Which reference "
+            "renders this site supports is UNKNOWN -- no rung verdict is shown. Probe it with "
+            "capture_tableau_oracle.py --reference-best",
+            ceiling.get("probe_status"),
+            f", reporting {invalid!r}, which is not a REST API version" if invalid else "",
+            ceiling["client_api_version"],
+        )
+        return
+    LOG.info(
+        "  server advertises REST %s (%s, product %s); we ask as %s",
+        ceiling["advertised_api_version"],
+        ceiling["advertised_release"] or "release not shown",
+        ceiling.get("product_version"),
+        ceiling["client_api_version"],
+    )
+    if ceiling.get("advertised_api_version_reflected"):
+        LOG.warning(
+            "  ⚠️ that version matched a credential this run holds and was REDACTED; the rung "
+            "verdicts below are derived from it and are unaffected"
+        )
+    for rung in ceiling["rungs"]:
+        line = LOG.warning if rung["verdict"] == UNAVAILABLE else LOG.info
+        line(
+            "    %-8s needs REST %-4s (%s) -> %s%s",
+            rung["tier"],
+            rung["min_api"],
+            rung["min_release"],
+            rung["verdict"].upper(),
+            f" -- {rung['ceiling']}" if rung["verdict"] == AVAILABLE else " on this server AT ANY CLIENT SETTING",
+        )
+    best = ceiling["best_reference_render"]
+    if best:
+        LOG.info("  --reference-best should resolve to %s here (expected from the advertised ceiling)", best.upper())
+    else:
+        LOG.warning(
+            "  NO reference render rung is reachable on this site's advertised ceiling (%s) -- the "
+            "offline 192x192 .twb thumbnail is the only thing left, which is layout-grade, never "
+            "validation-grade",
+            ceiling["advertised_api_version"],
+        )
+
+
 def main() -> int:
     """Assess the estate. Exit 1 when nothing could be assessed, 3 when a PRIMARY listing failed."""
     args = _build_parser().parse_args()
@@ -1459,6 +1789,7 @@ def main() -> int:
         site.retries,
     )
     LOG.info("  tiers: %s", ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+    _log_server_ceiling(assembled.get("server_ceiling"))
     LOG.info("  %s", db)
     LOG.info("  %s", report)
     for line in _warn_lines(assembled):

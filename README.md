@@ -186,17 +186,102 @@ A migration moves through **three locations, one direction**. Knowing which is w
 knowing where to find something. Full explanation, with the measured figures and the gates:
 **[`docs/migration-phases.md`](docs/migration-phases.md)**.
 
-| Phase | Where it lands | What produces it | What you get |
-| --- | --- | --- | --- |
-| **1. Collect & convert** | `_runs/<NNN>-<slug>/` | `run_engine_survey.py` → `assess_estate.py` → `harvest_estate_assets.py` → `run_estate.py`, plus `capture_tableau_oracle.py` | `assessment/` (what exists, what is used, migration order), `assets/` (the downloads), `bundle/` (the engine's conversion output), `oracle/` (Tableau's own renders and numbers) |
-| **2. Package for the agent** | `_runs/<NNN>-<slug>/packages/<batch>/<Unit>/` | [`scripts/package_unit.py`](scripts/package_unit.py) | one self-contained folder per migration unit — source, engine output, handover queue and reference evidence together, which **both gates accept with no flags** |
-| **3. Ship** | `migrations/{workbooks,datasources}/<slug>/fabric/` | ⚠️ a manual copy — no tool yet (issue [#458](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/458)) | the PBIP project a customer opens in Power BI Desktop |
+```text
+_runs/<NNN>-<slug>/                     ◀── PHASE 1  collect & convert  (gitignored)
+├── run.json                                what ran, against which site, at which SHAs
+├── assessment/                             what exists, what is USED, migration order
+│   ├── estate_survey.json                    the live-site survey the engine emits
+│   ├── assessment.json  report.md            the decision, and its human-readable form
+│   └── estate.db
+├── assets/
+│   ├── assets/                             the downloads: .twb(x) workbooks, .tds(x) sources
+│   └── parse-sweep.json  parse-sweep.md      both parsers' failure distribution over them
+├── oracle/                                 Tableau's OWN renders and numbers
+│   ├── images/  data/                        ⚠️ only for views that captured — 288 of 360 here
+│   └── oracle-manifest.json                  every view: captured, or not — with status and reason
+├── bundle/                                 the deterministic engine's conversion output
+│   ├── reports/<WB>.Report/                  ⚠️ engine truth — NEVER edit
+│   ├── semantic_models/<Model>.SemanticModel/ ⚠️ engine truth — NEVER edit; 18 for 62 pbip/ units
+│   ├── pbip/<Unit>/                          the working copy: .Report + .SemanticModel + .pbip
+│   ├── handover/<WB>.json                    the per-workbook remediation queue
+│   ├── data/                                 materialised extract rows
+│   └── engine-output-receipt.json            which engine version built this, and from where
+│
+├── packages/<batch>/<Unit>/            ◀── PHASE 2  one self-contained folder per unit
+│   ├── README.md  handover.md              start here — the gate commands, pre-scoped
+│   ├── migration-spec.json                 the parsed source                    (64 of 67)
+│   ├── fabric/                             the packaged copy of bundle/pbip/    (62 of 67)
+│   │   ├── <WB>.Report/                      PBIR
+│   │   ├── <Model>.SemanticModel/            TMDL
+│   │   └── <WB>.pbip
+│   ├── assets/<luid>_<Unit>.<ext>          the original source, alongside          (65 of 67)
+│   ├── handover/<WB>.json                  this unit's slice of the queue       (46 of 67)
+│   ├── oracle/                             this unit's reference evidence       (46 of 67)
+│   │   ├── worksheet/{images,data}/
+│   │   ├── dashboard/{images,data}/          (an `unknown/` tier appears if a view's type is unset)
+│   │   └── oracle-manifest.json
+│   ├── report.json  source-provenance.json   gate input, and source-to-LUID attribution
+│   ├── engine-output-receipt.json            which engine version built this      (67 of 67)
+│   └── package-manifest.json               what was packaged, and every omission with its reason
+│
+├── deliverables/                           customer-facing outputs — never committed
+└── scratch/                                the ONLY subdir that is safe to delete
+
+migrations/workbooks/<slug>/fabric/      ◀── PHASE 3  ship  (the deliverable only — the unit
+├── <WB>.Report/                                root may also hold source/, data/,
+├── <Model>.SemanticModel/                      reference/ and migration-spec.json)
+└── <WB>.pbip                               ← what the customer opens in Power BI Desktop
+```
+
+⚠️ **Every counted entry above is conditional — and the rule is NOT the source type.** On the
+67-package reference run, **5 units had no engine working copy** (`Meridian_Calc_Gauntlet`,
+`Meridian_Collision_Alpha`, `Meridian_Trip_Economics`, `RESTAPISample`, `TS_Users`) — four of them
+*workbooks*, so this is a per-unit conversion gap, not "datasources lack a report". 18 of the 19
+`.tds` units **do** ship a report, model and PBIP. Handover and oracle evidence exist for 46 of 67.
+The tree shows selected entries, not an exhaustive listing.
+
+⚠️ **Phase 3 is *trackable*, not automatically committed** — `data/` and customer-prefixed units are
+gitignored, so commit only what is public-safe.
+
+⚠️ **Which copy to edit is currently unsettled** ([#460](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/460)):
+`AGENTS.md` says `bundle/pbip/`, the generated package README says `<package>/fabric/`, and the
+package is a physical copy, so the two diverge the moment either is edited. Promote from whichever
+one carries the edits, and verify before and after.
+
+A **shared** datasource ships once to `migrations/datasources/<ds-slug>/fabric/` instead, and every
+report that uses it keeps a rewritten `definition.pbir` pointing four levels up at it.
+
+**1. Collect & convert** → `_runs/<NNN>-<slug>/`
+
+Run `run_engine_survey.py` → `assess_estate.py` → `harvest_estate_assets.py` → `run_estate.py`, plus
+`capture_tableau_oracle.py`. You get four subdirectories: `assessment/` (what exists, what is used,
+migration order), `assets/` (the downloads), `bundle/` (the engine's conversion output) and
+`oracle/` (Tableau's own renders and numbers).
+
+**2. Package for the agent** → `_runs/<NNN>-<slug>/packages/<batch>/<Unit>/`
+
+[`scripts/package_unit.py`](scripts/package_unit.py) emits one self-contained folder per migration
+unit — source, engine output, handover queue and reference evidence together — which **both gates
+accept with no flags**.
+
+**3. Ship** → `migrations/{workbooks,datasources}/<slug>/fabric/`
+
+The PBIP project a customer opens in Power BI Desktop.
+⚠️ Still a manual copy — no tool yet (issue
+[#458](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/458)).
 
 Two gates sit on phase 2: `check_reference_readiness.py` is the **entry** gate (per report page, is
 there trustworthy Tableau reference evidence to start from?) and `check_unit.py` is the **exit** gate
 (is this unit done?). ⚠️ A page the entry gate calls **`blind` is a finding, not a pass** — it means a
 fidelity bug on that page would be structurally unfalsifiable, so it exits non-zero and you deal with
 it before building.
+
+⚠️ **Both gates check the phase-2 package, not the phase-3 deliverable.** `check_unit.py` will run
+against a shipped `migrations/` folder, but it checks **less** there: measured on
+`examples/shipping-kpis`, page parity still passes while oracle coverage and the engine receipt both
+degrade to `NOT_CHECKED`, because the oracle and `engine-output-receipt.json` live in the package and
+are not shipped. That is honest rather than a false pass — `NOT_CHECKED` exits non-zero — but it is
+why a unit is verified **before** it is promoted, not after.
 
 Three things about that flow are worth knowing before you touch it, and each has cost someone real
 work:
