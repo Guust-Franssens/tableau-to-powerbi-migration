@@ -50,7 +50,13 @@ Two mechanisms, deliberately different in kind
 from __future__ import annotations
 
 import re
+import sys
+from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from host_paths import discloses_host_path  # noqa: E402  # pylint: disable=wrong-import-position
 
 
 class UnscopedStructure(TypeError):
@@ -138,7 +144,7 @@ def project(payload: Any, spec: Any, *, prefix: str = "") -> tuple[Any, list[str
         kept: dict[str, Any] = {}
         dropped = []
         for key, value in payload.items():
-            path = f"{prefix}.{key}" if prefix else key
+            path = f"{prefix}.{_safe_path_segment(key)}" if prefix else _safe_path_segment(key)
             if key not in spec:
                 dropped.append(path)
                 continue
@@ -149,15 +155,42 @@ def project(payload: Any, spec: Any, *, prefix: str = "") -> tuple[Any, list[str
     raise TypeError(f"unusable allowlist spec at {prefix or '.'}: {spec!r}")
 
 
+def _safe_path_segment(key: Any) -> str:
+    """One dropped-path segment, with a host-path-disclosing KEY redacted before it is built into it.
+
+    ⚠️ **#480 round-7 finding B2.** `project()`'s whole job is to refuse an unenumerated field, and it
+    then named the refusal using the field's own key - so an *untrusted* key was re-emitted verbatim
+    in `scope.dropped_fields`, which ships. Measured, one injected view field::
+
+        "<drive>:\\Users\\<account>\\private\\secret": "safe scalar"
+          -> "dropped_fields": ["views[].<drive>:\\Users\\<account>\\private\\secret"]
+
+    The rule applied here is the one `tableau_env.scrub_tree` (:461-478) already states for the
+    credential sink: **keys are scrubbed, and a diagnostic path is built from the SCRUBBED key.** The
+    guard must not become the disclosure channel. The `views[]` prefix survives, so the operator still
+    learns at which LEVEL an unnameable field was dropped - redaction here costs the key, not the
+    location.
+    """
+    text = str(key)
+    return REDACTED if discloses_host_path(text) else text
+
+
 # --------------------------------------------------------------------------------------------
 # the value-shaped half: absolute host paths, wherever they appear
 # --------------------------------------------------------------------------------------------
 
-#: An absolute path under a user profile, in the forms this repo's artifacts actually produce.
-#: Deliberately the same shape `scripts/set_data_folder.py` gates the repo on, so a package cannot
-#: ship what a commit could not. Matched against a PARSED string value, never against serialized
-#: text - `json.dumps` doubles each separator, and grepping the render for the single-separator form
-#: is how an earlier assertion in this feature was silently vacuous.
+#: Whether a value is a location AT ALL - anchored, and deliberately broader in one direction than a
+#: profile path: `<drive>:\builds\out` and `\\server\share\x` name the operator's machine even
+#: without a user profile in them. It is the *position* half of the question;
+#: :func:`host_paths.discloses_host_path` is the *containment* half, and :func:`redact_host_paths`
+#: takes the UNION of the two so neither half can narrow the other.
+#:
+#: ⚠️ This used to claim it was "the same shape `scripts/set_data_folder.py` gates the repo on". It
+#: was not, and that drift is #480 finding B1: `^` makes it a test of what a string STARTS with, so
+#: `"HTTP 503: " + <a host path>` passed it while failing the repo gate. It is matched against a
+#: PARSED string value, never against serialized text - `json.dumps` doubles each separator, and
+#: grepping the render for the single-separator form is how an earlier assertion here was silently
+#: vacuous.
 #:
 #: ⚠️ The POSIX segments are assembled from parts rather than written inline: spelled out, this
 #: pattern is itself an absolute-user-path literal, and the repo's own privacy gate
@@ -176,6 +209,14 @@ def redact_host_paths(payload: Any, *, prefix: str = "") -> tuple[Any, list[str]
     a field name nobody predicted cannot evade it - which is precisely the property the three
     name-shaped rounds lacked. It redacts rather than drops: the handover slice is the agent's work
     queue, and deleting a key it reads would trade a leak for a broken deliverable.
+
+    ⚠️ **Two questions, unioned** (#480 round-7 finding B1). `HOST_PATH_RE.match` asks whether the
+    value *starts* as a location, which is the right question for a `path`-shaped field and the wrong
+    one for prose: a status prefix, a quote or a `file:///` wrapper hides the disclosure from an
+    anchored test entirely. :func:`host_paths.discloses_host_path` asks whether the text discloses a
+    profile path ANYWHERE in it, and is the same definition the repo's commit gate uses - so a
+    handover slice cannot ship what a commit could not. Neither half is dropped: the anchored one
+    also catches a non-profile location (`<drive>:\\builds\\out`) that the profile regex is silent on.
     """
     if isinstance(payload, dict):
         out: dict[str, Any] = {}
@@ -193,7 +234,7 @@ def redact_host_paths(payload: Any, *, prefix: str = "") -> tuple[Any, list[str]
             rows.append(cleaned)
             hit.extend(found)
         return rows, hit
-    if isinstance(payload, str) and HOST_PATH_RE.match(payload):
+    if isinstance(payload, str) and (HOST_PATH_RE.match(payload) or discloses_host_path(payload)):
         return REDACTED, [prefix or "."]
     return payload, []
 

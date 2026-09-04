@@ -151,6 +151,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import read_handover  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_oracle_manifest  # noqa: E402  # pylint: disable=wrong-import-position
+from host_paths import discloses_host_path  # noqa: E402  # pylint: disable=wrong-import-position
 from manifest_scope import (  # noqa: E402  # pylint: disable=wrong-import-position
     ORACLE_MANIFEST_ALLOW,
     project,
@@ -503,16 +504,79 @@ def _declares_non_relative(declared: str) -> bool:
 def _declares_unsafe_path(declared: str) -> bool:
     """True when a declared string may not ship in the packaged manifest under ANY field name.
 
-    Non-relative (a host path, which names the customer's server, project and operator) or carrying
-    a `..` component (which claims a location outside the capture). Deliberately a predicate over a
-    VALUE, not a list of blessed field names: a second field name was the round-4 defect, and a
-    third one must not reopen it.
+    Three disqualifications, and the third is a CONTAINMENT test rather than a parse:
 
-    ⚠️ The `..` split is `PureWindowsPath` for the reason above: `PurePosixPath` does not treat `\\`
-    as a separator, so a Windows-shaped `sub\\..\\x` presents as ONE component on Linux and the
-    traversal test answers False there while answering True on Windows.
+    * **non-relative** - a host path, which names the customer's server, project and operator;
+    * **a `..` component** - which claims a location outside the capture;
+    * **a host path disclosed ANYWHERE INSIDE the string** - :func:`host_paths.discloses_host_path`.
+
+    Deliberately a predicate over a VALUE, not a list of blessed field names: a second field name was
+    the round-4 defect, and a third one must not reopen it.
+
+    ⚠️ **Round-7 blind-review finding B1: the first two questions are both parses, and a parse is the
+    wrong tool for prose.** They ask *"is this string a path?"*, so any prefix hides the answer.
+    `classify_export_error` prepends the HTTP status to a server diagnostic and persists it in
+    `retry_reasons[]` (`capture_tableau_oracle.py:278,597`), which is precisely where a real customer
+    path arrives wrapped in a sentence. Measured on the round-7 tip, one host path, four spellings::
+
+        <profile>\\private\\retry.log                       -> refused
+        "HTTP 503: " + it + " could not be opened"         -> SHIPPED into oracle/oracle-manifest.json
+        '"' + it + '"'                                     -> SHIPPED
+        file:///<drive>/Users/<account>/private/retry.log  -> SHIPPED
+
+    So the question the artifact has to answer is *"does this text DISCLOSE a host path?"*, and it is
+    asked with :mod:`host_paths` - the same regex `set_data_folder.py --check` gates every commit on,
+    imported rather than re-spelled. A package must not be able to ship what a commit could not, and
+    three competing definitions of one question is how this class survived six rounds.
+
+    ⚠️ The `..` split is `PureWindowsPath` for the reason in :func:`_declares_non_relative`:
+    `PurePosixPath` does not treat `\\` as a separator, so a Windows-shaped `sub\\..\\x` presents as
+    ONE component on Linux and the traversal test answers False there while answering True on
+    Windows.
     """
-    return _declares_non_relative(declared) or ".." in PureWindowsPath(declared).parts
+    return (
+        _declares_non_relative(declared)
+        or discloses_host_path(declared)
+        or ".." in PureWindowsPath(declared).parts
+    )
+
+
+def _contain_unsafe_key(key: Any, taken: dict[str, Any]) -> tuple[Any, bool]:
+    """`(key safe to ship, was it refused)` - one dictionary key, collision-disambiguated.
+
+    ⚠️ **Round-7 blind-review finding B2.** :func:`_contain_unsafe_strings` cleaned dictionary VALUES
+    and preserved raw KEYS, and `manifest_scope.project` then turns an unenumerated key into a
+    diagnostic path that ships in `scope.dropped_fields`. Injected as a view field, measured::
+
+        "<drive>:\\Users\\<account>\\private\\secret": "safe scalar"
+          -> "scope": {"dropped_fields": ["views[].<drive>:\\Users\\<account>\\private\\secret"]}
+
+    A key is untrusted input exactly as a value is; the manifest is written by a separate tool against
+    a live Tableau server.
+
+    Two properties are copied from :func:`tableau_env._scrub_key`, which already solved this for the
+    credential sink and documents why (`tableau_env.py:461-478`):
+
+    * **a collision is disambiguated, never silently dropped** - two distinct unsafe keys both contain
+      to the sentinel, and `dict` would keep the last and lose the rest, turning containment into data
+      loss;
+    * the caller builds its reported path from the CONTAINED key, so the guard cannot re-emit what it
+      just caught.
+
+    Non-string keys (JSON has none, but a Python payload may) pass through untouched. An
+    already-contained key reports refused, so the walk stays idempotent - including its `#2` collision
+    spelling, which a second pass must not re-count as a fresh, safe key.
+    """
+    if not isinstance(key, str):
+        return key, False
+    if key == REFUSED_PATH or key.startswith(f"{REFUSED_PATH}#"):
+        return key, True
+    if not _declares_unsafe_path(key):
+        return key, False
+    unique, suffix = REFUSED_PATH, 2
+    while unique in taken:
+        unique, suffix = f"{REFUSED_PATH}#{suffix}", suffix + 1
+    return unique, True
 
 
 def _contain_unsafe_strings(value: Any, prefix: str = "") -> tuple[Any, list[str]]:
@@ -540,6 +604,14 @@ def _contain_unsafe_strings(value: Any, prefix: str = "") -> tuple[Any, list[str
     `ORACLE_OMISSION` diagnosis, and `scope.refused_fields`. Reporting the sentinel makes the walk
     idempotent: running it twice refuses the same set, so containment can move earlier without any
     downstream reader losing what it could previously see.
+
+    ⚠️ **KEYS are contained too, and the reported path is built from the CONTAINED key** (round 7,
+    finding B2). A values-only walk left a dictionary key raw, and `manifest_scope.project` re-emitted
+    it as a diagnostic `dropped_fields` entry - the guard shipping what it was walking over. This is
+    the rule `tableau_env.scrub_tree` already states for the credential sink and for the same reason:
+    the field nobody thought about is the one that leaks, and a path built from the RAW key puts the
+    secret straight back into the record of having caught it. Collisions are disambiguated by
+    :func:`_contain_unsafe_key` rather than letting `dict` drop a field.
     """
     if isinstance(value, str):
         if value == REFUSED_PATH:
@@ -549,8 +621,12 @@ def _contain_unsafe_strings(value: Any, prefix: str = "") -> tuple[Any, list[str
         kept: dict[str, Any] = {}
         refused: list[str] = []
         for key, item in value.items():
-            cleaned, hit = _contain_unsafe_strings(item, f"{prefix}.{key}" if prefix else str(key))
-            kept[key] = cleaned
+            safe_key, key_refused = _contain_unsafe_key(key, kept)
+            here = f"{prefix}.{safe_key}" if prefix else str(safe_key)
+            if key_refused:
+                refused.append(f"{here} (key)")
+            cleaned, hit = _contain_unsafe_strings(item, here)
+            kept[safe_key] = cleaned
             refused.extend(hit)
         return kept, refused
     if isinstance(value, (list, tuple)):
@@ -818,12 +894,6 @@ def _scope_oracle_manifest(
     # estate context, so it is applied from the SHARED predicate rather than re-implemented.
     narrowed["views"] = tableau_oracle_manifest.flag_empty(packaged)
     scoped, dropped = project(narrowed, ORACLE_MANIFEST_ALLOW)
-    # ⚠️ #480 round 5. Containment is a property of the DOCUMENT, not of a leg. `_copy_leg` guards
-    # the four legs it copies, so a string the allowlist retains anywhere ELSE - `views[].flags[]`
-    # and `views[].view_name` both measured shipping an absolute host path - never met a check at
-    # all. Sweeping the scoped document closes every level at once, including any field a future
-    # allowlist entry adds, and the refusals are RECORDED rather than silently scrubbed.
-    scoped, refused = _contain_unsafe_strings(scoped)
 
     shipped = scoped.get("views") or []
     counts = dict.fromkeys(KIND_DIRS, 0)
@@ -836,6 +906,24 @@ def _scope_oracle_manifest(
             1 for view in shipped if isinstance(view.get(leg), dict) and view[leg].get("status") == "ok"
         )
     stamped = stamp_scope(scoped, unit, dropped, "oracle-manifest.json views filtered to this unit, counts recomputed")
+    # ⚠️ #480 round 5. Containment is a property of the DOCUMENT, not of a leg. `_copy_leg` guards
+    # the four legs it copies, so a string the allowlist retains anywhere ELSE - `views[].flags[]`
+    # and `views[].view_name` both measured shipping an absolute host path - never met a check at
+    # all. Sweeping the document closes every level at once, including any field a future allowlist
+    # entry adds, and the refusals are RECORDED rather than silently scrubbed.
+    #
+    # ⚠️ **Round-7 finding B2, second half: this sweep runs LAST, after `stamp_scope`, and nothing
+    # may be appended to the document after it.** It used to run on `scoped` and `stamp_scope` then
+    # appended `scope.dropped_fields` - field PATHS built by `project()` from the untrusted
+    # manifest's own key names - so a key nobody enumerated shipped verbatim inside the record of
+    # having dropped it. Sweeping `scoped` and then adding to it means "contained by construction"
+    # was false for every later stage; sweeping the STAMPED document makes it true for `scope.unit`,
+    # `scope.kept_fields` and `scope.dropped_fields` alike, and for whatever a future `stamp_scope`
+    # adds. `refused_fields` is the ONE thing written afterwards and it is safe BY CONSTRUCTION, not
+    # by inspection: every entry is a JSON path this walk built from CONTAINED keys and integer
+    # indexes, which is exactly the `tableau_env.scrub_tree` rule - the report of a catch must not
+    # re-emit what was caught.
+    stamped, refused = _contain_unsafe_strings(stamped)
     if refused:
         stamped["scope"]["refused_fields"] = sorted(refused)
     return stamped

@@ -16,23 +16,26 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from host_paths import HOST_PROFILE_PATH_RE  # noqa: E402  # pylint: disable=wrong-import-position
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PLACEHOLDER = "<REPO_ROOT>"
 # Matches:  expression DataFolder = "....."   (captures the quoted value)
 # Also accepts SourceFolder: most models use DataFolder, but at least one (shipping-kpis) was authored
 # with SourceFolder. Matching both stops a model silently drifting out of localize/sanitize coverage.
 DATAFOLDER_RE = re.compile(r'(expression\s+(?:DataFolder|SourceFolder)\s*=\s*")([^"]*)(")')
-# A leaked absolute path under a user profile. Covers the forms that actually show up in this repo's
-# artifacts: `C:\Users\x`, `C:/Users/x` (M/Power Query), `C:\\Users\\x` (JSON-escaped), `\\host\Users\x`
-# (UNC), plus POSIX `/Users/x` and `/home/x`.
-# Only *syntactically unambiguous* placeholders are exempt - `...`, `<anything>`, `%ANY_VAR%` - because
-# SECURITY.md and the READMEs have to show the pattern they warn about. Bare words like `user`, `you`
-# or `username` are NOT exempt: they are all real, registrable account names.
-ABSOLUTE_USER_PATH_RE = re.compile(
-    r"(?:[A-Za-z]:[\\/]{1,2}Users|\\\\[^\\/\"']+[\\/]{1,2}Users|(?<![\w.])/Users|(?<![\w.])/home)"
-    r"[\\/]{1,2}(?!\.\.\.|<|%)[^\\/\"'\s]+",
-    re.IGNORECASE,
-)
+# A leaked absolute path under a user profile, in the forms this repo's artifacts actually produce.
+#
+# ⚠️ **The pattern itself now lives in `scripts/host_paths.py` and this is an ALIAS.** It was
+# copied - not shared - into two other guards, and both copies drifted into asking a weaker question:
+# `manifest_scope.HOST_PATH_RE` anchored it with `^`, and `package_unit._declares_unsafe_path` parsed
+# the string as a path instead of searching it. A host path wrapped in prose (`HTTP 503: <it> could
+# not be opened`) was therefore refused by this gate and shipped by both of the others (#480 B1).
+# Three competing definitions of one question is how that leak class survived six review rounds, so
+# there is now exactly one, and every consumer imports it.
+ABSOLUTE_USER_PATH_RE = HOST_PROFILE_PATH_RE
 
 
 def _model_expression_files() -> list[Path]:
