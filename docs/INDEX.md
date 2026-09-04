@@ -81,6 +81,7 @@ Eligible files: tracked Markdown knowledge/navigation files, `.github/pbi.kb/**/
 | Run the test suite | [`docs/parallel-test-loop.md`](parallel-test-loop.md) | Fast parallel loop vs the serial pre-PR gate, and the `serial` marker. |
 | Find migration guidance | [`docs/reference-capture.md`](../docs/reference-capture.md) | Tableau reference capture and evidence grading. |
 | Find migration guidance | [`docs/reference-readiness.md`](../docs/reference-readiness.md) | The ENTRY gate: is there enough visual evidence to START, per page, with its grade. |
+| Migrate ONE workbook by hand | [`docs/start-with-one-workbook.md`](../docs/start-with-one-workbook.md) | Bring-your-own `.twb` + screenshots, no Tableau Server: the verified command sequence, the `tableau-<exact name>.png` naming contract, and the Desktop-connection prerequisite. |
 | Find migration guidance | [`docs/review-remediation-plan.md`](../docs/review-remediation-plan.md) | Route validation/review findings. |
 | Improve review throughput | [`docs/review-throughput-postmortem.md`](../docs/review-throughput-postmortem.md) | Measured 2026-09-01/02 review-round costs, causes, counterexamples, and the replacement brief contract. |
 | Find migration guidance | [`docs/tableau-dax-translation-guide.md`](../docs/tableau-dax-translation-guide.md) | Translate Tableau calcs/LODs/table calcs. |
