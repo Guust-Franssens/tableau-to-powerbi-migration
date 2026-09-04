@@ -13,7 +13,13 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 import parse_tableau  # noqa: E402  (path insert must precede this import)
-from parse_tableau import _conn_attr, _published_ds_name, _parse_published_datasource, parse_workbook  # noqa: E402
+from parse_tableau import (  # noqa: E402
+    _conn_attr,
+    _custom_sql_limitations,
+    _published_ds_name,
+    _parse_published_datasource,
+    parse_workbook,
+)
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "minimal.twb"
 PUBLISHED_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "published_datasource.twb"
@@ -759,3 +765,119 @@ def test_a_shared_datasource_and_its_workbooks_produce_ONE_key():
     tds_repo, tds_conn = _repo_and_conn("id='Shared' site='s'", "snowflake", "PHYSICAL_DB")
     twb_repo, twb_conn = _repo_and_conn("id='Shared' site='s'", "sqlproxy", "Shared")
     assert _published_ds_name(tds_repo, tds_conn)[0] == _published_ds_name(twb_repo, twb_conn)[0] == "Shared"
+
+
+# --- Issue #80: inherited custom SQL is copied verbatim; lint (REPORT, never repair) suspicious ---
+# --- shapes -- doubled comparison operators and literal \n/\t escapes hiding inside a SQL comment ---
+
+
+def _custom_sql_table(sql: str) -> dict:
+    return {"id": "tbl.custom_sql_query", "name": "Custom SQL Query", "custom_sql": sql}
+
+
+def test_doubled_less_than_operator_is_flagged_but_sql_is_not_rewritten():
+    """#80 shape 1: a corrupted '<' that became '<<'. REPORT, never REPAIR - the original SQL text
+    must survive untouched in the table dict; only a limitation is added."""
+    table = _custom_sql_table("SELECT * FROM orders WHERE amount << 10")
+    limitations = _custom_sql_limitations(table)
+
+    assert len(limitations) == 1
+    entry = limitations[0]
+    assert entry["item"] == "tbl.custom_sql_query"
+    assert entry["severity"] == "medium"
+    assert entry["stage"] == "parse"
+    assert "doubled comparison operator" in entry["issue"]
+    assert "NOT auto-repaired" in entry["issue"]
+    assert table["custom_sql"] == "SELECT * FROM orders WHERE amount << 10"  # untouched
+
+
+def test_doubled_greater_than_operator_is_flagged():
+    """#80 shape 1, the mirror case: '>>' where '>' was meant."""
+    table = _custom_sql_table("SELECT * FROM orders WHERE amount >> 10")
+    limitations = _custom_sql_limitations(table)
+
+    assert len(limitations) == 1
+    assert "doubled comparison operator" in limitations[0]["issue"]
+    assert ">>" in limitations[0]["issue"]
+
+
+def test_literal_backslash_n_after_line_comment_is_flagged():
+    """#80 shape 2, straight from the issue's own reproduction: a literal two-character '\\n' (not a
+    real newline) after a '--' comment does not terminate it, so 'where active = 1' is silently
+    swallowed into the comment by any SQL engine that reads '--' to the next REAL line break."""
+    table = _custom_sql_table("select * from t -- keep only active\\nwhere active = 1")
+    limitations = _custom_sql_limitations(table)
+
+    assert len(limitations) == 1
+    entry = limitations[0]
+    assert entry["severity"] == "high"
+    assert "does NOT terminate" in entry["issue"]
+    assert "\\n" in entry["issue"]
+
+
+def test_literal_backslash_t_after_line_comment_is_flagged():
+    """#80 shape 2, the '\\t' variant named alongside '\\n' in the issue."""
+    table = _custom_sql_table("select * from t -- tab example\\tSELECT * FROM secrets")
+    limitations = _custom_sql_limitations(table)
+
+    assert len(limitations) == 1
+    assert "\\t" in limitations[0]["issue"]
+
+
+def test_ordinary_comparison_operators_are_not_flagged():
+    """Negative control: legitimate SQL using '<', '>', '<=', '>=' and '<>' (none doubled) must NOT
+    be flagged. A lint with false positives on ordinary SQL trains reviewers to ignore it."""
+    table = _custom_sql_table("SELECT * FROM t WHERE a < 10 AND b > 5 AND c <= 3 AND d >= 4 AND e <> 6")
+    assert _custom_sql_limitations(table) == []
+
+
+def test_legitimate_backslash_in_custom_sql_is_not_flagged():
+    """Negative control: a realistic Windows file path (a real customer shape for a `.tds` pointing at
+    a Databricks/CSV volume) carries genuine backslashes that are never followed by 'n' or 't', so no
+    escape corruption exists. Must not be flagged."""
+    table = _custom_sql_table(r"SELECT * FROM t WHERE file_path = 'C:\Data\Files\export.csv'")
+    assert _custom_sql_limitations(table) == []
+
+
+def test_doubled_operator_inside_a_string_literal_is_not_flagged():
+    """Negative control: '<<'/'>>' appearing only as DATA inside a quoted string literal (e.g. a
+    customer's own sentinel value) is not a corrupted SQL operator and must not be flagged - the
+    issue's own suggested fix scopes the check to occurrences 'outside strings/comments'."""
+    table = _custom_sql_table("SELECT * FROM t WHERE code = '<<active>>'")
+    assert _custom_sql_limitations(table) == []
+
+
+def test_doubled_operator_outside_a_string_is_still_flagged_alongside_one_inside_a_string():
+    """The masking must be surgical: suppress the match INSIDE the string literal while still
+    catching a real doubled operator elsewhere in the same statement."""
+    table = _custom_sql_table("SELECT * FROM t WHERE code = '<<active>>' AND amount << 10")
+    limitations = _custom_sql_limitations(table)
+
+    assert len(limitations) == 1  # NOT two - the string-literal '<<' must not add a second finding
+    assert "amount << 10" in limitations[0]["issue"]
+
+
+def test_table_with_no_custom_sql_is_not_scanned():
+    """A regular (non custom-SQL) table has custom_sql=None; the lint must be a no-op, not an error."""
+    table = {"id": "tbl.orders", "name": "Orders", "source_relation": "table", "custom_sql": None}
+    assert _custom_sql_limitations(table) == []
+
+
+def test_custom_sql_lint_is_wired_into_collect_limitations_end_to_end():
+    """End-to-end regression for #80's own re-verification (issue comment 2026-09-02): parsing the
+    committed real-shaped fixture must now flag the doubled '<<'/'>>' operators it carries, where
+    previously the three emitted limitations covered other concerns only."""
+    fixture = Path(__file__).resolve().parent / "fixtures" / "CustomSQL_Parameter_And_Doubled_Operators.tds"
+    spec = parse_workbook(fixture)
+
+    entries = [
+        limit
+        for limit in spec["limitations_encountered"]
+        if limit["item"] == "tbl.custom_sql_query" and "doubled comparison operator" in limit["issue"]
+    ]
+    assert len(entries) == 1
+    assert entries[0]["severity"] == "medium"
+    # The underlying custom SQL must remain verbatim - the lint reports, it never rewrites.
+    table = spec["data_sources"][0]["tables"][0]
+    assert "<<" in table["custom_sql"]
+    assert ">>" in table["custom_sql"]

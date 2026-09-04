@@ -1262,6 +1262,141 @@ def _live_source_limitation(ds: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_DOUBLED_OPERATOR_RE = re.compile(r"<{2,}|>{2,}")
+_LITERAL_ESCAPE_RE = re.compile(r"\\[nt]")
+
+
+def _mask_sql_strings_and_comments(sql: str) -> tuple[str, list[tuple[int, int]]]:
+    """Return (masked, comment_spans) for a raw custom-SQL string.
+
+    `masked` is the same length as `sql` with the BODY of every string literal ('...', "...", or
+    `...`) and every comment (`-- ...` to end-of-line/string, `/* ... */`) replaced by '#'. Doubled
+    comparison operators found only inside a string literal are DATA, not a corrupted operator (e.g.
+    a customer's literal `'a<<b'` sentinel value), and #80's own suggested fix says to check
+    "outside strings/comments" - so masking those spans is what keeps the doubled-operator lint from
+    flagging quoted string content while still catching a real `<<`/`>>` in the SQL itself.
+
+    `comment_spans` are (start, end) offsets into the ORIGINAL `sql` for each comment body, used
+    separately by the literal-escape check: a literal `\\n`/`\\t` inside a `--` comment does not
+    terminate it (only a real newline does), so code can be silently swallowed - the concrete harm
+    named in #80. A quote character is not tracked as "escaped" via a preceding backslash here
+    (Tableau custom SQL commonly targets ANSI dialects where `''`/`""` doubling is the escape, not
+    backslash) - only the doubled-quote convention is honored, which is enough to keep this a
+    best-effort lint rather than a full SQL parser.
+    """
+    n = len(sql)
+    masked = list(sql)
+    comment_spans: list[tuple[int, int]] = []
+    i = 0
+    while i < n:
+        two = sql[i : i + 2]
+        if two == "--":
+            start = i + 2
+            j = start
+            while j < n and sql[j] != "\n":
+                masked[j] = "#"
+                j += 1
+            comment_spans.append((start, j))
+            i = j
+            continue
+        if two == "/*":
+            start = i + 2
+            j = start
+            while j < n and sql[j : j + 2] != "*/":
+                masked[j] = "#"
+                j += 1
+            comment_spans.append((start, j))
+            i = j + 2
+            continue
+        if sql[i] in "'\"`":
+            quote = sql[i]
+            j = i + 1
+            while j < n:
+                if sql[j] == quote:
+                    if sql[j + 1 : j + 2] == quote:  # doubled-quote escape, stays inside the literal
+                        masked[j] = "#"
+                        masked[j + 1] = "#"
+                        j += 2
+                        continue
+                    j += 1
+                    break
+                masked[j] = "#"
+                j += 1
+            i = j
+            continue
+        i += 1
+    return "".join(masked), comment_spans
+
+
+def _sql_snippet(sql: str, start: int, end: int, radius: int = 24) -> str:
+    """Return a short, single-line context window around sql[start:end] for a limitation message."""
+    lo, hi = max(0, start - radius), min(len(sql), end + radius)
+    snippet = sql[lo:hi].replace("\n", "\\n").replace("\t", "\\t")
+    return f"...{snippet}..." if (lo > 0 or hi < len(sql)) else snippet
+
+
+def _custom_sql_limitations(table: dict[str, Any]) -> list[dict[str, Any]]:
+    """REPORT (never repair) suspicious inherited custom SQL, per #80: a doubled comparison operator
+    (`<<`/`>>`, e.g. from a corrupted `<`/`>`) or a literal two-character `\\n`/`\\t` escape sitting
+    inside a `--`/`/* */` comment (which does NOT terminate it - only a real line break does, so
+    trailing SQL can be silently swallowed into the comment).
+
+    Deliberately REPORT, not repair or refuse: `<<` might be corrupted source, or it might be a
+    legitimate operator in the source dialect (e.g. a bitwise shift, or Postgres's network
+    contains-or-equal `<<`). Guessing which and rewriting the customer's SQL is worse than naming the
+    ambiguity - see the design rationale in this PR's description. Downstream (an agent or repair
+    script) decides what to do with the flag; this function only ever reads `custom_sql`.
+    """
+    sql = table.get("custom_sql")
+    if not sql:
+        return []
+    found: list[dict[str, Any]] = []
+    masked, comment_spans = _mask_sql_strings_and_comments(sql)
+
+    operator_hits = list(_DOUBLED_OPERATOR_RE.finditer(masked))
+    if operator_hits:
+        snippets = ", ".join(_sql_snippet(sql, m.start(), m.end()) for m in operator_hits)
+        found.append(
+            {
+                "item": table["id"],
+                "issue": (
+                    f"custom SQL for table '{table.get('name', table['id'])}' contains a doubled "
+                    f"comparison operator ({snippets}) outside any string literal/comment. This is "
+                    "either corrupted source SQL (a single '<' or '>' was likely meant) or a "
+                    "legitimate operator in the source dialect (e.g. a bitwise shift, or a "
+                    "database-specific operator such as Postgres's network '<<'). NOT auto-repaired: "
+                    "rewriting inherited SQL on a guess risks silently changing query semantics. "
+                    "ACTION: confirm intent against the source system before this table's custom SQL "
+                    "is migrated into Power Query M."
+                ),
+                "severity": "medium",
+                "stage": "parse",
+            }
+        )
+
+    raw_escapes = sorted(
+        {m.group(0) for start, end in comment_spans for m in _LITERAL_ESCAPE_RE.finditer(sql[start:end])}
+    )
+    if raw_escapes:
+        found.append(
+            {
+                "item": table["id"],
+                "issue": (
+                    f"custom SQL for table '{table.get('name', table['id'])}' has a literal "
+                    f"two-character escape ({', '.join(raw_escapes)}) inside a SQL comment. A literal "
+                    "backslash-n/backslash-t does NOT terminate a '--' or '/* */' comment (only a "
+                    "real line break/'*/' does), so any SQL written after it may be silently swallowed "
+                    "into the comment and never executed. NOT auto-repaired: confirm against the "
+                    "source system whether this is a corrupted line break/tab or intentional literal "
+                    "text before this table's custom SQL is migrated into Power Query M."
+                ),
+                "severity": "high",
+                "stage": "parse",
+            }
+        )
+    return found
+
+
 def _flatten_zones(zone: dict[str, Any]) -> list[dict[str, Any]]:
     """Depth-first flatten of a dashboard zone tree into one list, parents before children.
 
@@ -1321,6 +1456,8 @@ def collect_limitations(spec: dict[str, Any]) -> list[dict[str, Any]]:
             )
         for f in ds["fields"]:
             limitations.extend(_field_limitations(f))
+        for t in ds["tables"]:
+            limitations.extend(_custom_sql_limitations(t))
     limitations.extend(_worksheet_limitations(spec))
     limitations.extend(_dashboard_limitations(spec))
     return limitations
