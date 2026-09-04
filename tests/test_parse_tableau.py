@@ -6,6 +6,7 @@ usage:   pytest -q
 """
 
 import sys
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -941,6 +942,24 @@ def test_doubled_operator_in_bracket_identifier_contexts_is_not_flagged(sql):
     assert _custom_sql_limitations(_custom_sql_table(sql)) == []
 
 
+def test_spaced_bracket_alias_is_executable_and_not_flagged():
+    """SQLite accepts a spaced bracket alias as an identifier, not executable operator syntax."""
+    sql = "SELECT 1 [a<<b]"
+
+    assert sqlite3.connect(":memory:").execute(sql).fetchone() == (1,)
+    assert _custom_sql_limitations(_custom_sql_table(sql)) == []
+
+
+def test_spaced_bracket_alias_after_an_array_value_suffix_function_is_not_flagged():
+    """Only DuckDB's `array_value` constructor identifies a spaced postfix subscript."""
+    sql = "SELECT custom_array_value(1) [a<<b]"
+    connection = sqlite3.connect(":memory:")
+    connection.create_function("custom_array_value", 1, lambda value: value)
+
+    assert connection.execute(sql).fetchone() == (1,)
+    assert _custom_sql_limitations(_custom_sql_table(sql)) == []
+
+
 def test_doubled_operator_inside_an_array_or_subscript_expression_is_flagged():
     """An opening bracket immediately following an identifier is SQL expression syntax, not quoting."""
     limitations = _custom_sql_limitations(_custom_sql_table("SELECT values[1 << 2] FROM t"))
@@ -956,6 +975,22 @@ def test_doubled_operator_inside_an_array_or_subscript_expression_is_flagged():
 def test_doubled_operator_inside_a_postfix_subscript_is_flagged(sql):
     """Postfix array subscripts remain expressions even after a parenthesis or whitespace."""
     assert len(_custom_sql_limitations(_custom_sql_table(sql))) == 1
+
+
+@pytest.mark.parametrize(
+    "sql",
+    (
+        "SELECT (ARRAY[10,20,30,40]) [1 << 1]",
+        "SELECT array_value(10,20,30,40) [1 << 1]",
+        "SELECT (ARRAY[']']) [1 << 1]",
+    ),
+)
+def test_doubled_operator_inside_a_spaced_array_subscript_is_flagged(sql):
+    """Spaced postfix subscripts remain executable array expressions, not bracket aliases."""
+    limitations = _custom_sql_limitations(_custom_sql_table(sql))
+
+    assert len(limitations) == 1
+    assert limitations[0]["severity"] == "medium"
 
 
 def test_doubled_operator_inside_a_postgres_dollar_quoted_string_is_not_flagged():

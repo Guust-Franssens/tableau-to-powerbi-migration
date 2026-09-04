@@ -1265,6 +1265,10 @@ def _live_source_limitation(ds: dict[str, Any]) -> dict[str, Any]:
 _DOUBLED_OPERATOR_RE = re.compile(r"<{2,}|>{2,}")
 _LITERAL_ESCAPE_RE = re.compile(r"\\[nt]")
 _DOLLAR_QUOTE_RE = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$")
+_ARRAY_EXPRESSION_RE = re.compile(
+    r"(?:\(\s*)?(?:ARRAY\s*\[.*\]|\barray_value\s*\([^()]*\))\s*\)?$",
+    re.IGNORECASE | re.DOTALL,
+)
 _SQL_LINE_START_RE = re.compile(
     r"\s*(?:[+*]|/(?!\*)|-(?!-)|(?:ALTER|CREATE|DELETE|DROP|EXCEPT|FROM|GROUP|HAVING|INSERT|INTERSECT|LIMIT|OFFSET|"
     r"ORDER|SELECT|UNION|UPDATE|WHERE|WITH)\b)",
@@ -1307,7 +1311,7 @@ def _is_bracket_quoted_identifier(sql: str, index: int) -> bool:
     if not before:
         return True
     if before[-1] == ")":
-        return len(before) < len(prefix)
+        return len(before) < len(prefix) and _ARRAY_EXPRESSION_RE.search(before) is None
     if before[-1] in {"(", ".", ","}:
         return True
     word = re.search(r"[A-Za-z_][A-Za-z0-9_]*$", before)
