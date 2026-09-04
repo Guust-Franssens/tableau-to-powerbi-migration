@@ -30,6 +30,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
+import check_path_ceiling as cpc  # noqa: E402  # pylint: disable=wrong-import-position
 import check_reference_readiness as crr  # noqa: E402  # pylint: disable=wrong-import-position
 import check_unit  # noqa: E402  # pylint: disable=wrong-import-position
 import package_unit as pkg  # noqa: E402  # pylint: disable=wrong-import-position
@@ -486,3 +487,37 @@ def test_a_scoped_estate_report_still_earns_a_datasource_unit_its_not_applicable
 
     code, payload = _readiness(unit, tmp_path)
     assert (code, payload["status"]) == (0, "NOT_APPLICABLE")
+
+
+# --------------------------------------------------------------------------------------------
+# The ceilings themselves. Pinned HERE, in a suite `tests/mutate_package_unit.py` scores, because
+# that was the gap: mutating `DIR_CEILING` 247 -> 260 and running the two suites the mutation
+# harness uses reported `148 passed, exit 0`. The full documented gate command DOES catch it
+# (`tests/test_check_path_ceiling.py` pins both, and the same mutation gives `4 failed, exit 1`),
+# so the defect was never "nothing detects a regression" - it was that nothing the harness can
+# score detected one, and therefore no anchor could prove the pin can fail.
+# --------------------------------------------------------------------------------------------
+
+
+def test_the_measured_desktop_ceilings_are_pinned_as_two_DISTINCT_literals() -> None:
+    """259 and 247 are two separate end-to-end measurements, not one number and an offset.
+
+    They come from different guards - a fully qualified FILE name and a DIRECTORY name - and were
+    validated separately against Power BI Desktop 2.157.828.0, so each is pinned to its own literal.
+    Deriving one from the other would let a single edit move both and still look internally
+    consistent, which is exactly what a pin exists to prevent.
+    """
+    assert cpc.FILE_CEILING == 259, "Desktop: 'fully qualified file name must be less than 260 characters'"
+    assert cpc.DIR_CEILING == 247, "Desktop: 'the directory name must be less than 248 characters'"
+    assert cpc.FILE_CEILING - cpc.DIR_CEILING == 12, "the gap is CreateDirectory's 8.3 reservation, not a guess"
+
+
+def test_the_packager_budgets_against_those_same_two_literals() -> None:
+    """A second copy of "260" is how a repo ends up with two length rules - so there is only one.
+
+    `package_unit` imports the pair rather than restating it, and every projected path carries the
+    ceiling it was judged against, so this is the join between the pin above and the budget.
+    """
+    assert (pkg.WINDOWS_LIMITS.file_ceiling, pkg.WINDOWS_LIMITS.dir_ceiling) == (259, 247)
+    assert pkg.platform_limits("nt") == pkg.WINDOWS_LIMITS
+    assert pkg.platform_limits("posix").file_ceiling == cpc.POSIX_PATH_CEILING > cpc.FILE_CEILING
