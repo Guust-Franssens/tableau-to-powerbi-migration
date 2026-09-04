@@ -227,15 +227,16 @@ def build_m_query(conn: dict, table: str, column: str, custom_sql: str | None = 
     entire point - the probe must exercise the SAME credential path the real model will use, or it
     proves nothing about the real model.
 
-    `custom_sql` is that principle applied only to PBIP scaffold generation. The automated probe
-    must not refresh that scaffold, because doing so may run the full custom query and raise a
-    native-query approval modal that would masquerade as a credential failure.
+    `custom_sql` is that principle applied to the PBIP probe itself. The query is projected onto a
+    stable `ProbeOK` column so the probe never depends on optional Tableau schema enumeration.
     """
     klass = (conn.get("class") or "").lower()
     server = normalize_host(conn.get("server") or "")
     database = conn.get("database") or ""
     schema = conn.get("schema") or "default"
     native = _m_sql_literal(custom_sql) if custom_sql else None
+    if custom_sql is not None and not native:
+        raise ValueError("custom SQL is empty after removing comments; reachability cannot be assessed")
 
     if klass == "databricks":
         http_path = conn.get("http_path")

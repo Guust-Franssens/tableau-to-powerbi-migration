@@ -38,6 +38,18 @@ DATABRICKS = {
     "powerbi_target": "live_source",
 }
 
+SQLSERVER = {
+    "class": "sqlserver",
+    "server": "sql.example.com",
+    "database": "DB",
+    "powerbi_target": "live_source",
+}
+
+PROBE_PROJECTION = (
+    'without_probe = Table.RemoveColumns(one, {"ProbeOK"}, MissingField.Ignore),\n'
+    '    probe = Table.SelectColumns(Table.AddColumn(without_probe, "ProbeOK", each 1), {"ProbeOK"})'
+)
+
 
 def _source(tables: list[dict], fields: list[dict] | None = None) -> dict:
     return {
@@ -53,7 +65,7 @@ def test_custom_sql_scaffold_contains_the_sql_and_projects_a_probe_column():
     )
     assert "Value.NativeQuery" in m
     assert 'Table.FirstN(Value.NativeQuery(db, "SELECT a, b FROM raw.flights"), 1)' in m
-    assert '"ProbeOK"' in m
+    assert PROBE_PROJECTION in m
     assert 'Kind="Table"' not in m, "a custom-SQL relation has no table to navigate to"
     assert "SELECT a, b FROM raw.flights" in m
     assert "custom SQL" in note, "the operator must be told which path was scaffolded"
@@ -66,10 +78,21 @@ def test_databricks_custom_sql_scaffold_uses_native_query_without_automatic_prob
     assert "Databricks.Catalogs" in m
     assert "Value.NativeQuery" in m
     assert 'Table.FirstN(Value.NativeQuery(db, "SELECT a, b FROM raw.flights"), 1)' in m
-    assert '"ProbeOK"' in m
+    assert PROBE_PROJECTION in m
     assert 'Kind="Schema"' not in m
     assert "SELECT a, b FROM raw.flights" in m
     assert "custom SQL" in note
+
+
+def test_sql_server_custom_sql_scaffold_selects_the_added_probe_column():
+    m, _ = probe_live_source.build_m_query(SQLSERVER, "Q", "Col", custom_sql="SELECT a FROM t")
+
+    assert PROBE_PROJECTION in m
+
+
+def test_comment_only_custom_sql_is_cannot_assess_instead_of_table_navigation():
+    with pytest.raises(ValueError, match="empty after removing comments"):
+        probe_live_source.build_m_query(SNOWFLAKE, "Q", "Col", custom_sql="-- comment only")
 
 
 def test_a_real_table_still_navigates_and_is_unchanged_by_the_custom_sql_work():
