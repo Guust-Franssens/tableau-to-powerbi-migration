@@ -30,6 +30,7 @@ from check_datamodel import (
     check_tmdl_model,
     check_tmdl_text,
     find_compact_filters,
+    find_unguarded_divide_threshold,
     main,
 )
 
@@ -360,6 +361,53 @@ def test_compact_filter_in_measure_is_caught_by_gate() -> None:
     """Mutation coverage for the TMDL walker, not just the predicate helper."""
     text = "table S\n\tmeasure 'A' = CALCULATE(SUM('S'[Profit]), 'S'[Region] = [Region Param])\n"
     assert "COMPACT_FILTER" in _tmdl_codes(text)
+
+
+UNGUARDED_BLANK_THRESHOLD_CASES = [
+    # positive: unguarded, and 0 satisfies the comparison, so a blank denominator silently passes.
+    (True, "DIVIDE([Errors], [Total]) < 0.05"),
+    (True, "DIVIDE([Errors], [Total]) <= 0"),
+    (True, "DIVIDE([Errors], [Total]) = 0"),
+    (True, "DIVIDE('S'[Errors], 'S'[Total]) > -5"),
+    # negative: correctly guarded - the DIVIDE(...) call is no longer the entire left operand.
+    (False, "IF(ISBLANK(DIVIDE([Errors], [Total])), BLANK(), DIVIDE([Errors], [Total]) < 0.05)"),
+    # negative: 3-argument DIVIDE supplies an explicit alternate result and never returns BLANK().
+    (False, "DIVIDE([Errors], [Total], 0) < 0.05"),
+    # negative: safe direction - 0 does NOT satisfy the comparison, so a blank reads FALSE.
+    (False, "DIVIDE([Errors], [Total]) > 0.05"),
+    (False, "DIVIDE([Sales], [Target]) >= 100"),
+    # negative: an ordinary, non-threshold comparison entirely unrelated to DIVIDE.
+    (False, "SUM('S'[Sales]) > 0"),
+    (False, "'S'[Status] = \"Active\""),
+]
+
+
+@pytest.mark.parametrize(("illegal", "expression"), UNGUARDED_BLANK_THRESHOLD_CASES)
+def test_unguarded_divide_threshold_detection_is_precise(illegal: bool, expression: str) -> None:
+    """Only a bare, unguarded DIVIDE(...) compared unsafely against a literal threshold is flagged."""
+    assert (find_unguarded_divide_threshold(expression) is not None) is illegal
+
+
+def test_unguarded_divide_threshold_in_measure_is_caught_by_gate() -> None:
+    """Mutation coverage for the TMDL walker, not just the predicate helper (issue #82)."""
+    text = "table S\n\tmeasure 'Error Rate Flag' = DIVIDE([Errors], [Total]) < 0.05\n"
+    assert "UNGUARDED_BLANK_THRESHOLD" in _tmdl_codes(text)
+
+
+def test_guarded_divide_threshold_in_measure_is_not_flagged_by_gate() -> None:
+    """A correctly guarded measure clears the gate - the negative control for the gate itself."""
+    text = (
+        "table S\n"
+        "\tmeasure 'Error Rate Flag' = "
+        "IF(ISBLANK(DIVIDE([Errors], [Total])), BLANK(), DIVIDE([Errors], [Total]) < 0.05)\n"
+    )
+    assert "UNGUARDED_BLANK_THRESHOLD" not in _tmdl_codes(text)
+
+
+def test_unguarded_divide_threshold_in_calculated_column_is_caught_by_gate() -> None:
+    """The same unsafe shape on a calculated column, not just a measure."""
+    text = "table S\n\tcolumn 'Below Target' = DIVIDE('S'[Errors], 'S'[Total]) <= 0.1\n"
+    assert "UNGUARDED_BLANK_THRESHOLD" in _tmdl_codes(text)
 
 
 def test_full_datamodel_gate_has_no_false_positive_on_valid_model(tmp_path: Path) -> None:

@@ -16,6 +16,13 @@ Scope stays deliberately narrow because a false positive is worse than a miss:
   * measure/column name collisions within one table file
   * empty measure expressions
   * direct CALCULATE/CALCULATETABLE compact filters that compare a column to a measure
+  * a bare `DIVIDE(a, b) <op> <threshold>` comparison with no `ISBLANK` guard (issue #82) - narrowed
+    to the two-argument `DIVIDE` form (the one that can actually return `BLANK()`) compared directly
+    against a numeric literal, and only when `0` (what `BLANK()` coerces to) would itself satisfy
+    the comparison. A generic "any threshold on any nullable column" check was deliberately NOT
+    built: whether an arbitrary column/measure can be blank, and whether that blank should read as
+    included or excluded, is a business decision this checker cannot see from the DAX text alone -
+    see docs/tableau-dax-translation-guide.md, 'Threshold comparisons'.
 
 Expression LAYOUT - the class where a property is silently swallowed into the preceding DAX/M, or
 where the document does not parse at all - is deliberately NOT here. Two hand-written grammars for
@@ -26,6 +33,7 @@ positives; `scripts/tmdl_oracle.py` answers those questions with the real parser
 from __future__ import annotations
 
 import codecs
+import operator
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -58,6 +66,16 @@ _PROPERTY_RE = re.compile(r"^(?P<indent>\s*)(?P<name>[A-Za-z][A-Za-z0-9_]*)\s*:\
 _REPEATABLE_PROPERTIES = {"annotation", "extendedProperty", "changedProperty", "ref", "variation", "levels"}
 _COLUMN_EQ_MEASURE_RE = re.compile(r"^'?[^'\[\]]+'?\s*\[[^\]]+\]\s*(?:=|<>|<=|>=|<|>)\s*\[[^\]]+\]$")
 _CALCULATE_RE = re.compile(r"\bCALCULATE(?:TABLE)?\s*\(", re.IGNORECASE)
+_DIVIDE_CALL_RE = re.compile(r"^\s*DIVIDE\s*\(", re.IGNORECASE)
+_TRAILING_NUMERIC_CMP_RE = re.compile(r"^\s*(?P<op><=|>=|<>|<|>|=)\s*(?P<value>-?\d+(?:\.\d+)?)\s*$")
+_THRESHOLD_COMPARATORS = {
+    "<": operator.lt,
+    "<=": operator.le,
+    ">": operator.gt,
+    ">=": operator.ge,
+    "=": operator.eq,
+    "<>": operator.ne,
+}
 
 
 def _split_top_level_args(text: str) -> list[str]:
@@ -122,6 +140,70 @@ def find_compact_filters(expression: str) -> bool:
     return False
 
 
+def _matching_close_paren(text: str, open_idx: int) -> int | None:
+    """Return the index of the ')' matching the '(' at open_idx, string-aware."""
+    depth = 0
+    in_string = False
+    idx = open_idx
+    while idx < len(text):
+        ch = text[idx]
+        if ch == '"':
+            if in_string and idx + 1 < len(text) and text[idx + 1] == '"':
+                idx += 2
+                continue
+            in_string = not in_string
+        elif not in_string:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    return idx
+        idx += 1
+    return None
+
+
+def find_unguarded_divide_threshold(expression: str) -> tuple[str, float] | None:
+    """Detect a bare `DIVIDE(a, b) <op> <literal>` comparison with no `BLANK()` guard (issue #82).
+
+    `DIVIDE`'s two-argument form returns `BLANK()` (never `0`) when the denominator is `0` or
+    blank. `BLANK()` then coerces to `0` when a comparison operator evaluates it, so
+    `DIVIDE(a, b) < 100` silently reads `TRUE` for a row with no denominator whenever `0` itself
+    would satisfy the same comparison against that threshold - exactly the class issue #82
+    reported: a Tableau calculation that excluded nulls quietly starts including them.
+
+    Scope is deliberately narrow, matching `find_compact_filters` in this module:
+
+      * only the two-argument `DIVIDE` is in scope. The three-argument form supplies an explicit
+        alternate result and, by construction, never returns `BLANK()` - it is not part of this
+        risk at all.
+      * the `DIVIDE(...)` call must be the ENTIRE left operand of the comparison, i.e. the
+        measure/column body is nothing but the bare predicate. Any guard - `IF(ISBLANK(...), ...)`,
+        `COALESCE(...)`, an enclosing `VAR`/`RETURN` - changes the outer shape and this stops
+        matching, which is exactly how a correctly guarded measure clears the check.
+      * only fires when `0` actually satisfies the comparison against the literal threshold (see
+        the direction table in docs/tableau-dax-translation-guide.md) - the safe direction, where a
+        blank operand reads `FALSE`, is never flagged.
+
+    Returns the `(operator, threshold)` pair when the pattern is unsafe, otherwise `None`.
+    """
+    stripped = expression.strip()
+    call = _DIVIDE_CALL_RE.match(stripped)
+    if not call:
+        return None
+    close = _matching_close_paren(stripped, call.end() - 1)
+    if close is None:
+        return None
+    if len(_split_top_level_args(stripped[call.end() : close])) != 2:
+        return None  # 3-argument DIVIDE supplies an alternate result and never returns BLANK()
+    tail = _TRAILING_NUMERIC_CMP_RE.match(stripped[close + 1 :])
+    if not tail:
+        return None
+    op = tail.group("op")
+    value = float(tail.group("value"))
+    return (op, value) if _THRESHOLD_COMPARATORS[op](0, value) else None
+
+
 def _strip_tmdl_comment(line: str) -> str:
     """Remove a TMDL description/comment line so prose cannot be mistaken for a property."""
     return "" if line.lstrip().startswith("///") else line
@@ -152,6 +234,29 @@ def _empty_measure_finding(path: Path, pending_measure: tuple[str, int]) -> Tmdl
     """Build the repeated empty-measure finding once so narrowing stays simple."""
     name, line = pending_measure
     return TmdlFinding("EMPTY_EXPRESSION", f"measure '{name}' has no expression after '='.", path, line)
+
+
+def _threshold_findings(path: Path, kind: str, name: str, rest: str, number: int) -> list[TmdlFinding]:
+    """Wrap `find_unguarded_divide_threshold` into a `TmdlFinding`, if the header's body is unsafe."""
+    unsafe = find_unguarded_divide_threshold(rest.split("=", 1)[1])
+    if unsafe is None:
+        return []
+    op, value = unsafe
+    threshold = f"{value:g}"
+    return [
+        TmdlFinding(
+            "UNGUARDED_BLANK_THRESHOLD",
+            f"{kind} '{name}' compares DIVIDE(...) directly to `{op} {threshold}` with no ISBLANK "
+            "guard. DIVIDE's 2-argument form returns BLANK() (not 0) when its denominator is 0 or "
+            "blank, and BLANK() coerces to 0 in this comparison - so a blank ratio silently "
+            f"satisfies `{op} {threshold}` here. Guard it: "
+            f"IF(ISBLANK(DIVIDE(...)), BLANK(), DIVIDE(...) {op} {threshold}), or pass an explicit "
+            "alternate result as DIVIDE's 3rd argument if a missing denominator really should read "
+            "as 0. See docs/tableau-dax-translation-guide.md, 'Threshold comparisons'.",
+            path,
+            number,
+        )
+    ]
 
 
 def _append_name_collisions(
@@ -220,9 +325,15 @@ def check_tmdl_text(path: Path, text: str) -> list[TmdlFinding]:  # pylint: disa
                 columns = {}
             elif kind == "measure" and name and current_table:
                 measures.setdefault(name, number)
-                pending_measure = None if _expression_on_measure_header(rest) else (name, number)
+                if _expression_on_measure_header(rest):
+                    pending_measure = None
+                    findings.extend(_threshold_findings(path, "measure", name, rest, number))
+                else:
+                    pending_measure = (name, number)
             elif kind == "column" and name and current_table:
                 columns.setdefault(name, number)
+                if _expression_on_measure_header(rest):
+                    findings.extend(_threshold_findings(path, "column", name, rest, number))
             continue
 
         prop = _PROPERTY_RE.match(line)

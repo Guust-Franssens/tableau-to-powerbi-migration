@@ -42,6 +42,58 @@ Two things worth knowing, both **verified live** (2026-08-01, Desktop `EVALUATE`
   "fixing" it. If they confirm the field should be positive-when-late, swap the two operands — a
   one-token change.
 
+### Threshold comparisons — guard the operand or BLANK silently flips the result [issue #82]
+
+`BLANK()` **coerces to `0`** inside a numeric comparison. That single fact means a bare threshold
+predicate over a nullable operand does not fail loudly — it just quietly changes which rows a KPI
+flag, bucket, or filter matches, with no error anywhere. A Tableau calculation that treated a null as
+"unknown, so excluded" can become a DAX measure that includes it, or vice versa, purely because of
+which side of zero the threshold sits on.
+
+**Work out which direction is unsafe by asking "does `0` satisfy this comparison against my
+threshold?"** — if yes, a blank operand silently passes the predicate as `TRUE`:
+
+| Comparison | Is `0` on the passing side? | Effect on a blank operand |
+|---|---|---|
+| `[x] > 0` | No (`0 > 0` is `FALSE`) | blank → `FALSE` — usually the desired "excluded" behaviour |
+| `[x] >= 0` | **Yes** (`0 >= 0` is `TRUE`) | blank → `TRUE` — silently included |
+| `[x] < 100` | **Yes** (`0 < 100` is `TRUE`) | blank → `TRUE` — silently included (the classic bug: a null value now reads as "below threshold") |
+| `[x] <= 0` | **Yes** (`0 <= 0` is `TRUE`) | blank → `TRUE` — silently included |
+| `[x] > -5` | **Yes** (`0 > -5` is `TRUE`) | blank → `TRUE` — silently included |
+| `[x] = 0` | **Yes** | blank is indistinguishable from a real, computed `0` |
+| `[x] <> 0` | No | blank → `FALSE` — usually the desired "excluded" behaviour |
+
+The threshold's **sign**, not just the operator, decides safety — `[x] < 100` and `[x] < -100` behave
+oppositely. Never eyeball "`<` is unsafe, `>` is safe"; check whether `0` actually satisfies the
+specific comparison being written.
+
+**Guard pattern — wrap the comparison so a blank operand returns `BLANK()` instead of silently
+resolving:**
+
+```dax
+-- Unsafe: a shipment with no recorded delay reads as "on schedule" instead of "unknown"
+On Time Flag := [Delay Hours] < 1
+
+-- Guarded: preserves "unknown" as BLANK instead of coercing it into the comparison
+On Time Flag :=
+IF(
+    ISBLANK([Delay Hours]),
+    BLANK(),
+    [Delay Hours] < 1
+)
+```
+
+The same guard applies whenever the operand is the result of `DIVIDE(a, b)` with **no third
+argument** — DAX returns `BLANK()`, not `0`, when the denominator is `0` (or blank), so a ratio-style
+threshold (`% Complete`, error rate, margin) built on 2-argument `DIVIDE` inherits exactly this risk.
+Passing an explicit alternate result (`DIVIDE(a, b, 0)`) is the other valid fix **only** when a
+missing denominator really should read as `0` for this measure — confirm that intent with the
+customer rather than assuming it.
+
+This generalizes the existing `ISNULL(x) → ISBLANK(x)` note above: that row flags that the two null
+representations differ; this rule is about what happens next, when the (possibly blank) result feeds
+a `<`, `<=`, `>`, `>=`, `=`, or `<>` comparison against a literal threshold.
+
 
 ### Worked example — CASE/WHEN [seen]
 
