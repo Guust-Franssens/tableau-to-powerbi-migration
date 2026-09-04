@@ -87,6 +87,24 @@ retry whose PNG had finally landed sat unread on disk while the merged manifest 
 * `--exclude DIR` is the one auditable escape from both refusals, and is recorded in the merged
   manifest as `excluded_paths` -- an exclusion nothing records is indistinguishable from an omission.
 
+A MANIFEST IS VALIDATED, NOT MERELY PARSED (exit 2)
+----------------------------------------------------
+`--oracle-root` has always defined the shape it accepts (`is_capture_batch`); `--oracle` accepted
+whatever `json.loads` returned, and the gap between "this is JSON" and "this is a capture manifest"
+was reported as a clean merge. Measured through the CLI: `{}` and a schema-carrying manifest with no
+`views` key each exited **0** claiming `0 grouped`, and `[]` exited **1** with an unhandled
+`AttributeError` -- while a zero-byte or truncated file was already correctly refused at 2. Both
+modes now go through one validator, so an unassessable input is an input REFUSAL (exit 2) rather
+than the "clean" bucket: a JSON object, carrying `schema` `tableau-oracle/1`, with a `views` list
+(EMPTY is legitimate -- a capture that selected nothing; ABSENT is a damaged file) whose every
+record is an object carrying a `view_luid`.
+
+That last one is data loss rather than a missing field, which is why it refuses instead of being
+bucketed like a missing `workbook_luid`: merging is keyed on view identity, so records without one
+collapse onto a single bucket and newest-wins discards the rest before any outcome bucket exists to
+report them. Measured: two different views, both without `view_luid`, in ONE valid manifest ->
+`grouped_views: 1`, exit 0, view B named nowhere. A view name is not a substitute identity.
+
 WORKBOOKS ARE KEYED BY LUID, AND A DESTINATION COLLISION IS REFUSED
 -------------------------------------------------------------------
 Views are bucketed by `workbook_luid`, never by display name. Two DIFFERENT workbooks whose names
@@ -219,6 +237,49 @@ class UnclassifiedCaptureDirectory(ValueError):
     Discovery only means "every batch on disk" if the shape of a batch is defined AND anything not
     matching it is a blocking answer. Skipping the unrecognised directory would move the boundary a
     third time -- from "every argument you typed" to "every directory I happened to recognise".
+    """
+
+
+class MalformedCaptureManifest(ValueError):
+    """A named ``oracle-manifest.json`` parsed as JSON but is NOT a capture manifest. Refused.
+
+    ⚠️ The file-level failures were already fail-closed and this one was not: a zero-byte or truncated
+    manifest raises ``JSONDecodeError`` and exits 2, but valid JSON that is not a capture manifest was
+    handed straight to the merge. Measured through the CLI before this existed:
+
+    * ``{}`` -> **exit 0**, "0 workbook(s) ... 0 grouped" -- a damaged manifest reported as a clean merge;
+    * ``{"schema": "tableau-oracle/1", "server": ..., "site": ...}`` with no ``views`` -> **exit 0**;
+    * ``[]`` -> **exit 1** with an unhandled ``AttributeError`` from ``merge_batches``, i.e. a crash
+      rather than the documented input refusal.
+
+    ``--oracle-root`` never had this hole, because :func:`is_capture_batch` defines the shape it will
+    accept; ``--oracle`` bypassed that definition entirely. The asymmetry WAS the defect, so this
+    applies the same definition to both, plus the structure the merge actually depends on.
+    """
+
+
+class UnidentifiedCaptureView(ValueError):
+    """A capture manifest carries a view with no ``view_luid``, so WHICH view it is cannot be established.
+
+    ⚠️ This is silent data LOSS, not merely a missing field, and that is why it refuses at load rather
+    than being bucketed like a missing ``workbook_luid``. :func:`merge_batches` folds records together
+    by view identity; coercing a missing one to ``""`` makes every identity-less record in the estate
+    collide onto a single bucket, and newest-wins then discards all but one. Measured before this
+    existed, on ONE valid manifest holding two different views that both lacked ``view_luid``::
+
+        exit: 0    input_views: 2    grouped_views: 1    names: ["A"]
+
+    View B was not reported anywhere -- not as failed, not as unidentified, not in a count. The
+    missing-``workbook_luid`` precedent is deliberately NOT reused here: that one loses nothing (the
+    view survives, is bucketed under ``""``, is named in ``unidentified`` and holds the exit code
+    non-zero), because attribution is what cannot be established. Here the RECORD does not survive the
+    merge at all, so there is nothing downstream left to report it -- the refusal has to happen before
+    the fold, which makes it an input refusal (exit 2) like :class:`UnestablishedBatchSource`.
+
+    A view NAME is not a substitute identity: it is server-supplied response data, it is not unique,
+    and this repository already refuses to build an artifact stem from anything but a validated LUID
+    (``capture_tableau_oracle.artifact_stem``). The real capture writer always stamps ``view_luid``
+    (``view_luid = view["id"]``), so a manifest without one is damaged or hand-edited, never routine.
     """
 
 
@@ -406,12 +467,79 @@ def index_destinations(migrations_root: Path) -> tuple[dict[str, list[Path]], in
     return index, len(folders)
 
 
+def _validate_manifest(path: Path, payload: Any) -> dict[str, Any]:
+    """Refuse anything that parsed as JSON but is not a capture manifest this run can merge.
+
+    Four checks, in the order a reader would ask them, and each one is a measured fail-open rather
+    than defensive decoration -- see :class:`MalformedCaptureManifest` and
+    :class:`UnidentifiedCaptureView` for the reproductions.
+
+    1. **A JSON object.** ``[]`` reached :func:`merge_batches` and died on ``.get``, exit 1.
+    2. **The capture schema.** The same definition :func:`is_capture_batch` already applies under
+       ``--oracle-root``. Strict equality, deliberately: a future ``tableau-oracle/2`` is a manifest
+       this code has not been shown to understand, and discovery already refuses it. It also keeps
+       this script's own OUTPUT (``tableau-oracle-workbook/1``) out of its input.
+    3. **A ``views`` list.** ``{"schema": ..., "server": ..., "site": ...}`` with the key absent was
+       read as "a capture of nothing" and reported as a clean merge. An EMPTY list is left legitimate:
+       a capture that selected no view really does produce one, and refusing it would refuse a true
+       statement about the data. Absent is not empty -- one is a damaged file, the other is evidence.
+    4. **Every view identified.** Positions only in the message: a view NAME is server-supplied
+       response data, and this repository does not put that in a filename or, therefore, in a log.
+
+    Returns the payload so the caller reads as one expression; raises otherwise.
+    """
+    if not isinstance(payload, dict):
+        raise MalformedCaptureManifest(
+            f"{path} is not a capture manifest: its top level is a JSON {type(payload).__name__}, not an "
+            f"object. A grouping run cannot establish what it holds, so it is refused rather than merged."
+        )
+    schema = payload.get("schema")
+    if schema != CAPTURE_SCHEMA:
+        found = f"schema {str(schema)[:60]!r}" if schema is not None else "no 'schema' key"
+        raise MalformedCaptureManifest(
+            f"{path} declares {found}, not {CAPTURE_SCHEMA!r}. Only a capture "
+            f"manifest can be merged -- this script's own per-workbook output and any unrelated JSON "
+            f"file of the same name are refused, because grouping either one would report a clean "
+            f"merge of evidence that is not a capture."
+        )
+    views = payload.get("views")
+    if not isinstance(views, list):
+        raise MalformedCaptureManifest(
+            f"{path} carries no 'views' list (found {type(views).__name__}). A capture manifest with no "
+            f"views key is damaged, not empty: without it the run reports '0 workbook(s), 0 grouped' and "
+            f"exits 0, which is a clean-merge verdict on a file nothing was read from. Re-run "
+            f"capture_tableau_oracle.py."
+        )
+    unreadable = [index for index, view in enumerate(views) if not isinstance(view, dict)]
+    if unreadable:
+        raise MalformedCaptureManifest(
+            f"{path} holds {len(unreadable)} view record(s) that are not JSON objects "
+            f"(position(s) {', '.join(str(i) for i in unreadable[:8])}). Refused rather than skipped."
+        )
+    anonymous = [index for index, view in enumerate(views) if not view.get("view_luid")]
+    if anonymous:
+        raise UnidentifiedCaptureView(
+            f"{path} holds {len(anonymous)} of {len(views)} view record(s) with no view_luid "
+            f"(position(s) {', '.join(str(i) for i in anonymous[:8])}). Merging is keyed on view "
+            f"identity, so records without one collapse onto a single bucket and all but one are "
+            f"discarded silently -- measured: two views in, one view out, exit 0. A view name is not an "
+            f"identity. Re-capture with capture_tableau_oracle.py, which stamps view_luid from the "
+            f"server's own view id."
+        )
+    return payload
+
+
 def load_manifest(oracle_dir: Path) -> dict[str, Any]:
-    """Read the capture manifest, or raise a message that names the file we wanted."""
+    """Read the capture manifest, or raise a message that names the file we wanted.
+
+    ⚠️ Reading is not accepting. ``json.loads`` alone answers "is this a JSON file", which is a
+    strictly weaker question than "is this a capture manifest", and the gap between them was reported
+    as a clean merge -- :func:`_validate_manifest` closes it before any ``_Batch`` is constructed.
+    """
     path = oracle_dir / MANIFEST_NAME
     if not path.is_file():
         raise FileNotFoundError(f"no {MANIFEST_NAME} in {oracle_dir} - run capture_tableau_oracle.py first")
-    return json.loads(path.read_text(encoding="utf-8"))
+    return _validate_manifest(path, json.loads(path.read_text(encoding="utf-8")))
 
 
 def load_batches(oracle_dirs: list[Path]) -> list[_Batch]:
@@ -1475,6 +1603,8 @@ REFUSALS = (
     UnestablishedBatchSource,
     UnlistedBatchOnDisk,
     UnclassifiedCaptureDirectory,
+    MalformedCaptureManifest,
+    UnidentifiedCaptureView,
 )
 
 

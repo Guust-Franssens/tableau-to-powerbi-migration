@@ -1534,3 +1534,229 @@ def test_every_refusal_reaches_exit_2_through_main(tmp_path, monkeypatch, capsys
     monkeypatch.setattr(sys, "argv", argv)
     assert grp.main() == 2
     capsys.readouterr()
+
+
+# ------------------------------------------------- review round 7: AN UNASSESSABLE MANIFEST IS NOT
+# A CLEAN MERGE. Both findings below are the same fail-open class -- a damaged or unrelated input
+# classified into the "clean" bucket -- and both were measured through the CLI before they were fixed.
+
+
+def _raw_capture(root: Path, name: str, payload: str) -> Path:
+    """A capture directory whose manifest is written VERBATIM, so a malformed one can be built.
+
+    `_batch` cannot express these cases: it always writes a well-formed manifest, which is exactly the
+    reason the shape hole survived a full suite. The directory owns its own parent in every caller
+    below, because a bare `tmp_path` is shared with every other test's tmpdir and the unlisted-sibling
+    guard would fire on whatever else pytest's per-run root happens to hold.
+    """
+    directory = root / name
+    directory.mkdir(parents=True)
+    (directory / grp.MANIFEST_NAME).write_text(payload, encoding="utf-8")
+    return directory
+
+
+def _cli(oracle: Path, migrations: Path, monkeypatch) -> int:
+    """Exit code from `main()` -- the only thing an operator or a gate actually reads."""
+    monkeypatch.setattr(sys, "argv", ["group", "--oracle", str(oracle), "--migrations", str(migrations), "--dry-run"])
+    return grp.main()
+
+
+# ------------------------------------------------------------------ finding 1: manifest SHAPE
+
+
+def test_an_empty_json_object_is_refused_rather_than_grouped_as_zero_workbooks(tmp_path, monkeypatch):
+    """Measured before the fix: `{}` exited **0** reporting `0 workbook(s) ... 0 grouped`.
+
+    That is a clean-merge verdict on a file nothing was read from, which is the worst available
+    answer -- a gate reading the exit code is told the capture landed.
+    """
+    capture = _raw_capture(tmp_path / "run", "cap", "{}")
+    migrations = _migrations(tmp_path)
+    with pytest.raises(grp.MalformedCaptureManifest):
+        grp.run(capture, migrations, dry_run=True)
+    assert _cli(capture, migrations, monkeypatch) == 2
+
+
+def test_a_manifest_with_no_views_key_is_refused_even_when_its_schema_is_right(tmp_path, monkeypatch):
+    """The subtler half: `schema`, `server` and `site` present, `views` absent -> exit **0**.
+
+    It reads as a capture right up to the point where anything is read out of it.
+    """
+    payload = json.dumps({"schema": "tableau-oracle/1", "server": "https://example.online.tableau.com", "site": "acme"})
+    capture = _raw_capture(tmp_path / "run", "cap", payload)
+    migrations = _migrations(tmp_path)
+    with pytest.raises(grp.MalformedCaptureManifest) as excinfo:
+        grp.run(capture, migrations, dry_run=True)
+    assert "views" in str(excinfo.value)
+    assert _cli(capture, migrations, monkeypatch) == 2
+
+
+def test_a_JSON_LIST_manifest_exits_2_rather_than_CRASHING_at_1(tmp_path, monkeypatch):
+    """⚠️ Exit code, and it was the WRONG one. `[]` reached `merge_batches` and died on `.get`:
+
+        AttributeError: 'list' object has no attribute 'get'   -> exit 1
+
+    Exit 1 means "grouped what it could"; this input was never grouped at all. The documented
+    input-refusal code is 2, and an unhandled traceback is not a refusal.
+    """
+    capture = _raw_capture(tmp_path / "run", "cap", "[]")
+    assert _cli(capture, _migrations(tmp_path), monkeypatch) == 2
+
+
+def test_a_view_record_that_is_not_an_object_is_refused_rather_than_skipped(tmp_path, monkeypatch):
+    """Same class one level down: a `views` list holding a string still crashes `.get` downstream."""
+    payload = json.dumps({"schema": "tableau-oracle/1", "views": ["Daily Monitoring"]})
+    capture = _raw_capture(tmp_path / "run", "cap", payload)
+    migrations = _migrations(tmp_path)
+    with pytest.raises(grp.MalformedCaptureManifest):
+        grp.run(capture, migrations, dry_run=True)
+    assert _cli(capture, migrations, monkeypatch) == 2
+
+
+def test_this_scripts_OWN_grouped_manifest_is_refused_as_an_input(tmp_path, monkeypatch):
+    """`--oracle-root` never accepted it (`is_capture_batch`); `--oracle` did, because it applied no
+    shape at all. Feeding output back into input is the asymmetry that WAS the defect."""
+    payload = json.dumps({"schema": "tableau-oracle-workbook/1", "views": []})
+    capture = _raw_capture(tmp_path / "run", "reference", payload)
+    migrations = _migrations(tmp_path)
+    with pytest.raises(grp.MalformedCaptureManifest) as excinfo:
+        grp.run(capture, migrations, dry_run=True)
+    assert "tableau-oracle-workbook/1" in str(excinfo.value)
+    assert _cli(capture, migrations, monkeypatch) == 2
+
+
+# --------------------------------------------------- finding 1: NEGATIVE CONTROLS (over-correction)
+
+
+def test_an_EMPTY_views_list_is_a_true_statement_about_the_data_and_is_NOT_refused(tmp_path):
+    """⚠️ Absent is not empty, and refusing both would be the over-correction.
+
+    A capture whose `--workbook` filter selected nothing really does write `"views": []`, and
+    `capture_tableau_oracle.py` exits 0 for it. Refusing it here would turn an honest empty capture
+    into a blocking error, while the damaged file this guard exists for is the one with no key.
+    """
+    payload = json.dumps({"schema": "tableau-oracle/1", "captured_at": STAMP, "views": []})
+    capture = _raw_capture(tmp_path / "run", "cap", payload)
+    assert grp.load_manifest(capture)["views"] == []
+    assert grp.run(capture, _migrations(tmp_path), dry_run=True) == 0
+
+
+def test_a_well_formed_capture_manifest_still_loads_completely_unchanged(tmp_path):
+    """The load must not become lossy on the way to becoming strict."""
+    batch = _batch(
+        tmp_path / "_oracle", "cap", [_view(LUID, "Daily Monitoring", data="ok", image="ok", captured_at=STAMP)]
+    )
+    loaded = grp.load_manifest(batch)
+    assert loaded == json.loads((batch / grp.MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert loaded["views"][0]["view_luid"] == LUID
+
+
+def test_a_zero_byte_and_a_TRUNCATED_manifest_are_still_refused_at_2(tmp_path, monkeypatch):
+    """These two were ALREADY fail-closed. Pinned so the new validator cannot reroute them: a
+    `JSONDecodeError` must keep reaching `REFUSALS`, not become an unhandled crash."""
+    empty = _raw_capture(tmp_path / "empty", "cap", "")
+    truncated = _raw_capture(tmp_path / "truncated", "cap", '{"schema": "tableau-oracle/1", "views": [')
+    migrations = _migrations(tmp_path)
+    assert _cli(empty, migrations, monkeypatch) == 2
+    assert _cli(truncated, migrations, monkeypatch) == 2
+
+
+# ------------------------------------------------------------------ finding 2: VIEW IDENTITY
+
+
+def _anonymous_views_capture(tmp_path: Path) -> Path:
+    """ONE valid capture manifest holding TWO different views, neither carrying a `view_luid`."""
+    views = []
+    for name in ("A", "B"):
+        view = _view(LUID, name, data="ok", image="ok", captured_at=STAMP)
+        del view["view_luid"]
+        views.append(view)
+    payload = json.dumps({"schema": "tableau-oracle/1", "captured_at": STAMP, "views": views})
+    return _raw_capture(tmp_path / "run", "cap", payload)
+
+
+def test_TWO_views_with_no_view_luid_are_refused_rather_than_COLLAPSED_into_one(tmp_path, monkeypatch):
+    """⚠️ Silent data loss, and the measured numbers are the whole finding::
+
+        exit: 0    input_views: 2    grouped_views: 1    names: ["A"]
+
+    `merge_batches` bucketed on `view.get("view_luid") or ""`, so every identity-less record in the
+    estate landed in ONE bucket and newest-wins discarded all but one. View B was reported nowhere --
+    not failed, not unidentified, not in any count -- on a customer's capture.
+    """
+    capture = _anonymous_views_capture(tmp_path)
+    migrations = _migrations(tmp_path)
+    with pytest.raises(grp.UnidentifiedCaptureView) as excinfo:
+        grp.run(capture, migrations, dry_run=True)
+    assert "2 of 2" in str(excinfo.value)
+    assert _cli(capture, migrations, monkeypatch) == 2
+
+
+def test_ONE_anonymous_view_beside_an_identified_one_is_refused_too(tmp_path):
+    """A single identity-less record loses nothing on its own, and is still refused: it is the record
+    that cannot be placed in the fold, and "it only collides when there are two of them" is a
+    property of the input, not of the guard."""
+    good = _view(LUID, "Daily Monitoring", data="ok", image="ok", captured_at=STAMP)
+    anonymous = _view(OTHER, "Detail", data="ok", image="ok", captured_at=STAMP)
+    del anonymous["view_luid"]
+    payload = json.dumps({"schema": "tableau-oracle/1", "captured_at": STAMP, "views": [good, anonymous]})
+    capture = _raw_capture(tmp_path / "run", "cap", payload)
+    with pytest.raises(grp.UnidentifiedCaptureView) as excinfo:
+        grp.run(capture, _migrations(tmp_path), dry_run=True)
+    assert "1 of 2" in str(excinfo.value) and "position(s) 1" in str(excinfo.value)
+
+
+def test_the_identity_refusal_is_its_OWN_type_not_a_generic_malformed_manifest(tmp_path):
+    """ "This file is not a capture manifest" and "this capture cannot say which view it captured" are
+    different answers, and a test that can only assert *something* refused cannot say which guard it
+    exercised. Same reason `UnestablishedBatchSource` is not `IncompatibleBatchSources`."""
+    capture = _anonymous_views_capture(tmp_path)
+    with pytest.raises(grp.UnidentifiedCaptureView) as excinfo:
+        grp.load_manifest(capture)
+    assert not isinstance(excinfo.value, grp.MalformedCaptureManifest)
+
+
+def test_the_identity_refusal_names_POSITIONS_and_never_the_view_name(tmp_path):
+    """⚠️ A view NAME is server-supplied response data. This repository already refuses to build an
+    artifact stem from anything but a validated LUID, precisely because a reflected token once
+    arrived as a view name and was slugged into a filename. It does not belong in a log line either.
+    """
+    capture = _anonymous_views_capture(tmp_path)
+    with pytest.raises(grp.UnidentifiedCaptureView) as excinfo:
+        grp.load_manifest(capture)
+    message = str(excinfo.value)
+    assert "position(s) 0, 1" in message
+    assert "Daily Monitoring" not in message and '"A"' not in message
+
+
+# --------------------------------------------------- finding 2: NEGATIVE CONTROLS (over-correction)
+
+
+def test_a_missing_WORKBOOK_luid_is_still_BUCKETED_and_reported_not_refused_at_load(tmp_path):
+    """⚠️ The sibling field keeps its OWN, weaker treatment, and that is deliberate rather than
+    inconsistent. A missing `workbook_luid` loses nothing: the view survives the merge, is bucketed
+    under `""`, is named in the `unidentified` outcome and holds the exit code at 1. A missing
+    `view_luid` destroys the record before any bucket exists to report it. Different consequence,
+    different response -- and hoisting this one to a load-time refusal would delete a whole reporting
+    path the operator relies on.
+    """
+    view = _view(LUID, "Daily Monitoring", data="ok", image="ok", captured_at=STAMP)
+    del view["workbook_luid"]
+    payload = json.dumps({"schema": "tableau-oracle/1", "captured_at": STAMP, "views": [view]})
+    capture = _raw_capture(tmp_path / "run", "cap", payload)
+
+    assert grp.load_manifest(capture)["views"][0]["view_luid"] == LUID, "loading must not refuse it"
+    assert grp.run(capture, _migrations(tmp_path), dry_run=True) == 1, "reported, not refused"
+
+
+def test_a_legitimate_multi_batch_merge_is_UNAFFECTED_by_the_new_validation(tmp_path):
+    """The customer fix is the point of the PR. Every batch here is well-formed, so the validator must
+    be invisible: the third retry's render is still discovered, merged and promoted."""
+    batches = _three_batches(tmp_path)
+    migrations = _migrations(tmp_path)
+
+    assert grp.run(batches, migrations, dry_run=False) == 0
+
+    grouped = _grouped(migrations)
+    assert grouped["views"][0]["image"]["status"] == "ok"
+    assert grouped["views"][0]["image"]["source_batch"] == "airborne-services-retry2"
