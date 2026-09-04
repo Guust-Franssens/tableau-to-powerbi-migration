@@ -112,6 +112,30 @@ def test_projected_path_counts_supplementary_characters_as_two_units() -> None:
     assert file_path["length"] > len(file_path["path"])
 
 
+def test_pbir_envelope_is_pinned_to_committed_artifacts() -> None:
+    """The projection must remain above the largest committed page/visual directory identifiers."""
+    paths = list((Path(__file__).resolve().parents[1] / "examples").rglob("visual.json"))
+    paths += list((Path(__file__).resolve().parents[1] / "migrations").rglob("visual.json"))
+    identifiers = []
+    for path in paths:
+        parts = path.parts
+        page_index = parts.index("pages")
+        visual_index = parts.index("visuals")
+        identifiers.append((utf16_len(parts[page_index + 1]), utf16_len(parts[visual_index + 1])))
+    assert len(identifiers) == 869
+    assert max(page for page, _ in identifiers) == run_estate._PBIR_MAX_PAGE_ID_UTF16
+    assert max(visual for _, visual in identifiers) == run_estate._PBIR_MAX_VISUAL_ID_UTF16
+
+
+def test_realistic_long_estate_is_refused_by_conservative_pbir_envelope() -> None:
+    projection = run_estate.project_estate_path_ceiling(_root_for_length(90), ["u" * 37])
+    file_path = next(path for path in projection["paths"] if path["kind"] == "file")
+    directory = next(path for path in projection["paths"] if path["kind"] == "directory")
+    assert file_path["length"] == 265
+    assert directory["length"] == 253
+    assert projection["status"] == "over_ceiling"
+
+
 def test_estate_path_preflight_accepts_short_root_and_refuses_long_root(tmp_path: Path) -> None:
     source = tmp_path / ("A" * 20 + ".twb")
     source.write_text("<workbook />", encoding="utf-8")

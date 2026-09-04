@@ -176,8 +176,15 @@ SLICE_ONLY_COVERAGE = "slice_only_backfill"
 VOLATILE_GENERATED_DIRS = {".pbi"}
 SCRATCH_DIRS = frozenset({"scratch", "_work", "_build", "_probe", "tmp", "temp", "_shots"})
 SCRATCH_INTENTS = frozenset(part.lstrip("._") for part in SCRATCH_DIRS)
-_PBIR_PAGE_ID = "page-id"
-_PBIR_VISUAL_ID = "visual-id"
+# Measured from 869 committed PBIR visual files (examples/ and migrations/): page directory
+# identifiers are at most 20 UTF-16 units and visual identifiers at most 26. The two-unit margin
+# is deliberately applied to the visual identifier so the envelope remains conservative for a
+# future engine identifier without pretending that a placeholder is an upper bound.
+_PBIR_MAX_PAGE_ID_UTF16 = 20
+_PBIR_MAX_VISUAL_ID_UTF16 = 26
+_PBIR_IDENTIFIER_SAFETY_MARGIN = 2
+_PBIR_PAGE_ID = "p" * _PBIR_MAX_PAGE_ID_UTF16
+_PBIR_VISUAL_ID = "v" * (_PBIR_MAX_VISUAL_ID_UTF16 + _PBIR_IDENTIFIER_SAFETY_MARGIN)
 _PBIR_VISUAL_FILE = "visual" + ".json"
 _PBIR_VISUAL_TAIL = f"definition/pages/{_PBIR_PAGE_ID}/visuals/{_PBIR_VISUAL_ID}/{_PBIR_VISUAL_FILE}"
 

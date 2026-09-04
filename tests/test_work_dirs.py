@@ -55,15 +55,15 @@ from work_dirs import (
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
-        ("Enterprise Dashboards", "enterprise-dashboards"),
+        ("Enterprise Dashboards", "enterprise-dash"),
         ("Sales / Q1 Report", "sales-q1-report"),
-        ("  leading and trailing  ", "leading-and-trailing"),
+        ("  leading and trailing  ", "leading-and-tra"),
         ("Depot Genève", "depot-geneve"),
         # `<name>` rather than a bare word: the absolute-user-path gate
         # (`set_data_folder.py --check`) exempts syntactically unambiguous placeholders but NOT bare
         # words, because `bad`, `user` and `username` are all real registrable account names. This
         # repo is public and the gate caught the earlier literal in CI.
-        ("C:\\Users\\<name>\\path", "c-users-name-path"),
+        ("C:\\Users\\<name>\\path", "c-users-name-pa"),
         ("../../etc/passwd", "etc-passwd"),
         ("****!!!!####", "unit"),
         ("", "unit"),
@@ -82,8 +82,8 @@ def test_sanitize_unit_key_never_returns_empty_or_bare_punctuation() -> None:
 
 def test_sanitize_unit_key_caps_length() -> None:
     got = sanitize_unit_key("x" * 500)
-    # The six-character reduction is the tested budget for the measured 265 -> 259 path shape.
-    assert len(got) <= 54
+    # New slugs are decorative; the run number remains the permanent identity.
+    assert len(got) <= 15
     assert got  # capping must never produce an empty result
 
 
@@ -102,7 +102,7 @@ def test_allocate_run_starts_at_one_and_creates_canonical_subdirs(tmp_path: Path
     run = allocate_run("Enterprise Dashboards", repo_root=tmp_path)
 
     assert run.run_number == 1
-    assert run.root == runs_root(tmp_path) / "001-enterprise-dashboards"
+    assert run.root == runs_root(tmp_path) / "001-enterprise-dash"
     assert run.root.is_dir()
     for name in CANONICAL_SUBDIRS:
         if name in LAZY_SUBDIRS:
@@ -355,7 +355,7 @@ def test_list_runs_returns_manifests_sorted_by_run_number(tmp_path: Path) -> Non
     runs = list_runs(tmp_path)
 
     assert [r["run"] for r in runs] == [1, 2]
-    assert runs[0]["unit_key"] == "zzz-last-alphabetically"
+    assert runs[0]["unit_key"] == "zzz-last-alphab"
 
 
 def test_list_runs_on_empty_or_missing_runs_root_is_empty_not_an_error(tmp_path: Path) -> None:

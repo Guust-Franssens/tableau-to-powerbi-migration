@@ -143,12 +143,10 @@ LAZY_SUBDIRS: frozenset[str] = frozenset({"deliverables"})
 
 _RUN_DIR_RE = re.compile(r"^(\d+)(?:-.*)?$")
 _RESERVATIONS_DIR_NAME = ".run-number-reservations"
-# The old 60-character slug made the measured 265-unit path six characters too long. Keep that
-# measured reduction explicit: the equivalent path must fit the observed 259-character file ceiling
-# when the run slug is the only part changed. The run number remains the permanent identity.
-_MEASURED_LONG_PATH = 265
-_MEASURED_SAFE_PATH = 259
-_MAX_UNIT_KEY_LEN = 60 - (_MEASURED_LONG_PATH - _MEASURED_SAFE_PATH)
+# Run numbers are the permanent identity; slugs are decorative. Keep new slugs short enough that
+# the canonical run layout leaves room for the PBIR paths below it. Existing run directories are
+# never renamed, so this cap applies only when allocating a new run.
+_MAX_NEW_RUN_SLUG_LEN = 15
 _MAX_ALLOCATION_ATTEMPTS = 50  # generous; a genuine collision only ever needs one retry
 
 #: Manifest key under which `allocate_run` records the directory NAME (`<NNN>-<slug>`) it allocated.
@@ -233,7 +231,7 @@ MANIFEST_DETAIL_KEY = "manifest_detail"
 def sanitize_unit_key(name: str) -> str:
     """Turn an arbitrary unit name (a Tableau workbook/site/project display name) into a
     filesystem- and path-safe slug: lowercase ASCII, `-`-separated, never empty, capped at
-    `_MAX_UNIT_KEY_LEN` characters.
+    `_MAX_NEW_RUN_SLUG_LEN` characters.
 
     A display name is NEVER load-bearing for identity (issue #234, rule 2 - two projects or two
     workbooks can legitimately share a name; `tests/test_harvest_project_scope.py` already fixtures
@@ -248,7 +246,7 @@ def sanitize_unit_key(name: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", normalized).strip("-").lower()
     if not slug:
         return "unit"
-    return slug[:_MAX_UNIT_KEY_LEN].strip("-")
+    return slug[:_MAX_NEW_RUN_SLUG_LEN].strip("-")
 
 
 def runs_root(repo_root: Path | None = None) -> Path:
