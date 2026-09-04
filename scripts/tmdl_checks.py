@@ -14,6 +14,10 @@ Scope stays deliberately narrow because a false positive is worse than a miss:
 
   * duplicate scalar TMDL properties within one object
   * measure/column name collisions within one table file
+  * a measure name repeated in a DIFFERENT table (model-wide uniqueness - see issue #413: this is
+    the one check ported from the five drifted `examples/*/fabric/_validation/tmdl_validate/`
+    helpers consolidated onto `tools/tmdl_oracle`; it deserializes clean but Desktop refuses the
+    commit, which is exactly the class this module exists to catch cheaply, without AMO)
   * empty measure expressions
   * direct CALCULATE/CALCULATETABLE compact filters that compare a column to a measure
 
@@ -304,15 +308,60 @@ def _read_tmdl(path: Path) -> tuple[str | None, list[TmdlFinding]]:
         return None, findings
 
 
+def _iter_measure_declarations(text: str):
+    """Yield (line, table, measure name) for every measure header in one document.
+
+    Deliberately independent of `check_tmdl_text`'s own per-table bookkeeping, which resets at each
+    table boundary and is not visible outside that function - model-wide uniqueness needs every
+    measure name from every file, not just the last table seen in each.
+    """
+    current_table = ""
+    for number, raw in enumerate(text.splitlines(), start=1):
+        line = _strip_tmdl_comment(raw)
+        if not line.strip():
+            continue
+        obj = _OBJECT_RE.match(line)
+        if not obj:
+            continue
+        kind = obj.group("kind")
+        name = _object_name(obj.group("rest"))
+        if kind == "table" and name:
+            current_table = name
+        elif kind == "measure" and name and current_table:
+            yield number, current_table, name
+
+
 def check_tmdl_model(model_dir: Path) -> tuple[list[TmdlFinding], int]:
     """Every TMDL document in one .SemanticModel."""
     findings: list[TmdlFinding] = []
     definition = model_dir / "definition"
     files = sorted(definition.rglob("*.tmdl")) if definition.exists() else []
+    first_seen: dict[str, tuple[Path, int, str]] = {}
     for tmdl in files:
         text, problems = _read_tmdl(tmdl)
         findings.extend(problems)
         if text is None:
             continue
         findings.extend(check_tmdl_text(tmdl, text))
+        for line, table, name in _iter_measure_declarations(text):
+            # Tabular measure names are case-insensitive and unique across the WHOLE model, not
+            # merely within a table - unlike the same-table NAME_COLLISION check above, this fires
+            # across DIFFERENT tables and DIFFERENT files.
+            key = name.casefold()
+            seen = first_seen.get(key)
+            if seen is None:
+                first_seen[key] = (tmdl, line, table)
+                continue
+            first_file, first_line, first_table = seen
+            findings.append(
+                TmdlFinding(
+                    "MEASURE_NAME_DUPLICATE",
+                    f"measure '{name}' in table '{table}' repeats the model-wide name already used "
+                    f"by table '{first_table}' ({first_file.name}:{first_line}); Tabular measure "
+                    "names must be unique across the WHOLE model, not just within one table - "
+                    "Desktop refuses to load/commit this even though it deserializes clean.",
+                    tmdl,
+                    line,
+                )
+            )
     return findings, len(files)
