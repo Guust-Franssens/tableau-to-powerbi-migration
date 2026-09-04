@@ -60,10 +60,12 @@ def test_unexpected_skip_fails_the_pytest_session(pytester: pytest.Pytester) -> 
     )
     result = pytester.runpytest()
     assert result.ret == pytest.ExitCode.TESTS_FAILED
-    result.stdout.fnmatch_lines([
-        "*UNEXPECTED TEST SKIPS DETECTED*",
-        "*novel unrecorded skip reason that must fail*",
-    ])
+    result.stdout.fnmatch_lines(
+        [
+            "*UNEXPECTED TEST SKIPS DETECTED*",
+            "*novel unrecorded skip reason that must fail*",
+        ]
+    )
 
 
 def test_expected_skip_passes_the_pytest_session(pytester: pytest.Pytester) -> None:
@@ -100,12 +102,14 @@ def test_engine_skips_are_loudly_reported(pytester: pytest.Pytester) -> None:
     )
     result = pytester.runpytest()
     assert result.ret == pytest.ExitCode.OK
-    result.stdout.fnmatch_lines([
-        "*ENGINE-DEPENDENT TESTS SKIPPED (2 test cases did not run)*",
-        "*The deterministic conversion engine plugin (tableau-fabric-skills) is not installed.*",
-        "*test_engine_one*",
-        "*test_engine_two*",
-    ])
+    result.stdout.fnmatch_lines(
+        [
+            "*ENGINE-DEPENDENT TESTS SKIPPED (2 test cases did not run)*",
+            "*The deterministic conversion engine plugin (tableau-fabric-skills) is not installed.*",
+            "*test_engine_one*",
+            "*test_engine_two*",
+        ]
+    )
 
 
 def test_unexpected_skip_with_xdist_fails_pytest_session(pytester: pytest.Pytester) -> None:
@@ -122,10 +126,12 @@ def test_unexpected_skip_with_xdist_fails_pytest_session(pytester: pytest.Pytest
     )
     result = pytester.runpytest("-n", "2", "--dist", "loadfile")
     assert result.ret == pytest.ExitCode.TESTS_FAILED
-    result.stdout.fnmatch_lines([
-        "*UNEXPECTED TEST SKIPS DETECTED*",
-        "*novel unrecorded skip reason under xdist*",
-    ])
+    result.stdout.fnmatch_lines(
+        [
+            "*UNEXPECTED TEST SKIPS DETECTED*",
+            "*novel unrecorded skip reason under xdist*",
+        ]
+    )
 
 
 def test_headroom_padding_is_deterministic_across_path_lengths() -> None:
@@ -133,6 +139,7 @@ def test_headroom_padding_is_deterministic_across_path_lengths() -> None:
 
     when given a scaled ceiling, preventing the 1-in-13 skip count variance from #436.
     """
+
     # Simulate test_check_unit._pad_for_headroom with explicit ceiling
     def compute_pad(root_len: int, headroom: int = 10, offset: int = 46) -> int | None:
         target_ceiling = root_len + offset

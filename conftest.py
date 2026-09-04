@@ -54,38 +54,40 @@ RUN_GUI_ENV = "T2P_RUN_GUI"
 TRUTHY = {"1", "true", "yes", "on"}
 
 # Exact expected skip reasons (issues #435, #436).
-EXPECTED_EXACT_SKIP_REASONS: frozenset[str] = frozenset({
-    "deterministic tier not installed",
-    "the TMDL oracle needs the .NET SDK; scripts/preflight.ps1 checks for it",
-    "no PowerShell on PATH",
-    "powerbi-report-author not installed (npm bridge CLI; absent on Linux CI)",
-    "validator could not fetch the PBIR schema - schema checks did NOT run",
-    "no real cache.abf on this machine (they are gitignored); set PBIP_REFRESH_REAL_ABF",
-    "probe_desktop_credential.ps1 is a Windows-only UI Automation arbiter",
-    "real Win32 EnumWindows callback is Windows-only",
-    "PowerShell (pwsh.exe) not available in PATH",
-    "Windows-only (relies on real PID binding against Power BI Desktop)",
-    "no wind-energy example model in this repo",
-    "no examples/*/fabric/*.SemanticModel corpus",
-    "NTFS junction regression",
-    "this git no longer reports every trailing-slash path as ignored",
-    "pytest tmp_path is itself inside a git work tree on this machine",
-    "not a git work tree (exported source?)",
-    "pytest tmp_path sits inside a checkout on this machine",
-    "the home directory is itself an unignored path inside a checkout on this machine",
-    "Windows-specific path spelling",
-    "the administrative share is not reachable on this machine",
-    "8.3 name generation is disabled on this volume",
-    "no free drive letter available for subst",
-    "no unused drive letter to point at",
-    "lineage check is Windows-only",
-    "write-deny enforcement is an icacls ACL; the marker-only path cannot block a write",
-    "this platform/account cannot create symlinks without elevation",
-    "Windows filenames cannot hold undecodable bytes",
-    "off-Windows behaviour of the registry read",
-    "reads the Windows registry",
-    "filesystem will not store a combining-character filename unchanged",
-})
+EXPECTED_EXACT_SKIP_REASONS: frozenset[str] = frozenset(
+    {
+        "deterministic tier not installed",
+        "the TMDL oracle needs the .NET SDK; scripts/preflight.ps1 checks for it",
+        "no PowerShell on PATH",
+        "powerbi-report-author not installed (npm bridge CLI; absent on Linux CI)",
+        "validator could not fetch the PBIR schema - schema checks did NOT run",
+        "no real cache.abf on this machine (they are gitignored); set PBIP_REFRESH_REAL_ABF",
+        "probe_desktop_credential.ps1 is a Windows-only UI Automation arbiter",
+        "real Win32 EnumWindows callback is Windows-only",
+        "PowerShell (pwsh.exe) not available in PATH",
+        "Windows-only (relies on real PID binding against Power BI Desktop)",
+        "no wind-energy example model in this repo",
+        "no examples/*/fabric/*.SemanticModel corpus",
+        "NTFS junction regression",
+        "this git no longer reports every trailing-slash path as ignored",
+        "pytest tmp_path is itself inside a git work tree on this machine",
+        "not a git work tree (exported source?)",
+        "pytest tmp_path sits inside a checkout on this machine",
+        "the home directory is itself an unignored path inside a checkout on this machine",
+        "Windows-specific path spelling",
+        "the administrative share is not reachable on this machine",
+        "8.3 name generation is disabled on this volume",
+        "no free drive letter available for subst",
+        "no unused drive letter to point at",
+        "lineage check is Windows-only",
+        "write-deny enforcement is an icacls ACL; the marker-only path cannot block a write",
+        "this platform/account cannot create symlinks without elevation",
+        "Windows filenames cannot hold undecodable bytes",
+        "off-Windows behaviour of the registry read",
+        "reads the Windows registry",
+        "filesystem will not store a combining-character filename unchanged",
+    }
+)
 
 # Prefix-matched expected skip reasons.
 EXPECTED_PREFIX_SKIP_REASONS: tuple[str, ...] = (
@@ -124,6 +126,7 @@ def _extract_skip_reason(rep: Any) -> str:
     if reason.startswith("Skipped: "):
         reason = reason[len("Skipped: ") :]
     return reason.strip()
+
 
 WRONG_DIST_MESSAGE = (
     "pytest-xdist is active with --dist {dist!r}. This suite is only measured safe under "

@@ -3137,9 +3137,7 @@ def _deep_tree_with_pad(root: Path, pad: int) -> Path:
     return unit
 
 
-def _pad_for_headroom(
-    root: Path, scratch: Path, headroom: int, extra_args: list[str] | None = None
-) -> int | None:
+def _pad_for_headroom(root: Path, scratch: Path, headroom: int, extra_args: list[str] | None = None) -> int | None:
     """Calibrate the padding that leaves exactly ``headroom`` characters of root budget.
 
     ``root_budget`` falls one-for-one with the padded component, so one measured probe fixes the
