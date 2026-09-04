@@ -2580,16 +2580,24 @@ def test_a_foreign_flavour_staged_path_is_never_reinterpreted_by_the_host(tmp_pa
 
 
 def test_a_host_path_the_packager_cannot_classify_is_still_CONTAINED(tmp_path: Path) -> None:
-    """Reproduced: `File.Contents("/Users/<person>/private-data")` shipped verbatim at exit 4.
+    """Reproduced: a `File.Contents` argument naming a POSIX home directory shipped verbatim at exit 4.
 
     A POSIX user-profile directory has no file suffix and no trailing separator, so
     `_path_verdict` returns UNCLASSIFIED and the shape-only neutralizer skipped it. Exit 4 was
     right - the unit is not self-contained - but exit 4 means "written and incomplete", and a
     package carrying somebody's home directory is not merely incomplete. Containment now comes from
     the literal's ROLE: `File.Contents` reads files and nothing else.
+
+    One literal for both platforms: `_host_local` asks about the LITERAL's flavour, not the host's,
+    so a POSIX-absolute path is host-local on Windows too - which is exactly where the reviewer
+    measured it. The `<...>` segment is the placeholder form `set_data_folder.py --check` exempts; a
+    real account name committed to this repo is the very leak this test exists for.
     """
-    literal = "/Users/review-canary/private-data" if os.name == "nt" else r"C:\Users\review-canary\private-data"
-    bundle, oracle = _bundle(tmp_path)
+    literal = "/Users/<review-canary>/private-data"
+    assert pkg._path_verdict(literal) == pkg.UNCLASSIFIED  # noqa: SLF001
+    assert pkg._host_local(literal)  # noqa: SLF001
+
+    bundle, _oracle = _bundle(tmp_path)
     _point_partition_at(bundle, literal)
     code = _cli(tmp_path, bundle, "--unit", UNIT)
     assert code == pkg.EXIT_NOT_SELF_CONTAINED
@@ -2658,7 +2666,7 @@ def test_a_package_that_cannot_be_made_safe_is_not_written_at_all(tmp_path: Path
     Simulated here by disabling the neutralizer, which is the only thing that makes the tripwire
     unreachable.
     """
-    literal = "/Users/review-canary/private-data" if os.name == "nt" else r"C:\Users\review-canary\private-data"
+    literal = "/Users/<review-canary>/private-data"
     bundle, _ = _bundle(tmp_path)
     _point_partition_at(bundle, literal)
     original = pkg._neutralize_unshipped  # noqa: SLF001  # pylint: disable=protected-access
