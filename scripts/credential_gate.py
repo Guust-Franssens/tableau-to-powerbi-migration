@@ -1003,8 +1003,18 @@ def _no_audit_trail_reason(migration: Path, artifacts: list[Path]) -> str | None
     any content-addressed proof it is the same build - would be exactly the "invented link" this
     function exists to refuse. Fail closed instead: say plainly that no audit history could be found
     at this path, and name the real fix (verify at the bundle/spec root instead).
+
+    An existing `AUDIT` file, by itself, is proof enough that SOMETHING gated here - even a
+    `--force-scope` arm against a target that fails `_scope_refusal` still writes a `block-forced-
+    scope` entry before whatever comes next, and a legitimate later `probe-cleared` on that same
+    unusual-but-real target must not be reported as unassessable just because it never carried a
+    `SCOPE_MARKERS` file. `_scope_refusal` alone cannot tell that apart from a ship-destination copy
+    that never had anything written to it at all, so the `AUDIT` file's mere existence is checked
+    FIRST, and only its absence falls through to the scope check.
     """
     if not artifacts:
+        return None
+    if (migration / AUDIT).exists():
         return None
     return _scope_refusal(migration)
 
