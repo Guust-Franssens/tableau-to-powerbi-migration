@@ -326,13 +326,49 @@ subagents**, the CLI host died and wrote a crash dump into the repo root
 { "event": "Allocation failed - JavaScript heap out of memory", "trigger": "OOMError" }
 ```
 
-**Marked observed rather than measured, deliberately.** The dump was read at the time but not
-retained, so this is not reproducible from anything committed here. If it happens again, **keep the
-dump** (it is gitignored, not auto-deleted) and upgrade this claim.
+✅ **The mechanism is measured. ⚠️ The effective boundary is not explained, and ❌ the concurrency that
+reaches it has never been bisected.** The 2026-08-20 dumps were read and discarded, which is why that
+round stayed "observed". **Three** crashes have since been retained — 2026-09-03 06:00:22, 2026-09-03
+19:36:16 and 2026-09-04 01:00:36 — and all three carry `header.event` = *"Allocation failed -
+JavaScript heap out of memory"* with `header.trigger` = `OOMError`:
 
-Equally, be careful what the number means. **Six failed. Four was run repeatedly the same night
-without incident — which is not the same as four being safe**, and no one has bisected it. Treat
-"keep the wave small" as the rule and any specific ceiling as unproven.
+| dump (`javascriptHeap` unless noted) | `usedMemory` | `totalMemory` | `memoryLimit` | `availableMemory` | `resourceUsage.rss` |
+|---|---:|---:|---:|---:|---:|
+| `report.20260903.060022.36308.0.001.json` | 3,480,865,688 | 3,510,222,848 | 4,298,113,024 | 790,124,816 | 8,844,890,112 |
+| `report.20260903.193616.73536.0.001.json` | 3,437,318,968 | 3,466,874,880 | 4,298,113,024 | 833,526,904 | 8,679,428,096 |
+| `report.20260904.010036.6628.0.001.json` | 3,438,137,296 | 3,460,382,720 | 4,298,113,024 | 840,032,800 | 9,299,034,112 |
+
+Read them with `(Get-Content <dump> -Raw | ConvertFrom-Json).header.event` — the fields are nested
+under `header`, `javascriptHeap` and `resourceUsage`, so a top-level `.trigger` reads empty and looks
+like the dump is malformed when it is merely differently shaped.
+
+- ✅ **The failure reproduces at ~3.44–3.48 GB used**, each time with the heap essentially full
+  against what V8 had *currently allocated* — 99.2 % / 99.1 % / 99.4 % of `totalMemory`.
+- ⚠️ **`totalMemory` is NOT the ceiling, and the gap is unexplained.** Every dump also declares
+  `memoryLimit` = 4,298,113,024 (~4.30 GB) with ~0.8 GB still `availableMemory`, so each crash lands
+  at only 81.0 % / 80.0 % / 80.0 % of the limit V8 said it was allowed. `totalMemory` is how far the
+  heap had grown, not how far it could — quoting it as "the wall" states a ceiling this evidence does
+  not support. Closing the gap needs a run with `--max-old-space-size` and heap-growth sampling, not
+  another terminal dump.
+- ⚠️ **RSS is 2.5–2.7× the JS heap** (8.7–9.3 GB) while `resourceUsage.free_memory` still reported
+  4.7–6.5 GB free (13.9 % / 18.2 % / 19.0 % of machine RAM), so physical RAM was **not** exhausted at
+  the moment of death: an alarm configured only for near-exhaustion below 4.7 GB free would not have
+  fired at these snapshots. That is deliberately narrower than "a machine-pressure alarm would never
+  have fired" — no threshold is identified here, and a 15 %-free rule *would* have fired on the first
+  dump. Whether an RSS threshold calibrated to that 2.5–2.7× ratio could warn in time is untested: a
+  dump is a snapshot at the moment of death and says nothing about the approach to it, so these files
+  also cannot rule a gradual ramp in or out.
+- ❌ **Concurrency is known for only one of the three**, and from the session rather than the dump —
+  no dump records it. They confirm *what* kills the host, not *how many* agents it takes.
+
+⚠️ **Keep the dumps; the numbers above depend on disposable evidence.** They are gitignored
+(`git check-ignore -v` → `.gitignore:257:/report.[0-9]*.json`, and `git clean -ndX` would remove all
+three), so nothing committed to this repo proves any of this once the files are gone.
+
+Equally, be careful what the number means. **Six failed — and so did four.** The 2026-09-04 01:00:36
+crash came out of a wave of **four** (three blind reviews plus one fix agent), which retires the
+earlier reading that "four was run repeatedly the same night without incident". Treat "keep the wave
+small" as the rule and any specific safe number as unproven.
 
 Two consequences, both of which cost real work that night:
 

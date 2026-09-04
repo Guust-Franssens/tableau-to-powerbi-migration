@@ -1720,7 +1720,7 @@ NON_HTTP_CREDENTIAL_SCRIPTS: dict[str, str] = {
     "scripts/tableau_env.py": "IS the redactor and the chokepoint; gating it against itself is circular",
     "scripts/harvest_estate_assets.py": (
         "persists engine stderr into parse-sweep.json, and redacts it at the point of capture "
-        "(harvest_estate_assets.py:396) with the PAT secret and name; the HTTP call is the engine "
+        "(harvest_estate_assets.py:847) with the PAT secret and name; the HTTP call is the engine "
         "child process's, not this script's"
     ),
     "scripts/capture_tableau_reference.py": (

@@ -542,7 +542,7 @@ def test_one_oracle_row_cannot_cover_two_same_named_candidates(tmp_path: Path) -
     """
     _write_full_spec(tmp_path, dashboards=[("Sales", [])], worksheets=[("ws.sales", "Sales")])
     _write_report(tmp_path, ["Sales"])
-    _write_reference_manifest(tmp_path, ["Sales"])
+    _write_oracle_manifest(tmp_path, ["Sales"], view_type=None)
 
     oracle = cu.check_oracle_coverage(tmp_path, None, None)
 
@@ -550,6 +550,65 @@ def test_one_oracle_row_cannot_cover_two_same_named_candidates(tmp_path: Path) -
     assert oracle["visual_present"] == 0, "one picture cannot prove two different objects"
     assert oracle["contested_names"] == ["Sales", "Sales"]
     assert oracle["status"] == cu.STATUS_NOT_CHECKED
+
+
+def test_typed_oracle_records_cover_same_named_dashboard_and_worksheet(tmp_path: Path) -> None:
+    """Typed evidence resolves the expected page by its kind, not by its contested bare name."""
+    _write_full_spec(tmp_path, dashboards=[("Sales", [])], worksheets=[("ws.sales", "Sales")])
+    _write_report(tmp_path, ["Sales", "Sales"])
+    _write_oracle_manifest(tmp_path, ["Sales"], view_type="dashboard")
+
+    manifest_path = tmp_path / "_oracle" / "oracle-manifest.json"
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    image = "images/Sales__worksheet.png"
+    data = "data/Sales__worksheet.csv"
+    _png(tmp_path / "_oracle" / image)
+    _csv(tmp_path / "_oracle" / data)
+    payload["views"].append(
+        {
+            "view_name": "Sales",
+            "view_type": "worksheet",
+            "workbook_luid": UNIT_LUID,
+            "image": {"status": "ok", "path": image},
+            "data": {"status": "ok", "path": data, "row_count": 1},
+        }
+    )
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["status"] == cu.STATUS_PASS
+    assert oracle["visual_present"] == 2
+    assert oracle["numeric_present"] == 2
+    assert oracle["contested_names"] == []
+
+
+def test_unknown_typed_oracle_record_stays_contested_for_same_named_pages(tmp_path: Path) -> None:
+    """Unknown kind is a refusal and cannot choose between same-named expected pages."""
+    _write_full_spec(tmp_path, dashboards=[("Sales", [])], worksheets=[("ws.sales", "Sales")])
+    _write_report(tmp_path, ["Sales", "Sales"])
+    _write_oracle_manifest(tmp_path, ["Sales"], view_type="unknown")
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["status"] == cu.STATUS_NOT_CHECKED
+    assert oracle["visual_present"] == 0
+    assert oracle["contested_names"] == ["Sales", "Sales"]
+    assert oracle["kindless_evidence"] == 1
+
+
+def test_typed_oracle_record_cannot_cover_ambiguous_same_kind_pages(tmp_path: Path) -> None:
+    """Typed evidence still refuses when more than one expected page has that exact identity."""
+    _write_full_spec(tmp_path, dashboards=[("Sales", []), ("Sales", [])], worksheets=[])
+    _write_report(tmp_path, ["Sales", "Sales"])
+    _write_oracle_manifest(tmp_path, ["Sales"], view_type="dashboard")
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["status"] == cu.STATUS_NOT_CHECKED
+    assert oracle["visual_present"] == 0
+    assert oracle["numeric_present"] == 0
+    assert oracle["contested_names"] == ["Sales", "Sales"]
 
 
 def test_one_name_only_signature_cannot_sign_two_omissions(tmp_path: Path) -> None:

@@ -12,18 +12,39 @@ showed the original three fixtures (A/B/C) could not tell a correct fix from two
 Year-only partial fix and an over-broad mark-agnostic fix produce output identical to the right one
 on all three. So the set was extended until each candidate remedy is killed by some fixture.
 
-``DEFECT_PINS`` — currently wrong, must FLIP to ``lineChart`` when upstream fixes it. A failure here
-is the signal to verify the new output and retire the pin.
+``FIXED_BY_UPSTREAM_184`` (was ``DEFECT_PINS``) — ✅ **retired as defect pins on 2026-09-03, against
+measured output.** Upstream ``Yarbrdab000/tableau-fabric-skills#184`` closed COMPLETED 2026-09-02,
+fixed in engine **2.351.0**; measured on canonical **2.356.0**, all four now emit ``lineChart``.
+``_has_continuous_date`` was replaced in the Automatic branch by ``_has_date_dimension``, gating on
+date-ness and accepting ``*-Trunc``, the discrete ``_DATE_PARTS``/``_DATE_EXACT_DERIVATIONS``
+(including ``MDY``), and a raw date column with no derivation. They are **kept, not deleted**, with
+the direction reversed: a return to ``columnChart`` is now the original defect regressing, and it is
+silent when it does.
+
+⚠️ **This pin worked perfectly and was ignored for weeks — the lesson is worth more than the pin.**
+Its failure message already said *"this failing may mean upstream FIXED #424; confirm the emitted
+type is lineChart, then retire this pin."* Nobody read it, because the repo carried a standing
+"expect exactly six pre-existing engine-pin failures" baseline, and this was three of the six. An
+expected-failures baseline converts a designed alarm into background noise. Measured: the flip
+predates the 2.353.0 → 2.356.0 upgrade — the same six failed identically at 2.353.0. See
+``tests/test_upstream_repro_pins.py`` for the other half of that story, where a version gate made
+three behaviour pins unevaluable rather than merely noisy. Issue #486.
 
 ``PERMANENT_INVARIANTS`` — currently RIGHT. ⚠️ **Do not retire these with the rest of the pin.** They
 are what stops the fix from being over-broad: an explicit ``Bar`` mark stacks in Tableau too, so its
 ``columnChart`` is faithful, and a non-date discrete dimension is a genuine bar chart. A remedy that
 rewrites every date-on-Columns chart — or every discrete-dimension chart — to a line breaks these.
+✅ **Both held across the real fix** (measured 2.356.0: ``D`` still ``columnChart``, ``H`` still
+``columnChart``), which is the specific evidence that #184's remedy is correct rather than the
+over-broad one this file was built to distinguish it from.
 
-It deliberately does NOT assert an engine version. The shared harness in
-``tests/test_upstream_repro_pins.py`` pins one, which makes every test in that file fail the moment
-the canonical plugin moves; this file reports the observed version in its failure text instead, so
-the behaviour it describes stays checkable on whatever engine is installed.
+It deliberately does NOT assert an engine version — and **neither does the shared harness in
+``tests/test_upstream_repro_pins.py`` any more.** That harness used to ``assert`` its pinned version,
+which made every pin in that file fail the moment the canonical plugin moved; since 2026-09-03 (issue
+#486) the mismatch is a non-fatal ``UserWarning`` and the behaviour assertions still run. Measured
+2026-09-04: forcing the observed version to ``9.9.9`` emits the warning, and the #168 behaviour pin
+still runs and passes. This file has always reported the observed version in its failure text rather
+than gating on it, so the behaviour it describes stays checkable on whatever engine is installed.
 """
 
 from __future__ import annotations
@@ -71,15 +92,20 @@ THE_ONE_DIFFERENCE = {
     H_AUTO_STRING: "mark Automatic, a non-date string dimension (the negative control)",
 }
 
-# Currently wrong. Each must become "lineChart" when upstream fixes the predicate.
-DEFECT_PINS = {
-    A_AUTO_YEAR: "columnChart",
-    E_AUTO_MDY: "columnChart",
-    F_AUTO_DATETIME: "columnChart",
-    G_AUTO_CALCDATE: "columnChart",
+# ⚠️ RETIRED as defect pins on 2026-09-03 (issue #486) — these four now assert the FIXED behaviour.
+# Upstream `Yarbrdab000/tableau-fabric-skills#184` shipped in engine 2.351.0; measured on 2.356.0,
+# all four emit `lineChart`. Kept (rather than deleted) as a regression guard: a revert to
+# `columnChart` here is the original defect coming back, and it is silent when it does.
+FIXED_BY_UPSTREAM_184 = {
+    A_AUTO_YEAR: "lineChart",
+    E_AUTO_MDY: "lineChart",
+    F_AUTO_DATETIME: "lineChart",
+    G_AUTO_CALCDATE: "lineChart",
 }
 
 # Currently RIGHT. These must hold before AND after the fix - they bound its over-broad failure mode.
+# ✅ Measured 2026-09-03 at 2.356.0: BOTH held across the real fix, so #184's remedy is correct and
+# not over-broad. That is the specific thing this dict existed to find out.
 PERMANENT_INVARIANTS = {
     B_AUTO_TRUNC: "lineChart",
     C_LINE_YEAR: "lineChart",
@@ -87,7 +113,7 @@ PERMANENT_INVARIANTS = {
     H_AUTO_STRING: "columnChart",
 }
 
-CURRENT_MATRIX = {**DEFECT_PINS, **PERMANENT_INVARIANTS}
+CURRENT_MATRIX = {**FIXED_BY_UPSTREAM_184, **PERMANENT_INVARIANTS}
 
 # The exact binding the #424 reproduction claims, as (queryRef, entity, property, aggregation).
 # ``None`` aggregation means a bare Column projection; ``0`` is Sum (Avg=1, Count=2, Min=3, Max=4).
@@ -431,30 +457,35 @@ def test_the_fixture_set_discriminates_between_candidate_remedies() -> None:
     moved = {slug: (CURRENT_MATRIX[slug], got) for slug, got in observed.items() if CURRENT_MATRIX[slug] != got}
     assert observed == CURRENT_MATRIX, _signal(
         f"the emitted-type matrix moved (slug: expected -> observed) {moved}",
-        "if ONLY the DEFECT_PINS flipped to lineChart, upstream fixed #424 correctly - verify, then retire "
-        "those four and KEEP the PERMANENT_INVARIANTS; if any invariant moved, the fix is over-broad",
+        "since #184 shipped, ANY movement here is a regression: if a FIXED_BY_UPSTREAM_184 row went back "
+        "to columnChart the original defect has returned; if a PERMANENT_INVARIANT moved, a later change "
+        "went over-broad in exactly the way D and H exist to catch",
     )
 
 
 @requires_engine
-def test_variant_a_still_emits_the_stacked_column_defect() -> None:
-    """The reproduction anchor: the defective type AND the exact binding that makes it matter.
+def test_variant_a_emits_a_line_and_keeps_the_reproduction_binding() -> None:
+    """The anchor, direction reversed: the FIXED type, plus the exact binding that made it matter.
 
-    Asserting ``visualType`` plus "some Series projection" was not enough — round-1 review injected a
-    ``columnChart`` with a Series well but **no Category and no Y** and this test passed, so it could
-    have stayed green while the visual no longer represented the reproduction at all.
+    ⚠️ Was ``test_variant_a_still_emits_the_stacked_column_defect``, asserting ``columnChart``.
+    Retired 2026-09-03 (issue #486) against measured output: upstream #184 shipped in engine 2.351.0
+    and 2.356.0 emits ``lineChart`` here. The binding half is deliberately KEPT — the defect was never
+    "a column chart", it was "a stacked column of a **ratio** over a **date** axis split by a series",
+    and if the Category/Y/Series wells drift this fixture stops guarding anything even while the type
+    assertion stays green. Round-1 review injected a ``columnChart`` with a Series well but no
+    Category and no Y and the old test passed, which is why both halves are asserted.
     """
     visual = _only_visual(A_AUTO_YEAR)
 
-    assert visual["visual"]["visualType"] == "columnChart", _signal(
-        "an Automatic mark over a discrete date part no longer emits columnChart",
-        "this failing may mean upstream FIXED #424; confirm the emitted type is lineChart, then retire this pin",
+    assert visual["visual"]["visualType"] == "lineChart", _signal(
+        "an Automatic mark over a discrete date part no longer emits lineChart",
+        "this is the REGRESSION direction: columnChart here means upstream #184's fix has been reverted",
     )
     binding = _binding(visual)
     observed = {well: binding.get(well) for well in EXPECTED_A_BINDING}
     assert observed == EXPECTED_A_BINDING, _signal(
         f"the reproduction's binding changed.\n  expected: {EXPECTED_A_BINDING}\n  observed: {binding}",
-        "the defect is 'a stacked column of a ratio over a date axis'; without the date Category, the "
+        "the defect was 'a stacked column of a ratio over a date axis'; without the date Category, the "
         "Sum(AVAILABILITY_PCT) Y and the AIRLINE_CODE Series this fixture no longer demonstrates it",
     )
 
@@ -497,20 +528,28 @@ def test_the_shared_visual_id_is_input_derived_not_an_engine_inconsistency() -> 
 
 
 @requires_engine
-def test_the_engine_reports_no_warning_for_the_defect() -> None:
-    """The silence is the dangerous part: stacking is structurally valid, so nothing flags it."""
+def test_the_engine_reports_the_rebuilt_line_cleanly() -> None:
+    """The engine's self-report must now agree with the corrected output — and stay silent correctly.
+
+    ⚠️ Was ``test_the_engine_reports_no_warning_for_the_defect``, where the clean report was the
+    *dangerous* half: stacking is structurally valid, so nothing flagged a wrong chart. Since #184
+    the emitted visual is right, so ``visual_type: "line"`` / ``status: "rebuilt"`` / no reason is the
+    **correct** self-report rather than a silent defect. Measured 2.356.0. Kept because it is what
+    catches a half-fix: an engine that emits ``lineChart`` while still describing a ``column`` in
+    ``viz_fidelity`` is reporting on an artifact it did not emit.
+    """
     workbook = _run_engine_once()["workbooks"][A_AUTO_YEAR]
-    worksheet_rows = [row for row in workbook["viz_fidelity"] if row["visual_type"] == "column"]
+    worksheet_rows = [row for row in workbook["viz_fidelity"] if row["visual_type"] == "line"]
 
     assert worksheet_rows, _signal(
-        "no viz_fidelity row describes the emitted column visual",
-        "this failing may mean the fidelity record changed shape; re-read report.json before editing",
+        "no viz_fidelity row describes the emitted line visual",
+        "a row still saying 'column' means the self-report and the emitted PBIR disagree - a half-fix",
     )
     assert all(row["status"] == "rebuilt" and not row["reason"] for row in worksheet_rows), _signal(
-        f"the column visual is no longer reported clean (got {worksheet_rows})",
-        "this failing may mean upstream now WARNS about the chart-type choice, which would be a partial fix",
+        f"the line visual is no longer reported clean (got {worksheet_rows})",
+        "this failing may mean the engine now defers or warns on a chart type it used to rebuild",
     )
     assert not workbook["remediation_worklist"]["items"], _signal(
-        "the remediation worklist is no longer empty for the defective workbook",
+        "the remediation worklist is no longer empty for this workbook",
         "this failing may mean upstream now routes the chart-type choice to a human",
     )
