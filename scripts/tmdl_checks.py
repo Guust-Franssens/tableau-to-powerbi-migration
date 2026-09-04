@@ -15,9 +15,12 @@ Scope stays deliberately narrow because a false positive is worse than a miss:
   * duplicate scalar TMDL properties within one object
   * measure/column name collisions within one table file
   * a measure name repeated in a DIFFERENT table (model-wide uniqueness - see issue #413: this is
-    the one check ported from the five drifted `examples/*/fabric/_validation/tmdl_validate/`
-    helpers consolidated onto `tools/tmdl_oracle`; it deserializes clean but Desktop refuses the
-    commit, which is exactly the class this module exists to catch cheaply, without AMO)
+    the one check ported from the drifted `examples/*/fabric/_validation/tmdl_validate/` copies
+    - four of the five were pure redundant drift and were retired onto `tools/tmdl_oracle`; the
+    fifth, `examples/quadruple-axis-charts`, also checks unresolved DAX [bracket] references and
+    is kept for now since neither this module nor the oracle covers that yet. It deserializes
+    clean but Desktop refuses the commit, which is exactly the class this module exists to catch
+    cheaply, without AMO)
   * empty measure expressions
   * direct CALCULATE/CALCULATETABLE compact filters that compare a column to a measure
 
@@ -62,6 +65,10 @@ _PROPERTY_RE = re.compile(r"^(?P<indent>\s*)(?P<name>[A-Za-z][A-Za-z0-9_]*)\s*:\
 _REPEATABLE_PROPERTIES = {"annotation", "extendedProperty", "changedProperty", "ref", "variation", "levels"}
 _COLUMN_EQ_MEASURE_RE = re.compile(r"^'?[^'\[\]]+'?\s*\[[^\]]+\]\s*(?:=|<>|<=|>=|<|>)\s*\[[^\]]+\]$")
 _CALCULATE_RE = re.compile(r"\bCALCULATE(?:TABLE)?\s*\(", re.IGNORECASE)
+# TMDL's own quoting grammar: a quoted name is closed only by an apostrophe NOT followed by
+# another apostrophe (the doubled-apostrophe escape) - same rule check_field_bindings.py's
+# `_NAME`/`_unquote` use for the identical reason (a name like 'O''Brien Sales' is one token).
+_QUOTED_NAME_RE = re.compile(r"'(?:[^']|'')*'")
 
 
 def _split_top_level_args(text: str) -> list[str]:
@@ -132,11 +139,11 @@ def _strip_tmdl_comment(line: str) -> str:
 
 
 def _object_name(rest: str) -> str | None:
-    """Extract a TMDL object's name from the remainder of its header line."""
+    """Extract a TMDL object's name from the remainder of its header line, unescaped."""
     head = rest.split("=", 1)[0].strip()
     if head.startswith("'"):
-        end = head.find("'", 1)
-        return head[1:end] if end > 0 else None
+        match = _QUOTED_NAME_RE.match(head)
+        return match.group(0)[1:-1].replace("''", "'") if match else None
     parts = head.split()
     return parts[0] if parts else None
 

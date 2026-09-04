@@ -385,6 +385,36 @@ def test_measure_name_unique_across_tables_is_clean(tmp_path: Path) -> None:
     assert "MEASURE_NAME_DUPLICATE" not in {f.code for f in findings}
 
 
+def test_distinct_escaped_names_sharing_a_prefix_are_not_a_duplicate(tmp_path: Path) -> None:
+    """`'O''Brien Sales'` and `'O''Connor Sales'` are two distinct names, both escaping an embedded
+    apostrophe by doubling it (TMDL's quoting rule - see `_QUOTED_NAME_RE`/`check_field_bindings.py`'s
+    `_NAME`). A name parser that stops at the FIRST apostrophe truncates both to `O`, and would
+    misreport them as the same model-wide measure name.
+    """
+    model = _write_two_table_model(
+        tmp_path,
+        "table Orders\n\tmeasure 'O''Brien Sales' = SUM('Orders'[Amount])\n\n"
+        "\tcolumn Amount\n\t\tdataType: double\n",
+        "table _Measures\n\tmeasure 'O''Connor Sales' = SUM('Orders'[Amount])\n",
+    )
+    findings, _ = check_tmdl_model(model)
+    assert "MEASURE_NAME_DUPLICATE" not in {f.code for f in findings}
+
+
+def test_same_escaped_name_across_tables_is_still_a_duplicate(tmp_path: Path) -> None:
+    """Positive control for the fix above: the SAME escaped name repeated in another table must
+    still be caught - the doubled-apostrophe unescaping must not become a way to dodge the check.
+    """
+    model = _write_two_table_model(
+        tmp_path,
+        "table Orders\n\tmeasure 'O''Brien Sales' = SUM('Orders'[Amount])\n\n"
+        "\tcolumn Amount\n\t\tdataType: double\n",
+        "table _Measures\n\tmeasure 'O''Brien Sales' = SUM('Orders'[Amount])\n",
+    )
+    findings, _ = check_tmdl_model(model)
+    assert "MEASURE_NAME_DUPLICATE" in {f.code for f in findings}
+
+
 COMPACT_FILTER_CASES = [
     (True, "CALCULATE(SUM('S'[Profit]), 'S'[Region] = [Region Param])"),
     (True, "CALCULATETABLE(VALUES('S'[X]), 'S'[Year] = [Selected Year])"),
