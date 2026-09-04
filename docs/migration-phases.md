@@ -30,8 +30,8 @@ The pipeline has three locations, and the direction is one-way:
             │            entry gate: check_reference_readiness.py   (ready / blind)
             │            exit  gate: check_unit.py                  (is this unit done?)
             │
-            │  PHASE 3 — ship   ⚠️ NO TOOL: manual copy today (issue #458), and the source
-            │                      location is itself unsettled (issue #460)
+            │  PHASE 3 — ship   (scripts/promote_unit.py, #458/#462) — FROM the package,
+            │                      which is the canonical edit location (#460, settled)
             ▼
    migrations/{workbooks,datasources}/<slug>/fabric/
        the deliverable a customer opens in Power BI Desktop
@@ -122,7 +122,9 @@ on" versus "what did we download" — so a mismatch between them is not a defect
 There is **no `out/` level** — a bundle is `{pbip,reports,semantic_models,handover,data}`. Per
 `AGENTS.md:773` agents edit `pbip/`; `reports/` stays pristine so the engine-gap delta remains
 attributable. ⚠️ It is not the *only* documented working copy — the phase-2 package ships a
-`copytree` of it that its own README also calls the place to edit (#460, phase 3 below). Compare the
+`copytree` of it, and once that package exists it is the CANONICAL place to edit (#460, settled;
+phase 3 below). `pbip/` is where an agent works before packaging and the engine's own copy after it.
+Compare the
 baseline/working pair with `git diff --no-index --stat`, never PowerShell's `diff` (which is an alias
 for `Compare-Object` and compares the two path *strings*). Source:
 [`.github/skills/powerbi-report-gotchas/SKILL.md` §3](../.github/skills/powerbi-report-gotchas/SKILL.md).
@@ -181,10 +183,13 @@ discriminator and its resolver is non-fatal by design.
 capture. A display name is not an identity (#450).
 
 ❌ **`fabric/` here is a `shutil.copytree` of `<bundle>/pbip/<unit>/` (`scripts/package_unit.py:847`),
-not a link — so edits made here do NOT appear in the bundle, and vice versa.** The package's own
-README says to edit here; `AGENTS.md:773` says to edit in `<bundle>/pbip/`. Which one is
-authoritative is an open design question, **#460**; it matters most at phase 3, where promoting from
-the wrong one silently ships unedited engine output. See phase 3 below before you copy anything.
+not a link — so edits made here do NOT appear in the bundle, and vice versa.** ✅ **Which one is
+authoritative is SETTLED (#460): once a package exists, `<package>/fabric/` is canonical.** Two
+pieces of code enforce it rather than merely documenting it — `promote_unit.py` ships FROM the
+package (*"Promoting FROM the package is settled (#460)"*, `scripts/promote_unit.py:60`), and
+`package_unit.py` refuses to repackage over a package that carries edits, checking the digest twice
+and again under the swap. `AGENTS.md:773`'s *"agents edit `pbip/`"* governs the window **before**
+packaging; after it, work in the package. See phase 3 below for the promotion mechanics.
 
 ### Where `packages/` goes, and the constraint that decides it
 
@@ -237,39 +242,48 @@ The deliverable lands in `migrations/workbooks/<slug>/fabric/` (a workbook's rep
 `migrations/datasources/<ds-slug>/fabric/` (a shared/published datasource's model).
 
 ❌ **There is no tool for the phase 2 → phase 3 hop. It is a manual copy today**, tracked as **#458**.
-It is a high-risk hop for two evidenced reasons: the copy is where `definition.pbir`'s `byPath` stops
-resolving, and no gate checks that the *target* resolves (below); and **which location you copy FROM
-is currently unsettled** (below, #460).
+It is a high-risk hop for one evidenced reason: the copy is where `definition.pbir`'s `byPath` stops
+resolving, and no gate checks that the *target* resolves (below).
 
-### ⚠️ First decide WHERE you are promoting from — the repo currently gives two answers
+> ⚠️ This paragraph is stale — [`scripts/promote_unit.py`](../scripts/promote_unit.py) landed the
+> tool in #462 and closed #458. Use it; the manual mechanics below remain the reference for what it
+> does and for a hand-checked promotion.
 
-❌ **Open design question, tracked as #460 — do not treat either location as settled.** The toolkit
-documents two different places an agent edits, and they are physical copies of each other:
+### WHERE you promote from — settled (#460): the package
 
-| what says it | where it says agents edit |
+✅ **The package's `fabric/` is canonical once phase 2 has run.** Two pieces of code enforce it, so
+this is not a documentation preference:
+
+| what enforces it | how |
 |---|---|
-| `AGENTS.md:773` (shared conventions) | `<bundle>/pbip/` — *"agents edit **here**"* |
-| the package README `package_unit.py` writes (`scripts/package_unit.py:785`) | `<package>/fabric/` — *"the engine WORKING COPY - edit here"* |
+| [`scripts/promote_unit.py:60`](../scripts/promote_unit.py) | *"Promoting FROM the package is settled (#460)"* — `--package` is the only source it takes; `--bundle` produces a drift REPORT and never a promotion source |
+| [`scripts/package_unit.py`](../scripts/package_unit.py) | refuses to repackage over a package that carries edits (`PackageEditsRefused`), checking the digest before assembly **and again under the swap** — the package is the tree it protects |
+| [`scripts/check_migration_progress.py`](../scripts/check_migration_progress.py) | `--tamper` and progress mode both scan the packages beside the bundle; an edited canonical package is `PACKAGE_DRIFT` (exit 1), never `CLEAN` |
 
-The package's `fabric/` is a **`shutil.copytree`** of `<bundle>/pbip/<unit>/`
+`AGENTS.md:773`'s *"agents edit `<bundle>/pbip/`"* governs the window **before** packaging — there is
+no package yet to edit. After phase 2 the package is where the work goes, and `pbip/` is left as the
+engine's own copy.
+
+The package's `fabric/` is still a **`shutil.copytree`** of `<bundle>/pbip/<unit>/`
 (`scripts/package_unit.py:847`), not a link, so an edit in one is invisible in the other. ✅ Proven by
 sentinel edit during review of this document: after editing inside the package,
 `PACKAGE_EDIT_EXISTS=True` / `BUNDLE_EDIT_EXISTS=False`. ✅ Corroborated here — immediately after
 packaging the two trees are byte-identical (`git diff --no-index` exit 0, no output), so they can
-only diverge by someone editing one of them. Promoting from `<bundle>/pbip/` when the agent worked in
-the package ships **unchanged engine output and loses every agent-authored TMDL/PBIR change,
-silently, with no gate firing**.
+only diverge by someone editing one of them. Promoting from `<bundle>/pbip/` therefore ships
+**unchanged engine output and loses every agent-authored TMDL/PBIR change, silently** — which is what
+the rule above exists to prevent, not a live ambiguity.
 
-**Interim instruction until #460 is decided: promote from wherever the edits actually are, and verify
-both before and after.** Do not assume — check:
+**Verify anyway, before and after.** A settled rule tells you where the work *should* be; only a diff
+tells you where it *is*, and a unit migrated before the rule was settled may have been edited in the
+bundle:
 
 ```powershell
-# BEFORE promoting — have the two candidate sources diverged at all?
+# BEFORE promoting — has anyone edited the tree we are NOT promoting from?
 git diff --no-index --stat <bundle>\reports\<WB>.Report <bundle>\pbip\<WB>\<WB>.Report
 git diff --no-index --stat <bundle>\pbip\<WB> <run>\packages\<batch>\<Unit>\fabric
 
 # AFTER promoting, model per workbook — ONE comparison
-git diff --no-index --stat <source-you-chose> migrations\workbooks\<slug>\fabric
+git diff --no-index --stat <run>\packages\<batch>\<Unit>\fabric migrations\workbooks\<slug>\fabric
 
 # AFTER promoting, shared datasource — TWO comparisons, because the halves split up
 git diff --no-index --stat <source>\<Name>.Report        migrations\workbooks\<slug>\fabric\<Name>.Report
@@ -284,9 +298,10 @@ does not identify the edited side**: ✅ measured, a deletion-only edit *inside 
 yields equal insertions and deletions; and both trees may have been edited. To establish which side
 is authoritative, use the **full diff** (drop `--stat`), the `_build/generated-edit-declarations/`
 records where they exist ([`powerbi-report-gotchas` §3](../.github/skills/powerbi-report-gotchas/SKILL.md)),
-and your own knowledge of where the agent was told to work. **If you cannot establish it, stop and do
-not promote** — an unresolved provenance question is exactly the silent-loss case this section exists
-to prevent.
+`check_migration_progress.py --tamper` (which now names an edited package by file), and your own
+knowledge of where the agent was told to work. **If a diff says the BUNDLE was edited after
+packaging, stop and do not promote** — that work is not in the canonical tree and promoting would
+drop it.
 
 ⚠️ **Never use the whole-tree form on a shared datasource — it calls a correct promotion wrong.**
 ✅ Measured on a correctly split promotion: source-unit vs workbook destination exits **1**
@@ -387,8 +402,8 @@ user, so the rename is cheap today and gets more expensive the moment one appear
 
 | # | gap | status |
 |---|---|---|
-| 1 | No tool for phase 2 → phase 3; the `byPath` rewrite is manual and a wrong one validates clean | ❌ open, tracked as **#458** |
-| 2 | Two documented edit locations — `<bundle>/pbip/` (`AGENTS.md:773`) and `<package>/fabric/` (`package_unit.py:785`) — diverge because the package is a `copytree`, so promoting from the wrong one silently loses agent work | ❌ open design question, tracked as **#460**; promote from wherever the edits are and verify both ways |
+| 1 | The `byPath` rewrite at phase 2 → phase 3 is a place a wrong reference validates clean | ✅ tooled by `promote_unit.py` (#458, #462), which rewrites and then proves the target resolves ON DISK |
+| 2 | Two documented edit locations — `<bundle>/pbip/` and `<package>/fabric/` — that are physical copies | ✅ **settled (#460): the package is canonical once phase 2 has run.** `promote_unit.py` ships from it, `package_unit.py` refuses to repackage over its edits, and `check_migration_progress.py --tamper` reports an edited package as `PACKAGE_DRIFT` rather than `CLEAN` |
 | 3 | `semantic_models/` baselines exist for only 18 of 62 units on the reference run, so model churn cannot be measured for the rest | ❌ report as **BASELINE UNAVAILABLE** (#274, #359) |
 | 4 | `deliverables/` is a convention with no writer, and its name collides with phase 3's meaning | ⚠️ documented, not fixed |
 | 5 | Phase 1 stages still default to their own `_assessment*/` / `_oracle*/` / `_bundle*/` paths rather than the `_runs/` layout | ⚠️ deliberate scope limit of issue #234; migrating them is follow-up |
