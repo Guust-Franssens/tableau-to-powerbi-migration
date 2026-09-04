@@ -20,12 +20,12 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 7752e0cf2f54fbbf923c7b5d9099edc5e6ea28d035c5e93a5c70b9b26006bfe8  | stage | location | rule |
 11bd5f873fa004793229f9931b6d90ec5eff770f738b716c6198d6daabd03235  |---|---|---|
 bb4d1ac6af343d9fb2ddb1ae34c8d271b135e6a9c40799d23318095961436d82  | engine truth | `<bundle>/reports/`; `<bundle>/semantic_mod
-e1f5693812781e18e0bd9f912d3cad46a5968eaac37288d3f41dfce89b781377  | working copy | `<bundle>/pbip/` | agents edit **here**; ev
+776ea33b29b12bfb41ecb9d0c27ccea6dcab14470abf82c017f1f8c6fb83a37d  | working copy | `<bundle>/pbip/`, or `<package>/fabric/` wh
 bbc9c2fce4ae80dbec0f86aa181476faaf26ec3aadb2357ae73484eca318e61a  | deliverable | `migrations/{workbooks,datasources}/<slug>/f
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-50aa93555d821efdcf1a58137f2b19067825f08ef369ca0376e4531226f3b769  A bundle may contain `<bundle>/{pbip,reports,semantic_models
+c6fd237095a5ae341dc8f56a0cb0d2a91734129d2a9b050c95323d0af15b42b1  A bundle may contain `<bundle>/{pbip,reports,semantic_models
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-5935b700ea4b74be38bc4a582daec125da137f5f2a6ea62eced42e8ec23670f6  ~~ **The copy must keep `definition.pbir`'s `byPath` resolvi
+1690789c8feaa2b1349772bd3389964b47328b84f5dd2a8486f39722eaf79127  ~~ **The copy must keep `definition.pbir`'s `byPath` resolvi
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 d1590974a828f96fe221c0aa9c43f4265735e26b08e12cb83a4bce562dfa2b2a  - **Structural validation is necessary, not sufficient.** A 
 d6af19774647480f54397f7bf38b02c6f1d1b70cb1e18710278d2935ce71f50e  - **Keep `limitations_encountered` alive** through the whole
