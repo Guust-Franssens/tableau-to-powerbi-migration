@@ -173,7 +173,23 @@ the best provider *for the requested purpose* and records which it used and why.
 | **Public Playwright** | Tableau **Public** only, after capture QA | ⚠️ works (this repo's demos); hardening TODO |
 | **Guided manual export from the exact `.twbx`** (Tableau Desktop/Reader) | Extract-only workbooks with no live Server view — can be *validation-grade* | ❌ specified-only (guided prompts) |
 | **Embedded `.twbx` thumbnail** | Low-resolution rendered evidence for mark shape, layering, axis direction and labels; XML wins any conflict | ⚠️ extractor implemented; found in 17/17 workbooks in one Superstore-family estate, superseding the older "~4% carry thumbnails" figure for this measurement shape; worksheet coverage was still partial (5/10 in one workbook) |
-| **User-supplied screenshots** | Always-available floor; must be *guided* (exact filenames, reset state, viewport) | ⚠️ folder convention only |
+| **User-supplied screenshots** | Always-available floor; must be *guided* (exact filenames, reset state, viewport) | ✅ implemented — runs FIRST and unconditionally (#519) |
+
+⚠️ **The manual leg is not ordered by grade, it is ordered by AUTHORSHIP.** Dropping a file into
+`reference/` is an explicit operator act, so no automatic provider may quietly outrank it. It used to
+run last and only when everything else had failed, which meant a workbook carrying embedded
+thumbnails — 17/17 in the estate measured above — made the operator's own screenshots invisible:
+192×192 layout-only records were written while the full-page dashboard PNG sat unread beside them,
+and `--manual-validation-grade` silently did nothing. Thumbnails are now emitted *alongside*, because
+the two are not substitutes (a thumbnail is per-worksheet, a dropped screenshot is usually a
+dashboard page). Every candidate file is also accounted for: adopted, or named in the output with the
+reason (wrong prefix, wrong extension, not a PNG, empty, or below the 64 px legibility floor —
+`MIN_RENDER_EDGE`, shared with the readiness gate so a file adopted here cannot be rejected as
+illegible there). Byte size is no longer a criterion for a hand-supplied file: PNG is lossless, so a
+legible 1440×900 flat-fill dashboard measures ~7 KB and was silently discarded by the old 20 KB floor.
+`--manual-object-type` declares what a screenshot is a picture OF when its filename cannot carry the
+source object's exact name; normally the type is derived from `migration-spec.json`. First-timer
+route, verified end to end with no server: [`start-with-one-workbook.md`](start-with-one-workbook.md).
 
 ### Default = fail **closed**
 

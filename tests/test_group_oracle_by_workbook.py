@@ -335,8 +335,16 @@ def test_dry_run_writes_absolutely_nothing(tmp_path):
 
 
 def test_a_missing_manifest_names_the_file_it_wanted(tmp_path):
+    # ⚠️ A PRIVATE parent, not a bare `tmp_path`. `tmp_path` is a child of pytest's per-RUN root,
+    # which every other test's tmpdir shares -- and `test_capture_tableau_oracle.py` fills that root
+    # with directories that are real capture batches. The sibling scan finding them is the guard
+    # working correctly, so a fixture that does not own its own parent fails only when it runs after
+    # that suite: an order-dependent failure that presents as a mystery flake on an unrelated PR.
+    # Every other test here is already safe because `_capture` builds `tmp_path / "_oracle"`.
+    oracle = tmp_path / "run" / "batch"
+    oracle.mkdir(parents=True)
     with pytest.raises(FileNotFoundError, match="oracle-manifest.json"):
-        grp.run(tmp_path, tmp_path, dry_run=False)
+        grp.run(oracle, tmp_path, dry_run=False)
 
 
 def test_a_missing_migrations_root_is_survivable(tmp_path):

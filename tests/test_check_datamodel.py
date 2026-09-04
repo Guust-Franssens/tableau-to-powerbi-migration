@@ -22,6 +22,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 # ruff: noqa: E402  (the sys.path insert above must precede this import)
 from check_datamodel import (
+    ADVISORY_TMDL_CODES,
     _check_expression,
     _iter_m_blocks,
     check_datamodel,
@@ -30,6 +31,8 @@ from check_datamodel import (
     check_tmdl_model,
     check_tmdl_text,
     find_compact_filters,
+    find_incomplete_divide_calls,
+    find_unguarded_divide_thresholds,
     main,
 )
 
@@ -340,6 +343,79 @@ def test_empty_measure_expression_is_caught() -> None:
     assert "EMPTY_EXPRESSION" in _tmdl_codes(text)
 
 
+def _write_two_table_model(tmp_path: Path, orders_body: str, measures_body: str) -> Path:
+    """A two-file `.SemanticModel/definition` so model-wide checks see across files."""
+    definition = tmp_path / "M.SemanticModel" / "definition"
+    definition.mkdir(parents=True)
+    (definition / "Orders.tmdl").write_text(orders_body, encoding="utf-8")
+    (definition / "_Measures.tmdl").write_text(measures_body, encoding="utf-8")
+    return tmp_path / "M.SemanticModel"
+
+
+def test_measure_name_repeated_in_a_different_table_across_files_is_caught(tmp_path: Path) -> None:
+    """Ported from the drifted `tmdl_validate` helpers (issue #413): TmdlSerializer deserializes this
+    cleanly - the collision is invisible to a single-file, single-table scan - but Desktop refuses
+    the commit because measure names are unique across the WHOLE model, not merely per table.
+    """
+    model = _write_two_table_model(
+        tmp_path,
+        "table Orders\n\tmeasure Sales = SUM('Orders'[Amount])\n\n\tcolumn Amount\n\t\tdataType: double\n",
+        "table _Measures\n\tmeasure Sales = SUM('Orders'[Amount])\n",
+    )
+    findings, _ = check_tmdl_model(model)
+    assert "MEASURE_NAME_DUPLICATE" in {f.code for f in findings}
+
+
+def test_measure_name_duplicate_check_is_case_insensitive(tmp_path: Path) -> None:
+    """Tabular measure names collide regardless of case, same as TOM's own uniqueness rule."""
+    model = _write_two_table_model(
+        tmp_path,
+        "table Orders\n\tmeasure sales = SUM('Orders'[Amount])\n\n\tcolumn Amount\n\t\tdataType: double\n",
+        "table _Measures\n\tmeasure Sales = SUM('Orders'[Amount])\n",
+    )
+    findings, _ = check_tmdl_model(model)
+    assert "MEASURE_NAME_DUPLICATE" in {f.code for f in findings}
+
+
+def test_measure_name_unique_across_tables_is_clean(tmp_path: Path) -> None:
+    """The common, valid case: distinct measure names in different tables must stay silent."""
+    model = _write_two_table_model(
+        tmp_path,
+        "table Orders\n\tmeasure Sales = SUM('Orders'[Amount])\n\n\tcolumn Amount\n\t\tdataType: double\n",
+        "table _Measures\n\tmeasure Profit = [Sales] * 0.1\n",
+    )
+    findings, _ = check_tmdl_model(model)
+    assert "MEASURE_NAME_DUPLICATE" not in {f.code for f in findings}
+
+
+def test_distinct_escaped_names_sharing_a_prefix_are_not_a_duplicate(tmp_path: Path) -> None:
+    """`'O''Brien Sales'` and `'O''Connor Sales'` are two distinct names, both escaping an embedded
+    apostrophe by doubling it (TMDL's quoting rule - see `_QUOTED_NAME_RE`/`check_field_bindings.py`'s
+    `_NAME`). A name parser that stops at the FIRST apostrophe truncates both to `O`, and would
+    misreport them as the same model-wide measure name.
+    """
+    model = _write_two_table_model(
+        tmp_path,
+        "table Orders\n\tmeasure 'O''Brien Sales' = SUM('Orders'[Amount])\n\n\tcolumn Amount\n\t\tdataType: double\n",
+        "table _Measures\n\tmeasure 'O''Connor Sales' = SUM('Orders'[Amount])\n",
+    )
+    findings, _ = check_tmdl_model(model)
+    assert "MEASURE_NAME_DUPLICATE" not in {f.code for f in findings}
+
+
+def test_same_escaped_name_across_tables_is_still_a_duplicate(tmp_path: Path) -> None:
+    """Positive control for the fix above: the SAME escaped name repeated in another table must
+    still be caught - the doubled-apostrophe unescaping must not become a way to dodge the check.
+    """
+    model = _write_two_table_model(
+        tmp_path,
+        "table Orders\n\tmeasure 'O''Brien Sales' = SUM('Orders'[Amount])\n\n\tcolumn Amount\n\t\tdataType: double\n",
+        "table _Measures\n\tmeasure 'O''Brien Sales' = SUM('Orders'[Amount])\n",
+    )
+    findings, _ = check_tmdl_model(model)
+    assert "MEASURE_NAME_DUPLICATE" in {f.code for f in findings}
+
+
 COMPACT_FILTER_CASES = [
     (True, "CALCULATE(SUM('S'[Profit]), 'S'[Region] = [Region Param])"),
     (True, "CALCULATETABLE(VALUES('S'[X]), 'S'[Year] = [Selected Year])"),
@@ -360,6 +436,147 @@ def test_compact_filter_in_measure_is_caught_by_gate() -> None:
     """Mutation coverage for the TMDL walker, not just the predicate helper."""
     text = "table S\n\tmeasure 'A' = CALCULATE(SUM('S'[Profit]), 'S'[Region] = [Region Param])\n"
     assert "COMPACT_FILTER" in _tmdl_codes(text)
+
+
+UNGUARDED_BLANK_THRESHOLD_CASES = [
+    # positive: unguarded, and 0 satisfies the comparison, so a blank denominator silently passes.
+    (True, "DIVIDE([Errors], [Total]) < 0.05"),
+    (True, "DIVIDE([Errors], [Total]) <= 0"),
+    (True, "DIVIDE([Errors], [Total]) = 0"),
+    (True, "DIVIDE('S'[Errors], 'S'[Total]) > -5"),
+    # positive: a blank NUMERATOR passes straight through a 3-argument DIVIDE - the "alt" only
+    # substitutes on a 0/blank denominator, so this is unsafe even with a 3rd argument present.
+    (True, "DIVIDE([Errors], [Total], 0) < 0.05"),
+    # positive: a blank "alt" itself is not a safe substitute - both real-Desktop findings from the
+    # review (DIVIDE(BLANK(), 1, 0) and DIVIDE(1, 0, BLANK())) collapse to this same argument shape.
+    (True, "DIVIDE([Errors], [Total], [Fallback]) < 0.05"),
+    # positive: the unsafe comparison is nested inside IF(...) rather than the entire expression -
+    # this used to escape the check entirely because DIVIDE(...) wasn't the whole predicate.
+    (True, 'IF([Region] = "West", DIVIDE([Errors], [Total]) < 0.05, BLANK())'),
+    # positive: nested inside CALCULATE(...FILTER(...)) - another real generated-DAX shape.
+    (True, "CALCULATE(SUM('S'[x]), FILTER('S', DIVIDE([Errors], [Total]) < 0.05))"),
+    # negative: correctly guarded - ISBLANK(...) wraps the exact same DIVIDE(...) call earlier.
+    (False, "IF(ISBLANK(DIVIDE([Errors], [Total])), BLANK(), DIVIDE([Errors], [Total]) < 0.05)"),
+    # negative: both DIVIDE arguments are literals, so it can never return BLANK().
+    (False, "DIVIDE(1, 1) < 2"),
+    # negative: numerator defaults via COALESCE to a non-blank literal, denominator is a nonzero
+    # literal - DIVIDE can never return BLANK() here even though it's a bare 2-argument call.
+    (False, "DIVIDE(COALESCE([Errors], 0), 1) < 0.05"),
+    # negative: safe direction - 0 does NOT satisfy the comparison, so a blank reads FALSE.
+    (False, "DIVIDE([Errors], [Total]) > 0.05"),
+    (False, "DIVIDE([Sales], [Target]) >= 100"),
+    # negative: an ordinary, non-threshold comparison entirely unrelated to DIVIDE.
+    (False, "SUM('S'[Sales]) > 0"),
+    (False, "'S'[Status] = \"Active\""),
+    # negative: confirmed-good shapes from the review that must not start being flagged.
+    (False, "NOT ISBLANK([Errors]) && DIVIDE([Errors], [Total]) > 0.05"),
+    (False, "COALESCE(DIVIDE([Errors], [Total]), 0) < 0.05"),
+    (False, "(DIVIDE([Errors], [Total]) + 0) > 0.05"),
+    # positive (round 3): a block comment between the call's closing paren and its comparator must
+    # not hide the comparison - the `\s*` regex needs comment characters blanked, not left as-is.
+    (True, "DIVIDE([Errors], [Total]) /* note */ < 0.05"),
+    # positive (round 3): a stray `)` inside a block comment BETWEEN the call's own arguments must
+    # not be read as the call's real closing paren - that used to close the call one paren early
+    # and corrupt argument splitting so the comparison was never even reached.
+    (True, "DIVIDE([Errors], /* ) */ [Total]) < 0.05"),
+]
+
+
+@pytest.mark.parametrize(("illegal", "expression"), UNGUARDED_BLANK_THRESHOLD_CASES)
+def test_unguarded_divide_threshold_detection_is_precise(illegal: bool, expression: str) -> None:
+    """Only an unguarded DIVIDE(...) compared unsafely against a literal threshold is flagged."""
+    assert bool(find_unguarded_divide_thresholds(expression)) is illegal
+
+
+def test_unguarded_divide_threshold_in_measure_is_caught_by_gate() -> None:
+    """Mutation coverage for the TMDL walker, not just the predicate helper (issue #82)."""
+    text = "table S\n\tmeasure 'Error Rate Flag' = DIVIDE([Errors], [Total]) < 0.05\n"
+    assert "UNGUARDED_BLANK_THRESHOLD" in _tmdl_codes(text)
+
+
+def test_unguarded_divide_threshold_nested_in_if_is_caught_by_gate() -> None:
+    """A nested, not-the-entire-expression comparison must still be caught by the full TMDL walker."""
+    text = "table S\n\tmeasure 'Flag' = IF([Region] = \"West\", DIVIDE([Errors], [Total]) < 0.05, BLANK())\n"
+    assert "UNGUARDED_BLANK_THRESHOLD" in _tmdl_codes(text)
+
+
+def test_comment_between_divide_close_paren_and_comparator_is_caught_by_gate() -> None:
+    """A `/* ... */` comment right after `)` must not hide the comparator from the gate (round 3)."""
+    text = "table S\n\tmeasure 'Flag' = DIVIDE([Errors], [Total]) /* note */ < 0.05\n"
+    assert "UNGUARDED_BLANK_THRESHOLD" in _tmdl_codes(text)
+
+
+def test_stray_close_paren_inside_a_comment_between_divide_args_is_caught_by_gate() -> None:
+    """A `)` hidden inside a block comment between DIVIDE's own arguments must not fool paren matching."""
+    text = "table S\n\tmeasure 'Flag' = DIVIDE([Errors], /* ) */ [Total]) < 0.05\n"
+    assert "UNGUARDED_BLANK_THRESHOLD" in _tmdl_codes(text)
+
+
+def test_guarded_divide_threshold_in_measure_is_not_flagged_by_gate() -> None:
+    """A correctly guarded measure clears the gate - the negative control for the gate itself."""
+    text = (
+        "table S\n"
+        "\tmeasure 'Error Rate Flag' = "
+        "IF(ISBLANK(DIVIDE([Errors], [Total])), BLANK(), DIVIDE([Errors], [Total]) < 0.05)\n"
+    )
+    assert "UNGUARDED_BLANK_THRESHOLD" not in _tmdl_codes(text)
+
+
+def test_provably_non_blank_divide_in_measure_is_not_flagged_by_gate() -> None:
+    """A DIVIDE(...) that cannot return BLANK() is a false-positive risk this gate must not take."""
+    text = "table S\n\tmeasure 'Literal Ratio' = DIVIDE(1, 1) < 2\n"
+    assert "UNGUARDED_BLANK_THRESHOLD" not in _tmdl_codes(text)
+
+
+def test_unguarded_divide_threshold_in_calculated_column_is_caught_by_gate() -> None:
+    """The same unsafe shape on a calculated column, not just a measure."""
+    text = "table S\n\tcolumn 'Below Target' = DIVIDE('S'[Errors], 'S'[Total]) <= 0.1\n"
+    assert "UNGUARDED_BLANK_THRESHOLD" in _tmdl_codes(text)
+
+
+def test_unguarded_blank_threshold_and_cannot_assess_are_advisory_codes() -> None:
+    """Round-2 review contract: both codes must be in the advisory set the CLI keeps out of exit 1."""
+    assert ADVISORY_TMDL_CODES == {"UNGUARDED_BLANK_THRESHOLD", "BLANK_THRESHOLD_CANNOT_ASSESS"}
+
+
+def test_divide_pattern_inside_a_dax_comment_is_not_flagged() -> None:
+    """An unguarded-looking DIVIDE(...) that only exists inside a `//` comment must not warn."""
+    text = "table S\n\tmeasure 'A' = SUM('S'[x]) // example: DIVIDE([Errors], [Total]) < 0.05\n"
+    assert "UNGUARDED_BLANK_THRESHOLD" not in _tmdl_codes(text)
+
+
+def test_divide_pattern_inside_a_string_literal_is_not_flagged() -> None:
+    """An unguarded-looking DIVIDE(...) that only exists inside a DAX string literal must not warn."""
+    text = "table S\n\tmeasure 'A' = \"example: DIVIDE([Errors], [Total]) < 0.05\"\n"
+    assert "UNGUARDED_BLANK_THRESHOLD" not in _tmdl_codes(text)
+
+
+def test_incomplete_divide_call_is_flagged_cannot_assess_not_silently_clean() -> None:
+    """A DIVIDE( with no matching close paren on the line must be named CANNOT_ASSESS, not skipped."""
+    text = "table S\n\tmeasure 'A' = DIVIDE([Errors], [Total] < 0.05\n"
+    assert find_incomplete_divide_calls("DIVIDE([Errors], [Total] < 0.05")
+    assert "BLANK_THRESHOLD_CANNOT_ASSESS" in _tmdl_codes(text)
+    assert "UNGUARDED_BLANK_THRESHOLD" not in _tmdl_codes(text)
+
+
+def test_multiline_measure_expression_is_flagged_cannot_assess() -> None:
+    """A measure whose expression is deferred to following lines cannot be scanned - say so."""
+    text = "table S\n\tmeasure 'A' =\n\t\tDIVIDE([Errors], [Total]) < 0.05\n\t\tformatString: 0.00\n"
+    assert "BLANK_THRESHOLD_CANNOT_ASSESS" in _tmdl_codes(text)
+
+
+def test_multiline_calculated_column_expression_is_flagged_cannot_assess() -> None:
+    """The same deferred-expression shape on a calculated column, not just a measure."""
+    text = "table S\n\tcolumn 'A' =\n\t\tDIVIDE([Errors], [Total]) < 0.05\n\tcolumn 'B'\n"
+    assert "BLANK_THRESHOLD_CANNOT_ASSESS" in _tmdl_codes(text)
+
+
+def test_genuinely_empty_measure_header_does_not_get_a_cannot_assess_finding() -> None:
+    """A trailing bare `=` immediately followed by another object is EMPTY_EXPRESSION, not deferred."""
+    text = "table S\n\tmeasure 'A' =\n\tmeasure 'B' = SUM('S'[x])\n"
+    codes = _tmdl_codes(text)
+    assert "BLANK_THRESHOLD_CANNOT_ASSESS" not in codes
+    assert "EMPTY_EXPRESSION" in codes
 
 
 def test_full_datamodel_gate_has_no_false_positive_on_valid_model(tmp_path: Path) -> None:
@@ -532,6 +749,67 @@ def test_biff8_gate_reaches_the_cli_exit_code(tmp_path: Path, caplog: pytest.Log
         assert main([str(tmp_path)]) == 1
     assert "BIFF8_XLS_NAVIGATION_KEY" in caplog.text
     assert "BIFF8_XLS_CULTURE" in caplog.text
+
+
+def _model_with_measure(tmp_path: Path, measure_expr_lines: str, *, name: str = "Advisory.SemanticModel") -> Path:
+    """Build the smallest `.SemanticModel` the CLI will scan: one measure, one M partition."""
+    tables = tmp_path / name / "definition" / "tables"
+    tables.mkdir(parents=True)
+    (tables / "S.tmdl").write_text(
+        f"table S\n{measure_expr_lines}"
+        "\tcolumn x\n\t\tdataType: int64\n\n"
+        "\tpartition S = m\n\t\tmode: import\n"
+        '\t\tsource = let Source = #table({"x"}, {{1}}) in Source\n',
+        encoding="utf-8",
+    )
+    return tmp_path / name
+
+
+def test_unguarded_blank_threshold_alone_does_not_fail_the_cli_exit_code(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Round-2 contract point 1/2: this finding is advisory - it must NOT contribute to exit 1."""
+    _model_with_measure(tmp_path, "\tmeasure 'Flag' = DIVIDE([Errors], [Total]) < 0.05\n\t\tformatString: 0.00\n\n")
+    with caplog.at_level(logging.WARNING):
+        assert main([str(tmp_path)]) == 0
+    assert "UNGUARDED_BLANK_THRESHOLD" in caplog.text
+    assert "BLANK()-THRESHOLD ADVISORY" in caplog.text
+    assert "manual verification" in caplog.text.lower() or "manual Tableau/Power BI verification" in caplog.text
+
+
+def test_blank_threshold_cannot_assess_alone_does_not_fail_the_cli_exit_code(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A multi-line expression is unassessed, not clean, but it must still not force exit 1."""
+    _model_with_measure(
+        tmp_path,
+        "\tmeasure 'Flag' =\n\t\tDIVIDE([Errors], [Total]) < 0.05\n\t\tformatString: 0.00\n\n",
+    )
+    with caplog.at_level(logging.WARNING):
+        assert main([str(tmp_path)]) == 0
+    assert "BLANK_THRESHOLD_CANNOT_ASSESS" in caplog.text
+
+
+def test_a_real_structural_error_still_fails_the_cli_exit_code_alongside_an_advisory(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A genuine TMDL structural error must still exit 1 even when an advisory finding is present."""
+    tables = tmp_path / "Blocking.SemanticModel" / "definition" / "tables"
+    tables.mkdir(parents=True)
+    (tables / "S.tmdl").write_text(
+        "table S\n"
+        "\tmeasure 'Flag' = DIVIDE([Errors], [Total]) < 0.05\n"
+        "\t\tformatString: 0.00\n"
+        "\t\tformatString: 0.00\n\n"
+        "\tcolumn x\n\t\tdataType: int64\n\n"
+        "\tpartition S = m\n\t\tmode: import\n"
+        '\t\tsource = let Source = #table({"x"}, {{1}}) in Source\n',
+        encoding="utf-8",
+    )
+    with caplog.at_level(logging.WARNING):
+        assert main([str(tmp_path)]) == 1
+    assert "DUPLICATE_PROPERTY" in caplog.text
+    assert "UNGUARDED_BLANK_THRESHOLD" in caplog.text
 
 
 def test_tmdl_has_no_false_positives_across_the_committed_corpus() -> None:

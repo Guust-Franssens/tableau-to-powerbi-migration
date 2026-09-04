@@ -477,7 +477,7 @@ d4c951f4b08f6f93b8a2f6fd98d84e57eafc6f93763a790cb09df38ec48235a5  6. **Renames a
 464e8caca16f4ef2818f81a254241e589ef03a314751c363dac26918b2a38e61  7. **This checklist applies to fix/iteration passes too, not
 af4b710a7e768caa66b59858add7621482d1ee3ad45654d7bbe428002e785d1c  8. **Model-wide measure-name uniqueness is verified** ~ no t
 f9171464fd1f6640fe01ad1184c1aeccf06c886eedc6ffc5d4fed4dd0fbef6cb  9. **The model is Copilot-ready** ~ every table, column, and
-5b24ef271302b7bec860ebf88cbdb51be23d00c6b93b1a26f4e692301e1be881  10. **Model-level AI instructions are stamped (MANDATORY ~ n
+f5bfe3ad7c7d36a4e98d84a60a66200436371952e9f387e7de2ca0dfb4da88ad  10. **Model-level AI instructions are stamped (MANDATORY ~ n
 44a7f4969b846a6999555f13476d5302869ea17b51256afe8033226dc2859ea4  11. **The model is REFRESHED and the refresh is PERSISTED ~ 
 2142609b3e44f291e6b917cd345d9d596f6aa1949a21dc017cb6b498486721fd  12. **Every TMDL edit you made is declared, and `--tamper` e
 

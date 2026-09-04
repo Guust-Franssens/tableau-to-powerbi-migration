@@ -512,7 +512,7 @@ Add-Check 'Privacy Levels (manual)' 'optional' $true `
 # Since #254 this is load-bearing for a GATE, not only for an optional validator:
 # `check_datamodel.py` runs the TMDL oracle (tools/tmdl_oracle) to ask TmdlSerializer itself whether
 # each model parses. Without `dotnet` the gate reports UNASSESSABLE (exit 3) instead of a pass.
-Add-Cli 'dotnet' 'critical' 'Install the .NET SDK - needed to build/run the TMDL oracle (tools/tmdl_oracle) that check_datamodel.py uses, and the per-example tmdl_validate helpers.'
+Add-Cli 'dotnet' 'critical' 'Install the .NET SDK - needed to build/run the TMDL oracle (tools/tmdl_oracle) that check_datamodel.py uses. Issue #413 retired 4 of the 5 redundant per-example tmdl_validate copies; the quadruple-axis-charts one remains (its unique DAX [bracket]-reference check has no replacement yet) - dotnet is needed for both.'
 
 # --- AMO/TOM client assembly (the pbip-model-refresh skill's progress trace + ImageSave persist) ---
 # `dotnet` being on PATH proves only that a restore COULD run. It does not prove the restored package is

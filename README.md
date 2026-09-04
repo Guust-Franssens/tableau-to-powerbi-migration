@@ -34,6 +34,9 @@ This toolkit turns a Tableau `.twb` or `.twbx` into a local **Fabric Power BI se
 
 ## Quickstart
 
+> **Have one local `.twb` or `.twbx`, hand-supplied Tableau screenshots, and no Tableau
+> Server/Cloud connection?** Follow the **[single-workbook guide](docs/start-with-one-workbook.md)**.
+
 **Clone.** The 16 worked examples under `examples/` are ~91% of the repo's files. If you're mainly
 here for the **agent logic** (agents, scripts, docs), do a *blobless sparse* clone — it never downloads
 the example blobs:

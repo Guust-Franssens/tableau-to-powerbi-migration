@@ -3173,23 +3173,25 @@ def test_path_ceiling_pass_then_relocate_breaches_and_the_pass_said_so(tmp_path:
     """The reviewer's reproduction, committed: one tree, two roots, and the PASS row warned about it.
 
     Both the tree depth and the relocation distance are DERIVED from a calibration scan rather than
-    hard-coded, so the test holds at any temp-directory depth (measured: 107 characters on this
-    Windows runner, ~50 on Linux) without encoding the scanner's ceiling arithmetic. Overshooting the
-    budget by one keeps the binding path one unit over its OWN ceiling, so nothing created here needs
-    Windows long-path support.
+    hard-coded. Providing explicit ceilings sized relative to the runner's temp-directory length makes
+    the test deterministic across arbitrary temp paths (preventing skips when pytest run numbers change
+    temp dir length) without encoding scanner layout internals. Overshooting the budget by one keeps
+    the binding path one unit over its OWN ceiling, so nothing created here needs Windows long-path
+    support.
     """
     short_root = tmp_path / "s"
-    pad = _pad_for_headroom(short_root, tmp_path, headroom=12)
-    if pad is None:
-        pytest.skip("temp directory too deep to build a tree with controlled headroom")
+    root_len = len(str(short_root))
+    ceiling_args = ["--ceiling", str(root_len + 150), "--dir-ceiling", str(root_len + 138)]
+    pad = _pad_for_headroom(short_root, tmp_path, headroom=12, extra_args=ceiling_args)
+    assert pad is not None, "controlled headroom calibration must succeed"
 
-    short = _scan_paths(_deep_tree_with_pad(short_root, pad), tmp_path / "short.json")
+    short = _scan_paths(_deep_tree_with_pad(short_root, pad), tmp_path / "short.json", extra_args=ceiling_args)
     assert short["status"] == "ok", short
     budget, root_length = short["root_budget"], short["root_length"]
     assert budget >= root_length
 
     long_root = tmp_path / ("s" + "x" * (budget - root_length + 1))
-    after = _scan_paths(_deep_tree_with_pad(long_root, pad), tmp_path / "long.json")
+    after = _scan_paths(_deep_tree_with_pad(long_root, pad), tmp_path / "long.json", extra_args=ceiling_args)
 
     assert after["status"] == "over_ceiling", after
     note = cu._path_ceiling_budget_note(  # pylint: disable=protected-access
@@ -3207,29 +3209,32 @@ def _deep_tree_with_pad(root: Path, pad: int) -> Path:
     return unit
 
 
-def _pad_for_headroom(root: Path, scratch: Path, headroom: int) -> int | None:
+def _pad_for_headroom(root: Path, scratch: Path, headroom: int, extra_args: list[str] | None = None) -> int | None:
     """Calibrate the padding that leaves exactly ``headroom`` characters of root budget.
 
     ``root_budget`` falls one-for-one with the padded component, so one measured probe fixes the
     constant without this test knowing the scanner's ceilings or path layout.
     """
-    probe = _scan_paths(_deep_tree_with_pad(root, 1), scratch / "probe.json")
+    probe = _scan_paths(_deep_tree_with_pad(root, 1), scratch / "probe.json", extra_args=extra_args)
     pad = probe["root_budget"] + 1 - probe["root_length"] - headroom
     shutil.rmtree(root, ignore_errors=True)
     return pad if 1 <= pad <= 200 else None
 
 
-def _scan_paths(unit: Path, json_path: Path) -> dict:
+def _scan_paths(unit: Path, json_path: Path, extra_args: list[str] | None = None) -> dict:
     """Run the real scanner and return its machine-readable report."""
+    cmd = [
+        sys.executable,
+        str(REPO_ROOT / "scripts" / "check_path_ceiling.py"),
+        str(unit),
+        "--json",
+        str(json_path),
+        "--quiet",
+    ]
+    if extra_args:
+        cmd.extend(extra_args)
     subprocess.run(
-        [
-            sys.executable,
-            str(REPO_ROOT / "scripts" / "check_path_ceiling.py"),
-            str(unit),
-            "--json",
-            str(json_path),
-            "--quiet",
-        ],
+        cmd,
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
