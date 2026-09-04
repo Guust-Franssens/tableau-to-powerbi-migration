@@ -258,6 +258,36 @@ class Limits(NamedTuple):
 
 DEFAULT_LIMITS = Limits()
 
+#: The Windows pair under its own name, so a caller that means "the ceilings Power BI Desktop
+#: enforces" can say so instead of relying on this module's default happening to be them.
+WINDOWS_LIMITS = DEFAULT_LIMITS
+
+#: Linux/macOS `PATH_MAX` is 4096 INCLUDING the terminating NUL, so 4095 characters are usable.
+#: There is no POSIX counterpart to the Windows file/directory split - that 12-character gap exists
+#: because `CreateDirectory` reserves room for an 8.3 child name - so both ceilings are the same
+#: number here rather than an invented pair. `warn_at` keeps the same 19-character margin the
+#: Windows pair has (259 -> 240).
+POSIX_PATH_CEILING = 4095
+POSIX_LIMITS = Limits(file_ceiling=POSIX_PATH_CEILING, dir_ceiling=POSIX_PATH_CEILING, warn_at=POSIX_PATH_CEILING - 19)
+
+
+def platform_limits(system: str | None = None) -> Limits:
+    """The ceilings that apply to the paths THIS HOST may write - Windows' pair only on Windows.
+
+    ⚠️ **This module's own CLI deliberately does NOT use it.** Its question is "would this bundle
+    survive on a STOCK Windows machine?", which is a Windows question wherever the scan runs, so
+    `scan()` keeps :data:`WINDOWS_LIMITS` unconditionally. A caller whose question is instead "may
+    the host I am writing on create these paths at all" needs the host's own limits - `package_unit`
+    is that caller (blind-review B3): applying 259/247 to an absolute POSIX path refused a
+    297-character `--out` that produced a perfectly valid 332-character package, which is a false
+    refusal because packages are relocatable and the Windows ceiling belongs to the tails, not to
+    somebody's Linux build directory.
+
+    ``system`` accepts an `os.name` value (`"nt"` / `"posix"`) so both branches are testable from
+    either platform; it defaults to the running host.
+    """
+    return WINDOWS_LIMITS if (system or os.name) == "nt" else POSIX_LIMITS
+
 
 def read_git_long_paths(cwd: Path | None = None) -> bool | None:
     """Return the effective `git config core.longpaths`, or None when it cannot be determined.
@@ -311,7 +341,7 @@ def read_long_paths_enabled() -> int | None:
         return None
 
 
-def _utf16_len(value: str) -> int:
+def utf16_len(value: str) -> int:
     """Length in UTF-16 code units - the unit Power BI Desktop actually counts.
 
     Python's `len()` counts CODE POINTS; .NET's `String.Length` counts UTF-16 CODE UNITS, so every
@@ -323,6 +353,17 @@ def _utf16_len(value: str) -> int:
     under `surrogateescape`. Callers must treat that as UNKNOWN, never as clean.
     """
     return len(value.encode("utf-16-le", "strict")) // 2
+
+
+def _utf16_len(value: str) -> int:
+    """The historic private spelling of :func:`utf16_len`, kept because callers pin it.
+
+    ``tests/test_check_path_ceiling.py`` names it directly, and issue #476 needed the same
+    measurement from `package_unit.py` - which is a different module, so the private name stopped
+    being honest. Renaming a length helper is exactly how a repo ends up with two slightly different
+    length rules, so the old name delegates rather than duplicating the encode.
+    """
+    return utf16_len(value)
 
 
 def _safe_repr(value: str) -> str:
@@ -341,7 +382,7 @@ def collect(root: Path) -> tuple[list[dict], list[dict]]:
     unknown: list[dict] = []
 
     try:
-        root_units = _utf16_len(root_str)
+        root_units = utf16_len(root_str)
     except UnicodeEncodeError as exc:
         return [], [{"path": _safe_repr(root_str), "reason": f"root is not representable in UTF-16: {exc}"}]
 
@@ -357,7 +398,7 @@ def collect(root: Path) -> tuple[list[dict], list[dict]]:
         for name, kind in [(d, KIND_DIR) for d in dirnames] + [(f, KIND_FILE) for f in filenames]:
             full = os.path.join(dirpath, name)
             try:
-                length = _utf16_len(full)
+                length = utf16_len(full)
             except (UnicodeEncodeError, ValueError) as exc:
                 # An undecodable POSIX filename, or any name UTF-16 cannot represent. Unmeasurable
                 # is NOT clean - this is the failure shape this repo keeps re-introducing.
