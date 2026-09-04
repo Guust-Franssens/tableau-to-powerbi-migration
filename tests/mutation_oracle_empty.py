@@ -825,8 +825,13 @@ import capture_tableau_oracle as o
 o.certify_csv = certify
 """,
     ),
+    # ⚠️ The anchor here is the SUBSET assertion, not the end-to-end text/plain capture, and that is
+    # not a preference. `UNASSESSABLE_REASONS` has no production consumer -- it is read only by tests
+    # (`test_capture_tableau_oracle.py:1339` and `:1574`) -- so narrowing it cannot change what a
+    # capture records, and an end-to-end anchor CANNOT observe this mutation however thorough it
+    # looks. Measured: with the capture anchor it scored SURVIVED at hits=0.
     "the-unspecific-verdict-is-not-an-unassessable-reason": (
-        (f"{ORACLE}::test_text_plain_error_text_is_never_certified_as_CSV",),
+        (f"{ORACLE}::test_every_uncertified_verdict_has_an_authored_reason_and_none_is_a_refusal",),
         """
 import tableau_oracle_manifest as m
 # A new verdict added to the certifier and NOT to the verdict layer's reason set. The view is still
@@ -987,10 +992,17 @@ def log(unassessable, redactor):
     buffer = io.StringIO()
     handler = logging.StreamHandler(buffer)
     m.LOG.addHandler(handler)
+    # ⚠️ `propagate = False` is what makes this a REPLACEMENT rather than an ADDITION. Without it the
+    # original banner still reaches the test's caplog handler, the stripped copy is merely appended,
+    # and an `in warnings` assertion passes on the original -- scoring SURVIVED while looking like a
+    # faithful revert. Measured: that is exactly how this mutation failed before.
+    propagate = m.LOG.propagate
+    m.LOG.propagate = False
     try:
         _orig(unassessable, redactor)
     finally:
         m.LOG.removeHandler(handler)
+        m.LOG.propagate = propagate
     text = buffer.getvalue().replace(m.UNASSESSABLE_NO_CERTIFICATION, "")
     if text.strip():
         m.LOG.warning("%s", text)
@@ -998,9 +1010,7 @@ m._log_unassessable = log
 """,
     ),
     "the-packaged-legacy-capture-keeps-its-numeric-path": (
-        (
-            f"{GATES}::test_a_legacy_uncertified_capture_earns_no_numeric_evidence_end_to_end",
-        ),
+        (f"{GATES}::test_a_legacy_uncertified_capture_earns_no_numeric_evidence_end_to_end",),
         """
 import tableau_oracle_manifest as m
 _orig = m.unassessable_reason
