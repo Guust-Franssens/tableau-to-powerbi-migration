@@ -97,7 +97,10 @@ was reported as a clean merge. Measured through the CLI: `{}` and a schema-carry
 modes now go through one validator, so an unassessable input is an input REFUSAL (exit 2) rather
 than the "clean" bucket: a JSON object, carrying `schema` `tableau-oracle/1`, with a `views` list
 (EMPTY is legitimate -- a capture that selected nothing; ABSENT is a damaged file) whose every
-record is an object carrying a `view_luid`.
+record is an object carrying a `view_luid`, and every field this script reads carries the type it
+reads it as (`_MANIFEST_TYPES`/`_VIEW_TYPES`/`_LEG_TYPES` -- one declared table, so the next
+unvalidated field is not discovered by a crash: `view_luid: 123` was truthy and merged CLEAN, while
+`view_luid: {...}` and `image: "junk"` crashed at exit 1).
 
 That last one is data loss rather than a missing field, which is why it refuses instead of being
 bucketed like a missing `workbook_luid`: merging is keyed on view identity, so records without one
@@ -280,6 +283,16 @@ class UnidentifiedCaptureView(ValueError):
     and this repository already refuses to build an artifact stem from anything but a validated LUID
     (``capture_tableau_oracle.artifact_stem``). The real capture writer always stamps ``view_luid``
     (``view_luid = view["id"]``), so a manifest without one is damaged or hand-edited, never routine.
+
+    ⚠️ **A WRONG-TYPED identity is the same defect and was the worse half of it.** The first version of
+    this guard tested truthiness, which answers "is there something there" rather than "is it an
+    identity". Measured through the CLI afterwards:
+
+    * ``view_luid: 123`` -> truthy and hashable, so it bucketed, merged and reported a **clean** run;
+    * ``view_luid: {"nested": "id"}`` / ``["a"]`` -> truthy and UNHASHABLE, ``TypeError`` at exit 1;
+    * ``view_luid: true`` -> truthy, merged, and grouped under the bucket key ``True``.
+
+    :func:`_is_view_identity` types it instead: a non-empty string, and nothing else.
     """
 
 
@@ -467,10 +480,146 @@ def index_destinations(migrations_root: Path) -> tuple[dict[str, list[Path]], in
     return index, len(folders)
 
 
+@dataclass(frozen=True)
+class _Typed:
+    """One field this script READS out of a capture manifest, and the JSON type it must then carry.
+
+    ``items`` types the elements of a list field; ``None`` means the elements are not read.
+    """
+
+    name: str
+    kind: type
+    items: type | None = None
+
+
+# What a JSON value's Python type is CALLED in a refusal message. An operator reading it is looking at
+# a `.json` file, so `dict`/`str` name the wrong vocabulary for the thing they will go and edit.
+_JSON_TYPE_NAMES: dict[type, str] = {
+    bool: "boolean",
+    dict: "object",
+    float: "number",
+    int: "number",
+    list: "array",
+    str: "string",
+    type(None): "null",
+}
+
+# ------------------------------------------------------------------- the CONSUMED surface, declared
+# ⚠️ ONE table, applied ONCE, instead of one predicate per newly-discovered field. Three review rounds
+# added a guard for exactly the field that had just been reported -- `views`, then `view_luid`, then
+# `image.path` -- and each round left the NEXT unvalidated field crashing at exit 1 (the "grouped what
+# it could" code) or, worse, passing: a `view_luid` of `123` is truthy, so it bucketed, merged and
+# reported a CLEAN merge on a manifest whose identities are not identities.
+#
+# These entries are not a sample. They are every field this module reads out of manifest-sourced data,
+# and `tests/test_group_oracle_multi_batch.py::test_the_type_table_covers_EVERY_manifest_field_this_module_reads`
+# fails if a new consumer is added without either typing it here or declaring why its type cannot
+# matter -- which is what makes "no fourth round" checkable rather than merely intended.
+#
+# ABSENT and JSON `null` are NOT type errors. The real writer emits `"workbook_luid": null` and
+# `"view_name": null` whenever the REST response omitted them (`capture_tableau_oracle.py`), and every
+# consumer below already handles the absence. This table types what is PRESENT; it makes nothing
+# required. The one required field is `view_luid`, whose absence destroys a record rather than
+# degrading it -- see :class:`UnidentifiedCaptureView`.
+_MANIFEST_TYPES: tuple[_Typed, ...] = (
+    # Sorted against other batches' stamps to order the merge; a non-string breaks the comparison.
+    _Typed("captured_at", str),
+    # Normalized (`.strip().casefold()`) for the cross-tenant identity check.
+    _Typed("server", str),
+    _Typed("site", str),
+    # `sorted()` over mixed element types raises, and the union feeds the render-intent report.
+    _Typed("requested_renders", list, items=str),
+)
+_VIEW_TYPES: tuple[_Typed, ...] = (
+    # A BUCKET KEY. `group_views` does `buckets.setdefault(view.get("workbook_luid") or "", [])`, so an
+    # unhashable value crashed at exit 1 -- the same shape as the `view_luid` finding one field over.
+    _Typed("workbook_luid", str),
+    # A bucket key too (`workbook_names`), and `normalize()` does string work on it.
+    _Typed("workbook_name", str),
+    _Typed("captured_at", str),
+    _Typed("updated_at", str),
+)
+_LEG_TYPES: tuple[_Typed, ...] = (
+    _Typed("status", str),
+    # Joined onto a Path (`root / relative`) and read for its `.name`. Measured: an object-valued
+    # `path` raised `TypeError: unsupported operand type(s) for /` at exit 1.
+    _Typed("path", str),
+)
+
+
+def _json_type(value: Any) -> str:
+    """What ``value`` is called in JSON, for a message an operator can act on."""
+    return _JSON_TYPE_NAMES.get(type(value), type(value).__name__)
+
+
+def _refuse_untyped(path: Path, where: str, mapping: dict[str, Any], specs: tuple[_Typed, ...]) -> None:
+    """Refuse ``mapping`` if any field it CARRIES has a type this script cannot consume.
+
+    Absent and ``null`` are skipped: see :data:`_MANIFEST_TYPES` for why that is the writer's own
+    shape rather than leniency. Raising here rather than at the consumer is the whole point -- a
+    ``try``/``except`` around the consumer would convert a crash into a refusal without ever
+    establishing the shape, so the next unvalidated field would simply crash somewhere new.
+    """
+    for spec in specs:
+        value = mapping.get(spec.name)
+        if value is None:
+            continue
+        if not isinstance(value, spec.kind):
+            raise MalformedCaptureManifest(
+                f"{path}: {where} carries {spec.name!r} as a JSON {_json_type(value)}, not a "
+                f"{_JSON_TYPE_NAMES[spec.kind]}. This script reads that field, so a value of the wrong "
+                f"type is not a cosmetic difference -- it either crashes the merge or, when it happens "
+                f"to be usable, merges on a value that is not what it claims to be. Re-capture with "
+                f"capture_tableau_oracle.py."
+            )
+        if spec.items is None:
+            continue
+        wrong = [index for index, item in enumerate(value) if not isinstance(item, spec.items)]
+        if wrong:
+            raise MalformedCaptureManifest(
+                f"{path}: {where} carries {spec.name!r} with {len(wrong)} element(s) that are not "
+                f"{_JSON_TYPE_NAMES[spec.items]}s (position(s) {', '.join(str(i) for i in wrong[:8])})."
+            )
+
+
+def _refuse_untyped_views(path: Path, views: list[Any]) -> None:
+    """Type every view record and every render leg it carries, by POSITION only.
+
+    Legs are swept from :data:`RENDER_LEGS` rather than named here, so a render tier added to the
+    capture is validated the day it is added instead of the round after it crashes.
+    """
+    for index, view in enumerate(views):
+        _refuse_untyped(path, f"view {index}", view, _VIEW_TYPES)
+        for kind, _sub in RENDER_LEGS:
+            leg = view.get(kind)
+            if leg is None:
+                continue
+            if not isinstance(leg, dict):
+                raise MalformedCaptureManifest(
+                    f"{path}: view {index}'s {kind!r} leg is a JSON {_json_type(leg)}, not an object. "
+                    f"A leg is read for its status and its path, so a scalar there is an unassessable "
+                    f"record, not an empty one -- measured, it raised AttributeError at exit 1."
+                )
+            _refuse_untyped(path, f"view {index}'s {kind!r} leg", leg, _LEG_TYPES)
+
+
+def _is_view_identity(value: Any) -> bool:
+    """Is ``value`` something the merge can key a view on? A NON-EMPTY STRING, and nothing else.
+
+    ⚠️ Truthiness is not the question, and answering it was the third round of this same finding.
+    ``view_luid = 123`` is truthy, hashable and therefore merged, grouped and reported at exit 0 --
+    a clean verdict on a manifest whose identities are not identities. ``{...}`` and ``[...]`` are
+    truthy AND unhashable, so they crashed at exit 1 instead. Three inputs, three different wrong
+    answers, one missing type check. The writer stamps ``view_luid = view["id"]``, a REST LUID
+    string, so a non-string is damaged or hand-edited and never routine.
+    """
+    return isinstance(value, str) and bool(value.strip())
+
+
 def _validate_manifest(path: Path, payload: Any) -> dict[str, Any]:
     """Refuse anything that parsed as JSON but is not a capture manifest this run can merge.
 
-    Four checks, in the order a reader would ask them, and each one is a measured fail-open rather
+    Six checks, in the order a reader would ask them, and each one is a measured fail-open rather
     than defensive decoration -- see :class:`MalformedCaptureManifest` and
     :class:`UnidentifiedCaptureView` for the reproductions.
 
@@ -485,6 +634,10 @@ def _validate_manifest(path: Path, payload: Any) -> dict[str, Any]:
        statement about the data. Absent is not empty -- one is a damaged file, the other is evidence.
     4. **Every view identified.** Positions only in the message: a view NAME is server-supplied
        response data, and this repository does not put that in a filename or, therefore, in a log.
+    5. **Every field this script READS has the type it reads it as** (:data:`_MANIFEST_TYPES`,
+       :data:`_VIEW_TYPES`, :data:`_LEG_TYPES`). Declared once and applied once, because the previous
+       three rounds each added a predicate for one field and left the next one to be discovered by a
+       crash.
 
     Returns the payload so the caller reads as one expression; raises otherwise.
     """
@@ -516,16 +669,19 @@ def _validate_manifest(path: Path, payload: Any) -> dict[str, Any]:
             f"{path} holds {len(unreadable)} view record(s) that are not JSON objects "
             f"(position(s) {', '.join(str(i) for i in unreadable[:8])}). Refused rather than skipped."
         )
-    anonymous = [index for index, view in enumerate(views) if not view.get("view_luid")]
+    anonymous = [index for index, view in enumerate(views) if not _is_view_identity(view.get("view_luid"))]
     if anonymous:
         raise UnidentifiedCaptureView(
-            f"{path} holds {len(anonymous)} of {len(views)} view record(s) with no view_luid "
-            f"(position(s) {', '.join(str(i) for i in anonymous[:8])}). Merging is keyed on view "
+            f"{path} holds {len(anonymous)} of {len(views)} view record(s) with no usable view_luid "
+            f"-- absent, empty, or not a JSON string -- (position(s) "
+            f"{', '.join(str(i) for i in anonymous[:8])}). Merging is keyed on view "
             f"identity, so records without one collapse onto a single bucket and all but one are "
             f"discarded silently -- measured: two views in, one view out, exit 0. A view name is not an "
-            f"identity. Re-capture with capture_tableau_oracle.py, which stamps view_luid from the "
-            f"server's own view id."
+            f"identity, and neither is a number that happens to be truthy. Re-capture with "
+            f"capture_tableau_oracle.py, which stamps view_luid from the server's own view id."
         )
+    _refuse_untyped(path, "the manifest", payload, _MANIFEST_TYPES)
+    _refuse_untyped_views(path, views)
     return payload
 
 

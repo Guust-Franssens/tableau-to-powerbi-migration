@@ -14,6 +14,7 @@ with a failure from a batch that only covered some views.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -1760,3 +1761,263 @@ def test_a_legitimate_multi_batch_merge_is_UNAFFECTED_by_the_new_validation(tmp_
     grouped = _grouped(migrations)
     assert grouped["views"][0]["image"]["status"] == "ok"
     assert grouped["views"][0]["image"]["source_batch"] == "airborne-services-retry2"
+
+
+# ------------------------------------------------- review round 8: an identity is a TYPE, not a
+# truthiness. Same fail-open class as rounds 7's two findings and the THIRD time on this branch, so
+# the fix is a declared table of the fields this script consumes rather than a fourth predicate.
+#
+# Measured through the CLI on b310c37, with a matching destination folder present:
+#
+#     view_luid = 123                -> exit 0, "1 grouped"      <- truthy, hashable, reported CLEAN
+#     view_luid = {"nested": "id"}   -> exit 1, TypeError: unhashable type: 'dict'
+#     view_luid = ["a"] / true       -> exit 1 / merged
+#     image     = "junk"             -> exit 1, AttributeError: 'str' object has no attribute 'get'
+#     image.path= {"a": 1}           -> exit 1, TypeError: unsupported operand type(s) for /
+#
+# Exit 0 is the dangerous one; exit 1 is "grouped what it could", which is also not a refusal. The
+# documented input-refusal code is 2 for all of them.
+
+ABSENT = object()
+
+
+def _view_luid_capture(root: Path, luid) -> Path:
+    """One otherwise-perfect capture whose single view carries ``luid`` as its identity."""
+    view = _view(LUID, "Daily Monitoring", data="ok", image=None, captured_at=STAMP)
+    del view["data"]["path"]
+    if luid is ABSENT:
+        del view["view_luid"]
+    else:
+        view["view_luid"] = luid
+    payload = json.dumps({"schema": "tableau-oracle/1", "captured_at": STAMP, "views": [view]})
+    return _raw_capture(root, "cap", payload)
+
+
+@pytest.mark.parametrize(
+    "luid",
+    [
+        pytest.param(123, id="number"),
+        pytest.param({"nested": "id"}, id="object"),
+        pytest.param(["a"], id="array"),
+        pytest.param(True, id="boolean"),
+        pytest.param(0, id="zero"),
+        pytest.param("", id="empty-string"),
+        pytest.param("   ", id="whitespace"),
+        pytest.param(ABSENT, id="absent"),
+    ],
+)
+def test_a_view_luid_that_is_not_a_NON_EMPTY_STRING_is_refused_at_2(tmp_path, monkeypatch, luid):
+    """⚠️ ``123`` is the one that matters: truthy, hashable, merged, and reported as a clean run.
+
+    The other shapes crashed at 1 instead, which is a different wrong answer to the same missing
+    question. A LUID is a string (`capture_tableau_oracle.py` stamps `view_luid = view["id"]`), so
+    every value here is damaged input and every one of them is an input refusal.
+    """
+    capture = _view_luid_capture(tmp_path / "run", luid)
+    migrations = _migrations(tmp_path)
+    with pytest.raises(grp.UnidentifiedCaptureView):
+        grp.run(capture, migrations, dry_run=True)
+    assert _cli(capture, migrations, monkeypatch) == 2
+
+
+def test_a_wrong_TYPED_view_luid_is_the_identity_refusal_not_a_generic_shape_one(tmp_path):
+    """It is the same defect as an absent one -- WHICH view this is cannot be established -- so it must
+    reach the same named exception, or a consumer routing on the type sees two unrelated problems."""
+    with pytest.raises(grp.UnidentifiedCaptureView) as excinfo:
+        grp.load_manifest(_view_luid_capture(tmp_path / "run", 123))
+    assert not isinstance(excinfo.value, grp.MalformedCaptureManifest)
+    assert "123" not in str(excinfo.value), "the value is input data and does not belong in a log line"
+
+
+# ------------------------------------------------------------------ the CONSUMED leg/path structures
+
+
+def _legged_capture(root: Path, leg: str, value) -> Path:
+    """A capture whose single view carries ``leg`` verbatim as ``value``."""
+    view = _view(LUID, "Daily Monitoring", data="ok", image=None, captured_at=STAMP)
+    del view["data"]["path"]
+    view[leg] = value
+    payload = json.dumps({"schema": "tableau-oracle/1", "captured_at": STAMP, "views": [view]})
+    return _raw_capture(root, "cap", payload)
+
+
+@pytest.mark.parametrize("kind", [kind for kind, _sub in grp.RENDER_LEGS])
+def test_a_render_leg_that_is_a_SCALAR_is_refused_rather_than_crashing(tmp_path, monkeypatch, kind):
+    """`image: "junk"` died on `.get` inside `_leg_is_promotable` at exit 1.
+
+    ⚠️ Parametrized over `RENDER_LEGS` rather than over the two legs that were reported, so a render
+    tier added to the capture is covered the day it is added -- the previous rounds each fixed the one
+    field that had just been found.
+    """
+    capture = _legged_capture(tmp_path / "run", kind, "junk")
+    migrations = _migrations(tmp_path)
+    with pytest.raises(grp.MalformedCaptureManifest):
+        grp.run(capture, migrations, dry_run=True)
+    assert _cli(capture, migrations, monkeypatch) == 2
+
+
+def test_an_OBJECT_valued_leg_path_is_refused_rather_than_joined_onto_a_Path(tmp_path, monkeypatch):
+    """`root / {"a": 1}` raised `TypeError: unsupported operand type(s) for /: 'WindowsPath' and 'dict'`."""
+    capture = _legged_capture(tmp_path / "run", "image", {"status": "ok", "path": {"a": 1}})
+    migrations = _migrations(tmp_path)
+    with pytest.raises(grp.MalformedCaptureManifest) as excinfo:
+        grp.run(capture, migrations, dry_run=True)
+    assert "path" in str(excinfo.value)
+    assert _cli(capture, migrations, monkeypatch) == 2
+
+
+def test_a_leg_STATUS_that_is_not_a_string_is_refused_too(tmp_path, monkeypatch):
+    """The other consumed leg field. It is compared with `== "ok"`, so it never crashed -- it silently
+    failed every promotion test instead, which is a leg quietly downgraded rather than reported."""
+    capture = _legged_capture(tmp_path / "run", "image", {"status": ["ok"], "path": "images/x.png"})
+    migrations = _migrations(tmp_path)
+    with pytest.raises(grp.MalformedCaptureManifest):
+        grp.run(capture, migrations, dry_run=True)
+    assert _cli(capture, migrations, monkeypatch) == 2
+
+
+# ------------------------------------------- the table itself: every entry rejects, and it is CLOSED
+
+
+def _typed_capture(root: Path, scope: str, field: str, value) -> Path:
+    """A capture with ``field`` set to ``value`` at manifest, view or leg scope."""
+    view = _view(LUID, "Daily Monitoring", data="ok", image=None, captured_at=STAMP)
+    del view["data"]["path"]
+    manifest = {"schema": "tableau-oracle/1", "captured_at": STAMP, "views": [view]}
+    if scope == "manifest":
+        manifest[field] = value
+    elif scope == "view":
+        view[field] = value
+    else:
+        view["data"][field] = value
+    return _raw_capture(root, "cap", json.dumps(manifest))
+
+
+@pytest.mark.parametrize(
+    ("scope", "spec"),
+    [("manifest", s) for s in grp._MANIFEST_TYPES]
+    + [("view", s) for s in grp._VIEW_TYPES]
+    + [("leg", s) for s in grp._LEG_TYPES],
+    ids=lambda item: item.name if isinstance(item, grp._Typed) else item,
+)
+def test_EVERY_field_in_the_type_table_is_actually_enforced(tmp_path, monkeypatch, scope, spec):
+    """⚠️ The table is the fix, so a table entry nothing enforces would be the fix failing silently.
+
+    Parametrized over the declared tuples themselves: adding a field gets a rejection test for free,
+    and an entry the validator forgets to apply fails here rather than in a fourth review round.
+    """
+    wrong = {"a": 1} if spec.kind is not dict else "junk"
+    capture = _typed_capture(tmp_path / "run", scope, spec.name, wrong)
+    migrations = _migrations(tmp_path)
+    with pytest.raises(grp.MalformedCaptureManifest) as excinfo:
+        grp.run(capture, migrations, dry_run=True)
+    assert spec.name in str(excinfo.value)
+    assert _cli(capture, migrations, monkeypatch) == 2
+
+
+def test_a_LIST_field_is_typed_by_its_ELEMENTS_not_only_by_being_a_list(tmp_path, monkeypatch):
+    """`sorted(["png", 7])` raises. A list of the wrong things is not a list of the right ones."""
+    capture = _typed_capture(tmp_path / "run", "manifest", "requested_renders", ["png", 7])
+    migrations = _migrations(tmp_path)
+    with pytest.raises(grp.MalformedCaptureManifest) as excinfo:
+        grp.run(capture, migrations, dry_run=True)
+    assert "position(s) 1" in str(excinfo.value)
+    assert _cli(capture, migrations, monkeypatch) == 2
+
+
+# The manifest field names this module reads that the type table deliberately does NOT carry, each
+# with the reason its type cannot decide a verdict. ⚠️ Enumerated with a reason rather than a bare
+# skip-list: an unexplained exemption is how the next unvalidated field gets added.
+UNTYPED_ON_PURPOSE = {
+    # Container shape, refused by its own explicit check with its own message and reproduction.
+    "schema": "matched for equality against CAPTURE_SCHEMA",
+    "views": "must be a list of objects; checked before anything is read out of it",
+    "view_luid": "identity, typed by _is_view_identity and refused as UnidentifiedCaptureView",
+    "data": "a render leg; legs are swept from RENDER_LEGS, so naming them here would be a second list",
+    # Read from THIS script's own output, never from an input capture manifest.
+    "merge_order_ties": "written by merge_batches, read back for the report",
+    "merge_stale_candidates": "written by merge_batches, read back for the report",
+    "requested_renders_by_batch": "written by _merge_render_intent",
+    "source_batch": "stamped by _merge_one_view onto every surviving leg before anything reads it",
+    "refusal": "an outcome record built by this script",
+    # Read, but no JSON type it could carry changes the answer.
+    "reference_required": "read for truthiness only -- every JSON type is meaningfully truthy or not",
+    "rest_api_version": "copied verbatim into the per-workbook manifest, never interpreted",
+    "row_count": "compared with == 0, which is total over every JSON type",
+}
+
+
+def test_the_type_table_covers_EVERY_manifest_field_this_module_reads(tmp_path):
+    """⚠️ THE stop rule, and the reason there should not be a fourth round of this finding.
+
+    Rounds 6, 7 and 8 each added a guard for the one field that had just been reported, and each left
+    the next one to be discovered by a crash. This closes the surface instead of chasing it: every
+    `.get("literal")` in the module must be typed by the table, or exempted above WITH a reason.
+
+    It is a source census, which is machinery, and it earns that under the repo's escalation rule
+    because the ordinary tests cannot observe the defect it exists for -- a field added tomorrow has
+    no test today, and its absence from the table is invisible to every other assertion here.
+    """
+    source = Path(grp.__file__).read_text(encoding="utf-8")
+    read = set(re.findall(r'\.get\(\s*"([a-z_0-9]+)"', source))
+    typed = {spec.name for spec in grp._MANIFEST_TYPES + grp._VIEW_TYPES + grp._LEG_TYPES}
+
+    unaccounted = sorted(read - typed - set(UNTYPED_ON_PURPOSE))
+    assert not unaccounted, (
+        f"{unaccounted} are read out of manifest-shaped data and are neither typed in the table nor "
+        f"exempted with a reason. Add them to _MANIFEST_TYPES/_VIEW_TYPES/_LEG_TYPES, or to "
+        f"UNTYPED_ON_PURPOSE saying why no JSON type they could carry changes the verdict."
+    )
+    stale = sorted((typed | set(UNTYPED_ON_PURPOSE)) - read)
+    assert not stale, f"{stale} are declared but no longer read -- the table describes code that moved"
+    assert tmp_path.exists(), "fixture kept so this reads as an ordinary test, not a lint"
+
+
+# --------------------------------------------------- round 8: NEGATIVE CONTROLS (over-correction)
+
+
+def test_a_REAL_capture_manifest_still_merges_completely(tmp_path):
+    """The positive control that matters: a genuine UUID-string `view_luid`, three batches, no change.
+
+    `capture_tableau_oracle.py:637` stamps `view_luid = view["id"]` -- a REST LUID string -- so this
+    is the shape every real capture has, and the validator must be invisible to it.
+    """
+    batches = _three_batches(tmp_path)
+    migrations = _migrations(tmp_path)
+
+    assert grp.run(batches, migrations, dry_run=False) == 0
+
+    grouped = _by_luid(_grouped(migrations))
+    assert grouped[LUID]["image"]["status"] == "ok"
+    assert grouped[LUID]["image"]["source_batch"] == "airborne-services-retry2"
+    assert grouped[OTHER]["data"]["status"] == "ok"
+
+
+def test_the_writers_OWN_nulls_are_not_type_errors(tmp_path):
+    """⚠️ The most likely over-correction, and it would break every real capture.
+
+    `capture_tableau_oracle.py` writes `"workbook_luid": workbook.get("id")` and
+    `"view_name": view.get("name")`, so JSON `null` is what a REST response that omitted them
+    produces. Absent and null are the SAME statement -- "not recorded" -- and both are already
+    handled by every consumer. Typing what is present must not make anything required.
+    """
+    view = _view(LUID, "Daily Monitoring", data="ok", image=None, captured_at=STAMP, updated_at=None)
+    del view["data"]["path"]
+    view["workbook_luid"] = None
+    view["workbook_name"] = None
+    payload = json.dumps({"schema": "tableau-oracle/1", "captured_at": STAMP, "views": [view]})
+    capture = _raw_capture(tmp_path / "run", "cap", payload)
+
+    assert grp.load_manifest(capture)["views"][0]["view_luid"] == LUID
+    assert grp.run(capture, _migrations(tmp_path), dry_run=True) == 1, "bucketed and reported, not refused"
+
+
+def test_a_FAILED_leg_carrying_no_path_is_still_a_legitimate_record(tmp_path):
+    """A capture that failed writes `{"status": "transient", "error": ..., "detail": ...}` with no
+    `path` at all. Requiring `path` on a leg would refuse every unsuccessful capture ever taken."""
+    view = _view(LUID, "Daily Monitoring", data="transient", image="transient", captured_at=STAMP)
+    payload = json.dumps({"schema": "tableau-oracle/1", "captured_at": STAMP, "views": [view]})
+    capture = _raw_capture(tmp_path / "run", "cap", payload)
+
+    assert grp.load_manifest(capture)["views"][0]["data"]["status"] == "transient"
+    assert grp.run(capture, _migrations(tmp_path), dry_run=True) == 0, "grouped, not refused"

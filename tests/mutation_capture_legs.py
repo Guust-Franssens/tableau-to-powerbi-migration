@@ -1676,6 +1676,133 @@ def validate(path, payload):
 g._validate_manifest = validate
 """,
     ),
+    # ------------------------- review round 8: AN IDENTITY IS A TYPE, NOT A TRUTHINESS. The third
+    # round of the same fail-open class, so the mutations below break the DECLARED TABLE rather than
+    # any single predicate -- and the two over-corrections after them are the shapes a table makes
+    # easy to get wrong: refusing `null` (which the real writer emits) and requiring a leg `path`
+    # (which no failed capture has).
+    "view_luid-is-tested-for-TRUTHINESS-not-type": (
+        (
+            "tests/test_group_oracle_multi_batch.py::test_a_view_luid_that_is_not_a_NON_EMPTY_STRING_is_refused_at_2",
+            "tests/test_group_oracle_multi_batch.py"
+            "::test_a_wrong_TYPED_view_luid_is_the_identity_refusal_not_a_generic_shape_one",
+        ),
+        """
+import group_oracle_by_workbook as g
+def identity(value):
+    # THE defect, verbatim: `not view.get("view_luid")` answered "is there something there" instead
+    # of "is it an identity". `123` is truthy and hashable, so it bucketed, merged and reported a
+    # CLEAN run (measured: exit 0, "1 grouped"); `{...}` and `[...]` are truthy and unhashable and
+    # crashed at exit 1. Every shape check above this line still passes, which is why the manifest
+    # reads as well-formed right up to the fold.
+    _probe("view_luid-is-tested-for-TRUTHINESS-not-type")
+    return bool(value)
+g._is_view_identity = identity
+""",
+    ),
+    "the-consumed-leg-structures-are-not-typed": (
+        (
+            "tests/test_group_oracle_multi_batch.py::test_a_render_leg_that_is_a_SCALAR_is_refused_rather_than_crashing",
+            "tests/test_group_oracle_multi_batch.py"
+            "::test_an_OBJECT_valued_leg_path_is_refused_rather_than_joined_onto_a_Path",
+        ),
+        """
+import group_oracle_by_workbook as g
+def views(path, records):
+    # The second half of the finding: identity typed, legs still trusted. `image: "junk"` died on
+    # `.get` inside `_leg_is_promotable` and an object-valued `image.path` died on `root / path` --
+    # both at exit 1, the "grouped what it could" code, for input that was never grouped.
+    _probe("the-consumed-leg-structures-are-not-typed")
+    return None
+g._refuse_untyped_views = views
+""",
+    ),
+    "the-type-table-is-declared-but-never-applied": (
+        ("tests/test_group_oracle_multi_batch.py::test_EVERY_field_in_the_type_table_is_actually_enforced",),
+        """
+import group_oracle_by_workbook as g
+def untyped(path, where, mapping, specs):
+    # The failure mode a DECLARATIVE fix has that a predicate does not: a table that reads as
+    # complete and is enforced nowhere. Every field name still appears in the source, so the census
+    # test and every docstring stay green while nothing is actually checked.
+    _probe("the-type-table-is-declared-but-never-applied")
+    return None
+g._refuse_untyped = untyped
+""",
+    ),
+    "a-list-field-is-typed-only-as-a-LIST": (
+        (
+            "tests/test_group_oracle_multi_batch.py::test_a_LIST_field_is_typed_by_its_ELEMENTS_not_only_by_being_a_list",
+        ),
+        """
+import group_oracle_by_workbook as g
+_orig = g._refuse_untyped
+def untyped(path, where, mapping, specs):
+    # The half-measure: check the container, trust the contents. `sorted(["png", 7])` raises, so
+    # `requested_renders` with one wrong element still reaches exit 1 through the render-intent union.
+    _probe("a-list-field-is-typed-only-as-a-LIST")
+    return _orig(path, where, mapping, tuple(g._Typed(s.name, s.kind) for s in specs))
+g._refuse_untyped = untyped
+""",
+    ),
+    "JSON-null-is-treated-as-a-type-error": (
+        ("tests/test_group_oracle_multi_batch.py::test_the_writers_OWN_nulls_are_not_type_errors",),
+        """
+import group_oracle_by_workbook as g
+def untyped(path, where, mapping, specs):
+    # THE over-correction, and it would refuse real captures rather than damaged ones: the writer
+    # emits `"workbook_luid": workbook.get("id")`, so JSON null is what a REST response that omitted
+    # the field produces. "Present but null" and "absent" are one statement, and only one of them
+    # would still be accepted here.
+    _probe("JSON-null-is-treated-as-a-type-error")
+    for spec in specs:
+        value = mapping.get(spec.name)
+        if value is not None and not isinstance(value, spec.kind):
+            raise g.MalformedCaptureManifest(f"{path}: {where} carries {spec.name!r} wrongly typed")
+        if spec.name in mapping and mapping[spec.name] is None:
+            raise g.MalformedCaptureManifest(f"{path}: {where} carries {spec.name!r} as null")
+g._refuse_untyped = untyped
+""",
+    ),
+    "a-leg-is-required-to-carry-a-path": (
+        ("tests/test_group_oracle_multi_batch.py::test_a_FAILED_leg_carrying_no_path_is_still_a_legitimate_record",),
+        """
+import group_oracle_by_workbook as g
+_orig = g._refuse_untyped_views
+def views(path, records):
+    # The second over-correction: typing a field slides easily into requiring it. A capture that
+    # failed writes `{"status": "transient", "error": ..., "detail": ...}` with no `path` at all, so
+    # this refuses every unsuccessful capture ever taken -- the exact evidence the grouping exists to
+    # keep visible.
+    _probe("a-leg-is-required-to-carry-a-path")
+    _orig(path, records)
+    for index, view in enumerate(records):
+        for kind, _sub in g.RENDER_LEGS:
+            leg = view.get(kind)
+            if isinstance(leg, dict) and "path" not in leg:
+                raise g.MalformedCaptureManifest(f"{path}: view {index}'s {kind} leg carries no path")
+g._refuse_untyped_views = views
+""",
+    ),
+    "control-untyped-field-nobody-reads": (
+        (
+            "tests/test_group_oracle_multi_batch.py::test_a_legitimate_multi_batch_merge_is_UNAFFECTED_by_the_new_validation",
+        ),
+        """
+import group_oracle_by_workbook as g
+_orig = g._refuse_untyped_views
+def views(path, records):
+    # NEGATIVE CONTROL: type a field this script never reads (`view_name`, carried but not consumed).
+    # It must SURVIVE. If it were caught, the suite would be asserting on the validator's incidental
+    # reach rather than on the fields the merge actually depends on -- and every future table entry
+    # would then need a matching fixture edit for reasons nothing explains.
+    _orig(path, records)
+    for view in records:
+        if view.get("view_name") is not None and not isinstance(view.get("view_name"), str):
+            raise g.MalformedCaptureManifest(f"{path}: view_name is not a string")
+g._refuse_untyped_views = views
+""",
+    ),
     "control-absent-anchor-legs": (
         ("tests/test_capture_tableau_oracle_leg_decoupling.py::test_a_failed_data_leg_no_longer_skips_the_render",),
         """
@@ -1736,6 +1863,12 @@ PROBED = frozenset(
         "an-EMPTY-views-list-is-refused-as-damaged",
         "a-missing-workbook_luid-is-refused-at-load-too",
         "the-shape-and-identity-refusals-are-collapsed-into-one-type",
+        "view_luid-is-tested-for-TRUTHINESS-not-type",
+        "the-consumed-leg-structures-are-not-typed",
+        "the-type-table-is-declared-but-never-applied",
+        "a-list-field-is-typed-only-as-a-LIST",
+        "JSON-null-is-treated-as-a-type-error",
+        "a-leg-is-required-to-carry-a-path",
     }
 )
 
