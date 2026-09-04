@@ -2413,7 +2413,13 @@ def projected_paths(
     return _measure(package_roots(out_root, unit), _package_tails(bundle, unit, assets_dir), limits)
 
 
-def _budget(unit: str, out_root: Path, projected: list[ProjectedPath], limits: Limits) -> PathBudget:
+def _budget(
+    unit: str,
+    out_root: Path,
+    projected: list[ProjectedPath],
+    limits: Limits,
+    shipping_projected: list[ProjectedPath] | None = None,
+) -> PathBudget:
     """Turn a measured set into the two verdicts and the two budgets - see :class:`PathBudget`.
 
     ``cost`` is what a path spends ABOVE `--out`, which is the relocation-invariant number: every
@@ -2427,13 +2433,14 @@ def _budget(unit: str, out_root: Path, projected: list[ProjectedPath], limits: L
     def windows_ceiling(path: ProjectedPath) -> int:
         return WINDOWS_LIMITS.dir_ceiling if path.kind == KIND_DIR else WINDOWS_LIMITS.file_ceiling
 
+    shipping_projected = projected if shipping_projected is None else shipping_projected
     overruns = sorted(
         (path for path in projected if path.length > path.ceiling),
         key=lambda path: path.length - path.ceiling,
         reverse=True,
     )
     shipping = sorted(
-        (path for path in projected if cost(path) > windows_ceiling(path)),
+        (path for path in shipping_projected if cost(path) > windows_ceiling(path)),
         key=lambda path: cost(path) - windows_ceiling(path),
         reverse=True,
     )
@@ -2444,7 +2451,10 @@ def _budget(unit: str, out_root: Path, projected: list[ProjectedPath], limits: L
         min((path.ceiling - cost(path) for path in projected), default=limits.file_ceiling),
         overruns,
         shipping,
-        min((windows_ceiling(path) - cost(path) for path in projected), default=WINDOWS_LIMITS.file_ceiling),
+        min(
+            (windows_ceiling(path) - cost(path) for path in shipping_projected),
+            default=WINDOWS_LIMITS.file_ceiling,
+        ),
     )
 
 
@@ -2463,8 +2473,13 @@ def path_budget(
     that is the part of a path that travels with the package (blind-review B3).
     """
     limits = platform_limits() if limits is None else limits
+    tails = _package_tails(bundle, unit, assets_dir)
     return _budget(
-        unit, out_root, projected_paths(bundle, unit, out_root, limits=limits, assets_dir=assets_dir), limits
+        unit,
+        out_root,
+        _measure(package_roots(out_root, unit), tails, limits),
+        limits,
+        _measure((out_root / unit,), tails, limits),
     )
 
 
@@ -2480,7 +2495,13 @@ def assembled_budget(unit: str, staging: Path, final: Path, out_root: Path, limi
         (KIND_DIR if path.is_dir() else KIND_FILE, path.relative_to(staging).as_posix())
         for path in sorted(staging.rglob("*"))
     ]
-    return _budget(unit, out_root, _measure(package_roots(out_root, final.name), tails, limits), limits)
+    return _budget(
+        unit,
+        out_root,
+        _measure(package_roots(out_root, final.name), tails, limits),
+        limits,
+        _measure((out_root / final.name,), tails, limits),
+    )
 
 
 def assert_assembled_fits(unit: str, staging: Path, final: Path, out_root: Path, limits: Limits) -> None:

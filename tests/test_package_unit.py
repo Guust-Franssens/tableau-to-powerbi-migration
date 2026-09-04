@@ -2572,6 +2572,46 @@ def test_the_budget_measures_the_STAGED_tree_too_not_only_the_final_one(tmp_path
     ]
 
 
+def test_scratch_overrun_does_not_consume_the_WINDOWS_shipping_budget(tmp_path: Path) -> None:
+    """A POSIX host may need a long scratch root while the final package remains relocatable."""
+    unit = "B"
+    bundle = _pbir_bundle(tmp_path, unit)
+    out = _synthetic_out(cpc.POSIX_PATH_CEILING - len(_deepest_tail(unit)) - 1)
+
+    budget = pkg.path_budget(bundle, unit, out, limits=cpc.POSIX_LIMITS)
+
+    assert budget.overruns, "the staging or retired scratch root must exceed the POSIX host limit"
+    assert budget.shipping == [], "only the final package is judged for Windows portability"
+    final_paths = [
+        path
+        for path in pkg.projected_paths(bundle, unit, out, limits=cpc.POSIX_LIMITS)
+        if path.path.startswith(f"{out / unit}{os.sep}") or path.path == str(out / unit)
+    ]
+    assert budget.shipping_budget == min(
+        (pkg.WINDOWS_LIMITS.dir_ceiling if path.kind == pkg.KIND_DIR else pkg.WINDOWS_LIMITS.file_ceiling)
+        - (path.length - pkg.utf16_len(str(out)))
+        for path in final_paths
+    )
+
+    staging = tmp_path / "staging"
+    assembled_file = staging / _deepest_tail(unit)
+    assembled_file.parent.mkdir(parents=True)
+    assembled_file.write_text("{}", encoding="utf-8")
+    assembled = pkg.assembled_budget(unit, staging, out / unit, out, cpc.POSIX_LIMITS)
+    assert assembled.overruns
+    assert assembled.shipping == []
+
+
+def test_a_POSIX_scratch_overrun_still_refuses_packaging(tmp_path: Path) -> None:
+    """The shipping split must not weaken the host's refusal to write an overlong scratch tree."""
+    unit = "B"
+    bundle = _pbir_bundle(tmp_path, unit)
+    out = _synthetic_out(cpc.POSIX_PATH_CEILING - len(_deepest_tail(unit)) - 1)
+
+    with pytest.raises(pkg.PackagePathTooLong):
+        pkg.package_unit(bundle, unit, out, oracle_dir=None, assets_dir=None, limits=cpc.POSIX_LIMITS)
+
+
 def test_a_unit_that_fits_exactly_at_the_ceiling_is_NOT_refused(tmp_path: Path) -> None:
     """The negative control, one character away from the test above.
 
