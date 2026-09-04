@@ -666,6 +666,40 @@ def parse_data_sources(
     return data_sources, instance_maps, name_to_id_maps
 
 
+def _zero_data_source_limitation(root: etree._Element, data_sources: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """`parse_data_sources` only scans 'datasources/datasource'. A workbook whose root shape puts
+    <datasource> elements somewhere else silently yields zero data sources with no record that
+    anything was missed - indistinguishable from a genuinely empty workbook. Flag it either way,
+    naming what was searched, so downstream gates don't read silence as "correctly parsed empty"."""
+    if data_sources:
+        return None
+    reached = root.findall("datasources/datasource")
+    everywhere = root.findall(".//datasource")
+    if len(everywhere) > len(reached):
+        return {
+            "item": "workbook",
+            "issue": (
+                f"parse_data_sources found 0 usable data source(s) via the standard "
+                f"'datasources/datasource' XML path, but {len(everywhere)} <datasource> element(s) "
+                "exist elsewhere in the workbook that this path did not reach. The workbook's root "
+                "shape likely differs from what this parser expects; treat data_sources as UNKNOWN, "
+                "not genuinely empty, until the shape is investigated"
+            ),
+            "severity": "high",
+            "stage": "parse",
+        }
+    return {
+        "item": "workbook",
+        "issue": (
+            "parse_data_sources found 0 data source(s) searching 'datasources/datasource'; this "
+            "workbook may genuinely have no data sources, or its root shape is not recognised by "
+            "this parser - verify before treating it as a correctly-parsed empty workbook"
+        ),
+        "severity": "medium",
+        "stage": "parse",
+    }
+
+
 def _resolve_shelf(shelf_text: str | None, ds_instance_map: dict[str, str]) -> list[dict[str, Any]]:
     """Tokenize a Tableau shelf expression (e.g. '([ds].[a] / [ds].[b])') into resolved field refs.
     Falls back to a raw, unresolved note when a token can't be matched to a known field id."""
@@ -1542,10 +1576,14 @@ def _flatten_zones(zone: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
-def collect_limitations(spec: dict[str, Any]) -> list[dict[str, Any]]:
+def collect_limitations(spec: dict[str, Any], root: etree._Element | None = None) -> list[dict[str, Any]]:
     """Scan the parsed spec for known risk areas (extract-based sources, LOD/table calcs, unresolved
     shelf references) and emit limitations_encountered entries for the honest capabilities writeup."""
     limitations = []
+    if root is not None:
+        zero_ds_limitation = _zero_data_source_limitation(root, spec["data_sources"])
+        if zero_ds_limitation is not None:
+            limitations.append(zero_ds_limitation)
     for ds in spec["data_sources"]:
         published = ds.get("published_datasource")
         if published:
@@ -1796,7 +1834,7 @@ def parse_workbook(path: Path) -> dict[str, Any]:
         "limitations_encountered": [],
     }
     annotate_known_idioms(spec)
-    spec["limitations_encountered"] = collect_limitations(spec)
+    spec["limitations_encountered"] = collect_limitations(spec, root)
     return spec
 
 

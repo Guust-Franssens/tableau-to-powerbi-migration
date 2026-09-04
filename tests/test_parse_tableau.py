@@ -302,6 +302,51 @@ def test_limitations_are_collected_not_silently_dropped():
     assert any(item["item"] == spec["data_sources"][0]["id"] for item in spec["limitations_encountered"])
 
 
+ZERO_DATASOURCES_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "zero_datasources.twb"
+SHAPE_MISMATCH_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "datasource_shape_mismatch.twb"
+
+
+def test_zero_data_sources_raises_a_limitation_instead_of_a_silent_clean_spec():
+    """A workbook that genuinely has no data sources must say so in limitations_encountered, not
+    return a schema-valid empty spec indistinguishable from a parser that failed silently (issue
+    #518)."""
+    spec = parse_workbook(ZERO_DATASOURCES_FIXTURE)
+    assert spec["data_sources"] == []
+    assert any(
+        item["item"] == "workbook" and "datasources/datasource" in item["issue"]
+        for item in spec["limitations_encountered"]
+    )
+
+
+def test_unreached_datasource_elements_raise_a_high_severity_limitation():
+    """When <datasource> elements exist in the workbook but not under the standard
+    'datasources/datasource' path, the parser must flag the root-shape mismatch (high severity)
+    rather than reporting a genuinely-empty workbook (issue #518)."""
+    spec = parse_workbook(SHAPE_MISMATCH_FIXTURE)
+    assert spec["data_sources"] == []
+    matches = [
+        item
+        for item in spec["limitations_encountered"]
+        if item["item"] == "workbook" and "did not reach" in item["issue"]
+    ]
+    assert len(matches) == 1
+    assert matches[0]["severity"] == "high"
+
+
+def test_a_normal_workbook_with_real_data_sources_raises_no_zero_data_source_limitation():
+    """Negative control: a workbook that parses real data sources must NOT raise the zero-data-source
+    limitation - a limitation that fires on every normal workbook is worse than none (issue #518)."""
+    spec = parse_workbook(FIXTURE)
+    assert spec["data_sources"]
+    assert not any(
+        item["item"] == "workbook" and "0 data source" in item["issue"] for item in spec["limitations_encountered"]
+    )
+    assert not any(
+        item["item"] == "workbook" and "0 usable data source" in item["issue"]
+        for item in spec["limitations_encountered"]
+    )
+
+
 def test_internal_object_id_pseudo_column_flagged_not_silently_dropped():
     """Tableau's relationship-model data sources carry a '[__tableau_internal_object_id__]'-prefixed
     pseudo-column per physical table (datatype='table') that isn't real data. It must still be parsed
