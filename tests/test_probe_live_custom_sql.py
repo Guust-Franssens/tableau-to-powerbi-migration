@@ -19,6 +19,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
 
 import probe_live_source  # noqa: E402  # pylint: disable=wrong-import-position
+from parse_tableau import parse_workbook  # noqa: E402
 
 SNOWFLAKE = {
     "class": "snowflake",
@@ -52,6 +53,9 @@ PROBE_PROJECTION = (
 
 
 def _source(tables: list[dict], fields: list[dict] | None = None) -> dict:
+    for table in tables:
+        if table.get("custom_sql") is not None:
+            table["source_relation"] = "custom-sql"
     return {
         "connection": SNOWFLAKE,
         "tables": tables,
@@ -93,6 +97,25 @@ def test_sql_server_custom_sql_scaffold_selects_the_added_probe_column():
 def test_comment_only_custom_sql_is_cannot_assess_instead_of_table_navigation():
     with pytest.raises(ValueError, match="empty after removing comments"):
         probe_live_source.build_m_query(SNOWFLAKE, "Q", "Col", custom_sql="-- comment only")
+
+
+def test_parser_self_closing_text_relation_cannot_clear_as_a_physical_table(tmp_path, monkeypatch):
+    twb = tmp_path / "empty-custom-sql.twb"
+    twb.write_text(
+        '<workbook version="2024.1"><datasources><datasource name="ds.test" caption="Test">'
+        '<connection class="snowflake" server="x" warehouse="WH">'
+        '<relation type="text" name="Q" /></connection></datasource></datasources></workbook>',
+        encoding="utf-8",
+    )
+    source = parse_workbook(twb)["data_sources"][0]
+    assert source["tables"][0]["source_relation"] == "custom-sql"
+    assert source["tables"][0]["custom_sql"] is None
+
+    monkeypatch.setattr(probe_live_source, "_host_resolves", lambda _server: True)
+    monkeypatch.setattr(probe_live_source, "_open_desktop", lambda _pbip: 123)
+    rc, verdict = probe_live_source._probe_one(tmp_path, [source], 0, 1, False)  # pylint: disable=protected-access
+
+    assert (rc, verdict) == (1, "ERROR")
 
 
 def test_empty_custom_sql_after_a_real_table_cannot_clear_the_source(tmp_path, monkeypatch):
@@ -190,7 +213,14 @@ def test_custom_sql_probe_without_enumerated_columns_clears_when_refresh_returns
     rc, verdict = probe_live_source._probe_one_table(  # pylint: disable=protected-access
         tmp_path,
         SNOWFLAKE,
-        ({"name": "Flight_Level_Query", "custom_sql": "SELECT a FROM raw.flights"}, "ProbeOK"),
+        (
+            {
+                "name": "Flight_Level_Query",
+                "source_relation": "custom-sql",
+                "custom_sql": "SELECT a FROM raw.flights",
+            },
+            "ProbeOK",
+        ),
         (1, False),
     )
 
@@ -203,7 +233,7 @@ def test_custom_sql_probe_without_enumerated_columns_clears_when_refresh_returns
 
 
 def test_custom_sql_without_enumerated_columns_is_resolvable():
-    source = _source([{"name": "Q", "custom_sql": "SELECT 1"}], fields=[])
+    source = _source([{"name": "Q", "source_relation": "custom-sql", "custom_sql": "SELECT 1"}], fields=[])
 
     _, tables, column = probe_live_source._resolve_probe_target([source], 0)  # pylint: disable=protected-access
 
@@ -215,7 +245,11 @@ def test_unreachable_custom_sql_source_remains_refused(tmp_path, monkeypatch):
     monkeypatch.setattr(probe_live_source, "_host_resolves", lambda _server: False)
 
     rc, verdict = probe_live_source._probe_one(  # pylint: disable=protected-access
-        tmp_path, [_source([{"name": "Q", "custom_sql": "SELECT 1"}], fields=[])], 0, 1, False
+        tmp_path,
+        [_source([{"name": "Q", "source_relation": "custom-sql", "custom_sql": "SELECT 1"}], fields=[])],
+        0,
+        1,
+        False,
     )
 
     assert (rc, verdict) == (1, "UNREACHABLE")
@@ -246,7 +280,7 @@ def test_real_tables_are_probed_before_custom_sql_relations():
     # Reachability is proven equally by either, but a custom SELECT can be arbitrarily expensive.
     source = _source(
         [
-            {"name": "Q", "custom_sql": "SELECT * FROM huge"},
+            {"name": "Q", "source_relation": "custom-sql", "custom_sql": "SELECT * FROM huge"},
             {"name": "REAL_TABLE", "custom_sql": None},
         ]
     )
@@ -257,7 +291,7 @@ def test_real_tables_are_probed_before_custom_sql_relations():
 def test_mixed_source_proves_credentials_and_custom_sql(tmp_path, caplog, monkeypatch):
     source = _source(
         [
-            {"name": "Q", "custom_sql": "SELECT * FROM huge.fact"},
+            {"name": "Q", "source_relation": "custom-sql", "custom_sql": "SELECT * FROM huge.fact"},
             {"name": "REAL_TABLE", "custom_sql": None},
         ]
     )
@@ -279,7 +313,7 @@ def test_mixed_source_proves_credentials_and_custom_sql(tmp_path, caplog, monkey
 
 
 def test_the_custom_sql_relation_is_still_probed_when_it_is_the_only_candidate():
-    source = _source([{"name": "Q", "custom_sql": "SELECT 1"}])
+    source = _source([{"name": "Q", "source_relation": "custom-sql", "custom_sql": "SELECT 1"}])
     _, tables, _ = probe_live_source._resolve_probe_target([source], 0)  # pylint: disable=protected-access
     assert [t["name"] for t in tables] == ["Q"]
     assert tables[0]["custom_sql"] == "SELECT 1"

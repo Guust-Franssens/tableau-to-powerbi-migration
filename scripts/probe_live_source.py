@@ -495,8 +495,15 @@ def _connection_target(conn: dict) -> str:
 
 
 def _is_custom_sql(table: dict) -> bool:
-    """Treat an explicitly present, even empty, custom-SQL relation as custom SQL."""
-    return table.get("custom_sql") is not None
+    """Use the parser's relation discriminator, including empty custom-SQL payloads."""
+    return table.get("source_relation") == "custom-sql"
+
+
+def _probe_custom_sql(table: dict) -> str | None:
+    """Return custom SQL for probing, preserving an empty payload as an assessability failure."""
+    if not _is_custom_sql(table):
+        return None
+    return table.get("custom_sql") or ""
 
 
 def _resolve_probe_targets(sources: list[dict], source_index: int) -> list[tuple[str, dict, list[dict], str]]:
@@ -1079,7 +1086,7 @@ def _probe_one_table(migration: Path, conn: dict, target: tuple[dict, str], opts
     table_spec, column = target
     table = table_spec.get("name", "")
     try:
-        m_query, note = build_m_query(conn, table, column, custom_sql=table_spec.get("custom_sql"))
+        m_query, note = build_m_query(conn, table, column, custom_sql=_probe_custom_sql(table_spec))
     except ValueError as exc:
         log.error("PROBE: ERROR %s", exc)
         return 1, "ERROR"
