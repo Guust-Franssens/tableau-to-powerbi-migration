@@ -119,16 +119,29 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
     (
         "capture path: accept an absolute path from the manifest",
         PACKAGER,
-        '    if candidate.is_absolute() or candidate.drive or declared.startswith(("\\\\\\\\", "/")):',
-        "    if False:  # noqa",
+        # #480 round 4 moved this predicate into `_declares_non_relative` so `retained_path` meets
+        # the same check as `path`; the snippet follows it rather than being retired.
+        '    return candidate.is_absolute() or bool(candidate.drive) or declared.startswith(("\\\\\\\\", "/"))',
+        "    return False  # noqa",
         ["test_an_absolute_path_is_refused_and_never_reaches_the_manifest"],
     ),
     (
-        "capture path: echo the declared path back into the packaged manifest",
+        # ⚠️ REPLACES "capture path: echo the declared path back into the packaged manifest" (#480
+        # round 4). That mutation is now genuinely unobservable: `_contain_declared_paths` runs on
+        # every returned leg, so re-assigning `rewritten["path"] = leg["path"]` is scrubbed straight
+        # back to `REFUSED_PATH` and no test can see it. Keeping it would have reported a SURVIVOR
+        # that is really defence in depth. The sole mitigation is now the scrub itself, so that is
+        # what this mutation removes -- and it is a strictly stronger claim, because the scrub also
+        # covers the field name (`retained_path`) that walked around the old guard entirely.
+        "capture path: ship any declared string, however non-relative",
         PACKAGER,
-        '        rewritten["path"] = REFUSED_PATH',
-        '        rewritten["path"] = leg["path"]',
-        ["test_an_absolute_path_is_refused_and_never_reaches_the_manifest"],
+        "    refused = sorted(key for key, value in leg.items() if isinstance(value, str) "
+        "and _declares_unsafe_path(value))",
+        "    refused = []  # noqa",
+        [
+            "test_a_LEGACY_data_leg_cannot_ship_a_host_path_under_retained_path",
+            "test_the_containment_guard_is_field_AGNOSTIC_not_a_second_allowlist",
+        ],
     ),
     (
         "project: report one dropped path per ROW instead of one per field",

@@ -44,6 +44,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 from mutation_harness import (  # noqa: E402  # pylint: disable=wrong-import-position
     PY,
+    anchors_that_missed,
     last_line,
     observed_mutation,
     run,
@@ -656,10 +657,22 @@ g.subset_manifest = subset
     # times it actually executed. A mutation that applies and is never reached is scored on its
     # anchor's failure like any other and proves nothing.
     "the-uncertified-body-goes-back-under-data-slash-csv": (
-        (
-            f"{ORACLE}::test_an_uncertified_capture_is_unreadable_by_a_consumer_that_never_heard_of_certification",
-            f"{ORACLE}::test_text_plain_error_text_is_never_certified_as_CSV",
-        ),
+        # ⚠️ ONE anchor, and the second one was REMOVED by measurement, not by preference (#480
+        # round 4). `test_text_plain_error_text_is_never_certified_as_CSV` was declared beside it
+        # and asserts `"path" not in data`, so it reads like a perfect second witness -- but it
+        # goes through `_capture_one`, which reads the manifest back through `read_manifest`, and
+        # that boundary re-applies `withhold_uncertified_evidence`. The invariant is restored
+        # before the assertion runs, so the mutation is invisible to it. Measured, each anchor
+        # alone:
+        #
+        #     test_an_uncertified_capture_is_unreadable_by_...  observed=True   exit=1
+        #     test_text_plain_error_text_is_never_certified_as_CSV  observed=False  exit=0 (2 passed)
+        #
+        # Until round 4 the campaign ran both anchors in ONE pytest invocation under `-x`, so it
+        # stopped at the first failure and credited the mutation to the whole list. This is the
+        # defence in depth working, and it is exactly why an anchor has to be chosen at the layer
+        # the mutation changes.
+        (f"{ORACLE}::test_an_uncertified_capture_is_unreadable_by_a_consumer_that_never_heard_of_certification",),
         """
 import tableau_oracle_manifest as m
 import capture_tableau_oracle as o
@@ -1185,6 +1198,12 @@ def classify(name: str, code: str, target: tuple[str, ...]) -> tuple[str, str, i
         if session_ended_abnormally(outcomes):
             detail = f"{detail} [session ended abnormally: exit {returncode}]"
         return verdict, detail, hits
+    if anchors_that_missed(outcomes):
+        # #480 round 4. Some declared anchor saw it and another did not. That used to be scored
+        # CAUGHT on the first anchor's failure, which is what made this campaign's banner false.
+        # It is a real finding about the anchor list, so it gets its own word rather than being
+        # folded into HARNESS-ERROR, where it would read as an instrument fault.
+        return "PARTIAL-ANCHOR", detail, hits
     if session_is_trustworthy(outcomes):
         return "SURVIVED", detail, hits
     if not outcomes.get("recorded") and not outcomes.get("session_finished"):
@@ -1246,7 +1265,8 @@ def main() -> int:
             print(f"  {item}")
         return 1
     print(
-        f"all {len(MUTATIONS)} mutations scored as declared, each against its OWN anchor(s) "
+        f"all {len(MUTATIONS)} mutations scored as declared, each anchor run in its OWN pytest "
+        f"invocation and EVERY declared anchor required to observe the mutation "
         f"({sum(1 for v in EXPECTED.values() if v == 'CAUGHT')} caught, "
         f"{sum(1 for v in EXPECTED.values() if v == 'SURVIVED')} cosmetic controls survived, "
         f"{sum(1 for v in EXPECTED.values() if v == 'INVALID')} absent-anchor controls invalid; "

@@ -348,6 +348,16 @@ def run(name: str, code: str, target: str | Sequence[str]) -> tuple[str, int, st
 
     ``target`` is a file, or a sequence of pytest node IDs -- see :func:`pytest_targets`.
 
+    ⚠️ **Every declared target gets its OWN pytest invocation** (#480 round 4). Running them
+    together under ``-x`` meant pytest stopped at the first failure, so a mutation was credited
+    to the whole anchor list while only the first anchor ever executed. Measured on this repo's
+    own campaign: ``a-recorded-row-count-licenses-evidence-without-a-certification`` scored
+    CAUGHT naming its first anchor, and a custom mutation showed the shape directly --
+    ``BOTH ANCHORS WITH -x: first anchor failed`` / ``SECOND ANCHOR ALONE: 1 passed``. The
+    campaign banner claiming *"each against its OWN anchor(s)"* was therefore false for every
+    multi-anchor member, and it had already misled a human. ``-x`` is kept WITHIN one invocation,
+    where it only stops a single anchor's own parametrizations, and can hide nothing else.
+
     ``outcomes`` is the load-bearing return value, and it comes from pytest's own lifecycle
     hooks rather than its terminal output. Three measured reasons text parsing is not enough:
 
@@ -361,6 +371,22 @@ def run(name: str, code: str, target: str | Sequence[str]) -> tuple[str, int, st
     the summary tokens carry ANSI prefixes, which silently turned real detections into
     harness errors.
     """
+    targets = pytest_targets(target)
+    per_target: dict[str, dict] = {}
+    procs: list[subprocess.CompletedProcess] = []
+    for one in targets:
+        proc, outcomes = _run_one_target(name, code, one)
+        procs.append(proc)
+        per_target[one] = outcomes
+    merged = merge_target_outcomes(per_target)
+    # The FIRST invocation that reached a verdict-bearing failure is the one worth quoting; with a
+    # single target this is exactly the previous behaviour.
+    quoted = next((p for p, o in zip(procs, per_target.values()) if _observed_here(o)), procs[-1])
+    return name, merged["process_returncode"], describe(quoted, merged), merged
+
+
+def _run_one_target(name: str, code: str, target: str) -> tuple[subprocess.CompletedProcess, dict]:
+    """One pytest invocation with the mutation plugin installed, and its lifecycle record."""
     plugin = ROOT / "tests" / "_mutation_plugin.py"
     outcomes_file = ROOT / "tests" / "_mutation_outcomes.json"
     outcomes_file.unlink(missing_ok=True)
@@ -373,8 +399,7 @@ def run(name: str, code: str, target: str | Sequence[str]) -> tuple[str, int, st
     )
     env = sanitized_env()
     proc = subprocess.run(
-        [PY, "-m", "pytest", *pytest_targets(target)]
-        + ["-q", "-p", "_mutation_plugin", "--no-header", "-x", "--tb=no", "--color=no"],
+        [PY, "-m", "pytest", target] + ["-q", "-p", "_mutation_plugin", "--no-header", "-x", "--tb=no", "--color=no"],
         cwd=ROOT,
         capture_output=True,
         text=True,
@@ -391,8 +416,45 @@ def run(name: str, code: str, target: str | Sequence[str]) -> tuple[str, int, st
     # so both are carried and both must agree before anything is called SURVIVED.
     outcomes["process_returncode"] = proc.returncode
     outcomes_file.unlink(missing_ok=True)
-    detail = describe(proc, outcomes)
-    return name, proc.returncode, detail, outcomes
+    return proc, outcomes
+
+
+def merge_target_outcomes(per_target: dict[str, dict]) -> dict:
+    """One record for a mutation run against N targets, each in its own session.
+
+    The merge rule follows the harness's existing asymmetry -- **detection is durable, absence is
+    not** -- applied per field: evidence lists concatenate, anything that would DISQUALIFY a
+    session poisons the merge, and every "the session was complete" term must hold for ALL of
+    them, because a survival verdict is a claim about every anchor.
+
+    ``targets`` / ``targets_observing`` are what let :func:`observed_mutation` require that every
+    declared anchor saw the mutation, rather than any one of them.
+    """
+    records = list(per_target.values())
+
+    def gather(key: str) -> list:
+        return [item for record in records for item in (record.get(key) or [])]
+
+    exits = [record.get("exitstatus") for record in records]
+    returncodes = [record.get("process_returncode") for record in records]
+    loop_errors = [record.get("runtest_loop_exception") for record in records if record.get("runtest_loop_exception")]
+    return {
+        "call_failed": gather("call_failed"),
+        "setup_failed": gather("setup_failed"),
+        "collect_error": gather("collect_error"),
+        "synthetic_failed": gather("synthetic_failed"),
+        "internal_error": any(record.get("internal_error") for record in records),
+        "node_down": any(record.get("node_down") for record in records),
+        "session_finished": all(record.get("session_finished") for record in records),
+        "runtest_loop_completed": all(record.get("runtest_loop_completed") for record in records),
+        "saw_call_phase": all(record.get("saw_call_phase") for record in records),
+        "recorded": all(record.get("recorded") for record in records),
+        "exitstatus": next((code for code in exits if code not in (0, None)), 0 if exits else None),
+        "process_returncode": next((code for code in returncodes if code), 0 if returncodes else 0),
+        "runtest_loop_exception": loop_errors[0] if loop_errors else None,
+        "targets": list(per_target),
+        "targets_observing": [name for name, record in per_target.items() if _observed_here(record)],
+    }
 
 
 def read_outcomes(path: Path) -> dict:
@@ -419,6 +481,11 @@ def read_outcomes(path: Path) -> dict:
     return loaded
 
 
+def _observed_here(outcomes: dict) -> bool:
+    """Whether ONE session's record contains a genuine, named observation of the mutation."""
+    return bool(outcomes.get("call_failed") or outcomes.get("setup_failed"))
+
+
 def observed_mutation(outcomes: dict) -> bool:
     """True when a NAMED test genuinely observed the mutation.
 
@@ -432,8 +499,32 @@ def observed_mutation(outcomes: dict) -> bool:
     before it died, is still real evidence. The synthetic crash report xdist fabricates
     carries ``when="???"`` and is filtered at record time instead, so only actual
     ``call``/``setup``/``teardown`` failures ever reach these lists.
+
+    ⚠️ With a per-target record present, EVERY declared target must have observed it (#480 round
+    4). One anchor failing used to be enough, which is how a campaign could claim each mutation
+    was proved "against its OWN anchor(s)" while a second declared anchor passed untouched. A
+    record without ``targets`` -- a hand-built one in the scoring tests, or an older caller --
+    keeps the previous any-evidence rule, so this narrows real runs without inventing
+    per-target facts nobody recorded.
     """
-    return bool(outcomes.get("call_failed") or outcomes.get("setup_failed"))
+    targets = outcomes.get("targets")
+    if targets is None:
+        return _observed_here(outcomes)
+    return bool(targets) and len(outcomes.get("targets_observing") or []) == len(targets)
+
+
+def anchors_that_missed(outcomes: dict) -> list[str]:
+    """Declared targets that did NOT observe the mutation, when at least one did.
+
+    Empty for a clean CAUGHT, empty for a clean SURVIVED (nothing observed it anywhere), and
+    non-empty exactly in the case round 4 found: a partial detection that used to be reported as
+    a full one.
+    """
+    targets = outcomes.get("targets") or []
+    observing = outcomes.get("targets_observing") or []
+    if not observing or len(observing) == len(targets):
+        return []
+    return [target for target in targets if target not in observing]
 
 
 def session_is_trustworthy(outcomes: dict) -> bool:
@@ -513,6 +604,14 @@ def is_harness_error(outcomes: dict) -> bool:
 
 def describe(proc: subprocess.CompletedProcess, outcomes: dict) -> str:
     """One-line detail for the report, preferring the structured record."""
+    missed = anchors_that_missed(outcomes)
+    if missed:
+        # This case USED to read as an ordinary CAUGHT naming the first anchor. Saying which
+        # anchors did not see it is the whole remedy: the count alone would still let a reader
+        # assume the missing one was incidental.
+        observed = len(outcomes.get("targets_observing") or [])
+        names = ", ".join(target.split("::")[-1] for target in missed)
+        return f"only {observed}/{len(outcomes.get('targets') or [])} declared anchors observed it; missed by: {names}"
     if outcomes.get("call_failed"):
         return outcomes["call_failed"][0]
     if outcomes.get("setup_failed"):
