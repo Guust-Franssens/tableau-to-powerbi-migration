@@ -521,6 +521,23 @@ def test_a_waiting_process_rechecks_after_the_lock_and_does_not_rebuild(monkeypa
     assert result.read_text(encoding="utf-8") == "built by the other process"
 
 
+def test_release_only_removes_the_lock_if_it_still_carries_the_callers_token(tmp_path):
+    """A process must never delete a lock it no longer owns.
+
+    If a different owner has since taken the lock (e.g. after an operator manually cleared a
+    stale one per `_acquire_build_lock`'s recovery message), the file on disk carries a different
+    token; release must leave that new owner's lock alone rather than unlinking it.
+    """
+    lock_path = tmp_path / "release.lock"
+    lock_path.write_text(json.dumps({"pid": os.getpid(), "token": "someone-elses-token"}), encoding="utf-8")
+
+    tmdl_oracle._release_build_lock(lock_path, "our-stale-token")
+    assert lock_path.exists(), "release must not remove a lock carrying a DIFFERENT token"
+
+    tmdl_oracle._release_build_lock(lock_path, "someone-elses-token")
+    assert not lock_path.exists(), "release must remove the lock once the token actually matches"
+
+
 def test_a_build_failure_reaches_the_caller_as_oracle_unavailable_not_a_clean_result(monkeypatch, tmp_path):
     """A failed shared build must surface to every caller as `OracleUnavailable`, never as a clean
     result nor a stuck lock that blocks the next attempt.
@@ -553,60 +570,38 @@ def test_lock_timeout_raises_oracle_unavailable_and_cannot_hang(tmp_path):
     assert elapsed < 5, f"lock acquisition must be bounded, took {elapsed:.1f}s"
 
 
-def test_a_stale_lock_is_reclaimed_instead_of_blocking_every_later_run(tmp_path):
-    """A crashed builder's lock must not block every later run forever - the smallest safe
-    recovery is age-based reclamation, since a live build cannot be older than its own timeout.
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "{}",
+        "not json at all",
+        json.dumps({"pid": 999999, "token": "dead-owner"}),
+    ],
+    ids=["empty-object", "malformed-json", "well-formed-but-crashed-owner"],
+)
+def test_a_stale_dead_or_malformed_lock_times_out_and_is_never_automatically_removed(tmp_path, payload):
+    """Round-2 scope freeze (#529 review): automatic stale-lock reclamation was removed entirely.
+
+    A lock that is old, unreadable, or plainly belongs to a crashed process must still surface as a
+    bounded, explicit `OracleUnavailable` naming the lock path and the manual recovery (confirm no
+    build process is actually running, then delete the lock file) - never a hang, never a clean
+    result, and - the point of this test - never a silent automatic delete/reclaim either.
     """
-    lock_path = tmp_path / "stale.lock"
-    lock_path.write_text("{}", encoding="utf-8")
+    lock_path = tmp_path / "dead.lock"
+    lock_path.write_text(payload, encoding="utf-8")
     stale_time = time.time() - (tmdl_oracle.BUILD_LOCK_STALE_SECONDS + 5)
     os.utime(lock_path, (stale_time, stale_time))
 
-    # A short wait proves the reclaim is immediate: were staleness not checked, this would have to
-    # wait out the (much longer) full timeout instead.
     start = time.monotonic()
-    token = tmdl_oracle._acquire_build_lock(lock_path, wait=5, poll=0.05)
+    with pytest.raises(OracleUnavailable) as excinfo:
+        tmdl_oracle._acquire_build_lock(lock_path, wait=0.3, poll=0.05)
     elapsed = time.monotonic() - start
-    tmdl_oracle._release_build_lock(lock_path, token)
-    assert elapsed < 2, "a stale lock must be reclaimed promptly, not waited out"
+    assert elapsed < 5, f"a dead lock must time out within the configured bound, took {elapsed:.1f}s"
 
+    message = str(excinfo.value)
+    assert str(lock_path) in message, "the timeout must name the lock path"
+    assert "remove" in message.lower(), "the timeout must name the manual recovery, not recover silently"
 
-def test_a_racer_reclaiming_the_same_stale_lock_never_believes_it_holds_the_mutex_twice(monkeypatch, tmp_path):
-    """Deterministic interleaving: B acquires between A's stale observation and A's reclamation.
-
-    A observes the lock as stale and starts to reclaim it; before A's own rename lands, B (also
-    racing for the same stale lock) wins the reclaim first and creates its OWN fresh lock at the
-    same path. A's rename call then unavoidably grabs whatever currently sits at that path - B's
-    brand-new lock, not the stale one A actually judged - so content, not merely path, must decide
-    whether to discard what was grabbed. A must detect the mismatch, restore B's lock untouched,
-    and retry; it must never believe it holds the mutex, and B's lock must survive intact.
-    """
-    lock_path = tmp_path / "race.lock"
-    stale_time = time.time() - (tmdl_oracle.BUILD_LOCK_STALE_SECONDS + 5)
-    lock_path.write_text(json.dumps({"pid": 999999, "token": "dead-owner"}), encoding="utf-8")
-    os.utime(lock_path, (stale_time, stale_time))
-
-    real_rename = os.rename
-    state = {"b_intervened": False}
-
-    def racer_rename(src, dst):
-        # The instant A calls os.rename to claim the lock it believes is stale, simulate B having
-        # already won the SAME reclaim a moment earlier: B's rename+discard already happened, and
-        # B has already created its own fresh (non-stale) lock at `lock_path`. A's own rename call
-        # proceeds on whatever real os.rename does with the CURRENT contents of `lock_path` - which
-        # is now B's lock, not the one A originally observed.
-        if not state["b_intervened"] and str(src) == str(lock_path):
-            state["b_intervened"] = True
-            fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC)
-            with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                json.dump({"pid": os.getpid(), "token": "b-token"}, stream)
-        return real_rename(src, dst)
-
-    monkeypatch.setattr(tmdl_oracle.os, "rename", racer_rename)
-
-    with pytest.raises(OracleUnavailable, match="timed out"):
-        tmdl_oracle._acquire_build_lock(lock_path, wait=0.5, poll=0.05)
-
-    # B's lock must have survived A's failed reclaim attempt completely intact.
-    held = json.loads(lock_path.read_text(encoding="utf-8"))
-    assert held["token"] == "b-token", "A's reclaim must never discard a live successor's fresh lock"
+    # The lock file itself must be left completely untouched - no automatic reclaim/delete.
+    assert lock_path.exists(), "a stale/dead lock must never be automatically removed"
+    assert lock_path.read_text(encoding="utf-8") == payload, "the lock content must be left untouched"

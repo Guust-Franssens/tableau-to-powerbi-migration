@@ -32,8 +32,8 @@ normalises away. Issue #404 tracks it, with the measurement and the three mechan
 Requires the .NET SDK. `scripts/preflight.ps1` checks for it. If it is missing the gate reports
 UNASSESSABLE (a distinct exit code) rather than a pass - see check_datamodel.EXIT_UNASSESSABLE.
 
-Locking (issue #415, first-build part only)
---------------------------------------------
+Locking (issue #415, first-build part only - fail-closed serialization, not automatic recovery)
+--------------------------------------------------------------------------------------------------
 `ensure_built()` used to be an unlocked check-then-build: every parallel pytest worker that saw the
 DLL missing or stale would launch its own `dotnet build` into the SAME output directory. On Windows
 that is file-locking roulette - one or more builds fail even though the source is valid, and the
@@ -45,15 +45,17 @@ deploy run lock - not a new lock framework, an extension of the one already in t
 racing to build the SAME oracle are not a conflict: waiting for the winner and reusing its DLL is the
 whole fix, so this variant blocks (bounded) instead of erroring immediately.
 
-Stale-lock reclaim carries the same ownership-safety requirement `.github/skills/pbip-model-refresh`'s
-`_ModelLock._reclaim()` was written to satisfy: a bare "old mtime -> unlink" can delete a SUCCESSOR's
-brand-new lock if that successor reclaimed and recreated it in the window between our stat and our
-unlink. `_reclaim_stale_lock` closes that by claiming the file at a private path via `os.rename` (only
-one racer's rename can win) and then verifying, by CONTENT not merely by path, that what it grabbed is
-still the lock it judged stale before discarding it - a mismatch means a live successor's fresh lock
-was grabbed by accident, and it is restored untouched. Every acquired lock also carries a unique
-token, and `_release_build_lock` deletes it only if that token is still there, so a process a
-predecessor mistakenly judged stale can never delete a new owner's lock on its own release either.
+This is deliberately fail-CLOSED, not self-healing: a dead/crashed builder's lock is never removed
+automatically. An earlier revision reclaimed a stale lock (age-based) inside `_acquire_build_lock`
+itself, adapting `.github/skills/pbip-model-refresh`'s `_ModelLock._reclaim()` rename-and-verify
+pattern to avoid one racer deleting a live successor's fresh lock - but that is a second, more
+elaborate mutex mechanism, and review scoped it back out: a hung/dead builder now surfaces as a
+bounded, explicit `OracleUnavailable` naming the lock path and the manual recovery (confirm no build
+process is actually running, then delete the lock file), never a silent automatic reclaim and never
+a hang or a clean result. Every acquired lock still carries a unique ownership token, and
+`_release_build_lock` only deletes the file if it still carries that exact token - so a process
+racing to release after an operator has manually cleared and someone else has re-acquired the lock
+can never delete a new owner's lock instead of its own.
 """
 
 from __future__ import annotations
@@ -89,8 +91,8 @@ BUILD_LOCK_WAIT_SECONDS = BUILD_TIMEOUT_SECONDS + 60
 BUILD_LOCK_POLL_SECONDS = 0.2
 # `subprocess.run` inside ensure_built already bounds a live build to BUILD_TIMEOUT_SECONDS, so a
 # lock file older than that (plus margin) cannot belong to a still-running build - its owner
-# crashed. Reclaiming it is the smallest recovery that keeps a dead builder from blocking every
-# later run forever.
+# crashed. This is used only to make the timeout message more actionable (naming how old the lock
+# is); it does NOT license removing the lock automatically - see the module docstring.
 BUILD_LOCK_STALE_SECONDS = BUILD_TIMEOUT_SECONDS + 30
 
 log = logging.getLogger("tmdl_oracle")
@@ -156,48 +158,14 @@ def _read_lock_payload(path: Path) -> dict | None:
         return None
 
 
-def _reclaim_stale_lock(path: Path, observed: dict | None) -> bool:
-    """Attempt to reclaim a lock believed stale. Returns True only if it was genuinely discarded.
-
-    `os.rename` alone is NOT enough to make this safe: it moves whatever currently sits at `path`,
-    with no idea whether that is still the exact stale lock we stat'd a moment ago or one a
-    successor has since reclaimed-and-recreated for itself (that successor went through this same
-    function concurrently and won). So after claiming the file at a private path, its content is
-    compared against `observed` - what we read as evidence of staleness - before it is discarded.
-    A mismatch means we actually grabbed a LIVE successor's fresh lock out from under it; that must
-    be put back untouched, never deleted, so a legitimate new owner is never dispossessed and two
-    racers can never both believe they hold the mutex.
-    """
-    claim = path.with_name(f"{path.name}.reclaim.{os.getpid()}.{uuid.uuid4().hex}")
-    try:
-        os.rename(path, claim)
-    except OSError:
-        return False  # someone else already claimed/removed it first - nothing to do here
-    if observed is not None and _read_lock_payload(claim) == observed:
-        # Genuinely the same lock we judged stale by content, not merely by path - safe to discard.
-        with contextlib.suppress(OSError):
-            os.unlink(claim)
-        return True
-    # Either unreadable/torn (never confirmed stale) or a successor's fresh lock we grabbed by
-    # accident - restore it untouched so its rightful holder, if any, is not dispossessed.
-    try:
-        os.rename(claim, path)
-    except OSError:
-        # `path` is occupied again (a second restore race) - our private claim copy is now
-        # redundant either way; whatever lives at `path` is not ours to touch.
-        with contextlib.suppress(OSError):
-            os.unlink(claim)
-    return False
-
-
 def _acquire_build_lock(
     path: Path, *, wait: float = BUILD_LOCK_WAIT_SECONDS, poll: float = BUILD_LOCK_POLL_SECONDS
 ) -> str:
     """Take `path` as a bounded cross-process mutex for the build/restore critical section only.
 
     Returns a per-acquisition ownership token that the caller must pass back to
-    `_release_build_lock` - a plain unconditional unlink on release would let a process that has
-    since been judged stale (see `_reclaim_stale_lock`) delete a SUCCESSOR's lock instead of its own.
+    `_release_build_lock` - a plain unconditional unlink on release could delete a lock this
+    process no longer owns if an operator manually cleared it and a new owner has since acquired it.
 
     `O_CREAT | O_EXCL` rather than exists()-then-write, same as `deploy_estate.RunLock.acquire` -
     the check-then-act version has a window two simultaneous builders can both pass, which is
@@ -205,28 +173,32 @@ def _acquire_build_lock(
     failing on first contention: a second process wanting the SAME build should wait for the
     winner and reuse its DLL, not be told to go away.
 
-    Raises OracleUnavailable on timeout - never hangs, never returns having failed to lock.
+    Fail-CLOSED on a stale/dead lock, deliberately: this never reclaims or removes a lock file
+    automatically, however old it is - see the module docstring for why. Raises OracleUnavailable
+    on timeout, naming the lock path and the manual recovery, never hangs, never returns having
+    failed to lock.
     """
     deadline = time.monotonic() + wait
+    token = uuid.uuid4().hex
     while True:
-        token = uuid.uuid4().hex
         try:
             handle = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError:
-            try:
-                age = time.time() - path.stat().st_mtime
-            except FileNotFoundError:
-                continue  # released between our open() failing and this stat - retry immediately
-            if age > BUILD_LOCK_STALE_SECONDS:
-                # A live build cannot be this old; whatever took this lock is gone - but see
-                # `_reclaim_stale_lock` for why that alone does not license an unconditional delete.
-                _reclaim_stale_lock(path, _read_lock_payload(path))
-                continue
             if time.monotonic() >= deadline:
+                held = _read_lock_payload(path)
+                try:
+                    age = time.time() - path.stat().st_mtime
+                    age_note = f" ({age:.0f}s old)"
+                except FileNotFoundError:
+                    age_note = ""
+                pid_note = (
+                    f" (recorded pid {held['pid']})" if isinstance(held, dict) and "pid" in held else ""
+                )
                 raise OracleUnavailable(
-                    f"timed out after {wait:.0f}s waiting for {path} - another process appears to "
-                    f"be building the TMDL oracle ({age:.0f}s old). If it has crashed, delete "
-                    f"{path} and re-run."
+                    f"timed out after {wait:.0f}s waiting for {path}{age_note} - another process "
+                    f"appears to be building the TMDL oracle{pid_note}, or a previous builder "
+                    "crashed without releasing the lock. Verify no oracle build process is still "
+                    f"active, then remove {path} and re-run."
                 ) from None
             time.sleep(poll)
             continue
@@ -241,12 +213,12 @@ def _acquire_build_lock(
 def _release_build_lock(path: Path, token: str) -> None:
     """Remove the lock only if it still carries OUR token.
 
-    A predecessor that judged this run stale (e.g. after a false "crashed" verdict racing with a
-    slow write) could have reclaimed and recreated the lock for a new owner; unconditionally
-    unlinking would delete a lock we no longer own rather than our own.
+    A different process could have manually cleared a stale lock (per the operator recovery in
+    `_acquire_build_lock`'s timeout message) and acquired it as a new owner; unconditionally
+    unlinking here would delete a lock we no longer own rather than our own.
     """
     held = _read_lock_payload(path)
-    if held is not None and held.get("token") == token:
+    if isinstance(held, dict) and held.get("token") == token:
         with contextlib.suppress(OSError):
             path.unlink()
 
