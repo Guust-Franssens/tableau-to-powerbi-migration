@@ -695,7 +695,7 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
 ]
 
 _FAILED = re.compile(r"(\d+) failed")
-_ERROR = re.compile(r"(\d+) errors?\b|^ERROR\b", re.IGNORECASE | re.MULTILINE)
+_ERROR = re.compile(r"(\d+) errors?\b|^(?:ERROR|INTERNALERROR)\b", re.IGNORECASE | re.MULTILINE)
 
 
 def run_one_anchor(name: str) -> tuple[str, str]:

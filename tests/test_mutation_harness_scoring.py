@@ -345,6 +345,18 @@ def test_package_unit_campaign_treats_failed_plus_error_output_as_broken(monkeyp
     assert note == "1 failed, 1 error"
 
 
+def test_package_unit_campaign_treats_internalerror_plus_failed_output_as_broken(monkeypatch) -> None:
+    def fake_run(cmd, **_kwargs):
+        return subprocess.CompletedProcess(cmd, 3, stdout="INTERNALERROR> boom\n1 failed", stderr="")
+
+    monkeypatch.setattr(mutate_package_unit.subprocess, "run", fake_run)
+
+    verdict, note = mutate_package_unit.run_one_anchor("test_observes")
+
+    assert verdict == "BROKEN"
+    assert note == "1 failed"
+
+
 def test_package_unit_restored_anchor_declaration_runs_each_anchor_independently(monkeypatch) -> None:
     label = "README: send the agent back to the bundle to edit (issue #460's silent-discard shape)"
     names = next(
@@ -397,6 +409,18 @@ def test_check_unit_campaign_treats_failed_plus_error_output_as_broken(monkeypat
 
     assert verdict == "BROKEN"
     assert note == "1 failed, 1 error"
+
+
+def test_check_unit_campaign_treats_internalerror_plus_failed_output_as_broken(monkeypatch) -> None:
+    def fake_run(cmd, **_kwargs):
+        return subprocess.CompletedProcess(cmd, 3, stdout="INTERNALERROR> boom\n1 failed", stderr="")
+
+    monkeypatch.setattr(mutate_check_unit.subprocess, "run", fake_run)
+
+    verdict, note = mutate_check_unit.run_one_anchor("test_observes")
+
+    assert verdict == "BROKEN"
+    assert note == "1 failed"
 
 
 def test_campaign_main_treats_partial_anchor_as_non_success(monkeypatch) -> None:
