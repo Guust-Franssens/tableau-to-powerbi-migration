@@ -127,7 +127,7 @@ report tells you where. Read these first, in this order:
 
 | source | what it gives you |
 |---|---|
-| `read_handover.py <bundle> --workbook <name> --viz [--severity X]` | **your work queue**: `remediation_worklist` (per item `severity`, `category`, `reason`, `remediation`), **emptied** visuals — every binding dropped, so they render blank on a report that validates clean (15 in one measured workbook, previously unremarked) — and `viz_fidelity[]` (`status`, `tier`, `reason`). Reading the raw 347 KB slice by hand works but buries these; see `powerbi-report-gotchas` §10 |
+| `read_handover.py <bundle> --workbook <name> --viz [--severity X]` | **your work queue**: `remediation_worklist` (per item `severity`, `category`, `reason`, `remediation`), **emptied** visuals — every binding dropped, so they render blank on a report that validates clean (15 in one measured workbook; ⚠️ since #189 shipped in 2.355.0 the engine sets `pbip_ref_drops[].severity: blocking` itself — prefer that, the reader still ranks them) — and `viz_fidelity[]` (`status`, `tier`, `reason`). Reading the raw 347 KB slice by hand works but buries these; see `powerbi-report-gotchas` §10 |
 | `estate.pending_gates[]` | which gates must be OFFERED (e.g. `dashboard_audit`) — offer, never self-approve |
 | `migration-spec.json` | source intent the engine's input format cannot carry: `dashboards[].zones` (layout tree), `worksheets[].encodings`, `manual_sort`, `measure_names_values_pivot`, filter `note`s |
 | `migrations/<name>/reference/` | the Tableau screenshots — the only thing that can adjudicate *look and feel* |
@@ -242,7 +242,9 @@ it is slow, and `validate` will not catch a wrong encoding.
    measured, polishing visuals one at a time produced a page where every visual was individually
    defensible and the page as a whole read nothing like the source. A
    whole-page mismatch is also the one defect class `viz_fidelity` structurally cannot report,
-   because it is per-visual.
+   because it is per-visual. (⚠️ Narrowed: #188 adds `page_emitted:false` at the three drop sites
+   from 2.354.0, live in our 2.356.0 — and it never claims `true`, so a *missing* page is now
+   reportable but a *wrong-looking* page still is not.)
 2. **Take the validator's classification of `viz_fidelity`, not the raw list.** Repair only rows it
    routes to you as fixable. A `tier: "empty"` row (nothing to rebuild) is usually correct; a
    `degraded` row may be a deliberate and correct deferral. For rendering findings, treat the
