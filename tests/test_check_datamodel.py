@@ -30,7 +30,7 @@ from check_datamodel import (
     check_tmdl_model,
     check_tmdl_text,
     find_compact_filters,
-    find_unguarded_divide_threshold,
+    find_unguarded_divide_thresholds,
     main,
 )
 
@@ -369,28 +369,52 @@ UNGUARDED_BLANK_THRESHOLD_CASES = [
     (True, "DIVIDE([Errors], [Total]) <= 0"),
     (True, "DIVIDE([Errors], [Total]) = 0"),
     (True, "DIVIDE('S'[Errors], 'S'[Total]) > -5"),
-    # negative: correctly guarded - the DIVIDE(...) call is no longer the entire left operand.
+    # positive: a blank NUMERATOR passes straight through a 3-argument DIVIDE - the "alt" only
+    # substitutes on a 0/blank denominator, so this is unsafe even with a 3rd argument present.
+    (True, "DIVIDE([Errors], [Total], 0) < 0.05"),
+    # positive: a blank "alt" itself is not a safe substitute - both real-Desktop findings from the
+    # review (DIVIDE(BLANK(), 1, 0) and DIVIDE(1, 0, BLANK())) collapse to this same argument shape.
+    (True, "DIVIDE([Errors], [Total], [Fallback]) < 0.05"),
+    # positive: the unsafe comparison is nested inside IF(...) rather than the entire expression -
+    # this used to escape the check entirely because DIVIDE(...) wasn't the whole predicate.
+    (True, 'IF([Region] = "West", DIVIDE([Errors], [Total]) < 0.05, BLANK())'),
+    # positive: nested inside CALCULATE(...FILTER(...)) - another real generated-DAX shape.
+    (True, "CALCULATE(SUM('S'[x]), FILTER('S', DIVIDE([Errors], [Total]) < 0.05))"),
+    # negative: correctly guarded - ISBLANK(...) wraps the exact same DIVIDE(...) call earlier.
     (False, "IF(ISBLANK(DIVIDE([Errors], [Total])), BLANK(), DIVIDE([Errors], [Total]) < 0.05)"),
-    # negative: 3-argument DIVIDE supplies an explicit alternate result and never returns BLANK().
-    (False, "DIVIDE([Errors], [Total], 0) < 0.05"),
+    # negative: both DIVIDE arguments are literals, so it can never return BLANK().
+    (False, "DIVIDE(1, 1) < 2"),
+    # negative: numerator defaults via COALESCE to a non-blank literal, denominator is a nonzero
+    # literal - DIVIDE can never return BLANK() here even though it's a bare 2-argument call.
+    (False, "DIVIDE(COALESCE([Errors], 0), 1) < 0.05"),
     # negative: safe direction - 0 does NOT satisfy the comparison, so a blank reads FALSE.
     (False, "DIVIDE([Errors], [Total]) > 0.05"),
     (False, "DIVIDE([Sales], [Target]) >= 100"),
     # negative: an ordinary, non-threshold comparison entirely unrelated to DIVIDE.
     (False, "SUM('S'[Sales]) > 0"),
     (False, "'S'[Status] = \"Active\""),
+    # negative: confirmed-good shapes from the review that must not start being flagged.
+    (False, "NOT ISBLANK([Errors]) && DIVIDE([Errors], [Total]) > 0.05"),
+    (False, "COALESCE(DIVIDE([Errors], [Total]), 0) < 0.05"),
+    (False, "(DIVIDE([Errors], [Total]) + 0) > 0.05"),
 ]
 
 
 @pytest.mark.parametrize(("illegal", "expression"), UNGUARDED_BLANK_THRESHOLD_CASES)
 def test_unguarded_divide_threshold_detection_is_precise(illegal: bool, expression: str) -> None:
-    """Only a bare, unguarded DIVIDE(...) compared unsafely against a literal threshold is flagged."""
-    assert (find_unguarded_divide_threshold(expression) is not None) is illegal
+    """Only an unguarded DIVIDE(...) compared unsafely against a literal threshold is flagged."""
+    assert bool(find_unguarded_divide_thresholds(expression)) is illegal
 
 
 def test_unguarded_divide_threshold_in_measure_is_caught_by_gate() -> None:
     """Mutation coverage for the TMDL walker, not just the predicate helper (issue #82)."""
     text = "table S\n\tmeasure 'Error Rate Flag' = DIVIDE([Errors], [Total]) < 0.05\n"
+    assert "UNGUARDED_BLANK_THRESHOLD" in _tmdl_codes(text)
+
+
+def test_unguarded_divide_threshold_nested_in_if_is_caught_by_gate() -> None:
+    """A nested, not-the-entire-expression comparison must still be caught by the full TMDL walker."""
+    text = "table S\n\tmeasure 'Flag' = IF([Region] = \"West\", DIVIDE([Errors], [Total]) < 0.05, BLANK())\n"
     assert "UNGUARDED_BLANK_THRESHOLD" in _tmdl_codes(text)
 
 
@@ -401,6 +425,12 @@ def test_guarded_divide_threshold_in_measure_is_not_flagged_by_gate() -> None:
         "\tmeasure 'Error Rate Flag' = "
         "IF(ISBLANK(DIVIDE([Errors], [Total])), BLANK(), DIVIDE([Errors], [Total]) < 0.05)\n"
     )
+    assert "UNGUARDED_BLANK_THRESHOLD" not in _tmdl_codes(text)
+
+
+def test_provably_non_blank_divide_in_measure_is_not_flagged_by_gate() -> None:
+    """A DIVIDE(...) that cannot return BLANK() is a false-positive risk this gate must not take."""
+    text = "table S\n\tmeasure 'Literal Ratio' = DIVIDE(1, 1) < 2\n"
     assert "UNGUARDED_BLANK_THRESHOLD" not in _tmdl_codes(text)
 
 

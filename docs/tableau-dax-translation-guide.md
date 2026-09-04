@@ -51,7 +51,8 @@ flag, bucket, or filter matches, with no error anywhere. A Tableau calculation t
 which side of zero the threshold sits on.
 
 **Work out which direction is unsafe by asking "does `0` satisfy this comparison against my
-threshold?"** — if yes, a blank operand silently passes the predicate as `TRUE`:
+threshold?"** — if yes, a blank operand silently passes the predicate as `TRUE`. ✅ Verified live in
+Power BI Desktop (2026-09-03):
 
 | Comparison | Is `0` on the passing side? | Effect on a blank operand |
 |---|---|---|
@@ -83,16 +84,34 @@ IF(
 )
 ```
 
-The same guard applies whenever the operand is the result of `DIVIDE(a, b)` with **no third
-argument** — DAX returns `BLANK()`, not `0`, when the denominator is `0` (or blank), so a ratio-style
-threshold (`% Complete`, error rate, margin) built on 2-argument `DIVIDE` inherits exactly this risk.
-Passing an explicit alternate result (`DIVIDE(a, b, 0)`) is the other valid fix **only** when a
-missing denominator really should read as `0` for this measure — confirm that intent with the
-customer rather than assuming it.
+The same guard applies whenever the operand is the result of `DIVIDE(a, b[, alt])` — a ratio-style
+threshold (`% Complete`, error rate, margin) built on `DIVIDE` inherits exactly this risk. ⚠️ **A
+third `DIVIDE` argument does NOT make the call safe on its own** — verified live in Power BI Desktop
+(2026-09-03):
+
+```dax
+DIVIDE(BLANK(), 1, 0) < 0.05   -- true: "alt" only substitutes for a 0/blank DENOMINATOR, so a
+                               -- blank NUMERATOR still propagates straight through untouched
+DIVIDE(1, 0, BLANK()) < 0.05   -- true: the alternate result itself can be BLANK() too
+```
+
+A 3-argument `DIVIDE(a, b, alt)` is only provably safe when **both** `a` (the numerator) and `alt`
+(the alternate result) are themselves non-blank — e.g. `alt` is a literal like `0`, and `a` cannot be
+blank in context. Passing an explicit alternate result is the right fix **only** when a missing
+denominator really should read as that value for this measure, and only once the numerator's own
+blank case is separately accounted for — confirm that intent with the customer rather than assuming
+it, and prefer the `ISBLANK(...)` guard above when in doubt.
 
 This generalizes the existing `ISNULL(x) → ISBLANK(x)` note above: that row flags that the two null
 representations differ; this rule is about what happens next, when the (possibly blank) result feeds
 a `<`, `<=`, `>`, `>=`, `=`, or `<>` comparison against a literal threshold.
+
+`scripts/tmdl_checks.py`'s `find_unguarded_divide_thresholds` (wired into `scripts/check_datamodel.py`
+as the `UNGUARDED_BLANK_THRESHOLD` gate finding) flags this shape wherever a `DIVIDE(...)` call
+appears in generated DAX — including nested inside `IF(...)` or `CALCULATE(...)` — unless it is
+guarded by `ISBLANK(...)`, or its own arguments prove it cannot return `BLANK()` (a numeric/string
+literal, or `COALESCE(..., <that literal>)`, in both the numerator and — for the 3-argument form —
+the alternate result).
 
 
 ### Worked example — CASE/WHEN [seen]

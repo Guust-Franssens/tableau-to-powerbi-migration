@@ -39,9 +39,10 @@ Scope stays deliberately narrow because a false positive is worse than a miss:
   * measure/column name collisions within one table file
   * empty measure expressions
   * direct CALCULATE/CALCULATETABLE compact filters that compare a column to a measure
-  * a bare `DIVIDE(a, b) <op> <threshold>` comparison with no `ISBLANK` guard (issue #82) - `DIVIDE`
-    returns `BLANK()`, not `0`, on a `0`/blank denominator, and `BLANK()` coerces to `0` in a
-    comparison, so an unguarded threshold can silently flip which rows a KPI flag matches
+  * a `DIVIDE(a, b[, alt]) <op> <threshold>` comparison with no `ISBLANK` guard (issue #82) -
+    `DIVIDE` returns `BLANK()` whenever its numerator is blank, or its denominator is `0`/blank
+    with no 3rd argument, and `BLANK()` coerces to `0` in a comparison, so an unguarded threshold
+    can silently flip which rows a KPI flag matches, anywhere the call appears in the expression
   * legacy BIFF8 `.xls` partitions with a resolvable local source: their navigation key and type
     conversion culture, which otherwise fail or silently corrupt rows at refresh
 
@@ -76,7 +77,7 @@ from tmdl_checks import (
     check_tmdl_model,
     check_tmdl_text,
     find_compact_filters,
-    find_unguarded_divide_threshold,
+    find_unguarded_divide_thresholds,
 )
 from tmdl_oracle import OracleUnavailable, check_models
 
@@ -90,7 +91,7 @@ __all__ = [
     "check_tmdl_model",
     "check_tmdl_text",
     "find_compact_filters",
-    "find_unguarded_divide_threshold",
+    "find_unguarded_divide_thresholds",
     "main",
 ]
 
