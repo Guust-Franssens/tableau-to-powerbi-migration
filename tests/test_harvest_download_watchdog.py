@@ -718,7 +718,10 @@ def test_the_header_arithmetic_closes(tmp_path: Path) -> None:
     assert f"never downloaded {len(harvest.never_downloaded(rows))}" in text
     closure = next(line for line in text.splitlines() if line.startswith("Disjoint buckets"))
     assert closure.rstrip(".").endswith(f"= {len(rows)}"), closure
-    assert "2 parsed by both + 1 ours only + 1 his only + 1 both parsers + 3 never downloaded" in closure
+    assert (
+        "2 parsed by both + 1 ours only + 1 his only + 1 both parsers + 0 invalid/indeterminate + 3 never downloaded"
+        in closure
+    )
 
 
 def test_the_parser_buckets_ignore_rows_that_never_reached_a_parser(tmp_path: Path) -> None:
@@ -741,6 +744,113 @@ def test_a_clean_sweep_still_says_none(tmp_path: Path) -> None:
     section = text.split("## Downloads that never landed", 1)[1]
     assert section.lstrip().startswith("_none_")
     assert "never downloaded 0" in text
+
+
+# --- issue #483: an `ok` that is not exactly `true`/`false` must not enter no bucket, or a false one
+
+
+def rows_with_ok(ours_ok: object, theirs_ok: object) -> list[dict]:
+    """One asset that DID download, with the given (possibly malformed) `ok` on each side."""
+    return [
+        {
+            "name": "Weird Verdict",
+            "kind": "workbook",
+            "luid": "wb-weird",
+            "ours": {"ok": ours_ok},
+            "theirs": {"ok": theirs_ok},
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "ours_ok",
+    [None, "true", "yes", 1, 0, [], ["partial"], {}],
+    ids=["none", "string-true", "string-yes", "int-1", "int-0", "empty-list", "list", "dict"],
+)
+def test_a_malformed_ok_is_invalid_not_a_silent_success_or_failure(tmp_path: Path, ours_ok: object) -> None:
+    """A truthy non-bool `ok` used to slip into `both_ok`; a falsy one used to slip past `is False`.
+
+    Neither is a real verdict. Both must land in the invalid/indeterminate bucket and nowhere else.
+    """
+    rows = rows_with_ok(ours_ok, True)
+    assert harvest.indeterminate_parser_outcomes(rows) == rows
+    text = harvest.summarise(rows, tmp_path)
+    assert "invalid/indeterminate outcome 1." in text
+    assert "both parsed 0" in text.splitlines()[2]
+    assert "Weird Verdict" in text.split("## Invalid/indeterminate parser outcome", 1)[1]
+
+
+def test_ok_key_missing_from_an_existing_ours_dict_is_invalid(tmp_path: Path) -> None:
+    """`{"ours": {}}` (no `ok` key at all) is a downloaded, parsed row with an incomplete verdict --
+    distinct from a row with no `ours` key at all, which `never_downloaded()` already owns.
+    """
+    rows = [{"name": "Weird Verdict", "kind": "workbook", "luid": "wb-weird", "ours": {}, "theirs": {"ok": True}}]
+    assert harvest.indeterminate_parser_outcomes(rows) == rows
+    assert harvest.never_downloaded(rows) == [], "this row DID download and reach both parsers"
+    text = harvest.summarise(rows, tmp_path)
+    assert "invalid/indeterminate outcome 1." in text
+
+
+def test_the_reproduction_both_sides_none_used_to_enter_no_bucket(tmp_path: Path) -> None:
+    """The issue's own repro: total 1, every bucket 0, and the closure never caught it."""
+    rows = rows_with_ok(None, None)
+    text = harvest.summarise(rows, tmp_path)
+    closure = next(line for line in text.splitlines() if line.startswith("Disjoint buckets"))
+    assert closure.rstrip(".").endswith("= 1"), closure
+    assert (
+        "0 parsed by both + 0 ours only + 0 his only + 0 both parsers + 1 invalid/indeterminate + 0 never downloaded"
+        in closure
+    )
+
+
+def test_a_valid_boolean_ok_is_never_misclassified_as_invalid(tmp_path: Path) -> None:
+    """`True`/`False` themselves must not trip the new check -- only non-booleans should."""
+    assert harvest.indeterminate_parser_outcomes(rows_with_ok(True, True)) == []
+    assert harvest.indeterminate_parser_outcomes(rows_with_ok(False, False)) == []
+    assert harvest.indeterminate_parser_outcomes(rows_with_ok(True, False)) == []
+
+
+def test_an_invalid_outcome_is_not_a_clean_exit(tmp_path: Path) -> None:
+    """The whole point: it must not exit 0 as a complete sweep."""
+    rows = sweep_rows_all_ok_plus_one_invalid()
+    assert harvest.sweep_exit_code(rows) == harvest.EXIT_PARTIAL
+
+
+def sweep_rows_all_ok_plus_one_invalid() -> list[dict]:
+    return [
+        {"name": "Fine A", "kind": "workbook", "ours": {"ok": True}, "theirs": {"ok": True}},
+        {"name": "Fine B", "kind": "workbook", "ours": {"ok": True}, "theirs": {"ok": True}},
+        {"name": "Weird", "kind": "workbook", "ours": {"ok": "yes"}, "theirs": {"ok": True}},
+    ]
+
+
+def test_main_exits_partial_not_ok_when_an_asset_has_a_malformed_ok(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """End to end: a real parser bug that returns a non-boolean `ok` must not read as a clean run."""
+    db = tmp_path / "estate.db"
+    con = sqlite3.connect(db)
+    con.executescript(
+        """
+        CREATE TABLE project (luid TEXT PRIMARY KEY, name TEXT);
+        CREATE TABLE workbook (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        CREATE TABLE datasource (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        INSERT INTO workbook VALUES ('wb-ia', 'IA Redemptions', 'p');
+        """
+    )
+    con.commit()
+    con.close()
+    out = tmp_path / "_sweep"
+    monkeypatch.setattr(harvest, "engine_scripts_dir", lambda: tmp_path / "engine")
+    monkeypatch.setattr(harvest, "resolve_env", lambda path: {"TABLEAU_SERVER_URL": "https://example.invalid"})
+    monkeypatch.setattr(harvest, "require", lambda env: None)
+    monkeypatch.setattr(harvest, "download", landing_download)
+    monkeypatch.setattr(harvest, "parse_asset", lambda path, scripts: ({"ok": "yes"}, {"ok": True}))
+    monkeypatch.setattr(
+        sys, "argv", ["harvest_estate_assets.py", "--out", str(out), "--db", str(db), "--allow-unignored-out"]
+    )
+    assert harvest.main() == harvest.EXIT_PARTIAL, "a malformed ok must not read as a complete sweep"
+    assert "invalid/indeterminate outcome 1." in (out / "parse-sweep.md").read_text(encoding="utf-8")
 
 
 def test_the_failed_downloads_are_reported_to_the_operator_at_the_end(caplog: pytest.LogCaptureFixture) -> None:
@@ -922,6 +1032,72 @@ def test_the_section_is_absent_when_nothing_is_orphaned(tmp_path: Path) -> None:
     assert "## Do not convert yet" not in harvest.summarise(binding_rows(), tmp_path, [])
 
 
+# --- issue #483: two same-named workbooks in different projects must remain two orphans ----------
+
+
+def estate_with_two_same_named_workbooks(path: Path) -> Path:
+    """Two DIFFERENT workbooks, same display name, in different projects, both bound to one datasource."""
+    con = sqlite3.connect(path)
+    con.executescript(
+        """
+        CREATE TABLE project (luid TEXT PRIMARY KEY, name TEXT);
+        CREATE TABLE workbook (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        CREATE TABLE datasource (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        CREATE TABLE dependency (workbook_luid TEXT, datasource_luid TEXT, datasource_name TEXT);
+        INSERT INTO project VALUES ('proj-a', 'Region A');
+        INSERT INTO project VALUES ('proj-b', 'Region B');
+        INSERT INTO workbook VALUES ('wb-a', 'Revenue Dashboard', 'proj-a');
+        INSERT INTO workbook VALUES ('wb-b', 'Revenue Dashboard', 'proj-b');
+        INSERT INTO datasource VALUES ('ds-sessions', 'DS_Sessions_by_Product', 'proj-a');
+        INSERT INTO dependency VALUES ('wb-a', 'ds-sessions', 'DS_Sessions_by_Product');
+        INSERT INTO dependency VALUES ('wb-b', 'ds-sessions', 'DS_Sessions_by_Product');
+        """
+    )
+    con.commit()
+    con.close()
+    return path
+
+
+def duplicate_named_binding_rows() -> list[dict]:
+    """The datasource failed; BOTH same-named workbooks landed."""
+    return [
+        {"name": "DS_Sessions_by_Product", "kind": "datasource", "luid": "ds-sessions", "download_error": "500"},
+        {
+            "name": "Revenue Dashboard",
+            "kind": "workbook",
+            "luid": "wb-a",
+            "ours": {"ok": True},
+            "theirs": {"ok": True},
+        },
+        {
+            "name": "Revenue Dashboard",
+            "kind": "workbook",
+            "luid": "wb-b",
+            "ours": {"ok": True},
+            "theirs": {"ok": True},
+        },
+    ]
+
+
+def test_two_same_named_workbooks_in_different_projects_are_two_orphans(tmp_path: Path) -> None:
+    """Before the fix, `by_datasource` collected workbook NAMES into a `set`, so one 'Revenue
+    Dashboard' silently absorbed the other -- a real second workbook vanished from the report.
+    """
+    edges = edges_from(estate_with_two_same_named_workbooks(tmp_path / "estate.db"))
+    orphans = harvest.orphaned_dependents(duplicate_named_binding_rows(), edges)
+    assert orphans == [("DS_Sessions_by_Product", ["Revenue Dashboard", "Revenue Dashboard"])]
+    assert len(orphans[0][1]) == 2, "two distinct workbook identities collapsed into one orphan"
+
+
+def test_only_one_of_two_same_named_workbooks_landing_still_reports_just_that_one(tmp_path: Path) -> None:
+    """The LUID-keyed fix must not accidentally start double-counting a single landed workbook."""
+    rows = duplicate_named_binding_rows()
+    rows[2] = {"name": "Revenue Dashboard", "kind": "workbook", "luid": "wb-b", "download_error": "timeout"}
+    edges = edges_from(estate_with_two_same_named_workbooks(tmp_path / "estate.db"))
+    orphans = harvest.orphaned_dependents(rows, edges)
+    assert orphans == [("DS_Sessions_by_Product", ["Revenue Dashboard"])]
+
+
 def test_an_estate_db_without_a_dependency_table_still_harvests(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -956,7 +1132,9 @@ def test_an_estate_db_without_a_dependency_table_still_harvests(
         ["harvest_estate_assets.py", "--out", str(out), "--db", str(db), "--allow-unignored-out"],
     )
     assert harvest.main() == harvest.EXIT_OK
-    assert "never downloaded 0." in (out / "parse-sweep.md").read_text(encoding="utf-8")
+    assert "never downloaded 0, invalid/indeterminate outcome 0." in (out / "parse-sweep.md").read_text(
+        encoding="utf-8"
+    )
 
 
 def test_main_end_to_end_names_the_orphaned_workbook(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1017,7 +1195,10 @@ def test_a_failed_download_reaches_parse_sweep_md_through_main(monkeypatch: pyte
     assert harvest.main() == harvest.EXIT_NOTHING_ASSESSED
 
     text = (out / "parse-sweep.md").read_text(encoding="utf-8")
-    assert "**1 asset(s)** — ours failed 0, his failed 0, both parsed 0, never downloaded 1." in text
+    assert (
+        "**1 asset(s)** — ours failed 0, his failed 0, both parsed 0, never downloaded 1, invalid/indeterminate outcome 0."
+        in text
+    )
     assert "IA Redemptions by Campaign Report" in text.split("## Downloads that never landed", 1)[1]
 
 
@@ -1102,7 +1283,9 @@ def test_a_totally_failed_harvest_exits_nonzero_through_main(monkeypatch: pytest
     )
     assert harvest.main() == harvest.EXIT_NOTHING_ASSESSED
     # The report still has to be written: a non-zero exit must not cost the operator the evidence.
-    assert "never downloaded 1." in (out / "parse-sweep.md").read_text(encoding="utf-8")
+    assert "never downloaded 1, invalid/indeterminate outcome 0." in (out / "parse-sweep.md").read_text(
+        encoding="utf-8"
+    )
 
 
 def test_the_verdict_is_SAID_not_just_returned(

@@ -1022,6 +1022,9 @@ def orphaned_dependents(results: list[dict], edges: list[tuple[str, str, str, st
     (`dependency_datasources`) and then never looked at them again once one had failed, so catching
     it depended on the operator noticing (issue #472). A workbook that itself failed to download is
     left out: it is already in the never-landed list and is not about to be converted.
+
+    Two same-named workbooks in different projects remain TWO entries here (issue #483) — see the
+    LUID-keyed grouping below.
     """
     missing_ids = {id(r) for r in never_downloaded(results)}
     failed_datasources = {
@@ -1034,13 +1037,18 @@ def orphaned_dependents(results: list[dict], edges: list[tuple[str, str, str, st
         for r in results
         if id(r) not in missing_ids and r.get("kind") == "workbook"
     }
-    by_datasource: dict[str, set[str]] = {}
+    # Keyed by WORKBOOK LUID, the strongest identity `dependency_edges` carries — never by display
+    # name. A `set[str]` of names used to be the key here, so two workbooks that happen to share a
+    # name in different projects silently collapsed into one orphan entry (issue #483). LUID is
+    # never blank on this side: `dependency_edges` joins the workbook end on `workbook.luid =
+    # dependency.workbook_luid` with no name fallback (only the datasource end has one).
+    by_datasource: dict[str, dict[str, str]] = {}
     for workbook_luid, workbook_name, datasource_luid, datasource_name in edges:
         if datasource_luid in failed_datasources and workbook_luid in landed_workbooks:
-            by_datasource.setdefault(datasource_name or failed_datasources[datasource_luid], set()).add(
+            by_datasource.setdefault(datasource_name or failed_datasources[datasource_luid], {})[workbook_luid] = (
                 workbook_name or landed_workbooks[workbook_luid]
             )
-    return [(name, sorted(workbooks)) for name, workbooks in sorted(by_datasource.items())]
+    return [(name, sorted(workbook_names.values())) for name, workbook_names in sorted(by_datasource.items())]
 
 
 def never_downloaded(results: list[dict]) -> list[dict]:
@@ -1052,6 +1060,36 @@ def never_downloaded(results: list[dict]) -> list[dict]:
     arithmetic did not close (issue #472).
     """
     return [r for r in results if "ours" not in r or "theirs" not in r]
+
+
+def _strict_bool(value: object) -> bool | None:
+    """`True`/`False` only when `value` IS a boolean; `None` for everything else.
+
+    A parser's `ok` is meant to be exactly JSON/Python `true`/`false`. `value is False` (used below
+    for the overlapping ours/his-failed counts) already happens to be strict — `None is False` and
+    `"no" is False` are both `False` — but nothing previously caught the TRUTHY side: a non-bool
+    `ok` such as `"yes"`, `1`, or `["partial"]` passed the old `and`-based `both_ok` check as if it
+    were a real success. `bool` is a subclass of `int`, so this must check `isinstance(value, bool)`
+    and not merely `isinstance(value, int)`.
+    """
+    return value if isinstance(value, bool) else None
+
+
+def indeterminate_parser_outcomes(results: list[dict]) -> list[dict]:
+    """Rows that DID download but whose `ours`/`theirs` `ok` is missing or not a strict boolean.
+
+    Before this existed, such a row entered NO bucket in `summarise()` while still inflating
+    `len(results)`: the closure arithmetic could read `total 1` while every bucket read `0`, without
+    the assertion in `summarise()` ever failing (issue #483). Every asset that reached a parser now
+    lands in exactly one of: both parsed, ours only failed, his only failed, both failed, or here.
+    """
+    missing_ids = {id(r) for r in never_downloaded(results)}
+    return [
+        r
+        for r in results
+        if id(r) not in missing_ids
+        and (_strict_bool(r.get("ours", {}).get("ok")) is None or _strict_bool(r.get("theirs", {}).get("ok")) is None)
+    ]
 
 
 def failure_shape(message: str) -> str:
@@ -1079,26 +1117,45 @@ def summarise(  # pylint: disable=too-many-locals,too-many-statements,too-many-b
     missing = never_downloaded(results)
     missing_ids = {id(r) for r in missing}
     parsed = [r for r in results if id(r) not in missing_ids]
+    invalid = indeterminate_parser_outcomes(results)
+    invalid_ids = {id(r) for r in invalid}
+    valid = [r for r in parsed if id(r) not in invalid_ids]
+    # `ours_fail`/`theirs_fail` stay OVERLAPPING counts (an asset that defeats both parsers is in
+    # both), used only for the informational header line below -- unchanged from before #483.
     ours_fail = [r for r in parsed if r.get("ours", {}).get("ok") is False]
     theirs_fail = [r for r in parsed if r.get("theirs", {}).get("ok") is False]
-    both_ok = [r for r in parsed if r.get("ours", {}).get("ok") and r.get("theirs", {}).get("ok")]
     both_fail = [r for r in ours_fail if id(r) in {id(x) for x in theirs_fail}]
+    both_fail_ids = {id(r) for r in both_fail}
+    # From here down every row is DISJOINT: `valid` guarantees a strict boolean on both sides, so
+    # there are exactly four combinations (TT/FF/FT/TF) and each row lands in exactly one.
+    both_ok = [r for r in valid if r.get("ours", {}).get("ok") is True and r.get("theirs", {}).get("ok") is True]
+    ours_only = [r for r in valid if id(r) not in both_fail_ids and r.get("ours", {}).get("ok") is False]
+    theirs_only = [r for r in valid if id(r) not in both_fail_ids and r.get("theirs", {}).get("ok") is False]
+
+    disjoint_total = len(both_ok) + len(ours_only) + len(theirs_only) + len(both_fail) + len(invalid) + len(missing)
+    assert disjoint_total == len(results), (
+        f"disjoint outcome buckets summed to {disjoint_total}, not {len(results)} asset(s) -- "
+        "a row escaped every bucket (issue #483)"
+    )
 
     lines = ["# Estate parse sweep", ""]
     lines.append(
         f"**{len(results)} asset(s)** — ours failed {len(ours_fail)}, his failed {len(theirs_fail)}, "
-        f"both parsed {len(both_ok)}, never downloaded {len(missing)}."
+        f"both parsed {len(both_ok)}, never downloaded {len(missing)}, "
+        f"invalid/indeterminate outcome {len(invalid)}."
     )
     lines.append("")
     # The closure line is the audit: `ours failed`/`his failed` OVERLAP when one asset defeats both
-    # parsers, so those two numbers cannot be added to anything. These five are disjoint and must
-    # sum to the denominator -- which is the property that silently failed before issue #472.
+    # parsers, so those two numbers cannot be added to anything. These six are disjoint and must
+    # sum to the denominator -- which is the property that silently failed before issue #472, and
+    # again for a non-boolean `ok` before issue #483.
     lines.append(
         f"Disjoint buckets, which must add up to the {len(results)} above: "
-        f"{len(both_ok)} parsed by both + {len(ours_fail) - len(both_fail)} ours only + "
-        f"{len(theirs_fail) - len(both_fail)} his only + {len(both_fail)} both parsers + "
+        f"{len(both_ok)} parsed by both + {len(ours_only)} ours only + "
+        f"{len(theirs_only)} his only + {len(both_fail)} both parsers + "
+        f"{len(invalid)} invalid/indeterminate + "
         f"{len(missing)} never downloaded = "
-        f"{len(both_ok) + len(ours_fail) + len(theirs_fail) - len(both_fail) + len(missing)}."
+        f"{disjoint_total}."
     )
     lines.append("")
     lines.append(
@@ -1157,6 +1214,24 @@ def summarise(  # pylint: disable=too-many-locals,too-many-statements,too-many-b
             lines.append(f"  - {', '.join(names[:8])}{' …' if len(names) > 8 else ''}")
         lines.append("")
 
+    lines.append("## Invalid/indeterminate parser outcome")
+    lines.append("")
+    if not invalid:
+        lines.append("_none_")
+        lines.append("")
+    else:
+        lines.append(
+            f"**{len(invalid)} asset(s)** downloaded fine but `ok` was not exactly `true`/`false` on "
+            "at least one side. This is NOT a clean parse and NOT a clean failure -- treat it as "
+            "broken until a real parser verdict replaces it."
+        )
+        lines.append("")
+        for r in invalid:
+            ours_ok = r.get("ours", {}).get("ok")
+            theirs_ok = r.get("theirs", {}).get("ok")
+            lines.append(f"- `{r.get('name', '?')}` — ours.ok={ours_ok!r}, theirs.ok={theirs_ok!r}")
+        lines.append("")
+
     unsupported: dict[str, list[str]] = {}
     for r in results:
         for reason in (r.get("theirs", {}) or {}).get("unsupported", []) or []:
@@ -1173,6 +1248,18 @@ def summarise(  # pylint: disable=too-many-locals,too-many-statements,too-many-b
     text = "\n".join(lines) + "\n"
     (out / "parse-sweep.md").write_text(text, encoding="utf-8")
     (out / "parse-sweep.json").write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
+    # Machine-readable disjoint totals, so a caller can assert the closure without re-parsing the
+    # markdown -- the SAME assertion above is what guarantees these six sum to `total` (issue #483).
+    totals = {
+        "total": len(results),
+        "both_ok": len(both_ok),
+        "ours_only": len(ours_only),
+        "theirs_only": len(theirs_only),
+        "both_fail": len(both_fail),
+        "invalid": len(invalid),
+        "never_downloaded": len(missing),
+    }
+    (out / "parse-sweep-totals.json").write_text(json.dumps(totals, indent=2) + "\n", encoding="utf-8")
     return text
 
 
@@ -1360,12 +1447,16 @@ def sweep_exit_code(results: list[dict]) -> int:
     harvest that assessed nothing exited 0 (issue #472; reproduced in the blind review of #482).
     An empty `results` is `EXIT_NOTHING_ASSESSED` for the same reason it always was non-zero: a
     sweep that looked at nothing has said nothing about the estate.
+
+    An asset with an invalid/indeterminate `ok` (issue #483) is ALSO not a clean sweep: it did not
+    fail cleanly and it did not parse cleanly either, so it must not let the run exit 0.
     """
     missing = len(never_downloaded(results))
     assessed = len(results) - missing
     if assessed <= 0:
         return EXIT_NOTHING_ASSESSED
-    return EXIT_PARTIAL if missing else EXIT_OK
+    invalid = len(indeterminate_parser_outcomes(results))
+    return EXIT_PARTIAL if missing or invalid else EXIT_OK
 
 
 def report_failed_downloads(results: list[dict], orphans: list[tuple[str, list[str]]] | None = None) -> list[dict]:
