@@ -333,6 +333,43 @@ def test_package_unit_campaign_reports_partial_anchor_when_only_one_anchor_fails
     assert note == "caught: test_observes; missed: test_misses"
 
 
+def test_package_unit_campaign_treats_failed_plus_error_output_as_broken(monkeypatch) -> None:
+    def fake_run(cmd, **_kwargs):
+        return subprocess.CompletedProcess(cmd, 1, stdout="1 failed, 1 error", stderr="")
+
+    monkeypatch.setattr(mutate_package_unit.subprocess, "run", fake_run)
+
+    verdict, note = mutate_package_unit.run_one_anchor("test_observes")
+
+    assert verdict == "BROKEN"
+    assert note == "1 failed, 1 error"
+
+
+def test_package_unit_restored_anchor_declaration_runs_each_anchor_independently(monkeypatch) -> None:
+    label = "README: send the agent back to the bundle to edit (issue #460's silent-discard shape)"
+    names = next(
+        names for mutation_label, _target, _old, _new, names in mutate_package_unit.MUTATIONS if mutation_label == label
+    )
+    calls: list[str] = []
+
+    def fake_run(cmd, **_kwargs):
+        anchor = cmd[cmd.index("-k") + 1]
+        calls.append(anchor)
+        return subprocess.CompletedProcess(cmd, 1, stdout="1 failed", stderr="")
+
+    monkeypatch.setattr(mutate_package_unit.subprocess, "run", fake_run)
+
+    verdict, note = mutate_package_unit.run_anchor(names)
+
+    assert names == [
+        "test_AGENTS_md_and_the_package_readme_agree_on_where_an_agent_edits",
+        "test_declared_edit_tooling_is_scoped_to_bundle_work_in_BOTH_documents",
+    ]
+    assert calls == names
+    assert verdict == "CAUGHT (2 anchors)"
+    assert note == ""
+
+
 def test_check_unit_campaign_requires_every_anchor_to_fail(monkeypatch) -> None:
     calls: list[str] = []
 
@@ -348,6 +385,18 @@ def test_check_unit_campaign_requires_every_anchor_to_fail(monkeypatch) -> None:
     assert calls == ["test_first", "test_second"]
     assert verdict == "CAUGHT (2 anchors)"
     assert note == ""
+
+
+def test_check_unit_campaign_treats_failed_plus_error_output_as_broken(monkeypatch) -> None:
+    def fake_run(cmd, **_kwargs):
+        return subprocess.CompletedProcess(cmd, 1, stdout="1 failed, 1 error", stderr="")
+
+    monkeypatch.setattr(mutate_check_unit.subprocess, "run", fake_run)
+
+    verdict, note = mutate_check_unit.run_one_anchor("test_observes")
+
+    assert verdict == "BROKEN"
+    assert note == "1 failed, 1 error"
 
 
 def test_campaign_main_treats_partial_anchor_as_non_success(monkeypatch) -> None:

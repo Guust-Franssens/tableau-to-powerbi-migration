@@ -279,7 +279,10 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
         "| `fabric/` | the engine WORKING COPY - **edit here**, and when you work from a package THIS tree "
         "is canonical; `<bundle>/pbip/` never promotes over it.",
         "| `fabric/` | a copy of the engine working copy; edit `<bundle>/pbip/` instead.",
-        ["test_AGENTS_md_and_the_package_readme_agree_on_where_an_agent_edits"],
+        [
+            "test_AGENTS_md_and_the_package_readme_agree_on_where_an_agent_edits",
+            "test_declared_edit_tooling_is_scoped_to_bundle_work_in_BOTH_documents",
+        ],
     ),
     (
         "README: drop the bundle-only scope from the declared-edit tooling note",
@@ -572,6 +575,7 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
 ]
 
 _FAILED = re.compile(r"(\d+) failed")
+_ERROR = re.compile(r"(\d+) errors?\b|^ERROR\b", re.IGNORECASE | re.MULTILINE)
 
 
 def run_one_anchor(name: str) -> tuple[str, str]:
@@ -589,12 +593,14 @@ def run_one_anchor(name: str) -> tuple[str, str]:
         check=False,
         cwd=REPO_ROOT,
     )
-    tail = (proc.stdout or "")[-4000:]
+    tail = f"{proc.stdout or ''}\n{proc.stderr or ''}"[-4000:]
+    last = tail.strip().splitlines()[-1] if tail.strip() else "no output"
+    if _ERROR.search(tail):
+        return "BROKEN", last
     failed = _FAILED.search(tail)
     if failed:
         return f"CAUGHT ({failed.group(1)} failed)", ""
-    last = tail.strip().splitlines()[-1] if tail.strip() else "no output"
-    if proc.returncode != 0 or "error" in tail.lower():
+    if proc.returncode != 0:
         return "BROKEN", last
     return "SURVIVED", last
 

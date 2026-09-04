@@ -695,6 +695,7 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
 ]
 
 _FAILED = re.compile(r"(\d+) failed")
+_ERROR = re.compile(r"(\d+) errors?\b|^ERROR\b", re.IGNORECASE | re.MULTILINE)
 
 
 def run_one_anchor(name: str) -> tuple[str, str]:
@@ -715,13 +716,16 @@ def run_one_anchor(name: str) -> tuple[str, str]:
         check=False,
         cwd=REPO_ROOT,
     )
-    tail = (proc.stdout or "")[-4000:]
+    tail = f"{proc.stdout or ''}\n{proc.stderr or ''}"[-4000:]
+    last = tail.strip().splitlines()[-1] if tail.strip() else "no output"
+    if _ERROR.search(tail):
+        return "BROKEN", last
     failed = _FAILED.search(tail)
     if failed:
         return f"CAUGHT ({failed.group(1)} failed)", ""
-    if proc.returncode != 0 or "error" in tail.lower():
-        return "BROKEN", tail.strip().splitlines()[-1] if tail.strip() else "no output"
-    return "SURVIVED", tail.strip().splitlines()[-1] if tail.strip() else "no output"
+    if proc.returncode != 0:
+        return "BROKEN", last
+    return "SURVIVED", last
 
 
 def run_anchor(names: list[str]) -> tuple[str, str]:
