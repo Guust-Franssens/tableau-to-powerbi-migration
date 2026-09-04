@@ -393,8 +393,7 @@ def test_distinct_escaped_names_sharing_a_prefix_are_not_a_duplicate(tmp_path: P
     """
     model = _write_two_table_model(
         tmp_path,
-        "table Orders\n\tmeasure 'O''Brien Sales' = SUM('Orders'[Amount])\n\n"
-        "\tcolumn Amount\n\t\tdataType: double\n",
+        "table Orders\n\tmeasure 'O''Brien Sales' = SUM('Orders'[Amount])\n\n\tcolumn Amount\n\t\tdataType: double\n",
         "table _Measures\n\tmeasure 'O''Connor Sales' = SUM('Orders'[Amount])\n",
     )
     findings, _ = check_tmdl_model(model)
@@ -407,8 +406,7 @@ def test_same_escaped_name_across_tables_is_still_a_duplicate(tmp_path: Path) ->
     """
     model = _write_two_table_model(
         tmp_path,
-        "table Orders\n\tmeasure 'O''Brien Sales' = SUM('Orders'[Amount])\n\n"
-        "\tcolumn Amount\n\t\tdataType: double\n",
+        "table Orders\n\tmeasure 'O''Brien Sales' = SUM('Orders'[Amount])\n\n\tcolumn Amount\n\t\tdataType: double\n",
         "table _Measures\n\tmeasure 'O''Brien Sales' = SUM('Orders'[Amount])\n",
     )
     findings, _ = check_tmdl_model(model)
