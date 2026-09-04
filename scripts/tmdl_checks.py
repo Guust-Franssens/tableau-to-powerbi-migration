@@ -331,6 +331,32 @@ def _iter_measure_declarations(text: str):
             yield number, current_table, name
 
 
+def _duplicate_measure_finding(
+    first_seen: dict[str, tuple[Path, int, str]], tmdl: Path, line: int, table: str, name: str
+) -> TmdlFinding | None:
+    """Record `name`'s first sighting, or report it as a model-wide duplicate on a later one.
+
+    Tabular measure names are case-insensitive and unique across the WHOLE model, not merely
+    within a table - unlike the same-table NAME_COLLISION check above, this fires across
+    DIFFERENT tables and DIFFERENT files.
+    """
+    key = name.casefold()
+    seen = first_seen.get(key)
+    if seen is None:
+        first_seen[key] = (tmdl, line, table)
+        return None
+    first_file, first_line, first_table = seen
+    return TmdlFinding(
+        "MEASURE_NAME_DUPLICATE",
+        f"measure '{name}' in table '{table}' repeats the model-wide name already used "
+        f"by table '{first_table}' ({first_file.name}:{first_line}); Tabular measure "
+        "names must be unique across the WHOLE model, not just within one table - "
+        "Desktop refuses to load/commit this even though it deserializes clean.",
+        tmdl,
+        line,
+    )
+
+
 def check_tmdl_model(model_dir: Path) -> tuple[list[TmdlFinding], int]:
     """Every TMDL document in one .SemanticModel."""
     findings: list[TmdlFinding] = []
@@ -344,24 +370,7 @@ def check_tmdl_model(model_dir: Path) -> tuple[list[TmdlFinding], int]:
             continue
         findings.extend(check_tmdl_text(tmdl, text))
         for line, table, name in _iter_measure_declarations(text):
-            # Tabular measure names are case-insensitive and unique across the WHOLE model, not
-            # merely within a table - unlike the same-table NAME_COLLISION check above, this fires
-            # across DIFFERENT tables and DIFFERENT files.
-            key = name.casefold()
-            seen = first_seen.get(key)
-            if seen is None:
-                first_seen[key] = (tmdl, line, table)
-                continue
-            first_file, first_line, first_table = seen
-            findings.append(
-                TmdlFinding(
-                    "MEASURE_NAME_DUPLICATE",
-                    f"measure '{name}' in table '{table}' repeats the model-wide name already used "
-                    f"by table '{first_table}' ({first_file.name}:{first_line}); Tabular measure "
-                    "names must be unique across the WHOLE model, not just within one table - "
-                    "Desktop refuses to load/commit this even though it deserializes clean.",
-                    tmdl,
-                    line,
-                )
-            )
+            finding = _duplicate_measure_finding(first_seen, tmdl, line, table, name)
+            if finding is not None:
+                findings.append(finding)
     return findings, len(files)
