@@ -6,15 +6,29 @@ purpose: ship one finished migration unit - the phase 2 -> phase 3 hop that had 
          /published datasource shape, proving that reference resolves ON DISK, proving the shipped
          report and model have real CONTENT, and recording what promoted what.
 usage:   python scripts/promote_unit.py --package <_runs/NNN-slug/packages/<batch>/<Unit>>
-             --slug <slug> [--datasource-slug <ds-slug>] [--bundle <bundle>]
-             [--dry-run] [--force] [--json <file>] [--migrations-root <dir>]
+             --slug <slug> [--datasource-slug <ds-slug>] [--kind workbook|datasource]
+             [--bundle <bundle>] [--dry-run] [--force] [--json <file>] [--migrations-root <dir>]
 
 Why each guard exists (all of these are measured failures, not hypotheses)
 --------------------------------------------------------------------------
 * **Re-running `check_unit.py` here is deliberate duplication.** It costs under a second, and this
   is the hop where a defect stops being a working copy and becomes a deliverable. `--force`
-  overrides the GATE (never the content checks), and the override plus the observed exit code are
-  written into the record - an unchecked promotion must never look checked afterwards.
+  overrides **the `check_unit.py` gate and NOTHING else**, and the override plus the observed exit
+  code are written into the record - an unchecked promotion must never look checked afterwards.
+* **NO artifact may carry an absolute host path.** `migrations/**` is not blanket-gitignored, this
+  repo is public, and a customer package path embeds their server, project and operator names as
+  surely as `C:\\Users\\<username>\\…` embeds a real user. Every path that reaches the record, the
+  `--json` envelope or a finding is repo-relative, deliverable-relative or an opaque marker; a
+  path-bearing exception is rendered without its `filename`. Because the tool cannot rewrite a
+  customer's M query, it cannot SANITIZE a model that reads an absolute outside path either - so
+  `--force` does not ship one, it refuses (exit 5). Sanitize with `scripts/set_data_folder.py` or
+  carry the extract into the package.
+* **The unit's kind comes from `package-manifest.json`, never from the filesystem.**
+  `package_unit.py:unit_kind` is explicit: every `pbip/<Unit>/` in a real 2.339.0 estate run
+  carries BOTH a `.Report` and a `.SemanticModel` - all 62, datasource-only units included - so
+  "it has a report, therefore it is a workbook" promotes real published datasources as workbooks.
+  A missing or `unclassified` kind is CANNOT_ASSESS, and `--kind` fills that gap explicitly (it
+  can never contradict a manifest that does declare one).
 * **`byPath` is verified against the filesystem, not a schema.** `powerbi-report-author validate`
   returns `errorCount: 0` for a `.Report` whose `datasetReference.byPath.path` names a
   `.SemanticModel` that exists nowhere: shape, not target
@@ -47,6 +61,10 @@ Exit codes
 | 4  | PROMOTION_FAILED: the copy, the `byPath` rewrite, or a post-copy verification failed |
 | 5  | REFUSED_EXTERNAL_DATA_PATH: the model reads data from outside the deliverable (#461) |
 | 64 | usage error |
+
+⚠️ 5 is the verdict for that condition wherever it is caught. Both scans - the source one before
+anything is copied, and the shipped one after - raise the SAME `ExternalDataPath`, because
+automation must not get a different routing answer depending only on which scan saw it first.
 
 ⚠️ 2 exists so "cannot assess" can never collapse into the clean bucket - this repo's most common
 gate defect class. An unreadable package is a blocking state, not a silent success.
@@ -102,10 +120,25 @@ _UNSAFE_SLUG_CHARS = ':*?"<>|'
 REPORT_SUFFIX = ".Report"
 MODEL_SUFFIX = ".SemanticModel"
 RECORD_NAME = "promotion-record.json"
+MANIFEST_NAME = "package-manifest.json"
 RECORD_VERSION = 1
+
+# `package_unit.py:unit_kind`'s own vocabulary. `unclassified` is a real value it emits and is NOT
+# promotable on its own - it means the engine's report.json named this unit in neither list.
+KIND_WORKBOOK = "workbook"
+KIND_DATASOURCE = "datasource"
+DECLARABLE_KINDS = (KIND_WORKBOOK, KIND_DATASOURCE)
+
+# What an artifact says instead of an absolute host path. Never a truncation of the real one.
+OUTSIDE_REPO = "<outside-repo>"
+UNDER_MIGRATIONS_ROOT = "<migrations-root>"
 
 # A TMDL table declaration is a column-0 `table <name>` line; an indented one is a nested property.
 _TMDL_TABLE_RE = re.compile(r"^table\s+\S", re.MULTILINE)
+
+# The `model <name>` declaration every `model.tmdl` opens with. A zero-byte file satisfies
+# `is_file()` and shipped before this.
+_TMDL_MODEL_RE = re.compile(r"^model\s+\S", re.MULTILINE)
 
 # Every double-quoted literal in a TMDL/M source block. M has no escaped quote inside a literal -
 # it doubles them - so a non-greedy run between quotes is the right shape here.
@@ -139,19 +172,25 @@ class PromotionFailed(Exception):
     """A copy or a post-copy verification failed after work had started."""
 
 
+class ExternalDataPath(Exception):
+    """The model reads data from outside the deliverable (#461).
+
+    Its own class, not a `PromotionFailed`, because the two scans that can raise it sit either side
+    of the copy and used to route to DIFFERENT exit codes for one condition - 5 from the source
+    scan, 4 from the shipped one. Automation reads the code, so the condition owns the class.
+    """
+
+
 @dataclass(frozen=True)
 class PackageShape:
-    """What one package's `fabric/` actually holds."""
+    """What one package's `fabric/` actually holds, and what the MANIFEST says it is."""
 
     fabric: Path
     report: Path | None
     model: Path | None
     loose_files: tuple[Path, ...]
-
-    @property
-    def kind(self) -> str:
-        """`workbook` when a report is present, else `datasource`."""
-        return "workbook" if self.report is not None else "datasource"
+    kind: str
+    kind_source: str
 
 
 @dataclass
@@ -224,37 +263,106 @@ def _read_json(path: Path) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise CannotAssess(f"{path.name} could not be read: {exc}") from exc
+        raise CannotAssess(f"{path.name} could not be read: {_safe_error(exc)}") from exc
     if not isinstance(payload, dict):
         raise CannotAssess(f"{path.name} is not a JSON object")
     return payload
+
+
+def _safe_error(exc: BaseException) -> str:
+    """Render an exception WITHOUT the absolute host path `OSError` carries in `filename`.
+
+    ⚠️ Measured: `PermissionError: [Errno 13] Permission denied: 'C:\\Users\\<username>\\…'` is the
+    default `str()` of a failed read, and that string went straight into a `--json` envelope and a
+    committable finding. `strerror` plus `errno` says everything the operator needs and names no
+    path; the artifact already records WHICH file, relative to the package.
+    """
+    if isinstance(exc, OSError):
+        detail = exc.strerror or type(exc).__name__
+        return f"{type(exc).__name__}: {detail}" + (f" (errno {exc.errno})" if exc.errno is not None else "")
+    return f"{type(exc).__name__}: {exc}"
 
 
 def _repo_relative(path: Path, repo_root: Path) -> tuple[str, bool]:
     """Return (displayable path, whether it is repo-relative).
 
     A record can be committed - `migrations/**/fabric/**` is NOT blanket-gitignored - so a path
-    inside the repo is recorded relative to it, never as an absolute host path. A path outside the
-    repo is recorded verbatim WITH the flag set; a customer migration is kept out of this public
-    repo by prefixing the slug (`customer-<name>`), which is what the ignore rules key on.
+    inside the repo is recorded relative to it. ⚠️ A path OUTSIDE the repo used to be recorded
+    VERBATIM with a flag, which put `C:\\Users\\<username>\\…` into both the record and the `--json`
+    envelope on every promotion whose package or migrations root sat elsewhere. The flag is not a
+    redaction: nothing downstream acted on it. Only the leaf survives now, and the leaf is the unit
+    name the record already carries in `unit`.
     """
     try:
         return path.resolve().relative_to(repo_root).as_posix(), True
     except ValueError:
-        return path.resolve().as_posix(), False
+        return f"{OUTSIDE_REPO}/{path.name}" if path.name else OUTSIDE_REPO, False
 
 
-def discover_shape(package: Path) -> PackageShape:
-    """Read `<package>/fabric/` and decide which of the two documented shapes this unit is.
+def _destination_display(path: Path, plan: PromotionPlan, repo_root: Path) -> str:
+    """A promoted path, said WITHOUT an absolute host path.
 
-    Raises `CannotAssess` for anything ambiguous - two reports, two models, or neither - because a
-    guess here promotes the wrong tree into a customer deliverable.
+    Repo-relative when the deliverable really is in this repo (the normal case, and the most
+    useful); otherwise relative to the migrations root, which containment already guarantees every
+    destination lies under. Both are actionable; neither names a machine.
+    """
+    display, is_repo_relative = _repo_relative(path, repo_root)
+    if is_repo_relative:
+        return display
+    try:
+        return f"{UNDER_MIGRATIONS_ROOT}/{path.resolve().relative_to(plan.migrations_root.resolve()).as_posix()}"
+    except ValueError:
+        return display
+
+
+def declared_kind(package: Path, override: str | None) -> tuple[str, str]:
+    """The unit's kind and where it came from - the MANIFEST, never the filesystem.
+
+    ⚠️ `package_unit.py:unit_kind` is explicit that the filesystem cannot answer this: every
+    `pbip/<Unit>/` folder in a real 2.339.0 estate run carries BOTH a `.Report` and a
+    `.SemanticModel` - measured on all 62, datasource-only units included. Inferring "has a report,
+    therefore workbook" promoted real published datasources into `migrations/workbooks/`.
+
+    `--kind` fills a gap; it can never contradict a manifest that DOES declare one, because an
+    operator overruling the engine's own classification is a defect report, not a flag.
+    """
+    manifest = package / MANIFEST_NAME
+    if not manifest.is_file():
+        if override is not None:
+            return override, f"--kind (no {MANIFEST_NAME})"
+        raise CannotAssess(
+            f"package has no {MANIFEST_NAME}, so its kind is unknown - the filesystem cannot answer it "
+            f"(a datasource unit also ships a .Report). Re-run package_unit.py, or pass --kind."
+        )
+    payload = _read_json(manifest)
+    value = payload.get("kind")
+    if isinstance(value, str) and value.strip() in DECLARABLE_KINDS:
+        if override is not None and override != value.strip():
+            raise CannotAssess(
+                f"--kind {override!r} contradicts {MANIFEST_NAME}, which declares {value.strip()!r}; "
+                f"--kind fills a gap, it does not overrule the engine's own classification"
+            )
+        return value.strip(), MANIFEST_NAME
+    if override is not None:
+        return override, f"--kind ({MANIFEST_NAME} declares {value!r})"
+    raise CannotAssess(
+        f"{MANIFEST_NAME} declares kind {value!r}, which is not one of {DECLARABLE_KINDS} - the engine "
+        f"classified this unit as neither. Pass --kind to declare it explicitly; it is recorded."
+    )
+
+
+def discover_shape(package: Path, kind: str, kind_source: str) -> PackageShape:
+    """Read `<package>/fabric/` and prove it matches the kind the manifest declared.
+
+    Raises `CannotAssess` for anything ambiguous - two reports, two models, or an artifact the
+    declared kind requires and the package does not have - because a guess here promotes the wrong
+    tree into a customer deliverable.
     """
     if not package.is_dir():
-        raise CannotAssess(f"package is not a directory: {package}")
+        raise CannotAssess("package is not a directory")
     fabric = package / "fabric"
     if not fabric.is_dir():
-        raise CannotAssess(f"package has no fabric/ working copy: {fabric}")
+        raise CannotAssess("package has no fabric/ working copy")
     reports = sorted(p for p in fabric.iterdir() if p.is_dir() and p.name.endswith(REPORT_SUFFIX))
     models = sorted(p for p in fabric.iterdir() if p.is_dir() and p.name.endswith(MODEL_SUFFIX))
     strays = sorted(
@@ -270,13 +378,24 @@ def discover_shape(package: Path) -> PackageShape:
         raise CannotAssess(f"fabric/ holds {len(models)} .SemanticModel folders; a unit is exactly one model")
     if not reports and not models:
         raise CannotAssess("fabric/ holds neither a .Report nor a .SemanticModel - nothing to promote")
-
-    loose = tuple(sorted(p for p in fabric.iterdir() if p.is_file()))
-    return PackageShape(
-        fabric=fabric,
-        report=reports[0] if reports else None,
-        model=models[0] if models else None,
-        loose_files=loose,
+    if models and (reports or kind == KIND_DATASOURCE):
+        loose = tuple(sorted(p for p in fabric.iterdir() if p.is_file()))
+        return PackageShape(
+            fabric=fabric,
+            report=reports[0] if reports else None,
+            model=models[0],
+            loose_files=loose,
+            kind=kind,
+            kind_source=kind_source,
+        )
+    if models:
+        raise CannotAssess(f"package declares kind {kind!r} but fabric/ holds no {REPORT_SUFFIX} to promote")
+    # ⚠️ No model. A workbook's `byPath` had nothing of its own to point at, so it was verified
+    # against whatever happened to be in the DESTINATION - and a model left there by an earlier run
+    # turned "this package is missing its model" into exit 0 with `bypath_verified: true`.
+    raise CannotAssess(
+        f"package declares kind {kind!r} but fabric/ holds no .SemanticModel; a promotion must ship the "
+        f"model its byPath resolves to, never bind to whatever a previous run left in the destination"
     )
 
 
@@ -289,7 +408,7 @@ def _load_json_document(path: Path, label: str, check: ContentCheck) -> dict[str
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        check.unassessable.append(f"{label} is not readable JSON: {exc}")
+        check.unassessable.append(f"{label} is not readable JSON: {_safe_error(exc)}")
         return None
     if not isinstance(payload, dict):
         check.unassessable.append(f"{label} is valid JSON but not an object")
@@ -337,8 +456,11 @@ def slug_problem(value: str) -> str | None:
     ⚠️ **The highest-severity guard in the file.** `execute_plan` REPLACES its destination, so a
     slug carrying `..` or a drive letter is not a misfiling - it can destroy a directory outside
     the migration root. Measured pre-guard: `--slug ..\\..\\escaped` exited **0**, wrote the
-    deliverable outside the root, and reported success. Judged purely lexically; `Path.resolve()`
-    is never called on this untrusted value.
+    deliverable outside the root, and reported success. A TRAILING DOT is the same defect one
+    layer down: Windows normalises `foo.` to `foo`, so `--slug foo.` exited 0 and silently
+    destroyed the deliverable at `foo`. Judged purely lexically; `Path.resolve()` is never called
+    on this untrusted value, and `_refuse_aliased_root` is the on-disk backstop for the aliasing
+    (case-insensitivity) a lexical test cannot see.
     """
     windows = PureWindowsPath(value)
     for failed, message in (
@@ -353,6 +475,11 @@ def slug_problem(value: str) -> str | None:
         (
             any(char in value for char in _UNSAFE_SLUG_CHARS) or any(ord(char) < 32 for char in value),
             "must not contain a path-reserved or control character",
+        ),
+        (
+            value.endswith("."),
+            "must not end in a dot (Windows normalises 'foo.' to 'foo', so it would REPLACE the "
+            "deliverable at 'foo')",
         ),
         (value.split(".")[0].upper() in _RESERVED_DEVICE_NAMES, "must not be a reserved Windows device name"),
     ):
@@ -374,30 +501,95 @@ def _assert_contained(paths: list[Path], root: Path, what: str) -> None:
             raise CannotAssess(f"{what} would land outside the migrations root: {normalized.name}")
 
 
+def _read_tmdl(path: Path, label: str, check: ContentCheck) -> str | None:
+    """Read one TMDL file STRICTLY, recording an unassessable reason instead of guessing.
+
+    ⚠️ Two defects in one line before this. `errors="replace"` turned undecodable bytes into `\\ufffd`
+    and read on, so a mis-encoded model was silently *assessable* and could pass; and an `OSError`
+    propagated out of `main()` as a traceback - no exit contract at all, and its message carries the
+    absolute path it failed on.
+    """
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        check.unassessable.append(f"{label} could not be read: {_safe_error(exc)}")
+        return None
+
+
+def _check_pbir(report: Path, check: ContentCheck) -> None:
+    """`definition.pbir` must name the model this report binds to, at the SOURCE as well.
+
+    ⚠️ Unusable input is CANNOT_ASSESS (2), not a promotion that got as far as failing (4): the two
+    route to different responses, and this used to surface only as a `PromotionFailed` from the
+    rewrite - after the copy - because nothing looked at it beforehand.
+    """
+    label = f"{report.name}: definition.pbir"
+    pbir = report / "definition.pbir"
+    if not pbir.is_file():
+        check.unassessable.append(f"{label} is missing - the model this report binds to is unreadable")
+        return
+    document = _load_json_document(pbir, label, check)
+    if document is None:
+        return
+    reference = document.get("datasetReference")
+    by_path = reference.get("byPath") if isinstance(reference, dict) else None
+    if not isinstance(by_path, dict) or not isinstance(by_path.get("path"), str) or not by_path["path"].strip():
+        check.unassessable.append(f"{label} declares no datasetReference.byPath.path string")
+
+
+def _check_page_order(manifest: Path, pages: list[Path], report_name: str, check: ContentCheck) -> None:
+    """`pageOrder` must name pages that are actually THERE.
+
+    A non-empty list said nothing about whether its ids exist. Power BI opens the pages the manifest
+    orders, so a manifest that orders only absent ids opens a report with none of the real ones -
+    structurally present, functionally empty, and it passed. Matched against the page DIRECTORY name
+    or the `name` the page declares, because engine output uses the first and the schema the second.
+    """
+    document = _load_json_document(manifest, f"{report_name}: pages.json", check)
+    if document is None:
+        return
+    order = document.get("pageOrder")
+    if not (isinstance(order, list) and order):
+        check.unassessable.append(f"{report_name}: pages.json declares no non-empty pageOrder list")
+        return
+    present: set[str] = set()
+    for page_dir in pages:
+        present.add(page_dir.name)
+        declared = _load_json_document(page_dir / "page.json", f"{report_name}: {page_dir.name}/page.json", check)
+        if isinstance(declared, dict) and isinstance(declared.get("name"), str):
+            present.add(declared["name"])
+    missing = [str(name) for name in order if str(name) not in present]
+    if missing:
+        check.unassessable.append(
+            f"{report_name}: pages.json orders {len(missing)} page(s) that are not in definition/pages/ "
+            f"({', '.join(missing[:5])}) - Power BI opens the ordered pages, so these open as nothing"
+        )
+
+
 def check_report_content(report: Path) -> ContentCheck:
     """Assert `definition/pages/` enumerates real pages carrying real visuals.
 
     A folder count is not a content check - the precedent case had every expected folder present
     and nothing behind them. ⚠️ Neither is a FILE count: every document here is parsed, and
-    `pages.json` (the manifest Power BI reads for page order) must be present and well-formed,
-    because a report whose pages are not enumerated opens with none of them.
+    `pages.json` (the manifest Power BI reads for page order) must be present, well-formed, and
+    ORDER PAGES THAT EXIST, because a report whose pages are not enumerated opens with none of them.
     """
     check = ContentCheck()
+    _check_pbir(report, check)
     pages_dir = report / "definition" / "pages"
     if not pages_dir.is_dir():
         check.findings.append(f"{report.name}: no definition/pages/ directory")
         return check
 
+    candidates = sorted(p for p in pages_dir.iterdir() if p.is_dir() and (p / "page.json").is_file())
+    pages = [p for p in candidates if _page_is_well_formed(p, report.name, check)]
+
     manifest = pages_dir / "pages.json"
     if not manifest.is_file():
         check.unassessable.append(f"{report.name}: definition/pages/pages.json is missing - page order is unreadable")
     else:
-        document = _load_json_document(manifest, f"{report.name}: pages.json", check)
-        if document is not None and not (isinstance(document.get("pageOrder"), list) and document["pageOrder"]):
-            check.unassessable.append(f"{report.name}: pages.json declares no non-empty pageOrder list")
+        _check_page_order(manifest, pages, report.name, check)
 
-    candidates = sorted(p for p in pages_dir.iterdir() if p.is_dir() and (p / "page.json").is_file())
-    pages = [p for p in candidates if _page_is_well_formed(p, report.name, check)]
     visuals = [
         v
         for p in pages
@@ -420,19 +612,29 @@ def check_report_content(report: Path) -> ContentCheck:
 
 
 def check_model_content(model: Path) -> ContentCheck:
-    """Assert `definition/tables/` holds real TMDL tables and the model has a `model.tmdl`."""
+    """Assert `definition/tables/` holds real TMDL tables and `model.tmdl` declares a model.
+
+    ⚠️ `model.tmdl` is checked for a `model <name>` DECLARATION, not for existence: a zero-byte
+    file satisfies `is_file()`, and one shipped.
+    """
     check = ContentCheck()
     definition = model / "definition"
     tables_dir = definition / "tables"
-    if not (definition / "model.tmdl").is_file():
+    model_file = definition / "model.tmdl"
+    if not model_file.is_file():
         check.findings.append(f"{model.name}: no definition/model.tmdl")
+    else:
+        text = _read_tmdl(model_file, f"{model.name}: definition/model.tmdl", check)
+        if text is not None and not _TMDL_MODEL_RE.search(text):
+            check.findings.append(f"{model.name}: definition/model.tmdl declares no model - {len(text)} byte(s)")
     if not tables_dir.is_dir():
         check.findings.append(f"{model.name}: no definition/tables/ directory")
         return check
     tmdl = sorted(tables_dir.glob("*.tmdl"))
-    real = [p for p in tmdl if _TMDL_TABLE_RE.search(p.read_text(encoding="utf-8", errors="replace"))]
+    texts = {p: _read_tmdl(p, f"{model.name}: definition/tables/{p.name}", check) for p in tmdl}
+    real = [p for p, text in texts.items() if text is not None and _TMDL_TABLE_RE.search(text)]
     check.counts = {"table_files": len(tmdl), "tables": len(real)}
-    if not real:
+    if not real and not check.unassessable:
         check.findings.append(f"{model.name}: definition/tables/ holds {len(tmdl)} file(s) but ZERO table declarations")
     return check
 
@@ -503,7 +705,13 @@ def external_data_paths(model: Path, allowed_roots: tuple[Path, ...]) -> list[di
     roots = [root.resolve() for root in allowed_roots]
     found: list[dict[str, str]] = []
     for tmdl in sorted(definition.rglob("*.tmdl")):
-        text = tmdl.read_text(encoding="utf-8", errors="replace")
+        try:
+            text = tmdl.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise CannotAssess(
+                f"{tmdl.relative_to(model).as_posix()} could not be read, so its data references "
+                f"cannot be scanned: {_safe_error(exc)}"
+            ) from exc
         for candidate in _quoted_strings(text):
             if not _is_local_filesystem_path(candidate) or _inside_any(candidate, roots):
                 continue
@@ -583,12 +791,35 @@ def build_plan(
     """Decide every copy, the `byPath` value, and which stale artifact a re-run must clear.
 
     Every destination is checked for containment before the plan is returned, so a hostile or
-    fat-fingered slug is refused as `CANNOT_ASSESS` rather than escaping the migrations root.
+    fat-fingered slug is refused as `CANNOT_ASSESS` rather than escaping the migrations root, and
+    every deliverable root it would REPLACE is checked against what is actually on disk there.
     """
     plan = _build_plan_unchecked(shape, migrations_root, slug, datasource_slug)
     _assert_contained([step.destination for step in plan.steps], migrations_root, "a copy")
     _assert_contained(plan.stale_removals, migrations_root, "a stale removal")
+    for destination in (plan.report_destination, plan.model_destination):
+        if destination is not None:
+            _refuse_aliased_root(destination.parent.parent)
     return plan
+
+
+def _refuse_aliased_root(root: Path) -> None:
+    """Refuse a deliverable root that the filesystem resolves to a DIFFERENTLY-NAMED existing one.
+
+    The lexical slug guard cannot see this: `--slug Foo` is a perfectly legal component, and on a
+    case-insensitive filesystem it addresses the existing `foo` deliverable, which promotion would
+    then replace wholesale. Purely a comparison of what was asked for against what is on disk, so
+    on a case-sensitive filesystem (where they really are two deliverables) it never fires.
+    """
+    if not root.exists() or not root.parent.is_dir():
+        return
+    with suppress(OSError):
+        if root.name in {entry.name for entry in root.parent.iterdir()}:
+            return
+    raise CannotAssess(
+        f"deliverable {root.name!r} already exists on disk under a different spelling, so promoting it "
+        f"would REPLACE another unit's deliverable; promote under the name it already has"
+    )
 
 
 def _build_plan_unchecked(
@@ -597,10 +828,17 @@ def _build_plan_unchecked(
     slug: str,
     datasource_slug: str | None,
 ) -> PromotionPlan:
-    """The shape-specific half of `build_plan`, before containment is enforced."""
-    if shape.report is None:
-        if shape.model is None:  # unreachable: discover_shape refuses "neither", but never guess
-            raise CannotAssess("package holds neither a report nor a model")
+    """The shape-specific half of `build_plan`, before containment is enforced.
+
+    ⚠️ Keyed on the manifest's declared `kind`, never on "does `fabric/` hold a `.Report`". A
+    datasource unit's engine output legitimately holds one, and inferring from it promoted real
+    published datasources into `migrations/workbooks/`. Its report is deliberately NOT copied: the
+    deliverable for a datasource is the model, and the loose `.pbip` beside it names a report that
+    would not be there.
+    """
+    if shape.model is None:  # unreachable: discover_shape refuses a package with no model
+        raise CannotAssess("package holds no model to promote")
+    if shape.kind == KIND_DATASOURCE:
         model_dest_root = migrations_root / "datasources" / slug / "fabric"
         return PromotionPlan(
             shape=shape,
@@ -611,19 +849,11 @@ def _build_plan_unchecked(
             migrations_root=migrations_root,
         )
 
+    if shape.report is None:  # unreachable: discover_shape refuses a workbook with no report
+        raise CannotAssess("package declares a workbook but holds no report")
     report_dest_root = migrations_root / "workbooks" / slug / "fabric"
     steps = [CopyStep(shape.report, report_dest_root / shape.report.name, "report")]
     steps.extend(CopyStep(f, report_dest_root / f.name, "loose") for f in shape.loose_files)
-
-    if shape.model is None:
-        return PromotionPlan(
-            shape=shape,
-            steps=steps,
-            report_destination=report_dest_root / shape.report.name,
-            model_destination=None,
-            bypath=None,
-            migrations_root=migrations_root,
-        )
 
     if datasource_slug is None:
         # Model per workbook: already siblings, and the deliverable has the identical shape.
@@ -749,16 +979,18 @@ def rewrite_bypath(report: Path, bypath: str) -> dict[str, Any]:
     return {"previous": previous, "written": bypath, "changed": True}
 
 
-def verify_bypath(report: Path, migrations_root: Path) -> dict[str, Any]:
+def verify_bypath(report: Path, migrations_root: Path, expected_model: Path) -> dict[str, Any]:
     """Resolve `definition.pbir`'s `byPath` relative to the `.Report` folder, and prove the target
-    is a REAL semantic model.
+    is a REAL semantic model - specifically, the model THIS promotion copied.
 
     ⚠️ `powerbi-report-author validate` returns `errorCount: 0` for a `.Report` whose `byPath`
     names a `.SemanticModel` that exists nowhere - shape, not target. ⚠️ *"A directory containing
     some `definition/`"* is not enough either: a report-only package promoted at exit **0** against
-    a hand-made folder holding an empty `definition/`. So the target must carry `.SemanticModel`,
-    lie inside the migrations root, and pass the SAME content check criterion 5 applies to a
-    shipped model - reused, not re-implemented. Resolution is **lexical**.
+    a hand-made folder holding an empty `definition/`. ⚠️ Nor is *"a real model at that path"*: a
+    model left in the destination by an EARLIER run made a package that was missing its own model
+    verify clean. So the target must BE `expected_model`, carry `.SemanticModel`, lie inside the
+    migrations root, and pass the SAME content check criterion 5 applies to a shipped model -
+    reused, not re-implemented. Resolution is **lexical**.
     """
     pbir = report / "definition.pbir"
     if not pbir.is_file():
@@ -766,21 +998,25 @@ def verify_bypath(report: Path, migrations_root: Path) -> dict[str, Any]:
     try:
         payload = json.loads(pbir.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise PromotionFailed(f"{report.name}: shipped definition.pbir could not be read: {exc}") from exc
+        raise PromotionFailed(f"{report.name}: shipped definition.pbir could not be read: {_safe_error(exc)}") from exc
     reference = payload.get("datasetReference")
     by_path = reference.get("byPath") if isinstance(reference, dict) else None
     if not isinstance(by_path, dict) or not isinstance(by_path.get("path"), str):
         raise PromotionFailed(f"{report.name}: shipped definition.pbir has no datasetReference.byPath.path string")
     declared = by_path["path"]
     target = Path(os.path.normpath(report / declared))
-    _refuse_bad_model_target(report.name, declared, target, migrations_root)
+    _refuse_bad_model_target(report.name, declared, target, migrations_root, expected_model)
     return {"path": declared, "resolves": True, "target": target.name}
 
 
-def _refuse_bad_model_target(report_name: str, declared: str, target: Path, migrations_root: Path) -> None:
-    """Raise unless `target` is a semantic model, inside the tree, with real content."""
+def _refuse_bad_model_target(
+    report_name: str, declared: str, target: Path, migrations_root: Path, expected_model: Path
+) -> None:
+    """Raise unless `target` is the model this promotion copied, inside the tree, with real content."""
     reason = None
-    if not target.is_relative_to(migrations_root.resolve()):
+    if Path(os.path.normpath(target)) != Path(os.path.normpath(expected_model)):
+        reason = f"resolves to {target.name!r}, which is not the {expected_model.name!r} this promotion copied"
+    elif not target.is_relative_to(migrations_root.resolve()):
         reason = "resolves outside the migrations root"
     elif not target.is_dir():
         reason = "does not resolve to a directory on disk"
@@ -794,9 +1030,14 @@ def _refuse_bad_model_target(report_name: str, declared: str, target: Path, migr
             )
     if reason is not None:
         raise PromotionFailed(
-            f"{report_name}: byPath {declared!r} {reason} "
+            f"{report_name}: byPath {_safe_reference(declared)!r} {reason} "
             f"(a wrong byPath opens as a report with NO MODEL and validates clean)"
         )
+
+
+def _safe_reference(value: str) -> str:
+    """A `byPath` as it may be recorded: redacted if someone put an absolute path in it."""
+    return _redact_path(value) if _is_local_filesystem_path(value) else value
 
 
 def tree_drift(package_fabric: Path, bundle_unit: Path | None) -> dict[str, Any]:
@@ -828,33 +1069,30 @@ def tree_drift(package_fabric: Path, bundle_unit: Path | None) -> dict[str, Any]
     }
 
 
-def _engine_version(package: Path) -> str | None:
-    """The engine version from the package's own receipt, or None when it carries no answer."""
-    receipt = package / "engine-output-receipt.json"
-    if not receipt.is_file():
-        return None
-    try:
-        payload = json.loads(receipt.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    engine = payload.get("engine")
-    version = engine.get("version") if isinstance(engine, dict) else None
-    return version if isinstance(version, str) else None
-
-
 def _engine_provenance(package: Path) -> dict[str, Any]:
     """The engine version plus WHERE it came from, so `null` is never ambiguous.
 
     A missing `engine-output-receipt.json` is a provenance gap, not a correctness one, so it does
     not block - but a bare `"engine_version": null` cannot be told apart from a receipt that
     carried no version, so the source is recorded beside it and stays explicit.
+
+    ⚠️ Read BEFORE anything is copied, and tolerant of every malformed shape. A receipt holding
+    valid JSON that is not an object (`[]`) raised `AttributeError` out of `_engine_version` AFTER
+    the copy, which rollback did not cover - a shipped, unverified deliverable with no record.
     """
     receipt = package / "engine-output-receipt.json"
-    version = _engine_version(package)
-    if version is not None:
-        return {"engine_version": version, "engine_version_source": "engine-output-receipt.json"}
     if not receipt.is_file():
         return {"engine_version": None, "engine_version_source": "UNAVAILABLE: no engine-output-receipt.json"}
+    try:
+        payload = json.loads(receipt.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"engine_version": None, "engine_version_source": f"UNAVAILABLE: receipt unreadable ({_safe_error(exc)})"}
+    if not isinstance(payload, dict):
+        return {"engine_version": None, "engine_version_source": "UNAVAILABLE: receipt is not a JSON object"}
+    engine = payload.get("engine")
+    version = engine.get("version") if isinstance(engine, dict) else None
+    if isinstance(version, str):
+        return {"engine_version": version, "engine_version_source": "engine-output-receipt.json"}
     return {"engine_version": None, "engine_version_source": "UNAVAILABLE: receipt declares no engine.version"}
 
 
@@ -867,10 +1105,14 @@ def build_record(
 ) -> dict[str, Any]:
     """Assemble the promotion record: what promoted this, from what, and was it checked."""
     source, source_is_repo_relative = _repo_relative(args.package, repo_root)
-    copied = []
-    for step in plan.steps:
-        destination, _ = _repo_relative(step.destination, repo_root)
-        copied.append({"what": step.what, "destination": destination, "files": _count_files(step.source)})
+    copied = [
+        {
+            "what": step.what,
+            "destination": _destination_display(step.destination, plan, repo_root),
+            "files": _count_files(step.source),
+        }
+        for step in plan.steps
+    ]
     return {
         "record_version": RECORD_VERSION,
         "promoted_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -880,8 +1122,9 @@ def build_record(
         "unit": args.package.name,
         "slug": args.slug,
         "datasource_slug": args.datasource_slug,
+        "kind": plan.shape.kind,
+        "kind_source": plan.shape.kind_source,
         "shape": "shared_datasource" if args.datasource_slug else f"model_per_{plan.shape.kind}",
-        **_engine_provenance(args.package),
         "check_unit": gate,
         "forced": bool(args.force),
         "copied": copied,
@@ -889,10 +1132,14 @@ def build_record(
     }
 
 
-def write_records(record: dict[str, Any], plan: PromotionPlan) -> list[Path]:
+def write_records(record: dict[str, Any], plan: PromotionPlan, applied: AppliedCopies) -> list[Path]:
     """Write the record beside every deliverable this promotion touched.
 
     Both halves of a split promotion get one: either can be found on its own months later.
+
+    ⚠️ Written THROUGH `applied`, so the records are part of the same transaction as the report and
+    the model. Measured otherwise: an `OSError` between the first and second record exited 4 having
+    left a record claiming a promotion beside NO promoted artifacts.
     """
     roots: list[Path] = []
     for destination in (plan.report_destination, plan.model_destination):
@@ -904,6 +1151,7 @@ def write_records(record: dict[str, Any], plan: PromotionPlan) -> list[Path]:
     written = []
     for root in roots:
         path = root / RECORD_NAME
+        _stash(path, applied)
         path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
         written.append(path)
     return written
@@ -923,11 +1171,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "and rewrite the report's byPath to reach it",
     )
     parser.add_argument("--bundle", type=Path, default=None, help="originating engine bundle, for a drift REPORT only")
+    parser.add_argument(
+        "--kind",
+        choices=DECLARABLE_KINDS,
+        default=None,
+        help=f"declare the unit's kind when {MANIFEST_NAME} does not (missing, or 'unclassified'); it is "
+        "recorded, and it can never contradict a manifest that does declare one",
+    )
     parser.add_argument("--dry-run", action="store_true", help="print the plan and file count; change nothing")
     parser.add_argument(
         "--force",
         action="store_true",
-        help="promote even though check_unit.py failed; the override and the exit code are recorded",
+        help="promote even though check_unit.py failed; the override and the exit code are recorded. It "
+        "overrides THAT GATE ONLY - not the content checks, and not the external-data-path refusal (#461), "
+        "which has no sanitized artifact to ship",
     )
     parser.add_argument("--json", dest="json_path", type=Path, default=None, help="write the machine-readable envelope")
     parser.add_argument(
@@ -982,11 +1239,10 @@ def _bundle_unit(args: argparse.Namespace) -> Path | None:
 def _print_plan(plan: PromotionPlan, repo_root: Path) -> None:
     """Print the human-readable plan."""
     for step in plan.steps:
-        destination, _ = _repo_relative(step.destination, repo_root)
+        destination = _destination_display(step.destination, plan, repo_root)
         print(f"  {step.what:<6} {step.source.name} -> {destination} ({_count_files(step.source)} files)")
     for stale in plan.stale_removals:
-        destination, _ = _repo_relative(stale, repo_root)
-        print(f"  remove stale {destination}")
+        print(f"  remove stale {_destination_display(stale, plan, repo_root)}")
     if plan.bypath:
         print(f"  byPath       {plan.bypath}")
 
@@ -1006,28 +1262,42 @@ def _refuse(envelope: dict[str, Any], args: argparse.Namespace, status: str, fin
 def _promote(args: argparse.Namespace, plan: PromotionPlan, envelope: dict[str, Any], gate: dict[str, Any]) -> int:
     """Do the copy and everything that must be true afterwards.
 
-    The copy is rolled back if ANY later step fails, so a refused promotion never leaves a
-    half-shipped deliverable behind - one that looks promoted and was never verified.
+    ⚠️ The copy is rolled back if ANY later step fails - not merely `PromotionFailed` and `OSError`.
+    Measured: an ordinary `AttributeError` raised after the copy left a shipped, unverified
+    deliverable behind, one that looks promoted and never was. A `finally` that commits only on the
+    success path cannot be narrowed by accident the way an exception tuple can.
+
+    Metadata is read BEFORE the copy for the same reason: reading it afterwards is what created the
+    class of failure that had to be rolled back.
     """
+    provenance = _engine_provenance(args.package)
     applied = execute_plan(plan)
+    committed = False
     try:
-        result = _verify_and_record(args, plan, envelope, gate)
-    except (PromotionFailed, OSError):
-        applied.rollback()
-        raise
-    applied.commit()
+        result = _verify_and_record(args, plan, envelope, gate, provenance, applied)
+        committed = True
+    finally:
+        if committed:
+            applied.commit()
+        else:
+            applied.rollback()
     return result
 
 
 def _verify_and_record(
-    args: argparse.Namespace, plan: PromotionPlan, envelope: dict[str, Any], gate: dict[str, Any]
+    args: argparse.Namespace,
+    plan: PromotionPlan,
+    envelope: dict[str, Any],
+    gate: dict[str, Any],
+    provenance: dict[str, Any],
+    applied: AppliedCopies,
 ) -> int:
     """Everything that must be true about the SHIPPED tree, then the record."""
-    extra: dict[str, Any] = {}
+    extra: dict[str, Any] = dict(provenance)
     if plan.report_destination is not None and plan.bypath is not None:
         extra["bypath_rewrite"] = rewrite_bypath(plan.report_destination, plan.bypath)
     if plan.report_destination is not None:
-        extra["bypath_verified"] = verify_bypath(plan.report_destination, plan.migrations_root)
+        extra["bypath_verified"] = verify_bypath(plan.report_destination, plan.migrations_root, plan.model_destination)
 
     shipped = content_checks(plan.report_destination, plan.model_destination, "shipped")
     if not shipped.ok:
@@ -1037,56 +1307,52 @@ def _verify_and_record(
     shipped_external = (
         external_data_paths(plan.model_destination, (plan.deliverable_root,)) if plan.model_destination else []
     )
-    if shipped_external and not args.force:
-        raise PromotionFailed(
+    if shipped_external:
+        # ⚠️ NOT overridable by `--force`. The tool cannot rewrite a customer's M query, so it
+        # cannot ship a SANITIZED artifact here - forcing would put the raw absolute path, with its
+        # server and user names, into a committable TMDL. Same exception, and so the same exit
+        # code, as the source scan: one condition, one verdict.
+        raise ExternalDataPath(
             "EXTERNAL_DATA_PATH in the SHIPPED model: "
             + "; ".join(f"{item['file']} reads {item['redacted']}" for item in shipped_external)
         )
     extra["external_data_paths"] = {
         "source": envelope.get("external_data_paths", {}).get("source", []),
-        "shipped": [{"file": item["file"], "path": item["redacted"]} for item in shipped_external],
-        "forced": bool(shipped_external) and bool(args.force),
+        "shipped": [],
     }
     extra["drift"] = envelope["drift"]
 
     record = build_record(args, plan, REPO_ROOT, gate, extra)
-    written = write_records(record, plan)
+    written = write_records(record, plan, applied)
     envelope["status"] = "PROMOTED"
     envelope["exit_code"] = EXIT_OK
     envelope["record"] = record
-    envelope["record_paths"] = [_repo_relative(p, REPO_ROOT)[0] for p in written]
+    envelope["record_paths"] = [_destination_display(p, plan, REPO_ROOT) for p in written]
     _emit(envelope, args)
     print(f"PROMOTE: PROMOTED {args.package.name} -> {args.slug} ({plan.file_count} files)")
-    if shipped_external:
-        print(
-            f"  ⚠️ FORCED past {len(shipped_external)} EXTERNAL_DATA_PATH finding(s) (#461): the shipped model reads "
-            "data from outside the deliverable and will not load elsewhere. Recorded in the promotion record.",
-            file=sys.stderr,
-        )
-        for item in shipped_external:
-            print(f"     {item['file']} -> {item['redacted']}", file=sys.stderr)
     for path in written:
-        print(f"  record  {_repo_relative(path, REPO_ROOT)[0]}")
+        print(f"  record  {_destination_display(path, plan, REPO_ROOT)}")
     return EXIT_OK
 
 
 def assess(args: argparse.Namespace, envelope: dict[str, Any]) -> tuple[PackageShape | None, dict[str, Any], int]:
     """Everything that must hold BEFORE anything is written.
 
-    Order is deliberate: shape, then content, then the gate. `--force` reaches only the GATE - the
-    content checks above it are mandatory and cannot be overridden.
+    Order is deliberate: kind, then shape, then content, then the gate. `--force` reaches only the
+    GATE - everything above it is mandatory and cannot be overridden.
     """
     try:
-        shape = discover_shape(args.package)
+        kind, kind_source = declared_kind(args.package, args.kind)
+        shape = discover_shape(args.package, kind, kind_source)
+        _refuse_incompatible_arguments(args, shape)
     except CannotAssess as exc:
         return None, {}, _refuse(envelope, args, "CANNOT_ASSESS", [str(exc)], EXIT_CANNOT_ASSESS)
 
+    envelope["kind"] = shape.kind
+    envelope["kind_source"] = shape.kind_source
     envelope["shape"] = "shared_datasource" if args.datasource_slug else f"model_per_{shape.kind}"
-    if args.datasource_slug is not None and shape.model is None:
-        findings = ["--datasource-slug given but the package holds no .SemanticModel to share"]
-        return None, {}, _refuse(envelope, args, "CANNOT_ASSESS", findings, EXIT_CANNOT_ASSESS)
 
-    source = content_checks(shape.report, shape.model, "source")
+    source = content_checks(shape.report if shape.kind == KIND_WORKBOOK else None, shape.model, "source")
     envelope["source_content"] = source.counts
     if source.unassessable:
         # ⚠️ Unreadable content is CANNOT_ASSESS, never "refused on content" and never a pass. A
@@ -1101,6 +1367,20 @@ def assess(args: argparse.Namespace, envelope: dict[str, Any]) -> tuple[PackageS
         findings = [f"check_unit.py exited {gate['exit_code']} ({gate['status']}); --force overrides and is recorded"]
         return None, gate, _refuse(envelope, args, "REFUSED_BY_GATE", findings, EXIT_REFUSED_BY_GATE)
     return shape, gate, EXIT_OK
+
+
+def _refuse_incompatible_arguments(args: argparse.Namespace, shape: PackageShape) -> None:
+    """Refuse an argument that contradicts the kind the manifest declared.
+
+    `--datasource-slug` splits a WORKBOOK's halves and rewrites its report's `byPath`. A declared
+    datasource has no report to rewrite and its model already lands under `datasources/<slug>`, so
+    accepting the flag there would silently do something else than what was asked.
+    """
+    if args.datasource_slug is not None and shape.kind == KIND_DATASOURCE:
+        raise CannotAssess(
+            f"--datasource-slug splits a workbook's report from its model, but {MANIFEST_NAME} declares this "
+            f"unit a datasource; its model already lands under migrations/datasources/<--slug>"
+        )
 
 
 def _dry_run(args: argparse.Namespace, plan: PromotionPlan, envelope: dict[str, Any]) -> int:
@@ -1120,15 +1400,20 @@ def _check_external_paths(args: argparse.Namespace, shape: PackageShape, plan: P
     Both the package and the deliverable count as allowed roots: after the packaging half of #461
     lands the extract travels INSIDE the package, and `set_data_folder.py`'s convention puts a
     legitimate absolute path under the deliverable's own `data/`.
+
+    ⚠️ **`--force` does not reach this.** It overrides the `check_unit.py` gate; it cannot rewrite a
+    customer's M query, so there is no sanitized artifact for it to ship - forcing put the raw
+    absolute path, server and user names included, into a committable TMDL under
+    `migrations/**`, which is not blanket-gitignored and where nothing downstream would have caught
+    it. Remedy: `scripts/set_data_folder.py`, or carry the extract into the package.
     """
     if shape.model is None:
         return EXIT_OK
     found = external_data_paths(shape.model, (args.package, plan.deliverable_root))
     envelope["external_data_paths"] = {
         "source": [{"file": item["file"], "path": item["redacted"]} for item in found],
-        "forced": bool(found) and bool(args.force),
     }
-    if not found or args.force:
+    if not found:
         return EXIT_OK
     findings = [
         f"EXTERNAL_DATA_PATH: {item['file']} reads {item['redacted']}, which is absolute and resolves "
@@ -1138,8 +1423,9 @@ def _check_external_paths(args: argparse.Namespace, shape: PackageShape, plan: P
     findings.append(
         "A promoted model reading from a gitignored, machine-local, prunable location is the "
         "structurally-present/functionally-EMPTY deliverable (#461). An absolute path also embeds a real "
-        "USERNAME (scripts/set_data_folder.py --check gates that). Carry the extract INTO the package, or "
-        "re-run with --force, which is recorded."
+        "USERNAME (scripts/set_data_folder.py --check gates that), so this is NOT forceable - there is no "
+        "sanitized artifact to ship. Carry the extract INTO the package, or rewrite the reference with "
+        "scripts/set_data_folder.py."
     )
     code = _refuse(envelope, args, "REFUSED_EXTERNAL_DATA_PATH", findings, EXIT_REFUSED_EXTERNAL_PATH)
     for item in found:
@@ -1166,11 +1452,10 @@ def main(argv: list[str] | None = None) -> int:
     envelope["drift"] = tree_drift(shape.fabric, _bundle_unit(args))
     try:
         plan = build_plan(shape, args.migrations_root, args.slug, args.datasource_slug)
+        envelope["planned_files"] = plan.file_count
+        external = _check_external_paths(args, shape, plan, envelope)
     except CannotAssess as exc:
         return _refuse(envelope, args, "CANNOT_ASSESS", [str(exc)], EXIT_CANNOT_ASSESS)
-    envelope["planned_files"] = plan.file_count
-
-    external = _check_external_paths(args, shape, plan, envelope)
     if external != EXIT_OK:
         return external
 
@@ -1182,15 +1467,24 @@ def main(argv: list[str] | None = None) -> int:
 def _run_promotion(
     args: argparse.Namespace, plan: PromotionPlan, envelope: dict[str, Any], gate: dict[str, Any]
 ) -> int:
-    """Promote, mapping every failure mode onto its own exit code."""
+    """Promote, mapping every failure mode onto its own exit code.
+
+    ⚠️ The final `Exception` clause is deliberate and is not a swallow: everything it catches has
+    already been rolled back by `_promote`'s `finally`, and this turns it into a recorded exit code
+    instead of a traceback. A traceback is not merely untidy here - it has no exit contract for
+    automation to route on, and its rendering carries the absolute host paths this tool exists to
+    keep out of artifacts.
+    """
     try:
         return _promote(args, plan, envelope, gate)
     except CannotAssess as exc:
         return _refuse(envelope, args, "CANNOT_ASSESS", [str(exc)], EXIT_CANNOT_ASSESS)
+    except ExternalDataPath as exc:
+        return _refuse(envelope, args, "REFUSED_EXTERNAL_DATA_PATH", [str(exc)], EXIT_REFUSED_EXTERNAL_PATH)
     except PromotionFailed as exc:
         return _refuse(envelope, args, "PROMOTION_FAILED", [str(exc)], EXIT_PROMOTION_FAILED)
-    except OSError as exc:
-        return _refuse(envelope, args, "PROMOTION_FAILED", [f"copy failed: {exc}"], EXIT_PROMOTION_FAILED)
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        return _refuse(envelope, args, "PROMOTION_FAILED", [f"promotion failed: {_safe_error(exc)}"], EXIT_PROMOTION_FAILED)
 
 
 if __name__ == "__main__":
