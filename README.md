@@ -294,11 +294,17 @@ work:
 - **Phase 2 → 3 is a high-risk hop**, for two evidenced reasons. The copy is where
   `definition.pbir`'s `byPath` stops resolving, and a wrong one opens as *a report with no model*
   while `powerbi-report-author validate` still returns `errorCount: 0` — it checks reference shape,
-  not target. And **which location you copy FROM is currently unsettled**: the phase-2 package's
-  `fabric/` is a physical copy of `bundle/pbip/`, the two diverge as soon as an agent edits either,
-  and the repo documents both as "the working copy"
-  ([#460](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/460)). Promote from
-  whichever one carries the edits, and verify before and after.
+  not target. And you must copy FROM the right tree: the phase-2 package's `fabric/` is a physical
+  copy of `bundle/pbip/`, and the two diverge as soon as an agent edits either. **When a package
+  exists, its `fabric/` is CANONICAL and you promote from there**
+  ([#460](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/460)) — it is the
+  tree the package's own README tells an agent to edit, it is what `AGENTS.md`'s working-copy row
+  names, and re-running `package_unit.py` over an edited package now refuses (exit 3) rather than
+  quietly replacing it — `--discard-package-edits` is the deliberate override, and a package with no
+  recorded digest refuses too, because "I cannot tell whether this was edited" is not "it was not
+  edited". A *stale* artifact is a different thing and is still removed silently: the previous run
+  recorded it, the new input no longer produces it, so it never looks like an edit.
+  Promote from `bundle/pbip/` only for a unit that was never packaged.
 
 Running the pipeline yourself? The command-by-command procedure, with timings, exit codes and a
 failure playbook, is **[`docs/operator-runbook.md`](docs/operator-runbook.md)**.
