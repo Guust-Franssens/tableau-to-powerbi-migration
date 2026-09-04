@@ -25,6 +25,7 @@ from work_dirs import (
     DERIVED_NAME_MISMATCH,
     DERIVED_NAME_NOT_CONSULTED,
     DERIVED_NAME_UNAVAILABLE,
+    LAZY_SUBDIRS,
     PATH_CHECK_DIFFERS,
     PATH_CHECK_MATCHES,
     PATH_CHECK_UNRECORDED,
@@ -101,6 +102,8 @@ def test_allocate_run_starts_at_one_and_creates_canonical_subdirs(tmp_path: Path
     assert run.root == runs_root(tmp_path) / "001-enterprise-dashboards"
     assert run.root.is_dir()
     for name in CANONICAL_SUBDIRS:
+        if name in LAZY_SUBDIRS:
+            continue  # issue #481 - proven not to exist yet in a dedicated test below
         assert run.subdir(name).is_dir(), f"canonical subdir {name!r} was not created"
     # every accessor property must agree with subdir()
     assert run.assessment == run.subdir("assessment")
@@ -110,6 +113,44 @@ def test_allocate_run_starts_at_one_and_creates_canonical_subdirs(tmp_path: Path
     assert run.packages == run.subdir("packages")
     assert run.deliverables == run.subdir("deliverables")
     assert run.scratch == run.subdir("scratch")
+
+
+def test_allocate_run_does_not_eagerly_create_deliverables(tmp_path: Path) -> None:
+    """issue #481: `deliverables/` has no writer anywhere in the repo, so an eagerly-created copy
+    is an always-empty folder that reads to an operator as a failed or skipped step. It must not
+    exist on disk right after allocation, even though `subdir("deliverables")` still resolves a
+    path for it (the concept - operator-facing, customer-bound output, separate from `scratch/` -
+    is preserved; only the eager, empty folder is not)."""
+    run = allocate_run("acme", repo_root=tmp_path)
+
+    assert "deliverables" in CANONICAL_SUBDIRS, "the concept must survive - see issue #322"
+    assert not run.subdir("deliverables").exists(), "deliverables/ must not be created eagerly"
+    assert not (run.root / "deliverables").exists()
+
+
+def test_deliverables_property_creates_the_directory_lazily_on_first_access(tmp_path: Path) -> None:
+    """The counterpart to the test above: the directory must still be reachable and writable the
+    moment something actually needs it - `allocate_run` just no longer creates it up front."""
+    run = allocate_run("acme", repo_root=tmp_path)
+    assert not run.subdir("deliverables").exists()
+
+    path = run.deliverables
+
+    assert path == run.subdir("deliverables")
+    assert path.is_dir()
+    (path / "connections.md").write_text("customer server names go here\n", encoding="utf-8")
+    assert (path / "connections.md").is_file()
+
+
+def test_other_six_canonical_subdirs_are_unaffected_by_the_lazy_deliverables_change(tmp_path: Path) -> None:
+    """Negative control for issue #481: every canonical subdir OTHER than `deliverables/` must
+    still be created eagerly by `allocate_run`, exactly as before."""
+    run = allocate_run("acme", repo_root=tmp_path)
+
+    eager = [name for name in CANONICAL_SUBDIRS if name not in LAZY_SUBDIRS]
+    assert set(eager) == set(CANONICAL_SUBDIRS) - {"deliverables"}
+    for name in eager:
+        assert run.subdir(name).is_dir(), f"canonical subdir {name!r} must still be created eagerly"
 
 
 def test_allocate_run_numbering_is_global_across_units_not_per_unit(tmp_path: Path) -> None:

@@ -105,7 +105,7 @@ _runs/001-acme/run.json` → `.gitignore:162:/_*`), so this is not a fresh-clone
 | `bundle/` | `run_estate.py` (wraps the deterministic engine) | `pbip/`, `reports/`, `semantic_models/`, `handover/`, `data/` | 62 `pbip/` units, 48 report baselines, **18** model baselines, 46 handover slices |
 | `oracle/` | `capture_tableau_oracle.py` | Tableau's OWN renders and numbers, keyed by **view LUID** | 360 views (60 dashboards / 300 worksheets), 288 captured complete |
 | `packages/` | `package_unit.py` | phase 2 — see below | |
-| `deliverables/` | *nothing* | a safety convention, not a stage — see below | **empty in every run on this machine** |
+| `deliverables/` | *nothing yet* | a safety convention, not a stage — see below | not created until first use (issue #481) |
 | `scratch/` | whoever needs it | disposable, run-owned; the only subdir a future `--prune` may ever delete | |
 
 ✅ Verified 2026-09-03 by direct measurement of `_runs/408-…` (`oracle-manifest.json` `view_count` /
@@ -357,16 +357,20 @@ committed there yet.
 
 ## `packages/` versus `deliverables/` — one is a stage, one is not
 
-⚠️ **`deliverables/` is empty in every run on this machine, and no script in `scripts/` writes to
-it.** ✅ Verified 2026-09-03: of nine directories under `_runs/`, the three allocated through
-`work_dirs.py` have a `deliverables/` and all three contain **0 items**; the six legacy directories
-have no such subdir at all. The only `scripts/` matches for the word are prose in
-`check_migration_progress.py` and `run_estate.py`, not writes to this path.
+✅ **Fixed in issue #481: `deliverables/` is no longer created eagerly.** It used to be — of nine
+directories under `_runs/` measured 2026-09-03, the three allocated through `work_dirs.py` each had
+an always-empty `deliverables/`, and no script in `scripts/` wrote to it (the only `scripts/`
+matches for the word were prose in `check_migration_progress.py` and `run_estate.py`). An
+always-empty, prominently-named folder in every run reads to an operator as "something failed" or
+"something is missing".
 
-It exists purely as a **preventive convention** from issue #322: an operator-facing
-`connections.json`/`.md` naming real customer servers once landed unprefixed at the **repo root**,
-one `git add -A` away from being committed to this public repository. `deliverables/` is a landing
-zone that `.gitignore`'s root-anchored `/_*` covers by construction.
+The convention itself is still real (issue #322: an operator-facing `connections.json`/`.md`
+naming real customer servers once landed unprefixed at the **repo root**, one `git add -A` away
+from being committed to this public repository — `deliverables/` is the designated landing zone
+that `.gitignore`'s root-anchored `/_*` covers by construction). What changed is *when* the folder
+comes into being: `RunPaths.deliverables` now creates it **lazily, on first access**, instead of
+`allocate_run` creating it up front for every run whether or not anything ever writes there. An
+absent folder in a run that never used it says nothing; an empty one made a false claim.
 
 | | `packages/` | `deliverables/` |
 |---|---|---|
@@ -374,6 +378,7 @@ zone that `.gitignore`'s root-anchored `/_*` covers by construction.
 | produced by | `package_unit.py` | by hand, or a one-off script |
 | granularity | one folder per unit | whole-run, ad hoc |
 | a pipeline stage? | **yes** | **no** |
+| created | eagerly, at allocation | **lazily, on first access** (issue #481) |
 
 ⚠️ **"Deliverable" unfortunately means two different things in this repo**: this run-local
 `deliverables/` subdirectory (an operator's ad-hoc output, never git) and phase 3's
@@ -390,7 +395,7 @@ user, so the rename is cheap today and gets more expensive the moment one appear
 | 1 | No tool for phase 2 → phase 3; the `byPath` rewrite is manual and a wrong one validates clean | ❌ open, tracked as **#458** |
 | 2 | Two documented edit locations — `<bundle>/pbip/` (`AGENTS.md:773`) and `<package>/fabric/` (`package_unit.py:785`) — diverge because the package is a `copytree`, so promoting from the wrong one silently loses agent work | ❌ open design question, tracked as **#460**; promote from wherever the edits are and verify both ways |
 | 3 | `semantic_models/` baselines exist for only 18 of 62 units on the reference run, so model churn cannot be measured for the rest | ❌ report as **BASELINE UNAVAILABLE** (#274, #359) |
-| 4 | `deliverables/` is a convention with no writer, and its name collides with phase 3's meaning | ⚠️ documented, not fixed |
+| 4 | `deliverables/` is a convention with no writer, and its name collides with phase 3's meaning | ✅ fixed (#481) — no longer eagerly created; the name collision is unchanged and still open |
 | 5 | Phase 1 stages still default to their own `_assessment*/` / `_oracle*/` / `_bundle*/` paths rather than the `_runs/` layout | ⚠️ deliberate scope limit of issue #234; migrating them is follow-up |
 | 6 | Oracle evidence is layout/text grade only; validation grade requires a render you captured yourself | ⚠️ provider limit, not an oversight (#194) |
 
