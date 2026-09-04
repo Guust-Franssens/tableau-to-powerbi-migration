@@ -37,6 +37,8 @@ Scope stays deliberately narrow because a false positive is worse than a miss:
 
   * duplicate scalar TMDL properties within one object
   * measure/column name collisions within one table file
+  * a measure name repeated in a different table (Tabular measure names are unique model-wide, not
+    per-table; ported from the drifted `tmdl_validate` example helpers - issue #413)
   * empty measure expressions
   * direct CALCULATE/CALCULATETABLE compact filters that compare a column to a measure
   * a `DIVIDE(a, b[, alt]) <op> <threshold>` comparison with no `ISBLANK` guard (issue #82) -

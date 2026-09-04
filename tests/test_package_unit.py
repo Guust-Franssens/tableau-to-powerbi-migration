@@ -21,6 +21,7 @@ verifies recorded hashes and dimensions.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -34,6 +35,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
+import check_path_ceiling as cpc  # noqa: E402  # pylint: disable=wrong-import-position
 import manifest_scope as ms  # noqa: E402  # pylint: disable=wrong-import-position
 import package_unit as pkg  # noqa: E402  # pylint: disable=wrong-import-position
 import path_flavour as pf  # noqa: E402  # pylint: disable=wrong-import-position
@@ -1354,7 +1356,8 @@ def test_the_data_folder_parameter_names_a_PLACEHOLDER_not_the_machine_that_buil
     value = re.search(rf'expression {pkg.DATA_FOLDER_PARAM} = "([^"]+)"', expressions)
     assert value is not None, expressions
     assert value.group(1).startswith(pkg.PACKAGE_ROOT_TOKEN), value.group(1)
-    assert ".staging" not in value.group(1)
+    staging = pkg.staging_dir(root.parent, UNIT).name
+    assert staging not in value.group(1), f"the parameter names staging: {value.group(1)}"
     assert str(root) not in value.group(1), "the package names the machine that built it"
     assert str(tmp_path) not in expressions, "some other build-time path survived into the model"
     foreign = "/" if os.sep == "\\" else "\\"
@@ -2106,8 +2109,16 @@ def test_the_second_digest_check_does_not_refuse_an_UNEDITED_package(tmp_path: P
     _package(tmp_path, bundle, oracle)
     assert set(json.loads((root / pkg.MANIFEST_NAME).read_text(encoding="utf-8"))["contents"]["files"]) == first
     assert pkg.package_edits(root) == ([], None), "the re-run left the package disagreeing with its own record"
-    assert not list(_out(tmp_path).glob(".*.replaced"))
-    assert not list(_out(tmp_path).glob(".*.staging"))
+    # ⚠️ Asserted against the names the packager ACTUALLY writes. These were `.*.replaced` /
+    # `.*.staging`, both retired by #476 (staging is now `.<digest>`, the retired tree
+    # `.<digest>~`), so after the merge those globs matched nothing and this leak-check passed
+    # without being able to observe a leak at all. The sweep for any hidden sibling is what stops a
+    # third scratch name doing the same thing again.
+    staging = pkg.staging_dir(_out(tmp_path), UNIT)
+    assert not staging.exists(), f"the staging directory survived the run: {staging}"
+    assert not staging.with_name(f"{staging.name}~").exists(), "the retired package survived the run"
+    leaked = sorted(path.name for path in _out(tmp_path).iterdir() if path.name.startswith("."))
+    assert leaked == [], f"packaging left hidden scratch behind in --out: {leaked}"
 
 
 def test_a_package_with_no_recorded_digest_is_REFUSED_rather_than_assumed_clean(tmp_path: Path) -> None:
@@ -2310,7 +2321,632 @@ def test_write_png_is_a_real_image_so_these_fixtures_could_fail(tmp_path: Path) 
 
 
 # --------------------------------------------------------------------------------------------
-# 7. the blind-review round-4 blockers
+# 7. the path budget (#476) - a package Power BI Desktop cannot open, refused before it is written
+# --------------------------------------------------------------------------------------------
+#
+# The field failure: `[WinError 206] The filename or extension is too long`, thrown mid-assembly on
+# unit 30 of 47 of a live estate, naming no path, no limit and no remedy. Every test below is
+# ARITHMETIC on the destination side - the projected paths are strings that are never created - so
+# the boundary is exercised identically on the Linux and Windows CI runners, neither of which can be
+# assumed to write a 270-character path at all. The BUNDLE these read is deliberately short.
+
+#: The two generated id segments from the crash report, kept verbatim so the fixture is the shape
+#: that actually failed rather than a contrived deep tree.
+FIELD_PAGE_ID = "page-ws-CA-Summadc2995b2"
+FIELD_VISUAL_ID = "slicer-page-ws-Cb3f14546"
+
+#: Short enough that the SOURCE tree stays far below any limit on both CI runners, and longer than
+#: the staging stem so the FINAL package is the deeper of the two roots. The length under test comes
+#: from `--out`, which is the side issue #476 reports.
+BUDGET_UNIT = "Unit_Sales"
+
+
+def _pbir_bundle(tmp_path: Path, *units: str) -> Path:
+    """A bundle whose units each have the deepest-path shape that crashed in the field.
+
+    `pbip/<Unit>/<Unit>.Report/definition/pages/<page-id>/visuals/<visual-id>/visual.json` - the unit
+    name twice, then the two generated id segments.
+    """
+    bundle = tmp_path / "bundle"
+    names = list(units) or [BUDGET_UNIT]
+    write_engine_report(bundle, workbooks=names)
+    for unit in names:
+        visuals = (
+            bundle
+            / "pbip"
+            / unit
+            / f"{unit}.Report"
+            / "definition"
+            / "pages"
+            / FIELD_PAGE_ID
+            / "visuals"
+            / FIELD_VISUAL_ID
+        )
+        visuals.mkdir(parents=True)
+        (visuals / "visual.json").write_text("{}", encoding="utf-8")
+    return bundle
+
+
+def _deepest_tail(unit: str = BUDGET_UNIT) -> str:
+    """The package-relative path of :func:`_pbir_bundle`'s deepest file, built independently.
+
+    Spelled out with `Path` joins rather than read back from `package_unit`, so a test asserting a
+    length is not asking the code under test what the length should be.
+    """
+    return str(
+        Path(unit, "fabric", f"{unit}.Report", "definition", "pages", FIELD_PAGE_ID, "visuals", FIELD_VISUAL_ID)
+        / "visual.json"
+    )
+
+
+def _padded_path(base: Path, length: int) -> Path:
+    """A path under `base` measuring exactly `length` ASCII characters.
+
+    Segments are capped at 60 characters because a single name may not exceed 255 on either CI
+    runner, and because a real `--out` is several directories deep rather than one absurd one.
+    """
+    if len(str(base)) > length:
+        pytest.skip(f"{base} is already {len(str(base))} characters; cannot build a {length}-character path")
+    out = base
+    while len(str(out)) < length:
+        deficit = length - len(str(out))
+        out = out.with_name(out.name + "d") if deficit == 1 else out / ("d" * min(deficit - 1, 60))
+    assert len(str(out)) == length
+    return out
+
+
+def _synthetic_out(length: int) -> Path:
+    """A never-created `--out` of exactly `length` characters, rooted at the filesystem anchor.
+
+    The projection is arithmetic on strings and touches no filesystem, which is what lets these tests
+    sit exactly on the 259-character boundary. Anchoring at the drive root rather than under
+    `tmp_path` is deliberate: pytest's own temp path is already ~104 characters here, so a boundary
+    case needing a 102-character `--out` would SKIP on the machine it matters most on - and a skipped
+    boundary test proves nothing.
+    """
+    return _padded_path(Path(Path.cwd().anchor or "/") / "pkg", length)
+
+
+def _pin_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the CLI judge absolute paths against WINDOWS ceilings, whichever runner is executing.
+
+    `package_unit` asks :func:`package_unit.platform_limits` what the HOST may write (blind-review
+    B3), so a test that means "this is what a Windows operator sees" has to say so - otherwise it
+    asserts a refusal that the ubuntu runner correctly declines to make, and the two CI legs
+    disagree about arithmetic neither of them is wrong about.
+    """
+    monkeypatch.setattr(pkg, "platform_limits", lambda system=None: pkg.WINDOWS_LIMITS)
+
+
+def test_staging_is_shallower_than_the_package_it_becomes(tmp_path: Path) -> None:
+    """The staging segment sits at the DEEPEST point of every path assembly writes.
+
+    `<out>/.{unit}.staging/` made every one of the hundreds of files in a PBIR tree 9 characters
+    longer than its final home - overhead paid per file, in the exact resource that ran out.
+    """
+    field_unit = "IA_Operation_Health_Summary_Dashboard"
+    out = tmp_path / "packages"
+    assert len(str(pkg.staging_dir(out, field_unit))) < len(str(out / field_unit))
+
+
+def test_the_staging_name_costs_a_CONSTANT_never_the_length_of_the_unit_name(tmp_path: Path) -> None:
+    """A 37-character unit and a 4-character one stage under names of the same length.
+
+    This is the property that makes the reclaim predictable: the staging overhead stops scaling with
+    the name the engine already repeats twice inside the tree.
+    """
+    out = tmp_path / "packages"
+    assert len(pkg.staging_dir(out, "IA_Operation_Health_Summary_Dashboard").name) == len(
+        pkg.staging_dir(out, "Unit").name
+    )
+
+
+def test_two_units_do_not_stage_under_the_same_directory(tmp_path: Path) -> None:
+    """Shortening must not be bought by making the staging name shared - `--unit A --unit B` into one
+    `--out` would then assemble both in the same tree."""
+    out = tmp_path / "packages"
+    assert pkg.staging_dir(out, "Sales_Dashboard") != pkg.staging_dir(out, "Profit_Dashboard")
+
+
+def test_nothing_is_assembled_deeper_than_the_pre_fix_staging_tree(tmp_path: Path) -> None:
+    """The property that holds for EVERY unit name, stated without overclaiming.
+
+    ⚠️ "staging is never deeper than the final package" is **false** below ~9 characters: a unit
+    called `B` stages under a 9-character hidden name, so it is 8 characters deeper than `<out>/B`.
+    That is measured, not hidden - and it is still strictly better than `<out>/.B.staging`, which was
+    10. What is true for every name is that the overhead is a CONSTANT ceiling instead of
+    `len(unit) + 9`, and a unit that short has a short tail anyway (the engine repeats the name
+    twice inside the tree).
+    """
+    out = tmp_path / "packages"
+    for unit in ("B", "Unit", "Unit_Sales", "Sales_Dashboard", "IA_Operation_Health_Summary_Dashboard"):
+        assert len(pkg.staging_dir(out, unit).name) < len(f".{unit}.staging"), unit
+
+
+def test_the_retired_package_is_never_named_after_the_package_it_retires(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`replace_dir` moves the old package aside and `shutil.rmtree` then WALKS it.
+
+    `.{name}.replaced` made every path in a package being REPLACED 10 characters longer than the one
+    anything had measured, so a package that fitted could still fail its second run - in a tree
+    nothing looks at.
+    """
+    staged, final = tmp_path / "s", tmp_path / "Sales_Performance_Dashboard"
+    staged.mkdir()
+    final.mkdir()
+    seen: list[Path] = []
+    rename = pkg._rename_retrying  # pylint: disable=protected-access
+
+    def _record(src: Path, dst: Path) -> None:
+        seen.append(dst)
+        rename(src, dst)
+
+    monkeypatch.setattr(pkg, "_rename_retrying", _record)
+    pkg.replace_dir(staged, final)
+    assert seen, "replace_dir must move the existing package aside before the swap"
+    assert len(seen[0].name) < len(f".{final.name}.replaced"), seen[0]
+
+
+def test_the_budget_measures_both_the_staged_and_the_final_tree(tmp_path: Path) -> None:
+    """Neither root may be assumed to be the deeper one - which of the two wins depends on the name.
+
+    A file that fits its final home and not its staging path is exactly `[WinError 206]`, and a
+    package that fits while staged and not once renamed is a package Power BI Desktop refuses.
+    """
+    bundle = _pbir_bundle(tmp_path)
+    out = tmp_path / "packages"
+    projected = pkg.projected_paths(bundle, BUDGET_UNIT, out)
+    by_root = {
+        root: {path.tail for path in projected if path.path.startswith(f"{root}{os.sep}") or path.path == str(root)}
+        for root in pkg.package_roots(out, BUDGET_UNIT)
+    }
+    assert len(by_root) == 3, "the final tree, the staged tree and the retired tree"
+    assert all(tails for tails in by_root.values()), "every root must be measured"
+    assert len({frozenset(tails) for tails in by_root.values()}) == 1, "the same tails at every root"
+
+
+def test_a_unit_whose_paths_exceed_the_ceiling_is_refused_BEFORE_anything_is_written(tmp_path: Path) -> None:
+    """The customer's shape: 47 units, a canonical `_runs/<NNN>-<slug>/packages/<batch>/` `--out`.
+
+    The old failure wrote 29 packages first and then threw `[WinError 206]` from inside `shutil`.
+
+    ``limits`` is pinned to Windows' rather than inherited from the runner, because that is the
+    platform whose arithmetic this test states - see :func:`package_unit.platform_limits` and the
+    POSIX case below.
+    """
+    bundle = _pbir_bundle(tmp_path)
+    out = _padded_path(tmp_path, 200)
+    with pytest.raises(pkg.PackagePathTooLong) as excinfo:
+        pkg.package_unit(bundle, BUDGET_UNIT, out, oracle_dir=None, assets_dir=None, limits=pkg.WINDOWS_LIMITS)
+    assert not out.exists(), "the refusal must precede every write, including --out itself"
+    assert not (tmp_path / "packages").exists()
+    assert excinfo.value.budget.unit == BUDGET_UNIT
+
+
+def test_the_refusal_names_the_path_its_length_the_ceiling_and_the_characters_to_reclaim(tmp_path: Path) -> None:
+    """`[WinError 206]` names none of the four. Each one is separately actionable.
+
+    The arithmetic is checked against a number the test knows independently - the length of the
+    `--out` it built - and for internal consistency, so a message that merely looks plausible fails.
+    """
+    bundle = _pbir_bundle(tmp_path)
+    out = _padded_path(tmp_path, 200)
+    with pytest.raises(pkg.PackagePathTooLong) as excinfo:
+        pkg.package_unit(bundle, BUDGET_UNIT, out, oracle_dir=None, assets_dir=None, limits=pkg.WINDOWS_LIMITS)
+    message = str(excinfo.value)
+
+    assert str(out / BUDGET_UNIT) in message or str(pkg.staging_dir(out, BUDGET_UNIT)) in message, (
+        f"the offending path is not named: {message}"
+    )
+    measured = re.search(
+        r"deepest: (\d+) UTF-16 units, (\d+) over the (\d+)-character (file|directory) ceiling", message
+    )
+    assert measured is not None, message
+    length, over, ceiling = (int(measured.group(index)) for index in (1, 2, 3))
+    assert ceiling in (259, 247), "the ceilings come from check_path_ceiling.py, measured against Desktop"
+    assert length - ceiling == over > 0
+
+    remedy = re.search(r"--out is (\d+) character\(s\) long; it must be at most (-?\d+) \((\d+) shorter\)", message)
+    assert remedy is not None, message
+    current, allowed, reclaim = (int(remedy.group(index)) for index in (1, 2, 3))
+    assert current == len(str(out)) == 200, "the length reported for --out is not the one it has"
+    assert allowed + reclaim == current
+    assert "docs/windows-path-limits.md" in message
+
+
+def test_the_budget_measures_the_STAGED_tree_too_not_only_the_final_one(tmp_path: Path) -> None:
+    """A one-character unit stages under a 9-character name, so staging is the deeper of the two.
+
+    `--out` is sized so the FINAL tree fits the ceiling exactly and only the scratch trees are over:
+    a check that measured the destination alone would package this unit and then die assembling it.
+    """
+    unit = "B"
+    bundle = _pbir_bundle(tmp_path, unit)
+    out = _synthetic_out(pkg.WINDOWS_LIMITS.file_ceiling - len(_deepest_tail(unit)) - 1)
+    budget = pkg.path_budget(bundle, unit, out, limits=pkg.WINDOWS_LIMITS)
+    final = str(out / unit)
+    assert budget.overruns, "the scratch trees are over the ceiling and the final tree is not"
+    assert not [path for path in budget.overruns if path.path.startswith(f"{final}{os.sep}")], [
+        path.path for path in budget.overruns
+    ]
+
+
+def test_scratch_overrun_does_not_consume_the_WINDOWS_shipping_budget(tmp_path: Path) -> None:
+    """A POSIX host may need a long scratch root while the final package remains relocatable."""
+    unit = "B"
+    bundle = _pbir_bundle(tmp_path, unit)
+    out = _synthetic_out(cpc.POSIX_PATH_CEILING - len(_deepest_tail(unit)) - 1)
+
+    budget = pkg.path_budget(bundle, unit, out, limits=cpc.POSIX_LIMITS)
+
+    assert budget.overruns, "the staging or retired scratch root must exceed the POSIX host limit"
+    assert budget.shipping == [], "only the final package is judged for Windows portability"
+    final_paths = [
+        path
+        for path in pkg.projected_paths(bundle, unit, out, limits=cpc.POSIX_LIMITS)
+        if path.path.startswith(f"{out / unit}{os.sep}") or path.path == str(out / unit)
+    ]
+    assert budget.shipping_budget == min(
+        (pkg.WINDOWS_LIMITS.dir_ceiling if path.kind == pkg.KIND_DIR else pkg.WINDOWS_LIMITS.file_ceiling)
+        - (path.length - pkg.utf16_len(str(out)))
+        for path in final_paths
+    )
+
+    staging = tmp_path / "staging"
+    assembled_file = staging / _deepest_tail(unit)
+    assembled_file.parent.mkdir(parents=True)
+    assembled_file.write_text("{}", encoding="utf-8")
+    assembled = pkg.assembled_budget(unit, staging, out / unit, out, cpc.POSIX_LIMITS)
+    assert assembled.overruns
+    assert assembled.shipping == []
+
+
+def test_a_POSIX_scratch_overrun_still_refuses_packaging(tmp_path: Path) -> None:
+    """The shipping split must not weaken the host's refusal to write an overlong scratch tree."""
+    unit = "B"
+    bundle = _pbir_bundle(tmp_path, unit)
+    out = _synthetic_out(cpc.POSIX_PATH_CEILING - len(_deepest_tail(unit)) - 1)
+
+    with pytest.raises(pkg.PackagePathTooLong):
+        pkg.package_unit(bundle, unit, out, oracle_dir=None, assets_dir=None, limits=cpc.POSIX_LIMITS)
+
+
+def test_a_unit_that_fits_exactly_at_the_ceiling_is_NOT_refused(tmp_path: Path) -> None:
+    """The negative control, one character away from the test above.
+
+    Without it every assertion here is satisfied by a check that refuses everything. The unit name is
+    long enough that its own segment, not the staging stem, is the deeper root.
+    """
+    unit = "Sales_Performance_Dashboard"
+    bundle = _pbir_bundle(tmp_path, unit)
+    fits = _synthetic_out(pkg.WINDOWS_LIMITS.file_ceiling - len(_deepest_tail(unit)) - 1)
+    assert pkg.path_budget(bundle, unit, fits, limits=pkg.WINDOWS_LIMITS).overruns == []
+    assert pkg.path_budget(bundle, unit, fits, limits=pkg.WINDOWS_LIMITS).out_root_budget == len(str(fits))
+    assert pkg.path_budget(bundle, unit, fits / "x", limits=pkg.WINDOWS_LIMITS).overruns, (
+        "one character more must be refused"
+    )
+
+
+def test_a_unit_no_out_can_fit_says_so_instead_of_naming_an_impossible_directory(tmp_path: Path) -> None:
+    """When the tail alone is over the ceiling, shortening `--out` cannot rescue it.
+
+    Reproduced with lowered ceilings rather than a 260-character fixture tree, exactly as
+    `check_path_ceiling.py`'s own `--ceiling` does - a bundle deep enough to do this for real cannot
+    be created on a stock Windows runner, which is the whole reason this defect exists.
+    """
+    bundle = _pbir_bundle(tmp_path)
+    tiny = pkg.Limits(file_ceiling=40, dir_ceiling=28)
+    budget = pkg.path_budget(bundle, BUDGET_UNIT, tmp_path / "o", limits=tiny)
+    assert budget.out_root_budget < 0
+    message = pkg.render_path_budget(budget)
+    assert "NO --out can fit this unit" in message
+    assert f"{-budget.out_root_budget} character(s) over" in message
+
+
+def test_main_refuses_a_too_deep_out_before_packaging_ANY_unit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """29 of 47 packages written, then a crash, was the expensive half of this defect.
+
+    A shorter `--out` moves every unit, so the estate would be repackaged wholesale anyway; the run
+    is refused whole and the offenders are named together with the one number that fixes all of them.
+    """
+    _pin_windows(monkeypatch)
+    bundle = _pbir_bundle(tmp_path, BUDGET_UNIT, "Second_Unit")
+    out = _padded_path(tmp_path, 200)
+    with pytest.raises(SystemExit) as excinfo:
+        pkg.main(["--bundle", str(bundle), "--out", str(out), "--quiet"])
+    assert excinfo.value.code == 2
+    assert list(out.iterdir()) == [], "nothing may be written when the run is refused"
+
+
+def test_the_batch_refusal_names_every_offending_unit_and_one_number_that_fixes_them(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One unit at a time is how the field run discovered them - 29 packages apart."""
+    _pin_windows(monkeypatch)
+    bundle = _pbir_bundle(tmp_path, BUDGET_UNIT, "Second_Unit")
+    out = _padded_path(tmp_path, 200)
+    with pytest.raises(SystemExit):
+        pkg.main(["--bundle", str(bundle), "--out", str(out), "--quiet"])
+    message = capsys.readouterr().err
+    assert "2 of 2 unit(s)" in message
+    assert BUDGET_UNIT in message and "Second_Unit" in message
+    assert "NOTHING was packaged" in message
+    assert re.search(r"it must be at most (-?\d+) \((\d+) shorter\) for every unit to fit", message), message
+
+
+# --------------------------------------------------------------------------------------------
+# 7b. the blind-review blockers against the budget in section 7
+#
+# Three findings, each reproduced through the real CLI on the branch before it was fixed:
+#
+#   B2  a unit may be named exactly like another unit's staging directory, because a leading dot is
+#       a legal Tableau name. `Victim` and `.d72cee2e` were BOTH reported packaged at exit 0 and only
+#       `Victim` existed on disk - `rmtree(staging)` had deleted a finished package. Reporting
+#       success while destroying one is the worst outcome this file can produce, so it is first.
+#   B1  the projection measured a SUBSET and said exit 0 about the rest: `assets/`, `data/`,
+#       `oracle/`, a generated `expressions.tmdl` and the retired tree were all unmeasured. A valid
+#       204-character workbook filename projected a maximum of 102 and shipped a 279-character path.
+#   B3  Windows ceilings were applied to absolute POSIX paths, refusing a 297-character `--out`
+#       whose package was valid at 332. Packages relocate, so that is a false refusal.
+# --------------------------------------------------------------------------------------------
+
+
+# --- B2: a staging name may never be able to name a package ---------------------------------
+
+
+def test_a_unit_named_like_another_units_staging_directory_cannot_delete_it(tmp_path: Path) -> None:
+    """The reproduction, unchanged: two units, one of them named `.<digest of the other>`.
+
+    Before: `main` exited 0 having reported BOTH packaged, and the alias package was gone - deleted
+    by `rmtree(staging)` on its way to assembling `Victim`. The run reported success about an
+    artifact it had just destroyed, which no downstream gate can detect because the manifest that
+    would have said otherwise went with it.
+    """
+    victim = "Victim"
+    alias = pkg.staging_dir(tmp_path, victim).name
+    bundle = _pbir_bundle(tmp_path, victim, alias)
+    out = _out(tmp_path)
+    report = tmp_path / "packaging.json"
+
+    code = pkg.main(["--bundle", str(bundle), "--out", str(out), "--quiet", "--json", str(report)])
+
+    assert code == pkg.EXIT_UNIT_FAILED, "the alias name is refused, and a refusal is never exit 0"
+    packaged = [row["unit"] for row in json.loads(report.read_text(encoding="utf-8"))["units"]]
+    assert alias not in packaged, "a name that aliases a staging path must never be reported packaged"
+    assert all((out / name).is_dir() for name in packaged), (
+        f"every unit reported packaged must be on disk: {packaged} vs {sorted(p.name for p in out.iterdir())}"
+    )
+    assert (out / victim).is_dir(), "the unit that IS packageable still packages"
+
+
+def test_the_cleanup_refuses_to_delete_a_directory_this_packager_did_not_name(tmp_path: Path) -> None:
+    """The tripwire behind the name refusal: `rmtree` may only target a scratch name.
+
+    Prevention is the fix - a unit cannot be named like a staging directory - and this is asserted
+    anyway because the consequence is invisible here and lands on someone else, as a package that
+    was reported shipped and is not there.
+    """
+    package = tmp_path / "Victim"
+    (package / "fabric").mkdir(parents=True)
+    (package / "fabric" / "model.tmdl").write_text("rows", encoding="utf-8")
+
+    with pytest.raises(pkg.PackagingError) as excinfo:
+        pkg._discard_scratch(package)  # pylint: disable=protected-access
+    assert (package / "fabric" / "model.tmdl").is_file(), "nothing may be deleted when the name is refused"
+    assert "Victim" in str(excinfo.value)
+
+    scratch = pkg.staging_dir(tmp_path, "Victim")
+    scratch.mkdir()
+    pkg._discard_scratch(scratch)  # pylint: disable=protected-access
+    assert not scratch.exists(), "the negative control: a scratch name IS swept"
+
+
+@pytest.mark.parametrize("unit", ["B", "Book", "Victim", "IA_Operation_Health_Summary_Dashboard", "Ünit", "a b"])
+def test_every_scratch_name_this_packager_creates_is_one_no_unit_may_be_called(tmp_path: Path, unit: str) -> None:
+    """The structural link, in both directions, so the two halves cannot drift apart.
+
+    `staging_dir` and `retired_dir` are the only two generators; whatever they produce has to be a
+    name `unit_name_problem` refuses, or the collision B2 reproduced re-opens for a name shape nobody
+    thought of. The last assertion is the negative control - a real unit name is not reserved, so
+    this is not satisfied by refusing everything.
+    """
+    for scratch in (pkg.staging_dir(tmp_path, unit), pkg.retired_dir(tmp_path / unit)):
+        assert pkg.is_reserved_packaging_name(scratch.name), scratch
+        assert pkg.unit_name_problem(scratch.name) is not None, scratch
+    assert pkg.unit_name_problem(unit) is None, "a name a customer could really have must still package"
+
+
+# --- B1: the projection, and the measurement that makes incompleteness impossible ------------
+
+
+def _asset_bundle(tmp_path: Path, unit: str, asset_name: str) -> tuple[Path, Path]:
+    """`(bundle, assets)` where the unit resolves a source asset with a CUSTOMER-chosen filename."""
+    bundle = _pbir_bundle(tmp_path, unit)
+    assets = tmp_path / "assets"
+    assets.mkdir(parents=True, exist_ok=True)
+    (assets / asset_name).write_text("<workbook/>", encoding="utf-8")
+    (bundle / "handover").mkdir(parents=True, exist_ok=True)
+    (bundle / "handover" / f"{unit}.json").write_text(
+        json.dumps({"workbook": {"name": unit, "source_id": f"_runs/999-x/assets/{asset_name}"}}), encoding="utf-8"
+    )
+    return bundle, assets
+
+
+def test_the_source_assets_own_filename_is_projected_not_discovered_at_write_time(tmp_path: Path) -> None:
+    """204 characters is a legal Windows filename, and the customer chose it - we did not.
+
+    Measured before the fix: `projected maximum = 102, zero overruns`, `main_exit = 0`,
+    `asset_written = True`, packaged asset path **279**. A budget that measures a subset and then
+    reports exit 0 is the fail-open shape, not the safe direction.
+    """
+    unit, name = "Book", f"{'A' * 200}.twb"
+    bundle, assets = _asset_bundle(tmp_path, unit, name)
+    out = _synthetic_out(62)
+
+    projected = pkg.projected_paths(bundle, unit, out, limits=pkg.WINDOWS_LIMITS, assets_dir=assets)
+    assert f"assets/{name}" in {path.tail for path in projected}, "the asset the packager copies must be measured"
+
+    with pytest.raises(pkg.PackagePathTooLong) as excinfo:
+        pkg.package_unit(bundle, unit, out, oracle_dir=None, assets_dir=assets, limits=pkg.WINDOWS_LIMITS)
+    assert excinfo.value.budget.worst.tail == f"assets/{name}"
+    assert not out.exists(), "nothing may be written, including --out itself"
+
+
+def test_an_output_the_projection_never_predicted_is_still_refused_before_the_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The property that replaces the old "not exhaustive, and deliberately so" comment.
+
+    A projection is a MODEL of the output and blind review measured four real outputs missing from
+    it. This walks the tree assembly ACTUALLY produced, before the swap, so an output a future edit
+    adds appears in the budget without anyone remembering to declare it. Simulated by making an
+    existing writer emit one more file - which is exactly what "somebody adds an output" looks like.
+    """
+    bundle, _oracle = _bundle(tmp_path)
+    out = _out(tmp_path)
+    assert pkg.main(["--bundle", str(bundle), "--out", str(out), "--quiet"]) == 0
+    before = pkg.package_contents(out / UNIT)
+
+    projected = max(path.length for path in pkg.projected_paths(bundle, UNIT, out))
+    limits = pkg.Limits(file_ceiling=projected + 20, dir_ceiling=projected + 20)
+    surprise = "z" * (projected - len(str(pkg.staging_dir(out, UNIT))) + 30)
+    write_schema = pkg._write_spec_schema  # pylint: disable=protected-access
+
+    def _and_one_more(dest: Path) -> tuple[str | None, str | None]:
+        (dest / surprise).write_text("an output nobody added to the budget", encoding="utf-8")
+        return write_schema(dest)
+
+    monkeypatch.setattr(pkg, "_write_spec_schema", _and_one_more)
+    with pytest.raises(pkg.PackagePathTooLong) as excinfo:
+        pkg.package_unit(bundle, UNIT, out, oracle_dir=None, assets_dir=None, limits=limits)
+
+    assert excinfo.value.budget.worst.tail == surprise
+    assert pkg.package_contents(out / UNIT) == before, "the package already there must survive untouched"
+    assert not pkg.staging_dir(out, UNIT).exists(), "and the staged tree must be gone"
+
+
+def test_the_RETIRED_tree_is_measured_because_rmtree_WALKS_it(tmp_path: Path) -> None:
+    """Three roots, not two: a package being replaced is renamed to `.<digest>~` and then walked.
+
+    `.<digest>~` is 10 characters, staging is 9 and a unit called `B` is 1 - so for a short name the
+    retired tree is the DEEPEST thing packaging touches, and `shutil.rmtree` has to be able to open
+    every path in it. `--out` here is sized so the staged tree fits exactly and only the retired one
+    is over.
+    """
+    unit = "B"
+    bundle = _pbir_bundle(tmp_path, unit)
+    out = _synthetic_out(pkg.WINDOWS_LIMITS.file_ceiling - len(_deepest_tail(unit)) - 9)
+
+    assert pkg.retired_dir(out / unit) in pkg.package_roots(out, unit)
+    budget = pkg.path_budget(bundle, unit, out, limits=pkg.WINDOWS_LIMITS)
+    retired = f"{pkg.retired_dir(out / unit)}{os.sep}"
+    assert budget.overruns, "the retired tree is over the ceiling"
+    assert all(path.path.startswith(retired) for path in budget.overruns), [
+        path.path for path in budget.overruns if not path.path.startswith(retired)
+    ]
+
+
+def test_a_length_refusal_from_the_FILESYSTEM_is_restated_with_a_path_and_a_remedy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The backstop for the machine that cannot even WRITE the tree there is to measure.
+
+    On stock Windows the write throws before there is anything to walk, and `[WinError 206] The
+    filename or extension is too long` named no path, no limit and no remedy - it escaped as an
+    uncaught traceback whose exit 1 is indistinguishable from `EXIT_NO_WORKING_COPY`.
+    """
+    bundle, _oracle = _bundle(tmp_path)
+    out = _out(tmp_path)
+    out.mkdir(parents=True, exist_ok=True)
+    offender = str(out / UNIT / ("q" * 200))
+
+    def _too_long(*_args: object, **_kwargs: object) -> dict:
+        raise OSError(errno.ENAMETOOLONG, "File name too long", offender)
+
+    monkeypatch.setattr(pkg, "_assemble_unit", _too_long)
+    with pytest.raises(pkg.PackagingError) as excinfo:
+        pkg.package_unit(bundle, UNIT, out, oracle_dir=None, assets_dir=None)
+    assert offender in str(excinfo.value) and "check_path_ceiling.py" in str(excinfo.value)
+    assert not list(out.iterdir()), "nothing may survive a refusal"
+
+    def _denied(*_args: object, **_kwargs: object) -> dict:
+        raise OSError(errno.EACCES, "Permission denied", offender)
+
+    monkeypatch.setattr(pkg, "_assemble_unit", _denied)
+    with pytest.raises(OSError) as unrelated:
+        pkg.package_unit(bundle, UNIT, out, oracle_dir=None, assets_dir=None)
+    assert not isinstance(unrelated.value, pkg.PackagingError), "somebody else's OSError is not relabelled"
+
+
+# --- B3: Desktop's ceiling belongs to the TAILS, not to somebody's build directory -----------
+
+
+def test_a_long_POSIX_out_is_not_refused_by_a_ceiling_that_belongs_to_WINDOWS(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Measured before the fix: a 297-character POSIX `--out` exited 2, and bypassing only the budget
+    produced a valid package at exit 0 whose deepest path was 332.
+
+    259/247 were measured against Power BI Desktop on Windows. Applying them to an absolute path on a
+    host that has no such limit refuses a build that would be fine the moment it is relocated - and
+    relocation is what a package is FOR. The POSIX half is read through the DEFAULT, because the
+    defect was in which ceilings the default picks.
+    """
+    bundle = _pbir_bundle(tmp_path)
+    out = _synthetic_out(297)
+
+    assert pkg.path_budget(bundle, BUDGET_UNIT, out, limits=pkg.WINDOWS_LIMITS).refused
+
+    monkeypatch.setattr(pkg, "platform_limits", lambda system=None: cpc.POSIX_LIMITS)
+    posix = pkg.path_budget(bundle, BUDGET_UNIT, out)
+    assert not posix.refused, [path.path for path in posix.overruns]
+    assert posix.shipping_budget >= 0, "and the package still fits a Windows root once it lands"
+
+
+def test_a_tail_no_WINDOWS_root_can_fit_is_refused_even_on_a_generous_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The half of Desktop's ceiling that is NOT a false positive - and the negative control for B3.
+
+    Without this, "stop applying Windows ceilings on POSIX" would mean a Linux run happily building
+    a package no Windows machine can ever open. The ceilings are lowered here rather than a
+    260-character tree created, exactly as `check_path_ceiling.py`'s own `--ceiling` does.
+    """
+    monkeypatch.setattr(pkg, "WINDOWS_LIMITS", pkg.Limits(file_ceiling=40, dir_ceiling=28))
+    bundle = _pbir_bundle(tmp_path)
+    budget = pkg.path_budget(bundle, BUDGET_UNIT, tmp_path / "o", limits=cpc.POSIX_LIMITS)
+
+    assert budget.overruns == [], "the host itself is content with these paths"
+    assert budget.shipping, "no Windows root can fit this unit, so it is refused anyway"
+    assert budget.refused and budget.hard_budget < 0
+    assert "NO --out can fit this unit" in pkg.render_path_budget(budget)
+
+
+def test_a_package_that_barely_fits_a_WINDOWS_root_WARNS_and_still_ships(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the B3 split: advisory, never a refusal.
+
+    A tight relocation budget is a shipping hazard rather than a defect - `C:\\Users\\<name>\\
+    Documents\\` is ~28 characters before a customer makes one folder - so it is reported and the
+    package still ships. The first run is the negative control: a shallow package does not warn.
+    """
+    bundle, _oracle = _bundle(tmp_path)
+    command = ["--bundle", str(bundle), "--out", str(_out(tmp_path)), "--quiet"]
+
+    assert pkg.main(command) == 0
+    assert "tolerate a Windows root" not in capsys.readouterr().err
+
+    monkeypatch.setattr(pkg, "SHIPPING_ROOT_BUDGET_ADVISORY", 10_000)
+    assert pkg.main(command) == 0, "the advisory must not change the verdict"
+    warning = capsys.readouterr().err
+    assert "WARN" in warning and UNIT in warning
+    assert "tolerate a Windows root of fewer than 10000 characters" in warning
+
+
+# --------------------------------------------------------------------------------------------
+# 8. the blind-review round-4 blockers
 #
 # Six findings, each reproduced through the real CLI on the branch before it was fixed, and each
 # invisible to every gate that was already green. They share one shape: a verdict that reads as a
