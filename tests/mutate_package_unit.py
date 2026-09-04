@@ -36,6 +36,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PACKAGER = REPO_ROOT / "scripts" / "package_unit.py"
 MECHANISM = REPO_ROOT / "scripts" / "manifest_scope.py"
+CEILINGS = REPO_ROOT / "scripts" / "check_path_ceiling.py"
 SUITES = (REPO_ROOT / "tests" / "test_package_unit.py", REPO_ROOT / "tests" / "test_package_unit_gates.py")
 
 NEGATIVE_CONTROL = "NEGATIVE CONTROL"
@@ -192,8 +193,8 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
     (
         "repackaging: merge into the existing package instead of replacing it",
         PACKAGER,
-        "        replace_dir(staging, out_root / unit)",
-        "        shutil.copytree(staging, out_root / unit, dirs_exist_ok=True)",
+        "        replace_dir(staging, final, verify=None if discard_edits else partial(_refuse_if_edited, unit))",
+        "        shutil.copytree(staging, final, dirs_exist_ok=True)",
         ["test_repackaging_removes_evidence_the_new_input_no_longer_produces"],
     ),
     (
@@ -313,11 +314,16 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
         ["test_the_rows_the_model_imports_are_shipped_and_the_partition_reads_them"],
     ),
     (
-        "packager: write the data-folder parameter from the STAGING dir that is about to vanish",
+        # ⚠️ Replaces "write the parameter from the STAGING dir", which this merge made INERT. That
+        # mutation swapped `final` for `dest` in the value; the placeholder-root design now takes
+        # only the SEPARATOR from that argument, and two local paths have the same separator, so
+        # the swap changed nothing and the anchor test could no longer fail. This targets what
+        # actually protects the same property today: the value must never be a build-time path.
+        "packager: bake the BUILD-TIME package path into the data-folder parameter (the pre-token shape)",
         PACKAGER,
-        "f'expression {parameter} = \"{final}\\\\{DATA_DIR}\\\\\" '",
-        "f'expression {parameter} = \"{dest}\\\\{DATA_DIR}\\\\\" '",
-        ["test_the_data_folder_parameter_names_the_FINAL_package_not_its_staging_dir"],
+        '    return f"{PACKAGE_ROOT_TOKEN}{sep}{DATA_DIR}{sep}"',
+        '    return f"{final}{sep}{DATA_DIR}{sep}"',
+        ["test_the_data_folder_parameter_names_a_PLACEHOLDER_not_the_machine_that_built_it"],
     ),
     (
         "packager: drop the size ceiling, so an unbounded source is copied unnoticed",
@@ -384,6 +390,184 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
         "# --------------------------------------------------------------------------------------------\n# CLI",
         "# --------------------------------------------------------------------------------------------\n# CLI (negative control)",
         ["test_no_foreign_unit_survives_anywhere_in_the_packaged_report"],
+    ),
+    # ---- issue #476: the path budget, and the staging segment that was added at the deepest point -
+    (
+        "staging: put the unit name back in the staging segment (the pre-fix `.{unit}.staging`)",
+        PACKAGER,
+        '    return out_root / f".{_short_stem(unit)}"',
+        '    return out_root / f".{unit}.staging"',
+        [
+            "test_staging_is_shallower_than_the_package_it_becomes",
+            "test_the_staging_name_costs_a_CONSTANT_never_the_length_of_the_unit_name",
+            "test_nothing_is_assembled_deeper_than_the_pre_fix_staging_tree",
+        ],
+    ),
+    (
+        "staging: stage every unit under ONE shared directory, so a second unit overwrites the first",
+        PACKAGER,
+        '    return out_root / f".{_short_stem(unit)}"',
+        '    return out_root / ".staging"',
+        ["test_two_units_do_not_stage_under_the_same_directory"],
+    ),
+    (
+        "replace_dir: name the retired tree after the package it retires (10 characters deeper)",
+        PACKAGER,
+        '    return final.with_name(f".{_short_stem(final.name)}{_RETIRED_SUFFIX}")',
+        '    return final.with_name(f".{final.name}.replaced")',
+        ["test_the_retired_package_is_never_named_after_the_package_it_retires"],
+    ),
+    (
+        "budget: package the unit anyway, reproducing the mid-assembly WinError 206",
+        PACKAGER,
+        "    budget = path_budget(bundle, unit, out_root, limits=limits, assets_dir=assets_dir)\n"
+        "    if budget.refused:\n        raise PackagePathTooLong(budget)",
+        "    budget = path_budget(bundle, unit, out_root, limits=limits, assets_dir=assets_dir)\n"
+        "    if False:  # noqa\n        raise PackagePathTooLong(budget)",
+        [
+            "test_a_unit_whose_paths_exceed_the_ceiling_is_refused_BEFORE_anything_is_written",
+            "test_the_refusal_names_the_path_its_length_the_ceiling_and_the_characters_to_reclaim",
+        ],
+    ),
+    (
+        "budget: measure only the FINAL tree, missing a unit that fits once renamed and not before",
+        PACKAGER,
+        "    return (final, staging_dir(out_root, unit), retired_dir(final))",
+        "    return (final,)",
+        [
+            "test_the_budget_measures_the_STAGED_tree_too_not_only_the_final_one",
+            "test_the_budget_measures_both_the_staged_and_the_final_tree",
+        ],
+    ),
+    (
+        "budget: let the batch run start, so the estate fails one unit at a time again",
+        PACKAGER,
+        "        parser.error(render_out_too_deep(too_deep, len(units)))",
+        "        pass",
+        [
+            "test_main_refuses_a_too_deep_out_before_packaging_ANY_unit",
+            "test_the_batch_refusal_names_every_offending_unit_and_one_number_that_fixes_them",
+        ],
+    ),
+    (
+        "message: name the path but not its length, the ceiling or the overage (WinError 206's own failing)",
+        PACKAGER,
+        'f"  deepest: {worst.length} UTF-16 units, {worst.length - worst.ceiling} over the "\n'
+        '        f"{worst.ceiling}-character {kind} ceiling\\n"',
+        'f"  deepest: this path is too long\\n"',
+        ["test_the_refusal_names_the_path_its_length_the_ceiling_and_the_characters_to_reclaim"],
+    ),
+    (
+        "message: report a reclaim figure that does not add up to the --out it measured",
+        PACKAGER,
+        'f"{budget.hard_budget} ({budget.out_root_length - budget.hard_budget} shorter) for this unit to fit."',
+        'f"{budget.hard_budget} ({budget.hard_budget} shorter) for this unit to fit."',
+        ["test_the_refusal_names_the_path_its_length_the_ceiling_and_the_characters_to_reclaim"],
+    ),
+    (
+        "message: offer a negative --out length instead of saying no --out can fit the unit",
+        PACKAGER,
+        "        if budget.hard_budget >= 0",
+        "        if budget.hard_budget >= -1000",
+        ["test_a_unit_no_out_can_fit_says_so_instead_of_naming_an_impossible_directory"],
+    ),
+    # ---- blind-review B2: a staging name that could delete a finished package -------------------
+    (
+        "B2: allow a unit to be named exactly like another unit's staging directory",
+        PACKAGER,
+        "            is_reserved_packaging_name(unit),",
+        "            False,  # noqa",
+        [
+            "test_a_unit_named_like_another_units_staging_directory_cannot_delete_it",
+            "test_every_scratch_name_this_packager_creates_is_one_no_unit_may_be_called",
+        ],
+    ),
+    (
+        "B2: rmtree whatever occupies the staging path, named by this packager or not",
+        PACKAGER,
+        "    if not is_reserved_packaging_name(path.name):",
+        "    if False:  # noqa",
+        ["test_the_cleanup_refuses_to_delete_a_directory_this_packager_did_not_name"],
+    ),
+    (
+        "B2: reserve a name shape the generators never produce, so the two halves drift apart",
+        PACKAGER,
+        'rf"^\\.[0-9a-f]{{{_STAGING_STEM_CHARS}}}{re.escape(_RETIRED_SUFFIX)}?$"',
+        'r"^\\.reserved$"',
+        [
+            "test_every_scratch_name_this_packager_creates_is_one_no_unit_may_be_called",
+            "test_a_unit_named_like_another_units_staging_directory_cannot_delete_it",
+        ],
+    ),
+    # ---- blind-review B1: the projection that measured a subset and reported exit 0 -------------
+    (
+        "B1: stop projecting the source asset, whose filename the CUSTOMER chose",
+        PACKAGER,
+        '        tails.append((KIND_FILE, f"assets/{asset.name}"))',
+        "        pass",
+        ["test_the_source_assets_own_filename_is_projected_not_discovered_at_write_time"],
+    ),
+    (
+        "B1: trust the projection, so an output nobody predicted ships unmeasured",
+        PACKAGER,
+        "        assert_assembled_fits(unit, staging, final, out_root, limits)",
+        "        pass",
+        ["test_an_output_the_projection_never_predicted_is_still_refused_before_the_swap"],
+    ),
+    (
+        "B1: forget the RETIRED tree that shutil.rmtree walks on every repackage",
+        PACKAGER,
+        "    return (final, staging_dir(out_root, unit), retired_dir(final))",
+        "    return (final, staging_dir(out_root, unit))",
+        ["test_the_RETIRED_tree_is_measured_because_rmtree_WALKS_it"],
+    ),
+    (
+        "B1: let the filesystem's own length refusal escape as a bare traceback again",
+        PACKAGER,
+        '    if getattr(error, "winerror", None) != _TOO_LONG_WINERROR and error.errno != errno.ENAMETOOLONG:\n'
+        "        return None",
+        "    if True:  # noqa\n        return None",
+        ["test_a_length_refusal_from_the_FILESYSTEM_is_restated_with_a_path_and_a_remedy"],
+    ),
+    # ---- blind-review B3: whose ceiling is being applied to which path --------------------------
+    (
+        "B3: apply the WINDOWS ceilings to absolute paths on every host again",
+        PACKAGER,
+        "    limits = platform_limits() if limits is None else limits\n    return _budget(",
+        "    limits = WINDOWS_LIMITS if limits is None else limits\n    return _budget(",
+        ["test_a_long_POSIX_out_is_not_refused_by_a_ceiling_that_belongs_to_WINDOWS"],
+    ),
+    (
+        "B3: drop the relocation half, so a POSIX host builds a package Windows can never open",
+        PACKAGER,
+        "        return bool(self.overruns or self.shipping)",
+        "        return bool(self.overruns)",
+        ["test_a_tail_no_WINDOWS_root_can_fit_is_refused_even_on_a_generous_host"],
+    ),
+    (
+        "B3: swallow the shipping advisory, so a tight relocation budget travels unreported",
+        PACKAGER,
+        "    if not tight:\n        return None",
+        "    if True:  # noqa\n        return None",
+        ["test_a_package_that_barely_fits_a_WINDOWS_root_WARNS_and_still_ships"],
+    ),
+    # ---- the ceilings themselves: pinned in a suite this harness can score ----------------------
+    (
+        "ceilings: move DIR_CEILING to the value Desktop's own message names (247 -> 260)",
+        CEILINGS,
+        "DIR_CEILING = 247",
+        "DIR_CEILING = 260",
+        ["test_the_measured_desktop_ceilings_are_pinned_as_two_DISTINCT_literals"],
+    ),
+    (
+        "ceilings: derive FILE_CEILING from DIR_CEILING instead of pinning it separately",
+        CEILINGS,
+        "FILE_CEILING = 259\nDIR_CEILING = 247",
+        "FILE_CEILING = 247 + 13\nDIR_CEILING = 247",
+        [
+            "test_the_measured_desktop_ceilings_are_pinned_as_two_DISTINCT_literals",
+            "test_the_packager_budgets_against_those_same_two_literals",
+        ],
     ),
 ]
 
