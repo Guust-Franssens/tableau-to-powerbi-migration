@@ -29,11 +29,14 @@ pytest never ran.
 from __future__ import annotations
 
 import ast
+import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import mutate_check_unit  # noqa: E402
+import mutate_package_unit  # noqa: E402
 import mutation_harness  # noqa: E402
 from mutation_harness import (  # noqa: E402
     is_harness_error,
@@ -310,3 +313,50 @@ def test_a_setup_report_alone_does_not_prove_a_test_body_ran() -> None:
 
     assert session_is_trustworthy(outcomes) is False
     assert is_harness_error(outcomes) is True
+
+
+def test_package_unit_campaign_reports_partial_anchor_when_only_one_anchor_fails(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def fake_run(cmd, **_kwargs):
+        anchor = cmd[cmd.index("-k") + 1]
+        calls.append(anchor)
+        stdout = "1 failed" if anchor == "test_observes" else "1 passed"
+        return subprocess.CompletedProcess(cmd, 1 if anchor == "test_observes" else 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(mutate_package_unit.subprocess, "run", fake_run)
+
+    verdict, note = mutate_package_unit.run_anchor(["test_observes", "test_misses"])
+
+    assert calls == ["test_observes", "test_misses"]
+    assert verdict == "PARTIAL-ANCHOR"
+    assert note == "caught: test_observes; missed: test_misses"
+
+
+def test_check_unit_campaign_requires_every_anchor_to_fail(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def fake_run(cmd, **_kwargs):
+        anchor = cmd[cmd.index("-k") + 1]
+        calls.append(anchor)
+        return subprocess.CompletedProcess(cmd, 1, stdout="1 failed", stderr="")
+
+    monkeypatch.setattr(mutate_check_unit.subprocess, "run", fake_run)
+
+    verdict, note = mutate_check_unit.run_anchor(["test_first", "test_second"])
+
+    assert calls == ["test_first", "test_second"]
+    assert verdict == "CAUGHT (2 anchors)"
+    assert note == ""
+
+
+def test_campaign_main_treats_partial_anchor_as_non_success(monkeypatch) -> None:
+    partial_results = [
+        ("real mutation", "PARTIAL-ANCHOR", "caught: test_a; missed: test_b"),
+        (mutate_check_unit.NEGATIVE_CONTROL, "SURVIVED", ""),
+    ]
+    monkeypatch.setattr(mutate_check_unit, "run_campaign", lambda _selected: partial_results)
+    monkeypatch.setattr(mutate_package_unit, "run_campaign", lambda _selected: partial_results)
+
+    assert mutate_check_unit.main([]) == 1
+    assert mutate_package_unit.main([]) == 1

@@ -21,8 +21,8 @@ repo already trusts, and both of its refusals have caught false 100% scores here
 * a no-op NEGATIVE CONTROL runs through the identical path and must SURVIVE, which proves the
   harness can report a survivor at all.
 
-Each mutation names the single anchor test it must kill and is run against that anchor alone, so a
-"caught" verdict cannot be borrowed from an unrelated failure.
+Each mutation names the anchor tests it must kill and is run against each anchor alone, so a "caught"
+verdict cannot be borrowed from an unrelated failure.
 """
 
 from __future__ import annotations
@@ -278,10 +278,7 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
         "| `fabric/` | the engine WORKING COPY - **edit here**, and when you work from a package THIS tree "
         "is canonical; `<bundle>/pbip/` never promotes over it.",
         "| `fabric/` | a copy of the engine working copy; edit `<bundle>/pbip/` instead.",
-        [
-            "test_AGENTS_md_and_the_package_readme_agree_on_where_an_agent_edits",
-            "test_declared_edit_tooling_is_scoped_to_bundle_work_in_BOTH_documents",
-        ],
+        ["test_AGENTS_md_and_the_package_readme_agree_on_where_an_agent_edits"],
     ),
     (
         "README: drop the bundle-only scope from the declared-edit tooling note",
@@ -393,14 +390,14 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
 _FAILED = re.compile(r"(\d+) failed")
 
 
-def run_anchor(names: list[str]) -> tuple[str, str]:
-    """Run only the anchor tests; return (verdict, note).
+def run_one_anchor(name: str) -> tuple[str, str]:
+    """Run one anchor test; return (verdict, note).
 
     ``encoding="utf-8"`` is load-bearing on Windows: ``text=True`` alone decodes the child's stdout
     with the console codepage, and this file's own ``⚠️`` caveats appear in failing assertions.
     """
     proc = subprocess.run(  # noqa: S603
-        [sys.executable, "-m", "pytest", *[str(suite) for suite in SUITES], "-q", "-k", " or ".join(names)],
+        [sys.executable, "-m", "pytest", *[str(suite) for suite in SUITES], "-q", "-k", name],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -416,6 +413,22 @@ def run_anchor(names: list[str]) -> tuple[str, str]:
     if proc.returncode != 0 or "error" in tail.lower():
         return "BROKEN", last
     return "SURVIVED", last
+
+
+def run_anchor(names: list[str]) -> tuple[str, str]:
+    """Run each declared anchor independently; every one must observe the mutation."""
+    outcomes = [(name, *run_one_anchor(name)) for name in names]
+    broken = [(name, note) for name, verdict, note in outcomes if not verdict.startswith(("CAUGHT", "SURVIVED"))]
+    if broken:
+        return "BROKEN", "; ".join(f"{name}: {note}" for name, note in broken)
+
+    caught = [name for name, verdict, _note in outcomes if verdict.startswith("CAUGHT")]
+    missed = [name for name, verdict, _note in outcomes if verdict == "SURVIVED"]
+    if len(caught) == len(outcomes):
+        return (outcomes[0][1], outcomes[0][2]) if len(outcomes) == 1 else (f"CAUGHT ({len(caught)} anchors)", "")
+    if caught:
+        return "PARTIAL-ANCHOR", f"caught: {', '.join(caught)}; missed: {', '.join(missed)}"
+    return "SURVIVED", "; ".join(f"{name}: {note}" for name, _verdict, note in outcomes)
 
 
 def run_campaign(selected: list[tuple[str, Path, str, str, list[str]]]) -> list[tuple[str, str, str]]:
