@@ -7,6 +7,14 @@ usage:   python scripts/harvest_estate_assets.py --out <dir> [--env .env] [--lim
                                                  [--project NAME] [--project-id LUID]
                                                  [--allow-unignored-out]
 
+Exit codes
+----------
+`0` every in-scope asset reached BOTH parsers (a parse FAILURE is the report this script exists to
+produce, so it stays `0`); `1` NOTHING COULD BE ASSESSED — no asset reached a parser at all; `2`
+refused to write into a committable `--out`; `3` PARTIAL — some assets were assessed and at least
+one never downloaded. `1` and `3` are kept apart on purpose: automation must be able to tell "six of
+forty-seven failed" from "the whole harvest failed".
+
 Where the output goes
 ---------------------
 `--out` is `_sweep` by convention (`.gitignore`: `/_sweep*/`; `_harvest*` belongs to the OTHER
@@ -85,6 +93,42 @@ from engine_source import EngineNotFoundError, engine_scripts_dir  # noqa: E402 
 from tableau_env import engine_child_env, pat_secret, redact, require, resolve_env  # noqa: E402  # pylint: disable=wrong-import-position
 
 LOG = logging.getLogger("harvest_estate_assets")
+
+# --- exit codes: "could not assess" must never collapse into the clean bucket --------------------
+#
+# The final line used to be `return 0 if results else 1`, which counts ROWS -- and a failed download
+# appends a row. So a harvest in which NOTHING reached either parser exited 0. Measured on a
+# one-workbook estate with `download()` returning `(False, "network dead")`:
+#
+#   **1 asset(s)** - ours failed 0, his failed 0, both parsed 0, never downloaded 1.
+#   exit_code: 0
+#
+# That is the fail-open shape AGENTS.md singles out: automation downstream cannot tell a total
+# harvest failure from a clean sweep, and the customer's 47-asset run (41 ok / 6 failed) reported
+# "ours failed 0, his failed 0" for the same reason (issue #472, blind review of #482).
+#
+# The contract. It is deliberately ADDITIVE: no existing code changes meaning, because a code that
+# already means something is read by things this branch cannot see -- measured, `1` is asserted for
+# the unreadable-`estate.db` path by `tests/test_harvest_output_guard.py`, a file this change does
+# not own. So the bug is fixed by moving TOTAL failure out of `0` into the `1` it always documented,
+# and the previously-invisible PARTIAL case gets a NEW number.
+#
+#   0  every in-scope asset reached BOTH parsers. A parse FAILURE stays 0: the failure distribution
+#      is the artifact this script exists to produce, not a run failure.
+#   1  NOTHING COULD BE ASSESSED -- no asset reached a parser at all: every download failed (the new
+#      case), no asset was in scope, the engine is missing, or `estate.db` could not be read. This is
+#      what `main()` has documented since it was written; only the first case is new.
+#   2  refused to write into a committable `--out` (unchanged; nothing was downloaded).
+#   3  PARTIAL -- at least one asset was assessed AND at least one never downloaded (the customer's
+#      41-ok/6-failed shape). Non-zero because those six are absent from every bucket in the report
+#      and an operator reading the tally alone would call the run clean. A new number rather than a
+#      reuse of `1`: "some of the estate is missing" and "the estate was never looked at" need
+#      opposite responses, and 3 is the repo's established slot for a verdict kept apart from 0/1
+#      (`check_datamodel.EXIT_UNASSESSABLE`, `assess_estate.py`'s incomplete-primary-listing code).
+EXIT_OK = 0
+EXIT_NOTHING_ASSESSED = 1
+EXIT_REFUSED_UNIGNORED_OUT = 2
+EXIT_PARTIAL = 3
 
 # The download watchdog (below) pushes this module past pylint's 1200-line limit. The precedent in
 # this repo is a module-level waiver (`assess_estate.py`, `run_estate.py`, `deploy_estate.py` and
@@ -374,12 +418,14 @@ def refuse_unignored_output(
 # --- download watchdog: telling a STALLED download from a merely SLOW one -----------------------
 #
 # There are TWO nested timeouts and they catch opposite failures. The engine's `fetch_tds.py` passes
-# `timeout=300` to `urlopen` (`:407`, `:423`), which is a PER-SOCKET-READ timeout: it fires when a
+# `timeout=300` to `urlopen` (`:405`, `:443`), which is a PER-SOCKET-READ timeout: it fires when a
 # connection goes quiet. Ours was `subprocess.run(..., timeout=600)`, a TOTAL WALL CLOCK: it fires on
 # a download that is progressing perfectly well and merely large. A customer's 47-asset harvest lost
 # `IA Redemptions by Campaign Report` to the second one twice (issue #472) — very likely a healthy
 # download we killed. Raising 600 to 1200 only moves that cliff, so the ceiling is not the fix:
-# knowing whether bytes are still arriving is.
+# knowing whether bytes are still arriving is. The ceiling survives ONLY as the fallback for when
+# that knowledge is unavailable, and it is now derived from the child's own retry budget rather than
+# from history — see `DEFAULT_DOWNLOAD_TIMEOUT` below.
 #
 # ⚠️ A FILE-GROWTH watchdog cannot work here, and this is a property of the engine, not a guess.
 # `_http` ends `return resp.status, dict(resp.headers), resp.read()` — ONE unbounded read, the whole
@@ -422,11 +468,45 @@ def refuse_unignored_output(
 # (unsupported platform, denied handle, trampoline we could not walk) means no stall verdict — the
 # wall-clock ceiling applies instead, i.e. exactly today's behaviour.
 
-DEFAULT_DOWNLOAD_TIMEOUT = 600.0
-# The engine's own per-socket-read timeout (`fetch_tds.py:407,423` pass `timeout=300` to `urlopen`).
-# It is the contract for how long a HEALTHY transfer is allowed to go quiet between reads: urllib
-# tolerates a 299s gap and raises at 300s.
+# The engine's own per-socket-read timeout (`fetch_tds.py:405,443` — `_http_download(url, token,
+# dest, timeout=300, ...)` passes it to `urlopen`). It is the contract for how long a HEALTHY
+# transfer is allowed to go quiet between reads: urllib tolerates a 299s gap and raises at 300s.
 ENGINE_READ_TIMEOUT_SECONDS = 300.0
+# ⚠️ The blind fallback ceiling is DERIVED from the child's own retry budget, never chosen. 600 was
+# inherited from the pre-#472 `subprocess.run(..., timeout=600)` and is not a number about anything:
+# it is BELOW the child's bounded timer, so on any run where the progress probe is unreadable
+# (unsupported platform, denied handle, a subtree we cannot walk) we killed the fetcher before it
+# could produce its own authoritative verdict, and recorded `timeout after 600s` where the child
+# would have reported the real HTTP failure. That is precisely the "do not kill a tool that IS the
+# bounded timer" rule in AGENTS.md (blind review of #482).
+#
+# The arithmetic, read off installed engine 2.356.0's `fetch_tds.py` so the next person can
+# re-derive it (`python scripts/engine_source.py` locates the tree):
+#
+#   `_http_download(url, token, dest, timeout=300, *, max_attempts=4, ...)`  (`:405`)
+#     * up to `max_attempts` = 4 attempts, each of which may burn a full `timeout` = 300s read
+#       timeout before `urlopen` raises                                         -> 4 x 300 = 1200s
+#     * `sleeper(_retry_after_seconds(resp_headers, delay))` between attempts (`:487`). The
+#       unheaded default backoff is only 1+2+4 = 7s, but `_retry_after_seconds` honours a server
+#       `Retry-After` and clamps it to 60s (`:317-328`), so 60s is the worst case per gap, and
+#       there are `max_attempts - 1` gaps                                       ->  3 x  60 =  180s
+#     * one sign-in POST before the download (`_http_json(..., timeout=120)`)   ->            120s
+#     * interpreter start-up for the child                                      ->             30s
+#
+# `fetch_tds.main()` never overrides the 300 (it calls `download_workbook`/`download_datasource`
+# with their default `timeout=300`), so 300 is what actually runs, not merely what is available.
+ENGINE_DOWNLOAD_ATTEMPTS = 4
+ENGINE_BACKOFF_CAP_SECONDS = 60.0
+ENGINE_SIGNIN_TIMEOUT_SECONDS = 120.0
+CHILD_STARTUP_GRACE_SECONDS = 30.0
+# What the child may legitimately spend before it produces its OWN verdict. Our ceiling must never
+# sit below this, or we pre-empt the bounded timer and report `timeout after Ns` in place of the
+# real HTTP failure the fetcher was about to name.
+ENGINE_DOWNLOAD_BUDGET_SECONDS = (
+    ENGINE_DOWNLOAD_ATTEMPTS * ENGINE_READ_TIMEOUT_SECONDS + (ENGINE_DOWNLOAD_ATTEMPTS - 1) * ENGINE_BACKOFF_CAP_SECONDS
+)  # 1200 + 180 = 1380s
+DEFAULT_DOWNLOAD_TIMEOUT = ENGINE_DOWNLOAD_BUDGET_SECONDS + ENGINE_SIGNIN_TIMEOUT_SECONDS + CHILD_STARTUP_GRACE_SECONDS
+# = 1530s
 # ⚠️ This MUST NOT sit below `ENGINE_READ_TIMEOUT_SECONDS`. The first version of this fix defaulted
 # to 120s, by analogy with `refresh_pbip_model.py`'s liveness timer -- but that one WARNS and this
 # one KILLS, which is a different thing entirely. A bursty-but-healthy source pausing 120-300s
@@ -1273,6 +1353,21 @@ def record_parse(
     )
 
 
+def sweep_exit_code(results: list[dict]) -> int:
+    """`EXIT_OK` every asset assessed, `EXIT_PARTIAL` some, `EXIT_NOTHING_ASSESSED` none.
+
+    Counts ASSESSED assets, never rows. A failed download is a row too, which is exactly how a
+    harvest that assessed nothing exited 0 (issue #472; reproduced in the blind review of #482).
+    An empty `results` is `EXIT_NOTHING_ASSESSED` for the same reason it always was non-zero: a
+    sweep that looked at nothing has said nothing about the estate.
+    """
+    missing = len(never_downloaded(results))
+    assessed = len(results) - missing
+    if assessed <= 0:
+        return EXIT_NOTHING_ASSESSED
+    return EXIT_PARTIAL if missing else EXIT_OK
+
+
 def report_failed_downloads(results: list[dict], orphans: list[tuple[str, list[str]]] | None = None) -> list[dict]:
     """Say out loud, at the END of the run, which assets never landed. Returns those rows.
 
@@ -1302,7 +1397,7 @@ def report_failed_downloads(results: list[dict], orphans: list[tuple[str, list[s
 
 
 def main() -> int:  # pylint: disable=too-many-locals,too-many-statements,too-many-branches  # one sweep
-    """Harvest and sweep. Exit 2 when `--out` is committable, 1 when nothing could be assessed."""
+    """Harvest and sweep. Exit 0 complete, 1 nothing assessed, 2 committable `--out`, 3 partial."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", required=True, type=Path, help="output directory (must be git-ignored, see below)")
     ap.add_argument("--env", type=Path, default=REPO_ROOT / ".env")
@@ -1326,8 +1421,11 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-statements,too-ma
         type=float,
         default=DEFAULT_DOWNLOAD_TIMEOUT,
         help="wall-clock ceiling per asset, in seconds, applied ONLY while no download-progress "
-        f"signal is available (default {DEFAULT_DOWNLOAD_TIMEOUT:.0f}); 0 removes the ceiling. A "
-        "transfer we can see progressing is never killed by this.",
+        f"signal is available (default {DEFAULT_DOWNLOAD_TIMEOUT:.0f}, derived from the fetcher's "
+        f"own bounded retry budget: {ENGINE_DOWNLOAD_ATTEMPTS} attempts x "
+        f"{ENGINE_READ_TIMEOUT_SECONDS:.0f}s read timeout + backoff + sign-in); 0 removes the "
+        "ceiling. A transfer we can see progressing is never killed by this, and a value below the "
+        "fetcher's own budget kills it before it can report the real error.",
     )
     ap.add_argument(
         "--download-stall-timeout",
@@ -1351,10 +1449,22 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-statements,too-ma
     if 0 < args.download_stall_timeout < ENGINE_READ_TIMEOUT_SECONDS:
         LOG.warning(
             "--download-stall-timeout %.0fs is BELOW the fetcher's own %.0fs per-read timeout "
-            "(fetch_tds.py:407,423). urllib tolerates a gap that long on a healthy connection, so "
+            "(fetch_tds.py:405,443). urllib tolerates a gap that long on a healthy connection, so "
             "this can kill a bursty-but-healthy download and report it as hung.",
             args.download_stall_timeout,
             ENGINE_READ_TIMEOUT_SECONDS,
+        )
+    if 0 < args.download_timeout < ENGINE_DOWNLOAD_BUDGET_SECONDS:
+        LOG.warning(
+            "--download-timeout %.0fs is BELOW the fetcher's own %.0fs bounded retry budget "
+            "(%d attempts x %.0fs read timeout + backoff, fetch_tds.py:405). While the "
+            "download-progress signal is unreadable this ceiling KILLS the fetcher before its own "
+            "timer can report the real error, and you get `timeout after %.0fs` instead.",
+            args.download_timeout,
+            ENGINE_DOWNLOAD_BUDGET_SECONDS,
+            ENGINE_DOWNLOAD_ATTEMPTS,
+            ENGINE_READ_TIMEOUT_SECONDS,
+            args.download_timeout,
         )
     # Before the engine, the .env, the database and above all the download: a customer's workbooks
     # must never land somewhere this PUBLIC repo would commit them (issue #125). The guard is given
@@ -1363,14 +1473,14 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-statements,too-ma
     # is the whole of issue #374 -- measured: `--out ~/sweep` from cmd.exe was judged as
     # `%USERPROFILE%\sweep` (outside any work tree, so allowed) and written to `<checkout>\~\sweep`.
     if refuse_unignored_output(args.out, args.allow_unignored_out):
-        return 2
+        return EXIT_REFUSED_UNIGNORED_OUT
     args.out = _resolved(args.out)
     # One resolver, no fallback: the installed plugin is the single canonical engine (issue #107).
     try:
         scripts = engine_scripts_dir()
     except EngineNotFoundError as exc:
         LOG.error("%s", exc)
-        return 1
+        return EXIT_NOTHING_ASSESSED
 
     env = resolve_env(args.env)
     if not args.skip_download:
@@ -1387,7 +1497,7 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-statements,too-ma
     except (sqlite3.OperationalError, ValueError) as exc:
         con.close()
         LOG.error("%s; run assess_estate.py with --survey again before using project scoping", exc)
-        return 1
+        return EXIT_NOTHING_ASSESSED
     # Captured while the connection is open, and used only at the END: a datasource that fails to
     # download orphans every workbook bound to it, and the edges are the only thing that knows which.
     try:
@@ -1471,7 +1581,29 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-statements,too-ma
     LOG.info(
         "swept %d asset(s) in %.0fs -> %s", len(results), time.perf_counter() - started, args.out / "parse-sweep.md"
     )
-    return 0 if results else 1
+    code = sweep_exit_code(results)
+    assessed = len(results) - len(never_downloaded(results))
+    # The verdict, spelled out beside the tally. An exit code nobody prints is an exit code an
+    # operator watching a console never sees, and this run's whole defect was a failure that looked
+    # like a success.
+    if code == EXIT_NOTHING_ASSESSED:
+        LOG.error(
+            "NOTHING COULD BE ASSESSED: 0 of %d asset(s) reached a parser, so this sweep says "
+            "nothing about the estate. Exit %d.",
+            len(results),
+            code,
+        )
+    elif code == EXIT_PARTIAL:
+        LOG.warning(
+            "PARTIAL HARVEST: %d of %d asset(s) assessed, %d never downloaded. Exit %d — the "
+            "failure distribution below covers the %d that landed and NOT the rest.",
+            assessed,
+            len(results),
+            len(results) - assessed,
+            code,
+            assessed,
+        )
+    return code
 
 
 if __name__ == "__main__":

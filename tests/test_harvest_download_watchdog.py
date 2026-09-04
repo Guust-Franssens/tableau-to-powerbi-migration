@@ -384,7 +384,7 @@ def test_the_cli_warns_when_the_stall_deadline_undercuts_the_fetcher(
         ],
     )
     with caplog.at_level("WARNING", logger="harvest_estate_assets"):
-        assert harvest.main() == 0
+        assert harvest.main() == harvest.EXIT_NOTHING_ASSESSED
     warned = [r.getMessage() for r in caplog.records if "BELOW the fetcher's own" in r.getMessage()]
     assert warned, "an operator undercut the fetcher's read timeout and was told nothing"
     assert "300s per-read timeout" in warned[0]
@@ -763,6 +763,12 @@ def test_nothing_is_reported_when_every_asset_landed(caplog: pytest.LogCaptureFi
 # --- end to end through main() -------------------------------------------------------------------
 
 
+def landing_download(kind, luid, target, env, scripts, **kwargs):  # pylint: disable=unused-argument
+    """A `download()` stand-in whose asset actually LANDS, so `main()` reaches the parsers."""
+    Path(target).write_text("<workbook/>", encoding="utf-8")
+    return True, ""
+
+
 def test_main_forwards_the_operator_s_timeouts_to_every_download(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -806,7 +812,7 @@ def test_main_forwards_the_operator_s_timeouts_to_every_download(
             "77",
         ],
     )
-    assert harvest.main() == 0
+    assert harvest.main() == harvest.EXIT_NOTHING_ASSESSED, "a harvest that assessed nothing must not exit 0"
     assert seen, "no download was attempted at all"
     assert seen[0]["timeout"] == 1234.0, f"the CLI ceiling never reached download(): {seen[0]}"
     assert seen[0]["stall_timeout"] == 77.0, f"the CLI stall timeout never reached download(): {seen[0]}"
@@ -919,7 +925,13 @@ def test_the_section_is_absent_when_nothing_is_orphaned(tmp_path: Path) -> None:
 def test_an_estate_db_without_a_dependency_table_still_harvests(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """An older database cannot answer the orphan question; that is not a reason to fail the run."""
+    """An older database cannot answer the orphan question; that is not a reason to fail the run.
+
+    ⚠️ This test used to make the download FAIL and then assert `main() == 0`, which proved nothing
+    about harvesting — it pinned the fail-open exit code instead (blind review of #482). The asset
+    now lands, so a green run means the sweep completed on a dependency-table-less database, which
+    is the claim in the title.
+    """
     db = tmp_path / "estate.db"
     con = sqlite3.connect(db)
     con.executescript(
@@ -935,13 +947,16 @@ def test_an_estate_db_without_a_dependency_table_still_harvests(
     monkeypatch.setattr(harvest, "engine_scripts_dir", lambda: tmp_path / "engine")
     monkeypatch.setattr(harvest, "resolve_env", lambda path: {"TABLEAU_SERVER_URL": "https://example.invalid"})
     monkeypatch.setattr(harvest, "require", lambda env: None)
-    monkeypatch.setattr(harvest, "download", lambda *a, **k: (False, "nope"))
+    monkeypatch.setattr(harvest, "download", landing_download)
+    monkeypatch.setattr(harvest, "parse_asset", lambda path, scripts: ({"ok": True}, {"ok": True}))
+    out = tmp_path / "_sweep"
     monkeypatch.setattr(
         sys,
         "argv",
-        ["harvest_estate_assets.py", "--out", str(tmp_path / "_sweep"), "--db", str(db), "--allow-unignored-out"],
+        ["harvest_estate_assets.py", "--out", str(out), "--db", str(db), "--allow-unignored-out"],
     )
-    assert harvest.main() == 0
+    assert harvest.main() == harvest.EXIT_OK
+    assert "never downloaded 0." in (out / "parse-sweep.md").read_text(encoding="utf-8")
 
 
 def test_main_end_to_end_names_the_orphaned_workbook(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -963,7 +978,7 @@ def test_main_end_to_end_names_the_orphaned_workbook(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(
         sys, "argv", ["harvest_estate_assets.py", "--out", str(out), "--db", str(db), "--allow-unignored-out"]
     )
-    assert harvest.main() == 0
+    assert harvest.main() == harvest.EXIT_PARTIAL, "two workbooks landed and one datasource did not: that is PARTIAL"
 
     text = (out / "parse-sweep.md").read_text(encoding="utf-8")
     blocked = text.split("## Do not convert yet", 1)[1]
@@ -999,11 +1014,291 @@ def test_a_failed_download_reaches_parse_sweep_md_through_main(monkeypatch: pyte
     monkeypatch.setattr(
         sys, "argv", ["harvest_estate_assets.py", "--out", str(out), "--db", str(db), "--allow-unignored-out"]
     )
-    assert harvest.main() == 0
+    assert harvest.main() == harvest.EXIT_NOTHING_ASSESSED
 
     text = (out / "parse-sweep.md").read_text(encoding="utf-8")
     assert "**1 asset(s)** — ours failed 0, his failed 0, both parsed 0, never downloaded 1." in text
     assert "IA Redemptions by Campaign Report" in text.split("## Downloads that never landed", 1)[1]
+
+
+# --- blind review round 3, finding 1: a completely unassessed harvest must not exit 0 ------------
+#
+# Reproduced before fixing, on a one-workbook estate with `download()` returning
+# `(False, "network dead")`:
+#
+#   **1 asset(s)** — ours failed 0, his failed 0, both parsed 0, never downloaded 1.
+#   exit_code: 0
+#
+# `return 0 if results else 1` counted ROWS, and a failed download appends a row. Three tests in
+# this very file asserted `main() == 0` on estates where NOTHING was assessed, i.e. the suite was
+# pinning the fail-open behaviour. They are corrected above, not merely re-pinned: the one whose
+# subject is "an older database still harvests" now lands its asset, so it tests its own title.
+
+
+def assessed(name: str) -> dict:
+    """A row that reached BOTH parsers — the only shape that counts as assessed."""
+    return {"name": name, "kind": "workbook", "luid": name, "ours": {"ok": True}, "theirs": {"ok": True}}
+
+
+def unassessed(name: str) -> dict:
+    """A row whose download failed, so it reached neither parser."""
+    return {"name": name, "kind": "workbook", "luid": name, "download_error": "timeout after 600s"}
+
+
+def test_a_harvest_that_assessed_NOTHING_does_not_exit_zero() -> None:
+    """The defect, at the unit that decides it. Rows exist; assessments do not."""
+    assert harvest.sweep_exit_code([unassessed("IA Redemptions by Campaign Report")]) == harvest.EXIT_NOTHING_ASSESSED
+
+
+def test_an_empty_sweep_is_nothing_assessed_rather_than_a_clean_run() -> None:
+    assert harvest.sweep_exit_code([]) == harvest.EXIT_NOTHING_ASSESSED
+
+
+def test_the_customers_41_ok_6_failed_shape_is_distinguishable_from_a_total_failure() -> None:
+    """The judgement call this contract turns on: partial and total must not share a code.
+
+    SES ran 47 assets and got 41/6. Exit 0 said "clean"; a single non-zero for both shapes would say
+    "something went wrong" and lose the difference between six retryable assets and a dead site.
+    """
+    partial = [assessed(f"ok-{i}") for i in range(41)] + [unassessed(f"bad-{i}") for i in range(6)]
+    total = [unassessed(f"bad-{i}") for i in range(47)]
+    clean = [assessed(f"ok-{i}") for i in range(47)]
+    assert harvest.sweep_exit_code(partial) == harvest.EXIT_PARTIAL
+    assert harvest.sweep_exit_code(total) == harvest.EXIT_NOTHING_ASSESSED
+    assert harvest.sweep_exit_code(clean) == harvest.EXIT_OK
+    assert len({harvest.sweep_exit_code(r) for r in (partial, total, clean)}) == 3, (
+        "two of the three outcomes share an exit code, so automation cannot tell them apart"
+    )
+
+
+def test_a_PARSE_failure_is_the_report_this_script_exists_for_and_stays_exit_zero() -> None:
+    """Both parsers refusing an asset is a finding, not a run failure — the asset WAS assessed."""
+    rows = [{"name": "hard", "kind": "workbook", "luid": "h", "ours": {"ok": False}, "theirs": {"ok": False}}]
+    assert harvest.sweep_exit_code(rows) == harvest.EXIT_OK
+
+
+def test_a_totally_failed_harvest_exits_nonzero_through_main(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """End to end, through the CLI: the reviewer's controlled experiment, now green the right way."""
+    db = tmp_path / "estate.db"
+    con = sqlite3.connect(db)
+    con.executescript(
+        """
+        CREATE TABLE project (luid TEXT PRIMARY KEY, name TEXT);
+        CREATE TABLE workbook (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        CREATE TABLE datasource (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        CREATE TABLE dependency (workbook_luid TEXT, datasource_luid TEXT, datasource_name TEXT);
+        INSERT INTO workbook VALUES ('wb-ia', 'IA Redemptions by Campaign Report', 'p');
+        """
+    )
+    con.commit()
+    con.close()
+    out = tmp_path / "_sweep"
+    monkeypatch.setattr(harvest, "engine_scripts_dir", lambda: tmp_path / "engine")
+    monkeypatch.setattr(harvest, "resolve_env", lambda path: {"TABLEAU_SERVER_URL": "https://example.invalid"})
+    monkeypatch.setattr(harvest, "require", lambda env: None)
+    monkeypatch.setattr(harvest, "download", lambda *a, **k: (False, "network dead"))
+    monkeypatch.setattr(
+        sys, "argv", ["harvest_estate_assets.py", "--out", str(out), "--db", str(db), "--allow-unignored-out"]
+    )
+    assert harvest.main() == harvest.EXIT_NOTHING_ASSESSED
+    # The report still has to be written: a non-zero exit must not cost the operator the evidence.
+    assert "never downloaded 1." in (out / "parse-sweep.md").read_text(encoding="utf-8")
+
+
+def test_the_verdict_is_SAID_not_just_returned(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An exit code nobody prints is one an operator watching a console never sees."""
+    db = estate_with_a_binding(tmp_path / "estate.db")
+
+    def only_workbooks_land(kind, luid, target, env, scripts, **kwargs):  # pylint: disable=unused-argument
+        if kind == "datasource":
+            return False, "download failed (500)"
+        Path(target).write_text("<workbook/>", encoding="utf-8")
+        return True, ""
+
+    monkeypatch.setattr(harvest, "engine_scripts_dir", lambda: tmp_path / "engine")
+    monkeypatch.setattr(harvest, "resolve_env", lambda path: {"TABLEAU_SERVER_URL": "https://example.invalid"})
+    monkeypatch.setattr(harvest, "require", lambda env: None)
+    monkeypatch.setattr(harvest, "download", only_workbooks_land)
+    monkeypatch.setattr(harvest, "parse_asset", lambda path, scripts: ({"ok": True}, {"ok": True}))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["harvest_estate_assets.py", "--out", str(tmp_path / "_sweep"), "--db", str(db), "--allow-unignored-out"],
+    )
+    with caplog.at_level("WARNING", logger="harvest_estate_assets"):
+        assert harvest.main() == harvest.EXIT_PARTIAL
+    said = "\n".join(r.getMessage() for r in caplog.records)
+    assert "PARTIAL HARVEST" in said, f"the run ended partial and never said so: {said}"
+    assert "2 of 3 asset(s) assessed" in said
+
+
+def test_the_exit_contract_is_documented_where_an_operator_reads_it() -> None:
+    """`--help` is the contract's only reachable surface for someone not reading the source."""
+    help_text = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "harvest_estate_assets.py"), "--help"],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        check=False,
+    ).stdout
+    assert "Exit codes" in help_text
+    assert "NOTHING COULD BE ASSESSED" in help_text
+
+
+# --- blind review round 3, finding 2: the blind ceiling must outlast the child's own timer -------
+
+
+def test_the_blind_ceiling_is_not_below_the_childs_own_bounded_retry_budget() -> None:
+    """AGENTS.md: do not kill a tool that IS the bounded timer.
+
+    The engine's `_http_download` makes up to `max_attempts` attempts, each of which may burn a full
+    per-read timeout, before it raises its own classified error. The historical 600s ceiling sat
+    below that product, so on any run where the progress probe is unreadable we killed the fetcher
+    mid-budget and recorded `timeout after 600s` in place of the real HTTP failure.
+    """
+    assert harvest.DEFAULT_DOWNLOAD_TIMEOUT > harvest.ENGINE_DOWNLOAD_BUDGET_SECONDS, (
+        f"a {harvest.DEFAULT_DOWNLOAD_TIMEOUT:.0f}s ceiling pre-empts the fetcher's own "
+        f"{harvest.ENGINE_DOWNLOAD_BUDGET_SECONDS:.0f}s retry budget"
+    )
+    assert harvest.ENGINE_DOWNLOAD_BUDGET_SECONDS >= (
+        harvest.ENGINE_DOWNLOAD_ATTEMPTS * harvest.ENGINE_READ_TIMEOUT_SECONDS
+    ), "the budget does not even cover one full read timeout per attempt"
+
+
+def test_the_ceiling_constants_match_the_INSTALLED_engine() -> None:
+    """The arithmetic is only sound while the engine's own numbers are what we think they are.
+
+    Read off the installed canonical engine rather than restated: `max_attempts` and the default
+    `timeout` of `_http_download`, plus the `Retry-After` clamp. An engine bump that changes either
+    reddens this instead of silently invalidating the derivation.
+    """
+    import ast  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+    import re  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+
+    try:
+        fetch_tds = harvest.engine_scripts_dir() / "fetch_tds.py"
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        pytest.skip(f"canonical engine not installed, so its constants cannot be read: {exc}")
+    if not fetch_tds.is_file():
+        pytest.skip(f"{fetch_tds} is missing")
+    tree = ast.parse(fetch_tds.read_text(encoding="utf-8"))
+    fn = next(
+        (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_http_download"),
+        None,
+    )
+    assert fn is not None, "the engine no longer has `_http_download`; re-derive the ceiling"
+    defaults = {
+        arg.arg: value.value
+        for arg, value in zip(fn.args.args[-len(fn.args.defaults) :], fn.args.defaults, strict=True)
+        if isinstance(value, ast.Constant)
+    }
+    defaults.update(
+        {
+            arg.arg: value.value
+            for arg, value in zip(fn.args.kwonlyargs, fn.args.kw_defaults, strict=True)
+            if isinstance(value, ast.Constant)
+        }
+    )
+    assert defaults.get("timeout") == harvest.ENGINE_READ_TIMEOUT_SECONDS, (
+        f"the engine's per-read timeout is {defaults.get('timeout')}, not "
+        f"{harvest.ENGINE_READ_TIMEOUT_SECONDS}; re-derive DEFAULT_DOWNLOAD_TIMEOUT"
+    )
+    assert defaults.get("max_attempts") == harvest.ENGINE_DOWNLOAD_ATTEMPTS, (
+        f"the engine now makes {defaults.get('max_attempts')} attempts, not "
+        f"{harvest.ENGINE_DOWNLOAD_ATTEMPTS}; re-derive DEFAULT_DOWNLOAD_TIMEOUT"
+    )
+    clamp = re.compile(rf"min\(\s*wait\s*,\s*{harvest.ENGINE_BACKOFF_CAP_SECONDS:g}(?:\.0)?\s*\)")
+    assert clamp.search(fetch_tds.read_text(encoding="utf-8")), (
+        "the engine's Retry-After clamp is no longer "
+        f"{harvest.ENGINE_BACKOFF_CAP_SECONDS:g}s; re-derive the backoff term"
+    )
+
+
+def test_the_cli_warns_when_the_ceiling_undercuts_the_fetchers_retry_budget(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Deriving the DEFAULT does not stop an operator re-creating the defect with a flag."""
+    db = tmp_path / "estate.db"
+    con = sqlite3.connect(db)
+    con.executescript(
+        """
+        CREATE TABLE project (luid TEXT PRIMARY KEY, name TEXT);
+        CREATE TABLE workbook (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        CREATE TABLE datasource (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        CREATE TABLE dependency (workbook_luid TEXT, datasource_luid TEXT, datasource_name TEXT);
+        INSERT INTO workbook VALUES ('wb-ia', 'IA Redemptions', 'p');
+        """
+    )
+    con.commit()
+    con.close()
+    monkeypatch.setattr(harvest, "engine_scripts_dir", lambda: tmp_path / "engine")
+    monkeypatch.setattr(harvest, "resolve_env", lambda path: {"TABLEAU_SERVER_URL": "https://example.invalid"})
+    monkeypatch.setattr(harvest, "require", lambda env: None)
+    monkeypatch.setattr(harvest, "download", landing_download)
+    monkeypatch.setattr(harvest, "parse_asset", lambda path, scripts: ({"ok": True}, {"ok": True}))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "harvest_estate_assets.py",
+            "--out",
+            str(tmp_path / "_sweep"),
+            "--db",
+            str(db),
+            "--allow-unignored-out",
+            "--download-timeout",
+            "600",  # the historical default, now knowably too small
+        ],
+    )
+    with caplog.at_level("WARNING", logger="harvest_estate_assets"):
+        assert harvest.main() == harvest.EXIT_OK
+    warned = [r.getMessage() for r in caplog.records if "bounded retry budget" in r.getMessage()]
+    assert warned, "an operator set a ceiling below the fetcher's own budget and was told nothing"
+    assert "1380s bounded retry budget" in warned[0], warned[0]
+
+
+def test_a_blind_child_reaches_its_OWN_verdict_before_our_ceiling_fires() -> None:
+    """Finding 2 as behaviour, scaled from the real constants by one shared factor.
+
+    The child stands in for a fetcher that spends its ENTIRE retry budget and then reports; the
+    probe is unreadable throughout, which is the only situation where the ceiling is armed at all.
+    The control repeats it with the historical 600s ceiling scaled identically — that one IS killed,
+    which is what makes the first assertion evidence rather than a tautology.
+    """
+    scale = 1 / 200.0  # 1380s budget -> 6.9s, 1530s ceiling -> 7.65s
+    child_budget = harvest.ENGINE_DOWNLOAD_BUDGET_SECONDS * scale
+    blind = Counter(None)  # never readable: the unsupported-platform / denied-handle shape
+
+    run = harvest.run_watched(
+        sleeper(child_budget),
+        env=None,
+        timeout=harvest.DEFAULT_DOWNLOAD_TIMEOUT * scale,
+        stall_timeout=harvest.DEFAULT_STALL_TIMEOUT * scale,
+        probe=blind,
+        poll_interval=0.05,
+        heartbeat=1000.0,
+    )
+    assert run.verdict == "", (
+        f"killed at the ceiling after {run.elapsed:.2f}s, before the child's own "
+        f"{child_budget:.2f}s (scaled) retry budget could produce a verdict: {run.detail}"
+    )
+    assert run.returncode == 0, "the child never reported for itself"
+
+    killed = harvest.run_watched(
+        sleeper(child_budget),
+        env=None,
+        timeout=600.0 * scale,  # the historical ceiling, scaled the same way
+        stall_timeout=harvest.DEFAULT_STALL_TIMEOUT * scale,
+        probe=Counter(None),
+        poll_interval=0.05,
+        heartbeat=1000.0,
+    )
+    assert killed.verdict == "ceiling", (
+        "the control did not reproduce the defect, so the first assertion proves nothing about the ceiling"
+    )
 
 
 # --- the classification this module carries in the credential gate --------------------------------

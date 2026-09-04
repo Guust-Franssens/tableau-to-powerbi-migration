@@ -331,6 +331,93 @@ MUTATIONS: list[tuple[str, str, str, str, str, str]] = [
         "a killed child's reflected PAT rides out on the watchdog verdict, which never reaches the "
         "redactor on the returncode branch",
     ),
+    # ---------------------------------------------------------------- blind review round 3
+    (
+        "total-failure-still-exits-zero",
+        "    missing = len(never_downloaded(results))\n"
+        "    assessed = len(results) - missing\n"
+        "    if assessed <= 0:\n"
+        "        return EXIT_NOTHING_ASSESSED\n"
+        "    return EXIT_PARTIAL if missing else EXIT_OK",
+        "    return EXIT_OK if results else EXIT_NOTHING_ASSESSED",
+        node("test_a_harvest_that_assessed_NOTHING_does_not_exit_zero"),
+        node("test_a_clean_sweep_still_says_none"),
+        "the pre-review line restored verbatim: a harvest where NOTHING reached a parser exits 0",
+    ),
+    (
+        "partial-harvest-reported-as-clean",
+        "    return EXIT_PARTIAL if missing else EXIT_OK",
+        "    return EXIT_OK",
+        node("test_the_customers_41_ok_6_failed_shape_is_distinguishable_from_a_total_failure"),
+        node("test_a_harvest_that_assessed_NOTHING_does_not_exit_zero"),
+        "the customer's 41-ok/6-failed run exits 0 and the six vanish",
+    ),
+    (
+        "total-and-partial-share-one-code",
+        "    if assessed <= 0:\n        return EXIT_NOTHING_ASSESSED",
+        "    if assessed <= 0:\n        return EXIT_PARTIAL",
+        node("test_the_customers_41_ok_6_failed_shape_is_distinguishable_from_a_total_failure"),
+        node("test_a_clean_sweep_still_says_none"),
+        "automation cannot tell six retryable assets from a dead site",
+    ),
+    (
+        "a-parse-failure-counted-as-unassessed",
+        "    missing = len(never_downloaded(results))",
+        '    missing = len([r for r in results if not r.get("ours", {}).get("ok")])',
+        node("test_a_PARSE_failure_is_the_report_this_script_exists_for_and_stays_exit_zero"),
+        node("test_a_harvest_that_assessed_NOTHING_does_not_exit_zero"),
+        "the failure distribution this script exists to produce is reported as a run failure",
+    ),
+    (
+        "the-exit-code-is-computed-and-discarded",
+        "    code = sweep_exit_code(results)",
+        "    code = sweep_exit_code(results) and EXIT_OK",
+        node("test_a_totally_failed_harvest_exits_nonzero_through_main"),
+        node("test_a_clean_sweep_still_says_none"),
+        "main() computes the verdict correctly and returns 0 anyway",
+    ),
+    (
+        "partial-verdict-never-spoken",
+        "    elif code == EXIT_PARTIAL:",
+        "    elif False and code == EXIT_PARTIAL:",
+        node("test_the_verdict_is_SAID_not_just_returned"),
+        node("test_a_clean_sweep_still_says_none"),
+        "a partial harvest ends with a tally that reads clean and says nothing about the gap",
+    ),
+    (
+        "ceiling-back-to-the-historical-600",
+        "DEFAULT_DOWNLOAD_TIMEOUT = ENGINE_DOWNLOAD_BUDGET_SECONDS + ENGINE_SIGNIN_TIMEOUT_SECONDS "
+        "+ CHILD_STARTUP_GRACE_SECONDS",
+        "DEFAULT_DOWNLOAD_TIMEOUT = 600.0",
+        node("test_a_blind_child_reaches_its_OWN_verdict_before_our_ceiling_fires"),
+        node("test_a_stalled_download_is_killed_once_progress_stops"),
+        "the blind ceiling kills the fetcher mid-retry-budget and reports our timeout, not its error",
+    ),
+    (
+        "budget-forgets-the-retry-count",
+        "    ENGINE_DOWNLOAD_ATTEMPTS * ENGINE_READ_TIMEOUT_SECONDS + "
+        "(ENGINE_DOWNLOAD_ATTEMPTS - 1) * ENGINE_BACKOFF_CAP_SECONDS",
+        "    ENGINE_READ_TIMEOUT_SECONDS + (ENGINE_DOWNLOAD_ATTEMPTS - 1) * ENGINE_BACKOFF_CAP_SECONDS",
+        node("test_the_blind_ceiling_is_not_below_the_childs_own_bounded_retry_budget"),
+        node("test_a_stalled_download_is_killed_once_progress_stops"),
+        "the derivation covers one attempt instead of four, i.e. history dressed as arithmetic",
+    ),
+    (
+        "engine-constants-drift-unnoticed",
+        "ENGINE_DOWNLOAD_ATTEMPTS = 4",
+        "ENGINE_DOWNLOAD_ATTEMPTS = 8",
+        node("test_the_ceiling_constants_match_the_INSTALLED_engine"),
+        node("test_a_stalled_download_is_killed_once_progress_stops"),
+        "the arithmetic stops matching the engine it claims to be derived from",
+    ),
+    (
+        "no-cli-warning-for-a-ceiling-under-the-budget",
+        "    if 0 < args.download_timeout < ENGINE_DOWNLOAD_BUDGET_SECONDS:",
+        "    if False and 0 < args.download_timeout < ENGINE_DOWNLOAD_BUDGET_SECONDS:",
+        node("test_the_cli_warns_when_the_ceiling_undercuts_the_fetchers_retry_budget"),
+        node("test_a_stalled_download_is_killed_once_progress_stops"),
+        "an operator re-creates the 600s defect with a flag and is told nothing",
+    ),
     # ---------------------------------------------------------------- discriminating controls
     (
         "control-cosmetic",
