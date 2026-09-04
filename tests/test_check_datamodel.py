@@ -472,6 +472,13 @@ UNGUARDED_BLANK_THRESHOLD_CASES = [
     (False, "NOT ISBLANK([Errors]) && DIVIDE([Errors], [Total]) > 0.05"),
     (False, "COALESCE(DIVIDE([Errors], [Total]), 0) < 0.05"),
     (False, "(DIVIDE([Errors], [Total]) + 0) > 0.05"),
+    # positive (round 3): a block comment between the call's closing paren and its comparator must
+    # not hide the comparison - the `\s*` regex needs comment characters blanked, not left as-is.
+    (True, "DIVIDE([Errors], [Total]) /* note */ < 0.05"),
+    # positive (round 3): a stray `)` inside a block comment BETWEEN the call's own arguments must
+    # not be read as the call's real closing paren - that used to close the call one paren early
+    # and corrupt argument splitting so the comparison was never even reached.
+    (True, "DIVIDE([Errors], /* ) */ [Total]) < 0.05"),
 ]
 
 
@@ -490,6 +497,18 @@ def test_unguarded_divide_threshold_in_measure_is_caught_by_gate() -> None:
 def test_unguarded_divide_threshold_nested_in_if_is_caught_by_gate() -> None:
     """A nested, not-the-entire-expression comparison must still be caught by the full TMDL walker."""
     text = "table S\n\tmeasure 'Flag' = IF([Region] = \"West\", DIVIDE([Errors], [Total]) < 0.05, BLANK())\n"
+    assert "UNGUARDED_BLANK_THRESHOLD" in _tmdl_codes(text)
+
+
+def test_comment_between_divide_close_paren_and_comparator_is_caught_by_gate() -> None:
+    """A `/* ... */` comment right after `)` must not hide the comparator from the gate (round 3)."""
+    text = "table S\n\tmeasure 'Flag' = DIVIDE([Errors], [Total]) /* note */ < 0.05\n"
+    assert "UNGUARDED_BLANK_THRESHOLD" in _tmdl_codes(text)
+
+
+def test_stray_close_paren_inside_a_comment_between_divide_args_is_caught_by_gate() -> None:
+    """A `)` hidden inside a block comment between DIVIDE's own arguments must not fool paren matching."""
+    text = "table S\n\tmeasure 'Flag' = DIVIDE([Errors], /* ) */ [Total]) < 0.05\n"
     assert "UNGUARDED_BLANK_THRESHOLD" in _tmdl_codes(text)
 
 

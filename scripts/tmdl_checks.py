@@ -237,6 +237,54 @@ def _masked_positions(text: str) -> list[bool]:
     return masked
 
 
+def _mask_comments(text: str) -> str:
+    """Return a SAME-LENGTH copy of `text` with `//`/`/* */` comment characters blanked to spaces.
+
+    Structural DAX parsing (`_matching_close_paren`, `_split_top_level_args`, the trailing-
+    comparator regex) tracks string-literal state via quotes but has no notion of a DAX comment,
+    so a `)` or `,` sitting inside a `/* ... */` block comment was previously read as real syntax -
+    e.g. `DIVIDE([E], /* ) */ [T])` closed the call one paren too early, and a comment between a
+    call's `)` and its comparator (`DIVIDE(...) /* note */ < 0.05`) broke the `\\s*` match entirely
+    (issue #82 round 3). Blanking comment characters to spaces - rather than deleting them - keeps
+    every other offset identical to the original text, so callers can keep indexing into the
+    ORIGINAL expression (for `call_text`, positions, etc.) while only using this masked copy for
+    the structural walk itself. String-literal content is left untouched (unlike `_masked_positions`,
+    which also masks strings): downstream literal checks (`_is_definitely_non_blank`) still need to
+    read a string argument's real text, and `//`/`/*` cannot start a comment while inside a string
+    (matching `_masked_positions`'s own ordering: a full string is consumed before comments are
+    considered at all).
+    """
+    out = list(text)
+    idx = 0
+    length = len(text)
+    while idx < length:
+        ch = text[idx]
+        if ch == '"':
+            idx += 1
+            while idx < length:
+                if text[idx] == '"':
+                    if idx + 1 < length and text[idx + 1] == '"':
+                        idx += 2
+                        continue
+                    idx += 1
+                    break
+                idx += 1
+            continue
+        if text[idx : idx + 2] == "//":
+            for i in range(idx, length):
+                out[i] = " "
+            break
+        if text[idx : idx + 2] == "/*":
+            end = text.find("*/", idx + 2)
+            end = length if end == -1 else end + 2
+            for i in range(idx, end):
+                out[i] = " "
+            idx = end
+            continue
+        idx += 1
+    return "".join(out)
+
+
 def find_incomplete_divide_calls(expression: str) -> list[int]:
     """Positions of `DIVIDE(` calls this checker could not fully parse (no matching `)`).
 
@@ -245,6 +293,7 @@ def find_incomplete_divide_calls(expression: str) -> list[int]:
     assessed, and that must be visible rather than silently read as "clean" (issue #82 round 2).
     """
     masked = _masked_positions(expression)
+    structural = _mask_comments(expression)
     positions: list[int] = []
     for match in _DIVIDE_CALL_RE.finditer(expression):
         start = match.start()
@@ -252,7 +301,7 @@ def find_incomplete_divide_calls(expression: str) -> list[int]:
             continue
         if start > 0 and (expression[start - 1].isalnum() or expression[start - 1] == "_"):
             continue
-        if _matching_close_paren(expression, match.end() - 1) is None:
+        if _matching_close_paren(structural, match.end() - 1) is None:
             positions.append(start)
     return positions
 
@@ -276,7 +325,10 @@ def find_unguarded_divide_thresholds(expression: str) -> list[tuple[str, float, 
 
       * a `DIVIDE(...)` call is only in scope when the operator immediately following its closing
         `)` is a threshold comparator with a numeric literal on the right - `DIVIDE(...) * 100`
-        or `DIVIDE(...) + [x]` are different shapes this does not reason about.
+        or `DIVIDE(...) + [x]` are different shapes this does not reason about. A `/* ... */` or
+        `//` comment between the `)` and the operator, or hiding a stray `)`/`,` inside the call's
+        own arguments, does not change this - the structural walk runs against `_mask_comments`'s
+        same-length, comment-blanked copy of the expression (issue #82 round 3).
       * `DIVIDE(...)` is flagged wherever it appears in the expression - nested inside `IF(...)`,
         `CALCULATE(...FILTER(...))`, or anywhere else - not only when it is the entire expression.
         A call is excluded only when the exact same `DIVIDE(...)` text is wrapped in `ISBLANK(...)`
@@ -292,6 +344,7 @@ def find_unguarded_divide_thresholds(expression: str) -> list[tuple[str, float, 
     literal or comment (see `_masked_positions`).
     """
     masked = _masked_positions(expression)
+    structural = _mask_comments(expression)
     findings: list[tuple[str, float, int]] = []
     for match in _DIVIDE_CALL_RE.finditer(expression):
         start = match.start()
@@ -300,13 +353,13 @@ def find_unguarded_divide_thresholds(expression: str) -> list[tuple[str, float, 
         if start > 0 and (expression[start - 1].isalnum() or expression[start - 1] == "_"):
             continue  # e.g. a hypothetical "SUBDIVIDE(" - not a DIVIDE call
         open_idx = match.end() - 1
-        close = _matching_close_paren(expression, open_idx)
+        close = _matching_close_paren(structural, open_idx)
         if close is None:
             continue  # unparsable - reported separately by find_incomplete_divide_calls
-        args = _split_top_level_args(expression[match.end() : close])
+        args = _split_top_level_args(structural[match.end() : close])
         if len(args) not in (2, 3):
             continue
-        cmp_match = _LEADING_NUMERIC_CMP_RE.match(expression[close + 1 :])
+        cmp_match = _LEADING_NUMERIC_CMP_RE.match(structural[close + 1 :])
         if not cmp_match:
             continue
         op = cmp_match.group("op")
