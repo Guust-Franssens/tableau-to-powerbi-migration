@@ -33,9 +33,12 @@ an absorbed property and ordinary expression content produce a byte-identical pa
 from __future__ import annotations
 
 import json
+import os
+import string
 import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -370,3 +373,185 @@ def test_a_bom_prefixed_tmdl_file_is_reported_not_normalised_away(tmp_path):
     (definition / "t.tmdl").write_bytes(textwrap.dedent("\ufefftable T\n\tmeasure 'M' = 1\n").encode("utf-8"))
     findings, _ = check_tmdl_model(tmp_path / "M.SemanticModel")
     assert "TMDL_BOM" in {f.code for f in findings}
+
+
+# --- the cross-process build lock (issue #415, first-build part only) --------------------------
+#
+# `ensure_built()` used to be an unlocked check-then-build: every parallel pytest worker that saw
+# the DLL missing or stale would launch its own `dotnet build` into the SAME output directory. On
+# Windows that is file-locking roulette; an immediate rerun then "passes" only because one process
+# happened to finish the shared build first. These tests exercise the fix without needing a real
+# .NET SDK: `subprocess.run` is replaced by a stub that records each invocation and writes the DLL,
+# so the assertions are about how many times the SHARED build ran and whether every caller ended up
+# with the same result - never about `dotnet` itself.
+
+_LOCK_BARRIER_SCRIPT = string.Template(
+    textwrap.dedent(
+        """
+        import json
+        import os
+        import sys
+        import time
+        from pathlib import Path
+
+        sys.path.insert(0, "$repo_scripts")
+        import tmdl_oracle  # noqa: E402  pylint: disable=wrong-import-position
+
+        tmdl_oracle.PROJECT_DIR = Path("$project_dir")
+        tmdl_oracle.DLL = Path("$dll_path")
+        tmdl_oracle.PROJECT_FILE = Path("$project_file")
+
+        BUILD_LOG = "$build_log"
+        DELAY = $delay
+
+
+        def fake_run(cmd, **kwargs):  # pylint: disable=unused-argument
+            fd = os.open(BUILD_LOG, os.O_CREAT | os.O_APPEND | os.O_WRONLY)
+            os.write(fd, b"build\\n")
+            os.close(fd)
+            time.sleep(DELAY)
+            dll = tmdl_oracle.DLL
+            dll.parent.mkdir(parents=True, exist_ok=True)
+            dll.write_text("fake dll", encoding="utf-8")
+
+            class Result:  # pylint: disable=too-few-public-methods
+                returncode = 0
+                stdout = ""
+                stderr = ""
+
+            return Result()
+
+
+        tmdl_oracle.subprocess.run = fake_run
+
+        result_file = Path("$result_file")
+        try:
+            built = tmdl_oracle.ensure_built("dotnet-stub")
+            result_file.write_text(json.dumps({"status": "ok", "dll": str(built)}), encoding="utf-8")
+        except Exception as exc:  # pylint: disable=broad-except
+            result_file.write_text(json.dumps({"status": "error", "message": str(exc)}), encoding="utf-8")
+        """
+    )
+)
+
+
+def test_concurrent_processes_build_exactly_once_and_all_reuse_the_same_dll(tmp_path):
+    """The issue #415 barrier: several independent OS processes start with no build output at all;
+    exactly one of them invokes the (slow, observable) build, and every process ends up with the
+    same valid DLL.
+
+    Each worker is a genuinely separate `python` subprocess - not a thread, not a fork of this
+    process that would inherit its already-monkeypatched module state - so this races the shared
+    lock FILE on disk across real processes, the same shape parallel pytest workers hit.
+    """
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    project_file = project_dir / "tmdl_oracle.csproj"
+    project_file.write_text("<Project></Project>", encoding="utf-8")
+    dll_path = project_dir / "bin" / "Release" / "net9.0" / "tmdl_oracle.dll"
+    build_log = tmp_path / "build.log"
+
+    workers = []
+    for index in range(6):
+        script_path = tmp_path / f"worker_{index}.py"
+        result_path = tmp_path / f"result_{index}.json"
+        script_path.write_text(
+            _LOCK_BARRIER_SCRIPT.substitute(
+                repo_scripts=str(REPO_ROOT / "scripts"),
+                project_dir=str(project_dir),
+                dll_path=str(dll_path),
+                project_file=str(project_file),
+                build_log=str(build_log),
+                delay="0.5",
+                result_file=str(result_path),
+            ),
+            encoding="utf-8",
+        )
+        workers.append(
+            (subprocess.Popen([sys.executable, str(script_path)]), result_path)  # pylint: disable=consider-using-with
+        )
+
+    for proc, _ in workers:
+        assert proc.wait(timeout=60) == 0, "a worker crashed instead of recording a bounded result"
+
+    results = [json.loads(result_path.read_text(encoding="utf-8")) for _, result_path in workers]
+    assert all(result["status"] == "ok" for result in results), results
+    assert len({result["dll"] for result in results}) == 1, "every process must reuse the SAME built DLL"
+    assert build_log.read_text(encoding="utf-8").count("build\n") == 1, (
+        "exactly one process should have invoked the build; the rest must wait and reuse it "
+        "instead of each launching their own"
+    )
+
+
+def test_a_waiting_process_rechecks_after_the_lock_and_does_not_rebuild(monkeypatch, tmp_path):
+    """A process that had to wait for the lock must recheck whether a build is still needed before
+    building - otherwise every waiter rebuilds in turn once it is unblocked (issue #415).
+    """
+    monkeypatch.setattr(tmdl_oracle, "PROJECT_DIR", tmp_path)
+    monkeypatch.setattr(tmdl_oracle, "DLL", tmp_path / "tmdl_oracle.dll")
+    monkeypatch.setattr(tmdl_oracle, "_sources_newer_than_build", lambda: not tmdl_oracle.DLL.exists())
+
+    def fake_acquire(_path, **_kwargs):
+        # Simulate: while we were waiting for the lock, another process finished the build.
+        tmdl_oracle.DLL.write_text("built by the other process", encoding="utf-8")
+
+    def fake_run(*_args, **_kwargs):
+        raise AssertionError("must not rebuild - the recheck right after the lock should have seen the DLL")
+
+    monkeypatch.setattr(tmdl_oracle, "_acquire_build_lock", fake_acquire)
+    monkeypatch.setattr(tmdl_oracle, "_release_build_lock", lambda _path: None)
+    monkeypatch.setattr(tmdl_oracle.subprocess, "run", fake_run)
+
+    result = tmdl_oracle.ensure_built("dotnet-stub")
+    assert result == tmdl_oracle.DLL
+    assert result.read_text(encoding="utf-8") == "built by the other process"
+
+
+def test_a_build_failure_reaches_the_caller_as_oracle_unavailable_not_a_clean_result(monkeypatch, tmp_path):
+    """A failed shared build must surface to every caller as `OracleUnavailable`, never as a clean
+    result nor a stuck lock that blocks the next attempt.
+    """
+    monkeypatch.setattr(tmdl_oracle, "PROJECT_DIR", tmp_path)
+    monkeypatch.setattr(tmdl_oracle, "DLL", tmp_path / "tmdl_oracle.dll")
+    monkeypatch.setattr(tmdl_oracle, "_sources_newer_than_build", lambda: True)
+
+    class Result:  # pylint: disable=too-few-public-methods
+        returncode = 1
+        stdout = "restore failed: could not reach nuget.org"
+        stderr = ""
+
+    monkeypatch.setattr(tmdl_oracle.subprocess, "run", lambda *a, **k: Result())
+
+    with pytest.raises(OracleUnavailable, match="restore failed"):
+        tmdl_oracle.ensure_built("dotnet-stub")
+    # The lock must be released on failure too, or one failed build blocks every later attempt.
+    assert not (tmp_path / ".oracle-build.lock").exists()
+
+
+def test_lock_timeout_raises_oracle_unavailable_and_cannot_hang(tmp_path):
+    """A held lock must produce a bounded, actionable failure - never a hang, never a clean result."""
+    lock_path = tmp_path / "held.lock"
+    lock_path.write_text("{}", encoding="utf-8")
+    start = time.monotonic()
+    with pytest.raises(OracleUnavailable, match="timed out"):
+        tmdl_oracle._acquire_build_lock(lock_path, wait=0.3, poll=0.05)
+    elapsed = time.monotonic() - start
+    assert elapsed < 5, f"lock acquisition must be bounded, took {elapsed:.1f}s"
+
+
+def test_a_stale_lock_is_reclaimed_instead_of_blocking_every_later_run(tmp_path):
+    """A crashed builder's lock must not block every later run forever - the smallest safe
+    recovery is age-based reclamation, since a live build cannot be older than its own timeout.
+    """
+    lock_path = tmp_path / "stale.lock"
+    lock_path.write_text("{}", encoding="utf-8")
+    stale_time = time.time() - (tmdl_oracle.BUILD_LOCK_STALE_SECONDS + 5)
+    os.utime(lock_path, (stale_time, stale_time))
+
+    # A short wait proves the reclaim is immediate: were staleness not checked, this would have to
+    # wait out the (much longer) full timeout instead.
+    start = time.monotonic()
+    tmdl_oracle._acquire_build_lock(lock_path, wait=5, poll=0.05)
+    elapsed = time.monotonic() - start
+    tmdl_oracle._release_build_lock(lock_path)
+    assert elapsed < 2, "a stale lock must be reclaimed promptly, not waited out"

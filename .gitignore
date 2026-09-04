@@ -109,6 +109,9 @@ build/
 # `dotnet build`; only the Program.cs / *.csproj source belongs in git.
 [Bb]in/
 [Oo]bj/
+# Cross-process build lock (issue #415) - a transient marker `ensure_built()` holds only for the
+# shared build/restore critical section; never meant to be committed.
+tools/tmdl_oracle/.oracle-build.lock
 
 # `harvest_tableau_public.py` output (`--out-dir`, default `_harvest`): Tableau Public downloads +
 # parsed specs (bulk .twbx + specs, transient corpus for parser stress-testing / hard-workbook

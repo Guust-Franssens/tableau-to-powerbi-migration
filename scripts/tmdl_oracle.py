@@ -31,6 +31,19 @@ normalises away. Issue #404 tracks it, with the measurement and the three mechan
 
 Requires the .NET SDK. `scripts/preflight.ps1` checks for it. If it is missing the gate reports
 UNASSESSABLE (a distinct exit code) rather than a pass - see check_datamodel.EXIT_UNASSESSABLE.
+
+Locking (issue #415, first-build part only)
+--------------------------------------------
+`ensure_built()` used to be an unlocked check-then-build: every parallel pytest worker that saw the
+DLL missing or stale would launch its own `dotnet build` into the SAME output directory. On Windows
+that is file-locking roulette - one or more builds fail even though the source is valid, and the
+usual "fix" is a confused rerun that only passes because one process happened to finish the shared
+build first. `_acquire_build_lock`/`_release_build_lock` below serialize just that critical section
+using the same `O_CREAT|O_EXCL` atomic-file convention `deploy_estate.RunLock` already uses for the
+deploy run lock - not a new lock framework, an extension of the one already in this repo. Unlike
+`RunLock`, which fails fast because two overlapping deploys must never both proceed, two processes
+racing to build the SAME oracle are not a conflict: waiting for the winner and reusing its DLL is the
+whole fix, so this variant blocks (bounded) instead of erroring immediately.
 """
 
 from __future__ import annotations
@@ -41,6 +54,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 from tmdl_checks import TmdlFinding
@@ -55,6 +69,17 @@ BUILD_TIMEOUT_SECONDS = 600
 RUN_TIMEOUT_SECONDS = 600
 # Keep a command line comfortably inside the Windows 32 767-character limit.
 BATCH_SIZE = 32
+
+# A waiter must be able to outlast a legitimate first build (which restores AMO from nuget.org and
+# can legitimately run the whole BUILD_TIMEOUT_SECONDS) without producing a false "unavailable"
+# verdict - so the wait ceiling is the build timeout plus a margin, never unbounded.
+BUILD_LOCK_WAIT_SECONDS = BUILD_TIMEOUT_SECONDS + 60
+BUILD_LOCK_POLL_SECONDS = 0.2
+# `subprocess.run` inside ensure_built already bounds a live build to BUILD_TIMEOUT_SECONDS, so a
+# lock file older than that (plus margin) cannot belong to a still-running build - its owner
+# crashed. Reclaiming it is the smallest recovery that keeps a dead builder from blocking every
+# later run forever.
+BUILD_LOCK_STALE_SECONDS = BUILD_TIMEOUT_SECONDS + 30
 
 log = logging.getLogger("tmdl_oracle")
 
@@ -111,29 +136,89 @@ def _sources_newer_than_build() -> bool:
     )
 
 
+def _acquire_build_lock(
+    path: Path, *, wait: float = BUILD_LOCK_WAIT_SECONDS, poll: float = BUILD_LOCK_POLL_SECONDS
+) -> None:
+    """Take `path` as a bounded cross-process mutex for the build/restore critical section only.
+
+    `O_CREAT | O_EXCL` rather than exists()-then-write, same as `deploy_estate.RunLock.acquire` -
+    the check-then-act version has a window two simultaneous builders can both pass, which is
+    exactly the failure this exists to prevent. Unlike `RunLock`, this blocks (bounded) rather than
+    failing on first contention: a second process wanting the SAME build should wait for the
+    winner and reuse its DLL, not be told to go away.
+
+    Raises OracleUnavailable on timeout - never hangs, never returns having failed to lock.
+    """
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            handle = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                age = time.time() - path.stat().st_mtime
+            except FileNotFoundError:
+                continue  # released between our open() failing and this stat - retry immediately
+            if age > BUILD_LOCK_STALE_SECONDS:
+                # A live build cannot be this old; whatever took this lock is gone. Reclaim it
+                # rather than let a crashed builder block every later run forever.
+                path.unlink(missing_ok=True)
+                continue
+            if time.monotonic() >= deadline:
+                raise OracleUnavailable(
+                    f"timed out after {wait:.0f}s waiting for {path} - another process appears to "
+                    f"be building the TMDL oracle ({age:.0f}s old). If it has crashed, delete "
+                    f"{path} and re-run."
+                ) from None
+            time.sleep(poll)
+            continue
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump({"pid": os.getpid(), "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, stream)
+        return
+
+
+def _release_build_lock(path: Path) -> None:
+    """Best-effort release; a leftover lock is recoverable via the staleness check above."""
+    path.unlink(missing_ok=True)
+
+
 def ensure_built(dotnet: str) -> Path:
-    """Build tools/tmdl_oracle once, returning the assembly path."""
+    """Build tools/tmdl_oracle once, returning the assembly path.
+
+    Lock-free on the fast path by construction: once a build exists and nothing is newer, this
+    returns without touching the lock file at all - only the actual build/restore is the shared
+    critical section multiple concurrent `dotnet build` invocations corrupt or fail on Windows
+    (issue #415).
+    """
     if not _sources_newer_than_build():
         return DLL
-    log.info("Building the TMDL oracle (tools/tmdl_oracle) - first run also restores AMO from nuget.org.")
+    lock_path = PROJECT_DIR / ".oracle-build.lock"
+    _acquire_build_lock(lock_path)
     try:
-        completed = subprocess.run(
-            [dotnet, "build", str(PROJECT_DIR), "-c", "Release", "--nologo", "-v", "quiet"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=BUILD_TIMEOUT_SECONDS,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise OracleUnavailable(f"could not run `dotnet build`: {exc}") from exc
-    if completed.returncode != 0 or not DLL.exists():
-        raise OracleUnavailable(
-            f"`dotnet build {PROJECT_DIR}` failed (exit {completed.returncode}):\n"
-            f"{(completed.stdout + completed.stderr).strip()[:2000]}"
-        )
-    return DLL
+        # Recheck: another process may have finished the build while we waited for the lock - a
+        # waiter must reuse that DLL rather than rebuild it.
+        if not _sources_newer_than_build():
+            return DLL
+        log.info("Building the TMDL oracle (tools/tmdl_oracle) - first run also restores AMO from nuget.org.")
+        try:
+            completed = subprocess.run(
+                [dotnet, "build", str(PROJECT_DIR), "-c", "Release", "--nologo", "-v", "quiet"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=BUILD_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise OracleUnavailable(f"could not run `dotnet build`: {exc}") from exc
+        if completed.returncode != 0 or not DLL.exists():
+            raise OracleUnavailable(
+                f"`dotnet build {PROJECT_DIR}` failed (exit {completed.returncode}):\n"
+                f"{(completed.stdout + completed.stderr).strip()[:2000]}"
+            )
+        return DLL
+    finally:
+        _release_build_lock(lock_path)
 
 
 def _run_batch(dotnet: str, dll: Path, definitions: list[Path]) -> dict:
