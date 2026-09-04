@@ -221,12 +221,165 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
     (
         "README: delete the zero-text SVG caveat (survived round-1's assertion)",
         PACKAGER,
-        "* ⚠️ but an SVG is not universally a data oracle: a chart whose labels render as paths carries\n"
-        "  **zero** `<text>` elements. Measured on the same workbook, **four** of its worksheets do -\n"
-        "  `Hired By Year`, `Terminated By Year`, `Age Groups` and `Education Levels`. Absence of text is not\n"
-        "  absence of content - fall back to the PNG.",
-        "* the SVG and the PNG are both renders of the same object.",
-        ["test_the_readme_separates_the_png_and_svg_evidence_legs"],
+        "values as greppable `<text>` elements, except where labels render as paths - zero text is not zero\ncontent.",
+        "values as greppable `<text>` elements, and both are renders of the same object.",
+        ["test_the_readme_keeps_the_png_and_svg_legs_distinct_with_the_zero_text_caveat"],
+    ),
+    # ---- the 2026-09-03 cold-run findings, each a prose or shipping guard ----------------------
+    (
+        "README: demote the CSV oracle back below the image legs",
+        PACKAGER,
+        "**`oracle/*/data/*.csv` is the NUMERIC oracle** - exact labels and figures, "
+        "no OCR and no judgement. Read it first.",
+        "it also carries this unit's exported numbers.",
+        ["test_the_readme_leads_with_the_csv_numeric_oracle_before_any_image"],
+    ),
+    (
+        "README: drop the page-pairing contract an agent otherwise reads check_unit.py for",
+        PACKAGER,
+        "A page counts as REBUILT only when its `displayName` EXACTLY equals an expected object's name AND it\n"
+        "ships at least one visual; one that pairs by name with no visual is reported `blank` and FAILS. The\n"
+        "expected set is every dashboard PLUS every worksheet not placed on one.",
+        "Both gates grade this unit against the pages it is expected to carry.",
+        ["test_the_readme_states_the_page_pairing_contract"],
+    ),
+    (
+        "README: soften the zero-visual page from a FAILURE to an omission",
+        PACKAGER,
+        "ships at least one visual; one that pairs by name with no visual is reported `blank` and FAILS. The",
+        "ships at least one visual; one that pairs by name with no visual is simply not credited. The",
+        ["test_the_readme_states_the_page_pairing_contract"],
+    ),
+    (
+        "README: narrow the expected page set back to dashboards only",
+        PACKAGER,
+        "expected set is every dashboard PLUS every worksheet not placed on one.",
+        "expected set is every dashboard in the workbook.",
+        ["test_the_readme_states_the_page_pairing_contract"],
+    ),
+    (
+        "README: put the bare unit NAME back on the documented gate commands",
+        PACKAGER,
+        "    python scripts/check_reference_readiness.py <path-to-this-folder>\n"
+        "    python scripts/check_unit.py <path-to-this-folder>",
+        "    python scripts/check_reference_readiness.py {unit}\n    python scripts/check_unit.py {unit}",
+        ["test_every_command_the_readme_prints_produces_a_verdict_not_a_usage_error"],
+    ),
+    (
+        "README: delete the provenance ceiling an agent cannot lift from inside the package",
+        PACKAGER,
+        "## UNFIXABLE FROM THIS PACKAGE",
+        "## Notes",
+        ["test_the_readme_names_the_provenance_ceiling_it_cannot_lift"],
+    ),
+    (
+        "README: send the agent back to the bundle to edit (issue #460's silent-discard shape)",
+        PACKAGER,
+        "| `fabric/` | the engine WORKING COPY - **edit here**, and when you work from a package THIS tree "
+        "is canonical; `<bundle>/pbip/` never promotes over it.",
+        "| `fabric/` | a copy of the engine working copy; edit `<bundle>/pbip/` instead.",
+        [
+            "test_AGENTS_md_and_the_package_readme_agree_on_where_an_agent_edits",
+            "test_declared_edit_tooling_is_scoped_to_bundle_work_in_BOTH_documents",
+        ],
+    ),
+    (
+        "README: drop the bundle-only scope from the declared-edit tooling note",
+        PACKAGER,
+        " Declared-edit tooling (`declare_generated_edit.py`, `--tamper`) is bundle-only.",
+        "",
+        ["test_declared_edit_tooling_is_scoped_to_bundle_work_in_BOTH_documents"],
+    ),
+    (
+        "packager: stop shipping the spec contract, leaving the README to describe it",
+        PACKAGER,
+        "    shutil.copy2(SPEC_SCHEMA, dest / SPEC_SCHEMA.name)\n    return SPEC_SCHEMA.name, None",
+        "    return None, None",
+        ["test_the_package_ships_the_spec_schema_it_tells_an_agent_to_obey"],
+    ),
+    # ---- issue #461: the package carrying its own rows ----------------------------------------
+    (
+        "packager: skip localization, leaving every partition pointing into the bundle",
+        PACKAGER,
+        "    data_sources = _localize_data_sources(dest, final, model_name)",
+        '    data_sources = {"parameter": None, "shipped": [], "omissions": [], "bytes": 0}',
+        [
+            "test_no_packaged_tmdl_points_at_an_absolute_path_OUTSIDE_the_package",
+            "test_the_rows_the_model_imports_are_shipped_and_the_partition_reads_them",
+        ],
+    ),
+    (
+        "packager: rewrite the partitions but ship none of the bytes",
+        PACKAGER,
+        "    shutil.copy2(readable, target)",
+        "    pass",
+        ["test_the_rows_the_model_imports_are_shipped_and_the_partition_reads_them"],
+    ),
+    (
+        "packager: write the data-folder parameter from the STAGING dir that is about to vanish",
+        PACKAGER,
+        "f'expression {parameter} = \"{final}\\\\{DATA_DIR}\\\\\" '",
+        "f'expression {parameter} = \"{dest}\\\\{DATA_DIR}\\\\\" '",
+        ["test_the_data_folder_parameter_names_the_FINAL_package_not_its_staging_dir"],
+    ),
+    (
+        "packager: drop the size ceiling, so an unbounded source is copied unnoticed",
+        PACKAGER,
+        "    if size > MAX_DATA_BYTES:",
+        "    if False:  # noqa",
+        ["test_an_oversized_source_is_refused_by_the_ceiling_rather_than_copied"],
+    ),
+    (
+        "packager: skip an unshippable source SILENTLY instead of recording why",
+        PACKAGER,
+        '                record["omissions"].append({"file": _leaf(source), "reason": refusal})',
+        "                pass",
+        ["test_a_source_that_cannot_be_shipped_is_a_LOUD_omission_not_a_silent_skip"],
+    ),
+    (
+        "packager: resolve a packaged-name collision by overwriting the first source",
+        PACKAGER,
+        "        candidate = f\"{hashlib.sha256(source.encode('utf-8')).hexdigest()[:8]}/{name}\"",
+        "        candidate = candidate",
+        ["test_two_sources_sharing_a_file_name_do_not_overwrite_each_other"],
+    ),
+    (
+        "README: drop the data/ row, so the shipped rows are unmentioned in the package map",
+        PACKAGER,
+        "| `data/` | the rows the model imports",
+        "| `unmentioned/` | the rows the model imports",
+        ["test_the_generated_readme_names_every_file_the_package_contains"],
+    ),
+    (
+        "packager: scan only File.Contents, missing every datasource-only unit's folder parameter",
+        PACKAGER,
+        "    _localize_folder_parameters(documents, dest, final, record, taken, accounted)",
+        "    pass",
+        ["test_a_folder_PARAMETER_pointing_out_of_the_package_is_moved_with_its_files"],
+    ),
+    (
+        "packager: treat ANY POSIX-absolute literal as a file path (8 of 9 are false positives)",
+        PACKAGER,
+        'return value.startswith("/") and bool(PurePosixPath(value).suffix)',
+        'return value.startswith("/")',
+        ["test_a_POSIX_literal_with_no_file_suffix_is_left_alone"],
+    ),
+    (
+        "packager: PROBE a UNC literal, which blocks on SMB name resolution for minutes",
+        PACKAGER,
+        '        return None, "a UNC path is not probed, because resolving an absent host can block for minutes"',
+        "        pass",
+        ["test_a_UNC_literal_is_refused_WITHOUT_being_probed"],
+    ),
+    (
+        "packager: report EVERY absolute path, condemning the package's own legitimate DataFolder",
+        PACKAGER,
+        "            if value not in accounted and _is_path_literal(value) and not _inside(final, value):",
+        "            if value not in accounted and _is_path_literal(value):",
+        [
+            "test_an_absolute_path_under_the_packages_own_data_is_NOT_a_violation",
+            "test_the_rows_the_model_imports_are_shipped_and_the_partition_reads_them",
+        ],
     ),
     (
         f"{NEGATIVE_CONTROL}: a comment-only edit that must change no verdict",

@@ -7,9 +7,12 @@ absolute path, or a walk up to a repo root, would silently re-bind the tests to 
 `scripts/` folder and prove nothing about the copy.
 
 It also pins the DEFAULT Desktop-inspection state every test runs against - see
-:func:`healthy_desktop_state` for why that has to be explicit rather than inherited from the host OS.
+:func:`healthy_desktop_state` for why that has to be explicit rather than inherited from the host OS,
+and it owns the **`gui` exclusion** for exactly the same portability reason - see
+:func:`pytest_collection_modifyitems`.
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -20,9 +23,16 @@ SKILL_SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SKILL_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SKILL_SCRIPTS))
 
+# Kept in step with the host repo's root `conftest.py` BY DUPLICATION, on purpose: this folder is
+# copied out of the repo and run with the repo unimportable, so it cannot import a shared helper.
+GUI_MARKER = "gui"
+RUN_GUI = "--run-gui"
+RUN_GUI_ENV = "T2P_RUN_GUI"
+TRUTHY = {"1", "true", "yes", "on"}
+
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Register `timing` and `serial` HERE so the markers travel with the bundle.
+    """Register `timing`, `serial` and `gui` HERE so the markers travel with the bundle.
 
     **`timing`** - a handful of tests in this folder assert a sub-second wall-clock budget on an
     operation that takes ~0.03s. Measured (issue #387) under 22 concurrent pytest-xdist workers, one
@@ -38,6 +48,12 @@ def pytest_configure(config: pytest.Config) -> None:
     the probe degrading safely, and the test's stricter assertion correctly refusing it. Not one of
     them failed in seven runs that were not concurrently paired, so this needs the pairing.
 
+    **`gui`** - ten tests here spawn a real top-level window (seven a WPF app, three native
+    `CreateWindowExW` windows), which steals focus from whoever is at the keyboard; issue #447 is an
+    operator watching that happen for two days mid-demo. Registering it here is not cosmetic:
+    measured before this existed, the copied-out run emitted seven `PytestUnknownMarkWarning`s, and
+    an unregistered marker is one `--strict-markers` away from being an error in someone else's repo.
+
     Registering them in this conftest rather than a host `pyproject.toml` is the whole point: copy
     this folder into another repo and `-m "not (serial or timing)"` still works, with no
     unregistered-marker warning.
@@ -50,6 +66,48 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "serial: contends for a singleton external resource; must not run beside another such test",
     )
+    config.addinivalue_line(
+        "markers",
+        "gui: spawns a real top-level window; needed for UI-Automation coverage, opt-in only",
+    )
+
+
+def _gui_is_opted_in(config: pytest.Config) -> bool:
+    """Whether this run explicitly asked for the window-spawning tests.
+
+    `config.getoption(..., default=False)` rather than a bare lookup, because `--run-gui` is
+    registered by the HOST repo's root `conftest.py` and that file does not travel with this folder.
+    In the host repo the flag answers; in a copied-out bundle only the environment variable does.
+    """
+    if os.environ.get(RUN_GUI_ENV, "").strip().lower() in TRUTHY:
+        return True
+    return bool(config.getoption(RUN_GUI, default=False))
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Deselect the window-spawning tests unless this run asked for them. Travels with the bundle.
+
+    ⚠️ **The host repo's copy of this rule provably does not reach here.** `tests/test_skills.py`
+    copies this folder to a temp directory and runs it as a subprocess with `cwd` outside the repo
+    and `PYTEST_ADDOPTS` cleared, precisely so the copy proves its own portability - so the root
+    `conftest.py` and `pyproject.toml` are both absent by construction. Measured with every spawn
+    site instrumented to raise: that nested run reached **all ten** of them (`10 failed, 279 passed`),
+    while the outer suite's own summary reported **zero** deselections. Invisible, which is worse
+    than loud.
+
+    A hook rather than a marker expression, for the same reason as in the host repo: a command-line
+    `-m` REPLACES an ini expression instead of composing with it, so a `-m "not slow"` anywhere
+    upstream would put every window back. A hook runs after pytest has applied the caller's `-m`.
+
+    Opt in with `T2P_RUN_GUI=1` (portable), or `--run-gui` inside the host repo.
+    """
+    if _gui_is_opted_in(config):
+        return
+    kept = [item for item in items if item.get_closest_marker(GUI_MARKER) is None]
+    dropped = [item for item in items if item.get_closest_marker(GUI_MARKER) is not None]
+    if dropped:
+        items[:] = kept
+        config.hook.pytest_deselected(items=dropped)
 
 
 # The path above must be in place before the skill's own modules import, hence the E402 waiver.

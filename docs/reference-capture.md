@@ -246,8 +246,11 @@ values in its own rejection text). Measured on the captured files:
   with no page margin. **No new Python dependency.**
 - **Degrades loudly below 3.29.** On 3.21 / 3.24 / 3.28 the server returns HTTP 400 *"SVG export
   requires API version 3.29 or later"*. It never silently returns a PNG, so a `.svg` file can never
-  contain PNG bytes. ⚠️ `capture_tableau_oracle.py` still defaults to **3.21**; set
-  `TABLEAU_REST_API_VERSION=3.29` in `.env`.
+  contain PNG bytes. ⚠️ `capture_tableau_oracle.py` still defaults to **3.21**, so a site that *can*
+  do SVG still needs `TABLEAU_REST_API_VERSION=3.29` in `.env`. ⚠️⚠️ **But that is only the remedy when
+  the SERVER clears the floor too** — see [Why SVG failed](#why-svg-failed-three-states-never-two)
+  below. Raising a client preference above a server's advertised ceiling cannot make a 3.27 server
+  export SVG, and telling a customer otherwise is issue #474.
 - **It is not free.** SVG bytes ranged 39 KB → 5.0 MB per dashboard (PNG: 48 KB → 897 KB). A
   crosstab-shaped *worksheet* produced a **21 MB** SVG with 37,439 `<text>` elements against a 4.5 MB
   PNG. Prefer `--svg` for dashboards; think before sweeping it across every worksheet in an estate.
@@ -370,6 +373,108 @@ Three rules keep a probe from producing a confident wrong answer:
    LUID. It used to report `min(len(views), 3)` — the number of *eligible* views — which presented a
    single measurement as three independent corroborations.
 
+### Why SVG failed: three states, never two
+
+⚠️ **A customer was told to raise a knob that could not help them.** An on-prem Tableau Server
+reported `productVersion 2025.3.3` / `restApiVersion 3.27`; its SVG legs were refused, and the run's
+loudest, most actionable-looking line said *"Set `TABLEAU_REST_API_VERSION=3.29` in `.env` and
+re-run"*. A **client preference cannot lift a server's ceiling** — this is arithmetic, not judgement —
+so the advice was simply false there. The code that printed it already had the advertised ceiling in
+scope and never looked at it (#474).
+
+Every place we now say why SVG failed resolves through one classifier
+(`tableau_render_capability.svg_gate_advice`) to exactly one of three states — the three values of
+`supports(advertised, 3.29)`, so the partition is total by construction:
+
+| `cause` | when | what it says |
+|---|---|---|
+| `server_meets_floor` | advertised **≥ 3.29** | set `TABLEAU_REST_API_VERSION` to **exactly `3.29`** — see the exact-floor rule below. Where a **floor re-probe proved** the tier, it says so; otherwise it says the advertised number is a *claim*, not proof. If the pin already clears the floor too, it says **that** instead of naming a knob already turned |
+| `server_below_floor` | advertised **< 3.29** (the customer above) | SVG is unavailable **at any client setting**, and raising the pin above the ceiling is **not** a fix. Routes to the next rung: **PDF**, API 2.8, vector with embedded fonts |
+| `ceiling_not_established` | the ceiling was not **established** — see the three ways below | the **conditional**, never a confident instruction — plus how to establish the ceiling |
+
+⚠️ **The remedy names the floor EXACTLY, never "3.29 or later".** That phrasing survived the first
+fix and was caught in review of the fix (#475): on a server advertising **exactly 3.29** — which is
+what Server 2026.2 reports — every value "or later" licenses is above that server's own ceiling, so
+the message still contained the impossible configuration #474 exists to remove, one case in from the
+edge. The invariant is now stated as a relationship rather than as a literal: **no remedy may name a
+REST version the advertised ceiling cannot serve.** The floor is the highest number that is safe for
+every server in this state, because `server_meets_floor` means `advertised >= 3.29` by construction.
+The same "or later" wording in the capability probe's pin warning went with it.
+
+⚠️ **"`/serverinfo` answered" is not "the ceiling was established", and THREE different failures land
+in `ceiling_not_established`** (also #475's review, and each was measured producing a confident
+verdict beforehand):
+
+| what came back | what it used to be read as | what it is |
+|---|---|---|
+| no answer at all (`probe_status` 0) | unknown ✅ | unknown |
+| an **unsuccessful** answer whose body still carries `<restApiVersion>` — a proxy's 404, the server's own 500 | **the site's ceiling**: a 500 carrying `3.30` was read as REST 3.30, SVG *available* | unknown; the status is the diagnosis |
+| a **200** reporting something that is not a version (`garbage-999`, `not-a-version`, `3.x`) | a ceiling, in *both* directions: `garbage-999` → `(999,)` → best rung **SVG**; `not-a-version` → `(0,)` → **no rung reachable at all** | unknown; the report quotes what came back |
+
+The same input class produced both the most optimistic and the most pessimistic answer, so *"it fails
+safe"* was never available as a defence. A version field is now trusted only from a **successful**
+response and only when it matches a numeric API-version grammar; the offending text is kept —
+redacted at the parse boundary — as `invalid_rest_api_version`, so the report says *which* failure
+this was rather than only *"`/serverinfo` answered 200"*, which beside "not established" reads as a
+bug in this tool.
+
+⚠️ **The grammar is NOT membership in the version→release table.** `API_RELEASE` stops at 3.29 and a
+live Cloud site measured on 2026-08-30 already advertised **3.30**, so requiring membership would
+classify every real server past the documentation as unassessable. A numeric but unpublished version
+(`9.99`) stays **established and above the floor**; only text that is not a version at all is
+refused.
+
+Three consequences worth stating plainly:
+
+- **A plain `--svg` run now establishes the ceiling too.** `/serverinfo` is unauthenticated and costs
+  no metered export call, so it no longer takes `--reference-best` to know why a refusal happened.
+- **The manifest carries it.** `oracle-manifest.json` gains `advertised_rest_api_version` and
+  `server_product_version` beside the `rest_api_version` it already recorded (which is the *client*
+  preference), and each version-gated `svg` leg carries `cause` plus the same `remedy` the console
+  printed. One wording, two surfaces.
+- **What is NOT claimed.** Tableau documents an unsupported-REST-version error, so pinning *above* a
+  server's ceiling may well break other calls — **nobody here has measured that**, so nothing says
+  it. The only assertion is the provable one: it cannot enable SVG. Equally, "PNG and PDF reach back
+  to API 2.5 and 2.8" is a statement about **those routes' floors**, not a prediction about what
+  changing the pin would do.
+
+**The assessment reports the ceiling before anyone captures anything.** `assess_estate.py` is the
+first thing an operator runs against a new site, and the render ceiling is a property of the *site* —
+so `report.md`, `assessment.json` and the console now carry a **verdict per rung**, not two numbers
+to do arithmetic on:
+
+```
+- what we send            TABLEAU_REST_API_VERSION = 3.21   (a client preference)
+- the server advertises   REST 3.27, product 2025.3.3       (from /serverinfo)
+
+| rung     | route                  | needs                       | verdict                     |
+| svg      | /image?format=svg      | REST 3.29 (Server 2026.2)   | ❌ UNAVAILABLE on this server |
+| pdf      | /pdf?type=Unspecified  | REST 2.8  (Server 10.5)     | ✅ available (vector, embedded fonts) |
+| png_high | /image?resolution=high | REST 2.5  (Server 10.2)     | ✅ available |
+
+Bottom line: --reference-best should resolve to `pdf` on this site.
+```
+
+Three properties of that block are load-bearing:
+
+- **It states the raster ceiling, because *available* is the half operators over-trust.**
+  `?resolution=high` is **exactly 2× the dashboard's declared size** (52/52 above), so a **650×800**
+  dashboard tops out at **1300×1600, forever** and a label-dense page can be structurally legible and
+  content-illegible at once. That is *why* PDF matters on a sub-3.29 server: it is the only vector
+  rung left. ⚠️ Scoped to **dashboards** — a worksheet does honour `vizHeight` (see the route survey
+  above); the over-general phrasing was corrected once already and must not come back.
+- **It grades its own verdicts.** `unavailable` is firm — the site's own ceiling is below that rung's
+  documented floor. `available` is a *claim* the endpoint has not been asked to honour. Only
+  `--reference-best` settles it.
+- ⚠️ **State C applies here exactly as it applies to the capture warnings.** If the ceiling was not
+  established — `/serverinfo` did not answer, answered **unsuccessfully**, or answered 200 with
+  something that is not a version — the block says the ceiling was **not established**, names which
+  of those it was, and prints **no rung table at all** —
+  every rung's structured `verdict` is `unknown`, in the same field a consumer reads, because a rung
+  table rendered from a ceiling nobody established is indistinguishable at a glance from a measured
+  one. It **fails soft**: it never degrades the assessment, since nothing downstream is computed
+  from it.
+
 **A required reference that never arrived is exit code 5, never 0.** With `--reference-best` and an
 UNDETERMINED probe no render kind is requested at all, every view's data still succeeds, and the run
 would otherwise exit 0 having captured **zero** reference images. The manifest records
@@ -391,6 +496,43 @@ echoes `X-Tableau-Auth` puts a **live session token** in an error body, and the 
 written to disk. Probe details are scrubbed through the session's redactor before they are printed or
 serialised — while classification still reads the **raw** text, because redaction is handed the
 human-chosen PAT *name* and a short one would rewrite Tableau's own error codes.
+
+⚠️ **That includes `/serverinfo`, and "the request was unauthenticated" is NOT a reason to exempt
+it.** That argument is about the *request*; the hazard is the *speaker*. The same server — or any
+intermediary on the path — watched the PAT sign-in earlier in the run and can echo the credential in
+any later response, authenticated or not. Measured on a 200-shaped `/serverinfo` with a token in
+`productVersion` and its `build` attribute: it reached `assessment.json`, `report.md` and the console
+verbatim, because the redactor in hand was applied to one field out of four.
+
+⚠️⚠️ **Nor is "it matched a version grammar", and that second exemption is the more instructive one.**
+`restApiVersion` was then kept exempt because `api_tuple` had proved it numeric — a shape *"no
+credential can satisfy"*. **Nothing enforces that.** A Tableau session token has no validated shape at
+all (`assess_estate.Site` binds `creds["token"]` exactly as it arrives), so a server can issue a token
+that is literally `3.27`, reflect it as its own version, and be published as this site's advertised
+ceiling on all three surfaces. Measured. It is the same defect one layer down: **an assumption
+standing where an enforced property was needed.** The fix is deliberately *not* a tighter grammar —
+that narrows the overlap between credential shapes and version shapes and leaves the assumption in
+place for the next token shape.
+
+So **no response string leaves `server_info` unredacted**, and the capability is separated from the
+text that displays it:
+
+| what leaves | what it is |
+|---|---|
+| `rest_api_version` | the **redacted display** string — byte-identical to the advertised value in every run where the redactor finds nothing, i.e. every honest one |
+| `rest_api_version_reflected` | the redactor rewrote it, i.e. the server quoted a credential we hold back at us |
+| `ceiling_established`, `rung_support` | the **derived capability**, computed from the raw value inside the function: one boolean per *published* ladder floor |
+
+A reflected credential therefore costs the operator **the printed number and nothing else** — the
+ceiling is still established, every rung verdict is still correct, and `--reference-best` still
+resolves. The **release name is suppressed with the number** (`API_RELEASE` is a bijection, so
+printing *"Tableau 2025.3"* would hand back the digits redaction removed), and both `report.md` and
+the console **say** the number was suppressed and why: a bare redaction marker where a version belongs
+reads as a bug in this tool, and a server echoing a credential is worth raising with whoever operates
+it. ⚠️ Residual, stated rather than hidden: three booleans against documented floors do narrow a
+suppressed version to an *interval* (`svg: False, pdf: True` ⇒ `[2.8, 3.29)`). That is unavoidable for
+any honest report — the operator's question *is* which rungs the site reaches — and an interval across
+a published range is not a credential; the exact string was.
 
 ⚠️ **Redaction happens per value, BEFORE case-folding, splitting, stripping or truncation** — every
 one of those transforms defeats the repo redactor, which matches literals. Four review rounds each

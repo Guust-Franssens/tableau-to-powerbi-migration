@@ -21,6 +21,12 @@ is precisely the run that needs gating.
 The companion half is the `serial` and `timing` markers registered in `pyproject.toml`; the tests
 that carry `timing` declare it themselves, in their own source, so it survives being copied out of
 this repo. See `docs/parallel-test-loop.md` for the two-tier loop that uses them.
+
+This file also owns the **`gui`** exclusion (issue #447): a `gui` test spawns a real top-level window
+and steals focus, so it is deselected in every tier unless `--run-gui` / `T2P_RUN_GUI=1` asks for it.
+That lives here, in a collection hook, rather than in `addopts = "-m 'not gui'"` - because a
+command-line `-m` REPLACES an ini marker expression instead of composing with it, so
+`pytest -m "not slow"` (a command this repo's own docs recommend) put all of them back.
 """
 
 from __future__ import annotations
@@ -37,6 +43,14 @@ REQUIRED_DIST = "loadfile"
 CONTENDED_MARKERS = ("serial", "timing")
 
 INCLUDE_CONTENDED = "--include-contended"
+
+# A `gui` test spawns a REAL top-level window and steals focus on whatever machine runs it. Unlike
+# `serial`/`timing` this is excluded from EVERY tier, not just the parallel one, so the exclusion
+# below is unconditional and the opt-in has to be explicit.
+GUI_MARKER = "gui"
+RUN_GUI = "--run-gui"
+RUN_GUI_ENV = "T2P_RUN_GUI"
+TRUTHY = {"1", "true", "yes", "on"}
 
 WRONG_DIST_MESSAGE = (
     "pytest-xdist is active with --dist {dist!r}. This suite is only measured safe under "
@@ -60,6 +74,30 @@ def pytest_addoption(parser: pytest.Parser) -> None:
             "this exists for deliberately stress-testing that, not for normal use."
         ),
     )
+    parser.addoption(
+        RUN_GUI,
+        action="store_true",
+        default=False,
+        help=(
+            "Run `gui` tests, which spawn a real top-level window and steal focus. CI opts in with "
+            f"this; so does anyone deliberately working on the credential probe. `{RUN_GUI_ENV}=1` "
+            "does the same thing for a nested pytest that cannot be given a flag."
+        ),
+    )
+
+
+def gui_is_opted_in(config: pytest.Config) -> bool:
+    """Whether this run was explicitly asked for the window-spawning tests.
+
+    Two spellings, and both are load-bearing. The FLAG is what a human or a CI step types. The ENV
+    VAR is for a **nested** pytest that nobody can hand a flag to - `tests/test_skills.py` copies the
+    `pbip-model-refresh` bundle to a temp directory and runs it as a subprocess there, outside this
+    repo, where neither this file nor `pyproject.toml` exists (measured: the copied run reached all
+    ten spawn sites while the outer summary reported zero deselections).
+    """
+    if os.environ.get(RUN_GUI_ENV, "").strip().lower() in TRUTHY:
+        return True
+    return bool(config.getoption(RUN_GUI, default=False))
 
 
 def _xdist_is_active(config: pytest.Config) -> bool:
@@ -97,29 +135,41 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """Deselect every contended test whenever xdist is active. This is the MECHANISM.
+    """Deselect the tests that must not run in this configuration. This is the MECHANISM.
 
-    The markers alone are a convention: they only protect anything if the caller remembers
-    `-m "not (serial or timing)"`. Drop half of that - `-m "not timing"` - and all seven live
-    WPF/UI-Automation tests are collected under xdist again, which is precisely the configuration
-    measured to fail 3 times in 8 concurrent-pair runs (`harvest=INCOMPLETE`, 30.6s against 8.08s
-    serially). A guard that validates only `--dist loadfile` cannot see that, and a documented
-    command is not a mechanism.
+    Two independent exclusions, deliberately in one pass so the summary reports one honest count.
 
-    So the exclusion no longer depends on being asked for. `--include-contended` is the deliberate
-    opt-out, for stress-testing this very behaviour; it is not for normal use.
+    **`serial`/`timing`, whenever xdist is active.** The markers alone are a convention: they only
+    protect anything if the caller remembers `-m "not (serial or timing)"`. Drop half of that -
+    `-m "not timing"` - and all seven live WPF/UI-Automation tests are collected under xdist again,
+    which is precisely the configuration measured to fail 3 times in 8 concurrent-pair runs
+    (`harvest=INCOMPLETE`, 30.6s against 8.08s serially). A guard that validates only
+    `--dist loadfile` cannot see that, and a documented command is not a mechanism.
+    `--include-contended` is the deliberate opt-out, for stress-testing this very behaviour.
+
+    **`gui`, always, unless opted in.** ⚠️ This used to be `addopts = "-m 'not gui'"` in
+    `pyproject.toml`, and that was FAIL-OPEN: a command-line `-m` **replaces** the ini expression
+    rather than composing with it. Measured on the bundle's 309 tests - default `302/309`,
+    `-m gui` `7/309`, and `-m "not slow"` **`309/309`, every window-spawning test back**. Our own
+    `docs/offline-mock-harness.md` documents `pytest -q -m "not slow"`, so following the repo's
+    documentation re-opened the windows. A collection hook COMPOSES with `-m` instead: pytest applies
+    the caller's expression first, and whatever survives it still passes through here.
 
     Deselection - rather than skipping - keeps the count visible in the summary line
     (``N passed, 14 deselected``) and keeps every worker's collection identical, since each applies
     the same rule to the same items.
     """
-    if not _xdist_is_active(config) or config.getoption("include_contended"):
+    drop_gui = not gui_is_opted_in(config)
+    drop_contended = _xdist_is_active(config) and not config.getoption("include_contended")
+    if not (drop_gui or drop_contended):
         return
     kept: list[pytest.Item] = []
     dropped: list[pytest.Item] = []
     for item in items:
-        target = dropped if any(item.get_closest_marker(name) for name in CONTENDED_MARKERS) else kept
-        target.append(item)
+        unwanted = (drop_gui and item.get_closest_marker(GUI_MARKER) is not None) or (
+            drop_contended and any(item.get_closest_marker(name) for name in CONTENDED_MARKERS)
+        )
+        (dropped if unwanted else kept).append(item)
     if dropped:
         items[:] = kept
         config.hook.pytest_deselected(items=dropped)

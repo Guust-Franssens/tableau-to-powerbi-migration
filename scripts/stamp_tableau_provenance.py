@@ -59,6 +59,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from object_identity import RevisionKey, revision_key  # noqa: E402  # pylint: disable=wrong-import-position
 from tableau_env import pat_secret, resolve_env  # noqa: E402  # pylint: disable=wrong-import-position
 
 LOG = logging.getLogger("provenance")
@@ -67,11 +68,16 @@ WORKBOOK_SUFFIXES = (".twb", ".twbx")
 
 
 def fingerprint(path: Path) -> dict[str, Any]:
-    """Size + sha256, plus per-member CRCs for a ``.twbx``.
+    """Size + sha256 + a reproducible REVISION KEY, plus per-member CRCs for a ``.twbx``.
 
     The members matter more than the outer hash: a ``.twbx`` is a zip, and zip metadata (timestamps,
     compression) can differ between two downloads of the same content, so two identical workbooks can
     hash differently. Member CRCs compare the content itself.
+
+    ⚠️ That warning was written here and then not acted on where it counted - the origin comparison
+    below hashed raw bytes on BOTH sides, so an unchanged workbook read as ``name_only``.
+    :func:`object_identity.revision_key` is the content-normalised digest that makes the comparison
+    reproducible, and it is recorded on both sides so a consumer never has to guess which it holds.
     """
     raw = path.read_bytes()
     record: dict[str, Any] = {
@@ -79,6 +85,9 @@ def fingerprint(path: Path) -> dict[str, Any]:
         "size_bytes": len(raw),
         "sha256": hashlib.sha256(raw).hexdigest(),
     }
+    key = revision_key(raw)
+    if key is not None:
+        record["revision_key"] = key.as_json()
     if path.suffix.lower() == ".twbx" and zipfile.is_zipfile(path):
         with zipfile.ZipFile(path) as archive:
             record["members"] = [
@@ -152,10 +161,28 @@ class TableauLookup:
 
     def content_sha256(self, workbook_id: str) -> str | None:
         """sha256 of the workbook as the server would hand it to us, or ``None`` if it cannot be read."""
+        payload = self._content(workbook_id)
+        return hashlib.sha256(payload).hexdigest() if payload is not None else None
+
+    def content_revision_key(self, workbook_id: str) -> RevisionKey | None:
+        """The REPRODUCIBLE build digest of the site copy, or None when it cannot be computed.
+
+        ⚠️ :meth:`content_sha256` above is not reproducible and never was. Measured 2026-09-03 against
+        this site, three downloads of every item inside one run: the raw digest differed across
+        downloads for **27 of 49 archives** (18 of 48 workbooks, 9 of 19 datasources) while the
+        content-normalised digest differed for **0 of 67**. Every raw-unstable item had an identical
+        byte length, and the population is itself unstable - ``World Indicators`` differed in one
+        sample and agreed minutes later - so a raw comparison does not merely fail for a fixed
+        subset: any "confirmed" verdict it produces is luck.
+        """
+        payload = self._content(workbook_id)
+        return revision_key(payload) if payload is not None else None
+
+    def _content(self, workbook_id: str) -> bytes | None:
         status, payload = self._call(
             "GET", f"/sites/{self.site_id}/workbooks/{workbook_id}/content?includeExtract=True"
         )
-        return hashlib.sha256(payload).hexdigest() if status == 200 else None
+        return payload if status == 200 else None
 
 
 HARVEST_STEM_RE = re.compile(
@@ -183,7 +210,7 @@ def _sanitized(text: str) -> str:
     return "".join(char if char.isalnum() or char in "-_" else "_" for char in text)[:60]
 
 
-def find_origin(lookup: TableauLookup, stem: str, local_sha: str) -> dict[str, Any] | None:
+def find_origin(lookup: TableauLookup, stem: str, local: dict[str, Any]) -> dict[str, Any] | None:
     """Identify a local workbook on the site by LUID or name, then CONFIRM by content hash.
 
     Returns ``None`` when no workbook matches. When one does, ``matched_by`` records *how it was
@@ -193,8 +220,17 @@ def find_origin(lookup: TableauLookup, stem: str, local_sha: str) -> dict[str, A
     site, and it has changed since we harvested it", which is a different and more useful statement
     than a name collision.
 
-    A name-only match is still worth recording: it says "a workbook of this name exists there and it
-    is NOT this build", which is precisely the ambiguity that makes a cited figure irreproducible.
+    ⚠️ ``match`` alone could never carry that second claim, and saying it did was wrong. It compares
+    RAW bytes, and a `.twbx` is repacked per download - measured 2026-09-03 on this site, three
+    downloads of every item in one run: **27 of 49 archives** returned a different raw digest for
+    identical content, **0 of 67** items returned a different content digest. ``revision_match`` is
+    therefore the load-bearing verdict; ``match`` is kept unchanged so an existing consumer is not
+    silently re-interpreted, and because a raw MATCH still implies a content match.
+
+    ``revision_match`` is ``"same"`` / ``"differs"`` / ``None``, and ``None`` means *the two keys are
+    not comparable* - a missing key on either side, or two different algorithms. It is never
+    ``"differs"`` in that case: a false drift alarm on every pre-existing capture would be worse than
+    the gap it closes.
     """
     luid, name_part = split_harvest_stem(stem)
     workbooks = lookup.workbooks()
@@ -219,6 +255,9 @@ def find_origin(lookup: TableauLookup, stem: str, local_sha: str) -> dict[str, A
 
     workbook = candidates[0]
     remote_sha = lookup.content_sha256(workbook["id"])
+    remote_key = lookup.content_revision_key(workbook["id"])
+    local_key = RevisionKey.from_json(local.get("revision_key"))
+    agreement = local_key.agrees_with(remote_key) if local_key is not None else None
     return {
         "server": lookup.base,
         "site": lookup.site,
@@ -231,7 +270,9 @@ def find_origin(lookup: TableauLookup, stem: str, local_sha: str) -> dict[str, A
         "tableau_product_version": lookup.product_version,
         "rest_api_version": lookup.version,
         "matched_by": matched_by,
-        "match": "sha256" if remote_sha == local_sha else "name_only",
+        "match": "sha256" if remote_sha == local["sha256"] else "name_only",
+        "revision_match": None if agreement is None else ("same" if agreement else "differs"),
+        "remote_revision_key": remote_key.as_json() if remote_key is not None else None,
         "remote_sha256": remote_sha,
         "same_name_count": sum(1 for wb in workbooks if wb.get("name") == workbook.get("name")),
     }
@@ -261,7 +302,7 @@ def build(target: Path, env: dict[str, str]) -> dict[str, Any]:
         record = {"input": fingerprint(path)}
         if lookup is not None:
             try:
-                origin = find_origin(lookup, path.stem, record["input"]["sha256"])
+                origin = find_origin(lookup, path.stem, record["input"])
             except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
                 origin, record["lookup_error"] = None, f"{type(exc).__name__}: {str(exc)[:150]}"
             record["origin"] = origin

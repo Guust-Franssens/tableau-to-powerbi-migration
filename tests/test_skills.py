@@ -99,6 +99,12 @@ def _repo_free_env() -> dict[str, str]:
     env.pop("PYTHONPATH", None)
     env.pop("PYTEST_CURRENT_TEST", None)
     env.pop("PYTEST_ADDOPTS", None)
+    # `T2P_RUN_GUI` is the PORTABLE opt-in the copied bundle's own conftest reads (issue #447), and
+    # inheriting it here would make a PORTABILITY check spawn ten real top-level windows as a side
+    # effect. Whoever exported it asked to run the gui tests, not to have a `test_skills.py` run
+    # hijack their desktop; CI's `--run-gui -m gui` leg is where those tests are actually executed.
+    # Dropping it also makes this nested run deterministic rather than ambient-environment-dependent.
+    env.pop("T2P_RUN_GUI", None)
     return env
 
 

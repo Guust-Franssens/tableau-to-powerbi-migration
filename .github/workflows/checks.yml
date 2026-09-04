@@ -130,3 +130,24 @@ jobs:
 
       - name: Tests (pbip-model-refresh bundle, on the platform it actually runs on)
         run: uv run pytest -q .github/skills/pbip-model-refresh/tests/
+
+      # The root `conftest.py` deselects `gui` (window-spawning) tests in every tier, so an
+      # operator's desktop is never hijacked (issue #447). That protection is worthless if NOBODY
+      # runs them: issue #435 is this repo's own record of 15 engine tests skipping silently in CI,
+      # where a skip was being read as a pass. A hosted Windows runner has no one to interrupt, so
+      # this is where they belong.
+      #
+      # ⚠️ TWO things about this command are load-bearing, and dropping either re-opens the hole:
+      #
+      #   `--run-gui` is the OPT-IN. `-m gui` alone selects them and the hook then deselects them
+      #   again, so the step would report "no tests ran" and stay green. The flag composes with the
+      #   marker expression instead of replacing it, which is the whole reason the exclusion moved
+      #   out of `addopts` (a caller's `-m` REPLACED that, and `-m "not slow"` re-ran every window).
+      #
+      #   NO PATH ARGUMENT. `testpaths` then applies, so this covers `tests/` AND `.github/skills/`
+      #   - the entire repository's gui surface. The previous version named the bundle directory, so
+      #   a gui test added anywhere else would have been excluded by default and run by nothing.
+      #   `tests/test_gui_marker_gate.py` enforces that by collecting the repo's gui tests and
+      #   checking every one of them is reachable from this command.
+      - name: Tests (GUI, opt-in - the real UI-Automation path the credential probe depends on)
+        run: uv run pytest -q --run-gui -m gui

@@ -287,9 +287,20 @@ npx --yes @microsoft/powerbi-desktop-bridge-cli status --pid <literal pid> --wai
 Stop-Process -Id <literal pid> -Force
 ```
 
-> ⚠️ Deleting a >259-char fixture needs the `\\?\` prefix, and a git repo inside it needs a chmod
-> handler because git objects are read-only:
-> `shutil.rmtree("\\\\?\\" + str(root), onexc=lambda f, p, e: (os.chmod(p, stat.S_IWRITE), f(p)))`
+### Deleting a tree that is already over the ceiling
+
+⚠️ **Plain `Remove-Item` (and Explorer) will refuse it, even though Python happily wrote it.** This
+is the symptom people hit first and it reads like a permissions problem, not a path-length one.
+Deleting a >259-char tree needs the `\\?\` prefix, and a git repo inside it *additionally* needs a
+chmod handler because git's object files are read-only:
+
+```python
+shutil.rmtree("\\\\?\\" + str(root), onexc=lambda f, p, e: (os.chmod(p, stat.S_IWRITE), f(p)))
+```
+
+Both halves are load-bearing: the prefix alone still fails on `.git/objects/`, and the handler alone
+never gets far enough to matter. Reported cost of rediscovering this by trial and error on a customer
+engagement: real, and avoidable — issue #470.
 
 ### One correction to the crash report's framing
 

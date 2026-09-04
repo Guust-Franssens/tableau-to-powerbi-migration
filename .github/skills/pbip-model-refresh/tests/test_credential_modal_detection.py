@@ -1915,6 +1915,7 @@ def test_an_unresolvable_owner_chain_fails_closed() -> None:
     assert _credential_modal.main_frame([left, right]) is None, "a cycle leaves the root unknown"
 
 
+@pytest.mark.gui
 @pytest.mark.skipif(sys.platform != "win32", reason="creates real Win32 windows")
 def test_the_win32_harvest_reads_real_ownership_and_owner_enabled_state() -> None:
     """The modality facts must come from Win32, not from a dataclass default (#400 review round 3).
@@ -2142,6 +2143,7 @@ def _dotnet_main_window_handle(pid: int) -> int:
     return int((proc.stdout or "0").strip() or 0)
 
 
+@pytest.mark.gui
 @pytest.mark.skipif(sys.platform != "win32", reason="creates real Win32 windows")
 def test_a_native_unowned_credential_host_owning_a_tooltip_is_not_the_application() -> None:
     """Round 5's reproduction, built natively - the fourth topology to defeat frame identity.
@@ -2186,6 +2188,7 @@ def test_a_native_unowned_credential_host_owning_a_tooltip_is_not_the_applicatio
         probe.close()
 
 
+@pytest.mark.gui
 @pytest.mark.skipif(sys.platform != "win32", reason="creates real Win32 windows and shells out to PowerShell")
 def test_the_process_main_window_handle_is_a_z_order_answer_not_an_identity() -> None:
     """MEASURED, because "ask the authority" was the obvious fix and it does not work (#400 round 5).
@@ -2926,6 +2929,7 @@ $script:form.Add_Shown({ Set-Content -LiteralPath $ReadyFile -Value 'ready' -Enc
 """
 
 
+@pytest.mark.gui
 @pytest.mark.serial
 def test_an_owned_wpf_credential_modal_titled_refresh_is_a_hard_stop(tmp_path: Path) -> None:
     """Live regression for the review defect: the whole script, against a real owned WPF modal.
@@ -3382,6 +3386,7 @@ def _run_probe_against_wpf_modal(tmp_path: Path, modal_body: str, extra_args: li
         app.wait(timeout=30)
 
 
+@pytest.mark.gui
 @pytest.mark.serial
 def test_credential_text_reachable_only_through_textpattern_is_a_hard_stop(tmp_path: Path) -> None:
     """Exploit 1. `Name` + `ValuePattern` alone miss a read-only RichTextBox's content entirely."""
@@ -3391,6 +3396,7 @@ def test_credential_text_reachable_only_through_textpattern_is_a_hard_stop(tmp_p
     assert done.returncode == 1
 
 
+@pytest.mark.gui
 @pytest.mark.serial
 def test_credential_text_beyond_the_element_cap_never_reads_as_clean(tmp_path: Path) -> None:
     """Exploit 2. Truncation must not be indistinguishable from a complete, clean read.
@@ -3404,6 +3410,7 @@ def test_credential_text_beyond_the_element_cap_never_reads_as_clean(tmp_path: P
     assert "CREDENTIAL_PRESENT" not in done.stdout
 
 
+@pytest.mark.gui
 @pytest.mark.serial
 def test_credential_text_beyond_the_element_cap_convicts_when_the_cap_allows_it(tmp_path: Path) -> None:
     """The same window with the shipped cap: read in full, and convicted."""
@@ -3413,6 +3420,7 @@ def test_credential_text_beyond_the_element_cap_convicts_when_the_cap_allows_it(
     assert done.returncode == 1
 
 
+@pytest.mark.gui
 @pytest.mark.serial
 def test_a_signature_split_by_an_interposed_button_is_a_hard_stop(tmp_path: Path) -> None:
     """Exploit 3. The prose join must skip interactive elements, or `Cancel` breaks the sentence."""
@@ -3422,6 +3430,7 @@ def test_a_signature_split_by_an_interposed_button_is_a_hard_stop(tmp_path: Path
     assert done.returncode == 1
 
 
+@pytest.mark.gui
 @pytest.mark.serial
 def test_a_wedged_uia_provider_still_produces_a_verdict(tmp_path: Path) -> None:
     """The MEDIUM finding: an uncapped UIA walk let a 1s probe run 15s+ and emit nothing at all.
@@ -3675,6 +3684,7 @@ $script:timer.Add_Tick({
 """
 
 
+@pytest.mark.gui
 @pytest.mark.serial
 def test_a_native_query_prompt_beside_progress_text_is_live_reported(tmp_path: Path) -> None:
     """Round 3's High, end to end: a fully-harvested mixed window must not clear.

@@ -189,11 +189,20 @@ def test_a_failed_png_no_longer_swallows_the_svg_leg(tmp_path):
 
 
 def test_a_pre_329_site_is_reported_as_a_configuration_fault_not_a_broken_view(tmp_path):
+    """⚠️ The remedy is deliberately the CONDITIONAL one at capture time (#474).
+
+    ``_capture_render`` cannot know the site's advertised ceiling -- it is a property of the SITE and
+    nothing at that call carries it -- so it must not print the confident ``.env`` instruction, which
+    is false for any server below 3.29. ``write_manifest`` upgrades this once the run knows better;
+    the three-state contract is gated in ``tests/test_svg_server_ceiling.py``.
+    """
     session = _Session({"/data": (200, b"a\n1\n"), "image?format=svg": (400, SVG_TOO_OLD.encode())})
     record = oracle.capture_view(session, VIEW, tmp_path, frozenset({"svg"}))
     assert record["svg"]["status"] == "unsupported_api_version"
+    assert record["svg"]["cause"] == "ceiling_not_established"
     assert oracle.SVG_MIN_API_VERSION in record["svg"]["remedy"]
     assert "TABLEAU_REST_API_VERSION" in record["svg"]["remedy"]
+    assert "set it to 3.29 or later in .env" not in record["svg"]["remedy"]
 
 
 def test_a_disconnected_source_keeps_its_own_classification_and_is_not_relabelled(tmp_path):

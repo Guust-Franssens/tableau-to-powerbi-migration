@@ -326,13 +326,49 @@ subagents**, the CLI host died and wrote a crash dump into the repo root
 { "event": "Allocation failed - JavaScript heap out of memory", "trigger": "OOMError" }
 ```
 
-**Marked observed rather than measured, deliberately.** The dump was read at the time but not
-retained, so this is not reproducible from anything committed here. If it happens again, **keep the
-dump** (it is gitignored, not auto-deleted) and upgrade this claim.
+✅ **The mechanism is measured. ⚠️ The effective boundary is not explained, and ❌ the concurrency that
+reaches it has never been bisected.** The 2026-08-20 dumps were read and discarded, which is why that
+round stayed "observed". **Three** crashes have since been retained — 2026-09-03 06:00:22, 2026-09-03
+19:36:16 and 2026-09-04 01:00:36 — and all three carry `header.event` = *"Allocation failed -
+JavaScript heap out of memory"* with `header.trigger` = `OOMError`:
 
-Equally, be careful what the number means. **Six failed. Four was run repeatedly the same night
-without incident — which is not the same as four being safe**, and no one has bisected it. Treat
-"keep the wave small" as the rule and any specific ceiling as unproven.
+| dump (`javascriptHeap` unless noted) | `usedMemory` | `totalMemory` | `memoryLimit` | `availableMemory` | `resourceUsage.rss` |
+|---|---:|---:|---:|---:|---:|
+| `report.20260903.060022.36308.0.001.json` | 3,480,865,688 | 3,510,222,848 | 4,298,113,024 | 790,124,816 | 8,844,890,112 |
+| `report.20260903.193616.73536.0.001.json` | 3,437,318,968 | 3,466,874,880 | 4,298,113,024 | 833,526,904 | 8,679,428,096 |
+| `report.20260904.010036.6628.0.001.json` | 3,438,137,296 | 3,460,382,720 | 4,298,113,024 | 840,032,800 | 9,299,034,112 |
+
+Read them with `(Get-Content <dump> -Raw | ConvertFrom-Json).header.event` — the fields are nested
+under `header`, `javascriptHeap` and `resourceUsage`, so a top-level `.trigger` reads empty and looks
+like the dump is malformed when it is merely differently shaped.
+
+- ✅ **The failure reproduces at ~3.44–3.48 GB used**, each time with the heap essentially full
+  against what V8 had *currently allocated* — 99.2 % / 99.1 % / 99.4 % of `totalMemory`.
+- ⚠️ **`totalMemory` is NOT the ceiling, and the gap is unexplained.** Every dump also declares
+  `memoryLimit` = 4,298,113,024 (~4.30 GB) with ~0.8 GB still `availableMemory`, so each crash lands
+  at only 81.0 % / 80.0 % / 80.0 % of the limit V8 said it was allowed. `totalMemory` is how far the
+  heap had grown, not how far it could — quoting it as "the wall" states a ceiling this evidence does
+  not support. Closing the gap needs a run with `--max-old-space-size` and heap-growth sampling, not
+  another terminal dump.
+- ⚠️ **RSS is 2.5–2.7× the JS heap** (8.7–9.3 GB) while `resourceUsage.free_memory` still reported
+  4.7–6.5 GB free (13.9 % / 18.2 % / 19.0 % of machine RAM), so physical RAM was **not** exhausted at
+  the moment of death: an alarm configured only for near-exhaustion below 4.7 GB free would not have
+  fired at these snapshots. That is deliberately narrower than "a machine-pressure alarm would never
+  have fired" — no threshold is identified here, and a 15 %-free rule *would* have fired on the first
+  dump. Whether an RSS threshold calibrated to that 2.5–2.7× ratio could warn in time is untested: a
+  dump is a snapshot at the moment of death and says nothing about the approach to it, so these files
+  also cannot rule a gradual ramp in or out.
+- ❌ **Concurrency is known for only one of the three**, and from the session rather than the dump —
+  no dump records it. They confirm *what* kills the host, not *how many* agents it takes.
+
+⚠️ **Keep the dumps; the numbers above depend on disposable evidence.** They are gitignored
+(`git check-ignore -v` → `.gitignore:257:/report.[0-9]*.json`, and `git clean -ndX` would remove all
+three), so nothing committed to this repo proves any of this once the files are gone.
+
+Equally, be careful what the number means. **Six failed — and so did four.** The 2026-09-04 01:00:36
+crash came out of a wave of **four** (three blind reviews plus one fix agent), which retires the
+earlier reading that "four was run repeatedly the same night without incident". Treat "keep the wave
+small" as the rule and any specific safe number as unproven.
 
 Two consequences, both of which cost real work that night:
 
@@ -550,7 +586,7 @@ Step 1 answers *scope* by investigation, so only these are genuinely questions:
 | 2 | **Autonomy** — see the table below. Default `standard`. | The failure modes are symmetric: too autonomous and a run spends 105 minutes saying nothing; too interactive and an overnight run stops on question 1 and achieves nothing. |
 | 3 | **Fidelity bar** — faithful re-creation, or modernise where Power BI is better? | It decides real translations (a Tableau dual-axis trick → a native combo chart; a `MAKELINE` route map → endpoint bubbles). Both builders need it. |
 | 4 | **If we hit a wall — stop, or degrade?** | Pre-authorising the fallback is what lets an unattended run *survive* one instead of dying at 3 am. |
-| 5 | **Who drives the data refreshes?** — see the table below. Default `scripted`. | A refresh is the one long operation with **no progress signal**, so an agent cannot tell "working" from "hung" *while it is happening*. Only you know how big the source is and whether you will be at the keyboard. |
+| 5 | **Who drives the data refreshes?** — see the table below. Default `scripted`. | A refresh is the one long operation whose progress evidence is **conditional**: with the AMO trace up you get row counts, without it only elapsed time, which cannot tell "working" from "hung". Only you know how big the source is and whether you will be at the keyboard. |
 
 **Autonomy levels, defined by behaviour at a decision point — not by vibe:**
 
@@ -569,33 +605,46 @@ source was reachable.
 
 | strategy | who drives it | ceiling | you can see progress |
 |---|---|---|---|
-| **`scripted`** (default) | `refresh_pbip_model.py` | **hard 300 s** (330 s with grace), not configurable | ⚠️ an elapsed-time heartbeat only — `still refreshing, 42s / 330s` |
+| **`scripted`** (default) | `refresh_pbip_model.py` | **3600 s** on a default full refresh — whether trace setup succeeds **or fails** — and configurable; the legacy **300 s** (330 s with grace) applies only to explicit `--no-progress` and `--calculate-only`/`--measures-only` | ⚠️ conditional — row counts only once `ProgressReportCurrent` emits them, else an elapsed "waiting for first row-count event" heartbeat; non-fatal silence warning at 120 s |
 | `operator` | the agent prepares everything, stops, and asks **you** to hit Refresh in Desktop | none | ✅ per-table row counts, live in the UI |
 | `xmla` | manual XMLA/TOM against the live instance | none | ⚠️ partial |
 
-**Why it earns a slot in the intake instead of being discovered mid-run.** A refresh is the only
-routine step where *"still working"* and *"hung"* produce an identical signal — the scripted path's
-heartbeat reports **elapsed time, not work done** (`print_refresh_heartbeat` is documented as
-printing "an elapsed/total countdown *without claiming progress*"), so a slow refresh and a stuck one
-print the same line. Be precise about what it does catch: a **detected** credential modal does not
-heartbeat on, it aborts with a specific error. What survives is the case the detector cannot see —
-and the script says so itself on timeout: *"CAUSE UNKNOWN - this script cannot distinguish these two,
-and they need opposite responses"* — so the decision lands at the worst possible
-moment: mid-flight, under uncertainty, on the
-agent. Worse, the two governing rules **point in opposite directions** there. The general rule says
-time-box an unresponsive external system at ~2 minutes or 3 attempts; the carve-out says *don't*, if
-the tool announces its own deadline — and `refresh_pbip_model.py` is exactly such a tool. An agent
-that resolves that tension wrongly either kills a legitimately-running refresh (recording **no
-verdict at all** — measured) or waits indefinitely (129 minutes / 298 tool calls — also measured).
+⚠️ **This table was stale for two weeks and said the opposite** — "hard 300 s, not configurable" and
+"an elapsed-time heartbeat only". Both were fixed on 2026-08-21 (#253, #269, #283) and nobody updated
+the prose, so every agent inheriting this file was briefed against a ceiling the code no longer had.
+Re-read `refresh_pbip_model.py`'s constants before quoting a number from here.
 
-And the default's ceiling is **known to be too low for real sources**: measured against Snowflake,
-one table family took **~700–750 s** and another **~452 s**, both over the 330 s ceiling. Narrowing
-with `--tables` does **not** rescue it when a *single table* is the bottleneck rather than cumulative
-cost (proven twice, identical timeout both times). See #253.
+**Why it still earns a slot in the intake.** The default ceiling no longer kills the measured
+700–750 s Snowflake case: `REFRESH_ABSOLUTE_TIMEOUT_SECONDS = 3600.0` is deliberately sized
+"comfortably above" it, and the 120 s liveness timer reports silence **without killing** ("Killing on
+this timer would false-positive a healthy slow source"). ⚠️ **But three ways to lose a refresh
+remain, so do not read this as "the ceiling is solved":**
 
-So: if the source is large or the run is unattended, say so **now**. `operator` trades start-latency
-for a refresh that cannot silently time out and that you can watch. Picking it up front costs one
-line in the brief; discovering it at 330 s costs the refresh.
+- **`--no-progress` and `--calculate-only`/`--measures-only` stay on the legacy 300 s / 330 s path.**
+  That same 700–750 s Snowflake refresh still dies there.
+- **3600 s is still a fatal absolute backstop.** A default full refresh slower than an hour dies.
+- **Row-count evidence is not guaranteed even with the trace up.** Small tables can emit only
+  Begin/End events (#269 measured nine), so a traced refresh can stay elapsed-only for its
+  first-row latency or for its whole duration.
+
+What the **AMO/TOM assembly** changes is *observability*, not the timeout: preflight reports it as
+RECOMMENDED, and on trace-setup failure the 3600 s backstop is retained rather than reverting to
+300 s. Without AMO you keep the ceiling but lose row counts and liveness warnings, and `ImageSave`
+persist falls back to the UI path.
+
+Be precise about what the detector catches either way: a **detected** credential modal does not
+heartbeat on, it aborts with a specific error. What survives is the case the detector cannot see, and
+on a genuine timeout the script says so itself — *"CAUSE UNKNOWN - this script cannot distinguish
+these two, and they need opposite responses"*. The two governing rules also **point in opposite
+directions** there: the general rule says time-box an unresponsive external system at ~2 minutes or 3
+attempts; the carve-out says *don't*, if the tool announces its own deadline — and
+`refresh_pbip_model.py` is exactly such a tool. An agent that resolves that tension wrongly either
+kills a legitimately-running refresh (recording **no verdict at all** — measured) or waits
+indefinitely (129 minutes / 298 tool calls — also measured).
+
+So: if the source is large or the run is unattended, say so **now** — and say whether AMO is present.
+`operator` remains the choice that trades start-latency for a refresh you can watch in the UI with no
+dependency on the trace at all.
 
 ⚠️ `xmla` has a scope constraint worth stating in the brief: it must be **whole-database** scope if a
 calculated table depends on a refreshed table (e.g. a `Date` table built with
@@ -722,6 +771,11 @@ _runs/<NNN>-<slug>/
     assets/             harvest_estate_assets.py-shaped downloads
     bundle/              run_estate.py-shaped conversion output
     oracle/               capture_tableau_oracle.py-shaped reference capture
+    packages/              package_unit.py's per-unit, agent-facing handover packages — ⚠️ `--out`
+                            names a subdirectory INSIDE this one (`packages/<batch>/<Unit>/`), never
+                            `packages/` itself: `conflicting_evidence_dirs` refuses an `--out` whose
+                            parent holds `oracle/`, and a run root always does (measured: bare exits
+                            2, one level deeper exits 0). See `docs/migration-phases.md`
     deliverables/          operator-facing outputs meant for the CUSTOMER, never for git —
                             the `ses-prep/` near-miss (issue #322): a `connections.json`/`.md`
                             naming 17 real customer servers landed unprefixed, unignored, at the
@@ -736,7 +790,7 @@ ignored, which proves nothing; see `harvest_estate_assets.py`'s own guard for th
 
 **`scripts/work_dirs.py`** is the single source of truth for these paths — `sanitize_unit_key`,
 `allocate_run` (atomic `mkdir`-exclusive, retry on collision, never a read-then-write race),
-`RunPaths` (the six subdirs above as properties), and `list_runs`. It resolves the repo root from
+`RunPaths` (the seven subdirs above as properties), and `list_runs`. It resolves the repo root from
 its **own file location**, never from `Path.cwd()` — an empty stray `fabric/` was once written at
 the repo root by a script that resolved a relative path against whatever CWD an agent happened to
 invoke it from, which is exactly the failure a single importable resolver removes.
@@ -770,18 +824,17 @@ replay convention, and committed deliverables respectively, none of them per-run
   | stage | location | rule |
   |---|---|---|
   | engine truth | `<bundle>/reports/`; `<bundle>/semantic_models/` (if emitted) | **NEVER edit an existing baseline** |
-  | working copy | `<bundle>/pbip/` | agents edit **here**; every edit re-runnable from `_build/` and declared |
+  | working copy | `<bundle>/pbip/`, or `<package>/fabric/` when you were handed a PACKAGE | agents edit **here**; whichever tree you were handed is CANONICAL. `declare_generated_edit.py` / `--tamper` cover BUNDLE work only (#460) |
   | deliverable | `migrations/{workbooks,datasources}/<slug>/fabric/` | **COPIED at sign-off**, so the bundle survives as evidence |
 
   A bundle may contain `<bundle>/{pbip,reports,semantic_models,handover,data}` — **no `out/` level**;
   `<bundle>/semantic_models/` is conditional (absent for 8/12 workbooks), and absent baseline ≠ no
-  changes — see `AGENTS.md`. Keep `<bundle>/reports/` pristine and compare it with git
-  (`powerbi-report-gotchas` §3).
+  changes — see `AGENTS.md`.
 
   ⚠️ **The copy must keep
   `definition.pbir`'s `byPath` resolving** — plain copy for a per-workbook model, path rewrite for a
-  shared datasource; never ship `<bundle>/reports/` (reference-only: no model beside it). Mechanics:
-  `powerbi-report-gotchas` §3.
+  shared datasource; never ship `<bundle>/reports/` (reference-only: no model beside it) and never
+  edit it - keep it pristine and diff it with git. Mechanics: `powerbi-report-gotchas` §3.
 
 - **Structural validation is necessary, not sufficient.** A clean parse/validate proves shape, not
   correctness: TMDL deserialization and `powerbi-report-author validate` both pass defects that only
