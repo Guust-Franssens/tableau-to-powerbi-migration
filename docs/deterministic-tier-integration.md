@@ -501,14 +501,16 @@ path**).*
    never in emitted M. Run the same scan over emitted M; add `#"Name"` resolution to
    `openability_selfcheck`. ✅ **Landed**: `m_parameters_defined` is present on 44/44 workbooks at
    2.339.0 and is the one check that failed anywhere in that run.
-6. 🟠 **`openability_selfcheck` loses `not_evaluated` on the post-wrap re-check.**
+6. ✅ **FIXED UPSTREAM — `openability_selfcheck` loses `not_evaluated` on the post-wrap re-check.**
    `migrate_estate._recheck_openability_after_wrap` rebuilds the payload with only
    `ok`/`checks`/`issues`/`rechecked_after_row_predicate_wrap`, dropping `not_evaluated` and
    `reference_case_mismatches` — so the tri-state discipline the engine documents fails on precisely
    the payload whose check set was recomputed. Measured 2.339.0: 1 of 44, and it is the payload with
    `rechecked_after_row_predicate_wrap: true`. **Filed** as
    [`tableau-fabric-skills#183`](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/183) — a
-   regression from the fix for upstream #177 that retracts the disclosure upstream #141 added.
+   regression from the fix for upstream #177 that retracts the disclosure upstream #141 added —
+   and **fixed in engine 2.340.0**, below our canonical 2.353.0, so both keys now survive the
+   re-check. Kept here because the finding is what produced the fix (audit: issue #486).
 7. 🟠 **No rebase seam** — absolute paths are correct but unrelocatable; a `SourceFolder` parameter
    fixes it upstream for everyone.
 8. 🟡 **Contradictory counters** — `workbooks_viz_warned = 0` vs `visuals_warned = 56`.
