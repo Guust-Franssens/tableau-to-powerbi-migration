@@ -245,10 +245,10 @@ def project_estate_path_ceiling(output_root: Path, unit_names: list[str] | None)
 
 def preflight_estate_path_ceiling(input_dir: Path, output_root: Path) -> tuple[bool, str]:
     """Refuse an estate whose canonical downstream PBIP skeleton exceeds Desktop's ceilings."""
-    names = _input_unit_names(input_dir)
     try:
+        names = _input_unit_names(input_dir)
         projection = project_estate_path_ceiling(output_root, names)
-    except (UnicodeEncodeError, ValueError) as exc:
+    except (OSError, RuntimeError, UnicodeEncodeError, ValueError) as exc:
         return False, (
             f"CANNOT ASSESS downstream PBIP path length ({type(exc).__name__}: {exc}). "
             "Allocate/use a shorter run/output root, then retry."
