@@ -50,6 +50,8 @@ dev = [
 py-modules = []
 
 [tool.pytest.ini_options]
+# Default to reporting failed, skipped, and error details so evidence is visible (issues #435, #436).
+addopts = "-rfsE"
 # pytest skips dot-directories by default (`norecursedirs` includes `.*`), so the tests bundled
 # inside `.github/skills/<skill>/tests/` were collected by NOBODY - the code moved out of `tests/`
 # would have gone silently ungated. Naming the roots explicitly is what makes a self-contained skill

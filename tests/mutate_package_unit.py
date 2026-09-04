@@ -21,8 +21,8 @@ repo already trusts, and both of its refusals have caught false 100% scores here
 * a no-op NEGATIVE CONTROL runs through the identical path and must SURVIVE, which proves the
   harness can report a survivor at all.
 
-Each mutation names the single anchor test it must kill and is run against that anchor alone, so a
-"caught" verdict cannot be borrowed from an unrelated failure.
+Each mutation names the anchor tests it must kill and is run against each anchor alone, so a "caught"
+verdict cannot be borrowed from an unrelated failure.
 """
 
 from __future__ import annotations
@@ -277,7 +277,9 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
         "README: send the agent back to the bundle to edit (issue #460's silent-discard shape)",
         PACKAGER,
         "| `fabric/` | the engine WORKING COPY - **edit here**, and when you work from a package THIS tree "
-        "is canonical; `<bundle>/pbip/` never promotes over it.",
+        "is canonical; `<bundle>/pbip/` never promotes over it. Re-running `package_unit.py` into this "
+        "folder REFUSES (exit 3) rather than discarding what you changed - `--discard-package-edits` "
+        "overrides. Declared-edit tooling (`declare_generated_edit.py`, `--tamper`) is bundle-only.",
         "| `fabric/` | a copy of the engine working copy; edit `<bundle>/pbip/` instead.",
         [
             "test_AGENTS_md_and_the_package_readme_agree_on_where_an_agent_edits",
@@ -575,16 +577,17 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
 ]
 
 _FAILED = re.compile(r"(\d+) failed")
+_ERROR = re.compile(r"(\d+) errors?\b|^(?:ERROR|INTERNALERROR)\b", re.IGNORECASE | re.MULTILINE)
 
 
-def run_anchor(names: list[str]) -> tuple[str, str]:
-    """Run only the anchor tests; return (verdict, note).
+def run_one_anchor(name: str) -> tuple[str, str]:
+    """Run one anchor test; return (verdict, note).
 
     ``encoding="utf-8"`` is load-bearing on Windows: ``text=True`` alone decodes the child's stdout
     with the console codepage, and this file's own ``⚠️`` caveats appear in failing assertions.
     """
     proc = subprocess.run(  # noqa: S603
-        [sys.executable, "-m", "pytest", *[str(suite) for suite in SUITES], "-q", "-k", " or ".join(names)],
+        [sys.executable, "-m", "pytest", *[str(suite) for suite in SUITES], "-q", "-k", name],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -592,14 +595,32 @@ def run_anchor(names: list[str]) -> tuple[str, str]:
         check=False,
         cwd=REPO_ROOT,
     )
-    tail = (proc.stdout or "")[-4000:]
+    tail = f"{proc.stdout or ''}\n{proc.stderr or ''}"[-4000:]
+    last = tail.strip().splitlines()[-1] if tail.strip() else "no output"
+    if _ERROR.search(tail):
+        return "BROKEN", last
     failed = _FAILED.search(tail)
     if failed:
         return f"CAUGHT ({failed.group(1)} failed)", ""
-    last = tail.strip().splitlines()[-1] if tail.strip() else "no output"
-    if proc.returncode != 0 or "error" in tail.lower():
+    if proc.returncode != 0:
         return "BROKEN", last
     return "SURVIVED", last
+
+
+def run_anchor(names: list[str]) -> tuple[str, str]:
+    """Run each declared anchor independently; every one must observe the mutation."""
+    outcomes = [(name, *run_one_anchor(name)) for name in names]
+    broken = [(name, note) for name, verdict, note in outcomes if not verdict.startswith(("CAUGHT", "SURVIVED"))]
+    if broken:
+        return "BROKEN", "; ".join(f"{name}: {note}" for name, note in broken)
+
+    caught = [name for name, verdict, _note in outcomes if verdict.startswith("CAUGHT")]
+    missed = [name for name, verdict, _note in outcomes if verdict == "SURVIVED"]
+    if len(caught) == len(outcomes):
+        return (outcomes[0][1], outcomes[0][2]) if len(outcomes) == 1 else (f"CAUGHT ({len(caught)} anchors)", "")
+    if caught:
+        return "PARTIAL-ANCHOR", f"caught: {', '.join(caught)}; missed: {', '.join(missed)}"
+    return "SURVIVED", "; ".join(f"{name}: {note}" for name, _verdict, note in outcomes)
 
 
 def run_campaign(selected: list[tuple[str, Path, str, str, list[str]]]) -> list[tuple[str, str, str]]:
