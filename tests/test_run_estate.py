@@ -59,14 +59,17 @@ def _write(path: Path, text: str = "x") -> Path:
 
 
 def _root_for_length(length: int) -> Path:
-    """A synthetic absolute-like root with an exact UTF-16 length."""
-    return Path("/" + "r" * (length - 1))
+    """A synthetic resolved root with an exact UTF-16 length on the current host."""
+    anchor = Path.cwd().anchor
+    return Path(anchor + "r" * (length - utf16_len(anchor))).resolve()
 
 
 def _boundary_root(unit: str, ceiling: int) -> Path:
-    probe = run_estate.project_estate_path_ceiling(Path("/r"), [unit])
+    probe_root = Path("/r").resolve()
+    probe = run_estate.project_estate_path_ceiling(probe_root, [unit])
     file_length = next(path["length"] for path in probe["paths"] if path["kind"] == "file")
-    return _root_for_length(1 + ceiling - file_length + 1)
+    target_length = utf16_len(str(probe_root)) + ceiling - file_length
+    return _root_for_length(target_length)
 
 
 # ---------------------------------------------------------------------------
@@ -131,11 +134,18 @@ def test_pbir_envelope_is_pinned_to_committed_artifacts() -> None:
 
 
 def test_realistic_long_estate_is_refused_by_conservative_pbir_envelope() -> None:
-    projection = run_estate.project_estate_path_ceiling(_root_for_length(90), ["u" * 37])
+    root = _root_for_length(90)
+    unit = "u" * 37
+    projection = run_estate.project_estate_path_ceiling(root, [unit])
     file_path = next(path for path in projection["paths"] if path["kind"] == "file")
     directory = next(path for path in projection["paths"] if path["kind"] == "directory")
-    assert file_path["length"] == 269
-    assert directory["length"] == 257
+    report_root = Path("pbip") / unit / f"{unit}.Report"
+    visual_tail = Path(run_estate._PBIR_VISUAL_TAIL)
+    assert utf16_len(str(root)) == 90
+    assert file_path["length"] == utf16_len(str(root)) + 1 + utf16_len(str(report_root / visual_tail))
+    assert directory["length"] == utf16_len(str(root)) + 1 + utf16_len(
+        str(report_root / visual_tail.parent)
+    )
     assert projection["status"] == "over_ceiling"
 
 
