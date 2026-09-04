@@ -14,6 +14,7 @@ would produce a false ``verified``, which is the single worst outcome in this sy
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from decimal import Decimal
@@ -28,9 +29,13 @@ dos = importlib.util.module_from_spec(spec)
 sys.modules["dax_oracle_server"] = dos
 spec.loader.exec_module(dos)
 
+SIMULATE_ENGINE_ABSENT = "T2P_SIMULATE_ENGINE_ABSENT_FOR_TESTS"
+
 
 def _contract():
     """The engine's contract module, or None when the deterministic tier is not installed."""
+    if os.environ.get(SIMULATE_ENGINE_ABSENT):
+        return None
     return dos._load_contract()
 
 

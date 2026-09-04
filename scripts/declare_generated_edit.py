@@ -1,12 +1,37 @@
 """
-purpose: run a generated-artifact fix script and record before/after hashes for tamper detection.
+purpose: run a generated-artifact fix script, record before/after hashes for tamper detection, and
+         write a NAVIGATIONAL replay-manifest row so the script stays findable (issue #259).
 usage:   python scripts/declare_generated_edit.py --bundle <dir> --target <generated-path>
-                                           --script <_build/fix_*.py> [-- <script-args>...]
+                                           --script <_build/fix_*.py>
+                                           [--purpose <one-line reason>] [-- <script-args>...]
 
 This is an audit wrapper, not an authorization system. It records what a replayable fix script did so
 ``check_migration_progress.py --tamper`` can distinguish declared repairs from silent drift. Anyone
 who can edit the bundle can also forge the JSON record; review still has to decide whether the script
 is a legitimate, idempotent repair.
+
+The replay-manifest row (issue #259)
+-------------------------------------
+161 replay scripts existed across a real estate with no way to enumerate them: the convention
+mandated writing a replay script for every generated edit, but never mandated making it findable.
+A drift declaration is written only when the target's hash actually changed - a correct, idempotent
+fix script re-run a second time prints ``DECLARE: NO_CHANGE`` and records no declaration, so an
+idempotent re-run used to make the script invisible again. The row written here (via
+``generated_edit_declarations.write_replay_registration``) is written UNCONDITIONALLY - even on the
+`DECLARE: NO_CHANGE` path - and is keyed by a collision-safe digest of TARGET, so re-declaring the
+same edit updates its own row instead of accumulating a second, contradictory one, while two
+distinct targets never collide onto the same row.
+
+This manifest is deliberately an INDEX FOR DISCOVERABILITY, not a verification gate: it does not
+prove the named script still exists on disk, that it matches any digest, that it belongs to a
+package, or that it covers every generated edit in the bundle. Nothing consumes it as a sign-off
+condition. A CLI check_replay_manifest.py has been descoped from this change per review; anything
+stronger than "find the script that made this edit" is future work tracked under issue #259.
+
+Ordering: the authoritative generated-edit declaration (`--tamper` evidence) is computed and
+persisted BEFORE this best-effort navigational row is attempted. A failure writing the manifest row
+is surfaced explicitly (a warning on stderr) but never discards or precedes the authoritative
+declaration - an applied, hash-changing edit is never left with zero declarations.
 """
 
 from __future__ import annotations
@@ -18,7 +43,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from generated_edit_declarations import append_generated_edit_declaration
+from generated_edit_declarations import append_generated_edit_declaration, write_replay_registration
 
 GENERATED_ARTIFACTS_KEY = "generated_artifacts"
 
@@ -44,6 +69,29 @@ def load_generated_run(bundle: Path) -> dict:
     if not isinstance(generated, dict) or generated.get("version") != 1 or not generated.get("run_id"):
         raise ValueError(f"{bundle / 'input_manifest.json'} has no generated_artifacts v1 run identity")
     return generated
+
+
+def script_identity_of(bundle: Path, script: Path) -> str:
+    """A replay script's manifest key: bundle-relative when possible, absolute otherwise."""
+    return script.relative_to(bundle).as_posix() if script.is_relative_to(bundle) else str(script)
+
+
+def register_replay_script(bundle: Path, script: Path, target: Path, purpose: str) -> Path:
+    """Write this replay script's navigational manifest row (issue #259) - unconditionally, even on
+    a `DECLARE: NO_CHANGE` run, since findability doesn't depend on whether the target's hash
+    changed this time. This is a discoverability index only, not proof of anything about the
+    script or the edit - see the module docstring."""
+    generated = load_generated_run(bundle)
+    return write_replay_registration(
+        bundle,
+        {
+            "version": 1,
+            "run_id": generated["run_id"],
+            "target": target.relative_to(bundle).as_posix(),
+            "script_identity": script_identity_of(bundle, script),
+            "purpose": purpose,
+        },
+    )
 
 
 def append_declaration(
@@ -81,6 +129,9 @@ def main(argv: list[str] | None = None) -> int:
         "--target", required=True, type=Path, help="generated artifact path, absolute or bundle-relative"
     )
     parser.add_argument("--script", required=True, type=Path, help="replayable fix script to run")
+    parser.add_argument(
+        "--purpose", default="", help="one-line reason this replay script exists, for the navigational manifest"
+    )
     parser.add_argument("script_args", nargs=argparse.REMAINDER, help="arguments passed to the fix script after --")
     args = parser.parse_args(argv)
 
@@ -94,12 +145,26 @@ def main(argv: list[str] | None = None) -> int:
     if result.returncode != 0:
         return result.returncode
 
+    # Authoritative first: the generated-edit declaration is what `check_migration_progress.py
+    # --tamper` relies on, and it must exist whenever the target actually changed - regardless of
+    # whether the best-effort navigational manifest write below succeeds. Compute the after-hash and
+    # persist that declaration before attempting the (non-authoritative) replay-manifest row, so a
+    # failure in the latter can never leave `target=after` with zero declarations.
     after = sha256_file(target) if target.is_file() else None
     if before == after:
-        print(f"DECLARE: NO_CHANGE {target}")
+        message = f"DECLARE: NO_CHANGE {target}"
+    else:
+        declaration = append_declaration(bundle, target, script, before, after)
+        message = f"DECLARE: RECORDED {target.relative_to(bundle).as_posix()} -> {declaration}"
+
+    try:
+        registration = register_replay_script(bundle, script, target, args.purpose)
+    except OSError as exc:
+        print(message)
+        print(f"WARNING: navigational replay-manifest write failed for {target}: {exc}", file=sys.stderr)
         return 0
-    declaration = append_declaration(bundle, target, script, before, after)
-    print(f"DECLARE: RECORDED {target.relative_to(bundle).as_posix()} -> {declaration}")
+
+    print(f"{message} (registered {registration})")
     return 0
 
 

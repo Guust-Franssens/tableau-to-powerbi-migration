@@ -666,6 +666,40 @@ def parse_data_sources(
     return data_sources, instance_maps, name_to_id_maps
 
 
+def _zero_data_source_limitation(root: etree._Element, data_sources: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """`parse_data_sources` only scans 'datasources/datasource'. A workbook whose root shape puts
+    <datasource> elements somewhere else silently yields zero data sources with no record that
+    anything was missed - indistinguishable from a genuinely empty workbook. Flag it either way,
+    naming what was searched, so downstream gates don't read silence as "correctly parsed empty"."""
+    if data_sources:
+        return None
+    reached = root.findall("datasources/datasource")
+    everywhere = root.findall(".//datasource")
+    if len(everywhere) > len(reached):
+        return {
+            "item": "workbook",
+            "issue": (
+                f"parse_data_sources found 0 usable data source(s) via the standard "
+                f"'datasources/datasource' XML path, but {len(everywhere)} <datasource> element(s) "
+                "exist elsewhere in the workbook that this path did not reach. The workbook's root "
+                "shape likely differs from what this parser expects; treat data_sources as UNKNOWN, "
+                "not genuinely empty, until the shape is investigated"
+            ),
+            "severity": "high",
+            "stage": "parse",
+        }
+    return {
+        "item": "workbook",
+        "issue": (
+            "parse_data_sources found 0 data source(s) searching 'datasources/datasource'; this "
+            "workbook may genuinely have no data sources, or its root shape is not recognised by "
+            "this parser - verify before treating it as a correctly-parsed empty workbook"
+        ),
+        "severity": "medium",
+        "stage": "parse",
+    }
+
+
 def _resolve_shelf(shelf_text: str | None, ds_instance_map: dict[str, str]) -> list[dict[str, Any]]:
     """Tokenize a Tableau shelf expression (e.g. '([ds].[a] / [ds].[b])') into resolved field refs.
     Falls back to a raw, unresolved note when a token can't be matched to a known field id."""
@@ -1262,6 +1296,273 @@ def _live_source_limitation(ds: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_DOUBLED_OPERATOR_RE = re.compile(r"<{2,}|>{2,}")
+_LITERAL_ESCAPE_RE = re.compile(r"\\[nt]")
+_DOLLAR_QUOTE_RE = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$")
+_ARRAY_EXPRESSION_RE = re.compile(
+    r"(?:\(\s*)?(?:ARRAY\s*\[.*\]|\barray_value\s*\([^()]*\))\s*\)?$",
+    re.IGNORECASE | re.DOTALL,
+)
+_SQL_LINE_START_RE = re.compile(
+    r"\s*(?:[+*]|/(?!\*)|-(?!-)|(?:ALTER|CREATE|DELETE|DROP|EXCEPT|FROM|GROUP|HAVING|INSERT|INTERSECT|LIMIT|OFFSET|"
+    r"ORDER|SELECT|UNION|UPDATE|WHERE|WITH)\b)",
+    re.IGNORECASE,
+)
+_SQL_KEYWORDS = frozenset(
+    {
+        "AS",
+        "AND",
+        "BY",
+        "CASE",
+        "DELETE",
+        "DISTINCT",
+        "ELSE",
+        "FROM",
+        "GROUP",
+        "HAVING",
+        "INSERT",
+        "INTO",
+        "JOIN",
+        "LIMIT",
+        "NOT",
+        "ON",
+        "ORDER",
+        "OR",
+        "SELECT",
+        "SET",
+        "THEN",
+        "UPDATE",
+        "WHERE",
+        "WHEN",
+    }
+)
+
+
+def _is_bracket_quoted_identifier(sql: str, index: int) -> bool:
+    """Return whether `[` at index begins a SQL Server/SQLite quoted identifier."""
+    prefix = sql[:index]
+    before = prefix.rstrip()
+    if not before:
+        return True
+    if before[-1] == ")":
+        return len(before) < len(prefix) and _ARRAY_EXPRESSION_RE.search(before) is None
+    if before[-1] in {"(", ".", ","}:
+        return True
+    word = re.search(r"[A-Za-z_][A-Za-z0-9_]*$", before)
+    if word is not None and word.group().upper() in _SQL_KEYWORDS:
+        return True
+    if len(before) < len(prefix):
+        return before[-1].isdigit()
+    return False
+
+
+def _mask_dollar_quoted_string(sql: str, masked: list[str], index: int) -> int | None:
+    """Mask a PostgreSQL dollar-quoted literal, returning its end offset if one begins at index."""
+    delimiter_match = _DOLLAR_QUOTE_RE.match(sql, index)
+    if delimiter_match is None:
+        return None
+    delimiter = delimiter_match.group()
+    end = sql.find(delimiter, delimiter_match.end())
+    body_end = len(sql) if end == -1 else end
+    for body_index in range(delimiter_match.end(), body_end):
+        masked[body_index] = "#"
+    return len(sql) if end == -1 else end + len(delimiter)
+
+
+def _mask_sql_strings_and_comments(sql: str) -> tuple[str, list[tuple[int, int, bool]]]:
+    """Return (masked, comment_spans) for a raw custom-SQL string.
+
+    `masked` is the same length as `sql` with the BODY of every string literal ('...', "...", or
+    `...`), bracket-quoted identifier (`[...]`), and comment (`-- ...` to end-of-line/string,
+    `/* ... */`) replaced by '#'. Doubled comparison operators found only inside quoted content are
+    DATA, not a corrupted operator (e.g. a customer's literal `'a<<b'` sentinel value), and #80's
+    own suggested fix says to check "outside strings/comments" - so masking those spans is what keeps
+    the doubled-operator lint from flagging quoted content while still catching a real `<<`/`>>` in
+    the SQL itself.
+
+    `comment_spans` are (start, end, unterminated_line_comment) offsets into the ORIGINAL `sql` for
+    each comment body. A quote character is not tracked as "escaped" via a preceding backslash here
+    (Tableau custom SQL commonly targets ANSI dialects where `''`/`""` doubling is the escape, not
+    backslash) - only the doubled-quote convention is honored, which is enough to keep this a
+    best-effort lint rather than a full SQL parser.
+    """
+    n = len(sql)
+    masked = list(sql)
+    comment_spans: list[tuple[int, int, bool]] = []
+    i = 0
+    while i < n:
+        two = sql[i : i + 2]
+        dollar_quote_end = _mask_dollar_quoted_string(sql, masked, i)
+        if dollar_quote_end is not None:
+            i = dollar_quote_end
+            continue
+        if two == "--":
+            start = i + 2
+            masked[i] = "#"
+            masked[i + 1] = "#"
+            j = start
+            while j < n and sql[j] != "\n":
+                masked[j] = "#"
+                j += 1
+            comment_spans.append((start, j, j == n))
+            i = j
+            continue
+        if two == "/*":
+            start = i + 2
+            masked[i] = "#"
+            masked[i + 1] = "#"
+            j = start
+            while j < n and sql[j : j + 2] != "*/":
+                masked[j] = "#"
+                j += 1
+            comment_spans.append((start, j, False))
+            if j < n:
+                masked[j] = "#"
+                masked[j + 1] = "#"
+            i = j + 2
+            continue
+        if sql[i] in "'\"`" or (sql[i] == "[" and _is_bracket_quoted_identifier(sql, i)):
+            quote = "]" if sql[i] == "[" else sql[i]
+            j = i + 1
+            while j < n:
+                if sql[j] == quote:
+                    if sql[j + 1 : j + 2] == quote:  # doubled-quote escape, stays inside the literal
+                        masked[j] = "#"
+                        masked[j + 1] = "#"
+                        j += 2
+                        continue
+                    j += 1
+                    break
+                masked[j] = "#"
+                j += 1
+            i = j
+            continue
+        i += 1
+    return "".join(masked), comment_spans
+
+
+def _sql_snippet(sql: str, start: int, end: int, radius: int = 24) -> str:
+    """Return a short, single-line context window around sql[start:end] for a limitation message."""
+    lo, hi = max(0, start - radius), min(len(sql), end + radius)
+    snippet = sql[lo:hi].replace("\n", "\\n").replace("\t", "\\t")
+    return f"...{snippet}..." if (lo > 0 or hi < len(sql)) else snippet
+
+
+def _has_executable_sql(masked: str) -> bool:
+    """Return whether SQL remains after comments and whitespace are removed."""
+    return bool(re.sub(r"[#\s;]+", "", masked))
+
+
+def _custom_sql_limitations(table: dict[str, Any]) -> list[dict[str, Any]]:
+    """REPORT (never repair) suspicious inherited custom SQL, per #80: a doubled comparison operator
+    (`<<`/`>>`, e.g. from a corrupted `<`/`>`) or a literal two-character `\\n`/`\\t` escape.
+
+    Deliberately REPORT, not repair or refuse: `<<` might be corrupted source, or it might be a
+    legitimate operator in the source dialect (e.g. a bitwise shift, or Postgres's network
+    contains-or-equal `<<`). Guessing which and rewriting the customer's SQL is worse than naming the
+    ambiguity - see the design rationale in this PR's description. Downstream (an agent or repair
+    script) decides what to do with the flag; this function only ever reads `custom_sql`.
+    """
+    sql = table.get("custom_sql")
+    if table.get("source_relation") == "custom-sql" and (not isinstance(sql, str) or not sql.strip()):
+        return [
+            {
+                "item": table["id"],
+                "issue": (
+                    f"custom SQL relation for table '{table.get('name', table['id'])}' has no SQL text, "
+                    "so it cannot be assessed or migrated faithfully. ACTION: recover the custom SQL "
+                    "from the Tableau source system before migration."
+                ),
+                "severity": "high",
+                "stage": "parse",
+            }
+        ]
+    if not isinstance(sql, str):
+        return []
+    found: list[dict[str, Any]] = []
+    masked, comment_spans = _mask_sql_strings_and_comments(sql)
+    if not _has_executable_sql(masked):
+        return [
+            {
+                "item": table["id"],
+                "issue": (
+                    f"custom SQL relation for table '{table.get('name', table['id'])}' has no executable "
+                    "SQL statement, so it cannot be assessed or migrated faithfully. ACTION: recover the "
+                    "custom SQL from the Tableau source system before migration."
+                ),
+                "severity": "high",
+                "stage": "parse",
+            }
+        ]
+
+    operator_hits = list(_DOUBLED_OPERATOR_RE.finditer(masked))
+    if operator_hits:
+        snippets = ", ".join(_sql_snippet(sql, m.start(), m.end()) for m in operator_hits)
+        found.append(
+            {
+                "item": table["id"],
+                "issue": (
+                    f"custom SQL for table '{table.get('name', table['id'])}' contains a doubled "
+                    f"comparison operator ({snippets}) outside any string literal/comment. This is "
+                    "either corrupted source SQL (a single '<' or '>' was likely meant) or a "
+                    "legitimate operator in the source dialect (e.g. a bitwise shift, or a "
+                    "database-specific operator such as Postgres's network '<<'). NOT auto-repaired: "
+                    "rewriting inherited SQL on a guess risks silently changing query semantics. "
+                    "ACTION: confirm intent against the source system before this table's custom SQL "
+                    "is migrated into Power Query M."
+                ),
+                "severity": "medium",
+                "stage": "parse",
+            }
+        )
+
+    raw_escapes = list(_LITERAL_ESCAPE_RE.finditer(sql))
+    swallowed_matches = [
+        match
+        for match in raw_escapes
+        if any(
+            start <= match.start() < end and unterminated and _SQL_LINE_START_RE.match(sql[match.end() : end])
+            for start, end, unterminated in comment_spans
+        )
+    ]
+    swallowed_positions = {match.start() for match in swallowed_matches}
+    swallowed_escapes = sorted({match.group(0) for match in swallowed_matches})
+    other_escapes = sorted({match.group(0) for match in raw_escapes if match.start() not in swallowed_positions})
+    if swallowed_escapes:
+        found.append(
+            {
+                "item": table["id"],
+                "issue": (
+                    f"custom SQL for table '{table.get('name', table['id'])}' has a literal "
+                    f"two-character escape ({', '.join(swallowed_escapes)}) inside an unterminated "
+                    "line comment. A literal backslash-n/backslash-t does NOT terminate '--' (only a "
+                    "real line break does), so any following SQL is silently swallowed into the comment "
+                    "and never executed. NOT auto-repaired: confirm against the "
+                    "source system whether this is a corrupted line break/tab or intentional literal "
+                    "text before this table's custom SQL is migrated into Power Query M."
+                ),
+                "severity": "high",
+                "stage": "parse",
+            }
+        )
+    if other_escapes:
+        found.append(
+            {
+                "item": table["id"],
+                "issue": (
+                    f"custom SQL for table '{table.get('name', table['id'])}' has a literal "
+                    f"two-character escape ({', '.join(other_escapes)}). This may be corrupted inherited "
+                    "SQL, but no unterminated line comment was found. NOT auto-repaired: confirm against "
+                    "the source system whether this is a corrupted line break/tab or intentional literal "
+                    "text before this table's custom SQL is migrated into Power Query M."
+                ),
+                "severity": "medium",
+                "stage": "parse",
+            }
+        )
+    return found
+
+
 def _flatten_zones(zone: dict[str, Any]) -> list[dict[str, Any]]:
     """Depth-first flatten of a dashboard zone tree into one list, parents before children.
 
@@ -1275,10 +1576,14 @@ def _flatten_zones(zone: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
-def collect_limitations(spec: dict[str, Any]) -> list[dict[str, Any]]:
+def collect_limitations(spec: dict[str, Any], root: etree._Element | None = None) -> list[dict[str, Any]]:
     """Scan the parsed spec for known risk areas (extract-based sources, LOD/table calcs, unresolved
     shelf references) and emit limitations_encountered entries for the honest capabilities writeup."""
     limitations = []
+    if root is not None:
+        zero_ds_limitation = _zero_data_source_limitation(root, spec["data_sources"])
+        if zero_ds_limitation is not None:
+            limitations.append(zero_ds_limitation)
     for ds in spec["data_sources"]:
         published = ds.get("published_datasource")
         if published:
@@ -1321,6 +1626,8 @@ def collect_limitations(spec: dict[str, Any]) -> list[dict[str, Any]]:
             )
         for f in ds["fields"]:
             limitations.extend(_field_limitations(f))
+        for t in ds["tables"]:
+            limitations.extend(_custom_sql_limitations(t))
     limitations.extend(_worksheet_limitations(spec))
     limitations.extend(_dashboard_limitations(spec))
     return limitations
@@ -1527,7 +1834,7 @@ def parse_workbook(path: Path) -> dict[str, Any]:
         "limitations_encountered": [],
     }
     annotate_known_idioms(spec)
-    spec["limitations_encountered"] = collect_limitations(spec)
+    spec["limitations_encountered"] = collect_limitations(spec, root)
     return spec
 
 

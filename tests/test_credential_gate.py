@@ -59,6 +59,10 @@ def _append_audit(migration: Path, action: str, detail: str) -> None:
         "action": action,
         "detail": detail,
         "user": "test",
+        # Real `_audit()` always stamps `scope`; issue #354's review tightened `_audit_entries` to
+        # drop any entry missing it (a stripped-scope copy is no longer "legacy", it is untrusted).
+        # An unscoped synthetic fixture would now be silently dropped and never actually exercised.
+        "scope": str(migration.resolve()),
     }
     with (migration / ".credential-gate-audit.log").open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(audit) + "\n")
@@ -489,13 +493,26 @@ def test_evidence_predating_the_most_recent_block_does_not_count(migration: Path
 
     The audit log is a text file and cannot be made unforgeable at same-user privilege - that is
     documented, not hidden. Ordering at least means stale or backdated evidence earns nothing.
+
+    The forged entry carries the migration's own `scope` - a real same-user forger can trivially
+    copy that field too, so omitting it here would test something else entirely: issue #354's
+    mixed-scope-poisoning requirement now makes an entry with no/mismatched `scope` untrust the
+    WHOLE trail (exit 3, "cannot assess"), not just this one entry. Stamping the real scope isolates
+    the ordering assertion this test is actually about from that unrelated, newer check.
     """
     import json as _json
 
     run_gate("block", str(migration), "--sources", "x")
     run_gate("clear", str(migration), "--reason", "sneaky")
     audit = migration / ".credential-gate-audit.log"
-    forged = _json.dumps({"ts": "2020-01-01T00:00:00+00:00", "action": "probe-cleared", "detail": "forged"})
+    forged = _json.dumps(
+        {
+            "ts": "2020-01-01T00:00:00+00:00",
+            "action": "probe-cleared",
+            "detail": "forged",
+            "scope": str(migration.resolve()),
+        }
+    )
     audit.write_text(audit.read_text(encoding="utf-8") + forged + "\n", encoding="utf-8")
     (migration / "fabric" / "M.tmdl").write_text("table x", encoding="utf-8")
     assert run_gate("verify", str(migration)).returncode == 1, "backdated evidence must not count"
@@ -1523,6 +1540,613 @@ def test_an_earned_clear_still_verifies_clean_for_a_live_source(tmp_path: Path) 
     assert "no gate was ever applied" not in out, "this migration WAS gated - it passed by earning the lift"
 
 
+# --- issue #354: `verify` must not pass vacuously at a ship destination with no audit history ---
+#
+# The mandated final gate reads `.credential-gate-audit.log` at EXACTLY the path it is given, and
+# nowhere else. The documented ship step copies built artifacts from an engine bundle to
+# `migrations/{workbooks,datasources}/<slug>/fabric/` - a location that never had a gate armed at
+# it, so it never got an audit log either. Before this fix, `verify` there reported "OK - no gate
+# was ever applied" (exit 0), indistinguishable from a migration that genuinely never needed one.
+#
+# Three states, three exit codes:
+#   0 - a gate was applied and passed, or genuinely never needed one, at a legitimate gate root
+#   1 - a gate was applied and failed (unchanged, pre-existing)
+#   3 - no audit history exists here AT ALL, and this is not a place a gate could have been armed
+
+
+def test_a_ship_destination_copy_with_no_audit_history_CANNOT_be_verified_ok(tmp_path: Path) -> None:
+    """State 3: the exact vacuous-pass reproduction from issue #354, pinned.
+
+    A directory that carries built model artifacts (as a plain copy of engine-bundle output would),
+    but none of the scope markers (`migration-spec.json`, `engine-output-receipt.json`,
+    `input_manifest.json`) that would make it a legitimate place for a gate to have been armed, and
+    no `.credential-gate-audit.log` either. This is the shape of
+    `migrations/workbooks/<name>/fabric/` after the documented sign-off copy: real artifacts, zero
+    audit history. `verify` must refuse to call this clean.
+    """
+    ship_destination = tmp_path / "migrations" / "workbooks" / "some-dash" / "fabric"
+    ship_destination.mkdir(parents=True)
+    (ship_destination / "model.tmdl").write_text("table Shipment")  # copied engine output, no receipt beside it
+
+    proc = run_gate("verify", str(ship_destination))
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode == 3, f"a no-audit-history ship copy must not verify OK or as a violation:\n{out}"
+    assert "CANNOT ASSESS" in out
+    assert "GATE VERIFY: OK" not in out, "must never print the same verdict as a genuine never-gated pass"
+
+
+def test_extract_only_at_its_own_spec_root_still_verifies_ok_state_1(tmp_path: Path) -> None:
+    """Negative control: a genuine pass must still exit 0 (state 1 is not swallowed by state 3).
+
+    Identical shape to the state-3 fixture above - artifacts, no audit log - except this directory
+    DOES carry `migration-spec.json`, exactly like a real parser-path migration that correctly never
+    had a gate armed (extract-only). An over-correction that also fails this would be its own
+    defect: `test_an_extract_only_migration_that_was_never_gated_verifies_CLEAN` already locks this
+    in structurally; this test additionally locks in the exit code contract from issue #354's fix.
+    """
+    mig = tmp_path / "mig"
+    (mig / "fabric").mkdir(parents=True)
+    (mig / "migration-spec.json").write_text("{}", encoding="utf-8")
+    (mig / "fabric" / "model.tmdl").write_text("table Orders")
+
+    proc = run_gate("verify", str(mig))
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode == 0, f"a legitimate never-gated migration must still verify clean:\n{out}"
+    assert "CANNOT ASSESS" not in out
+
+
+def test_a_gate_applied_and_failed_at_its_own_bundle_root_is_still_state_2(tmp_path: Path) -> None:
+    """State 2 (gate applied and failed) must still exit 1, unaffected by the new state-3 check.
+
+    This is the pre-existing VIOLATION path: verified AT the bundle/spec root that actually carries
+    the audit log, so `_no_audit_trail_reason` must stand aside and let the existing violation
+    logic run.
+
+    On Windows `block` arms a REAL write-deny ACL on `fabric/` (see `denied_dirs`), so writing the
+    "built while blocked" artifact below can itself raise `PermissionError` - that is enforcement
+    doing its job, not a test bug, and is handled explicitly rather than left to crash the run.
+    """
+    mig = tmp_path / "mig"
+    (mig / "fabric").mkdir(parents=True)
+    (mig / "migration-spec.json").write_text("{}", encoding="utf-8")
+    run_gate("block", str(mig), "--sources", "shipment")
+    try:
+        (mig / "fabric" / "model.tmdl").write_text("table Shipment")  # built while blocked
+    except PermissionError:
+        pytest.skip("the real write-deny ACL on Windows prevented the violation from landing at all")
+
+    proc = run_gate("verify", str(mig))
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode == 1, f"artifacts built while the gate is applied must still VIOLATE:\n{out}"
+    assert "VIOLATION" in out
+    assert "CANNOT ASSESS" not in out
+
+
+def test_an_empty_ship_destination_with_no_artifacts_is_not_flagged(tmp_path: Path) -> None:
+    """No artifacts, nothing to assess: state 3 must not fire on an empty/not-yet-built directory."""
+    ship_destination = tmp_path / "migrations" / "workbooks" / "not-started-yet" / "fabric"
+    ship_destination.mkdir(parents=True)
+
+    proc = run_gate("verify", str(ship_destination))
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode == 0, out
+    assert "CANNOT ASSESS" not in out
+
+
+# --- issue #354, review round 3 (scoped DOWN): three bounded fail-closed fixes only -------------
+#
+# A third review round explicitly REJECTED the content-sniffing "does the spec merely NAME a live
+# source" classifier that used to live here and required three narrower, precisely-bounded fixes
+# instead - each one reusing an EXISTING classifier/helper, never a new one:
+#   1. never-gated classification now defers entirely to `preflight_source_credentials._classify_legs`
+#      (the SAME canonical classifier - `connection_target.powerbi_target` - that arms the gate in
+#      the first place) and requires an EXPLICIT, VALID `flat_file` verdict on EVERY declared
+#      source; anything else (unknown, missing, malformed, unsupported, or a live target) is
+#      CANNOT ASSESS, never assumed extract-only by default.
+#   2. `_audit_entries` no longer skips a single malformed line and keeps trusting whatever else
+#      parsed - ANY nonblank unparseable line now poisons the WHOLE trail. An entry with NO `scope`
+#      key at all is no longer trusted as "legacy" evidence either - only an entry naming THIS
+#      directory counts.
+#   3. a trusted `block`/earned-`clear` history is now also checked against what the CURRENT spec
+#      declares: if the cleared source's identity key was swapped for a different one in the same
+#      directory, that stale clearance no longer certifies what is here today.
+#
+# Residual, deliberately left open (tracked in #391, NOT solved here): a copied `flat_file` spec
+# placed beside artifacts from an unrelated, live-source build is not provably attributable to
+# those specific artifacts without a receipt/run-identity correlation mechanism. Issue #354 stays
+# open after this partial fix.
+
+
+def test_an_unknown_stamped_target_CANNOT_be_verified_ok(tmp_path: Path) -> None:
+    """Requirement 1: an EXPLICIT `powerbi_target: unknown` stamp is not extract-only by default.
+
+    `classify_source` returns "review" (neither `no-creds` nor `needs-credential`) for anything
+    that is not a validated `flat_file` - an unknown stamp must fail closed, not fall through to a
+    vacuous pass. `class`/`server` are included so `_leg_key` can compute a stable identity and the
+    leg is genuinely classified `review`, rather than falling back to `needs-credential` for having
+    no identifying fields at all (that fallback is covered separately, below).
+    """
+    mig = tmp_path / "mig"
+    (mig / "fabric").mkdir(parents=True)
+    (mig / "migration-spec.json").write_text(
+        json.dumps(
+            {
+                "data_sources": [
+                    {"connection": {"class": "some-mystery-system", "server": "host1", "powerbi_target": "unknown"}}
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (mig / "fabric" / "model.tmdl").write_text("table Shipment")
+
+    proc = run_gate("verify", str(mig))
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode == 3, f"an unknown-stamped target must not verify OK:\n{out}"
+    assert "CANNOT ASSESS" in out
+
+
+def test_a_missing_stamp_with_no_classifiable_class_CANNOT_be_verified_ok(tmp_path: Path) -> None:
+    """Requirement 1: a connection with no `powerbi_target` AND no `class` is not extract-only.
+
+    Legacy/unstamped specs must be classified through the same canonical
+    `connection_target.powerbi_target` computation the parser itself uses - here there is nothing
+    to compute FROM, so it resolves to `unknown` and must fail closed exactly like the explicit
+    unknown stamp above.
+    """
+    mig = tmp_path / "mig"
+    (mig / "fabric").mkdir(parents=True)
+    (mig / "migration-spec.json").write_text(
+        json.dumps({"data_sources": [{"connection": {}}]}),
+        encoding="utf-8",
+    )
+    (mig / "fabric" / "model.tmdl").write_text("table Shipment")
+
+    proc = run_gate("verify", str(mig))
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode == 3, f"an unstamped, unclassifiable connection must not verify OK:\n{out}"
+    assert "CANNOT ASSESS" in out
+
+
+def test_a_genuine_all_flat_file_spec_still_verifies_ok(tmp_path: Path) -> None:
+    """Negative control for requirement 1: every source EXPLICITLY and VALIDLY `flat_file` passes.
+
+    Replaces the rejected `test_b1_negative_control...` fixture, which asserted a pass for
+    `powerbi_target: "extract"` - not a real classification value, and which CANNOT pass under the
+    tightened allow-list. A genuine flat-file stamp (what the parser actually writes for a packaged
+    Excel/CSV extract) must still verify clean.
+    """
+    mig = tmp_path / "mig"
+    (mig / "fabric").mkdir(parents=True)
+    (mig / "migration-spec.json").write_text(
+        json.dumps({"data_sources": [{"connection": {"class": "excel-direct", "powerbi_target": "flat_file"}}]}),
+        encoding="utf-8",
+    )
+    (mig / "fabric" / "model.tmdl").write_text("table Orders")
+
+    proc = run_gate("verify", str(mig))
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode == 0, f"a genuinely all-flat-file spec must still verify clean:\n{out}"
+    assert "CANNOT ASSESS" not in out
+
+
+def test_a_live_stamped_target_with_no_audit_CANNOT_be_verified_ok(tmp_path: Path) -> None:
+    """A copied spec explicitly naming a live source, with no audit trail, must not pass.
+
+    Same shape `package_unit.py` would produce copying a real live-source spec into a handover
+    package that was never itself gated - a gate SHOULD have existed here; its total absence is
+    suspicious, not reassuring.
+    """
+    mig = tmp_path / "mig"
+    (mig / "fabric").mkdir(parents=True)
+    (mig / "migration-spec.json").write_text(
+        json.dumps({"data_sources": [{"connection": {"powerbi_target": "live_source"}}]}),
+        encoding="utf-8",
+    )
+    (mig / "fabric" / "model.tmdl").write_text("table Shipment")
+
+    proc = run_gate("verify", str(mig))
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode == 3, f"a copied spec naming a live source with no audit trail must not pass:\n{out}"
+    assert "CANNOT ASSESS" in out
+
+
+@pytest.mark.parametrize(
+    "make_audit",
+    [
+        pytest.param(lambda p: p.write_bytes(b""), id="zero-byte"),
+        pytest.param(lambda p: p.write_text('{"action": "block", "detail":', encoding="utf-8"), id="truncated-json"),
+        pytest.param(lambda p: p.write_text("not json at all\n", encoding="utf-8"), id="malformed-json"),
+        pytest.param(lambda p: p.mkdir(), id="directory-not-a-file"),
+    ],
+)
+def test_an_unreadable_or_corrupt_audit_log_CANNOT_be_verified_ok(tmp_path: Path, make_audit) -> None:
+    """Requirement 2: the audit PATH existing is not evidence - only successfully PARSED content is.
+
+    Each variant here would satisfy a bare `.exists()` check and fall through to a false pass, even
+    though nothing about it could actually be trusted.
+    """
+    mig = tmp_path / "mig"
+    (mig / "fabric").mkdir(parents=True)
+    (mig / "migration-spec.json").write_text(
+        json.dumps({"data_sources": [{"connection": {"powerbi_target": "live_source"}}]}),
+        encoding="utf-8",
+    )
+    (mig / "fabric" / "model.tmdl").write_text("table Shipment")
+    make_audit(mig / ".credential-gate-audit.log")
+
+    proc = run_gate("verify", str(mig))
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode == 3, f"a corrupt/unreadable audit log must not be trusted as a pass:\n{out}"
+    assert "CANNOT ASSESS" in out
+
+
+def test_a_malformed_trailing_line_poisons_an_otherwise_genuine_history(tmp_path: Path) -> None:
+    """Requirement 2, the reversal specifically: a REAL earned clearance is not immune to corruption.
+
+    A previous implementation silently SKIPPED a single unparseable line and kept trusting whatever
+    else parsed, so a genuinely earned clearance survived a corrupted trailing record. That is
+    exactly backwards: any nonblank line that fails to parse must poison the WHOLE trail, because a
+    log that can be partially forged/truncated and still "mostly" trusted is not trustworthy at all.
+
+    Uses an `engine-output-receipt.json` bundle root (not `migration-spec.json`) so the state-3
+    check cannot ALSO fire for spec-classification reasons - this isolates the audit-corruption
+    path specifically.
+    """
+    mig = tmp_path / "bundle"
+    (mig / "fabric").mkdir(parents=True)
+    (mig / "engine-output-receipt.json").write_text("{}", encoding="utf-8")
+    run_gate("block", str(mig), "--sources", "shipment")
+    run_gate("clear", str(mig), "--reason", "probe returned a row", "--earned")
+    (mig / "fabric" / "model.tmdl").write_text("table Shipment")
+    audit = mig / ".credential-gate-audit.log"
+    audit.write_text(audit.read_text(encoding="utf-8") + "not json at all\n", encoding="utf-8")
+
+    proc = run_gate("verify", str(mig))
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode == 3, f"a genuinely earned clearance must not survive a corrupted trailing line:\n{out}"
+    assert "CANNOT ASSESS" in out
+
+
+def test_an_unscoped_legacy_audit_copy_CANNOT_certify_this_directory(tmp_path: Path) -> None:
+    """Requirement 2: an entry with NO `scope` key at all is legacy/unbound evidence, not trusted.
+
+    A previous implementation trusted an entry carrying no `scope` field at all (pre-fix legacy
+    shape) as-is - which meant a foreign log with its `scope` field stripped, rather than merely
+    pointing at a different directory, would ALSO certify wherever it was copied. Missing scope
+    must now fail exactly like mismatched scope.
+
+    The recorded `sources` key deliberately MATCHES what the spec classifies today (computed via
+    the real `_leg_key`), so requirement 3's source-set-mismatch check cannot ALSO produce a state-3
+    verdict here - this isolates the missing-scope trust question specifically. No `block`/`clear`
+    marker files exist either (the log is hand-written, not produced by the CLI), so a false pass
+    would show up as exit 0, not a marker-enforcement violation.
+    """
+    sys.path.insert(0, str(REPO / "scripts"))
+    import preflight_source_credentials as pf  # noqa: PLC0415
+
+    mig = tmp_path / "mig"
+    (mig / "fabric").mkdir(parents=True)
+    (mig / "migration-spec.json").write_text(
+        json.dumps({"data_sources": [{"connection": {"class": "sqlserver", "server": "host1", "database": "db"}}]}),
+        encoding="utf-8",
+    )
+    (mig / "fabric" / "model.tmdl").write_text("table Shipment")
+    key = pf._leg_key({}, 0, {"class": "sqlserver", "server": "host1", "database": "db"})
+    (mig / ".credential-gate-audit.log").write_text(
+        json.dumps({"action": "block", "sources": [key]})
+        + "\n"
+        + json.dumps({"action": "probe-cleared", "sources": [key]})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    proc = run_gate("verify", str(mig))
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode == 3, f"an unscoped legacy audit copy must not certify this directory:\n{out}"
+    assert "CANNOT ASSESS" in out
+
+
+def test_a_foreign_audit_log_copied_in_from_another_scope_CANNOT_be_verified_ok(tmp_path: Path) -> None:
+    """Requirement 2: a real, valid audit log is not proof for a directory it was never written for.
+
+    Arms and earns a clearance in scope A, then copies that exact, byte-for-byte valid log into
+    unrelated scope B. Before scope-binding, B's `verify` read A's history as its own - the gate
+    became forgeable by `cp`.
+    """
+    scope_a = tmp_path / "scope-a"
+    (scope_a / "fabric").mkdir(parents=True)
+    (scope_a / "migration-spec.json").write_text("{}", encoding="utf-8")
+    run_gate("block", str(scope_a), "--sources", "shipment")
+    run_gate("clear", str(scope_a), "--reason", "probe returned a row", "--earned")
+
+    scope_b = tmp_path / "scope-b"
+    (scope_b / "fabric").mkdir(parents=True)
+    (scope_b / "migration-spec.json").write_text(
+        json.dumps({"data_sources": [{"connection": {"powerbi_target": "live_source"}}]}),
+        encoding="utf-8",
+    )
+    (scope_b / "fabric" / "model.tmdl").write_text("table Shipment")
+    (scope_b / ".credential-gate-audit.log").write_text(
+        (scope_a / ".credential-gate-audit.log").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+
+    proc = run_gate("verify", str(scope_b))
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode == 3, f"a copied audit log from a different scope must not certify this one:\n{out}"
+    assert "CANNOT ASSESS" in out
+
+
+def test_negative_control_verifying_at_the_original_scope_still_passes(tmp_path: Path) -> None:
+    """Negative control: the log's OWN scope must still verify clean, unaffected."""
+    scope_a = tmp_path / "scope-a"
+    (scope_a / "fabric").mkdir(parents=True)
+    (scope_a / "migration-spec.json").write_text("{}", encoding="utf-8")
+    run_gate("block", str(scope_a), "--sources", "shipment")
+    run_gate("clear", str(scope_a), "--reason", "probe returned a row", "--earned")
+    (scope_a / "fabric" / "model.tmdl").write_text("table Shipment")
+
+    proc = run_gate("verify", str(scope_a))
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode == 0, f"the scope the log was actually written for must still verify clean:\n{out}"
+
+
+def test_a_swapped_live_source_key_makes_a_stale_clearance_unable_to_certify_it(tmp_path: Path) -> None:
+    """Requirement 3: correctly-scoped evidence for a DIFFERENT source cannot cover this one.
+
+    Arms and earns a clearance for one live source's real `_leg_key` identity, then the spec in the
+    SAME directory is re-pointed at a different upstream without ever being re-gated. The audit
+    trail is genuine and correctly scoped - it just names a source that no longer matches what the
+    spec declares today.
+    """
+    sys.path.insert(0, str(REPO / "scripts"))
+    import preflight_source_credentials as pf  # noqa: PLC0415
+
+    def _spec(server: str) -> str:
+        return json.dumps(
+            {"data_sources": [{"connection": {"class": "sqlserver", "server": server, "database": "db"}}]}
+        )
+
+    mig = tmp_path / "mig"
+    (mig / "fabric").mkdir(parents=True)
+    mig_spec = mig / "migration-spec.json"
+    mig_spec.write_text(_spec("e1.example"), encoding="utf-8")
+
+    key_e1 = pf._leg_key({}, 0, {"class": "sqlserver", "server": "e1.example", "database": "db"})
+    run_gate("block", str(mig), "--sources", key_e1)
+    run_gate("clear", str(mig), "--reason", "probe returned a row", "--earned")
+    (mig / "fabric" / "model.tmdl").write_text("table Shipment")
+
+    # Re-point the SAME directory's spec at a different upstream, without ever re-gating it.
+    mig_spec.write_text(_spec("e2.example"), encoding="utf-8")
+
+    proc = run_gate("verify", str(mig))
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode == 3, f"a stale clearance for a swapped source must not verify OK:\n{out}"
+    assert "CANNOT ASSESS" in out
+
+
+def test_negative_control_an_unswapped_source_still_verifies_clean(tmp_path: Path) -> None:
+    """Negative control for requirement 3: an UNCHANGED source key must still verify clean."""
+    sys.path.insert(0, str(REPO / "scripts"))
+    import preflight_source_credentials as pf  # noqa: PLC0415
+
+    mig = tmp_path / "mig"
+    (mig / "fabric").mkdir(parents=True)
+    (mig / "migration-spec.json").write_text(
+        json.dumps(
+            {"data_sources": [{"connection": {"class": "sqlserver", "server": "e1.example", "database": "db"}}]}
+        ),
+        encoding="utf-8",
+    )
+
+    key_e1 = pf._leg_key({}, 0, {"class": "sqlserver", "server": "e1.example", "database": "db"})
+    run_gate("block", str(mig), "--sources", key_e1)
+    run_gate("clear", str(mig), "--reason", "probe returned a row", "--earned")
+    (mig / "fabric" / "model.tmdl").write_text("table Shipment")
+
+    proc = run_gate("verify", str(mig))
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode == 0, f"an unchanged, correctly-cleared source must still verify clean:\n{out}"
+
+
+# --- Requirement 1 (2nd bounded round, comment 5546182629): mixed-scope audit poisoning --------
+#
+# The single-entry cases above (a wholly unscoped copy, a wholly foreign-scope copy) already
+# return None from `_audit_entries` because EVERY entry fails the scope check, so the trail is
+# empty either way. The gap this closes is different: an otherwise-genuine, fully-scoped history
+# with just ONE extra unscoped/foreign-scope line mixed in used to keep trusting the rest of it
+# (the earlier "drop just this entry" implementation). That must now poison the WHOLE trail too.
+
+
+def test_a_mixed_trail_with_one_unscoped_entry_CANNOT_certify_this_directory(tmp_path: Path) -> None:
+    """Requirement 1: one entry with NO `scope` key mixed into an otherwise-genuine trail poisons it all.
+
+    A real, earned clearance is written first (fully scoped, by the real CLI), then a single
+    hand-appended line with no `scope` field is appended after it. Every OTHER line is genuine and
+    correctly scoped - only ONE line is bad. Dropping just that line and trusting the rest would
+    still report OK; the whole trail must be untrustworthy instead.
+    """
+    mig = tmp_path / "mig"
+    (mig / "fabric").mkdir(parents=True)
+    (mig / "migration-spec.json").write_text(
+        json.dumps({"data_sources": [{"connection": {"class": "sqlserver", "server": "host1", "database": "db"}}]}),
+        encoding="utf-8",
+    )
+    sys.path.insert(0, str(REPO / "scripts"))
+    import preflight_source_credentials as pf  # noqa: PLC0415
+
+    key = pf._leg_key({}, 0, {"class": "sqlserver", "server": "host1", "database": "db"})
+    run_gate("block", str(mig), "--sources", key)
+    run_gate("clear", str(mig), "--reason", "probe returned a row", "--earned")
+    (mig / "fabric" / "model.tmdl").write_text("table Shipment")
+    audit = mig / ".credential-gate-audit.log"
+    unscoped = json.dumps({"ts": "2020-01-01T00:00:00+00:00", "action": "probe-cleared", "detail": "no scope here"})
+    audit.write_text(audit.read_text(encoding="utf-8") + unscoped + "\n", encoding="utf-8")
+
+    proc = run_gate("verify", str(mig))
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode == 3, f"a mixed genuine+unscoped trail must not certify this directory:\n{out}"
+    assert "CANNOT ASSESS" in out
+
+
+def test_a_mixed_trail_with_one_foreign_scope_entry_CANNOT_certify_this_directory(tmp_path: Path) -> None:
+    """Requirement 1: one entry naming a DIFFERENT scope mixed into a real trail poisons it all."""
+    mig = tmp_path / "mig"
+    other = tmp_path / "unrelated-other-scope"
+    other.mkdir(parents=True)
+    (mig / "fabric").mkdir(parents=True)
+    (mig / "migration-spec.json").write_text(
+        json.dumps({"data_sources": [{"connection": {"class": "sqlserver", "server": "host1", "database": "db"}}]}),
+        encoding="utf-8",
+    )
+    sys.path.insert(0, str(REPO / "scripts"))
+    import preflight_source_credentials as pf  # noqa: PLC0415
+
+    key = pf._leg_key({}, 0, {"class": "sqlserver", "server": "host1", "database": "db"})
+    run_gate("block", str(mig), "--sources", key)
+    run_gate("clear", str(mig), "--reason", "probe returned a row", "--earned")
+    (mig / "fabric" / "model.tmdl").write_text("table Shipment")
+    audit = mig / ".credential-gate-audit.log"
+    foreign = json.dumps(
+        {"ts": "2020-01-01T00:00:00+00:00", "action": "probe-cleared", "detail": "wrong scope", "scope": str(other)}
+    )
+    audit.write_text(audit.read_text(encoding="utf-8") + foreign + "\n", encoding="utf-8")
+
+    proc = run_gate("verify", str(mig))
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode == 3, f"a mixed genuine+foreign-scope trail must not certify this directory:\n{out}"
+    assert "CANNOT ASSESS" in out
+
+
+def test_negative_control_a_fully_scoped_mixed_action_trail_still_verifies_ok(tmp_path: Path) -> None:
+    """Negative control for requirement 1: a trail where EVERY entry matches scope still passes."""
+    mig = tmp_path / "mig"
+    (mig / "fabric").mkdir(parents=True)
+    (mig / "migration-spec.json").write_text(
+        json.dumps({"data_sources": [{"connection": {"class": "sqlserver", "server": "host1", "database": "db"}}]}),
+        encoding="utf-8",
+    )
+    sys.path.insert(0, str(REPO / "scripts"))
+    import preflight_source_credentials as pf  # noqa: PLC0415
+
+    key = pf._leg_key({}, 0, {"class": "sqlserver", "server": "host1", "database": "db"})
+    run_gate("block", str(mig), "--sources", key)
+    run_gate("clear", str(mig), "--reason", "probe returned a row", "--earned")
+    (mig / "fabric" / "model.tmdl").write_text("table Shipment")
+
+    proc = run_gate("verify", str(mig))
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode == 0, f"a fully, consistently scoped trail must still verify clean:\n{out}"
+
+
+# --- Requirement 2 (2nd bounded round, comment 5546182629): multi-source earned state -----------
+#
+# `_source_set_mismatch_reason` used to compare against only `_last_block_sources` - the MOST
+# RECENT `block`'s source list. A migration with two independently-blocked-and-cleared live
+# sources (E1 earned first, E2 blocked and earned later) would have its earlier source E1 silently
+# drop out of that "most recent" list, producing a FALSE state-3 against a fully, correctly earned
+# migration. It must instead compare against the complete accumulated earned set.
+
+
+def test_two_independently_earned_sources_both_verify_clean_together(tmp_path: Path) -> None:
+    """Requirement 2: E1 earned, then E2 independently earned later, both still verify 0.
+
+    Regression guard: comparing only the MOST RECENT block's source list (instead of the full
+    accumulated earned set) would report E1 as newly "uncovered" the moment E2 alone gets
+    re-blocked and cleared, even though E1 was never touched, dropped, or unproven.
+    """
+    sys.path.insert(0, str(REPO / "scripts"))
+    import preflight_source_credentials as pf  # noqa: PLC0415
+
+    def _spec() -> str:
+        return json.dumps(
+            {
+                "data_sources": [
+                    {"connection": {"class": "sqlserver", "server": "e1.example", "database": "db"}},
+                    {"connection": {"class": "sqlserver", "server": "e2.example", "database": "db"}},
+                ]
+            }
+        )
+
+    mig = tmp_path / "mig"
+    (mig / "fabric").mkdir(parents=True)
+    (mig / "migration-spec.json").write_text(_spec(), encoding="utf-8")
+
+    key_e1 = pf._leg_key({}, 0, {"class": "sqlserver", "server": "e1.example", "database": "db"})
+    key_e2 = pf._leg_key({}, 1, {"class": "sqlserver", "server": "e2.example", "database": "db"})
+
+    run_gate("block", str(mig), "--sources", key_e1)
+    run_gate("clear", str(mig), "--reason", "E1 probe returned a row", "--earned")
+    # E2 is blocked and earned INDEPENDENTLY, later, and its own `block` names only E2 - so a
+    # "most recent block" comparison would see only E2 here, not E1+E2.
+    run_gate("block", str(mig), "--sources", key_e2)
+    run_gate("clear", str(mig), "--reason", "E2 probe returned a row", "--earned")
+    (mig / "fabric" / "model.tmdl").write_text("table Shipment")
+
+    proc = run_gate("verify", str(mig))
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode == 0, f"two independently earned sources must both verify clean:\n{out}"
+
+
+def test_swapping_either_of_two_earned_sources_for_an_unearned_one_fails(tmp_path: Path) -> None:
+    """Requirement 2: replacing EITHER earned source with an unearned E3 must verify 3."""
+    sys.path.insert(0, str(REPO / "scripts"))
+    import preflight_source_credentials as pf  # noqa: PLC0415
+
+    def _spec(second_server: str) -> str:
+        return json.dumps(
+            {
+                "data_sources": [
+                    {"connection": {"class": "sqlserver", "server": "e1.example", "database": "db"}},
+                    {"connection": {"class": "sqlserver", "server": second_server, "database": "db"}},
+                ]
+            }
+        )
+
+    mig = tmp_path / "mig"
+    (mig / "fabric").mkdir(parents=True)
+    mig_spec = mig / "migration-spec.json"
+    mig_spec.write_text(_spec("e2.example"), encoding="utf-8")
+
+    key_e1 = pf._leg_key({}, 0, {"class": "sqlserver", "server": "e1.example", "database": "db"})
+    key_e2 = pf._leg_key({}, 1, {"class": "sqlserver", "server": "e2.example", "database": "db"})
+
+    run_gate("block", str(mig), "--sources", key_e1)
+    run_gate("clear", str(mig), "--reason", "E1 probe returned a row", "--earned")
+    run_gate("block", str(mig), "--sources", key_e2)
+    run_gate("clear", str(mig), "--reason", "E2 probe returned a row", "--earned")
+    (mig / "fabric" / "model.tmdl").write_text("table Shipment")
+
+    # Swap E2 for an unearned E3, without ever re-gating - E1 is untouched and still earned.
+    mig_spec.write_text(_spec("e3.example"), encoding="utf-8")
+
+    proc = run_gate("verify", str(mig))
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode == 3, f"swapping an earned source for an unearned one must not verify OK:\n{out}"
+    assert "CANNOT ASSESS" in out
+
+
 # --- `list`: the multi-unit query (#344) ------------------------------------------------------
 #
 # Added after a field report from a ~44-unit estate: "I am always asked to run these for all the
@@ -1540,8 +2164,13 @@ def _unit(root: Path, name: str, *, marker: bool = False, override: bool = False
     if override:
         (d / ".credential-gate-AUTHORIZED").write_text("x", encoding="utf-8")
     if audit:
+        # Stamped with THIS unit's own scope so the tightened `_audit_entries` (issue #354 review:
+        # an entry with no matching scope is now legacy/unbound evidence, not trusted) accepts it -
+        # exactly what a real `_audit()` call always writes; these fixtures previously relied on the
+        # since-removed "no scope key = trust it" concession.
         (d / ".credential-gate-audit.log").write_text(
-            "\n".join(json.dumps({"action": a}) for a in audit) + "\n", encoding="utf-8"
+            "\n".join(json.dumps({"action": a, "scope": str(d.resolve())}) for a in audit) + "\n",
+            encoding="utf-8",
         )
     return d
 
