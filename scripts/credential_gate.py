@@ -66,6 +66,12 @@ from pathlib import Path
 
 from migration_bundle import ENGINE_OUTPUT_DIRS, ENGINE_RECEIPT, is_engine_artifact, sha256_file
 
+# Imported as a plain NAME, not reached through the module (`preflight_source_credentials._classify_legs`
+# is `protected-access` to pylint, W0212). This is the SAME canonical classifier
+# (`connection_target.powerbi_target`) that arms the gate in the first place; issue #354's review
+# explicitly required reusing it here rather than a second, independently-maintained opinion.
+from preflight_source_credentials import _classify_legs
+
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger("credential_gate")
 
@@ -200,13 +206,22 @@ def _audit_entries(migration: Path) -> list[dict] | None:
     """Parsed, scope-checked audit entries for `migration`, or None when none can be trusted.
 
     The SOLE reader of `AUDIT` - every function that used to `json.loads` it directly now calls
-    this instead, so both issue #354 fixes apply wherever the log is trusted, not just in `verify`.
-    (B2) a path existing is not evidence; only successfully-parsed content is - a directory,
-    unreadable/locked file, or unparseable JSON used to read as "gate never applied". (B3) a path is
-    not scope - an entry naming a DIFFERENT scope than `migration` is dropped (a copied/hardlinked/
-    symlinked foreign log no longer certifies this directory); an entry with no `scope` key at all
-    (pre-fix) is trusted as-is. Returns None (never `[]`) so callers can tell "no evidence" apart
-    from "trusted, and it says nothing happened".
+    this instead, so every issue #354 fix applies wherever the log is trusted, not just in `verify`.
+
+    (B2, tightened per review) a path existing is not evidence; only successfully-parsed content is
+    - a directory or an unreadable/locked file returns None outright. A NONBLANK line that fails to
+    parse as a JSON object poisons the WHOLE file, not just that line: a partially-corrupt log used
+    to keep whatever parsed and read as trustworthy, which is exactly the "some of this is real, so
+    all of it must be" reasoning a forged/truncated trailing record relies on.
+
+    (B3, tightened per review) a path is not scope: an entry naming a DIFFERENT scope than
+    `migration`, OR carrying no `scope` key at all, is dropped. A missing scope used to be trusted as
+    pre-fix legacy evidence; that concession is itself the forgery this closes - a foreign log with
+    its `scope` field stripped would otherwise certify any directory it was copied into. Only an
+    entry this directory's OWN `_audit()` call actually wrote (and therefore stamped) counts.
+
+    Returns None (never `[]`) so callers can tell "no evidence" apart from "trusted, and it says
+    nothing happened".
     """
     path = migration / AUDIT
     if not path.is_file():
@@ -224,11 +239,10 @@ def _audit_entries(migration: Path) -> list[dict] | None:
         try:
             entry = json.loads(line)
         except ValueError:
-            continue
+            return None
         if not isinstance(entry, dict):
-            continue
-        recorded_scope = entry.get("scope")
-        if recorded_scope is not None and recorded_scope != scope:
+            return None
+        if entry.get("scope") != scope:
             continue
         entries.append(entry)
     if not entries:
@@ -1009,11 +1023,22 @@ def _gate_was_ever_applied(migration: Path) -> bool:
     return any(entry.get("action") in BLOCK_ACTIONS for entry in entries)
 
 
-def _spec_describes_a_live_source(migration: Path) -> bool | None:
-    """Does `migration-spec.json`'s content say a gate should have existed here?
+def _spec_all_sources_are_flat_file(migration: Path) -> bool | None:
+    """Does `migration-spec.json` classify EVERY declared data source as a valid flat file?
 
-    True: names a `powerbi_target: live_source` data source. False: parses cleanly, names none - a
-    genuine extract-only migration. None: missing/unreadable/malformed - treated as True (fail closed).
+    Issue #354 review, scoped down: reuses `preflight_source_credentials._classify_legs` - the SAME
+    canonical classifier (`connection_target.powerbi_target`) that arms the gate in the first place
+    - rather than a second, independently-maintained opinion of what "extract-only" means. Only an
+    EXPLICIT, VALID `no-creds` verdict (i.e. `powerbi_target == FLAT_FILE`, stamped or freshly
+    computed from the connection class) on every leg of every data source counts as legitimately
+    never-gated. `needs-credential` (a live system) and `review` (unknown, unsupported, or a legacy
+    connection with nothing to classify) both mean "cannot be assumed extract-only" and return
+    False - the allow-list is deliberately narrow, because under-gating a live source is the failure
+    this whole module exists to prevent.
+
+    An empty/absent `data_sources` list is vacuously all-flat: there is nothing declared to gate.
+    Returns None only when the spec itself cannot be read in the shape this classifier expects -
+    callers must not default a parse failure to a pass either.
     """
     try:
         spec = json.loads((migration / MIGRATION_SPEC).read_text(encoding="utf-8"))
@@ -1024,12 +1049,66 @@ def _spec_describes_a_live_source(migration: Path) -> bool | None:
     sources = spec.get("data_sources", [])
     if not isinstance(sources, list):
         return None
-    for source in sources:
+    for index, source in enumerate(sources):
         if not isinstance(source, dict):
             return None
-        if (source.get("connection") or {}).get("powerbi_target") == "live_source":
-            return True
-    return False
+        for _key, _display, verdict, _reason in _classify_legs(source, index):
+            if verdict != "no-creds":
+                return False
+    return True
+
+
+def _current_live_source_keys(migration: Path) -> set[str] | None:
+    """Live-source identity keys `migration-spec.json` names TODAY, or None when unreadable.
+
+    Same classifier and the same stable identity (`preflight_source_credentials._leg_key`, via
+    `_classify_legs`) a real `block`/earned `clear` is armed and lifted against, so a trusted
+    clearance can be compared against what is ACTUALLY present now - not just what it once said.
+    None means "cannot compare"; callers must treat that as neither a match nor a mismatch.
+    """
+    try:
+        spec = json.loads((migration / MIGRATION_SPEC).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(spec, dict):
+        return None
+    sources = spec.get("data_sources", [])
+    if not isinstance(sources, list):
+        return None
+    keys: set[str] = set()
+    for index, source in enumerate(sources):
+        if not isinstance(source, dict):
+            return None
+        for key, _display, verdict, _reason in _classify_legs(source, index):
+            if verdict == "needs-credential":
+                keys.add(key)
+    return keys
+
+
+def _source_set_mismatch_reason(migration: Path) -> str | None:
+    """Why a trusted clearance no longer covers what the spec names TODAY, or None when it does.
+
+    Issue #354 review: a trusted `block`/earned-`clear` audit entry names the source keys it
+    covers. If `migration-spec.json` in this SAME directory has since been re-pointed at a
+    DIFFERENT live source - the cleared key swapped for a new one, not merely dropped - that
+    clearance no longer proves what it once did: nobody has proven the NEW upstream is reachable.
+    Compared by `_leg_key`, the identity the gate itself arms and clears against, never by display
+    name. Silent when there is nothing to compare (`_last_block_sources`/`_current_live_source_keys`
+    both come back empty or unreadable) - this only fires on a real, positive mismatch.
+    """
+    recorded = _last_block_sources(migration)
+    if not recorded:
+        return None
+    current = _current_live_source_keys(migration)
+    if not current:
+        return None
+    uncovered = current - set(recorded)
+    if not uncovered:
+        return None
+    return (
+        f"{migration}'s {MIGRATION_SPEC} now names live source key(s) {sorted(uncovered)} not "
+        f"covered by the recorded clearance for {sorted(set(recorded))}"
+    )
 
 
 def _no_audit_trail_reason(migration: Path, artifacts: list[Path]) -> str | None:
@@ -1037,16 +1116,18 @@ def _no_audit_trail_reason(migration: Path, artifacts: list[Path]) -> str | None
 
     Issue #354: no TRUSTED audit entry (`_audit_entries`, B2/B3) is correct for (1) genuinely never
     gated at its own root - engine bundles always carry a real entry, but the parser path instead
-    carries `migration-spec.json` naming no live source; and (2) a SHIP DESTINATION holding only a
-    COPY of built artifacts, with no trusted entry and (ordinarily) no `SCOPE_MARKERS` either -
-    except `package_unit.py` writes a fresh `migration-spec.json` into handover packages purely as
-    documentation, unconnected to gating history ("B1"). Marker presence alone cannot tell that
-    apart from case 1; its CONTENT can, via `_spec_describes_a_live_source`.
+    carries `migration-spec.json` classifying every data source as flat_file; and (2) a SHIP
+    DESTINATION holding only a COPY of built artifacts, with no trusted entry and (ordinarily) no
+    `SCOPE_MARKERS` either - except `package_unit.py` writes a fresh `migration-spec.json` into
+    handover packages purely as documentation, unconnected to gating history. Marker presence alone
+    cannot tell that apart from case 1; its CONTENT can, via `_spec_all_sources_are_flat_file`.
 
     Deliberately never tries to locate the originating bundle - `engine-output-receipt.json` records
     only a VERSION, not a path, so there is no link from a copy back to the root that gated it, and
     guessing one (a sibling directory, an unauthenticated `--bundle` argument) would be exactly the
-    invented link this refuses. Fail closed, naming the real fix: verify at the bundle/spec root.
+    invented link this refuses. Fail closed, naming the real fix: verify at the bundle/spec root. A
+    copied flat_file spec placed beside UNRELATED artifacts remains unattributable this way too -
+    that residual is tracked separately in #391, not solved here.
 
     `_audit_entries` is checked FIRST - a `--force-scope` arm on an unusual target still leaves a
     trusted entry, indistinguishable from a bare copy by `_scope_refusal` alone. An
@@ -1066,12 +1147,13 @@ def _no_audit_trail_reason(migration: Path, artifacts: list[Path]) -> str | None
             "genuine engine bundle root always has one (run_estate.py records an 'engine-receipt' "
             "entry unconditionally), so this is a copy of that marker, not the bundle root itself"
         )
-    live = _spec_describes_a_live_source(migration)
-    if live is not False:
+    all_flat = _spec_all_sources_are_flat_file(migration)
+    if all_flat is not True:
         return f"{migration}'s {MIGRATION_SPEC} " + (
-            "could not be read to confirm it never needed a gate"
-            if live is None
-            else "names a live data source, so a gate should have been armed here"
+            "could not be read to confirm every data source is an explicitly, validly classified flat file"
+            if all_flat is None
+            else "does not classify every declared data source as flat_file - an unknown, missing, "
+            "malformed, unsupported, or live target cannot be assumed extract-only"
         )
     return None
 
@@ -1085,6 +1167,15 @@ def _log_cannot_assess(reason: str) -> None:
     log.error("  lives at the bundle/spec root where the gate was armed. Run 'verify' THERE instead.")
     log.error("  Reporting OK here would be indistinguishable from a migration that was genuinely")
     log.error("  never gated, which is exactly the false-clean issue #354 exists to close.")
+
+
+def _log_source_mismatch(reason: str) -> None:
+    """Explain a state-3 verdict from a stale/swapped source clearance (issue #354 review)."""
+    log.error("GATE VERIFY: CANNOT ASSESS - the recorded clearance no longer covers what this")
+    log.error("  migration's %s names today (%s).", MIGRATION_SPEC, reason)
+    log.error("  A trusted 'block'/earned-clear history is scoped to the SOURCES it named, not just")
+    log.error("  the directory: re-arm the gate and re-prove reachability for the new source before")
+    log.error("  this can verify clean.")
 
 
 def _log_ok_verdict(migration: Path, *, authentic: bool, marker: bool, deny: bool) -> None:
@@ -1124,11 +1215,21 @@ def _verify_one(migration: Path) -> int:
     is neither "passed" nor "failed" - it is "this check could not be performed here" - and it must
     exit differently from both, or a ship-destination copy with no audit log reads exactly like a
     migration that was legitimately never gated. See `_no_audit_trail_reason`.
+
+    A SIXTH state (issue #354 review) is checked right after: a trusted `block`/earned-`clear`
+    history CAN exist and still not certify what is here TODAY, if the spec was re-pointed at a
+    different live source in the same directory without ever being re-gated. See
+    `_source_set_mismatch_reason`.
     """
     artifacts = audited_paths(migration)
     no_audit_trail = _no_audit_trail_reason(migration, artifacts)
     if no_audit_trail is not None:
         _log_cannot_assess(no_audit_trail)
+        return 3
+
+    source_mismatch = _source_set_mismatch_reason(migration)
+    if source_mismatch is not None:
+        _log_source_mismatch(source_mismatch)
         return 3
 
     marker = (migration / MARKER).exists()
