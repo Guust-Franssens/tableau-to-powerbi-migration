@@ -1473,7 +1473,7 @@ def test_listed_canonical_cousin_is_REFUSED_not_skipped(tmp_path):
     second = _batch(runs / "002", "oracle", [_view(OTHER, "Summary", data="ok", image="ok", captured_at=STAMP)])
     _batch(runs / "003", "oracle", [_view("view-3", "Other", data="ok", image="ok", captured_at=STAMP)])
 
-    with pytest.raises(grp.UnlistedBatchOnDisk, match="003/oracle"):
+    with pytest.raises(grp.UnlistedBatchOnDisk, match=re.escape(str((runs / "003" / "oracle").resolve()))):
         grp.resolve_batch_dirs([first, second], None, [])
 
 
