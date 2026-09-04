@@ -70,14 +70,7 @@ def test_semantic_model_gotchas_uses_live_validation_and_no_dead_bundled_claims(
 
     output = tmp_path / "marketplace"
     build_plugin.build(output)
-    published = (
-        output
-        / "plugins"
-        / build_plugin.PLUGIN_NAME
-        / "skills"
-        / "powerbi-semantic-model-gotchas"
-        / "SKILL.md"
-    )
+    published = output / "plugins" / build_plugin.PLUGIN_NAME / "skills" / "powerbi-semantic-model-gotchas" / "SKILL.md"
     published_text = published.read_text(encoding="utf-8")
     assert command in published_text
     assert "scripts/_tools/TabularEditor/" not in published_text
