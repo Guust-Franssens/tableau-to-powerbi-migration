@@ -13,6 +13,7 @@ it ran. Nothing in this repository treats it as an authoritative gate.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -26,8 +27,9 @@ GENERATED_EDIT_DECLARATIONS_DIR = Path("_build") / "generated-edit-declarations"
 
 # The navigational replay-script index (issue #259): one row per declared target, so a replay
 # script stays findable even after an idempotent `DECLARE: NO_CHANGE` re-run that writes no drift
-# declaration. Keyed by TARGET rather than a unique-per-run name, so a repeated declaration of the
-# same edit overwrites its own row instead of accumulating contradictory duplicates.
+# declaration. Keyed by a collision-safe digest of TARGET rather than a unique-per-run name, so a
+# repeated declaration of the same edit overwrites its own row instead of accumulating contradictory
+# duplicates, while two distinct targets that sanitize to the same readable stem never collide.
 REPLAY_MANIFEST_DIR = Path("_build") / "replay-manifest"
 
 _SAFE_STEM = re.compile(r"[^A-Za-z0-9_.-]+")
@@ -93,8 +95,17 @@ def _directory_records(path: Path) -> list[dict[str, Any]]:
 
 
 def _sanitized_key(value: str) -> str:
-    """A filesystem-safe, stable key for one navigational manifest row."""
-    return _SAFE_STEM.sub("_", value).strip("_")[-200:] or "record"
+    """A filesystem-safe, COLLISION-SAFE, stable key for one navigational manifest row.
+
+    A readable sanitized stem alone is not enough: distinct targets ``A/B.tmdl`` and ``A_B.tmdl``
+    both sanitize to ``A_B.tmdl`` and would silently overwrite one another. A stable short digest of
+    the exact, UNSANITIZED ``value`` is appended before the stem is truncated, so two different
+    target identities always land on two different filenames while the same target identity always
+    lands back on the same one (idempotent re-declaration still overwrites its own row).
+    """
+    stem = _SAFE_STEM.sub("_", value).strip("_")[-160:] or "record"
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+    return f"{stem}-{digest}"
 
 
 def write_replay_registration(bundle: Path, registration: dict[str, Any]) -> Path:
@@ -109,7 +120,8 @@ def write_replay_registration(bundle: Path, registration: dict[str, Any]) -> Pat
     payload = dict(registration)
     payload.setdefault("version", 1)
     payload.setdefault("recorded_at", datetime.now(timezone.utc).isoformat(timespec="seconds"))
-    final_path = directory / f"{_sanitized_key(str(payload.get('target') or 'record'))}.json"
+    target_key = str(payload.get("target") or "record")
+    final_path = directory / f"{_sanitized_key(target_key)}.json"
     staging_path = final_path.with_name(final_path.name + f".{uuid.uuid4().hex}.tmp")
     try:
         staging_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")

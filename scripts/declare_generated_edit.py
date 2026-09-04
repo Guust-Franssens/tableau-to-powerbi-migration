@@ -18,14 +18,20 @@ A drift declaration is written only when the target's hash actually changed - a 
 fix script re-run a second time prints ``DECLARE: NO_CHANGE`` and records no declaration, so an
 idempotent re-run used to make the script invisible again. The row written here (via
 ``generated_edit_declarations.write_replay_registration``) is written UNCONDITIONALLY - even on the
-`DECLARE: NO_CHANGE` path - and is keyed by TARGET, so re-declaring the same edit updates its own
-row instead of accumulating a second, contradictory one.
+`DECLARE: NO_CHANGE` path - and is keyed by a collision-safe digest of TARGET, so re-declaring the
+same edit updates its own row instead of accumulating a second, contradictory one, while two
+distinct targets never collide onto the same row.
 
 This manifest is deliberately an INDEX FOR DISCOVERABILITY, not a verification gate: it does not
 prove the named script still exists on disk, that it matches any digest, that it belongs to a
 package, or that it covers every generated edit in the bundle. Nothing consumes it as a sign-off
 condition. A CLI check_replay_manifest.py has been descoped from this change per review; anything
 stronger than "find the script that made this edit" is future work tracked under issue #259.
+
+Ordering: the authoritative generated-edit declaration (`--tamper` evidence) is computed and
+persisted BEFORE this best-effort navigational row is attempted. A failure writing the manifest row
+is surfaced explicitly (a warning on stderr) but never discards or precedes the authoritative
+declaration - an applied, hash-changing edit is never left with zero declarations.
 """
 
 from __future__ import annotations
@@ -139,14 +145,26 @@ def main(argv: list[str] | None = None) -> int:
     if result.returncode != 0:
         return result.returncode
 
-    registration = register_replay_script(bundle, script, target, args.purpose)
-
+    # Authoritative first: the generated-edit declaration is what `check_migration_progress.py
+    # --tamper` relies on, and it must exist whenever the target actually changed - regardless of
+    # whether the best-effort navigational manifest write below succeeds. Compute the after-hash and
+    # persist that declaration before attempting the (non-authoritative) replay-manifest row, so a
+    # failure in the latter can never leave `target=after` with zero declarations.
     after = sha256_file(target) if target.is_file() else None
     if before == after:
-        print(f"DECLARE: NO_CHANGE {target} (registered {registration})")
+        message = f"DECLARE: NO_CHANGE {target}"
+    else:
+        declaration = append_declaration(bundle, target, script, before, after)
+        message = f"DECLARE: RECORDED {target.relative_to(bundle).as_posix()} -> {declaration}"
+
+    try:
+        registration = register_replay_script(bundle, script, target, args.purpose)
+    except OSError as exc:
+        print(message)
+        print(f"WARNING: navigational replay-manifest write failed for {target}: {exc}", file=sys.stderr)
         return 0
-    declaration = append_declaration(bundle, target, script, before, after)
-    print(f"DECLARE: RECORDED {target.relative_to(bundle).as_posix()} -> {declaration} (registered {registration})")
+
+    print(f"{message} (registered {registration})")
     return 0
 
 

@@ -3,9 +3,11 @@
 Scope, deliberately bounded per review: this manifest exists so a human can FIND the replay script
 behind a declared edit. It is not a verification gate - there is no checker script, no schema
 enforcement, no hashing, and no cross-check against the drift-declaration directory. These tests
-prove only the writer contract: declaring an edit writes/updates one navigational row, repeated
-declaration is deterministic (no accumulating duplicates), and the existing generated-edit
-declaration workflow (tamper-detection hashes) is unchanged.
+prove the writer contract: declaring an edit writes/updates one navigational row, repeated
+declaration is deterministic (no accumulating duplicates, and no collisions between distinct
+targets that sanitize to the same stem), the authoritative generated-edit declaration always takes
+precedence over the best-effort manifest write, and the existing generated-edit declaration
+workflow (tamper-detection hashes) is unchanged.
 """
 
 import json
@@ -16,6 +18,12 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 DECLARE_SCRIPT = REPO / "scripts" / "declare_generated_edit.py"
+
+sys.path.insert(0, str(REPO / "scripts"))
+
+# ruff: noqa: E402  (the sys.path insert above must precede this import)
+# pylint: disable=wrong-import-position
+from generated_edit_declarations import REPLAY_MANIFEST_DIR, load_replay_registrations, write_replay_registration
 
 
 def _write_bundle(bundle: Path, target: str, target_contents: str) -> Path:
@@ -144,3 +152,59 @@ def test_existing_generated_edit_declaration_workflow_is_unchanged(tmp_path):
     assert declaration["target"] == target
     assert declaration["kind"] == "changed"
     assert declaration["baseline_sha256"] != declaration["expected_sha256"]
+
+
+def test_distinct_targets_that_sanitize_to_the_same_stem_do_not_collide(tmp_path):
+    """`A/B.tmdl` and `A_B.tmdl` both sanitize their separator to `_`, so a stem-only key would
+    collide them onto one row. The digest suffix must keep them as two distinct rows, while a
+    genuine repeat of either target still lands back on its own single row."""
+    write_replay_registration(
+        tmp_path, {"target": "A/B.tmdl", "script_identity": "_build/fix_a.py", "purpose": "fix a", "run_id": "run-1"}
+    )
+    write_replay_registration(
+        tmp_path, {"target": "A_B.tmdl", "script_identity": "_build/fix_b.py", "purpose": "fix b", "run_id": "run-1"}
+    )
+
+    rows = load_replay_registrations(tmp_path)
+    assert len(rows) == 2, "two distinct targets sanitizing to the same stem must not overwrite each other"
+    by_target = {row["target"]: row for row in rows}
+    assert by_target["A/B.tmdl"]["script_identity"] == "_build/fix_a.py"
+    assert by_target["A_B.tmdl"]["script_identity"] == "_build/fix_b.py"
+
+    manifest_dir = tmp_path / REPLAY_MANIFEST_DIR
+    assert len(list(manifest_dir.glob("*.json"))) == 2
+
+    # Repeating the SAME target remains idempotent: it still updates its own row, not a new one.
+    write_replay_registration(
+        tmp_path,
+        {"target": "A/B.tmdl", "script_identity": "_build/fix_a.py", "purpose": "fix a, re-run", "run_id": "run-1"},
+    )
+    rows = load_replay_registrations(tmp_path)
+    assert len(rows) == 2, "re-declaring one of the two targets must not add a third row"
+    by_target = {row["target"]: row for row in rows}
+    assert by_target["A/B.tmdl"]["purpose"] == "fix a, re-run"
+
+
+def test_navigational_write_failure_never_costs_the_authoritative_declaration(tmp_path):
+    """The generated-edit declaration is authoritative; the replay-manifest row is not. If the
+    manifest write fails (simulated here by pre-occupying its directory path with a plain file, so
+    `mkdir` raises), the authoritative declaration must already be persisted - never zero
+    declarations for a real, hash-changing edit."""
+    target = "M.SemanticModel/definition/tables/Orders.tmdl"
+    _write_bundle(tmp_path, target, "original")
+    fix = _write_fix_script(tmp_path, target, "fixed")
+
+    manifest_path = tmp_path / REPLAY_MANIFEST_DIR
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text("not a directory", encoding="utf-8")  # blocks REPLAY_MANIFEST_DIR's mkdir
+
+    proc = _declare(tmp_path, target, fix, purpose="fix orders tmdl")
+    assert proc.returncode == 0, proc.stderr
+    assert "DECLARE: RECORDED" in proc.stdout
+    assert "navigational replay-manifest write failed" in proc.stderr
+
+    declarations_dir = tmp_path / "_build" / "generated-edit-declarations"
+    declaration_files = list(declarations_dir.glob("*.json"))
+    assert len(declaration_files) == 1, "the authoritative declaration must exist despite the manifest write failure"
+    declaration = json.loads(declaration_files[0].read_text(encoding="utf-8"))
+    assert declaration["kind"] == "changed"
