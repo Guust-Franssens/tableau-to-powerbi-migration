@@ -216,8 +216,34 @@ def _m_sql_literal(sql: str) -> str:
     whitespace-insensitive so collapsing is safe, with one exception: `--` comments run to
     end-of-line, so a collapse would comment out everything after them. Strip those first.
     """
-    without_comments = re.sub(r"--[^\n]*", " ", sql)
-    return " ".join(without_comments.split()).replace('"', '""')
+    without_comments = []
+    index = 0
+    while index < len(sql):
+        if sql[index] == "'":
+            quote_start = index
+            index += 1
+            while index < len(sql):
+                if sql[index] != "'":
+                    index += 1
+                    continue
+                if index + 1 < len(sql) and sql[index + 1] == "'":
+                    index += 2
+                    continue
+                index += 1
+                break
+            without_comments.append(sql[quote_start:index])
+            continue
+        if sql.startswith("--", index):
+            newline = sql.find("\n", index)
+            index = len(sql) if newline < 0 else newline
+            continue
+        if sql.startswith("/*", index):
+            end = sql.find("*/", index + 2)
+            index = len(sql) if end < 0 else end + 2
+            continue
+        without_comments.append(sql[index])
+        index += 1
+    return " ".join("".join(without_comments).split()).replace('"', '""')
 
 
 def build_m_query(conn: dict, table: str, column: str, custom_sql: str | None = None) -> tuple[str, str]:

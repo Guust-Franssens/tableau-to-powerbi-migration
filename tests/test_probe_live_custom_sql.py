@@ -99,6 +99,23 @@ def test_comment_only_custom_sql_is_cannot_assess_instead_of_table_navigation():
         probe_live_source.build_m_query(SNOWFLAKE, "Q", "Col", custom_sql="-- comment only")
 
 
+def test_block_comment_only_custom_sql_is_cannot_assess():
+    with pytest.raises(ValueError, match="empty after removing comments"):
+        probe_live_source.build_m_query(SNOWFLAKE, "Q", "Col", custom_sql="/* comment only */")
+
+
+def test_executable_sql_survives_a_block_comment():
+    m, _ = probe_live_source.build_m_query(SNOWFLAKE, "Q", "Col", custom_sql="SELECT 1 /* note */")
+
+    assert 'Value.NativeQuery(db, "SELECT 1")' in m
+
+
+def test_block_comment_markers_inside_sql_string_survive():
+    m, _ = probe_live_source.build_m_query(SNOWFLAKE, "Q", "Col", custom_sql="SELECT '/* data */'")
+
+    assert "SELECT '/* data */'" in m
+
+
 def test_parser_self_closing_text_relation_cannot_clear_as_a_physical_table(tmp_path, monkeypatch):
     twb = tmp_path / "empty-custom-sql.twb"
     twb.write_text(
