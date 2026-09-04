@@ -36,6 +36,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PACKAGER = REPO_ROOT / "scripts" / "package_unit.py"
 MECHANISM = REPO_ROOT / "scripts" / "manifest_scope.py"
+DETECTOR = REPO_ROOT / "scripts" / "host_paths.py"
 SUITES = (REPO_ROOT / "tests" / "test_package_unit.py", REPO_ROOT / "tests" / "test_package_unit_gates.py")
 
 NEGATIVE_CONTROL = "NEGATIVE CONTROL"
@@ -104,7 +105,7 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
     (
         "handover: stop redacting absolute host paths by value",
         MECHANISM,
-        "    if isinstance(payload, str) and (HOST_PATH_RE.match(payload) or discloses_host_path(payload)):"
+        "    if isinstance(payload, str) and discloses_host_location(payload):"
         '\n        return REDACTED, [prefix or "."]',
         '    if False:  # noqa\n        return REDACTED, [prefix or "."]',
         ["test_an_absolute_path_anywhere_in_the_handover_slice_is_redacted"],
@@ -129,9 +130,16 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
         # the mutation SURVIVED against it. What only the parse half answers is a NON-PROFILE
         # location (`<drive>:\builds\...`), which is what the new anchor drives. Strictly stronger:
         # it isolates this branch instead of sharing an input with the guard beside it.
+        #
+        # ⚠️ Round 9 RE-ANCHORED it AGAIN, for the same reason one layer up, and the pattern is the
+        # point: `discloses_host_location` refuses every ROOTED location, build drives included, so
+        # a build drive no longer isolates anything either. What is left to this branch alone is a
+        # DRIVE-RELATIVE path (`<drive>:secret.png` - a drive with no root separator), which no
+        # grammar of absolute locations can see because nothing about it is rooted. Each wider layer
+        # costs one re-isolation; skipping it leaves the branch unfalsifiable and green.
         '    return candidate.is_absolute() or bool(candidate.drive) or declared.startswith(("\\\\\\\\", "/"))',
         "    return False  # noqa",
-        ["test_a_NON_PROFILE_absolute_location_is_refused_by_the_PARSE_half"],
+        ["test_a_DRIVE_RELATIVE_path_is_refused_by_the_PARSE_half_alone"],
     ),
     (
         # ⚠️ REPLACES "capture path: echo the declared path back into the packaged manifest" (#480
@@ -254,20 +262,76 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
         # test that says so.
         "containment: ask 'IS this a path' again, so a host path wrapped in prose ships",
         PACKAGER,
-        '    return _declares_non_relative(declared) or discloses_host_path(declared) or ".." '
-        "in PureWindowsPath(declared).parts",
+        "    return (\n"
+        "        _declares_non_relative(declared) or discloses_host_location(declared) "
+        'or ".." in PureWindowsPath(declared).parts\n'
+        "    )",
         '    return _declares_non_relative(declared) or ".." in PureWindowsPath(declared).parts  # noqa',
         ["test_a_host_path_WRAPPED_IN_PROSE_is_refused_not_only_a_bare_one"],
     ),
     (
-        # The same sub-class on the handover slice's own guard. `HOST_PATH_RE` is anchored, so
-        # dropping the containment half restores exactly the escape, one artifact over -- which is
-        # what "fix the mechanism, not the site" means here: one detector, three consumers.
-        "handover: redact only what STARTS as a path, so a host path in prose ships whole",
+        # The same sub-class on the handover slice's own guard. Round 7's `HOST_PATH_RE` was anchored
+        # and is now deleted, so this restores the escape by narrowing the CONSUMER instead: one
+        # detector, three consumers, and narrowing any one of them reopens it one artifact over.
+        "handover: redact only what a PROFILE regex sees, so a build root in prose ships whole",
         MECHANISM,
-        "    if isinstance(payload, str) and (HOST_PATH_RE.match(payload) or discloses_host_path(payload)):",
-        "    if isinstance(payload, str) and HOST_PATH_RE.match(payload):  # noqa",
+        "    if isinstance(payload, str) and discloses_host_location(payload):",
+        "    if isinstance(payload, str) and discloses_host_path(payload):  # noqa",
         ["test_a_host_path_WRAPPED_IN_PROSE_is_redacted_in_the_HANDOVER_slice_too"],
+    ),
+    # ---- round-9 leak 1: the predicate matched a SPELLING, not the property ----------------------
+    (
+        # The round-8 detector, restored at the DETECTOR rather than at a consumer: the shipping
+        # question narrows back to "is there a user profile in this text". Everything else in the
+        # pipeline is untouched, so what fails is exactly the class round 9 measured escaping -- a
+        # build drive, a UNC share, a POSIX root, and a real profile path re-spelled as an
+        # administrative share or as percent-encoding.
+        "detector: narrow the shipping question back to PROFILE paths only, as round 8 did",
+        DETECTOR,
+        "    if HOST_PROFILE_PATH_RE.search(text):\n        return True\n    return any(",
+        "    return HOST_PROFILE_PATH_RE.search(text) is not None\n    return any(  # noqa",
+        [
+            "test_a_NON_PROFILE_absolute_WRAPPED_IN_PROSE_is_refused_in_EVERY_SPELLING",
+            "test_a_host_path_WRAPPED_IN_PROSE_is_redacted_in_the_HANDOVER_slice_too",
+        ],
+    ),
+    (
+        # The normalisation half on its own. The grammar stays wide; only the alphabet-folding is
+        # removed, and that is enough on its own -- the grammar is written against ONE separator, so
+        # with nothing folding the alphabet first every Windows spelling walks out along with the
+        # percent-encoded one. That is the round-8 failure mode in one line: a wide grammar over an
+        # unnormalised string is still a spelling test.
+        "detector: ask the grammar without folding the alphabet first",
+        DETECTOR,
+        "for found in _HOST_LOCATION_RE.finditer(_normalised(text))",
+        "for found in _HOST_LOCATION_RE.finditer(text)  # noqa",
+        ["test_a_NON_PROFILE_absolute_WRAPPED_IN_PROSE_is_refused_in_EVERY_SPELLING"],
+    ),
+    # ---- round-9 leak 2: the handover slice's KEYS were never contained --------------------------
+    (
+        # Round 8's handover walk, restored: VALUES cleaned, KEYS carried raw. The slice ships WHOLE
+        # and is the agent's work queue, so a key is exactly as untrusted as a value -- which the
+        # packager's own manifest walk had already concluded one artifact and one round earlier.
+        "handover: clean VALUES but carry raw dictionary KEYS, as round 8 did",
+        MECHANISM,
+        "            safe_key, key_redacted = _redacted_key(key, out)",
+        "            safe_key, key_redacted = key, False  # noqa",
+        [
+            "test_an_untrusted_handover_KEY_is_redacted_like_a_value",
+            "test_the_handover_KEY_walk_reports_the_REDACTED_key_and_stays_idempotent",
+        ],
+    ),
+    (
+        # Redaction without collision disambiguation: two unsafe keys both land on one sentinel and
+        # `dict` keeps the last, so the agent's work queue silently loses a field. Containment that
+        # destroys data is not containment, which is why `tableau_env.scrub_tree` disambiguates and
+        # why both of its heirs copy the property rather than the code.
+        "handover: redact colliding keys onto ONE sentinel, losing every field but the last",
+        MECHANISM,
+        "    unique, suffix = REDACTED, 2\n    while unique in taken:\n"
+        '        unique, suffix = f"{REDACTED}#{suffix}", suffix + 1\n    return unique, True',
+        "    return REDACTED, True  # noqa",
+        ["test_the_handover_KEY_walk_reports_the_REDACTED_key_and_stays_idempotent"],
     ),
     # ---- round-7 finding B2: keys are untrusted too, and nothing may be appended after the sweep --
     (

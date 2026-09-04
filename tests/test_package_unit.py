@@ -31,6 +31,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
+import host_paths as hp  # noqa: E402  # pylint: disable=wrong-import-position
 import manifest_scope as ms  # noqa: E402  # pylint: disable=wrong-import-position
 import package_unit as pkg  # noqa: E402  # pylint: disable=wrong-import-position
 import reference_evidence as rev  # noqa: E402  # pylint: disable=wrong-import-position
@@ -1134,7 +1135,7 @@ def test_an_absolute_path_is_refused_and_never_reaches_the_manifest(tmp_path: Pa
 
 
 def test_a_NON_PROFILE_absolute_location_is_refused_by_the_PARSE_half(tmp_path: Path) -> None:
-    """What ONLY `_declares_non_relative` answers, isolated so the branch stays falsifiable.
+    """What ONLY `_declares_non_relative` answered, isolated so the branch stays falsifiable.
 
     Round 7 gave the packager a second, CONTAINMENT-shaped question (does this text disclose a path
     under a user PROFILE?), and for the ordinary case both layers now fire on the same string with
@@ -1147,9 +1148,55 @@ def test_a_NON_PROFILE_absolute_location_is_refused_by_the_PARSE_half(tmp_path: 
     parse is the only thing that can refuse it. Neuter it and the leg gets a different diagnosis on
     both hosts - *"escapes the capture root"* on Windows, *"does not resolve to a file"* on Linux,
     because `PureWindowsPath`'s drive is what makes the two agree here in the first place.
+
+    ⚠️ **Round 9 MASKED this test the same way round 7 masked its predecessor, and it is kept anyway.**
+    `host_paths.discloses_host_location` now refuses every rooted location, a build drive included,
+    so this string is refused by two layers again and the mutation SURVIVES against it. The claim is
+    still true and still worth pinning - a build drive must not ship - so the test stays and the
+    MUTATION moves, to :func:`test_a_DRIVE_RELATIVE_path_is_refused_by_the_PARSE_half_alone`. Deleting
+    it would trade a true assertion for nothing; leaving the mutation here would report a green
+    campaign for a branch nothing exercises.
     """
     bundle, oracle = _bundle(tmp_path)
     declared = f"D:{_SEP}builds{_SEP}out{_SEP}secret.png"
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    manifest["views"][0]["image"] = {"status": "ok", "path": declared, "sha256": "x", "bytes": 3}
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+
+    shipped = json.loads((_out(tmp_path) / UNIT / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    leg = shipped["views"][0]["image"]
+    assert leg["status"] == pkg.OMITTED_STATUS
+    assert leg["path"] == pkg.REFUSED_PATH, "the declared location must not be echoed back"
+    assert "non-relative" in leg["packaging_reason"]
+    assert declared not in json.dumps(shipped)
+
+
+def test_a_DRIVE_RELATIVE_path_is_refused_by_the_PARSE_half_alone(tmp_path: Path) -> None:
+    """Round 9's re-isolation of the parse branch, and the pattern behind having to do it twice.
+
+    Each time a wider containment layer lands above `_declares_non_relative`, the proof that the
+    parse still runs has to be re-isolated or the branch quietly becomes unfalsifiable. Round 7
+    masked the profile anchor; round 8 re-isolated it on a build drive; round 9's predicate covers
+    every ROOTED location, build drives included, so a build drive isolates nothing any more.
+
+    What is left to only this branch is a **drive-relative** path - `<drive>:secret.png`, a drive with
+    no root separator, which Windows resolves against that drive's current directory. It is a real
+    escape route for `_resolve_capture_file` and the containment predicate is silent on it BY
+    CONSTRUCTION: nothing about it is rooted, so no grammar of absolute locations can see it.
+    Measured on the round-9 tip::
+
+        <drive>:secret.png -> _declares_non_relative=True  discloses_host_location=False
+
+    which is exactly the shape an anchor needs: one branch answers, the other cannot.
+    """
+    declared = "C:secret.png"
+    assert pkg._declares_non_relative(declared) is True  # pylint: disable=protected-access
+    assert hp.discloses_host_location(declared) is False, (
+        "the containment half must be silent, or this isolates nothing"
+    )
+
+    bundle, oracle = _bundle(tmp_path)
     manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
     manifest["views"][0]["image"] = {"status": "ok", "path": declared, "sha256": "x", "bytes": 3}
     (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
@@ -1576,40 +1623,141 @@ def test_a_host_path_WRAPPED_IN_PROSE_is_redacted_in_the_HANDOVER_slice_too(tmp_
     `redact_host_paths` asked `HOST_PATH_RE.match` - whether the value STARTS as a location - while
     its own docstring claimed it was "the same shape `set_data_folder.py` gates the repo on". It was
     not, and that drift is finding B1 in a second place: fixing only the packager would have left the
-    identical escape in the artifact that ships WHOLE. Both halves are asserted, because the anchored
-    test is not redundant either - it catches a non-profile location the profile regex is silent on.
+    identical escape in the artifact that ships WHOLE.
+
+    ⚠️ **Round 9 DELETED the anchored half rather than keeping it beside the containment one.** Both
+    were spelling tests and the union of two spelling tests still missed `HTTP 503: ` + a non-profile
+    absolute. `host_paths.discloses_host_location` is a strict superset of the anchored predicate, so
+    the `non_profile_root` row below asserts the same verdict for a better reason: it is refused
+    because it is ROOTED, not because it happens to be at the start of the string. Moving it into
+    prose - which no anchored test could ever have caught - is what pins that.
     """
     bundle, oracle = _bundle(tmp_path)
     path = bundle / "handover" / f"{UNIT}.json"
     payload = json.loads(path.read_text(encoding="utf-8"))
     payload["workbook"]["wrapped_note"] = f"HTTP 503: {HOST_PATH_ROOT}{_SEP}private{_SEP}x could not be opened"
     payload["workbook"]["non_profile_root"] = f"D:{_SEP}builds{_SEP}out"
+    payload["workbook"]["non_profile_in_prose"] = f"the build wrote to D:{_SEP}builds{_SEP}out and stopped"
     path.write_text(json.dumps(payload), encoding="utf-8")
     _package(tmp_path, bundle, oracle)
     shipped = json.loads((_out(tmp_path) / UNIT / "handover" / f"{UNIT}.json").read_text(encoding="utf-8"))
     assert shipped["workbook"]["wrapped_note"] == ms.REDACTED, "a host path inside prose must still be redacted"
-    assert shipped["workbook"]["non_profile_root"] == ms.REDACTED, "the anchored half must not be narrowed away"
+    assert shipped["workbook"]["non_profile_root"] == ms.REDACTED, "a non-profile location must still be redacted"
+    assert shipped["workbook"]["non_profile_in_prose"] == ms.REDACTED, "and it must not be rescued by a prefix"
     account = HOST_PATH_ROOT.rsplit(_SEP, 1)[-1]
     assert account not in json.dumps(shipped)
 
 
+def test_an_untrusted_handover_KEY_is_redacted_like_a_value(tmp_path: Path) -> None:
+    """#480 round-9 leak 2. `redact_host_paths` cleaned VALUES and preserved raw KEYS.
+
+    Round 8 declined this, citing *"engine-authored keys, no reproduction"*. A reproduction now
+    exists, and it is built with the same hypothetical-future-field method this slice's own
+    value-redaction test (`test_an_absolute_path_anywhere_in_the_handover_slice_is_redacted`) already
+    uses - so declining it required the value half and the key half of ONE artifact to be held to two
+    different standards of evidence. Measured on the round-8 tip::
+
+        HANDOVER_TOP_KEY_PRESENT=True
+        HANDOVER_NESTED_KEY_PRESENT=True
+        HANDOVER_RAW_TEXT_PRESENT=True    -> customer-shipped handover/Book.json carries the path
+
+    "Engine-authored" describes a key's ORIGIN; it does not enforce the shipping invariant. The
+    packager's own manifest walk had already concluded exactly this one artifact over, in round 7.
+
+    The collision row is not decoration: two distinct unsafe keys must not both redact onto one
+    sentinel and let `dict` keep the last, which would turn a redaction into silent data loss inside
+    the agent's actual work queue.
+    """
+    leak_a = f"{HOST_PATH_ROOT}{_SEP}private{_SEP}secret"
+    leak_b = f"D:{_SEP}builds{_SEP}out"
+    account = HOST_PATH_ROOT.rsplit(_SEP, 1)[-1]
+    bundle, oracle = _bundle(tmp_path)
+    path = bundle / "handover" / f"{UNIT}.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["workbook"][leak_a] = "safe scalar a"
+    payload["workbook"][leak_b] = "safe scalar b"
+    payload["workbook"]["nested"] = {"deep": [{leak_a: "safe scalar c"}]}
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    result = _package(tmp_path, bundle, oracle)
+
+    shipped = json.loads((_out(tmp_path) / UNIT / "handover" / f"{UNIT}.json").read_text(encoding="utf-8"))
+    rendered = json.dumps(shipped)
+    assert leak_a not in rendered and leak_b not in rendered and account not in rendered
+    assert ms.REDACTED in shipped["workbook"] and f"{ms.REDACTED}#2" in shipped["workbook"]
+    assert sorted([shipped["workbook"][ms.REDACTED], shipped["workbook"][f"{ms.REDACTED}#2"]]) == [
+        "safe scalar a",
+        "safe scalar b",
+    ], "a collision must lose neither field's value"
+    assert shipped["workbook"]["nested"]["deep"][0] == {ms.REDACTED: "safe scalar c"}
+    assert any("redacted" in note for note in result["notes"]), "a redaction must be reported, not silent"
+
+    leaked = [
+        item.relative_to(_out(tmp_path) / UNIT).as_posix()
+        for item in (_out(tmp_path) / UNIT).rglob("*")
+        if item.is_file() and account in item.read_text(encoding="utf-8", errors="ignore")
+    ]
+    assert leaked == [], f"an untrusted handover KEY must not reach any packaged artifact: {leaked}"
+
+
+def test_the_handover_KEY_walk_reports_the_REDACTED_key_and_stays_idempotent() -> None:
+    """Driven directly, because two properties of key redaction have no artifact that shows them.
+
+    Copied from `package_unit._contain_unsafe_key`, which solved this for the oracle manifest one
+    round earlier, and from `tableau_env.scrub_tree` before that: the reported path must be built
+    from the REDACTED key or the record of the catch re-emits what was caught, and a second pass over
+    an already-redacted document must not read the sentinel as a fresh, safe key.
+    """
+    leak_a = f"{HOST_PATH_ROOT}{_SEP}a"
+    leak_b = f"{HOST_PATH_ROOT}{_SEP}b"
+    payload = {leak_a: "kept-a", leak_b: "kept-b", "rows": [{leak_a: "kept-nested"}], "count": 7}
+    cleaned, redacted = ms.redact_host_paths(payload, prefix="handover/Book.json")
+
+    assert sorted(cleaned) == sorted([ms.REDACTED, f"{ms.REDACTED}#2", "rows", "count"])
+    assert sorted(value for value in cleaned.values() if isinstance(value, str)) == ["kept-a", "kept-b"]
+    assert cleaned["rows"][0] == {ms.REDACTED: "kept-nested"} and cleaned["count"] == 7
+    assert sorted(redacted) == [
+        f"handover/Book.json.{ms.REDACTED} (key)",
+        f"handover/Book.json.{ms.REDACTED}#2 (key)",
+        f"handover/Book.json.rows[0].{ms.REDACTED} (key)",
+    ]
+    assert HOST_PATH_ROOT not in json.dumps(cleaned) + json.dumps(redacted)
+
+    again, redacted_again = ms.redact_host_paths(cleaned, prefix="handover/Book.json")
+    assert again == cleaned and sorted(redacted_again) == sorted(redacted), "the walk must be idempotent"
+
+
 def test_ORDINARY_PROSE_that_merely_MENTIONS_a_path_is_NOT_refused(tmp_path: Path) -> None:
-    """Positive control for B1's broader predicate - and the main risk the fix introduces.
+    """Positive control for the broader predicate - and the main risk the fix introduces.
 
     A CONTAINS test is far likelier to false-positive than an IS test, and over-refusal destroys the
     operator's evidence exactly as under-refusal leaks it. Every shape here mentions something
     path-like while disclosing no host location: a REST route, a relative directory, a `..` inside a
-    sentence, `Users` as an English word, a Windows-looking path that is not a profile root, and the
-    repo's own documented `<placeholder>` spelling - which `set_data_folder.py --check` exempts on
-    purpose, so the packager must exempt it identically or the two definitions have re-diverged.
+    sentence, `Users` as an English word, an ordinary view name, and the repo's own documented
+    `<placeholder>` spelling - which `set_data_folder.py --check` exempts on purpose, so the packager
+    must exempt it identically or the two definitions have re-diverged.
+
+    ⚠️ **Round 9 REVERSES one entry of this control, deliberately, and it is the whole point of the
+    round.** Round 8 asserted here that `the build wrote to <drive>:\\builds and then stopped` must
+    ship, on the reading that a non-profile location in prose is ordinary text. It is not: this PR's
+    own parse anchor states that a build drive names the OPERATOR'S MACHINE and must be refused, and
+    a location cannot become acceptable merely because a status prefix precedes it. That entry has
+    moved to :func:`test_a_NON_PROFILE_absolute_WRAPPED_IN_PROSE_is_refused_in_EVERY_SPELLING`, which
+    asserts the opposite verdict on the same string.
+
+    The four entries after the blank line are round 9's own negative controls, one per way the wider
+    grammar could over-fire: a URL whose PATH looks POSIX-absolute, a dotted version string, a drive
+    letter in prose with no path after it, and a colon-bearing timestamp.
     """
     prose = [
-        "HTTP 503 from GET /api/views/x after 2 retries",
+        "HTTP 503 from GET /api/2.4/sites/abc/views/def after 2 retries",
         "renderer wrote nothing (see ../logs on the server)",
         "images/view-0.png was 0 bytes",
         "Users of this dashboard see a blank page",
-        f"the build wrote to D:{_SEP}builds and then stopped",
         f"set DataFolder to C:{_SEP}Users{_SEP}<account>{_SEP}data as SECURITY.md documents",
+        "GET https://tableau.example.com/var/lib/x returned 500",
+        "engine 2.339.0, powerbi-report-author 0.1.4, node v20.11.1",
+        "drive D: is full; free 0 bytes",
+        "captured at 2026-09-04T16:30:53+02:00 (12:04:07 elapsed)",
     ]
     shipped, _ = _shipped_with(
         tmp_path,
@@ -1618,6 +1766,74 @@ def test_ORDINARY_PROSE_that_merely_MENTIONS_a_path_is_NOT_refused(tmp_path: Pat
     assert shipped["views"][0]["image"]["retry_reasons"] == prose, "informative prose must stay informative"
     assert shipped["views"][0]["view_name"] == "Sales by Users"
     assert "refused_fields" not in shipped["scope"], "nothing was refused, so nothing may be recorded"
+
+
+def test_a_NON_PROFILE_absolute_WRAPPED_IN_PROSE_is_refused_in_EVERY_SPELLING(tmp_path: Path) -> None:
+    """#480 round-9 leak 1. The containment predicate matched a SPELLING, not the property.
+
+    Rounds 3-8 each widened the guard by one shape, and each time a different spelling escaped -
+    because a *profile root* is a way of writing a location, not the property that matters to a
+    customer deliverable. Measured on the round-8 tip, one wrapper (`HTTP 503: `, which is how
+    `classify_export_error` writes `retry_reasons[]`) over locations that are all absolute::
+
+        <drive>:\\builds\\out\\secret.log                        -> DISCLOSES=False  SHIPPED=True
+        \\\\customer-server\\finance-share\\secret.log              -> DISCLOSES=False  SHIPPED=True
+        /var/lib/tableau/secret.log                           -> DISCLOSES=False  SHIPPED=True
+        \\\\server\\C$\\Users\\<a real account>\\private\\secret.log  -> DISCLOSES=False  SHIPPED=True
+        C%3A%5CUsers%5C<a real account>%5Cprivate%5Csecret.log-> DISCLOSES=False  SHIPPED=True
+
+    The last two are the decisive ones and are why the account name is asserted against the shipped
+    BYTES: they are a REAL profile path with a REAL account name, re-spelled as an administrative
+    share and as percent-encoding. A spelling test lets the same secret through in another alphabet,
+    so the predicate now normalises the alphabet away and asks ONE question about every rooted form.
+    """
+    account = "blind-review-account"
+    profile = f"C:{_SEP}Users{_SEP}{account}"
+    wrapped = [
+        f"HTTP 503: D:{_SEP}builds{_SEP}out{_SEP}secret.log could not be opened",
+        f"HTTP 503: {_SEP}{_SEP}customer-server{_SEP}finance-share{_SEP}secret.log could not be opened",
+        "HTTP 503: /var/lib/tableau/secret.log could not be opened",
+        f"HTTP 503: {_SEP}{_SEP}server{_SEP}C${_SEP}Users{_SEP}{account}{_SEP}private{_SEP}secret.log failed",
+        f"HTTP 503: {_SEP}{_SEP}?{_SEP}D:{_SEP}builds{_SEP}out{_SEP}secret.log could not be opened",
+        f"HTTP 503: D:{_SEP}{_SEP}builds{_SEP}{_SEP}out{_SEP}secret.log could not be opened",
+        f"HTTP 503: C%3A%5CUsers%5C{account}%5Cprivate%5Csecret.log could not be opened",
+        "HTTP 503: %2Fvar%2Flib%2Ftableau%2Fsecret.log could not be opened",
+        f"the build wrote to D:{_SEP}builds and then stopped",
+    ]
+    shipped, root = _shipped_with(tmp_path, view={"image": {"status": "failed", "retry_reasons": list(wrapped)}})
+    assert shipped["views"][0]["image"]["retry_reasons"] == [pkg.REFUSED_PATH] * len(wrapped)
+    assert absolute_host_paths(shipped) == []
+    assert profile not in json.dumps(shipped)
+    leaked = [
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_file() and account in path.read_text(encoding="utf-8", errors="ignore")
+    ]
+    assert leaked == [], f"no shipped artifact may carry the account name in ANY spelling: {leaked}"
+
+
+def test_the_SHIPPING_predicate_is_a_STRICT_SUPERSET_of_the_repo_COMMIT_GATE() -> None:
+    """The module's stated invariant, asserted rather than asserted-in-prose.
+
+    `host_paths` exists so "a package can never ship what a commit could not" is structurally true.
+    Round 9 gives it TWO predicates - a narrow, profile-only one for the repo's own tracked files and
+    a wide one for customer artifacts - and that is only safe while the wide one contains the narrow
+    one. It is not two independent regexes: `discloses_host_location` unions the narrow predicate in
+    rather than reimplementing it, so this asserts a property of the composition, and the
+    `<placeholder>` row is the one that would break first if a future edit re-spelled it instead.
+    """
+    for text in (
+        HOST_PATH,
+        f"{HOST_PATH_ROOT}{_SEP}private{_SEP}x.log",
+        f"HTTP 503: {HOST_PATH_ROOT}{_SEP}x could not be opened",
+        f'"{HOST_PATH_ROOT}{_SEP}x"',
+        "file:///" + HOST_PATH_ROOT.replace(_SEP, "/") + "/x",
+        f"C:{_SEP}Users{_SEP}<account>{_SEP}data",
+        "Users of this dashboard see a blank page",
+        "/api/2.4/sites/abc/views/def",
+    ):
+        narrow = hp.discloses_host_path(text)
+        assert hp.discloses_host_location(text) or not narrow, f"the shipping predicate narrowed on: {text!r}"
 
 
 def test_an_untrusted_dictionary_KEY_is_contained_like_a_value(tmp_path: Path) -> None:

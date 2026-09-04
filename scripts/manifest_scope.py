@@ -49,14 +49,13 @@ Two mechanisms, deliberately different in kind
 
 from __future__ import annotations
 
-import re
 import sys
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from host_paths import discloses_host_path  # noqa: E402  # pylint: disable=wrong-import-position
+from host_paths import discloses_host_location, discloses_host_path  # noqa: E402  # pylint: disable=wrong-import-position
 
 
 class UnscopedStructure(TypeError):
@@ -170,60 +169,93 @@ def _safe_path_segment(key: Any) -> str:
     guard must not become the disclosure channel. The `views[]` prefix survives, so the operator still
     learns at which LEVEL an unnameable field was dropped - redaction here costs the key, not the
     location.
+
+    ⚠️ **This one stays on the NARROW, profile-only predicate, and that is deliberate** (round 9).
+    Everything that SHIPS is judged by :func:`host_paths.discloses_host_location`; this is not a
+    shipping decision but a pre-scrub applied while a diagnostic is being BUILT, and the mitigation
+    is the packager's final sweep over the stamped document, which is wide. Widening this one too
+    would MASK that sweep - `test_NOTHING_is_appended_to_the_oracle_manifest_after_its_last_containment_pass`
+    discriminates the two guards precisely by driving a key this one is silent on, and with both wide
+    the ordering claim becomes unobservable. That is the same trap round 9 documents for the parse
+    anchor in `package_unit._declares_non_relative`: a wider layer above an existing one retires the
+    proof that the lower one still runs. Nothing leaks by keeping it narrow - the sweep refuses the
+    raw key either way.
     """
     text = str(key)
     return REDACTED if discloses_host_path(text) else text
 
 
 # --------------------------------------------------------------------------------------------
-# the value-shaped half: absolute host paths, wherever they appear
+# the value-shaped half: absolute host locations, wherever they appear
 # --------------------------------------------------------------------------------------------
 
-#: Whether a value is a location AT ALL - anchored, and deliberately broader in one direction than a
-#: profile path: `<drive>:\builds\out` and `\\server\share\x` name the operator's machine even
-#: without a user profile in them. It is the *position* half of the question;
-#: :func:`host_paths.discloses_host_path` is the *containment* half, and :func:`redact_host_paths`
-#: takes the UNION of the two so neither half can narrow the other.
-#:
-#: ⚠️ This used to claim it was "the same shape `scripts/set_data_folder.py` gates the repo on". It
-#: was not, and that drift is #480 finding B1: `^` makes it a test of what a string STARTS with, so
-#: `"HTTP 503: " + <a host path>` passed it while failing the repo gate. It is matched against a
-#: PARSED string value, never against serialized text - `json.dumps` doubles each separator, and
-#: grepping the render for the single-separator form is how an earlier assertion here was silently
-#: vacuous.
-#:
-#: ⚠️ The POSIX segments are assembled from parts rather than written inline: spelled out, this
-#: pattern is itself an absolute-user-path literal, and the repo's own privacy gate
-#: (`set_data_folder.py --check`, a CI step) flagged this file - the detector tripping the detector.
-_POSIX_PROFILE_DIRS = ("Users", "home")
-HOST_PATH_RE = re.compile(
-    r"^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/]|" + "|".join(f"/{name}/" for name in _POSIX_PROFILE_DIRS) + ")",
-)
 REDACTED = "<redacted-absolute-path>"
 
 
+def _redacted_key(key: Any, taken: dict[str, Any]) -> tuple[Any, bool]:
+    """`(key safe to ship, was it redacted)` - one dictionary key, collision-disambiguated.
+
+    ⚠️ **#480 round 9, leak 2.** :func:`redact_host_paths` cleaned dictionary VALUES and preserved
+    raw KEYS, so the handover slice - the one artifact that ships WHOLE - carried whatever a key
+    spelled. Round 8 declined this citing *"engine-authored keys, no reproduction"*; a reproduction
+    now exists, built with the same hypothetical-future-field method the slice's own value-redaction
+    test already uses::
+
+        {"workbook": {"<a profile path>": "safe scalar"}}
+          -> handover/Book.json ships the key, and the account name, verbatim
+
+    "Engine-authored" describes a key's ORIGIN; it does not enforce the shipping invariant, and the
+    packager's own manifest walk (`package_unit._contain_unsafe_key`) had already concluded the same
+    thing one artifact over. The two properties below are copied from there, and from
+    `tableau_env._scrub_key` before it:
+
+    * **a collision is disambiguated, never silently dropped** - two distinct unsafe keys would
+      otherwise both redact to one sentinel and `dict` would keep the last, turning redaction into
+      data loss in the agent's actual work queue;
+    * an **already-redacted** key reports redacted, so the walk stays idempotent and a second pass
+      cannot read the sentinel as a fresh, safe key.
+    """
+    if not isinstance(key, str):
+        return key, False
+    if key == REDACTED or key.startswith(f"{REDACTED}#"):
+        return key, True
+    if not discloses_host_location(key):
+        return key, False
+    unique, suffix = REDACTED, 2
+    while unique in taken:
+        unique, suffix = f"{REDACTED}#{suffix}", suffix + 1
+    return unique, True
+
+
 def redact_host_paths(payload: Any, *, prefix: str = "") -> tuple[Any, list[str]]:
-    """`(payload with absolute host paths replaced, JSON paths redacted)`.
+    """`(payload with absolute host locations replaced, JSON paths redacted)`.
 
     The complement to `project()`, for documents that must ship whole. It closes by VALUE SHAPE, so
     a field name nobody predicted cannot evade it - which is precisely the property the three
     name-shaped rounds lacked. It redacts rather than drops: the handover slice is the agent's work
     queue, and deleting a key it reads would trade a leak for a broken deliverable.
 
-    ⚠️ **Two questions, unioned** (#480 round-7 finding B1). `HOST_PATH_RE.match` asks whether the
-    value *starts* as a location, which is the right question for a `path`-shaped field and the wrong
-    one for prose: a status prefix, a quote or a `file:///` wrapper hides the disclosure from an
-    anchored test entirely. :func:`host_paths.discloses_host_path` asks whether the text discloses a
-    profile path ANYWHERE in it, and is the same definition the repo's commit gate uses - so a
-    handover slice cannot ship what a commit could not. Neither half is dropped: the anchored one
-    also catches a non-profile location (`<drive>:\\builds\\out`) that the profile regex is silent on.
+    ⚠️ **ONE question, asked once** (#480 round 9). Round 7 unioned an anchored `HOST_PATH_RE.match`
+    ("does this value START as a location") with a profile-only containment test, because neither
+    alone covered the other. Both were spelling tests, and round 9 measured the gap between them:
+    `HTTP 503: ` + a non-profile absolute passed BOTH. :func:`host_paths.discloses_host_location`
+    normalises the spelling away and then asks a single question, and it is a strict superset of the
+    anchored predicate it replaced - so that predicate is deleted rather than kept beside it. Two
+    overlapping definitions of one question is what six rounds of this PR have been.
+
+    ⚠️ **KEYS are redacted too** (round 9, leak 2), by :func:`_redacted_key`, and the reported path
+    is built from the REDACTED key so the record of the catch cannot re-emit what was caught.
     """
     if isinstance(payload, dict):
         out: dict[str, Any] = {}
         hit: list[str] = []
         for key, value in payload.items():
-            cleaned, found = redact_host_paths(value, prefix=f"{prefix}.{key}")
-            out[key] = cleaned
+            safe_key, key_redacted = _redacted_key(key, out)
+            here = f"{prefix}.{safe_key}"
+            if key_redacted:
+                hit.append(f"{here} (key)")
+            cleaned, found = redact_host_paths(value, prefix=here)
+            out[safe_key] = cleaned
             hit.extend(found)
         return out, hit
     if isinstance(payload, list):
@@ -234,7 +266,7 @@ def redact_host_paths(payload: Any, *, prefix: str = "") -> tuple[Any, list[str]
             rows.append(cleaned)
             hit.extend(found)
         return rows, hit
-    if isinstance(payload, str) and (HOST_PATH_RE.match(payload) or discloses_host_path(payload)):
+    if isinstance(payload, str) and discloses_host_location(payload):
         return REDACTED, [prefix or "."]
     return payload, []
 

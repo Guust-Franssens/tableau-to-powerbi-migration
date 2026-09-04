@@ -151,7 +151,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import read_handover  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_oracle_manifest  # noqa: E402  # pylint: disable=wrong-import-position
-from host_paths import discloses_host_path  # noqa: E402  # pylint: disable=wrong-import-position
+from host_paths import discloses_host_location  # noqa: E402  # pylint: disable=wrong-import-position
 from manifest_scope import (  # noqa: E402  # pylint: disable=wrong-import-position
     ORACLE_MANIFEST_ALLOW,
     project,
@@ -496,6 +496,19 @@ def _declares_non_relative(declared: str) -> bool:
     conventions - `C:\\…`, `C:/…`, `\\\\server\\share\\…` and, with the explicit prefix test beside it,
     POSIX `/home/<user>` and `/Users/<user>` - identically on either host. Same idiom, same reason, as
     `promote_unit.slug_problem`.
+
+    ⚠️ **Round 9 masked this branch a SECOND time, and it is re-anchored again rather than deleted.**
+    Round 7 gave the packager a containment question and round 8 isolated this parse with a build
+    drive, because containment was silent on one. Round 9's containment covers every absolute
+    location, so a build drive no longer isolates anything. What remains ONLY this branch's is a
+    **drive-relative** path - `<drive>:secret.png`, a drive with no root separator, which Windows
+    resolves against that drive's current directory. It is a real and dangerous shape for
+    :func:`_resolve_capture_file` and the containment predicate is silent on it by construction
+    (nothing is *rooted*), so it is what
+    :func:`test_a_DRIVE_RELATIVE_path_is_refused_by_the_PARSE_half_alone` drives and where the
+    mutation is anchored. The pattern to keep noticing: **each time a wider layer lands above this
+    one, the proof that this one still runs has to be re-isolated, or the branch quietly becomes
+    unfalsifiable.**
     """
     candidate = PureWindowsPath(declared)
     return candidate.is_absolute() or bool(candidate.drive) or declared.startswith(("\\\\", "/"))
@@ -508,7 +521,8 @@ def _declares_unsafe_path(declared: str) -> bool:
 
     * **non-relative** - a host path, which names the customer's server, project and operator;
     * **a `..` component** - which claims a location outside the capture;
-    * **a host path disclosed ANYWHERE INSIDE the string** - :func:`host_paths.discloses_host_path`.
+    * **an absolute location disclosed ANYWHERE INSIDE the string** -
+      :func:`host_paths.discloses_host_location`.
 
     Deliberately a predicate over a VALUE, not a list of blessed field names: a second field name was
     the round-4 defect, and a third one must not reopen it.
@@ -525,16 +539,31 @@ def _declares_unsafe_path(declared: str) -> bool:
         file:///<drive>/Users/<account>/private/retry.log  -> SHIPPED
 
     So the question the artifact has to answer is *"does this text DISCLOSE a host path?"*, and it is
-    asked with :mod:`host_paths` - the same regex `set_data_folder.py --check` gates every commit on,
-    imported rather than re-spelled. A package must not be able to ship what a commit could not, and
-    three competing definitions of one question is how this class survived six rounds.
+    asked with :mod:`host_paths` - imported rather than re-spelled. A package must not be able to ship
+    what a commit could not, and three competing definitions of one question is how this class
+    survived six rounds.
+
+    ⚠️ **Round-9 blind-review finding: the containment half matched a SPELLING, not the property.**
+    It recognised a *profile* root only, so every other absolute location shipped the moment it was
+    wrapped in prose - including a real profile path with a real account name, re-spelled as an
+    administrative-share UNC or percent-encoded. It now asks
+    :func:`host_paths.discloses_host_location`, which normalises the spelling away and then asks one
+    question about every rooted form. Measured on the round-8 tip, one wrapper over five locations::
+
+        HTTP 503: <drive>:\\builds\\out\\secret.log ...                      -> SHIPPED
+        HTTP 503: \\\\customer-server\\finance-share\\secret.log ...            -> SHIPPED
+        HTTP 503: /var/lib/tableau/secret.log ...                          -> SHIPPED
+        HTTP 503: \\\\server\\C$\\Users\\<account>\\private\\secret.log ...        -> SHIPPED
+        HTTP 503: C%3A%5CUsers%5C<account>%5Cprivate%5Csecret.log ...      -> SHIPPED
 
     ⚠️ The `..` split is `PureWindowsPath` for the reason in :func:`_declares_non_relative`:
     `PurePosixPath` does not treat `\\` as a separator, so a Windows-shaped `sub\\..\\x` presents as
     ONE component on Linux and the traversal test answers False there while answering True on
     Windows.
     """
-    return _declares_non_relative(declared) or discloses_host_path(declared) or ".." in PureWindowsPath(declared).parts
+    return (
+        _declares_non_relative(declared) or discloses_host_location(declared) or ".." in PureWindowsPath(declared).parts
+    )
 
 
 def _contain_unsafe_key(key: Any, taken: dict[str, Any]) -> tuple[Any, bool]:
