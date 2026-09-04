@@ -105,7 +105,7 @@ def test_block_comment_only_custom_sql_is_cannot_assess():
 
 
 def test_executable_sql_survives_a_block_comment():
-    m, _ = probe_live_source.build_m_query(SNOWFLAKE, "Q", "Col", custom_sql="SELECT 1 /* note */")
+    m, _ = probe_live_source.build_m_query(SNOWFLAKE, "Q", "Col", custom_sql="SELECT/* note */1")
 
     assert 'Value.NativeQuery(db, "SELECT 1")' in m
 

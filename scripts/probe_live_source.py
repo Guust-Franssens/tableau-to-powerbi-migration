@@ -239,6 +239,7 @@ def _m_sql_literal(sql: str) -> str:
             continue
         if sql.startswith("/*", index):
             end = sql.find("*/", index + 2)
+            without_comments.append(" ")
             index = len(sql) if end < 0 else end + 2
             continue
         without_comments.append(sql[index])
