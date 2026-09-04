@@ -534,11 +534,7 @@ def _declares_unsafe_path(declared: str) -> bool:
     ONE component on Linux and the traversal test answers False there while answering True on
     Windows.
     """
-    return (
-        _declares_non_relative(declared)
-        or discloses_host_path(declared)
-        or ".." in PureWindowsPath(declared).parts
-    )
+    return _declares_non_relative(declared) or discloses_host_path(declared) or ".." in PureWindowsPath(declared).parts
 
 
 def _contain_unsafe_key(key: Any, taken: dict[str, Any]) -> tuple[Any, bool]:

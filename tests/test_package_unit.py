@@ -1105,6 +1105,15 @@ def test_an_absolute_path_is_refused_and_never_reaches_the_manifest(tmp_path: Pa
     resolved path anyway. Keeping it is deliberate - it is a named requirement and it gives a PRECISE
     diagnosis - so its observable contract is asserted here, otherwise the branch is unfalsifiable
     and could be lost in a refactor without anything going red.
+
+    ⚠️ **Round 7 added a THIRD layer over this same input, and it is why the mutation that neuters
+    `_declares_non_relative` now SURVIVES against this test.** `tmp_path` on Windows sits under the
+    runner's own profile, so `discloses_host_path` refuses the declared string with the identical
+    *"non-relative"* diagnosis and nothing here can tell the two layers apart. What only the parse
+    half answers is a NON-PROFILE location, and that is asserted separately in
+    :func:`test_a_NON_PROFILE_absolute_location_is_refused_by_the_PARSE_half`, which is where the
+    mutation is now anchored. This test is unchanged and still true; it is simply no longer the
+    discriminator.
     """
     bundle, oracle = _bundle(tmp_path)
     secret = tmp_path / "absolute-secret.png"
@@ -1122,6 +1131,36 @@ def test_an_absolute_path_is_refused_and_never_reaches_the_manifest(tmp_path: Pa
     assert leg["path"] == pkg.REFUSED_PATH, "the declared path must not be echoed back"
     assert "non-relative" in leg["packaging_reason"], "an absolute path must be diagnosed as such"
     assert str(secret) not in json.dumps(shipped)
+
+
+def test_a_NON_PROFILE_absolute_location_is_refused_by_the_PARSE_half(tmp_path: Path) -> None:
+    """What ONLY `_declares_non_relative` answers, isolated so the branch stays falsifiable.
+
+    Round 7 gave the packager a second, CONTAINMENT-shaped question (does this text disclose a path
+    under a user PROFILE?), and for the ordinary case both layers now fire on the same string with
+    the same *"non-relative"* diagnosis. That is defence in depth and it is wanted - but it made the
+    parse half unobservable, and an unfalsifiable guard is the thing this repo's mutation campaign
+    exists to refuse.
+
+    A build drive is the discriminator: `<drive>:\\builds\\out\\secret.png` names the operator's
+    machine while disclosing no profile, so `host_paths.discloses_host_path` is silent on it and the
+    parse is the only thing that can refuse it. Neuter it and the leg gets a different diagnosis on
+    both hosts - *"escapes the capture root"* on Windows, *"does not resolve to a file"* on Linux,
+    because `PureWindowsPath`'s drive is what makes the two agree here in the first place.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    declared = f"D:{_SEP}builds{_SEP}out{_SEP}secret.png"
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    manifest["views"][0]["image"] = {"status": "ok", "path": declared, "sha256": "x", "bytes": 3}
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+
+    shipped = json.loads((_out(tmp_path) / UNIT / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    leg = shipped["views"][0]["image"]
+    assert leg["status"] == pkg.OMITTED_STATUS
+    assert leg["path"] == pkg.REFUSED_PATH, "the declared location must not be echoed back"
+    assert "non-relative" in leg["packaging_reason"], "only the PARSE half can diagnose this one"
+    assert declared not in json.dumps(shipped)
 
 
 def test_a_symlink_out_of_the_capture_root_is_refused(tmp_path: Path) -> None:
@@ -1487,6 +1526,198 @@ def test_a_LEGITIMATE_string_inside_a_retained_container_survives_unmodified(tmp
     assert "refused_fields" not in shipped["scope"], "nothing was refused, so nothing may be recorded"
     assert not [line for line in _lines(tmp_path) if line.startswith("ORACLE_OMISSION") and "retry_reasons" in line]
     assert root.is_dir()
+
+
+# --------------------------------------------------------------------------------------------
+# #480 round 7: a host path WRAPPED IN PROSE, and an untrusted dictionary KEY
+# --------------------------------------------------------------------------------------------
+
+
+def test_a_host_path_WRAPPED_IN_PROSE_is_refused_not_only_a_bare_one(tmp_path: Path) -> None:
+    """#480 round-7 finding B1. The predicate PARSED the string, so any prefix hid the answer.
+
+    `classify_export_error` prepends the HTTP status to a server diagnostic and persists the result
+    in `retry_reasons[]` (`capture_tableau_oracle.py:278,597`), so the field most likely to carry a
+    real customer path is also the field where it arrives wrapped in a sentence. Review's measured
+    reproduction against the round-7 tip::
+
+        raw:               <profile>\\private\\retry.log could not be opened
+        classified detail: HTTP 503: <profile>\\private\\retry.log could not be opened
+        package predicate: False
+        shipped artifact:  oracle/oracle-manifest.json
+
+    Four spellings of ONE path, which is the point: a shipped artifact's question is CONTAINMENT
+    ("does this text disclose a host path?"), not shape ("is this string a path?"). The account name
+    is asserted against the shipped BYTES too, because a walk of the parse is structurally blind to a
+    disclosure that sits inside authored prose rather than being a string VALUE.
+    """
+    leak = f"{HOST_PATH_ROOT}{_SEP}private{_SEP}retry.log"
+    account = HOST_PATH_ROOT.rsplit(_SEP, 1)[-1]
+    wrapped = [
+        f"HTTP 503: {leak} could not be opened",
+        f'"{leak}"',
+        "file:///" + HOST_PATH_ROOT.replace(_SEP, "/") + "/private/retry.log",
+        f"exported nothing; see {leak}",
+    ]
+    shipped, root = _shipped_with(tmp_path, view={"image": {"status": "failed", "retry_reasons": list(wrapped)}})
+    assert shipped["views"][0]["image"]["retry_reasons"] == [pkg.REFUSED_PATH] * len(wrapped)
+    assert absolute_host_paths(shipped) == []
+    leaked = [
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_file() and account in path.read_text(encoding="utf-8", errors="ignore")
+    ]
+    assert leaked == [], f"no shipped artifact may carry the account name: {leaked}"
+
+
+def test_a_host_path_WRAPPED_IN_PROSE_is_redacted_in_the_HANDOVER_slice_too(tmp_path: Path) -> None:
+    """The same sub-class on the second value-shaped guard, which had the same anchored predicate.
+
+    `redact_host_paths` asked `HOST_PATH_RE.match` - whether the value STARTS as a location - while
+    its own docstring claimed it was "the same shape `set_data_folder.py` gates the repo on". It was
+    not, and that drift is finding B1 in a second place: fixing only the packager would have left the
+    identical escape in the artifact that ships WHOLE. Both halves are asserted, because the anchored
+    test is not redundant either - it catches a non-profile location the profile regex is silent on.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    path = bundle / "handover" / f"{UNIT}.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["workbook"]["wrapped_note"] = f"HTTP 503: {HOST_PATH_ROOT}{_SEP}private{_SEP}x could not be opened"
+    payload["workbook"]["non_profile_root"] = f"D:{_SEP}builds{_SEP}out"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+    shipped = json.loads((_out(tmp_path) / UNIT / "handover" / f"{UNIT}.json").read_text(encoding="utf-8"))
+    assert shipped["workbook"]["wrapped_note"] == ms.REDACTED, "a host path inside prose must still be redacted"
+    assert shipped["workbook"]["non_profile_root"] == ms.REDACTED, "the anchored half must not be narrowed away"
+    account = HOST_PATH_ROOT.rsplit(_SEP, 1)[-1]
+    assert account not in json.dumps(shipped)
+
+
+def test_ORDINARY_PROSE_that_merely_MENTIONS_a_path_is_NOT_refused(tmp_path: Path) -> None:
+    """Positive control for B1's broader predicate - and the main risk the fix introduces.
+
+    A CONTAINS test is far likelier to false-positive than an IS test, and over-refusal destroys the
+    operator's evidence exactly as under-refusal leaks it. Every shape here mentions something
+    path-like while disclosing no host location: a REST route, a relative directory, a `..` inside a
+    sentence, `Users` as an English word, a Windows-looking path that is not a profile root, and the
+    repo's own documented `<placeholder>` spelling - which `set_data_folder.py --check` exempts on
+    purpose, so the packager must exempt it identically or the two definitions have re-diverged.
+    """
+    prose = [
+        "HTTP 503 from GET /api/views/x after 2 retries",
+        "renderer wrote nothing (see ../logs on the server)",
+        "images/view-0.png was 0 bytes",
+        "Users of this dashboard see a blank page",
+        f"the build wrote to D:{_SEP}builds and then stopped",
+        f"set DataFolder to C:{_SEP}Users{_SEP}<account>{_SEP}data as SECURITY.md documents",
+    ]
+    shipped, _ = _shipped_with(
+        tmp_path,
+        view={"image": {"status": "failed", "retry_reasons": list(prose)}, "view_name": "Sales by Users"},
+    )
+    assert shipped["views"][0]["image"]["retry_reasons"] == prose, "informative prose must stay informative"
+    assert shipped["views"][0]["view_name"] == "Sales by Users"
+    assert "refused_fields" not in shipped["scope"], "nothing was refused, so nothing may be recorded"
+
+
+def test_an_untrusted_dictionary_KEY_is_contained_like_a_value(tmp_path: Path) -> None:
+    """#480 round-7 finding B2. The walk cleaned VALUES and preserved KEYS.
+
+    `project()`'s whole job is to refuse an unenumerated field - and it then NAMED the refusal using
+    that field's own key, so an untrusted key shipped verbatim inside the record of having dropped
+    it. Review's injected view field and its measured result on the round-7 tip::
+
+        "<profile>\\private\\secret": "safe scalar"
+          -> "scope": {"dropped_fields": ["views[].<profile>\\private\\secret"]}
+
+    The key is contained at the same intake as the values, so `dropped_fields` can only ever name the
+    CONTAINED key - and the `views[]` prefix survives, so the operator still learns at which level an
+    unnameable field was dropped.
+    """
+    leak = f"{HOST_PATH_ROOT}{_SEP}private{_SEP}secret"
+    account = HOST_PATH_ROOT.rsplit(_SEP, 1)[-1]
+    shipped, root = _shipped_with(tmp_path, view={leak: "safe scalar"})
+    assert absolute_host_paths(shipped) == []
+    assert f"views[].{pkg.REFUSED_PATH}" in shipped["scope"]["dropped_fields"]
+    assert leak not in json.dumps(shipped)
+    leaked = [
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_file() and account in path.read_text(encoding="utf-8", errors="ignore")
+    ]
+    assert leaked == [], f"an untrusted KEY must not reach any packaged artifact: {leaked}"
+
+
+def test_NOTHING_is_appended_to_the_oracle_manifest_after_its_last_containment_pass(tmp_path: Path) -> None:
+    """The structural half of B2, and the one that makes "contained by construction" true.
+
+    A TOP-LEVEL manifest key never passes through the per-view intake, so it reaches `project()` raw
+    and lands in `scope.dropped_fields` - which `stamp_scope` used to append AFTER the document's
+    last containment pass. Two keys are driven, because the two guards are complementary rather than
+    redundant and this pins which one answers:
+
+    * a **profile** path is redacted by `manifest_scope._safe_path_segment` while it is being built
+      into the diagnostic, keeping the `<redacted-absolute-path>` spelling and losing only the key;
+    * a **non-profile** location (`D:\\...`) discloses no user profile, so the segment builder is
+      silent on it and only the final sweep - which now runs on the STAMPED document - refuses it.
+
+    Neuter either one and this fails, which is exactly the claim: a later stage must not be able to
+    append raw text to a shipped structure.
+    """
+    profile_key = f"{HOST_PATH_ROOT}{_SEP}private{_SEP}secret"
+    location_key = f"D:{_SEP}builds{_SEP}out"
+    bundle, oracle = _bundle(tmp_path)
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    manifest[profile_key] = "safe scalar"
+    manifest[location_key] = "safe scalar"
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+
+    shipped = json.loads((_out(tmp_path) / UNIT / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    dropped = shipped["scope"]["dropped_fields"]
+    assert ms.REDACTED in dropped, f"a profile key must be redacted as the diagnostic is built: {dropped}"
+    assert pkg.REFUSED_PATH in dropped, f"the final sweep must refuse a non-profile location key: {dropped}"
+    assert profile_key not in json.dumps(shipped) and location_key not in json.dumps(shipped)
+    assert absolute_host_paths(shipped) == []
+    assert any(entry.startswith("scope.dropped_fields[") for entry in shipped["scope"]["refused_fields"]), (
+        "the refusal must be RECORDED, and by the path it refused"
+    )
+
+
+def test_the_containment_walk_contains_KEYS_and_reports_the_CONTAINED_key(tmp_path: Path) -> None:
+    """Driven directly, because three properties of key containment have no artifact that shows them.
+
+    Copied from `tableau_env.scrub_tree` (:461-478), which already solved this for the credential
+    sink and documents why each matters:
+
+    1. a **collision is disambiguated, never silently dropped** - two distinct unsafe keys both
+       contain to the sentinel, and `dict` would keep the last, turning containment into data loss;
+    2. the **reported path uses the CONTAINED key**, or the guard re-emits what it just caught into
+       `scope.refused_fields`;
+    3. the walk stays **IDEMPOTENT**, including the `#2` collision spelling - a second pass must not
+       read it as a fresh, safe key and stop reporting it, which is what lets containment move to the
+       source without a later reader losing what it could previously see.
+    """
+    leak_a = f"{HOST_PATH_ROOT}{_SEP}a"
+    leak_b = f"{HOST_PATH_ROOT}{_SEP}b"
+    payload = {leak_a: "kept-a", leak_b: "kept-b", "views": [{leak_a: "kept-nested"}], "count": 7}
+    contained, refused = pkg._contain_unsafe_strings(payload)  # pylint: disable=protected-access
+
+    assert sorted(contained) == sorted([pkg.REFUSED_PATH, f"{pkg.REFUSED_PATH}#2", "views", "count"])
+    assert sorted(value for value in contained.values() if isinstance(value, str)) == ["kept-a", "kept-b"], (
+        "a collision must lose neither field's value"
+    )
+    assert contained["views"][0] == {pkg.REFUSED_PATH: "kept-nested"} and contained["count"] == 7
+    assert sorted(refused) == [
+        f"{pkg.REFUSED_PATH} (key)",
+        f"{pkg.REFUSED_PATH}#2 (key)",
+        f"views[0].{pkg.REFUSED_PATH} (key)",
+    ]
+    assert HOST_PATH_ROOT not in json.dumps(contained) + json.dumps(refused)
+
+    again, refused_again = pkg._contain_unsafe_strings(contained)  # pylint: disable=protected-access
+    assert again == contained and sorted(refused_again) == sorted(refused), "the walk must be idempotent"
+    assert tmp_path.is_dir()
 
 
 def test_a_NON_allowlisted_scalar_list_never_ships_at_all(tmp_path: Path) -> None:
