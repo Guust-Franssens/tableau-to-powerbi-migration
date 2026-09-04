@@ -633,7 +633,7 @@ def _write(records, tmp_path, capability_report=None, server_info=None, configur
 def _stale_record():
     return {
         "view_name": "v",
-        "data": {"status": "ok", "row_count": 1, "elapsed_sec": 0.1},
+        "data": {"status": "ok", "certification": "certified", "row_count": 1, "elapsed_sec": 0.1},
         "svg": {"status": verdict.SVG_UNSUPPORTED_STATUS, "detail": "SVG export requires API version 3.29"},
     }
 
@@ -673,7 +673,7 @@ def test_a_leg_that_failed_for_any_OTHER_reason_is_not_stamped_with_an_svg_verdi
     """Negative control on the selector: only a version-gated SVG leg carries this vocabulary."""
     record = {
         "view_name": "v",
-        "data": {"status": "ok", "row_count": 1, "elapsed_sec": 0.1},
+        "data": {"status": "ok", "certification": "certified", "row_count": 1, "elapsed_sec": 0.1},
         "svg": {"status": "failed", "detail": "data sources not connected"},
     }
     _code, manifest = _write([record], tmp_path, server_info=SES)
@@ -710,7 +710,11 @@ def test_nothing_claims_that_over_pinning_breaks_other_calls(tmp_path, caplog):
 
 def test_a_run_with_no_version_gated_leg_prints_no_svg_verdict_at_all(tmp_path, caplog):
     """Negative control: the classifier must not narrate on a clean run."""
-    record = {"view_name": "v", "data": {"status": "ok", "row_count": 1, "elapsed_sec": 0.1}, "svg": {"status": "ok"}}
+    record = {
+        "view_name": "v",
+        "data": {"status": "ok", "certification": "certified", "row_count": 1, "elapsed_sec": 0.1},
+        "svg": {"status": "ok"},
+    }
     with caplog.at_level(logging.WARNING, logger="tableau-oracle"):
         _write([record], tmp_path, server_info=SES)
     assert "could not produce SVG" not in caplog.text

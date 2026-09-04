@@ -32,6 +32,15 @@ from typing import Any
 import tableau_render_capability as capability
 import tableau_view_types
 from tableau_env import redacted_note, scrub_tree
+from tableau_payload_facts import (
+    CSV_CERTIFIED,
+    CSV_CONTENT_TYPE_ABSENT,
+    CSV_CONTENT_TYPE_UNSPECIFIC,
+    CSV_REFUSAL_DETAIL,
+    CSV_REFUSALS,
+    CSV_UNCERTIFIED,
+    CSV_UNCERTIFIED_DETAIL,
+)
 
 LOG = logging.getLogger("tableau-oracle")
 
@@ -68,14 +77,418 @@ NOT_ATTEMPTED = "not_attempted"
 # the only render there was, and renaming the key now would orphan every manifest already captured.
 _LEG_KEY = {"png": "image", "svg": "svg", "pdf": "pdf"}
 
+# A view whose `/data` export SUCCEEDED and carried no data rows (#471). A per-view flag and NOT a
+# status: the HTTP call genuinely succeeded, and `status` drives the exit code plus the
+# `blocked`/`failed` partitions, so overloading it would turn a legible run into a failed one. The
+# fact is a DIAGNOSTIC -- an otherwise-clean run still exits 0 -- exactly as `render_unestablished`
+# is a diagnostic rather than a failure.
+FLAG_DATA_EMPTY = "data_empty"
+
+# ...and WHY it is empty, as far as the capture can honestly tell. Two values, because there are
+# three real causes and the payload can only separate one of them:
+#
+#   * a real query that returned nothing -- the field defect (#471): a relative-date filter whose
+#     window has no data yet, or a required filter defaulting to None;
+#   * a sheet with no underlying query at all -- a glossary/reference sheet, where an empty `/data`
+#     is CORRECT behaviour and counting it as a defect overstates the finding (14 -> 12 on the
+#     reporting site) and trains the reader to discount the whole list.
+#
+# ⚠️ **The tempting discriminators do not work, and this was MEASURED rather than reasoned.** Over
+# `summarise_csv`: a 0-byte body (glossary) and a 2-byte CRLF body (blank data) BOTH land on
+# `row_count=0, columns=[]`, differing only in `bytes`. "Glossary means 0 bytes" is one site's
+# observation at n=14, not a documented Tableau contract, so the byte count is deliberately NOT
+# consulted. What a payload CAN establish is that a header came back at all: a CSV naming its
+# columns proves a query ran and returned a shape, which no fieldless sheet can produce. The
+# converse does not hold -- a real query can also return nothing at all -- so an absent header is
+# reported as UNCLASSIFIABLE rather than assigned to either cause. Resolving it needs field-level
+# metadata (`Sheet.sheetFieldInstances`, or the workbook XML `parse_tableau.py` reads) that this
+# capture does not hold; see the module note in :func:`empty_classification`.
+EMPTY_QUERY_NO_ROWS = "empty_query_no_rows"
+EMPTY_CANNOT_CLASSIFY = "empty_cannot_classify"
+
+# A view whose `/data` export succeeded and whose evidence CANNOT BE ASSESSED AT ALL -- the third
+# state, and the one this layer used to be missing. Before it, `empty_classification` returned `None`
+# for a record with no `row_count`, and every consumer read that `None` as "not empty": the view was
+# reported successful, evidence-complete, unflagged and unnamed, indistinguishable from one that
+# returned 900,000 rows. That is the #471 defect one level up -- "a zero-row capture reads as ok"
+# fixed, "an UNASSESSABLE capture reads as ok" introduced -- and it is strictly worse than the
+# `KeyError` it replaced, because a crash is fail-closed and a clean bucket is not.
+#
+# ⚠️ It is a FLAG and not a status, for the same reason `data_empty` is: the transport genuinely
+# succeeded. Collapsing it into `status` would destroy a real distinction (the HTTP call worked) and
+# would move the exit code for a run whose only fault is that we cannot vouch for what we hold.
+FLAG_DATA_UNASSESSABLE = "data_unassessable"
+
+# The reason for a record whose data leg recorded NO row count at all -- an older manifest written
+# before the field, a `certification` this module does not recognise and no count beside it, or a
+# corrupt `row_count`. Nothing measured the rows, so nothing may be claimed about them.
+UNASSESSABLE_NO_ROW_COUNT = "row_count_unrecorded"
+
+# The reason for the shape EVERY pre-#480 manifest on a customer's disk actually has: a row count IS
+# recorded and no certification is (#480 round 3). Distinct from `UNASSESSABLE_NO_ROW_COUNT` because
+# that literal would be a LIE on such a record -- `origin/master`'s producer called `summarise_csv`
+# on every HTTP 200 body and wrote its `row_count`, so a legacy record can say `row_count: 900` while
+# nothing whatsoever established those bytes as CSV. Naming it `row_count_unrecorded` would send an
+# operator looking for a missing number that is right there in the file, and would hide the real
+# question, which is what the number was counted FROM.
+#
+# ⚠️ It covers three routes to the same fact, all of which mean "no certification was established":
+# the key is absent, its value is not one of `certify_csv`'s verdicts, or it is an UNCERTIFIED /
+# REFUSED verdict that nevertheless carries a count. The last one is a self-contradictory record and
+# is named by its own certification instead, because that is the more specific true statement.
+UNASSESSABLE_NO_CERTIFICATION = "certification_unestablished"
+
+# Reasons a CURRENT capture can supply, from `certify_csv`'s closed vocabulary. Only the UNCERTIFIED
+# verdicts (`content_type_absent`, `content_type_unspecific`) can reach a `status: ok` record --
+# every refusal is recorded `format_mismatch` at capture time and never claims to be a successful
+# data leg -- but the whole set is accepted here so a record written by a newer capture is named
+# honestly rather than flattened.
+CERTIFICATION_REASONS = CSV_UNCERTIFIED | CSV_REFUSALS
+#: Every value :func:`unassessable_reason` can return. A closed set, so a consumer reading a reason
+#: off a manifest can check it rather than trust whatever string is in the field.
+UNASSESSABLE_REASONS = frozenset({UNASSESSABLE_NO_ROW_COUNT, UNASSESSABLE_NO_CERTIFICATION}) | CERTIFICATION_REASONS
+
+# ─────────────────────────────────────────────────────────────────────────────────────────────────
+# WHERE a data leg's bytes are named, which is the difference between evidence and a retained blob.
+#
+# ⚠️ **This is a STRUCTURAL rule, not a flag, and that is the whole point of it (#480 round 2).**
+# Round 1 recorded an uncertified capture honestly -- `certification`, `flags`, no `row_count`, its
+# own counted-and-named list -- and then left the bytes at `data/<luid>.csv` under the same `path`
+# key a certified capture uses. Every consumer that wanted a number therefore kept reading it: the
+# review found `build_reconcile_items.build()` emitting `tableau_value: 10.0` from a record whose own
+# flags said `data_unassessable`, and `check_unit` counting the same record as numeric evidence.
+# Patching each consumer to check the flag cannot terminate -- the next consumer is by definition the
+# one nobody enumerated -- so the invalid state is made UNREPRESENTABLE instead: an uncertified body
+# is never written under `data/`, never named `.csv`, and never named by `path`.
+#
+# The consequence is that a consumer needs no new knowledge to be safe. `build_reconcile_items`
+# requires `status == "ok" and data["path"]`, `check_unit` requires the same, `package_unit._copy_leg`
+# and `group_oracle_by_workbook.copy_view_files` both key on `path` -- and all four skip an
+# uncertified capture without a line of change, because there is nothing there to read.
+#
+#: The key a CERTIFIED data leg names its file with. Unchanged, and named here so the pair reads as
+#: one decision.
+EVIDENCE_PATH_KEY = "path"
+#: The key UNCERTIFIED retained bytes are named with instead. A different key on purpose: a consumer
+#: that reads `path` gets nothing, and a consumer that wants the bytes for forensics has to ask for
+#: them by a name that says what they are.
+RETAINED_PATH_KEY = "retained_path"
+#: Beside it, an authored sentence saying why the bytes are not evidence -- so a manifest answers the
+#: question without the reader having to know this module's vocabulary.
+EVIDENCE_WITHHELD_KEY = "evidence_withheld"
+#: The subdirectory uncertified bytes are retained in, and the suffix they carry. NOT `data/` and NOT
+#: `.csv`: a consumer that lists or globs the capture folder must not find them either, which is the
+#: same fail-open one level down from the manifest.
+RETAINED_DIR = "unassessable"
+RETAINED_SUFFIX = ".bin"
+#: The sentence used when a record gives no verdict of its own AND no count -- a manifest written
+#: before `certification` existed whose rows nothing measured, or a corrupt record.
+RETAINED_DETAIL_DEFAULT = (
+    "this data leg records no row count and no CSV certification, so nothing established its bytes "
+    "as data. They are retained for inspection and are NOT placed where a numeric-oracle consumer "
+    "reads evidence; re-capture to obtain assessable numbers."
+)
+#: The sentence for the LEGACY shape: a row count is present and a certification is not. Separate
+#: from the default because the default's first clause is false here, and a withheld-evidence
+#: sentence that misstates the record is worse than none -- an operator who reads "records no row
+#: count" beside `row_count: 900` concludes the tool is confused rather than that the number is
+#: unbacked.
+RETAINED_DETAIL_NO_CERTIFICATION = (
+    "this data leg records a row count that was taken BEFORE anything certified its bytes as CSV -- "
+    "the capture that wrote it summarised every HTTP 200 body, including an error page or a "
+    "plain-text banner, so the number counts lines rather than data rows. The bytes are retained for "
+    "inspection and are NOT placed where a numeric-oracle consumer reads evidence; re-capture to "
+    "obtain a count something stands behind."
+)
+#: Why retained bytes are not evidence, keyed by the reason :func:`unassessable_reason` gives. Keyed
+#: on the REASON and not on the raw `certification`, because two of the four reasons are this
+#: module's own and have no certification to look up -- and because keying on the certification is
+#: how a legacy record came to carry the "records no row count" sentence while recording one.
+UNASSESSABLE_DETAIL = {
+    UNASSESSABLE_NO_ROW_COUNT: RETAINED_DETAIL_DEFAULT,
+    UNASSESSABLE_NO_CERTIFICATION: RETAINED_DETAIL_NO_CERTIFICATION,
+    **CSV_UNCERTIFIED_DETAIL,
+    **CSV_REFUSAL_DETAIL,
+}
+
+
+def data_leg_fields(out_dir: Path, stem: str, certification: str) -> tuple[Path, dict[str, str]]:
+    """``(file to write, the manifest fields that NAME it)`` -- the ONE place that pair is decided.
+
+    Both halves move together or the rule is only half applied: bytes under ``data/*.csv`` named by
+    ``retained_path`` are still discoverable by anything globbing the capture folder, and bytes in
+    ``unassessable/`` named by ``path`` are still read by every consumer that asks for a path. The
+    withheld-evidence sentence ships in the same breath, so a record can never say "not evidence" in
+    one field and offer a readable ``path`` in another. Kept here, not at the call site, so a second
+    writer cannot invent its own convention.
+
+    The returned paths are relative POSIX strings built from module literals plus ``stem``, which the
+    caller derives from a validated LUID -- nothing a server sent reaches them.
+    """
+    if certification == CSV_CERTIFIED:
+        path = out_dir / "data" / f"{stem}.csv"
+        return path, {EVIDENCE_PATH_KEY: f"data/{path.name}"}
+    path = out_dir / RETAINED_DIR / f"{stem}{RETAINED_SUFFIX}"
+    return path, {
+        RETAINED_PATH_KEY: f"{RETAINED_DIR}/{path.name}",
+        EVIDENCE_WITHHELD_KEY: CSV_UNCERTIFIED_DETAIL[certification],
+    }
+
+
+def unassessable_reason(record: dict[str, Any]) -> str | None:
+    """Why a SUCCESSFUL data leg cannot be assessed for emptiness at all, or ``None``.
+
+    The third state, beside "rows present" and "zero rows". ⚠️ **Certification is authoritative and a
+    recorded ``row_count`` is not** (#480 round 3): a leg is assessable ONLY when it says
+    :data:`tableau_payload_facts.CSV_CERTIFIED` *and* carries a structurally valid count. Everything
+    else is unassessable, and the reason says which "else" it is.
+
+    ⚠️ **Trusting the count was the whole defect, and it is not a hypothetical.** ``origin/master``'s
+    producer called ``summarise_csv`` on the body of every HTTP 200 and wrote its ``row_count``,
+    certifying nothing -- so EVERY manifest a customer has already captured has a number and no
+    certificate, and a gate that returns early on the number is a gate that has never fired on real
+    data. A row count derived from an uncertified body is a count of the LINES in whatever came back:
+    ``<html>`` parses as a one-column CSV, and a plain-text outage banner parses as one row with a
+    header. That is #471's failure 2 with a number attached, which is worse than no number.
+
+    Four reasons, and the order between them is "the most specific TRUE statement wins":
+
+    * a ``certification`` from :data:`CERTIFICATION_REASONS` -- the record's own verdict, returned
+      verbatim, INCLUDING when it contradicts itself by carrying a count as well. Self-contradiction
+      resolves toward the refusal, never toward the count;
+    * :data:`UNASSESSABLE_NO_CERTIFICATION` -- a valid count and no certification we recognise
+      (absent, or a string outside :data:`tableau_payload_facts.CSV_VERDICTS`). The real legacy shape;
+    * :data:`UNASSESSABLE_NO_ROW_COUNT` -- no usable count either way, which is all that can honestly
+      be said when both are missing;
+    * ``None`` -- certified, and counted.
+
+    ``bool`` is excluded explicitly: ``isinstance(True, int)`` is true in Python, and a ``row_count``
+    of ``True`` is a corrupt record, not a measurement of one row.
+    """
+    data = record.get("data") or {}
+    if data.get("status") != "ok":
+        return None
+    certification = data.get("certification")
+    row_count = data.get("row_count")
+    counted = isinstance(row_count, int) and not isinstance(row_count, bool)
+    if certification in CERTIFICATION_REASONS:
+        return certification
+    if certification == CSV_CERTIFIED:
+        return None if counted else UNASSESSABLE_NO_ROW_COUNT
+    return UNASSESSABLE_NO_CERTIFICATION if counted else UNASSESSABLE_NO_ROW_COUNT
+
+
+def withhold_uncertified_evidence(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Records in which no UNASSESSABLE data leg names a file under the evidence key.
+
+    The enforcement point for the structural rule above, applied both when this repo WRITES a
+    manifest (so a current capture cannot produce the invalid state) and when it READS one (so a
+    manifest written before the rule -- the review's own second reproduction, ``flags=[
+    data_unassessable, row_count_unrecorded]`` with ``data/view.csv`` still under ``path`` -- cannot
+    be consumed as evidence either). A file already on disk cannot be rewritten retroactively, so the
+    boundary that loads it is where the invariant is restored; :func:`read_manifest` is that
+    boundary.
+
+    An already-compliant record is returned untouched, so this is idempotent and cheap to apply more
+    than once along a pipeline.
+
+    ⚠️ The bytes are NOT deleted and ``status`` is NOT changed. The transport genuinely succeeded and
+    the body may well be a perfect export -- what is denied is that anything ESTABLISHED it as one.
+    Copies rather than mutates, for the reason :func:`flag_empty` does.
+    """
+    out = []
+    for record in records:
+        data = record.get("data") if isinstance(record, dict) else None
+        if not isinstance(data, dict) or EVIDENCE_PATH_KEY not in data:
+            out.append(record)
+            continue
+        reason = unassessable_reason(record)
+        if not reason:
+            out.append(record)
+            continue
+        demoted = {k: v for k, v in data.items() if k != EVIDENCE_PATH_KEY}
+        demoted[RETAINED_PATH_KEY] = data[EVIDENCE_PATH_KEY]
+        demoted[EVIDENCE_WITHHELD_KEY] = UNASSESSABLE_DETAIL.get(reason, RETAINED_DETAIL_DEFAULT)
+        out.append({**record, "data": demoted})
+    return out
+
+
+def read_manifest(path: Path) -> Any:
+    """Load an ``oracle-manifest.json`` with the evidence-path rule restored over its views.
+
+    ⚠️ **Read a capture manifest through this, never ``json.loads`` directly.** A manifest written
+    before #480 names uncertified bytes under ``path``, and a consumer reading that file raw reads
+    the exact fail-open shape this change removes. For a manifest THIS repo wrote the guarantee is
+    stronger and needs no cooperation at all, because :func:`write_manifest` already applied the same
+    rule to the bytes on disk; this is what covers the ones it did not write.
+
+    Raises exactly what ``read_text``/``json.loads`` raise -- a caller that wants to tolerate an
+    absent or corrupt manifest must still say so, as it did before.
+    """
+    manifest = json.loads(path.read_text(encoding="utf-8-sig"))
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("views"), list):
+        return manifest
+    return {**manifest, "views": withhold_uncertified_evidence(manifest["views"])}
+
+
+def empty_classification(record: dict[str, Any]) -> str | None:
+    """Why this view's data leg is empty, or ``None`` when it is not empty at all.
+
+    The ONE predicate for "this capture carries no rows", shared by the per-view console line, the
+    per-view flag, the manifest's count and the manifest's named list -- for the same reason
+    :func:`_partition` is one function: three copies of a rule is three chances for a count and a
+    list to disagree about the same views.
+
+    ``None`` is returned for anything that is not an ESTABLISHED zero-row capture, which includes a
+    record whose data leg failed (its emptiness is explained by the failure, not by the view) and an
+    older record that carries no ``row_count`` at all (absence is not a zero -- claiming one would
+    invent a diagnostic about a manifest that never measured it).
+
+    ⚠️ **That ``None`` is NOT "this capture is fine", and reading it as one is a fail-open defect in
+    its own right.** It answers a single question -- "is this an established zero-row capture" -- and
+    a record with no ``row_count`` answers it "no" for the opposite reason a 900,000-row capture
+    does. :func:`unassessable_reason` is the other half, and every consumer that partitions, counts
+    or flags must consult both; the count is not evidence-complete without it.
+
+    ⚠️ **The glossary case is left OPEN on purpose.** ``EMPTY_CANNOT_CLASSIFY`` means the export
+    returned no header, which a fieldless sheet and a genuinely empty query produce identically; the
+    only thing that separates them is field-level metadata, and the capture holds none. The Metadata
+    API call this run already makes asks for ``luid`` and nothing else, and widening it is not free:
+    ``tableau_view_types`` refuses a partial answer WHOLE, so a field this server spells differently
+    would turn view typing off for every view on the site, and per-field nodes would push a large
+    estate at its 32 MiB body bound. Guessing from the byte count would be cheap and wrong. So the
+    honest states are two, and the third is named as missing rather than invented.
+    ⚠️ **A zero that nothing certified is not a measurement either** (#480 round 3). ``row_count: 0``
+    on an UNCERTIFIED body is #471's failure 2 exactly: an outage banner exports as HTTP 200, parses
+    as one header row and no data rows, and reads here as "the query returned nothing" -- which sends
+    an operator to look at a Tableau filter for a view whose server returned an error page. So this
+    defers to :func:`unassessable_reason` first, and the two predicates are MUTUALLY EXCLUSIVE by
+    construction rather than by the caller remembering to check both.
+    """
+    data = record.get("data") or {}
+    if data.get("status") != "ok" or data.get("row_count") != 0 or unassessable_reason(record):
+        return None
+    return EMPTY_QUERY_NO_ROWS if data.get("columns") else EMPTY_CANNOT_CLASSIFY
+
+
+def flag_empty(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Records with the per-view ``flags`` key added to every capture whose numbers are not clean.
+
+    Two flags, because there are three states and only one of them is silent. An established
+    zero-row capture gets :data:`FLAG_DATA_EMPTY` plus its classification; a capture nothing could
+    measure gets :data:`FLAG_DATA_UNASSESSABLE` plus its reason. A capture that returned rows gets
+    no flag at all, which is what keeps the flag worth reading.
+
+    ⚠️ The unassessable half is the fail-open fix: without it a record with no ``row_count`` came
+    through here untouched, and "no flags" is exactly what a clean capture looks like. Every
+    consumer -- the packaged unit, the per-workbook subset, a human reading one view -- then read
+    silence as evidence.
+
+    Copies rather than mutates: the caller's records are its own, and a function that silently
+    rewrites the list it was handed is the shape that makes a second call to it wrong.
+
+    The flag is what a CONSUMER reads -- ``package_unit.py`` ships it per view, and a per-workbook
+    subset carries it along -- so the fact survives every slice of the capture, not just the
+    capture-wide manifest.
+    """
+    out = []
+    for record in records:
+        classification = empty_classification(record)
+        unassessable = unassessable_reason(record)
+        if classification:
+            added = [FLAG_DATA_EMPTY, classification]
+        elif unassessable:
+            added = [FLAG_DATA_UNASSESSABLE, unassessable]
+        else:
+            out.append(record)
+            continue
+        flags = list(dict.fromkeys([*record.get("flags", []), *added]))
+        out.append({**record, "flags": flags})
+    return out
+
+
+def _named_views(records: list[dict[str, Any]], reason_of, key: str) -> list[dict[str, Any]]:
+    """The shared projection behind every "counted AND named" list in this module.
+
+    One function so a count and its list cannot describe different views, and so a new diagnostic
+    ships the same identity fields as the ones before it. ``reason_of`` is the predicate --
+    :func:`empty_classification` or :func:`unassessable_reason` -- and ``key`` names what the reason
+    is called in the entry, since "why is this empty" and "why can this not be assessed" are
+    different questions and must not share a field name.
+    """
+    out = []
+    for record in records:
+        reason = reason_of(record)
+        if not reason:
+            continue
+        out.append(
+            {
+                "view_luid": record.get("view_luid"),
+                "view_name": record.get("view_name"),
+                "workbook_name": record.get("workbook_name"),
+                "view_type": record.get("view_type"),
+                key: reason,
+            }
+        )
+    return out
+
+
+def data_unassessable_views(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Views whose data leg SUCCEEDED and whose evidence could not be assessed. Counted AND named.
+
+    The same shape as :func:`data_empty_views` and for the same reason, applied to the state that
+    had no reporting at all. A reviewer needs "on WHICH views is a numeric-fidelity finding
+    impossible" answered identically whether the cause is a measured zero or an unmeasurable body --
+    and the second used to answer "none", silently, which is worse than the first because it looks
+    like good news.
+
+    Each entry carries its REASON, not a verdict: ``row_count_unrecorded`` is a manifest written
+    before the count existed (re-capture and it resolves), while ``content_type_absent`` is a live
+    server or proxy that did not declare what it sent (the payload may be perfect data -- nothing
+    here establishes that it is, which is exactly the point).
+    """
+    return _named_views(records, unassessable_reason, "reason")
+
+
+def data_empty_views(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Views whose data leg SUCCEEDED and returned zero rows. Counted AND named (#471).
+
+    The same argument :func:`render_unestablished` already makes, applied to the numeric half: the
+    count answers "how much of my oracle is evidentially empty" and the list answers "for which
+    views is a NUMERIC-fidelity finding currently impossible to make". Before this the count was the
+    only thing that escaped -- ``empty`` was computed as a list and immediately reduced to its
+    ``len()`` -- so a reviewer holding a 94-view capture with 12 blank ones had to open every PNG by
+    hand to find them (SES, 2026-09-03).
+
+    Each entry carries its CLASSIFICATION rather than a verdict, for the reason
+    :func:`render_unestablished` carries per-tier statuses rather than one: the causes need opposite
+    remedies. A relative-date filter whose window has not landed yet is re-runnable; a required
+    filter defaulting to None never resolves from a default-state capture and needs ``?vf_`` state
+    pinning (#194). This capture cannot tell those two apart either -- both are
+    ``EMPTY_QUERY_NO_ROWS`` -- because nothing on hand describes a view's filters, and inventing the
+    distinction from a rendered image would be a guess.
+    """
+    return _named_views(records, empty_classification, "classification")
+
 
 def log_progress(index: int, total: int, record: dict[str, Any], redactor=None) -> None:
-    """One line per view: proof of rows captured, or a loud, classified failure.
+    """One line per view: proof of rows captured, a loud zero, or a loud, classified failure.
 
     ⚠️ The console is the THIRD artifact, after the manifest and the files. A view NAME is response
     data -- a reflected token can arrive as one -- and this line used to slice it to 34 characters
     before anything scrubbed it, which is the round-4 defect at a boundary round 4 never looked at.
     CI keeps its logs, so "only the terminal" is not a mitigation.
+
+    ⚠️ A zero-row capture is a WARNING, not an INFO carrying a zero (#471). ``0 rows`` inside the
+    ordinary progress line is technically visible and practically invisible: the reporting site had
+    12 of them among 91 INFO lines and found them by opening PNGs by hand. The line keeps its
+    columns so the run still reads as a table, and gains the classification and a marker.
+
+    ⚠️ An UNASSESSABLE capture is a WARNING for the same reason and a separate branch for a stronger
+    one: the ordinary line interpolates ``data["row_count"]``, which a record without one does not
+    have, so printing it here raised ``KeyError`` and took the whole run down at the console. It
+    reports no row count, because there is none to report -- printing ``0`` would be the invented
+    zero this module refuses everywhere else.
     """
     data = record.get("data", {})
     name = redacted_note(record.get("view_name"), redactor, limit=34)
@@ -87,9 +500,33 @@ def log_progress(index: int, total: int, record: dict[str, Any], redactor=None) 
         if data.get("retries"):
             marks.append(f"retry x{data['retries']}")
         suffix = f"  ({', '.join(marks)})" if marks else ""
-        LOG.info(
-            "  %2d/%d  %-34s %5d rows  %6.1fs%s", index, total, name, data["row_count"], data["elapsed_sec"], suffix
-        )
+        empty = empty_classification(record)
+        unassessable = unassessable_reason(record)
+        if unassessable:
+            LOG.warning(
+                "  %2d/%d  %-34s     ? rows  %6.1fs%s  <- UNASSESSABLE (%s)",
+                index,
+                total,
+                name,
+                data.get("elapsed_sec", 0.0),
+                suffix,
+                unassessable,
+            )
+        elif empty:
+            LOG.warning(
+                "  %2d/%d  %-34s %5d rows  %6.1fs%s  <- NO DATA (%s)",
+                index,
+                total,
+                name,
+                data["row_count"],
+                data["elapsed_sec"],
+                suffix,
+                empty,
+            )
+        else:
+            LOG.info(
+                "  %2d/%d  %-34s %5d rows  %6.1fs%s", index, total, name, data["row_count"], data["elapsed_sec"], suffix
+            )
     elif status == "source_credential":
         LOG.warning("  %2d/%d  %-34s NEEDS CREDENTIAL: %s", index, total, name, data.get("detail"))
     else:
@@ -144,11 +581,24 @@ def _partition(
     ok = [r for r in records if r.get("data", {}).get("status") == "ok"]
     return {
         "ok": ok,
-        "empty": [r for r in ok if r["data"]["row_count"] == 0],
+        # ONE predicate, shared with the named list and the per-view flag (#471). It used to be an
+        # inline `r["data"]["row_count"] == 0` here and a second copy in `group_oracle_by_workbook`,
+        # which is how a count and a list come to disagree about the same views -- and it raised
+        # KeyError on an older record whose data leg recorded no row count at all.
+        "empty": [r for r in ok if empty_classification(r)],
+        # The third state. Separate from `empty` because they need opposite readings: an empty
+        # capture MEASURED nothing there, an unassessable one measured NOTHING AT ALL.
+        "unassessable": [r for r in ok if unassessable_reason(r)],
+        # ⚠️ `not unassessable_reason(r)` is the fail-open fix. `complete` is what the run reports as
+        # "captured", and a record whose rows were never measured used to satisfy every clause here:
+        # data status ok, renders ok, nothing to say otherwise. Evidence-complete has to mean the
+        # evidence was established, not that nothing objected.
         "complete": [
             r
             for r in records
-            if r.get("data", {}).get("status") == "ok" and all(s == "ok" for s in _render_statuses(r, requested))
+            if r.get("data", {}).get("status") == "ok"
+            and not unassessable_reason(r)
+            and all(s == "ok" for s in _render_statuses(r, requested))
         ],
         "blocked": [
             r
@@ -246,6 +696,12 @@ def write_manifest(  # pylint: disable=too-many-locals
     probe instead: the same debug-the-wrong-system cost that made 3 wrong for the same input. A
     *partial* block still yields 5, because the absence is then not explained by the credential.
 
+    ⚠️ **A zero-row capture is NOT one of these codes** (#471). It is recorded, flagged, named and
+    warned about, and an otherwise-clean run still exits 0: the export succeeded, so calling it a
+    failure would make an operator debug the transport for a view whose filter is simply pointed at
+    a day with no data. Legibility and exit status are different questions, and conflating them is
+    what "do not overload ``status``" means in practice.
+
     ``server_info`` is :func:`tableau_render_capability.server_info`'s answer -- the site's ADVERTISED
     REST ceiling. It is a separate parameter rather than a seventh field on ``CaptureRun`` on purpose:
     it is the only response-derived value in that bundle, and folding it in would taint the whole
@@ -254,6 +710,16 @@ def write_manifest(  # pylint: disable=too-many-locals
     state, not a default nobody thought about: the ceiling was not established, and the verdict below
     says exactly that instead of guessing.
     """
+    # Before anything partitions or counts them: the per-view fact rides ON the record, so every
+    # downstream slice of this capture -- the manifest, a per-workbook subset, a packaged unit --
+    # carries it without re-deriving the rule.
+    records = flag_empty(records)
+    # ...and the STRUCTURAL half beside it (#480 round 2). `_capture_data` already writes an
+    # uncertified body outside `data/`, so this normally changes nothing; it is here because
+    # `write_manifest` is the one place every record must pass through, and a record assembled by
+    # anything other than `_capture_data` must not be able to reach the manifest with uncertified
+    # bytes named as evidence.
+    records = withhold_uncertified_evidence(records)
     sets = _partition(records, run.requested_renders)
     blocked, failed, complete = sets["blocked"], sets["failed"], sets["complete"]
     rendered = sum(1 for r in records if any(r.get(leg, {}).get("status") == "ok" for leg in ("image", "svg", "pdf")))
@@ -262,6 +728,7 @@ def write_manifest(  # pylint: disable=too-many-locals
     credential_only = rendered == 0 and bool(blocked) and len(blocked) == len(records)
     reference_missing = run.reference_required and rendered == 0 and not credential_only
     unestablished = render_unestablished(records, run.requested_renders)
+    empty_views = data_empty_views(records)
     gate = svg_gate(capability_report, server_info, run.env.get("TABLEAU_REST_API_VERSION"))
     _stamp_svg_gate(records, gate, run.session.redact_text)
     manifest = {
@@ -285,6 +752,20 @@ def write_manifest(  # pylint: disable=too-many-locals
         "captured_complete": len(complete),
         "data_ok": len(sets["ok"]),
         "data_empty": len(sets["empty"]),
+        # #471: the same counted-AND-named shape as `render_unestablished_views`, and for the same
+        # reason: the count answers "how much of this oracle is evidentially empty", the list answers
+        # "on WHICH views can a numeric-fidelity finding not be made". The count already existed and
+        # the list did not -- `empty` was built and immediately reduced to its `len()` -- so 12 blank
+        # views among 94 were countable and unfindable, indistinguishable per view from a capture
+        # that returned 900,000 rows.
+        "data_empty_views": empty_views,
+        # The third state, counted AND named beside the other two. A capture whose rows were never
+        # measured is not a clean capture and not an empty one; before this it was reported as
+        # neither, which meant it was reported as fine. `data_ok` deliberately still counts it --
+        # the HTTP call DID succeed, and collapsing that into the numeric verdict would destroy a
+        # real distinction -- so this pair is what stops `data_ok` being read as evidence.
+        "data_unassessable": len(sets["unassessable"]),
+        "data_unassessable_views": data_unassessable_views(records),
         "image_ok": sum(1 for r in records if r.get("image", {}).get("status") == "ok"),
         "svg_ok": sum(1 for r in records if r.get("svg", {}).get("status") == "ok"),
         "pdf_ok": sum(1 for r in records if r.get("pdf", {}).get("status") == "ok"),
@@ -309,6 +790,12 @@ def write_manifest(  # pylint: disable=too-many-locals
         "views": records,
     }
     manifest_path = run.out_dir / "oracle-manifest.json"
+    # The manifest's own directory, ensured HERE rather than inherited as a side effect. It used to
+    # exist only because `_capture_data` created `<out>/data/` before every export -- including the
+    # ones it then refused -- and since #480 an uncertified or refused body creates nothing there. A
+    # writer that depends on another function's incidental `mkdir` is one refactor from losing the
+    # whole manifest of a run whose every leg failed, which is the run most worth reading.
+    run.out_dir.mkdir(parents=True, exist_ok=True)
     # THE SINK. Everything above this line is a source, and five review rounds went one source at a
     # time: `raw_get`, the 200-mismatch diagnostic, a case-folded Content-Type, a truncated body quote,
     # a `<detail>` capture group -- and then a field that was never a diagnostic at all, a successful
@@ -333,10 +820,12 @@ def write_manifest(  # pylint: disable=too-many-locals
         )
 
     LOG.info(
-        "\n%d/%d captured (%d empty), %d credential-blocked, %d failed, %d re-auth(s), %d retr(ies), %.0fs -> %s",
+        "\n%d/%d captured (%d empty, %d unassessable), %d credential-blocked, %d failed, %d re-auth(s), "
+        "%d retr(ies), %.0fs -> %s",
         len(complete),
         len(records),
         len(sets["empty"]),
+        len(sets["unassessable"]),
         len(blocked),
         len(failed),
         run.session.reauth_count,
@@ -346,6 +835,8 @@ def write_manifest(  # pylint: disable=too-many-locals
     )
     _log_blocked_and_stale(records, blocked, capability_report, gate, run.session.redact_text)
     _log_unestablished(unestablished, run.session.redact_text)
+    _log_empty(empty_views, run.session.redact_text)
+    _log_unassessable(data_unassessable_views(records), run.session.redact_text)
     if reference_missing:
         LOG.error(
             "\nA reference render was REQUIRED (--reference-best) but NONE was captured across %d "
@@ -371,6 +862,96 @@ def write_manifest(  # pylint: disable=too-many-locals
     if failed:
         return 1 if complete else 3
     return 2 if blocked else 0
+
+
+def _log_empty(empty: list[dict[str, Any]], redactor) -> None:
+    """Name every view whose capture carries no data rows, and say what that costs.
+
+    Separate from ``_log_unestablished`` for the same reason that one is separate from
+    ``_log_blocked_and_stale``: the remedies differ, and they differ WITHIN this class too. A
+    relative-date filter whose window has no data yet is re-runnable tomorrow; a required filter
+    defaulting to None never resolves from a default-state capture and needs ``?vf_`` state pinning
+    (#194). So the actionable statement is about the CONSEQUENCE, which is what a fidelity reviewer
+    would otherwise discover by opening 94 PNGs by hand.
+    """
+    if not empty:
+        return
+    LOG.warning(
+        "\n%d view(s) captured ZERO DATA ROWS. The export SUCCEEDED, so these are recorded "
+        "status 'ok' and this run's exit code is unaffected -- but a NUMERIC-fidelity finding "
+        "cannot be made or refuted from an empty capture, exactly as a missing render makes a "
+        "visual one impossible. Two field causes need OPPOSITE remedies: a relative-date filter "
+        "whose window has not landed yet is re-runnable, while a required filter defaulting to "
+        "None can never resolve from a default-state capture (it needs ?vf_ pinning, #194):",
+        len(empty),
+    )
+    for entry in empty:
+        LOG.warning(
+            "  - %s (%s): %s",
+            redacted_note(entry.get("view_name"), redactor, limit=60),
+            redacted_note(entry.get("workbook_name"), redactor, limit=60),
+            entry.get("classification"),
+        )
+    if any(entry.get("classification") == EMPTY_CANNOT_CLASSIFY for entry in empty):
+        LOG.warning(
+            "  %s means the export returned NO HEADER at all. A sheet with no underlying query "
+            "(a glossary or reference sheet, where empty is CORRECT) and a real query that "
+            "returned nothing are indistinguishable from that payload, and this capture holds no "
+            "field-level metadata to separate them -- so it is reported unclassified rather than "
+            "guessed from the byte count. Check those views by hand before counting them as "
+            "defects; %s is the class that is certainly a real query with a real header.",
+            EMPTY_CANNOT_CLASSIFY,
+            EMPTY_QUERY_NO_ROWS,
+        )
+
+
+def _log_unassessable(unassessable: list[dict[str, Any]], redactor) -> None:
+    """Name every view whose data leg succeeded and whose evidence could not be assessed at all.
+
+    A separate block from :func:`_log_empty`, and the separation is the whole point: an empty
+    capture is a MEASUREMENT (zero rows came back, which a numeric review can act on), while this
+    one is the absence of a measurement. Folding them together would let a reader take "N empty"
+    as the total cost, when the unassessable views are the ones nothing at all is known about.
+
+    Every reason is actionable and they are actionable DIFFERENTLY: ``row_count_unrecorded`` is an
+    older manifest and re-capturing resolves it; ``certification_unestablished`` is the OTHER older
+    manifest -- it has a number, taken before anything certified the body, and re-capturing resolves
+    it too but the operator must first be told not to trust the number that is sitting right there;
+    while ``content_type_absent`` and ``content_type_unspecific`` are a live server or proxy that did
+    not declare what it sent, or declared only ``text/plain`` -- re-capturing reproduces both, and
+    the fix is upstream.
+    """
+    if not unassessable:
+        return
+    LOG.warning(
+        "\n%d view(s) captured data that could NOT BE ASSESSED. The export succeeded, so these are "
+        "recorded status 'ok' and this run's exit code is unaffected -- but nothing established a "
+        "row count for them, so they are NOT counted as captured-complete and a numeric-fidelity "
+        "finding cannot be made or refuted from them. This is not the same as an empty capture: an "
+        "empty one measured zero rows, these measured nothing. Their retained bytes are kept under "
+        "'%s/' and named '%s', never as data, so nothing downstream can read them as numbers. '%s' "
+        "means an older manifest that predates the count (re-capture resolves it); '%s' means an "
+        "older manifest that DOES carry a count, taken before anything certified the body as CSV -- "
+        "an error page counts as one row just as well, so re-capture rather than reading it; '%s' "
+        "means the server or a proxy returned the body with no Content-Type, and '%s' that it "
+        "declared only text/plain, which an error banner is too. A CSV carries no signature, so "
+        "none of these establishes those bytes as data -- for the last two the fix is upstream of "
+        "this capture:",
+        len(unassessable),
+        RETAINED_DIR,
+        RETAINED_PATH_KEY,
+        UNASSESSABLE_NO_ROW_COUNT,
+        UNASSESSABLE_NO_CERTIFICATION,
+        CSV_CONTENT_TYPE_ABSENT,
+        CSV_CONTENT_TYPE_UNSPECIFIC,
+    )
+    for entry in unassessable:
+        LOG.warning(
+            "  - %s (%s): %s",
+            redacted_note(entry.get("view_name"), redactor, limit=60),
+            redacted_note(entry.get("workbook_name"), redactor, limit=60),
+            entry.get("reason"),
+        )
 
 
 def svg_gate(

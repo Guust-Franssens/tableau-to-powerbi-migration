@@ -109,7 +109,19 @@ def _bundle(tmp_path: Path, *, covered: set[str] | None, datasource_only: bool =
                 "workbook_luid": WB_LUID,
                 "workbook_name": UNIT,
                 "view_type": obj.kind,
-                "data": {"status": "ok", "path": f"data/{index}.csv"},
+                # ⚠️ The shape a CURRENT capture writes, all three fields together (#480 round 3).
+                # `status`+`path` alone was the pre-certification shape, and since certification
+                # became authoritative that record is unassessable: packaging withholds its `path`
+                # and both gates below correctly report NOT_CHECKED. This is the positive end-to-end
+                # control, so it has to be a capture something actually measured; the negative half
+                # is `test_a_legacy_uncertified_capture_earns_no_numeric_evidence_end_to_end`.
+                "data": {
+                    "status": "ok",
+                    "certification": "certified",
+                    "path": f"data/{index}.csv",
+                    "row_count": 1,
+                    "columns": ["a", "b"],
+                },
             }
             for index, obj in enumerate(chosen)
         ],
@@ -208,6 +220,80 @@ def test_oracle_coverage_reports_the_uncaptured_pages_as_missing(tmp_path: Path)
 def _first_object_name() -> str:
     """The name of the first Tableau object in the fixture - the one the negative control covers."""
     return (crr.source_objects(FIXTURE) or [])[0].name
+
+
+# --------------------------------------------------------------------------------------------
+# after - the LEGACY negative control, end to end (#480 round 3)
+#
+# The positive control above was, until round 3, `{"status": "ok", "path": ...}` and nothing else -
+# which is a PRE-CERTIFICATION record, not a current one. It passed because a bare `row_count` (and
+# before that, a bare `path`) was accepted as evidence. Now that certification is authoritative, the
+# same fixture must be split in two: a genuinely certified capture that stays consumable, and this -
+# the shape a customer's existing `_oracle/` actually holds - which must not reach a numeric gate.
+# --------------------------------------------------------------------------------------------
+
+
+def _legacy_oracle(oracle: Path) -> None:
+    """Rewrite a captured manifest into the shape `origin/master`'s producer wrote for every 200.
+
+    A `row_count` and `columns` derived from the body, and NO `certification` - because nothing
+    certified anything. The files stay exactly where they are: this is a manifest-shape change, which
+    is the only kind a pre-#480 capture on disk can have.
+    """
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    for view in manifest["views"]:
+        data = view.get("data") or {}
+        if data.get("status") == "ok":
+            data.pop("certification", None)
+            data["row_count"] = 1
+            data["columns"] = ["a", "b"]
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+
+def test_a_legacy_uncertified_capture_earns_no_numeric_evidence_end_to_end(tmp_path: Path) -> None:
+    """The whole point of #471/#480: a sign-off must not be built on numbers nobody measured.
+
+    ⚠️ This is the SAME workbook, the SAME pages and the SAME CSV bytes as the positive control
+    above; only the manifest's certification differs. So a fix that merely made packaging stricter
+    for everything would fail `test_check_unit_finds_the_spec_and_the_oracle_with_no_overrides`, and
+    a fix that kept trusting `row_count` would fail here. Both together are the discrimination.
+    """
+    bundle, oracle, _ = _bundle(tmp_path, covered=None)
+    _legacy_oracle(oracle)
+    unit = _package(tmp_path, bundle, oracle)
+
+    shipped = json.loads((unit / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    assert shipped["views"], "the views must still ship - the bytes are retained, not deleted"
+    for view in shipped["views"]:
+        data = view["data"]
+        assert data["status"] == "ok", "the transport DID succeed and that distinction survives"
+        assert "path" not in data, "a legacy row count must not license an evidence path end to end"
+        assert data["row_count"] == 1, "the recorded number is kept for forensics"
+        assert data["evidence_withheld"], "the package must SAY why the number is not evidence"
+
+    coverage = check_unit.check_oracle_coverage(unit, None, None)
+    assert coverage["status"] == check_unit.STATUS_NOT_CHECKED
+    assert coverage["numeric_present"] == 0, "not one page may count as numerically evidenced"
+    assert coverage["visual_present"] == coverage["pages"], "the RENDER evidence is untouched by this"
+
+
+def test_the_documented_check_unit_command_refuses_a_legacy_capture_as_numeric_evidence(tmp_path: Path) -> None:
+    """The same claim through the CLI, because `check_unit`'s in-process API is not what an operator runs."""
+    bundle, oracle, _ = _bundle(tmp_path, covered=None)
+    _legacy_oracle(oracle)
+    unit = _package(tmp_path, bundle, oracle)
+    out = tmp_path / "legacy-unit.json"
+    proc = subprocess.run(  # noqa: S603
+        [sys.executable, str(SCRIPTS / "check_unit.py"), str(unit), "--quiet", "--json", str(out)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=900,
+    )
+    assert proc.returncode != check_unit.EXIT_USAGE, proc.stderr
+    checks = {check["id"]: check for check in json.loads(out.read_text(encoding="utf-8"))["checks"]}
+    assert checks["page-parity"]["status"] == check_unit.STATUS_PASS, "only the NUMERIC half is withheld"
+    assert checks["oracle-coverage"]["status"] == check_unit.STATUS_NOT_CHECKED
 
 
 # --------------------------------------------------------------------------------------------
