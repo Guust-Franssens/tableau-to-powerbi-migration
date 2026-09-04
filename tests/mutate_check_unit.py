@@ -268,10 +268,19 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
         ["test_two_same_named_candidates_cannot_share_one_rendered_page"],
     ),
     (
-        "SHARED TYPE: oracle evidence satisfies a contested candidate",
-        '    contested = _claim(index, page["name"]).outcome != oid.UNIQUE',
-        "    contested = False",
-        ["test_one_oracle_row_cannot_cover_two_same_named_candidates"],
+        "SHARED TYPE: typed oracle evidence still uses a bare-name claim",
+        "    record, refusal = evidence.evidence_for(page)\n"
+        "    if record is not None:\n"
+        "        identity = _candidate_identity(page)\n"
+        "        typed_unique = identity is not None and index.resolve(identity).outcome == oid.UNIQUE\n"
+        "        contested = not typed_unique\n"
+        "        if contested:\n"
+        "            record = None\n"
+        "    else:\n"
+        '        contested = _claim(index, page["name"]).outcome != oid.UNIQUE',
+        '    contested = _claim(index, page["name"]).outcome != oid.UNIQUE\n'
+        "    record, refusal = evidence.evidence_for(page)",
+        ["test_typed_oracle_records_cover_same_named_dashboard_and_worksheet"],
     ),
     (
         "SHARED TYPE: a bare-name signature is applied without resolving it",

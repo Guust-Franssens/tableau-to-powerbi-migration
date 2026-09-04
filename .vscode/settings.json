@@ -7,5 +7,28 @@
         "~/.copilot/skills": true,
         "~/.claude/skills": true,
         "~/.vscode/extensions/synapsevscode.synapse-1.25.0/copilot/skills": true
+    },
+    "files.exclude": {
+        "**/__pycache__": true,
+        "**/*.egg-info": true,
+        ".pytest_cache": true,
+        ".ruff_cache": true,
+        ".mypy_cache": true,
+        ".test-scratch": true,
+        "_build": true,
+        "dist": true,
+        "report.[0-9]*.json": true
+    },
+    "files.watcherExclude": {
+        "**/_runs/**": true,
+        "**/.venv/**": true,
+        "**/__pycache__/**": true,
+        "**/.pytest_cache/**": true,
+        "**/.ruff_cache/**": true
+    },
+    "search.exclude": {
+        "**/_runs": true,
+        "**/.venv": true,
+        "**/dist": true
     }
 }

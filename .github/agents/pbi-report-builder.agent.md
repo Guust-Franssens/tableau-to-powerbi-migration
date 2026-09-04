@@ -31,18 +31,17 @@ parser-path `migration-spec.json` when no bundle exists yet.
   | stage | location | rule |
   |---|---|---|
   | engine truth | `<bundle>/reports/`; `<bundle>/semantic_models/` (if emitted) | **NEVER edit an existing baseline** |
-  | working copy | `<bundle>/pbip/` | agents edit **here**; every edit re-runnable from `_build/` and declared |
+  | working copy | `<bundle>/pbip/`, or `<package>/fabric/` when you were handed a PACKAGE | agents edit **here**; whichever tree you were handed is CANONICAL. `declare_generated_edit.py` / `--tamper` cover BUNDLE work only (#460) |
   | deliverable | `migrations/{workbooks,datasources}/<slug>/fabric/` | **COPIED at sign-off**, so the bundle survives as evidence |
 
   A bundle may contain `<bundle>/{pbip,reports,semantic_models,handover,data}` — **no `out/` level**;
   `<bundle>/semantic_models/` is conditional (absent for 8/12 workbooks), and absent baseline ≠ no
-  changes — see `AGENTS.md`. Keep `<bundle>/reports/` pristine and compare it with git
-  (`powerbi-report-gotchas` §3).
+  changes — see `AGENTS.md`.
 
   ⚠️ **The copy must keep
   `definition.pbir`'s `byPath` resolving** — plain copy for a per-workbook model, path rewrite for a
-  shared datasource; never ship `<bundle>/reports/` (reference-only: no model beside it). Mechanics:
-  `powerbi-report-gotchas` §3.
+  shared datasource; never ship `<bundle>/reports/` (reference-only: no model beside it) and never
+  edit it - keep it pristine and diff it with git. Mechanics: `powerbi-report-gotchas` §3.
 
 - **Structural validation is necessary, not sufficient.** A clean parse/validate proves shape, not
   correctness: TMDL deserialization and `powerbi-report-author validate` both pass defects that only
@@ -127,7 +126,7 @@ report tells you where. Read these first, in this order:
 
 | source | what it gives you |
 |---|---|
-| `read_handover.py <bundle> --workbook <name> --viz [--severity X]` | **your work queue**: `remediation_worklist` (per item `severity`, `category`, `reason`, `remediation`), **emptied** visuals — every binding dropped, so they render blank on a report that validates clean (15 in one measured workbook, previously unremarked) — and `viz_fidelity[]` (`status`, `tier`, `reason`). Reading the raw 347 KB slice by hand works but buries these; see `powerbi-report-gotchas` §10 |
+| `read_handover.py <bundle> --workbook <name> --viz [--severity X]` | **your work queue**: `remediation_worklist` (per item `severity`, `category`, `reason`, `remediation`), **emptied** visuals — every binding dropped, so they render blank on a report that validates clean (15 in one measured workbook; ⚠️ since #189 shipped in 2.355.0 the engine sets `pbip_ref_drops[].severity: blocking` itself — prefer that, the reader still ranks them) — and `viz_fidelity[]` (`status`, `tier`, `reason`). Reading the raw 347 KB slice by hand works but buries these; see `powerbi-report-gotchas` §10 |
 | `estate.pending_gates[]` | which gates must be OFFERED (e.g. `dashboard_audit`) — offer, never self-approve |
 | `migration-spec.json` | source intent the engine's input format cannot carry: `dashboards[].zones` (layout tree), `worksheets[].encodings`, `manual_sort`, `measure_names_values_pivot`, filter `note`s |
 | `migrations/<name>/reference/` | the Tableau screenshots — the only thing that can adjudicate *look and feel* |
@@ -242,7 +241,9 @@ it is slow, and `validate` will not catch a wrong encoding.
    measured, polishing visuals one at a time produced a page where every visual was individually
    defensible and the page as a whole read nothing like the source. A
    whole-page mismatch is also the one defect class `viz_fidelity` structurally cannot report,
-   because it is per-visual.
+   because it is per-visual. (⚠️ Narrowed: #188 adds `page_emitted:false` at the three drop sites
+   from 2.354.0, live in our 2.356.0 — and it never claims `true`, so a *missing* page is now
+   reportable but a *wrong-looking* page still is not.)
 2. **Take the validator's classification of `viz_fidelity`, not the raw list.** Repair only rows it
    routes to you as fixable. A `tier: "empty"` row (nothing to rebuild) is usually correct; a
    `degraded` row may be a deliberate and correct deferral. For rendering findings, treat the

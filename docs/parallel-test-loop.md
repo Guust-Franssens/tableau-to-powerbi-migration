@@ -33,9 +33,32 @@ real external load, which is the condition this loop exists for. 2702 node ids; 
 | tier 1, **bare `-n auto --dist loadfile`, no `-m` at all** | **235 s** | identical to the row above, **node id by node id** |
 
 **~3.3x faster**, and the last row is the point of the mechanism below: forgetting the filter no
-longer changes what runs. The three standing failures are the deliberate
-`tests/test_upstream_repro_pins.py` engine-drift tripwires (engine pinned 2.260.0, installed
-2.339.0); they fail identically on `master`.
+longer changes what runs.
+
+⚠️ **The "three standing failures" baseline is RETIRED as of 2026-09-03 (issue #486). The expected
+number is now ZERO.** Re-brief anyone working against the old figure — including the later
+"expect exactly six" variant, which was these three plus three in
+`tests/test_issue_424_chart_type_pin.py`.
+
+The three recorded here were described as *"the deliberate `tests/test_upstream_repro_pins.py`
+engine-drift tripwires (engine pinned 2.260.0, installed 2.339.0); they fail identically on
+`master`"* — and that framing is the defect, not the record of it. `_run_engine_once()` `assert`ed
+the pinned version, and **every** behaviour pin in that file reaches the engine through it, so a
+version bump did not report drift: it made the #166, #168 and #171 pins fail *before their own
+assertions ran*. Those three behaviours were therefore **unevaluated** from the moment the plugin
+passed 2.260.0, while still costing three red tests that everyone had been taught to expect. Version
+drift is now a non-fatal `UserWarning`; with the gate removed, #166 and #171 **pass** (both still
+OPEN upstream) and #168 had genuinely been fixed without anyone noticing.
+
+The generalisable lesson, and the reason this is written here rather than only in a commit message:
+**an "expected failures" baseline converts a designed alarm into background noise.** The `#424` pin's
+own failure text said *"this failing may mean upstream FIXED #424; confirm the emitted type is
+lineChart, then retire this pin."* It was correct, it was sitting in the output, and it was skipped
+for days because the surrounding instruction said to expect it. A permanently-red test does not warn;
+it trains. If a pin is expected to fail, either fix it or delete it — do not document the failure.
+
+Current expectation: `tests/test_upstream_repro_pins.py` and `tests/test_issue_424_chart_type_pin.py`
+report **30 passed, 0 failed** on canonical engine 2.356.0.
 
 Every run was compared **by node id**, not by summary totals, because a summary hides the failure
 mode that matters: a test that skips or short-circuits under contention leaves `N passed` looking
