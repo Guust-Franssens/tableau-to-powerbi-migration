@@ -2367,8 +2367,15 @@ def _oracle_grade(grades: set[str], evidence: OracleEvidence) -> str:
 
 def _oracle_row(page: dict[str, Any], index: Any, evidence: OracleEvidence) -> dict[str, Any]:
     """Coverage for one expected page. A contested name or an ambiguous match takes no evidence."""
-    contested = _claim(index, page["name"]).outcome != oid.UNIQUE
-    record, refusal = (None, None) if contested else evidence.evidence_for(page)
+    record, refusal = evidence.evidence_for(page)
+    if record is not None:
+        identity = _candidate_identity(page)
+        typed_unique = identity is not None and index.resolve(identity).outcome == oid.UNIQUE
+        contested = not typed_unique
+        if contested:
+            record = None
+    else:
+        contested = _claim(index, page["name"]).outcome != oid.UNIQUE
     return {
         "page": page,
         "contested": contested,
