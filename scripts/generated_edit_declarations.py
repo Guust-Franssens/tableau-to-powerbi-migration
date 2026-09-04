@@ -1,7 +1,14 @@
 """
-purpose: append and read generated-artifact edit declarations, and the replay-script registrations
-         that make those replay scripts discoverable (issue #259), without shared-writer loss.
-usage:   imported by declaration writers, check_migration_progress.py, and check_replay_manifest.py
+purpose: append and read generated-artifact edit declarations, and write the NAVIGATIONAL
+         replay-script manifest entry beside each declared edit (issue #259), without
+         shared-writer loss.
+usage:   imported by declaration writers and check_migration_progress.py
+
+The replay-manifest entry this module writes (`write_replay_registration`/`load_replay_registrations`)
+is an INDEX FOR DISCOVERABILITY ONLY. It is not proof that the named script still exists on disk,
+that it matches any digest, that it belongs to a particular package or run, or that it covers every
+generated edit in the bundle - it only records what `declare_generated_edit.py` was told at the time
+it ran. Nothing in this repository treats it as an authoritative gate.
 """
 
 from __future__ import annotations
@@ -17,10 +24,10 @@ from typing import Any
 GENERATED_EDIT_DECLARATIONS = Path("_build") / "generated-edit-declarations.json"
 GENERATED_EDIT_DECLARATIONS_DIR = Path("_build") / "generated-edit-declarations"
 
-# One registration per replay script, EVERY time it is run through `declare_generated_edit.py` -
-# including the idempotent `DECLARE: NO_CHANGE` case a drift declaration never records. That gap is
-# exactly what issue #259 measured: a script that made no change on this run is still a script that
-# exists and must stay discoverable, so registration is unconditional where a drift declaration is not.
+# The navigational replay-script index (issue #259): one row per declared target, so a replay
+# script stays findable even after an idempotent `DECLARE: NO_CHANGE` re-run that writes no drift
+# declaration. Keyed by TARGET rather than a unique-per-run name, so a repeated declaration of the
+# same edit overwrites its own row instead of accumulating contradictory duplicates.
 REPLAY_MANIFEST_DIR = Path("_build") / "replay-manifest"
 
 _SAFE_STEM = re.compile(r"[^A-Za-z0-9_.-]+")
@@ -85,18 +92,36 @@ def _directory_records(path: Path) -> list[dict[str, Any]]:
     return records
 
 
-def append_replay_registration(bundle: Path, registration: dict[str, Any]) -> Path:
-    """Persist one replay-script registration (issue #259), one file per registering run.
+def _sanitized_key(value: str) -> str:
+    """A filesystem-safe, stable key for one navigational manifest row."""
+    return _SAFE_STEM.sub("_", value).strip("_")[-200:] or "record"
 
-    A registration answers "does this replay script exist and is it discoverable", which is a
-    different question from a drift declaration's "did this run's edit match its declared hash" -
-    so it is written unconditionally, even on the ``DECLARE: NO_CHANGE`` path a declaration skips.
+
+def write_replay_registration(bundle: Path, registration: dict[str, Any]) -> Path:
+    """Idempotently write one navigational replay-manifest row, keyed by its declared ``target``.
+
+    Unlike the append-only declaration directory, this index intentionally OVERWRITES: re-declaring
+    the same target (e.g. an idempotent `DECLARE: NO_CHANGE` re-run) must update the existing row
+    rather than accumulate a second, contradictory one for the same declared edit.
     """
-    return _append_record(bundle / REPLAY_MANIFEST_DIR, registration, "script_identity")
+    directory = bundle / REPLAY_MANIFEST_DIR
+    directory.mkdir(parents=True, exist_ok=True)
+    payload = dict(registration)
+    payload.setdefault("version", 1)
+    payload.setdefault("recorded_at", datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    final_path = directory / f"{_sanitized_key(str(payload.get('target') or 'record'))}.json"
+    staging_path = final_path.with_name(final_path.name + f".{uuid.uuid4().hex}.tmp")
+    try:
+        staging_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        os.replace(staging_path, final_path)
+    finally:
+        if staging_path.exists():
+            staging_path.unlink()
+    return final_path
 
 
 def load_replay_registrations(bundle: Path) -> list[dict[str, Any]]:
-    """Every replay-script registration recorded for this bundle, corrupt records skipped."""
+    """Every navigational replay-manifest row recorded for this bundle, corrupt records skipped."""
     return _directory_records(bundle / REPLAY_MANIFEST_DIR)
 
 
