@@ -32,6 +32,7 @@ command-line `-m` REPLACES an ini marker expression instead of composing with it
 from __future__ import annotations
 
 import os
+from typing import Any
 
 import pytest
 
@@ -51,6 +52,78 @@ GUI_MARKER = "gui"
 RUN_GUI = "--run-gui"
 RUN_GUI_ENV = "T2P_RUN_GUI"
 TRUTHY = {"1", "true", "yes", "on"}
+
+# Exact expected skip reasons (issues #435, #436).
+EXPECTED_EXACT_SKIP_REASONS: frozenset[str] = frozenset({
+    "deterministic tier not installed",
+    "the TMDL oracle needs the .NET SDK; scripts/preflight.ps1 checks for it",
+    "no PowerShell on PATH",
+    "powerbi-report-author not installed (npm bridge CLI; absent on Linux CI)",
+    "validator could not fetch the PBIR schema - schema checks did NOT run",
+    "no real cache.abf on this machine (they are gitignored); set PBIP_REFRESH_REAL_ABF",
+    "probe_desktop_credential.ps1 is a Windows-only UI Automation arbiter",
+    "real Win32 EnumWindows callback is Windows-only",
+    "PowerShell (pwsh.exe) not available in PATH",
+    "Windows-only (relies on real PID binding against Power BI Desktop)",
+    "no wind-energy example model in this repo",
+    "no examples/*/fabric/*.SemanticModel corpus",
+    "NTFS junction regression",
+    "this git no longer reports every trailing-slash path as ignored",
+    "pytest tmp_path is itself inside a git work tree on this machine",
+    "not a git work tree (exported source?)",
+    "pytest tmp_path sits inside a checkout on this machine",
+    "the home directory is itself an unignored path inside a checkout on this machine",
+    "Windows-specific path spelling",
+    "the administrative share is not reachable on this machine",
+    "8.3 name generation is disabled on this volume",
+    "no free drive letter available for subst",
+    "no unused drive letter to point at",
+    "lineage check is Windows-only",
+    "write-deny enforcement is an icacls ACL; the marker-only path cannot block a write",
+    "this platform/account cannot create symlinks without elevation",
+    "Windows filenames cannot hold undecodable bytes",
+    "off-Windows behaviour of the registry read",
+    "reads the Windows registry",
+    "filesystem will not store a combining-character filename unchanged",
+})
+
+# Prefix-matched expected skip reasons.
+EXPECTED_PREFIX_SKIP_REASONS: tuple[str, ...] = (
+    "tests/fixtures/live/multi-source-live.twbx not present - generate it with scripts/make_live_source_fixture.py",
+    "could not create junction: ",
+    "could not create an NTFS junction: ",
+    "subst failed: ",
+)
+
+ENGINE_SKIP_REASON = "deterministic tier not installed"
+
+
+def is_expected_skip_reason(reason: str) -> bool:
+    """Whether a skip reason is in the repository's baseline of expected skips (issue #436)."""
+    clean = reason.strip()
+    if clean in EXPECTED_EXACT_SKIP_REASONS:
+        return True
+    return any(clean.startswith(prefix) for prefix in EXPECTED_PREFIX_SKIP_REASONS)
+
+
+def is_engine_skip(reason: str) -> bool:
+    """Whether a skip reason is an engine-dependent test skip (issue #435)."""
+    return reason.strip() == ENGINE_SKIP_REASON
+
+
+def _extract_skip_reason(rep: Any) -> str:
+    """Extract normalized skip reason from a TestReport object."""
+    if isinstance(rep.longrepr, tuple) and len(rep.longrepr) >= 3:
+        reason = str(rep.longrepr[2])
+    elif isinstance(rep.longrepr, str):
+        reason = rep.longrepr
+    elif hasattr(rep, "longreprtext") and rep.longreprtext:
+        reason = rep.longreprtext
+    else:
+        reason = str(rep.longrepr or "")
+    if reason.startswith("Skipped: "):
+        reason = reason[len("Skipped: ") :]
+    return reason.strip()
 
 WRONG_DIST_MESSAGE = (
     "pytest-xdist is active with --dist {dist!r}. This suite is only measured safe under "
@@ -173,3 +246,58 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     if dropped:
         items[:] = kept
         config.hook.pytest_deselected(items=dropped)
+
+
+def pytest_terminal_summary(
+    terminalreporter: Any,
+    exitstatus: int,  # pylint: disable=unused-argument
+    config: pytest.Config,  # pylint: disable=unused-argument
+) -> None:
+    """Assert skip reasons match expected baseline and report engine skips loudly (issues #435, #436)."""
+    skipped_reports = terminalreporter.stats.get("skipped", [])
+    if not skipped_reports:
+        return
+
+    unexpected_skips: list[tuple[str, str]] = []
+    engine_skips: list[str] = []
+
+    for rep in skipped_reports:
+        reason = _extract_skip_reason(rep)
+        if is_engine_skip(reason):
+            engine_skips.append(rep.nodeid)
+        if not is_expected_skip_reason(reason):
+            unexpected_skips.append((rep.nodeid, reason))
+
+    # Loud reporting for engine skips (issue #435)
+    if engine_skips:
+        terminalreporter.write_sep(
+            "=",
+            f"ENGINE-DEPENDENT TESTS SKIPPED ({len(engine_skips)} test cases did not run)",
+            yellow=True,
+            bold=True,
+        )
+        terminalreporter.write_line(
+            "The deterministic conversion engine plugin (tableau-fabric-skills) is not installed.\n"
+            f"{len(engine_skips)} test cases requiring the engine plugin were skipped under @requires_engine:\n"
+            + "\n".join(f"  - {nodeid}" for nodeid in sorted(engine_skips)),
+            yellow=True,
+        )
+        terminalreporter.write_sep("=", yellow=True)
+
+    # Fail the run if any unexpected skip reason is encountered (issue #436)
+    if unexpected_skips:
+        terminalreporter.write_sep(
+            "!",
+            f"UNEXPECTED TEST SKIPS DETECTED ({len(unexpected_skips)} tests)",
+            red=True,
+            bold=True,
+        )
+        terminalreporter.write_line(
+            "Every skipped test must match a known per-reason expected-skip baseline (issue #436).\n"
+            "The following tests were skipped with unexpected or unregistered reasons:\n"
+            + "\n".join(f"  - {nodeid}: {reason!r}" for nodeid, reason in unexpected_skips),
+            red=True,
+        )
+        terminalreporter.write_sep("!", red=True)
+        # pylint: disable=protected-access
+        terminalreporter._session.exitstatus = pytest.ExitCode.TESTS_FAILED

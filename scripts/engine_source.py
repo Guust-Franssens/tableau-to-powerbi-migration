@@ -35,9 +35,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# Test simulation hook: when set, engine resolution acts as if the plugin is not installed.
+SIMULATE_ENGINE_ABSENT_ENV = "T2P_SIMULATE_ENGINE_ABSENT_FOR_TESTS"
 
 # The one canonical location: the installed Copilot plugin `tableau-fabric-skills@tableau-collection`.
 PLUGIN_ENGINE_ROOT = Path.home() / ".copilot" / "installed-plugins" / "tableau-collection" / "tableau-fabric-skills"
@@ -92,7 +96,7 @@ def is_engine_tree(root: Path) -> bool:
 
 def engine_root() -> Path:
     """The canonical engine root, or raise. There is no second candidate, on purpose."""
-    if is_engine_tree(PLUGIN_ENGINE_ROOT):
+    if not os.environ.get(SIMULATE_ENGINE_ABSENT_ENV) and is_engine_tree(PLUGIN_ENGINE_ROOT):
         return PLUGIN_ENGINE_ROOT
     raise EngineNotFoundError(
         f"the deterministic conversion engine is not installed at {PLUGIN_ENGINE_ROOT}. "
