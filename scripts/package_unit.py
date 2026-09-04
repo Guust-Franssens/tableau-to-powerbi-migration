@@ -471,6 +471,54 @@ def object_filename(name: str, luid: str, taken: set[str]) -> str:
     return stem
 
 
+def _declares_non_relative(declared: str) -> bool:
+    """True when a DECLARED string names an absolute, drive-relative or UNC location.
+
+    Extracted so the containment rule has exactly ONE definition. It was inline in
+    :func:`_resolve_capture_file`, keyed to the `path` field, and that is precisely how round-4
+    review walked around it: `withhold_uncertified_evidence` renames `path` to `retained_path`
+    BEFORE the packager looks, so a legacy record's absolute host path met no check at all.
+    """
+    candidate = Path(declared)
+    return candidate.is_absolute() or bool(candidate.drive) or declared.startswith(("\\\\", "/"))
+
+
+def _declares_unsafe_path(declared: str) -> bool:
+    """True when a declared string may not ship in the packaged manifest under ANY field name.
+
+    Non-relative (a host path, which names the customer's server, project and operator) or carrying
+    a `..` component (which claims a location outside the capture). Deliberately a predicate over a
+    VALUE, not a list of blessed field names: a second field name was the round-4 defect, and a
+    third one must not reopen it.
+    """
+    return _declares_non_relative(declared) or ".." in Path(declared).parts
+
+
+def _contain_declared_paths(leg: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+    """`(leg with every unsafe declared string refused, diagnosis)` - the field-AGNOSTIC guard.
+
+    ⚠️ **Round-4 finding 1.** `_resolve_capture_file` protects the `path` field only, so it is a
+    guard on one NAME rather than on the manifest. `withhold_uncertified_evidence` demotes an
+    uncertified data leg's `path` to `retained_path` before packaging (correctly - the bytes are not
+    evidence), and the packager then shipped that value verbatim, allowlisted by `manifest_scope`.
+    The measured differential, one certified and one legacy record declaring the SAME absolute path:
+
+        certified_data.path=<refused-by-packager>      # guarded
+        legacy_data.retained_path=C:\\Users\\...\\oracle.csv   # shipped
+
+    That is #461's class - a customer package carrying an absolute host path - and this repo is
+    public. So the check runs over every string the manifest declared, whatever it called the field.
+    Values this packager writes itself (`path`, `packaged_from`) are already normalised and
+    capture-relative, so re-checking them is free and keeps the rule unconditional.
+    """
+    refused = sorted(key for key, value in leg.items() if isinstance(value, str) and _declares_unsafe_path(value))
+    if not refused:
+        return leg, None
+    contained = {**leg, **{key: REFUSED_PATH for key in refused}}
+    fields = ", ".join(f"'{key}'" for key in refused)
+    return contained, f"capture declares a non-relative or escaping path in {fields} ({REFUSED_PATH}) - refused"
+
+
 def _resolve_capture_file(oracle_root: Path, declared: str) -> tuple[Path | None, str | None]:
     """`(resolved file, refusal reason)` for a capture-relative path the MANIFEST asked us to copy.
 
@@ -490,7 +538,7 @@ def _resolve_capture_file(oracle_root: Path, declared: str) -> tuple[Path | None
     if not declared:
         return None, "capture declares an empty path"
     candidate = Path(declared)
-    if candidate.is_absolute() or candidate.drive or declared.startswith(("\\\\", "/")):
+    if _declares_non_relative(declared):
         return None, f"capture declares a non-relative path ({REFUSED_PATH}) - refused"
     try:
         root = oracle_root.resolve(strict=True)
@@ -507,18 +555,25 @@ def _resolve_capture_file(oracle_root: Path, declared: str) -> tuple[Path | None
 def _copy_leg(
     source_dir: Path, dest_dir: Path, leg: Any, target: Path, rel_prefix: str
 ) -> tuple[dict[str, Any] | None, str | None]:
-    """`(rewritten leg, omission reason)` for one render or data leg."""
+    """`(rewritten leg, omission reason)` for one render or data leg.
+
+    ⚠️ Every branch returns through :func:`_contain_declared_paths`, including the ones that copy
+    nothing. A leg the packager declines to copy is not a leg it may echo verbatim - that was
+    round-4 finding 1, where an uncertified data leg's `retained_path` reached the packaged manifest
+    without meeting any check.
+    """
     if not isinstance(leg, dict):
         return None, None
     if leg.get("status") != "ok" or not isinstance(leg.get("path"), str):
-        return dict(leg), None
+        return _contain_declared_paths(_state_withheld_bytes(dict(leg)))
     origin, refusal = _resolve_capture_file(source_dir, leg["path"])
     if origin is None:
         rewritten = dict(leg)
         rewritten["status"] = OMITTED_STATUS
         rewritten["packaging_reason"] = refusal or "capture path unusable"
         rewritten["path"] = REFUSED_PATH
-        return rewritten, rewritten["packaging_reason"]
+        contained, _ = _contain_declared_paths(rewritten)
+        return contained, rewritten["packaging_reason"]
     destination = dest_dir / target
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(origin, destination)
@@ -527,7 +582,31 @@ def _copy_leg(
     # Normalised and capture-RELATIVE, never the declared string: the declared form is attacker-
     # controlled and was how an absolute host path reached the packaged manifest.
     rewritten["packaged_from"] = origin.resolve().relative_to(source_dir.resolve()).as_posix()
-    return rewritten, None
+    return _contain_declared_paths(rewritten)
+
+
+def _state_withheld_bytes(leg: dict[str, Any]) -> dict[str, Any]:
+    """Say, in the packaged leg itself, that withheld bytes are NOT in this package.
+
+    ⚠️ Round-4 finding 1, second half: `retained_path` survives packaging while the bytes it names
+    deliberately do not, so read against the package the reference dangles. The bytes cannot be
+    copied - they are uncertified, and shipping them under `<kind>/data/` is the fail-open #480
+    exists to close - and dropping the pointer would lose the operator's only route back to them in
+    the capture they still hold. So the reference is KEPT and disambiguated: it is capture-relative,
+    and the leg says so rather than leaving a consumer to discover it by a failed open.
+
+    Keyed on `tableau_oracle_manifest`'s own constant, not on a name this module invents, so the
+    vocabulary stays owned by the module that writes it.
+    """
+    if not isinstance(leg.get(tableau_oracle_manifest.RETAINED_PATH_KEY), str):
+        return leg
+    return {
+        **leg,
+        "packaging_reason": (
+            "uncertified bytes are retained in the CAPTURE and are deliberately not packaged; "
+            f"'{tableau_oracle_manifest.RETAINED_PATH_KEY}' is relative to that capture, not to this package"
+        ),
+    }
 
 
 def package_oracle(  # pylint: disable=too-many-locals

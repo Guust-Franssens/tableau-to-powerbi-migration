@@ -1133,6 +1133,86 @@ def test_a_symlink_out_of_the_capture_root_is_refused(tmp_path: Path) -> None:
     assert not [p for p in root.rglob("*") if p.is_file() and b"EXFILTRATION-CANARY" in p.read_bytes()]
 
 
+def test_a_LEGACY_data_leg_cannot_ship_a_host_path_under_retained_path(tmp_path: Path) -> None:
+    """#480 round 4, finding 1. The containment guard was keyed to a FIELD NAME, not to the manifest.
+
+    `withhold_uncertified_evidence` demotes an uncertified data leg's `path` to `retained_path`
+    before the packager looks at it -- correctly, because those bytes are not evidence -- and
+    `_copy_leg` then keyed on `path`, found none, and returned the leg verbatim. The review's
+    controlled differential drove ONE absolute path through both shapes:
+
+        certified_data.path=<refused-by-packager>
+        legacy_data.retained_path=<drive>:\\Users\\<account>\\private\\oracle.csv
+
+    A customer package carrying an absolute host path is #461's class -- it names their server,
+    project and operator, and this repo is public.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    # The REAL legacy shape: a row count and no certification, so it is withheld and renamed.
+    manifest["views"][0]["data"] = {
+        "status": "ok",
+        "path": f"{HOST_PATH_ROOT}{_SEP}private{_SEP}oracle.csv",
+        "row_count": 900,
+    }
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+
+    shipped = json.loads((_out(tmp_path) / UNIT / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    data = [v for v in shipped["views"] if v.get("flags")][0]["data"]
+    assert absolute_host_paths(shipped) == [], "no packaged field may carry an absolute host path"
+    assert data["retained_path"] == pkg.REFUSED_PATH, "the demoted field must meet the SAME check as `path`"
+    assert "path" not in data, "demotion still holds: uncertified bytes are never named as evidence"
+
+
+def test_the_containment_guard_is_field_AGNOSTIC_not_a_second_allowlist(tmp_path: Path) -> None:
+    """The class-closing half: a THIRD field name must not reopen what round 4 found.
+
+    `retained_path` was the second name; fixing it by name would leave the next one open. This
+    drives an absolute path through `packaged_from` on a leg the packager does not copy -- a field
+    it normally writes itself, and therefore one nobody would think to guard.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    manifest["views"][0]["image"] = {
+        "status": "failed",
+        "packaged_from": f"{HOST_PATH_ROOT}{_SEP}private{_SEP}leak.png",
+    }
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+
+    shipped = json.loads((_out(tmp_path) / UNIT / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    assert absolute_host_paths(shipped) == []
+    assert shipped["views"][0]["image"]["packaged_from"] == pkg.REFUSED_PATH
+
+
+def test_a_LEGITIMATE_relative_retained_path_still_packages_and_says_where_the_bytes_are(
+    tmp_path: Path,
+) -> None:
+    """Positive control for the two above, plus the second half of finding 1.
+
+    A capture-relative `retained_path` must survive -- refusing everything would pass the security
+    assertion while destroying the operator's only route back to the retained bytes. It must also
+    not read as a file inside the PACKAGE: those bytes are deliberately not copied, so read against
+    the package the reference dangles. The leg says which it is.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    manifest["views"][0]["data"] = {"status": "ok", "path": "data/view-0.csv", "row_count": 900}
+    (oracle / "data").mkdir(parents=True, exist_ok=True)
+    (oracle / "data" / "view-0.csv").write_text("Region\r\nWest\r\n", encoding="utf-8")
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+
+    root = _out(tmp_path) / UNIT
+    shipped = json.loads((root / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    data = [v for v in shipped["views"] if v.get("flags")][0]["data"]
+    assert data["retained_path"] == "data/view-0.csv", "a safe capture-relative pointer must survive"
+    assert "capture" in data["packaging_reason"], "the reference must say it names the capture, not this package"
+    assert not (root / "oracle" / "data" / "view-0.csv").exists(), "the bytes stay out of the package"
+    assert not list((root / "oracle").rglob("*.csv"))
+
+
 def test_the_per_view_empty_flag_survives_packaging(tmp_path: Path) -> None:
     """#471. A per-view fact must not be dropped silently at the package boundary.
 
