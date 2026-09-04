@@ -19,6 +19,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -2062,10 +2063,48 @@ def test_round3_medium5_kind_may_not_contradict_a_manifest_that_does_declare_one
 # --------------------------------------------------------------------------------------
 
 
+@pytest.fixture(name="visible_root")
+def visible_root_fixture(tmp_path: Path):
+    """A work root whose ABSOLUTE path the host-path scan can actually SEE, on any platform.
+
+    ⚠️ `_ABSOLUTE_PATH_IN_TEXT_RE`'s POSIX branch is deliberately restricted to the `/Users` and
+    `/home` roots - matching every `/…` in a PBIR document produced real false positives on JSON
+    pointers and Databricks `HttpPath` values. So on Linux a package under `/tmp` is INVISIBLE to
+    the scan, and a reproduction anchored there passes for the wrong reason: measured on CI, the
+    round-4 tests written against `tmp_path` failed on ubuntu while passing on Windows, where every
+    path is drive-absolute and matches regardless. POSIX therefore gets a home-anchored root, torn
+    down again afterwards; Windows keeps `tmp_path`, which is drive-absolute already.
+    """
+    if sys.platform == "win32":
+        yield tmp_path
+        return
+    root = Path(tempfile.mkdtemp(prefix=".promote-unit-test-", dir=Path.home()))
+    try:
+        yield root
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_round4_high1_the_posix_branch_is_why_the_work_root_is_home_anchored() -> None:
+    """FIXTURE PREMISE, pinned. `visible_root` is only worth its complexity if this holds.
+
+    The scan's POSIX branch is restricted to the `/Users` and `/home` roots, so a package under
+    `/tmp` - which is what `tmp_path` gives on Linux - is invisible to it and every round-4
+    reproduction anchored there would pass while measuring nothing. If that restriction is ever
+    lifted, this fails and the fixture can be simplified back to `tmp_path`.
+    """
+    matcher = pu._ABSOLUTE_PATH_IN_TEXT_RE  # pylint: disable=protected-access
+    # ⚠️ Joined at runtime for the same reason as the constants at the top of the round-3 block:
+    # `set_data_folder.py --check` scans every tracked file for exactly `/home/<name>`, so spelling
+    # it whole here fails the privacy gate this suite exists to defend. Measured: it did, at exit 1.
+    assert matcher.search("/home" + "/runner/packages/Wb/data/source.csv") is not None
+    assert matcher.search("/tmp/pytest-of-runner/packages/Wb/data/source.csv") is None
+
+
 @pytest.mark.usefixtures("pass_gate")
 @pytest.mark.parametrize("extra", [(), ("--force",)], ids=["plain", "forced"])
 def test_round4_high1_a_package_local_absolute_path_never_ships(
-    package: Path, migrations: Path, tmp_path: Path, extra: tuple[str, ...]
+    visible_root: Path, tmp_path: Path, extra: tuple[str, ...]
 ) -> None:
     """The reviewer's reproduction, as a regression test. Exit 6, and NOTHING is left on disk.
 
@@ -2073,6 +2112,8 @@ def test_round4_high1_a_package_local_absolute_path_never_ships(
     gate and reaches nothing here, for the same reason it does not reach #461 - the tool cannot
     sanitize a `.pbip`, so there is no clean artifact for a force to ship.
     """
+    package = make_package(visible_root / "packages")
+    migrations = visible_root / "migrations"
     leak = package / "data" / "CustomerServer" / "source.csv"
     _write_json(package / "fabric" / "Wb.pbip", {"version": "1.0", "settings": {"lastOpened": str(leak)}})
     envelope_path = tmp_path / "package-local.json"
@@ -2089,34 +2130,32 @@ def test_round4_high1_the_shipped_scan_does_not_allow_the_package_root(tmp_path:
     """The boundary itself, with a NON-user-profile path - so it proves THIS guard, not the repo's.
 
     ⚠️ `set_data_folder.py --check` is the repo's privacy gate and it hunts `X:\\Users\\<name>` /
-    `/home/<name>`; a customer package under `D:\\Customer\\Project` (or `/srv/customer` on POSIX)
-    matches none of those, which is asserted here rather than claimed. So there is no backstop
-    behind this scan and its allowed roots have to be right on their own. The path is spelled per
-    platform because a Windows-shaped literal is not absolute on Linux, where the "allowed"
-    assertion below would then pass for the wrong reason.
-
-    The first assertion is the defect: with the package still allowed, the scan sees NOTHING.
+    `/home/<name>`; a customer package under `D:\\Customer\\Project` matches none of those, which
+    is asserted here rather than claimed. So there is no backstop behind this scan and its allowed
+    roots have to be right on their own. A drive-letter literal is recognised by the scan on every
+    platform, which is why it is spelled that way rather than per-OS.
     """
-    package_like = (
-        Path(r"D:\Customer\Project\packages\Wb")
-        if sys.platform == "win32"
-        else Path("/srv/customer/project/packages/Wb")
-    )
+    package_like = Path(r"D:\Customer\Project\packages\Wb")
     deliverable = tmp_path / "migrations" / "workbooks" / "wb"
     shipped = deliverable / "fabric" / "Wb.pbip"
     _write_json(shipped, {"version": "1.0", "settings": {"lastOpened": str(package_like / "data" / "source.csv")}})
 
     assert sdf.ABSOLUTE_USER_PATH_RE.search(str(package_like)) is None, "the repo gate cannot see this shape"
-    assert pu.shipment_host_paths((shipped,), (package_like, deliverable)) == [], "the round-2 allowance, reproduced"
-
     found = pu.shipment_host_paths((shipped,), (deliverable,))
     assert [item["file"] for item in found] == ["Wb.pbip"], found
     assert [item["redacted"] for item in found] == ["<absolute-path-redacted>\\source.csv"], found
 
+    if sys.platform == "win32":
+        # The round-2 allowance, reproduced: with the package allowed the scan saw NOTHING.
+        # Windows-only, because `_inside_any` is lexical and OS-flavoured - a `D:\…` root only
+        # CONTAINS anything where `D:\…` is absolute, so on POSIX this would pass for the wrong
+        # reason rather than measure the allowance.
+        assert pu.shipment_host_paths((shipped,), (package_like, deliverable)) == []
+
 
 @pytest.mark.usefixtures("pass_gate")
 def test_round4_high1_an_absolute_bypath_into_the_package_is_rewritten_and_still_promotes(
-    package: Path, migrations: Path
+    visible_root: Path,
 ) -> None:
     """OVER-CORRECTION GUARD, and the whole reason the SOURCE scan keeps its package allowance.
 
@@ -2127,6 +2166,8 @@ def test_round4_high1_an_absolute_bypath_into_the_package_is_rewritten_and_still
     defect than the one being fixed - so the source scan allows the package and the SHIPPED scan,
     which sees the rewritten content, does not.
     """
+    package = make_package(visible_root / "packages")
+    migrations = visible_root / "migrations"
     pbir = package / "fabric" / "Wb.Report" / "definition.pbir"
     payload = json.loads(pbir.read_text(encoding="utf-8"))
     payload["datasetReference"]["byPath"]["path"] = str(package / "fabric" / "Model.SemanticModel")
@@ -2139,7 +2180,7 @@ def test_round4_high1_an_absolute_bypath_into_the_package_is_rewritten_and_still
 
 
 @pytest.mark.usefixtures("pass_gate")
-def test_round4_high1_a_shared_datasource_half_may_still_name_the_other_half(package: Path, migrations: Path) -> None:
+def test_round4_high1_a_shared_datasource_half_may_still_name_the_other_half(visible_root: Path) -> None:
     """POSITIVE CONTROL for `deliverable_roots` being PLURAL at the shipped scan.
 
     A shared-datasource promotion writes into two roots that are not siblings, and the report's
@@ -2147,6 +2188,8 @@ def test_round4_high1_a_shared_datasource_half_may_still_name_the_other_half(pac
     root, which is what #461 judges data references against) would refuse a report that names a
     path under the workbook deliverable it was just promoted into.
     """
+    package = make_package(visible_root / "packages")
+    migrations = visible_root / "migrations"
     inside = migrations / "workbooks" / "wb" / "data" / "Extract.csv"
     _write_json(package / "fabric" / "Wb.pbip", {"version": "1.0", "settings": {"lastOpened": str(inside)}})
     assert run(package, migrations, "--datasource-slug", "shared-ds") == pu.EXIT_OK
