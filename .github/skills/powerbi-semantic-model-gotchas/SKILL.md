@@ -17,6 +17,19 @@ only at query time. Every section below is a defect class that survived a clean 
 > (Tableau `ATTR()`, `MAKELINE`, "Number of Records") are examples of what produced the defect, not
 > prerequisites. Cross-references to `docs/` and `.github/agents/` are paths in the host repo.
 
+> **Engine-version provenance — read before acting on any entry that names the deterministic engine.**
+> Audited 2026-09-03 (issue #486) against upstream `Yarbrdab000/tableau-fabric-skills` issue state,
+> on canonical plugin **2.353.0**, then re-verified 2026-09-03 after the plugin was upgraded to **2.356.0** (upstream `main`). Entries whose defect was fixed
+> upstream now carry a ⚠️ retraction or version-qualification **in place**, with the original
+> measurement kept visible. Two things that audit could **not** settle, so do not read silence as
+> currency: (a) claims naming an engine **source line** (`storage_mode.py:99`, `connection_to_m.py:2869`,
+> `openability_gate.py`) were pinned at 2.146.0–2.339.0 and the line numbers have certainly moved —
+> treat them as *where to look*, never as a citation; (b) an engine claim with **no upstream issue**
+> was left standing, because absence of an issue is not evidence of a fix. Neither was re-measured —
+> the audit was deliberately documentation-only, since re-measuring means running the engine.
+> Anything about **Power BI Desktop**, TMDL/AMO or the modeling MCP is unaffected by engine drift and
+> was out of scope.
+
 ## 1. Translating source fields
 
 - **`ATTR()`** in a calculated field used at row-granularity (post city-filter, exactly one row) is
@@ -825,10 +838,18 @@ So the naming itself is diagnostic:
   ⚠️ `localhost` alone is an ordinary local SQL Server/Postgres, and a `_sqlproxy` parameter pointing
   at a **real** host is a successful rebind — only the **combination** is a phantom.
 
-This is upstream `Yarbrdab000/tableau-fabric-skills#174` (fixed at engine 2.274.0, which adds a
-`phantom_published_proxy_tables` finding). Before that build the phantom ships silently, and the
-orphans are exactly what mislead a later fix-pass into hand-wiring a bad connection — the PEM entry
-above is what that looks like when it goes wrong.
+This is upstream `Yarbrdab000/tableau-fabric-skills#174`, **closed COMPLETED 2026-09-02**. ⚠️ **Two
+corrections to the sentence this replaces.** (1) The version was wrong here: the maintainer's closing
+comment states the fix has been on `main` **since 2.275.0** (not 2.274.0) and is unchanged through
+2.350.0 — so it IS in our canonical 2.353.0. (2) It is a **gate, not a repair**: a secondary
+published-datasource dependency recorded in `binding_signal` is now *consumed*, so the run should
+emit a `phantom_published_proxy_tables` entry naming the datasource plus a warning that the table
+opens empty. ⚠️ **We have never confirmed it fires** — upstream closed on landed code and explicitly
+asked us to reopen if a run over `Beam_Availability` produces no such entry, calling a null result
+from us more valuable than a confirmation. So: on a >= 2.275.0 bundle, **the absence of
+`phantom_published_proxy_tables` is not evidence of no phantom** until someone checks. The artifact
+read below (bare vs class-suffixed vs `_sqlproxy` + `localhost`) is unaffected and remains the way to
+diagnose one by hand.
 
 ## 6. File-based extracts: a legacy `.xls` + a custom OS locale silently corrupts DATA
 
@@ -966,6 +987,15 @@ Measured 2026-08-08 (`book_6-1-Maps`, same Superstore BIFF8 `.xls` and same en-B
 Three defects that cost a full debugging cycle each, none of which §6 covers.
 
 ### 7.1 The emitted navigation key is XLSX-shaped and can never match a legacy `.xls`
+
+⚠️ **FIXED UPSTREAM — the ENGINE no longer emits this, but the diagnosis below is still how you read
+the symptom.** `Yarbrdab000/tableau-fabric-skills#129` (*"the emit site is unconditionally
+`[Item=,Kind=]`, but a BIFF8 nav table has only Name/Data"*) was **fixed in 2.147.0**, following #108
+in the same area. Any engine at or above 2.147.0 — the canonical engine was 2.356.0 at 2026-09-04;
+resolve yours with `python scripts/engine_source.py` — should already emit the Name-keyed
+form for a legacy `.xls`. Keep reading if you are debugging an **older** bundle, a hand-edited
+partition, or the same `key didn't match any rows` error from another cause — the Power Query
+mechanics, the `Orders$` trap and the enumeration probe are all engine-independent and still correct.
 
 The engine emits the navigation record Power Query uses for a **modern `.xlsx`**:
 
@@ -1124,7 +1154,22 @@ programmatically. That works. It is simply work you pay per workbook, on top of 
 fields x 60 requests down to the one category you are about to author.
 
 The reader also de-duplicates `category_guidance`, which is emitted **per request** rather than per
-category. Verified across all 38 handovers of `_bundle-208`: exactly **one distinct guidance string
+category — and still is. ⚠️ **`Yarbrdab000/tableau-fabric-skills#170` (engine 2.328.0) ADDED a
+separately named, de-duplicated artifact; it did not de-duplicate the surfaces this reader reads.**
+`repair-queue.json` hoists the guidance into one `guidance` map keyed by category and ships each
+request slim, while `report.json` and the handover slices keep their inline copy **on purpose**: the
+engine's own docstring calls it *"STRICTLY ADDITIVE ... `requests[]` still carries its inline
+`category_guidance` for every existing consumer"* (`migrate_estate.py`), and its
+`test_repair_queue_artifact.py::test_the_original_handoff_is_untouched` pins that, because removing
+the inline copy would be a schema removal. So the de-duplication is **not** a no-op — it is still
+doing real work on every surface except the queue. Measured on a fresh 2.356.0 conversion of
+`tests/fixtures` (2026-09-03): `report.json` carries **9** handoff requests, **9** of them with
+inline guidance across **3** distinct categories — **6 duplicate copies the reader removes** — while
+the same run's `repair-queue.json` carries **3** guidance keys and **0** requests with inline
+guidance. (`#170` shipped both asks — the maintainer reproduced the duplication independently at
+2.327.0 first — and its own title records that the original *"unreachable"* framing was retracted in
+its comments.) The sizing that motivated it still stands: verified across all 38 handovers of
+`_bundle-208`, exactly **one distinct guidance string
 per category, estate-wide**. In the worked 60-request file, repeated guidance accounts for
 **44,775 bytes (12.6% of the 347 KB file)**. Both the earlier "~53 KB" and "dominant cost" claims
 were overstated: it is a worthwhile saving, not the dominant cost. All seven categories together cost
@@ -1163,7 +1208,12 @@ engine claim; never cite it as evidence that something opens.**
 | the filesystem | deliberate — it judges whether an M path is *foreign*, never whether it *exists* |
 
 **Measured on the 2.339.0 estate run** (`_runs/estate-2.339.0-20260829/report.json`, 45 workbooks, 44
-carrying the field):
+carrying the field) — ⚠️ **NEEDS A MEASURED RE-CHECK at 2.353.0 (issue #486).** The 2026-09-03
+upstream audit found **no** issue tracking the `ok: true`-beside-defects ratio, so nothing here is
+retracted; but "no upstream issue" is not evidence the numbers still hold 14 releases later, and this
+table's *counts* are the part most likely to have moved. The **structural** claim — that this is a
+regex scan over TMDL text with no filesystem, no AMO and no report layer, so `ok` can never mean "it
+opens" — is what you should act on, and it does not depend on the counts:
 
 | measurement | value |
 |---|---|
@@ -1201,6 +1251,14 @@ payload whose check set was recomputed — and the gate's own source comment cla
 ("present and empty on a healthy build, so its absence is never mistaken for *not evaluated*").
 Filed upstream as [`tableau-fabric-skills#183`](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/183):
 it is a regression from the fix for upstream #177, which silently retracts the disclosure #141 added.
+⚠️ **FIXED UPSTREAM in 2.340.0, which is below our canonical 2.353.0 — the two keys survive the
+re-check now.** Upstream reproduced it at the function and confirmed the exact key set
+(`['checks','issues','not_evaluated','ok','reference_case_mismatches']` before, four keys after). So
+on a 2.353.0 bundle the tri-state discipline above is safe on **every** payload, including the
+re-checked one, and a missing `not_evaluated` is once again a real signal rather than an artifact of
+the re-check. The measurement is kept because it is the reason the fix exists — and because the
+discipline it teaches (a check that only pays off when you follow the instructions is the one that
+punishes following them) outlives the bug.
 
 **No static gate settles openability, and the TMDL oracle is not the exception.** The strongest
 offline signal is the parser Desktop itself uses — `TmdlSerializer.DeserializeDatabaseFromFolder`,
@@ -1253,7 +1311,14 @@ field incident to a mechanism you have not reproduced.
 
 ### Still open: what DID cause the three BLANK() dispatchers
 
-Unknown. Three workbooks (ACMU `_Measures.tmdl:87` `'Selected Measure'`, Airline Scorecard, Flight
+Unknown — and ⚠️ **still unknown after the 2026-09-03 upstream audit (issue #486): there is no
+upstream issue tracking this, so it is a bucket-3 "needs a measured re-check", not a fixed defect.**
+The nearest neighbour, `Yarbrdab000/tableau-fabric-skills#168`, is closed COMPLETED but answers a
+*different* question (it ruled branch count out and shipped partial emission); it never identified
+why an identical formula stubs in one workbook and translates in another. Do not treat #168's closure
+as closing this.
+
+Three workbooks (ACMU `_Measures.tmdl:87` `'Selected Measure'`, Airline Scorecard, Flight
 Phase `'Measure - All Phases'`) each shipped a bare `BLANK()` dispatcher while every branch measure
 it referenced was translated correctly. That pattern is real and reported from the field. The cause
 is not established. Do not fill the gap with a plausible story.
@@ -1272,6 +1337,29 @@ Same formula, same engine, same run, opposite results. That **rules out formula 
 type** as the cause, and points at something order- or run-state-dependent instead. It also
 independently rules out branch *count*: the engine author probed 15 identical branches directly at
 2.260.0 and they translate (`Yarbrdab000/tableau-fabric-skills#168`).
+
+⚠️ **#168's REMEDY has since shipped, and it changes what a stub looks like — 🟢 measured here on
+canonical 2.356.0, not inferred.** The all-or-nothing behaviour is gone: the engine now emits a
+**partial** dispatcher and *discloses* the drop in the TMDL, where a debugger looks. On the committed
+`issue-168-case-one-bad-branch` fixture (one unresolvable branch of four):
+
+```
+measure 'Selected KPI' = IF(EXACT([Select KPI Value], "Sales"), SUM('Orders'[SALES]), ...)
+annotation TranslatedBy = deterministic (parameter dispatcher; 3 of 4 branches live;
+                          dropped WHEN "Bad Branch")
+```
+
+`model_translation_handoff.requests` is now **0** for that workbook — so a dispatcher that used to
+arrive as a `BLANK()` stub *plus* a handover request now arrives as working DAX with a named gap and
+**no request at all**. ⚠️ **Consequence for triage:** counting handover requests no longer finds these.
+Read the `TranslatedBy` annotation. Pinned by
+`tests/test_upstream_repro_pins.py::test_issue_168_pins_partial_dispatcher_with_disclosure`, which
+now guards the *fixed* direction.
+
+⚠️ **This does NOT explain the three field cases above, and must not be read as closing them.**
+Those were built on 2.146.0, long before the remedy; #168 answered *"why does one bad branch discard
+the good ones"*, never *"why does an identical formula stub in one workbook and translate in
+another"*. That remains unknown and still needs a measured re-check (issue #486).
 
 ⚠️ **But it contradicts this section's own record**, which lists ACMU's `'Selected Measure'` among the
 three that *shipped a stub*. Both cannot be true of the same artifact. Unresolved as of writing —
@@ -1292,7 +1380,12 @@ Y-axis swaps with a slicer.
 ⚠️ **`_GUIDANCE[MODEL_OBJECT_PARAMETER]` routes to field parameters, and for this shape that is
 usually the heavier answer.** When every branch is **already a working measure** - the normal case,
 because the engine translates the branches fine and refuses only the dispatcher - a plain `SWITCH` is
-the lighter, faithful fix and needs no new model object:
+the lighter, faithful fix and needs no new model object.
+⚠️ **The premise "refuses only the dispatcher" is stale at >= 2.356.0** (measured, see the #168 entry
+above): the engine now emits a *partial* dispatcher itself and names the dropped branch in a
+`TranslatedBy` annotation. So check the emitted measure **before** hand-authoring a `SWITCH` — you may
+be rewriting DAX that already works, and the only thing genuinely missing is the one branch the
+annotation names.
 
 ```dax
 Selected Measure =

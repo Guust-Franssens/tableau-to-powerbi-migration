@@ -28,6 +28,16 @@ The tamper mode is an audit record, not a security boundary. A declaration is wr
 script that changed the artifact, so it proves the edit was made visible and replayable; it does not
 authorize the edit or protect against someone hand-editing the declaration JSON.
 
+⚠️ **BOTH modes look at the phase-2 packages, not only at the bundle.** Since #460 was settled - the
+package's `fabric/` is the canonical place an agent edits, and `promote_unit.py` ships FROM it - a
+gate pointed only at `<bundle>/pbip/` is looking in the tree the work is NOT in. Measured before this
+was fixed, on a package whose model had just been edited: `--tamper` reported
+`CLEAN  "3 generated artifact(s) are pristine against their engine-run hashes"` at exit 0, and
+progress reported `SILENT  deliverable_count_seen=0` for an agent that had been producing
+deliverables the whole time - the precise signal an orchestrator reads as "this subagent is dead".
+Packages are found beside the bundle by default (`_runs/<NNN>-<slug>/{bundle,packages}`);
+`--packages` names a different root.
+
 ⚠️ **A stall is not a failure, and a fast run is not a success.** A migration can legitimately go
 quiet while Power BI Desktop loads a model (~60-90s) or an XMLA refresh runs (measured 93s), and a
 correct early STOP - an unreachable source, a missing credential - produces almost no artifacts at
@@ -72,6 +82,19 @@ GENERATED_ARTIFACTS_KEY = "generated_artifacts"
 GENERATED_EDIT_DECLARATIONS = Path("_build") / "generated-edit-declarations.json"
 GENERATED_EDIT_DECLARATIONS_DIR = Path("_build") / "generated-edit-declarations"
 VOLATILE_GENERATED_DIRS = {".pbi"}
+
+#: The phase-2 handover packages `package_unit.py` writes, and the manifest that makes one
+#: self-describing. Since #460 was settled the package's `fabric/` is the CANONICAL place an agent
+#: edits, and `promote_unit.py` ships FROM it - so a gate that only ever looked in the bundle was
+#: looking in the wrong tree. Measured before this: edit a canonical package, and `--tamper` reports
+#: `CLEAN  "3 generated artifact(s) are pristine against their engine-run hashes"` at exit 0 while
+#: progress reports `SILENT  deliverable_count_seen=0` for an agent that had been working all along.
+PACKAGES_DIRNAME = "packages"
+PACKAGE_MANIFEST_NAME = "package-manifest.json"
+#: How deep under a `packages/` root a `<Unit>/package-manifest.json` may sit. The documented layout
+#: is `packages/<batch>/<Unit>/`, so 2 is the real depth; 3 leaves room for one nesting level a
+#: future batch convention might add without turning this into an unbounded tree walk.
+PACKAGE_SEARCH_DEPTH = 3
 
 # A Desktop model load is 60-90s and a refresh + ImageSave was measured at 93s, so a window shorter
 # than this cannot distinguish "loading" from "stuck" and must not try.
@@ -398,8 +421,107 @@ def adjudicate_generated_drift(
     return adjudicated
 
 
-def tamper_check(bundle: Path) -> tuple[str, list[str]]:
-    """Detect generated artifacts that changed without structured declaration evidence."""
+def discover_package_roots(bundle: Path, explicit: Path | None = None) -> list[Path]:
+    """Every phase-2 package directory this bundle is accountable for.
+
+    A package is identified by carrying its own `package-manifest.json`, never by its position, so
+    the discovery cannot be fooled by a batch directory named something unexpected.
+
+    ⚠️ **Auto-discovery is the point, not a convenience.** The reproduction that made this necessary
+    is the DOCUMENTED command - `check_migration_progress.py --bundle <b> --tamper`, no new flag -
+    reporting CLEAN while the canonical package carried an edit. An opt-in flag would leave that
+    command exactly as wrong as it was. `--packages` exists for a layout the canonical one does not
+    cover, and it overrides the search rather than adding to it.
+
+    The canonical layout is `_runs/<NNN>-<slug>/{bundle,packages}` (`work_dirs.RunPaths`), so the
+    default search is the bundle's SIBLING `packages/`, plus a `packages/` nested inside the bundle
+    for the ad-hoc layout an operator gets by passing `--out <bundle>/packages`.
+    """
+    roots = [explicit] if explicit is not None else [bundle.parent / PACKAGES_DIRNAME, bundle / PACKAGES_DIRNAME]
+    found: set[Path] = set()
+    for root in roots:
+        if root is None or not root.is_dir():
+            continue
+        if (root / PACKAGE_MANIFEST_NAME).is_file():
+            found.add(root)
+        for depth in range(1, PACKAGE_SEARCH_DEPTH + 1):
+            pattern = "/".join(["*"] * depth) + f"/{PACKAGE_MANIFEST_NAME}"
+            found.update(manifest.parent for manifest in root.glob(pattern) if manifest.is_file())
+    return sorted(found)
+
+
+def package_edit_state(package: Path) -> tuple[list[str], str | None]:
+    """`(files that differ from what packaging recorded, reason it could not be established)`.
+
+    Delegates to `package_unit.package_edits` rather than re-deriving the comparison: two
+    implementations of "has this package been edited" would answer differently the first time either
+    changed, and this gate exists to make that answer visible.
+    """
+    from package_unit import package_edits  # pylint: disable=import-outside-toplevel
+
+    return package_edits(package)
+
+
+def package_tamper_check(roots: list[Path]) -> tuple[str, list[str]]:
+    """Have the CANONICAL packages been edited since packaging wrote them?
+
+    ⚠️ **"No packages" and "packages all pristine" must not print the same**, which is the same
+    doctrine `_no_baseline_verdict` applies one layer up: a silent absence reads as a clean bill of
+    health for a tree nobody looked at. A run that has not reached phase 2 yet is a legitimate,
+    NAMED state here.
+
+    A package edit is reported, not condemned. `<package>/fabric/` is where an agent is *supposed*
+    to work (#460, settled by `promote_unit.py`, which ships from it) - so the finding is "the
+    canonical tree carries work that the engine-run hashes cannot account for", which is exactly
+    what an orchestrator needs to know before promoting, and exactly what a CLEAN verdict used to
+    hide.
+    """
+    if not roots:
+        return "CLEAN", ["no phase-2 packages found beside this bundle - nothing canonical to check"]
+    edited: list[str] = []
+    unassessable: list[str] = []
+    notes: list[str] = []
+    for package in roots:
+        changed, reason = package_edit_state(package)
+        if reason is not None:
+            unassessable.append(package.name)
+            notes.append(f"PACKAGE UNASSESSABLE: {package.name} - {reason}")
+            continue
+        if changed:
+            edited.append(package.name)
+            notes.append(
+                f"PACKAGE EDITED: {package.name} - {len(changed)} file(s) differ from what packaging "
+                f"wrote: {', '.join(changed[:5])}" + (" ..." if len(changed) > 5 else "")
+            )
+    if not edited and not unassessable:
+        return "CLEAN", [f"{len(roots)} phase-2 package(s) still match their own package-manifest.json digest"]
+    if edited:
+        return "PACKAGE_DRIFT", notes
+    return "PACKAGE_UNASSESSABLE", notes
+
+
+def tamper_check(bundle: Path, package_roots: list[Path] | None = None) -> tuple[str, list[str]]:
+    """Detect generated artifacts that changed without structured declaration evidence.
+
+    Two trees, because since #460 there are two: the engine bundle, adjudicated against the
+    engine-run baseline in `input_manifest.json`, and the phase-2 packages, adjudicated against each
+    package's own `package-manifest.json` digest. A bundle-level verdict wins when it is already
+    non-clean - it is about the baseline everything else is measured from - but a package finding
+    REPLACES a would-be clean one, so `--tamper` can no longer report CLEAN for a tree it never
+    looked at.
+    """
+    state, notes = _bundle_tamper_check(bundle)
+    package_state, package_notes = package_tamper_check(
+        package_roots if package_roots is not None else discover_package_roots(bundle)
+    )
+    notes = [*notes, *package_notes]
+    if package_state != "CLEAN" and state in {"CLEAN", "DECLARED_DRIFT"}:
+        return package_state, notes
+    return state, notes
+
+
+def _bundle_tamper_check(bundle: Path) -> tuple[str, list[str]]:
+    """The bundle half: generated artifacts against the engine-run hashes in `input_manifest.json`."""
     generated = load_generated_artifact_baseline(bundle)
     if generated is None:
         return _no_baseline_verdict(bundle)
@@ -443,13 +565,35 @@ def tamper_check(bundle: Path) -> tuple[str, list[str]]:
     return ("DRIFT" if undeclared else "DECLARED_DRIFT"), [*notes, *coverage_notes]
 
 
-def scan(bundle: Path, since: datetime, baseline: datetime | None = None) -> dict[str, Any]:
+def _record_write(buckets: dict[str, dict[str, Any]], name: str, written: datetime, relative: Path) -> None:
+    """Fold one file's write into a bucket, keeping the newest example."""
+    bucket = buckets[name]
+    bucket["count"] += 1
+    if bucket["newest"] is None or written > bucket["newest"]:
+        bucket["newest"] = written
+        bucket["example"] = str(relative)
+
+
+def scan(
+    bundle: Path,
+    since: datetime,
+    baseline: datetime | None = None,
+    package_roots: list[Path] | None = None,
+) -> dict[str, Any]:
     """Count files by bucket within the window, and record the newest write in each.
 
     `newest_overall` is tracked separately and ignores the window, because "nothing in the last 30
     minutes" has two very different meanings: a run that never started (the delegation failed) and a
     run that went quiet an hour ago (finished, blocked on a human, or dead). Without it the tool
     reports "has this run started?" for a bundle that has been working all evening.
+
+    ⚠️ **The phase-2 packages are scanned TOO, and that is the whole of a measured false SILENT.**
+    Since #460 was settled the canonical place an agent edits is `<package>/fabric/`, which lives
+    beside the bundle rather than inside it - so a gate that scanned only the bundle reported
+    `SILENT  deliverable_count_seen=0` for an agent that had been producing deliverables the whole
+    time, which is the exact signal an orchestrator reads as "this subagent is dead". Package files
+    are classified by the same :func:`classify` on a path relative to the package's PARENT, so
+    `<Unit>/fabric/<Model>.SemanticModel/...` lands in `deliverable` on its own merits.
     """
     buckets: dict[str, dict[str, Any]] = {
         b: {"count": 0, "newest": None, "example": None} for b in ("deliverable", "scratch", "other")
@@ -458,34 +602,25 @@ def scan(bundle: Path, since: datetime, baseline: datetime | None = None) -> dic
         b: {"count": 0, "newest": None, "example": None} for b in ("deliverable", "scratch", "other")
     }
     newest_overall: datetime | None = None
-    now = datetime.now()
     cutoff = max(since, baseline) if baseline else since
-    observed_minutes = max(0.0, (now - cutoff).total_seconds() / 60)
-    for path in bundle.rglob("*"):
-        if not path.is_file():
-            continue
-        try:
-            written = datetime.fromtimestamp(path.stat().st_mtime)
-        except OSError:
-            continue
-        if baseline and written < baseline:
-            continue
-        relative = path.relative_to(bundle)
-        bucket_name = classify(relative)
-        if newest_overall is None or written > newest_overall:
-            newest_overall = written
-        overall_bucket = overall_buckets[bucket_name]
-        overall_bucket["count"] += 1
-        if overall_bucket["newest"] is None or written > overall_bucket["newest"]:
-            overall_bucket["newest"] = written
-            overall_bucket["example"] = str(relative)
-        if written < cutoff:
-            continue
-        bucket = buckets[bucket_name]
-        bucket["count"] += 1
-        if bucket["newest"] is None or written > bucket["newest"]:
-            bucket["newest"] = written
-            bucket["example"] = str(relative)
+    observed_minutes = max(0.0, (datetime.now() - cutoff).total_seconds() / 60)
+    for root, anchor in [(bundle, bundle), *[(package, package.parent) for package in package_roots or []]]:
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            try:
+                written = datetime.fromtimestamp(path.stat().st_mtime)
+            except OSError:
+                continue
+            if baseline and written < baseline:
+                continue
+            relative = path.relative_to(anchor)
+            bucket_name = classify(relative)
+            if newest_overall is None or written > newest_overall:
+                newest_overall = written
+            _record_write(overall_buckets, bucket_name, written, relative)
+            if written >= cutoff:
+                _record_write(buckets, bucket_name, written, relative)
     return {
         "buckets": buckets,
         "overall_buckets": overall_buckets,
@@ -493,6 +628,7 @@ def scan(bundle: Path, since: datetime, baseline: datetime | None = None) -> dic
         "newest_overall": newest_overall,
         "baseline": baseline,
         "observed_minutes": observed_minutes,
+        "packages_scanned": [str(package) for package in package_roots or []],
     }
 
 
@@ -703,34 +839,49 @@ def run_handoff_mode(bundle: Path, as_json: bool) -> int:
     return {"READY": 0, "NOT_READY": 1, "NO_MODEL": 2}[state]
 
 
-def run_tamper_mode(bundle: Path, as_json: bool) -> int:
+def run_tamper_mode(bundle: Path, as_json: bool, package_roots: list[Path] | None = None) -> int:
     """Run the generated-artifact drift gate and return its process exit code.
 
     ``UNREADABLE_DECLARATIONS`` -> 4 is a NEW code, and it can only replace a situation that
     previously died with an uncaught traceback (also exiting 1, indistinguishably from a real
     ``DRIFT``). No bundle that ever produced one of the five existing verdicts produces a different
     one now.
+
+    ``PACKAGE_DRIFT`` -> 1 joins ``DRIFT``: a generated artifact changed and nothing accounts for it,
+    which is the same finding wherever the artifact lives. ``PACKAGE_UNASSESSABLE`` -> 5 is its own
+    code because "this package carries no digest, so whether it was edited cannot be established" is
+    not the same answer as "it was edited" - the distinction this whole review round is about. Both
+    are reachable only for a bundle that has phase-2 packages beside it, which no bundle had when
+    the five existing verdicts were specified.
     """
-    state, notes = tamper_check(bundle)
+    state, notes = tamper_check(bundle, package_roots)
     _emit_notes("TAMPER", bundle, state, notes, as_json)
     return {
         "CLEAN": 0,
         "DECLARED_DRIFT": 0,
         "DRIFT": 1,
+        "PACKAGE_DRIFT": 1,
         "NO_BASELINE": 2,
         "NO_BASELINE_BY_DESIGN": 3,
         "UNREADABLE_DECLARATIONS": 4,
+        "PACKAGE_UNASSESSABLE": 5,
     }[state]
 
 
 def main(argv: list[str] | None = None) -> int:
     """Exit 0 PROGRESSING/THINKING/READY, 1 STALLED/NOT_READY, 2 SILENT/NO_MODEL.
 
-    ``--tamper`` has its own exit map: 0 CLEAN/DECLARED_DRIFT, 1 DRIFT, 2 NO_BASELINE (a baseline
-    that should exist is missing, corrupt, or invalid), 3 NO_BASELINE_BY_DESIGN (this bundle shape
-    never records one - expected absence, not tampering; see ``_no_baseline_verdict``),
-    4 UNREADABLE_DECLARATIONS (artifacts drifted and the ledger that might exonerate them cannot be
-    read - deliberately NOT 1, which means "drifted and undeclared").
+    ``--tamper`` has its own exit map: 0 CLEAN/DECLARED_DRIFT, 1 DRIFT and PACKAGE_DRIFT,
+    2 NO_BASELINE (a baseline that should exist is missing, corrupt, or invalid),
+    3 NO_BASELINE_BY_DESIGN (this bundle shape never records one - expected absence, not tampering;
+    see ``_no_baseline_verdict``), 4 UNREADABLE_DECLARATIONS (artifacts drifted and the ledger that
+    might exonerate them cannot be read - deliberately NOT 1, which means "drifted and undeclared"),
+    5 PACKAGE_UNASSESSABLE (a phase-2 package carries no digest, so whether it was edited cannot be
+    established - deliberately NOT 1 for the same reason).
+
+    Both modes look at the phase-2 packages as well as the bundle, because since #460 was settled
+    the canonical place an agent edits is ``<package>/fabric/`` and that lives beside the bundle.
+    ``--packages`` overrides the search for a non-canonical layout.
     """
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--bundle", required=True, type=Path, help="the migration's output directory")
@@ -745,6 +896,11 @@ def main(argv: list[str] | None = None) -> int:
         choices=(LIVENESS_UNKNOWN, LIVENESS_ACTIVE, "idle"),
         default=LIVENESS_UNKNOWN,
         help="external runtime signal; use active when tool-call count rose since the last poll",
+    )
+    parser.add_argument(
+        "--packages",
+        type=Path,
+        help="phase-2 package root; defaults to the bundle's sibling packages/ (the canonical layout)",
     )
     parser.add_argument(
         "--handoff",
@@ -770,8 +926,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.handoff:
         return run_handoff_mode(args.bundle, args.json)
 
+    packages = discover_package_roots(args.bundle, args.packages)
     if args.tamper:
-        return run_tamper_mode(args.bundle, args.json)
+        return run_tamper_mode(args.bundle, args.json, packages)
 
     if args.baseline is None:
         LOG.error(
@@ -781,7 +938,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     since = datetime.now() - timedelta(minutes=args.since_minutes)
-    scanned = scan(args.bundle, since, args.baseline)
+    scanned = scan(args.bundle, since, args.baseline, packages)
     state, detail = verdict(scanned, args.since_minutes, args.liveness)
 
     if args.json:
@@ -794,6 +951,7 @@ def main(argv: list[str] | None = None) -> int:
             "baseline": args.baseline.isoformat(timespec="seconds") if args.baseline else None,
             "liveness": args.liveness,
             "checked_at": datetime.now().isoformat(timespec="seconds"),
+            "packages_scanned": scanned.get("packages_scanned", []),
             "buckets": {
                 name: {
                     "count": b["count"],
