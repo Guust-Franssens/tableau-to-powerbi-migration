@@ -15,6 +15,7 @@ Two things are deliberately NOT mocked away:
 """
 
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -105,6 +106,17 @@ def run(package: Path, migrations: Path, *extra: str) -> int:
     """Invoke the CLI in-process and return its exit code."""
     argv = ["--package", str(package), "--slug", "wb", "--migrations-root", str(migrations), *extra]
     return pu.main(argv)
+
+
+def shape_of(package: Path) -> pu.PackageShape:
+    """`discover_shape` for a unit test, with the kind read from the package's own manifest.
+
+    The kind is no longer inferable from the filesystem (a datasource unit also ships a `.Report`),
+    so `discover_shape` takes it as an argument. Routing through `declared_kind` rather than
+    hard-coding `"workbook"` keeps these tests honest: a fixture whose manifest stopped declaring a
+    kind fails here instead of being quietly promoted as one.
+    """
+    return pu.discover_shape(package, *pu.declared_kind(package, None))
 
 
 # --------------------------------------------------------------------------------------
@@ -240,7 +252,7 @@ def test_verify_bypath_rejects_a_reference_whose_target_exists_nowhere(tmp_path:
     report = tmp_path / "Wb.Report"
     _write_report(report, "NoSuchModel.SemanticModel")
     with pytest.raises(pu.PromotionFailed, match="does not resolve to a directory"):
-        pu.verify_bypath(report, tmp_path)
+        pu.verify_bypath(report, tmp_path, tmp_path / "NoSuchModel.SemanticModel")
 
 
 def test_verify_bypath_rejects_a_target_folder_with_no_definition_inside(tmp_path: Path) -> None:
@@ -249,7 +261,19 @@ def test_verify_bypath_rejects_a_target_folder_with_no_definition_inside(tmp_pat
     _write_report(report, "Model.SemanticModel")
     (tmp_path / "Model.SemanticModel").mkdir()
     with pytest.raises(pu.PromotionFailed, match="not a working semantic model"):
-        pu.verify_bypath(report, tmp_path)
+        pu.verify_bypath(report, tmp_path, tmp_path / "Model.SemanticModel")
+
+
+def test_verify_bypath_rejects_a_real_model_that_is_not_the_one_this_promotion_copied(tmp_path: Path) -> None:
+    """HIGH 3's unit half. A perfectly valid model at the other end is still the WRONG answer when
+    it is not the model this promotion shipped - that is how a stale model from an earlier run made
+    a package that was missing its own model verify clean."""
+    report = tmp_path / "Wb.Report"
+    _write_report(report, "Stale.SemanticModel")
+    _write_model(tmp_path / "Stale.SemanticModel")
+    _write_model(tmp_path / "Fresh.SemanticModel")
+    with pytest.raises(pu.PromotionFailed, match="not the 'Fresh.SemanticModel' this promotion copied"):
+        pu.verify_bypath(report, tmp_path, tmp_path / "Fresh.SemanticModel")
 
 
 @pytest.mark.usefixtures("pass_gate")
@@ -267,11 +291,16 @@ def test_a_dangling_bypath_fails_the_promotion_rather_than_shipping_it(
 
 def _force_bad_path(report: Path) -> dict:
     """Write a byPath that is one level short - the realistic off-by-one."""
+    return _force_path(report, "../../../datasources/shared-ds/fabric/Model.SemanticModel")
+
+
+def _force_path(report: Path, value: str) -> dict:
+    """Write `value` into the shipped `definition.pbir`, standing in for the real rewrite."""
     pbir = report / "definition.pbir"
     payload = json.loads(pbir.read_text(encoding="utf-8"))
-    payload["datasetReference"]["byPath"]["path"] = "../../../datasources/shared-ds/fabric/Model.SemanticModel"
+    payload["datasetReference"]["byPath"]["path"] = value
     pbir.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    return {"previous": None, "written": payload["datasetReference"]["byPath"]["path"], "changed": True}
+    return {"previous": None, "written": value, "changed": True}
 
 
 # --------------------------------------------------------------------------------------
@@ -419,21 +448,23 @@ def test_the_recorded_external_path_is_redacted_because_it_embeds_a_username(
 
 
 @pytest.mark.usefixtures("pass_gate")
-def test_force_overrides_the_external_path_refusal_and_records_it(
-    package: Path, migrations: Path, tmp_path: Path
-) -> None:
-    """Like the `check_unit` override: allowed, but never invisible afterwards."""
+def test_force_does_not_override_the_external_path_refusal(package: Path, migrations: Path, tmp_path: Path) -> None:
+    """⚠️ CONTRACT CHANGE (round-2 review). `--force` used to ship this and record the override.
+
+    It cannot: the tool cannot rewrite a customer's M query, so there is no sanitized artifact for
+    `--force` to ship - the raw absolute path, with its server and user names, landed verbatim in a
+    committable TMDL under `migrations/**`. `--force` overrides the `check_unit.py` GATE and
+    nothing else, and this refusal keeps its own exit code.
+    """
     outside = tmp_path / "elsewhere" / "Extract_Extract.csv"
     outside.parent.mkdir(parents=True)
     outside.write_text("A\n", encoding="utf-8")
     _write_partition(package / "fabric" / "Model.SemanticModel", str(outside))
 
-    assert run(package, migrations, "--force") == pu.EXIT_OK
-    record = json.loads((migrations / "workbooks" / "wb" / "promotion-record.json").read_text(encoding="utf-8"))
-    assert record["external_data_paths"]["forced"] is True
-    assert record["external_data_paths"]["shipped"], (
-        "the shipped model's findings must be recorded, not just the source's"
-    )
+    envelope_path = tmp_path / "forced.json"
+    assert run(package, migrations, "--force", "--json", str(envelope_path)) == pu.EXIT_REFUSED_EXTERNAL_PATH
+    assert json.loads(envelope_path.read_text(encoding="utf-8"))["status"] == "REFUSED_EXTERNAL_DATA_PATH"
+    assert not migrations.exists()
 
 
 @pytest.mark.usefixtures("pass_gate")
@@ -531,7 +562,7 @@ def test_the_shipped_model_is_re_scanned_after_the_copy(
         return applied
 
     monkeypatch.setattr(pu, "execute_plan", _inject)
-    assert run(package, migrations) == pu.EXIT_PROMOTION_FAILED
+    assert run(package, migrations) == pu.EXIT_REFUSED_EXTERNAL_PATH
 
 
 def external_findings(model: Path, root: Path) -> list:
@@ -632,7 +663,7 @@ def test_a_plan_that_would_escape_the_root_cannot_assess(package: Path, migratio
     """Defence in depth behind the argument check: `build_plan` itself refuses an escaping
     destination, so a future caller that skips `parse_args` still cannot promote outside the root.
     """
-    shape = pu.discover_shape(package)
+    shape = shape_of(package)
     with pytest.raises(pu.CannotAssess, match="outside the migrations root"):
         pu.build_plan(shape, migrations, "../../escaped", None)
 
@@ -645,7 +676,7 @@ def test_containment_is_anchored_at_the_ROOT_not_at_the_workbooks_tier(package: 
     the root, and `slug_problem` is what refuses a slug carrying a separator at all. Two layers,
     two different questions; conflating them would make one of them untestable.
     """
-    shape = pu.discover_shape(package)
+    shape = shape_of(package)
     plan = pu.build_plan(shape, migrations, "../escaped", None)
     assert plan.report_destination.is_relative_to(migrations)
     assert pu.slug_problem("../escaped") is not None, "the argument layer is what rejects this one"
@@ -659,7 +690,7 @@ def test_execute_plan_refuses_an_escaping_destination_even_if_a_plan_reaches_it(
     victim = tmp_path / "outside"
     victim.mkdir()
     (victim / "keep.txt").write_text("keep", encoding="utf-8")
-    shape = pu.discover_shape(package)
+    shape = shape_of(package)
     plan = pu.PromotionPlan(
         shape=shape,
         steps=[pu.CopyStep(shape.report, victim, "report")],
@@ -685,37 +716,52 @@ def test_ordinary_slugs_are_accepted(slug: str) -> None:
 
 
 @pytest.mark.usefixtures("pass_gate")
-def test_a_bypath_target_that_is_not_a_semantic_model_fails_the_promotion(tmp_path: Path, migrations: Path) -> None:
-    """Reproduced by the reviewer: a report-only package promoted at exit **0** against a hand-made
-    folder that merely held an empty `definition/`. "Some directory with a definition/" is not a
-    model - it has no `model.tmdl` and no tables, so a report bound to it opens with no data."""
-    package = tmp_path / "packages" / "Wb"
-    _write_report(package / "fabric" / "Wb.Report", "Fake.SemanticModel")
+def test_a_bypath_target_that_is_not_a_semantic_model_fails_the_promotion(
+    package: Path, migrations: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reproduced by the reviewer: a promotion succeeded at exit **0** against a hand-made folder
+    that merely held an empty `definition/`. "Some directory with a definition/" is not a model -
+    it has no `model.tmdl` and no tables, so a report bound to it opens with no data."""
     fake = migrations / "workbooks" / "wb" / "fabric" / "Fake.SemanticModel"
     (fake / "definition").mkdir(parents=True)
+    monkeypatch.setattr(pu, "rewrite_bypath", lambda report, bypath: _force_path(report, "../Fake.SemanticModel"))
     assert run(package, migrations) == pu.EXIT_PROMOTION_FAILED
     assert not (fake / "definition" / "model.tmdl").exists()
 
 
 @pytest.mark.usefixtures("pass_gate")
-def test_a_bypath_target_that_is_not_a_semanticmodel_folder_fails(tmp_path: Path, migrations: Path) -> None:
+def test_a_bypath_target_that_is_not_a_semanticmodel_folder_fails(
+    package: Path, migrations: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The suffix carries meaning: Power BI resolves a MODEL here, not any folder."""
-    package = tmp_path / "packages" / "Wb"
-    _write_report(package / "fabric" / "Wb.Report", "NotAModel")
     target = migrations / "workbooks" / "wb" / "fabric" / "NotAModel"
     _write_model(target)
+    monkeypatch.setattr(pu, "rewrite_bypath", lambda report, bypath: _force_path(report, "../NotAModel"))
     assert run(package, migrations) == pu.EXIT_PROMOTION_FAILED
 
 
 def test_verify_bypath_rejects_a_target_outside_the_migrations_root(tmp_path: Path) -> None:
     """A deliverable that reaches out of the tree does not survive delivery, however real the model
-    at the other end is on THIS machine."""
+    at the other end is on THIS machine.
+
+    ⚠️ The byPath is written with `_force_path`, not through `_write_report`'s `model_name`
+    argument. That argument is a NAME and the helper prepends its own `../`, so handing it a whole
+    relative path silently produced SIX levels of `..` where the test meant five - one level above
+    `tmp_path` entirely, at a target that did not exist and was not `outside`. It passed anyway
+    while `verify_bypath` had no identity check, because the escape it was really asserting was an
+    accident. Identity is now checked first and must be SATISFIED here, so that the containment
+    branch is the one this test actually reaches.
+    """
     outside = tmp_path / "outside" / "Model.SemanticModel"
     _write_model(outside)
     report = tmp_path / "root" / "workbooks" / "wb" / "fabric" / "Wb.Report"
-    _write_report(report, "../../../../../outside/Model.SemanticModel")
+    _write_report(report, "Model.SemanticModel")
+    _force_path(report, "../../../../../outside/Model.SemanticModel")
+    assert (report / "../../../../../outside/Model.SemanticModel").resolve() == outside.resolve(), (
+        "the byPath must resolve to the model this promotion copied, or the identity branch fires instead"
+    )
     with pytest.raises(pu.PromotionFailed, match="outside the migrations root"):
-        pu.verify_bypath(report, tmp_path / "root")
+        pu.verify_bypath(report, tmp_path / "root", outside)
 
 
 def test_verify_bypath_rejects_a_model_folder_whose_tables_are_empty(tmp_path: Path) -> None:
@@ -728,7 +774,7 @@ def test_verify_bypath_rejects_a_model_folder_whose_tables_are_empty(tmp_path: P
     for tmdl in (model / "definition" / "tables").glob("*.tmdl"):
         tmdl.write_text("/// nothing declared here\n", encoding="utf-8")
     with pytest.raises(pu.PromotionFailed, match="not a working semantic model"):
-        pu.verify_bypath(report, tmp_path)
+        pu.verify_bypath(report, tmp_path, model)
 
 
 # --------------------------------------------------------------------------------------
@@ -1131,3 +1177,299 @@ def test_drift_keys_the_bundle_lookup_on_the_manifest_unit_not_the_folder_name(
     envelope_path = tmp_path / "renamed.json"
     assert run(renamed, migrations, "--bundle", str(tmp_path / "bundle"), "--json", str(envelope_path)) == pu.EXIT_OK
     assert json.loads(envelope_path.read_text(encoding="utf-8"))["drift"]["status"] == "identical"
+
+
+# --------------------------------------------------------------------------------------
+# Round-2 blind review: five HIGH findings, each pinned by the reviewer's own reproduction
+# --------------------------------------------------------------------------------------
+
+
+# A drive-absolute literal, in raw text or JSON-escaped. The `(?!/)` lookahead is what keeps a URL
+# scheme (`https://`) out: there the character after the colon is `/` and so is the next one.
+ABSOLUTE_IN_TEXT = re.compile(r"[A-Za-z]:[\\/](?!/)")
+
+
+def host_paths_in(text: str, *roots: Path) -> list[str]:
+    """Every absolute host path this artifact text exposes.
+
+    Two independent probes, because either alone is weak: the literal test roots (which on Windows
+    sit under `C:\\Users\\<username>\\AppData\\...` and so carry a real username), and any
+    drive-letter literal at all.
+    """
+    leaks = [str(root) for root in roots if str(root) in text or root.as_posix() in text]
+    return leaks + ABSOLUTE_IN_TEXT.findall(text)
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_high1_a_successful_promotion_records_no_absolute_host_path(
+    package: Path, migrations: Path, tmp_path: Path
+) -> None:
+    """HIGH 1. `migrations/**` is not blanket-gitignored and this repo is PUBLIC, so neither the
+    record nor the envelope may carry an absolute host path - it embeds a real USERNAME, and a
+    customer package path embeds their server or project names too."""
+    envelope_path = tmp_path / "ok.json"
+    assert run(package, migrations, "--json", str(envelope_path)) == pu.EXIT_OK
+    record_text = (migrations / "workbooks" / "wb" / "promotion-record.json").read_text(encoding="utf-8")
+    assert host_paths_in(record_text, package, migrations) == [], record_text
+    assert host_paths_in(envelope_path.read_text(encoding="utf-8"), package, migrations) == []
+
+
+def test_high1_a_cannot_assess_refusal_records_no_absolute_host_path(tmp_path: Path, migrations: Path) -> None:
+    """HIGH 1. The refusal envelope is an artifact too, and the missing-package finding used to
+    carry the fully resolved package path - username included."""
+    envelope_path = tmp_path / "missing.json"
+    missing = tmp_path / "packages" / "NoSuchUnit"
+    assert run(missing, migrations, "--json", str(envelope_path)) == pu.EXIT_CANNOT_ASSESS
+    text = envelope_path.read_text(encoding="utf-8")
+    assert host_paths_in(text, missing, tmp_path) == [], text
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_high1_force_may_not_ship_a_model_carrying_a_raw_external_path(
+    package: Path, migrations: Path, tmp_path: Path
+) -> None:
+    """HIGH 1 + the `--force` contract. `--force` overrides the `check_unit.py` GATE and nothing
+    else: it cannot sanitize a customer's M query, so shipping one would put the raw absolute path
+    - server name, username - into a committable TMDL. It refuses instead."""
+    outside = tmp_path / "private-user" / "CustomerServer" / "Extract.csv"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("A\n", encoding="utf-8")
+    _write_partition(package / "fabric" / "Model.SemanticModel", str(outside))
+
+    assert run(package, migrations, "--force") == pu.EXIT_REFUSED_EXTERNAL_PATH
+    assert not migrations.exists(), "nothing may ship while the raw path is still in the model"
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_high2_a_declared_datasource_package_promotes_as_a_datasource(tmp_path: Path, migrations: Path) -> None:
+    """HIGH 2. `package_unit.py:unit_kind` is explicit that EVERY `pbip/<Unit>/` in a real 2.339.0
+    estate run carries BOTH a `.Report` and a `.SemanticModel`, datasource-only units included, so
+    the filesystem cannot answer this question - only the manifest's `kind` can."""
+    package = make_package(tmp_path / "packages", unit="PublishedDS")
+    _write_json(package / "package-manifest.json", {"unit": "PublishedDS", "kind": "datasource"})
+
+    assert run(package, migrations) == pu.EXIT_OK
+    assert (migrations / "datasources" / "wb" / "fabric" / "Model.SemanticModel").is_dir()
+    assert not (migrations / "workbooks").exists(), "a declared datasource must never land as a workbook"
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_high3_a_report_only_package_cannot_assess_even_against_a_stale_destination_model(
+    tmp_path: Path, migrations: Path
+) -> None:
+    """HIGH 3. `byPath` was verified against whatever happened to exist in the destination, so a
+    model left by an EARLIER run turned "this package is missing its model" into exit 0."""
+    package = tmp_path / "packages" / "Wb"
+    _write_report(package / "fabric" / "Wb.Report", "Model.SemanticModel")
+    _write_json(package / "package-manifest.json", {"unit": "Wb", "kind": "workbook"})
+    stale = migrations / "workbooks" / "wb" / "fabric" / "Model.SemanticModel"
+    _write_model(stale)
+
+    envelope_path = tmp_path / "reportonly.json"
+    assert run(package, migrations, "--json", str(envelope_path)) == pu.EXIT_CANNOT_ASSESS
+    findings = json.loads(envelope_path.read_text(encoding="utf-8"))["findings"]
+    assert any("no .SemanticModel" in finding for finding in findings), findings
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_high4_an_unexpected_exception_rolls_the_whole_promotion_back(
+    package: Path, migrations: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HIGH 4. Rollback covered only `PromotionFailed` and `OSError`, so ANY other ordinary
+    exception after the copy left a shipped, unverified deliverable behind."""
+
+    def _explode(*_args, **_kwargs):
+        raise AttributeError("injected: an ordinary bug after the copy")
+
+    monkeypatch.setattr(pu, "build_record", _explode)
+    assert run(package, migrations) == pu.EXIT_PROMOTION_FAILED
+    assert not (migrations / "workbooks" / "wb" / "fabric" / "Wb.Report").exists()
+    assert not (migrations / "workbooks" / "wb" / "fabric" / "Model.SemanticModel").exists()
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_high4_a_receipt_that_is_a_json_array_does_not_crash_after_the_copy(package: Path, migrations: Path) -> None:
+    """HIGH 4's reproduction: valid JSON that is not an object made `_engine_version` raise
+    `AttributeError` AFTER the copy. Provenance is read before anything is written now."""
+    (package / "engine-output-receipt.json").write_text("[]\n", encoding="utf-8")
+    assert run(package, migrations) == pu.EXIT_OK
+    record = json.loads((migrations / "workbooks" / "wb" / "promotion-record.json").read_text(encoding="utf-8"))
+    assert record["engine_version"] is None
+    assert "not a JSON object" in record["engine_version_source"]
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_high4_a_failure_after_the_first_record_leaves_no_orphan_record(
+    package: Path, migrations: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HIGH 4, second half: a record claiming a promotion, beside NO promoted artifacts.
+
+    The records are part of the same transaction as the report and the model, so a failure between
+    the two records rolls both of them back with everything else.
+    """
+    real_write = Path.write_text
+    state = {"records": 0}
+
+    def _fail_on_the_second_record(self: Path, data: str, **kwargs):
+        if self.name == pu.RECORD_NAME:
+            state["records"] += 1
+            if state["records"] == 2:
+                raise OSError("injected: the second record could not be written")
+        return real_write(self, data, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", _fail_on_the_second_record)
+    assert run(package, migrations, "--datasource-slug", "shared-ds") == pu.EXIT_PROMOTION_FAILED
+    assert state["records"] == 2, "the injection must have fired on the SECOND record, not the first"
+    monkeypatch.undo()
+    assert not list(migrations.rglob(pu.RECORD_NAME)), "no record may survive a rolled-back promotion"
+    assert not (migrations / "workbooks" / "wb" / "fabric" / "Wb.Report").exists()
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_high5_a_trailing_dot_slug_cannot_overwrite_another_deliverable(
+    package: Path, migrations: Path, tmp_path: Path
+) -> None:
+    """HIGH 5. Windows normalises `foo.` and `foo` to the same filesystem path, and promotion
+    REPLACES its destination - so `--slug foo.` silently destroyed the deliverable at `foo`."""
+    assert pu.main(["--package", str(package), "--slug", "foo", "--migrations-root", str(migrations)]) == pu.EXIT_OK
+    marker = migrations / "workbooks" / "foo" / "fabric" / "marker.txt"
+    marker.write_text("the first deliverable", encoding="utf-8")
+
+    other = make_package(tmp_path / "other", unit="Other")
+    with pytest.raises(SystemExit) as excinfo:
+        pu.main(["--package", str(other), "--slug", "foo.", "--migrations-root", str(migrations)])
+    assert excinfo.value.code == pu.EXIT_USAGE
+    assert marker.read_text(encoding="utf-8") == "the first deliverable"
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_high5_a_slug_that_aliases_an_existing_deliverable_on_disk_is_refused(
+    package: Path, migrations: Path, tmp_path: Path
+) -> None:
+    """HIGH 5's backstop: the lexical guard cannot see case-insensitive aliasing (`Foo` for an
+    existing `foo`), so the DESTINATION's real on-disk identity is compared before it is replaced.
+
+    Skipped where the filesystem is case-sensitive, because there the two are genuinely different
+    deliverables and refusing would be wrong.
+    """
+    assert pu.main(["--package", str(package), "--slug", "foo", "--migrations-root", str(migrations)]) == pu.EXIT_OK
+    if not (migrations / "workbooks" / "FOO").exists():
+        pytest.skip("case-sensitive filesystem: 'FOO' and 'foo' are not the same deliverable")
+    marker = migrations / "workbooks" / "foo" / "fabric" / "marker.txt"
+    marker.write_text("the first deliverable", encoding="utf-8")
+
+    other = make_package(tmp_path / "other", unit="Other")
+    assert (
+        pu.main(["--package", str(other), "--slug", "FOO", "--migrations-root", str(migrations)])
+        == pu.EXIT_CANNOT_ASSESS
+    )
+    assert marker.read_text(encoding="utf-8") == "the first deliverable"
+
+
+# --------------------------------------------------------------------------------------
+# Round-2 blind review: the three MEDIUM findings
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_medium1_a_pages_manifest_that_orders_a_page_that_is_not_there_is_refused_on_content(
+    package: Path, migrations: Path, tmp_path: Path
+) -> None:
+    """MEDIUM 1. `pageOrder` being non-empty said nothing about whether those ids exist: a report
+    whose manifest orders only pages that are absent opens with NONE of the real ones.
+
+    ⚠️ **REFUSED_CONTENT (3), not CANNOT_ASSESS (2)** - the round-2 fix first classified it as
+    unassessable and that was the wrong half of this repo's own dividing line. `pages.json` parsed,
+    `definition/pages/` enumerated, and the ordered id is provably absent: the input was read in
+    full and the verdict is definitive, which is the *"structurally present, functionally empty"*
+    sentence exit 3 exists for. Nothing here is unreadable or ambiguous. It also had a measured
+    cost: as `unassessable` it OUTRANKED and swallowed `... enumerates no page` in the sibling test
+    below, so a report with no pages at all stopped being reported as empty.
+    """
+    manifest = package / "fabric" / "Wb.Report" / "definition" / "pages" / "pages.json"
+    _write_json(manifest, {"pageOrder": ["ghost"]})
+    envelope_path = tmp_path / "ghost.json"
+    assert run(package, migrations, "--json", str(envelope_path)) == pu.EXIT_REFUSED_CONTENT
+    envelope = json.loads(envelope_path.read_text(encoding="utf-8"))
+    assert envelope["status"] == "REFUSED_CONTENT", envelope["status"]
+    assert any("orders 1 page" in finding for finding in envelope["findings"]), envelope["findings"]
+    assert not migrations.exists(), "a refused promotion must not create the deliverable"
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_medium1_an_unreadable_pages_manifest_is_still_cannot_assess(
+    package: Path, migrations: Path, tmp_path: Path
+) -> None:
+    """The other side of that line, pinned so the fix above cannot be over-applied.
+
+    A `pages.json` that will not parse is genuinely unassessable - the page order is UNKNOWN rather
+    than known-wrong - and must keep routing to 2. Moving the ordered-page verdict to 3 must not
+    drag this one with it.
+    """
+    manifest = package / "fabric" / "Wb.Report" / "definition" / "pages" / "pages.json"
+    manifest.write_text("{not json", encoding="utf-8")
+    envelope_path = tmp_path / "badmanifest.json"
+    assert run(package, migrations, "--json", str(envelope_path)) == pu.EXIT_CANNOT_ASSESS
+    findings = json.loads(envelope_path.read_text(encoding="utf-8"))["findings"]
+    assert any("pages.json is not readable JSON" in finding for finding in findings), findings
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_medium2_a_zero_byte_model_tmdl_is_not_a_model(package: Path, migrations: Path) -> None:
+    """MEDIUM 2. A zero-byte `model.tmdl` satisfied `is_file()` and shipped."""
+    (package / "fabric" / "Model.SemanticModel" / "definition" / "model.tmdl").write_text("", encoding="utf-8")
+    assert run(package, migrations) == pu.EXIT_REFUSED_CONTENT
+    assert not migrations.exists()
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_medium2_an_unreadable_table_tmdl_cannot_assess_rather_than_raising(
+    package: Path, migrations: Path, tmp_path: Path
+) -> None:
+    """MEDIUM 2. The read raised `OSError` out of `main()` - a traceback, no exit contract, and the
+    exception message carries the absolute path it failed on."""
+    tables = package / "fabric" / "Model.SemanticModel" / "definition" / "tables"
+    (tables / "T0.tmdl").unlink()
+    (tables / "T0.tmdl").mkdir()  # a directory is unreadable as text on every platform
+
+    envelope_path = tmp_path / "unreadable.json"
+    assert run(package, migrations, "--json", str(envelope_path)) == pu.EXIT_CANNOT_ASSESS
+    text = envelope_path.read_text(encoding="utf-8")
+    assert "could not be read" in text, text
+    assert host_paths_in(text, package, migrations) == [], text
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_medium2_an_invalid_source_pbir_is_a_source_assessment_not_a_promotion_failure(
+    package: Path, migrations: Path, tmp_path: Path
+) -> None:
+    """MEDIUM 2. An unusable `definition.pbir` in the SOURCE is unassessable input (2), not a
+    promotion that got as far as failing (4) - the two route to different responses."""
+    _write_json(package / "fabric" / "Wb.Report" / "definition.pbir", {"version": "4.0"})
+    envelope_path = tmp_path / "pbir.json"
+    assert run(package, migrations, "--json", str(envelope_path)) == pu.EXIT_CANNOT_ASSESS
+    findings = json.loads(envelope_path.read_text(encoding="utf-8"))["findings"]
+    assert any("datasetReference.byPath.path" in finding for finding in findings), findings
+    assert not migrations.exists()
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_medium3_the_shipped_external_path_scan_uses_the_same_exit_code_as_the_source_scan(
+    package: Path, migrations: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MEDIUM 3. The same defect routed to 5 or to 4 depending only on WHICH of the two scans saw
+    it first, so automation got a different verdict for one condition."""
+    outside = tmp_path / "elsewhere" / "Extract.csv"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("A\n", encoding="utf-8")
+    real_execute = pu.execute_plan
+
+    def _inject(plan: pu.PromotionPlan) -> pu.AppliedCopies:
+        applied = real_execute(plan)
+        _write_partition(plan.model_destination, str(outside))
+        return applied
+
+    monkeypatch.setattr(pu, "execute_plan", _inject)
+    envelope_path = tmp_path / "shipped-ext.json"
+    assert run(package, migrations, "--json", str(envelope_path)) == pu.EXIT_REFUSED_EXTERNAL_PATH
+    assert json.loads(envelope_path.read_text(encoding="utf-8"))["status"] == "REFUSED_EXTERNAL_DATA_PATH"
