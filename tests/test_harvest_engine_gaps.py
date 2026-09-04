@@ -533,16 +533,15 @@ def test_exit_code_is_ok_when_everything_is_paired_and_attributed(tmp_path):
     assert heg.main([str(bundle), "--quiet"]) == heg.EXIT_OK
 
 
-def test_bundle_mutated_after_snapshot_does_not_change_the_harvest_input(tmp_path, monkeypatch):
+def test_harvest_isolated_from_source_mutation_after_snapshot(tmp_path, monkeypatch):
     bundle = _bundle(tmp_path, entity_working="Renamed")
     real_copytree = heg.shutil.copytree
     target = bundle / "pbip" / "WB" / "WB.Report" / VISUAL
-    original = target.read_bytes()
 
     def copy_then_mutate(source, destination, *args, **kwargs):
         result = real_copytree(source, destination, *args, **kwargs)
-        _write(target, _visual("Orders", position=41))
-        target.write_bytes(original)
+        if Path(source) == bundle:
+            _write(target, _visual("Orders", position=41))
         return result
 
     monkeypatch.setattr(heg.shutil, "copytree", copy_then_mutate)
@@ -552,6 +551,8 @@ def test_bundle_mutated_after_snapshot_does_not_change_the_harvest_input(tmp_pat
     assert report["status"] == heg.STATUS_COMPLETE
     assert report["concurrency"]["verified"] is True
     assert report["provenance"][heg.PROV_ENGINE] > 0
+    assert report["provenance"][heg.PROV_TIER] == 0
+    assert report["tier_edits"] == []
 
 
 def test_snapshot_copy_failure_has_literal_blocking_contract(tmp_path, monkeypatch):
