@@ -93,7 +93,7 @@ def find_cycle(graph: dict[str, list[str]]) -> list[str] | None:
             if neighbor not in color:
                 continue  # unknown dependency is reported separately, not as a cycle
             if color[neighbor] == GRAY:
-                return [*path[path.index(neighbor):], neighbor]
+                return [*path[path.index(neighbor) :], neighbor]
             if color[neighbor] == WHITE:
                 found = visit(neighbor)
                 if found:
