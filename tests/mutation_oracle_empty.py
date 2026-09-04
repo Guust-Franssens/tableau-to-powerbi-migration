@@ -55,6 +55,10 @@ from mutation_harness import (  # noqa: E402  # pylint: disable=wrong-import-pos
 ORACLE = "tests/test_capture_tableau_oracle.py"
 GROUP = "tests/test_group_oracle_by_workbook.py"
 PACKAGE = "tests/test_package_unit.py"
+#: The END-TO-END acceptance suite (#446). Added for #480 round 3, because a predicate proved in
+#: isolation and a packaged unit read back through the documented `check_unit` invocation are two
+#: different claims, and the customer runs the second one.
+GATES = "tests/test_package_unit_gates.py"
 
 # Where a mutation records how many times its patched path actually EXECUTED. A mutation that
 # compiles, applies, and is never reached is scored CAUGHT on its anchor's failure like any other --
@@ -831,6 +835,190 @@ import tableau_oracle_manifest as m
 m.UNASSESSABLE_REASONS = frozenset(r for r in m.UNASSESSABLE_REASONS if r != "content_type_unspecific")
 """,
     ),
+    # ---- #480 round 3: certification is authoritative, a recorded row count is not ---------------
+    #
+    # ⚠️ These two are the campaign's most important members, because the round-2 gate they revert to
+    # was structurally incapable of firing on real data. `origin/master`'s producer called
+    # `summarise_csv(payload)` on the body of EVERY HTTP 200 and wrote its `row_count` with no
+    # certification, so every manifest a customer already holds has a number and no certificate.
+    #
+    # They are deliberately MINIMAL and disjoint reverts rather than one restoration of the round-2
+    # function: a single mutation covering both shapes would be killed by either anchor, and could
+    # not show that each shape is pinned on its own. Each reverts exactly one branch.
+    "a-recorded-row-count-licenses-evidence-without-a-certification": (
+        (
+            f"{ORACLE}::test_a_LEGACY_RECORD_WITH_A_ROW_COUNT_and_no_certification_is_not_evidence",
+            f"{GROUP}::test_a_legacy_row_count_without_a_certification_is_not_evidence",
+        ),
+        """
+import tableau_oracle_manifest as m
+_orig = m.unassessable_reason
+def reason(record):
+    # The round-2 behaviour for the shape that actually exists: NO certification key, and an integer
+    # `row_count` already recorded. Round 2 returned None here, so a legacy manifest kept `path` and
+    # all four numeric consumers read it -- the gate had never fired on a real capture.
+    _hit()
+    data = record.get("data") or {}
+    if data.get("status") == "ok" and data.get("certification") is None:
+        rows = data.get("row_count")
+        if isinstance(rows, int) and not isinstance(rows, bool):
+            return None
+    return _orig(record)
+m.unassessable_reason = reason
+""",
+    ),
+    "a-contradictory-record-is-believed-on-its-count": (
+        (f"{ORACLE}::test_a_record_that_contradicts_itself_is_believed_on_its_REFUSAL_not_on_its_count",),
+        """
+import tableau_oracle_manifest as m
+_orig = m.unassessable_reason
+def reason(record):
+    # The other round-2 branch: a record that says `content_type_absent` AND carries a `row_count`.
+    # Resolving the contradiction toward the number is the fail-open direction, because the number
+    # would then have come from the very body the certification says nothing established.
+    _hit()
+    data = record.get("data") or {}
+    if data.get("status") == "ok" and data.get("certification") in m.CERTIFICATION_REASONS:
+        rows = data.get("row_count")
+        if isinstance(rows, int) and not isinstance(rows, bool):
+            return None
+    return _orig(record)
+m.unassessable_reason = reason
+""",
+    ),
+    "an-unknown-certification-falls-through-to-the-count": (
+        (f"{ORACLE}::test_a_certification_this_module_does_not_recognise_is_unassessable_not_assessable",),
+        """
+import tableau_oracle_manifest as m
+_orig = m.unassessable_reason
+def reason(record):
+    # A closed vocabulary only protects anything if a value OUTSIDE it is refused rather than
+    # ignored. This is the fail-open reading: "unrecognised string, so fall through to whatever else
+    # the record says" -- which a newer capture's verdict, or a corrupted field, walks straight past.
+    _hit()
+    data = record.get("data") or {}
+    import tableau_payload_facts as f
+    if data.get("status") == "ok" and data.get("certification") not in f.CSV_VERDICTS:
+        rows = data.get("row_count")
+        if isinstance(rows, int) and not isinstance(rows, bool):
+            return None
+    return _orig(record)
+m.unassessable_reason = reason
+""",
+    ),
+    "the-legacy-reason-is-folded-onto-row-count-unrecorded": (
+        (f"{ORACLE}::test_a_LEGACY_RECORD_WITH_A_ROW_COUNT_and_no_certification_is_not_evidence",),
+        """
+import tableau_oracle_manifest as m
+_orig = m.unassessable_reason
+def reason(record):
+    # The "one reason is enough" simplification. The GATE still fires, so every path-withholding
+    # assertion passes -- and the operator is told a record reading `row_count: 900` has no row
+    # count, which sends them hunting a number that is sitting in the file. Naming is the fix here.
+    _hit()
+    out = _orig(record)
+    return m.UNASSESSABLE_NO_ROW_COUNT if out == m.UNASSESSABLE_NO_CERTIFICATION else out
+m.unassessable_reason = reason
+""",
+    ),
+    "the-withheld-sentence-is-keyed-on-the-certification-again": (
+        (f"{ORACLE}::test_a_LEGACY_RECORD_WITH_A_ROW_COUNT_and_no_certification_is_not_evidence",),
+        """
+import tableau_oracle_manifest as m
+import tableau_payload_facts as f
+_orig = m.withhold_uncertified_evidence
+def withhold(records):
+    # Round 2's keying: look the sentence up by the raw `certification`. A legacy record has none, so
+    # it lands on the DEFAULT sentence -- which opens "this data leg records no row count" beside a
+    # recorded row count. The demotion is unchanged; only the explanation is wrong, which is the
+    # half a path-only assertion cannot see.
+    _hit()
+    out = _orig(records)
+    for record in out:
+        data = record.get("data") or {}
+        if m.EVIDENCE_WITHHELD_KEY in data:
+            data[m.EVIDENCE_WITHHELD_KEY] = f.CSV_UNCERTIFIED_DETAIL.get(
+                data.get("certification"), m.RETAINED_DETAIL_DEFAULT
+            )
+    return out
+m.withhold_uncertified_evidence = withhold
+""",
+    ),
+    "an-uncertified-zero-is-still-a-measured-empty-query": (
+        (f"{ORACLE}::test_a_zero_row_count_on_an_uncertified_body_is_never_reported_as_an_empty_QUERY",),
+        """
+import tableau_oracle_manifest as m
+_orig = m.empty_classification
+def classify(record):
+    # `empty_classification` without its deferral to `unassessable_reason`. `Service temporarily
+    # unavailable` exports 200, parses as one header and no data rows, and is reported
+    # `empty_query_no_rows` -- #471's failure 2 with the number kept, which sends an operator to a
+    # Tableau filter for a view whose server returned an error page.
+    _hit()
+    data = record.get("data") or {}
+    if data.get("status") != "ok" or data.get("row_count") != 0:
+        return None
+    return m.EMPTY_QUERY_NO_ROWS if data.get("columns") else m.EMPTY_CANNOT_CLASSIFY
+m.empty_classification = classify
+""",
+    ),
+    "no-capture-is-ever-classified-empty-any-more": (
+        (f"{ORACLE}::test_a_CERTIFIED_zero_row_capture_is_still_reported_as_an_empty_query",),
+        """
+import tableau_oracle_manifest as m
+# The over-correction matched to the mutation above. "Defer to unassessable_reason" implemented as
+# "never classify anything as empty" passes every uncertified-zero assertion and silently deletes
+# #471's entire feature -- only a CERTIFIED zero-row control can tell the two apart.
+_hit()
+m.empty_classification = lambda record: None
+""",
+    ),
+    "the-run-end-banner-omits-the-fourth-reason": (
+        (f"{ORACLE}::test_the_run_end_banner_names_the_certification_reason_too",),
+        """
+import tableau_oracle_manifest as m
+_orig = m._log_unassessable
+def log(unassessable, redactor):
+    # The banner as it stood before the fourth reason existed. The per-view list still prints
+    # `certification_unestablished`, and the block that is supposed to explain what it costs never
+    # mentions it -- so it reads to an operator as an internal code.
+    _hit()
+    import io, logging
+    buffer = io.StringIO()
+    handler = logging.StreamHandler(buffer)
+    m.LOG.addHandler(handler)
+    try:
+        _orig(unassessable, redactor)
+    finally:
+        m.LOG.removeHandler(handler)
+    text = buffer.getvalue().replace(m.UNASSESSABLE_NO_CERTIFICATION, "")
+    if text.strip():
+        m.LOG.warning("%s", text)
+m._log_unassessable = log
+""",
+    ),
+    "the-packaged-legacy-capture-keeps-its-numeric-path": (
+        (
+            f"{GATES}::test_a_legacy_uncertified_capture_earns_no_numeric_evidence_end_to_end",
+        ),
+        """
+import tableau_oracle_manifest as m
+_orig = m.unassessable_reason
+def reason(record):
+    # The same round-2 revert as the first round-3 mutation, anchored END TO END instead. It is a
+    # separate mutation because the first one proves the predicate and this one proves the whole
+    # packaging + `check_unit` chain still refuses -- a fix at either end alone would leave a
+    # customer's existing capture consumable by the gate they actually run.
+    _hit()
+    data = record.get("data") or {}
+    if data.get("status") == "ok" and data.get("certification") is None:
+        rows = data.get("row_count")
+        if isinstance(rows, int) and not isinstance(rows, bool):
+            return None
+    return _orig(record)
+m.unassessable_reason = reason
+""",
+    ),
     # ------------------------------------------------------------- discriminating controls
     "control-cosmetic-withheld-sentence-wording": (
         (
@@ -900,6 +1088,17 @@ HIT_COUNTED = frozenset(
         "the-packager-copies-uncertified-bytes-into-its-data-folder",
         "text-plain-is-a-csv-declaration-again",
         "text-plain-is-refused-outright",
+        # #480 round 3. Every one of these counts, because the shape they revert to is the one that
+        # was never observed to fire -- a verdict without an execution count would repeat that.
+        "a-recorded-row-count-licenses-evidence-without-a-certification",
+        "a-contradictory-record-is-believed-on-its-count",
+        "an-unknown-certification-falls-through-to-the-count",
+        "the-legacy-reason-is-folded-onto-row-count-unrecorded",
+        "the-withheld-sentence-is-keyed-on-the-certification-again",
+        "an-uncertified-zero-is-still-a-measured-empty-query",
+        "no-capture-is-ever-classified-empty-any-more",
+        "the-run-end-banner-omits-the-fourth-reason",
+        "the-packaged-legacy-capture-keeps-its-numeric-path",
     }
 )
 
@@ -912,7 +1111,7 @@ def verify_anchors() -> list[str]:
     mutation CAUGHT by a test that never ran.
     """
     collected: set[str] = set()
-    for suite in (ORACLE, GROUP, PACKAGE):
+    for suite in (ORACLE, GROUP, PACKAGE, GATES):
         proc = subprocess.run(
             [PY, "-m", "pytest", suite, "--collect-only", "-q", "--no-header", "--color=no"],
             cwd=ROOT,
