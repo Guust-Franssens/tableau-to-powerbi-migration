@@ -2366,7 +2366,7 @@ def _oracle_grade(grades: set[str], evidence: OracleEvidence) -> str:
 
 
 def _oracle_row(page: dict[str, Any], index: Any, evidence: OracleEvidence) -> dict[str, Any]:
-    """Coverage for one expected page. A contested name or an ambiguous match takes no evidence."""
+    """Coverage for one expected page; typed evidence may disambiguate a shared name."""
     record, refusal = evidence.evidence_for(page)
     if record is not None:
         identity = _candidate_identity(page)
