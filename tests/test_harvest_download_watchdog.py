@@ -20,6 +20,7 @@ import sys
 import threading
 import time
 import tokenize
+from concurrent.futures import Future
 from pathlib import Path
 
 import pytest
@@ -853,6 +854,65 @@ def test_main_exits_partial_not_ok_when_an_asset_has_a_malformed_ok(
     assert "invalid/indeterminate outcome 1." in (out / "parse-sweep.md").read_text(encoding="utf-8")
 
 
+# --- blind-review follow-up: the PER-ASSET parse line must use the same strict verdict -----------
+
+
+def _finished_future(result: tuple[dict, dict]) -> Future:
+    future: Future = Future()
+    future.set_result(result)
+    return future
+
+
+def test_record_parse_never_prints_ours_equals_ok_for_a_malformed_truthy_value(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A truthy-but-non-boolean `ok` (`"true"`, `1`, a list, a dict) used to print `ours=ok` here,
+    even though the SAME row was correctly routed to the invalid/indeterminate bucket by
+    `summarise()`. The two must never disagree about one row (blind-review follow-up to #483).
+    """
+    results: list[dict] = []
+    with caplog.at_level("INFO", logger="harvest_estate_assets"):
+        harvest.record_parse(
+            (1, {"name": "Weird"}, _finished_future(({"ok": "true"}, {"ok": True}))), results, 1, time.perf_counter()
+        )
+    messages = "\n".join(r.getMessage() for r in caplog.records)
+    assert "ours=ok" not in messages, messages
+    assert "ours=INVALID" in messages, messages
+    assert "his=ok" in messages, messages
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [None, "true", "yes", 1, 0, [], ["partial"], {}],
+    ids=["none", "string-true", "string-yes", "int-1", "int-0", "empty-list", "list", "dict"],
+)
+def test_record_parse_labels_every_malformed_ok_shape_as_invalid(
+    caplog: pytest.LogCaptureFixture, malformed: object
+) -> None:
+    """Every shape the summary-level test covers must ALSO be caught at the per-asset log line."""
+    results: list[dict] = []
+    with caplog.at_level("INFO", logger="harvest_estate_assets"):
+        harvest.record_parse(
+            (1, {"name": "Weird"}, _finished_future(({"ok": malformed}, {"ok": True}))), results, 1, time.perf_counter()
+        )
+    messages = "\n".join(r.getMessage() for r in caplog.records)
+    assert "ours=ok" not in messages and "ours=FAIL" not in messages, messages
+    assert "ours=INVALID" in messages, messages
+
+
+def test_record_parse_preserves_exact_true_false_wording(caplog: pytest.LogCaptureFixture) -> None:
+    """A real boolean verdict must still read exactly `ok`/`FAIL`, never `INVALID`."""
+    results: list[dict] = []
+    with caplog.at_level("INFO", logger="harvest_estate_assets"):
+        harvest.record_parse(
+            (1, {"name": "Clean"}, _finished_future(({"ok": True}, {"ok": False}))), results, 1, time.perf_counter()
+        )
+    messages = "\n".join(r.getMessage() for r in caplog.records)
+    assert "ours=ok" in messages, messages
+    assert "his=FAIL" in messages, messages
+    assert "INVALID" not in messages, messages
+
+
 def test_the_failed_downloads_are_reported_to_the_operator_at_the_end(caplog: pytest.LogCaptureFixture) -> None:
     """`download_error` was written to the record and surfaced NOWHERE a human looks."""
     with caplog.at_level("WARNING", logger="harvest_estate_assets"):
@@ -961,7 +1021,7 @@ def binding_rows() -> list[dict]:
     ]
 
 
-def edges_from(db: Path) -> list[tuple[str, str, str, str]]:
+def edges_from(db: Path) -> list[tuple[str, str, str, str, str]]:
     con = sqlite3.connect(db)
     try:
         return harvest.dependency_edges(con)
@@ -972,14 +1032,16 @@ def edges_from(db: Path) -> list[tuple[str, str, str, str]]:
 def test_a_failed_datasource_names_the_workbooks_it_orphans(tmp_path: Path) -> None:
     """Their agent worked this out BY HAND; the harvester already resolves the edge."""
     edges = edges_from(estate_with_a_binding(tmp_path / "estate.db"))
-    assert harvest.orphaned_dependents(binding_rows(), edges) == [("DS_Sessions_by_Product", ["IA IFC Sessions"])]
+    assert harvest.orphaned_dependents(binding_rows(), edges) == [
+        ("DS_Sessions_by_Product", [("wb-ifc", "IA IFC Sessions")])
+    ]
 
 
 def test_a_workbook_bound_to_NOTHING_that_failed_is_not_flagged(tmp_path: Path) -> None:
     """Flagging every workbook would make the warning worthless."""
     edges = edges_from(estate_with_a_binding(tmp_path / "estate.db"))
     orphans = harvest.orphaned_dependents(binding_rows(), edges)
-    assert "Standalone" not in [name for _, workbooks in orphans for name in workbooks]
+    assert "Standalone" not in [name for _, workbooks in orphans for _, name in workbooks]
 
 
 def test_a_workbook_that_ITSELF_failed_is_not_listed_as_an_orphan(tmp_path: Path) -> None:
@@ -1012,7 +1074,7 @@ def test_an_edge_resolved_only_by_NAME_still_finds_the_dependent(tmp_path: Path)
     con.commit()
     con.close()
     assert harvest.orphaned_dependents(binding_rows(), edges_from(db)) == [
-        ("DS_Sessions_by_Product", ["IA IFC Sessions"])
+        ("DS_Sessions_by_Product", [("wb-ifc", "IA IFC Sessions")])
     ]
 
 
@@ -1024,8 +1086,10 @@ def test_the_orphans_reach_the_report_and_the_operator(tmp_path: Path, caplog: p
     messages = "\n".join(r.getMessage() for r in caplog.records)
     assert "## Do not convert yet" in text
     assert "IA IFC Sessions" in text.split("## Do not convert yet", 1)[1]
+    assert "wb-ifc" in text.split("## Do not convert yet", 1)[1], "the orphan's LUID must reach the report too"
     assert "DO NOT CONVERT YET" in messages
     assert "IA IFC Sessions" in messages
+    assert "wb-ifc" in messages, "the orphan's LUID must reach the operator's log line too"
 
 
 def test_the_section_is_absent_when_nothing_is_orphaned(tmp_path: Path) -> None:
@@ -1082,11 +1146,14 @@ def duplicate_named_binding_rows() -> list[dict]:
 def test_two_same_named_workbooks_in_different_projects_are_two_orphans(tmp_path: Path) -> None:
     """Before the fix, `by_datasource` collected workbook NAMES into a `set`, so one 'Revenue
     Dashboard' silently absorbed the other -- a real second workbook vanished from the report.
+    LUID must be kept in the return value, not just used internally and then thrown away, or the
+    two entries print identically and read as one duplicated line (blind-review follow-up).
     """
     edges = edges_from(estate_with_two_same_named_workbooks(tmp_path / "estate.db"))
     orphans = harvest.orphaned_dependents(duplicate_named_binding_rows(), edges)
-    assert orphans == [("DS_Sessions_by_Product", ["Revenue Dashboard", "Revenue Dashboard"])]
+    assert orphans == [("DS_Sessions_by_Product", [("wb-a", "Revenue Dashboard"), ("wb-b", "Revenue Dashboard")])]
     assert len(orphans[0][1]) == 2, "two distinct workbook identities collapsed into one orphan"
+    assert len({identity for identity, _ in orphans[0][1]}) == 2, "both entries must carry a DISTINCT identity"
 
 
 def test_only_one_of_two_same_named_workbooks_landing_still_reports_just_that_one(tmp_path: Path) -> None:
@@ -1095,7 +1162,46 @@ def test_only_one_of_two_same_named_workbooks_landing_still_reports_just_that_on
     rows[2] = {"name": "Revenue Dashboard", "kind": "workbook", "luid": "wb-b", "download_error": "timeout"}
     edges = edges_from(estate_with_two_same_named_workbooks(tmp_path / "estate.db"))
     orphans = harvest.orphaned_dependents(rows, edges)
-    assert orphans == [("DS_Sessions_by_Product", ["Revenue Dashboard"])]
+    assert orphans == [("DS_Sessions_by_Product", [("wb-a", "Revenue Dashboard")])]
+
+
+def test_same_named_orphans_are_distinguishable_in_the_markdown_and_log(tmp_path: Path) -> None:
+    """The report/log MUST show the LUID beside the name, or the two lines read as one duplicate."""
+    edges = edges_from(estate_with_two_same_named_workbooks(tmp_path / "estate.db"))
+    orphans = harvest.orphaned_dependents(duplicate_named_binding_rows(), edges)
+    text = harvest.summarise(duplicate_named_binding_rows(), tmp_path, orphans)
+    section = text.split("## Do not convert yet", 1)[1]
+    assert "wb-a" in section and "wb-b" in section, "both distinct identities must reach the report"
+
+
+def test_missing_luid_falls_back_to_project_plus_name_identity() -> None:
+    """When an edge cannot resolve a workbook LUID, the strongest identity left is the
+    project-qualified name -- never a bare display name, which is the exact collision #483 exists
+    to close. Built by hand: a real site survey never leaves `dependency_edges`' workbook LUID
+    blank (no fallback join on that side), so this exercises the defensive branch directly.
+    """
+    results = [
+        {"name": "DS_Sessions_by_Product", "kind": "datasource", "luid": "ds-sessions", "download_error": "500"},
+        {"name": "Revenue Dashboard", "kind": "workbook", "luid": "", "ours": {"ok": True}, "theirs": {"ok": True}},
+    ]
+    edges = [("", "Revenue Dashboard", "Region A", "ds-sessions", "DS_Sessions_by_Product")]
+    orphans = harvest.orphaned_dependents(results, edges)
+    assert orphans == [("DS_Sessions_by_Product", [("Region A::Revenue Dashboard", "Revenue Dashboard")])]
+
+
+def test_a_truly_unidentifiable_workbook_is_reported_not_dropped() -> None:
+    """No LUID and no project left either -- the row must still be reported, never silently
+    dropped, but it must also never be reported under a bare display name (issue #483)."""
+    results = [
+        {"name": "DS_Sessions_by_Product", "kind": "datasource", "luid": "ds-sessions", "download_error": "500"},
+        {"name": "Mystery Workbook", "kind": "workbook", "luid": "", "ours": {"ok": True}, "theirs": {"ok": True}},
+    ]
+    edges = [("", "Mystery Workbook", "", "ds-sessions", "DS_Sessions_by_Product")]
+    orphans = harvest.orphaned_dependents(results, edges)
+    assert len(orphans) == 1, "an unidentifiable workbook must not be dropped"
+    identity, name = orphans[0][1][0]
+    assert identity.startswith("UNIDENTIFIED-"), identity
+    assert name == "Mystery Workbook"
 
 
 def test_an_estate_db_without_a_dependency_table_still_harvests(

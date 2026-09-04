@@ -989,17 +989,21 @@ def parse_theirs(path: Path, scripts: Path) -> dict[str, Any]:
         return {"ok": False, "error": f"harness: {type(exc).__name__}: {exc}"}
 
 
-def dependency_edges(con: sqlite3.Connection) -> list[tuple[str, str, str, str]]:
-    """Every `(workbook_luid, workbook_name, datasource_luid, datasource_name)` binding on the site.
+def dependency_edges(con: sqlite3.Connection) -> list[tuple[str, str, str, str, str]]:
+    """Every `(workbook_luid, workbook_name, workbook_project, datasource_luid, datasource_name)`
+    binding on the site.
 
     Same join as `dependency_datasources` — LUID first, normalized name as the fallback an
     unresolved survey edge needs — but it keeps the WORKBOOK end too, which is the end that matters
-    once a datasource has failed to download.
+    once a datasource has failed to download. `workbook_project` is carried alongside the LUID so
+    `orphaned_dependents()` has a project-plus-name identity to fall back to WITHOUT inventing one
+    (issue #483 follow-up): it is a plain `LEFT JOIN` on data this query already touches, not a new
+    table or a new identity abstraction.
     """
     return list(
         con.execute(
             """
-            SELECT DISTINCT workbook.luid, workbook.name, datasource.luid, datasource.name
+            SELECT DISTINCT workbook.luid, workbook.name, project.name, datasource.luid, datasource.name
             FROM dependency
             JOIN workbook ON workbook.luid = dependency.workbook_luid
             JOIN datasource ON dependency.datasource_luid = datasource.luid
@@ -1007,14 +1011,17 @@ def dependency_edges(con: sqlite3.Connection) -> list[tuple[str, str, str, str]]
                     COALESCE(dependency.datasource_luid, '') = ''
                     AND LOWER(TRIM(dependency.datasource_name)) = LOWER(TRIM(datasource.name))
                 )
+            LEFT JOIN project ON project.luid = workbook.project_luid
             ORDER BY datasource.name, workbook.name
             """
         )
     )
 
 
-def orphaned_dependents(results: list[dict], edges: list[tuple[str, str, str, str]]) -> list[tuple[str, list[str]]]:
-    """`[(failed datasource name, [workbooks that DID land and bind to it])]`.
+def orphaned_dependents(
+    results: list[dict], edges: list[tuple[str, str, str, str, str]]
+) -> list[tuple[str, list[tuple[str, str]]]]:
+    """`[(failed datasource name, [(workbook identity, workbook name) that DID land and bind to it])]`.
 
     A datasource that never downloaded does not fail alone: every workbook bound to it converts to
     an incomplete model, and a report against a model nobody migrated is the documented "empty
@@ -1023,8 +1030,14 @@ def orphaned_dependents(results: list[dict], edges: list[tuple[str, str, str, st
     it depended on the operator noticing (issue #472). A workbook that itself failed to download is
     left out: it is already in the never-landed list and is not about to be converted.
 
-    Two same-named workbooks in different projects remain TWO entries here (issue #483) — see the
-    LUID-keyed grouping below.
+    Each workbook entry carries its own IDENTITY beside its display name, never a bare name alone
+    (issue #483, and its follow-up review): two same-named workbooks in different projects must stay
+    two entries all the way to the human/machine output, not just inside this function's internal
+    grouping. The identity is, in order: the workbook LUID (the normal case — `dependency_edges`
+    resolves the workbook end by LUID with no fallback, so this is blank only for a hand-built edge);
+    else a project-qualified `"<project>::<name>"` built from data `dependency_edges` already
+    carries; else an explicit `UNIDENTIFIED-N` marker so an edge that resolves neither is still
+    reported instead of being silently dropped or coalesced with an unrelated one.
     """
     missing_ids = {id(r) for r in never_downloaded(results)}
     failed_datasources = {
@@ -1037,18 +1050,32 @@ def orphaned_dependents(results: list[dict], edges: list[tuple[str, str, str, st
         for r in results
         if id(r) not in missing_ids and r.get("kind") == "workbook"
     }
-    # Keyed by WORKBOOK LUID, the strongest identity `dependency_edges` carries — never by display
-    # name. A `set[str]` of names used to be the key here, so two workbooks that happen to share a
-    # name in different projects silently collapsed into one orphan entry (issue #483). LUID is
-    # never blank on this side: `dependency_edges` joins the workbook end on `workbook.luid =
-    # dependency.workbook_luid` with no name fallback (only the datasource end has one).
-    by_datasource: dict[str, dict[str, str]] = {}
-    for workbook_luid, workbook_name, datasource_luid, datasource_name in edges:
-        if datasource_luid in failed_datasources and workbook_luid in landed_workbooks:
-            by_datasource.setdefault(datasource_name or failed_datasources[datasource_luid], {})[workbook_luid] = (
-                workbook_name or landed_workbooks[workbook_luid]
-            )
-    return [(name, sorted(workbook_names.values())) for name, workbook_names in sorted(by_datasource.items())]
+    by_datasource: dict[str, dict[str, tuple[str, str]]] = {}
+    unidentified = 0
+    for workbook_luid, workbook_name, workbook_project, datasource_luid, datasource_name in edges:
+        if datasource_luid not in failed_datasources or workbook_luid not in landed_workbooks:
+            continue
+        name = workbook_name or landed_workbooks[workbook_luid]
+        if workbook_luid:
+            identity = workbook_luid
+        elif workbook_project:
+            identity = f"{workbook_project}::{name}"
+        else:
+            unidentified += 1
+            identity = f"UNIDENTIFIED-{unidentified}"
+        key = datasource_name or failed_datasources[datasource_luid]
+        by_datasource.setdefault(key, {})[identity] = (identity, name)
+    return [
+        (name, sorted(entries.values(), key=lambda entry: (entry[0], entry[1])))
+        for name, entries in sorted(by_datasource.items())
+    ]
+
+
+def _format_orphan_workbook(entry: tuple[str, str]) -> str:
+    """`"<name> [<identity>]"` -- human-readable, but the identity is always visible beside it so a
+    duplicate display name never reads as a single workbook (issue #483 follow-up)."""
+    identity, name = entry
+    return f"{name} [{identity}]"
 
 
 def never_downloaded(results: list[dict]) -> list[dict]:
@@ -1073,6 +1100,17 @@ def _strict_bool(value: object) -> bool | None:
     and not merely `isinstance(value, int)`.
     """
     return value if isinstance(value, bool) else None
+
+
+def _verdict_label(strict_ok: bool | None) -> str:
+    """`"ok"` / `"FAIL"` for a real boolean verdict, `"INVALID"` for `_strict_bool`'s `None`.
+
+    Keeps a per-asset log line and `summarise()`'s bucket classification from disagreeing about the
+    SAME row (issue #483 follow-up): both now read the verdict through `_strict_bool()` first.
+    """
+    if strict_ok is None:
+        return "INVALID"
+    return "ok" if strict_ok else "FAIL"
 
 
 def indeterminate_parser_outcomes(results: list[dict]) -> list[dict]:
@@ -1111,7 +1149,7 @@ def grouped_by_shape(rows: list[dict], detail: Callable[[dict], str]) -> list[tu
 
 
 def summarise(  # pylint: disable=too-many-locals,too-many-statements,too-many-branches
-    results: list[dict], out: Path, orphans: list[tuple[str, list[str]]] | None = None
+    results: list[dict], out: Path, orphans: list[tuple[str, list[tuple[str, str]]]] | None = None
 ) -> str:
     """Group failures by SHAPE, because one root cause repeated 12 times is one feature request."""
     missing = never_downloaded(results)
@@ -1185,12 +1223,15 @@ def summarise(  # pylint: disable=too-many-locals,too-many-statements,too-many-b
         lines.append("")
         lines.append(
             "These workbooks downloaded fine, so nothing else here flags them. They would each "
-            "convert against a model nobody migrated, which is the documented **empty report**."
+            "convert against a model nobody migrated, which is the documented **empty report**. "
+            "Each is named with its identity (LUID, or a project fallback) so two same-named "
+            "workbooks in different projects stay distinguishable (issue #483)."
         )
         lines.append("")
         for datasource, workbooks in orphans:
             lines.append(f"- `{datasource}` (failed) blocks **{len(workbooks)}** workbook(s):")
-            lines.append(f"  - {', '.join(workbooks[:8])}{' …' if len(workbooks) > 8 else ''}")
+            labels = [_format_orphan_workbook(w) for w in workbooks]
+            lines.append(f"  - {', '.join(labels[:8])}{' …' if len(labels) > 8 else ''}")
         lines.append("")
 
     for title, rows, key in (
@@ -1423,19 +1464,33 @@ def record_parse(
     total: int,
     started: float,
 ) -> None:
-    """Collect one finished offline parse and log it, so progress interleaves with the downloads."""
+    """Collect one finished offline parse and log it, so progress interleaves with the downloads.
+
+    Uses the SAME `_strict_bool()` verdict as `summarise()`'s bucket classification (issue #483
+    follow-up): a truthy-but-non-boolean `ok` (`"true"`, `1`, a list, a dict) used to print as
+    `ours=ok`/`his=ok` here — an operator watching the run scroll by would read that as a clean
+    parse, while the eventual summary correctly routed the SAME row to the invalid/indeterminate
+    bucket. The two had to agree.
+    """
     index, row, future = entry
     row["ours"], row["theirs"] = future.result()
     results.append(row)
-    mark = "ok " if row["ours"].get("ok") and row["theirs"].get("ok") else "DIFF"
+    ours_ok = _strict_bool(row["ours"].get("ok"))
+    theirs_ok = _strict_bool(row["theirs"].get("ok"))
+    if ours_ok is None or theirs_ok is None:
+        mark = "IND "
+    elif ours_ok and theirs_ok:
+        mark = "ok "
+    else:
+        mark = "DIFF"
     LOG.info(
         "[%d/%d] %-46s %s ours=%s his=%s %s",
         index,
         total,
         row["name"][:46],
         mark,
-        "ok" if row["ours"].get("ok") else "FAIL",
-        "ok" if row["theirs"].get("ok") else "FAIL",
+        _verdict_label(ours_ok),
+        _verdict_label(theirs_ok),
         progress(len(results), total, started),
     )
 
@@ -1459,7 +1514,9 @@ def sweep_exit_code(results: list[dict]) -> int:
     return EXIT_PARTIAL if missing or invalid else EXIT_OK
 
 
-def report_failed_downloads(results: list[dict], orphans: list[tuple[str, list[str]]] | None = None) -> list[dict]:
+def report_failed_downloads(
+    results: list[dict], orphans: list[tuple[str, list[tuple[str, str]]]] | None = None
+) -> list[dict]:
     """Say out loud, at the END of the run, which assets never landed. Returns those rows.
 
     The per-asset `DOWNLOAD FAILED` warning has already scrolled past a 47-line run by the time the
@@ -1477,12 +1534,13 @@ def report_failed_downloads(results: list[dict], orphans: list[tuple[str, list[s
         for row in missing:
             LOG.warning("  - %s (%s): %s", row.get("name", "?"), row.get("kind", "?"), row.get("download_error", "?"))
     for datasource, workbooks in orphans or []:
+        labels = [_format_orphan_workbook(w) for w in workbooks]
         LOG.warning(
             "DO NOT CONVERT YET: '%s' never downloaded, so %d workbook(s) that DID land would "
             "convert against a model nobody migrated: %s",
             datasource,
             len(workbooks),
-            ", ".join(workbooks[:8]) + (" …" if len(workbooks) > 8 else ""),
+            ", ".join(labels[:8]) + (" …" if len(labels) > 8 else ""),
         )
     return missing
 
