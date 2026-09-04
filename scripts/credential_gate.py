@@ -202,6 +202,23 @@ def _audit(migration: Path, action: str, detail: str, sources: list[str] | None 
         pass
 
 
+def _valid_scoped_audit_entry(line: str, scope: str) -> dict | None:
+    """One audit line as a trusted entry, or None when it cannot be trusted at all.
+
+    Split out of `_audit_entries` purely to keep that function's return-statement count under the
+    complexity limit - no behavior change. A line is trusted only if it parses as a JSON object AND
+    names exactly this `scope`; anything else (malformed JSON, a non-object, a missing or different
+    `scope`) is untrustworthy, and `_audit_entries` treats untrustworthy as poisoning the whole file.
+    """
+    try:
+        entry = json.loads(line)
+    except ValueError:
+        return None
+    if not isinstance(entry, dict) or entry.get("scope") != scope:
+        return None
+    return entry
+
+
 def _audit_entries(migration: Path) -> list[dict] | None:
     """Parsed, scope-checked audit entries for `migration`, or None when none can be trusted.
 
@@ -215,10 +232,14 @@ def _audit_entries(migration: Path) -> list[dict] | None:
     all of it must be" reasoning a forged/truncated trailing record relies on.
 
     (B3, tightened per review) a path is not scope: an entry naming a DIFFERENT scope than
-    `migration`, OR carrying no `scope` key at all, is dropped. A missing scope used to be trusted as
-    pre-fix legacy evidence; that concession is itself the forgery this closes - a foreign log with
-    its `scope` field stripped would otherwise certify any directory it was copied into. Only an
-    entry this directory's OWN `_audit()` call actually wrote (and therefore stamped) counts.
+    `migration`, OR carrying no `scope` key at all, POISONS THE WHOLE TRAIL - it is not merely
+    dropped while earlier/later same-scope entries are still trusted. A missing scope used to be
+    trusted as pre-fix legacy evidence; that concession is itself the forgery this closes - a
+    foreign log with its `scope` field stripped would otherwise certify any directory it was copied
+    into. Skipping just the bad entry and keeping the rest re-opens the exact "some of this is real,
+    so all of it must be" reasoning B2 already closes for malformed JSON - a single unscoped/foreign
+    line appended to an otherwise-genuine history must not leave that history still trusted. Only a
+    log where EVERY entry is this directory's OWN, actually-stamped scope counts at all.
 
     Returns None (never `[]`) so callers can tell "no evidence" apart from "trusted, and it says
     nothing happened".
@@ -236,14 +257,9 @@ def _audit_entries(migration: Path) -> list[dict] | None:
         line = line.strip()
         if not line:
             continue
-        try:
-            entry = json.loads(line)
-        except ValueError:
+        entry = _valid_scoped_audit_entry(line, scope)
+        if entry is None:
             return None
-        if not isinstance(entry, dict):
-            return None
-        if entry.get("scope") != scope:
-            continue
         entries.append(entry)
     if not entries:
         return None
@@ -1088,26 +1104,40 @@ def _current_live_source_keys(migration: Path) -> set[str] | None:
 def _source_set_mismatch_reason(migration: Path) -> str | None:
     """Why a trusted clearance no longer covers what the spec names TODAY, or None when it does.
 
-    Issue #354 review: a trusted `block`/earned-`clear` audit entry names the source keys it
-    covers. If `migration-spec.json` in this SAME directory has since been re-pointed at a
-    DIFFERENT live source - the cleared key swapped for a new one, not merely dropped - that
-    clearance no longer proves what it once did: nobody has proven the NEW upstream is reachable.
-    Compared by `_leg_key`, the identity the gate itself arms and clears against, never by display
-    name. Silent when there is nothing to compare (`_last_block_sources`/`_current_live_source_keys`
-    both come back empty or unreadable) - this only fires on a real, positive mismatch.
+    Issue #354 review: the recorded clearance covers whatever `_earned_sources` -- the SAME
+    per-source ledger `_clear_was_earned`/`_redundant_rearm` already trust -- currently reports as
+    earned, not merely the most recent `block`'s source list. That distinction is load-bearing for a
+    multi-source migration: source E1 earned first, then E2 independently blocked and earned later,
+    is two TRUE clearances, but `_last_block_sources` only ever sees the LAST block's list (just
+    E2) and would wrongly report E1 as uncovered - a false state-3 against a fully, correctly earned
+    migration. `_earned_sources` accumulates per-source state across every block/clear in the log,
+    so both stay covered.
+
+    If `migration-spec.json` in this SAME directory has since been re-pointed at a DIFFERENT live
+    source - a cleared key swapped for a new one, not merely dropped - that new key is not in the
+    earned set: nobody has proven the NEW upstream is reachable. Compared by `_leg_key`, the
+    identity the gate itself arms and clears against, never by display name.
+
+    A global `authorize` (human sign-off not tied to any specific source) covers everything
+    unconditionally, same as `_clear_was_earned` treats it - the mismatch question does not apply.
+    Silent when there is nothing to compare (no earned sources, or `_current_live_source_keys`
+    unreadable/empty) - this only fires on a real, positive mismatch.
     """
-    recorded = _last_block_sources(migration)
+    states, authorized = _earned_sources(migration)
+    if authorized:
+        return None
+    recorded = {source for source, earned in states.items() if earned}
     if not recorded:
         return None
     current = _current_live_source_keys(migration)
     if not current:
         return None
-    uncovered = current - set(recorded)
+    uncovered = current - recorded
     if not uncovered:
         return None
     return (
         f"{migration}'s {MIGRATION_SPEC} now names live source key(s) {sorted(uncovered)} not "
-        f"covered by the recorded clearance for {sorted(set(recorded))}"
+        f"covered by the recorded clearance for {sorted(recorded)}"
     )
 
 

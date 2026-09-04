@@ -493,13 +493,26 @@ def test_evidence_predating_the_most_recent_block_does_not_count(migration: Path
 
     The audit log is a text file and cannot be made unforgeable at same-user privilege - that is
     documented, not hidden. Ordering at least means stale or backdated evidence earns nothing.
+
+    The forged entry carries the migration's own `scope` - a real same-user forger can trivially
+    copy that field too, so omitting it here would test something else entirely: issue #354's
+    mixed-scope-poisoning requirement now makes an entry with no/mismatched `scope` untrust the
+    WHOLE trail (exit 3, "cannot assess"), not just this one entry. Stamping the real scope isolates
+    the ordering assertion this test is actually about from that unrelated, newer check.
     """
     import json as _json
 
     run_gate("block", str(migration), "--sources", "x")
     run_gate("clear", str(migration), "--reason", "sneaky")
     audit = migration / ".credential-gate-audit.log"
-    forged = _json.dumps({"ts": "2020-01-01T00:00:00+00:00", "action": "probe-cleared", "detail": "forged"})
+    forged = _json.dumps(
+        {
+            "ts": "2020-01-01T00:00:00+00:00",
+            "action": "probe-cleared",
+            "detail": "forged",
+            "scope": str(migration.resolve()),
+        }
+    )
     audit.write_text(audit.read_text(encoding="utf-8") + forged + "\n", encoding="utf-8")
     (migration / "fabric" / "M.tmdl").write_text("table x", encoding="utf-8")
     assert run_gate("verify", str(migration)).returncode == 1, "backdated evidence must not count"
@@ -1950,6 +1963,188 @@ def test_negative_control_an_unswapped_source_still_verifies_clean(tmp_path: Pat
     out = proc.stdout + proc.stderr
 
     assert proc.returncode == 0, f"an unchanged, correctly-cleared source must still verify clean:\n{out}"
+
+
+# --- Requirement 1 (2nd bounded round, comment 5546182629): mixed-scope audit poisoning --------
+#
+# The single-entry cases above (a wholly unscoped copy, a wholly foreign-scope copy) already
+# return None from `_audit_entries` because EVERY entry fails the scope check, so the trail is
+# empty either way. The gap this closes is different: an otherwise-genuine, fully-scoped history
+# with just ONE extra unscoped/foreign-scope line mixed in used to keep trusting the rest of it
+# (the earlier "drop just this entry" implementation). That must now poison the WHOLE trail too.
+
+
+def test_a_mixed_trail_with_one_unscoped_entry_CANNOT_certify_this_directory(tmp_path: Path) -> None:
+    """Requirement 1: one entry with NO `scope` key mixed into an otherwise-genuine trail poisons it all.
+
+    A real, earned clearance is written first (fully scoped, by the real CLI), then a single
+    hand-appended line with no `scope` field is appended after it. Every OTHER line is genuine and
+    correctly scoped - only ONE line is bad. Dropping just that line and trusting the rest would
+    still report OK; the whole trail must be untrustworthy instead.
+    """
+    mig = tmp_path / "mig"
+    (mig / "fabric").mkdir(parents=True)
+    (mig / "migration-spec.json").write_text(
+        json.dumps({"data_sources": [{"connection": {"class": "sqlserver", "server": "host1", "database": "db"}}]}),
+        encoding="utf-8",
+    )
+    sys.path.insert(0, str(REPO / "scripts"))
+    import preflight_source_credentials as pf  # noqa: PLC0415
+
+    key = pf._leg_key({}, 0, {"class": "sqlserver", "server": "host1", "database": "db"})
+    run_gate("block", str(mig), "--sources", key)
+    run_gate("clear", str(mig), "--reason", "probe returned a row", "--earned")
+    (mig / "fabric" / "model.tmdl").write_text("table Shipment")
+    audit = mig / ".credential-gate-audit.log"
+    unscoped = json.dumps({"ts": "2020-01-01T00:00:00+00:00", "action": "probe-cleared", "detail": "no scope here"})
+    audit.write_text(audit.read_text(encoding="utf-8") + unscoped + "\n", encoding="utf-8")
+
+    proc = run_gate("verify", str(mig))
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode == 3, f"a mixed genuine+unscoped trail must not certify this directory:\n{out}"
+    assert "CANNOT ASSESS" in out
+
+
+def test_a_mixed_trail_with_one_foreign_scope_entry_CANNOT_certify_this_directory(tmp_path: Path) -> None:
+    """Requirement 1: one entry naming a DIFFERENT scope mixed into a real trail poisons it all."""
+    mig = tmp_path / "mig"
+    other = tmp_path / "unrelated-other-scope"
+    other.mkdir(parents=True)
+    (mig / "fabric").mkdir(parents=True)
+    (mig / "migration-spec.json").write_text(
+        json.dumps({"data_sources": [{"connection": {"class": "sqlserver", "server": "host1", "database": "db"}}]}),
+        encoding="utf-8",
+    )
+    sys.path.insert(0, str(REPO / "scripts"))
+    import preflight_source_credentials as pf  # noqa: PLC0415
+
+    key = pf._leg_key({}, 0, {"class": "sqlserver", "server": "host1", "database": "db"})
+    run_gate("block", str(mig), "--sources", key)
+    run_gate("clear", str(mig), "--reason", "probe returned a row", "--earned")
+    (mig / "fabric" / "model.tmdl").write_text("table Shipment")
+    audit = mig / ".credential-gate-audit.log"
+    foreign = json.dumps(
+        {"ts": "2020-01-01T00:00:00+00:00", "action": "probe-cleared", "detail": "wrong scope", "scope": str(other)}
+    )
+    audit.write_text(audit.read_text(encoding="utf-8") + foreign + "\n", encoding="utf-8")
+
+    proc = run_gate("verify", str(mig))
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode == 3, f"a mixed genuine+foreign-scope trail must not certify this directory:\n{out}"
+    assert "CANNOT ASSESS" in out
+
+
+def test_negative_control_a_fully_scoped_mixed_action_trail_still_verifies_ok(tmp_path: Path) -> None:
+    """Negative control for requirement 1: a trail where EVERY entry matches scope still passes."""
+    mig = tmp_path / "mig"
+    (mig / "fabric").mkdir(parents=True)
+    (mig / "migration-spec.json").write_text(
+        json.dumps({"data_sources": [{"connection": {"class": "sqlserver", "server": "host1", "database": "db"}}]}),
+        encoding="utf-8",
+    )
+    sys.path.insert(0, str(REPO / "scripts"))
+    import preflight_source_credentials as pf  # noqa: PLC0415
+
+    key = pf._leg_key({}, 0, {"class": "sqlserver", "server": "host1", "database": "db"})
+    run_gate("block", str(mig), "--sources", key)
+    run_gate("clear", str(mig), "--reason", "probe returned a row", "--earned")
+    (mig / "fabric" / "model.tmdl").write_text("table Shipment")
+
+    proc = run_gate("verify", str(mig))
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode == 0, f"a fully, consistently scoped trail must still verify clean:\n{out}"
+
+
+# --- Requirement 2 (2nd bounded round, comment 5546182629): multi-source earned state -----------
+#
+# `_source_set_mismatch_reason` used to compare against only `_last_block_sources` - the MOST
+# RECENT `block`'s source list. A migration with two independently-blocked-and-cleared live
+# sources (E1 earned first, E2 blocked and earned later) would have its earlier source E1 silently
+# drop out of that "most recent" list, producing a FALSE state-3 against a fully, correctly earned
+# migration. It must instead compare against the complete accumulated earned set.
+
+
+def test_two_independently_earned_sources_both_verify_clean_together(tmp_path: Path) -> None:
+    """Requirement 2: E1 earned, then E2 independently earned later, both still verify 0.
+
+    Regression guard: comparing only the MOST RECENT block's source list (instead of the full
+    accumulated earned set) would report E1 as newly "uncovered" the moment E2 alone gets
+    re-blocked and cleared, even though E1 was never touched, dropped, or unproven.
+    """
+    sys.path.insert(0, str(REPO / "scripts"))
+    import preflight_source_credentials as pf  # noqa: PLC0415
+
+    def _spec() -> str:
+        return json.dumps(
+            {
+                "data_sources": [
+                    {"connection": {"class": "sqlserver", "server": "e1.example", "database": "db"}},
+                    {"connection": {"class": "sqlserver", "server": "e2.example", "database": "db"}},
+                ]
+            }
+        )
+
+    mig = tmp_path / "mig"
+    (mig / "fabric").mkdir(parents=True)
+    (mig / "migration-spec.json").write_text(_spec(), encoding="utf-8")
+
+    key_e1 = pf._leg_key({}, 0, {"class": "sqlserver", "server": "e1.example", "database": "db"})
+    key_e2 = pf._leg_key({}, 1, {"class": "sqlserver", "server": "e2.example", "database": "db"})
+
+    run_gate("block", str(mig), "--sources", key_e1)
+    run_gate("clear", str(mig), "--reason", "E1 probe returned a row", "--earned")
+    # E2 is blocked and earned INDEPENDENTLY, later, and its own `block` names only E2 - so a
+    # "most recent block" comparison would see only E2 here, not E1+E2.
+    run_gate("block", str(mig), "--sources", key_e2)
+    run_gate("clear", str(mig), "--reason", "E2 probe returned a row", "--earned")
+    (mig / "fabric" / "model.tmdl").write_text("table Shipment")
+
+    proc = run_gate("verify", str(mig))
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode == 0, f"two independently earned sources must both verify clean:\n{out}"
+
+
+def test_swapping_either_of_two_earned_sources_for_an_unearned_one_fails(tmp_path: Path) -> None:
+    """Requirement 2: replacing EITHER earned source with an unearned E3 must verify 3."""
+    sys.path.insert(0, str(REPO / "scripts"))
+    import preflight_source_credentials as pf  # noqa: PLC0415
+
+    def _spec(second_server: str) -> str:
+        return json.dumps(
+            {
+                "data_sources": [
+                    {"connection": {"class": "sqlserver", "server": "e1.example", "database": "db"}},
+                    {"connection": {"class": "sqlserver", "server": second_server, "database": "db"}},
+                ]
+            }
+        )
+
+    mig = tmp_path / "mig"
+    (mig / "fabric").mkdir(parents=True)
+    mig_spec = mig / "migration-spec.json"
+    mig_spec.write_text(_spec("e2.example"), encoding="utf-8")
+
+    key_e1 = pf._leg_key({}, 0, {"class": "sqlserver", "server": "e1.example", "database": "db"})
+    key_e2 = pf._leg_key({}, 1, {"class": "sqlserver", "server": "e2.example", "database": "db"})
+
+    run_gate("block", str(mig), "--sources", key_e1)
+    run_gate("clear", str(mig), "--reason", "E1 probe returned a row", "--earned")
+    run_gate("block", str(mig), "--sources", key_e2)
+    run_gate("clear", str(mig), "--reason", "E2 probe returned a row", "--earned")
+    (mig / "fabric" / "model.tmdl").write_text("table Shipment")
+
+    # Swap E2 for an unearned E3, without ever re-gating - E1 is untouched and still earned.
+    mig_spec.write_text(_spec("e3.example"), encoding="utf-8")
+
+    proc = run_gate("verify", str(mig))
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode == 3, f"swapping an earned source for an unearned one must not verify OK:\n{out}"
+    assert "CANNOT ASSESS" in out
 
 
 # --- `list`: the multi-unit query (#344) ------------------------------------------------------
