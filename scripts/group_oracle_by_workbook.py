@@ -140,7 +140,9 @@ import re
 import shutil
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+from pathlib import PureWindowsPath
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -355,6 +357,9 @@ def discover_batches(root: Path, excluded: frozenset[Path]) -> list[Path]:
             continue
         if is_capture_batch(child):
             found.append(child)
+            continue
+        if is_capture_batch(child / "oracle"):
+            found.append(child / "oracle")
             continue
         unclassified.append(child)
     if unclassified:
@@ -603,6 +608,28 @@ def _refuse_untyped_views(path: Path, views: list[Any]) -> None:
             _refuse_untyped(path, f"view {index}'s {kind!r} leg", leg, _LEG_TYPES)
 
 
+def _normalize_timestamp(path: Path, where: str, value: Any) -> str | None:
+    """Return one canonical UTC representation, or preserve an absent value."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise MalformedCaptureManifest(
+            f"{path}: {where} carries an empty or invalid timestamp. Present timestamps must be "
+            "non-blank ISO-8601 values; omit the field when it is genuinely unavailable."
+        )
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise MalformedCaptureManifest(
+            f"{path}: {where} carries invalid timestamp {value!r}; expected ISO-8601."
+        ) from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    if "T" not in value and " " not in value:
+        return parsed.date().isoformat() + "Z"
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def _is_view_identity(value: Any) -> bool:
     """Is ``value`` something the merge can key a view on? A NON-EMPTY STRING, and nothing else.
 
@@ -682,6 +709,12 @@ def _validate_manifest(path: Path, payload: Any) -> dict[str, Any]:
         )
     _refuse_untyped(path, "the manifest", payload, _MANIFEST_TYPES)
     _refuse_untyped_views(path, views)
+    if "captured_at" in payload:
+        payload["captured_at"] = _normalize_timestamp(path, "manifest 'captured_at'", payload["captured_at"])
+    for index, view in enumerate(views):
+        for field in ("captured_at", "updated_at"):
+            if field in view:
+                view[field] = _normalize_timestamp(path, f"view {index}'s {field!r}", view[field])
     return payload
 
 
@@ -716,6 +749,25 @@ def load_batches(oracle_dirs: list[Path]) -> list[_Batch]:
     ]
 
 
+def _contained_artifact(root: Path, relative: Any) -> Path | None:
+    """Resolve an artifact only when it remains beneath its capture batch."""
+    if not isinstance(relative, str) or not relative.strip():
+        return None
+    windows = PureWindowsPath(relative)
+    candidate = Path(relative)
+    if candidate.is_absolute() or windows.is_absolute() or windows.drive or windows.root:
+        return None
+    if ".." in candidate.parts:
+        return None
+    resolved_root = root.resolve()
+    resolved = (root / candidate).resolve()
+    try:
+        resolved.relative_to(resolved_root)
+    except ValueError:
+        return None
+    return resolved
+
+
 def _leg_is_promotable(entry: dict[str, Any], root: Path) -> bool:
     """A leg may only win the merge if it is ``ok`` AND the artifact it names is on disk.
 
@@ -723,8 +775,8 @@ def _leg_is_promotable(entry: dict[str, Any], root: Path) -> bool:
     somebody has since deleted must not displace an earlier batch that still has the bytes. Without
     the on-disk half, merging could make a reference set worse than either input.
     """
-    relative = entry.get("path")
-    return bool(entry.get("status") == "ok" and relative and (root / relative).is_file())
+    source = _contained_artifact(root, entry.get("path"))
+    return bool(entry.get("status") == "ok" and source is not None and source.is_file())
 
 
 def _stamp(batch: _Batch, view: dict[str, Any]) -> str:
@@ -1122,8 +1174,8 @@ def copy_view_files(
         if entry.get("status") != "ok" or not relative:
             continue
         oracle_dir = roots[entry.get("source_batch", next(iter(roots)))]
-        source = oracle_dir / relative
-        if not source.is_file():
+        source = _contained_artifact(oracle_dir, relative)
+        if source is None or not source.is_file():
             LOG.warning("  MISSING on disk, not copied: %s (%s)", relative, oracle_dir.name)
             downgraded = {k: v for k, v in entry.items() if k != "path"}
             downgraded["status"] = NOT_COPIED_STATUS

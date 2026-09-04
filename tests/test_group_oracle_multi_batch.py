@@ -1456,6 +1456,17 @@ def test_oracle_root_DISCOVERS_the_batch_nobody_listed(tmp_path):
     assert set(grouped["batches"]) == {"airborne-services", "airborne-services-retry", "airborne-services-retry2"}
 
 
+def test_oracle_root_DISCOVERS_canonical_run_layout(tmp_path):
+    runs = tmp_path / "_runs"
+    first = _batch(runs / "001", "oracle", [_view(LUID, "Daily Monitoring", data="ok", image="ok", captured_at=STAMP)])
+    second = _batch(runs / "002", "oracle", [_view(OTHER, "Summary", data="ok", image="ok", captured_at=STAMP)])
+    third = _batch(runs / "003", "oracle", [_view("view-3", "Other", data="ok", image="ok", captured_at=STAMP)])
+
+    discovered = grp.discover_batches(runs, frozenset())
+
+    assert discovered == [first, second, third]
+
+
 def test_a_root_that_is_ITSELF_a_capture_is_the_ordinary_layout(tmp_path):
     """`_oracle/` with `images/`, `data/` and a manifest is one batch. Its own subdirs are structure."""
     oracle = tmp_path / "_oracle"
@@ -1464,6 +1475,40 @@ def test_a_root_that_is_ITSELF_a_capture_is_the_ordinary_layout(tmp_path):
 
     assert grp.run(None, migrations, dry_run=False, oracle_root=oracle) == 0
     assert _grouped(migrations)["views"][0]["image"]["status"] == "ok"
+
+
+def test_an_artifact_outside_the_capture_batch_is_never_promoted_or_copied(tmp_path):
+    oracle = _batch(
+        tmp_path,
+        "outside-path",
+        [_view(LUID, "Daily Monitoring", data="ok", image="ok", captured_at=STAMP)],
+    )
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(PNG)
+    manifest_path = oracle / grp.MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["views"][0]["image"]["path"] = "../outside.png"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    migrations = _migrations(tmp_path)
+    assert grp.run(oracle, migrations, dry_run=False) == 1
+    grouped = _grouped(migrations)
+    assert grouped["views"][0]["image"]["status"] == grp.NOT_COPIED_STATUS
+    assert outside.read_bytes() == PNG
+    assert not (migrations / "airborne-services" / "reference" / "images" / "outside.png").exists()
+
+
+@pytest.mark.parametrize("field", ["captured_at", "updated_at"])
+def test_blank_timestamp_is_malformed_not_a_revision_match(tmp_path, field):
+    batch = _batch(tmp_path, "blank-time", [_view(LUID, "Daily Monitoring", data="ok", image="ok", captured_at=STAMP)])
+    manifest_path = batch / grp.MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    target = manifest if field == "captured_at" else manifest["views"][0]
+    target[field] = "   "
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(grp.MalformedCaptureManifest):
+        grp.load_batches([batch])
 
 
 def test_a_directory_under_the_root_that_is_NOT_a_batch_blocks(tmp_path):
