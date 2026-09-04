@@ -48,16 +48,8 @@ Two policy divergences from the tamper gate, both stricter, both deliberate:
 Axis 2 - SHAPE lives in `harvest_gap_shapes.py`: a structural JSON-pointer diff plus a TMDL line
 diff. Buckets were chosen by measuring the corpus first; `UNCLASSIFIED` is retained and reported.
 
-Axis 0, beneath both - **the bundle is assumed to hold still, and that is NOT verified.** Provenance
-is adjudicated from one read of the bundle and evidence is taken from others, so a bundle edited
-while the harvest runs can have a TIER edit attributed to the ENGINE, with `status: complete` and no
-warning. Four review rounds of PR #399 tried to close this and each fix was defeated by a read the
-previous enumeration had not modelled - most tellingly a directory MEMBERSHIP read, which carries no
-bytes to digest at all. The guarantee is withdrawn rather than half-made: `concurrency.verified` is
-`false` in every report, the markdown says so beside its own conclusion, and issue #418 carries all
-the reproductions plus what a real fix would need (a guarantee about the INPUT - an OS snapshot, a
-copy, or an exclusivity assertion - never one that depends on having enumerated every read).
-**Harvest a bundle nothing else is writing to.**
+Axis 0, beneath both - the bundle is fingerprinted before and after the harvest. A mismatch is a
+distinct, blocking `unstable` result; it is never folded into a normal attribution.
 
 This module does NOT use git, and that is a correctness fix. Measured: of 44 pairs, the mandated
 `git diff --no-index --stat` produced NO stat line for 3 (worst path 261/285/287 vs 259 for the 41 it
@@ -87,6 +79,7 @@ engine artifacts with an INJECTED change (a copied unit reported exactly 1 tier 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from collections import Counter
@@ -105,6 +98,7 @@ from harvest_gap_report import (
     DEFAULT_TOP,
     STATUS_COMPLETE,
     STATUS_INCOMPLETE,
+    STATUS_UNSTABLE,
     STATUS_UNTRUSTWORTHY,
     render,
     render_markdown,
@@ -124,6 +118,7 @@ EXIT_OK = 0
 EXIT_UNTRUSTWORTHY = 1
 EXIT_USAGE = 2
 EXIT_INCOMPLETE = 3
+EXIT_UNSTABLE = 4
 
 # STATUS_* are DEFINED in `harvest_gap_report` and re-exported here. They live there because that
 # module depends on nothing, so the pair stays one-way - and because the renderer must be able to ask
@@ -185,6 +180,23 @@ class Pair(NamedTuple):
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _bundle_fingerprint(bundle: Path) -> str | None:
+    """Fingerprint the complete file set and contents, or return None if it cannot be read."""
+    digest = hashlib.sha256()
+    try:
+        paths = sorted(path for path in bundle.rglob("*") if path.is_file())
+        for path in paths:
+            relative = path.relative_to(bundle).as_posix().encode("utf-8")
+            digest.update(len(relative).to_bytes(8, "big"))
+            digest.update(relative)
+            content = path.read_bytes()
+            digest.update(len(content).to_bytes(8, "big"))
+            digest.update(content)
+    except OSError:
+        return None
+    return digest.hexdigest()
 
 
 class Evidence:
@@ -909,8 +921,23 @@ def _finalize(scan: Scan) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     return entries, records
 
 
+def _apply_stability(report: dict[str, Any], before: str | None, bundle: Path) -> dict[str, Any]:
+    """Mark a report unusable when the bundle fingerprint changed or could not be read."""
+    after = _bundle_fingerprint(bundle)
+    if before is None or after is None:
+        report["status"] = STATUS_UNSTABLE
+        report["concurrency"]["reason"] = "bundle could not be fingerprinted before and after the harvest"
+    elif before != after:
+        report["status"] = STATUS_UNSTABLE
+        report["concurrency"]["reason"] = "bundle changed while the harvest was running"
+    else:
+        report["concurrency"]["verified"] = True
+    return report
+
+
 def harvest(bundle: Path) -> dict[str, Any]:
     """Compare, attribute and classify one bundle. Returns the machine-readable report."""
+    before = _bundle_fingerprint(bundle)
     evidence = _load_evidence(bundle)
 
     # ⚠️ The engine baseline is validated INDEPENDENTLY of the delta, and BEFORE it is read. The
@@ -937,7 +964,7 @@ def harvest(bundle: Path) -> dict[str, Any]:
     reasons = _incomplete_reasons(entries, scan, evidence, coverage, unreconciled)
     status = _overall_status(tampered or baseline_drift, reasons)
 
-    return {
+    report = {
         "version": REPORT_VERSION,
         "generated_at": _utcnow(),
         "bundle": str(bundle),
@@ -964,14 +991,7 @@ def harvest(bundle: Path) -> dict[str, Any]:
         "unreconciled_drift": unreconciled,
         "concurrency": {
             "verified": False,
-            "note": (
-                "⚠️ Attribution assumes the bundle was NOT modified while this harvest ran. That is"
-                " NOT verified. Four review rounds of PR #399 tried and the guarantee was withdrawn:"
-                " a mid-harvest change can make the report attribute a tier edit to the engine, with"
-                " `status: complete` and no warning. Reproductions, the 17-read enumeration and the"
-                " two read categories it did not model are in issue #418. Harvest a bundle nothing"
-                " else is writing to."
-            ),
+            "note": "the bundle was fingerprinted before and after the harvest",
         },
         "pairs": entries,
         "unassessable": scan.unassessable,
@@ -986,6 +1006,7 @@ def harvest(bundle: Path) -> dict[str, Any]:
             ),
         },
     }
+    return _apply_stability(report, before, bundle)
 
 
 def _emit(text: str, stream) -> None:
@@ -1004,6 +1025,8 @@ def _emit(text: str, stream) -> None:
 
 
 def _exit_code(reports: list[dict[str, Any]]) -> int:
+    if any(r["status"] == STATUS_UNSTABLE for r in reports):
+        return EXIT_UNSTABLE
     if any(r["status"] == STATUS_UNTRUSTWORTHY for r in reports):
         return EXIT_UNTRUSTWORTHY
     if any(r["status"] == STATUS_INCOMPLETE for r in reports):
