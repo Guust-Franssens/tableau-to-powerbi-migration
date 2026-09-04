@@ -606,7 +606,11 @@ REQUIRED: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "pbi-migration-validator.agent.md",
-        "6565d664facb237fa1c8e07ce15931fe44464ab35b8ac6fb2ed398f8e2e04af3",
+        # Re-pointed 2026-09-03 (issue #486) from 6565d664fa…: the rule was REWORDED, not removed, so
+        # the coverage entry moves with it rather than being dropped. The audit added that the
+        # "30 of 44" figure is a 2.339.0 measurement nobody has re-run, and that the block's
+        # load-bearing half is the structural blindness, not the count.
+        "a8ba94b9f8f4076f13ddf3906335ce9328da8e449e597491206eeaeedb31dfaa",
         "the validator's rule that `openability_selfcheck.ok` is adjudicated, never cited",
     ),
     (

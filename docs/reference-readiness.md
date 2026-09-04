@@ -90,7 +90,7 @@ are a genuine low-fidelity evidence route, so it rejects placeholders without re
 | `embedded_thumbnail` | `layout_grade` | worksheet — Tableau `<thumbnail>` blocks are per-worksheet renders |
 | `public_playwright` | `layout_grade`, `text_readable` | dashboard — driven from the spec's dashboard list |
 | `oracle_capture` | `layout_grade`, `text_readable` | PR #422's `view_type`; absent or `unknown` ⇒ cannot establish |
-| `manual` | `layout_grade`, `text_readable`, **`validation_grade`** | unknown — *unless* the operator asserted validation grade, which is an explicit claim about this object |
+| `manual` | `layout_grade`, `text_readable`, **`validation_grade`** | whatever the manifest's `view_type` declares; unknown if it declares none |
 | `server_rest` | *nothing* (not wired) | — |
 | anything else | *nothing* | — |
 
@@ -100,6 +100,16 @@ also *unwalkable* until round 2: `collect_manual` globs `tableau-*.png` and name
 file stem, so every name carried a `tableau-` prefix and matched nothing. The prefix is stripped now,
 so a file dropped as `tableau-<object>.png` resolves. The ceiling note in the output names each
 provider's ceiling and this route, rather than merely saying validation grade is rare.
+
+⚠️ **Grade does NOT widen scope, and the route stayed unwalkable for a second reason until #519.**
+Round 3 removed the grade⇒kind promotion (`reference_evidence.MANUAL_KIND_HINT`), so a `manual` record
+satisfies a page only when the manifest entry *declares* `view_type`. Nothing wrote one: measured
+2026-09-04, a correctly named, sha256-attributed, `--manual-validation-grade` screenshot still came
+back `UNVERIFIABLE - name only; scope unknown cannot satisfy a dashboard page`, and the hint asking
+for `view_type` named a field no flag could produce. `capture_tableau_reference.py` now DERIVES it
+from `migration-spec.json` — the name join is `object_identity.normalize`'s (whitespace-collapsed,
+casefolded, **never slugified**), a name claimed by two kinds is dropped rather than guessed, and
+`--manual-object-type` is the explicit fallback when the filename cannot carry the object's name.
 
 ### The page mapping must be readable
 

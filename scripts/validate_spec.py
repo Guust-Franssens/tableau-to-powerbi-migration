@@ -2,13 +2,19 @@
 purpose: Re-validate migration-spec.json after agents append limitations_encountered entries.
 usage:   python scripts/validate_spec.py migrations/workbooks/<slug>/migration-spec.json
          python scripts/validate_spec.py --all
-         python scripts/validate_spec.py --all --check     # CI: fail on duplicates, repair nothing
+         python scripts/validate_spec.py --all --repair    # ALSO rewrite the file, removing dupes
 
-Two modes on purpose. The default REPAIRS exact `limitations_encountered` duplicates in place,
-because that is what an agent appending entries wants. CI must not use that mode: GitHub Actions
-never commits the rewrite back, so a mutating run leaves the duplicate in the proposed content and
-still exits 0 -- a green gate for exactly the defect it exists to catch (#75). `--check` reports
-duplicates as a failure and writes nothing.
+**This command does not write unless you ask it to.** Repairing exact `limitations_encountered`
+duplicates in place used to be the DEFAULT, so `validate_spec.py <spec>` silently rewrote the file it
+was asked to inspect and reported the rewrite as `deduped ... removed`. Measured on the 2026-09-03
+cold run: an agent ran the documented validate command and its spec changed underneath it. A
+validator that writes is a surprise, and a surprise in a tool an agent runs to CHECK something is the
+worst place to put one -- so the mutation is now opt-in behind `--repair`.
+
+The reporting default is also what CI needs, and for a reason older than this change: GitHub Actions
+never commits a rewrite back, so a mutating run leaves the duplicate in the proposed content and
+still exits 0 -- a green gate for exactly the defect it exists to catch (#75). `--check` is kept as
+an accepted alias of the default so the workflow and the existing agent docs keep working.
 """
 
 from __future__ import annotations
@@ -96,9 +102,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("spec", nargs="*", type=Path, help="migration-spec.json path(s) to validate")
     parser.add_argument("--all", action="store_true", help="validate every spec under examples/ and migrations/")
     parser.add_argument(
+        "--repair",
+        action="store_true",
+        help="REWRITE each spec in place to drop exact limitation duplicates (off by default)",
+    )
+    parser.add_argument(
         "--check",
         action="store_true",
-        help="report exact limitation duplicates as a FAILURE instead of repairing them in place (for CI)",
+        help="accepted alias of the default (report duplicates, write nothing); kept for CI and existing docs",
     )
     args = parser.parse_args(argv)
 
@@ -125,10 +136,10 @@ def main(argv: list[str] | None = None) -> int:
         source = spec_path.read_text(encoding="utf-8")
         spec = json.loads(source)
         removed = dedupe_limitations(spec)
-        if removed and args.check:
+        if removed and not args.repair:
             duplicate_count += 1
             LOGGER.error(
-                "DUPLICATE  %s (%d exact limitation duplicate(s); re-run without --check to repair)",
+                "DUPLICATE  %s (%d exact limitation duplicate(s); re-run with --repair to remove them)",
                 spec_path,
                 removed,
             )
@@ -154,7 +165,7 @@ def main(argv: list[str] | None = None) -> int:
         # file looking for a constraint that does not exist.
         LOGGER.error(
             "%d of %d spec(s) carry exact limitation duplicates. These are schema-valid, so the "
-            "schema will never catch them; re-run without --check to repair, and commit the result.",
+            "schema will never catch them; re-run with --repair to remove them, and commit the result.",
             duplicate_count,
             len(targets),
         )

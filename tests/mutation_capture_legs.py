@@ -1,4 +1,4 @@
-"""Mutation harness for #423: prove the capture-leg and timeout tests can FAIL.
+"""Mutation harness for #423: prove the capture-leg, timeout and multi-batch tests can FAIL.
 
     python tests/mutation_capture_legs.py
 
@@ -11,10 +11,9 @@ emits ``FAILED`` for a test that never executed.
 ⚠️ **Every mutation names the TEST NODE IDs that must observe it, and is run and baselined against
 only those.** That is review round 1's finding 6, and it was not a theoretical risk: mutations run
 under ``-x``, so a whole-file target credits a mutation to whichever test in the file fails first.
-``merge-reads-only-the-last-batch`` -- a mutation that has since moved to the grouping campaign --
-was reported CAUGHT by a neighbour while its own documented anchor SURVIVED (``1 passed``), because
-that anchor's fixture already contained the whole answer. The advertised proof did not exist. Three
-changes make that unrepeatable:
+``merge-reads-only-the-last-batch`` was reported CAUGHT by a neighbour while its own documented
+anchor SURVIVED -- ``1 passed`` -- because that anchor's fixture already contained the whole answer
+in its final batch. The advertised proof did not exist. Three changes make that unrepeatable:
 
 * the mutation table maps name -> node IDs, so the claim is data rather than prose;
 * :func:`verify_anchors` refuses to run if any anchor names a test pytest does not collect -- an
@@ -67,16 +66,41 @@ from mutation_harness import (  # noqa: E402  # pylint: disable=wrong-import-pos
 )
 
 LEGS = "tests/test_capture_tableau_oracle_leg_decoupling.py"
+BATCH = "tests/test_group_oracle_multi_batch.py"
 SOCKET = "tests/test_tableau_http_deadline.py"
 ORACLE = "tests/test_capture_tableau_oracle.py"
 COMPLETE = "tests/test_payload_completeness.py"
+
+# ⚠️ PROBE: proof that the mutated BODY ran, not merely that a test went red.
+#
+# A mutation is only evidence if the replaced behaviour actually executed. A red test can also mean
+# the patch crashed on import, or that a fixture happened to break -- this repository has measured
+# both, and once scored 22/22 "caught" where every one was an import error. `observed_mutation()`
+# answers "did a named test fail in its call phase", which is necessary and not sufficient.
+#
+# So every mutation added for review round 3 calls `_probe("<its own name>")` from INSIDE the branch
+# whose behaviour it changes, and `PROBED` declares the tag that must appear. Absent tag -> the
+# verdict is refused, however red the suite went. The prelude is prepended to EVERY mutation (it is
+# inert if unused), so an older mutation is unaffected and can be probed later without ceremony.
+PROBE = ROOT / "tests" / "_mutation_probe.txt"
+
+PROBE_PRELUDE = f"""
+from pathlib import Path as _ProbePath
+_PROBE_FILE = _ProbePath(r"{PROBE}")
+
+
+def _probe(tag):
+    with _PROBE_FILE.open("a", encoding="utf-8") as _fh:
+        _fh.write(tag + "\\n")
+
+"""
 
 # name -> (the test NODE IDs that must observe it, the patch injected as a pytest plugin at startup)
 #
 # ⚠️ Node IDs, not files, and that is review round 1's finding 6. Mutations run under ``-x``, so a
 # whole-file target credits a mutation to whichever test fails FIRST -- and the failing test may have
 # nothing to do with the behaviour under test. Measured on this very file:
-# ``merge-reads-only-the-last-batch`` (now in the grouping campaign) was reported CAUGHT by
+# ``merge-reads-only-the-last-batch`` was reported CAUGHT by
 # ``test_the_two_legs_may_come_from_DIFFERENT_batches`` while its own documented anchor,
 # ``test_a_later_batch_that_finally_succeeded_is_promoted``, SURVIVED -- 1 passed. The advertised
 # proof did not exist. Anchoring makes the mutation-to-test mapping a checkable fact, and
@@ -300,7 +324,276 @@ def build(max_attempts, budget_sec, timeout_sec=o.REST_TIMEOUT_SEC):
 o.build_retry_policy = build
 """,
     ),
-    # -------------------------------------------------------- review round 1: salvage recovery
+    # ------------------------------------------------------------------- multi-batch promotion
+    "merge-reads-only-the-last-batch": (
+        ("tests/test_group_oracle_multi_batch.py::test_a_later_batch_that_finally_succeeded_is_promoted",),
+        """
+import group_oracle_by_workbook as g
+_orig = g.load_batches
+g.load_batches = lambda dirs: _orig(dirs)[-1:]
+""",
+    ),
+    "merge-ignores-the-on-disk-check": (
+        (
+            "tests/test_group_oracle_multi_batch.py::test_a_newer_batch_whose_file_is_GONE_does_not_displace_an_older_one_that_has_it",
+        ),
+        """
+import group_oracle_by_workbook as g
+# A manifest entry is treated as evidence: a newer `ok` whose bytes are gone displaces an older
+# batch that still has them, making the merged set worse than either input.
+g._leg_is_promotable = lambda entry, root: entry.get("status") == "ok" and bool(entry.get("path"))
+""",
+    ),
+    "merge-uses-argv-order-not-captured-at": (
+        ("tests/test_group_oracle_multi_batch.py::test_argument_order_does_not_decide_the_winner_when_timestamps_do",),
+        """
+import group_oracle_by_workbook as g
+_orig = g._merge_one_view
+def merge_one(candidates, roots):
+    # Order the merge by the position on the command line, so the answer depends on typing habit
+    # rather than on when each capture actually happened.
+    return _orig(sorted(candidates, key=lambda pair: pair[0].order, reverse=True), roots)
+g._merge_one_view = merge_one
+""",
+    ),
+    "merge-ignores-the-per-view-timestamp": (
+        ("tests/test_group_oracle_multi_batch.py::test_a_per_view_timestamp_outranks_the_batch_manifest_timestamp",),
+        """
+import group_oracle_by_workbook as g
+_orig = g._merge_one_view
+def merge_one(candidates, roots):
+    # Dates every view by its BATCH manifest, so a long capture's views all look simultaneous.
+    return _orig(sorted(candidates, key=lambda pair: (pair[0].captured_at, pair[0].order), reverse=True), roots)
+g._merge_one_view = merge_one
+""",
+    ),
+    "merge-drops-a-leg-no-batch-established": (
+        ("tests/test_group_oracle_multi_batch.py::test_a_view_no_batch_could_render_stays_visibly_unestablished",),
+        """
+import group_oracle_by_workbook as g
+_orig = g._merge_one_view
+def merge_one(candidates, roots):
+    merged = _orig(candidates, roots)
+    for kind, _sub in g.RENDER_LEGS:
+        if (merged.get(kind) or {}).get("status") not in (None, "ok"):
+            merged.pop(kind, None)
+    return merged
+g._merge_one_view = merge_one
+""",
+    ),
+    "merge-never-reports-the-basis": (
+        ("tests/test_group_oracle_multi_batch.py::test_an_undated_batch_is_reported_rather_than_dated_by_argv",),
+        """
+import group_oracle_by_workbook as g
+_orig = g.merge_batches
+def merge(batches):
+    manifest, roots, _basis = _orig(batches)
+    manifest["merge_order_basis"] = "captured_at"
+    return manifest, roots, "captured_at"
+g.merge_batches = merge
+""",
+    ),
+    "source-batch-is-never-recorded": (
+        ("tests/test_group_oracle_multi_batch.py::test_every_promoted_artifact_names_the_batch_it_came_from",),
+        """
+import group_oracle_by_workbook as g
+_orig = g._merge_one_view
+def merge_one(candidates, roots):
+    merged = _orig(candidates, roots)
+    merged.pop("source_batch", None)
+    for kind, _sub in g.RENDER_LEGS:
+        if isinstance(merged.get(kind), dict):
+            merged[kind].pop("source_batch", None)
+    return merged
+g._merge_one_view = merge_one
+""",
+    ),
+    "workbook-census-omitted": (
+        (
+            "tests/test_group_oracle_multi_batch.py::test_the_workbook_manifest_says_which_views_have_no_establishable_render",
+        ),
+        """
+import group_oracle_by_workbook as g
+_orig = g.subset_manifest
+def subset(manifest, workbook, views):
+    out = _orig(manifest, workbook, views)
+    # The per-workbook manifest stops answering "which pages of THIS workbook have no reference".
+    out.pop("render_unestablished", None)
+    out.pop("render_unestablished_views", None)
+    return out
+g.subset_manifest = subset
+""",
+    ),
+    "workbook-census-reads-the-capture-not-the-grouping": (
+        (
+            "tests/test_group_oracle_multi_batch.py::test_an_artifact_the_grouping_could_not_place_counts_as_unestablished",
+        ),
+        """
+import group_oracle_by_workbook as g
+_orig = g.subset_manifest
+def subset(manifest, workbook, views):
+    out = _orig(manifest, workbook, views)
+    # Recomputes from the CAPTURE's statuses instead of the GROUPED ones, so a leg the capture
+    # obtained but this grouping could not place still reads as covered.
+    capture_views = [v for v in manifest.get("views", []) if v.get("workbook_name") == workbook]
+    census = g.render_unestablished(capture_views, frozenset(manifest.get("requested_renders") or []))
+    out["render_unestablished"] = len(census)
+    out["render_unestablished_views"] = census
+    return out
+g.subset_manifest = subset
+""",
+    ),
+    # ------------------------------------------------- review round 1: render intent, ties, salvage
+    "intent-copied-from-the-newest-batch-only": (
+        ("tests/test_group_oracle_multi_batch.py::test_a_later_DATA_ONLY_batch_does_not_erase_a_known_render_gap",),
+        """
+import group_oracle_by_workbook as g
+_orig = g._merge_render_intent
+def intent(batches, views):
+    out = _orig(batches, views)
+    # The round-1 finding-2 defect: intent taken from the newest batch, so a later data-only run
+    # rewrites `requested_renders` to [] and every known render gap reads as "never requested".
+    newest = max(batches, key=lambda b: (b.captured_at, b.order))
+    out["requested_renders"] = sorted(newest.manifest.get("requested_renders") or [])
+    return out
+g._merge_render_intent = intent
+""",
+    ),
+    "leg-fallback-takes-the-newest-VIEW-not-the-newest-record": (
+        ("tests/test_group_oracle_multi_batch.py::test_a_later_DATA_ONLY_batch_does_not_erase_a_known_render_gap",),
+        """
+import group_oracle_by_workbook as g
+_orig = g._resolve_leg
+def resolve(candidates, kind, roots):
+    winner, ties = _orig(candidates, kind, roots)
+    # The other half of finding 2: when nothing is promotable, fall back to the newest VIEW rather
+    # than the newest view that HAS a record for this leg -- so a data-only batch erases the older
+    # batch's failed image instead of preserving it.
+    if winner is not None and not g._leg_is_promotable(winner[1].get(kind) or {}, roots[winner[0].label]):
+        newest = candidates[0]
+        return (newest if isinstance(newest[1].get(kind), dict) else None), ties
+    return winner, ties
+g._resolve_leg = resolve
+""",
+    ),
+    "reference_required-taken-from-the-newest-batch": (
+        (
+            "tests/test_group_oracle_multi_batch.py"
+            "::test_a_batch_that_required_a_reference_is_not_overruled_by_one_that_did_not",
+        ),
+        """
+import group_oracle_by_workbook as g
+_orig = g._merge_render_intent
+def intent(batches, views):
+    out = _orig(batches, views)
+    newest = max(batches, key=lambda b: (b.captured_at, b.order))
+    out["reference_required"] = bool(newest.manifest.get("reference_required"))
+    out["reference_missing"] = bool(out["reference_required"] and not out.get("reference_missing") is False)
+    return out
+g._merge_render_intent = intent
+""",
+    ),
+    "ties-reported-as-captured_at": (
+        ("tests/test_group_oracle_multi_batch.py::test_equal_timestamps_are_reported_as_a_tie_not_as_captured_at",),
+        """
+import group_oracle_by_workbook as g
+_orig = g._resolve_leg
+def resolve(candidates, kind, roots):
+    winner, _ties = _orig(candidates, kind, roots)
+    # Finding 5: equal timestamps decide nothing, but the basis still claimed `captured_at`.
+    return winner, []
+g._resolve_leg = resolve
+""",
+    ),
+    "a-tie-is-reported-even-when-it-decided-nothing": (
+        ("tests/test_group_oracle_multi_batch.py::test_a_tie_that_decides_NOTHING_is_not_reported",),
+        """
+import group_oracle_by_workbook as g
+_orig = g._resolve_leg
+def resolve(candidates, kind, roots):
+    winner, _ties = _orig(candidates, kind, roots)
+    # The opposite over-reaction: flag every shared timestamp, including ones evidence separated,
+    # until the field fires on ordinary runs and nobody reads it.
+    if winner is None:
+        return winner, []
+    same = [b.label for b, v in candidates if g._stamp(b, v) == g._stamp(*winner)]
+    return winner, (same if len(same) > 1 else [])
+g._resolve_leg = resolve
+""",
+    ),
+    # ------------------------------------------- review round 6: PROVENANCE, not merely freshness
+    #
+    # ⚠️ Both of these were fail-OPEN, and both produced a manifest that reported itself entirely
+    # healthy while carrying evidence that did not belong to what it claimed to describe.
+    "batches-from-different-tenants-are-merged": (
+        ("tests/test_group_oracle_multi_batch.py::test_batches_from_DIFFERENT_tenants_are_refused_rather_than_merged",),
+        """
+import group_oracle_by_workbook as g
+def refuse(batches):
+    # Cross-tenant evidence mixing: two sites sharing only a workbook CAPTION folded into one
+    # manifest that declared tenant B's server/site while its views carried tenant A's artifacts.
+    return None
+g._refuse_incompatible_sources = refuse
+""",
+    ),
+    "an-unrecorded-source-merges-with-anything": (
+        (
+            "tests/test_group_oracle_multi_batch.py::test_a_manifest_that_records_NO_source_cannot_be_merged_with_one_that_does",
+        ),
+        """
+import group_oracle_by_workbook as g
+_orig = g._refuse_incompatible_sources
+def refuse(batches):
+    # Treat an absent server/site as a WILDCARD rather than as its own identity -- which lets
+    # precisely the batch we know least about merge with anything, the wrong direction for a guard
+    # whose failure mode is presenting one customer's data as another's.
+    known = [b for b in batches if g._source_identity(b.manifest) is not None]
+    return _orig(known) if known else None
+g._refuse_incompatible_sources = refuse
+""",
+    ),
+    "a-stale-render-is-promoted-across-revisions": (
+        (
+            "tests/test_group_oracle_multi_batch.py::test_an_older_render_of_a_DIFFERENT_revision_is_not_promoted_beside_newer_data",
+        ),
+        """
+import group_oracle_by_workbook as g
+def revision(view):
+    # Collapse every revision to one value, so any batch can supply any leg -- the pre-fix
+    # behaviour. An old `image: ok` then lands beside new data under the NEW revision's
+    # `updated_at`, and the manifest reports data_ok=1, image_ok=1, render_unestablished=0.
+    return "same"
+g._revision = revision
+""",
+    ),
+    "an-unknown-revision-counts-as-a-match": (
+        (
+            "tests/test_group_oracle_multi_batch.py::test_a_view_whose_revision_is_UNKNOWN_does_not_promote_across_batches",
+        ),
+        """
+import group_oracle_by_workbook as g
+def revision(view):
+    # The subtler half: keep the gate but let a MISSING `updated_at` satisfy it. "We cannot tell"
+    # silently becomes "they are the same", which is the inference the gate exists to refuse -- and
+    # a server that omits `updatedAt` is a real shape, not a hypothetical one.
+    return view.get("updated_at") or "unknown"
+g._revision = revision
+""",
+    ),
+    "a-refused-stale-leg-is-dropped-instead-of-marked": (
+        (
+            "tests/test_group_oracle_multi_batch.py::test_a_refused_stale_render_is_RECORDED_rather_than_silently_dropped",
+        ),
+        """
+import group_oracle_by_workbook as g
+def blocked(refused, kind, roots):
+    # Refuse the promotion and say nothing. The merge is then CORRECT and unreadable: "an older
+    # revision has a render for this view" is the fact that decides whether to re-capture, and a
+    # silent absence turns a known gap into an unknown one.
+    return None
+g._first_blocked_by_revision = blocked
+""",
+    ),
     "reauthenticate-on-the-final-attempt": (
         (
             "tests/test_capture_tableau_oracle_leg_decoupling.py"
@@ -472,6 +765,61 @@ def read_bounded(stream, deadline, timeout):
     # -- a real export streaming legitimately slowly -- and silently shrinks every capture.
     return _orig(stream, deadline if deadline is not None else time.monotonic() + timeout, timeout)
 h._read_bounded = read_bounded
+""",
+    ),
+    "batch-label-is-the-directory-name": (
+        (
+            "tests/test_group_oracle_multi_batch.py"
+            "::test_two_captures_with_the_same_directory_NAME_stay_distinguishable",
+        ),
+        """
+import group_oracle_by_workbook as g
+# Round 2's finding 2: two captures at run1/oracle and run2/oracle collapse into one label, one
+# `roots` entry, and indistinguishable provenance.
+g._batch_labels = lambda dirs: [d.name for d in dirs]
+""",
+    ),
+    "batch-labels-disambiguated-by-index": (
+        (
+            "tests/test_group_oracle_multi_batch.py"
+            "::test_a_disambiguated_label_says_WHICH_capture_not_merely_that_they_differ",
+        ),
+        """
+import group_oracle_by_workbook as g
+def labels(dirs):
+    # Unique, and useless as provenance: `oracle`, `oracle-2` says only THAT they differ, never which
+    # directory a reader should open.
+    seen, out = {}, []
+    for d in dirs:
+        seen[d.name] = seen.get(d.name, 0) + 1
+        out.append(d.name if seen[d.name] == 1 else f"{d.name}-{seen[d.name]}")
+    return out
+g._batch_labels = labels
+""",
+    ),
+    "every-label-prefixed-whether-or-not-it-collides": (
+        ("tests/test_group_oracle_multi_batch.py::test_unique_names_are_left_alone",),
+        """
+import group_oracle_by_workbook as g
+_orig = g._batch_labels
+# The opposite over-reach: prefix everything, churning `source_batch` for every existing capture.
+g._batch_labels = lambda dirs: ["/".join(d.resolve().parts[-2:]) for d in dirs]
+""",
+    ),
+    "the-same-capture-twice-is-silently-deduplicated": (
+        ("tests/test_group_oracle_multi_batch.py::test_the_same_capture_given_twice_is_refused_not_deduplicated",),
+        """
+import group_oracle_by_workbook as g
+_orig = g.load_batches
+def load(dirs):
+    seen, unique = set(), []
+    for d in dirs:
+        key = str(d.resolve())
+        if key not in seen:
+            seen.add(key)
+            unique.append(d)
+    return _orig(unique)
+g.load_batches = load
 """,
     ),
     # ------------------------------------- review round 3: the whole request, and an exact keyword
@@ -883,6 +1231,312 @@ def connect(self):
 h._DeadlineHTTPSConnection.connect = connect
 """,
     ),
+    # ------------------------------------ review round 3: "CANNOT ESTABLISH" IS ITS OWN STATE.
+    #
+    # ⚠️ Every mutation below calls `_probe(...)` from inside the branch it changes. Its tag must
+    # appear in the probe file or the verdict is refused, however red the suite went -- a red test
+    # proves a test failed, never that the mutated body ran.
+    "two-unknown-sources-compare-equal": (
+        (
+            "tests/test_group_oracle_multi_batch.py"
+            "::test_TWO_anonymous_captures_do_not_merge_just_because_both_are_anonymous",
+        ),
+        """
+import group_oracle_by_workbook as g
+_orig = g._source_identity
+def identity(manifest):
+    # THE blocker, verbatim: map a missing identity onto ("", "") so two anonymous manifests produce
+    # ONE identity, the cardinality check sees no disagreement, and they merge.
+    found = _orig(manifest)
+    if found is None:
+        _probe("two-unknown-sources-compare-equal")
+        return "", ""
+    return found
+g._source_identity = identity
+""",
+    ),
+    "an-empty-site-is-treated-as-unrecorded": (
+        ("tests/test_group_oracle_multi_batch.py::test_a_recorded_but_EMPTY_site_is_the_default_site_not_an_absence",),
+        """
+import group_oracle_by_workbook as g
+_orig = g._source_identity
+def identity(manifest):
+    # The OVER-correction, and the reason the guard tests field PRESENCE rather than truthiness:
+    # `""` is Tableau Server's documented DEFAULT SITE, so treating it as an absence refuses every
+    # legitimate Default-site merge. A rule that fires on everything is as useless as one that never
+    # fires, and only this second mutation can tell the two apart.
+    found = _orig(manifest)
+    if found is not None and not found[1]:
+        _probe("an-empty-site-is-treated-as-unrecorded")
+        return None
+    return found
+g._source_identity = identity
+""",
+    ),
+    "the-two-source-refusals-are-collapsed-into-one-type": (
+        (
+            "tests/test_group_oracle_multi_batch.py"
+            "::test_an_unestablished_source_is_NOT_reported_as_a_tenant_disagreement",
+        ),
+        """
+import group_oracle_by_workbook as g
+_orig = g._refuse_incompatible_sources
+def refuse(batches):
+    # "These are two tenants" and "we cannot tell whether these are two tenants" are different
+    # answers. One shared exception type still blocks, so every exit-code assertion keeps passing --
+    # and the fail-open collapse could return unnoticed, because no test could name which guard fired.
+    try:
+        return _orig(batches)
+    except g.UnestablishedBatchSource as exc:
+        _probe("the-two-source-refusals-are-collapsed-into-one-type")
+        raise g.IncompatibleBatchSources(str(exc)) from None
+g._refuse_incompatible_sources = refuse
+""",
+    ),
+    # ------------------------------------ review round 3: PROMOTION IS RECONCILED, NOT LAYERED.
+    "a-refused-artifact-is-left-on-disk": (
+        (
+            "tests/test_group_oracle_multi_batch.py"
+            "::test_a_REFUSED_old_revision_artifact_does_not_stay_in_reference_images",
+        ),
+        """
+import group_oracle_by_workbook as g
+def reconcile(destination, written, previous, *, dry_run):
+    # THE blocker: copy the winners and reconcile nothing. The manifest still correctly reports the
+    # stale render as unpromoted -- and the old-revision PNG stays in reference/images/, so a
+    # consumer listing the DIRECTORY gets evidence the merge explicitly rejected.
+    _probe("a-refused-artifact-is-left-on-disk")
+    return [], []
+g._reconcile_destination = reconcile
+""",
+    ),
+    "reconciliation-deletes-what-it-cannot-attribute": (
+        ("tests/test_group_oracle_multi_batch.py::test_reconciliation_removes_only_files_a_PREVIOUS_grouping_named",),
+        """
+import group_oracle_by_workbook as g
+from pathlib import Path
+def reconcile(destination, written, previous, *, dry_run):
+    # The OVER-correction: "replace" read as "delete anything I did not write". reference/{images,data}/
+    # is this script's tree, but not everything in it is ours -- silently removing a hand-dropped
+    # reference is a worse failure than the one being fixed.
+    _probe("reconciliation-deletes-what-it-cannot-attribute")
+    on_disk = set()
+    for _kind, sub in g.RENDER_LEGS:
+        folder = destination / sub
+        if folder.is_dir():
+            on_disk |= {f"{sub}/{c.name}" for c in folder.iterdir() if c.is_file()}
+    extra = sorted(on_disk - written)
+    if not dry_run:
+        for relative in extra:
+            (destination / relative).unlink(missing_ok=True)
+    return extra, []
+g._reconcile_destination = reconcile
+""",
+    ),
+    "unattributed-files-are-accepted-silently": (
+        ("tests/test_group_oracle_multi_batch.py::test_reconciliation_removes_only_files_a_PREVIOUS_grouping_named",),
+        """
+import group_oracle_by_workbook as g
+_orig = g._reconcile_destination
+def reconcile(destination, written, previous, *, dry_run):
+    # Keep the removal, drop the report. The dangerous half is quiet: a folder holding bytes no
+    # manifest accounts for reads as a clean promotion, and the exit code says everything landed.
+    _probe("unattributed-files-are-accepted-silently")
+    removed, _unattributed = _orig(destination, written, previous, dry_run=dry_run)
+    return removed, []
+g._reconcile_destination = reconcile
+""",
+    ),
+    "a-dry-run-reconciles-anyway": (
+        ("tests/test_group_oracle_multi_batch.py::test_a_dry_run_reconciles_NOTHING",),
+        """
+import group_oracle_by_workbook as g
+_orig = g._reconcile_destination
+def reconcile(destination, written, previous, *, dry_run):
+    # Deleting IS writing. A dry run that removes files is not a dry run, and this is the one
+    # mutation whose damage is invisible in the manifest it produces.
+    _probe("a-dry-run-reconciles-anyway")
+    return _orig(destination, written, previous, dry_run=False)
+g._reconcile_destination = reconcile
+""",
+    ),
+    # ------------------------------------ review round 3: WORKBOOKS ARE KEYED BY LUID.
+    "views-are-bucketed-by-workbook-NAME": (
+        (
+            "tests/test_group_oracle_multi_batch.py"
+            "::test_two_DIFFERENT_workbooks_normalizing_onto_one_folder_are_both_refused",
+        ),
+        """
+import group_oracle_by_workbook as g
+def group(manifest):
+    # THE blocker, verbatim: bucket by display name. Two distinct LUIDs whose names normalize onto
+    # one key merge into one bucket, and nothing downstream can tell they were ever two workbooks.
+    _probe("views-are-bucketed-by-workbook-NAME")
+    buckets = {}
+    for view in manifest.get("views", []):
+        buckets.setdefault(view.get("workbook_name") or "", []).append(view)
+    return buckets
+g.group_views = group
+""",
+    ),
+    "a-destination-claimed-twice-is-written-anyway": (
+        (
+            "tests/test_group_oracle_multi_batch.py"
+            "::test_two_DIFFERENT_workbooks_normalizing_onto_one_folder_are_both_refused",
+        ),
+        """
+import group_oracle_by_workbook as g
+def contested(resolved):
+    # Keep the LUID keying and lose the collision detection: each folder reports exactly one
+    # claimant, so both workbooks are written in sequence and the second manifest overwrites the
+    # first while both workbooks' files remain. Exit 0, no warning.
+    _probe("a-destination-claimed-twice-is-written-anyway")
+    return {item.folder: [item.luid] for item in resolved}
+g._contested = contested
+""",
+    ),
+    "every-shared-parent-counts-as-a-collision": (
+        ("tests/test_group_oracle_multi_batch.py::test_two_workbooks_with_their_OWN_folders_still_group",),
+        """
+import group_oracle_by_workbook as g
+def contested(resolved):
+    # The OVER-correction: refuse any capture carrying more than one workbook. It passes the
+    # collision test and breaks every ordinary estate -- which is why the negative control exists.
+    _probe("every-shared-parent-counts-as-a-collision")
+    everyone = [item.luid for item in resolved]
+    return {item.folder: everyone for item in resolved}
+g._contested = contested
+""",
+    ),
+    "a-missing-workbook-luid-falls-back-to-the-name": (
+        (
+            "tests/test_group_oracle_multi_batch.py"
+            "::test_a_view_with_NO_workbook_luid_is_refused_rather_than_bucketed_by_name",
+        ),
+        """
+import group_oracle_by_workbook as g
+def group(manifest):
+    # The subtle half: keep LUID keying but let a MISSING LUID fall back to the display name. "We
+    # cannot tell which workbook this is" silently becomes an identity again, which is the whole
+    # defect class -- an unassessable input collapsing into the clean bucket.
+    buckets = {}
+    for view in manifest.get("views", []):
+        key = view.get("workbook_luid")
+        if not key:
+            _probe("a-missing-workbook-luid-falls-back-to-the-name")
+            key = view.get("workbook_name") or ""
+        buckets.setdefault(key, []).append(view)
+    return buckets
+g.group_views = group
+""",
+    ),
+    # ------------------------------------ review round 3: EVERY BATCH ON DISK.
+    "an-unlisted-batch-beside-a-given-one-is-skipped": (
+        ("tests/test_group_oracle_multi_batch.py::test_a_batch_on_disk_that_was_not_passed_is_REFUSED_not_skipped",),
+        """
+import group_oracle_by_workbook as g
+def siblings(listed, excluded):
+    # THE moved boundary: read exactly the arguments the operator remembered. The third retry whose
+    # PNG finally landed stays unread, and the merged manifest reports the earlier failure as current.
+    _probe("an-unlisted-batch-beside-a-given-one-is-skipped")
+    return None
+g._refuse_unlisted_siblings = siblings
+""",
+    ),
+    "any-sibling-directory-blocks-the-listed-mode": (
+        ("tests/test_group_oracle_multi_batch.py::test_a_non_batch_sibling_does_not_block_the_LISTED_mode",),
+        """
+import group_oracle_by_workbook as g
+def siblings(listed, excluded):
+    # The OVER-correction: refuse on ANY sibling directory rather than on an unlisted capture BATCH.
+    # `_runs/<run>/oracle` sits beside assessment/, bundle/ and scratch/, so this makes the listed
+    # mode unusable on the layout this repo actually writes.
+    _probe("any-sibling-directory-blocks-the-listed-mode")
+    for path in {p.resolve().parent for p in listed}:
+        for child in (c for c in path.iterdir() if c.is_dir()):
+            if child.resolve() not in {p.resolve() for p in listed} and child.resolve() not in excluded:
+                raise g.UnlistedBatchOnDisk(str(child))
+g._refuse_unlisted_siblings = siblings
+""",
+    ),
+    "discovery-skips-what-it-cannot-classify": (
+        ("tests/test_group_oracle_multi_batch.py::test_a_directory_under_the_root_that_is_NOT_a_batch_blocks",),
+        """
+import group_oracle_by_workbook as g
+def discover(root, excluded):
+    # The boundary moved a THIRD time: from "every argument you typed" to "every directory I happened
+    # to recognise". A half-written capture is then silently absent, which is the same defect in a
+    # third costume -- and the only difference from the shipped rule is a `continue` instead of a raise.
+    _probe("discovery-skips-what-it-cannot-classify")
+    found = []
+    root_is_batch = g.is_capture_batch(root)
+    if root_is_batch:
+        found.append(root)
+    for child in sorted(p for p in root.iterdir() if p.is_dir()):
+        if child.resolve() in excluded:
+            continue
+        if root_is_batch and child.name in g.CAPTURE_SUBDIRS:
+            continue
+        if g.is_capture_batch(child):
+            found.append(child)
+    return found
+g.discover_batches = discover
+""",
+    ),
+    "any-oracle_manifest_json-counts-as-a-capture-batch": (
+        ("tests/test_group_oracle_multi_batch.py::test_a_GROUPED_manifest_is_not_mistaken_for_a_capture_batch",),
+        """
+import group_oracle_by_workbook as g
+def is_batch(directory):
+    # Match on the FILENAME rather than the schema. `migrations/workbooks/<slug>/reference/` carries a
+    # file with exactly that name -- this script's own OUTPUT -- so discovery would feed output into
+    # input, and a per-workbook subset would be merged as though it were a capture.
+    _probe("any-oracle_manifest_json-counts-as-a-capture-batch")
+    return (directory / g.MANIFEST_NAME).is_file()
+g.is_capture_batch = is_batch
+""",
+    ),
+    "exclude-is-accepted-and-ignored": (
+        ("tests/test_group_oracle_multi_batch.py::test_exclude_is_the_ONE_auditable_escape_and_is_recorded",),
+        """
+import group_oracle_by_workbook as g
+_orig = g.resolve_batch_dirs
+def resolve(oracle, oracle_root, exclude):
+    # The flag parses, the refusal still fires, and nothing an operator excluded is actually excluded.
+    # The auditable escape becomes an unusable one -- fail-CLOSED, but it makes the guard un-shippable.
+    _probe("exclude-is-accepted-and-ignored")
+    return _orig(oracle, oracle_root, ())
+g.resolve_batch_dirs = resolve
+""",
+    ),
+    # ------------------------------------ review round 3, finding 4: THE EXIT CODE.
+    "a-stale-refusal-does-not-reach-the-exit-code": (
+        (
+            "tests/test_group_oracle_multi_batch.py"
+            "::test_a_REFUSED_old_revision_artifact_does_not_stay_in_reference_images",
+        ),
+        """
+import group_oracle_by_workbook as g
+def incomplete(outcomes, manifest):
+    # The shipped behaviour before finding 4: warn about the refused cross-revision leg, persist the
+    # count, and return 0. A gate reading only the exit code is told everything landed.
+    _probe("a-stale-refusal-does-not-reach-the-exit-code")
+    return bool(any(outcomes[b] for b in g.OUTCOME_BUCKETS if b != "grouped"))
+g._incomplete = incomplete
+""",
+    ),
+    "every-run-reports-incomplete": (
+        ("tests/test_group_oracle_multi_batch.py::test_an_UNCHANGED_re_run_removes_nothing",),
+        """
+import group_oracle_by_workbook as g
+def incomplete(outcomes, manifest):
+    # The OVER-correction. An exit code that is always 1 carries no information, and would pass every
+    # single "must not return 0" assertion in this file.
+    _probe("every-run-reports-incomplete")
+    return True
+g._incomplete = incomplete
+""",
+    ),
     # -------------------------------------------------------------- discriminating controls
     "control-cosmetic-log-wording": (
         (
@@ -897,11 +1551,270 @@ def log(unestablished, redactor):
 m._log_unestablished = log
 """,
     ),
+    "control-cosmetic-batch-report-key": (
+        ("tests/test_group_oracle_multi_batch.py::test_the_grouping_report_names_every_batch_it_merged",),
+        """
+import group_oracle_by_workbook as g
+_orig = g._write_grouping_report
+def report(inputs, outcomes):
+    out = _orig(inputs, outcomes)
+    g.LOG.info("cosmetic extra line, asserted on by nothing")
+    return out
+g._write_grouping_report = report
+""",
+    ),
+    # ------------------------- review round 7: AN UNASSESSABLE MANIFEST IS NOT A CLEAN MERGE.
+    # Both mutations below restore a measured fail-open verbatim; the two after them are the
+    # matching OVER-corrections, because a validator that refuses legitimate captures would block
+    # the customer multi-batch merge this whole change exists to deliver.
+    "a-manifest-is-parsed-but-not-validated": (
+        (
+            "tests/test_group_oracle_multi_batch.py"
+            "::test_an_empty_json_object_is_refused_rather_than_grouped_as_zero_workbooks",
+            "tests/test_group_oracle_multi_batch.py"
+            "::test_a_manifest_with_no_views_key_is_refused_even_when_its_schema_is_right",
+            "tests/test_group_oracle_multi_batch.py::test_a_JSON_LIST_manifest_exits_2_rather_than_CRASHING_at_1",
+        ),
+        """
+import json
+from pathlib import Path
+import group_oracle_by_workbook as g
+def load(oracle_dir):
+    # THE defect, verbatim: reading is accepting. `{}` and a schema-carrying manifest with no `views`
+    # then report a CLEAN merge (exit 0, "0 grouped"), and `[]` dies on `.get` inside merge_batches
+    # at exit 1 -- the "grouped what it could" code, for an input that was never grouped at all.
+    _probe("a-manifest-is-parsed-but-not-validated")
+    path = oracle_dir / g.MANIFEST_NAME
+    if not path.is_file():
+        raise FileNotFoundError(f"no {g.MANIFEST_NAME} in {oracle_dir}")
+    return json.loads(path.read_text(encoding="utf-8"))
+g.load_manifest = load
+""",
+    ),
+    "a-missing-view_luid-collapses-onto-the-empty-string": (
+        (
+            "tests/test_group_oracle_multi_batch.py"
+            "::test_TWO_views_with_no_view_luid_are_refused_rather_than_COLLAPSED_into_one",
+            "tests/test_group_oracle_multi_batch.py::test_ONE_anonymous_view_beside_an_identified_one_is_refused_too",
+        ),
+        """
+import group_oracle_by_workbook as g
+_orig = g._validate_manifest
+def validate(path, payload):
+    # THE second defect: keep every SHAPE check and drop only the identity one, so the manifest is
+    # well-formed by every other measure and `merge_batches` still buckets on `view_luid or ""` --
+    # a coercion this mutation deliberately does NOT touch, because it is still in the shipped code
+    # and is exactly what makes a missing identity lossy. Two anonymous views -> one bucket,
+    # newest-wins, one view out, exit 0.
+    _probe("a-missing-view_luid-collapses-onto-the-empty-string")
+    try:
+        return _orig(path, payload)
+    except g.UnidentifiedCaptureView:
+        return payload
+g._validate_manifest = validate
+""",
+    ),
+    "an-EMPTY-views-list-is-refused-as-damaged": (
+        (
+            "tests/test_group_oracle_multi_batch.py"
+            "::test_an_EMPTY_views_list_is_a_true_statement_about_the_data_and_is_NOT_refused",
+        ),
+        """
+import group_oracle_by_workbook as g
+_orig = g._validate_manifest
+def validate(path, payload):
+    # The OVER-correction, and the reason the guard tests the KEY rather than truthiness: a capture
+    # whose filter selected nothing really does write `"views": []` and exits 0. Refusing it turns an
+    # honest empty capture into a blocking error while catching nothing the shipped rule misses.
+    _probe("an-EMPTY-views-list-is-refused-as-damaged")
+    found = _orig(path, payload)
+    if not found["views"]:
+        raise g.MalformedCaptureManifest(f"{path} carries no views")
+    return found
+g._validate_manifest = validate
+""",
+    ),
+    "a-missing-workbook_luid-is-refused-at-load-too": (
+        (
+            "tests/test_group_oracle_multi_batch.py"
+            "::test_a_missing_WORKBOOK_luid_is_still_BUCKETED_and_reported_not_refused_at_load",
+        ),
+        """
+import group_oracle_by_workbook as g
+_orig = g._validate_manifest
+def validate(path, payload):
+    # The plausible OVER-correction: "both LUIDs are identity, so refuse both." It reads as symmetry
+    # and it deletes a whole reporting path -- the `unidentified` outcome bucket, its REFUSAL_NO_LUID
+    # record and its exit-1 verdict all become unreachable. The two fields differ in CONSEQUENCE: a
+    # missing workbook_luid loses nothing, a missing view_luid destroys the record.
+    _probe("a-missing-workbook_luid-is-refused-at-load-too")
+    found = _orig(path, payload)
+    anonymous = [i for i, v in enumerate(found["views"]) if not v.get("workbook_luid")]
+    if anonymous:
+        raise g.UnidentifiedCaptureView(f"{path} holds {len(anonymous)} view(s) with no workbook_luid")
+    return found
+g._validate_manifest = validate
+""",
+    ),
+    "the-shape-and-identity-refusals-are-collapsed-into-one-type": (
+        (
+            "tests/test_group_oracle_multi_batch.py"
+            "::test_the_identity_refusal_is_its_OWN_type_not_a_generic_malformed_manifest",
+        ),
+        """
+import group_oracle_by_workbook as g
+_orig = g._validate_manifest
+def validate(path, payload):
+    # "This file is not a capture manifest" and "this capture cannot say which view it captured" are
+    # different answers. One shared type still exits 2, so every exit-code assertion keeps passing --
+    # and no test could then name which guard fired, which is how the weaker one rots back open.
+    _probe("the-shape-and-identity-refusals-are-collapsed-into-one-type")
+    try:
+        return _orig(path, payload)
+    except g.UnidentifiedCaptureView as exc:
+        raise g.MalformedCaptureManifest(str(exc)) from None
+g._validate_manifest = validate
+""",
+    ),
+    # ------------------------- review round 8: AN IDENTITY IS A TYPE, NOT A TRUTHINESS. The third
+    # round of the same fail-open class, so the mutations below break the DECLARED TABLE rather than
+    # any single predicate -- and the two over-corrections after them are the shapes a table makes
+    # easy to get wrong: refusing `null` (which the real writer emits) and requiring a leg `path`
+    # (which no failed capture has).
+    "view_luid-is-tested-for-TRUTHINESS-not-type": (
+        (
+            "tests/test_group_oracle_multi_batch.py::test_a_view_luid_that_is_not_a_NON_EMPTY_STRING_is_refused_at_2",
+            "tests/test_group_oracle_multi_batch.py"
+            "::test_a_wrong_TYPED_view_luid_is_the_identity_refusal_not_a_generic_shape_one",
+        ),
+        """
+import group_oracle_by_workbook as g
+def identity(value):
+    # THE defect, verbatim: `not view.get("view_luid")` answered "is there something there" instead
+    # of "is it an identity". `123` is truthy and hashable, so it bucketed, merged and reported a
+    # CLEAN run (measured: exit 0, "1 grouped"); `{...}` and `[...]` are truthy and unhashable and
+    # crashed at exit 1. Every shape check above this line still passes, which is why the manifest
+    # reads as well-formed right up to the fold.
+    _probe("view_luid-is-tested-for-TRUTHINESS-not-type")
+    return bool(value)
+g._is_view_identity = identity
+""",
+    ),
+    "the-consumed-leg-structures-are-not-typed": (
+        (
+            "tests/test_group_oracle_multi_batch.py::test_a_render_leg_that_is_a_SCALAR_is_refused_rather_than_crashing",
+            "tests/test_group_oracle_multi_batch.py"
+            "::test_an_OBJECT_valued_leg_path_is_refused_rather_than_joined_onto_a_Path",
+        ),
+        """
+import group_oracle_by_workbook as g
+def views(path, records):
+    # The second half of the finding: identity typed, legs still trusted. `image: "junk"` died on
+    # `.get` inside `_leg_is_promotable` and an object-valued `image.path` died on `root / path` --
+    # both at exit 1, the "grouped what it could" code, for input that was never grouped.
+    _probe("the-consumed-leg-structures-are-not-typed")
+    return None
+g._refuse_untyped_views = views
+""",
+    ),
+    "the-type-table-is-declared-but-never-applied": (
+        ("tests/test_group_oracle_multi_batch.py::test_EVERY_field_in_the_type_table_is_actually_enforced",),
+        """
+import group_oracle_by_workbook as g
+def untyped(path, where, mapping, specs):
+    # The failure mode a DECLARATIVE fix has that a predicate does not: a table that reads as
+    # complete and is enforced nowhere. Every field name still appears in the source, so the census
+    # test and every docstring stay green while nothing is actually checked.
+    _probe("the-type-table-is-declared-but-never-applied")
+    return None
+g._refuse_untyped = untyped
+""",
+    ),
+    "a-list-field-is-typed-only-as-a-LIST": (
+        (
+            "tests/test_group_oracle_multi_batch.py::test_a_LIST_field_is_typed_by_its_ELEMENTS_not_only_by_being_a_list",
+        ),
+        """
+import group_oracle_by_workbook as g
+_orig = g._refuse_untyped
+def untyped(path, where, mapping, specs):
+    # The half-measure: check the container, trust the contents. `sorted(["png", 7])` raises, so
+    # `requested_renders` with one wrong element still reaches exit 1 through the render-intent union.
+    _probe("a-list-field-is-typed-only-as-a-LIST")
+    return _orig(path, where, mapping, tuple(g._Typed(s.name, s.kind) for s in specs))
+g._refuse_untyped = untyped
+""",
+    ),
+    "JSON-null-is-treated-as-a-type-error": (
+        ("tests/test_group_oracle_multi_batch.py::test_the_writers_OWN_nulls_are_not_type_errors",),
+        """
+import group_oracle_by_workbook as g
+def untyped(path, where, mapping, specs):
+    # THE over-correction, and it would refuse real captures rather than damaged ones: the writer
+    # emits `"workbook_luid": workbook.get("id")`, so JSON null is what a REST response that omitted
+    # the field produces. "Present but null" and "absent" are one statement, and only one of them
+    # would still be accepted here.
+    _probe("JSON-null-is-treated-as-a-type-error")
+    for spec in specs:
+        value = mapping.get(spec.name)
+        if value is not None and not isinstance(value, spec.kind):
+            raise g.MalformedCaptureManifest(f"{path}: {where} carries {spec.name!r} wrongly typed")
+        if spec.name in mapping and mapping[spec.name] is None:
+            raise g.MalformedCaptureManifest(f"{path}: {where} carries {spec.name!r} as null")
+g._refuse_untyped = untyped
+""",
+    ),
+    "a-leg-is-required-to-carry-a-path": (
+        ("tests/test_group_oracle_multi_batch.py::test_a_FAILED_leg_carrying_no_path_is_still_a_legitimate_record",),
+        """
+import group_oracle_by_workbook as g
+_orig = g._refuse_untyped_views
+def views(path, records):
+    # The second over-correction: typing a field slides easily into requiring it. A capture that
+    # failed writes `{"status": "transient", "error": ..., "detail": ...}` with no `path` at all, so
+    # this refuses every unsuccessful capture ever taken -- the exact evidence the grouping exists to
+    # keep visible.
+    _probe("a-leg-is-required-to-carry-a-path")
+    _orig(path, records)
+    for index, view in enumerate(records):
+        for kind, _sub in g.RENDER_LEGS:
+            leg = view.get(kind)
+            if isinstance(leg, dict) and "path" not in leg:
+                raise g.MalformedCaptureManifest(f"{path}: view {index}'s {kind} leg carries no path")
+g._refuse_untyped_views = views
+""",
+    ),
+    "control-untyped-field-nobody-reads": (
+        (
+            "tests/test_group_oracle_multi_batch.py::test_a_legitimate_multi_batch_merge_is_UNAFFECTED_by_the_new_validation",
+        ),
+        """
+import group_oracle_by_workbook as g
+_orig = g._refuse_untyped_views
+def views(path, records):
+    # NEGATIVE CONTROL: type a field this script never reads (`view_name`, carried but not consumed).
+    # It must SURVIVE. If it were caught, the suite would be asserting on the validator's incidental
+    # reach rather than on the fields the merge actually depends on -- and every future table entry
+    # would then need a matching fixture edit for reasons nothing explains.
+    _orig(path, records)
+    for view in records:
+        if view.get("view_name") is not None and not isinstance(view.get("view_name"), str):
+            raise g.MalformedCaptureManifest(f"{path}: view_name is not a string")
+g._refuse_untyped_views = views
+""",
+    ),
     "control-absent-anchor-legs": (
         ("tests/test_capture_tableau_oracle_leg_decoupling.py::test_a_failed_data_leg_no_longer_skips_the_render",),
         """
 import capture_tableau_oracle as o
 o._this_symbol_does_not_exist.attribute = 1
+""",
+    ),
+    "control-absent-anchor-batch": (
+        ("tests/test_group_oracle_multi_batch.py::test_a_later_batch_that_finally_succeeded_is_promoted",),
+        """
+import group_oracle_by_workbook as g
+g._also_not_a_real_symbol.attribute = 1
 """,
     ),
 }
@@ -914,6 +1827,76 @@ EXPECTED = {
     for name in MUTATIONS
 }
 
+# name -> the tag its mutated body must write. Only the round-3 mutations declare one, because only
+# those were written with a `_probe(...)` call inside the branch they change; an older mutation has
+# no tag and is scored exactly as before. A declared tag that does NOT appear refuses the verdict --
+# which is stronger than "a test went red", the check that once reported 22/22 caught on 22 import
+# errors. A NEGATIVE probe is asserted too, for the absent-anchor controls: they must not run.
+#
+# ⚠️ ENUMERATED, never derived from the code. Deriving it (`"_probe(" in code`) would make the
+# harness's own guard fail open in the most likely way it will ever be attacked: delete the
+# `_probe(...)` line while editing a mutation and the requirement deletes itself with it, silently
+# returning that mutation to red-suite-only scoring. :func:`verify_probes` makes that a hard error in
+# BOTH directions instead -- a probed mutation that lost its call, and a call nobody declared.
+PROBED = frozenset(
+    {
+        "two-unknown-sources-compare-equal",
+        "an-empty-site-is-treated-as-unrecorded",
+        "the-two-source-refusals-are-collapsed-into-one-type",
+        "a-refused-artifact-is-left-on-disk",
+        "reconciliation-deletes-what-it-cannot-attribute",
+        "unattributed-files-are-accepted-silently",
+        "a-dry-run-reconciles-anyway",
+        "views-are-bucketed-by-workbook-NAME",
+        "a-destination-claimed-twice-is-written-anyway",
+        "every-shared-parent-counts-as-a-collision",
+        "a-missing-workbook-luid-falls-back-to-the-name",
+        "an-unlisted-batch-beside-a-given-one-is-skipped",
+        "any-sibling-directory-blocks-the-listed-mode",
+        "discovery-skips-what-it-cannot-classify",
+        "any-oracle_manifest_json-counts-as-a-capture-batch",
+        "exclude-is-accepted-and-ignored",
+        "a-stale-refusal-does-not-reach-the-exit-code",
+        "every-run-reports-incomplete",
+        "a-manifest-is-parsed-but-not-validated",
+        "a-missing-view_luid-collapses-onto-the-empty-string",
+        "an-EMPTY-views-list-is-refused-as-damaged",
+        "a-missing-workbook_luid-is-refused-at-load-too",
+        "the-shape-and-identity-refusals-are-collapsed-into-one-type",
+        "view_luid-is-tested-for-TRUTHINESS-not-type",
+        "the-consumed-leg-structures-are-not-typed",
+        "the-type-table-is-declared-but-never-applied",
+        "a-list-field-is-typed-only-as-a-LIST",
+        "JSON-null-is-treated-as-a-type-error",
+        "a-leg-is-required-to-carry-a-path",
+    }
+)
+
+
+def verify_probes() -> list[str]:
+    """The declared probe set and the mutations that actually call ``_probe`` must be the SAME set.
+
+    Both directions are failures, and the first is the one that matters: a mutation listed here whose
+    ``_probe(...)`` call has been edited away would pass every other check while quietly losing the
+    proof that its body ran.
+    """
+    calls = {name for name, (_anchors, code) in MUTATIONS.items() if "_probe(" in code}
+    unknown = sorted(PROBED - set(MUTATIONS))
+    return (
+        [f"{name}: declared probed but never calls _probe()" for name in sorted(PROBED & set(MUTATIONS) - calls)]
+        + [f"{name}: calls _probe() but is not declared in PROBED" for name in sorted(calls - PROBED)]
+        + [f"{name}: declared probed but is not a mutation" for name in unknown]
+    )
+
+
+def probe_tags() -> set[str]:
+    """Every tag written by the mutation that just ran, then reset for the next one."""
+    if not PROBE.is_file():
+        return set()
+    tags = {line.strip() for line in PROBE.read_text(encoding="utf-8").splitlines() if line.strip()}
+    PROBE.unlink(missing_ok=True)
+    return tags
+
 
 def verify_anchors() -> list[str]:
     """Every declared anchor must name a test pytest actually collects.
@@ -924,7 +1907,7 @@ def verify_anchors() -> list[str]:
     that never ran. This is the same false-green shape the shared harness's own docstring records.
     """
     collected: set[str] = set()
-    for suite in (LEGS, SOCKET, ORACLE, COMPLETE):
+    for suite in (LEGS, BATCH, SOCKET, ORACLE, COMPLETE):
         proc = subprocess.run(
             [PY, "-m", "pytest", suite, "--collect-only", "-q", "--no-header", "--color=no"],
             cwd=ROOT,
@@ -970,12 +1953,21 @@ def baseline(anchors: tuple[str, ...]) -> tuple[int, str]:
 
 def classify(name: str, code: str, target: tuple[str, ...]) -> tuple[str, str]:
     """Score one mutation as CAUGHT / SURVIVED / INVALID / HARNESS-ERROR, with a detail line."""
+    PROBE.unlink(missing_ok=True)
     try:
-        _label, returncode, detail, outcomes = run(name, code, target)
+        _label, returncode, detail, outcomes = run(name, PROBE_PRELUDE + code, target)
     except SystemExit as exc:
         # The shared harness refuses to score a mutation whose plugin failed to import. That is
         # exactly the verdict an absent-anchor control is meant to earn.
-        return "INVALID", str(exc)
+        return "INVALID", f"{exc} [probe: {sorted(probe_tags()) or 'nothing ran'}]"
+    tags = probe_tags()
+    expected_tag = name if name in PROBED else None
+    if expected_tag is not None and expected_tag not in tags:
+        # ⚠️ The point of the probe. A red suite proves a test failed; it does not prove the replaced
+        # body ever executed, and this repository has scored 22 import errors as 22 detections.
+        return "NO-PROBE", f"{detail} [mutated body never ran: probe tags {sorted(tags) or 'none'}]"
+    if expected_tag is None and tags:
+        return "HARNESS-ERROR", f"an unprobed mutation wrote probe tags {sorted(tags)}"
     if observed_mutation(outcomes):
         verdict = "CAUGHT" if outcomes["call_failed"] else "CAUGHT*"
         if session_ended_abnormally(outcomes):
@@ -998,6 +1990,13 @@ def classify(name: str, code: str, target: tuple[str, ...]) -> tuple[str, str]:
 
 def main() -> int:
     """Run every mutation against its own anchors, and fail unless each scored what it declared."""
+    broken = verify_probes()
+    if broken:
+        print("HARNESS ERROR: the declared probe set and the mutations that call _probe() disagree:")
+        for item in broken:
+            print(f"  {item}")
+        return 2
+
     missing = verify_anchors()
     if missing:
         print("HARNESS ERROR: an anchor names a test pytest does not collect, so it proves nothing:")
@@ -1034,7 +2033,8 @@ def main() -> int:
         f"all {len(MUTATIONS)} mutations scored as declared, each against its OWN anchor(s) "
         f"({sum(1 for v in EXPECTED.values() if v == 'CAUGHT')} caught, "
         f"{sum(1 for v in EXPECTED.values() if v == 'SURVIVED')} cosmetic controls survived, "
-        f"{sum(1 for v in EXPECTED.values() if v == 'INVALID')} absent-anchor controls invalid)"
+        f"{sum(1 for v in EXPECTED.values() if v == 'INVALID')} absent-anchor controls invalid); "
+        f"{len(PROBED)} of them additionally PROVED the mutated body ran"
     )
     return 0
 
