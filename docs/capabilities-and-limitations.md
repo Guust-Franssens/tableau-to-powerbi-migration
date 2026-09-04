@@ -209,7 +209,10 @@ a single pass does.
     and `PBIR_TEXTBOX_HEIGHT_BELOW_FLOOR` — and no chart equivalent. This is a property of the
     *validator*, so it is unaffected by any engine version.
   - ⚠️ **The population counts are ours at 2.339.0 and are NOT current at 2.356.0.** Treat the
-    numbers as a worked example, not as today's estate.
+    numbers as a worked example, not as today's estate. ❌ They cannot be refreshed from this repo:
+    the source `Airline Alliance Activity Dashboard _ #VOTD.twbx` is a public `#VOTD` workbook that is
+    **not committed here** (only its built output under `examples/airline-alliance-activity/` is), so
+    re-measuring the population needs the workbook re-downloaded first.
   - ❌ **It does not reproduce in the maintainer's corpus.** His 2026-09-03 sweep of 312 `visual.json`
     across 34 workbooks at engine **2.355.0** reports *"Neither reproduces in our 34-workbook
     corpus"* — 2 sub-20px visuals, none near 12px. He kept #186 open because **code inspection**
