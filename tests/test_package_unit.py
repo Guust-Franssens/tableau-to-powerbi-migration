@@ -4490,6 +4490,34 @@ def test_one_unit_raising_does_not_stop_the_units_after_it(
     assert f"OK   {BATCH_LATE}" in summary
 
 
+@pytest.mark.parametrize(
+    ("message", "filename"),
+    [
+        (r"C:\Users\Neutral Canary\secret.csv", r"C:\Users\Neutral Canary\package.py"),
+        (r"\\server\share\NeutralCanary\secret.csv", r"\\server\share\NeutralCanary\package.py"),
+        ("/home/NeutralCanary/secret.csv", "/home/NeutralCanary/package.py"),
+        ("ordinary failure text", "/home/project/package.py"),
+    ],
+)
+def test_a_crash_diagnostic_redacts_host_locations_but_keeps_actionable_context(message: str, filename: str) -> None:
+    """Crash reports may identify the frame, but never disclose the host that ran it."""
+    namespace: dict[str, object] = {}
+    try:
+        exec(compile(f"raise RuntimeError({message!r})", filename, "exec"), namespace)  # noqa: S102
+    except RuntimeError as error:
+        crash = pkg.UnitCrashed("NeutralUnit", error)
+    else:
+        pytest.fail("the diagnostic fixture did not raise")
+
+    report = f"{crash}\n{crash.traceback}"
+    assert "NeutralCanary" not in report
+    assert "RuntimeError" in report
+    assert "line 1, in <module>" in crash.traceback
+    assert Path(filename.replace("\\", "/")).name in crash.traceback
+    if "ordinary" in message:
+        assert "ordinary failure text" in report
+
+
 def test_a_failed_unit_leaves_no_staging_tree_and_no_partial_package(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

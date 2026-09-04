@@ -522,7 +522,44 @@ def _error_label(error: BaseException) -> str:
 def _one_line(text: object) -> str:
     """One greppable line for a message that may carry newlines - `shutil.Error` carries several."""
     flattened = " ".join(str(text).split())
-    return flattened if len(flattened) <= _MAX_ERROR_LINE else flattened[: _MAX_ERROR_LINE - 1] + "…"
+    safe = _sanitize_diagnostic(flattened)
+    return safe if len(safe) <= _MAX_ERROR_LINE else safe[: _MAX_ERROR_LINE - 1] + "…"
+
+
+def _sanitize_diagnostic(text: str) -> str:
+    """Redact host locations while retaining the useful non-path part of a diagnostic.
+
+    The existing containment predicate is deliberately the only path detector. A location may contain
+    spaces, so redacting whitespace-delimited words would leave the tail of a private path behind.
+    """
+    parts = re.split(r"(\s+)", text)
+    redacting_path_tail = False
+    for index, part in enumerate(parts):
+        if not part or part.isspace():
+            continue
+        redact = discloses_host_location(part) or (
+            redacting_path_tail and any(separator in part for separator in _NAME_SEPARATORS)
+        )
+        parts[index] = "[host location redacted]" if redact else part
+        redacting_path_tail = redact
+    return "".join(parts)
+
+
+def _safe_frame_name(filename: str) -> str:
+    """Keep traceback frame identity without carrying the machine path that led to it."""
+    return re.split(r"[\\/]", filename.rstrip("/\\"))[-1] or "<frame>"
+
+
+def _safe_traceback(error: BaseException) -> str:
+    """Render actionable traceback frames while applying the shipped-artifact path rule to text."""
+    lines = ["Traceback (most recent call last):"]
+    for frame in traceback.extract_tb(error.__traceback__):
+        lines.append(f'  File "{_safe_frame_name(frame.filename)}", line {frame.lineno}, in {frame.name}')
+        if frame.line:
+            lines.append(f"    {_sanitize_diagnostic(frame.line.strip())}")
+    lines.append(f"{_error_label(error)}: {_one_line(error)}")
+    lines.extend(_sanitize_diagnostic(note) for note in getattr(error, "__notes__", ()))
+    return "\n".join(lines) + "\n"
 
 
 class UnitCrashed(PackagingError):
@@ -543,7 +580,7 @@ class UnitCrashed(PackagingError):
     def __init__(self, unit: str, error: BaseException) -> None:
         self.unit, self.error = unit, error
         self.label = _error_label(error)
-        self.traceback = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+        self.traceback = _safe_traceback(error)
         super().__init__(
             f"packaging {unit} FAILED and nothing was written for it ({self.label}: {_one_line(error)}). "
             "Every other requested unit was still attempted; see the traceback in --json under failed[]."
