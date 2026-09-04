@@ -350,8 +350,9 @@ throwing an error" is necessary but not sufficient:
 10. **Model-level AI instructions are stamped (MANDATORY — not optional).** A grounded, high-signal
    `migrations/workbooks/<slug>/ai-instructions.md` exists and has been written into the culture
    `CustomInstructions` key via `python scripts/set_ai_instructions.py --model …`; `--check` shows the
-   model OK with **no `[!]` advisory warnings**, and the model still passes an offline `tmdl_validate`
-   deserialize. A migrated model without AI instructions is not done.
+   model OK with **no `[!]` advisory warnings**, and the model still passes offline TMDL
+   deserialization — `python scripts/check_datamodel.py <SemanticModel>` exits 0. A migrated model
+   without AI instructions is not done.
 11. **The model is REFRESHED and the refresh is PERSISTED — the handoff gate (workflow step 8).** The
    report builder must receive a model that already holds data; otherwise every visual renders empty
    and reads as a binding bug. Use the pbip-model-refresh skill, then require exactly
