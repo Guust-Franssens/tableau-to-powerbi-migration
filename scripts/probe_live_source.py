@@ -29,13 +29,13 @@ So the probe has to go *through* Power BI, and the smallest thing Power BI can e
 Hence: for ordinary tables, one table, `Table.FirstN(..., 1)`, refresh, require a row. That IS
 Power BI's `SELECT 1` - it just has to be spelled as a partition instead of a shell command.
 
-Why custom SQL stops before refresh
------------------------------------
-A Tableau relation of `type='text'` is already a hand-written query. Automatically wrapping it in
-`Value.NativeQuery` would lose both properties this probe exists for: folding is off, so the
-warehouse runs the full custom query, and Desktop can raise a native-query approval modal that looks
-like a false NO_CREDENTIAL. For custom SQL this script writes the same throwaway PBIP scaffold but
-returns OPERATOR_REQUIRED before opening Desktop; a human must decide whether to run it.
+Custom SQL is judged by its own query
+-------------------------------------
+A Tableau relation of `type='text'` is already a hand-written query. The probe runs it through
+`Value.NativeQuery` and adds a constant probe column, so it does not need Tableau's optional column
+enumeration. This still runs the full custom query (folding is off), but it proves reachability using
+the same Power BI credential path as the eventual model. A query that cannot be run remains a
+non-zero source verdict; missing schema metadata is never treated as a successful probe.
 
 The ordinary-table probe mirrors the builder on purpose: `pbi-semantic-builder` is instructed to emit
 `Databricks.Catalogs(host, httpPath, ...)` / `Sql.Database(server, db)`, and `build_m_query` below
@@ -46,7 +46,6 @@ Outcomes (last line, machine-readable; exit 0 only on DATA_OK)
 -------------------------------------------------------------
     PROBE: DATA_OK <n> row(s) from <table>     the source is genuinely reachable, build for real
     PROBE: SKIPPED <reason>                    not a live source - nothing to prove
-    PROBE: OPERATOR_REQUIRED <path>            custom SQL needs a human Desktop refresh; exit 4
     PROBE: NO_CREDENTIAL <detail>              a human must sign in; no retry can fix this
     PROBE: ACCESS_DENIED <detail>              permissions must change; signing in again is not enough
     PROBE: UNREACHABLE <detail>                refresh failed for a non-credential reason
@@ -136,7 +135,6 @@ PROBE_KILL_MARGIN_SECONDS = 60
 # construction" is false - the old 180s default sat only 13s (7.8%) above that cold success and would
 # report a healthy-but-cold source as a failure. 390s is comfortably clear of it.
 PROBE_TIMEOUT_SECONDS = REFRESH_TIMEOUT_SECONDS + REFRESH_WALL_CLOCK_GRACE_SECONDS + PROBE_KILL_MARGIN_SECONDS
-EXIT_OPERATOR_REQUIRED = 4
 
 # A credential block does not surface as a clean "auth failed". Measured: the mashup engine raises
 # the credential exception and then crashes posting it back over the named pipe, so the client sees
@@ -252,7 +250,13 @@ def build_m_query(conn: dict, table: str, column: str, custom_sql: str | None = 
             f'    db = Source{{[Name="{database}",Kind="Database"]}}[Data],\n'
         )
         if native:
-            m = head + f'    one = Value.NativeQuery(db, "{native}")\n' + "in\n    one"
+            m = (
+                head
+                + f'    one = Table.FirstN(Value.NativeQuery(db, "{native}"), 1),\n'
+                + '    without_probe = Table.RemoveColumns(one, {"ProbeOK"}, MissingField.Ignore),\n'
+                + '    probe = Table.SelectColumns(Table.AddColumn(without_probe, "ProbeOK", each 1), {"ProbeOK"})\n'
+                + "in\n    probe"
+            )
             return m, f"Databricks {server}{http_path} :: {database} :: custom SQL '{table}'"
         m = (
             head + f'    sch = db{{[Name="{schema}",Kind="Schema"]}}[Data],\n'
@@ -268,9 +272,11 @@ def build_m_query(conn: dict, table: str, column: str, custom_sql: str | None = 
             m = (
                 "let\n"
                 f'    Source = Sql.Database("{server}", "{database}", [Query="{native}"]),\n'
-                "    one = Table.FirstN(Source, 1)\n"
+                "    one = Table.FirstN(Source, 1),\n"
+                '    without_probe = Table.RemoveColumns(one, {"ProbeOK"}, MissingField.Ignore),\n'
+                '    probe = Table.SelectColumns(Table.AddColumn(without_probe, "ProbeOK", each 1), {"ProbeOK"})\n'
                 "in\n"
-                "    one"
+                "    probe"
             )
             return m, f"SQL Server {server} :: {database} :: custom SQL '{table}'"
         m = (
@@ -300,7 +306,13 @@ def build_m_query(conn: dict, table: str, column: str, custom_sql: str | None = 
             f'    db = Source{{[Name="{database}",Kind="Database"]}}[Data],\n'
         )
         if native:
-            m = head + f'    one = Value.NativeQuery(db, "{native}")\n' + "in\n    one"
+            m = (
+                head
+                + f'    one = Table.FirstN(Value.NativeQuery(db, "{native}"), 1),\n'
+                + '    without_probe = Table.RemoveColumns(one, {"ProbeOK"}, MissingField.Ignore),\n'
+                + '    probe = Table.SelectColumns(Table.AddColumn(without_probe, "ProbeOK", each 1), {"ProbeOK"})\n'
+                + "in\n    probe"
+            )
             return m, f"Snowflake {server} ({warehouse}) :: {database} :: custom SQL '{table}'"
         m = (
             head + f'    sch = db{{[Name="{schema}",Kind="Schema"]}}[Data],\n'
@@ -492,7 +504,8 @@ def _resolve_probe_targets(sources: list[dict], source_index: int) -> list[tuple
     `build_m_query`), but a real table costs the source a catalog lookup and a one-row read, whereas
     a custom-SQL relation runs the workbook's own hand-written SELECT - which can be arbitrarily
     expensive and can trigger Desktop's native-query approval modal. Prefer the cheap proof for
-    credentials, but never let it certify a later custom-SQL relation as DATA_OK.
+    credentials, but still probe any later custom-SQL relation rather than letting the cheap table
+    stand in for it.
     """
     if source_index >= len(sources):
         log.error("PROBE: ERROR source index %d out of range (%d sources)", source_index, len(sources))
@@ -517,10 +530,12 @@ def _resolve_probe_targets(sources: list[dict], source_index: int) -> list[tuple
     tables = [t for t in (source.get("tables") or []) if t.get("name")]
     tables.sort(key=lambda t: bool(t.get("custom_sql")))
     fields = [f for f in source.get("fields", []) if f.get("kind") == "column"]
-    if not tables or not fields:
+    if not tables or (not fields and not any(t.get("custom_sql") for t in tables)):
         log.error("PROBE: ERROR source has no table/column to probe")
         raise SystemExit(1)
-    column = fields[0]["internal_name"].strip("[]")
+    # Custom SQL is projected onto a probe column by build_m_query, so its parsed schema is not
+    # evidence needed to execute the query. Ordinary table navigation still requires a real column.
+    column = fields[0]["internal_name"].strip("[]") if fields else "ProbeOK"
     return [(name, leg, tables, column) for name, leg in live_legs]
 
 
@@ -931,20 +946,6 @@ def _print_verdict_directive(verdict: str) -> None:
             "################################################################"
         )
         return
-    if verdict == "OPERATOR_REQUIRED":
-        log.error(
-            "\n"
-            "################################################################\n"
-            "#  STOP - CUSTOM SQL PROBE NEEDS A HUMAN IN POWER BI DESKTOP.\n"
-            "################################################################\n"
-            "  The throwaway PBIP was written, but this script did not refresh it.\n"
-            "  A custom SQL refresh may run the full customer query and may show Desktop's\n"
-            "  native-query approval modal, so an automated verdict would be expensive and\n"
-            "  untrustworthy. The gate stays armed until the operator reports the Desktop\n"
-            "  refresh result.\n"
-            "################################################################"
-        )
-        return
     if verdict == "NO_CREDENTIAL":
         log.error(
             "\n"
@@ -1054,16 +1055,9 @@ def _probe_leg(
     for i, table in enumerate(tables):
         rc, verdict = _probe_one_table(migration, conn, (table, column), opts)
         if rc == 0:
-            custom_tables = [candidate for candidate in tables[i + 1 :] if candidate.get("custom_sql")]
-            if not custom_tables:
-                return 0, "DATA_OK"
-            log.error(
-                "PROBE: OPERATOR_REQUIRED source credentials were proven by table '%s', but %d "
-                "custom-SQL relation(s) still require Power BI Desktop operator refresh.",
-                table.get("name"),
-                len(custom_tables),
-            )
-            return _probe_one_table(migration, conn, (custom_tables[0], column), opts)
+            if any(candidate.get("custom_sql") for candidate in tables[i + 1 :]):
+                continue
+            return 0, "DATA_OK"
         if verdict != "BAD_TABLE" or i == len(tables) - 1:
             return rc, verdict
         log.warning("table '%s' not found at the source - trying the next one in the spec", table.get("name"))
@@ -1084,29 +1078,12 @@ def _probe_one_table(migration: Path, conn: dict, target: tuple[dict, str], opts
         log.error("PROBE: ERROR %s", exc)
         return 1, "ERROR"
 
-    pbip = _write_probe_model(migration, m_query, table, column) / "Probe.pbip"
+    pbip = (
+        _write_probe_model(migration, m_query, table, "ProbeOK" if table_spec.get("custom_sql") else column)
+        / "Probe.pbip"
+    )
     log.info("probe model built: %s", pbip.parent)
     log.info("target: %s", note)
-    # `probe_bundle.py` makes the same OPERATOR_REQUIRED decision by scanning emitted M for
-    # Value.NativeQuery; this script has the richer parsed `custom_sql` relation before M exists.
-    if table_spec.get("custom_sql"):
-        log.error("PROBE: OPERATOR_REQUIRED %s", pbip.parent)
-        log.error(
-            "Open %s in Power BI Desktop, hit Refresh, and report whether rows came back; do NOT "
-            "use a SQL client such as DBeaver, Snowsight, or SSMS.",
-            pbip,
-        )
-        log.error(
-            "Custom SQL refresh WILL run the full customer query; folding is off, so this is not "
-            "a cheap row probe. The probe is still isolated to one table and no report layer."
-        )
-        log.error(
-            "Automation stops here because Desktop's native-query approval modal looks like a "
-            "credential failure; the gate stays armed until the operator reports the result."
-        )
-        _record_attempt(migration, "OPERATOR_REQUIRED", f"{table} -> OPERATOR_REQUIRED ({pbip.parent})")
-        return EXIT_OPERATOR_REQUIRED, "OPERATOR_REQUIRED"
-
     pid = None
     desktop_event = None
     try:
