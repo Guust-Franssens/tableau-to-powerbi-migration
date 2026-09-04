@@ -30,11 +30,20 @@ DATAFOLDER_RE = re.compile(r'(expression\s+(?:DataFolder|SourceFolder)\s*=\s*")(
 #
 # ⚠️ **The pattern itself now lives in `scripts/host_paths.py` and this is an ALIAS.** It was
 # copied - not shared - into two other guards, and both copies drifted into asking a weaker question:
-# `manifest_scope.HOST_PATH_RE` anchored it with `^`, and `package_unit._declares_unsafe_path` parsed
-# the string as a path instead of searching it. A host path wrapped in prose (`HTTP 503: <it> could
-# not be opened`) was therefore refused by this gate and shipped by both of the others (#480 B1).
-# Three competing definitions of one question is how that leak class survived six review rounds, so
-# there is now exactly one, and every consumer imports it.
+# one anchored it with `^`, and `package_unit._declares_unsafe_path` parsed the string as a path
+# instead of searching it. A host path wrapped in prose (`HTTP 503: <it> could not be opened`) was
+# therefore refused by this gate and shipped by both of the others (#480 B1). Three competing
+# definitions of one question is how that leak class survived six review rounds, so there is now
+# exactly one definition per question, and every consumer imports it.
+#
+# ⚠️ **This gate deliberately keeps the NARROW question, and round 9 is why that is a choice rather
+# than an oversight.** What ships to a customer is now judged by `host_paths.discloses_host_location`
+# - any absolute location on any host, in any spelling - because a build drive, a UNC share and a
+# POSIX root all name the operator's machine. This gate cannot ask that: it is `search`ed over every
+# git-tracked file, and this repo's own fixtures, runbooks and docstrings name those locations on
+# purpose. The invariant still holds one-directionally and is asserted in `tests/test_package_unit.py`
+# - the shipping predicate is a strict superset of this one, so a package can never ship what a
+# commit could not.
 ABSOLUTE_USER_PATH_RE = HOST_PROFILE_PATH_RE
 
 
