@@ -570,7 +570,13 @@ def test_typed_oracle_records_cover_same_named_dashboard_and_worksheet(tmp_path:
             "view_type": "worksheet",
             "workbook_luid": UNIT_LUID,
             "image": {"status": "ok", "path": image},
-            "data": {"status": "ok", "path": data, "row_count": 1},
+            # ⚠️ `certification` for the same reason `_write_oracle_manifest` writes it: since #480
+            # round 3 a `row_count` alone no longer licenses an evidence `path`, and `read_manifest`
+            # demotes an uncertified leg to `retained_path` -- so a hand-built record without one is
+            # a LEGACY capture, and would make this test assert the certification rule rather than
+            # the typed-resolution rule it exists for. The uncertified end is held, deliberately, by
+            # `test_a_legacy_uncertified_record_is_not_numeric_evidence`.
+            "data": {"status": "ok", "certification": "certified", "path": data, "row_count": 1},
         }
     )
     manifest_path.write_text(json.dumps(payload), encoding="utf-8")

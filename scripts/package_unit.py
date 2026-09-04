@@ -144,7 +144,7 @@ import shutil
 import subprocess
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -484,8 +484,19 @@ def _declares_non_relative(declared: str) -> bool:
     :func:`_resolve_capture_file`, keyed to the `path` field, and that is precisely how round-4
     review walked around it: `withhold_uncertified_evidence` renames `path` to `retained_path`
     BEFORE the packager looks, so a legacy record's absolute host path met no check at all.
+
+    ⚠️ **Judged on `PureWindowsPath`, never on `Path`, and that is the whole point** (round 7). A
+    capture is taken on the operator's Windows host and may be packaged anywhere - this repo's own CI
+    is Linux - so the string is Windows-shaped whatever OS reads it. `Path` is the RUNNING platform's
+    flavour, and `PurePosixPath` sees `<drive>:\\Users\\<account>\\x` as an ordinary relative filename
+    that merely contains backslashes: measured, `is_absolute()`/`.drive` both answer False there and
+    the guard silently stopped containing on Linux while passing every assertion on Windows. A guard
+    whose protection depends on the OS running it is not a guard. `PureWindowsPath` recognises both
+    conventions - `C:\\…`, `C:/…`, `\\\\server\\share\\…` and, with the explicit prefix test beside it,
+    POSIX `/home/…` and `/Users/…` - identically on either host. Same idiom, same reason, as
+    `promote_unit.slug_problem`.
     """
-    candidate = Path(declared)
+    candidate = PureWindowsPath(declared)
     return candidate.is_absolute() or bool(candidate.drive) or declared.startswith(("\\\\", "/"))
 
 
@@ -496,8 +507,12 @@ def _declares_unsafe_path(declared: str) -> bool:
     a `..` component (which claims a location outside the capture). Deliberately a predicate over a
     VALUE, not a list of blessed field names: a second field name was the round-4 defect, and a
     third one must not reopen it.
+
+    ⚠️ The `..` split is `PureWindowsPath` for the reason above: `PurePosixPath` does not treat `\\`
+    as a separator, so a Windows-shaped `sub\\..\\x` presents as ONE component on Linux and the
+    traversal test answers False there while answering True on Windows.
     """
-    return _declares_non_relative(declared) or ".." in Path(declared).parts
+    return _declares_non_relative(declared) or ".." in PureWindowsPath(declared).parts
 
 
 def _contain_unsafe_strings(value: Any, prefix: str = "") -> tuple[Any, list[str]]:
@@ -584,10 +599,22 @@ def _resolve_capture_file(oracle_root: Path, declared: str) -> tuple[Path | None
     * an absolute path - copied, AND written verbatim into the packaged manifest.
 
     So the check is containment, not sanitisation of the string: reject an absolute or drive-relative
-    path outright, resolve **strictly** (which follows symlinks and normalises `..`), and require the
-    result to stay under the resolved capture root. Resolving both sides is what closes the symlink
-    route - a link inside the capture pointing outside it normalises to an outside path, and
-    comparing unresolved strings would not see that.
+    path outright, resolve (which follows symlinks and normalises `..`), and require the result to
+    stay under the resolved capture root. Resolving both sides is what closes the symlink route - a
+    link inside the capture pointing outside it normalises to an outside path, and comparing
+    unresolved strings would not see that.
+
+    ⚠️ **The candidate resolves NON-strictly, and the strictness lives in `is_file()` below**
+    (round 7). `resolve(strict=True)` is platform-dependent in exactly the case this guard exists
+    for: POSIX `realpath` `lstat`s every component, so `sub/../../outside-secret.png` raises
+    `FileNotFoundError` on the missing `sub` and was diagnosed as *"does not resolve to a file"* on
+    Linux, while Windows normalises `..` textually first, resolves, and correctly reports *"escapes
+    the capture root"*. Measured by driving `posixpath.realpath` directly: strict raises, non-strict
+    returns the escaping path both times. The traversal was refused either way - `resolved` is `None`
+    in both branches - but the DIAGNOSIS flipped, and a refusal that cannot say it refused a
+    traversal is one nobody can tell from a missing file. Non-strict resolution still follows every
+    symlink that exists, so the containment claim is unchanged; `resolved.is_file()` is what a
+    non-existent path now fails, and it fails it identically on both hosts.
     """
     if not declared:
         return None, "capture declares an empty path"
@@ -600,7 +627,7 @@ def _resolve_capture_file(oracle_root: Path, declared: str) -> tuple[Path | None
         return None, f"capture declares a non-relative path ({REFUSED_PATH}) - refused"
     try:
         root = oracle_root.resolve(strict=True)
-        resolved = (root / candidate).resolve(strict=True)
+        resolved = (root / candidate).resolve()
     except OSError:
         return None, "capture path does not resolve to a file"
     if not resolved.is_relative_to(root):
