@@ -277,7 +277,9 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
         "README: send the agent back to the bundle to edit (issue #460's silent-discard shape)",
         PACKAGER,
         "| `fabric/` | the engine WORKING COPY - **edit here**, and when you work from a package THIS tree "
-        "is canonical; `<bundle>/pbip/` never promotes over it.",
+        "is canonical; `<bundle>/pbip/` never promotes over it. Re-running `package_unit.py` into this "
+        "folder REFUSES (exit 3) rather than discarding what you changed - `--discard-package-edits` "
+        "overrides. Declared-edit tooling (`declare_generated_edit.py`, `--tamper`) is bundle-only.",
         "| `fabric/` | a copy of the engine working copy; edit `<bundle>/pbip/` instead.",
         [
             "test_AGENTS_md_and_the_package_readme_agree_on_where_an_agent_edits",
