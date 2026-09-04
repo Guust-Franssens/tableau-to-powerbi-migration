@@ -123,7 +123,11 @@ Exit codes
 | 1 | at least one unit has NO engine working copy under `pbip/`. It is still packaged - the source,
       the reference and the engine's own handover slice are all there - but there is nothing to build
       on, and `check_reference_readiness.py` reports it as a finding rather than a pass. |
-| 2 | usage error (argparse) |
+| 2 | usage error (argparse), including an `--out` too deep for the paths this bundle would produce.
+      Every unit is measured against `check_path_ceiling.py`'s ceilings BEFORE any is assembled, and
+      the refusal names the path, its length, the ceiling and how many characters `--out` must lose.
+      Nothing is packaged: a shorter `--out` moves every unit, so a partial estate would be redone
+      anyway (#476). |
 | 3 | at least one requested unit already has a package carrying EDITS, and this packager replaces a
       package whole. Those units were left untouched; every other requested unit was still packaged.
       `--discard-package-edits` overwrites them deliberately. |
@@ -175,11 +179,23 @@ import uuid
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
-from typing import Any
+from typing import Any, NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import read_handover  # noqa: E402  # pylint: disable=wrong-import-position
+
+# The path budget is measured by `check_path_ceiling.py` and NOWHERE else (#476). Its ceilings were
+# taken end to end against Power BI Desktop 2.157.828.0, and its `utf16_len` counts the UTF-16 code
+# units .NET counts rather than the code points `len()` counts - a distinction a second, local copy
+# of "260" would lose on its first edit.
+from check_path_ceiling import (  # noqa: E402  # pylint: disable=wrong-import-position
+    DEFAULT_LIMITS,
+    KIND_DIR,
+    KIND_FILE,
+    Limits,
+    utf16_len,
+)
 from manifest_scope import (  # noqa: E402  # pylint: disable=wrong-import-position
     ORACLE_MANIFEST_ALLOW,
     project,
@@ -386,6 +402,19 @@ class PackageEditsRefused(PackagingError):
             f"refusing to repackage {unit}: {package} is the canonical place to edit, and {detail}. "
             "Re-run with --discard-package-edits to overwrite it, or move the package aside first."
         )
+
+
+class PackagePathTooLong(PackagingError):
+    """Assembling this unit here would produce a path Power BI Desktop refuses to open (#476).
+
+    Raised BEFORE anything is written. The failure it replaces was `[WinError 206] The filename or
+    extension is too long`, thrown mid-assembly 29 units into a 47-unit estate, naming no path, no
+    limit and no remedy. Carries the measured :class:`PathBudget` so the message can name all three.
+    """
+
+    def __init__(self, budget: PathBudget) -> None:
+        self.budget = budget
+        super().__init__(render_path_budget(budget))
 
 
 class UnassessableInput(PackagingError):
@@ -1508,11 +1537,11 @@ def _write_data_folder_expression(dest: Path, final: Path, model_name: str, para
     """Declare the folder parameter, in the exact shape this repo's committed models already use.
 
     ⚠️ The value is the FINAL package's own separator flavour, and a PLACEHOLDER root - never
-    ``dest``, and since round-2 finding 1 never ``final`` either. Assembly runs in a
-    ``.<unit>.staging`` directory that `replace_dir` renames afterwards, so writing ``dest`` here
-    bakes a path that stops existing the moment packaging succeeds - and it would still LOOK right
-    in the file. Writing ``final`` bakes the builder's own location into a deliverable that exists
-    to be moved. See :data:`PACKAGE_ROOT_TOKEN`.
+    ``dest``, and since round-2 finding 1 never ``final`` either. Assembly runs in the hidden staging
+    directory :func:`staging_dir` names, which `replace_dir` renames afterwards, so writing ``dest``
+    here bakes a path that stops existing the moment packaging succeeds - and it would still LOOK
+    right in the file. Writing ``final`` bakes the builder's own location into a deliverable that
+    exists to be moved. See :data:`PACKAGE_ROOT_TOKEN`.
 
     Appended rather than overwritten: `expressions.tmdl` is a list of expression objects, and an
     engine model that grows one later must not have it silently replaced. The `lineageTag` is a
@@ -2086,6 +2115,210 @@ def _handover_workbook(handover: Any, unit: str, dest: Path) -> dict[str, Any] |
     return next((wb for name, wb, _ in found if name == unit), found[0][1] if found else None)
 
 
+# --------------------------------------------------------------------------------------------
+# the path budget - measured BEFORE anything is written (#476)
+# --------------------------------------------------------------------------------------------
+
+#: The package-relative paths this packager writes that are neither the copied `fabric/` tree nor
+#: the handover slice. Enumerated rather than walked because they do not exist yet, and listed at
+#: all because a unit with NO engine working copy ships only these - `fabric/` is then empty and
+#: something still has to be the deepest thing measured. Every one is a single short segment, so
+#: none of them is ever the binding constraint when a `fabric/` tree is present.
+_SCAFFOLD_FILES = (
+    "README.md",
+    "handover.md",
+    MANIFEST_NAME,
+    "report.json",
+    "source-provenance.json",
+    "engine-output-receipt.json",
+    "migration-spec.json",
+    SPEC_SCHEMA.name,
+)
+
+#: Hex characters of the unit digest that name its staging directory. The staging segment sits at the
+#: DEEPEST point of every path assembly touches, so its length is pure overhead paid by every file in
+#: the tree; making it a constant 9 characters (`.` + 8 hex) instead of `.{unit}.staging` reclaims
+#: `len(unit)` characters for a 37-character unit name and never costs more than 8. Long enough that
+#: two units in one `--out` do not collide (2**32 pairs), short enough to stop mattering.
+_STAGING_STEM_CHARS = 8
+
+#: How many offending units a batch refusal names before summarising. Matching
+#: `check_path_ceiling.WORST_N`'s reasoning: naming the unit is the whole point, but an `--out` that
+#: is too deep is usually too deep for many units at once, and they all share one remedy.
+WORST_UNITS = 5
+
+
+class ProjectedPath(NamedTuple):
+    """One path packaging WILL produce, measured before it exists.
+
+    ``tail`` is package-relative and therefore survives relocation, which is the number that answers
+    "will this fit somewhere else"; ``length`` is UTF-16 code units, the unit Power BI Desktop counts.
+    """
+
+    kind: str
+    tail: str
+    path: str
+    length: int
+    ceiling: int
+
+
+class PathBudget(NamedTuple):
+    """What one unit's paths measure against the ceilings, and how much `--out` may spend.
+
+    ``out_root_budget`` is the longest `--out` this unit tolerates. It is derived from the
+    package-relative tails, so it survives relocation: **negative** means no `--out` can fit this
+    unit at all and the lever is the unit's own name (which the engine repeats in
+    `<Unit>/<Unit>.Report/`), not the operator's directory.
+    """
+
+    unit: str
+    out_root: Path
+    out_root_length: int
+    out_root_budget: int
+    overruns: list[ProjectedPath]
+
+
+def _short_stem(name: str) -> str:
+    """A fixed-width, collision-resistant stem for `name` - see :data:`_STAGING_STEM_CHARS`."""
+    return hashlib.sha256(name.encode("utf-8")).hexdigest()[:_STAGING_STEM_CHARS]
+
+
+def staging_dir(out_root: Path, unit: str) -> Path:
+    """Where `unit` is assembled before `replace_dir` swaps it into `<out_root>/<unit>`.
+
+    ⚠️ **A SIBLING of the final package, never a child, and never longer than it in any measured
+    estate.** Assembly used to happen in `<out>/.{unit}.staging/`, so every one of the hundreds of
+    files in a PBIR tree was written 9 characters deeper than its final home - and the crash in
+    issue #476 (`[WinError 206]`, 29 units into 47) landed in exactly that margin. The name is
+    hidden, and derived from the unit rather than fixed, so two units packaged into one `--out`
+    cannot collide the way a shared `.staging` would.
+
+    Kept INSIDE `out_root` deliberately, against the issue's own suggestion of `tempfile.mkdtemp()`:
+    the swap is `Path.rename`, which is atomic only within one volume and fails outright across
+    two - and a temp root would also move assembly outside the directory `conflicting_evidence_dirs`
+    has already cleared.
+    """
+    return out_root / f".{_short_stem(unit)}"
+
+
+def _package_tails(bundle: Path, unit: str) -> list[tuple[str, str]]:
+    """`(kind, package-relative path)` for every path packaging can predict before writing one.
+
+    ⚠️ **Not exhaustive, and deliberately so in the safe direction.** Oracle renders and localized
+    data copies are omitted because both depend on identity resolution that has not run yet; they
+    are shallower than the PBIR tree in every measured estate (`oracle/<kind>/images/<name>.<ext>`
+    with the name capped at :data:`_MAX_OBJECT_NAME`). A path missing from here costs *protection* -
+    it can still be hit at assembly time - never a false refusal of a unit that would have fitted.
+    """
+    tails: list[tuple[str, str]] = [(KIND_DIR, "")]
+    source = bundle / "pbip" / unit
+    if source.is_dir():
+        tails.append((KIND_DIR, "fabric"))
+        tails.extend(
+            (KIND_DIR if path.is_dir() else KIND_FILE, f"fabric/{path.relative_to(source).as_posix()}")
+            for path in sorted(source.rglob("*"))
+        )
+    tails.append((KIND_DIR, "handover"))
+    tails.append((KIND_FILE, f"handover/{unit}.json"))
+    tails.extend((KIND_FILE, name) for name in _SCAFFOLD_FILES)
+    return tails
+
+
+def projected_paths(bundle: Path, unit: str, out_root: Path, *, limits: Limits = DEFAULT_LIMITS) -> list[ProjectedPath]:
+    """Measure every predictable path at BOTH roots the unit passes through.
+
+    The staged tree and the final tree are measured together because assembly writes one and the
+    package ships as the other; taking the longer of the two is what makes the answer independent of
+    which one happens to be deeper after a future edit to :func:`staging_dir`.
+    """
+    roots = (out_root / unit, staging_dir(out_root, unit))
+    projected: list[ProjectedPath] = []
+    for kind, tail in _package_tails(bundle, unit):
+        ceiling = limits.dir_ceiling if kind == KIND_DIR else limits.file_ceiling
+        for root in roots:
+            full = str(root / tail) if tail else str(root)
+            projected.append(ProjectedPath(kind, tail, full, utf16_len(full), ceiling))
+    return projected
+
+
+def path_budget(bundle: Path, unit: str, out_root: Path, *, limits: Limits = DEFAULT_LIMITS) -> PathBudget:
+    """What `unit` would measure under `out_root`, and how long an `--out` it can tolerate."""
+    projected = projected_paths(bundle, unit, out_root, limits=limits)
+    root_length = utf16_len(str(out_root))
+    overruns = sorted(
+        (path for path in projected if path.length > path.ceiling),
+        key=lambda path: path.length - path.ceiling,
+        reverse=True,
+    )
+    budget = min((path.ceiling - (path.length - root_length) for path in projected), default=limits.file_ceiling)
+    return PathBudget(unit, out_root, root_length, budget, overruns)
+
+
+def render_path_budget(budget: PathBudget) -> str:
+    """The actionable refusal for ONE unit: which path, how long, against what, and what fixes it."""
+    worst = budget.overruns[0]
+    kind = "directory" if worst.kind == KIND_DIR else "file"
+    remedy = (
+        f"--out is {budget.out_root_length} character(s) long; it must be at most "
+        f"{budget.out_root_budget} ({budget.out_root_length - budget.out_root_budget} shorter) for this unit to fit."
+        if budget.out_root_budget >= 0
+        else (
+            f"NO --out can fit this unit: its package-relative shape is already "
+            f"{-budget.out_root_budget} character(s) over on its own. The lever is the name the engine "
+            f"repeats in <Unit>/<Unit>.Report/, not the output directory."
+        )
+    )
+    return (
+        f"{budget.unit}: packaging it under {budget.out_root} would produce {len(budget.overruns)} path(s) "
+        f"Power BI Desktop refuses to open, so it was not assembled at all.\n"
+        f"  deepest: {worst.length} UTF-16 units, {worst.length - worst.ceiling} over the "
+        f"{worst.ceiling}-character {kind} ceiling\n"
+        f"    {worst.path}\n"
+        f"{remedy}\n"
+        f"Ceilings are measured in scripts/check_path_ceiling.py; background in docs/windows-path-limits.md."
+    )
+
+
+def render_out_too_deep(budgets: list[PathBudget], total: int) -> str:
+    """The actionable refusal for a BATCH, raised before any unit is assembled.
+
+    Every unit is named with its own overage rather than only the first, because they all share one
+    remedy - a shorter `--out` - and the operator needs the single number that satisfies all of them.
+    Packaging the units that DO fit was considered and rejected: the estate would have to be
+    repackaged wholesale under the shorter `--out` anyway, and a half-packaged estate is exactly the
+    state issue #476 was reported from.
+    """
+    lines = [
+        f"--out {budgets[0].out_root} is too deep: {len(budgets)} of {total} unit(s) would be assembled at paths "
+        "Power BI Desktop refuses to open, so NOTHING was packaged."
+    ]
+    for budget in budgets[:WORST_UNITS]:
+        worst = budget.overruns[0]
+        kind = "directory" if worst.kind == KIND_DIR else "file"
+        lines.append(
+            f"  {budget.unit}: {worst.length} UTF-16 units, {worst.length - worst.ceiling} over the "
+            f"{worst.ceiling}-character {kind} ceiling"
+        )
+        lines.append(f"    {worst.path}")
+    if len(budgets) > WORST_UNITS:
+        lines.append(f"  ... and {len(budgets) - WORST_UNITS} more")
+    fits = min(budget.out_root_budget for budget in budgets)
+    root_length = budgets[0].out_root_length
+    lines.append(
+        f"--out is {root_length} character(s) long; it must be at most {fits} ({root_length - fits} shorter) "
+        "for every unit to fit."
+        if fits >= 0
+        else (
+            f"No --out can fit every unit: the worst is {-fits} character(s) over on its "
+            "package-relative shape alone, so shortening the output directory cannot rescue it - the "
+            "lever is the name the engine repeats in <Unit>/<Unit>.Report/. Package the units that fit "
+            "with --unit."
+        )
+    )
+    lines.append("Ceilings are measured in scripts/check_path_ceiling.py; background in docs/windows-path-limits.md.")
+    return "\n".join(lines)
+
+
 def package_unit(  # pylint: disable=too-many-arguments
     bundle: Path,
     unit: str,
@@ -2116,11 +2349,20 @@ def package_unit(  # pylint: disable=too-many-arguments
     `report.json` or from a `pbip/` directory name, both of which originate in the customer's Tableau
     estate - so it is source-controlled input, and `..\\escaped-package` used to write a whole
     package outside `--out` (see :class:`UnsafeUnitName`).
+
+    ⚠️ **Refuses BEFORE assembling anything that would not fit** (#476). The path budget is measured
+    on the destination the name check just cleared, so an overlong `--out` costs one message instead
+    of a `[WinError 206]` thrown 29 units into a 47-unit estate with a half-written staging tree
+    behind it. Order is load-bearing: the name decides WHERE we write, so it is settled first, and
+    only then is that destination measured.
     """
     final = assert_package_destination(out_root, unit)
+    budget = path_budget(bundle, unit, out_root)
+    if budget.overruns:
+        raise PackagePathTooLong(budget)
     if final.is_dir() and not discard_edits:
         _refuse_if_edited(unit, final)
-    staging = out_root / f".{sanitize_staging_name(unit)}.staging"
+    staging = staging_dir(out_root, unit)
     shutil.rmtree(staging, ignore_errors=True)
     try:
         result = _assemble_unit(bundle, unit, staging, final=final, oracle_dir=oracle_dir, assets_dir=assets_dir)
@@ -2177,11 +2419,6 @@ def package_edits(root: Path) -> tuple[list[str], str | None]:
     changed = set(recorded) ^ set(current)
     changed |= {path for path in set(recorded) & set(current) if recorded[path] != current[path]}
     return sorted(changed), None
-
-
-def sanitize_staging_name(unit: str) -> str:
-    """A filesystem-safe stem for this unit's staging directory."""
-    return _UNSAFE.sub("_", unit)[:_MAX_OBJECT_NAME] or "unit"
 
 
 #: Every separator either flavour recognises, checked REGARDLESS of the host. A packaging host is not
@@ -2257,6 +2494,11 @@ def replace_dir(staged: Path, final: Path, verify: Callable[[Path], None] | None
     one has landed, and it is restored if the rename fails - on Windows a directory rename onto an
     existing target fails outright, so the move-aside is required rather than defensive.
 
+    ⚠️ The retired name is **shorter than the package it retires**, for the same reason
+    :func:`staging_dir` is (#476): `.{name}.replaced` made every path in a package that is being
+    REPLACED 10 characters longer than the one being measured, and `shutil.rmtree` then walks it -
+    so a package that fits could still fail its second run, in a tree nothing had measured.
+
     ``verify`` is called with the RETIRED directory after it has been renamed aside and before the
     new one lands. Raising from it restores the retired directory and aborts the swap. That ordering
     is the whole point: the check happens when nothing can still be written to the package through
@@ -2267,7 +2509,7 @@ def replace_dir(staged: Path, final: Path, verify: Callable[[Path], None] | None
     if not final.exists():
         _rename_retrying(staged, final)
         return
-    retired = final.with_name(f".{final.name}.replaced")
+    retired = final.with_name(f".{_short_stem(final.name)}~")
     shutil.rmtree(retired, ignore_errors=True)
     _rename_retrying(final, retired)
     swapped = False
@@ -2731,6 +2973,18 @@ def _run_verdict(
     return EXIT_OK if all(result["packaged"] for result in results) else EXIT_NO_WORKING_COPY
 
 
+def _refuse_out_too_deep(parser: argparse.ArgumentParser, bundle: Path, units: list[str], out_root: Path) -> None:
+    """Refuse the WHOLE run when any unit's projected paths would not fit under ``out_root`` (#476).
+
+    Measured for EVERY unit before ANY of them is assembled. The field failure this replaces crashed
+    with `[WinError 206]` having already written 29 of 47 packages, so the operator paid for 29 units
+    of work AND still had to repackage the estate under a shorter `--out`.
+    """
+    too_deep = [budget for budget in (path_budget(bundle, unit, out_root) for unit in units) if budget.overruns]
+    if too_deep:
+        parser.error(render_out_too_deep(too_deep, len(units)))
+
+
 def main(argv: list[str] | None = None) -> int:
     """Package the requested units and report what each one carries."""
     parser = _build_parser()
@@ -2761,6 +3015,7 @@ def main(argv: list[str] | None = None) -> int:
     if not units:
         return _refuse_zero_units(bundle, out_root, args.json)
 
+    _refuse_out_too_deep(parser, bundle, sorted(units), out_root)
     results: list[dict[str, Any]] = []
     refused: list[PackageEditsRefused] = []
     failed: list[PackagingError] = []

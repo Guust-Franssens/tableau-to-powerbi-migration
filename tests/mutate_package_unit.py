@@ -192,8 +192,8 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
     (
         "repackaging: merge into the existing package instead of replacing it",
         PACKAGER,
-        "        replace_dir(staging, out_root / unit)",
-        "        shutil.copytree(staging, out_root / unit, dirs_exist_ok=True)",
+        "        replace_dir(staging, final, verify=None if discard_edits else partial(_refuse_if_edited, unit))",
+        "        shutil.copytree(staging, final, dirs_exist_ok=True)",
         ["test_repackaging_removes_evidence_the_new_input_no_longer_produces"],
     ),
     (
@@ -316,11 +316,16 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
         ["test_the_rows_the_model_imports_are_shipped_and_the_partition_reads_them"],
     ),
     (
-        "packager: write the data-folder parameter from the STAGING dir that is about to vanish",
+        # ⚠️ Replaces "write the parameter from the STAGING dir", which this merge made INERT. That
+        # mutation swapped `final` for `dest` in the value; the placeholder-root design now takes
+        # only the SEPARATOR from that argument, and two local paths have the same separator, so
+        # the swap changed nothing and the anchor test could no longer fail. This targets what
+        # actually protects the same property today: the value must never be a build-time path.
+        "packager: bake the BUILD-TIME package path into the data-folder parameter (the pre-token shape)",
         PACKAGER,
-        "f'expression {parameter} = \"{final}\\\\{DATA_DIR}\\\\\" '",
-        "f'expression {parameter} = \"{dest}\\\\{DATA_DIR}\\\\\" '",
-        ["test_the_data_folder_parameter_names_the_FINAL_package_not_its_staging_dir"],
+        '    return f"{PACKAGE_ROOT_TOKEN}{sep}{DATA_DIR}{sep}"',
+        '    return f"{final}{sep}{DATA_DIR}{sep}"',
+        ["test_the_data_folder_parameter_names_a_PLACEHOLDER_not_the_machine_that_built_it"],
     ),
     (
         "packager: drop the size ceiling, so an unbounded source is copied unnoticed",
@@ -387,6 +392,86 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
         "# --------------------------------------------------------------------------------------------\n# CLI",
         "# --------------------------------------------------------------------------------------------\n# CLI (negative control)",
         ["test_no_foreign_unit_survives_anywhere_in_the_packaged_report"],
+    ),
+    # ---- issue #476: the path budget, and the staging segment that was added at the deepest point -
+    (
+        "staging: put the unit name back in the staging segment (the pre-fix `.{unit}.staging`)",
+        PACKAGER,
+        '    return out_root / f".{_short_stem(unit)}"',
+        '    return out_root / f".{unit}.staging"',
+        [
+            "test_staging_is_shallower_than_the_package_it_becomes",
+            "test_the_staging_name_costs_a_CONSTANT_never_the_length_of_the_unit_name",
+            "test_nothing_is_assembled_deeper_than_the_pre_fix_staging_tree",
+        ],
+    ),
+    (
+        "staging: stage every unit under ONE shared directory, so a second unit overwrites the first",
+        PACKAGER,
+        '    return out_root / f".{_short_stem(unit)}"',
+        '    return out_root / ".staging"',
+        ["test_two_units_do_not_stage_under_the_same_directory"],
+    ),
+    (
+        "replace_dir: name the retired tree after the package it retires (10 characters deeper)",
+        PACKAGER,
+        '    retired = final.with_name(f".{_short_stem(final.name)}~")',
+        '    retired = final.with_name(f".{final.name}.replaced")',
+        ["test_the_retired_package_is_never_named_after_the_package_it_retires"],
+    ),
+    (
+        "budget: package the unit anyway, reproducing the mid-assembly WinError 206",
+        PACKAGER,
+        "    budget = path_budget(bundle, unit, out_root)\n    if budget.overruns:\n"
+        "        raise PackagePathTooLong(budget)",
+        "    budget = path_budget(bundle, unit, out_root)\n    if False:  # noqa\n"
+        "        raise PackagePathTooLong(budget)",
+        [
+            "test_a_unit_whose_paths_exceed_the_ceiling_is_refused_BEFORE_anything_is_written",
+            "test_the_refusal_names_the_path_its_length_the_ceiling_and_the_characters_to_reclaim",
+        ],
+    ),
+    (
+        "budget: measure only the FINAL tree, missing a unit that fits once renamed and not before",
+        PACKAGER,
+        "    roots = (out_root / unit, staging_dir(out_root, unit))",
+        "    roots = (out_root / unit,)",
+        [
+            "test_the_budget_measures_the_STAGED_tree_too_not_only_the_final_one",
+            "test_the_budget_measures_both_the_staged_and_the_final_tree",
+        ],
+    ),
+    (
+        "budget: let the batch run start, so the estate fails one unit at a time again",
+        PACKAGER,
+        "        parser.error(render_out_too_deep(too_deep, len(units)))",
+        "        pass",
+        [
+            "test_main_refuses_a_too_deep_out_before_packaging_ANY_unit",
+            "test_the_batch_refusal_names_every_offending_unit_and_one_number_that_fixes_them",
+        ],
+    ),
+    (
+        "message: name the path but not its length, the ceiling or the overage (WinError 206's own failing)",
+        PACKAGER,
+        'f"  deepest: {worst.length} UTF-16 units, {worst.length - worst.ceiling} over the "\n'
+        '        f"{worst.ceiling}-character {kind} ceiling\\n"',
+        'f"  deepest: this path is too long\\n"',
+        ["test_the_refusal_names_the_path_its_length_the_ceiling_and_the_characters_to_reclaim"],
+    ),
+    (
+        "message: report a reclaim figure that does not add up to the --out it measured",
+        PACKAGER,
+        'f"{budget.out_root_budget} ({budget.out_root_length - budget.out_root_budget} shorter) for this unit to fit."',
+        'f"{budget.out_root_budget} ({budget.out_root_budget} shorter) for this unit to fit."',
+        ["test_the_refusal_names_the_path_its_length_the_ceiling_and_the_characters_to_reclaim"],
+    ),
+    (
+        "message: offer a negative --out length instead of saying no --out can fit the unit",
+        PACKAGER,
+        "        if budget.out_root_budget >= 0",
+        "        if budget.out_root_budget >= -1000",
+        ["test_a_unit_no_out_can_fit_says_so_instead_of_naming_an_impossible_directory"],
     ),
 ]
 

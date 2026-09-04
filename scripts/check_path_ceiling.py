@@ -311,7 +311,7 @@ def read_long_paths_enabled() -> int | None:
         return None
 
 
-def _utf16_len(value: str) -> int:
+def utf16_len(value: str) -> int:
     """Length in UTF-16 code units - the unit Power BI Desktop actually counts.
 
     Python's `len()` counts CODE POINTS; .NET's `String.Length` counts UTF-16 CODE UNITS, so every
@@ -323,6 +323,17 @@ def _utf16_len(value: str) -> int:
     under `surrogateescape`. Callers must treat that as UNKNOWN, never as clean.
     """
     return len(value.encode("utf-16-le", "strict")) // 2
+
+
+def _utf16_len(value: str) -> int:
+    """The historic private spelling of :func:`utf16_len`, kept because callers pin it.
+
+    ``tests/test_check_path_ceiling.py`` names it directly, and issue #476 needed the same
+    measurement from `package_unit.py` - which is a different module, so the private name stopped
+    being honest. Renaming a length helper is exactly how a repo ends up with two slightly different
+    length rules, so the old name delegates rather than duplicating the encode.
+    """
+    return utf16_len(value)
 
 
 def _safe_repr(value: str) -> str:
@@ -341,7 +352,7 @@ def collect(root: Path) -> tuple[list[dict], list[dict]]:
     unknown: list[dict] = []
 
     try:
-        root_units = _utf16_len(root_str)
+        root_units = utf16_len(root_str)
     except UnicodeEncodeError as exc:
         return [], [{"path": _safe_repr(root_str), "reason": f"root is not representable in UTF-16: {exc}"}]
 
@@ -357,7 +368,7 @@ def collect(root: Path) -> tuple[list[dict], list[dict]]:
         for name, kind in [(d, KIND_DIR) for d in dirnames] + [(f, KIND_FILE) for f in filenames]:
             full = os.path.join(dirpath, name)
             try:
-                length = _utf16_len(full)
+                length = utf16_len(full)
             except (UnicodeEncodeError, ValueError) as exc:
                 # An undecodable POSIX filename, or any name UTF-16 cannot represent. Unmeasurable
                 # is NOT clean - this is the failure shape this repo keeps re-introducing.
