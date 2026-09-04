@@ -1,9 +1,8 @@
 """Regression tests for the custom-SQL probe path in `scripts/probe_live_source.py`.
 
 A Tableau relation of `type='text'` is a hand-written SELECT that Tableau merely NAMES (e.g.
-`Flight_Level_Query`). The parser records that as `custom_sql` on the table. That query is too
-expensive and modal-prone to run automatically, so the probe must write the PBIP scaffold and return
-a distinct non-zero OPERATOR_REQUIRED verdict instead of claiming DATA_OK or SKIPPED.
+`Flight_Level_Query`). The parser records that as `custom_sql` on the table. The probe runs that query
+and projects a known constant, so it does not depend on optional enumerated columns.
 
 Ordinary table navigation remains covered here because that proven cheap path must not move while the
 custom-SQL path changes.
@@ -20,6 +19,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
 
 import probe_live_source  # noqa: E402  # pylint: disable=wrong-import-position
+from parse_tableau import parse_workbook  # noqa: E402
 
 SNOWFLAKE = {
     "class": "snowflake",
@@ -39,21 +39,37 @@ DATABRICKS = {
     "powerbi_target": "live_source",
 }
 
+SQLSERVER = {
+    "class": "sqlserver",
+    "server": "sql.example.com",
+    "database": "DB",
+    "powerbi_target": "live_source",
+}
 
-def _source(tables: list[dict]) -> dict:
+PROBE_PROJECTION = (
+    'without_probe = Table.RemoveColumns(one, {"ProbeOK"}, MissingField.Ignore),\n'
+    '    probe = Table.SelectColumns(Table.AddColumn(without_probe, "ProbeOK", each 1), {"ProbeOK"})'
+)
+
+
+def _source(tables: list[dict], fields: list[dict] | None = None) -> dict:
+    for table in tables:
+        if table.get("custom_sql") is not None:
+            table["source_relation"] = "custom-sql"
     return {
         "connection": SNOWFLAKE,
         "tables": tables,
-        "fields": [{"kind": "column", "internal_name": "[Col]"}],
+        "fields": [{"kind": "column", "internal_name": "[Col]"}] if fields is None else fields,
     }
 
 
-def test_custom_sql_scaffold_contains_the_sql_but_not_a_one_row_automatic_probe():
+def test_custom_sql_scaffold_contains_the_sql_and_projects_a_probe_column():
     m, note = probe_live_source.build_m_query(
         SNOWFLAKE, "Flight_Level_Query", "Col", custom_sql="SELECT a, b FROM raw.flights"
     )
     assert "Value.NativeQuery" in m
-    assert "Table.FirstN(Value.NativeQuery" not in m
+    assert 'Table.FirstN(Value.NativeQuery(db, "SELECT a, b FROM raw.flights"), 1)' in m
+    assert PROBE_PROJECTION in m
     assert 'Kind="Table"' not in m, "a custom-SQL relation has no table to navigate to"
     assert "SELECT a, b FROM raw.flights" in m
     assert "custom SQL" in note, "the operator must be told which path was scaffolded"
@@ -65,10 +81,83 @@ def test_databricks_custom_sql_scaffold_uses_native_query_without_automatic_prob
     )
     assert "Databricks.Catalogs" in m
     assert "Value.NativeQuery" in m
-    assert "Table.FirstN(Value.NativeQuery" not in m
+    assert 'Table.FirstN(Value.NativeQuery(db, "SELECT a, b FROM raw.flights"), 1)' in m
+    assert PROBE_PROJECTION in m
     assert 'Kind="Schema"' not in m
     assert "SELECT a, b FROM raw.flights" in m
     assert "custom SQL" in note
+
+
+def test_sql_server_custom_sql_scaffold_selects_the_added_probe_column():
+    m, _ = probe_live_source.build_m_query(SQLSERVER, "Q", "Col", custom_sql="SELECT a FROM t")
+
+    assert PROBE_PROJECTION in m
+
+
+def test_comment_only_custom_sql_is_cannot_assess_instead_of_table_navigation():
+    with pytest.raises(ValueError, match="empty after removing comments"):
+        probe_live_source.build_m_query(SNOWFLAKE, "Q", "Col", custom_sql="-- comment only")
+
+
+def test_block_comment_only_custom_sql_is_cannot_assess():
+    with pytest.raises(ValueError, match="empty after removing comments"):
+        probe_live_source.build_m_query(SNOWFLAKE, "Q", "Col", custom_sql="/* comment only */")
+
+
+def test_executable_sql_survives_a_block_comment():
+    m, _ = probe_live_source.build_m_query(SNOWFLAKE, "Q", "Col", custom_sql="SELECT/* note */1")
+
+    assert 'Value.NativeQuery(db, "SELECT 1")' in m
+
+
+def test_block_comment_markers_inside_sql_string_survive():
+    m, _ = probe_live_source.build_m_query(SNOWFLAKE, "Q", "Col", custom_sql="SELECT '/* data */'")
+
+    assert "SELECT '/* data */'" in m
+
+
+def test_parser_self_closing_text_relation_cannot_clear_as_a_physical_table(tmp_path, monkeypatch):
+    twb = tmp_path / "empty-custom-sql.twb"
+    twb.write_text(
+        '<workbook version="2024.1"><datasources><datasource name="ds.test" caption="Test">'
+        '<connection class="snowflake" server="x" warehouse="WH">'
+        '<relation type="text" name="Q" /></connection></datasource></datasources></workbook>',
+        encoding="utf-8",
+    )
+    source = parse_workbook(twb)["data_sources"][0]
+    assert source["tables"][0]["source_relation"] == "custom-sql"
+    assert source["tables"][0]["custom_sql"] is None
+
+    monkeypatch.setattr(probe_live_source, "_host_resolves", lambda _server: True)
+    monkeypatch.setattr(probe_live_source, "_open_desktop", lambda _pbip: 123)
+    rc, verdict = probe_live_source._probe_one(tmp_path, [source], 0, 1, False)  # pylint: disable=protected-access
+
+    assert (rc, verdict) == (1, "ERROR")
+
+
+def test_empty_custom_sql_after_a_real_table_cannot_clear_the_source(tmp_path, monkeypatch):
+    source = _source(
+        [
+            {"name": "REAL_TABLE", "custom_sql": None},
+            {"name": "EMPTY_QUERY", "custom_sql": ""},
+        ]
+    )
+    original_probe = probe_live_source._probe_one_table
+    attempted = []
+
+    def _probe_table(migration, conn, target, opts):
+        attempted.append(target[0]["name"])
+        if target[0]["name"] == "REAL_TABLE":
+            return 0, "DATA_OK"
+        return original_probe(migration, conn, target, opts)
+
+    monkeypatch.setattr(probe_live_source, "_host_resolves", lambda _server: True)
+    monkeypatch.setattr(probe_live_source, "_probe_one_table", _probe_table)
+
+    rc, verdict = probe_live_source._probe_one(tmp_path, [source], 0, 1, False)  # pylint: disable=protected-access
+
+    assert (rc, verdict) == (1, "ERROR")
+    assert attempted == ["REAL_TABLE", "EMPTY_QUERY"]
 
 
 def test_a_real_table_still_navigates_and_is_unchanged_by_the_custom_sql_work():
@@ -131,35 +220,65 @@ def test_a_line_comment_cannot_swallow_the_rest_of_the_collapsed_query():
     assert "\\n" not in m and m.count("Value.NativeQuery") == 1
 
 
-def test_custom_sql_probe_writes_pbip_then_requires_desktop_operator(tmp_path, caplog, monkeypatch):
-    def _unexpected_open(_pbip: Path) -> int:
-        raise AssertionError("custom SQL must not be opened/refreshed automatically")
-
-    monkeypatch.setattr(probe_live_source, "_open_desktop", _unexpected_open)
-    caplog.set_level("INFO", logger="probe_live_source")
+def test_custom_sql_probe_without_enumerated_columns_clears_when_refresh_returns_data(tmp_path, monkeypatch):
+    monkeypatch.setattr(probe_live_source, "_open_desktop", lambda _pbip: 123)
+    monkeypatch.setattr(probe_live_source, "_wait_for_catalog", lambda _pid: True)
+    monkeypatch.setattr(probe_live_source, "_network_fault_observed", lambda _conn: False)
+    monkeypatch.setattr(probe_live_source, "_refresh_and_classify", lambda *_args: (0, "DATA_OK"))
+    monkeypatch.setattr(probe_live_source, "_close", lambda _pid, _pbip: True)
 
     rc, verdict = probe_live_source._probe_one_table(  # pylint: disable=protected-access
         tmp_path,
         SNOWFLAKE,
-        ({"name": "Flight_Level_Query", "custom_sql": "SELECT a FROM raw.flights"}, "Col"),
+        (
+            {
+                "name": "Flight_Level_Query",
+                "source_relation": "custom-sql",
+                "custom_sql": "SELECT a FROM raw.flights",
+            },
+            "ProbeOK",
+        ),
         (1, False),
     )
 
-    assert rc == probe_live_source.EXIT_OPERATOR_REQUIRED
-    assert rc != 0
-    assert verdict == "OPERATOR_REQUIRED"
+    assert (rc, verdict) == (0, "DATA_OK")
     pbip = next(tmp_path.glob("_probe/run-*/Probe.pbip"))
     assert pbip.exists(), "operator handoff must include the probe PBIP"
-    messages = "\n".join(record.getMessage() for record in caplog.records)
-    assert f"PROBE: OPERATOR_REQUIRED {pbip.parent}" in messages
-    assert f"Open {pbip} in Power BI Desktop" in messages
-    assert "do NOT use a SQL client" in messages
-    assert "Custom SQL refresh WILL run the full customer query" in messages
-    assert "not a cheap row probe" in messages
-    assert "isolated to one table and no report layer" in messages
-    assert "native-query approval modal looks like a credential failure" in messages
-    assert "gate stays armed until the operator reports the result" in messages
-    assert "DBeaver" in messages and "Snowsight" in messages and "SSMS" in messages
+    tmdl = next(pbip.parent.glob("*.SemanticModel/definition/tables/*.tmdl")).read_text()
+    assert "column 'ProbeOK'" in tmdl
+    assert "sourceColumn: ProbeOK" in tmdl
+
+
+def test_custom_sql_without_enumerated_columns_is_resolvable():
+    source = _source([{"name": "Q", "source_relation": "custom-sql", "custom_sql": "SELECT 1"}], fields=[])
+
+    _, tables, column = probe_live_source._resolve_probe_target([source], 0)  # pylint: disable=protected-access
+
+    assert [table["name"] for table in tables] == ["Q"]
+    assert column == "ProbeOK"
+
+
+def test_unreachable_custom_sql_source_remains_refused(tmp_path, monkeypatch):
+    monkeypatch.setattr(probe_live_source, "_host_resolves", lambda _server: False)
+
+    rc, verdict = probe_live_source._probe_one(  # pylint: disable=protected-access
+        tmp_path,
+        [_source([{"name": "Q", "source_relation": "custom-sql", "custom_sql": "SELECT 1"}], fields=[])],
+        0,
+        1,
+        False,
+    )
+
+    assert (rc, verdict) == (1, "UNREACHABLE")
+
+
+def test_ordinary_source_without_columns_is_cannot_assess():
+    source = _source([{"name": "REAL_TABLE", "custom_sql": None}], fields=[])
+
+    with pytest.raises(SystemExit) as raised:
+        probe_live_source._resolve_probe_target([source], 0)  # pylint: disable=protected-access
+
+    assert raised.value.code == 1
 
 
 @pytest.mark.parametrize(
@@ -178,7 +297,7 @@ def test_real_tables_are_probed_before_custom_sql_relations():
     # Reachability is proven equally by either, but a custom SELECT can be arbitrarily expensive.
     source = _source(
         [
-            {"name": "Q", "custom_sql": "SELECT * FROM huge"},
+            {"name": "Q", "source_relation": "custom-sql", "custom_sql": "SELECT * FROM huge"},
             {"name": "REAL_TABLE", "custom_sql": None},
         ]
     )
@@ -186,10 +305,10 @@ def test_real_tables_are_probed_before_custom_sql_relations():
     assert [t["name"] for t in tables] == ["REAL_TABLE", "Q"]
 
 
-def test_mixed_source_proves_credentials_but_still_requires_operator(tmp_path, caplog, monkeypatch):
+def test_mixed_source_proves_credentials_and_custom_sql(tmp_path, caplog, monkeypatch):
     source = _source(
         [
-            {"name": "Q", "custom_sql": "SELECT * FROM huge.fact"},
+            {"name": "Q", "source_relation": "custom-sql", "custom_sql": "SELECT * FROM huge.fact"},
             {"name": "REAL_TABLE", "custom_sql": None},
         ]
     )
@@ -198,8 +317,6 @@ def test_mixed_source_proves_credentials_but_still_requires_operator(tmp_path, c
     def _probe_table(_migration: Path, _conn: dict, target: tuple[dict, str], _opts: tuple[int, bool]):
         table_spec, _column = target
         attempted.append(table_spec["name"])
-        if table_spec.get("custom_sql"):
-            return probe_live_source.EXIT_OPERATOR_REQUIRED, "OPERATOR_REQUIRED"
         return 0, "DATA_OK"
 
     monkeypatch.setattr(probe_live_source, "_host_resolves", lambda _server: True)
@@ -208,16 +325,12 @@ def test_mixed_source_proves_credentials_but_still_requires_operator(tmp_path, c
 
     rc, verdict = probe_live_source._probe_one(tmp_path, [source], 0, 7, False)  # pylint: disable=protected-access
 
-    assert rc == probe_live_source.EXIT_OPERATOR_REQUIRED
-    assert verdict == "OPERATOR_REQUIRED"
+    assert (rc, verdict) == (0, "DATA_OK")
     assert attempted == ["REAL_TABLE", "Q"]
-    messages = "\n".join(record.getMessage() for record in caplog.records)
-    assert "source credentials were proven by table 'REAL_TABLE'" in messages
-    assert "custom-SQL relation(s) still require Power BI Desktop operator refresh" in messages
 
 
 def test_the_custom_sql_relation_is_still_probed_when_it_is_the_only_candidate():
-    source = _source([{"name": "Q", "custom_sql": "SELECT 1"}])
+    source = _source([{"name": "Q", "source_relation": "custom-sql", "custom_sql": "SELECT 1"}])
     _, tables, _ = probe_live_source._resolve_probe_target([source], 0)  # pylint: disable=protected-access
     assert [t["name"] for t in tables] == ["Q"]
     assert tables[0]["custom_sql"] == "SELECT 1"
