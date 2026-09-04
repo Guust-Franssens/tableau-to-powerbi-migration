@@ -172,11 +172,60 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
     (
         # The name is untrusted too, and it leaves the manifest for `handover.md` and
         # `package-manifest.json`, which the document sweep never sees.
-        "packaging: name the object from the raw view_name, uncontained",
+        #
+        # ⚠️ Round 6 RE-ANCHORED the snippet, not the claim: containment moved from the naming pair
+        # to the whole view, at the source, so `naming, _ = _contain_unsafe_strings([...])` no longer
+        # exists to mutate. Reading the RAW view back is the strictly larger version of the same
+        # edit, and it still has to kill the round-5 name anchor.
+        "packaging: read the RAW view, uncontained, as rounds 3-5 did",
         PACKAGER,
-        '        naming, _ = _contain_unsafe_strings([view.get("view_name"), view.get("view_url_name")])',
-        '        naming = [view.get("view_name"), view.get("view_url_name")]  # noqa',
-        ["test_a_refused_object_NAME_does_not_leak_into_the_other_two_artifacts"],
+        "        view = _contain_unsafe_strings(raw_view)[0]",
+        "        view = raw_view  # noqa",
+        [
+            "test_a_refused_object_NAME_does_not_leak_into_the_other_two_artifacts",
+            "test_the_ORACLE_RESULT_itself_is_contained_not_only_the_scoped_manifest",
+        ],
+    ),
+    # ---- round-6 finding: contain the oracle RESULT at its source, not at a fifth consumer -------
+    (
+        # The precise round-5 behaviour, restored: the NAME contained and nothing else. It proves the
+        # new anchors need whole-view containment rather than one more field, which is exactly what
+        # rounds 3, 4 and 5 each supplied and each was followed by. The round-5 anchors SURVIVE this
+        # by design - `oracle-manifest.json` is still swept - and that is the finding in one line.
+        "packaging: contain only the object NAME, as round 5 did, leaving the LUID and type raw",
+        PACKAGER,
+        "        view = _contain_unsafe_strings(raw_view)[0]",
+        '        view = {**raw_view, "view_name": _contain_unsafe_strings(raw_view.get("view_name"))[0]}  # noqa',
+        [
+            "test_the_ORACLE_RESULT_itself_is_contained_not_only_the_scoped_manifest",
+            "test_a_refused_view_LUID_does_not_reach_an_OMISSION_row",
+        ],
+    ),
+    (
+        # Moving containment to the source is only safe because the walk is IDEMPOTENT: a later
+        # reader must still be able to see that a value was refused. Neutered, the sentinel reads as
+        # an ordinary string, `_copy_leg` stops diagnosing and `scope.refused_fields` empties - the
+        # operator loses both the WHY and the WHERE while the value stays contained, which is the
+        # silent-scrub failure round 5 named.
+        "containment: treat an already-refused string as ordinary, retiring the diagnosis",
+        PACKAGER,
+        '        if value == REFUSED_PATH:\n            return value, [prefix or "."]',
+        "        if False:  # noqa\n            pass",
+        [
+            "test_a_refused_nested_string_is_DIAGNOSED_not_silently_scrubbed",
+            "test_a_VIEW_LEVEL_string_cannot_ship_a_host_path_either",
+        ],
+    ),
+    (
+        # The consumer enumeration's second document: `source-provenance.json` feeds
+        # `shippable_provenance`, `render_handover` and `workbook_identity`'s conflict sentence, and
+        # nothing downstream sweeps any of them. The sentence is why an artifact-walking assertion is
+        # not enough on its own - the leak stops being a string VALUE the moment it is quoted.
+        "packaging: read source-provenance.json raw, so the identity quotes it verbatim",
+        PACKAGER,
+        "    entries = _contain_unsafe_strings(entries)[0]",
+        "    entries = list(entries)  # noqa",
+        ["test_the_WORKBOOK_IDENTITY_document_is_contained_at_its_own_intake_too"],
     ),
     (
         "project: report one dropped path per ROW instead of one per field",

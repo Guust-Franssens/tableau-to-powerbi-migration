@@ -1074,9 +1074,18 @@ def _secret_outside(oracle: Path, name: str) -> Path:
 
 @pytest.mark.parametrize("declared", ["../outside-secret.png", "sub/../../outside-secret.png"])
 def test_a_relative_path_escaping_the_capture_root_is_refused(tmp_path: Path, declared: str) -> None:
-    """`../` traversal copied an arbitrary file byte-identically into the customer package."""
+    """`../` traversal copied an arbitrary file byte-identically into the customer package.
+
+    ⚠️ The end-to-end half is now defended TWICE: round-6 source containment refuses a `..` component
+    before `_resolve_capture_file` ever sees it, so the end-to-end assertions alone can no longer
+    tell whether the containment check still exists. The resolver is therefore driven DIRECTLY as
+    well - it is the sole mitigation for the shape source containment cannot see, a symlink INSIDE
+    the capture pointing out of it, and a check nothing can falsify is a check that will be deleted.
+    """
     bundle, oracle = _bundle(tmp_path)
     _secret_outside(oracle, "outside-secret.png")
+    resolved, reason = pkg._resolve_capture_file(oracle, declared)  # pylint: disable=protected-access
+    assert resolved is None and "escapes the capture root" in str(reason)
     manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
     manifest["views"][0]["image"] = {"status": "ok", "path": declared, "sha256": "x", "bytes": 3}
     (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
@@ -1267,6 +1276,140 @@ def test_a_refused_object_NAME_does_not_leak_into_the_other_two_artifacts(tmp_pa
     ]
     assert leaked == [], f"the account name must not reach any packaged artifact: {leaked}"
     assert not [path for path in root.rglob("*") if account in path.name]
+
+
+def test_the_ORACLE_RESULT_itself_is_contained_not_only_the_scoped_manifest(tmp_path: Path) -> None:
+    """#480 round 6. The document sweep guards ONE artifact; `oracle.objects` is built beside it.
+
+    Rounds 3, 4 and 5 each contained a value at the consumer that had just leaked, and each was
+    followed by a consumer that had not been enumerated. Round 5 swept the scoped
+    `oracle-manifest.json`, and `package_oracle` went on constructing `objects`/`omissions` from the
+    RAW view - which `package-manifest.json` embeds verbatim and `render_handover` interpolates.
+    Review's controlled input and its measured result on the tip::
+
+        view_luid = <drive>:\\Users\\<account>\\private\\view-id.log
+        view_type = \\\\server\\share\\declared-type.log
+
+        oracle-manifest view_luid:                  <refused-by-packager>   # swept
+        package-manifest oracle.objects[0].view_luid: <drive>:\\Users\\...   # NOT swept
+        handover.md:  UNTYPED_RENDER ... luid=<drive>:\\Users\\...           # NOT swept
+
+    So this asserts the SOURCE, not a fifth sweep: the view is contained once, before any field is
+    read, and all four shipped surfaces are checked together because that is the class - a future
+    consumer must inherit containment rather than need its own guard.
+    """
+    luid_leak = f"{HOST_PATH_ROOT}{_SEP}private{_SEP}view-id.log"
+    type_leak = f"{_SEP}{_SEP}server{_SEP}share{_SEP}declared-type.log"
+    shipped, root = _shipped_with(tmp_path, view={"view_luid": luid_leak, "view_type": type_leak})
+
+    package = json.loads((root / "package-manifest.json").read_text(encoding="utf-8"))
+    obj = package["oracle"]["objects"][0]
+    assert obj["view_luid"] == pkg.REFUSED_PATH, "objects[] must be built from the CONTAINED view"
+    assert obj["declared_view_type"] == pkg.REFUSED_PATH
+    assert obj["view_type"] == pkg.KIND_UNKNOWN, "a refused declared type is still untyped, not invented"
+    assert absolute_host_paths(package) == [], "package-manifest.json is a shipped artifact too"
+    assert shipped["views"][0]["view_luid"] == pkg.REFUSED_PATH
+
+    handover = (root / "handover.md").read_text(encoding="utf-8")
+    assert "UNTYPED_RENDER" in handover
+    account = HOST_PATH_ROOT.rsplit(_SEP, 1)[-1]
+    leaked = [
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_file() and account in path.read_text(encoding="utf-8", errors="ignore")
+    ]
+    assert leaked == [], f"no shipped artifact may carry the account name: {leaked}"
+    assert not [path for path in root.rglob("*") if account in path.name], "nor may a filename stem"
+
+
+def test_a_refused_view_LUID_does_not_reach_an_OMISSION_row(tmp_path: Path) -> None:
+    """`omissions[]` is the second structure built beside the sweep, and it carries the LUID too.
+
+    It reaches `package-manifest.json` and the `ORACLE_OMISSION` line, neither of which the scoped
+    manifest's sweep sees. Driven with a leg the packager refuses, so an omission row actually
+    exists to inspect.
+    """
+    luid_leak = f"{HOST_PATH_ROOT}{_SEP}private{_SEP}view-id.log"
+    _, root = _shipped_with(
+        tmp_path,
+        view={"view_luid": luid_leak, "image": {"status": "ok", "path": f"{HOST_PATH_ROOT}{_SEP}secret.png"}},
+    )
+    package = json.loads((root / "package-manifest.json").read_text(encoding="utf-8"))
+    omissions = package["oracle"]["omissions"]
+    assert omissions and omissions[0]["view_luid"] == pkg.REFUSED_PATH
+    assert absolute_host_paths(package) == []
+    assert "non-relative" in omissions[0]["reason"], "the leg's own diagnosis must survive containment"
+    assert luid_leak not in (root / "handover.md").read_text(encoding="utf-8")
+
+
+def test_an_ORDINARY_capture_is_byte_identical_after_containment(tmp_path: Path) -> None:
+    """Positive control for the source containment: a real LUID and a real type must not be mangled.
+
+    A real `view_luid` is a UUID and a real `view_type` is `dashboard`/`worksheet`/`unknown`.
+    Containing the whole view at the source touches every field, so the cost of getting the
+    predicate wrong is now the whole capture rather than one leg - assert the no-op explicitly.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    shipped = json.loads((root / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    package = json.loads((root / "package-manifest.json").read_text(encoding="utf-8"))
+    by_luid = {view["view_luid"]: view for view in shipped["views"]}
+    assert sorted(by_luid) == [
+        "aaaaaaaa-0000-0000-0000-000000000001",
+        "aaaaaaaa-0000-0000-0000-000000000002",
+    ], "every LUID survives verbatim"
+    assert by_luid["aaaaaaaa-0000-0000-0000-000000000002"]["view_type"] == "dashboard"
+    assert by_luid["aaaaaaaa-0000-0000-0000-000000000001"]["view_name"] == "Sales"
+    assert "refused_fields" not in shipped["scope"], "an ordinary capture refuses nothing"
+    assert [obj["view_luid"] for obj in package["oracle"]["objects"]] == sorted(by_luid)
+    assert {obj["view_type"] for obj in package["oracle"]["objects"]} == {"worksheet", "dashboard"}
+    assert package["oracle"]["omissions"] == []
+    assert "unknown/images" not in _images(tmp_path)
+
+
+def test_the_WORKBOOK_IDENTITY_document_is_contained_at_its_own_intake_too(tmp_path: Path) -> None:
+    """The consumer enumeration's second finding: `source-provenance.json` is untrusted input too.
+
+    `origin.workbook_luid` is server-supplied and three readers take it before anything sweeps it -
+    `shippable_provenance` ships it, `render_handover` interpolates it into `ORACLE_ATTRIBUTION
+    luid=`, and `workbook_identity`'s conflict diagnosis quotes it INTO A SENTENCE. Measured before
+    the intake containment::
+
+        scope.suppressed_reason: ... source-provenance.json records <drive>:\\Users\\<account>\\...
+        handover.md: ORACLE_ATTRIBUTION ... reason=... records <drive>:\\Users\\<account>\\...
+
+    ⚠️ `absolute_host_paths` is structurally blind to that second form - the leak is a substring of
+    an authored sentence, not a string VALUE - so this asserts on the account name in the shipped
+    bytes as well. A walk of the parse is the right tool for a field; it is the wrong tool for prose.
+    """
+    leak = f"{HOST_PATH_ROOT}{_SEP}private{_SEP}leak.log"
+    bundle, oracle = _bundle(tmp_path, provenance_luid=leak)
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    provenance = json.loads((root / "source-provenance.json").read_text(encoding="utf-8"))
+    assert pkg.REFUSED_PATH in provenance["scope"]["suppressed_reason"], "the diagnosis quotes the CONTAINED value"
+    assert absolute_host_paths(provenance) == []
+    account = HOST_PATH_ROOT.rsplit(_SEP, 1)[-1]
+    leaked = [
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_file() and account in path.read_text(encoding="utf-8", errors="ignore")
+    ]
+    assert leaked == [], f"no shipped artifact may carry the account name: {leaked}"
+
+
+def test_a_LEGITIMATE_provenance_entry_reaches_the_identity_unchanged(tmp_path: Path) -> None:
+    """Positive control for the provenance intake: a real LUID, sha and filename must not be mangled."""
+    bundle, oracle = _bundle(tmp_path)
+    result = _package(tmp_path, bundle, oracle)
+    identity = result["workbook_identity"]
+    assert identity["luid"] == WB_LUID and identity["match"] == "sha256" and identity["reason"] is None
+    provenance = json.loads((_out(tmp_path) / UNIT / "source-provenance.json").read_text(encoding="utf-8"))
+    entry = provenance["inputs"][0]
+    assert entry["origin"] == {"workbook_luid": WB_LUID, "match": "sha256"}
+    assert entry["input"]["file"] == f"{WB_LUID}_{UNIT}.twb"
+    assert len(entry["input"]["sha256"]) == 64
 
 
 def test_a_refused_nested_string_is_DIAGNOSED_not_silently_scrubbed(tmp_path: Path) -> None:

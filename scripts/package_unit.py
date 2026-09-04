@@ -518,8 +518,17 @@ def _contain_unsafe_strings(value: Any, prefix: str = "") -> tuple[Any, list[str
     strings in dicts, lists, tuples and any nesting of them, which is why a fourth allowlisted
     container, a nested dict, or a list of dicts cannot reopen it - there is no level left that is
     not visited. Non-string scalars are returned untouched, so counts, verdicts and flags survive.
+
+    ⚠️ **An ALREADY-refused string reports its path too** (round 6). Containment now happens once at
+    the source, so by the time a later reader walks the same value the sentinel is all that is left -
+    and a walk that reported nothing would silently retire two things this package needs: the leg's
+    `ORACLE_OMISSION` diagnosis, and `scope.refused_fields`. Reporting the sentinel makes the walk
+    idempotent: running it twice refuses the same set, so containment can move earlier without any
+    downstream reader losing what it could previously see.
     """
     if isinstance(value, str):
+        if value == REFUSED_PATH:
+            return value, [prefix or "."]
         return (REFUSED_PATH, [prefix or "."]) if _declares_unsafe_path(value) else (value, [])
     if isinstance(value, dict):
         kept: dict[str, Any] = {}
@@ -583,7 +592,11 @@ def _resolve_capture_file(oracle_root: Path, declared: str) -> tuple[Path | None
     if not declared:
         return None, "capture declares an empty path"
     candidate = Path(declared)
-    if _declares_non_relative(declared):
+    if _declares_non_relative(declared) or declared == REFUSED_PATH:
+        # The sentinel means source containment (round 6) already refused this string, so the
+        # declared form no longer exists here. It is diagnosed as the refusal it is, rather than
+        # left to `resolve(strict=True)` to report as a missing file - which would read to an
+        # operator as a capture defect instead of a refusal this packager made deliberately.
         return None, f"capture declares a non-relative path ({REFUSED_PATH}) - refused"
     try:
         root = oracle_root.resolve(strict=True)
@@ -668,6 +681,20 @@ def package_oracle(  # pylint: disable=too-many-locals
     written before the rule - would be copied into `<kind>/data/<stem>.csv` and shipped to the
     consumer as numbers. Demoting first means those bytes simply have no `path` to copy, and the
     packaged manifest carries `retained_path` plus the reason instead.
+    ⚠️ **Round 6 contains the view at the SOURCE, not at each consumer.** Rounds 3, 4 and 5 each
+    contained a value at the reader that had just leaked - a field name, a top-level value, then the
+    scoped `oracle-manifest.json` document - and each was followed by a reader nobody had enumerated.
+    Measured on the tip of round 5, with `view_luid` and `view_type` declaring host paths::
+
+        oracle-manifest view_luid:                     <refused-by-packager>   # swept
+        package-manifest oracle.objects[0].view_luid:  <drive>:\\Users\\...    # built beside it
+        handover.md: UNTYPED_RENDER ... luid=<drive>:\\Users\\...              # rendered from it
+
+    So the view is contained ONCE here, before any field of it is read, and `objects`, `omissions`,
+    the packaged record, the filename stem and every artifact derived from them are contained BY
+    CONSTRUCTION. A consumer added later inherits that rather than needing a sixth guard. Legs keep
+    their own diagnosis because :func:`_contain_unsafe_strings` reports an already-refused string as
+    refused, so the walk is idempotent and `_copy_leg` still says WHICH field it refused and why.
     """
     views = tableau_oracle_manifest.withhold_uncertified_evidence(views)
     taken: set[str] = set()
@@ -675,15 +702,11 @@ def package_oracle(  # pylint: disable=too-many-locals
     objects: list[dict[str, Any]] = []
     omissions: list[dict[str, Any]] = []
 
-    for view in views:
+    for raw_view in views:
+        view = _contain_unsafe_strings(raw_view)[0]
         kind = view_kind(view)
         luid = str(view.get("view_luid") or "")
-        # #480 round 5. The NAMES are untrusted too, and they leave the manifest: measured, an
-        # absolute `view_name` reached `handover.md`, `package-manifest.json` and the packaged
-        # stem. Containing them ONCE here means the filename, the greppable line and the object
-        # row all derive from the contained value rather than each re-deciding.
-        naming, _ = _contain_unsafe_strings([view.get("view_name"), view.get("view_url_name")])
-        stem = object_filename(str(naming[0] or naming[1] or ""), luid, taken)
+        stem = object_filename(str(view.get("view_name") or view.get("view_url_name") or ""), luid, taken)
         record = dict(view)
         images: list[str] = []
 
@@ -719,7 +742,7 @@ def package_oracle(  # pylint: disable=too-many-locals
         packaged.append(record)
         objects.append(
             {
-                "name": naming[0],
+                "name": view.get("view_name"),
                 "view_luid": luid,
                 "view_type": kind,
                 "declared_view_type": view.get("view_type"),
@@ -1155,6 +1178,15 @@ def _assemble_unit(  # pylint: disable=too-many-locals
         notes.append(f"source asset unresolved ({asset_route}); both gates will report CANNOT_ESTABLISH")
 
     _payload, entries = scope_provenance(read_json(bundle / "source-provenance.json"), sha256_of(asset))
+    # #480 round 6, the SECOND untrusted document, contained at its own intake for the same reason as
+    # the oracle capture. Its `origin.workbook_luid` is server-supplied, and three consumers read it
+    # before anything sweeps it: `shippable_provenance` ships it, `render_handover` interpolates it
+    # into `ORACLE_ATTRIBUTION luid=`, and `workbook_identity`'s conflict diagnosis quotes it INTO a
+    # sentence - which `absolute_host_paths` cannot see, because the value is no longer a value.
+    # Measured before this line existed: `scope.suppressed_reason` and `handover.md` both carried
+    # `<drive>:\Users\<account>\private\leak.log`. Containing at intake means every one of them is
+    # fed a contained value, exactly as `package_oracle` is.
+    entries = _contain_unsafe_strings(entries)[0]
     identity = workbook_identity(entries, asset)
     write_json(dest / "source-provenance.json", shippable_provenance(entries, identity, unit))
     write_json(dest / "report.json", scope_report(engine_report, unit))
