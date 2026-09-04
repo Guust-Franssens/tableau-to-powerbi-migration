@@ -991,7 +991,8 @@ Three defects that cost a full debugging cycle each, none of which §6 covers.
 ⚠️ **FIXED UPSTREAM — the ENGINE no longer emits this, but the diagnosis below is still how you read
 the symptom.** `Yarbrdab000/tableau-fabric-skills#129` (*"the emit site is unconditionally
 `[Item=,Kind=]`, but a BIFF8 nav table has only Name/Data"*) was **fixed in 2.147.0**, following #108
-in the same area; we run 2.353.0. So a pristine 2.353.0 bundle should already emit the Name-keyed
+in the same area. Any engine at or above 2.147.0 — the canonical engine was 2.356.0 at 2026-09-04;
+resolve yours with `python scripts/engine_source.py` — should already emit the Name-keyed
 form for a legacy `.xls`. Keep reading if you are debugging an **older** bundle, a hand-edited
 partition, or the same `key didn't match any rows` error from another cause — the Power Query
 mechanics, the `Orders$` trap and the enumeration probe are all engine-independent and still correct.

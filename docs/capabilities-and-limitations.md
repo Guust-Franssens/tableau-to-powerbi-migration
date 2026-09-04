@@ -196,9 +196,28 @@ a single pass does.
   mean "the visuals can be seen", but the gap is specifically *chart* visuals, not visuals in general.
   This is the concrete, named instance of the general rule that structural validation is necessary but
   not sufficient. Reported upstream on
-  [#186](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/186) — ✅ **still OPEN as of
-  2026-09-03, so this chart-height gap still reproduces**; related to
-  [#180](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/180).
+  [#186](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/186).
+
+  ⚠️ **The counts above are OUR measurement at engine 2.339.0 and have NOT been re-measured since; an
+  earlier version of this bullet said "still OPEN as of 2026-09-03, so this chart-height gap still
+  reproduces", which is exactly the issue-state inference this document exists to remove (issue #486,
+  our tracker #494).** Issue state establishes nothing in either direction. What the evidence actually
+  supports, split by claim:
+
+  - ✅ **The validator half is re-measured, 2026-09-04, and holds.** `powerbi-report-author` 0.1.4's
+    shipped `dist/` contains exactly two height-floor rule codes — `PBIR_SLICER_HEIGHT_BELOW_FLOOR`
+    and `PBIR_TEXTBOX_HEIGHT_BELOW_FLOOR` — and no chart equivalent. This is a property of the
+    *validator*, so it is unaffected by any engine version.
+  - ⚠️ **The population counts are ours at 2.339.0 and are NOT current at 2.356.0.** Treat the
+    numbers as a worked example, not as today's estate.
+  - ❌ **It does not reproduce in the maintainer's corpus.** His 2026-09-03 sweep of 312 `visual.json`
+    across 34 workbooks at engine **2.355.0** reports *"Neither reproduces in our 34-workbook
+    corpus"* — 2 sub-20px visuals, none near 12px. He kept #186 open because **code inspection**
+    confirmed the structural gap (every size floor in the emit path is type-based, the only
+    content-aware sizer is text, and `geometry_defects.floor` at ≤41px is not a blocking gate) while
+    his corpus could not exercise the reported shape — not because he reproduced it.
+
+  Related to [#180](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/180).
 
   ⚠️ **The "#180 slicers *regressed*" framing is RETRACTED — the engine is not wrong here, and the
   correction matters because it changes who you report the next instance to.** #180 was closed

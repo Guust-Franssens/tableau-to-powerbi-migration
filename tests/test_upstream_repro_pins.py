@@ -1,10 +1,19 @@
 """Pinning tests for tiny upstream-engine repro fixtures.
 
-These tests intentionally assert the canonical deterministic engine's CURRENT behaviour for
-``fixtures/upstream-repros``. They are not normal pass-after-fix regressions. For an upstream defect
-such as #168, the expected value is the defect observed at the pinned engine version: while upstream
-is broken the test passes; when upstream fixes it the test FAILS. Treat that failure as a signal to
-verify the new engine output, then update the expectation and the pinned engine version below.
+These tests assert the canonical deterministic engine's CURRENT behaviour for
+``fixtures/upstream-repros``. **Two opposite directions live in this file, and #168 has changed
+sides** — read each test's own docstring rather than assuming one lifetime for all of them:
+
+* **Defect-direction pins** hold the defect observed at the pinned engine version: while upstream is
+  broken the test passes, and when upstream fixes it the test FAILS. ``#171`` is one — generated
+  field-parameter support should break it, for review.
+* **Post-fix regression guards** hold the FIXED behaviour: they pass today and fail if the defect
+  returns. ``#168`` was reversed into one on 2026-09-03 against measured output at engine 2.356.0 —
+  its defect-direction pin fired exactly as designed, upstream had shipped the fix, and the pin was
+  turned around rather than deleted. ``#166`` was always this direction.
+
+Either way a failure is a signal, not a verdict: verify against the current canonical engine, then
+update the expectation and the pinned engine version below.
 
 The engine is an optional installed Copilot plugin, not a repo dependency, so engine-backed tests use
 the existing ``requires_engine`` skip pattern and skip cleanly when the deterministic tier is absent.

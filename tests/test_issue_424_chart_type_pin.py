@@ -38,10 +38,13 @@ rewrites every date-on-Columns chart — or every discrete-dimension chart — t
 ``columnChart``), which is the specific evidence that #184's remedy is correct rather than the
 over-broad one this file was built to distinguish it from.
 
-It deliberately does NOT assert an engine version. The shared harness in
-``tests/test_upstream_repro_pins.py`` pins one, which makes every test in that file fail the moment
-the canonical plugin moves; this file reports the observed version in its failure text instead, so
-the behaviour it describes stays checkable on whatever engine is installed.
+It deliberately does NOT assert an engine version — and **neither does the shared harness in
+``tests/test_upstream_repro_pins.py`` any more.** That harness used to ``assert`` its pinned version,
+which made every pin in that file fail the moment the canonical plugin moved; since 2026-09-03 (issue
+#486) the mismatch is a non-fatal ``UserWarning`` and the behaviour assertions still run. Measured
+2026-09-04: forcing the observed version to ``9.9.9`` emits the warning, and the #168 behaviour pin
+still runs and passes. This file has always reported the observed version in its failure text rather
+than gating on it, so the behaviour it describes stays checkable on whatever engine is installed.
 """
 
 from __future__ import annotations

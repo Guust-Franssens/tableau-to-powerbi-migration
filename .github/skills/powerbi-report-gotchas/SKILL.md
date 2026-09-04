@@ -104,7 +104,8 @@ These pass `validate` but render wrong. Only a live Desktop screenshot catches t
   rendered **All**; the byte-identical payload moved to `general.filter` rendered **10**. On a slicer,
   `filterConfig` restricts which items are offered and pre-selects nothing, so engine-emitted defaults
     there are inert. ⚠️ **The ENGINE half of this is fixed upstream — do not go hunting for it.**
-    `Yarbrdab000/tableau-fabric-skills#130` shipped in **2.149.0** (we run 2.353.0): the emitter has
+    `Yarbrdab000/tableau-fabric-skills#130` shipped in **2.149.0**, which is below the canonical
+    engine (2.356.0 at 2026-09-04 — resolve yours with `python scripts/engine_source.py`): the emitter has
     written the open-on selection into `general.filter` since 2.51.0, and the two residual
     `filterConfig`-only slicers were both **boolean** columns the pre-selection gate declined; the
     corpus now emits **zero**. The PBIR rule above is unchanged and still yours to apply when you
@@ -191,9 +192,24 @@ These pass `validate` but render wrong. Only a live Desktop screenshot catches t
 
 ### A literal must carry the COLUMN's type — and the same mistake fails two opposite ways
 
-✅ **Re-verified against upstream 2026-09-03: [`Yarbrdab000/tableau-fabric-skills#178`](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/178)
-is OPEN and its own title records "still reproduces at 2.339.0" — this STILL REPRODUCES at our
-2.353.0.** Do not confuse it with #130 (§1's slicer bullet), which fixed the same string-quoted
+✅ **Re-measured 2026-09-04 in the canonical engine we actually run (2.356.0): this STILL REPRODUCES
+for us, and the evidence is the engine's code, not an issue's state.** `twb_to_pbir.py:10559`
+(`_data_point_colors`, the `scopeId` selector) emits
+`"Right": {"Literal": {"Value": _semantic_string_literal(m["value"])}}` unconditionally; the column's
+datatype is in scope a few lines above and is never consulted, so a boolean member is still written as
+the *string* `'true'`.
+
+⚠️ **Upstream has FIXED it and we do not have the fix yet — so this bullet is version-scoped, not
+permanent.** [`Yarbrdab000/tableau-fabric-skills#178`](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/178)
+is **CLOSED COMPLETED (2026-09-03 20:48:36Z)**; closing commit `39276a08` reproduced it at **2.358.0**
+and shipped a datatype-keyed literal in **2.359.0** (upstream `VERSION` reads 2.365.0). Resolve the
+installed version with `python scripts/engine_source.py` before trusting this either way: at ≤ 2.358.0
+the defect is live, at ≥ 2.359.0 it is not.
+
+⚠️ **The previous wording said "#178 is OPEN … so this STILL REPRODUCES" — that inference was invalid
+even while its conclusion happened to be right**, and it was wrong about the state within a day. An
+issue's state is not a measurement in either direction (issue #486). Do not confuse this with
+`Yarbrdab000/tableau-fabric-skills#130` (§1's slicer bullet), which fixed the same string-quoted
 boolean in the *slicer pre-selection* path only; the **data-colour** slot below is untouched.
 
 🟢 render-verified (Desktop 2.157.828.0). PBIR encodes a literal's type in the string itself:
@@ -529,7 +545,8 @@ Treat `shapeMap` as unusable rather than merely superseded.
 ⚠️ **The engine half is version-stale.** `shapeMap`/`filledMap` emission was the 2.113.0 behaviour;
 `Yarbrdab000/tableau-fabric-skills#112` and **#128 (fixed 2.148.0)** moved location-only maps onto
 `azureMap`, and 2.126.0 onwards was measured emitting `azureMap` throughout (`AGENTS.md`, engine
-source section). At our 2.353.0, expect `azureMap`, not `shapeMap`. The **Desktop** finding — that
+source section). Anything at or above 2.148.0 — the canonical engine was 2.356.0 at 2026-09-04 —
+should emit `azureMap`, not `shapeMap`. The **Desktop** finding — that
 `shapeMap` renders a blank rectangle and validates clean — is unaffected and still holds; what is
 retracted is the expectation that a pristine run hands you `shapeMap` to convert.
 
