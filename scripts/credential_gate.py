@@ -972,6 +972,71 @@ def _gate_was_ever_applied(migration: Path) -> bool:
     return False
 
 
+def _no_audit_trail_reason(migration: Path, artifacts: list[Path]) -> str | None:
+    """Why `verify` cannot even ask whether a gate applied here, or None when it legitimately can.
+
+    Issue #354: `_gate_was_ever_applied` returning False (no `AUDIT` file at all) is the CORRECT
+    answer for two situations that must not print or exit the same way:
+
+    1. a migration/bundle that genuinely never needed a gate, checked at its own root - extract-only,
+       or a live source classified but never armed. `run_estate.py` always calls `_audit(out_dir,
+       "engine-receipt", ...)` right after `write_engine_receipt`, unconditionally, so every engine
+       bundle root carries an `AUDIT` file even when it has zero `block` entries; the parser path has
+       no such unconditional write, so a genuinely never-gated parser-path unit has no `AUDIT` file
+       either - but it DOES carry `migration-spec.json` beside it, one of `SCOPE_MARKERS`.
+    2. a SHIP DESTINATION that merely received a COPY of built artifacts from a gate-bearing root
+       elsewhere (the documented `migrations/{workbooks,datasources}/<slug>/fabric/` sign-off copy).
+       It has no `AUDIT` file for the same surface reason as (1) - nothing was ever written there -
+       but it also carries none of `SCOPE_MARKERS`, because it was never itself a place a gate could
+       have been armed; the gate, if any, was armed at the bundle/spec root the artifacts were copied
+       FROM.
+
+    `_scope_refusal` is already the exact test for "is this identifiable as one migration or engine
+    bundle", reused here rather than re-implemented. Only fires when there is something to assess in
+    the first place (`artifacts`); an empty or irrelevant directory has nothing to fail closed about.
+
+    Deliberately does NOT attempt to locate the originating bundle on its own - engine-output-receipt
+    provenance records a VERSION, not a path (`manifest_scope.scope_receipt`'s docstring: "engine
+    provenance is a VERSION, not a location on the machine that happened to build it"), so there is no
+    recorded pointer from a copied artifact back to the root that gated it. Inventing one - guessing a
+    sibling `_runs/.../bundle` directory, or trusting an unauthenticated `--bundle` argument without
+    any content-addressed proof it is the same build - would be exactly the "invented link" this
+    function exists to refuse. Fail closed instead: say plainly that no audit history could be found
+    at this path, and name the real fix (verify at the bundle/spec root instead).
+    """
+    if not artifacts:
+        return None
+    return _scope_refusal(migration)
+
+
+def _log_cannot_assess(reason: str) -> None:
+    """Explain a state-3 verdict: report only, never returns a code (`_verify_one` owns that)."""
+    log.error("GATE VERIFY: CANNOT ASSESS - no '%s' audit log exists at this path, and it is", AUDIT)
+    log.error("  not identifiable as a place a gate could ever have been armed (%s).", reason)
+    log.error("  This is the shape of a ship-destination copy: built artifacts are copied to")
+    log.error("  'migrations/{workbooks,datasources}/<slug>/fabric/', but the audit log is not - it")
+    log.error("  lives at the bundle/spec root where the gate was armed. Run 'verify' THERE instead.")
+    log.error("  Reporting OK here would be indistinguishable from a migration that was genuinely")
+    log.error("  never gated, which is exactly the false-clean issue #354 exists to close.")
+
+
+def _log_ok_verdict(migration: Path, *, authentic: bool, marker: bool, deny: bool) -> None:
+    """Report WHY a clean `verify` passed - never returns a code (`_verify_one` owns that)."""
+    if authentic:
+        log.info("GATE VERIFY: OK - build-only run authorized by a human (audit-backed).")
+    elif marker or deny:
+        log.info("GATE VERIFY: OK - gate applied, no model/report artifacts exist.")
+    elif not _gate_was_ever_applied(migration):
+        # Say WHY it passed, so an extract-only pass is never confused with a gate that was lifted.
+        log.info("GATE VERIFY: OK - no gate was ever applied to this migration (no 'block' entry in")
+        log.info("  the audit log), so there was no lift to earn. Expected for an extract-only")
+        log.info("  migration where every datasource is a packaged/flat file and step 6 correctly")
+        log.info("  raised no gate. NOTE: this attests the gate's own history, not that the source")
+        log.info("  classification was right - that is step 6/6b's job.")
+    else:
+        log.info("GATE VERIFY: OK - gate not applied.")
+
+
 def _verify_one(migration: Path) -> int:
     """Authoritative post-hoc check: did anything get built while the gate was up?
 
@@ -986,7 +1051,19 @@ def _verify_one(migration: Path) -> int:
 
     None of which applies when a gate was never raised in the first place - see
     `_gate_was_ever_applied`.
+
+    A FIFTH state is checked before any of those: no audit history exists at this path AT ALL, and
+    the path does not look like a place a gate could ever have been armed either (issue #354). That
+    is neither "passed" nor "failed" - it is "this check could not be performed here" - and it must
+    exit differently from both, or a ship-destination copy with no audit log reads exactly like a
+    migration that was legitimately never gated. See `_no_audit_trail_reason`.
     """
+    artifacts = audited_paths(migration)
+    no_audit_trail = _no_audit_trail_reason(migration, artifacts)
+    if no_audit_trail is not None:
+        _log_cannot_assess(no_audit_trail)
+        return 3
+
     marker = (migration / MARKER).exists()
     override_file = (migration / OVERRIDE).exists()
     authentic = _override_is_authentic(migration)
@@ -1007,7 +1084,6 @@ def _verify_one(migration: Path) -> int:
     # Measured: `clear --reason "I decided it is fine"` lifted the ACL and the build proceeded with
     # no probe ever run. Enforcement cannot prevent that (clear has to exist for teardown), but it
     # must never pass silently, or the guarantee is gone via the front door.
-    artifacts = audited_paths(migration)
     pre_gate_engine_artifacts, gate_artifacts = _split_pre_gate_engine_artifacts(migration, artifacts)
     if artifacts and not deny and not _clear_was_earned(migration) and _gate_was_ever_applied(migration):
         log.error("GATE VERIFY: UNEARNED CLEAR - artifacts exist, but no successful probe and no")
@@ -1036,24 +1112,21 @@ def _verify_one(migration: Path) -> int:
 
     if violations:
         return 1
-    if authentic:
-        log.info("GATE VERIFY: OK - build-only run authorized by a human (audit-backed).")
-    elif marker or deny:
-        log.info("GATE VERIFY: OK - gate applied, no model/report artifacts exist.")
-    elif not _gate_was_ever_applied(migration):
-        # Say WHY it passed, so an extract-only pass is never confused with a gate that was lifted.
-        log.info("GATE VERIFY: OK - no gate was ever applied to this migration (no 'block' entry in")
-        log.info("  the audit log), so there was no lift to earn. Expected for an extract-only")
-        log.info("  migration where every datasource is a packaged/flat file and step 6 correctly")
-        log.info("  raised no gate. NOTE: this attests the gate's own history, not that the source")
-        log.info("  classification was right - that is step 6/6b's job.")
-    else:
-        log.info("GATE VERIFY: OK - gate not applied.")
+    _log_ok_verdict(migration, authentic=authentic, marker=marker, deny=deny)
     return 0
 
 
 def verify(migration: Path) -> int:
-    """Verify one audit-bearing migration/bundle target."""
+    """Verify one audit-bearing migration/bundle target.
+
+    Exit codes, deliberately three-way rather than a pass/fail boolean (issue #354): **0** a gate
+    was applied and passed, or was never needed at a location that could legitimately say so; **1**
+    a gate was applied and failed, or was cleared unearned; **3** no audit history exists at this
+    path AT ALL, and the path is not itself a place a gate could have been armed - most commonly a
+    ship-destination copy of built artifacts checked instead of the bundle/spec root that actually
+    carries `.credential-gate-audit.log`. `3` must never be read as `0`: "I could not check this"
+    and "I checked and it is clean" are different claims and must not print or exit alike.
+    """
     return _verify_one(migration)
 
 

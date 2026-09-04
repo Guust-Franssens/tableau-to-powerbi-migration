@@ -1523,6 +1523,96 @@ def test_an_earned_clear_still_verifies_clean_for_a_live_source(tmp_path: Path) 
     assert "no gate was ever applied" not in out, "this migration WAS gated - it passed by earning the lift"
 
 
+# --- issue #354: `verify` must not pass vacuously at a ship destination with no audit history ---
+#
+# The mandated final gate reads `.credential-gate-audit.log` at EXACTLY the path it is given, and
+# nowhere else. The documented ship step copies built artifacts from an engine bundle to
+# `migrations/{workbooks,datasources}/<slug>/fabric/` - a location that never had a gate armed at
+# it, so it never got an audit log either. Before this fix, `verify` there reported "OK - no gate
+# was ever applied" (exit 0), indistinguishable from a migration that genuinely never needed one.
+#
+# Three states, three exit codes:
+#   0 - a gate was applied and passed, or genuinely never needed one, at a legitimate gate root
+#   1 - a gate was applied and failed (unchanged, pre-existing)
+#   3 - no audit history exists here AT ALL, and this is not a place a gate could have been armed
+
+
+def test_a_ship_destination_copy_with_no_audit_history_CANNOT_be_verified_ok(tmp_path: Path) -> None:
+    """State 3: the exact vacuous-pass reproduction from issue #354, pinned.
+
+    A directory that carries built model artifacts (as a plain copy of engine-bundle output would),
+    but none of the scope markers (`migration-spec.json`, `engine-output-receipt.json`,
+    `input_manifest.json`) that would make it a legitimate place for a gate to have been armed, and
+    no `.credential-gate-audit.log` either. This is the shape of
+    `migrations/workbooks/<name>/fabric/` after the documented sign-off copy: real artifacts, zero
+    audit history. `verify` must refuse to call this clean.
+    """
+    ship_destination = tmp_path / "migrations" / "workbooks" / "some-dash" / "fabric"
+    ship_destination.mkdir(parents=True)
+    (ship_destination / "model.tmdl").write_text("table Shipment")  # copied engine output, no receipt beside it
+
+    proc = run_gate("verify", str(ship_destination))
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode == 3, f"a no-audit-history ship copy must not verify OK or as a violation:\n{out}"
+    assert "CANNOT ASSESS" in out
+    assert "GATE VERIFY: OK" not in out, "must never print the same verdict as a genuine never-gated pass"
+
+
+def test_extract_only_at_its_own_spec_root_still_verifies_ok_state_1(tmp_path: Path) -> None:
+    """Negative control: a genuine pass must still exit 0 (state 1 is not swallowed by state 3).
+
+    Identical shape to the state-3 fixture above - artifacts, no audit log - except this directory
+    DOES carry `migration-spec.json`, exactly like a real parser-path migration that correctly never
+    had a gate armed (extract-only). An over-correction that also fails this would be its own
+    defect: `test_an_extract_only_migration_that_was_never_gated_verifies_CLEAN` already locks this
+    in structurally; this test additionally locks in the exit code contract from issue #354's fix.
+    """
+    mig = tmp_path / "mig"
+    (mig / "fabric").mkdir(parents=True)
+    (mig / "migration-spec.json").write_text("{}", encoding="utf-8")
+    (mig / "fabric" / "model.tmdl").write_text("table Orders")
+
+    proc = run_gate("verify", str(mig))
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode == 0, f"a legitimate never-gated migration must still verify clean:\n{out}"
+    assert "CANNOT ASSESS" not in out
+
+
+def test_a_gate_applied_and_failed_at_its_own_bundle_root_is_still_state_2(tmp_path: Path) -> None:
+    """State 2 (gate applied and failed) must still exit 1, unaffected by the new state-3 check.
+
+    This is the pre-existing VIOLATION path: verified AT the bundle/spec root that actually carries
+    the audit log, so `_no_audit_trail_reason` must stand aside and let the existing violation
+    logic run.
+    """
+    mig = tmp_path / "mig"
+    (mig / "fabric").mkdir(parents=True)
+    (mig / "migration-spec.json").write_text("{}", encoding="utf-8")
+    run_gate("block", str(mig), "--sources", "shipment")
+    (mig / "fabric" / "model.tmdl").write_text("table Shipment")  # built while blocked
+
+    proc = run_gate("verify", str(mig))
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode == 1, f"artifacts built while the gate is applied must still VIOLATE:\n{out}"
+    assert "VIOLATION" in out
+    assert "CANNOT ASSESS" not in out
+
+
+def test_an_empty_ship_destination_with_no_artifacts_is_not_flagged(tmp_path: Path) -> None:
+    """No artifacts, nothing to assess: state 3 must not fire on an empty/not-yet-built directory."""
+    ship_destination = tmp_path / "migrations" / "workbooks" / "not-started-yet" / "fabric"
+    ship_destination.mkdir(parents=True)
+
+    proc = run_gate("verify", str(ship_destination))
+    out = proc.stdout + proc.stderr
+
+    assert proc.returncode == 0, out
+    assert "CANNOT ASSESS" not in out
+
+
 # --- `list`: the multi-unit query (#344) ------------------------------------------------------
 #
 # Added after a field report from a ~44-unit estate: "I am always asked to run these for all the
