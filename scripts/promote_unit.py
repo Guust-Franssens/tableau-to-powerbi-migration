@@ -1570,18 +1570,35 @@ def _verify_and_record(
         "shipped": [],
     }
 
+    # ⚠️ **The PACKAGE is deliberately NOT an allowed root here, and the source scan's allowance
+    # of it is not an inconsistency.** The whole point of promotion is that the deliverable stops
+    # depending on the phase-2 package, so a shipped file naming `…\packages\<Unit>\…` is BOTH a
+    # host-path leak and a deliverable that cannot refresh on any other machine - #461's defect,
+    # measured across run 408's 62 packaged units as 32 absolute references in 26 of them.
+    # Measured 2026-09-04, before this fix:
+    # an absolute `<package>\data\CustomerServer\source.csv` in a shipped `Wb.pbip` promoted at
+    # `exit=0 status=PROMOTED`, source findings empty, with the package path still in the shipped
+    # file. `_build_plan_unchecked` copies `fabric/` only, so that `data/` never travels - the
+    # reference is dangling as well as leaking. Same allowed-root rule the SHIPPED external-path
+    # scan above already applies (`(plan.deliverable_root,)`); this scan was the outlier.
     shipped_host = shipment_host_paths(
         tuple(step.destination for step in plan.steps),
-        (args.package, *plan.deliverable_roots),
+        plan.deliverable_roots,
     )
     if shipped_host:
-        # ⚠️ Same reasoning as the shipped external-path scan above, and NOT overridable by
-        # `--force` either: the tool cannot sanitize a customer's `localSettings.json` or `.pbip`,
-        # so there is no clean artifact for a force to ship. Same exception, same exit code as the
-        # source scan - one condition, one verdict, whichever scan saw it first.
+        # ⚠️ REFUSED, never rewritten. A deliverable-relative rewrite would point at a file the
+        # plan does not copy, trading a loud refusal for a silently broken deliverable - which is
+        # the #461 defect itself. NOT overridable by `--force` either: the tool cannot sanitize a
+        # customer's `localSettings.json` or `.pbip`, so there is no clean artifact for a force to
+        # ship. Same exception, same exit code as the source scan - one condition, one verdict,
+        # whichever scan saw it first.
         raise HostPathLeak(
             "HOST_PATH in the SHIPPED tree: "
             + "; ".join(f"{item['file']} carries {item['redacted']}" for item in shipped_host)
+            + "; a path resolving outside the deliverable it was promoted into cannot refresh on "
+            "any other machine, and one pointing back at the phase-2 package publishes that "
+            "package's location as well. Remedy: delete or sanitize the reference, or carry the "
+            "data into the deliverable with scripts/set_data_folder.py."
         )
     extra["host_paths"] = {"source": envelope.get("host_paths", {}).get("source", []), "shipped": []}
     extra["drift"] = envelope["drift"]
@@ -1703,6 +1720,17 @@ def _check_host_paths(args: argparse.Namespace, plan: PromotionPlan, envelope: d
     Scanned at the SOURCE, over exactly the files the plan will copy, so a refusal ships nothing;
     scanned again over the shipped tree in `_verify_and_record`. `--force` does not reach this, for
     the same reason it does not reach #461: there is no sanitized artifact to ship.
+
+    ⚠️ **The two scans use DIFFERENT allowed roots on purpose, and the asymmetry is measured, not
+    an oversight.** Here the package IS an allowed root: the artifact legitimately still lives in
+    it, and one shipped file's content is REWRITTEN on the way out - a source `definition.pbir`
+    whose `byPath` is the absolute `<package>\\fabric\\<Model>.SemanticModel` is replaced by
+    `rewrite_bypath` with `../<Model>.SemanticModel` and ships clean (measured 2026-09-04:
+    `exit=0`, shipped byPath `'../Model.SemanticModel'`). Refusing that here would refuse a real
+    delivery, which is a worse defect than the one being fixed. The SHIPPED scan judges the same
+    files after every rewrite, where the package is no longer defensible as a root - see
+    `_verify_and_record`. So a package-local path that is NOT rewritten costs a copy and a
+    rollback rather than an early exit; nothing ships either way.
     """
     found = shipment_host_paths(
         tuple(step.source for step in plan.steps),

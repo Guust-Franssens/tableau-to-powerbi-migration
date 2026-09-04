@@ -29,6 +29,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 # ruff: noqa: E402  (the sys.path insert above must precede this import)
 # pylint: disable=wrong-import-position
 import promote_unit as pu
+import set_data_folder as sdf
 
 PASSING_GATE = {"ran": True, "exit_code": 0, "status": "AUTOMATED_CHECKS_PASS", "passed": True}
 
@@ -2034,3 +2035,120 @@ def test_round3_medium5_kind_may_not_contradict_a_manifest_that_does_declare_one
     """`--kind` fills a GAP; an operator overruling the engine's classification is a defect report."""
     assert run(package, migrations, "--kind", "datasource") == pu.EXIT_CANNOT_ASSESS
     assert not migrations.exists()
+
+
+# --------------------------------------------------------------------------------------
+# ROUND 4, HIGH 1 - the SHIPPED scan may not treat the phase-2 package as an allowed root
+#
+# Round 3 widened the host-path scan to the whole shipment but left `args.package` allowed in BOTH
+# scans, which moved the failure boundary instead of removing it. Measured 2026-09-04, before this
+# fix, with an absolute `<package>\data\CustomerServer\source.csv` written into the shipped
+# `Wb.pbip`, the real (failing) gate and `--force`:
+#
+#     exit=0 status=PROMOTED gate=1
+#     source-host-findings={'source': []}
+#     shipped-exists=True
+#     absolute-package-path-shipped=True
+#
+# Nothing rewrites that literal during the copy, so the promoted deliverable still pointed at the
+# phase-2 package: a host-path leak AND a deliverable that cannot refresh anywhere else - #461,
+# measured across run 408's 62 packaged units as 32 absolute references in 26 of them.
+# `_build_plan_unchecked` copies `fabric/` only, so the `data/` it names never travels either.
+#
+# The fix is asymmetric on purpose: the SOURCE scan keeps the package (the artifact legitimately
+# lives there, and one shipped file - `definition.pbir` - is rewritten on the way out), the SHIPPED
+# scan allows only `plan.deliverable_roots`. Refused, never rewritten: a deliverable-relative
+# rewrite would point at a file the plan does not copy.
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.usefixtures("pass_gate")
+@pytest.mark.parametrize("extra", [(), ("--force",)], ids=["plain", "forced"])
+def test_round4_high1_a_package_local_absolute_path_never_ships(
+    package: Path, migrations: Path, tmp_path: Path, extra: tuple[str, ...]
+) -> None:
+    """The reviewer's reproduction, as a regression test. Exit 6, and NOTHING is left on disk.
+
+    `--force` is parametrized because the reproduction used it: it overrides the `check_unit.py`
+    gate and reaches nothing here, for the same reason it does not reach #461 - the tool cannot
+    sanitize a `.pbip`, so there is no clean artifact for a force to ship.
+    """
+    leak = package / "data" / "CustomerServer" / "source.csv"
+    _write_json(package / "fabric" / "Wb.pbip", {"version": "1.0", "settings": {"lastOpened": str(leak)}})
+    envelope_path = tmp_path / "package-local.json"
+    assert run(package, migrations, "--json", str(envelope_path), *extra) == pu.EXIT_REFUSED_HOST_PATH
+    assert [p for p in migrations.rglob("*") if p.is_file()] == [], "a rolled-back promotion leaves no artifact"
+
+    envelope = json.loads(envelope_path.read_text(encoding="utf-8"))
+    assert envelope["status"] == "REFUSED_HOST_PATH"
+    assert host_paths_in(envelope_path.read_text(encoding="utf-8"), package, migrations) == []
+    assert any("Wb.pbip" in finding for finding in envelope["findings"]), envelope["findings"]
+
+
+def test_round4_high1_the_shipped_scan_does_not_allow_the_package_root(tmp_path: Path) -> None:
+    """The boundary itself, with a NON-user-profile path - so it proves THIS guard, not the repo's.
+
+    ⚠️ `set_data_folder.py --check` is the repo's privacy gate and it hunts `X:\\Users\\<name>` /
+    `/home/<name>`; a customer package under `D:\\Customer\\Project` (or `/srv/customer` on POSIX)
+    matches none of those, which is asserted here rather than claimed. So there is no backstop
+    behind this scan and its allowed roots have to be right on their own. The path is spelled per
+    platform because a Windows-shaped literal is not absolute on Linux, where the "allowed"
+    assertion below would then pass for the wrong reason.
+
+    The first assertion is the defect: with the package still allowed, the scan sees NOTHING.
+    """
+    package_like = (
+        Path(r"D:\Customer\Project\packages\Wb")
+        if sys.platform == "win32"
+        else Path("/srv/customer/project/packages/Wb")
+    )
+    deliverable = tmp_path / "migrations" / "workbooks" / "wb"
+    shipped = deliverable / "fabric" / "Wb.pbip"
+    _write_json(shipped, {"version": "1.0", "settings": {"lastOpened": str(package_like / "data" / "source.csv")}})
+
+    assert sdf.ABSOLUTE_USER_PATH_RE.search(str(package_like)) is None, "the repo gate cannot see this shape"
+    assert pu.shipment_host_paths((shipped,), (package_like, deliverable)) == [], "the round-2 allowance, reproduced"
+
+    found = pu.shipment_host_paths((shipped,), (deliverable,))
+    assert [item["file"] for item in found] == ["Wb.pbip"], found
+    assert [item["redacted"] for item in found] == ["<absolute-path-redacted>\\source.csv"], found
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_round4_high1_an_absolute_bypath_into_the_package_is_rewritten_and_still_promotes(
+    package: Path, migrations: Path
+) -> None:
+    """OVER-CORRECTION GUARD, and the whole reason the SOURCE scan keeps its package allowance.
+
+    Measured 2026-09-04: a source `definition.pbir` whose `byPath` is the absolute
+    `<package>\\fabric\\Model.SemanticModel` promotes at exit 0 with a shipped byPath of
+    `../Model.SemanticModel`, because `rewrite_bypath` replaces it during the copy. Judging that
+    file at the SOURCE against the deliverable would refuse a delivery that ships clean - a worse
+    defect than the one being fixed - so the source scan allows the package and the SHIPPED scan,
+    which sees the rewritten content, does not.
+    """
+    pbir = package / "fabric" / "Wb.Report" / "definition.pbir"
+    payload = json.loads(pbir.read_text(encoding="utf-8"))
+    payload["datasetReference"]["byPath"]["path"] = str(package / "fabric" / "Model.SemanticModel")
+    _write_json(pbir, payload)
+
+    assert run(package, migrations) == pu.EXIT_OK
+    shipped = migrations / "workbooks" / "wb" / "fabric" / "Wb.Report" / "definition.pbir"
+    declared = json.loads(shipped.read_text(encoding="utf-8"))["datasetReference"]["byPath"]["path"]
+    assert declared == "../Model.SemanticModel", declared
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_round4_high1_a_shared_datasource_half_may_still_name_the_other_half(package: Path, migrations: Path) -> None:
+    """POSITIVE CONTROL for `deliverable_roots` being PLURAL at the shipped scan.
+
+    A shared-datasource promotion writes into two roots that are not siblings, and the report's
+    own root is not the model's. Narrowing the shipped scan to `plan.deliverable_root` (the MODEL's
+    root, which is what #461 judges data references against) would refuse a report that names a
+    path under the workbook deliverable it was just promoted into.
+    """
+    inside = migrations / "workbooks" / "wb" / "data" / "Extract.csv"
+    _write_json(package / "fabric" / "Wb.pbip", {"version": "1.0", "settings": {"lastOpened": str(inside)}})
+    assert run(package, migrations, "--datasource-slug", "shared-ds") == pu.EXIT_OK
+    assert (migrations / "datasources" / "shared-ds" / "fabric" / "Model.SemanticModel").is_dir()
+    assert (migrations / "workbooks" / "wb" / "fabric" / "Wb.Report").is_dir()
