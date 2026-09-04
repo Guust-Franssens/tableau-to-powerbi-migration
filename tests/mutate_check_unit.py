@@ -13,7 +13,7 @@ things this harness refuses to do, both of which have produced false 100% scores
 * A no-op NEGATIVE CONTROL is run through the identical path and must SURVIVE, which proves the
   harness can report a survivor at all.
 
-Each mutation names the single anchor test it must kill, and is run against that anchor alone.
+Each mutation names the anchor tests it must kill, and is run against each anchor alone.
 """
 
 from __future__ import annotations
@@ -695,10 +695,11 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
 ]
 
 _FAILED = re.compile(r"(\d+) failed")
+_ERROR = re.compile(r"(\d+) errors?\b|^(?:ERROR|INTERNALERROR)\b", re.IGNORECASE | re.MULTILINE)
 
 
-def run_anchor(names: list[str]) -> tuple[str, str]:
-    """Run only the anchor tests; return (verdict, note).
+def run_one_anchor(name: str) -> tuple[str, str]:
+    """Run one anchor test; return (verdict, note).
 
     ⚠️ ``encoding="utf-8"`` is load-bearing on Windows. ``text=True`` alone decodes the child's stdout
     with the console codepage (cp1252 here), which raises ``UnicodeDecodeError`` the moment a failing
@@ -707,7 +708,7 @@ def run_anchor(names: list[str]) -> tuple[str, str]:
     CAUGHT, but it made every emoji-carrying assertion structurally unmutatable.
     """
     proc = subprocess.run(
-        [sys.executable, "-m", "pytest", *[str(suite) for suite in SUITES], "-q", "-k", " or ".join(names)],
+        [sys.executable, "-m", "pytest", *[str(suite) for suite in SUITES], "-q", "-k", name],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -715,13 +716,32 @@ def run_anchor(names: list[str]) -> tuple[str, str]:
         check=False,
         cwd=REPO_ROOT,
     )
-    tail = (proc.stdout or "")[-4000:]
+    tail = f"{proc.stdout or ''}\n{proc.stderr or ''}"[-4000:]
+    last = tail.strip().splitlines()[-1] if tail.strip() else "no output"
+    if _ERROR.search(tail):
+        return "BROKEN", last
     failed = _FAILED.search(tail)
     if failed:
         return f"CAUGHT ({failed.group(1)} failed)", ""
-    if proc.returncode != 0 or "error" in tail.lower():
-        return "BROKEN", tail.strip().splitlines()[-1] if tail.strip() else "no output"
-    return "SURVIVED", tail.strip().splitlines()[-1] if tail.strip() else "no output"
+    if proc.returncode != 0:
+        return "BROKEN", last
+    return "SURVIVED", last
+
+
+def run_anchor(names: list[str]) -> tuple[str, str]:
+    """Run each declared anchor independently; every one must observe the mutation."""
+    outcomes = [(name, *run_one_anchor(name)) for name in names]
+    broken = [(name, note) for name, verdict, note in outcomes if not verdict.startswith(("CAUGHT", "SURVIVED"))]
+    if broken:
+        return "BROKEN", "; ".join(f"{name}: {note}" for name, note in broken)
+
+    caught = [name for name, verdict, _note in outcomes if verdict.startswith("CAUGHT")]
+    missed = [name for name, verdict, _note in outcomes if verdict == "SURVIVED"]
+    if len(caught) == len(outcomes):
+        return (outcomes[0][1], outcomes[0][2]) if len(outcomes) == 1 else (f"CAUGHT ({len(caught)} anchors)", "")
+    if caught:
+        return "PARTIAL-ANCHOR", f"caught: {', '.join(caught)}; missed: {', '.join(missed)}"
+    return "SURVIVED", "; ".join(f"{name}: {note}" for name, _verdict, note in outcomes)
 
 
 def run_campaign(selected: list[tuple[str, str, str, list[str]]]) -> list[tuple[str, str, str]]:
@@ -765,7 +785,7 @@ def main(argv: list[str] | None = None) -> int:
     controls = [(label, verdict) for label, verdict, _note in results if NEGATIVE_CONTROL in label]
     mutations = [(label, verdict) for label, verdict, _note in results if NEGATIVE_CONTROL not in label]
     caught = sum(1 for _label, verdict in mutations if verdict.startswith("CAUGHT"))
-    broken = [label for label, verdict in mutations if verdict.startswith("ANCHOR-SNIPPET")]
+    broken = [label for label, verdict in mutations if not verdict.startswith(("CAUGHT", "SURVIVED"))]
     survived = [label for label, verdict in mutations if verdict == "SURVIVED"]
     control_ok = bool(controls) and all(verdict == "SURVIVED" for _label, verdict in controls)
     print()
@@ -775,7 +795,7 @@ def main(argv: list[str] | None = None) -> int:
     # real problem was two stale anchor snippets - a confident wrong answer from the instrument
     # written to prove the tests can fail.
     if broken:
-        print(f"{len(broken)} mutation(s) COULD NOT BE APPLIED (stale anchor snippet): {'; '.join(broken)}")
+        print(f"{len(broken)} mutation(s) COULD NOT BE APPLIED or BROKE/PARTIALLY matched: {'; '.join(broken)}")
     if survived:
         print(f"{len(survived)} mutation(s) SURVIVED (no test failed): {'; '.join(survived)}")
     if not controls:

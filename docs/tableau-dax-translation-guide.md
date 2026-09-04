@@ -42,6 +42,89 @@ Two things worth knowing, both **verified live** (2026-08-01, Desktop `EVALUATE`
   "fixing" it. If they confirm the field should be positive-when-late, swap the two operands — a
   one-token change.
 
+### Threshold comparisons — guard the operand or BLANK silently flips the result [issue #82]
+
+`BLANK()` **coerces to `0`** inside a numeric comparison. That single fact means a bare threshold
+predicate over a nullable operand does not fail loudly — it just quietly changes which rows a KPI
+flag, bucket, or filter matches, with no error anywhere. A Tableau calculation that treated a null as
+"unknown, so excluded" can become a DAX measure that includes it, or vice versa, purely because of
+which side of zero the threshold sits on.
+
+**Work out which direction is unsafe by asking "does `0` satisfy this comparison against my
+threshold?"** — if yes, a blank operand silently passes the predicate as `TRUE`. ✅ Verified live in
+Power BI Desktop 2.157.828.0 (2026-09-03):
+
+| Comparison | Is `0` on the passing side? | Effect on a blank operand |
+|---|---|---|
+| `[x] > 0` | No (`0 > 0` is `FALSE`) | blank → `FALSE` — usually the desired "excluded" behaviour |
+| `[x] >= 0` | **Yes** (`0 >= 0` is `TRUE`) | blank → `TRUE` — silently included |
+| `[x] < 100` | **Yes** (`0 < 100` is `TRUE`) | blank → `TRUE` — silently included (the classic bug: a null value now reads as "below threshold") |
+| `[x] <= 0` | **Yes** (`0 <= 0` is `TRUE`) | blank → `TRUE` — silently included |
+| `[x] > -5` | **Yes** (`0 > -5` is `TRUE`) | blank → `TRUE` — silently included |
+| `[x] = 0` | **Yes** | blank is indistinguishable from a real, computed `0` |
+| `[x] <> 0` | No | blank → `FALSE` — usually the desired "excluded" behaviour |
+
+The threshold's **sign**, not just the operator, decides safety — `[x] < 100` and `[x] < -100` behave
+oppositely. Never eyeball "`<` is unsafe, `>` is safe"; check whether `0` actually satisfies the
+specific comparison being written.
+
+**Guard pattern — wrap the comparison so a blank operand returns `BLANK()` instead of silently
+resolving:**
+
+```dax
+-- Unsafe: a shipment with no recorded delay reads as "on schedule" instead of "unknown"
+On Time Flag := [Delay Hours] < 1
+
+-- Guarded: preserves "unknown" as BLANK instead of coercing it into the comparison
+On Time Flag :=
+IF(
+    ISBLANK([Delay Hours]),
+    BLANK(),
+    [Delay Hours] < 1
+)
+```
+
+The same guard applies whenever the operand is the result of `DIVIDE(a, b[, alt])` — a ratio-style
+threshold (`% Complete`, error rate, margin) built on `DIVIDE` inherits exactly this risk. ✅ **A
+third `DIVIDE` argument does NOT make the call safe on its own** — verified live in Power BI Desktop
+2.157.828.0 (2026-09-03):
+
+```dax
+DIVIDE(BLANK(), 1, 0) < 0.05   -- true: "alt" only substitutes for a 0/blank DENOMINATOR, so a
+                               -- blank NUMERATOR still propagates straight through untouched
+DIVIDE(1, 0, BLANK()) < 0.05   -- true: the alternate result itself can be BLANK() too
+```
+
+A 3-argument `DIVIDE(a, b, alt)` is only provably safe when **both** `a` (the numerator) and `alt`
+(the alternate result) are themselves non-blank — e.g. `alt` is a literal like `0`, and `a` cannot be
+blank in context. Passing an explicit alternate result is the right fix **only** when a missing
+denominator really should read as that value for this measure, and only once the numerator's own
+blank case is separately accounted for — confirm that intent with the customer rather than assuming
+it, and prefer the `ISBLANK(...)` guard above when in doubt.
+
+This generalizes the existing `ISNULL(x) → ISBLANK(x)` note above: that row flags that the two null
+representations differ; this rule is about what happens next, when the (possibly blank) result feeds
+a `<`, `<=`, `>`, `>=`, `=`, or `<>` comparison against a literal threshold.
+
+`scripts/tmdl_checks.py`'s `find_unguarded_divide_thresholds` (wired into `scripts/check_datamodel.py`
+as the `UNGUARDED_BLANK_THRESHOLD` finding) flags this shape wherever a `DIVIDE(...)` call appears in
+generated DAX — including nested inside `IF(...)` or `CALCULATE(...)` — unless it is guarded by
+`ISBLANK(...)`, or its own arguments prove it cannot return `BLANK()` (a numeric/string literal, or
+`COALESCE(..., <that literal>)`, in both the numerator and — for the 3-argument form — the alternate
+result). It also flags `BLANK_THRESHOLD_CANNOT_ASSESS` for a shape it cannot read at all (a
+multi-line measure/column expression, or a `DIVIDE(` with no closing paren on its line) — that is a
+"not assessed", never a silent pass.
+
+**Both findings are advisory, not a hard gate** (`ADVISORY_TMDL_CODES` in `scripts/tmdl_checks.py`):
+they never make `check_datamodel.py` exit 1. A second, independent review round measured that a
+text-only detector for this class — however narrowly scoped — cannot be made reliable by adding more
+patterns: it still missed real unsafe shapes (parenthesized wrapping, `VAR`/`RETURN`, a measure that
+is itself the operand, a reversed `threshold > DIVIDE(...)` comparison — each would need a real DAX
+parser to resolve) and still flagged some provably-safe ones. Proving this class semantically clean
+from DAX *text* is not reliable, so the check is printed as an advisory that still requires manual
+Tableau/Power BI verification, rather than as a blocking finding that would train reviewers to
+disable or ignore the gate the first time it cries wolf on correct DAX.
+
 
 ### Worked example — CASE/WHEN [seen]
 
