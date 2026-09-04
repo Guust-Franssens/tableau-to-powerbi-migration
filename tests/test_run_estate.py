@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import run_estate  # noqa: E402  # pylint: disable=wrong-import-position
 from check_path_ceiling import DIR_CEILING, FILE_CEILING, utf16_len  # noqa: E402
+from check_reference_readiness import engine_page_id  # noqa: E402
 
 
 def _report(workbooks=None, dod_status="pass", gates=None) -> dict:
@@ -123,16 +124,18 @@ def test_pbir_envelope_is_pinned_to_committed_artifacts() -> None:
         visual_index = parts.index("visuals")
         identifiers.append((utf16_len(parts[page_index + 1]), utf16_len(parts[visual_index + 1])))
     assert len(identifiers) == 869
-    assert max(page for page, _ in identifiers) == run_estate._PBIR_MAX_PAGE_ID_UTF16
+    assert max(page for page, _ in identifiers) == 20
+    assert run_estate._PBIR_MAX_PAGE_ID_UTF16 == 24
     assert max(visual for _, visual in identifiers) == run_estate._PBIR_MAX_VISUAL_ID_UTF16
+    assert utf16_len(engine_page_id("x" * 100)) == run_estate._PBIR_MAX_PAGE_ID_UTF16
 
 
 def test_realistic_long_estate_is_refused_by_conservative_pbir_envelope() -> None:
     projection = run_estate.project_estate_path_ceiling(_root_for_length(90), ["u" * 37])
     file_path = next(path for path in projection["paths"] if path["kind"] == "file")
     directory = next(path for path in projection["paths"] if path["kind"] == "directory")
-    assert file_path["length"] == 265
-    assert directory["length"] == 253
+    assert file_path["length"] == 269
+    assert directory["length"] == 257
     assert projection["status"] == "over_ceiling"
 
 
