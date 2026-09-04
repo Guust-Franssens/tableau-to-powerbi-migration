@@ -4,9 +4,9 @@ purpose: refuse a named migration-target request that does not resolve UNAMBIGUO
          datasource `DS_CAPS` was silently applied instead to a similarly (but not identically)
          named, workbook-EMBEDDED datasource `IA_CAPS_DS`. That workbook was then built, validated
          and reported on - the wrong artifact shipped clean.
-usage:   python scripts/resolve_datasource_target.py --raw <assess_estate --out dir> \\
+usage:   python scripts/resolve_datasource_target.py --raw <assess_estate output dir> \\
              --name DS_CAPS --class published
-         python scripts/resolve_datasource_target.py --raw <assess_estate --out dir> \\
+         python scripts/resolve_datasource_target.py --raw <assess_estate output dir> \\
              --name DS_CAPS --class published --json out.json
 
 Why a CLASS guard, not a name check
