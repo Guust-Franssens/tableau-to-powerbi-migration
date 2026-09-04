@@ -187,6 +187,7 @@ check_pbir_layout.py
 check_pbir_valid.py
 check_reference_readiness.py
 check_relationship_health.py
+check_replay_manifest.py
 check_sqlproxy_connections.py
 check_stub_measures.py
 check_unit.py
