@@ -24,7 +24,14 @@ Scope stays deliberately narrow because a false positive is worse than a miss:
     comparison. A generic "any threshold on any nullable column" check was deliberately NOT built:
     whether an arbitrary column/measure can be blank, and whether that blank should read as
     included or excluded, is a business decision this checker cannot see from the DAX text alone -
-    see docs/tableau-dax-translation-guide.md, 'Threshold comparisons'.
+    see docs/tableau-dax-translation-guide.md, 'Threshold comparisons'. **ADVISORY ONLY**
+    (`ADVISORY_TMDL_CODES`): a round-2 review measured that a text-only detector, however narrow,
+    both misses real unsafe shapes (parenthesized, multiline, `VAR`-bound, measure-indirected DAX
+    would all need a real DAX parser to prove) and flags some provably-safe ones, so
+    `check_datamodel.py` keeps `UNGUARDED_BLANK_THRESHOLD` and `BLANK_THRESHOLD_CANNOT_ASSESS`
+    (the latter for a multi-line expression, or a `DIVIDE(` this checker could not fully parse -
+    "did not assess" must never look like "clean") out of its exit-1 total, printing them as an
+    advisory that still requires manual verification instead.
 
 Expression LAYOUT - the class where a property is silently swallowed into the preceding DAX/M, or
 where the document does not parse at all - is deliberately NOT here. Two hand-written grammars for
@@ -81,6 +88,14 @@ _THRESHOLD_COMPARATORS = {
     "=": operator.eq,
     "<>": operator.ne,
 }
+
+# The BLANK()-threshold family (issue #82) is advisory, not a structural error: round 2 of its
+# review found the narrow text-only detector both misses real unsafe shapes (parenthesized,
+# multiline, VAR-bound, measure-indirected DAX - proving those needs a real DAX parser, which this
+# module deliberately does not build) and flags some provably-safe ones. `check_datamodel.py`
+# reads this set to keep these findings out of its exit-1 total; they are printed as an advisory
+# instead. See docs/tableau-dax-translation-guide.md, 'Threshold comparisons'.
+ADVISORY_TMDL_CODES = frozenset({"UNGUARDED_BLANK_THRESHOLD", "BLANK_THRESHOLD_CANNOT_ASSESS"})
 
 
 def _split_top_level_args(text: str) -> list[str]:
@@ -168,11 +183,75 @@ def _matching_close_paren(text: str, open_idx: int) -> int | None:
     return None
 
 
+def _masked_positions(text: str) -> list[bool]:
+    """Mark positions inside a DAX string literal or `//`/`/* */` comment.
+
+    Not a DAX parser - just enough to stop a `DIVIDE(...)` pattern that only appears as prose
+    inside a string literal or comment from being mistaken for a real call. Existing structural
+    helpers (`_matching_close_paren`, `_split_top_level_args`) already track string state
+    themselves when walking real code, so this is used only to filter candidate DIVIDE(...) match
+    *start* positions before any of that runs.
+    """
+    masked = [False] * len(text)
+    idx = 0
+    length = len(text)
+    while idx < length:
+        ch = text[idx]
+        if ch == '"':
+            start = idx
+            idx += 1
+            while idx < length:
+                if text[idx] == '"':
+                    if idx + 1 < length and text[idx + 1] == '"':
+                        idx += 2
+                        continue
+                    idx += 1
+                    break
+                idx += 1
+            for i in range(start, min(idx, length)):
+                masked[i] = True
+            continue
+        if text[idx : idx + 2] == "//":
+            for i in range(idx, length):
+                masked[i] = True
+            break
+        if text[idx : idx + 2] == "/*":
+            end = text.find("*/", idx + 2)
+            end = length if end == -1 else end + 2
+            for i in range(idx, end):
+                masked[i] = True
+            idx = end
+            continue
+        idx += 1
+    return masked
+
+
+def find_incomplete_divide_calls(expression: str) -> list[int]:
+    """Positions of `DIVIDE(` calls this checker could not fully parse (no matching `)`).
+
+    Either the DAX is genuinely malformed, or the expression continues past the single line of
+    TMDL text handed in here - either way, whether it is guarded against `BLANK()` was NOT
+    assessed, and that must be visible rather than silently read as "clean" (issue #82 round 2).
+    """
+    masked = _masked_positions(expression)
+    positions: list[int] = []
+    for match in _DIVIDE_CALL_RE.finditer(expression):
+        start = match.start()
+        if masked[start]:
+            continue
+        if start > 0 and (expression[start - 1].isalnum() or expression[start - 1] == "_"):
+            continue
+        if _matching_close_paren(expression, match.end() - 1) is None:
+            positions.append(start)
+    return positions
+
+
 def find_unguarded_divide_thresholds(expression: str) -> list[tuple[str, float, int]]:
     """Detect every `DIVIDE(a, b[, alt]) <op> <literal>` comparison with no `BLANK()` guard (#82).
 
     `DIVIDE`'s **numerator** can make the call return `BLANK()` regardless of how many arguments
-    it has - measured live in Desktop (Power BI Desktop 2.140.x, 2026-09-03):
+    it has - measured live in Desktop (Power BI Desktop 2.157.828.0, 2026-09-03; an earlier,
+    unverified note here cited 2.140.x):
 
         DIVIDE(BLANK(), 1, 0)    < 0.05  ->  true   -- 3rd-argument "alt" does NOT catch this
         DIVIDE(1, 0, BLANK())    < 0.05  ->  true   -- ... nor does a blank "alt" itself
@@ -196,17 +275,23 @@ def find_unguarded_divide_thresholds(expression: str) -> list[tuple[str, float, 
         the direction table in docs/tableau-dax-translation-guide.md) - the safe direction, where a
         blank operand reads `FALSE`, is never flagged.
 
-    Returns a list of `(operator, threshold, position)` for every unguarded occurrence found.
+    Returns a list of `(operator, threshold, position)` for every unguarded occurrence found. A
+    `DIVIDE(...)` call that could not be fully parsed (no matching `)`) is NOT reported here - see
+    `find_incomplete_divide_calls` - and neither is one whose match position falls inside a string
+    literal or comment (see `_masked_positions`).
     """
+    masked = _masked_positions(expression)
     findings: list[tuple[str, float, int]] = []
     for match in _DIVIDE_CALL_RE.finditer(expression):
         start = match.start()
+        if masked[start]:
+            continue  # e.g. a DIVIDE(...)-shaped example inside a string literal or comment
         if start > 0 and (expression[start - 1].isalnum() or expression[start - 1] == "_"):
             continue  # e.g. a hypothetical "SUBDIVIDE(" - not a DIVIDE call
         open_idx = match.end() - 1
         close = _matching_close_paren(expression, open_idx)
         if close is None:
-            continue
+            continue  # unparsable - reported separately by find_incomplete_divide_calls
         args = _split_top_level_args(expression[match.end() : close])
         if len(args) not in (2, 3):
             continue
@@ -309,9 +394,14 @@ def _empty_measure_finding(path: Path, pending_measure: tuple[str, int]) -> Tmdl
 
 
 def _threshold_findings(path: Path, kind: str, name: str, rest: str, number: int) -> list[TmdlFinding]:
-    """Wrap `find_unguarded_divide_thresholds` into `TmdlFinding`s, one per unsafe occurrence."""
+    """Wrap `find_unguarded_divide_thresholds`/`find_incomplete_divide_calls` into `TmdlFinding`s.
+
+    Advisory only (see `ADVISORY_TMDL_CODES`) - `check_datamodel.py` keeps these out of its exit-1
+    total, printing them separately with a note that manual verification is still required.
+    """
+    expression = rest.split("=", 1)[1]
     findings = []
-    for op, value, _position in find_unguarded_divide_thresholds(rest.split("=", 1)[1]):
+    for op, value, _position in find_unguarded_divide_thresholds(expression):
         threshold = f"{value:g}"
         findings.append(
             TmdlFinding(
@@ -322,13 +412,44 @@ def _threshold_findings(path: Path, kind: str, name: str, rest: str, number: int
                 f"`{op} {threshold}` here, even inside an IF/CALCULATE, and even with a 3rd DIVIDE "
                 "argument (which only substitutes for a 0/blank denominator, not a blank numerator). "
                 f"Guard it: IF(ISBLANK(DIVIDE(...)), BLANK(), DIVIDE(...) {op} {threshold}), or make "
-                "sure both the numerator and the alternate result are provably non-blank. See "
+                "sure both the numerator and the alternate result are provably non-blank. ADVISORY "
+                "ONLY - manual verification is still required. See "
                 "docs/tableau-dax-translation-guide.md, 'Threshold comparisons'.",
                 path,
                 number,
             )
         )
+    for _position in find_incomplete_divide_calls(expression):
+        findings.append(
+            TmdlFinding(
+                "BLANK_THRESHOLD_CANNOT_ASSESS",
+                f"{kind} '{name}' contains a DIVIDE(...) call this checker could not fully parse "
+                "(no matching closing parenthesis on this line) - whether it is guarded against "
+                "BLANK() was NOT assessed, and this is not a pass for that expression. Verify it "
+                "manually. See docs/tableau-dax-translation-guide.md, 'Threshold comparisons'.",
+                path,
+                number,
+            )
+        )
     return findings
+
+
+def _deferred_expression_header(rest: str) -> bool:
+    """Whether an object header declares `=` but defers the expression to the following lines."""
+    return "=" in rest and not rest.split("=", 1)[1].strip()
+
+
+def _cannot_assess_finding(path: Path, kind: str, name: str, line: int) -> TmdlFinding:
+    """A measure/column whose expression spans multiple lines - out of scope for this text checker."""
+    return TmdlFinding(
+        "BLANK_THRESHOLD_CANNOT_ASSESS",
+        f"{kind} '{name}' has a multi-line expression; whether any DIVIDE(...) threshold comparison "
+        "in it is guarded against BLANK() was NOT assessed (this checker only reads the header "
+        "line). This is not a pass for that expression - verify it manually. See "
+        "docs/tableau-dax-translation-guide.md, 'Threshold comparisons'.",
+        path,
+        line,
+    )
 
 
 def _append_name_collisions(
@@ -358,6 +479,7 @@ def check_tmdl_text(path: Path, text: str) -> list[TmdlFinding]:  # pylint: disa
     measures: dict[str, int] = {}
     columns: dict[str, int] = {}
     pending_measure: tuple[str, int] | None = None
+    pending_deferred_expr: tuple[str, str, int] | None = None  # (kind, name, line) for BLANK_THRESHOLD_CANNOT_ASSESS
 
     for number, raw in enumerate(text.splitlines(), start=1):
         line = _strip_tmdl_comment(raw)
@@ -367,6 +489,8 @@ def check_tmdl_text(path: Path, text: str) -> list[TmdlFinding]:  # pylint: disa
         if pending_measure and _OBJECT_RE.match(line):
             findings.append(_empty_measure_finding(path, pending_measure))
             pending_measure = None
+        if pending_deferred_expr and _OBJECT_RE.match(line):
+            pending_deferred_expr = None  # genuinely empty - EMPTY_EXPRESSION (if any) covers it
 
         if find_compact_filters(line):
             findings.append(
@@ -402,10 +526,14 @@ def check_tmdl_text(path: Path, text: str) -> list[TmdlFinding]:  # pylint: disa
                     findings.extend(_threshold_findings(path, "measure", name, rest, number))
                 else:
                     pending_measure = (name, number)
+                    if _deferred_expression_header(rest):
+                        pending_deferred_expr = ("measure", name, number)
             elif kind == "column" and name and current_table:
                 columns.setdefault(name, number)
                 if _expression_on_measure_header(rest):
                     findings.extend(_threshold_findings(path, "column", name, rest, number))
+                elif _deferred_expression_header(rest):
+                    pending_deferred_expr = ("column", name, number)
             continue
 
         prop = _PROPERTY_RE.match(line)
@@ -431,10 +559,14 @@ def check_tmdl_text(path: Path, text: str) -> list[TmdlFinding]:  # pylint: disa
             if pending_measure:
                 findings.append(_empty_measure_finding(path, pending_measure))
                 pending_measure = None
+            pending_deferred_expr = None  # a property line with no prior content: genuinely empty
             continue
 
         if pending_measure and line.strip():
             pending_measure = None
+        if pending_deferred_expr and line.strip():
+            findings.append(_cannot_assess_finding(path, *pending_deferred_expr))
+            pending_deferred_expr = None
 
     if pending_measure:
         findings.append(_empty_measure_finding(path, pending_measure))

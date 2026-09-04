@@ -22,6 +22,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 # ruff: noqa: E402  (the sys.path insert above must precede this import)
 from check_datamodel import (
+    ADVISORY_TMDL_CODES,
     _check_expression,
     _iter_m_blocks,
     check_datamodel,
@@ -30,6 +31,7 @@ from check_datamodel import (
     check_tmdl_model,
     check_tmdl_text,
     find_compact_filters,
+    find_incomplete_divide_calls,
     find_unguarded_divide_thresholds,
     main,
 )
@@ -440,6 +442,51 @@ def test_unguarded_divide_threshold_in_calculated_column_is_caught_by_gate() -> 
     assert "UNGUARDED_BLANK_THRESHOLD" in _tmdl_codes(text)
 
 
+def test_unguarded_blank_threshold_and_cannot_assess_are_advisory_codes() -> None:
+    """Round-2 review contract: both codes must be in the advisory set the CLI keeps out of exit 1."""
+    assert ADVISORY_TMDL_CODES == {"UNGUARDED_BLANK_THRESHOLD", "BLANK_THRESHOLD_CANNOT_ASSESS"}
+
+
+def test_divide_pattern_inside_a_dax_comment_is_not_flagged() -> None:
+    """An unguarded-looking DIVIDE(...) that only exists inside a `//` comment must not warn."""
+    text = "table S\n\tmeasure 'A' = SUM('S'[x]) // example: DIVIDE([Errors], [Total]) < 0.05\n"
+    assert "UNGUARDED_BLANK_THRESHOLD" not in _tmdl_codes(text)
+
+
+def test_divide_pattern_inside_a_string_literal_is_not_flagged() -> None:
+    """An unguarded-looking DIVIDE(...) that only exists inside a DAX string literal must not warn."""
+    text = "table S\n\tmeasure 'A' = \"example: DIVIDE([Errors], [Total]) < 0.05\"\n"
+    assert "UNGUARDED_BLANK_THRESHOLD" not in _tmdl_codes(text)
+
+
+def test_incomplete_divide_call_is_flagged_cannot_assess_not_silently_clean() -> None:
+    """A DIVIDE( with no matching close paren on the line must be named CANNOT_ASSESS, not skipped."""
+    text = "table S\n\tmeasure 'A' = DIVIDE([Errors], [Total] < 0.05\n"
+    assert find_incomplete_divide_calls("DIVIDE([Errors], [Total] < 0.05")
+    assert "BLANK_THRESHOLD_CANNOT_ASSESS" in _tmdl_codes(text)
+    assert "UNGUARDED_BLANK_THRESHOLD" not in _tmdl_codes(text)
+
+
+def test_multiline_measure_expression_is_flagged_cannot_assess() -> None:
+    """A measure whose expression is deferred to following lines cannot be scanned - say so."""
+    text = "table S\n\tmeasure 'A' =\n\t\tDIVIDE([Errors], [Total]) < 0.05\n\t\tformatString: 0.00\n"
+    assert "BLANK_THRESHOLD_CANNOT_ASSESS" in _tmdl_codes(text)
+
+
+def test_multiline_calculated_column_expression_is_flagged_cannot_assess() -> None:
+    """The same deferred-expression shape on a calculated column, not just a measure."""
+    text = "table S\n\tcolumn 'A' =\n\t\tDIVIDE([Errors], [Total]) < 0.05\n\tcolumn 'B'\n"
+    assert "BLANK_THRESHOLD_CANNOT_ASSESS" in _tmdl_codes(text)
+
+
+def test_genuinely_empty_measure_header_does_not_get_a_cannot_assess_finding() -> None:
+    """A trailing bare `=` immediately followed by another object is EMPTY_EXPRESSION, not deferred."""
+    text = "table S\n\tmeasure 'A' =\n\tmeasure 'B' = SUM('S'[x])\n"
+    codes = _tmdl_codes(text)
+    assert "BLANK_THRESHOLD_CANNOT_ASSESS" not in codes
+    assert "EMPTY_EXPRESSION" in codes
+
+
 def test_full_datamodel_gate_has_no_false_positive_on_valid_model(tmp_path: Path) -> None:
     """The integrated gate must pass a valid model while scanning both M and TMDL."""
     tables = tmp_path / "Good.SemanticModel" / "definition" / "tables"
@@ -610,6 +657,67 @@ def test_biff8_gate_reaches_the_cli_exit_code(tmp_path: Path, caplog: pytest.Log
         assert main([str(tmp_path)]) == 1
     assert "BIFF8_XLS_NAVIGATION_KEY" in caplog.text
     assert "BIFF8_XLS_CULTURE" in caplog.text
+
+
+def _model_with_measure(tmp_path: Path, measure_expr_lines: str, *, name: str = "Advisory.SemanticModel") -> Path:
+    """Build the smallest `.SemanticModel` the CLI will scan: one measure, one M partition."""
+    tables = tmp_path / name / "definition" / "tables"
+    tables.mkdir(parents=True)
+    (tables / "S.tmdl").write_text(
+        f"table S\n{measure_expr_lines}"
+        "\tcolumn x\n\t\tdataType: int64\n\n"
+        "\tpartition S = m\n\t\tmode: import\n"
+        '\t\tsource = let Source = #table({"x"}, {{1}}) in Source\n',
+        encoding="utf-8",
+    )
+    return tmp_path / name
+
+
+def test_unguarded_blank_threshold_alone_does_not_fail_the_cli_exit_code(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Round-2 contract point 1/2: this finding is advisory - it must NOT contribute to exit 1."""
+    _model_with_measure(tmp_path, "\tmeasure 'Flag' = DIVIDE([Errors], [Total]) < 0.05\n\t\tformatString: 0.00\n\n")
+    with caplog.at_level(logging.WARNING):
+        assert main([str(tmp_path)]) == 0
+    assert "UNGUARDED_BLANK_THRESHOLD" in caplog.text
+    assert "BLANK()-THRESHOLD ADVISORY" in caplog.text
+    assert "manual verification" in caplog.text.lower() or "manual Tableau/Power BI verification" in caplog.text
+
+
+def test_blank_threshold_cannot_assess_alone_does_not_fail_the_cli_exit_code(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A multi-line expression is unassessed, not clean, but it must still not force exit 1."""
+    _model_with_measure(
+        tmp_path,
+        "\tmeasure 'Flag' =\n\t\tDIVIDE([Errors], [Total]) < 0.05\n\t\tformatString: 0.00\n\n",
+    )
+    with caplog.at_level(logging.WARNING):
+        assert main([str(tmp_path)]) == 0
+    assert "BLANK_THRESHOLD_CANNOT_ASSESS" in caplog.text
+
+
+def test_a_real_structural_error_still_fails_the_cli_exit_code_alongside_an_advisory(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A genuine TMDL structural error must still exit 1 even when an advisory finding is present."""
+    tables = tmp_path / "Blocking.SemanticModel" / "definition" / "tables"
+    tables.mkdir(parents=True)
+    (tables / "S.tmdl").write_text(
+        "table S\n"
+        "\tmeasure 'Flag' = DIVIDE([Errors], [Total]) < 0.05\n"
+        "\t\tformatString: 0.00\n"
+        "\t\tformatString: 0.00\n\n"
+        "\tcolumn x\n\t\tdataType: int64\n\n"
+        "\tpartition S = m\n\t\tmode: import\n"
+        '\t\tsource = let Source = #table({"x"}, {{1}}) in Source\n',
+        encoding="utf-8",
+    )
+    with caplog.at_level(logging.WARNING):
+        assert main([str(tmp_path)]) == 1
+    assert "DUPLICATE_PROPERTY" in caplog.text
+    assert "UNGUARDED_BLANK_THRESHOLD" in caplog.text
 
 
 def test_tmdl_has_no_false_positives_across_the_committed_corpus() -> None:

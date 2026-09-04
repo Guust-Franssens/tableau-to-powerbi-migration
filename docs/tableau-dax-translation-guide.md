@@ -52,7 +52,7 @@ which side of zero the threshold sits on.
 
 **Work out which direction is unsafe by asking "does `0` satisfy this comparison against my
 threshold?"** — if yes, a blank operand silently passes the predicate as `TRUE`. ✅ Verified live in
-Power BI Desktop (2026-09-03):
+Power BI Desktop 2.157.828.0 (2026-09-03):
 
 | Comparison | Is `0` on the passing side? | Effect on a blank operand |
 |---|---|---|
@@ -85,9 +85,9 @@ IF(
 ```
 
 The same guard applies whenever the operand is the result of `DIVIDE(a, b[, alt])` — a ratio-style
-threshold (`% Complete`, error rate, margin) built on `DIVIDE` inherits exactly this risk. ⚠️ **A
+threshold (`% Complete`, error rate, margin) built on `DIVIDE` inherits exactly this risk. ✅ **A
 third `DIVIDE` argument does NOT make the call safe on its own** — verified live in Power BI Desktop
-(2026-09-03):
+2.157.828.0 (2026-09-03):
 
 ```dax
 DIVIDE(BLANK(), 1, 0) < 0.05   -- true: "alt" only substitutes for a 0/blank DENOMINATOR, so a
@@ -107,11 +107,23 @@ representations differ; this rule is about what happens next, when the (possibly
 a `<`, `<=`, `>`, `>=`, `=`, or `<>` comparison against a literal threshold.
 
 `scripts/tmdl_checks.py`'s `find_unguarded_divide_thresholds` (wired into `scripts/check_datamodel.py`
-as the `UNGUARDED_BLANK_THRESHOLD` gate finding) flags this shape wherever a `DIVIDE(...)` call
-appears in generated DAX — including nested inside `IF(...)` or `CALCULATE(...)` — unless it is
-guarded by `ISBLANK(...)`, or its own arguments prove it cannot return `BLANK()` (a numeric/string
-literal, or `COALESCE(..., <that literal>)`, in both the numerator and — for the 3-argument form —
-the alternate result).
+as the `UNGUARDED_BLANK_THRESHOLD` finding) flags this shape wherever a `DIVIDE(...)` call appears in
+generated DAX — including nested inside `IF(...)` or `CALCULATE(...)` — unless it is guarded by
+`ISBLANK(...)`, or its own arguments prove it cannot return `BLANK()` (a numeric/string literal, or
+`COALESCE(..., <that literal>)`, in both the numerator and — for the 3-argument form — the alternate
+result). It also flags `BLANK_THRESHOLD_CANNOT_ASSESS` for a shape it cannot read at all (a
+multi-line measure/column expression, or a `DIVIDE(` with no closing paren on its line) — that is a
+"not assessed", never a silent pass.
+
+**Both findings are advisory, not a hard gate** (`ADVISORY_TMDL_CODES` in `scripts/tmdl_checks.py`):
+they never make `check_datamodel.py` exit 1. A second, independent review round measured that a
+text-only detector for this class — however narrowly scoped — cannot be made reliable by adding more
+patterns: it still missed real unsafe shapes (parenthesized wrapping, `VAR`/`RETURN`, a measure that
+is itself the operand, a reversed `threshold > DIVIDE(...)` comparison — each would need a real DAX
+parser to resolve) and still flagged some provably-safe ones. Proving this class semantically clean
+from DAX *text* is not reliable, so the check is printed as an advisory that still requires manual
+Tableau/Power BI verification, rather than as a blocking finding that would train reviewers to
+disable or ignore the gate the first time it cries wolf on correct DAX.
 
 
 ### Worked example — CASE/WHEN [seen]
