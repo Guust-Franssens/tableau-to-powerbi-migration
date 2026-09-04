@@ -73,17 +73,17 @@ so with `--manual-validation-grade` — your assertion, logged as yours.
 
 ## 4. The command sequence
 
-Windows PowerShell, from the repo root, with the repo's venv Python:
+Windows PowerShell, from the repo root, through the uv-managed environment:
 
 ```
-python scripts/parse_tableau.py migrations/workbooks/<slug>/source/<workbook>.twbx `
+uv run --frozen python scripts/parse_tableau.py migrations/workbooks/<slug>/source/<workbook>.twbx `
     -o migrations/workbooks/<slug>/migration-spec.json
 
-python scripts/capture_tableau_reference.py migrations/workbooks/<slug>
+uv run --frozen python scripts/capture_tableau_reference.py migrations/workbooks/<slug>
 
-python scripts/run_estate.py --input migrations/workbooks/<slug>/source --output _runs/001-<slug>/bundle
+uv run --frozen python scripts/run_estate.py --input migrations/workbooks/<slug>/source --output _runs/001-<slug>/bundle
 
-python scripts/check_reference_readiness.py _runs/001-<slug>/bundle `
+uv run --frozen python scripts/check_reference_readiness.py _runs/001-<slug>/bundle `
     --source migrations/workbooks/<slug>/source/<workbook>.twbx `
     --reference migrations/workbooks/<slug>/reference
 ```
