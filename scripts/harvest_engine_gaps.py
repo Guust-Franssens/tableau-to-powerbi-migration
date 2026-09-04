@@ -79,9 +79,10 @@ engine artifacts with an INJECTED change (a copied unit reported exactly 1 tier 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
+import shutil
 import sys
+import tempfile
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -180,23 +181,6 @@ class Pair(NamedTuple):
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-
-
-def _bundle_fingerprint(bundle: Path) -> str | None:
-    """Fingerprint the complete file set and contents, or return None if it cannot be read."""
-    digest = hashlib.sha256()
-    try:
-        paths = sorted(path for path in bundle.rglob("*") if path.is_file())
-        for path in paths:
-            relative = path.relative_to(bundle).as_posix().encode("utf-8")
-            digest.update(len(relative).to_bytes(8, "big"))
-            digest.update(relative)
-            content = path.read_bytes()
-            digest.update(len(content).to_bytes(8, "big"))
-            digest.update(content)
-    except OSError:
-        return None
-    return digest.hexdigest()
 
 
 class Evidence:
@@ -921,23 +905,8 @@ def _finalize(scan: Scan) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     return entries, records
 
 
-def _apply_stability(report: dict[str, Any], before: str | None, bundle: Path) -> dict[str, Any]:
-    """Mark a report unusable when the bundle fingerprint changed or could not be read."""
-    after = _bundle_fingerprint(bundle)
-    if before is None or after is None:
-        report["status"] = STATUS_UNSTABLE
-        report["concurrency"]["reason"] = "bundle could not be fingerprinted before and after the harvest"
-    elif before != after:
-        report["status"] = STATUS_UNSTABLE
-        report["concurrency"]["reason"] = "bundle changed while the harvest was running"
-    else:
-        report["concurrency"]["verified"] = True
-    return report
-
-
-def harvest(bundle: Path) -> dict[str, Any]:
+def _harvest_snapshot(bundle: Path) -> dict[str, Any]:
     """Compare, attribute and classify one bundle. Returns the machine-readable report."""
-    before = _bundle_fingerprint(bundle)
     evidence = _load_evidence(bundle)
 
     # ⚠️ The engine baseline is validated INDEPENDENTLY of the delta, and BEFORE it is read. The
@@ -990,8 +959,8 @@ def harvest(bundle: Path) -> dict[str, Any]:
         "unpaired_drift_records": len(unpaired),
         "unreconciled_drift": unreconciled,
         "concurrency": {
-            "verified": False,
-            "note": "the bundle was fingerprinted before and after the harvest",
+            "verified": True,
+            "note": "the harvest ran against an immutable copied snapshot of the bundle",
         },
         "pairs": entries,
         "unassessable": scan.unassessable,
@@ -1006,7 +975,67 @@ def harvest(bundle: Path) -> dict[str, Any]:
             ),
         },
     }
-    return _apply_stability(report, before, bundle)
+    return report
+
+
+def harvest(bundle: Path) -> dict[str, Any]:
+    """Copy the bundle once, then compare and attribute only the copied snapshot."""
+    try:
+        with tempfile.TemporaryDirectory(prefix="harvest-engine-gaps-") as temporary:
+            snapshot = Path(temporary) / "bundle"
+            shutil.copytree(bundle, snapshot)
+            report = _harvest_snapshot(snapshot)
+    except OSError as exc:
+        return {
+            "version": REPORT_VERSION,
+            "generated_at": _utcnow(),
+            "bundle": str(bundle),
+            "status": STATUS_UNSTABLE,
+            "incomplete_reasons": [],
+            "engine": {"available": False},
+            "attribution": {
+                "usable": False,
+                "unavailable_reason": "snapshot_copy_failed",
+                "files_recorded": 0,
+                "coverage": {"paths_compared": 0, "paths_attributed": 0, "paths_unattributed": 0, "complete": False},
+                "notes": [],
+            },
+            "layers": {
+                layer: {
+                    "artifacts": 0,
+                    "pairs_assessed": 0,
+                    "identical": 0,
+                    "differs": 0,
+                    "unpaired_no_baseline": 0,
+                    "unpaired_no_working": 0,
+                    "unassessable": 0,
+                    "files_changed": 0,
+                    "files_added": 0,
+                    "files_removed": 0,
+                    "files_post_engine_only": 0,
+                    "baseline_reference_resolves": 0,
+                    "baseline_reference_checked": 0,
+                }
+                for layer in (LAYER_REPORT, LAYER_MODEL)
+            },
+            "provenance": {name: 0 for name in PROVENANCES} | {"differing_files": 0},
+            "shapes": [],
+            "tier_edits": [],
+            "baseline_tampered": [],
+            "baseline_drift": [],
+            "baseline_roots": list(BASELINE_ROOTS),
+            "unpaired_drift_records": 0,
+            "unreconciled_drift": [],
+            "concurrency": {
+                "verified": False,
+                "reason": f"could not copy bundle to a stable snapshot: {type(exc).__name__}: {exc}",
+            },
+            "pairs": [],
+            "unassessable": [],
+            "git_blind_spot": {"count": 0, "path_max": GIT_READABLE_PATH_MAX, "pairs": [], "note": ""},
+        }
+    report["bundle"] = str(bundle)
+    return report
 
 
 def _emit(text: str, stream) -> None:

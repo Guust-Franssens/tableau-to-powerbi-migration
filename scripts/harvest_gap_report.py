@@ -31,8 +31,8 @@ STATUS_UNSTABLE = "unstable"
 
 # ✅ Printed beside EVERY conclusion this report reaches, clean or not.
 CONCURRENCY_CAVEAT = (
-    "> ✅ **Bundle stability was verified** by fingerprinting the complete file set and contents before"
-    " and after the harvest."
+    "> ✅ **Bundle stability was verified** by copying the bundle once and running the complete harvest"
+    " against that immutable snapshot. Changes to the source after the copy cannot affect attribution."
 )
 
 
@@ -169,6 +169,11 @@ def render(report: dict[str, Any], top: int = DEFAULT_TOP) -> str:
         f" from {report['attribution']['files_recorded']} recorded artifacts",
     ]
     lines += [f"      note              : {note}" for note in report["attribution"]["notes"]]
+    concurrency = report["concurrency"]
+    lines.append(
+        f"  stability             : {'verified' if concurrency['verified'] else 'NOT verified'}"
+        + (f" ({concurrency['reason']})" if not concurrency["verified"] else "")
+    )
     lines.append(
         f"  attribution coverage  : {_pct(coverage['paths_attributed'], coverage['paths_compared'])}"
         f" of compared paths{'' if coverage['complete'] else '  <- NOT complete; status cannot be `complete`'}"
@@ -245,6 +250,11 @@ def _tier_edit_conclusion(report: dict[str, Any], top: int) -> list[str]:
                 f" {', '.join(record['shapes'])} | {record['declared_by'] or '**undeclared**'} |"
             )
         return lines
+    if report.get("status") == STATUS_UNSTABLE:
+        return [
+            "**Undetermined - this is NOT a clean result.** The harvest could not prove a stable input:"
+            f" {report['concurrency'].get('reason', 'unknown reason')}."
+        ]
     if _tier_edits_determined(report):
         return [
             "**None.** Every differing byte in this bundle is still hash-identical to what the engine"

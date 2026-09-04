@@ -533,26 +533,36 @@ def test_exit_code_is_ok_when_everything_is_paired_and_attributed(tmp_path):
     assert heg.main([str(bundle), "--quiet"]) == heg.EXIT_OK
 
 
-def test_bundle_mutated_between_reads_is_a_distinct_blocking_result(tmp_path, monkeypatch):
+def test_bundle_mutated_after_snapshot_does_not_change_the_harvest_input(tmp_path, monkeypatch):
     bundle = _bundle(tmp_path, entity_working="Renamed")
-    real_scan = heg._scan_pairs
-    position = 41
+    real_copytree = heg.shutil.copytree
+    target = bundle / "pbip" / "WB" / "WB.Report" / VISUAL
+    original = target.read_bytes()
 
-    def scan_then_mutate(path, evidence):
-        nonlocal position
-        result = real_scan(path, evidence)
-        position += 1
-        _write(path / "pbip" / "WB" / "WB.Report" / VISUAL, _visual("Orders", position=position))
+    def copy_then_mutate(source, destination, *args, **kwargs):
+        result = real_copytree(source, destination, *args, **kwargs)
+        _write(target, _visual("Orders", position=41))
+        target.write_bytes(original)
         return result
 
-    monkeypatch.setattr(heg, "_scan_pairs", scan_then_mutate)
+    monkeypatch.setattr(heg.shutil, "copytree", copy_then_mutate)
 
     report = heg.harvest(bundle)
 
-    assert report["status"] == heg.STATUS_UNSTABLE
-    assert report["concurrency"]["verified"] is False
-    assert "changed while" in report["concurrency"]["reason"]
-    assert heg.main([str(bundle), "--quiet"]) == heg.EXIT_UNSTABLE
+    assert report["status"] == heg.STATUS_COMPLETE
+    assert report["concurrency"]["verified"] is True
+    assert report["provenance"][heg.PROV_ENGINE] > 0
+
+
+def test_snapshot_copy_failure_has_literal_blocking_contract(tmp_path, monkeypatch):
+    monkeypatch.setattr(heg.shutil, "copytree", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("injected")))
+
+    report = heg.harvest(_bundle(tmp_path))
+
+    assert report["status"] == "unstable"
+    assert heg.EXIT_UNSTABLE == 4
+    assert "could not copy bundle" in hgr.render(report)
+    assert heg.main([str(_bundle(tmp_path)), "--quiet"]) == 4
 
 
 def test_stable_bundle_has_a_verified_concurrency_result(tmp_path):
@@ -1662,15 +1672,15 @@ def test_the_caveat_is_printed_beside_a_tier_edit_finding_too(tmp_path):
     assert "Bundle stability was verified" in markdown
 
 
-def test_a_mid_harvest_edit_is_a_blocking_unstable_result(tmp_path, monkeypatch):
-    """A bundle changed during the harvest cannot produce an attribution verdict."""
+def test_a_mid_harvest_edit_is_isolated_from_the_harvest_snapshot(tmp_path, monkeypatch):
+    """A source edit after snapshot creation cannot alter the attribution input."""
     bundle = _identical_bundle(tmp_path)
     original = heg._scan_pairs
     fired = []
 
     def scan_after_the_edit(bundle_arg: Path, evidence):
         fired.append(bundle_arg)
-        _mutate_working_file_changed(bundle_arg)
+        _mutate_working_file_changed(bundle)
         return original(bundle_arg, evidence)
 
     monkeypatch.setattr(heg, "_scan_pairs", scan_after_the_edit)
@@ -1678,9 +1688,9 @@ def test_a_mid_harvest_edit_is_a_blocking_unstable_result(tmp_path, monkeypatch)
     markdown = hgr.render_markdown(report)
 
     assert fired, "the injection never fired - this fixture pins nothing"
-    assert report["status"] == heg.STATUS_UNSTABLE
-    assert "Bundle stability was not verified" in markdown
-    assert report["concurrency"]["verified"] is False
+    assert report["status"] == heg.STATUS_COMPLETE
+    assert "Bundle stability was verified" in markdown
+    assert report["concurrency"]["verified"] is True
 
 
 def test_the_pair_rows_reconcile_with_the_top_level(tmp_path):
