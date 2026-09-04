@@ -41,6 +41,14 @@ Scope stays deliberately narrow because a false positive is worse than a miss:
     per-table; ported from the drifted `tmdl_validate` example helpers - issue #413)
   * empty measure expressions
   * direct CALCULATE/CALCULATETABLE compact filters that compare a column to a measure
+  * a `DIVIDE(a, b[, alt]) <op> <threshold>` comparison with no `ISBLANK` guard (issue #82) -
+    `DIVIDE` returns `BLANK()` whenever its numerator is blank, or its denominator is `0`/blank
+    with no 3rd argument, and `BLANK()` coerces to `0` in a comparison, so an unguarded threshold
+    can silently flip which rows a KPI flag matches, anywhere the call appears in the expression.
+    **Advisory only** (`ADVISORY_TMDL_CODES`) - printed separately and excluded from the exit-1
+    total, because a text-only detector for this class both misses real unsafe shapes and flags
+    some provably-safe ones (see scripts/tmdl_checks.py); a mandatory gate with false positives on
+    correct DAX is worse than none, because every future finding then gets ignored.
   * legacy BIFF8 `.xls` partitions with a resolvable local source: their navigation key and type
     conversion culture, which otherwise fail or silently corrupt rows at refresh
 
@@ -71,16 +79,20 @@ from pathlib import Path
 
 from check_empty_model import eval_m_path, model_parameters
 from tmdl_checks import (
+    ADVISORY_TMDL_CODES,
     TmdlFinding,
     check_tmdl_model,
     check_tmdl_text,
     find_compact_filters,
+    find_incomplete_divide_calls,
+    find_unguarded_divide_thresholds,
 )
 from tmdl_oracle import OracleUnavailable, check_models
 
 # Re-exported so `from check_datamodel import ...` keeps working for callers and tests that
 # predate the split of the TMDL half into tmdl_checks.
 __all__ = [
+    "ADVISORY_TMDL_CODES",
     "TmdlFinding",
     "check_datamodel",
     "check_model",
@@ -88,6 +100,8 @@ __all__ = [
     "check_tmdl_model",
     "check_tmdl_text",
     "find_compact_filters",
+    "find_incomplete_divide_calls",
+    "find_unguarded_divide_thresholds",
     "main",
 ]
 
@@ -845,7 +859,7 @@ def _run_oracle(targets: list[Path], skip: bool) -> tuple[int, bool]:
     return len(findings), True
 
 
-def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-locals,too-many-branches
+def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
     """CLI entry point: check every requested model and exit non-zero if anything is structurally wrong."""
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -874,6 +888,7 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
     tmdl_scanned_total = 0
     empty_m: list[Path] = []
     empty_tmdl: list[Path] = []
+    advisory_total = 0
     for model in targets:
         m_findings, m_scanned, tmdl_findings, tmdl_scanned = check_datamodel(model)
         m_scanned_total += m_scanned
@@ -882,18 +897,28 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
             empty_m.append(model)
         if tmdl_scanned == 0:
             empty_tmdl.append(model)
+        blocking_tmdl = [finding for finding in tmdl_findings if finding.code not in ADVISORY_TMDL_CODES]
+        advisory_tmdl = [finding for finding in tmdl_findings if finding.code in ADVISORY_TMDL_CODES]
         if m_findings:
             total += len(m_findings)
             log.error("M SYNTAX ERRORS in %s", model.relative_to(REPO_ROOT) if REPO_ROOT in model.parents else model)
             for finding in m_findings:
                 log.error("%s", finding.render(REPO_ROOT))
-        if tmdl_findings:
-            total += len(tmdl_findings)
+        if blocking_tmdl:
+            total += len(blocking_tmdl)
             log.error(
                 "TMDL STRUCTURAL ERRORS in %s", model.relative_to(REPO_ROOT) if REPO_ROOT in model.parents else model
             )
-            for finding in tmdl_findings:
+            for finding in blocking_tmdl:
                 log.error("%s", finding.render(REPO_ROOT))
+        if advisory_tmdl:
+            advisory_total += len(advisory_tmdl)
+            log.warning(
+                "BLANK()-THRESHOLD ADVISORY in %s (NOT counted toward pass/fail)",
+                model.relative_to(REPO_ROOT) if REPO_ROOT in model.parents else model,
+            )
+            for finding in advisory_tmdl:
+                log.warning("%s", finding.render(REPO_ROOT))
 
     if empty_m:
         # "clean" and "nothing was checked" must never look the same - an agent would read the
@@ -935,14 +960,26 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
             len(targets),
         )
         return 1
+    if advisory_total:
+        log.warning(
+            "\n%d BLANK()-threshold advisory finding(s) across %d model(s) - NOT counted toward "
+            "pass/fail. This class was NOT proven safe: manual verification in Tableau/Power BI is "
+            "still required, and DAX shapes this checker cannot fully assess (multi-line "
+            "expressions, unparsable DIVIDE(...) calls, and anything needing real DAX evaluation) "
+            "were not assessed either way. See docs/tableau-dax-translation-guide.md, "
+            "'Threshold comparisons'.",
+            advisory_total,
+            len(targets),
+        )
     log.info(
-        "Data model OK - %d M expression(s) and %d TMDL document(s) across %d model(s), no structural "
-        "problems found.\n  NOTE: structural checks only%s; a clean result does not prove the model "
-        "refreshes.",
+        "Data model OK - %d M expression(s) and %d TMDL document(s) across %d model(s), no "
+        "blocking structural problems found.\n  NOTE: structural checks only%s; a clean result "
+        "does not prove the model refreshes%s.",
         m_scanned_total,
         tmdl_scanned_total,
         len(targets),
         "" if oracle_ran else ", and the TMDL oracle did NOT run",
+        ", and does not prove the BLANK()-threshold advisories above are safe" if advisory_total else "",
     )
     return 0
 
