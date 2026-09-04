@@ -768,7 +768,7 @@ def test_a_shared_datasource_and_its_workbooks_produce_ONE_key():
 
 
 # --- Issue #80: inherited custom SQL is copied verbatim; lint (REPORT, never repair) suspicious ---
-# --- shapes -- doubled comparison operators and literal \n/\t escapes hiding inside a SQL comment ---
+# --- shapes -- doubled comparison operators and literal \n/\t escapes in inherited SQL ---
 
 
 def _custom_sql_table(sql: str) -> dict:
@@ -824,6 +824,33 @@ def test_literal_backslash_t_after_line_comment_is_flagged():
     assert "\\t" in limitations[0]["issue"]
 
 
+def test_literal_escapes_outside_an_unterminated_line_comment_are_medium():
+    """Literal escapes corrupt custom SQL wherever they occur, but only an unterminated line comment
+    swallows trailing SQL."""
+    table = _custom_sql_table("SELECT 1\\n+ 1 /* docs \\t harmless */")
+    limitations = _custom_sql_limitations(table)
+
+    assert len(limitations) == 1
+    assert limitations[0]["severity"] == "medium"
+    assert "\\n" in limitations[0]["issue"]
+    assert "\\t" in limitations[0]["issue"]
+
+
+def test_literal_escape_in_a_line_comment_terminated_by_a_real_newline_is_medium():
+    """A real newline terminates a '--' comment even when its body contains literal '\\n' text."""
+    limitations = _custom_sql_limitations(_custom_sql_table("SELECT 1 -- source C:\\temp\\new.csv\n+ 1"))
+
+    assert len(limitations) == 1
+    assert limitations[0]["severity"] == "medium"
+
+
+def test_literal_escape_outside_a_swallowing_comment_keeps_its_medium_finding():
+    """A high-severity occurrence does not erase an independent medium-severity occurrence."""
+    limitations = _custom_sql_limitations(_custom_sql_table("SELECT '\\n' -- \\n"))
+
+    assert {limitation["severity"] for limitation in limitations} == {"high", "medium"}
+
+
 def test_ordinary_comparison_operators_are_not_flagged():
     """Negative control: legitimate SQL using '<', '>', '<=', '>=' and '<>' (none doubled) must NOT
     be flagged. A lint with false positives on ordinary SQL trains reviewers to ignore it."""
@@ -847,6 +874,52 @@ def test_doubled_operator_inside_a_string_literal_is_not_flagged():
     assert _custom_sql_limitations(table) == []
 
 
+def test_doubled_operator_inside_a_line_comment_is_not_flagged():
+    """Operators in comments are not SQL code and must remain masked."""
+    assert _custom_sql_limitations(_custom_sql_table("SELECT 1 -- << obsolete syntax")) == []
+
+
+def test_doubled_operator_inside_a_bracket_quoted_identifier_is_not_flagged():
+    """SQL Server/SQLite bracket-quoted identifier content is not an operator."""
+    assert _custom_sql_limitations(_custom_sql_table("SELECT [a<<b] FROM (SELECT 1 AS [a<<b])")) == []
+
+
+@pytest.mark.parametrize(
+    "sql",
+    (
+        "SELECT DISTINCT [a<<b]",
+        "SELECT COUNT([a<<b])",
+        "SELECT COUNT(*) [total << count] FROM orders",
+        "UPDATE [a<<b] SET x = 1",
+    ),
+)
+def test_doubled_operator_in_bracket_identifier_contexts_is_not_flagged(sql):
+    """Bracket identifiers can follow SQL modifiers, functions, and DML keywords."""
+    assert _custom_sql_limitations(_custom_sql_table(sql)) == []
+
+
+def test_doubled_operator_inside_an_array_or_subscript_expression_is_flagged():
+    """An opening bracket immediately following an identifier is SQL expression syntax, not quoting."""
+    limitations = _custom_sql_limitations(_custom_sql_table("SELECT values[1 << 2] FROM t"))
+
+    assert len(limitations) == 1
+    assert limitations[0]["severity"] == "medium"
+
+
+@pytest.mark.parametrize(
+    "sql",
+    ("SELECT (ARRAY[1, 2])[1 << 1]", "SELECT values [1 << 2] FROM t"),
+)
+def test_doubled_operator_inside_a_postfix_subscript_is_flagged(sql):
+    """Postfix array subscripts remain expressions even after a parenthesis or whitespace."""
+    assert len(_custom_sql_limitations(_custom_sql_table(sql))) == 1
+
+
+def test_doubled_operator_inside_a_postgres_dollar_quoted_string_is_not_flagged():
+    """Dollar-quoted PostgreSQL literal content is not executable operator syntax."""
+    assert _custom_sql_limitations(_custom_sql_table("SELECT $tag$a << b$tag$")) == []
+
+
 def test_doubled_operator_outside_a_string_is_still_flagged_alongside_one_inside_a_string():
     """The masking must be surgical: suppress the match INSIDE the string literal while still
     catching a real doubled operator elsewhere in the same statement."""
@@ -861,6 +934,22 @@ def test_table_with_no_custom_sql_is_not_scanned():
     """A regular (non custom-SQL) table has custom_sql=None; the lint must be a no-op, not an error."""
     table = {"id": "tbl.orders", "name": "Orders", "source_relation": "table", "custom_sql": None}
     assert _custom_sql_limitations(table) == []
+
+
+def test_custom_sql_relation_with_missing_sql_is_reported():
+    """A text relation without text is unassessable, not an ordinary non-custom-SQL table."""
+    datasource = parse_tableau.etree.fromstring(
+        "<datasource><connection><relation name='Empty Custom SQL' type='text' /></connection></datasource>"
+    )
+    table = parse_tableau._parse_tables(datasource, parse_tableau.IdRegistry())[0]
+
+    assert table["source_relation"] == "custom-sql"
+    assert table["custom_sql"] is None
+    limitations = _custom_sql_limitations(table)
+
+    assert len(limitations) == 1
+    assert limitations[0]["severity"] == "high"
+    assert "has no SQL text" in limitations[0]["issue"]
 
 
 def test_custom_sql_lint_is_wired_into_collect_limitations_end_to_end():

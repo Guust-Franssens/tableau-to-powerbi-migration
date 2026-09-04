@@ -1264,39 +1264,98 @@ def _live_source_limitation(ds: dict[str, Any]) -> dict[str, Any]:
 
 _DOUBLED_OPERATOR_RE = re.compile(r"<{2,}|>{2,}")
 _LITERAL_ESCAPE_RE = re.compile(r"\\[nt]")
+_DOLLAR_QUOTE_RE = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$")
+_SQL_KEYWORDS = frozenset(
+    {
+        "AS",
+        "AND",
+        "BY",
+        "CASE",
+        "DELETE",
+        "DISTINCT",
+        "ELSE",
+        "FROM",
+        "GROUP",
+        "HAVING",
+        "INSERT",
+        "INTO",
+        "JOIN",
+        "LIMIT",
+        "NOT",
+        "ON",
+        "ORDER",
+        "OR",
+        "SELECT",
+        "SET",
+        "THEN",
+        "UPDATE",
+        "WHERE",
+        "WHEN",
+    }
+)
 
 
-def _mask_sql_strings_and_comments(sql: str) -> tuple[str, list[tuple[int, int]]]:
+def _is_bracket_quoted_identifier(sql: str, index: int) -> bool:
+    """Return whether `[` at index begins a SQL Server/SQLite quoted identifier."""
+    prefix = sql[:index]
+    before = prefix.rstrip()
+    if not before:
+        return True
+    if before[-1] == ")":
+        return len(before) < len(prefix)
+    if before[-1] in {"(", ".", ","}:
+        return True
+    word = re.search(r"[A-Za-z_][A-Za-z0-9_]*$", before)
+    return word is not None and word.group().upper() in _SQL_KEYWORDS
+
+
+def _mask_dollar_quoted_string(sql: str, masked: list[str], index: int) -> int | None:
+    """Mask a PostgreSQL dollar-quoted literal, returning its end offset if one begins at index."""
+    delimiter_match = _DOLLAR_QUOTE_RE.match(sql, index)
+    if delimiter_match is None:
+        return None
+    delimiter = delimiter_match.group()
+    end = sql.find(delimiter, delimiter_match.end())
+    body_end = len(sql) if end == -1 else end
+    for body_index in range(delimiter_match.end(), body_end):
+        masked[body_index] = "#"
+    return len(sql) if end == -1 else end + len(delimiter)
+
+
+def _mask_sql_strings_and_comments(sql: str) -> tuple[str, list[tuple[int, int, bool]]]:
     """Return (masked, comment_spans) for a raw custom-SQL string.
 
     `masked` is the same length as `sql` with the BODY of every string literal ('...', "...", or
-    `...`) and every comment (`-- ...` to end-of-line/string, `/* ... */`) replaced by '#'. Doubled
-    comparison operators found only inside a string literal are DATA, not a corrupted operator (e.g.
-    a customer's literal `'a<<b'` sentinel value), and #80's own suggested fix says to check
-    "outside strings/comments" - so masking those spans is what keeps the doubled-operator lint from
-    flagging quoted string content while still catching a real `<<`/`>>` in the SQL itself.
+    `...`), bracket-quoted identifier (`[...]`), and comment (`-- ...` to end-of-line/string,
+    `/* ... */`) replaced by '#'. Doubled comparison operators found only inside quoted content are
+    DATA, not a corrupted operator (e.g. a customer's literal `'a<<b'` sentinel value), and #80's
+    own suggested fix says to check "outside strings/comments" - so masking those spans is what keeps
+    the doubled-operator lint from flagging quoted content while still catching a real `<<`/`>>` in
+    the SQL itself.
 
-    `comment_spans` are (start, end) offsets into the ORIGINAL `sql` for each comment body, used
-    separately by the literal-escape check: a literal `\\n`/`\\t` inside a `--` comment does not
-    terminate it (only a real newline does), so code can be silently swallowed - the concrete harm
-    named in #80. A quote character is not tracked as "escaped" via a preceding backslash here
+    `comment_spans` are (start, end, unterminated_line_comment) offsets into the ORIGINAL `sql` for
+    each comment body. A quote character is not tracked as "escaped" via a preceding backslash here
     (Tableau custom SQL commonly targets ANSI dialects where `''`/`""` doubling is the escape, not
     backslash) - only the doubled-quote convention is honored, which is enough to keep this a
     best-effort lint rather than a full SQL parser.
     """
     n = len(sql)
     masked = list(sql)
-    comment_spans: list[tuple[int, int]] = []
+    comment_spans: list[tuple[int, int, bool]] = []
     i = 0
     while i < n:
         two = sql[i : i + 2]
+        dollar_quote_end = _mask_dollar_quoted_string(sql, masked, i)
+        if dollar_quote_end is not None:
+            i = dollar_quote_end
+            continue
         if two == "--":
             start = i + 2
             j = start
             while j < n and sql[j] != "\n":
                 masked[j] = "#"
                 j += 1
-            comment_spans.append((start, j))
+            comment_spans.append((start, j, j == n))
             i = j
             continue
         if two == "/*":
@@ -1305,11 +1364,11 @@ def _mask_sql_strings_and_comments(sql: str) -> tuple[str, list[tuple[int, int]]
             while j < n and sql[j : j + 2] != "*/":
                 masked[j] = "#"
                 j += 1
-            comment_spans.append((start, j))
+            comment_spans.append((start, j, False))
             i = j + 2
             continue
-        if sql[i] in "'\"`":
-            quote = sql[i]
+        if sql[i] in "'\"`" or (sql[i] == "[" and _is_bracket_quoted_identifier(sql, i)):
+            quote = "]" if sql[i] == "[" else sql[i]
             j = i + 1
             while j < n:
                 if sql[j] == quote:
@@ -1337,9 +1396,7 @@ def _sql_snippet(sql: str, start: int, end: int, radius: int = 24) -> str:
 
 def _custom_sql_limitations(table: dict[str, Any]) -> list[dict[str, Any]]:
     """REPORT (never repair) suspicious inherited custom SQL, per #80: a doubled comparison operator
-    (`<<`/`>>`, e.g. from a corrupted `<`/`>`) or a literal two-character `\\n`/`\\t` escape sitting
-    inside a `--`/`/* */` comment (which does NOT terminate it - only a real line break does, so
-    trailing SQL can be silently swallowed into the comment).
+    (`<<`/`>>`, e.g. from a corrupted `<`/`>`) or a literal two-character `\\n`/`\\t` escape.
 
     Deliberately REPORT, not repair or refuse: `<<` might be corrupted source, or it might be a
     legitimate operator in the source dialect (e.g. a bitwise shift, or Postgres's network
@@ -1348,7 +1405,20 @@ def _custom_sql_limitations(table: dict[str, Any]) -> list[dict[str, Any]]:
     script) decides what to do with the flag; this function only ever reads `custom_sql`.
     """
     sql = table.get("custom_sql")
-    if not sql:
+    if table.get("source_relation") == "custom-sql" and (not isinstance(sql, str) or not sql.strip()):
+        return [
+            {
+                "item": table["id"],
+                "issue": (
+                    f"custom SQL relation for table '{table.get('name', table['id'])}' has no SQL text, "
+                    "so it cannot be assessed or migrated faithfully. ACTION: recover the custom SQL "
+                    "from the Tableau source system before migration."
+                ),
+                "severity": "high",
+                "stage": "parse",
+            }
+        ]
+    if not isinstance(sql, str):
         return []
     found: list[dict[str, Any]] = []
     masked, comment_spans = _mask_sql_strings_and_comments(sql)
@@ -1374,23 +1444,44 @@ def _custom_sql_limitations(table: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
 
-    raw_escapes = sorted(
-        {m.group(0) for start, end in comment_spans for m in _LITERAL_ESCAPE_RE.finditer(sql[start:end])}
-    )
-    if raw_escapes:
+    raw_escapes = list(_LITERAL_ESCAPE_RE.finditer(sql))
+    swallowed_matches = [
+        match
+        for match in raw_escapes
+        if any(start <= match.start() < end and unterminated for start, end, unterminated in comment_spans)
+    ]
+    swallowed_positions = {match.start() for match in swallowed_matches}
+    swallowed_escapes = sorted({match.group(0) for match in swallowed_matches})
+    other_escapes = sorted({match.group(0) for match in raw_escapes if match.start() not in swallowed_positions})
+    if swallowed_escapes:
         found.append(
             {
                 "item": table["id"],
                 "issue": (
                     f"custom SQL for table '{table.get('name', table['id'])}' has a literal "
-                    f"two-character escape ({', '.join(raw_escapes)}) inside a SQL comment. A literal "
-                    "backslash-n/backslash-t does NOT terminate a '--' or '/* */' comment (only a "
-                    "real line break/'*/' does), so any SQL written after it may be silently swallowed "
-                    "into the comment and never executed. NOT auto-repaired: confirm against the "
+                    f"two-character escape ({', '.join(swallowed_escapes)}) inside an unterminated "
+                    "line comment. A literal backslash-n/backslash-t does NOT terminate '--' (only a "
+                    "real line break does), so any following SQL is silently swallowed into the comment "
+                    "and never executed. NOT auto-repaired: confirm against the "
                     "source system whether this is a corrupted line break/tab or intentional literal "
                     "text before this table's custom SQL is migrated into Power Query M."
                 ),
                 "severity": "high",
+                "stage": "parse",
+            }
+        )
+    if other_escapes:
+        found.append(
+            {
+                "item": table["id"],
+                "issue": (
+                    f"custom SQL for table '{table.get('name', table['id'])}' has a literal "
+                    f"two-character escape ({', '.join(other_escapes)}). This may be corrupted inherited "
+                    "SQL, but no unterminated line comment was found. NOT auto-repaired: confirm against "
+                    "the source system whether this is a corrupted line break/tab or intentional literal "
+                    "text before this table's custom SQL is migrated into Power Query M."
+                ),
+                "severity": "medium",
                 "stage": "parse",
             }
         )
