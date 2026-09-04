@@ -494,6 +494,11 @@ def _connection_target(conn: dict) -> str:
     return computed
 
 
+def _is_custom_sql(table: dict) -> bool:
+    """Treat an explicitly present, even empty, custom-SQL relation as custom SQL."""
+    return table.get("custom_sql") is not None
+
+
 def _resolve_probe_targets(sources: list[dict], source_index: int) -> list[tuple[str, dict, list[dict], str]]:
     """Pick every live connection leg, its candidate tables and a column to probe.
 
@@ -529,9 +534,9 @@ def _resolve_probe_targets(sources: list[dict], source_index: int) -> list[tuple
         return []
 
     tables = [t for t in (source.get("tables") or []) if t.get("name")]
-    tables.sort(key=lambda t: bool(t.get("custom_sql")))
+    tables.sort(key=_is_custom_sql)
     fields = [f for f in source.get("fields", []) if f.get("kind") == "column"]
-    if not tables or (not fields and not any(t.get("custom_sql") for t in tables)):
+    if not tables or (not fields and not any(_is_custom_sql(t) for t in tables)):
         log.error("PROBE: ERROR source has no table/column to probe")
         raise SystemExit(1)
     # Custom SQL is projected onto a probe column by build_m_query, so its parsed schema is not
@@ -1056,7 +1061,7 @@ def _probe_leg(
     for i, table in enumerate(tables):
         rc, verdict = _probe_one_table(migration, conn, (table, column), opts)
         if rc == 0:
-            if any(candidate.get("custom_sql") for candidate in tables[i + 1 :]):
+            if any(_is_custom_sql(candidate) for candidate in tables[i + 1 :]):
                 continue
             return 0, "DATA_OK"
         if verdict != "BAD_TABLE" or i == len(tables) - 1:
@@ -1080,7 +1085,7 @@ def _probe_one_table(migration: Path, conn: dict, target: tuple[dict, str], opts
         return 1, "ERROR"
 
     pbip = (
-        _write_probe_model(migration, m_query, table, "ProbeOK" if table_spec.get("custom_sql") else column)
+        _write_probe_model(migration, m_query, table, "ProbeOK" if _is_custom_sql(table_spec) else column)
         / "Probe.pbip"
     )
     log.info("probe model built: %s", pbip.parent)

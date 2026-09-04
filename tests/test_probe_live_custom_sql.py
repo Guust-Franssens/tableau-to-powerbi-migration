@@ -95,6 +95,31 @@ def test_comment_only_custom_sql_is_cannot_assess_instead_of_table_navigation():
         probe_live_source.build_m_query(SNOWFLAKE, "Q", "Col", custom_sql="-- comment only")
 
 
+def test_empty_custom_sql_after_a_real_table_cannot_clear_the_source(tmp_path, monkeypatch):
+    source = _source(
+        [
+            {"name": "REAL_TABLE", "custom_sql": None},
+            {"name": "EMPTY_QUERY", "custom_sql": ""},
+        ]
+    )
+    original_probe = probe_live_source._probe_one_table
+    attempted = []
+
+    def _probe_table(migration, conn, target, opts):
+        attempted.append(target[0]["name"])
+        if target[0]["name"] == "REAL_TABLE":
+            return 0, "DATA_OK"
+        return original_probe(migration, conn, target, opts)
+
+    monkeypatch.setattr(probe_live_source, "_host_resolves", lambda _server: True)
+    monkeypatch.setattr(probe_live_source, "_probe_one_table", _probe_table)
+
+    rc, verdict = probe_live_source._probe_one(tmp_path, [source], 0, 1, False)  # pylint: disable=protected-access
+
+    assert (rc, verdict) == (1, "ERROR")
+    assert attempted == ["REAL_TABLE", "EMPTY_QUERY"]
+
+
 def test_a_real_table_still_navigates_and_is_unchanged_by_the_custom_sql_work():
     m, note = probe_live_source.build_m_query(SNOWFLAKE, "FLIGHTS", "Col")
     expected = (
