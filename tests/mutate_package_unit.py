@@ -133,15 +133,50 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
         # that is really defence in depth. The sole mitigation is now the scrub itself, so that is
         # what this mutation removes -- and it is a strictly stronger claim, because the scrub also
         # covers the field name (`retained_path`) that walked around the old guard entirely.
+        #
+        # ⚠️ Round 5 RE-ANCHORED it. The document sweep in `_scope_oracle_manifest` now contains the
+        # same values a second time, so the two former anchors -- which read the packaged MANIFEST --
+        # survive this mutation on the strength of that sweep alone. What only the leg guard produces
+        # is the DIAGNOSIS: neutered, `_copy_leg` returns no reason, so no `ORACLE_OMISSION` line is
+        # written and the operator cannot tell a hostile manifest from a silent one.
         "capture path: ship any declared string, however non-relative",
         PACKAGER,
-        "    refused = sorted(key for key, value in leg.items() if isinstance(value, str) "
-        "and _declares_unsafe_path(value))",
-        "    refused = []  # noqa",
+        "    contained, refused = _contain_unsafe_strings(leg)",
+        "    contained, refused = leg, []  # noqa",
+        ["test_a_refused_nested_string_is_DIAGNOSED_not_silently_scrubbed"],
+    ),
+    # ---- round-5 finding: containment must be recursive, and cover the whole document -----------
+    (
+        # Round 3 guarded a NAME, round 4 guarded a top-level VALUE, and a string one level down --
+        # inside an allowlisted `SCALAR_LIST` -- walked around both. Removing the container descent
+        # restores exactly that: `views` itself is a list, so nothing under it is visited at all.
+        "containment: stop descending into lists and tuples, so a nested string ships verbatim",
+        PACKAGER,
+        "    if isinstance(value, (list, tuple)):",
+        "    if False:  # noqa",
         [
-            "test_a_LEGACY_data_leg_cannot_ship_a_host_path_under_retained_path",
-            "test_the_containment_guard_is_field_AGNOSTIC_not_a_second_allowlist",
+            "test_a_string_INSIDE_a_retained_container_cannot_ship_a_host_path",
+            "test_a_VIEW_LEVEL_string_cannot_ship_a_host_path_either",
+            "test_the_containment_walk_reaches_EVERY_depth_and_container",
         ],
+    ),
+    (
+        # The other half of the round-5 boundary: the four copied legs are not the document. With the
+        # sweep gone, `views[].flags[]` and `views[].view_name` meet no check on any path.
+        "oracle manifest: guard only the copied legs, not the packaged document",
+        PACKAGER,
+        "    scoped, refused = _contain_unsafe_strings(scoped)",
+        "    refused = []  # noqa",
+        ["test_a_VIEW_LEVEL_string_cannot_ship_a_host_path_either"],
+    ),
+    (
+        # The name is untrusted too, and it leaves the manifest for `handover.md` and
+        # `package-manifest.json`, which the document sweep never sees.
+        "packaging: name the object from the raw view_name, uncontained",
+        PACKAGER,
+        '        naming, _ = _contain_unsafe_strings([view.get("view_name"), view.get("view_url_name")])',
+        '        naming = [view.get("view_name"), view.get("view_url_name")]  # noqa',
+        ["test_a_refused_object_NAME_does_not_leak_into_the_other_two_artifacts"],
     ),
     (
         "project: report one dropped path per ROW instead of one per field",

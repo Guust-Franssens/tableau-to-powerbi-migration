@@ -1186,6 +1186,180 @@ def test_the_containment_guard_is_field_AGNOSTIC_not_a_second_allowlist(tmp_path
     assert shipped["views"][0]["image"]["packaged_from"] == pkg.REFUSED_PATH
 
 
+# --------------------------------------------------------------------------------------------
+# #480 round 5: the guard is a property of the DOCUMENT, at every depth
+# --------------------------------------------------------------------------------------------
+
+
+def _shipped_with(tmp_path: Path, *, view: dict) -> tuple[dict, Path]:
+    """Package one bundle whose first oracle view is overwritten with ``view``."""
+    bundle, oracle = _bundle(tmp_path)
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    manifest["views"][0].update(view)
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    return json.loads((root / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8")), root
+
+
+def test_a_string_INSIDE_a_retained_container_cannot_ship_a_host_path(tmp_path: Path) -> None:
+    """#480 round 5, the blocking finding. Round 4 walked `leg.items()`, so a LIST was never opened.
+
+    Review's controlled experiment, reproduced verbatim against the tip before this fix::
+
+        shipped_image={'status': 'failed', 'retry_reasons': ['<drive>:\\\\Users\\\\...\\\\retry.log']}
+        absolute_leaks=['.views[0].image.retry_reasons[0]']
+
+    `retry_reasons` carries server-response diagnostics and is allowlisted as `SCALAR_LIST`, so it is
+    exactly the text most likely to contain a real customer path -- and this repo is public.
+    `dimensions_px` is asserted beside it because fixing `retry_reasons` BY NAME is the fourth escape
+    this test exists to refuse: it is a different allowlisted list, guarded by the same walk.
+    """
+    leak = f"{HOST_PATH_ROOT}{_SEP}private{_SEP}retry.log"
+    shipped, _ = _shipped_with(
+        tmp_path,
+        view={
+            "image": {"status": "failed", "retry_reasons": [leak]},
+            "svg": {"status": "failed", "dimensions_px": [leak]},
+        },
+    )
+    assert absolute_host_paths(shipped) == [], "no string at any depth may carry an absolute host path"
+    assert shipped["views"][0]["image"]["retry_reasons"] == [pkg.REFUSED_PATH]
+    assert shipped["views"][0]["svg"]["dimensions_px"] == [pkg.REFUSED_PATH]
+    assert leak not in json.dumps(shipped)
+
+
+def test_a_VIEW_LEVEL_string_cannot_ship_a_host_path_either(tmp_path: Path) -> None:
+    """The half the review did not reach: `_copy_leg` guards four legs, and the view is not one.
+
+    Measured on the tip with the leg walk made recursive but still called only from `_copy_leg`::
+
+        E view-level flags[] (allowlisted SCALAR_LIST): LEAK leaks=['.views[0].flags[0]']
+        F view_name (scalar, view level):               LEAK leaks=['.views[0].view_name']
+
+    `flags` was allowlisted for #471 and `view_name` has shipped since round 1, so "guard the legs"
+    was never the boundary -- the boundary is the packaged DOCUMENT. The refusal is also RECORDED,
+    because a scrub nobody can see is indistinguishable from a capture that never said anything.
+    """
+    leak = f"{HOST_PATH_ROOT}{_SEP}private{_SEP}leak.log"
+    shipped, _ = _shipped_with(tmp_path, view={"flags": [leak], "view_name": leak})
+    assert absolute_host_paths(shipped) == []
+    assert shipped["views"][0]["flags"] == [pkg.REFUSED_PATH]
+    assert shipped["views"][0]["view_name"] == pkg.REFUSED_PATH
+    assert sorted(shipped["scope"]["refused_fields"]) == ["views[0].flags[0]", "views[0].view_name"]
+
+
+def test_a_refused_object_NAME_does_not_leak_into_the_other_two_artifacts(tmp_path: Path) -> None:
+    """The name leaves the manifest: measured, it reached `handover.md` AND `package-manifest.json`.
+
+    `object_filename` replaces separators, so an absolute `view_name` became the packaged stem
+    `C_Users_<account>_private_leak.log` -- still the account, just punctuated differently. Containing
+    the naming pair ONCE means the stem, the greppable `object=` field and the `objects[].name` row
+    all derive from the contained value instead of each re-deciding.
+    """
+    leak = f"{HOST_PATH_ROOT}{_SEP}private{_SEP}leak.log"
+    _, root = _shipped_with(tmp_path, view={"view_name": leak})
+    account = HOST_PATH_ROOT.rsplit(_SEP, 1)[-1]
+    leaked = [
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_file() and account in path.read_text(encoding="utf-8", errors="ignore")
+    ]
+    assert leaked == [], f"the account name must not reach any packaged artifact: {leaked}"
+    assert not [path for path in root.rglob("*") if account in path.name]
+
+
+def test_a_refused_nested_string_is_DIAGNOSED_not_silently_scrubbed(tmp_path: Path) -> None:
+    """The leg guard's own contract, which the document sweep cannot supply: WHY, and WHERE.
+
+    A scrub with no diagnosis leaves the operator with a `<refused-by-packager>` and no way to tell a
+    hostile manifest from a capture that recorded nothing. The reason names the JSON path -- never
+    the value -- so the line is actionable without re-leaking what was refused.
+    """
+    leak = f"{HOST_PATH_ROOT}{_SEP}private{_SEP}retry.log"
+    _shipped_with(tmp_path, view={"image": {"status": "failed", "retry_reasons": [leak]}})
+    omissions = [line for line in _lines(tmp_path) if line.startswith("ORACLE_OMISSION")]
+    assert len(omissions) == 1, omissions
+    assert "'retry_reasons[0]'" in omissions[0], "the refusal must name the JSON path it refused"
+    assert "non-relative" in omissions[0]
+    assert leak not in omissions[0], "a diagnosis must not re-leak the value it refused"
+
+
+def test_the_containment_walk_reaches_EVERY_depth_and_container() -> None:
+    """The class, not the instance: a string is refused wherever it sits, in any nesting.
+
+    Driven directly because the current allowlist has no retained two-level container to drive it
+    through -- which is precisely why this is asserted now rather than after a future
+    `Rows({"notes": SCALAR_LIST})` reopens the hole. Tuples are covered because the walk must not
+    silently convert one to a list either.
+    """
+    leak = f"{HOST_PATH_ROOT}{_SEP}x"
+    payload = {
+        "flat": leak,
+        "in_list": [leak],
+        "list_in_dict_in_list": [{"notes": [leak]}],
+        "dict_in_list": [{"src": leak}],
+        "in_tuple": (leak, "keep/me"),
+        "deep": {"a": [{"b": [[leak]]}]},
+        "count": 7,
+        "safe": "data/view-0.csv",
+    }
+    contained, refused = pkg._contain_unsafe_strings(payload)  # pylint: disable=protected-access
+    assert leak not in json.dumps(contained, default=list)
+    assert contained["count"] == 7 and contained["safe"] == "data/view-0.csv"
+    assert isinstance(contained["in_tuple"], tuple) and contained["in_tuple"][1] == "keep/me"
+    assert sorted(refused) == [
+        "deep.a[0].b[0][0]",
+        "dict_in_list[0].src",
+        "flat",
+        "in_list[0]",
+        "in_tuple[0]",
+        "list_in_dict_in_list[0].notes[0]",
+    ]
+
+
+def test_a_LEGITIMATE_string_inside_a_retained_container_survives_unmodified(tmp_path: Path) -> None:
+    """Positive control. An over-correction that scrubs diagnostics destroys the operator's evidence.
+
+    Three shapes that must all pass through byte-identically: a relative capture path, prose that
+    merely MENTIONS something path-like (`/api/views`, `../logs`) without declaring a location, and
+    a non-string scalar list. A capture whose only sin is being informative must stay informative.
+    """
+    prose = [
+        "HTTP 503 from GET /api/views/x after 2 retries",
+        "renderer wrote nothing (see ../logs on the server)",
+        "images/view-0.png was 0 bytes",
+    ]
+    shipped, root = _shipped_with(
+        tmp_path,
+        view={
+            "image": {"status": "failed", "retry_reasons": list(prose), "dimensions_px": [1300, 1600]},
+            "flags": ["data_empty"],
+        },
+    )
+    leg = shipped["views"][0]["image"]
+    assert leg["retry_reasons"] == prose, "a diagnostic that is not a declared path must not be mangled"
+    assert leg["dimensions_px"] == [1300, 1600]
+    assert shipped["views"][0]["flags"] == ["data_empty"]
+    assert "refused_fields" not in shipped["scope"], "nothing was refused, so nothing may be recorded"
+    assert not [line for line in _lines(tmp_path) if line.startswith("ORACLE_OMISSION") and "retry_reasons" in line]
+    assert root.is_dir()
+
+
+def test_a_NON_allowlisted_scalar_list_never_ships_at_all(tmp_path: Path) -> None:
+    """The other half of the closure: an unenumerated container is DROPPED before it can be refused.
+
+    Containment and scoping are complementary, and this pins which one answers. A field nobody
+    allowlisted cannot ship even a safe value, so a future leaky container has to be added
+    deliberately -- and when it is, the walk above already covers it.
+    """
+    leak = f"{HOST_PATH_ROOT}{_SEP}private{_SEP}leak.log"
+    shipped, _ = _shipped_with(tmp_path, view={"image": {"status": "failed", "future_paths": [leak]}})
+    assert absolute_host_paths(shipped) == []
+    assert "future_paths" not in shipped["views"][0]["image"]
+    assert "views[].image.future_paths" in shipped["scope"]["dropped_fields"]
+
+
 def test_a_LEGITIMATE_relative_retained_path_still_packages_and_says_where_the_bytes_are(
     tmp_path: Path,
 ) -> None:

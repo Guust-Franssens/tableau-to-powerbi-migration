@@ -500,6 +500,46 @@ def _declares_unsafe_path(declared: str) -> bool:
     return _declares_non_relative(declared) or ".." in Path(declared).parts
 
 
+def _contain_unsafe_strings(value: Any, prefix: str = "") -> tuple[Any, list[str]]:
+    """`(value with EVERY unsafe declared string refused, the JSON paths refused)` - recursive.
+
+    ⚠️ **Round-5 finding.** Rounds 3 and 4 each moved the boundary instead of removing it: round 3
+    guarded the `path` NAME, so `retained_path` walked around it; round 4 made the check a predicate
+    over a VALUE but iterated `leg.items()` only, so a string inside a retained CONTAINER walked
+    around that. Measured on the tip, one absolute host path per shape::
+
+        image.retry_reasons[0]   -> shipped verbatim   (allowlisted SCALAR_LIST)
+        image.dimensions_px[0]   -> shipped verbatim   (allowlisted SCALAR_LIST)
+        views[].flags[0]         -> shipped verbatim   (view level, never reached the leg guard)
+        views[].view_name        -> shipped verbatim   (view level, plain scalar)
+
+    So the invariant is neither a field name nor a top-level value: **no string reachable from a
+    shipped document may declare a non-relative or escaping path, wherever it sits.** This walks
+    strings in dicts, lists, tuples and any nesting of them, which is why a fourth allowlisted
+    container, a nested dict, or a list of dicts cannot reopen it - there is no level left that is
+    not visited. Non-string scalars are returned untouched, so counts, verdicts and flags survive.
+    """
+    if isinstance(value, str):
+        return (REFUSED_PATH, [prefix or "."]) if _declares_unsafe_path(value) else (value, [])
+    if isinstance(value, dict):
+        kept: dict[str, Any] = {}
+        refused: list[str] = []
+        for key, item in value.items():
+            cleaned, hit = _contain_unsafe_strings(item, f"{prefix}.{key}" if prefix else str(key))
+            kept[key] = cleaned
+            refused.extend(hit)
+        return kept, refused
+    if isinstance(value, (list, tuple)):
+        rows: list[Any] = []
+        refused = []
+        for index, item in enumerate(value):
+            cleaned, hit = _contain_unsafe_strings(item, f"{prefix}[{index}]")
+            rows.append(cleaned)
+            refused.extend(hit)
+        return (tuple(rows) if isinstance(value, tuple) else rows), refused
+    return value, []
+
+
 def _contain_declared_paths(leg: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
     """`(leg with every unsafe declared string refused, diagnosis)` - the field-AGNOSTIC guard.
 
@@ -517,11 +557,10 @@ def _contain_declared_paths(leg: dict[str, Any]) -> tuple[dict[str, Any], str | 
     Values this packager writes itself (`path`, `packaged_from`) are already normalised and
     capture-relative, so re-checking them is free and keeps the rule unconditional.
     """
-    refused = sorted(key for key, value in leg.items() if isinstance(value, str) and _declares_unsafe_path(value))
+    contained, refused = _contain_unsafe_strings(leg)
     if not refused:
         return leg, None
-    contained = {**leg, **{key: REFUSED_PATH for key in refused}}
-    fields = ", ".join(f"'{key}'" for key in refused)
+    fields = ", ".join(f"'{name}'" for name in sorted(refused))
     return contained, f"capture declares a non-relative or escaping path in {fields} ({REFUSED_PATH}) - refused"
 
 
@@ -639,7 +678,12 @@ def package_oracle(  # pylint: disable=too-many-locals
     for view in views:
         kind = view_kind(view)
         luid = str(view.get("view_luid") or "")
-        stem = object_filename(str(view.get("view_name") or view.get("view_url_name") or ""), luid, taken)
+        # #480 round 5. The NAMES are untrusted too, and they leave the manifest: measured, an
+        # absolute `view_name` reached `handover.md`, `package-manifest.json` and the packaged
+        # stem. Containing them ONCE here means the filename, the greppable line and the object
+        # row all derive from the contained value rather than each re-deciding.
+        naming, _ = _contain_unsafe_strings([view.get("view_name"), view.get("view_url_name")])
+        stem = object_filename(str(naming[0] or naming[1] or ""), luid, taken)
         record = dict(view)
         images: list[str] = []
 
@@ -675,7 +719,7 @@ def package_oracle(  # pylint: disable=too-many-locals
         packaged.append(record)
         objects.append(
             {
-                "name": view.get("view_name"),
+                "name": naming[0],
                 "view_luid": luid,
                 "view_type": kind,
                 "declared_view_type": view.get("view_type"),
@@ -724,6 +768,12 @@ def _scope_oracle_manifest(
     # estate context, so it is applied from the SHARED predicate rather than re-implemented.
     narrowed["views"] = tableau_oracle_manifest.flag_empty(packaged)
     scoped, dropped = project(narrowed, ORACLE_MANIFEST_ALLOW)
+    # ⚠️ #480 round 5. Containment is a property of the DOCUMENT, not of a leg. `_copy_leg` guards
+    # the four legs it copies, so a string the allowlist retains anywhere ELSE - `views[].flags[]`
+    # and `views[].view_name` both measured shipping an absolute host path - never met a check at
+    # all. Sweeping the scoped document closes every level at once, including any field a future
+    # allowlist entry adds, and the refusals are RECORDED rather than silently scrubbed.
+    scoped, refused = _contain_unsafe_strings(scoped)
 
     shipped = scoped.get("views") or []
     counts = dict.fromkeys(KIND_DIRS, 0)
@@ -735,7 +785,10 @@ def _scope_oracle_manifest(
         scoped[f"{leg}_ok"] = sum(
             1 for view in shipped if isinstance(view.get(leg), dict) and view[leg].get("status") == "ok"
         )
-    return stamp_scope(scoped, unit, dropped, "oracle-manifest.json views filtered to this unit, counts recomputed")
+    stamped = stamp_scope(scoped, unit, dropped, "oracle-manifest.json views filtered to this unit, counts recomputed")
+    if refused:
+        stamped["scope"]["refused_fields"] = sorted(refused)
+    return stamped
 
 
 # --------------------------------------------------------------------------------------------
