@@ -100,7 +100,10 @@ EXPECTED_PREFIX_SKIP_REASONS: tuple[str, ...] = (
     "canonical engine not installed, so its constants cannot be read:",
 )
 
-ENGINE_SKIP_REASON = "deterministic tier not installed"
+ENGINE_SKIP_REASONS: tuple[str, ...] = (
+    "deterministic tier not installed",
+    "canonical engine not installed, so its constants cannot be read:",
+)
 
 
 def is_expected_skip_reason(reason: str) -> bool:
@@ -113,7 +116,8 @@ def is_expected_skip_reason(reason: str) -> bool:
 
 def is_engine_skip(reason: str) -> bool:
     """Whether a skip reason is an engine-dependent test skip (issue #435)."""
-    return reason.strip() == ENGINE_SKIP_REASON
+    clean = reason.strip()
+    return any(clean == r or clean.startswith(r) for r in ENGINE_SKIP_REASONS)
 
 
 def _extract_skip_reason(rep: Any) -> str:
@@ -193,7 +197,7 @@ def _xdist_is_active(config: pytest.Config) -> bool:
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Refuse a parallel run that silently dropped `--dist loadfile`.
+    """Refuse a parallel run that silently dropped `--dist loadfile`, and ensure failures/errors remain visible.
 
     The early return on a falsy `numprocesses` is load-bearing in two directions, not one. It covers
     plain serial runs, where the option is unset - and it covers every xdist **worker**, which is not
@@ -205,6 +209,13 @@ def pytest_configure(config: pytest.Config) -> None:
     `numprocesses` may still be the string ``"auto"`` depending on hook ordering, so this tests
     truthiness rather than comparing to an int.
     """
+    # Augment reportchars so 'f' and 'E' are always included even if caller passes -rs (issue #436).
+    reportchars = getattr(config.option, "reportchars", "")
+    for char in ("f", "E"):
+        if char not in reportchars:
+            reportchars += char
+    config.option.reportchars = reportchars
+
     if not getattr(config.option, "numprocesses", None):
         return
     dist = getattr(config.option, "dist", "no")

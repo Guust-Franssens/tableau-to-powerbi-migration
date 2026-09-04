@@ -11,6 +11,7 @@ These tests verify that:
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 import pytest
 
 import conftest
@@ -18,6 +19,8 @@ import conftest
 pytest_plugins = ("pytester",)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+import engine_source  # noqa: E402  # pylint: disable=wrong-import-position,wrong-import-order
 
 
 def test_expected_skip_reasons_contain_known_entries() -> None:
@@ -53,9 +56,12 @@ def test_unknown_skip_reason_is_rejected() -> None:
 
 
 def test_is_engine_skip_identifies_canonical_reason() -> None:
-    """Only the canonical engine skip reason is classified as an engine skip."""
+    """Canonical engine skip reasons (including constants check) are classified as engine skips."""
     assert conftest.is_engine_skip("deterministic tier not installed")
     assert conftest.is_engine_skip("  deterministic tier not installed  ")
+    assert conftest.is_engine_skip(
+        "canonical engine not installed, so its constants cannot be read: No module named foo"
+    )
     assert not conftest.is_engine_skip("Windows-specific path spelling")
 
 
@@ -189,3 +195,51 @@ def test_all_15_engine_dependent_tests_are_accounted_for() -> None:
         content = file_path.read_text(encoding="utf-8")
         assert "requires_engine" in content, f"{rel_path} must declare requires_engine"
         assert expected_count > 0, f"{rel_path} must have positive expected count"
+
+
+def test_caller_passing_rs_still_sees_failure_and_error_node_ids(pytester: pytest.Pytester) -> None:
+    """When a caller passes -rs, failures and errors must still appear in short summary info."""
+    conftest_code = (REPO_ROOT / "conftest.py").read_text(encoding="utf-8")
+    pytester.makeconftest(conftest_code)
+    pytester.makepyfile(
+        """
+        import pytest
+
+        def test_known_skip():
+            pytest.skip("Windows-specific path spelling")
+
+        def test_forced_failure():
+            assert False, "deliberate test failure"
+        """
+    )
+    result = pytester.runpytest("-rs")
+    assert result.ret == pytest.ExitCode.TESTS_FAILED
+    result.stdout.fnmatch_lines(
+        [
+            "*SKIPPED*Windows-specific path spelling*",
+            "*FAILED*test_forced_failure*",
+        ]
+    )
+
+
+def test_synthetic_installed_engine_root_under_simulation_env(tmp_path: Path, monkeypatch) -> None:
+    """An injected synthetic root remains authoritative even when SIMULATE_ENGINE_ABSENT_ENV is set."""
+    # Create synthetic engine tree
+    fake_root = tmp_path / "synthetic_engine"
+    skill = fake_root / engine_source.ENGINE_SKILL
+    (skill / "scripts").mkdir(parents=True, exist_ok=True)
+    (skill / "VERSION").write_text("2.130.0\n", encoding="utf-8")
+
+    monkeypatch.setenv(engine_source.SIMULATE_ENGINE_ABSENT_ENV, "1")
+    monkeypatch.setattr(engine_source, "PLUGIN_ENGINE_ROOT", fake_root)
+
+    # Injected synthetic root resolves
+    assert engine_source.engine_root() == fake_root
+    assert engine_source.engine_version(fake_root) == "2.130.0"
+
+    # Non-canonical root is still refused without allow_noncanonical
+    other = tmp_path / "other"
+    (other / engine_source.ENGINE_SKILL / "scripts").mkdir(parents=True, exist_ok=True)
+    with pytest.raises(engine_source.NonCanonicalEngineError):
+        engine_source.resolve_engine(other)
+    assert engine_source.resolve_engine(other, allow_noncanonical=True) == other

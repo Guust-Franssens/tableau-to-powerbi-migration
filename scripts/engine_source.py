@@ -44,7 +44,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SIMULATE_ENGINE_ABSENT_ENV = "T2P_SIMULATE_ENGINE_ABSENT_FOR_TESTS"
 
 # The one canonical location: the installed Copilot plugin `tableau-fabric-skills@tableau-collection`.
-PLUGIN_ENGINE_ROOT = Path.home() / ".copilot" / "installed-plugins" / "tableau-collection" / "tableau-fabric-skills"
+DEFAULT_PLUGIN_ENGINE_ROOT = (
+    Path.home() / ".copilot" / "installed-plugins" / "tableau-collection" / "tableau-fabric-skills"
+)
+PLUGIN_ENGINE_ROOT = DEFAULT_PLUGIN_ENGINE_ROOT
 
 # Where the engine lives inside a `tableau-fabric-skills` tree, plugin or clone alike.
 ENGINE_SKILL = Path("skills") / "tableau-migration"
@@ -96,7 +99,12 @@ def is_engine_tree(root: Path) -> bool:
 
 def engine_root() -> Path:
     """The canonical engine root, or raise. There is no second candidate, on purpose."""
-    if not os.environ.get(SIMULATE_ENGINE_ABSENT_ENV) and is_engine_tree(PLUGIN_ENGINE_ROOT):
+    # When simulating engine absent, default plugin root is treated as absent, but an explicitly injected
+    # or monkeypatched non-default root in tests remains authoritative.
+    simulated_absent = bool(os.environ.get(SIMULATE_ENGINE_ABSENT_ENV)) and (
+        PLUGIN_ENGINE_ROOT == DEFAULT_PLUGIN_ENGINE_ROOT
+    )
+    if not simulated_absent and is_engine_tree(PLUGIN_ENGINE_ROOT):
         return PLUGIN_ENGINE_ROOT
     raise EngineNotFoundError(
         f"the deterministic conversion engine is not installed at {PLUGIN_ENGINE_ROOT}. "
