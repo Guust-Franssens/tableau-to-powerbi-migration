@@ -493,7 +493,7 @@ def _declares_non_relative(declared: str) -> bool:
     the guard silently stopped containing on Linux while passing every assertion on Windows. A guard
     whose protection depends on the OS running it is not a guard. `PureWindowsPath` recognises both
     conventions - `C:\\…`, `C:/…`, `\\\\server\\share\\…` and, with the explicit prefix test beside it,
-    POSIX `/home/…` and `/Users/…` - identically on either host. Same idiom, same reason, as
+    POSIX `/home/<user>` and `/Users/<user>` - identically on either host. Same idiom, same reason, as
     `promote_unit.slug_problem`.
     """
     candidate = PureWindowsPath(declared)
