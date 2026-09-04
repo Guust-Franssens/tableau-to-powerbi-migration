@@ -127,15 +127,31 @@ Exit codes
 | 3 | at least one requested unit already has a package carrying EDITS, and this packager replaces a
       package whole. Those units were left untouched; every other requested unit was still packaged.
       `--discard-package-edits` overwrites them deliberately. |
-| 4 | at least one unit ships WITHOUT a source its model names - the bytes could not be copied, or a
-      literal could not be classified. The package is still written (it carries everything else) but
-      it is not complete, and the shipped model cannot refresh that partition from the package
-      alone. Ranked above 1 because 1 is already visible in every gate's verdict while this is not:
-      a model missing its rows loads, validates and passes `check_datamodel.py`. |
+| 4 | at least one unit is NOT SELF-CONTAINED - it ships without something it names: a source its
+      model reads (the bytes could not be copied, or a literal could not be classified), or the
+      semantic model its report's `definition.pbir` `byPath` points at. The package is still written
+      (it carries everything else) but it is not complete. Ranked above 1 because 1 is already
+      visible in every gate's verdict while this is not: a model missing its rows loads, validates
+      and passes `check_datamodel.py`, and `powerbi-report-author validate` returns `errorCount: 0`
+      for a `byPath` naming a model that exists nowhere. |
+| 5 | at least one unit hit a CONTRADICTION this packager refuses to ship past, and NOTHING was
+      written for it: a source whose bytes do not match the digest `input_manifest.json` declares, a
+      unit name that would write outside `--out`, or a host path that could not be contained in the
+      model. Other requested units were still packaged. Deliberately the same number and meaning as
+      PR #487's `EXIT_UNIT_FAILED`, since that PR has this branch as its base. |
+| 6 | at least one unit - or the bundle itself - CANNOT BE ASSESSED: an input that had to be read
+      exists and is unreadable, a report declares pages while its source asset cannot be resolved, or
+      the bundle names no units at all. Nothing was written for those units. Ranked ABOVE every other
+      outcome because every other code is a verdict about content, and "I could not read the input"
+      is not a verdict - collapsing it into 0 is the defect class this repository keeps re-finding
+      (measured on this branch: a truncated `report.json`, a truncated handover slice, a deleted
+      source asset and a zero-unit bundle all exited 0). |
 
-An oracle omission INSIDE a package is not exit 1 or 4: a unit whose oracle genuinely has no render
-for a page is the negative control, and it must package successfully and still report that page
-BLIND. Exit 4 is about the model's own rows, nothing else.
+An oracle omission INSIDE a package is not exit 1, 4 or 6: a unit whose oracle genuinely has no
+render for a page is the negative control, and it must package successfully and still report that
+page BLIND. A missing, absent or truncated oracle is therefore explicitly NOT an unassessable input;
+the entry gate reports it, correctly, at exit 1 FINDINGS. Exit 4 is about what the package itself
+promises to carry, nothing else.
 """
 
 from __future__ import annotations
@@ -158,7 +174,7 @@ import time
 import uuid
 from collections.abc import Callable
 from functools import partial
-from pathlib import Path, PurePath, PurePosixPath
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -294,11 +310,22 @@ BIND_COMMAND = "python scripts/set_data_folder.py --package <path-to-this-folder
 
 #: This script's exit codes, named so a caller never has to read a bare integer. The table in the
 #: module docstring is the contract; these are the same numbers.
+#:
+#: ⚠️ **5 and 6 are allocated to two DIFFERENT refusals, and the difference is the whole point.**
+#: 5 is "a unit raised and nothing was written for it" - a definite contradiction this packager
+#: measured (a declared digest that does not match the bytes, a unit name that escapes `--out`, a
+#: host path that could not be contained). 6 is "an input that had to be read could not be
+#: assessed", which is not a verdict about the package at all. Collapsing them re-creates the defect
+#: class this repo keeps re-finding: unassessable input reaching a clean - or a merely-incomplete -
+#: verdict. 5 also deliberately matches PR #487's `EXIT_UNIT_FAILED`, which this branch is the base
+#: of, so the two do not have to be reconciled after the fact.
 EXIT_OK = 0
 EXIT_NO_WORKING_COPY = 1
 EXIT_USAGE = 2
 EXIT_EDITS_REFUSED = 3
 EXIT_NOT_SELF_CONTAINED = 4
+EXIT_UNIT_FAILED = 5
+EXIT_CANNOT_ASSESS = 6
 
 #: The name of the manifest that records what a package contains, INCLUDING the per-file digest that
 #: makes an agent's edit to the canonical `fabric/` tree detectable on the next run. Excluded from
@@ -361,17 +388,88 @@ class PackageEditsRefused(PackagingError):
         )
 
 
+class UnassessableInput(PackagingError):
+    """An input this packager HAD to read to package a unit exists but could not be assessed.
+
+    ⚠️ **Distinct from every other refusal on purpose.** "I could not read it" is not "it is fine"
+    and it is not "it is broken" - it is the third state this repository keeps losing. Measured on
+    this branch before the fix: a truncated `report.json` produced `exit 0  OK Book [unclassified]`
+    with no notes at all, a truncated handover slice produced `exit 0` with the slice simply absent
+    from the package, and a workbook whose source asset had been deleted produced `exit 0  OK Book`
+    - three different unreadable inputs, one clean verdict.
+
+    Nothing is written for the unit: assembly happens in a staging directory that is removed on the
+    way out, so a previously-good package at the same path survives untouched rather than being
+    replaced by one built from input nobody could read.
+    """
+
+    def __init__(self, unit: str, reasons: list[str]) -> None:
+        self.unit, self.reasons = unit, reasons
+        super().__init__(
+            f"cannot assess {unit}: " + "; ".join(reasons) + ". Nothing was packaged for it - a package "
+            "built from input that could not be read would carry a verdict nobody can stand behind."
+        )
+
+
+class UnsafeUnitName(PackagingError):
+    """A unit name that would write outside ``--out``, so it is refused before anything is created.
+
+    ⚠️ **A unit name is SOURCE-CONTROLLED input, not a label we chose.** :func:`bundle_units` takes
+    it from the engine's `report.json` (`workbooks[].name`) and from `pbip/` directory names, both
+    of which come from the customer's Tableau estate. Measured on this branch before the fix: a
+    workbook named `..\\escaped-package` wrote a full package to `<out>/../escaped-package` - outside
+    the directory the operator named, with `written_is_inside_out = false` and a zero stderr.
+
+    Refused rather than sanitized: silently rewriting `..\\x` to `_x` would package a unit under a
+    name that matches nothing in the bundle, and every later join - handover slice, oracle
+    attribution, `promote_unit.py`'s manifest kind - is keyed by that name.
+    """
+
+    def __init__(self, unit: str, reason: str) -> None:
+        self.unit, self.reason = unit, reason
+        super().__init__(
+            f"refusing to package {unit!r}: {reason}. A unit name must be a single path component, so "
+            "that a name taken from the customer's own workbook titles cannot choose where this "
+            "packager writes."
+        )
+
+
 # --------------------------------------------------------------------------------------------
 # reading the bundle
 # --------------------------------------------------------------------------------------------
 
 
 def read_json(path: Path) -> Any:
-    """Parse a JSON file, or return None when it is absent or unreadable."""
+    """Parse a JSON file, or return None when it is absent or unreadable.
+
+    ⚠️ **This collapses ABSENT and UNREADABLE, which is the right answer for a caller that treats
+    both as "no data" and the wrong one for a caller that must refuse.** Use :func:`read_json_checked`
+    wherever a missing file is a legitimate shape but a corrupt one is not - which is every input
+    named in :func:`_unassessable_inputs`.
+    """
     try:
         return json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return None
+
+
+def read_json_checked(path: Path) -> tuple[Any, str | None]:
+    """`(payload, reason it could not be assessed)` - absence and corruption told apart.
+
+    A file that is not there returns `(None, None)`: the caller decides whether an absence is
+    legitimate, and for most of these inputs it is (a datasource unit has no oracle, four workbooks
+    in the reference estate have no `pbip/` working copy). A file that IS there and cannot be parsed
+    returns a reason, and every caller that reads one of these must treat that as blocking - the
+    packager cannot know what the file said, so it cannot honestly report on what it packaged.
+    """
+    if not path.exists():
+        return None, None
+    try:
+        return json.loads(path.read_text(encoding="utf-8-sig")), None
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        return None, f"{path.name} is present but is not readable JSON ({type(exc).__name__})"
+    except OSError as exc:
+        return None, f"{path.name} is present but could not be read ({type(exc).__name__})"
 
 
 def write_json(path: Path, payload: Any) -> None:
@@ -467,6 +565,14 @@ def resolve_asset(bundle: Path, unit: str, handover: Any, assets_dir: Path | Non
     `_runs\\999-x\\assets\\minimal.twb` reaching a POSIX packaging host has no separators `Path`
     recognises: its "name" is the whole string, nothing matches, and a source asset that IS present
     resolves to `unresolved` - both gates then report CANNOT_ESTABLISH (round-2 finding 2).
+
+    ⚠️ **`staged_input_path` is interpreted in ITS OWN flavour, never the host's** - the same
+    hazard, and the same fix, as :func:`_classify_source`. `Path` is the host's: on Windows
+    `Path("/mnt/share/elsewhere/Book.twb")` is resolved against the CURRENT DRIVE, so a POSIX
+    literal from a Linux harvest matched `C:\\mnt\\share\\elsewhere\\Book.twb` and those unrelated
+    bytes were copied into the package as the customer's workbook - measured, with a clean exit 0
+    and a manifest digest that said otherwise. A foreign-flavour staged path is skipped, and the
+    name-based candidates below still resolve the asset where it actually is.
     """
     workbook = handover.get("workbook") if isinstance(handover, dict) else None
     source_id = workbook.get("source_id") if isinstance(workbook, dict) else None
@@ -482,7 +588,7 @@ def resolve_asset(bundle: Path, unit: str, handover: Any, assets_dir: Path | Non
         if not isinstance(asset, dict) or PurePosixPath(leaf(str(asset.get("name") or ""))).stem != unit:
             continue
         staged = asset.get("staged_input_path")
-        candidates = [Path(str(staged))] if staged else []
+        candidates = [Path(str(staged))] if staged and is_host_native(str(staged)) else []
         candidates += [
             base / str(asset.get("name"))
             for base in (assets_dir, bundle / "assets", bundle.parent / "assets")
@@ -492,6 +598,55 @@ def resolve_asset(bundle: Path, unit: str, handover: Any, assets_dir: Path | Non
             if candidate.is_file():
                 return candidate, "input_manifest.staged_input_path"
     return None, "unresolved"
+
+
+def declared_asset_digest(bundle: Path, name: str) -> str | None:
+    """The sha256 `input_manifest.json` declares for the asset called ``name``, if it declares one.
+
+    Matched on the manifest entry's own basename, in both flavours, for the same reason
+    :func:`resolve_asset` is: the manifest is written by whichever machine ran the harvest.
+    """
+    manifest = read_json(bundle / "input_manifest.json")
+    for asset in (manifest.get("assets") or []) if isinstance(manifest, dict) else []:
+        if not isinstance(asset, dict) or leaf(str(asset.get("name") or "")) != name:
+            continue
+        declared = asset.get("sha256")
+        if isinstance(declared, str) and declared.strip():
+            return declared.strip().lower()
+    return None
+
+
+def assert_declared_digest(unit: str, bundle: Path, asset: Path, route: str) -> None:
+    """Refuse when the resolved source does not hash to what `input_manifest.json` declared for it.
+
+    ⚠️ **This digest is the ONLY thing that can catch a resolution that found the wrong file**, and
+    until now nothing consulted it. Measured on this branch: a `staged_input_path` of
+    `/mnt/share/elsewhere/Book.twb` was reinterpreted by the Windows host against the current drive,
+    a completely unrelated workbook was copied into the package as the customer's source, and the
+    run exited **0** - with the manifest's own `sha256` (`5d65d756…`) sitting one field away from the
+    bytes that actually shipped (`54a6036a…`).
+
+    The flavour fix in :func:`resolve_asset` closes the route that produced that specific wrong file;
+    this closes the CLASS. Any future resolution order, any harvest that renames an asset, any
+    operator pointing `--assets` at a stale directory lands here, and lands closed: nothing is
+    written for the unit, because a package whose `assets/` holds the wrong workbook silently
+    invalidates every page verdict both gates then produce from it.
+
+    A manifest that declares no digest for the asset is not a failure - `sha256` is optional in the
+    shapes this repository has measured, and an absent declaration is an absence, not a mismatch.
+    """
+    declared = declared_asset_digest(bundle, asset.name)
+    if declared is None:
+        return
+    actual = sha256_of(asset)
+    if actual is not None and actual.lower() == declared:
+        return
+    raise PackagingError(
+        f"refusing to package {unit}: the source resolved via {route} does not match the digest "
+        f"input_manifest.json declares for {asset.name} (declared {declared[:16]}..., resolved "
+        f"{(actual or 'unreadable')[:16]}...). Those are different bytes, so every page verdict a "
+        "gate computes from this package would be about the wrong workbook; nothing was written."
+    )
 
 
 def scope_provenance(provenance: Any, asset_sha: str | None) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -1470,18 +1625,29 @@ def _neutralize_unshipped(documents: list[Path], final: Path) -> tuple[list[str]
     share rather than this host - refusing to probe it is a hang-avoidance measure, not evidence that
     it is unreachable, so destroying it would break a configuration that may work at the customer.
 
-    Only a definite :data:`PATH_LITERAL` is touched. An UNCLASSIFIED literal is reported and left
-    alone: it may be a service route, and rewriting a Databricks endpoint into a file-system token
-    would break a model that was never broken.
+    ⚠️ **A literal is contained when its SHAPE proves it is a path, or when its ROLE does.** Shape
+    alone (:data:`PATH_LITERAL`) left a hole the size of the whole POSIX user-profile convention:
+    `File.Contents("/Users/<person>/private-data")` has no suffix and no trailing separator, so
+    :func:`_path_verdict` returns UNCLASSIFIED, nothing rewrote it, and the customer's - or the
+    builder's - home directory shipped verbatim inside `Imported0.tmdl` at exit 4. The package was
+    written anyway, because exit 4 means "incomplete", and a leaked host path is not merely
+    incomplete.
+
+    The role evidence is exactly the one :func:`_service_routes` already uses in the opposite
+    direction, read from the same document: `File.Contents` takes a file path and takes nothing else,
+    so a literal in that position is a path however it is spelled. A service route in an uncatalogued
+    field is still left alone - it is never a `File.Contents` argument, which is what makes this
+    additive rather than a reversal of the UNCLASSIFIED rule.
     """
     neutralized: list[str] = []
     retained: list[str] = []
     for document in documents:
         text = document.read_text(encoding="utf-8")
         routes = _service_routes(text)
+        contained = _contained_literals(text)
         rewritten = text
         for value in sorted({match.group(1) for match in ABSOLUTE_LITERAL_RE.finditer(text)}):
-            if value in routes or _inside(final, value) or _path_verdict(value) != PATH_LITERAL:
+            if value in routes or _inside(final, value) or value not in contained:
                 continue
             if not _host_local(value):
                 retained.append(_leaf(value))
@@ -1493,6 +1659,20 @@ def _neutralize_unshipped(documents: list[Path], final: Path) -> tuple[list[str]
     return sorted(set(neutralized)), sorted(set(retained))
 
 
+def _contained_literals(text: str) -> set[str]:
+    """Every literal in ``text`` this packager must not let ship verbatim: path by SHAPE or by ROLE.
+
+    One site, so the neutralizer and its tripwire (:func:`_assert_no_host_path_survives`) can never
+    disagree about which literals are in scope - a tripwire narrower than the rule it guards is
+    decorative, and one that is wider fires on literals nothing was ever going to rewrite.
+    """
+    by_shape = {
+        match.group(1) for match in ABSOLUTE_LITERAL_RE.finditer(text) if _path_verdict(match.group(1)) == PATH_LITERAL
+    }
+    by_role = {match.group(1) for match in FILE_CONTENTS_RE.finditer(text) if match.group(1).strip()}
+    return by_shape | by_role
+
+
 def _assert_no_host_path_survives(documents: list[Path], final: Path) -> None:
     """Tripwire: no shipped `.tmdl` may name a directory on the machine that built the package.
 
@@ -1500,15 +1680,21 @@ def _assert_no_host_path_survives(documents: list[Path], final: Path) -> None:
     reason as :func:`_assert_distinct_destinations`: the consequence is invisible here and lands on
     someone else. A leaked absolute path is what `set_data_folder.py --check` fails the repo for, and
     a package is handed to a customer where no CI gate runs at all.
+
+    ⚠️ **When it DOES fire, nothing is written.** It raises before the staging tree is renamed into
+    place, so the unit is reported as failed (exit 5) with no package on disk - "a package that
+    cannot be made safe must not be written". Previously it escaped as an uncaught traceback, whose
+    interpreter exit 1 is indistinguishable from `EXIT_NO_WORKING_COPY`.
     """
     for document in documents:
         text = document.read_text(encoding="utf-8")
         routes = _service_routes(text)
+        contained = _contained_literals(text)
         for match in ABSOLUTE_LITERAL_RE.finditer(text):
             value = match.group(1)
             if value in routes or _inside(final, value) or not _host_local(value):
                 continue
-            if _path_verdict(value) == PATH_LITERAL:
+            if value in contained:
                 raise PackagingError(
                     f"the packaged model still names a path on this machine ({_leaf(value)}), which "
                     "resolves for nobody the package is handed to; nothing is shipped"
@@ -1926,17 +2112,19 @@ def package_unit(  # pylint: disable=too-many-arguments
     way, which is what makes it a check under the lock rather than one more racing read: once the
     directory is retired, nothing can reach it by the path a writer would use, and if it changed it
     is renamed straight back.
+    ⚠️ **The unit name is checked BEFORE anything is created.** It comes from the engine's
+    `report.json` or from a `pbip/` directory name, both of which originate in the customer's Tableau
+    estate - so it is source-controlled input, and `..\\escaped-package` used to write a whole
+    package outside `--out` (see :class:`UnsafeUnitName`).
     """
-    existing = out_root / unit
-    if existing.is_dir() and not discard_edits:
-        _refuse_if_edited(unit, existing)
+    final = assert_package_destination(out_root, unit)
+    if final.is_dir() and not discard_edits:
+        _refuse_if_edited(unit, final)
     staging = out_root / f".{sanitize_staging_name(unit)}.staging"
     shutil.rmtree(staging, ignore_errors=True)
     try:
-        result = _assemble_unit(
-            bundle, unit, staging, final=out_root / unit, oracle_dir=oracle_dir, assets_dir=assets_dir
-        )
-        replace_dir(staging, out_root / unit, verify=None if discard_edits else partial(_refuse_if_edited, unit))
+        result = _assemble_unit(bundle, unit, staging, final=final, oracle_dir=oracle_dir, assets_dir=assets_dir)
+        replace_dir(staging, final, verify=None if discard_edits else partial(_refuse_if_edited, unit))
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     return result
@@ -1994,6 +2182,61 @@ def package_edits(root: Path) -> tuple[list[str], str | None]:
 def sanitize_staging_name(unit: str) -> str:
     """A filesystem-safe stem for this unit's staging directory."""
     return _UNSAFE.sub("_", unit)[:_MAX_OBJECT_NAME] or "unit"
+
+
+#: Every separator either flavour recognises, checked REGARDLESS of the host. A packaging host is not
+#: necessarily the harvest host, and `..\\x` is a traversal on Windows while `PurePosixPath` reads it
+#: as one innocent-looking filename - so asking `Path` (which is the host's) answers the wrong
+#: question on exactly the platform pairing that matters.
+_NAME_SEPARATORS = ("/", "\\")
+
+
+def unit_name_problem(unit: str) -> str | None:
+    """Why ``unit`` may not be used as a directory name under ``--out``, or None when it is safe.
+
+    ⚠️ **Both separators, on both platforms.** `..\\escaped` reaching a POSIX packaging host is one
+    filename to `pathlib` and a traversal to the Windows machine that will later read the estate, and
+    `../escaped` is a traversal on both. Neither is a name any real Tableau workbook has, so refusing
+    the whole class costs nothing and closes it for good.
+
+    Rejects, in order: an empty or whitespace-only name; a name containing either separator; `.` and
+    `..`; a drive-qualified name (`C:` / `C:\\x`, which `os.path.join` on Windows resolves against
+    the *current directory of that drive*); and a name that is otherwise not a single component.
+    """
+    if not unit or not unit.strip():
+        return "it is empty"
+    if any(separator in unit for separator in _NAME_SEPARATORS):
+        return "it contains a path separator, so it names a location rather than a unit"
+    if unit in {".", ".."}:
+        return "it is a relative directory reference, not a name"
+    if re.match(r"^[A-Za-z]:", unit):
+        return "it is drive-qualified, which resolves against that drive rather than under --out"
+    if PurePath(unit).name != unit or PureWindowsPath(unit).name != unit:
+        return "it is not a single path component"
+    return None
+
+
+def assert_package_destination(out_root: Path, unit: str) -> Path:
+    """`<out_root>/<unit>`, having proved BOTH that the name is safe and that the result is inside.
+
+    Two checks rather than one, because they fail differently and only the pair is closed. The name
+    check refuses the traversal that source-controlled input can express (:class:`UnsafeUnitName`);
+    the containment check is the tripwire behind it, and it resolves both sides - a lexical
+    comparison passes a directory junction pointing out of the tree, which is the same defect
+    `promote_unit._refuse_aliased_root` exists for one hop later.
+
+    Resolving is safe here in a way it is NOT for a data-source literal: both operands are local
+    paths this process chose, never a UNC literal out of a customer's M query, so there is no SMB
+    host to block on (compare :func:`_inside`).
+    """
+    problem = unit_name_problem(unit)
+    if problem is not None:
+        raise UnsafeUnitName(unit, problem)
+    root = out_root.resolve()
+    destination = (out_root / unit).resolve()
+    if destination.parent != root:
+        raise UnsafeUnitName(unit, f"it resolves to {destination.name} outside --out")
+    return out_root / unit
 
 
 def replace_dir(staged: Path, final: Path, verify: Callable[[Path], None] | None = None) -> None:
@@ -2060,6 +2303,82 @@ def _rename_retrying(src: Path, dst: Path) -> None:
             time.sleep(_SWAP_BACKOFF_SEC)
 
 
+#: The bundle inputs whose CORRUPTION makes a unit unassessable. Absence is legitimate for every one
+#: of them (a datasource unit has no handover slice; four workbooks in the reference estate have no
+#: engine output at all), so the entry is a path and the caller distinguishes the two states through
+#: :func:`read_json_checked`.
+#:
+#: ⚠️ **`oracle-manifest.json` is deliberately NOT here, and the omission is load-bearing.** An
+#: oracle that is missing, absent or truncated must still PACKAGE, so that the entry gate can report
+#: the pages it covers as BLIND - that is the negative control the whole packaging contract is
+#: written around ("an oracle omission INSIDE a package is not exit 1 or 4", module docstring), and
+#: it is verified working. The oracle is evidence ABOUT the unit; these four files are what the unit
+#: IS.
+def _unassessable_inputs(bundle: Path, unit: str) -> list[str]:
+    """Every reason this unit's bundle input exists but could not be read. Empty means assessable."""
+    reasons = []
+    for path in (
+        bundle / "report.json",
+        bundle / "handover" / f"{unit}.json",
+        bundle / "source-provenance.json",
+        bundle / "engine-output-receipt.json",
+        bundle / "input_manifest.json",
+    ):
+        _payload, reason = read_json_checked(path)
+        if reason is not None:
+            reasons.append(reason)
+    return reasons
+
+
+def _report_pages(dest: Path, report_name: str | None) -> int:
+    """How many pages the packaged report declares, or 0 when there is no report to declare any."""
+    if not report_name:
+        return 0
+    pages = read_json(dest / "fabric" / report_name / "definition" / "pages" / "pages.json")
+    order = pages.get("pageOrder") if isinstance(pages, dict) else None
+    return len(order) if isinstance(order, list) else 0
+
+
+def _model_binding(dest: Path, report_name: str | None) -> dict[str, Any]:
+    """How the packaged report finds its semantic model, and whether that model is IN the package.
+
+    ⚠️ **A `byPath` that does not resolve inside the package is not self-contained**, and nothing
+    used to say so. Measured on this branch: a report whose `definition.pbir` reads
+    `byPath: ../../Shared/Shared.SemanticModel` - the ordinary shared/published-datasource shape,
+    which has fixtures in this repository - packaged at **exit 0** with `manifest_model: null` and
+    `self_contained: true`, while the model it names existed nowhere in the folder. The consequence
+    is silent by construction: `powerbi-report-author validate` returns `errorCount: 0` for a
+    `byPath` naming a model that exists nowhere (it checks reference SHAPE, not target), and the
+    report then opens in Desktop with no model at all.
+
+    `byConnection` makes no containment claim - the report is bound to a published model and the
+    package was never supposed to carry one - so it is recorded and passed. An absent
+    `definition.pbir` is recorded as `absent` and also passed: the report declares no binding, which
+    is a different (engine-side) problem from one that declares a binding it cannot honour.
+    """
+    if not report_name:
+        return {"kind": "no_report", "path": None, "resolves_in_package": True}
+    pbir_path = dest / "fabric" / report_name / "definition.pbir"
+    payload, reason = read_json_checked(pbir_path)
+    if reason is not None:
+        return {"kind": "unreadable", "path": None, "resolves_in_package": False, "detail": reason}
+    if not isinstance(payload, dict):
+        return {"kind": "absent", "path": None, "resolves_in_package": True}
+    reference = payload.get("datasetReference") if isinstance(payload.get("datasetReference"), dict) else {}
+    by_path = reference.get("byPath") if isinstance(reference.get("byPath"), dict) else None
+    if by_path is None:
+        kind = "byConnection" if reference.get("byConnection") else "absent"
+        return {"kind": kind, "path": None, "resolves_in_package": True}
+    declared = str(by_path.get("path") or "")
+    target = (pbir_path.parent / declared).resolve() if declared else None
+    inside = target is not None and dest.resolve() in target.parents
+    return {
+        "kind": "byPath",
+        "path": declared or None,
+        "resolves_in_package": bool(target is not None and target.is_dir() and inside),
+    }
+
+
 def _data_source_notes(data_sources: dict[str, Any]) -> list[str]:
     """One `PACKAGE_NOTE` line per way a source did not end up in the package, plus the bind reminder.
 
@@ -2085,6 +2404,46 @@ def _data_source_notes(data_sources: dict[str, Any]) -> list[str]:
     return notes
 
 
+def _stage_asset(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    bundle: Path, unit: str, dest: Path, handover: Any, assets_dir: Path | None, report_name: str | None
+) -> tuple[Path | None, str, str | None]:
+    """`(packaged asset, route, note)` - copy the source in, or refuse when its absence blinds a gate.
+
+    ⚠️ **A report with pages and no source is UNASSESSABLE, not merely incomplete.** `check_unit`
+    cannot derive an expected page set without it (#443) and the entry gate returns
+    CANNOT_ESTABLISH, so every per-page verdict such a package would produce is "I do not know" -
+    and this used to report `exit 0  OK Book`. A unit with no report (every datasource-only unit,
+    18 of 67 in the reference run) makes no page claim, so its missing asset stays a recorded note.
+    """
+    asset, route = resolve_asset(bundle, unit, handover, assets_dir)
+    if asset is not None:
+        assert_declared_digest(unit, bundle, asset, route)
+        (dest / "assets").mkdir(parents=True, exist_ok=True)
+        shutil.copy2(asset, dest / "assets" / asset.name)
+        return dest / "assets" / asset.name, route, None
+    pages = _report_pages(dest, report_name)
+    if pages:
+        raise UnassessableInput(
+            unit,
+            [
+                f"its source asset could not be resolved ({route}) while its report declares {pages} "
+                "page(s), so neither gate can establish a page verdict"
+            ],
+        )
+    return None, route, f"source asset unresolved ({route}); both gates will report CANNOT_ESTABLISH"
+
+
+def _stage_handover(bundle: Path, unit: str, dest: Path) -> tuple[Any, list[str], str | None]:
+    """`(scoped handover slice, redacted paths, note)` written into the package."""
+    handover = read_json(bundle / "handover" / f"{unit}.json")
+    (dest / "handover").mkdir(parents=True, exist_ok=True)
+    if not isinstance(handover, dict):
+        return handover, [], f"no handover slice at handover/{unit}.json"
+    cleaned, redactions = scope_handover(handover, unit)
+    write_json(dest / "handover" / f"{unit}.json", cleaned)
+    return cleaned, redactions, None
+
+
 def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-many-positional-arguments
     bundle: Path, unit: str, dest: Path, *, final: Path, oracle_dir: Path | None, assets_dir: Path | None
 ) -> dict[str, Any]:
@@ -2093,7 +2452,14 @@ def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
     ``final`` is where ``dest`` will be renamed to. Anything that must record its OWN separator
     flavour - only the data-folder parameter today - has to use it, because ``dest`` stops existing
     the moment packaging succeeds. Neither path is written INTO the package (round-2 finding 1).
+
+    ⚠️ **The assessability check runs FIRST, before a single byte is copied.** An input that exists
+    and cannot be read is refused here rather than absorbed into a note, so nothing is written and a
+    previously-good package at ``final`` survives untouched.
     """
+    unassessable = _unassessable_inputs(bundle, unit)
+    if unassessable:
+        raise UnassessableInput(unit, unassessable)
     engine_report = read_json(bundle / "report.json")
     workbooks, datasources = engine_unit_names(engine_report)
     dest.mkdir(parents=True, exist_ok=True)
@@ -2105,23 +2471,12 @@ def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
     data_sources = _localize_data_sources(dest, final, model_name)
     notes.extend(_data_source_notes(data_sources))
 
-    handover = read_json(bundle / "handover" / f"{unit}.json")
-    (dest / "handover").mkdir(parents=True, exist_ok=True)
-    redactions: list[str] = []
-    if isinstance(handover, dict):
-        cleaned, redactions = scope_handover(handover, unit)
-        write_json(dest / "handover" / f"{unit}.json", cleaned)
-        handover = cleaned
-    else:
-        notes.append(f"no handover slice at handover/{unit}.json")
-
-    asset, asset_route = resolve_asset(bundle, unit, handover, assets_dir)
-    if asset is not None:
-        (dest / "assets").mkdir(parents=True, exist_ok=True)
-        shutil.copy2(asset, dest / "assets" / asset.name)
-        asset = dest / "assets" / asset.name
-    else:
-        notes.append(f"source asset unresolved ({asset_route}); both gates will report CANNOT_ESTABLISH")
+    handover, redactions, handover_note = _stage_handover(bundle, unit, dest)
+    if handover_note:
+        notes.append(handover_note)
+    asset, asset_route, asset_note = _stage_asset(bundle, unit, dest, handover, assets_dir, report_name)
+    if asset_note:
+        notes.append(asset_note)
 
     _payload, entries = scope_provenance(read_json(bundle / "source-provenance.json"), sha256_of(asset))
     identity = workbook_identity(entries, asset)
@@ -2143,11 +2498,19 @@ def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
             f"redacted {len(redactions)} absolute host path(s) from the handover slice: {', '.join(redactions[:5])}"
         )
 
+    binding = _model_binding(dest, report_name)
+    if binding["kind"] == "byPath" and not binding["resolves_in_package"]:
+        notes.append(
+            f"the report's definition.pbir names a semantic model at {binding['path']} that is NOT in "
+            "this package, so it opens with no model; promote the model this report shares and rewrite "
+            "byPath, or repackage the unit that owns it"
+        )
     result = {
         "unit": unit,
         "kind": unit_kind(unit, workbooks, datasources),
         "engine": ((receipt or {}).get("engine") or {}).get("version"),
         "packaged": report_name is not None or model_name is not None,
+        "self_contained": bool(data_sources["self_contained"] and binding["resolves_in_package"]),
         "artifacts": {
             "migration_spec": spec,
             "migration_spec_schema": schema,
@@ -2157,6 +2520,7 @@ def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
             "model": f"fabric/{model_name}" if model_name else None,
             "handover": f"handover/{unit}.json" if isinstance(handover, dict) else None,
         },
+        "model_binding": binding,
         "workbook_identity": identity,
         "data_sources": data_sources,
         "oracle": oracle,
@@ -2179,7 +2543,57 @@ def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
 # --------------------------------------------------------------------------------------------
 
 
-def render(results: list[dict[str, Any]], out_root: Path, refused: list[PackageEditsRefused] | None = None) -> str:
+def _run_totals(
+    results: list[dict[str, Any]], refused: list[PackageEditsRefused], failed: list[PackagingError]
+) -> list[str]:
+    """The lines after the per-unit list: every state that must not be inferred from a silence."""
+    lines: list[str] = []
+    starved = sorted(result["unit"] for result in results if not result["packaged"])
+    if starved:
+        lines.append(
+            f"WARN: {len(starved)} unit(s) have NO engine working copy under pbip/ - packaged for their "
+            f"source, reference and handover only, with nothing to build on: {', '.join(starved)}"
+        )
+    if refused:
+        lines.append(
+            f"REFUSED: {len(refused)} unit(s) already carry edits in the package, which is the canonical "
+            "place to work - they were left untouched. Re-run with --discard-package-edits to overwrite."
+        )
+    unassessable = sorted(item.unit for item in failed if isinstance(item, UnassessableInput))
+    if unassessable:
+        lines.append(
+            f"CANNOT ASSESS: {len(unassessable)} unit(s) had an input that exists but could not be read, "
+            "so nothing was packaged for them - this is neither a clean nor a failed verdict: "
+            f"{', '.join(unassessable)}"
+        )
+    hard = sorted(getattr(item, "unit", "?") for item in failed if not isinstance(item, UnassessableInput))
+    if hard:
+        lines.append(
+            f"UNIT FAILED: {len(hard)} unit(s) hit a contradiction this packager refuses to ship past, "
+            f"so nothing was written for them: {', '.join(hard)}"
+        )
+    incomplete = sorted(result["unit"] for result in results if not result.get("self_contained", True))
+    if incomplete:
+        lines.append(
+            f"NOT SELF-CONTAINED: {len(incomplete)} unit(s) ship without something they name - a source "
+            "their model reads, or the semantic model their report's byPath points at - so the package "
+            f"alone is not enough to build on; see {MANIFEST_NAME}: {', '.join(incomplete)}"
+        )
+    unbound = sorted(result["unit"] for result in results if result["data_sources"].get("binding"))
+    if unbound:
+        lines.append(
+            f"UNBOUND: {len(unbound)} unit(s) read their rows through a {PACKAGE_ROOT_TOKEN} placeholder. "
+            f"Wherever a package ends up, run `{BIND_COMMAND}` there before opening the model."
+        )
+    return lines
+
+
+def render(
+    results: list[dict[str, Any]],
+    out_root: Path,
+    refused: list[PackageEditsRefused] | None = None,
+    failed: list[PackagingError] | None = None,
+) -> str:
     """The human verdict: one line per unit, then the totals that make an omission visible."""
     lines = [f"package_unit: {len(results)} unit(s) -> {out_root}"]
     for result in sorted(results, key=lambda item: item["unit"]):
@@ -2194,33 +2608,13 @@ def render(results: list[dict[str, Any]], out_root: Path, refused: list[PackageE
         )
     for refusal in sorted(refused or [], key=lambda item: item.unit):
         lines.append(f"  KEPT {refusal.unit} - not repackaged, the existing package carries edits")
+    for failure in sorted(failed or [], key=lambda item: getattr(item, "unit", "")):
+        label = "CANT" if isinstance(failure, UnassessableInput) else "FAIL"
+        lines.append(f"  {label} {getattr(failure, 'unit', '?')} - NOT packaged: {failure}")
     packaged = sum(1 for result in results if result["packaged"])
     with_oracle = sum(1 for result in results if result["oracle"].get("objects"))
     lines.append(f"packaged {packaged}/{len(results)}; {with_oracle} carry oracle evidence")
-    starved = sorted(result["unit"] for result in results if not result["packaged"])
-    if starved:
-        lines.append(
-            f"WARN: {len(starved)} unit(s) have NO engine working copy under pbip/ - packaged for their "
-            f"source, reference and handover only, with nothing to build on: {', '.join(starved)}"
-        )
-    if refused:
-        lines.append(
-            f"REFUSED: {len(refused)} unit(s) already carry edits in the package, which is the canonical "
-            "place to work - they were left untouched. Re-run with --discard-package-edits to overwrite."
-        )
-    incomplete = sorted(result["unit"] for result in results if not result["data_sources"].get("self_contained", True))
-    if incomplete:
-        lines.append(
-            f"NOT SELF-CONTAINED: {len(incomplete)} unit(s) ship without a source their model names, so "
-            "that partition cannot refresh from the package - see data_sources in each "
-            f"{MANIFEST_NAME}: {', '.join(incomplete)}"
-        )
-    unbound = sorted(result["unit"] for result in results if result["data_sources"].get("binding"))
-    if unbound:
-        lines.append(
-            f"UNBOUND: {len(unbound)} unit(s) read their rows through a {PACKAGE_ROOT_TOKEN} placeholder. "
-            f"Wherever a package ends up, run `{BIND_COMMAND}` there before opening the model."
-        )
+    lines.extend(_run_totals(results, refused or [], failed or []))
     return "\n".join(lines)
 
 
@@ -2233,11 +2627,19 @@ def _package_each(  # pylint: disable=too-many-arguments,too-many-positional-arg
     discard_edits: bool,
     results: list[dict[str, Any]],
     refused: list[PackageEditsRefused],
+    failed: list[PackagingError] | None = None,
 ) -> None:
     """Package each unit, collecting refusals instead of stopping at the first one.
 
     One unit's edits must not stop the rest of the estate being packaged; `main` still returns 3 for
     any refusal, so this cannot pass unnoticed.
+
+    ⚠️ **Every :class:`PackagingError` is collected, not just the edit refusal.** Before this, an
+    unassessable input, an unsafe unit name or a containment tripwire escaped as an uncaught
+    traceback: the interpreter's exit 1 is indistinguishable from `EXIT_NO_WORKING_COPY`, and the
+    remaining units of an estate were never packaged at all. Collecting them keeps the run going and
+    gives each class its own exit code; nothing is written for a unit that raises, because assembly
+    happens in a staging directory that the `finally` in :func:`package_unit` removes.
     """
     for unit in units:
         try:
@@ -2254,10 +2656,15 @@ def _package_each(  # pylint: disable=too-many-arguments,too-many-positional-arg
         except PackageEditsRefused as refusal:
             print(str(refusal), file=sys.stderr)
             refused.append(refusal)
+        except PackagingError as failure:
+            print(str(failure), file=sys.stderr)
+            if failed is None:
+                raise
+            failed.append(failure)
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Package the requested units and report what each one carries."""
+def _build_parser() -> argparse.ArgumentParser:
+    """The CLI surface, in its own function so ``main`` stays inside its complexity budget."""
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("Attribution", maxsplit=1)[0])
     parser.add_argument("--bundle", type=Path, required=True, help="engine bundle root (holds pbip/, handover/)")
     parser.add_argument("--out", type=Path, required=True, help="directory to write <Unit>/ packages into")
@@ -2271,6 +2678,62 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="overwrite an existing package even though it carries edits made since it was written",
     )
+    return parser
+
+
+def _refuse_zero_units(bundle: Path, out_root: Path, json_path: Path | None) -> int:
+    """The verdict for a bundle that names no units at all.
+
+    ⚠️ **`packaged 0/0` at exit 0 is TRUE and useless**, and it is the shape a caller reads as "the
+    estate is packaged" - measured on this branch. The emptiness is a fact about the BUNDLE rather
+    than about the command line, so it gets the cannot-assess code rather than argparse's 2, and the
+    `--json` envelope is still written so an automated caller has a record of the refusal.
+    """
+    print(
+        f"cannot assess {bundle}: its report.json lists no workbooks or datasources and it has no "
+        "pbip/ working copies, so there is nothing to package and 'packaged 0/0' would read as "
+        "success. Point --bundle at an engine run, or check that report.json parsed.",
+        file=sys.stderr,
+    )
+    if json_path:
+        write_json(
+            json_path,
+            {
+                "id": "package-unit",
+                "bundle": str(bundle),
+                "out": str(out_root),
+                "units": [],
+                "refused": [],
+                "failed": [],
+                "cannot_assess": ["the bundle names no units"],
+            },
+        )
+    return EXIT_CANNOT_ASSESS
+
+
+def _run_verdict(
+    results: list[dict[str, Any]], refused: list[PackageEditsRefused], failed: list[PackagingError]
+) -> int:
+    """The run's exit code, worst first.
+
+    The two "nothing was written" states rank ABOVE every verdict about content: a verdict computed
+    from input that could not be read, or reported alongside a unit that never got packaged at all,
+    is the fail-open shape this ordering exists to make impossible.
+    """
+    if any(isinstance(failure, UnassessableInput) for failure in failed):
+        return EXIT_CANNOT_ASSESS
+    if failed:
+        return EXIT_UNIT_FAILED
+    if refused:
+        return EXIT_EDITS_REFUSED
+    if any(not result.get("self_contained", True) for result in results):
+        return EXIT_NOT_SELF_CONTAINED
+    return EXIT_OK if all(result["packaged"] for result in results) else EXIT_NO_WORKING_COPY
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Package the requested units and report what each one carries."""
+    parser = _build_parser()
     args = parser.parse_args(argv)
 
     bundle = args.bundle.resolve()
@@ -2295,9 +2758,15 @@ def main(argv: list[str] | None = None) -> int:
             "its own oracle and that one, and every page becomes 'unverifiable' rather than ready. "
             "Choose an --out outside the capture tree."
         )
+    if not units:
+        return _refuse_zero_units(bundle, out_root, args.json)
+
     results: list[dict[str, Any]] = []
     refused: list[PackageEditsRefused] = []
-    _package_each(sorted(units), bundle, out_root, oracle_dir, assets_dir, args.discard_package_edits, results, refused)
+    failed: list[PackagingError] = []
+    _package_each(
+        sorted(units), bundle, out_root, oracle_dir, assets_dir, args.discard_package_edits, results, refused, failed
+    )
 
     payload = {
         "id": "package-unit",
@@ -2309,16 +2778,20 @@ def main(argv: list[str] | None = None) -> int:
         "refused": [
             {"unit": refusal.unit, "changed": refusal.changed, "reason": refusal.reason} for refusal in refused
         ],
+        "failed": [
+            {
+                "unit": getattr(failure, "unit", None),
+                "state": "cannot_assess" if isinstance(failure, UnassessableInput) else "unit_failed",
+                "reason": str(failure),
+            }
+            for failure in failed
+        ],
     }
     if args.json:
         write_json(args.json, payload)
     if not args.quiet:
-        print(render(results, out_root, refused))
-    if refused:
-        return EXIT_EDITS_REFUSED
-    if any(not result["data_sources"].get("self_contained", True) for result in results):
-        return EXIT_NOT_SELF_CONTAINED
-    return EXIT_OK if all(result["packaged"] for result in results) else EXIT_NO_WORKING_COPY
+        print(render(results, out_root, refused, failed))
+    return _run_verdict(results, refused, failed)
 
 
 if __name__ == "__main__":
