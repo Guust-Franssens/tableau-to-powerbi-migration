@@ -1467,6 +1467,27 @@ def test_oracle_root_DISCOVERS_canonical_run_layout(tmp_path):
     assert discovered == [first, second, third]
 
 
+def test_listed_canonical_cousin_is_REFUSED_not_skipped(tmp_path):
+    runs = tmp_path / "_runs"
+    first = _batch(runs / "001", "oracle", [_view(LUID, "Daily Monitoring", data="ok", image="ok", captured_at=STAMP)])
+    second = _batch(runs / "002", "oracle", [_view(OTHER, "Summary", data="ok", image="ok", captured_at=STAMP)])
+    _batch(runs / "003", "oracle", [_view("view-3", "Other", data="ok", image="ok", captured_at=STAMP)])
+
+    with pytest.raises(grp.UnlistedBatchOnDisk, match="003/oracle"):
+        grp.resolve_batch_dirs([first, second], None, [])
+
+
+def test_oracle_root_excludes_canonical_batch_path(tmp_path):
+    runs = tmp_path / "_runs"
+    first = _batch(runs / "001", "oracle", [_view(LUID, "Daily Monitoring", data="ok", image="ok", captured_at=STAMP)])
+    second = _batch(runs / "002", "oracle", [_view(OTHER, "Summary", data="ok", image="ok", captured_at=STAMP)])
+    third = _batch(runs / "003", "oracle", [_view("view-3", "Other", data="ok", image="ok", captured_at=STAMP)])
+
+    discovered = grp.discover_batches(runs, frozenset({third.resolve()}))
+
+    assert discovered == [first, second]
+
+
 def test_a_root_that_is_ITSELF_a_capture_is_the_ordinary_layout(tmp_path):
     """`_oracle/` with `images/`, `data/` and a manifest is one batch. Its own subdirs are structure."""
     oracle = tmp_path / "_oracle"

@@ -351,15 +351,18 @@ def discover_batches(root: Path, excluded: frozenset[Path]) -> list[Path]:
         found.append(root)
     unclassified: list[Path] = []
     for child in sorted(p for p in root.iterdir() if p.is_dir()):
-        if child.resolve() in excluded:
+        child_resolved = child.resolve()
+        oracle = child / "oracle"
+        oracle_resolved = oracle.resolve()
+        if child_resolved in excluded or oracle_resolved in excluded:
             continue
         if root_is_batch and child.name in CAPTURE_SUBDIRS:
             continue
         if is_capture_batch(child):
             found.append(child)
             continue
-        if is_capture_batch(child / "oracle"):
-            found.append(child / "oracle")
+        if is_capture_batch(oracle):
+            found.append(oracle)
             continue
         unclassified.append(child)
     if unclassified:
@@ -427,6 +430,21 @@ def resolve_batch_dirs(
     listed = [oracle] if isinstance(oracle, Path) else list(oracle or [])
     if not listed:
         raise FileNotFoundError("no capture directory given: pass --oracle DIR or --oracle-root DIR")
+    canonical = [path.resolve() for path in listed]
+    if all(path.name == "oracle" for path in canonical):
+        scopes = {path.parent.parent for path in canonical}
+        if len(scopes) == 1 and next(iter(scopes)).name == "_runs":
+            discovered = discover_batches(next(iter(scopes)), excluded)
+            discovered_set = set(discovered)
+            listed_set = set(canonical)
+            omitted = sorted(discovered_set - listed_set - excluded)
+            if omitted:
+                raise UnlistedBatchOnDisk(
+                    f"{len(omitted)} canonical capture batch(es) sit beside the ones given and were not "
+                    f"passed: {', '.join(str(path) for path in omitted)}. Promotion must consider every "
+                    "batch on disk -- pass each one with --oracle, use --oracle-root to discover them, "
+                    "or --exclude the ones deliberately not part of this merge."
+                )
     _refuse_unlisted_siblings(listed, excluded)
     return listed, excluded
 
