@@ -237,7 +237,7 @@ Desktop on open** — they only surface when the PBIP is actually opened, not fr
   (invisible to `validate` and TMDL structural checks; the report shows "Something's wrong with one or
   more fields" in Desktop). Hoist the measure into a `VAR` and compare the column to the VAR. Found in
   58 CM/CY/PM measures of the Airline build. See `docs/tableau-dax-translation-guide.md` §4.
-- **Validate before reporting success.** After writing TMDL files, run
+- **Validate before reporting success.** In this repository, after writing TMDL files, run
   `python scripts/check_datamodel.py <SemanticModel>`. It invokes `tools/tmdl_oracle` and
   `TmdlSerializer`, the same parser Power BI Desktop uses, and requires the .NET SDK. This catches
   syntax errors (though not the naming-collision one above, which only surfaces on actual model
