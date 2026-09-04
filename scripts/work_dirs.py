@@ -62,8 +62,8 @@ under `allocated_abs_path`, and `check_run_location` (surfaced by `list_runs` an
 `python scripts/work_dirs.py --verify`) reports `intact`, `moved` or `unverifiable`. `unverifiable`
 is NOT a soft `intact` - see `check_run_location`.
 
-`--verify` is a GATE, not a status query: exit 0 all intact / 1 at least one moved / 3 at least one
-unverifiable. It rests on ONE invariant, implemented in one discovery function and one
+`--verify` is a GATE, not a status query: exit 0 all intact / 1 at least one moved / 2 duplicate
+number / 3 at least one unverifiable. It rests on ONE invariant, implemented in one discovery function and one
 classification function: every child directory of an existing `_runs/` root is a candidate run, any
 candidate whose identity cannot be POSITIVELY established from its own evidence is `unverifiable`,
 and `intact` is only ever returned on positive proof. So a run directory it cannot read at all -
@@ -142,6 +142,7 @@ CANONICAL_SUBDIRS: tuple[str, ...] = (
 LAZY_SUBDIRS: frozenset[str] = frozenset({"deliverables"})
 
 _RUN_DIR_RE = re.compile(r"^(\d+)(?:-.*)?$")
+_RESERVATIONS_DIR_NAME = ".run-number-reservations"
 # Matches the Fabric artifact-name ceiling used elsewhere in this org's conventions (table names
 # under 60 chars) - the slug is decoration, not identity, so there is no reason to let it run long.
 _MAX_UNIT_KEY_LEN = 60
@@ -184,8 +185,14 @@ RUN_PATH_KEY = "allocated_abs_path"
 #: #470 is about - a renumbered run that read back as healthy.
 RUN_LOCATION_INTACT = "intact"
 RUN_LOCATION_MOVED = "moved"
+RUN_LOCATION_DUPLICATE = "duplicate"
 RUN_LOCATION_UNVERIFIABLE = "unverifiable"
-RUN_LOCATION_STATES: tuple[str, ...] = (RUN_LOCATION_INTACT, RUN_LOCATION_MOVED, RUN_LOCATION_UNVERIFIABLE)
+RUN_LOCATION_STATES: tuple[str, ...] = (
+    RUN_LOCATION_INTACT,
+    RUN_LOCATION_MOVED,
+    RUN_LOCATION_DUPLICATE,
+    RUN_LOCATION_UNVERIFIABLE,
+)
 
 #: Values of `RunLocationCheck.derived_name_check` - a strictly SUBORDINATE hint, only ever set on an
 #: `UNVERIFIABLE` run, and never able to promote one to `INTACT`. See `check_run_location`.
@@ -341,8 +348,18 @@ def _run_dir_name(run_number: int, unit_key: str) -> str:
     the directory and `_derived_dir_name` uses it to reconstruct one, so the zero-padding rule
     cannot drift between the two.
     """
+    return f"{_run_number_dir_name(run_number)}-{unit_key}"
+
+
+def _run_number_dir_name(run_number: int) -> str:
+    """The number-only directory name used to reserve a run number before adding its decorative slug."""
     width = max(3, len(str(run_number)))
-    return f"{run_number:0{width}d}-{unit_key}"
+    return f"{run_number:0{width}d}"
+
+
+def _reservations_root(root: Path) -> Path:
+    """The private directory holding permanent, number-only allocation reservations."""
+    return root / _RESERVATIONS_DIR_NAME
 
 
 def _derived_dir_name(manifest: dict[str, Any]) -> str | None:
@@ -749,10 +766,11 @@ def allocate_run(
     """Atomically allocate the next numbered run directory for `unit_key` under `_runs/`.
 
     Allocation is `mkdir`-exclusive with retry on collision (issue #234 acceptance criterion 1),
-    never read-the-max-then-write: two processes racing for the same number cannot both believe
-    they got it, because the loser's `mkdir` raises `FileExistsError` and it moves on to the next
-    candidate. The directory name is `<NNN>-<slug>`, zero-padded to at least 3 digits; the slug is
-    decoration only (never parsed back - see `sanitize_unit_key`), the number is the identity.
+    never read-the-max-then-write: a number-only directory is reserved permanently before its
+    decorative slug is added, so two processes racing with different slugs cannot both believe they
+    got the same number.
+    The directory name is `<NNN>-<slug>`, zero-padded to at least 3 digits; the slug is decoration
+    only (never parsed back - see `sanitize_unit_key`), the number is the identity.
 
     When `create_subdirs` is true, every canonical subdir EXCEPT those in `LAZY_SUBDIRS` is
     created immediately. `deliverables/` is the one member today (issue #481): it has no writer
@@ -780,17 +798,21 @@ def allocate_run(
     """
     root = runs_root(repo_root)
     root.mkdir(parents=True, exist_ok=True)
+    reservation_root = _reservations_root(root)
+    reservation_root.mkdir(parents=False, exist_ok=True)
     slug = sanitize_unit_key(unit_key)
 
-    existing = _existing_run_numbers(root)
+    existing = _existing_run_numbers(root) + _existing_run_numbers(reservation_root)
     candidate = (max(existing) + 1) if existing else 1
     for _ in range(_MAX_ALLOCATION_ATTEMPTS):
+        reservation_dir = reservation_root / _run_number_dir_name(candidate)
         run_dir = root / _run_dir_name(candidate, slug)
         try:
-            run_dir.mkdir(parents=False, exist_ok=False)
+            reservation_dir.mkdir(parents=False, exist_ok=False)
         except FileExistsError:
             candidate += 1
             continue
+        run_dir.mkdir(parents=False, exist_ok=False)
 
         run = RunPaths(root=run_dir, run_number=candidate, unit_key=slug)
         if create_subdirs:
@@ -822,8 +844,9 @@ def allocate_run(
 def _discover_run_dirs(root: Path) -> tuple[list[Path], str | None]:
     """`(candidates, root_problem)` - the module's one discovery site. Never raises.
 
-    EVERY child directory of an existing `_runs/` root is a candidate run. There is no name
-    pattern and no "has a `run.json`" precondition, because both were fail-open filters and both
+    Every child directory of an existing `_runs/` root except this module's private
+    `_RESERVATIONS_DIR_NAME` metadata directory is a candidate run. There is no name pattern and no
+    "has a `run.json`" precondition, because both were fail-open filters and both
     are finding 2 of PR #477's second review round: a real allocated run whose directory was
     renamed to `acme-without-number` and whose manifest was deleted matched neither test, so the
     CLI printed `(no run directories found)`, `0 run(s): 0 intact, 0 moved, 0 unverifiable`, exit
@@ -863,6 +886,8 @@ def _discover_run_dirs(root: Path) -> tuple[list[Path], str | None]:
 
     found: list[Path] = []
     for child in children:
+        if child.name == _RESERVATIONS_DIR_NAME:
+            continue
         try:
             child_mode = os.stat(child).st_mode
         except OSError:
@@ -1008,7 +1033,8 @@ def verify_runs(repo_root: Path | None = None) -> tuple[list[dict[str, Any]], di
     malformed, locked, or valid-JSON-but-not-an-object contributed ZERO to every bucket, and the CLI
     printed `0 run(s): 0 intact, 0 moved, 0 unverifiable`, exit 0 - the `unverifiable` bucket
     sitting at 0 precisely when something was unverifiable. Every discovered directory is counted
-    now, and one that cannot be assessed counts as `unverifiable` (exit 3).
+    now, and one that cannot be assessed counts as `unverifiable` (exit 3). Runs whose directory
+    names carry the same number are `duplicate` (exit 2), not intact.
 
     ⚠️ "Discovered" means what `_discover_run_dirs` returns, which is EVERY child directory of the
     root plus the root itself when the root cannot be enumerated. A directory renamed out of the
@@ -1016,6 +1042,23 @@ def verify_runs(repo_root: Path | None = None) -> tuple[list[dict[str, Any]], di
     `0 run(s)`, exit 0, with the tree still sitting on disk.
     """
     runs = _collect_runs(repo_root)
+    numbers: dict[int, list[dict[str, Any]]] = {}
+    for run in runs:
+        name = run.get("location_check", {}).get("actual_dir_name", "")
+        match = _RUN_DIR_RE.match(name)
+        if match:
+            numbers.setdefault(int(match.group(1)), []).append(run)
+    for number, duplicates in numbers.items():
+        if len(duplicates) < 2:
+            continue
+        for run in duplicates:
+            check = run["location_check"]
+            if check["state"] == RUN_LOCATION_INTACT:
+                check["state"] = RUN_LOCATION_DUPLICATE
+                check["detail"] = (
+                    f"run number {number} is used by {len(duplicates)} directories - run numbers are identities "
+                    "and must never be reused"
+                )
     counts = {state: 0 for state in RUN_LOCATION_STATES}
     for run in runs:
         state = run.get("location_check", {}).get("state", RUN_LOCATION_UNVERIFIABLE)
@@ -1024,12 +1067,13 @@ def verify_runs(repo_root: Path | None = None) -> tuple[list[dict[str, Any]], di
 
 
 def verify_exit_code(counts: dict[str, int]) -> int:
-    """Gate semantics, matching `check_reference_readiness.py`: 0 clean, 1 findings, 3 cannot
-    establish - and neither 1 nor 3 is a pass. A `moved` run outranks an `unverifiable` one because
-    it is an established finding rather than an unanswered question.
+    """Gate semantics: 0 clean, 1 moved, 2 duplicate identities, 3 cannot establish - and no
+    nonzero exit is a pass. A moved run outranks duplicate identities and an unanswered question.
     """
     if counts.get(RUN_LOCATION_MOVED):
         return 1
+    if counts.get(RUN_LOCATION_DUPLICATE):
+        return 2
     if counts.get(RUN_LOCATION_UNVERIFIABLE):
         return 3
     return 0
@@ -1066,7 +1110,7 @@ def main() -> int:
         action="store_true",
         help=(
             "allocate nothing; report whether every run is still where it was allocated. "
-            "Exit 0 all intact / 1 at least one moved / 3 at least one unverifiable"
+            "Exit 0 all intact / 1 at least one moved / 2 duplicate number / 3 at least one unverifiable"
         ),
     )
     args = parser.parse_args()

@@ -23,9 +23,10 @@ Two identifiers that deliberately stay UN-quoted, each with its own test below:
   Windows forbids in a path, while the `table` header keeps the real quoted name.
 
 The authoritative structural check is TOM's `TmdlSerializer.DeserializeDatabaseFromFolder` (the offline
-`examples/*/fabric/_validation/tmdl_validate`). It was run out-of-band against the emitted models for
-each case here and returned PASS (and FAILED on the old un-quoted output), but it needs the .NET SDK +
-a Windows-only TOM package, so it is not wired into this cross-platform suite; these tests assert the
+`tools/tmdl_oracle`, the consolidated TMDL validator - issue #413). It was run out-of-band against the
+emitted models for each case here and returned PASS (and FAILED on the old un-quoted output), but it
+needs the .NET SDK + a Windows-only TOM package, so it is not wired into this cross-platform suite;
+these tests assert the
 emitted TMDL text instead.
 """
 

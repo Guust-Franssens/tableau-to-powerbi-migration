@@ -340,6 +340,79 @@ def test_empty_measure_expression_is_caught() -> None:
     assert "EMPTY_EXPRESSION" in _tmdl_codes(text)
 
 
+def _write_two_table_model(tmp_path: Path, orders_body: str, measures_body: str) -> Path:
+    """A two-file `.SemanticModel/definition` so model-wide checks see across files."""
+    definition = tmp_path / "M.SemanticModel" / "definition"
+    definition.mkdir(parents=True)
+    (definition / "Orders.tmdl").write_text(orders_body, encoding="utf-8")
+    (definition / "_Measures.tmdl").write_text(measures_body, encoding="utf-8")
+    return tmp_path / "M.SemanticModel"
+
+
+def test_measure_name_repeated_in_a_different_table_across_files_is_caught(tmp_path: Path) -> None:
+    """Ported from the drifted `tmdl_validate` helpers (issue #413): TmdlSerializer deserializes this
+    cleanly - the collision is invisible to a single-file, single-table scan - but Desktop refuses
+    the commit because measure names are unique across the WHOLE model, not merely per table.
+    """
+    model = _write_two_table_model(
+        tmp_path,
+        "table Orders\n\tmeasure Sales = SUM('Orders'[Amount])\n\n\tcolumn Amount\n\t\tdataType: double\n",
+        "table _Measures\n\tmeasure Sales = SUM('Orders'[Amount])\n",
+    )
+    findings, _ = check_tmdl_model(model)
+    assert "MEASURE_NAME_DUPLICATE" in {f.code for f in findings}
+
+
+def test_measure_name_duplicate_check_is_case_insensitive(tmp_path: Path) -> None:
+    """Tabular measure names collide regardless of case, same as TOM's own uniqueness rule."""
+    model = _write_two_table_model(
+        tmp_path,
+        "table Orders\n\tmeasure sales = SUM('Orders'[Amount])\n\n\tcolumn Amount\n\t\tdataType: double\n",
+        "table _Measures\n\tmeasure Sales = SUM('Orders'[Amount])\n",
+    )
+    findings, _ = check_tmdl_model(model)
+    assert "MEASURE_NAME_DUPLICATE" in {f.code for f in findings}
+
+
+def test_measure_name_unique_across_tables_is_clean(tmp_path: Path) -> None:
+    """The common, valid case: distinct measure names in different tables must stay silent."""
+    model = _write_two_table_model(
+        tmp_path,
+        "table Orders\n\tmeasure Sales = SUM('Orders'[Amount])\n\n\tcolumn Amount\n\t\tdataType: double\n",
+        "table _Measures\n\tmeasure Profit = [Sales] * 0.1\n",
+    )
+    findings, _ = check_tmdl_model(model)
+    assert "MEASURE_NAME_DUPLICATE" not in {f.code for f in findings}
+
+
+def test_distinct_escaped_names_sharing_a_prefix_are_not_a_duplicate(tmp_path: Path) -> None:
+    """`'O''Brien Sales'` and `'O''Connor Sales'` are two distinct names, both escaping an embedded
+    apostrophe by doubling it (TMDL's quoting rule - see `_QUOTED_NAME_RE`/`check_field_bindings.py`'s
+    `_NAME`). A name parser that stops at the FIRST apostrophe truncates both to `O`, and would
+    misreport them as the same model-wide measure name.
+    """
+    model = _write_two_table_model(
+        tmp_path,
+        "table Orders\n\tmeasure 'O''Brien Sales' = SUM('Orders'[Amount])\n\n\tcolumn Amount\n\t\tdataType: double\n",
+        "table _Measures\n\tmeasure 'O''Connor Sales' = SUM('Orders'[Amount])\n",
+    )
+    findings, _ = check_tmdl_model(model)
+    assert "MEASURE_NAME_DUPLICATE" not in {f.code for f in findings}
+
+
+def test_same_escaped_name_across_tables_is_still_a_duplicate(tmp_path: Path) -> None:
+    """Positive control for the fix above: the SAME escaped name repeated in another table must
+    still be caught - the doubled-apostrophe unescaping must not become a way to dodge the check.
+    """
+    model = _write_two_table_model(
+        tmp_path,
+        "table Orders\n\tmeasure 'O''Brien Sales' = SUM('Orders'[Amount])\n\n\tcolumn Amount\n\t\tdataType: double\n",
+        "table _Measures\n\tmeasure 'O''Brien Sales' = SUM('Orders'[Amount])\n",
+    )
+    findings, _ = check_tmdl_model(model)
+    assert "MEASURE_NAME_DUPLICATE" in {f.code for f in findings}
+
+
 COMPACT_FILTER_CASES = [
     (True, "CALCULATE(SUM('S'[Profit]), 'S'[Region] = [Region Param])"),
     (True, "CALCULATETABLE(VALUES('S'[X]), 'S'[Year] = [Selected Year])"),
