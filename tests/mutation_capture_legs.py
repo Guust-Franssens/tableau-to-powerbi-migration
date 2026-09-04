@@ -1563,6 +1563,119 @@ def report(inputs, outcomes):
 g._write_grouping_report = report
 """,
     ),
+    # ------------------------- review round 7: AN UNASSESSABLE MANIFEST IS NOT A CLEAN MERGE.
+    # Both mutations below restore a measured fail-open verbatim; the two after them are the
+    # matching OVER-corrections, because a validator that refuses legitimate captures would block
+    # the customer multi-batch merge this whole change exists to deliver.
+    "a-manifest-is-parsed-but-not-validated": (
+        (
+            "tests/test_group_oracle_multi_batch.py"
+            "::test_an_empty_json_object_is_refused_rather_than_grouped_as_zero_workbooks",
+            "tests/test_group_oracle_multi_batch.py"
+            "::test_a_manifest_with_no_views_key_is_refused_even_when_its_schema_is_right",
+            "tests/test_group_oracle_multi_batch.py::test_a_JSON_LIST_manifest_exits_2_rather_than_CRASHING_at_1",
+        ),
+        """
+import json
+from pathlib import Path
+import group_oracle_by_workbook as g
+def load(oracle_dir):
+    # THE defect, verbatim: reading is accepting. `{}` and a schema-carrying manifest with no `views`
+    # then report a CLEAN merge (exit 0, "0 grouped"), and `[]` dies on `.get` inside merge_batches
+    # at exit 1 -- the "grouped what it could" code, for an input that was never grouped at all.
+    _probe("a-manifest-is-parsed-but-not-validated")
+    path = oracle_dir / g.MANIFEST_NAME
+    if not path.is_file():
+        raise FileNotFoundError(f"no {g.MANIFEST_NAME} in {oracle_dir}")
+    return json.loads(path.read_text(encoding="utf-8"))
+g.load_manifest = load
+""",
+    ),
+    "a-missing-view_luid-collapses-onto-the-empty-string": (
+        (
+            "tests/test_group_oracle_multi_batch.py"
+            "::test_TWO_views_with_no_view_luid_are_refused_rather_than_COLLAPSED_into_one",
+            "tests/test_group_oracle_multi_batch.py::test_ONE_anonymous_view_beside_an_identified_one_is_refused_too",
+        ),
+        """
+import group_oracle_by_workbook as g
+_orig = g._validate_manifest
+def validate(path, payload):
+    # THE second defect: keep every SHAPE check and drop only the identity one, so the manifest is
+    # well-formed by every other measure and `merge_batches` still buckets on `view_luid or ""` --
+    # a coercion this mutation deliberately does NOT touch, because it is still in the shipped code
+    # and is exactly what makes a missing identity lossy. Two anonymous views -> one bucket,
+    # newest-wins, one view out, exit 0.
+    _probe("a-missing-view_luid-collapses-onto-the-empty-string")
+    try:
+        return _orig(path, payload)
+    except g.UnidentifiedCaptureView:
+        return payload
+g._validate_manifest = validate
+""",
+    ),
+    "an-EMPTY-views-list-is-refused-as-damaged": (
+        (
+            "tests/test_group_oracle_multi_batch.py"
+            "::test_an_EMPTY_views_list_is_a_true_statement_about_the_data_and_is_NOT_refused",
+        ),
+        """
+import group_oracle_by_workbook as g
+_orig = g._validate_manifest
+def validate(path, payload):
+    # The OVER-correction, and the reason the guard tests the KEY rather than truthiness: a capture
+    # whose filter selected nothing really does write `"views": []` and exits 0. Refusing it turns an
+    # honest empty capture into a blocking error while catching nothing the shipped rule misses.
+    _probe("an-EMPTY-views-list-is-refused-as-damaged")
+    found = _orig(path, payload)
+    if not found["views"]:
+        raise g.MalformedCaptureManifest(f"{path} carries no views")
+    return found
+g._validate_manifest = validate
+""",
+    ),
+    "a-missing-workbook_luid-is-refused-at-load-too": (
+        (
+            "tests/test_group_oracle_multi_batch.py"
+            "::test_a_missing_WORKBOOK_luid_is_still_BUCKETED_and_reported_not_refused_at_load",
+        ),
+        """
+import group_oracle_by_workbook as g
+_orig = g._validate_manifest
+def validate(path, payload):
+    # The plausible OVER-correction: "both LUIDs are identity, so refuse both." It reads as symmetry
+    # and it deletes a whole reporting path -- the `unidentified` outcome bucket, its REFUSAL_NO_LUID
+    # record and its exit-1 verdict all become unreachable. The two fields differ in CONSEQUENCE: a
+    # missing workbook_luid loses nothing, a missing view_luid destroys the record.
+    _probe("a-missing-workbook_luid-is-refused-at-load-too")
+    found = _orig(path, payload)
+    anonymous = [i for i, v in enumerate(found["views"]) if not v.get("workbook_luid")]
+    if anonymous:
+        raise g.UnidentifiedCaptureView(f"{path} holds {len(anonymous)} view(s) with no workbook_luid")
+    return found
+g._validate_manifest = validate
+""",
+    ),
+    "the-shape-and-identity-refusals-are-collapsed-into-one-type": (
+        (
+            "tests/test_group_oracle_multi_batch.py"
+            "::test_the_identity_refusal_is_its_OWN_type_not_a_generic_malformed_manifest",
+        ),
+        """
+import group_oracle_by_workbook as g
+_orig = g._validate_manifest
+def validate(path, payload):
+    # "This file is not a capture manifest" and "this capture cannot say which view it captured" are
+    # different answers. One shared type still exits 2, so every exit-code assertion keeps passing --
+    # and no test could then name which guard fired, which is how the weaker one rots back open.
+    _probe("the-shape-and-identity-refusals-are-collapsed-into-one-type")
+    try:
+        return _orig(path, payload)
+    except g.UnidentifiedCaptureView as exc:
+        raise g.MalformedCaptureManifest(str(exc)) from None
+g._validate_manifest = validate
+""",
+    ),
     "control-absent-anchor-legs": (
         ("tests/test_capture_tableau_oracle_leg_decoupling.py::test_a_failed_data_leg_no_longer_skips_the_render",),
         """
@@ -1618,6 +1731,11 @@ PROBED = frozenset(
         "exclude-is-accepted-and-ignored",
         "a-stale-refusal-does-not-reach-the-exit-code",
         "every-run-reports-incomplete",
+        "a-manifest-is-parsed-but-not-validated",
+        "a-missing-view_luid-collapses-onto-the-empty-string",
+        "an-EMPTY-views-list-is-refused-as-damaged",
+        "a-missing-workbook_luid-is-refused-at-load-too",
+        "the-shape-and-identity-refusals-are-collapsed-into-one-type",
     }
 )
 
