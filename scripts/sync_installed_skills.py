@@ -1015,9 +1015,7 @@ def _report(args: argparse.Namespace, plan: SyncPlan) -> int:  # pylint: disable
     # clean bucket" shape, arriving by way of the very fix that removed the deletion (round 7).
     escapes = install_reparse_points(installed, plan.owned)
     if escapes:
-        raise UnsafeInstallError(
-            f"{len(escapes)} reparse point(s) inside owned bundle(s): {', '.join(escapes)}"
-        )
+        raise UnsafeInstallError(f"{len(escapes)} reparse point(s) inside owned bundle(s): {', '.join(escapes)}")
     changed, extra = diff_tree(plan.src, installed, scope=plan.owned)
     missing = [name for name in plan.bundles if not (installed / name / "SKILL.md").is_file()]
     unmerged, unmerged_error = ([], None) if plan.source.from_worktree else local_divergence(plan.src, plan.workdir)
