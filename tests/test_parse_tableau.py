@@ -824,6 +824,47 @@ def test_literal_backslash_t_after_line_comment_is_flagged():
     assert "\\t" in limitations[0]["issue"]
 
 
+def test_literal_escape_before_a_sql_clause_in_a_line_comment_is_high():
+    """A real newline would make the following clause executable SQL."""
+    limitations = _custom_sql_limitations(_custom_sql_table("SELECT 1 -- note\\nORDER BY 1"))
+
+    assert len(limitations) == 1
+    assert limitations[0]["severity"] == "high"
+
+
+def test_literal_escape_before_a_ddl_statement_in_a_line_comment_is_high():
+    """A real newline would make the following DDL statement executable SQL."""
+    limitations = _custom_sql_limitations(_custom_sql_table("SELECT 1; -- note\\nCREATE TABLE x (id INTEGER)"))
+
+    assert len(limitations) == 1
+    assert limitations[0]["severity"] == "high"
+
+
+def test_literal_escape_before_an_expression_continuation_in_a_line_comment_is_high():
+    """A real newline would make the following expression continuation executable SQL."""
+    limitations = _custom_sql_limitations(_custom_sql_table("SELECT 1 -- note\\n+ 1"))
+
+    assert len(limitations) == 1
+    assert limitations[0]["severity"] == "high"
+
+
+@pytest.mark.parametrize("continuation", ("-- continued comment", "/* continued comment */"))
+def test_literal_escape_before_another_comment_is_medium(continuation):
+    """A real newline before another comment would not expose executable SQL."""
+    limitations = _custom_sql_limitations(_custom_sql_table(f"SELECT 1 -- note\\n{continuation}"))
+
+    assert len(limitations) == 1
+    assert limitations[0]["severity"] == "medium"
+
+
+def test_literal_escape_in_an_eof_line_comment_is_medium():
+    """A line comment at EOF has no following SQL to swallow."""
+    limitations = _custom_sql_limitations(_custom_sql_table("SELECT 1 -- source C:\\temp\\new.csv"))
+
+    assert len(limitations) == 1
+    assert limitations[0]["severity"] == "medium"
+
+
 def test_literal_escapes_outside_an_unterminated_line_comment_are_medium():
     """Literal escapes corrupt custom SQL wherever they occur, but only an unterminated line comment
     swallows trailing SQL."""
@@ -844,11 +885,11 @@ def test_literal_escape_in_a_line_comment_terminated_by_a_real_newline_is_medium
     assert limitations[0]["severity"] == "medium"
 
 
-def test_literal_escape_outside_a_swallowing_comment_keeps_its_medium_finding():
-    """A high-severity occurrence does not erase an independent medium-severity occurrence."""
+def test_literal_escape_outside_an_eof_comment_keeps_its_medium_finding():
+    """An EOF comment cannot swallow following SQL, so both escape occurrences remain medium."""
     limitations = _custom_sql_limitations(_custom_sql_table("SELECT '\\n' -- \\n"))
 
-    assert {limitation["severity"] for limitation in limitations} == {"high", "medium"}
+    assert {limitation["severity"] for limitation in limitations} == {"medium"}
 
 
 def test_ordinary_comparison_operators_are_not_flagged():
@@ -890,6 +931,8 @@ def test_doubled_operator_inside_a_bracket_quoted_identifier_is_not_flagged():
         "SELECT DISTINCT [a<<b]",
         "SELECT COUNT([a<<b])",
         "SELECT COUNT(*) [total << count] FROM orders",
+        "SELECT 1 [a<<b]",
+        "SELECT 1 [1<<b]",
         "UPDATE [a<<b] SET x = 1",
     ),
 )
@@ -950,6 +993,33 @@ def test_custom_sql_relation_with_missing_sql_is_reported():
     assert len(limitations) == 1
     assert limitations[0]["severity"] == "high"
     assert "has no SQL text" in limitations[0]["issue"]
+
+
+@pytest.mark.parametrize("sql", ("-- only a comment", "/* only a comment */"))
+def test_comment_only_custom_sql_is_reported(sql):
+    """Comment-only text relations are unassessable rather than clean custom SQL."""
+    table = {"id": "tbl.comment_only", "name": "Comment Only", "source_relation": "custom-sql", "custom_sql": sql}
+
+    limitations = _custom_sql_limitations(table)
+
+    assert len(limitations) == 1
+    assert limitations[0]["severity"] == "high"
+    assert "no executable SQL statement" in limitations[0]["issue"]
+
+
+def test_parse_workbook_preserves_literal_escapes_in_custom_sql(tmp_path):
+    """The production parser preserves literal escapes instead of converting them to whitespace."""
+    sql = r"SELECT 1\n+ 1\tAS value"
+    fixture = tmp_path / "literal_escapes.tds"
+    fixture.write_text(
+        f"<datasource name='Literal Escapes'><connection class='sqlite'><relation name='Custom SQL' "
+        f"type='text'><![CDATA[{sql}]]></relation></connection></datasource>",
+        encoding="utf-8",
+    )
+
+    spec = parse_workbook(fixture)
+
+    assert spec["data_sources"][0]["tables"][0]["custom_sql"] == sql
 
 
 def test_custom_sql_lint_is_wired_into_collect_limitations_end_to_end():

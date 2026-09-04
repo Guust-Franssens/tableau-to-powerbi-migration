@@ -1265,6 +1265,11 @@ def _live_source_limitation(ds: dict[str, Any]) -> dict[str, Any]:
 _DOUBLED_OPERATOR_RE = re.compile(r"<{2,}|>{2,}")
 _LITERAL_ESCAPE_RE = re.compile(r"\\[nt]")
 _DOLLAR_QUOTE_RE = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$")
+_SQL_LINE_START_RE = re.compile(
+    r"\s*(?:[+*]|/(?!\*)|-(?!-)|(?:ALTER|CREATE|DELETE|DROP|EXCEPT|FROM|GROUP|HAVING|INSERT|INTERSECT|LIMIT|OFFSET|"
+    r"ORDER|SELECT|UNION|UPDATE|WHERE|WITH)\b)",
+    re.IGNORECASE,
+)
 _SQL_KEYWORDS = frozenset(
     {
         "AS",
@@ -1306,7 +1311,11 @@ def _is_bracket_quoted_identifier(sql: str, index: int) -> bool:
     if before[-1] in {"(", ".", ","}:
         return True
     word = re.search(r"[A-Za-z_][A-Za-z0-9_]*$", before)
-    return word is not None and word.group().upper() in _SQL_KEYWORDS
+    if word is not None and word.group().upper() in _SQL_KEYWORDS:
+        return True
+    if len(before) < len(prefix):
+        return before[-1].isdigit()
+    return False
 
 
 def _mask_dollar_quoted_string(sql: str, masked: list[str], index: int) -> int | None:
@@ -1351,6 +1360,8 @@ def _mask_sql_strings_and_comments(sql: str) -> tuple[str, list[tuple[int, int, 
             continue
         if two == "--":
             start = i + 2
+            masked[i] = "#"
+            masked[i + 1] = "#"
             j = start
             while j < n and sql[j] != "\n":
                 masked[j] = "#"
@@ -1360,11 +1371,16 @@ def _mask_sql_strings_and_comments(sql: str) -> tuple[str, list[tuple[int, int, 
             continue
         if two == "/*":
             start = i + 2
+            masked[i] = "#"
+            masked[i + 1] = "#"
             j = start
             while j < n and sql[j : j + 2] != "*/":
                 masked[j] = "#"
                 j += 1
             comment_spans.append((start, j, False))
+            if j < n:
+                masked[j] = "#"
+                masked[j + 1] = "#"
             i = j + 2
             continue
         if sql[i] in "'\"`" or (sql[i] == "[" and _is_bracket_quoted_identifier(sql, i)):
@@ -1392,6 +1408,11 @@ def _sql_snippet(sql: str, start: int, end: int, radius: int = 24) -> str:
     lo, hi = max(0, start - radius), min(len(sql), end + radius)
     snippet = sql[lo:hi].replace("\n", "\\n").replace("\t", "\\t")
     return f"...{snippet}..." if (lo > 0 or hi < len(sql)) else snippet
+
+
+def _has_executable_sql(masked: str) -> bool:
+    """Return whether SQL remains after comments and whitespace are removed."""
+    return bool(re.sub(r"[#\s;]+", "", masked))
 
 
 def _custom_sql_limitations(table: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1422,6 +1443,19 @@ def _custom_sql_limitations(table: dict[str, Any]) -> list[dict[str, Any]]:
         return []
     found: list[dict[str, Any]] = []
     masked, comment_spans = _mask_sql_strings_and_comments(sql)
+    if not _has_executable_sql(masked):
+        return [
+            {
+                "item": table["id"],
+                "issue": (
+                    f"custom SQL relation for table '{table.get('name', table['id'])}' has no executable "
+                    "SQL statement, so it cannot be assessed or migrated faithfully. ACTION: recover the "
+                    "custom SQL from the Tableau source system before migration."
+                ),
+                "severity": "high",
+                "stage": "parse",
+            }
+        ]
 
     operator_hits = list(_DOUBLED_OPERATOR_RE.finditer(masked))
     if operator_hits:
@@ -1448,7 +1482,10 @@ def _custom_sql_limitations(table: dict[str, Any]) -> list[dict[str, Any]]:
     swallowed_matches = [
         match
         for match in raw_escapes
-        if any(start <= match.start() < end and unterminated for start, end, unterminated in comment_spans)
+        if any(
+            start <= match.start() < end and unterminated and _SQL_LINE_START_RE.match(sql[match.end() : end])
+            for start, end, unterminated in comment_spans
+        )
     ]
     swallowed_positions = {match.start() for match in swallowed_matches}
     swallowed_escapes = sorted({match.group(0) for match in swallowed_matches})
