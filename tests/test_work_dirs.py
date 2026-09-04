@@ -82,7 +82,8 @@ def test_sanitize_unit_key_never_returns_empty_or_bare_punctuation() -> None:
 
 def test_sanitize_unit_key_caps_length() -> None:
     got = sanitize_unit_key("x" * 500)
-    assert len(got) <= 60
+    # The six-character reduction is the tested budget for the measured 265 -> 259 path shape.
+    assert len(got) <= 54
     assert got  # capping must never produce an empty result
 
 

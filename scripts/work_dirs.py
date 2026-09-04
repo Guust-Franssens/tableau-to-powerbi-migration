@@ -143,9 +143,12 @@ LAZY_SUBDIRS: frozenset[str] = frozenset({"deliverables"})
 
 _RUN_DIR_RE = re.compile(r"^(\d+)(?:-.*)?$")
 _RESERVATIONS_DIR_NAME = ".run-number-reservations"
-# Matches the Fabric artifact-name ceiling used elsewhere in this org's conventions (table names
-# under 60 chars) - the slug is decoration, not identity, so there is no reason to let it run long.
-_MAX_UNIT_KEY_LEN = 60
+# The old 60-character slug made the measured 265-unit path six characters too long. Keep that
+# measured reduction explicit: the equivalent path must fit the observed 259-character file ceiling
+# when the run slug is the only part changed. The run number remains the permanent identity.
+_MEASURED_LONG_PATH = 265
+_MEASURED_SAFE_PATH = 259
+_MAX_UNIT_KEY_LEN = 60 - (_MEASURED_LONG_PATH - _MEASURED_SAFE_PATH)
 _MAX_ALLOCATION_ATTEMPTS = 50  # generous; a genuine collision only ever needs one retry
 
 #: Manifest key under which `allocate_run` records the directory NAME (`<NNN>-<slug>`) it allocated.

@@ -149,6 +149,7 @@ from check_blank_placeholders import scan as scan_blank_placeholders
 from check_pbir_valid import REPORT_NAME as PBIR_VALID_REPORT
 from check_pbir_valid import render as render_pbir_valid
 from check_pbir_valid import scan as scan_pbir_validity
+from check_path_ceiling import DIR_CEILING, FILE_CEILING, utf16_len
 from engine_source import EngineNotFoundError, NonCanonicalEngineError, engine_provenance, resolve_engine
 from migration_bundle import ENGINE_RECEIPT, sha256_file, write_engine_receipt
 
@@ -169,11 +170,106 @@ EXIT_EMPTY_MODEL = 6
 EXIT_INVALID_PBIR = 7
 EXIT_BLANK_PLACEHOLDER = 8
 EXIT_BUNDLE_REWRITE = 9
+EXIT_PATH_CEILING = 10
 GENERATED_ARTIFACTS_KEY = "generated_artifacts"
 SLICE_ONLY_COVERAGE = "slice_only_backfill"
 VOLATILE_GENERATED_DIRS = {".pbi"}
 SCRATCH_DIRS = frozenset({"scratch", "_work", "_build", "_probe", "tmp", "temp", "_shots"})
 SCRATCH_INTENTS = frozenset(part.lstrip("._") for part in SCRATCH_DIRS)
+_PBIR_PAGE_ID = "page-id"
+_PBIR_VISUAL_ID = "visual-id"
+_PBIR_VISUAL_FILE = "visual" + ".json"
+_PBIR_VISUAL_TAIL = f"definition/pages/{_PBIR_PAGE_ID}/visuals/{_PBIR_VISUAL_ID}/{_PBIR_VISUAL_FILE}"
+
+
+def _input_unit_names(input_dir: Path) -> list[str] | None:
+    """Return source names available before conversion, or ``None`` when the input is not assessable."""
+    if input_dir.is_file():
+        candidates = [input_dir]
+    elif input_dir.is_dir():
+        candidates = sorted(
+            path
+            for path in input_dir.rglob("*")
+            if path.is_file() and path.suffix.lower() in {".twb", ".twbx", ".tds", ".tdsx"}
+        )
+    else:
+        return None
+    return [path.stem for path in candidates] or None
+
+
+def project_estate_path_ceiling(output_root: Path, unit_names: list[str] | None) -> dict:
+    """Project the canonical PBIP visual path before the engine writes any output.
+
+    The fixed page/visual identifiers define the minimum canonical PBIR safety envelope; the estate's
+    longest source name and actual output root are the variable inputs available at this stage.
+    """
+    output_root = output_root.resolve()
+    if not unit_names:
+        return {
+            "status": "cannot_establish",
+            "reason": "no unit/workbook name was available before conversion",
+            "output_root": str(output_root),
+        }
+    records = []
+    for name in unit_names:
+        unit = str(name)
+        report = f"{unit}.Report"
+        report_root = output_root / "pbip" / unit / report
+        directory = report_root / _PBIR_VISUAL_TAIL.rsplit("/", 1)[0]
+        file_path = report_root / _PBIR_VISUAL_TAIL
+        records.extend(
+            (
+                {
+                    "kind": "directory",
+                    "path": str(directory),
+                    "length": utf16_len(str(directory)),
+                    "ceiling": DIR_CEILING,
+                },
+                {
+                    "kind": "file",
+                    "path": str(file_path),
+                    "length": utf16_len(str(file_path)),
+                    "ceiling": FILE_CEILING,
+                },
+            )
+        )
+    offenders = [record for record in records if record["length"] > record["ceiling"]]
+    return {
+        "status": "over_ceiling" if offenders else "ok",
+        "output_root": str(output_root),
+        "longest_unit": max(unit_names, key=utf16_len),
+        "paths": records,
+        "offenders": offenders,
+    }
+
+
+def preflight_estate_path_ceiling(input_dir: Path, output_root: Path) -> tuple[bool, str]:
+    """Refuse an estate whose canonical downstream PBIP skeleton exceeds Desktop's ceilings."""
+    names = _input_unit_names(input_dir)
+    try:
+        projection = project_estate_path_ceiling(output_root, names)
+    except (UnicodeEncodeError, ValueError) as exc:
+        return False, (
+            f"CANNOT ASSESS downstream PBIP path length ({type(exc).__name__}: {exc}). "
+            "Allocate/use a shorter run/output root, then retry."
+        )
+    if projection["status"] == "cannot_establish":
+        return False, (
+            "CANNOT ASSESS downstream PBIP path length: the input estate has no usable unit/workbook "
+            "name. Allocate/use a shorter run/output root, then retry."
+        )
+    if projection["status"] == "over_ceiling":
+        worst = max(projection["offenders"], key=lambda record: record["length"] - record["ceiling"])
+        return False, (
+            f"PATH CEILING: projected {worst['kind']} is {worst['length']} UTF-16 units "
+            f"(ceiling {worst['ceiling']}) for unit {projection['longest_unit']!r}. "
+            "Allocate/use a shorter run/output root; LongPathsEnabled and \\\\?\\ prefixes do not make "
+            "Power BI Desktop accept these paths."
+        )
+    return True, (
+        f"PATH CEILING: projected canonical PBIP visual path fits ({projection['longest_unit']!r}); "
+        "this is the pre-conversion safety envelope."
+    )
 
 
 def run_engine(engine: Path, src: Path, out: Path, approved_dax: Path | None) -> tuple[int, str]:
@@ -1094,6 +1190,11 @@ def resolve_run_engine(args: argparse.Namespace) -> tuple[Path | None, int]:
         provenance["version"] or "unknown",
         "canonical plugin" if provenance["canonical"] else "NON-CANONICAL OVERRIDE",
     )
+    if args.input:
+        path_ok, path_detail = preflight_estate_path_ceiling(args.input, args.output)
+        print(path_detail)
+        if not path_ok:
+            return None, EXIT_PATH_CEILING
     return engine, EXIT_OK
 
 

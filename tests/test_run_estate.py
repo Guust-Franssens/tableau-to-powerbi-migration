@@ -19,6 +19,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import run_estate  # noqa: E402  # pylint: disable=wrong-import-position
+from check_path_ceiling import DIR_CEILING, FILE_CEILING, utf16_len  # noqa: E402
 
 
 def _report(workbooks=None, dod_status="pass", gates=None) -> dict:
@@ -56,6 +57,17 @@ def _write(path: Path, text: str = "x") -> Path:
     return path
 
 
+def _root_for_length(length: int) -> Path:
+    """A synthetic absolute-like root with an exact UTF-16 length."""
+    return Path("/" + "r" * (length - 1))
+
+
+def _boundary_root(unit: str, ceiling: int) -> Path:
+    probe = run_estate.project_estate_path_ceiling(Path("/r"), [unit])
+    file_length = next(path["length"] for path in probe["paths"] if path["kind"] == "file")
+    return _root_for_length(1 + ceiling - file_length + 1)
+
+
 # ---------------------------------------------------------------------------
 # The reason this script exists at all
 # ---------------------------------------------------------------------------
@@ -72,6 +84,47 @@ def test_a_failed_definition_of_done_is_not_a_pass() -> None:
     ok, detail = run_estate.check_definition_of_done(_report(dod_status="failed"))
     assert ok is False
     assert "failed" in detail
+
+
+def test_projected_path_uses_utf16_and_accepts_the_measured_file_boundary() -> None:
+    unit = "A" * 20
+    root = _boundary_root(unit, FILE_CEILING)
+    projection = run_estate.project_estate_path_ceiling(root, [unit])
+    file_path = next(path for path in projection["paths"] if path["kind"] == "file")
+    assert file_path["length"] == FILE_CEILING
+    assert projection["status"] == "ok"
+
+
+def test_projected_path_refuses_the_next_file_and_directory_boundaries() -> None:
+    unit = "A" * 20
+    root = _boundary_root(unit, FILE_CEILING + 1)
+    projection = run_estate.project_estate_path_ceiling(root, [unit])
+    assert projection["status"] == "over_ceiling"
+    assert any(path["length"] == FILE_CEILING + 1 for path in projection["offenders"])
+    assert any(path["length"] == DIR_CEILING + 1 for path in projection["offenders"])
+
+
+def test_projected_path_counts_supplementary_characters_as_two_units() -> None:
+    unit = "😀" * 20
+    projection = run_estate.project_estate_path_ceiling(Path("/r"), [unit])
+    file_path = next(path for path in projection["paths"] if path["kind"] == "file")
+    assert file_path["length"] == utf16_len(file_path["path"])
+    assert file_path["length"] > len(file_path["path"])
+
+
+def test_estate_path_preflight_accepts_short_root_and_refuses_long_root(tmp_path: Path) -> None:
+    source = tmp_path / ("A" * 20 + ".twb")
+    source.write_text("<workbook />", encoding="utf-8")
+    assert run_estate.preflight_estate_path_ceiling(source, Path("/short"))[0] is True
+    ok, detail = run_estate.preflight_estate_path_ceiling(source, _boundary_root("A" * 20, FILE_CEILING + 1))
+    assert ok is False
+    assert "shorter run/output root" in detail
+
+
+def test_estate_path_preflight_cannot_assess_missing_input(tmp_path: Path) -> None:
+    ok, detail = run_estate.preflight_estate_path_ceiling(tmp_path / "missing", Path("/short"))
+    assert ok is False
+    assert "CANNOT ASSESS" in detail
 
 
 def test_warn_is_allowed_through() -> None:
@@ -225,6 +278,7 @@ def test_the_generated_manifest_is_written_before_the_engine_receipt(tmp_path: P
     monkeypatch.setattr(run_estate, "run_engine", _fake_engine)
     src = tmp_path / "src"
     src.mkdir()
+    (src / "unit.twb").write_text("<workbook />", encoding="utf-8")
     argv = [
         "--engine",
         str(tmp_path / "engine"),
@@ -282,6 +336,7 @@ def test_the_bundle_records_which_engine_built_it(tmp_path: Path, monkeypatch) -
     monkeypatch.setattr(run_estate, "run_engine", _fake_engine)
     src = tmp_path / "src"
     src.mkdir()
+    (src / "unit.twb").write_text("<workbook />", encoding="utf-8")
     argv = ["--engine", str(engine), "--allow-noncanonical-engine", "--input", str(src), "--output", str(out)]
     assert run_estate.main(argv) == run_estate.EXIT_OK
 
@@ -795,6 +850,7 @@ def _first_run(tmp_path: Path, monkeypatch, version: str = "2.339.0") -> tuple[P
     out = tmp_path / "bundle"
     src = tmp_path / "src"
     src.mkdir(exist_ok=True)
+    (src / "unit.twb").write_text("<workbook />", encoding="utf-8")
     monkeypatch.setattr(run_estate, "run_engine", _bundle_engine())
     assert run_estate.main(_landing_argv(engine, src, out)) == run_estate.EXIT_OK
     return engine, src, out
@@ -929,6 +985,7 @@ def test_a_slice_only_backfill_cannot_bless_downstream_work_as_engine_output(tmp
     out = tmp_path / "bundle"
     src = tmp_path / "src"
     src.mkdir()
+    (src / "unit.twb").write_text("<workbook />", encoding="utf-8")
     _write(out / "report.json", json.dumps(_report()))
     sentinel = _write(out / "pbip" / "WB" / "WB.SemanticModel" / "definition" / "tables" / "Hand.tmdl", "table Hand")
 
@@ -989,6 +1046,7 @@ def test_a_bundle_with_no_baseline_blocks_rather_than_reporting_clean(tmp_path: 
     out = tmp_path / "bundle"
     src = tmp_path / "src"
     src.mkdir()
+    (src / "unit.twb").write_text("<workbook />", encoding="utf-8")
     _write(out / "report.json", json.dumps(_report()))
     sentinel = _write(out / "pbip" / "WB" / "WB.SemanticModel" / "definition" / "tables" / "Hand.tmdl", "table Hand")
     calls = _relanding(monkeypatch)
@@ -1006,6 +1064,7 @@ def test_an_unassessable_bundle_is_recoverable_with_both_acknowledgements(tmp_pa
     out = tmp_path / "bundle"
     src = tmp_path / "src"
     src.mkdir()
+    (src / "unit.twb").write_text("<workbook />", encoding="utf-8")
     _write(out / "report.json", json.dumps(_report()))
     _write(out / "pbip" / "WB" / "WB.SemanticModel" / "definition" / "tables" / "Hand.tmdl", "table Hand")
     calls = _relanding(monkeypatch)
@@ -1331,6 +1390,7 @@ def test_an_existing_but_non_bundle_output_folder_is_not_treated_as_a_bundle(tmp
     out = tmp_path / "bundle"
     src = tmp_path / "src"
     src.mkdir()
+    (src / "unit.twb").write_text("<workbook />", encoding="utf-8")
     _write(out / "notes.md", "operator scratch, nothing the engine wrote")
     calls = _relanding(monkeypatch)
 
