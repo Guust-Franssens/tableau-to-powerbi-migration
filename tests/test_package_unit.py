@@ -2307,3 +2307,467 @@ def test_write_png_is_a_real_image_so_these_fixtures_could_fail(tmp_path: Path) 
         tmp_path / "probe.png",
         rev.RecordedFacts(sha256=hashlib.sha256(blob).hexdigest(), byte_size=len(blob), width=320, height=240),
     ) == (320, 240)
+
+
+# --------------------------------------------------------------------------------------------
+# 7. the blind-review round-4 blockers
+#
+# Six findings, each reproduced through the real CLI on the branch before it was fixed, and each
+# invisible to every gate that was already green. They share one shape: a verdict that reads as a
+# pass while the thing it is a verdict ABOUT could not be established, could not be contained, or
+# was never even the right file.
+# --------------------------------------------------------------------------------------------
+
+
+def _cli(tmp_path: Path, bundle: Path, *extra: str) -> int:
+    """The CLI as an operator runs it, returning the exit CODE - never the printed text."""
+    return pkg.main(["--bundle", str(bundle), "--out", str(_out(tmp_path)), "--quiet", *extra])
+
+
+# --- B6: a source-controlled unit name must not choose where this packager writes ------------
+
+
+@pytest.mark.parametrize(
+    "evil",
+    [
+        r"..\escaped-package",
+        "../escaped-posix",
+        r"sub\..\..\escaped-nested",
+        "sub/../../escaped-nested-posix",
+        r"C:\escaped-absolute",
+        "/escaped-rooted",
+        "..",
+    ],
+)
+def test_a_unit_name_that_escapes_the_out_directory_is_refused(tmp_path: Path, evil: str) -> None:
+    """Reproduced: a workbook named `..\\escaped-package` wrote a full package OUTSIDE `--out`.
+
+    The name is not ours - `bundle_units` reads it from the engine's `report.json`
+    (`workbooks[].name`) and from `pbip/` directory names, both of which come from the customer's
+    Tableau estate, so this is source-controlled input reaching a filesystem write. Measured before
+    the fix: `requested_out=...\\packages\\out`, `written=...\\packages\\escaped-package`,
+    `written_is_inside_out=False`, exit 1, empty stderr.
+
+    Both separators are exercised on BOTH platforms on purpose: a packaging host is not necessarily
+    the harvest host, and `..\\x` is one innocent filename to `PurePosixPath` and a traversal to
+    Windows.
+    """
+    bundle, _ = _bundle(tmp_path)
+    write_engine_report(bundle, workbooks=[UNIT, evil])
+    assert evil in pkg.bundle_units(bundle), "the fixture must actually offer the hostile name"
+
+    before = {path for path in _out(tmp_path).parent.rglob("*")} if _out(tmp_path).parent.exists() else set()
+    code = _cli(tmp_path, bundle, "--unit", evil)
+    after = {path for path in _out(tmp_path).parent.rglob("*")}
+
+    assert code == pkg.EXIT_UNIT_FAILED
+    out = _out(tmp_path)
+    escaped = sorted(path for path in after - before if path != out and out not in path.parents)
+    assert not escaped, f"packaging wrote outside --out: {escaped}"
+
+
+def test_the_unit_name_guard_names_the_problem_rather_than_sanitizing_it(tmp_path: Path) -> None:
+    """Refused, not rewritten: every later join is keyed by the unit name.
+
+    Silently mapping `..\\x` to `_x` would package a unit under a name that matches nothing in the
+    bundle - no handover slice, no oracle attribution, and `promote_unit.py` reading a manifest kind
+    for a unit the engine never emitted.
+    """
+    assert pkg.unit_name_problem(UNIT) is None
+    assert pkg.unit_name_problem("Sales - 2026 (final).v2") is None
+    for evil in (r"..\x", "../x", "", "   ", ".", "..", r"C:\x", "/x", r"a\b", "a/b"):
+        assert pkg.unit_name_problem(evil) is not None, f"{evil!r} was accepted as a unit name"
+
+    # Each branch has to be independently observable, or a mutation that deletes one is caught only
+    # by the catch-all below it and the deleted branch is credited as covered. Measured while
+    # writing this: removing the separator branch entirely left every rejection intact, because
+    # `PurePath(...).name` rejects the same strings with a vaguer reason.
+    assert "path separator" in (pkg.unit_name_problem(r"a\b") or "")
+    assert "path separator" in (pkg.unit_name_problem("a/b") or "")
+    assert "relative directory reference" in (pkg.unit_name_problem("..") or "")
+    assert "drive-qualified" in (pkg.unit_name_problem("C:") or "")
+    assert "empty" in (pkg.unit_name_problem("   ") or "")
+
+    with pytest.raises(pkg.UnsafeUnitName):
+        pkg.assert_package_destination(tmp_path, r"..\escape")
+    assert pkg.assert_package_destination(tmp_path, UNIT) == tmp_path / UNIT
+
+
+# --- B5: "cannot assess" is its own blocking state, distinct from clean AND from failed -------
+
+
+def test_a_truncated_engine_report_is_refused_rather_than_packaged_unclassified(tmp_path: Path) -> None:
+    """Reproduced: `exit 0  OK Book [unclassified]`, with no notes at all.
+
+    `read_json` returns None for absent AND for corrupt, so a `report.json` nobody could parse read
+    as "this bundle classifies nothing" - and the unit was packaged with a classification invented
+    by the fallback.
+    """
+    bundle, _ = _bundle(tmp_path)
+    (bundle / "report.json").write_text('{"workbooks": [{"name": "Book"', encoding="utf-8")
+    assert _cli(tmp_path, bundle, "--unit", UNIT) == pkg.EXIT_CANNOT_ASSESS
+    assert not (_out(tmp_path) / UNIT).exists(), "a package was written from input that could not be read"
+
+
+def test_a_truncated_handover_slice_is_refused_rather_than_silently_absent(tmp_path: Path) -> None:
+    """Reproduced: `exit 0`, and the handover slice simply not in the package."""
+    bundle, _ = _bundle(tmp_path)
+    (bundle / "handover" / f"{UNIT}.json").write_text('{"workbook": {"source_id"', encoding="utf-8")
+    assert _cli(tmp_path, bundle, "--unit", UNIT) == pkg.EXIT_CANNOT_ASSESS
+    assert not (_out(tmp_path) / UNIT).exists()
+
+
+@pytest.mark.parametrize("name", ["source-provenance.json", "engine-output-receipt.json", "input_manifest.json"])
+def test_every_bundle_input_that_must_be_read_is_refused_when_it_is_corrupt(tmp_path: Path, name: str) -> None:
+    """The whole enumerated surface, not just the two the reviewer happened to truncate."""
+    bundle, _ = _bundle(tmp_path)
+    (bundle / name).write_text("{ not json", encoding="utf-8")
+    assert _cli(tmp_path, bundle, "--unit", UNIT) == pkg.EXIT_CANNOT_ASSESS
+    assert not (_out(tmp_path) / UNIT).exists()
+
+
+def test_an_ABSENT_input_still_packages_because_absence_is_not_corruption(tmp_path: Path) -> None:
+    """The negative control the refusal above must not swallow.
+
+    `source-provenance.json`, `engine-output-receipt.json` and `input_manifest.json` are all
+    legitimately absent in real bundle shapes, and a packager that refused an absence would refuse
+    most of the reference estate. Corruption is what cannot be assessed; absence is a fact.
+    """
+    bundle, _ = _bundle(tmp_path)
+    for name in ("source-provenance.json", "engine-output-receipt.json", "input_manifest.json"):
+        (bundle / name).unlink(missing_ok=True)
+    assert _cli(tmp_path, bundle, "--unit", UNIT) == 0
+    assert (_out(tmp_path) / UNIT / "package-manifest.json").is_file()
+
+
+def test_a_workbook_whose_source_asset_vanished_cannot_be_assessed(tmp_path: Path) -> None:
+    """Reproduced: `exit 0  OK Book`, for a package on which BOTH gates return CANNOT_ESTABLISH.
+
+    Without the source, `check_unit` cannot derive an expected page set (#443) and the entry gate
+    reports `CANNOT_ESTABLISH`, so every per-page verdict the package would yield is "I do not
+    know". Saying `OK` for it is the clean-verdict-from-unreadable-input class exactly.
+    """
+    bundle, _ = _bundle(tmp_path)
+    for path in (tmp_path / "assets").iterdir():
+        path.unlink()
+    assert _cli(tmp_path, bundle, "--unit", UNIT) == pkg.EXIT_CANNOT_ASSESS
+    assert not (_out(tmp_path) / UNIT).exists()
+
+
+def test_a_datasource_unit_with_no_asset_still_packages_because_it_claims_no_pages(tmp_path: Path) -> None:
+    """The negative control for the rule above - 18 of 67 units in the reference run are this shape.
+
+    A datasource-only unit ships a model and no report, so it makes no page claim and its missing
+    asset blinds nothing. Refusing it would refuse a quarter of the estate.
+    """
+    bundle, oracle = _bundle(tmp_path, datasources=("Shared_Extract",))
+    model = bundle / "pbip" / "Shared_Extract" / "Shared_Extract.SemanticModel" / "definition"
+    model.mkdir(parents=True, exist_ok=True)
+    (model / "model.tmdl").write_text("model Model\n", encoding="utf-8")
+    result = pkg.package_unit(
+        bundle, "Shared_Extract", _out(tmp_path), oracle_dir=oracle, assets_dir=bundle.parent / "assets"
+    )
+    assert result["artifacts"]["asset"] is None
+    assert (_out(tmp_path) / "Shared_Extract" / "fabric" / "Shared_Extract.SemanticModel").is_dir()
+
+
+def test_a_bundle_that_names_no_units_at_all_never_reports_success(tmp_path: Path) -> None:
+    """Reproduced: `packaged 0/0` at exit 0 - true, useless, and read by a caller as "estate done"."""
+    bundle, _ = _bundle(tmp_path)
+    write_engine_report(bundle, workbooks=[], datasources=[])
+    shutil.rmtree(bundle / "pbip")
+    assert pkg.bundle_units(bundle) == []
+    report = tmp_path / "packaging.json"
+    assert _cli(tmp_path, bundle, "--json", str(report)) == pkg.EXIT_CANNOT_ASSESS
+    assert json.loads(report.read_text(encoding="utf-8"))["cannot_assess"]
+
+
+def test_cannot_assess_outranks_every_verdict_about_content(tmp_path: Path) -> None:
+    """One unassessable unit beside a perfectly good one is still a cannot-assess RUN.
+
+    The good unit is still packaged - one bad input must not cost an estate its other 66 units - but
+    the run's own code says "there is something here I could not read", because that is the only
+    honest thing a caller can act on.
+    """
+    bundle, _ = _bundle(tmp_path)
+    write_engine_report(bundle, workbooks=[UNIT, "Never_Emitted"])
+    (bundle / "handover" / "Never_Emitted.json").write_text("{ truncated", encoding="utf-8")
+    assert _cli(tmp_path, bundle) == pkg.EXIT_CANNOT_ASSESS
+    assert (_out(tmp_path) / UNIT / "package-manifest.json").is_file()
+    assert not (_out(tmp_path) / "Never_Emitted").exists()
+
+
+def test_a_TRUNCATED_ORACLE_still_packages_so_the_entry_gate_can_report_those_pages_blind(tmp_path: Path) -> None:
+    """The deliberate hole in the cannot-assess surface, pinned so it cannot be closed by accident.
+
+    An oracle that is missing, absent or truncated must still PACKAGE: a unit whose oracle has no
+    render for a page is the negative control the whole packaging contract is written around, and it
+    has to reach `check_reference_readiness.py` as exit 1 FINDINGS rather than never existing. The
+    oracle is evidence ABOUT the unit; the four bundle inputs above are what the unit IS.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    (oracle / "oracle-manifest.json").write_text('{"views": [', encoding="utf-8")
+    assert _cli(tmp_path, bundle, "--unit", UNIT) in {0, pkg.EXIT_NO_WORKING_COPY}
+    assert (_out(tmp_path) / UNIT / "package-manifest.json").is_file()
+
+
+# --- B3: the declared digest is enforced, and a staged path is read in its OWN flavour --------
+
+
+def test_a_source_contradicting_the_declared_digest_refuses_instead_of_shipping(tmp_path: Path) -> None:
+    """Reproduced: `expected 5d65d756...`, `shipped 54a6036a...`, `package_exit=0`.
+
+    The manifest digest exists for exactly this and nothing consulted it. A package whose `assets/`
+    holds a different workbook silently invalidates every page verdict both gates then compute from
+    it, so the refusal is total: nothing is written.
+    """
+    bundle, _ = _bundle(tmp_path)
+    name = f"{WB_LUID}_{UNIT}.twb"
+    other = write_workbook(tmp_path / "other" / name, worksheets=["Something", "Else"])
+    (bundle / "input_manifest.json").write_text(
+        json.dumps({"assets": [{"name": name, "sha256": hashlib.sha256(other.read_bytes()).hexdigest()}]}),
+        encoding="utf-8",
+    )
+    assert _cli(tmp_path, bundle, "--unit", UNIT) == pkg.EXIT_UNIT_FAILED
+    assert not (_out(tmp_path) / UNIT).exists()
+
+
+def test_a_source_MATCHING_the_declared_digest_packages_normally(tmp_path: Path) -> None:
+    """The control: enforcing a digest must not refuse the estate it was measured on."""
+    bundle, _ = _bundle(tmp_path)
+    name = f"{WB_LUID}_{UNIT}.twb"
+    real = tmp_path / "assets" / name
+    (bundle / "input_manifest.json").write_text(
+        json.dumps({"assets": [{"name": name, "sha256": hashlib.sha256(real.read_bytes()).hexdigest()}]}),
+        encoding="utf-8",
+    )
+    assert _cli(tmp_path, bundle, "--unit", UNIT) == 0
+    shipped = _out(tmp_path) / UNIT / "assets" / name
+    assert hashlib.sha256(shipped.read_bytes()).digest() == hashlib.sha256(real.read_bytes()).digest()
+
+
+def test_a_manifest_declaring_no_digest_is_an_absence_not_a_mismatch(tmp_path: Path) -> None:
+    """`sha256` is optional in the shapes measured here; an absent declaration cannot contradict."""
+    bundle, _ = _bundle(tmp_path)
+    name = f"{WB_LUID}_{UNIT}.twb"
+    (bundle / "input_manifest.json").write_text(json.dumps({"assets": [{"name": name}]}), encoding="utf-8")
+    assert pkg.declared_asset_digest(bundle, name) is None
+    assert _cli(tmp_path, bundle, "--unit", UNIT) == 0
+
+
+def test_a_foreign_flavour_staged_path_is_never_reinterpreted_by_the_host(tmp_path: Path) -> None:
+    """Reproduced: a POSIX `staged_input_path` was resolved against the CURRENT DRIVE on Windows.
+
+    `Path` is the host's. A literal written by a Linux harvest is not a fallback for a Windows
+    packager to reinterpret - it is a path this machine cannot own, and whatever bytes happen to sit
+    at the reinterpreted location are not the customer's workbook. The same hazard, and the same
+    fix, as `_classify_source` (round-2 finding 2).
+    """
+    foreign = "/mnt/share/elsewhere/Book.twb" if os.name == "nt" else r"C:\share\elsewhere\Book.twb"
+    assert not pf.is_host_native(foreign)
+
+    bundle, _ = _bundle(tmp_path)
+    (bundle / "handover" / f"{UNIT}.json").write_text(json.dumps({"workbook": {"source_id": ""}}), encoding="utf-8")
+    (bundle / "input_manifest.json").write_text(
+        json.dumps({"assets": [{"name": f"{UNIT}.twb", "staged_input_path": foreign}]}), encoding="utf-8"
+    )
+    asset, route = pkg.resolve_asset(bundle, UNIT, {}, tmp_path / "no-such-assets")
+    assert asset is None, f"a foreign staged path was reinterpreted as {asset}"
+    assert route == "unresolved"
+
+
+# --- B4: a host path that cannot be classified must not ship verbatim -------------------------
+
+
+def test_a_host_path_the_packager_cannot_classify_is_still_CONTAINED(tmp_path: Path) -> None:
+    """Reproduced: `File.Contents("/Users/<person>/private-data")` shipped verbatim at exit 4.
+
+    A POSIX user-profile directory has no file suffix and no trailing separator, so
+    `_path_verdict` returns UNCLASSIFIED and the shape-only neutralizer skipped it. Exit 4 was
+    right - the unit is not self-contained - but exit 4 means "written and incomplete", and a
+    package carrying somebody's home directory is not merely incomplete. Containment now comes from
+    the literal's ROLE: `File.Contents` reads files and nothing else.
+    """
+    literal = "/Users/review-canary/private-data" if os.name == "nt" else r"C:\Users\review-canary\private-data"
+    bundle, oracle = _bundle(tmp_path)
+    _point_partition_at(bundle, literal)
+    code = _cli(tmp_path, bundle, "--unit", UNIT)
+    assert code == pkg.EXIT_NOT_SELF_CONTAINED
+
+    shipped = "\n".join(path.read_text(encoding="utf-8") for path in (_out(tmp_path) / UNIT / "fabric").rglob("*.tmdl"))
+    assert literal not in shipped, "the customer's host path shipped inside the package"
+    assert pkg.UNAVAILABLE_TOKEN in shipped
+    record = json.loads((_out(tmp_path) / UNIT / "package-manifest.json").read_text(encoding="utf-8"))
+    assert record["self_contained"] is False
+
+
+def test_an_UNCATALOGUED_service_route_is_still_left_alone(tmp_path: Path) -> None:
+    """The control the role rule must not break: containment is by role, not by "POSIX-absolute".
+
+    A Databricks endpoint is never a `File.Contents` argument - no Databricks model writes one - so
+    widening containment to the `File.Contents` role cannot reach it, and rewriting a working
+    endpoint into a filesystem token would break a model that was never broken.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    _point_partition_at(bundle, http_path="/sql/1.0/warehouses/764e5801f0e0fac8")
+    assert _cli(tmp_path, bundle, "--unit", UNIT) == 0
+    shipped = "\n".join(path.read_text(encoding="utf-8") for path in (_out(tmp_path) / UNIT / "fabric").rglob("*.tmdl"))
+    assert "/sql/1.0/warehouses/764e5801f0e0fac8" in shipped
+
+
+def test_an_unclassifiable_literal_in_an_UNKNOWN_field_is_recorded_and_left_alone(tmp_path: Path) -> None:
+    """The other half of the control, and the one the `HttpPath` fixture structurally cannot give.
+
+    `HttpPath` is exonerated by :func:`package_unit._service_routes` before containment is even
+    consulted, so widening containment to *every* POSIX-absolute literal leaves that fixture green.
+    This literal is in a field nothing has catalogued - so it is UNCLASSIFIED, it is NOT a
+    `File.Contents` argument, and the packager has no evidence it is a path at all. The contract is
+    the one `test_an_unassessable_POSIX_literal_is_RECORDED_not_silently_cleared` states: recorded
+    with its reason, never rewritten. Rewriting it would break a model that was never broken.
+    """
+    route = "/api/v2/customer-feed"
+    bundle, _ = _bundle(tmp_path)
+    definition = bundle / "pbip" / UNIT / f"{UNIT}.SemanticModel" / "definition"
+    (definition / "tables").mkdir(parents=True, exist_ok=True)
+    (definition / "model.tmdl").write_text("model Model\n\tculture: en-US\n\n", encoding="utf-8")
+    (definition / "tables" / "Feed.tmdl").write_text(
+        "table Feed\n"
+        "\tpartition 'Feed' = m\n"
+        "\t\tmode: import\n"
+        "\t\tsource =\n"
+        "\t\t\tlet\n"
+        f'\t\t\t\tSource = SomeConnector.Contents("host.example.net", [Route = "{route}"])\n'
+        "\t\t\tin\n"
+        "\t\t\t\tSource\n",
+        encoding="utf-8",
+    )
+    assert _cli(tmp_path, bundle, "--unit", UNIT) == pkg.EXIT_NOT_SELF_CONTAINED
+    shipped = "\n".join(path.read_text(encoding="utf-8") for path in (_out(tmp_path) / UNIT / "fabric").rglob("*.tmdl"))
+    assert route in shipped, "an uncatalogued route was rewritten on shape alone"
+    assert pkg.UNAVAILABLE_TOKEN not in shipped
+    record = json.loads((_out(tmp_path) / UNIT / "package-manifest.json").read_text(encoding="utf-8"))
+    assert record["data_sources"]["neutralized"] == []
+    assert [row["reason"] for row in record["data_sources"]["omissions"]] == [pkg.UNCLASSIFIED_REASON]
+
+
+def test_a_package_that_cannot_be_made_safe_is_not_written_at_all(tmp_path: Path) -> None:
+    """The tripwire's own contract: when containment fails, nothing lands on disk.
+
+    `_assert_no_host_path_survives` used to escape as an uncaught traceback, whose interpreter
+    exit 1 is indistinguishable from `EXIT_NO_WORKING_COPY` - and it aborted the rest of the estate.
+    Simulated here by disabling the neutralizer, which is the only thing that makes the tripwire
+    unreachable.
+    """
+    literal = "/Users/review-canary/private-data" if os.name == "nt" else r"C:\Users\review-canary\private-data"
+    bundle, _ = _bundle(tmp_path)
+    _point_partition_at(bundle, literal)
+    original = pkg._neutralize_unshipped  # noqa: SLF001  # pylint: disable=protected-access
+    try:
+        pkg._neutralize_unshipped = lambda documents, final: ([], [])  # noqa: SLF001
+        code = _cli(tmp_path, bundle, "--unit", UNIT)
+    finally:
+        pkg._neutralize_unshipped = original  # noqa: SLF001
+    assert code == pkg.EXIT_UNIT_FAILED
+    assert not (_out(tmp_path) / UNIT).exists()
+
+
+# --- B2: a byPath that does not resolve inside the package is not self-contained --------------
+
+
+def _bind_report_to(bundle: Path, path: str) -> None:
+    """Write the engine's `definition.pbir` INSIDE the report folder, as real PBIP does."""
+    report = bundle / "pbip" / UNIT / f"{UNIT}.Report"
+    (report / "definition.pbir").write_text(
+        json.dumps({"version": "4.0", "datasetReference": {"byPath": {"path": path}}}), encoding="utf-8"
+    )
+
+
+def test_a_report_pointing_at_a_model_outside_the_package_is_NOT_self_contained(tmp_path: Path) -> None:
+    """Reproduced: `package_exit=0`, `manifest_model=null`, `package_self_contained_flag=true`.
+
+    `byPath: ../../Shared/Shared.SemanticModel` is the ordinary shared/published-datasource shape
+    and this repository has fixtures for it, so it is not an edge case. The consequence is silent by
+    construction: `powerbi-report-author validate` returns `errorCount: 0` for a `byPath` naming a
+    model that exists nowhere, and the report then opens in Desktop with no model at all.
+    """
+    bundle, _ = _bundle(tmp_path)
+    _bind_report_to(bundle, "../../Shared/Shared.SemanticModel")
+    assert _cli(tmp_path, bundle, "--unit", UNIT) == pkg.EXIT_NOT_SELF_CONTAINED
+
+    record = json.loads((_out(tmp_path) / UNIT / "package-manifest.json").read_text(encoding="utf-8"))
+    assert record["self_contained"] is False
+    assert record["model_binding"] == {
+        "kind": "byPath",
+        "path": "../../Shared/Shared.SemanticModel",
+        "resolves_in_package": False,
+    }
+
+
+def test_a_byPath_that_DOES_resolve_inside_the_package_is_self_contained(tmp_path: Path) -> None:
+    """The control: `../<Model>.SemanticModel` is what the engine actually emits, and must pass.
+
+    27 of 62 model names differ from their unit's, so the pair survives only because `pbip/<Unit>/`
+    is copied whole - which is precisely the case this check must not call broken.
+    """
+    bundle, _ = _bundle(tmp_path)
+    model = bundle / "pbip" / UNIT / f"{UNIT}.SemanticModel" / "definition"
+    model.mkdir(parents=True, exist_ok=True)
+    (model / "model.tmdl").write_text("model Model\n", encoding="utf-8")
+    _bind_report_to(bundle, f"../{UNIT}.SemanticModel")
+    assert _cli(tmp_path, bundle, "--unit", UNIT) == 0
+    record = json.loads((_out(tmp_path) / UNIT / "package-manifest.json").read_text(encoding="utf-8"))
+    assert record["model_binding"]["resolves_in_package"] is True
+    assert record["self_contained"] is True
+
+
+def test_a_byPath_escaping_through_the_package_root_does_not_count_as_resolved(tmp_path: Path) -> None:
+    """A model that exists on disk but OUTSIDE the package is not in the package.
+
+    Containment is the question, not existence - otherwise `../../../<somewhere real>` passes for
+    every builder whose machine happens to have one there, and for nobody the package is handed to.
+    """
+    bundle, _ = _bundle(tmp_path)
+    outside = _out(tmp_path).parent / "Shared.SemanticModel" / "definition"
+    outside.mkdir(parents=True, exist_ok=True)
+    (outside / "model.tmdl").write_text("model Model\n", encoding="utf-8")
+    _bind_report_to(bundle, "../../../Shared.SemanticModel")
+    assert _cli(tmp_path, bundle, "--unit", UNIT) == pkg.EXIT_NOT_SELF_CONTAINED
+
+
+def test_a_byConnection_report_makes_no_containment_claim(tmp_path: Path) -> None:
+    """A report bound to a published model was never supposed to carry one - recorded, and passed."""
+    bundle, _ = _bundle(tmp_path)
+    report = bundle / "pbip" / UNIT / f"{UNIT}.Report"
+    (report / "definition.pbir").write_text(
+        json.dumps({"version": "4.0", "datasetReference": {"byConnection": {"connectionString": "..."}}}),
+        encoding="utf-8",
+    )
+    assert _cli(tmp_path, bundle, "--unit", UNIT) == 0
+    record = json.loads((_out(tmp_path) / UNIT / "package-manifest.json").read_text(encoding="utf-8"))
+    assert record["model_binding"]["kind"] == "byConnection"
+    assert record["self_contained"] is True
+
+
+# --- the exit-code contract itself ------------------------------------------------------------
+
+
+def test_the_exit_codes_are_distinct_and_the_docstring_names_every_one() -> None:
+    """5 and 6 mean different things, and neither collides with anything already allocated.
+
+    PR #487 has this branch as its base and allocated 5 to `EXIT_UNIT_FAILED`; this file uses the
+    same number for the same meaning deliberately, so the two do not have to be reconciled after a
+    merge. 6 is the cannot-assess state, which must never collapse into either 0 or 5.
+    """
+    codes = {
+        pkg.EXIT_OK: "EXIT_OK",
+        pkg.EXIT_NO_WORKING_COPY: "EXIT_NO_WORKING_COPY",
+        pkg.EXIT_USAGE: "EXIT_USAGE",
+        pkg.EXIT_EDITS_REFUSED: "EXIT_EDITS_REFUSED",
+        pkg.EXIT_NOT_SELF_CONTAINED: "EXIT_NOT_SELF_CONTAINED",
+        pkg.EXIT_UNIT_FAILED: "EXIT_UNIT_FAILED",
+        pkg.EXIT_CANNOT_ASSESS: "EXIT_CANNOT_ASSESS",
+    }
+    assert len(codes) == 7, f"two exit codes collide: {codes}"
+    assert (pkg.EXIT_UNIT_FAILED, pkg.EXIT_CANNOT_ASSESS) == (5, 6)
+    for number in codes:
+        assert re.search(rf"^\| {number} \|", pkg.__doc__ or "", re.MULTILINE), f"exit {number} is undocumented"
