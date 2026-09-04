@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,7 @@ from work_dirs import (
     PATH_CHECK_MATCHES,
     PATH_CHECK_UNRECORDED,
     RUN_LOCATION_INTACT,
+    RUN_LOCATION_DUPLICATE,
     RUN_LOCATION_KEY,
     RUN_LOCATION_MOVED,
     RUN_LOCATION_UNVERIFIABLE,
@@ -206,6 +208,15 @@ def test_allocate_run_never_renumbers_or_reuses_a_number(tmp_path: Path) -> None
     assert run_a.root.is_dir()  # the first run's directory must still exist, untouched
 
 
+def test_allocate_run_does_not_reuse_a_deleted_run_number(tmp_path: Path) -> None:
+    first = allocate_run("acme", repo_root=tmp_path)
+    shutil.rmtree(first.root)
+
+    second = allocate_run("beta", repo_root=tmp_path)
+
+    assert second.run_number == 2
+
+
 def test_allocate_run_retries_past_a_pre_existing_collision(tmp_path: Path) -> None:
     """Simulates a collision: pre-create the directory the next allocation would naturally pick,
     and assert `allocate_run` skips over it rather than raising or overwriting (issue #234 AC1)."""
@@ -236,7 +247,7 @@ def test_allocate_run_retries_on_a_true_concurrent_mkdir_race(tmp_path: Path, mo
     triggered = {"n": 0}
 
     def racy_mkdir(self: Path, *args: object, **kwargs: object) -> None:
-        if self.name == "001-acme" and triggered["n"] == 0:
+        if self.name == "001" and triggered["n"] == 0:
             triggered["n"] += 1
             original_mkdir(self, parents=True, exist_ok=True)  # another process "wins" the race
         original_mkdir(self, *args, **kwargs)  # real semantics decide whether THIS call raises
@@ -248,6 +259,33 @@ def test_allocate_run_retries_on_a_true_concurrent_mkdir_race(tmp_path: Path, mo
     assert triggered["n"] == 1, "the simulated race was never triggered - this test proves nothing"
     assert run.run_number == 2
     assert not (runs_root(tmp_path) / "001-acme" / "run.json").exists(), "the raced-away run must not be finalized"
+
+
+def test_allocate_run_reserves_numbers_atomically_across_distinct_slugs(tmp_path: Path) -> None:
+    """issue #513: the full `<NNN>-<slug>` mkdir let simultaneous distinct slugs reuse one number.
+    The barrier makes every worker race for its first candidate; without it this is only serial allocation."""
+    names = [f"unit-{index}" for index in range(6)]
+    barrier = threading.Barrier(len(names))
+    runs: list = []
+    failures: list[BaseException] = []
+
+    def allocate(name: str) -> None:
+        try:
+            barrier.wait()
+            runs.append(allocate_run(name, repo_root=tmp_path))
+        except BaseException as exc:  # pragma: no cover - propagated below with the original exception
+            failures.append(exc)
+
+    threads = [threading.Thread(target=allocate, args=(name,)) for name in names]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert not failures
+    numbers = [run.run_number for run in runs]
+    assert len(runs) == len(names), "the barrier-synchronised workers did not all allocate"
+    assert len(set(numbers)) == len(numbers), "distinct slugs must never reuse a run number"
 
 
 def test_allocate_run_writes_a_readable_manifest(tmp_path: Path) -> None:
@@ -735,7 +773,12 @@ def test_the_gate_sees_exactly_the_run_inspection_omits(tmp_path: Path, shape: s
 
     assert [run["root"] for run in inspected] == [str(runs_root(tmp_path) / "001-healthy")]
     assert [Path(run["root"]).name for run in gated] == ["001-healthy", "002-half-written"]
-    assert counts == {RUN_LOCATION_INTACT: 1, RUN_LOCATION_MOVED: 0, RUN_LOCATION_UNVERIFIABLE: 1}
+    assert counts == {
+        RUN_LOCATION_INTACT: 1,
+        RUN_LOCATION_MOVED: 0,
+        RUN_LOCATION_DUPLICATE: 0,
+        RUN_LOCATION_UNVERIFIABLE: 1,
+    }
 
 
 def test_a_run_json_that_cannot_be_read_at_all_is_unverifiable_not_invisible(
@@ -789,7 +832,12 @@ def test_a_verified_tree_of_freshly_allocated_runs_is_still_clean(tmp_path: Path
 
     _runs, counts = verify_runs(tmp_path)
 
-    assert counts == {RUN_LOCATION_INTACT: 2, RUN_LOCATION_MOVED: 0, RUN_LOCATION_UNVERIFIABLE: 0}
+    assert counts == {
+        RUN_LOCATION_INTACT: 2,
+        RUN_LOCATION_MOVED: 0,
+        RUN_LOCATION_DUPLICATE: 0,
+        RUN_LOCATION_UNVERIFIABLE: 0,
+    }
     assert verify_exit_code(counts) == 0
 
 
@@ -805,18 +853,48 @@ def test_verify_runs_counts_each_state_separately(tmp_path: Path) -> None:
 
     _runs, counts = verify_runs(tmp_path)
 
-    assert counts == {RUN_LOCATION_INTACT: 1, RUN_LOCATION_MOVED: 1, RUN_LOCATION_UNVERIFIABLE: 1}
+    assert counts == {
+        RUN_LOCATION_INTACT: 1,
+        RUN_LOCATION_MOVED: 1,
+        RUN_LOCATION_DUPLICATE: 0,
+        RUN_LOCATION_UNVERIFIABLE: 1,
+    }
+
+
+def test_verify_runs_reports_duplicate_run_numbers_as_non_clean(tmp_path: Path) -> None:
+    first = allocate_run("acme", repo_root=tmp_path)
+    duplicate = runs_root(tmp_path) / "001-beta"
+    shutil.copytree(first.root, duplicate)
+    manifest = json.loads((duplicate / "run.json").read_text(encoding="utf-8"))
+    manifest.update({"unit_key": "beta", RUN_LOCATION_KEY: duplicate.name, RUN_PATH_KEY: str(duplicate)})
+    (duplicate / "run.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    runs, counts = verify_runs(tmp_path)
+
+    assert [run["location_check"]["state"] for run in runs] == [RUN_LOCATION_DUPLICATE] * 2
+    assert counts == {
+        RUN_LOCATION_INTACT: 0,
+        RUN_LOCATION_MOVED: 0,
+        RUN_LOCATION_DUPLICATE: 2,
+        RUN_LOCATION_UNVERIFIABLE: 0,
+    }
+    assert verify_exit_code(counts) == 2
+
+    result = _run_verify_cli(tmp_path)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "DUPLICATE" in result.stdout
 
 
 @pytest.mark.parametrize(
     ("counts", "expected"),
     [
-        ({RUN_LOCATION_INTACT: 3, RUN_LOCATION_MOVED: 0, RUN_LOCATION_UNVERIFIABLE: 0}, 0),
-        ({RUN_LOCATION_INTACT: 0, RUN_LOCATION_MOVED: 0, RUN_LOCATION_UNVERIFIABLE: 0}, 0),
-        ({RUN_LOCATION_INTACT: 1, RUN_LOCATION_MOVED: 1, RUN_LOCATION_UNVERIFIABLE: 0}, 1),
-        ({RUN_LOCATION_INTACT: 1, RUN_LOCATION_MOVED: 0, RUN_LOCATION_UNVERIFIABLE: 1}, 3),
+        ({RUN_LOCATION_INTACT: 3, RUN_LOCATION_MOVED: 0, RUN_LOCATION_DUPLICATE: 0, RUN_LOCATION_UNVERIFIABLE: 0}, 0),
+        ({RUN_LOCATION_INTACT: 0, RUN_LOCATION_MOVED: 0, RUN_LOCATION_DUPLICATE: 0, RUN_LOCATION_UNVERIFIABLE: 0}, 0),
+        ({RUN_LOCATION_INTACT: 1, RUN_LOCATION_MOVED: 1, RUN_LOCATION_DUPLICATE: 0, RUN_LOCATION_UNVERIFIABLE: 0}, 1),
+        ({RUN_LOCATION_INTACT: 1, RUN_LOCATION_MOVED: 0, RUN_LOCATION_DUPLICATE: 1, RUN_LOCATION_UNVERIFIABLE: 0}, 2),
+        ({RUN_LOCATION_INTACT: 1, RUN_LOCATION_MOVED: 0, RUN_LOCATION_DUPLICATE: 0, RUN_LOCATION_UNVERIFIABLE: 1}, 3),
         # an established finding outranks an unanswered question, but NEITHER is a pass
-        ({RUN_LOCATION_INTACT: 0, RUN_LOCATION_MOVED: 1, RUN_LOCATION_UNVERIFIABLE: 9}, 1),
+        ({RUN_LOCATION_INTACT: 0, RUN_LOCATION_MOVED: 1, RUN_LOCATION_DUPLICATE: 9, RUN_LOCATION_UNVERIFIABLE: 9}, 1),
     ],
 )
 def test_verify_exit_code_gates_on_state_never_on_printed_text(counts: dict, expected: int) -> None:
@@ -882,7 +960,7 @@ def test_verify_cli_exits_3_on_a_run_directory_it_cannot_assess(tmp_path: Path) 
 
     assert result.returncode == 3, result.stdout + result.stderr
     assert "UNVERIFIABLE" in result.stdout
-    assert "0 intact, 0 moved, 1 unverifiable" in result.stdout
+    assert "0 intact, 0 moved, 0 duplicate, 1 unverifiable" in result.stdout
     assert "1 run(s)" in result.stdout, "the run directory was counted as nothing at all"
 
 
@@ -1125,7 +1203,12 @@ def test_a_regular_file_beside_the_runs_is_not_a_candidate_run(tmp_path: Path) -
 
     _gated, counts = verify_runs(tmp_path)
 
-    assert counts == {RUN_LOCATION_INTACT: 1, RUN_LOCATION_MOVED: 0, RUN_LOCATION_UNVERIFIABLE: 0}
+    assert counts == {
+        RUN_LOCATION_INTACT: 1,
+        RUN_LOCATION_MOVED: 0,
+        RUN_LOCATION_DUPLICATE: 0,
+        RUN_LOCATION_UNVERIFIABLE: 0,
+    }
     assert verify_exit_code(counts) == 0
 
 
@@ -1171,7 +1254,12 @@ def test_a_runs_root_that_was_never_created_is_still_a_clean_zero(tmp_path: Path
     and must stay distinguishable from "the root exists and cannot be read"."""
     _gated, counts = verify_runs(tmp_path)
 
-    assert counts == {RUN_LOCATION_INTACT: 0, RUN_LOCATION_MOVED: 0, RUN_LOCATION_UNVERIFIABLE: 0}
+    assert counts == {
+        RUN_LOCATION_INTACT: 0,
+        RUN_LOCATION_MOVED: 0,
+        RUN_LOCATION_DUPLICATE: 0,
+        RUN_LOCATION_UNVERIFIABLE: 0,
+    }
     assert verify_exit_code(counts) == 0
 
 
@@ -1353,7 +1441,12 @@ def test_intact_is_constructed_at_exactly_one_place_in_work_dirs() -> None:
     assert _state_keyword_sites("RUN_LOCATION_INTACT") == ["check_run_location"]
     assert _state_keyword_sites("RUN_LOCATION_MOVED") == ["check_run_location"]
 
-    assert _constant_load_scopes("RUN_LOCATION_INTACT") == ["<module>", "check_run_location", "is_intact"], (
+    assert _constant_load_scopes("RUN_LOCATION_INTACT") == [
+        "<module>",
+        "check_run_location",
+        "is_intact",
+        "verify_runs",
+    ], (
         "a new scope references `intact` - either the classification surface re-opened, or this "
         "allowlist needs a deliberate update naming the new consumer"
     )
