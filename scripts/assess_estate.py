@@ -98,6 +98,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import resolve_datasource_target as target_resolution  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_render_capability as render_capability  # noqa: E402  # pylint: disable=wrong-import-position
 from tableau_env import env_source, pat_secret, redact, require, resolve_env  # noqa: E402  # pylint: disable=wrong-import-position
 
@@ -982,6 +983,10 @@ def assemble(raw: dict[str, Any], target: float) -> dict[str, Any]:
         # The site's render ceiling, carried through verbatim so a programmatic consumer reads the
         # same three numbers the report renders. `None` when the probe was not run at all.
         "server_ceiling": raw.get("server_ceiling"),
+        # Computed ONCE, estate-wide (issue #368): a named-target request is guarded per-request by
+        # `resolve_datasource_target.py`, but the hazard it would hit is surfaced here BEFORE anyone
+        # picks a target, not discovered mid-migration.
+        "datasource_hazards": target_resolution.datasource_class_hazards(raw),
         **_degraded_contract(raw.get("collection_errors") or [], len(curve)),
     }
 
@@ -1620,6 +1625,39 @@ def _render_degraded(assembled: dict[str, Any]) -> list[str]:
     return out
 
 
+def _render_datasource_hazards(assembled: dict[str, Any]) -> list[str]:
+    """Estate-wide datasource-name hazards (issue #368): surfaced once, before anyone picks a target.
+
+    Neither list means "this name is broken" - it means a named-target request for it cannot be
+    resolved by name alone, and `resolve_datasource_target.py` will (correctly) refuse it. Naming
+    the hazard here is what lets an operator pick a target that is not a landmine in the first
+    place, rather than discovering the refusal mid-migration.
+    """
+    hazards = assembled.get("datasource_hazards") or {}
+    cross_class = hazards.get("cross_class") or []
+    duplicates = hazards.get("duplicate_within_class") or []
+    if not cross_class and not duplicates:
+        return []
+    out = ["## ⚠️ Datasource name hazards", ""]
+    if cross_class:
+        out.append(
+            f"**{len(cross_class)} name(s) match BOTH published and embedded datasources** - a "
+            "named-target request for one of these is AMBIGUOUS ACROSS CLASSES and will be refused:"
+        )
+        for row in cross_class:
+            out.append(f"  - {row['name']!r} - classes: {', '.join(row['classes'])}")
+        out.append("")
+    if duplicates:
+        out.append(
+            f"**{len(duplicates)} name(s) are not unique within their own class** - a named-target "
+            "request for one of these is AMBIGUOUS and will be refused:"
+        )
+        for row in duplicates:
+            out.append(f"  - {row['name']!r} ({row['class']}) - {row['count']} candidates")
+        out.append("")
+    return out
+
+
 def render_report(assembled: dict[str, Any], raw: dict[str, Any], target: float) -> str:
     """The customer-facing summary. Leads with the decision, not the inventory."""
     rows = assembled["workbooks"]
@@ -1627,6 +1665,7 @@ def render_report(assembled: dict[str, Any], raw: dict[str, Any], target: float)
     out += _render_curve(rows, target)
     out += _render_tiers(rows)
     out += _render_sequencing(assembled, rows)
+    out += _render_datasource_hazards(assembled)
     out += _render_server_ceiling(assembled.get("server_ceiling"))
     out += _render_iam(assembled, raw)
     return "\n".join(out) + "\n"
