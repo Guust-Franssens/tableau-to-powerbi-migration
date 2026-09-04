@@ -533,6 +533,46 @@ def test_exit_code_is_ok_when_everything_is_paired_and_attributed(tmp_path):
     assert heg.main([str(bundle), "--quiet"]) == heg.EXIT_OK
 
 
+def test_harvest_isolated_from_source_mutation_after_snapshot(tmp_path, monkeypatch):
+    bundle = _bundle(tmp_path, entity_working="Renamed")
+    real_copytree = heg.shutil.copytree
+    target = bundle / "pbip" / "WB" / "WB.Report" / VISUAL
+
+    def copy_then_mutate(source, destination, *args, **kwargs):
+        result = real_copytree(source, destination, *args, **kwargs)
+        if Path(source) == bundle:
+            _write(target, _visual("Orders", position=41))
+        return result
+
+    monkeypatch.setattr(heg.shutil, "copytree", copy_then_mutate)
+
+    report = heg.harvest(bundle)
+
+    assert report["status"] == heg.STATUS_COMPLETE
+    assert report["concurrency"]["verified"] is True
+    assert report["provenance"][heg.PROV_ENGINE] > 0
+    assert report["provenance"][heg.PROV_TIER] == 0
+    assert report["tier_edits"] == []
+
+
+def test_snapshot_copy_failure_has_literal_blocking_contract(tmp_path, monkeypatch):
+    monkeypatch.setattr(heg.shutil, "copytree", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("injected")))
+
+    report = heg.harvest(_bundle(tmp_path))
+
+    assert report["status"] == "unstable"
+    assert heg.EXIT_UNSTABLE == 4
+    assert "could not copy bundle" in hgr.render(report)
+    assert heg.main([str(_bundle(tmp_path)), "--quiet"]) == 4
+
+
+def test_stable_bundle_has_a_verified_concurrency_result(tmp_path):
+    report = heg.harvest(_bundle(tmp_path, entity_working="Renamed"))
+
+    assert report["status"] == heg.STATUS_COMPLETE
+    assert report["concurrency"]["verified"] is True
+
+
 def test_json_is_written_before_the_console_render(tmp_path, monkeypatch):
     """`--json` is a contract; it must not depend on the terminal's codec."""
     bundle = _bundle(tmp_path, entity_working="Renamed")
@@ -1575,12 +1615,7 @@ def test_the_pair_rows_reconcile_with_the_top_level_on_an_ordinary_run(tmp_path)
 
 
 # ---------------------------------------------------------------------------------------------
-# Round-9 review: race detection is DESCOPED (issue #418), so the report must SAY so.
-#
-# Four rounds closed four windows and a fifth read category appeared each time - most tellingly a
-# directory MEMBERSHIP read, which carries no bytes to digest at all. Dropping the detector while
-# keeping the confident claim would ship the false confidence with none of the partial protection,
-# which is strictly worse than either shipping or not shipping. So the claim is qualified instead.
+# Issue #418: race detection is a blocking stability proof.
 # ---------------------------------------------------------------------------------------------
 
 
@@ -1590,10 +1625,8 @@ def test_the_report_never_claims_more_than_it_verified_about_concurrency(tmp_pat
     markdown = hgr.render_markdown(report)
 
     assert CLEAN_CLAIM in markdown, "the claim must stay reachable, or the caveat carries no meaning"
-    assert "Attribution assumes the bundle was not modified during the harvest" in markdown
-    assert "issue #418" in markdown
-    assert report["concurrency"]["verified"] is False
-    assert "NOT verified" in report["concurrency"]["note"]
+    assert "Bundle stability was verified" in markdown
+    assert report["concurrency"]["verified"] is True
 
 
 @pytest.mark.parametrize("branch", ["clean", "tier_edit", "undetermined"])
@@ -1626,8 +1659,7 @@ def test_every_tier_edit_branch_carries_the_concurrency_caveat(tmp_path, branch)
     if branch == "undetermined":
         assert "**Undetermined - this is NOT a clean result.**" in markdown, "fixture missed its branch"
         assert CLEAN_CLAIM not in markdown
-    assert "Attribution assumes the bundle was not modified during the harvest" in markdown
-    assert "issue #418" in markdown
+    assert "Bundle stability was verified" in markdown
 
 
 def test_the_caveat_is_printed_beside_a_tier_edit_finding_too(tmp_path):
@@ -1638,24 +1670,18 @@ def test_the_caveat_is_printed_beside_a_tier_edit_finding_too(tmp_path):
     markdown = hgr.render_markdown(heg.harvest(bundle))
 
     assert "| unit | layer | file |" in markdown, "the fixture must produce a tier-edit table"
-    assert "Attribution assumes the bundle was not modified during the harvest" in markdown
+    assert "Bundle stability was verified" in markdown
 
 
-def test_a_mid_harvest_edit_is_a_KNOWN_limitation_not_a_silent_one(tmp_path, monkeypatch):
-    """⚠️ Pins the descoped behaviour HONESTLY: the wrong attribution still happens.
-
-    This test exists so nobody reads the removal as "it was fixed". An edit landing between
-    adjudication and the scan is still attributed to the engine and the run still says `complete`.
-    What changed is that the report no longer claims otherwise - the caveat is printed beside the
-    conclusion, and issue #418 holds the reproductions.
-    """
+def test_a_mid_harvest_edit_is_isolated_from_the_harvest_snapshot(tmp_path, monkeypatch):
+    """A source edit after snapshot creation cannot alter the attribution input."""
     bundle = _identical_bundle(tmp_path)
     original = heg._scan_pairs
     fired = []
 
     def scan_after_the_edit(bundle_arg: Path, evidence):
         fired.append(bundle_arg)
-        _mutate_working_file_changed(bundle_arg)
+        _mutate_working_file_changed(bundle)
         return original(bundle_arg, evidence)
 
     monkeypatch.setattr(heg, "_scan_pairs", scan_after_the_edit)
@@ -1663,10 +1689,9 @@ def test_a_mid_harvest_edit_is_a_KNOWN_limitation_not_a_silent_one(tmp_path, mon
     markdown = hgr.render_markdown(report)
 
     assert fired, "the injection never fired - this fixture pins nothing"
-    assert report["status"] == heg.STATUS_COMPLETE, "the limitation is real: this is the known-wrong result"
-    assert report["provenance"][heg.PROV_ENGINE] == 1, "a tier edit IS still attributed to the engine"
-    assert "Attribution assumes the bundle was not modified during the harvest" in markdown
-    assert report["concurrency"]["verified"] is False
+    assert report["status"] == heg.STATUS_COMPLETE
+    assert "Bundle stability was verified" in markdown
+    assert report["concurrency"]["verified"] is True
 
 
 def test_the_pair_rows_reconcile_with_the_top_level(tmp_path):

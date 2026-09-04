@@ -800,3 +800,178 @@ def test_STALLED_output_says_ASK_rather_than_kill(tmp_path):
     combined = out.stdout + out.stderr
     assert "ASK IT WHAT IT IS BLOCKED ON" in combined
     assert "Do NOT kill it" in combined
+
+
+# --- the CANONICAL location: both modes must look at the phase-2 packages, not only the bundle ---
+#
+# Blind-review round-4 finding B1. #460 was settled by `promote_unit.py` - the package's `fabric/`
+# is where an agent edits and where phase 3 ships FROM - but both modes of this gate still inspected
+# only the bundle. Measured on a package whose model had just been edited: `--tamper` reported
+# `CLEAN  "3 generated artifact(s) are pristine against their engine-run hashes"` at exit 0, and
+# progress reported `SILENT  deliverable_count_seen=0`.
+
+
+def _run_layout(tmp_path: Path, *, edited: bool, minutes_ago: float = 0) -> tuple[Path, Path]:
+    """`(bundle, package)` in the canonical `_runs/<NNN>-<slug>/{bundle,packages}` shape.
+
+    The package carries its own `package-manifest.json` digest, which is the authority on whether it
+    has been edited - the same one `package_unit.package_edits` reads, and the same one
+    `package_unit` itself refuses to repackage over. The BUNDLE is given a matching engine-run
+    baseline so it is genuinely pristine: the whole point of the finding is a true "the bundle is
+    clean" note standing in for a verdict about a tree nobody looked at.
+    """
+    bundle = tmp_path / "run" / "bundle"
+    package = tmp_path / "run" / "packages" / "batch" / "Book"
+    model = package / "fabric" / "Book.SemanticModel" / "definition"
+    _touch(bundle / "pbip" / "Book" / "Book.Report" / "definition" / "pages" / "pages.json", minutes_ago)
+    _touch(model / "tables" / "Imported0.tmdl", minutes_ago)
+    contents = {
+        path.relative_to(package).as_posix(): cmp_mod.sha256_file(path)
+        for path in sorted(package.rglob("*"))
+        if path.is_file()
+    }
+    if edited:
+        (model / "tables" / "Imported0.tmdl").write_text("edited by the agent\n", encoding="utf-8")
+    (package / "package-manifest.json").write_text(
+        json.dumps({"unit": "Book", "contents": {"files": contents}}), encoding="utf-8"
+    )
+    _write_manifest(
+        bundle,
+        {
+            path.relative_to(bundle).as_posix(): cmp_mod.sha256_file(path)
+            for path in sorted(bundle.rglob("*"))
+            if cmp_mod._is_generated_artifact(path, bundle)  # noqa: SLF001  # pylint: disable=protected-access
+        },
+    )
+    return bundle, package
+
+
+def test_an_edit_to_the_CANONICAL_package_is_no_longer_reported_as_clean(tmp_path):
+    """Reproduced: `exit=0  state=CLEAN  "3 generated artifact(s) are pristine"`.
+
+    The bundle really IS pristine - that note is true and always was. What made the verdict wrong is
+    that it was the ONLY tree looked at, so a gate whose whole job is "did a generated artifact
+    change without evidence" answered about the copy nobody was working in.
+    """
+    bundle, _package = _run_layout(tmp_path, edited=True)
+    state, notes = cmp_mod.tamper_check(bundle)
+    assert state == "PACKAGE_DRIFT"
+    assert any("PACKAGE EDITED: Book" in note for note in notes)
+    assert cmp_mod.run_tamper_mode(bundle, as_json=False) == 1
+
+
+def test_an_UNEDITED_package_still_reports_clean(tmp_path):
+    """The control: looking at a second tree must not make every migration fail the gate."""
+    bundle, _package = _run_layout(tmp_path, edited=False)
+    state, notes = cmp_mod.tamper_check(bundle)
+    assert state == "CLEAN"
+    assert any("phase-2 package(s) still match" in note for note in notes)
+    assert cmp_mod.run_tamper_mode(bundle, as_json=False) == 0
+
+
+def test_no_packages_at_all_is_a_NAMED_state_not_a_silent_pass(tmp_path):
+    """ "No packages" and "packages all pristine" must not print the same thing.
+
+    The same doctrine `_no_baseline_verdict` applies one layer up: a silent absence reads as a clean
+    bill of health for a tree nobody looked at. A run that has not reached phase 2 is legitimate -
+    and it has to SAY so.
+    """
+    bundle = tmp_path / "run" / "bundle"
+    _touch(bundle / "pbip" / "Book" / "Book.Report" / "definition" / "pages" / "pages.json")
+    _write_manifest(
+        bundle,
+        {
+            path.relative_to(bundle).as_posix(): cmp_mod.sha256_file(path)
+            for path in sorted(bundle.rglob("*"))
+            if cmp_mod._is_generated_artifact(path, bundle)  # noqa: SLF001  # pylint: disable=protected-access
+        },
+    )
+    state, notes = cmp_mod.tamper_check(bundle)
+    assert state == "CLEAN"
+    assert any("no phase-2 packages found" in note for note in notes)
+
+
+def test_a_package_carrying_no_digest_cannot_be_assessed_rather_than_passing(tmp_path):
+    """A package with no recorded digest is not "unedited" - it is unassessable, and says so.
+
+    Its own exit code (5), because "I cannot tell" and "it was edited" route to different responses:
+    one is a question about the package's provenance, the other is a finding about its content.
+    """
+    bundle, package = _run_layout(tmp_path, edited=False)
+    (package / "package-manifest.json").write_text(json.dumps({"unit": "Book"}), encoding="utf-8")
+    state, notes = cmp_mod.tamper_check(bundle)
+    assert state == "PACKAGE_UNASSESSABLE"
+    assert any("PACKAGE UNASSESSABLE" in note for note in notes)
+    assert cmp_mod.run_tamper_mode(bundle, as_json=False) == 5
+
+
+def test_a_bundle_level_finding_is_not_masked_by_a_package_finding(tmp_path):
+    """Precedence: the bundle verdict is about the baseline everything else is measured from.
+
+    Both trees are in trouble here on purpose - the package carries an edit AND the bundle has no
+    usable baseline. Returning `PACKAGE_DRIFT` would tell a caller to go look at the package while
+    the more fundamental problem (nothing can be adjudicated at all) went unreported. The package
+    NOTES still ship either way, so nothing is lost by the ordering - only the headline changes.
+    """
+    bundle, _package = _run_layout(tmp_path, edited=True)
+    (bundle / "input_manifest.json").unlink()
+    state, notes = cmp_mod.tamper_check(bundle)
+    assert state == "NO_BASELINE"
+    assert any("PACKAGE EDITED: Book" in note for note in notes), "the package finding was dropped, not deferred"
+
+
+def test_progress_counts_work_done_in_the_CANONICAL_package(tmp_path):
+    """Reproduced: `state=SILENT  deliverable_count_seen=0` while the agent was working.
+
+    The bundle here is deliberately OLD and the package fresh, which is exactly the shape of a unit
+    that has been packaged and handed to an agent: nothing more is written to `pbip/` after phase 2.
+    Scanning only the bundle therefore sees ZERO deliverables in the window, and an orchestrator
+    reads that as a dead subagent.
+
+    The assertion is on the deliverable COUNT rather than on the exact quiet state, because which
+    quiet state a bundle-only scan lands in (`SILENT` vs `STALLED` vs `THINKING`) depends on what
+    else happens to be in the tree - and the finding is about the count that every one of them is
+    computed from.
+    """
+    bundle, package = _run_layout(tmp_path, edited=False, minutes_ago=180)
+    for path in package.rglob("*"):
+        if path.is_file():
+            _touch(path, minutes_ago=1)
+
+    since = datetime.now() - timedelta(minutes=30)
+    bundle_only = cmp_mod.scan(bundle, since)
+    with_packages = cmp_mod.scan(bundle, since, None, [package])
+
+    assert bundle_only["buckets"]["deliverable"]["count"] == 0, "the fixture must reproduce the blind window"
+    assert cmp_mod.verdict(bundle_only, 30)[0] != "PROGRESSING"
+    assert with_packages["buckets"]["deliverable"]["count"] > 0
+    assert cmp_mod.verdict(with_packages, 30)[0] == "PROGRESSING"
+    assert with_packages["packages_scanned"] == [str(package)]
+
+
+def test_package_discovery_finds_the_canonical_layout_and_nothing_else(tmp_path):
+    """A package is identified by carrying its own manifest, never by its position in the tree."""
+    bundle, package = _run_layout(tmp_path, edited=False)
+    assert cmp_mod.discover_package_roots(bundle) == [package]
+
+    # A sibling directory that merely looks like a batch, with no manifest, is not a package.
+    (tmp_path / "run" / "packages" / "batch" / "NotAPackage").mkdir(parents=True, exist_ok=True)
+    assert cmp_mod.discover_package_roots(bundle) == [package]
+
+    # --packages OVERRIDES the search rather than adding to it, so a caller with an odd layout does
+    # not silently also pick up the canonical one.
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "Other").mkdir(parents=True, exist_ok=True)
+    (elsewhere / "Other" / "package-manifest.json").write_text("{}", encoding="utf-8")
+    assert cmp_mod.discover_package_roots(bundle, elsewhere) == [elsewhere / "Other"]
+
+
+def test_the_tamper_cli_exit_map_has_no_duplicate_meaning(tmp_path):
+    """Every tamper state maps to a code, and the two new ones do not collide with the five old."""
+    bundle, package = _run_layout(tmp_path, edited=True)
+    proc = _run("--bundle", str(bundle), "--tamper", "--json")
+    assert proc.returncode == 1
+    payload = json.loads(proc.stdout)
+    assert payload["state"] == "PACKAGE_DRIFT"
+    assert any("PACKAGE EDITED" in note for note in payload["notes"])
+    assert package.is_dir()

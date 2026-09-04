@@ -4,7 +4,8 @@ purpose: single source of truth for the canonical PRE-BUNDLE work layout - resol
          (`_assessment`, `_sweep`, `_oracle`, an ad hoc `_work/<name>`, or a stray `fabric/` from a
          CWD-relative path). See issue #291 (gaps 1 and 3) and issue #234, whose corrected design
          this module implements: `_runs/<NNN>-<slug>/{assessment,assets,bundle,oracle,packages,
-         deliverables,scratch}/`.
+         deliverables,scratch}/`. `deliverables/` is created lazily, on first access, not up
+         front (issue #481) - see `LAZY_SUBDIRS`.
 usage:   python scripts/work_dirs.py <unit-name> [--repo-root PATH] [--json]
          python scripts/work_dirs.py --verify [--repo-root PATH] [--json]
          from work_dirs import allocate_run, sanitize_unit_key, runs_root, list_runs
@@ -113,7 +114,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 #                 `package_unit.conflicting_evidence_dirs` refuses an `--out` whose parent holds
 #                 `oracle/`, and this run root always does. Measured: `--out <run>/packages` exits
 #                 2, `--out <run>/packages/<batch>` exits 0. See `tests/test_work_dirs.py`.
-#   deliverables/ operator-facing outputs meant for the customer, never for git (issue #322)
+#   deliverables/ operator-facing outputs meant for the customer, never for git (issue #322).
+#                 ⚠️ NOT eagerly created (issue #481) - see LAZY_SUBDIRS below. Nothing in this
+#                 repo writes here today, so an eagerly-created copy is an always-empty folder
+#                 that reads to an operator as "something failed", not as a signpost.
 #   scratch/      disposable, run-owned - the only subdir a future `--prune` may ever delete
 CANONICAL_SUBDIRS: tuple[str, ...] = (
     "assessment",
@@ -124,6 +128,18 @@ CANONICAL_SUBDIRS: tuple[str, ...] = (
     "deliverables",
     "scratch",
 )
+
+#: Canonical subdirs `allocate_run` does NOT create up front. `deliverables/` is the one member
+#: today (issue #481): a sweep of `scripts/*.py` for a `deliverables/` writer found none - only
+#: this module defines the path, so every run produced a folder nothing ever filled. The concept
+#: is still real (issue #322 - operator-facing, customer-bound output needs a home that is not
+#: `scratch/`, because it has a different lifecycle), so this keeps the name in `CANONICAL_SUBDIRS`
+#: and keeps `.subdir("deliverables")` / `.deliverables` valid - it only stops the FOLDER from
+#: existing before anything has a reason to write into it. The `.deliverables` property below
+#: creates it on access, so the directory appears exactly when something is about to use it, and
+#: an absent folder in an unused run says nothing at all (never a false "this step ran and
+#: produced nothing").
+LAZY_SUBDIRS: frozenset[str] = frozenset({"deliverables"})
 
 _RUN_DIR_RE = re.compile(r"^(\d+)(?:-.*)?$")
 # Matches the Fabric artifact-name ceiling used elsewhere in this org's conventions (table names
@@ -286,8 +302,16 @@ class RunPaths:
 
     @property
     def deliverables(self) -> Path:
-        """Operator-facing outputs meant for the customer, never for git (issue #322)."""
-        return self.subdir("deliverables")
+        """Operator-facing outputs meant for the customer, never for git (issue #322).
+
+        Created lazily, on first access (issue #481): unlike the other six canonical subdirs,
+        `allocate_run` does not create this one up front - see `LAZY_SUBDIRS`. Accessing this
+        property is what brings the directory into being, so it appears exactly when something is
+        about to write into it rather than sitting empty in every run that never uses it.
+        """
+        path = self.subdir("deliverables")
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
     @property
     def scratch(self) -> Path:
@@ -730,6 +754,11 @@ def allocate_run(
     candidate. The directory name is `<NNN>-<slug>`, zero-padded to at least 3 digits; the slug is
     decoration only (never parsed back - see `sanitize_unit_key`), the number is the identity.
 
+    When `create_subdirs` is true, every canonical subdir EXCEPT those in `LAZY_SUBDIRS` is
+    created immediately. `deliverables/` is the one member today (issue #481): it has no writer
+    yet, so creating it up front produced an always-empty folder that read to an operator as a
+    failed or skipped step. Its `RunPaths.deliverables` accessor still creates it on first access.
+
     ⚠️ **The directory this returns must never be renamed, renumbered or reused.** Generated bundle
     output under `<run>/bundle/` embeds ABSOLUTE self-paths, so renaming a run afterwards breaks
     every bundle beneath it (refresh, `byPath` report-to-model binding, `_build/` replay). A real
@@ -766,6 +795,8 @@ def allocate_run(
         run = RunPaths(root=run_dir, run_number=candidate, unit_key=slug)
         if create_subdirs:
             for sub in CANONICAL_SUBDIRS:
+                if sub in LAZY_SUBDIRS:
+                    continue  # issue #481 - e.g. deliverables/: created on first access, not here
                 run.subdir(sub).mkdir(parents=True, exist_ok=True)
 
         manifest: dict[str, Any] = dict(extra_manifest or {})

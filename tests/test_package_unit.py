@@ -21,19 +21,26 @@ verifies recorded hashes and dimensions.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
+import os
 import re
+import shutil
 import sys
-from pathlib import Path
+import time
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
+import check_path_ceiling as cpc  # noqa: E402  # pylint: disable=wrong-import-position
 import manifest_scope as ms  # noqa: E402  # pylint: disable=wrong-import-position
 import package_unit as pkg  # noqa: E402  # pylint: disable=wrong-import-position
+import path_flavour as pf  # noqa: E402  # pylint: disable=wrong-import-position
 import reference_evidence as rev  # noqa: E402  # pylint: disable=wrong-import-position
+import set_data_folder as sdf  # noqa: E402  # pylint: disable=wrong-import-position
 from manifest_scope import KEEP, REPORT_ALLOW, Rows, project  # noqa: E402  # pylint: disable=wrong-import-position
 from test_check_reference_readiness import (  # noqa: E402  # pylint: disable=wrong-import-position
     write_engine_report,
@@ -828,7 +835,13 @@ def test_the_scoped_report_still_declares_both_collections_as_lists(tmp_path: Pa
 
 
 def _package_with_receipt(tmp_path: Path) -> Path:
-    """A package carrying every artifact the packager can emit, including the engine receipt."""
+    """A package carrying every artifact the packager can emit: receipt, model, and imported rows.
+
+    The imported CSV is part of the SHARED fixture rather than a private one, because the package
+    map guard below is derived from what the packager actually writes - so a fixture whose model
+    imports nothing makes `data/` invisible to it. Measured: with a data-less fixture the mutation
+    "drop the data/ row from the README" SURVIVED the whole campaign.
+    """
     bundle, oracle = _bundle(tmp_path)
     emitted = bundle / "pbip" / UNIT / f"{UNIT}.Report" / "definition" / "report.json"
     emitted.parent.mkdir(parents=True, exist_ok=True)
@@ -836,18 +849,29 @@ def _package_with_receipt(tmp_path: Path) -> Path:
     (bundle / "engine-output-receipt.json").write_text(
         json.dumps({"version": 1, "engine": {"version": "2.339.0"}, "artifacts": []}), encoding="utf-8"
     )
+    payload = tmp_path / "extract" / "federated_abc" / "Extract_Extract.csv"
+    payload.parent.mkdir(parents=True, exist_ok=True)
+    payload.write_text("Employee_ID,Salary\n1,100\n", encoding="utf-8")
+    _point_partition_at(bundle, str(payload))
     _package(tmp_path, bundle, oracle)
     return _out(tmp_path) / UNIT
 
 
 def test_the_generated_readme_names_every_file_the_package_contains(tmp_path: Path) -> None:
-    """Finding 3: three files shipped in every package and appeared nowhere in its own map."""
+    """Finding 3: three files shipped in every package and appeared nowhere in its own map.
+
+    ⚠️ The membership test is a backticked TABLE KEY, not a bare substring. Measured while adding
+    the `data/` row for #461: with a substring check, replacing that row's key survived the whole
+    mutation campaign, because the README says `oracle/*/data/*.csv` elsewhere and `"data" in
+    readme` was true either way. A short shipped name is exactly the case a substring check cannot
+    decide, and every shipped name here is short.
+    """
     root = _package_with_receipt(tmp_path)
     readme = (root / "README.md").read_text(encoding="utf-8")
     shipped = sorted(path.name for path in root.iterdir() if path.name != "README.md")
-    missing = [name for name in shipped if name not in readme]
+    missing = [name for name in shipped if not re.search(rf"`{re.escape(name)}[/`]", readme)]
     assert missing == [], f"shipped but unnamed in the package's own README: {missing}"
-    for load_bearing in ("report.json", "source-provenance.json", "engine-output-receipt.json"):
+    for load_bearing in ("report.json", "source-provenance.json", "engine-output-receipt.json", "data"):
         assert load_bearing in shipped
 
 
@@ -873,24 +897,722 @@ def test_the_module_layout_comment_names_the_oracle_kinds_the_code_emits() -> No
         assert f"{kind}/{{images,data}}" in doc, f"the layout comment does not name {kind}/"
 
 
-def test_the_readme_separates_the_png_and_svg_evidence_legs(tmp_path: Path) -> None:
-    """They are different evidence, not duplicates: the PNG is looked at, the SVG is grepped.
+def test_the_readme_leads_with_the_csv_numeric_oracle_before_any_image(tmp_path: Path) -> None:
+    """The CSVs are the numeric oracle, and the README used to bury them in a table cell.
 
-    ⚠️ Round-2 review: this asserted only "not duplicates", the two extensions and `122`, so
-    **deleting the entire zero-text caveat left it green**. The caveat is the half an agent acts on -
-    it is what stops "the SVG has no text" being read as "the object has no content" - so it is
-    asserted here explicitly, by the worksheets it names.
-
-    The count was also wrong: **four** worksheets in that workbook carry zero `<text>` elements, not
-    three. `Terminated By Year` was omitted when the finding was first written up.
+    Measured on the 2026-09-03 cold run, by the agent that worked from the package: two of its three
+    targets would have been near-useless as SVG data oracles (`Cities` carries 9 `<text>` elements,
+    `States` 24), while `oracle/worksheet/data/States.csv` handed over `New York 6,270 /
+    Michigan 976` plus the `Rank Top 2` boolean with no OCR and no judgement. So the ORDER is the
+    finding: whichever evidence the README names first is the one an agent reaches for.
     """
     readme = (_package_with_receipt(tmp_path) / "README.md").read_text(encoding="utf-8")
-    assert "not duplicates" in readme
+    csv_at = readme.find("`oracle/*/data/*.csv`")
+    assert csv_at != -1, "the README does not name the CSV oracle by its glob"
+    assert "NUMERIC oracle" in readme[csv_at : csv_at + 120]
+    first_image = min(readme.find("`.png`"), readme.find("`.svg`"))
+    assert first_image != -1
+    assert csv_at < first_image, "the README still introduces the image legs before the numeric oracle"
+
+
+def test_the_readme_keeps_the_png_and_svg_legs_distinct_with_the_zero_text_caveat(tmp_path: Path) -> None:
+    """They are different evidence: the PNG is looked at, the SVG is grepped - and may be empty.
+
+    ⚠️ Round-2 review of the original guard: it asserted only "not duplicates", the two extensions
+    and a measured count, so **deleting the entire zero-text caveat left it green**. The caveat is
+    the half an agent acts on - it is what stops "the SVG has no text" being read as "the object has
+    no content" - so both halves are asserted, and neither is a count that a re-measurement retires.
+    """
+    readme = " ".join((_package_with_receipt(tmp_path) / "README.md").read_text(encoding="utf-8").split())
     assert "`.png`" in readme and "`.svg`" in readme
-    assert "122" in readme
-    assert "zero" in readme
-    for silent in ("Hired By Year", "Terminated By Year", "Age Groups", "Education Levels"):
-        assert silent in readme, f"the zero-text caveat does not name {silent}"
+    assert "LOOK at" in readme, "the README no longer says what the PNG leg is FOR"
+    assert "`<text>`" in readme, "the README no longer says what the SVG leg is FOR"
+    assert "zero text is not zero content" in readme, "the zero-text caveat has been deleted"
+
+
+def test_the_readme_states_the_page_pairing_contract(tmp_path: Path) -> None:
+    """`check_unit.check_page_parity` pairs on the exact page name, and a zero-visual page FAILS.
+
+    The cold-run agent had to read `check_unit.py` to learn this, which is the trip the package
+    exists to remove. Verified against the source rather than the brief, three claims:
+
+    * `actual_pages` (:1244) takes ``displayName``, and `page_expectation` (:1148) pairs only
+      ``rendered`` pages - those `_page_visual_count` (:1213) finds at least one ``visual.json``
+      under. Its docstring names the reason: without it, "renaming an empty page to an expected
+      page's title certified it as rebuilt".
+    * a zero-visual page that is not the engine's crash-guard placeholder is `blank`
+      (`_zero_visual_pages`, :1745), and `blank` is one of the four conditions that force
+      ``STATUS_PRECONDITION_FAILED`` (:1527). So it FAILS rather than merely going uncredited -
+      asserted separately below, because "at least one visual" alone reads as "not counted".
+    * the expected set is dashboards PLUS ORPHAN worksheets (`_spec_pages`, :853-854). Measured in
+      `expected_pages`' own docstring: 19 of 43 workbooks in a real estate have zero dashboards, so
+      "dashboards only" would grade those against an EMPTY expected set.
+    """
+    readme = " ".join((_package_with_receipt(tmp_path) / "README.md").read_text(encoding="utf-8").split())
+    assert "`displayName`" in readme
+    assert "at least one visual" in readme, "the README does not say a zero-visual page is not rebuilt"
+    assert "`blank` and FAILS" in readme, "the README does not say a zero-visual page FAILS the gate"
+    assert "every worksheet not placed on one" in readme, "the README narrows the expected set to dashboards"
+
+
+def test_the_package_ships_the_spec_schema_it_tells_an_agent_to_obey(tmp_path: Path) -> None:
+    """Shipping the contract beats describing it: the cold-run agent invented a shape and lost six entries.
+
+    The file is asserted to be byte-identical to `docs/migration-spec.schema.json`, because a scoped
+    extract is a copy, and a copy of a contract drifts from the contract `validate_spec.py` enforces.
+    """
+    root = _package_with_receipt(tmp_path)
+    shipped = root / "migration-spec.schema.json"
+    assert shipped.is_file(), "the package does not ship the spec contract"
+    assert shipped.read_bytes() == pkg.SPEC_SCHEMA.read_bytes()
+    manifest = json.loads((root / "package-manifest.json").read_text(encoding="utf-8"))
+    assert manifest["artifacts"]["migration_spec_schema"] == "migration-spec.schema.json"
+
+    schema = json.loads(shipped.read_text(encoding="utf-8"))
+    limitation = schema["properties"]["limitations_encountered"]["items"]
+    assert limitation["additionalProperties"] is False
+    assert sorted(limitation["required"]) == ["issue", "item", "severity", "stage"]
+
+
+def test_the_readme_names_the_provenance_ceiling_it_cannot_lift(tmp_path: Path) -> None:
+    """An agent must learn up front which finding it can NEVER clear from inside the package.
+
+    Measured on the shipped `HR_Dashboard` package: `origin.match` is `name_only`, every emitted page
+    reports `UNVERIFIABLE - REVISION NOT ESTABLISHED`, and the gate exits 1. The remedy needs Tableau
+    Server credentials AND the three `origin` fields `scope.dropped_fields` strips, so it is not
+    reachable from here - which is worth a few lines and is otherwise a whole budget spent finding
+    out.
+    """
+    readme = " ".join((_package_with_receipt(tmp_path) / "README.md").read_text(encoding="utf-8").split())
+    section = readme.split("## UNFIXABLE FROM THIS PACKAGE", 1)
+    assert len(section) == 2, "the README has no UNFIXABLE section"
+    body = section[1]
+    assert '`origin.match: "name_only"`' in body
+    for stripped in ("origin.remote_sha256", "origin.server", "origin.site"):
+        assert stripped in body, f"the ceiling does not name the dropped field {stripped}"
+    assert "stamp_tableau_provenance.py" in body
+    assert "NEVER exit 0" in body, "the consequence is not stated plainly"
+
+
+def test_AGENTS_md_and_the_package_readme_agree_on_where_an_agent_edits(tmp_path: Path) -> None:
+    """Issue #460: two shipped documents named two different canonical edit locations.
+
+    `AGENTS.md`'s three-locations table said `<bundle>/pbip/`; the generated package README said
+    `<package>/fabric/` - and `_copy_fabric` makes the second a `shutil.copytree` of the first, so
+    they are byte-identical until one is edited and diverge silently thereafter. Promoting from the
+    wrong one discards every agent edit.
+
+    The guard is a CROSS-DOCUMENT derivation, not two copies of a string: it reads which row the
+    README marks `**edit here**`, takes that row's own path, and requires `AGENTS.md`'s working-copy
+    row to name it under `<package>/`. Change either side alone and this fails.
+    """
+    agents_row = _agents_working_copy_row()
+    readme = (_package_with_receipt(tmp_path) / "README.md").read_text(encoding="utf-8")
+    edit_rows = [line for line in readme.splitlines() if "**edit here**" in line]
+    assert len(edit_rows) == 1, f"the README must mark exactly one tree as the edit location: {edit_rows}"
+    edit_path = edit_rows[0].split("|")[1].strip().strip("`")
+
+    assert f"<package>/{edit_path}" in agents_row, (
+        f"the package README tells an agent to edit `{edit_path}`, but AGENTS.md's working-copy row "
+        f"does not name <package>/{edit_path}: {agents_row.strip()}"
+    )
+    assert "CANONICAL" in agents_row, "AGENTS.md does not say which tree wins when both exist"
+    assert "canonical" in edit_rows[0], "the README does not say the package tree wins"
+
+
+def test_declared_edit_tooling_is_scoped_to_bundle_work_in_BOTH_documents(tmp_path: Path) -> None:
+    """The cheap half of #460: `declare_generated_edit.py` cannot run on package work at all.
+
+    The cold-run agent reported its edits were "undeclarable by construction", so the tamper
+    machinery that argued for keeping the bundle canonical was not protecting the package path
+    anyway. Both documents must say so, or one of them sends an agent to run a tool that cannot run.
+    """
+    agents_row = _agents_working_copy_row()
+    readme = (_package_with_receipt(tmp_path) / "README.md").read_text(encoding="utf-8")
+    for text, where in ((agents_row, "AGENTS.md"), (readme, "the package README")):
+        assert "declare_generated_edit.py" in text, f"{where} does not name the declared-edit tool"
+        assert "--tamper" in text, f"{where} does not name the tamper check"
+        assert "bundle" in text.lower(), f"{where} does not scope the declared-edit tooling to bundle work"
+
+
+def _agents_working_copy_row() -> str:
+    """The one `working copy` row of AGENTS.md's synced three-locations table.
+
+    Read from inside `<!-- BEGIN:shared-conventions -->` on purpose: that block is what
+    `sync_agent_conventions.py` copies into every persona, so a row asserted here is a row every
+    subagent actually receives.
+    """
+    text = (Path(__file__).resolve().parents[1] / "AGENTS.md").read_text(encoding="utf-8")
+    block = text.split("<!-- BEGIN:shared-conventions -->")[1].split("<!-- END:shared-conventions -->")[0]
+    rows = [line for line in block.splitlines() if line.strip().startswith("| working copy |")]
+    assert len(rows) == 1, f"expected exactly one working-copy row in the synced block, got {len(rows)}"
+    return rows[0]
+
+
+# --------------------------------------------------------------------------------------------
+# 4b-2. self-containment: the model's own rows (issue #461)
+#
+# `_copy_fabric` copies the engine's working copy verbatim, and the engine writes an ABSOLUTE,
+# machine-local path into every import partition, pointing back into the originating
+# `<bundle>/data/`. Measured across the 67 packaged units of estate run 408: 23 such references in
+# 17 units, 11.2 MB of extracts the package did not carry. No existing gate saw it - `check_unit.py`
+# passed page parity and oracle coverage on `HR_Dashboard`, and `powerbi-report-author validate` was
+# clean - so these tests are the only thing standing between that defect and its return.
+# --------------------------------------------------------------------------------------------
+
+
+def _model_definition(root: Path) -> Path:
+    """The packaged model's `definition/` directory, asserted to exist so a typo cannot vacate a test."""
+    models = [path for path in (root / "fabric").iterdir() if path.name.endswith(".SemanticModel")]
+    assert len(models) == 1, f"expected exactly one packaged model, got {[path.name for path in models]}"
+    definition = models[0] / "definition"
+    assert definition.is_dir(), f"no definition/ under {models[0]}"
+    return definition
+
+
+def _absolute_literals(root: Path) -> list[tuple[str, str]]:
+    """Every quoted absolute path in every packaged `.tmdl`, as `(file name, literal)`."""
+    quoted = re.compile(r"\"([A-Za-z]:[\\/][^\"]*|\\\\[^\"]*|/[A-Za-z][^\"]*)\"")
+    return [
+        (path.name, match.group(1))
+        for path in root.rglob("*.tmdl")
+        for match in quoted.finditer(path.read_text(encoding="utf-8"))
+    ]
+
+
+def test_no_packaged_tmdl_points_at_an_absolute_path_OUTSIDE_the_package(tmp_path: Path) -> None:
+    """Issue #461's acceptance criterion, tightened by round-2 finding 1.
+
+    The rule used to be "every absolute literal that survives must resolve INSIDE the package", which
+    a package satisfied by naming its own build-time location - so it was true on the builder's
+    machine and false everywhere the package was actually used. The rule is now stronger and does not
+    depend on where the package is: a shipped `.tmdl` names NO absolute path on any machine's
+    filesystem at all. Rows are reached through a `<PACKAGE_ROOT>` placeholder the recipient binds.
+
+    The positive control is the bundle the package was built FROM: it must still carry the absolute
+    literal, or this asserts nothing about a packager that simply had nothing to repair.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    payload = tmp_path / "extract" / "federated_abc" / "Extract_Extract.csv"
+    payload.parent.mkdir(parents=True, exist_ok=True)
+    payload.write_text("Employee_ID,Salary\n1,100\n", encoding="utf-8")
+    _point_partition_at(bundle, str(payload))
+    before = _absolute_literals(bundle / "pbip" / UNIT)
+    assert [value for _name, value in before] == [str(payload)], (
+        f"the fixture bundle carries no absolute literal to repair, so this proves nothing: {before}"
+    )
+
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    assert _absolute_literals(root) == [], "the packaged model still names a path on this machine"
+    assert pkg.PACKAGE_ROOT_TOKEN in (_model_definition(root) / pkg.EXPRESSIONS_TMDL).read_text(encoding="utf-8")
+
+
+def test_a_folder_PARAMETER_pointing_out_of_the_package_is_moved_with_its_files(tmp_path: Path) -> None:
+    """The shape a `File.Contents`-only scan cannot see, and it is 9 of the estate's 31 literals.
+
+    Measured on estate run 408: every datasource-only unit carries
+    ``expression SourceFolder = "<bundle>\\pbip\\<Unit>\\<Unit>.Data"`` with partitions doing
+    ``File.Contents(#"SourceFolder" & "\\Sample - Superstore.xlsx")``. Scanning only for
+    ``File.Contents("<absolute>")`` closed 17 of 26 affected units; this shape is the other 9.
+
+    The parameter is REUSED, not replaced - the partitions' concatenation was written against its
+    separator convention - so the assertion is that its value moved and the files came with it. Since
+    round-2 finding 1 the moved value is placeholder-rooted, so "moved" is asserted against the
+    package's own `data/` tail rather than against a machine path.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    folder = tmp_path / "SharedSource.Data"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "Sample - Superstore.xlsx").write_text("workbook bytes", encoding="utf-8")
+    _point_partition_at(bundle, folder=str(folder), leaf="Sample - Superstore.xlsx")
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+
+    value = _folder_parameter(root)
+    assert value.startswith(pkg.PACKAGE_ROOT_TOKEN), f"the folder parameter names a machine: {value}"
+    assert "SharedSource.Data" in value, f"the parameter lost the tail its partitions read: {value}"
+    assert (root / "data" / "SharedSource.Data" / "Sample - Superstore.xlsx").is_file()
+    shipped = json.loads((root / "package-manifest.json").read_text(encoding="utf-8"))["data_sources"]["shipped"]
+    assert [row["path"] for row in shipped] == ["data/SharedSource.Data/Sample - Superstore.xlsx"]
+
+
+def test_a_POSIX_literal_with_no_file_suffix_is_left_alone(tmp_path: Path) -> None:
+    """At face value a POSIX-absolute literal is mostly a FALSE POSITIVE, and acting on one is a bug.
+
+    Measured on estate run 408: 9 POSIX-absolute literals, 8 of them false - a Databricks
+    ``HttpPath = "/sql/1.0/warehouses/<id>"`` in three units, and a bare ``"/"`` inside a
+    ``TableauFormula`` annotation in two more. Requiring a file suffix keeps the one genuine hit (a
+    macOS ``.xlsx``) and drops all eight, so both halves are asserted here from one fixture.
+
+    ⚠️ ``_is_path_literal`` being False is "do not ACT on it", not "definitely not a path": it
+    collapses ``NOT_A_PATH`` and ``UNCLASSIFIED``. The endpoint is cleared by its ROLE, in the
+    fixture's measured shape - a ``HttpPath`` field, never a ``File.Contents`` argument, which no
+    Databricks model writes. The same string in a filesystem position is still reported, and
+    ``test_an_unassessable_POSIX_literal_is_RECORDED_not_silently_cleared`` pins that.
+    """
+    for value in ("/sql/1.0/warehouses/764e5801f0e0fac8", "/", "/mnt/lake/warehouse"):
+        assert not pkg._is_path_literal(value), f"{value} would be treated as a file path"  # noqa: SLF001
+    for value in ("/Users/<person>/Data/Global Superstore.xlsx", r"C:\data\x.csv", r"\\host\share\x.csv"):
+        assert pkg._is_path_literal(value), f"{value} would be ignored"  # noqa: SLF001
+    assert pkg._path_verdict("/") == pkg.NOT_A_PATH  # noqa: SLF001
+    assert pkg._path_verdict("/mnt/lake/warehouse") == pkg.UNCLASSIFIED  # noqa: SLF001
+
+    bundle, oracle = _bundle(tmp_path)
+    _point_partition_at(bundle, http_path="/sql/1.0/warehouses/764e5801f0e0fac8")
+    _package(tmp_path, bundle, oracle)
+    record = json.loads(((_out(tmp_path) / UNIT) / "package-manifest.json").read_text(encoding="utf-8"))
+    assert record["data_sources"] == {
+        "parameter": None,
+        "shipped": [],
+        "omissions": [],
+        "bytes": 0,
+        "neutralized": [],
+        "retained_network": [],
+        "binding": None,
+        "self_contained": True,
+    }
+
+
+def test_an_unassessable_POSIX_literal_is_RECORDED_not_silently_cleared(tmp_path: Path) -> None:
+    """The bucket the endpoint carve-out must not empty (blind-review finding 5).
+
+    ``/mnt/lake/warehouse`` is the SAME shape as the Databricks endpoint cleared above - POSIX
+    absolute, no suffix, no trailing separator - and nothing in the string separates them. What
+    separates them is the role: here it is the argument of ``File.Contents``, which reads files and
+    nothing else, so the literal is a path this packager could not ship and the run must say so.
+    Delete the ``UNCLASSIFIED`` branch of ``_external_after_rewrite`` and this goes red while the
+    test above stays green - that pairing is the whole contract.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    _point_partition_at(bundle, "/mnt/lake/warehouse")
+    _package(tmp_path, bundle, oracle)
+    record = json.loads(((_out(tmp_path) / UNIT) / "package-manifest.json").read_text(encoding="utf-8"))
+    assert record["data_sources"]["shipped"] == []
+    assert [row["file"] for row in record["data_sources"]["omissions"]] == ["warehouse"]
+    assert record["data_sources"]["omissions"][0]["reason"] == pkg.UNCLASSIFIED_REASON
+
+
+def test_a_UNC_literal_is_refused_WITHOUT_being_probed(tmp_path: Path) -> None:
+    """Probing a UNC host that does not exist blocks on SMB name resolution, for MINUTES.
+
+    Measured by PR #462: it took one test module from 30 seconds to **52 minutes** and starved a
+    subprocess into its 600 s timeout. So containment is judged lexically and a UNC source is
+    refused unprobed - loud and instant. The test is time-boxed, because the whole failure mode is
+    that it does not come back: a wall-clock assertion is the only one that can observe it.
+    """
+    started = time.monotonic()
+    assert not pkg._inside(tmp_path, r"\\no-such-host-461\share\data.csv")  # noqa: SLF001
+    readable, refusal = pkg._classify_source(r"\\no-such-host-461\share\data.csv")  # noqa: SLF001
+    elapsed = time.monotonic() - started
+    assert readable is None
+    assert "UNC" in refusal and "block" in refusal
+    assert elapsed < 5, f"the UNC literal was probed: {elapsed:.1f}s"
+
+
+def test_containment_is_judged_in_the_LITERALS_OWN_flavour_including_its_case_rules() -> None:
+    """Round-2 finding 2: `_inside` answered every question through `PureWindowsPath`.
+
+    That class compares case-INSENSITIVELY, which is right for `C:\\Pkg` and wrong for `/pkg`. On
+    Linux an external `/data/Extract.csv` was therefore judged INSIDE a package at `/DATA`, and
+    "inside the package" is the one verdict that produces total silence: localization skips it,
+    the post-rewrite scan skips it, nothing is shipped, nothing is recorded, nothing is rewritten.
+    The reviewer measured exactly that - `record={'parameter': None, 'shipped': [], 'omissions': [],
+    'bytes': 0}` with `post_scan=[] writes=0`.
+
+    Both directions are asserted from one pair, because a fix that simply made everything
+    case-sensitive would break the Windows half, where `C:\\PKG` and `c:\\pkg` ARE one directory.
+    """
+    assert pkg._inside(PureWindowsPath(r"C:\PKG"), r"c:\pkg\data\x.csv")  # noqa: SLF001
+    assert not pkg._inside(PurePosixPath("/DATA"), "/data/Extract.csv")  # noqa: SLF001
+    assert pkg._inside(PurePosixPath("/data"), "/data/Extract.csv")  # noqa: SLF001
+
+    # A literal of the other flavour is never contained, whichever way round it is asked.
+    assert not pkg._inside(PurePosixPath("/tmp/out/Book"), r"C:\tmp\out\Book\data\x.csv")  # noqa: SLF001
+    assert not pkg._inside(PureWindowsPath(r"C:\out\Book"), "/out/Book/data/x.csv")  # noqa: SLF001
+    # ... and `..` is still collapsed, so escaping through the package root is not "inside" it.
+    assert not pkg._inside(PurePosixPath("/pkg"), "/pkg/../etc/shadow")  # noqa: SLF001
+    assert not pkg._inside(PureWindowsPath(r"C:\pkg"), r"C:\pkg\..\Windows\x.csv")  # noqa: SLF001
+
+
+def test_a_foreign_flavour_source_is_REFUSED_rather_than_reinterpreted_by_the_host() -> None:
+    """Round-2 finding 2: `Path` is the host's, and a foreign literal is not refused by it - it is
+    RESOLVED, against the current drive.
+
+    On Windows `Path("/Users/<person>/Data/x.xlsx").is_file()` asks about
+    `C:\\Users\\<person>\\Data\\x.xlsx`. The reviewer measured a foreign macOS literal being
+    `accepted_as` a local path with `refusal=None`, which is not a near miss: whatever bytes happen
+    to sit there are packaged as the customer's data source, and the manifest says the source was
+    shipped.
+    """
+    foreign = "/opt/data/customer.xlsx" if os.name == "nt" else r"C:\opt\data\customer.xlsx"
+    readable, refusal = pkg._classify_source(foreign)  # noqa: SLF001
+    assert readable is None
+    assert refusal is not None and "cannot resolve" in refusal
+    readable, refusal = pkg._classify_source(foreign, expect_dir=True)  # noqa: SLF001
+    assert readable is None and refusal is not None
+
+
+@pytest.mark.skipif(os.name != "nt", reason="reproduces the WINDOWS half: Path resolves / against the current drive")
+def test_a_posix_literal_on_windows_cannot_package_unrelated_local_bytes(tmp_path: Path) -> None:
+    """The reviewer's experiment, run on a file that really exists.
+
+    A real local file is addressed by its drive-less, POSIX-slashed form. The host would resolve
+    that to the same file and package it as the source the model named; the packager must not.
+    """
+    local = tmp_path / "unrelated.csv"
+    local.write_text("local,bytes\n1,2\n", encoding="utf-8")
+    posix_form = str(local).split(":", 1)[1].replace("\\", "/")
+    assert Path(posix_form).is_file(), "the host does resolve this, which is the whole hazard"
+
+    readable, refusal = pkg._classify_source(posix_form)  # noqa: SLF001
+    assert readable is None, f"unrelated local bytes were accepted as {posix_form}"
+    assert refusal is not None
+
+
+def test_a_source_id_written_with_the_OTHER_separator_still_resolves_its_asset(tmp_path: Path) -> None:
+    """Round-2 finding 2: `resolve_asset` split the source id with `Path(...).name`.
+
+    A `source_id` is written by whichever machine ran the harvest, so
+    `_runs\\999-x\\assets\\Book.twb` reaching a POSIX packaging host has, to `Path`, no separators
+    at all: its `.name` is the whole string, no asset matches, and the unit packages with no source
+    - both gates then report CANNOT_ESTABLISH on a unit whose asset was sitting right there.
+
+    ⚠️ This can only FAIL on POSIX (on Windows `Path` reads both separators), which is why it
+    asserts the flavour-free helper directly as well - that assertion fails on either platform.
+    """
+    assert pf.leaf(r"_runs\999-x\assets\Book.twb") == "Book.twb"
+    assert pf.leaf("_runs/999-x/assets/Book.twb") == "Book.twb"
+
+    bundle, _oracle = _bundle(tmp_path)
+    asset_name = f"{WB_LUID}_{UNIT}.twb"
+    for source_id in (f"_runs\\999-x\\assets\\{asset_name}", f"_runs/999-x/assets/{asset_name}"):
+        resolved, route = pkg.resolve_asset(
+            bundle, UNIT, {"workbook": {"source_id": source_id}}, bundle.parent / "assets"
+        )
+        assert resolved is not None and resolved.name == asset_name, f"{source_id} did not resolve"
+        assert route == "handover.workbook.source_id"
+
+    """ "Absolute AND not under the destination", never "absolute" (finding from PR #462).
+
+    `set_data_folder.py`'s existing convention is an absolute `DataFolder` under the deliverable, and
+    it is exactly what both repairs here produce - so a rule that flagged every absolute path would
+    condemn its own output and, worse, make the legitimate convention look like a regression.
+    """
+    root = _package_with_receipt(tmp_path)
+    inside = str(root / "data" / "federated_abc" / "Extract_Extract.csv")
+    assert pkg._is_path_literal(inside)  # noqa: SLF001
+    assert pkg._inside(root, inside)  # noqa: SLF001
+    assert pkg._inside(root, str(root / "data") + "\\")  # noqa: SLF001
+    assert not pkg._inside(root, str(root.parent / "elsewhere" / "x.csv"))  # noqa: SLF001
+    record = json.loads((root / "package-manifest.json").read_text(encoding="utf-8"))
+    assert record["data_sources"]["omissions"] == [], "the packager reported its own legitimate output"
+
+
+def _folder_parameter(root: Path) -> str:
+    """The value of the model's own folder parameter, whichever name the engine gave it."""
+    text = "".join(path.read_text(encoding="utf-8") for path in _model_definition(root).rglob("*.tmdl"))
+    match = re.search(r'expression\s+(?:#"[^"]+"|[^\s=]+)\s*=\s*"([^"]*)"\s*meta', text)
+    assert match is not None, text
+    return match.group(1)
+
+
+def test_the_rows_the_model_imports_are_shipped_and_the_partition_reads_them(tmp_path: Path) -> None:
+    """Self-containment is bytes AND wiring: either half alone leaves the package unusable.
+
+    A copy nothing points at is dead weight; a rewritten partition with no copy behind it fails only
+    at refresh time, on someone else's machine, months later. So the shipped file is asserted to
+    exist on disk, the partition is asserted to read it through the parameter, and the two are
+    joined by the manifest rather than by two independent string checks.
+    """
+    root = _package_with_receipt(tmp_path)
+    record = json.loads((root / "package-manifest.json").read_text(encoding="utf-8"))["data_sources"]
+    assert record["shipped"], "no data source was shipped, so the fixture does not exercise #461"
+    assert record["omissions"] == []
+    assert record["parameter"] == pkg.DATA_FOLDER_PARAM
+
+    partitions = "".join(path.read_text(encoding="utf-8") for path in _model_definition(root).rglob("*.tmdl"))
+    for row in record["shipped"]:
+        shipped = root / row["path"]
+        assert shipped.is_file(), f"the manifest claims {row['path']} but nothing is there"
+        assert shipped.stat().st_size == row["bytes"]
+        relative = row["path"].split(f"{pkg.DATA_DIR}/", 1)[1].replace("/", os.sep)
+        assert f'{pkg.DATA_FOLDER_PARAM} & "{relative}"' in partitions, "no partition reads the shipped copy"
+
+
+def test_the_data_folder_parameter_names_a_PLACEHOLDER_not_the_machine_that_built_it(tmp_path: Path) -> None:
+    """Round-2 finding 1: the value used to be the package's absolute build-time location.
+
+    Two failures in one value. It named the STAGING directory in the original defect - a path that
+    stops existing the moment packaging succeeds - and, once that was fixed to ``final``, it named
+    the builder's own output folder, so moving the handover package left its rows present on disk
+    and unreachable, and shipped a `C:\\Users\\<name>\\...` to a customer.
+
+    The shipped value is a placeholder; binding resolves it, and that is asserted here end to end
+    rather than trusted, because a placeholder nobody can resolve is not an improvement.
+    """
+    root = _package_with_receipt(tmp_path)
+    expressions = (_model_definition(root) / pkg.EXPRESSIONS_TMDL).read_text(encoding="utf-8")
+    value = re.search(rf'expression {pkg.DATA_FOLDER_PARAM} = "([^"]+)"', expressions)
+    assert value is not None, expressions
+    assert value.group(1).startswith(pkg.PACKAGE_ROOT_TOKEN), value.group(1)
+    staging = pkg.staging_dir(root.parent, UNIT).name
+    assert staging not in value.group(1), f"the parameter names staging: {value.group(1)}"
+    assert str(root) not in value.group(1), "the package names the machine that built it"
+    assert str(tmp_path) not in expressions, "some other build-time path survived into the model"
+    foreign = "/" if os.sep == "\\" else "\\"
+    assert foreign not in value.group(1), f"the parameter mixes path separators: {value.group(1)}"
+
+    binding = json.loads((root / "package-manifest.json").read_text(encoding="utf-8"))["data_sources"]["binding"]
+    assert binding["state"] == "unbound" and binding["token"] == pkg.PACKAGE_ROOT_TOKEN
+    assert sdf._package(root) == 0, "the package could not be bound to its own location"  # noqa: SLF001
+    bound = re.search(
+        rf'expression {pkg.DATA_FOLDER_PARAM} = "([^"]+)"',
+        (_model_definition(root) / pkg.EXPRESSIONS_TMDL).read_text(encoding="utf-8"),
+    )
+    assert bound is not None
+    named = Path(bound.group(1))
+    assert named.is_dir(), f"binding named a directory that does not exist: {named}"
+    assert named.resolve() == (root / pkg.DATA_DIR).resolve()
+
+
+def test_a_moved_package_still_reaches_its_rows_once_it_is_BOUND(tmp_path: Path) -> None:
+    """The acceptance test for the design decision, and the one the old value could not pass.
+
+    Round-2 finding 1 measured `embedded_path_exists_after_move=False` beside
+    `packaged_data_exists_after_move=True`: the rows moved with the folder, and the model kept
+    naming where they used to be. A handover package exists to be handed over, so this walks the
+    whole route - package here, MOVE the folder, bind it there, and read the file the partition now
+    names off disk.
+    """
+    root = _package_with_receipt(tmp_path)
+    moved = tmp_path / "customer" / "delivered" / UNIT
+    moved.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(root), str(moved))
+
+    assert sdf._package(moved) == 0  # noqa: SLF001
+    text = (_model_definition(moved) / pkg.EXPRESSIONS_TMDL).read_text(encoding="utf-8")
+    value = re.search(rf'expression {pkg.DATA_FOLDER_PARAM} = "([^"]+)"', text)
+    assert value is not None and Path(value.group(1)).is_dir()
+    tail = re.search(
+        rf'{pkg.DATA_FOLDER_PARAM} & "([^"]+)"',
+        "".join(path.read_text(encoding="utf-8") for path in _model_definition(moved).rglob("*.tmdl")),
+    )
+    assert tail is not None, "no partition reads the shipped copy through the parameter"
+    reached = Path(value.group(1) + tail.group(1))
+    assert reached.is_file(), f"the bound model names rows that are not there: {reached}"
+    assert reached.read_text(encoding="utf-8").startswith("Employee_ID")
+
+
+@pytest.mark.parametrize(
+    ("base", "expected"),
+    [
+        (PureWindowsPath(r"C:\runs\packages\out\Book"), "<PACKAGE_ROOT>\\data\\"),
+        (PurePosixPath("/tmp/pytest-0/packages/out/Book"), "<PACKAGE_ROOT>/data/"),
+    ],
+)
+def test_the_data_folder_value_never_mixes_separators_on_EITHER_platform(base: Path, expected: str) -> None:
+    """The Linux-only defect that ubuntu CI caught and every Windows run structurally could not.
+
+    The value was composed with a literal ``\\``, so on Linux it read
+    ``/tmp/.../out/Book\\data\\`` - ONE path segment with backslashes inside it, naming a directory
+    that does not exist. On Windows both separators resolve, so no local run, no Desktop check and
+    no artifact-level assertion could see it: the composition has to be exercised against a base of
+    the OTHER flavour, which is what this does.
+
+    ``_path_separator`` is asserted directly as well, because it is the whole rule and reading it
+    off a composed string would let a half-correct answer pass. The base supplies the FLAVOUR only -
+    the value itself is placeholder-rooted since round-2 finding 1 - so the assertion is that none
+    of the base's own path survives into it.
+    """
+    assert pkg._path_separator(str(base)) == ("\\" if isinstance(base, PureWindowsPath) else "/")  # noqa: SLF001
+    assert pkg._package_data_folder(base) == expected  # noqa: SLF001
+    assert str(base) not in pkg._package_data_folder(base)  # noqa: SLF001
+    assert pkg._moved_folder_value(base, "SharedSource.Data", "/some/where/") == (  # noqa: SLF001
+        expected + "SharedSource.Data" + ("\\" if isinstance(base, PureWindowsPath) else "/")
+    )
+
+
+def test_a_path_written_in_the_OTHER_flavour_is_still_composed_consistently() -> None:
+    """`C:/runs/out` is a Windows path spelled with forward slashes, and the old rule got it wrong.
+
+    "Does the string contain a backslash" was a proxy for flavour, and it fails in both directions:
+    a Windows path written with `/` answered `/`, and a POSIX directory whose NAME contains a
+    backslash - `/var/tmp/customer\\name/Book`, the reviewer's own case - answered `\\` and produced
+    a value that is half one flavour and half the other. Flavour is decided by the ROOT.
+    """
+    assert pkg._path_separator("C:/runs/out") == "\\"  # noqa: SLF001
+    assert pkg._path_separator("/var/tmp/customer\\name/Book") == "/"  # noqa: SLF001
+    assert pf.flavour("C:/runs/out") == pf.WINDOWS
+    assert pf.flavour("/var/tmp/customer\\name/Book") == pf.POSIX
+    assert pf.flavour("relative/path") is None
+    assert pf.join("/var/tmp/customer\\name/Book", "data", "Shared.Data", trailing=True) == (
+        "/var/tmp/customer\\name/Book/data/Shared.Data/"
+    )
+
+
+def test_a_source_that_cannot_be_shipped_is_a_LOUD_omission_not_a_silent_skip(tmp_path: Path) -> None:
+    """Measured on estate run 408: one unit references a `/Users/...` macOS path absent from this
+    machine, so "copy it" is not always available and the unshippable case is real rather than
+    hypothetical.
+
+    Such a reference is recorded twice over - as a manifest omission carrying its reason, and as a
+    package note, which is what `handover.md` renders. Asserting the reason too, because an omission
+    with no cause is the silent skip wearing a different name.
+
+    ⚠️ It used to KEEP its original literal, on the argument that the path "still resolves wherever
+    it did before". Round-2 finding 1: wherever that was, it was not the customer's machine, and the
+    literal carried a user-profile directory into a deliverable while `package_unit.py` exited 0. The
+    literal is now neutralized and the run reports exit 4.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    absent = tmp_path / "definitely-not-here" / "Extract_Extract.csv"
+    _point_partition_at(bundle, str(absent))
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+
+    record = json.loads((root / "package-manifest.json").read_text(encoding="utf-8"))
+    omissions = record["data_sources"]["omissions"]
+    assert [row["file"] for row in omissions] == ["Extract_Extract.csv"]
+    assert "not present on the packaging machine" in omissions[0]["reason"]
+    assert record["data_sources"]["shipped"] == []
+    assert record["data_sources"]["neutralized"] == ["Extract_Extract.csv"]
+    assert record["data_sources"]["self_contained"] is False
+    assert any("Extract_Extract.csv" in note for note in record["notes"]), record["notes"]
+    assert "Extract_Extract.csv" in (root / "handover.md").read_text(encoding="utf-8")
+
+    partitions = "".join(path.read_text(encoding="utf-8") for path in _model_definition(root).rglob("*.tmdl"))
+    assert str(absent) not in partitions, "the shipped model still names a directory on this machine"
+    assert str(absent.parent) not in partitions
+    assert pkg.UNAVAILABLE_TOKEN in partitions
+    assert _absolute_literals(root) == []
+
+
+def test_a_unit_shipping_without_its_rows_is_a_NONZERO_verdict(tmp_path: Path) -> None:
+    """Round-2 finding 1: `package_unit_exit=0` while the package could not refresh a partition.
+
+    Exit 0 is the only signal an automated caller reads, so a package that is missing the rows its
+    own model names must not earn it. Both directions from one fixture: the same bundle with the
+    source PRESENT exits 0, so this cannot pass by refusing everything.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    payload = tmp_path / "extract" / "Extract_Extract.csv"
+    payload.parent.mkdir(parents=True, exist_ok=True)
+    payload.write_text("a,b\n1,2\n", encoding="utf-8")
+    _point_partition_at(bundle, str(payload))
+    argv = ["--bundle", str(bundle), "--out", str(_out(tmp_path)), "--oracle", str(oracle), "--quiet"]
+    assert pkg.main(argv) == pkg.EXIT_OK
+
+    payload.unlink()
+    assert pkg.main([*argv, "--discard-package-edits"]) == pkg.EXIT_NOT_SELF_CONTAINED
+
+
+def test_an_oversized_source_is_refused_by_the_ceiling_rather_than_copied(tmp_path: Path) -> None:
+    """The ceiling exists so an unbounded case is loud, and it must not fire on a normal one.
+
+    Both directions are asserted from ONE fixture by moving the ceiling, not the data: a test that
+    only proves the refusal cannot tell a working ceiling from one set to zero.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    payload = tmp_path / "big.csv"
+    payload.write_text("a,b\n1,2\n" * 500, encoding="utf-8")
+    _point_partition_at(bundle, str(payload))
+
+    _package(tmp_path, bundle, oracle)
+    generous = json.loads(((_out(tmp_path) / UNIT) / "package-manifest.json").read_text(encoding="utf-8"))
+    assert generous["data_sources"]["shipped"], "the ceiling refused a source it should have shipped"
+
+    original = pkg.MAX_DATA_BYTES
+    try:
+        pkg.MAX_DATA_BYTES = 16
+        _package(tmp_path, bundle, oracle)
+    finally:
+        pkg.MAX_DATA_BYTES = original
+    refused = json.loads(((_out(tmp_path) / UNIT) / "package-manifest.json").read_text(encoding="utf-8"))
+    assert refused["data_sources"]["shipped"] == []
+    assert "exceeds the" in refused["data_sources"]["omissions"][0]["reason"]
+
+
+def test_two_sources_sharing_a_file_name_do_not_overwrite_each_other(tmp_path: Path) -> None:
+    """The engine's extract paths are `.../<table>/federated_<hash>/Extract_Extract.csv`.
+
+    Parent folder plus file name is readable but not unique, and two sources landing on one packaged
+    file would silently repoint one partition at the other's ROWS - a wrong-numbers defect no
+    structural check can see.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    first = tmp_path / "one" / "federated" / "Extract_Extract.csv"
+    second = tmp_path / "two" / "federated" / "Extract_Extract.csv"
+    for path, body in ((first, "a\n1\n"), (second, "a\n2\n")):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+    _point_partition_at(bundle, str(first), str(second))
+
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    shipped = json.loads((root / "package-manifest.json").read_text(encoding="utf-8"))["data_sources"]["shipped"]
+    assert len(shipped) == 2, shipped
+    bodies = sorted((root / row["path"]).read_text(encoding="utf-8") for row in shipped)
+    assert bodies == ["a\n1\n", "a\n2\n"], "one packaged copy overwrote the other"
+
+
+def _resolves_inside(root: Path, value: str) -> bool:
+    """Lexical containment, never `Path.resolve()` - see `package_unit._inside` for the 52-minute UNC hang."""
+    return pkg._inside(root, value)  # noqa: SLF001  # pylint: disable=protected-access
+
+
+def _point_partition_at(bundle: Path, *sources: str, folder: str = "", leaf: str = "", http_path: str = "") -> None:
+    """Give the fixture model import partitions shaped as the engine actually emits them.
+
+    Three shapes, because the packager must tell three apart: a bare `File.Contents("<absolute>")`,
+    the folder PARAMETER that every datasource-only unit in the estate uses, and a Databricks
+    `HttpPath` - a POSIX-absolute literal that is NOT a path at all and must stay silent.
+    """
+    definition = bundle / "pbip" / UNIT / f"{UNIT}.SemanticModel" / "definition"
+    (definition / "tables").mkdir(parents=True, exist_ok=True)
+    (definition / "model.tmdl").write_text("model Model\n\tculture: en-US\n\n", encoding="utf-8")
+    if http_path:
+        (definition / "tables" / "Warehouse.tmdl").write_text(
+            "table Warehouse\n"
+            "\tpartition 'Warehouse' = m\n"
+            "\t\tmode: import\n"
+            "\t\tsource =\n"
+            "\t\t\tlet\n"
+            '\t\t\t\tSource = Databricks.Catalogs("adb-1.azuredatabricks.net", '
+            f'[HttpPath = "{http_path}", Catalog = null])\n'
+            "\t\t\tin\n"
+            "\t\t\t\tSource\n",
+            encoding="utf-8",
+        )
+    if folder:
+        (definition / "expressions.tmdl").write_text(
+            f'expression SourceFolder = "{folder}" meta [IsParameterQuery=true, Type="Text",'
+            " IsParameterQueryRequired=true]\n\n",
+            encoding="utf-8",
+        )
+        (definition / "tables" / "Shared.tmdl").write_text(
+            "table Shared\n"
+            "\tpartition 'Shared' = m\n"
+            "\t\tmode: import\n"
+            "\t\tsource =\n"
+            "\t\t\tlet\n"
+            f'\t\t\t\tSource = Excel.Workbook(File.Contents(#"SourceFolder" & "\\{leaf}"), null, true)\n'
+            "\t\t\tin\n"
+            "\t\t\t\tSource\n",
+            encoding="utf-8",
+        )
+    for index, source in enumerate(sources):
+        (definition / "tables" / f"Imported{index}.tmdl").write_text(
+            f"table Imported{index}\n"
+            f"\tpartition 'Imported{index}' = m\n"
+            "\t\tmode: import\n"
+            "\t\tsource =\n"
+            "\t\t\tlet\n"
+            f'\t\t\t\tSource = Csv.Document(File.Contents("{source}"), [Delimiter=","])\n'
+            "\t\t\tin\n"
+            "\t\t\t\tSource\n",
+            encoding="utf-8",
+        )
 
 
 # --------------------------------------------------------------------------------------------
@@ -1251,8 +1973,29 @@ def test_repackaging_removes_evidence_the_new_input_no_longer_produces(tmp_path:
     assert manifest["oracle"]["objects"] == []
 
 
+def _adopt_as_previously_packaged(root: Path) -> None:
+    """Record the package's CURRENT contents as what packaging wrote, so planted files read as STALE.
+
+    This is the whole distinction the #460 edit guard makes, and it is a distinction about the
+    RECORD, not about the bytes. A file packaging wrote last run and the new input no longer
+    produces is stale; a file no run ever wrote is an addition, and an addition is what an agent
+    editing the canonical `fabric/` tree makes. On disk the two are identical, so a test that plants
+    unrecorded files is testing the guard, not staleness - which is exactly why the version of this
+    test that did so started failing the moment the guard landed.
+    """
+    manifest_path = root / pkg.MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["contents"]["files"] = pkg.package_contents(root)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+
 def test_repackaging_removes_a_stale_file_from_every_copied_tree(tmp_path: Path) -> None:
-    """Not just `oracle/`: stale `assets/` and `fabric/` files persisted the same way."""
+    """Not just `oracle/`: stale `assets/` and `fabric/` files persisted the same way.
+
+    The planted files are made stale by RECORDING them, not merely by writing them - see
+    `_adopt_as_previously_packaged`. Skip that step and this exercises the #460 edit guard instead,
+    and proves nothing at all about replace-not-merge.
+    """
     bundle, oracle = _bundle(tmp_path)
     _package(tmp_path, bundle, oracle)
     root = _out(tmp_path) / UNIT
@@ -1264,10 +2007,159 @@ def test_repackaging_removes_a_stale_file_from_every_copied_tree(tmp_path: Path)
     for path in planted:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("{}", encoding="utf-8")
+    _adopt_as_previously_packaged(root)
+    assert pkg.package_edits(root) == ([], None), "the fixture planted EDITS, so it would test the guard instead"
 
     _package(tmp_path, bundle, oracle)
     survivors = [str(path.relative_to(root)) for path in planted if path.exists()]
     assert survivors == [], f"stale artifacts survived repackaging: {survivors}"
+
+
+# The package is the canonical place to edit (#460), and `replace_dir` above replaces it WHOLE - so
+# re-running the same command silently deleted an agent's work. The guard and the removal contract
+# above pull in opposite directions on the same tree, and both are load-bearing; the seam between
+# them is the digest packaging records of its own output.
+# --------------------------------------------------------------------------------------------
+
+
+def test_repackaging_REFUSES_when_the_package_carries_an_edit(tmp_path: Path) -> None:
+    """Silent loss is the one unacceptable outcome, so an unrecorded change stops the re-run.
+
+    Both shapes an agent makes are asserted, because the guard compares a SET of digests and an
+    added file and a modified file take different branches of it: a new page under the canonical
+    `fabric/` tree, and an appended `limitations_encountered` entry in `migration-spec.json`.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    added = root / "fabric" / f"{UNIT}.Report" / "definition" / "pages" / "agent-authored-page.json"
+    added.parent.mkdir(parents=True, exist_ok=True)
+    added.write_text('{"name": "agent"}', encoding="utf-8")
+    spec = root / "migration-spec.json"
+    spec.write_text(json.dumps({"limitations_encountered": [{"item": "x"}]}), encoding="utf-8")
+
+    with pytest.raises(pkg.PackageEditsRefused) as refusal:
+        _package(tmp_path, bundle, oracle)
+    assert refusal.value.reason is None
+    assert sorted(refusal.value.changed) == [
+        "fabric/Book.Report/definition/pages/agent-authored-page.json",
+        "migration-spec.json",
+    ]
+    assert added.read_text(encoding="utf-8") == '{"name": "agent"}', "the refused run overwrote the edit anyway"
+    assert "--discard-package-edits" in str(refusal.value), "the refusal does not name the way out"
+
+
+def test_an_edit_made_DURING_assembly_is_not_overwritten_by_the_swap(tmp_path: Path) -> None:
+    """Round-2 finding 3: the #460 guard checked the digest ONCE, before assembly began.
+
+    Assembly is not instant - it copies a render tree and shells out to `parse_tableau.py` - and
+    nothing re-read the package before `replace_dir` deleted it. An edit made anywhere in that
+    window was accepted by the filesystem and then destroyed by the swap, with the guard already
+    "passed": the reviewer measured `edit_survived_repackage=False`.
+
+    The window is simulated the way the reviewer did, by editing the canonical package from inside
+    `_assemble_unit` - that is the only way to land a write in a window that is otherwise a race.
+    What is asserted is not the timing but the OUTCOME: the edit is still on disk, and the run
+    refused rather than reporting success.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    marker = '{"name": "written while packaging was running"}'
+    edited = root / "fabric" / f"{UNIT}.Report" / "definition" / "pages" / "agent-page.json"
+
+    original = pkg._assemble_unit  # noqa: SLF001
+
+    def _assemble_then_edit(*args: object, **kwargs: object) -> dict:
+        result = original(*args, **kwargs)
+        edited.parent.mkdir(parents=True, exist_ok=True)
+        edited.write_text(marker, encoding="utf-8")
+        return result
+
+    pkg._assemble_unit = _assemble_then_edit  # noqa: SLF001
+    try:
+        with pytest.raises(pkg.PackageEditsRefused) as refusal:
+            _package(tmp_path, bundle, oracle)
+    finally:
+        pkg._assemble_unit = original  # noqa: SLF001
+
+    assert edited.is_file(), "the edit made during assembly was destroyed by the swap"
+    assert edited.read_text(encoding="utf-8") == marker
+    assert "fabric/Book.Report/definition/pages/agent-page.json" in refusal.value.changed
+    assert (root / pkg.MANIFEST_NAME).is_file(), "the package was left half-replaced"
+    assert not list(_out(tmp_path).glob(".*.replaced")), "the retired copy was not restored"
+
+
+def test_the_second_digest_check_does_not_refuse_an_UNEDITED_package(tmp_path: Path) -> None:
+    """The negative control for the re-check: a clean re-run must still replace the package.
+
+    A guard that refuses everything would pass the test above and make the tool useless, and the
+    check now runs at a moment - after the existing package has been renamed aside - where getting
+    the path wrong would refuse every single run.
+
+    ⚠️ It asserts the file SET, not the digests: `migration-spec.json` is not byte-stable between
+    runs, which is precisely why the guard compares a package against the digest THAT run recorded
+    rather than against a previous run's.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    first = set(json.loads((root / pkg.MANIFEST_NAME).read_text(encoding="utf-8"))["contents"]["files"])
+
+    _package(tmp_path, bundle, oracle)
+    assert set(json.loads((root / pkg.MANIFEST_NAME).read_text(encoding="utf-8"))["contents"]["files"]) == first
+    assert pkg.package_edits(root) == ([], None), "the re-run left the package disagreeing with its own record"
+    # ⚠️ Asserted against the names the packager ACTUALLY writes. These were `.*.replaced` /
+    # `.*.staging`, both retired by #476 (staging is now `.<digest>`, the retired tree
+    # `.<digest>~`), so after the merge those globs matched nothing and this leak-check passed
+    # without being able to observe a leak at all. The sweep for any hidden sibling is what stops a
+    # third scratch name doing the same thing again.
+    staging = pkg.staging_dir(_out(tmp_path), UNIT)
+    assert not staging.exists(), f"the staging directory survived the run: {staging}"
+    assert not staging.with_name(f"{staging.name}~").exists(), "the retired package survived the run"
+    leaked = sorted(path.name for path in _out(tmp_path).iterdir() if path.name.startswith("."))
+    assert leaked == [], f"packaging left hidden scratch behind in --out: {leaked}"
+
+
+def test_a_package_with_no_recorded_digest_is_REFUSED_rather_than_assumed_clean(tmp_path: Path) -> None:
+    """ "I cannot tell whether this was edited" is not "it was not edited" - it is its own answer.
+
+    A package written before the digest existed, or one whose manifest was removed, carries no
+    record to compare against. Treating that as unedited is the collapse this repo keeps re-fixing,
+    so it refuses with a REASON and an empty change list rather than overwriting.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    (root / pkg.MANIFEST_NAME).unlink()
+
+    changed, reason = pkg.package_edits(root)
+    assert changed == []
+    assert reason is not None and "cannot be established" in reason
+    with pytest.raises(pkg.PackageEditsRefused) as refusal:
+        _package(tmp_path, bundle, oracle)
+    assert refusal.value.reason == reason
+
+
+def test_discard_package_edits_overwrites_the_package_deliberately(tmp_path: Path) -> None:
+    """The override exists so the guard costs a flag rather than a wedged estate.
+
+    Asserted through `main`, not `package_unit`, because the flag is the whole user-facing contract:
+    a refusal exits 3 and leaves the package untouched, and the same run with the flag exits 0 and
+    rebuilds it.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    edited = root / "fabric" / f"{UNIT}.Report" / "definition" / "pages" / "agent-authored-page.json"
+    edited.parent.mkdir(parents=True, exist_ok=True)
+    edited.write_text('{"name": "agent"}', encoding="utf-8")
+    argv = ["--bundle", str(bundle), "--out", str(_out(tmp_path)), "--oracle", str(oracle), "--quiet"]
+
+    assert pkg.main([*argv, "--assets", str(bundle.parent / "assets")]) == 3
+    assert edited.is_file(), "a refused run destroyed the edit it refused to overwrite"
+    assert pkg.main([*argv, "--assets", str(bundle.parent / "assets"), "--discard-package-edits"]) == 0
+    assert not edited.exists(), "--discard-package-edits did not rebuild the package"
 
 
 def test_a_failed_repackage_leaves_the_previous_package_intact(tmp_path: Path) -> None:
@@ -1426,3 +2318,1100 @@ def test_write_png_is_a_real_image_so_these_fixtures_could_fail(tmp_path: Path) 
         tmp_path / "probe.png",
         rev.RecordedFacts(sha256=hashlib.sha256(blob).hexdigest(), byte_size=len(blob), width=320, height=240),
     ) == (320, 240)
+
+
+# --------------------------------------------------------------------------------------------
+# 7. the path budget (#476) - a package Power BI Desktop cannot open, refused before it is written
+# --------------------------------------------------------------------------------------------
+#
+# The field failure: `[WinError 206] The filename or extension is too long`, thrown mid-assembly on
+# unit 30 of 47 of a live estate, naming no path, no limit and no remedy. Every test below is
+# ARITHMETIC on the destination side - the projected paths are strings that are never created - so
+# the boundary is exercised identically on the Linux and Windows CI runners, neither of which can be
+# assumed to write a 270-character path at all. The BUNDLE these read is deliberately short.
+
+#: The two generated id segments from the crash report, kept verbatim so the fixture is the shape
+#: that actually failed rather than a contrived deep tree.
+FIELD_PAGE_ID = "page-ws-CA-Summadc2995b2"
+FIELD_VISUAL_ID = "slicer-page-ws-Cb3f14546"
+
+#: Short enough that the SOURCE tree stays far below any limit on both CI runners, and longer than
+#: the staging stem so the FINAL package is the deeper of the two roots. The length under test comes
+#: from `--out`, which is the side issue #476 reports.
+BUDGET_UNIT = "Unit_Sales"
+
+
+def _pbir_bundle(tmp_path: Path, *units: str) -> Path:
+    """A bundle whose units each have the deepest-path shape that crashed in the field.
+
+    `pbip/<Unit>/<Unit>.Report/definition/pages/<page-id>/visuals/<visual-id>/visual.json` - the unit
+    name twice, then the two generated id segments.
+    """
+    bundle = tmp_path / "bundle"
+    names = list(units) or [BUDGET_UNIT]
+    write_engine_report(bundle, workbooks=names)
+    for unit in names:
+        visuals = (
+            bundle
+            / "pbip"
+            / unit
+            / f"{unit}.Report"
+            / "definition"
+            / "pages"
+            / FIELD_PAGE_ID
+            / "visuals"
+            / FIELD_VISUAL_ID
+        )
+        visuals.mkdir(parents=True)
+        (visuals / "visual.json").write_text("{}", encoding="utf-8")
+    return bundle
+
+
+def _deepest_tail(unit: str = BUDGET_UNIT) -> str:
+    """The package-relative path of :func:`_pbir_bundle`'s deepest file, built independently.
+
+    Spelled out with `Path` joins rather than read back from `package_unit`, so a test asserting a
+    length is not asking the code under test what the length should be.
+    """
+    return str(
+        Path(unit, "fabric", f"{unit}.Report", "definition", "pages", FIELD_PAGE_ID, "visuals", FIELD_VISUAL_ID)
+        / "visual.json"
+    )
+
+
+def _padded_path(base: Path, length: int) -> Path:
+    """A path under `base` measuring exactly `length` ASCII characters.
+
+    Segments are capped at 60 characters because a single name may not exceed 255 on either CI
+    runner, and because a real `--out` is several directories deep rather than one absurd one.
+    """
+    if len(str(base)) > length:
+        pytest.skip(f"{base} is already {len(str(base))} characters; cannot build a {length}-character path")
+    out = base
+    while len(str(out)) < length:
+        deficit = length - len(str(out))
+        out = out.with_name(out.name + "d") if deficit == 1 else out / ("d" * min(deficit - 1, 60))
+    assert len(str(out)) == length
+    return out
+
+
+def _synthetic_out(length: int) -> Path:
+    """A never-created `--out` of exactly `length` characters, rooted at the filesystem anchor.
+
+    The projection is arithmetic on strings and touches no filesystem, which is what lets these tests
+    sit exactly on the 259-character boundary. Anchoring at the drive root rather than under
+    `tmp_path` is deliberate: pytest's own temp path is already ~104 characters here, so a boundary
+    case needing a 102-character `--out` would SKIP on the machine it matters most on - and a skipped
+    boundary test proves nothing.
+    """
+    return _padded_path(Path(Path.cwd().anchor or "/") / "pkg", length)
+
+
+def _pin_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the CLI judge absolute paths against WINDOWS ceilings, whichever runner is executing.
+
+    `package_unit` asks :func:`package_unit.platform_limits` what the HOST may write (blind-review
+    B3), so a test that means "this is what a Windows operator sees" has to say so - otherwise it
+    asserts a refusal that the ubuntu runner correctly declines to make, and the two CI legs
+    disagree about arithmetic neither of them is wrong about.
+    """
+    monkeypatch.setattr(pkg, "platform_limits", lambda system=None: pkg.WINDOWS_LIMITS)
+
+
+def test_staging_is_shallower_than_the_package_it_becomes(tmp_path: Path) -> None:
+    """The staging segment sits at the DEEPEST point of every path assembly writes.
+
+    `<out>/.{unit}.staging/` made every one of the hundreds of files in a PBIR tree 9 characters
+    longer than its final home - overhead paid per file, in the exact resource that ran out.
+    """
+    field_unit = "IA_Operation_Health_Summary_Dashboard"
+    out = tmp_path / "packages"
+    assert len(str(pkg.staging_dir(out, field_unit))) < len(str(out / field_unit))
+
+
+def test_the_staging_name_costs_a_CONSTANT_never_the_length_of_the_unit_name(tmp_path: Path) -> None:
+    """A 37-character unit and a 4-character one stage under names of the same length.
+
+    This is the property that makes the reclaim predictable: the staging overhead stops scaling with
+    the name the engine already repeats twice inside the tree.
+    """
+    out = tmp_path / "packages"
+    assert len(pkg.staging_dir(out, "IA_Operation_Health_Summary_Dashboard").name) == len(
+        pkg.staging_dir(out, "Unit").name
+    )
+
+
+def test_two_units_do_not_stage_under_the_same_directory(tmp_path: Path) -> None:
+    """Shortening must not be bought by making the staging name shared - `--unit A --unit B` into one
+    `--out` would then assemble both in the same tree."""
+    out = tmp_path / "packages"
+    assert pkg.staging_dir(out, "Sales_Dashboard") != pkg.staging_dir(out, "Profit_Dashboard")
+
+
+def test_nothing_is_assembled_deeper_than_the_pre_fix_staging_tree(tmp_path: Path) -> None:
+    """The property that holds for EVERY unit name, stated without overclaiming.
+
+    ⚠️ "staging is never deeper than the final package" is **false** below ~9 characters: a unit
+    called `B` stages under a 9-character hidden name, so it is 8 characters deeper than `<out>/B`.
+    That is measured, not hidden - and it is still strictly better than `<out>/.B.staging`, which was
+    10. What is true for every name is that the overhead is a CONSTANT ceiling instead of
+    `len(unit) + 9`, and a unit that short has a short tail anyway (the engine repeats the name
+    twice inside the tree).
+    """
+    out = tmp_path / "packages"
+    for unit in ("B", "Unit", "Unit_Sales", "Sales_Dashboard", "IA_Operation_Health_Summary_Dashboard"):
+        assert len(pkg.staging_dir(out, unit).name) < len(f".{unit}.staging"), unit
+
+
+def test_the_retired_package_is_never_named_after_the_package_it_retires(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`replace_dir` moves the old package aside and `shutil.rmtree` then WALKS it.
+
+    `.{name}.replaced` made every path in a package being REPLACED 10 characters longer than the one
+    anything had measured, so a package that fitted could still fail its second run - in a tree
+    nothing looks at.
+    """
+    staged, final = tmp_path / "s", tmp_path / "Sales_Performance_Dashboard"
+    staged.mkdir()
+    final.mkdir()
+    seen: list[Path] = []
+    rename = pkg._rename_retrying  # pylint: disable=protected-access
+
+    def _record(src: Path, dst: Path) -> None:
+        seen.append(dst)
+        rename(src, dst)
+
+    monkeypatch.setattr(pkg, "_rename_retrying", _record)
+    pkg.replace_dir(staged, final)
+    assert seen, "replace_dir must move the existing package aside before the swap"
+    assert len(seen[0].name) < len(f".{final.name}.replaced"), seen[0]
+
+
+def test_the_budget_measures_both_the_staged_and_the_final_tree(tmp_path: Path) -> None:
+    """Neither root may be assumed to be the deeper one - which of the two wins depends on the name.
+
+    A file that fits its final home and not its staging path is exactly `[WinError 206]`, and a
+    package that fits while staged and not once renamed is a package Power BI Desktop refuses.
+    """
+    bundle = _pbir_bundle(tmp_path)
+    out = tmp_path / "packages"
+    projected = pkg.projected_paths(bundle, BUDGET_UNIT, out)
+    by_root = {
+        root: {path.tail for path in projected if path.path.startswith(f"{root}{os.sep}") or path.path == str(root)}
+        for root in pkg.package_roots(out, BUDGET_UNIT)
+    }
+    assert len(by_root) == 3, "the final tree, the staged tree and the retired tree"
+    assert all(tails for tails in by_root.values()), "every root must be measured"
+    assert len({frozenset(tails) for tails in by_root.values()}) == 1, "the same tails at every root"
+
+
+def test_a_unit_whose_paths_exceed_the_ceiling_is_refused_BEFORE_anything_is_written(tmp_path: Path) -> None:
+    """The customer's shape: 47 units, a canonical `_runs/<NNN>-<slug>/packages/<batch>/` `--out`.
+
+    The old failure wrote 29 packages first and then threw `[WinError 206]` from inside `shutil`.
+
+    ``limits`` is pinned to Windows' rather than inherited from the runner, because that is the
+    platform whose arithmetic this test states - see :func:`package_unit.platform_limits` and the
+    POSIX case below.
+    """
+    bundle = _pbir_bundle(tmp_path)
+    out = _padded_path(tmp_path, 200)
+    with pytest.raises(pkg.PackagePathTooLong) as excinfo:
+        pkg.package_unit(bundle, BUDGET_UNIT, out, oracle_dir=None, assets_dir=None, limits=pkg.WINDOWS_LIMITS)
+    assert not out.exists(), "the refusal must precede every write, including --out itself"
+    assert not (tmp_path / "packages").exists()
+    assert excinfo.value.budget.unit == BUDGET_UNIT
+
+
+def test_the_refusal_names_the_path_its_length_the_ceiling_and_the_characters_to_reclaim(tmp_path: Path) -> None:
+    """`[WinError 206]` names none of the four. Each one is separately actionable.
+
+    The arithmetic is checked against a number the test knows independently - the length of the
+    `--out` it built - and for internal consistency, so a message that merely looks plausible fails.
+    """
+    bundle = _pbir_bundle(tmp_path)
+    out = _padded_path(tmp_path, 200)
+    with pytest.raises(pkg.PackagePathTooLong) as excinfo:
+        pkg.package_unit(bundle, BUDGET_UNIT, out, oracle_dir=None, assets_dir=None, limits=pkg.WINDOWS_LIMITS)
+    message = str(excinfo.value)
+
+    assert str(out / BUDGET_UNIT) in message or str(pkg.staging_dir(out, BUDGET_UNIT)) in message, (
+        f"the offending path is not named: {message}"
+    )
+    measured = re.search(
+        r"deepest: (\d+) UTF-16 units, (\d+) over the (\d+)-character (file|directory) ceiling", message
+    )
+    assert measured is not None, message
+    length, over, ceiling = (int(measured.group(index)) for index in (1, 2, 3))
+    assert ceiling in (259, 247), "the ceilings come from check_path_ceiling.py, measured against Desktop"
+    assert length - ceiling == over > 0
+
+    remedy = re.search(r"--out is (\d+) character\(s\) long; it must be at most (-?\d+) \((\d+) shorter\)", message)
+    assert remedy is not None, message
+    current, allowed, reclaim = (int(remedy.group(index)) for index in (1, 2, 3))
+    assert current == len(str(out)) == 200, "the length reported for --out is not the one it has"
+    assert allowed + reclaim == current
+    assert "docs/windows-path-limits.md" in message
+
+
+def test_the_budget_measures_the_STAGED_tree_too_not_only_the_final_one(tmp_path: Path) -> None:
+    """A one-character unit stages under a 9-character name, so staging is the deeper of the two.
+
+    `--out` is sized so the FINAL tree fits the ceiling exactly and only the scratch trees are over:
+    a check that measured the destination alone would package this unit and then die assembling it.
+    """
+    unit = "B"
+    bundle = _pbir_bundle(tmp_path, unit)
+    out = _synthetic_out(pkg.WINDOWS_LIMITS.file_ceiling - len(_deepest_tail(unit)) - 1)
+    budget = pkg.path_budget(bundle, unit, out, limits=pkg.WINDOWS_LIMITS)
+    final = str(out / unit)
+    assert budget.overruns, "the scratch trees are over the ceiling and the final tree is not"
+    assert not [path for path in budget.overruns if path.path.startswith(f"{final}{os.sep}")], [
+        path.path for path in budget.overruns
+    ]
+
+
+def test_scratch_overrun_does_not_consume_the_WINDOWS_shipping_budget(tmp_path: Path) -> None:
+    """A POSIX host may need a long scratch root while the final package remains relocatable."""
+    unit = "B"
+    bundle = _pbir_bundle(tmp_path, unit)
+    out = _synthetic_out(cpc.POSIX_PATH_CEILING - len(_deepest_tail(unit)) - 1)
+
+    budget = pkg.path_budget(bundle, unit, out, limits=cpc.POSIX_LIMITS)
+
+    assert budget.overruns, "the staging or retired scratch root must exceed the POSIX host limit"
+    assert budget.shipping == [], "only the final package is judged for Windows portability"
+    final_paths = [
+        path
+        for path in pkg.projected_paths(bundle, unit, out, limits=cpc.POSIX_LIMITS)
+        if path.path.startswith(f"{out / unit}{os.sep}") or path.path == str(out / unit)
+    ]
+    assert budget.shipping_budget == min(
+        (pkg.WINDOWS_LIMITS.dir_ceiling if path.kind == pkg.KIND_DIR else pkg.WINDOWS_LIMITS.file_ceiling)
+        - (path.length - pkg.utf16_len(str(out)))
+        for path in final_paths
+    )
+
+    staging = tmp_path / "staging"
+    assembled_file = staging / _deepest_tail(unit)
+    assembled_file.parent.mkdir(parents=True)
+    assembled_file.write_text("{}", encoding="utf-8")
+    assembled = pkg.assembled_budget(unit, staging, out / unit, out, cpc.POSIX_LIMITS)
+    assert assembled.overruns
+    assert assembled.shipping == []
+
+
+def test_a_POSIX_scratch_overrun_still_refuses_packaging(tmp_path: Path) -> None:
+    """The shipping split must not weaken the host's refusal to write an overlong scratch tree."""
+    unit = "B"
+    bundle = _pbir_bundle(tmp_path, unit)
+    out = _synthetic_out(cpc.POSIX_PATH_CEILING - len(_deepest_tail(unit)) - 1)
+
+    with pytest.raises(pkg.PackagePathTooLong):
+        pkg.package_unit(bundle, unit, out, oracle_dir=None, assets_dir=None, limits=cpc.POSIX_LIMITS)
+
+
+def test_a_unit_that_fits_exactly_at_the_ceiling_is_NOT_refused(tmp_path: Path) -> None:
+    """The negative control, one character away from the test above.
+
+    Without it every assertion here is satisfied by a check that refuses everything. The unit name is
+    long enough that its own segment, not the staging stem, is the deeper root.
+    """
+    unit = "Sales_Performance_Dashboard"
+    bundle = _pbir_bundle(tmp_path, unit)
+    fits = _synthetic_out(pkg.WINDOWS_LIMITS.file_ceiling - len(_deepest_tail(unit)) - 1)
+    assert pkg.path_budget(bundle, unit, fits, limits=pkg.WINDOWS_LIMITS).overruns == []
+    assert pkg.path_budget(bundle, unit, fits, limits=pkg.WINDOWS_LIMITS).out_root_budget == len(str(fits))
+    assert pkg.path_budget(bundle, unit, fits / "x", limits=pkg.WINDOWS_LIMITS).overruns, (
+        "one character more must be refused"
+    )
+
+
+def test_a_unit_no_out_can_fit_says_so_instead_of_naming_an_impossible_directory(tmp_path: Path) -> None:
+    """When the tail alone is over the ceiling, shortening `--out` cannot rescue it.
+
+    Reproduced with lowered ceilings rather than a 260-character fixture tree, exactly as
+    `check_path_ceiling.py`'s own `--ceiling` does - a bundle deep enough to do this for real cannot
+    be created on a stock Windows runner, which is the whole reason this defect exists.
+    """
+    bundle = _pbir_bundle(tmp_path)
+    tiny = pkg.Limits(file_ceiling=40, dir_ceiling=28)
+    budget = pkg.path_budget(bundle, BUDGET_UNIT, tmp_path / "o", limits=tiny)
+    assert budget.out_root_budget < 0
+    message = pkg.render_path_budget(budget)
+    assert "NO --out can fit this unit" in message
+    assert f"{-budget.out_root_budget} character(s) over" in message
+
+
+def test_main_refuses_a_too_deep_out_before_packaging_ANY_unit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """29 of 47 packages written, then a crash, was the expensive half of this defect.
+
+    A shorter `--out` moves every unit, so the estate would be repackaged wholesale anyway; the run
+    is refused whole and the offenders are named together with the one number that fixes all of them.
+    """
+    _pin_windows(monkeypatch)
+    bundle = _pbir_bundle(tmp_path, BUDGET_UNIT, "Second_Unit")
+    out = _padded_path(tmp_path, 200)
+    with pytest.raises(SystemExit) as excinfo:
+        pkg.main(["--bundle", str(bundle), "--out", str(out), "--quiet"])
+    assert excinfo.value.code == 2
+    assert list(out.iterdir()) == [], "nothing may be written when the run is refused"
+
+
+def test_the_batch_refusal_names_every_offending_unit_and_one_number_that_fixes_them(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One unit at a time is how the field run discovered them - 29 packages apart."""
+    _pin_windows(monkeypatch)
+    bundle = _pbir_bundle(tmp_path, BUDGET_UNIT, "Second_Unit")
+    out = _padded_path(tmp_path, 200)
+    with pytest.raises(SystemExit):
+        pkg.main(["--bundle", str(bundle), "--out", str(out), "--quiet"])
+    message = capsys.readouterr().err
+    assert "2 of 2 unit(s)" in message
+    assert BUDGET_UNIT in message and "Second_Unit" in message
+    assert "NOTHING was packaged" in message
+    assert re.search(r"it must be at most (-?\d+) \((\d+) shorter\) for every unit to fit", message), message
+
+
+# --------------------------------------------------------------------------------------------
+# 7b. the blind-review blockers against the budget in section 7
+#
+# Three findings, each reproduced through the real CLI on the branch before it was fixed:
+#
+#   B2  a unit may be named exactly like another unit's staging directory, because a leading dot is
+#       a legal Tableau name. `Victim` and `.d72cee2e` were BOTH reported packaged at exit 0 and only
+#       `Victim` existed on disk - `rmtree(staging)` had deleted a finished package. Reporting
+#       success while destroying one is the worst outcome this file can produce, so it is first.
+#   B1  the projection measured a SUBSET and said exit 0 about the rest: `assets/`, `data/`,
+#       `oracle/`, a generated `expressions.tmdl` and the retired tree were all unmeasured. A valid
+#       204-character workbook filename projected a maximum of 102 and shipped a 279-character path.
+#   B3  Windows ceilings were applied to absolute POSIX paths, refusing a 297-character `--out`
+#       whose package was valid at 332. Packages relocate, so that is a false refusal.
+# --------------------------------------------------------------------------------------------
+
+
+# --- B2: a staging name may never be able to name a package ---------------------------------
+
+
+def test_a_unit_named_like_another_units_staging_directory_cannot_delete_it(tmp_path: Path) -> None:
+    """The reproduction, unchanged: two units, one of them named `.<digest of the other>`.
+
+    Before: `main` exited 0 having reported BOTH packaged, and the alias package was gone - deleted
+    by `rmtree(staging)` on its way to assembling `Victim`. The run reported success about an
+    artifact it had just destroyed, which no downstream gate can detect because the manifest that
+    would have said otherwise went with it.
+    """
+    victim = "Victim"
+    alias = pkg.staging_dir(tmp_path, victim).name
+    bundle = _pbir_bundle(tmp_path, victim, alias)
+    out = _out(tmp_path)
+    report = tmp_path / "packaging.json"
+
+    code = pkg.main(["--bundle", str(bundle), "--out", str(out), "--quiet", "--json", str(report)])
+
+    assert code == pkg.EXIT_UNIT_FAILED, "the alias name is refused, and a refusal is never exit 0"
+    packaged = [row["unit"] for row in json.loads(report.read_text(encoding="utf-8"))["units"]]
+    assert alias not in packaged, "a name that aliases a staging path must never be reported packaged"
+    assert all((out / name).is_dir() for name in packaged), (
+        f"every unit reported packaged must be on disk: {packaged} vs {sorted(p.name for p in out.iterdir())}"
+    )
+    assert (out / victim).is_dir(), "the unit that IS packageable still packages"
+
+
+def test_the_cleanup_refuses_to_delete_a_directory_this_packager_did_not_name(tmp_path: Path) -> None:
+    """The tripwire behind the name refusal: `rmtree` may only target a scratch name.
+
+    Prevention is the fix - a unit cannot be named like a staging directory - and this is asserted
+    anyway because the consequence is invisible here and lands on someone else, as a package that
+    was reported shipped and is not there.
+    """
+    package = tmp_path / "Victim"
+    (package / "fabric").mkdir(parents=True)
+    (package / "fabric" / "model.tmdl").write_text("rows", encoding="utf-8")
+
+    with pytest.raises(pkg.PackagingError) as excinfo:
+        pkg._discard_scratch(package)  # pylint: disable=protected-access
+    assert (package / "fabric" / "model.tmdl").is_file(), "nothing may be deleted when the name is refused"
+    assert "Victim" in str(excinfo.value)
+
+    scratch = pkg.staging_dir(tmp_path, "Victim")
+    scratch.mkdir()
+    pkg._discard_scratch(scratch)  # pylint: disable=protected-access
+    assert not scratch.exists(), "the negative control: a scratch name IS swept"
+
+
+@pytest.mark.parametrize("unit", ["B", "Book", "Victim", "IA_Operation_Health_Summary_Dashboard", "Ünit", "a b"])
+def test_every_scratch_name_this_packager_creates_is_one_no_unit_may_be_called(tmp_path: Path, unit: str) -> None:
+    """The structural link, in both directions, so the two halves cannot drift apart.
+
+    `staging_dir` and `retired_dir` are the only two generators; whatever they produce has to be a
+    name `unit_name_problem` refuses, or the collision B2 reproduced re-opens for a name shape nobody
+    thought of. The last assertion is the negative control - a real unit name is not reserved, so
+    this is not satisfied by refusing everything.
+    """
+    for scratch in (pkg.staging_dir(tmp_path, unit), pkg.retired_dir(tmp_path / unit)):
+        assert pkg.is_reserved_packaging_name(scratch.name), scratch
+        assert pkg.unit_name_problem(scratch.name) is not None, scratch
+    assert pkg.unit_name_problem(unit) is None, "a name a customer could really have must still package"
+
+
+# --- B1: the projection, and the measurement that makes incompleteness impossible ------------
+
+
+def _asset_bundle(tmp_path: Path, unit: str, asset_name: str) -> tuple[Path, Path]:
+    """`(bundle, assets)` where the unit resolves a source asset with a CUSTOMER-chosen filename."""
+    bundle = _pbir_bundle(tmp_path, unit)
+    assets = tmp_path / "assets"
+    assets.mkdir(parents=True, exist_ok=True)
+    (assets / asset_name).write_text("<workbook/>", encoding="utf-8")
+    (bundle / "handover").mkdir(parents=True, exist_ok=True)
+    (bundle / "handover" / f"{unit}.json").write_text(
+        json.dumps({"workbook": {"name": unit, "source_id": f"_runs/999-x/assets/{asset_name}"}}), encoding="utf-8"
+    )
+    return bundle, assets
+
+
+def test_the_source_assets_own_filename_is_projected_not_discovered_at_write_time(tmp_path: Path) -> None:
+    """204 characters is a legal Windows filename, and the customer chose it - we did not.
+
+    Measured before the fix: `projected maximum = 102, zero overruns`, `main_exit = 0`,
+    `asset_written = True`, packaged asset path **279**. A budget that measures a subset and then
+    reports exit 0 is the fail-open shape, not the safe direction.
+    """
+    unit, name = "Book", f"{'A' * 200}.twb"
+    bundle, assets = _asset_bundle(tmp_path, unit, name)
+    out = _synthetic_out(62)
+
+    projected = pkg.projected_paths(bundle, unit, out, limits=pkg.WINDOWS_LIMITS, assets_dir=assets)
+    assert f"assets/{name}" in {path.tail for path in projected}, "the asset the packager copies must be measured"
+
+    with pytest.raises(pkg.PackagePathTooLong) as excinfo:
+        pkg.package_unit(bundle, unit, out, oracle_dir=None, assets_dir=assets, limits=pkg.WINDOWS_LIMITS)
+    assert excinfo.value.budget.worst.tail == f"assets/{name}"
+    assert not out.exists(), "nothing may be written, including --out itself"
+
+
+def test_an_output_the_projection_never_predicted_is_still_refused_before_the_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The property that replaces the old "not exhaustive, and deliberately so" comment.
+
+    A projection is a MODEL of the output and blind review measured four real outputs missing from
+    it. This walks the tree assembly ACTUALLY produced, before the swap, so an output a future edit
+    adds appears in the budget without anyone remembering to declare it. Simulated by making an
+    existing writer emit one more file - which is exactly what "somebody adds an output" looks like.
+    """
+    bundle, _oracle = _bundle(tmp_path)
+    out = _out(tmp_path)
+    assert pkg.main(["--bundle", str(bundle), "--out", str(out), "--quiet"]) == 0
+    before = pkg.package_contents(out / UNIT)
+
+    projected = max(path.length for path in pkg.projected_paths(bundle, UNIT, out))
+    limits = pkg.Limits(file_ceiling=projected + 20, dir_ceiling=projected + 20)
+    surprise = "z" * (projected - len(str(pkg.staging_dir(out, UNIT))) + 30)
+    write_schema = pkg._write_spec_schema  # pylint: disable=protected-access
+
+    def _and_one_more(dest: Path) -> tuple[str | None, str | None]:
+        (dest / surprise).write_text("an output nobody added to the budget", encoding="utf-8")
+        return write_schema(dest)
+
+    monkeypatch.setattr(pkg, "_write_spec_schema", _and_one_more)
+    with pytest.raises(pkg.PackagePathTooLong) as excinfo:
+        pkg.package_unit(bundle, UNIT, out, oracle_dir=None, assets_dir=None, limits=limits)
+
+    assert excinfo.value.budget.worst.tail == surprise
+    assert pkg.package_contents(out / UNIT) == before, "the package already there must survive untouched"
+    assert not pkg.staging_dir(out, UNIT).exists(), "and the staged tree must be gone"
+
+
+def test_the_RETIRED_tree_is_measured_because_rmtree_WALKS_it(tmp_path: Path) -> None:
+    """Three roots, not two: a package being replaced is renamed to `.<digest>~` and then walked.
+
+    `.<digest>~` is 10 characters, staging is 9 and a unit called `B` is 1 - so for a short name the
+    retired tree is the DEEPEST thing packaging touches, and `shutil.rmtree` has to be able to open
+    every path in it. `--out` here is sized so the staged tree fits exactly and only the retired one
+    is over.
+    """
+    unit = "B"
+    bundle = _pbir_bundle(tmp_path, unit)
+    out = _synthetic_out(pkg.WINDOWS_LIMITS.file_ceiling - len(_deepest_tail(unit)) - 9)
+
+    assert pkg.retired_dir(out / unit) in pkg.package_roots(out, unit)
+    budget = pkg.path_budget(bundle, unit, out, limits=pkg.WINDOWS_LIMITS)
+    retired = f"{pkg.retired_dir(out / unit)}{os.sep}"
+    assert budget.overruns, "the retired tree is over the ceiling"
+    assert all(path.path.startswith(retired) for path in budget.overruns), [
+        path.path for path in budget.overruns if not path.path.startswith(retired)
+    ]
+
+
+def test_a_length_refusal_from_the_FILESYSTEM_is_restated_with_a_path_and_a_remedy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The backstop for the machine that cannot even WRITE the tree there is to measure.
+
+    On stock Windows the write throws before there is anything to walk, and `[WinError 206] The
+    filename or extension is too long` named no path, no limit and no remedy - it escaped as an
+    uncaught traceback whose exit 1 is indistinguishable from `EXIT_NO_WORKING_COPY`.
+    """
+    bundle, _oracle = _bundle(tmp_path)
+    out = _out(tmp_path)
+    out.mkdir(parents=True, exist_ok=True)
+    offender = str(out / UNIT / ("q" * 200))
+
+    def _too_long(*_args: object, **_kwargs: object) -> dict:
+        raise OSError(errno.ENAMETOOLONG, "File name too long", offender)
+
+    monkeypatch.setattr(pkg, "_assemble_unit", _too_long)
+    with pytest.raises(pkg.PackagingError) as excinfo:
+        pkg.package_unit(bundle, UNIT, out, oracle_dir=None, assets_dir=None)
+    assert offender in str(excinfo.value) and "check_path_ceiling.py" in str(excinfo.value)
+    assert not list(out.iterdir()), "nothing may survive a refusal"
+
+    def _denied(*_args: object, **_kwargs: object) -> dict:
+        raise OSError(errno.EACCES, "Permission denied", offender)
+
+    monkeypatch.setattr(pkg, "_assemble_unit", _denied)
+    with pytest.raises(OSError) as unrelated:
+        pkg.package_unit(bundle, UNIT, out, oracle_dir=None, assets_dir=None)
+    assert not isinstance(unrelated.value, pkg.PackagingError), "somebody else's OSError is not relabelled"
+
+
+# --- B3: Desktop's ceiling belongs to the TAILS, not to somebody's build directory -----------
+
+
+def test_a_long_POSIX_out_is_not_refused_by_a_ceiling_that_belongs_to_WINDOWS(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Measured before the fix: a 297-character POSIX `--out` exited 2, and bypassing only the budget
+    produced a valid package at exit 0 whose deepest path was 332.
+
+    259/247 were measured against Power BI Desktop on Windows. Applying them to an absolute path on a
+    host that has no such limit refuses a build that would be fine the moment it is relocated - and
+    relocation is what a package is FOR. The POSIX half is read through the DEFAULT, because the
+    defect was in which ceilings the default picks.
+    """
+    bundle = _pbir_bundle(tmp_path)
+    out = _synthetic_out(297)
+
+    assert pkg.path_budget(bundle, BUDGET_UNIT, out, limits=pkg.WINDOWS_LIMITS).refused
+
+    monkeypatch.setattr(pkg, "platform_limits", lambda system=None: cpc.POSIX_LIMITS)
+    posix = pkg.path_budget(bundle, BUDGET_UNIT, out)
+    assert not posix.refused, [path.path for path in posix.overruns]
+    assert posix.shipping_budget >= 0, "and the package still fits a Windows root once it lands"
+
+
+def test_a_tail_no_WINDOWS_root_can_fit_is_refused_even_on_a_generous_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The half of Desktop's ceiling that is NOT a false positive - and the negative control for B3.
+
+    Without this, "stop applying Windows ceilings on POSIX" would mean a Linux run happily building
+    a package no Windows machine can ever open. The ceilings are lowered here rather than a
+    260-character tree created, exactly as `check_path_ceiling.py`'s own `--ceiling` does.
+    """
+    monkeypatch.setattr(pkg, "WINDOWS_LIMITS", pkg.Limits(file_ceiling=40, dir_ceiling=28))
+    bundle = _pbir_bundle(tmp_path)
+    budget = pkg.path_budget(bundle, BUDGET_UNIT, tmp_path / "o", limits=cpc.POSIX_LIMITS)
+
+    assert budget.overruns == [], "the host itself is content with these paths"
+    assert budget.shipping, "no Windows root can fit this unit, so it is refused anyway"
+    assert budget.refused and budget.hard_budget < 0
+    assert "NO --out can fit this unit" in pkg.render_path_budget(budget)
+
+
+def test_a_package_that_barely_fits_a_WINDOWS_root_WARNS_and_still_ships(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the B3 split: advisory, never a refusal.
+
+    A tight relocation budget is a shipping hazard rather than a defect - `C:\\Users\\<name>\\
+    Documents\\` is ~28 characters before a customer makes one folder - so it is reported and the
+    package still ships. The first run is the negative control: a shallow package does not warn.
+    """
+    bundle, _oracle = _bundle(tmp_path)
+    command = ["--bundle", str(bundle), "--out", str(_out(tmp_path)), "--quiet"]
+
+    assert pkg.main(command) == 0
+    assert "tolerate a Windows root" not in capsys.readouterr().err
+
+    monkeypatch.setattr(pkg, "SHIPPING_ROOT_BUDGET_ADVISORY", 10_000)
+    assert pkg.main(command) == 0, "the advisory must not change the verdict"
+    warning = capsys.readouterr().err
+    assert "WARN" in warning and UNIT in warning
+    assert "tolerate a Windows root of fewer than 10000 characters" in warning
+
+
+# --------------------------------------------------------------------------------------------
+# 8. the blind-review round-4 blockers
+#
+# Six findings, each reproduced through the real CLI on the branch before it was fixed, and each
+# invisible to every gate that was already green. They share one shape: a verdict that reads as a
+# pass while the thing it is a verdict ABOUT could not be established, could not be contained, or
+# was never even the right file.
+# --------------------------------------------------------------------------------------------
+
+
+def _cli(tmp_path: Path, bundle: Path, *extra: str) -> int:
+    """The CLI as an operator runs it, returning the exit CODE - never the printed text."""
+    return pkg.main(["--bundle", str(bundle), "--out", str(_out(tmp_path)), "--quiet", *extra])
+
+
+# --- B6: a source-controlled unit name must not choose where this packager writes ------------
+
+
+@pytest.mark.parametrize(
+    "evil",
+    [
+        r"..\escaped-package",
+        "../escaped-posix",
+        r"sub\..\..\escaped-nested",
+        "sub/../../escaped-nested-posix",
+        r"C:\escaped-absolute",
+        "/escaped-rooted",
+        "..",
+    ],
+)
+def test_a_unit_name_that_escapes_the_out_directory_is_refused(tmp_path: Path, evil: str) -> None:
+    """Reproduced: a workbook named `..\\escaped-package` wrote a full package OUTSIDE `--out`.
+
+    The name is not ours - `bundle_units` reads it from the engine's `report.json`
+    (`workbooks[].name`) and from `pbip/` directory names, both of which come from the customer's
+    Tableau estate, so this is source-controlled input reaching a filesystem write. Measured before
+    the fix: `requested_out=...\\packages\\out`, `written=...\\packages\\escaped-package`,
+    `written_is_inside_out=False`, exit 1, empty stderr.
+
+    Both separators are exercised on BOTH platforms on purpose: a packaging host is not necessarily
+    the harvest host, and `..\\x` is one innocent filename to `PurePosixPath` and a traversal to
+    Windows.
+    """
+    bundle, _ = _bundle(tmp_path)
+    write_engine_report(bundle, workbooks=[UNIT, evil])
+    assert evil in pkg.bundle_units(bundle), "the fixture must actually offer the hostile name"
+
+    before = {path for path in _out(tmp_path).parent.rglob("*")} if _out(tmp_path).parent.exists() else set()
+    code = _cli(tmp_path, bundle, "--unit", evil)
+    after = {path for path in _out(tmp_path).parent.rglob("*")}
+
+    assert code == pkg.EXIT_UNIT_FAILED
+    out = _out(tmp_path)
+    escaped = sorted(path for path in after - before if path != out and out not in path.parents)
+    assert not escaped, f"packaging wrote outside --out: {escaped}"
+
+
+def test_the_unit_name_guard_names_the_problem_rather_than_sanitizing_it(tmp_path: Path) -> None:
+    """Refused, not rewritten: every later join is keyed by the unit name.
+
+    Silently mapping `..\\x` to `_x` would package a unit under a name that matches nothing in the
+    bundle - no handover slice, no oracle attribution, and `promote_unit.py` reading a manifest kind
+    for a unit the engine never emitted.
+    """
+    assert pkg.unit_name_problem(UNIT) is None
+    assert pkg.unit_name_problem("Sales - 2026 (final).v2") is None
+    for evil in (r"..\x", "../x", "", "   ", ".", "..", r"C:\x", "/x", r"a\b", "a/b"):
+        assert pkg.unit_name_problem(evil) is not None, f"{evil!r} was accepted as a unit name"
+
+    # Each branch has to be independently observable, or a mutation that deletes one is caught only
+    # by the catch-all below it and the deleted branch is credited as covered. Measured while
+    # writing this: removing the separator branch entirely left every rejection intact, because
+    # `PurePath(...).name` rejects the same strings with a vaguer reason.
+    assert "path separator" in (pkg.unit_name_problem(r"a\b") or "")
+    assert "path separator" in (pkg.unit_name_problem("a/b") or "")
+    assert "relative directory reference" in (pkg.unit_name_problem("..") or "")
+    assert "drive-qualified" in (pkg.unit_name_problem("C:") or "")
+    assert "empty" in (pkg.unit_name_problem("   ") or "")
+
+    with pytest.raises(pkg.UnsafeUnitName):
+        pkg.assert_package_destination(tmp_path, r"..\escape")
+    assert pkg.assert_package_destination(tmp_path, UNIT) == tmp_path / UNIT
+
+
+# --- B5: "cannot assess" is its own blocking state, distinct from clean AND from failed -------
+
+
+def test_a_truncated_engine_report_is_refused_rather_than_packaged_unclassified(tmp_path: Path) -> None:
+    """Reproduced: `exit 0  OK Book [unclassified]`, with no notes at all.
+
+    `read_json` returns None for absent AND for corrupt, so a `report.json` nobody could parse read
+    as "this bundle classifies nothing" - and the unit was packaged with a classification invented
+    by the fallback.
+    """
+    bundle, _ = _bundle(tmp_path)
+    (bundle / "report.json").write_text('{"workbooks": [{"name": "Book"', encoding="utf-8")
+    assert _cli(tmp_path, bundle, "--unit", UNIT) == pkg.EXIT_CANNOT_ASSESS
+    assert not (_out(tmp_path) / UNIT).exists(), "a package was written from input that could not be read"
+
+
+def test_a_truncated_handover_slice_is_refused_rather_than_silently_absent(tmp_path: Path) -> None:
+    """Reproduced: `exit 0`, and the handover slice simply not in the package."""
+    bundle, _ = _bundle(tmp_path)
+    (bundle / "handover" / f"{UNIT}.json").write_text('{"workbook": {"source_id"', encoding="utf-8")
+    assert _cli(tmp_path, bundle, "--unit", UNIT) == pkg.EXIT_CANNOT_ASSESS
+    assert not (_out(tmp_path) / UNIT).exists()
+
+
+@pytest.mark.parametrize("name", ["source-provenance.json", "engine-output-receipt.json", "input_manifest.json"])
+def test_every_bundle_input_that_must_be_read_is_refused_when_it_is_corrupt(tmp_path: Path, name: str) -> None:
+    """The whole enumerated surface, not just the two the reviewer happened to truncate."""
+    bundle, _ = _bundle(tmp_path)
+    (bundle / name).write_text("{ not json", encoding="utf-8")
+    assert _cli(tmp_path, bundle, "--unit", UNIT) == pkg.EXIT_CANNOT_ASSESS
+    assert not (_out(tmp_path) / UNIT).exists()
+
+
+def test_an_ABSENT_input_still_packages_because_absence_is_not_corruption(tmp_path: Path) -> None:
+    """The negative control the refusal above must not swallow.
+
+    `source-provenance.json`, `engine-output-receipt.json` and `input_manifest.json` are all
+    legitimately absent in real bundle shapes, and a packager that refused an absence would refuse
+    most of the reference estate. Corruption is what cannot be assessed; absence is a fact.
+    """
+    bundle, _ = _bundle(tmp_path)
+    for name in ("source-provenance.json", "engine-output-receipt.json", "input_manifest.json"):
+        (bundle / name).unlink(missing_ok=True)
+    assert _cli(tmp_path, bundle, "--unit", UNIT) == 0
+    assert (_out(tmp_path) / UNIT / "package-manifest.json").is_file()
+
+
+def test_a_workbook_whose_source_asset_vanished_cannot_be_assessed(tmp_path: Path) -> None:
+    """Reproduced: `exit 0  OK Book`, for a package on which BOTH gates return CANNOT_ESTABLISH.
+
+    Without the source, `check_unit` cannot derive an expected page set (#443) and the entry gate
+    reports `CANNOT_ESTABLISH`, so every per-page verdict the package would yield is "I do not
+    know". Saying `OK` for it is the clean-verdict-from-unreadable-input class exactly.
+    """
+    bundle, _ = _bundle(tmp_path)
+    for path in (tmp_path / "assets").iterdir():
+        path.unlink()
+    assert _cli(tmp_path, bundle, "--unit", UNIT) == pkg.EXIT_CANNOT_ASSESS
+    assert not (_out(tmp_path) / UNIT).exists()
+
+
+def test_a_datasource_unit_with_no_asset_still_packages_because_it_claims_no_pages(tmp_path: Path) -> None:
+    """The negative control for the rule above - 18 of 67 units in the reference run are this shape.
+
+    A datasource-only unit ships a model and no report, so it makes no page claim and its missing
+    asset blinds nothing. Refusing it would refuse a quarter of the estate.
+    """
+    bundle, oracle = _bundle(tmp_path, datasources=("Shared_Extract",))
+    model = bundle / "pbip" / "Shared_Extract" / "Shared_Extract.SemanticModel" / "definition"
+    model.mkdir(parents=True, exist_ok=True)
+    (model / "model.tmdl").write_text("model Model\n", encoding="utf-8")
+    result = pkg.package_unit(
+        bundle, "Shared_Extract", _out(tmp_path), oracle_dir=oracle, assets_dir=bundle.parent / "assets"
+    )
+    assert result["artifacts"]["asset"] is None
+    assert (_out(tmp_path) / "Shared_Extract" / "fabric" / "Shared_Extract.SemanticModel").is_dir()
+
+
+def test_a_bundle_that_names_no_units_at_all_never_reports_success(tmp_path: Path) -> None:
+    """Reproduced: `packaged 0/0` at exit 0 - true, useless, and read by a caller as "estate done"."""
+    bundle, _ = _bundle(tmp_path)
+    write_engine_report(bundle, workbooks=[], datasources=[])
+    shutil.rmtree(bundle / "pbip")
+    assert pkg.bundle_units(bundle) == []
+    report = tmp_path / "packaging.json"
+    assert _cli(tmp_path, bundle, "--json", str(report)) == pkg.EXIT_CANNOT_ASSESS
+    assert json.loads(report.read_text(encoding="utf-8"))["cannot_assess"]
+
+
+def test_cannot_assess_outranks_every_verdict_about_content(tmp_path: Path) -> None:
+    """One unassessable unit beside a perfectly good one is still a cannot-assess RUN.
+
+    The good unit is still packaged - one bad input must not cost an estate its other 66 units - but
+    the run's own code says "there is something here I could not read", because that is the only
+    honest thing a caller can act on.
+    """
+    bundle, _ = _bundle(tmp_path)
+    write_engine_report(bundle, workbooks=[UNIT, "Never_Emitted"])
+    (bundle / "handover" / "Never_Emitted.json").write_text("{ truncated", encoding="utf-8")
+    assert _cli(tmp_path, bundle) == pkg.EXIT_CANNOT_ASSESS
+    assert (_out(tmp_path) / UNIT / "package-manifest.json").is_file()
+    assert not (_out(tmp_path) / "Never_Emitted").exists()
+
+
+def test_a_TRUNCATED_ORACLE_still_packages_so_the_entry_gate_can_report_those_pages_blind(tmp_path: Path) -> None:
+    """The deliberate hole in the cannot-assess surface, pinned so it cannot be closed by accident.
+
+    An oracle that is missing, absent or truncated must still PACKAGE: a unit whose oracle has no
+    render for a page is the negative control the whole packaging contract is written around, and it
+    has to reach `check_reference_readiness.py` as exit 1 FINDINGS rather than never existing. The
+    oracle is evidence ABOUT the unit; the four bundle inputs above are what the unit IS.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    (oracle / "oracle-manifest.json").write_text('{"views": [', encoding="utf-8")
+    assert _cli(tmp_path, bundle, "--unit", UNIT) in {0, pkg.EXIT_NO_WORKING_COPY}
+    assert (_out(tmp_path) / UNIT / "package-manifest.json").is_file()
+
+
+# --- B3: the declared digest is enforced, and a staged path is read in its OWN flavour --------
+
+
+def test_a_source_contradicting_the_declared_digest_refuses_instead_of_shipping(tmp_path: Path) -> None:
+    """Reproduced: `expected 5d65d756...`, `shipped 54a6036a...`, `package_exit=0`.
+
+    The manifest digest exists for exactly this and nothing consulted it. A package whose `assets/`
+    holds a different workbook silently invalidates every page verdict both gates then compute from
+    it, so the refusal is total: nothing is written.
+    """
+    bundle, _ = _bundle(tmp_path)
+    name = f"{WB_LUID}_{UNIT}.twb"
+    other = write_workbook(tmp_path / "other" / name, worksheets=["Something", "Else"])
+    (bundle / "input_manifest.json").write_text(
+        json.dumps({"assets": [{"name": name, "sha256": hashlib.sha256(other.read_bytes()).hexdigest()}]}),
+        encoding="utf-8",
+    )
+    assert _cli(tmp_path, bundle, "--unit", UNIT) == pkg.EXIT_UNIT_FAILED
+    assert not (_out(tmp_path) / UNIT).exists()
+
+
+def test_a_source_MATCHING_the_declared_digest_packages_normally(tmp_path: Path) -> None:
+    """The control: enforcing a digest must not refuse the estate it was measured on."""
+    bundle, _ = _bundle(tmp_path)
+    name = f"{WB_LUID}_{UNIT}.twb"
+    real = tmp_path / "assets" / name
+    (bundle / "input_manifest.json").write_text(
+        json.dumps({"assets": [{"name": name, "sha256": hashlib.sha256(real.read_bytes()).hexdigest()}]}),
+        encoding="utf-8",
+    )
+    assert _cli(tmp_path, bundle, "--unit", UNIT) == 0
+    shipped = _out(tmp_path) / UNIT / "assets" / name
+    assert hashlib.sha256(shipped.read_bytes()).digest() == hashlib.sha256(real.read_bytes()).digest()
+
+
+def test_a_manifest_declaring_no_digest_is_an_absence_not_a_mismatch(tmp_path: Path) -> None:
+    """`sha256` is optional in the shapes measured here; an absent declaration cannot contradict."""
+    bundle, _ = _bundle(tmp_path)
+    name = f"{WB_LUID}_{UNIT}.twb"
+    (bundle / "input_manifest.json").write_text(json.dumps({"assets": [{"name": name}]}), encoding="utf-8")
+    assert pkg.declared_asset_digest(bundle, name) is None
+    assert _cli(tmp_path, bundle, "--unit", UNIT) == 0
+
+
+def test_a_foreign_flavour_staged_path_is_never_reinterpreted_by_the_host(tmp_path: Path) -> None:
+    """Reproduced: a POSIX `staged_input_path` was resolved against the CURRENT DRIVE on Windows.
+
+    `Path` is the host's. A literal written by a Linux harvest is not a fallback for a Windows
+    packager to reinterpret - it is a path this machine cannot own, and whatever bytes happen to sit
+    at the reinterpreted location are not the customer's workbook. The same hazard, and the same
+    fix, as `_classify_source` (round-2 finding 2).
+    """
+    foreign = "/mnt/share/elsewhere/Book.twb" if os.name == "nt" else r"C:\share\elsewhere\Book.twb"
+    assert not pf.is_host_native(foreign)
+
+    bundle, _ = _bundle(tmp_path)
+    (bundle / "handover" / f"{UNIT}.json").write_text(json.dumps({"workbook": {"source_id": ""}}), encoding="utf-8")
+    (bundle / "input_manifest.json").write_text(
+        json.dumps({"assets": [{"name": f"{UNIT}.twb", "staged_input_path": foreign}]}), encoding="utf-8"
+    )
+    asset, route = pkg.resolve_asset(bundle, UNIT, {}, tmp_path / "no-such-assets")
+    assert asset is None, f"a foreign staged path was reinterpreted as {asset}"
+    assert route == "unresolved"
+
+
+# --- B4: a host path that cannot be classified must not ship verbatim -------------------------
+
+
+def test_a_host_path_the_packager_cannot_classify_is_still_CONTAINED(tmp_path: Path) -> None:
+    """Reproduced: a `File.Contents` argument naming a POSIX home directory shipped verbatim at exit 4.
+
+    A POSIX user-profile directory has no file suffix and no trailing separator, so
+    `_path_verdict` returns UNCLASSIFIED and the shape-only neutralizer skipped it. Exit 4 was
+    right - the unit is not self-contained - but exit 4 means "written and incomplete", and a
+    package carrying somebody's home directory is not merely incomplete. Containment now comes from
+    the literal's ROLE: `File.Contents` reads files and nothing else.
+
+    One literal for both platforms: `_host_local` asks about the LITERAL's flavour, not the host's,
+    so a POSIX-absolute path is host-local on Windows too - which is exactly where the reviewer
+    measured it. The `<...>` segment is the placeholder form `set_data_folder.py --check` exempts; a
+    real account name committed to this repo is the very leak this test exists for.
+    """
+    literal = "/Users/<review-canary>/private-data"
+    assert pkg._path_verdict(literal) == pkg.UNCLASSIFIED  # noqa: SLF001
+    assert pkg._host_local(literal)  # noqa: SLF001
+
+    bundle, _oracle = _bundle(tmp_path)
+    _point_partition_at(bundle, literal)
+    code = _cli(tmp_path, bundle, "--unit", UNIT)
+    assert code == pkg.EXIT_NOT_SELF_CONTAINED
+
+    shipped = "\n".join(path.read_text(encoding="utf-8") for path in (_out(tmp_path) / UNIT / "fabric").rglob("*.tmdl"))
+    assert literal not in shipped, "the customer's host path shipped inside the package"
+    assert pkg.UNAVAILABLE_TOKEN in shipped
+    record = json.loads((_out(tmp_path) / UNIT / "package-manifest.json").read_text(encoding="utf-8"))
+    assert record["self_contained"] is False
+
+
+def test_an_UNCATALOGUED_service_route_is_still_left_alone(tmp_path: Path) -> None:
+    """The control the role rule must not break: containment is by role, not by "POSIX-absolute".
+
+    A Databricks endpoint is never a `File.Contents` argument - no Databricks model writes one - so
+    widening containment to the `File.Contents` role cannot reach it, and rewriting a working
+    endpoint into a filesystem token would break a model that was never broken.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    _point_partition_at(bundle, http_path="/sql/1.0/warehouses/764e5801f0e0fac8")
+    assert _cli(tmp_path, bundle, "--unit", UNIT) == 0
+    shipped = "\n".join(path.read_text(encoding="utf-8") for path in (_out(tmp_path) / UNIT / "fabric").rglob("*.tmdl"))
+    assert "/sql/1.0/warehouses/764e5801f0e0fac8" in shipped
+
+
+def test_an_unclassifiable_literal_in_an_UNKNOWN_field_is_recorded_and_left_alone(tmp_path: Path) -> None:
+    """The other half of the control, and the one the `HttpPath` fixture structurally cannot give.
+
+    `HttpPath` is exonerated by :func:`package_unit._service_routes` before containment is even
+    consulted, so widening containment to *every* POSIX-absolute literal leaves that fixture green.
+    This literal is in a field nothing has catalogued - so it is UNCLASSIFIED, it is NOT a
+    `File.Contents` argument, and the packager has no evidence it is a path at all. The contract is
+    the one `test_an_unassessable_POSIX_literal_is_RECORDED_not_silently_cleared` states: recorded
+    with its reason, never rewritten. Rewriting it would break a model that was never broken.
+    """
+    route = "/api/v2/customer-feed"
+    bundle, _ = _bundle(tmp_path)
+    definition = bundle / "pbip" / UNIT / f"{UNIT}.SemanticModel" / "definition"
+    (definition / "tables").mkdir(parents=True, exist_ok=True)
+    (definition / "model.tmdl").write_text("model Model\n\tculture: en-US\n\n", encoding="utf-8")
+    (definition / "tables" / "Feed.tmdl").write_text(
+        "table Feed\n"
+        "\tpartition 'Feed' = m\n"
+        "\t\tmode: import\n"
+        "\t\tsource =\n"
+        "\t\t\tlet\n"
+        f'\t\t\t\tSource = SomeConnector.Contents("host.example.net", [Route = "{route}"])\n'
+        "\t\t\tin\n"
+        "\t\t\t\tSource\n",
+        encoding="utf-8",
+    )
+    assert _cli(tmp_path, bundle, "--unit", UNIT) == pkg.EXIT_NOT_SELF_CONTAINED
+    shipped = "\n".join(path.read_text(encoding="utf-8") for path in (_out(tmp_path) / UNIT / "fabric").rglob("*.tmdl"))
+    assert route in shipped, "an uncatalogued route was rewritten on shape alone"
+    assert pkg.UNAVAILABLE_TOKEN not in shipped
+    record = json.loads((_out(tmp_path) / UNIT / "package-manifest.json").read_text(encoding="utf-8"))
+    assert record["data_sources"]["neutralized"] == []
+    assert [row["reason"] for row in record["data_sources"]["omissions"]] == [pkg.UNCLASSIFIED_REASON]
+
+
+def test_a_package_that_cannot_be_made_safe_is_not_written_at_all(tmp_path: Path) -> None:
+    """The tripwire's own contract: when containment fails, nothing lands on disk.
+
+    `_assert_no_host_path_survives` used to escape as an uncaught traceback, whose interpreter
+    exit 1 is indistinguishable from `EXIT_NO_WORKING_COPY` - and it aborted the rest of the estate.
+    Simulated here by disabling the neutralizer, which is the only thing that makes the tripwire
+    unreachable.
+    """
+    literal = "/Users/<review-canary>/private-data"
+    bundle, _ = _bundle(tmp_path)
+    _point_partition_at(bundle, literal)
+    original = pkg._neutralize_unshipped  # noqa: SLF001  # pylint: disable=protected-access
+    try:
+        pkg._neutralize_unshipped = lambda documents, final: ([], [])  # noqa: SLF001
+        code = _cli(tmp_path, bundle, "--unit", UNIT)
+    finally:
+        pkg._neutralize_unshipped = original  # noqa: SLF001
+    assert code == pkg.EXIT_UNIT_FAILED
+    assert not (_out(tmp_path) / UNIT).exists()
+
+
+# --- B2: a byPath that does not resolve inside the package is not self-contained --------------
+
+
+def _bind_report_to(bundle: Path, path: str) -> None:
+    """Write the engine's `definition.pbir` INSIDE the report folder, as real PBIP does."""
+    report = bundle / "pbip" / UNIT / f"{UNIT}.Report"
+    (report / "definition.pbir").write_text(
+        json.dumps({"version": "4.0", "datasetReference": {"byPath": {"path": path}}}), encoding="utf-8"
+    )
+
+
+def test_a_report_pointing_at_a_model_outside_the_package_is_NOT_self_contained(tmp_path: Path) -> None:
+    """Reproduced: `package_exit=0`, `manifest_model=null`, `package_self_contained_flag=true`.
+
+    `byPath: ../../Shared/Shared.SemanticModel` is the ordinary shared/published-datasource shape
+    and this repository has fixtures for it, so it is not an edge case. The consequence is silent by
+    construction: `powerbi-report-author validate` returns `errorCount: 0` for a `byPath` naming a
+    model that exists nowhere, and the report then opens in Desktop with no model at all.
+    """
+    bundle, _ = _bundle(tmp_path)
+    _bind_report_to(bundle, "../../Shared/Shared.SemanticModel")
+    assert _cli(tmp_path, bundle, "--unit", UNIT) == pkg.EXIT_NOT_SELF_CONTAINED
+
+    record = json.loads((_out(tmp_path) / UNIT / "package-manifest.json").read_text(encoding="utf-8"))
+    assert record["self_contained"] is False
+    assert record["model_binding"] == {
+        "kind": "byPath",
+        "path": "../../Shared/Shared.SemanticModel",
+        "resolves_in_package": False,
+    }
+
+
+def test_a_byPath_that_DOES_resolve_inside_the_package_is_self_contained(tmp_path: Path) -> None:
+    """The control: `../<Model>.SemanticModel` is what the engine actually emits, and must pass.
+
+    27 of 62 model names differ from their unit's, so the pair survives only because `pbip/<Unit>/`
+    is copied whole - which is precisely the case this check must not call broken.
+    """
+    bundle, _ = _bundle(tmp_path)
+    model = bundle / "pbip" / UNIT / f"{UNIT}.SemanticModel" / "definition"
+    model.mkdir(parents=True, exist_ok=True)
+    (model / "model.tmdl").write_text("model Model\n", encoding="utf-8")
+    _bind_report_to(bundle, f"../{UNIT}.SemanticModel")
+    assert _cli(tmp_path, bundle, "--unit", UNIT) == 0
+    record = json.loads((_out(tmp_path) / UNIT / "package-manifest.json").read_text(encoding="utf-8"))
+    assert record["model_binding"]["resolves_in_package"] is True
+    assert record["self_contained"] is True
+
+
+def test_a_byPath_escaping_through_the_package_root_does_not_count_as_resolved(tmp_path: Path) -> None:
+    """A model that exists on disk but OUTSIDE the package is not in the package.
+
+    Containment is the question, not existence - otherwise `../../../<somewhere real>` passes for
+    every builder whose machine happens to have one there, and for nobody the package is handed to.
+    """
+    bundle, _ = _bundle(tmp_path)
+    outside = _out(tmp_path).parent / "Shared.SemanticModel" / "definition"
+    outside.mkdir(parents=True, exist_ok=True)
+    (outside / "model.tmdl").write_text("model Model\n", encoding="utf-8")
+    _bind_report_to(bundle, "../../../Shared.SemanticModel")
+    assert _cli(tmp_path, bundle, "--unit", UNIT) == pkg.EXIT_NOT_SELF_CONTAINED
+
+
+def test_a_byConnection_report_makes_no_containment_claim(tmp_path: Path) -> None:
+    """A report bound to a published model was never supposed to carry one - recorded, and passed."""
+    bundle, _ = _bundle(tmp_path)
+    report = bundle / "pbip" / UNIT / f"{UNIT}.Report"
+    (report / "definition.pbir").write_text(
+        json.dumps({"version": "4.0", "datasetReference": {"byConnection": {"connectionString": "..."}}}),
+        encoding="utf-8",
+    )
+    assert _cli(tmp_path, bundle, "--unit", UNIT) == 0
+    record = json.loads((_out(tmp_path) / UNIT / "package-manifest.json").read_text(encoding="utf-8"))
+    assert record["model_binding"]["kind"] == "byConnection"
+    assert record["self_contained"] is True
+
+
+# --- the exit-code contract itself ------------------------------------------------------------
+
+
+def test_the_exit_codes_are_distinct_and_the_docstring_names_every_one() -> None:
+    """5 and 6 mean different things, and neither collides with anything already allocated.
+
+    PR #487 has this branch as its base and allocated 5 to `EXIT_UNIT_FAILED`; this file uses the
+    same number for the same meaning deliberately, so the two do not have to be reconciled after a
+    merge. 6 is the cannot-assess state, which must never collapse into either 0 or 5.
+    """
+    codes = {
+        pkg.EXIT_OK: "EXIT_OK",
+        pkg.EXIT_NO_WORKING_COPY: "EXIT_NO_WORKING_COPY",
+        pkg.EXIT_USAGE: "EXIT_USAGE",
+        pkg.EXIT_EDITS_REFUSED: "EXIT_EDITS_REFUSED",
+        pkg.EXIT_NOT_SELF_CONTAINED: "EXIT_NOT_SELF_CONTAINED",
+        pkg.EXIT_UNIT_FAILED: "EXIT_UNIT_FAILED",
+        pkg.EXIT_CANNOT_ASSESS: "EXIT_CANNOT_ASSESS",
+    }
+    assert len(codes) == 7, f"two exit codes collide: {codes}"
+    assert (pkg.EXIT_UNIT_FAILED, pkg.EXIT_CANNOT_ASSESS) == (5, 6)
+    for number in codes:
+        assert re.search(rf"^\| {number} \|", pkg.__doc__ or "", re.MULTILINE), f"exit {number} is undocumented"

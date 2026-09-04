@@ -35,18 +35,17 @@ examples, not hypothetical ones.
   | stage | location | rule |
   |---|---|---|
   | engine truth | `<bundle>/reports/`; `<bundle>/semantic_models/` (if emitted) | **NEVER edit an existing baseline** |
-  | working copy | `<bundle>/pbip/` | agents edit **here**; every edit re-runnable from `_build/` and declared |
+  | working copy | `<bundle>/pbip/`, or `<package>/fabric/` when you were handed a PACKAGE | agents edit **here**; whichever tree you were handed is CANONICAL. `declare_generated_edit.py` / `--tamper` cover BUNDLE work only (#460) |
   | deliverable | `migrations/{workbooks,datasources}/<slug>/fabric/` | **COPIED at sign-off**, so the bundle survives as evidence |
 
   A bundle may contain `<bundle>/{pbip,reports,semantic_models,handover,data}` — **no `out/` level**;
   `<bundle>/semantic_models/` is conditional (absent for 8/12 workbooks), and absent baseline ≠ no
-  changes — see `AGENTS.md`. Keep `<bundle>/reports/` pristine and compare it with git
-  (`powerbi-report-gotchas` §3).
+  changes — see `AGENTS.md`.
 
   ⚠️ **The copy must keep
   `definition.pbir`'s `byPath` resolving** — plain copy for a per-workbook model, path rewrite for a
-  shared datasource; never ship `<bundle>/reports/` (reference-only: no model beside it). Mechanics:
-  `powerbi-report-gotchas` §3.
+  shared datasource; never ship `<bundle>/reports/` (reference-only: no model beside it) and never
+  edit it - keep it pristine and diff it with git. Mechanics: `powerbi-report-gotchas` §3.
 
 - **Structural validation is necessary, not sufficient.** A clean parse/validate proves shape, not
   correctness: TMDL deserialization and `powerbi-report-author validate` both pass defects that only
@@ -172,7 +171,10 @@ enrich it, and hand it over refreshed.
    to fewer, which refreshes cleanly and returns the **wrong** data. The engine's own
    `endpoints_distinct` (2.75.0+) checks the same invariant but counts against **its own** parse, so
    it cannot see a mis-parse and it stays silent when it cannot derive an endpoint count at all
-   (flat-file islands). Ours counts against `migration-spec.json`, parsed independently — that is why
+   (flat-file islands). ⚠️ The *silence* half is narrowed: upstream #141 made a not-evaluated
+   `endpoints_distinct` say so, and #183 (2.340.0, below our 2.353.0) restored the `not_evaluated`
+   key the post-wrap re-check had been dropping — so read that key, do not infer from absence.
+   Ours counts against `migration-spec.json`, parsed independently — that is why
    both run, and why agreeing with it is a result rather than a formality. Never silently rewrite his
    M; a wrong connector is a finding to route, not a fix to apply.
 4. **Author the residual DAX from `requests[]`** — each carries `name`, `formula`, `role`,
@@ -348,8 +350,9 @@ throwing an error" is necessary but not sufficient:
 10. **Model-level AI instructions are stamped (MANDATORY — not optional).** A grounded, high-signal
    `migrations/workbooks/<slug>/ai-instructions.md` exists and has been written into the culture
    `CustomInstructions` key via `python scripts/set_ai_instructions.py --model …`; `--check` shows the
-   model OK with **no `[!]` advisory warnings**, and the model still passes an offline `tmdl_validate`
-   deserialize. A migrated model without AI instructions is not done.
+   model OK with **no `[!]` advisory warnings**, and the model still passes offline TMDL
+   deserialization — `python scripts/check_datamodel.py <SemanticModel>` exits 0. A migrated model
+   without AI instructions is not done.
 11. **The model is REFRESHED and the refresh is PERSISTED — the handoff gate (workflow step 8).** The
    report builder must receive a model that already holds data; otherwise every visual renders empty
    and reads as a binding bug. Use the pbip-model-refresh skill, then require exactly

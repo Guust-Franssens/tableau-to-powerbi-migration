@@ -371,7 +371,7 @@ def test_legitimate_appended_limitation_passes_and_is_not_rewritten(tmp_path: Pa
 
 
 def test_duplicate_appended_limitation_is_collapsed_in_first_seen_order(tmp_path: Path) -> None:
-    """Validation keeps one copy of an exact append without rejecting the spec."""
+    """`--repair` keeps one copy of an exact append without rejecting the spec."""
     spec = _fixture_spec()
     first = {"item": "worksheet:profit", "issue": "duplicate downstream note", "severity": "high", "stage": "validate"}
     second = {"item": "worksheet:loss", "issue": "later note", "severity": "low", "stage": "validate"}
@@ -380,7 +380,7 @@ def test_duplicate_appended_limitation_is_collapsed_in_first_seen_order(tmp_path
     path.write_text(json.dumps(spec, indent=2), encoding="utf-8")
 
     proc = subprocess.run(
-        [sys.executable, str(REPO_ROOT / "scripts" / "validate_spec.py"), str(path)],
+        [sys.executable, str(REPO_ROOT / "scripts" / "validate_spec.py"), str(path), "--repair"],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -392,6 +392,38 @@ def test_duplicate_appended_limitation_is_collapsed_in_first_seen_order(tmp_path
     limitations = json.loads(path.read_text(encoding="utf-8"))["limitations_encountered"]
     assert limitations[-2:] == [first, second]
     assert limitations.count(first) == 1
+
+
+def test_default_mode_reports_a_duplicate_and_writes_NOTHING(tmp_path: Path) -> None:
+    """A validator must not silently rewrite the file it was asked to inspect.
+
+    Measured on the 2026-09-03 cold run: an agent ran the documented `validate_spec.py <spec>` and
+    the spec changed underneath it, announced only as `deduped ... removed`. The repair is now
+    opt-in behind `--repair`, so BOTH halves are asserted: exiting 1 while still rewriting would be
+    the same surprise with a different exit code, and leaving the file alone while exiting 0 would
+    hide the duplicate that `--repair` exists to remove.
+    """
+    spec = _fixture_spec()
+    entry = {"item": "worksheet:profit", "issue": "duplicate downstream note", "severity": "high", "stage": "validate"}
+    spec["limitations_encountered"].extend([entry, entry])
+    path = tmp_path / "migration-spec.json"
+    path.write_text(json.dumps(spec, indent=2), encoding="utf-8")
+    before = path.read_text(encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "validate_spec.py"), str(path)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+    assert proc.returncode == 1, "a duplicate must be REPORTED by default, not quietly repaired"
+    assert path.read_text(encoding="utf-8") == before, "the default mode must not rewrite the file"
+    combined = proc.stdout + proc.stderr
+    assert "DUPLICATE" in combined
+    assert "--repair" in combined, "the report must name the flag that performs the repair"
 
 
 def test_check_mode_FAILS_on_a_duplicate_and_repairs_nothing(tmp_path: Path) -> None:
