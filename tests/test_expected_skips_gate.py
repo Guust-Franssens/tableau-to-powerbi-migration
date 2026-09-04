@@ -33,6 +33,19 @@ def test_expected_skip_reasons_contain_known_entries() -> None:
         assert conftest.is_expected_skip_reason(prefix + " extra detail")
 
 
+def test_newly_registered_master_skip_reasons_are_accepted() -> None:
+    """The 3 skip reasons introduced by master are accepted by the baseline."""
+    assert conftest.is_expected_skip_reason("reproduces the WINDOWS half: Path resolves / against the current drive")
+    assert conftest.is_expected_skip_reason("case-sensitive filesystem: 'FOO' and 'foo' are not the same deliverable")
+    assert conftest.is_expected_skip_reason(
+        "canonical engine not installed, so its constants cannot be read: No module named 'engine'"
+    )
+    # Ensure arbitrary prefixes with 'not installed', 'Windows', or 'filesystem' are still rejected
+    assert not conftest.is_expected_skip_reason("not installed: something else")
+    assert not conftest.is_expected_skip_reason("Windows something")
+    assert not conftest.is_expected_skip_reason("filesystem error")
+
+
 def test_unknown_skip_reason_is_rejected() -> None:
     """An unlisted skip reason is rejected by is_expected_skip_reason."""
     assert not conftest.is_expected_skip_reason("an arbitrary unexpected skip reason")

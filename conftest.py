@@ -86,6 +86,8 @@ EXPECTED_EXACT_SKIP_REASONS: frozenset[str] = frozenset(
         "off-Windows behaviour of the registry read",
         "reads the Windows registry",
         "filesystem will not store a combining-character filename unchanged",
+        "reproduces the WINDOWS half: Path resolves / against the current drive",
+        "case-sensitive filesystem: 'FOO' and 'foo' are not the same deliverable",
     }
 )
 
@@ -95,6 +97,7 @@ EXPECTED_PREFIX_SKIP_REASONS: tuple[str, ...] = (
     "could not create junction: ",
     "could not create an NTFS junction: ",
     "subst failed: ",
+    "canonical engine not installed, so its constants cannot be read:",
 )
 
 ENGINE_SKIP_REASON = "deterministic tier not installed"
