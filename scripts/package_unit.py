@@ -128,6 +128,12 @@ An omission INSIDE a package is not exit 1: a unit whose oracle genuinely has no
 the negative control, and it must package successfully and still report that page BLIND.
 """
 
+# Packaging, the evidence walk, path containment and the CLI deliberately live together: this module
+# IS the per-unit handover boundary, and splitting it would put the containment predicates a hop away
+# from the copy that must obey them - which is exactly how `retained_path` escaped the `path` guard.
+# Nine sibling scripts carry the same waiver (`check_unit.py`, `run_estate.py`, `parse_tableau.py`, ...).
+# ⚠️ Revisit when issue #497 restructures staging; that work reopens this file anyway.
+# pylint: disable=too-many-lines
 from __future__ import annotations
 
 import argparse
