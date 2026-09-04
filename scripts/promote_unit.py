@@ -19,10 +19,15 @@ Why each guard exists (all of these are measured failures, not hypotheses)
   repo is public, and a customer package path embeds their server, project and operator names as
   surely as `C:\\Users\\<username>\\…` embeds a real user. Every path that reaches the record, the
   `--json` envelope or a finding is repo-relative, deliverable-relative or an opaque marker; a
-  path-bearing exception is rendered without its `filename`. Because the tool cannot rewrite a
-  customer's M query, it cannot SANITIZE a model that reads an absolute outside path either - so
-  `--force` does not ship one, it refuses (exit 5). Sanitize with `scripts/set_data_folder.py` or
-  carry the extract into the package.
+  path-bearing exception is rendered without its `filename`. **The same rule governs every BYTE
+  that ships**, not merely model TMDL: `.pbi/` (Desktop's per-machine state) is excluded from the
+  shipment outright, and every other shipped file is scanned as text and refused at exit 6 if it
+  names a machine - measured, a `.Report/.pbi/localSettings.json` shipped a customer path at exit 0
+  under `--force`, and the git-TRACKED `.pbi/unappliedChanges.json`, `.pbip` and `report.json` are
+  the same defect in a file that really would reach the public repo. Because the tool cannot
+  rewrite a customer's M query, it cannot SANITIZE a model that reads an absolute outside path
+  either - so `--force` does not ship one, it refuses (exit 5). Sanitize with
+  `scripts/set_data_folder.py` or carry the extract into the package.
 * **The unit's kind comes from `package-manifest.json`, never from the filesystem.**
   `package_unit.py:unit_kind` is explicit: every `pbip/<Unit>/` in a real 2.339.0 estate run
   carries BOTH a `.Report` and a `.SemanticModel` - all 62, datasource-only units included - so
@@ -38,7 +43,10 @@ Why each guard exists (all of these are measured failures, not hypotheses)
   that had passed a sign-off held only Desktop-local settings. Every PBIR document is parsed, at
   the SOURCE and again at the DESTINATION; unreadable input is `CANNOT_ASSESS`, never a count.
 * **The slug must be a single safe path component.** `execute_plan` replaces its destination, so a
-  slug carrying `..` is not a misfiling - it is a delete outside the migration root.
+  slug carrying `..` is not a misfiling - it is a delete outside the migration root. ⚠️ And the
+  containment check behind it resolves both sides: measured, a `migrations/workbooks/<slug>`
+  JUNCTION pointing outside the root passed a lexical check and shipped the whole deliverable, plus
+  its record, outside the tree at exit 0.
 * **A model may not read data from OUTSIDE the tree it is promoted into (#461).** Measured across
   run 408's 62 packaged units: **32 absolute machine-local references across 26 units (42%)**,
   pointing into the bundle's gitignored, prunable `data/`. NO existing gate sees it. The test is
@@ -60,11 +68,15 @@ Exit codes
 | 3  | REFUSED_CONTENT: the source is structurally present but functionally empty |
 | 4  | PROMOTION_FAILED: the copy, the `byPath` rewrite, or a post-copy verification failed |
 | 5  | REFUSED_EXTERNAL_DATA_PATH: the model reads data from outside the deliverable (#461) |
+| 6  | REFUSED_HOST_PATH: some file this would ship names an absolute host path |
 | 64 | usage error |
 
 ⚠️ 5 is the verdict for that condition wherever it is caught. Both scans - the source one before
 anything is copied, and the shipped one after - raise the SAME `ExternalDataPath`, because
-automation must not get a different routing answer depending only on which scan saw it first.
+automation must not get a different routing answer depending only on which scan saw it first. 6
+works the same way, and is a SEPARATE code rather than a second meaning for 5 because the remedies
+differ: 5 is fixed with `set_data_folder.py` or by carrying the extract in, 6 by deleting or
+sanitizing a file that is often not a model file at all.
 
 ⚠️ 2 exists so "cannot assess" can never collapse into the clean bucket - this repo's most common
 gate defect class. An unreadable package is a blocking state, not a silent success.
@@ -105,6 +117,7 @@ EXIT_CANNOT_ASSESS = 2
 EXIT_REFUSED_CONTENT = 3
 EXIT_PROMOTION_FAILED = 4
 EXIT_REFUSED_EXTERNAL_PATH = 5
+EXIT_REFUSED_HOST_PATH = 6
 EXIT_USAGE = 64
 
 # check_unit.py's own documented exits, kept here so the record says what the number MEANT rather
@@ -156,6 +169,45 @@ _TMDL_STRING_RE = re.compile(r'"([^"\n]*)"')
 # lines: `"C:" & "\secret\data.csv"`. Judged as one value, because each fragment alone is harmless.
 _TMDL_CONCAT_RE = re.compile(r'"[^"\n]*"(?:\s*&\s*"[^"\n]*")+')
 
+# Power BI Desktop's per-machine state inside an artifact folder. NOT copied - see
+# `_shipped_files`. `.gitignore:169-172` already calls `.pbi/cache.abf`, `.pbi/localSettings.json`
+# and `.pbi/editorSettings.json` "machine-specific, regenerated automatically on open", which is
+# the whole argument: they are not part of the PBIP definition, `localSettings.json` records the
+# OPERATOR's local model and data paths, and `cache.abf` is a multi-hundred-MB binary no text scan
+# can inspect. Excluding them removes the leak at its source instead of detecting it afterwards -
+# and it is not enough on its own, because `.gitignore` names only those three FILES: a sibling
+# `.pbi/unappliedChanges.json` (also Desktop-written) is git-TRACKED, so it would reach the public
+# repo. Measured with `git check-ignore`, 2026-09-04.
+DESKTOP_LOCAL_EXCLUSIONS = frozenset({".pbi"})
+
+# Suffixes a text scan cannot inspect. Deliberately the same vocabulary as
+# `scripts/set_data_folder.py:_check`, plus the image types PBIR carries in
+# `StaticResources/RegisteredResources/`. A file with an UNLISTED suffix that will not decode is
+# `CannotAssess` (blocking), never silently skipped - see `shipment_host_paths`.
+UNSCANNABLE_BINARY_SUFFIXES = frozenset(
+    {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".pbix", ".abf", ".hyper", ".twbx", ".twb", ".xlsx", ".zip"}
+)
+
+# An absolute host path ANYWHERE in a shipped text file - quoted, bare, or JSON-escaped. This is
+# the whole-artifact counterpart of `_TMDL_STRING_RE`, which only ever saw quoted literals in model
+# TMDL and therefore could not see `.pbi/localSettings.json`, `report.json` or a `.pbip`.
+#
+# Vocabulary reused from `scripts/set_data_folder.py:ABSOLUTE_USER_PATH_RE` rather than reinvented:
+# `C:\x`, `C:/x`, JSON-escaped `C:\\x`, UNC `\\host\x` (and JSON-escaped `\\\\host\\x`), POSIX
+# `/Users/<x>` and `/home/<x>`. The POSIX branch is restricted to those two roots on purpose - matching
+# every `/…` in a PBIR document produced false positives on JSON pointers and Databricks
+# `HttpPath` values, which is the same residual `_is_local_filesystem_path` documents.
+#
+# ⚠️ Two guards keep a URL scheme out, and BOTH are needed: the lookbehind rejects a multi-letter
+# scheme (`https:`), and `(?!/)` rejects the `//` that follows one. The trailing `+` (not `*`)
+# means a bare `C:\` in prose is not a match.
+_ABSOLUTE_PATH_IN_TEXT_RE = re.compile(
+    r"(?:(?<![A-Za-z0-9])[A-Za-z]:[\\/](?!/)"
+    r"|\\{2,4}[^\\/\s\"'<>|]+[\\/]{1,2}"
+    r"|(?<![\w.])/(?:Users|home)/)"
+    r"[^\s\"'<>|]+"
+)
+
 
 class UsageErrorParser(argparse.ArgumentParser):
     """`argparse` exits 2 on a bad command line, and 2 is CANNOT_ASSESS here.
@@ -186,6 +238,18 @@ class ExternalDataPath(Exception):
     Its own class, not a `PromotionFailed`, because the two scans that can raise it sit either side
     of the copy and used to route to DIFFERENT exit codes for one condition - 5 from the source
     scan, 4 from the shipped one. Automation reads the code, so the condition owns the class.
+    """
+
+
+class HostPathLeak(Exception):
+    """A file this promotion would SHIP carries an absolute host path.
+
+    Its own class and its own exit code (6), not a second meaning for `ExternalDataPath` (5),
+    because the two conditions have different remedies and automation routes on the code. 5 says
+    *the model READS from a location the deliverable does not contain* - remedied by
+    `scripts/set_data_folder.py` or by carrying the extract into the package. 6 says *a shipped
+    byte NAMES a machine* - remedied by deleting or sanitizing that file, which may not be a model
+    file at all.
     """
 
 
@@ -258,12 +322,61 @@ class PromotionPlan:
             raise CannotAssess("plan has no destination")
         return anchor.parent.parent
 
+    @property
+    def deliverable_roots(self) -> tuple[Path, ...]:
+        """EVERY `<slug>/` this promotion writes into - one, or two for a shared datasource.
+
+        `deliverable_root` deliberately answers a narrower question (where the MODEL lands, which
+        is the boundary #461 judges its data references against). The host-path scan covers the
+        report as well, and for a shared datasource the two halves stop being siblings, so a report
+        that legitimately names its own deliverable would be judged against the datasource's root.
+        """
+        roots: list[Path] = []
+        for destination in (self.report_destination, self.model_destination):
+            if destination is not None and destination.parent.parent not in roots:
+                roots.append(destination.parent.parent)
+        return tuple(roots)
+
+
+def _shipped_files(path: Path) -> list[Path]:
+    """Every file at or under `path` that a promotion actually COPIES.
+
+    ⚠️ The single definition of "what ships", used by the file count, by `execute_plan`'s copy and
+    by the host-path scan. Three answers to that question is how a scan and a copy disagree, which
+    is the shape of finding 1: the count and the copy covered the whole tree while the scan covered
+    model TMDL only.
+    """
+    if path.is_file():
+        return [path]
+    if not path.is_dir():
+        return []
+    return sorted(
+        item
+        for item in path.rglob("*")
+        if item.is_file() and not any(part in DESKTOP_LOCAL_EXCLUSIONS for part in item.relative_to(path).parts)
+    )
+
 
 def _count_files(path: Path) -> int:
-    """Number of files at or under `path` (1 for a file)."""
-    if path.is_file():
-        return 1
-    return sum(1 for item in path.rglob("*") if item.is_file())
+    """Number of files at or under `path` that will be copied (1 for a file)."""
+    return len(_shipped_files(path))
+
+
+def _resolved_for_containment(path: Path) -> Path:
+    """`path` with every symlink and junction resolved, ready to be judged against a root.
+
+    ⚠️ **A lexical containment check is not a containment check.** Measured: with
+    `migrations/workbooks/<slug>` made a junction to a directory outside `migrations/`, every
+    planned destination was *lexically* inside the root, and the promotion wrote the report, the
+    model and the promotion record OUTSIDE it at exit **0**.
+
+    `resolve()` is non-strict on purpose. The destination does not exist yet - a strict resolve
+    would raise on every first promotion - and a non-strict one is exactly right here because
+    Windows' `realpath` resolves the longest EXISTING prefix, which is where a junction has to
+    live, and appends the rest lexically. Both sides of the comparison go through this function, so
+    a migrations root that is itself reached through a junction still contains its own children.
+    """
+    return Path(os.path.normpath(path)).resolve()
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -288,7 +401,12 @@ def _safe_error(exc: BaseException) -> str:
     if isinstance(exc, OSError):
         detail = exc.strerror or type(exc).__name__
         return f"{type(exc).__name__}: {detail}" + (f" (errno {exc.errno})" if exc.errno is not None else "")
-    return f"{type(exc).__name__}: {exc}"
+    # ⚠️ The fallback is REDACTED rather than trusted. Fixing only the one site that interpolated a
+    # raw `OSError` would move the boundary instead of removing it: `ValueError` from
+    # `Path.relative_to` renders BOTH absolute paths, `subprocess.TimeoutExpired` renders the whole
+    # command line, and the broad `except Exception` in `_run_promotion` renders whatever arrives.
+    # Redacting here means a NEW path-bearing exception type cannot reintroduce the defect.
+    return redact_host_paths(f"{type(exc).__name__}: {exc}")
 
 
 def _repo_relative(path: Path, repo_root: Path) -> tuple[str, bool]:
@@ -323,6 +441,26 @@ def _destination_display(path: Path, plan: PromotionPlan, repo_root: Path) -> st
         return display
 
 
+def _read_manifest(manifest: Path) -> dict[str, Any]:
+    """`package-manifest.json` as an object, or a BLOCKING refusal that names the remedy.
+
+    ⚠️ `--kind` deliberately does NOT rescue a manifest that will not parse, and the message says
+    so. It fills a gap the engine left (`kind` absent, or `unclassified`); a manifest that is
+    unreadable or is not an object is evidence the PACKAGE may be damaged, and declaring a kind
+    over it would be a guess about which tree a customer deliverable lands in. A blocking verdict
+    still has to be actionable, though - "package-manifest.json is not a JSON object" with no
+    remedy is where an operator stops.
+    """
+    try:
+        return _read_json(manifest)
+    except CannotAssess as exc:
+        raise CannotAssess(
+            f"{exc}, so the unit's kind is unknown - the filesystem cannot answer it (a datasource unit "
+            f"also ships a .Report). Re-run package_unit.py to regenerate {MANIFEST_NAME}; --kind does not "
+            f"rescue a manifest that will not parse, because that is evidence about the whole package"
+        ) from exc
+
+
 def declared_kind(package: Path, override: str | None) -> tuple[str, str]:
     """The unit's kind and where it came from - the MANIFEST, never the filesystem.
 
@@ -342,7 +480,7 @@ def declared_kind(package: Path, override: str | None) -> tuple[str, str]:
             f"package has no {MANIFEST_NAME}, so its kind is unknown - the filesystem cannot answer it "
             f"(a datasource unit also ships a .Report). Re-run package_unit.py, or pass --kind."
         )
-    payload = _read_json(manifest)
+    payload = _read_manifest(manifest)
     value = payload.get("kind")
     if isinstance(value, str) and value.strip() in DECLARABLE_KINDS:
         if override is not None and override != value.strip():
@@ -500,12 +638,19 @@ def _assert_contained(paths: list[Path], root: Path, what: str) -> None:
 
     Defence in depth behind `slug_problem`: a containment check that never fires is exactly the
     one you want here, because the one that DOES fire is the one nobody wrote.
+
+    ⚠️ Judged on RESOLVED paths, both sides. A lexical comparison passed a `migrations/workbooks/
+    <slug>` junction pointing outside the root and the promotion shipped there at exit 0 - the
+    check ran, agreed, and was measuring the wrong thing. See `_resolved_for_containment`.
     """
-    resolved_root = root.resolve()
+    resolved_root = _resolved_for_containment(root)
     for path in paths:
-        normalized = Path(os.path.normpath(path))
+        normalized = _resolved_for_containment(path)
         if not normalized.is_relative_to(resolved_root):
-            raise CannotAssess(f"{what} would land outside the migrations root: {normalized.name}")
+            raise CannotAssess(
+                f"{what} would land outside the migrations root: {normalized.name} "
+                f"(the destination resolves, through a symlink or junction, outside the tree it was asked for)"
+            )
 
 
 def _read_tmdl(path: Path, label: str, check: ContentCheck) -> str | None:
@@ -756,6 +901,60 @@ def _inside_any(candidate: str, roots: list[Path]) -> bool:
     return any(normalized.is_relative_to(root) for root in roots)
 
 
+def redact_host_paths(text: str) -> str:
+    """Every absolute host path in `text`, replaced by its redaction. Never a truncation."""
+    return _ABSOLUTE_PATH_IN_TEXT_RE.sub(lambda match: _redact_path(match.group(0)), text)
+
+
+def shipment_host_paths(roots: tuple[Path, ...], allowed_roots: tuple[Path, ...]) -> list[dict[str, str]]:
+    """Absolute host paths in ANY file this promotion would ship, outside every allowed root.
+
+    ⚠️ **The invariant is "no shipped file carries an absolute host path", so the scan is keyed on
+    the SHIPMENT, not on a file extension.** `external_data_paths` reads a model's
+    `definition/**/*.tmdl` and nothing else, which is the right shape for the question it asks
+    (*where does this model READ from*) and the wrong shape for this one. Measured 2026-09-04:
+    a `.Report/.pbi/localSettings.json` carrying `C:\\Users\\<operator>\\ServerA\\source.csv`
+    promoted at exit **0** under `--force`, and `git check-ignore` confirms the sibling
+    `.pbi/unappliedChanges.json`, the `.pbip` and `definition/report.json` are all git-TRACKED, so
+    the same leak reaches a PUBLIC repository.
+
+    Two halves, and each closes something the other cannot:
+
+    * **`.pbi/` is not shipped at all** (`DESKTOP_LOCAL_EXCLUSIONS`). It is Desktop's per-machine
+      state, `.gitignore:169-172` already says so, and `cache.abf` is a binary no text scan could
+      read - removing it beats detecting it.
+    * **every other shipped file is scanned as text**, with a suffix allowlist for the genuinely
+      binary ones and `CannotAssess` for anything unlisted that will not decode. Silently skipping
+      an undecodable file would be a fail-open in the one place this repo can least afford one.
+
+    Judged *absolute AND outside* - the same rule as #461, deliberately - so a localized absolute
+    path under the deliverable's own `data/` (the `set_data_folder.py` convention) still promotes.
+    ❌ Residual: that localized path is still an `ABSOLUTE_USER_PATH_RE` hit at COMMIT time; the
+    existing `scripts/set_data_folder.py --check` gate owns that, and `--sanitize` is the remedy.
+    """
+    allowed = [root.resolve() for root in allowed_roots]
+    found: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for root in roots:
+        for item in _shipped_files(root):
+            label = root.name if item == root else f"{root.name}/{item.relative_to(root).as_posix()}"
+            if item.suffix.lower() in UNSCANNABLE_BINARY_SUFFIXES:
+                continue
+            try:
+                text = item.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                raise CannotAssess(
+                    f"{label} could not be read as text, so it cannot be scanned for host paths "
+                    f"({_safe_error(exc)}); a file that ships unscanned is not a file that shipped clean"
+                ) from exc
+            for candidate in _ABSOLUTE_PATH_IN_TEXT_RE.findall(text):
+                if _inside_any(candidate, allowed) or (label, candidate) in seen:
+                    continue
+                seen.add((label, candidate))
+                found.append({"file": label, "redacted": _redact_path(candidate), "full": candidate})
+    return found
+
+
 def content_checks(shape_report: Path | None, shape_model: Path | None, where: str) -> ContentCheck:
     """Run both content checks over one location and merge them into a single verdict."""
     merged = ContentCheck()
@@ -969,7 +1168,11 @@ def execute_plan(plan: PromotionPlan) -> AppliedCopies:
             step.destination.parent.mkdir(parents=True, exist_ok=True)
             _stash(step.destination, applied)
             if step.source.is_dir():
-                shutil.copytree(step.source, step.destination)
+                shutil.copytree(
+                    step.source,
+                    step.destination,
+                    ignore=shutil.ignore_patterns(*DESKTOP_LOCAL_EXCLUSIONS),
+                )
             else:
                 shutil.copy2(step.source, step.destination)
     except OSError:
@@ -986,7 +1189,7 @@ def rewrite_bypath(report: Path, bypath: str) -> dict[str, Any]:
     try:
         payload = json.loads(pbir.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise PromotionFailed(f"{report.name}: definition.pbir could not be read: {exc}") from exc
+        raise PromotionFailed(f"{report.name}: definition.pbir could not be read: {_safe_error(exc)}") from exc
     reference = payload.get("datasetReference")
     if not isinstance(reference, dict) or not isinstance(reference.get("byPath"), dict):
         raise PromotionFailed(f"{report.name}: definition.pbir has no datasetReference.byPath to rewrite")
@@ -1045,7 +1248,7 @@ def _refuse_bad_model_target(
     reason = None
     if Path(os.path.normpath(target)) != Path(os.path.normpath(expected_model)):
         reason = f"resolves to {target.name!r}, which is not the {expected_model.name!r} this promotion copied"
-    elif not target.is_relative_to(migrations_root.resolve()):
+    elif not _resolved_for_containment(target).is_relative_to(_resolved_for_containment(migrations_root)):
         reason = "resolves outside the migrations root"
     elif not target.is_dir():
         reason = "does not resolve to a directory on disk"
@@ -1366,6 +1569,21 @@ def _verify_and_record(
         "source": envelope.get("external_data_paths", {}).get("source", []),
         "shipped": [],
     }
+
+    shipped_host = shipment_host_paths(
+        tuple(step.destination for step in plan.steps),
+        (args.package, *plan.deliverable_roots),
+    )
+    if shipped_host:
+        # ⚠️ Same reasoning as the shipped external-path scan above, and NOT overridable by
+        # `--force` either: the tool cannot sanitize a customer's `localSettings.json` or `.pbip`,
+        # so there is no clean artifact for a force to ship. Same exception, same exit code as the
+        # source scan - one condition, one verdict, whichever scan saw it first.
+        raise HostPathLeak(
+            "HOST_PATH in the SHIPPED tree: "
+            + "; ".join(f"{item['file']} carries {item['redacted']}" for item in shipped_host)
+        )
+    extra["host_paths"] = {"source": envelope.get("host_paths", {}).get("source", []), "shipped": []}
     extra["drift"] = envelope["drift"]
 
     record = build_record(args, plan, REPO_ROOT, facts.gate, extra)
@@ -1479,6 +1697,37 @@ def _check_external_paths(args: argparse.Namespace, shape: PackageShape, plan: P
     return code
 
 
+def _check_host_paths(args: argparse.Namespace, plan: PromotionPlan, envelope: dict) -> int:
+    """Refuse to ship ANY file carrying an absolute host path, whatever its extension (finding 1).
+
+    Scanned at the SOURCE, over exactly the files the plan will copy, so a refusal ships nothing;
+    scanned again over the shipped tree in `_verify_and_record`. `--force` does not reach this, for
+    the same reason it does not reach #461: there is no sanitized artifact to ship.
+    """
+    found = shipment_host_paths(
+        tuple(step.source for step in plan.steps),
+        (args.package, *plan.deliverable_roots),
+    )
+    envelope["host_paths"] = {"source": [{"file": item["file"], "path": item["redacted"]} for item in found]}
+    if not found:
+        return EXIT_OK
+    findings = [
+        f"HOST_PATH: {item['file']} carries {item['redacted']}, an absolute path that resolves OUTSIDE "
+        f"both the package and the deliverable"
+        for item in found
+    ]
+    findings.append(
+        "migrations/** is not blanket-gitignored and this repo is PUBLIC, so a shipped absolute path "
+        "publishes a real username, and a customer package path publishes their server, project and "
+        "operator names. Power BI Desktop's own .pbi/ state is excluded from the shipment already; "
+        "anything left here is a file that must be deleted or sanitized before it can be promoted."
+    )
+    code = _refuse(envelope, args, "REFUSED_HOST_PATH", findings, EXIT_REFUSED_HOST_PATH)
+    for item in found:
+        print(f"  full path (not recorded, terminal only): {item['full']}", file=sys.stderr)
+    return code
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point."""
     args = parse_args(argv)
@@ -1500,10 +1749,13 @@ def main(argv: list[str] | None = None) -> int:
         plan = build_plan(shape, args.migrations_root, args.slug, args.datasource_slug)
         envelope["planned_files"] = plan.file_count
         external = _check_external_paths(args, shape, plan, envelope)
+        host = _check_host_paths(args, plan, envelope) if external == EXIT_OK else EXIT_OK
     except CannotAssess as exc:
         return _refuse(envelope, args, "CANNOT_ASSESS", [str(exc)], EXIT_CANNOT_ASSESS)
     if external != EXIT_OK:
         return external
+    if host != EXIT_OK:
+        return host
 
     if args.dry_run:
         return _dry_run(args, plan, envelope)
@@ -1527,6 +1779,8 @@ def _run_promotion(
         return _refuse(envelope, args, "CANNOT_ASSESS", [str(exc)], EXIT_CANNOT_ASSESS)
     except ExternalDataPath as exc:
         return _refuse(envelope, args, "REFUSED_EXTERNAL_DATA_PATH", [str(exc)], EXIT_REFUSED_EXTERNAL_PATH)
+    except HostPathLeak as exc:
+        return _refuse(envelope, args, "REFUSED_HOST_PATH", [str(exc)], EXIT_REFUSED_HOST_PATH)
     except PromotionFailed as exc:
         return _refuse(envelope, args, "PROMOTION_FAILED", [str(exc)], EXIT_PROMOTION_FAILED)
     except Exception as exc:  # pylint: disable=broad-exception-caught

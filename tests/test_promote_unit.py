@@ -17,6 +17,7 @@ Two things are deliberately NOT mocked away:
 import json
 import re
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -1473,3 +1474,563 @@ def test_medium3_the_shipped_external_path_scan_uses_the_same_exit_code_as_the_s
     envelope_path = tmp_path / "shipped-ext.json"
     assert run(package, migrations, "--json", str(envelope_path)) == pu.EXIT_REFUSED_EXTERNAL_PATH
     assert json.loads(envelope_path.read_text(encoding="utf-8"))["status"] == "REFUSED_EXTERNAL_DATA_PATH"
+
+
+# --------------------------------------------------------------------------------------
+# ROUND 3, HIGH 1 - the path invariant is about the SHIPMENT, not about `*.tmdl`
+#
+# Measured before the fix: a `.Report/.pbi/localSettings.json` carrying
+# `C:\Users\<operator>\ServerA\source.csv` promoted at `exit=0 gate=1 status=PROMOTED`,
+# `shipped=True contains-identity=True`. The scan read model `definition/**/*.tmdl` and the copy
+# took the whole tree, so every non-TMDL byte shipped unexamined.
+#
+# `.pbi/localSettings.json` is gitignored BY NAME (`.gitignore:171`), which the review did not
+# mention and which is worth stating plainly: that one file would not itself have reached the
+# public repo. The breach is real regardless, because the boundary was wrong rather than the
+# example: `git check-ignore` (2026-09-04) reports `.pbi/unappliedChanges.json` - written by the
+# same Desktop - and the `.pbip` and `definition/report.json` as TRACKED.
+# --------------------------------------------------------------------------------------
+
+CUSTOMER_PATH = "C:" + r"\Users\CustomerOperator\ServerA\source.csv"
+UNC_PATH = r"\\CustomerFileServer\finance\budget.xlsx"
+POSIX_PATH = "/Users" + "/customer-analyst/data/Sales.xlsx"
+# ⚠️ Spelled in PIECES on purpose, and the join is not cosmetic. `scripts/set_data_folder.py
+# --check` is this repo's privacy gate and it scans every git-TRACKED file for exactly
+# `X:\Users\<name>` and `/Users/<name>`; a test file that hard-codes one fails the gate it exists
+# to defend. Measured while writing these tests: the first draft did, at exit 1. Joining at import
+# keeps the RUNTIME value a real absolute path while the source text carries no match. `UNC_PATH`
+# needs no join - that pattern only matches a UNC share whose first segment is `Users`.
+
+
+def _pbi_local_settings(package: Path) -> Path:
+    """The Desktop-local settings file Power BI writes beside a report."""
+    return package / "fabric" / "Wb.Report" / ".pbi" / "localSettings.json"
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_round3_high1_desktop_local_state_is_not_shipped_at_all(package: Path, migrations: Path) -> None:
+    """`.pbi/` is EXCLUDED from the shipment rather than scanned.
+
+    Deliberately the stronger of the two available fixes for this file. It is Desktop's
+    per-machine state - `.gitignore:169-172` calls it "machine-specific, regenerated automatically
+    on open" - `localSettings.json` records the OPERATOR's local paths, and `cache.abf` is a
+    multi-hundred-MB binary that no text scan could have inspected anyway. Not shipping it removes
+    the leak; scanning it would only have detected one.
+    """
+    settings = _pbi_local_settings(package)
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(json.dumps({"cachePath": CUSTOMER_PATH}), encoding="utf-8")
+    (settings.parent / "cache.abf").write_bytes(b"\x00\x01\x02\xff not utf-8")
+
+    assert run(package, migrations, "--force") == pu.EXIT_OK
+    shipped_report = migrations / "workbooks" / "wb" / "fabric" / "Wb.Report"
+    assert shipped_report.is_dir(), "the report itself must still ship"
+    assert not (shipped_report / ".pbi").exists(), "Desktop-local state must not reach the deliverable"
+    assert [p.name for p in shipped_report.rglob("*") if p.name in {"localSettings.json", "cache.abf"}] == []
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_round3_high1_the_excluded_files_are_not_counted_as_shipped(package: Path, migrations: Path) -> None:
+    """The file COUNT has to agree with the copy, or the record asserts files that never shipped.
+
+    One definition of "what ships" (`_shipped_files`), used by the count, the copy and the scan.
+    Three answers to that question is exactly the disagreement this finding was.
+    """
+    settings = _pbi_local_settings(package)
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text("{}", encoding="utf-8")
+    assert run(package, migrations) == pu.EXIT_OK
+    record = json.loads((migrations / "workbooks" / "wb" / "promotion-record.json").read_text(encoding="utf-8"))
+    counted = {item["what"]: item["files"] for item in record["copied"]}
+    on_disk = len([p for p in (migrations / "workbooks" / "wb" / "fabric" / "Wb.Report").rglob("*") if p.is_file()])
+    assert counted["report"] == on_disk, record["copied"]
+
+
+@pytest.mark.usefixtures("pass_gate")
+@pytest.mark.parametrize(
+    ("what", "relative", "payload"),
+    [
+        ("the loose .pbip", "Wb.pbip", {"version": "1.0", "settings": {"lastOpened": CUSTOMER_PATH}}),
+        ("report.json", "Wb.Report/definition/report.json", {"resourcePackages": [{"path": CUSTOMER_PATH}]}),
+        (
+            "a visual",
+            "Wb.Report/definition/pages/page-0/visuals/v0/visual.json",
+            {"name": "v0", "visual": {"visualType": "card"}, "note": UNC_PATH},
+        ),
+        (
+            "the model's .pbip-adjacent settings",
+            "Model.SemanticModel/.platform",
+            {"metadata": {"lastRefreshFrom": POSIX_PATH}},
+        ),
+    ],
+)
+def test_round3_high1_a_host_path_in_any_shipped_file_refuses_and_ships_nothing(
+    package: Path, migrations: Path, what: str, relative: str, payload: dict
+) -> None:
+    """Exit 6, for a file the model-TMDL scan structurally could not see.
+
+    All four of these are git-TRACKED under `migrations/**`, so each one really does reach a public
+    repository. Three absolute forms are covered on purpose - drive-letter, UNC and POSIX - because
+    a UNC share and a macOS path are the same defect on a different machine, which is the rule
+    `_is_local_filesystem_path` already states for TMDL.
+    """
+    _write_json(package / "fabric" / Path(relative), payload)
+    assert run(package, migrations, "--force") == pu.EXIT_REFUSED_HOST_PATH, what
+    assert not migrations.exists(), "nothing may ship while a host path is still in the tree"
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_round3_high1_a_real_user_profile_path_is_refused_and_never_recorded(
+    package: Path, migrations: Path, tmp_path: Path
+) -> None:
+    """The username claim, pinned against a REAL user profile rather than a spelled-out constant.
+
+    The constants above are joined at import so this tracked file does not itself trip
+    `set_data_folder.py --check`; that keeps the gate honest but leaves the actual
+    `X:\\Users\\<real name>` shape untested. `Path.home()` supplies it at runtime, on whichever
+    machine and OS is running the suite, and it is the exact string the privacy gate hunts for.
+    """
+    leaked = Path.home() / "CustomerDrop" / "source.csv"
+    _write_json(package / "fabric" / "Wb.pbip", {"version": "1.0", "settings": {"lastOpened": str(leaked)}})
+    envelope_path = tmp_path / "home.json"
+    assert run(package, migrations, "--force", "--json", str(envelope_path)) == pu.EXIT_REFUSED_HOST_PATH
+    assert not migrations.exists()
+    text = envelope_path.read_text(encoding="utf-8")
+    assert Path.home().name not in text, text
+    assert host_paths_in(text, package, migrations, Path.home()) == [], text
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_round3_high1_force_does_not_override_the_host_path_refusal(package: Path, migrations: Path) -> None:
+    """`--force` overrides the `check_unit.py` GATE and nothing else.
+
+    Same reasoning as #461's exit 5: the tool cannot rewrite a customer's `.pbip` or `report.json`,
+    so there is no sanitized artifact for a force to ship. The negative control is the point - the
+    identical package promotes at exit 0 once the path is gone.
+    """
+    pbip = package / "fabric" / "Wb.pbip"
+    original = pbip.read_text(encoding="utf-8")
+    _write_json(pbip, {"version": "1.0", "settings": {"lastOpened": CUSTOMER_PATH}})
+    assert run(package, migrations, "--force") == pu.EXIT_REFUSED_HOST_PATH
+    assert not migrations.exists()
+
+    pbip.write_text(original, encoding="utf-8")
+    assert run(package, migrations, "--force") == pu.EXIT_OK, "the refusal must be about the PATH, not the --force"
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_round3_high1_the_recorded_host_path_is_redacted_because_it_embeds_a_username(
+    package: Path, migrations: Path, tmp_path: Path
+) -> None:
+    """The refusal envelope is itself an artifact: it may name the FILE, never the path."""
+    _write_json(package / "fabric" / "Wb.pbip", {"version": "1.0", "settings": {"lastOpened": CUSTOMER_PATH}})
+    envelope_path = tmp_path / "host.json"
+    assert run(package, migrations, "--force", "--json", str(envelope_path)) == pu.EXIT_REFUSED_HOST_PATH
+    text = envelope_path.read_text(encoding="utf-8")
+    assert "CustomerOperator" not in text, text
+    assert "ServerA" not in text, text
+    envelope = json.loads(text)
+    assert envelope["status"] == "REFUSED_HOST_PATH"
+    assert any("Wb.pbip" in finding for finding in envelope["findings"]), envelope["findings"]
+    assert any("source.csv" in finding for finding in envelope["findings"]), "the leaf must survive"
+
+
+@pytest.mark.usefixtures("pass_gate")
+@pytest.mark.parametrize(
+    ("what", "value"),
+    [
+        ("an https URL", "https://contoso.sharepoint.com/sites/finance/Shared%20Documents/Sales.xlsx"),
+        ("a Databricks HttpPath", "/sql/1.0/warehouses/abc123"),
+        ("a bare slash", "/"),
+        ("a relative reference", "../Model.SemanticModel"),
+        ("a JSON schema pointer", "#/definitions/visualContainer"),
+    ],
+)
+def test_round3_high1_a_non_local_reference_is_not_a_host_path(
+    package: Path, migrations: Path, what: str, value: str
+) -> None:
+    """POSITIVE CONTROL for the regex. A scan that refuses everything is not coverage.
+
+    The URL cases are the ones that would break it: `https:` reaches `[A-Za-z]:[\\\\/]` unless BOTH
+    the multi-letter-scheme lookbehind and the `(?!/)` guard are present.
+    """
+    _write_json(package / "fabric" / "Wb.pbip", {"version": "1.0", "settings": {"lastOpened": value}})
+    assert run(package, migrations) == pu.EXIT_OK, what
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_round3_high1_an_absolute_path_inside_the_shipment_still_promotes(package: Path, migrations: Path) -> None:
+    """Judged *absolute AND outside*, the same rule as #461 - never "absolute" alone.
+
+    `set_data_folder.py --localize` deliberately writes an absolute path under the deliverable's
+    own `data/`, and the model-TMDL scan has always allowed it. Widening the scan must not quietly
+    make the whole-tree version stricter than the model version it generalises.
+    """
+    inside = migrations / "workbooks" / "wb" / "data" / "Extract.csv"
+    _write_json(package / "fabric" / "Wb.pbip", {"version": "1.0", "settings": {"lastOpened": str(inside)}})
+    assert run(package, migrations) == pu.EXIT_OK
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_round3_high1_a_known_binary_resource_ships_without_being_scanned(package: Path, migrations: Path) -> None:
+    """POSITIVE CONTROL. PBIR carries real images; they are not text and must not block a ship."""
+    logo = package / "fabric" / "Wb.Report" / "StaticResources" / "RegisteredResources" / "logo.png"
+    logo.parent.mkdir(parents=True, exist_ok=True)
+    logo.write_bytes(b"\x89PNG\r\n\x1a\n\xff\xfe not utf-8 at all")
+    assert run(package, migrations) == pu.EXIT_OK
+    assert (migrations / "workbooks" / "wb" / "fabric" / "Wb.Report" / logo.relative_to(logo.parents[2])).is_file()
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_round3_high1_an_undecodable_file_of_an_unlisted_type_is_cannot_assess(package: Path, migrations: Path) -> None:
+    """FAIL-CLOSED. "I could not read it" is exit 2 here, never a silent skip.
+
+    Skipping every undecodable file would have made the whole scan bypassable by renaming a file:
+    that is the collapse-into-the-clean-bucket defect this module's exit 2 exists to prevent.
+    """
+    blob = package / "fabric" / "Wb.Report" / "definition" / "mystery.dat"
+    blob.write_bytes(b"\xff\xfe\x00\x01 definitely not utf-8")
+    assert run(package, migrations) == pu.EXIT_CANNOT_ASSESS
+    assert not migrations.exists()
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_round3_high1_the_shipped_tree_is_re_scanned_after_the_copy(
+    package: Path, migrations: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same condition, same verdict, whichever scan saw it first - the MEDIUM 3 rule, for exit 6."""
+    real_execute = pu.execute_plan
+
+    def _inject(plan: pu.PromotionPlan) -> pu.AppliedCopies:
+        applied = real_execute(plan)
+        _write_json(
+            plan.report_destination / "definition" / "report.json",
+            {"resourcePackages": [{"path": CUSTOMER_PATH}]},
+        )
+        return applied
+
+    monkeypatch.setattr(pu, "execute_plan", _inject)
+    envelope_path = tmp_path / "shipped-host.json"
+    assert run(package, migrations, "--json", str(envelope_path)) == pu.EXIT_REFUSED_HOST_PATH
+    envelope = json.loads(envelope_path.read_text(encoding="utf-8"))
+    assert envelope["status"] == "REFUSED_HOST_PATH"
+    assert "CustomerOperator" not in envelope_path.read_text(encoding="utf-8")
+
+
+# --------------------------------------------------------------------------------------
+# ROUND 3, HIGH 2 - a lexical containment check is not a containment check
+#
+# Measured before the fix: with `migrations/workbooks/wb` made a junction to a directory outside
+# `migrations/`, `exit=0 outside-report=True outside-record=True`. Every planned path was
+# *lexically* inside the root, so the check ran, agreed, and was measuring the wrong thing.
+# --------------------------------------------------------------------------------------
+
+
+def _link_directory(link: Path, target: Path) -> None:
+    """A junction (Windows) or a directory symlink (POSIX). A lexical check sees through neither."""
+    link.parent.mkdir(parents=True, exist_ok=True)
+    if sys.platform == "win32":
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)], capture_output=True, check=False
+        )
+        if completed.returncode != 0:
+            pytest.skip("this machine would not create a junction")
+        return
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except (OSError, NotImplementedError):  # pragma: no cover - privilege-dependent
+        pytest.skip("this machine would not create a directory symlink")
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_round3_high2_a_linked_deliverable_root_cannot_escape_the_migrations_root(
+    package: Path, migrations: Path, tmp_path: Path
+) -> None:
+    """The promoter may not write, or REPLACE, anything outside its declared containment boundary."""
+    outside = tmp_path / "outside-the-root"
+    outside.mkdir(parents=True)
+    (outside / "pre-existing.txt").write_text("must survive\n", encoding="utf-8")
+    _link_directory(migrations / "workbooks" / "wb", outside)
+
+    assert run(package, migrations) == pu.EXIT_CANNOT_ASSESS
+    assert not (outside / "fabric").exists(), "nothing may be written outside the migrations root"
+    assert not (outside / "promotion-record.json").exists()
+    assert (outside / "pre-existing.txt").read_text(encoding="utf-8") == "must survive\n"
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_round3_high2_the_refusal_names_no_absolute_host_path(package: Path, migrations: Path, tmp_path: Path) -> None:
+    """A containment refusal is an artifact too - it may say WHAT, never WHERE."""
+    outside = tmp_path / "outside-the-root"
+    outside.mkdir(parents=True)
+    _link_directory(migrations / "workbooks" / "wb", outside)
+    envelope_path = tmp_path / "contained.json"
+    assert run(package, migrations, "--json", str(envelope_path)) == pu.EXIT_CANNOT_ASSESS
+    text = envelope_path.read_text(encoding="utf-8")
+    assert host_paths_in(text, package, migrations, outside) == [], text
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_round3_high2_containment_is_judged_against_the_ROOT_so_a_linked_root_still_promotes(
+    package: Path, tmp_path: Path
+) -> None:
+    """The over-fix guard, end to end.
+
+    A `--migrations-root` that is itself reached through a link (a rehearsal root, a mapped work
+    area, a macOS `/tmp`) still contains its own children, so BOTH sides are resolved. The
+    shared-datasource shape is used because its `byPath` deliberately climbs four levels - the one
+    case where containment against the unit folder rather than the root would refuse a legal
+    promotion.
+    """
+    real_root = tmp_path / "real-migrations"
+    real_root.mkdir(parents=True)
+    linked_root = tmp_path / "linked-migrations"
+    _link_directory(linked_root, real_root)
+
+    assert run(package, linked_root, "--datasource-slug", "shared-ds") == pu.EXIT_OK
+    report = real_root / "workbooks" / "wb" / "fabric" / "Wb.Report"
+    model = real_root / "datasources" / "shared-ds" / "fabric" / "Model.SemanticModel"
+    assert report.is_dir() and model.is_dir()
+    declared = json.loads((report / "definition.pbir").read_text(encoding="utf-8"))
+    assert (
+        declared["datasetReference"]["byPath"]["path"] == "../../../../datasources/shared-ds/fabric/Model.SemanticModel"
+    )
+
+
+def test_round3_high2_containment_resolves_the_ROOT_as_well_as_the_destination(tmp_path: Path) -> None:
+    """The over-fix guard, at the level where it can actually be measured.
+
+    ⚠️ The end-to-end test above CANNOT kill a "resolve the destination but not the root" mutation,
+    and saying so is the point: `parse_args` already calls `.resolve()` on `--migrations-root`, so
+    by the time `_assert_contained` sees it the two are identical and that mutation is EQUIVALENT
+    rather than merely uncaught. `_assert_contained` is nonetheless reachable with an unresolved
+    root - it takes whatever a caller passes - and its contract is *both sides resolved*, so the
+    contract is pinned here rather than inferred from a caller that happens to resolve first.
+    """
+    real_root = tmp_path / "real-migrations"
+    real_root.mkdir(parents=True)
+    linked_root = tmp_path / "linked-migrations"
+    _link_directory(linked_root, real_root)
+
+    inside = linked_root / "workbooks" / "wb" / "fabric" / "Wb.Report"
+    pu._assert_contained([inside], linked_root, "a copy")  # pylint: disable=protected-access
+
+    with pytest.raises(pu.CannotAssess):
+        pu._assert_contained(  # pylint: disable=protected-access
+            [tmp_path / "elsewhere" / "Wb.Report"], linked_root, "a copy"
+        )
+
+
+# --------------------------------------------------------------------------------------
+# ROUND 3, HIGH 3 - a path-bearing exception may not reach the `--json` envelope
+#
+# Measured before the fix: a destination `definition.pbir` read raising
+# `FileNotFoundError(..., filename=<absolute path>)` produced exit 4 with the complete
+# `C:\tfmig\wtpromote\...\definition.pbir` inside `findings`.
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_round3_high3_a_failed_bypath_rewrite_records_no_absolute_host_path(
+    package: Path, migrations: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`rewrite_bypath` was the one site still interpolating a raw exception."""
+    real_read_text = Path.read_text
+
+    def _boom(self: Path, *args, **kwargs):
+        if self.name == "definition.pbir" and migrations.resolve() in self.resolve().parents:
+            raise FileNotFoundError(2, "No such file or directory", str(self))
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _boom)
+    envelope_path = tmp_path / "rewrite.json"
+    assert run(package, migrations, "--json", str(envelope_path)) == pu.EXIT_PROMOTION_FAILED
+    text = envelope_path.read_text(encoding="utf-8")
+    assert host_paths_in(text, package, migrations, tmp_path) == [], text
+    findings = json.loads(text)["findings"]
+    assert any("definition.pbir" in finding for finding in findings), findings
+    assert any("errno 2" in finding for finding in findings), "the operator still gets the CAUSE"
+
+
+@pytest.mark.parametrize(
+    ("what", "exc"),
+    [
+        ("a ValueError rendering two absolute paths", ValueError(f"'{Path.cwd()}' is not in the subpath of '/opt'")),
+        ("a RuntimeError naming a Windows path", RuntimeError(f"failed at {CUSTOMER_PATH}")),
+        ("a RuntimeError naming a UNC share", RuntimeError(f"failed at {UNC_PATH}")),
+        ("a RuntimeError naming a POSIX home", RuntimeError(f"failed at {POSIX_PATH}")),
+    ],
+)
+def test_round3_high3_safe_error_redacts_any_path_bearing_exception(what: str, exc: Exception) -> None:
+    """Fixing only the one reported call site would MOVE the boundary, not remove it.
+
+    `_safe_error` handled `OSError.filename` and trusted `str(exc)` for everything else - but
+    `Path.relative_to` raises `ValueError` carrying BOTH paths, `subprocess.TimeoutExpired` renders
+    a whole command line, and `_run_promotion`'s broad `except Exception` renders whatever arrives.
+    Redacting in the renderer means a new path-bearing exception type cannot reintroduce it.
+    """
+    rendered = pu._safe_error(exc)  # pylint: disable=protected-access
+    assert "CustomerOperator" not in rendered, rendered
+    assert "CustomerFileServer" not in rendered, rendered
+    assert "customer-analyst" not in rendered, rendered
+    assert host_paths_in(rendered, Path.cwd()) == [], f"{what}: {rendered}"
+    assert type(exc).__name__ in rendered, "the TYPE is still said - it is what the operator routes on"
+
+
+def test_round3_high3_no_call_site_interpolates_a_raw_exception() -> None:
+    """The audit, kept executable. One missed site reproduces the whole defect.
+
+    Fixing only the reported line would have MOVED the boundary rather than removed it, so this
+    checks the rule instead of the line: an exception may be interpolated only when it is one this
+    module RAISED (its message is already built from `_safe_error` and redacted parts), or when it
+    is the `_safe_error` fallback that feeds `redact_host_paths`. A foreign exception - `OSError`
+    with its `filename`, `ValueError` from `Path.relative_to` with both paths,
+    `subprocess.TimeoutExpired` with a whole command line - must go through `_safe_error`.
+    """
+    ours = {"CannotAssess", "PromotionFailed", "HostPathLeak", "ExternalDataPath"}
+    interpolates = re.compile(r"\{exc(?:![sra])?(?::[^}]*)?\}")
+    handler: set[str] | None = None
+    offenders: list[str] = []
+    for line in (REPO_ROOT / "scripts" / "promote_unit.py").read_text(encoding="utf-8").splitlines():
+        if re.match(r"\s*(?:async\s+)?def\s", line):
+            handler = None
+        caught = re.match(r"\s*except\s+(.+?)\s+as\s+exc\s*:", line)
+        if caught:
+            handler = set(re.findall(r"\w+", caught.group(1)))
+        if not interpolates.search(line) or "_safe_error" in line:
+            continue
+        if line.strip().startswith("return redact_host_paths("):
+            continue  # the one permitted interpolation: it IS the redactor's input
+        if handler is None or not handler <= ours:
+            offenders.append(line.strip())
+    assert offenders == [], offenders
+
+
+# --------------------------------------------------------------------------------------
+# ROUND 3, MEDIUM 4 - `--force` may not ship a READABLE but empty report
+#
+# The existing force test corrupted `visual.json`, which is `unassessable` (exit 2) and so
+# exercises a branch `--force` was never near. The mutation `if source.findings and not
+# args.force:` passed all 116 tests.
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_round3_medium4_force_cannot_ship_a_readable_report_with_zero_visuals(
+    package: Path, migrations: Path, tmp_path: Path
+) -> None:
+    """REFUSED_CONTENT (3), not CANNOT_ASSESS (2) - the branch `--force` could actually have reached.
+
+    Every document here parses. The report is structurally present and functionally empty, which is
+    exactly what exit 3 means, and `--force` overrides the `check_unit.py` gate and nothing else.
+    """
+    shutil.rmtree(package / "fabric" / "Wb.Report")
+    _write_report(package / "fabric" / "Wb.Report", "Model.SemanticModel", pages=2, visuals_per_page=0)
+    envelope_path = tmp_path / "empty.json"
+    assert run(package, migrations, "--force", "--json", str(envelope_path)) == pu.EXIT_REFUSED_CONTENT
+    envelope = json.loads(envelope_path.read_text(encoding="utf-8"))
+    assert envelope["status"] == "REFUSED_CONTENT"
+    assert any("ZERO visuals" in finding for finding in envelope["findings"]), envelope["findings"]
+    assert not migrations.exists()
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_round3_medium4_force_cannot_ship_a_model_with_zero_tables(package: Path, migrations: Path) -> None:
+    """The model half of the same claim: readable, parseable, and empty is still exit 3 under --force."""
+    tables = package / "fabric" / "Model.SemanticModel" / "definition" / "tables"
+    for tmdl in tables.glob("*.tmdl"):
+        tmdl.write_text("// no table declaration here\n", encoding="utf-8")
+    assert run(package, migrations, "--force") == pu.EXIT_REFUSED_CONTENT
+    assert not migrations.exists()
+
+
+# --------------------------------------------------------------------------------------
+# ROUND 3, MEDIUM 5 - the required manifest boundaries were unpinned
+#
+# Production was already right for all five shapes; four mutations that BROKE it passed all 116
+# tests. These pin the behaviour so it cannot regress silently.
+# --------------------------------------------------------------------------------------
+
+MANIFEST_BOUNDARIES = [
+    ("a zero-byte manifest", ""),
+    ("a truncated manifest", '{"unit": "Wb", "kind": "workb'),
+    ("a manifest that is a JSON array", '["workbook"]'),
+    ("a manifest that is a bare string", '"workbook"'),
+    ("a manifest that is JSON null", "null"),
+    ("a manifest declaring no kind", '{"unit": "Wb"}'),
+    ("a manifest declaring a null kind", '{"unit": "Wb", "kind": null}'),
+    ("a manifest declaring an unclassified kind", '{"unit": "Wb", "kind": "unclassified"}'),
+    ("a manifest declaring an unknown kind", '{"unit": "Wb", "kind": "dashboard"}'),
+]
+
+
+@pytest.mark.usefixtures("pass_gate")
+@pytest.mark.parametrize(("what", "text"), MANIFEST_BOUNDARIES)
+def test_round3_medium5_a_malformed_manifest_blocks_and_ships_nothing(
+    package: Path, migrations: Path, what: str, text: str
+) -> None:
+    """Exit 2 for every shape, because the kind is what decides WHERE a unit is promoted to.
+
+    `package_unit.py:unit_kind` is explicit that the filesystem cannot answer this - every
+    `pbip/<Unit>/` in a real 2.339.0 estate run carries BOTH a `.Report` and a `.SemanticModel`,
+    all 62 of them - so any fallback here promotes real published datasources as workbooks.
+    """
+    (package / "package-manifest.json").write_text(text, encoding="utf-8")
+    assert run(package, migrations) == pu.EXIT_CANNOT_ASSESS, what
+    assert not migrations.exists(), what
+
+
+@pytest.mark.usefixtures("pass_gate")
+@pytest.mark.parametrize(("what", "text"), MANIFEST_BOUNDARIES)
+def test_round3_medium5_the_refusal_says_which_manifest_shape_it_was(
+    package: Path, migrations: Path, tmp_path: Path, what: str, text: str
+) -> None:
+    """A blocking verdict has to be actionable: `--kind` is the documented remedy, so it is named."""
+    (package / "package-manifest.json").write_text(text, encoding="utf-8")
+    envelope_path = tmp_path / "manifest.json"
+    assert run(package, migrations, "--json", str(envelope_path)) == pu.EXIT_CANNOT_ASSESS
+    envelope = json.loads(envelope_path.read_text(encoding="utf-8"))
+    assert envelope["status"] == "CANNOT_ASSESS"
+    joined = " ".join(envelope["findings"])
+    assert "package-manifest.json" in joined, joined
+    # Either remedy is legitimate and they are NOT interchangeable: `--kind` fills a gap the engine
+    # left, while a manifest that will not parse is evidence about the whole package and has to be
+    # regenerated. What is unacceptable is a blocking verdict with no next step at all.
+    assert re.search(r"--kind|package_unit\.py", joined), f"{what}: the remedy must be named - {joined}"
+
+
+@pytest.mark.usefixtures("pass_gate")
+@pytest.mark.parametrize(
+    ("what", "text"),
+    [
+        ("a missing kind", '{"unit": "Wb"}'),
+        ("an unclassified kind", '{"unit": "Wb", "kind": "unclassified"}'),
+        ("no manifest at all", None),
+    ],
+)
+def test_round3_medium5_kind_fills_the_gap_the_manifest_left(
+    package: Path, migrations: Path, what: str, text: str | None
+) -> None:
+    """POSITIVE CONTROL. A promoter that refuses every manifest passes every test above.
+
+    `--kind` is the documented escape hatch, and the record has to say the kind came from the FLAG
+    rather than from the engine - an unchecked classification must never look classified afterwards.
+    """
+    manifest = package / "package-manifest.json"
+    if text is None:
+        manifest.unlink()
+    else:
+        manifest.write_text(text, encoding="utf-8")
+    assert run(package, migrations, "--kind", "workbook") == pu.EXIT_OK, what
+    record = json.loads((migrations / "workbooks" / "wb" / "promotion-record.json").read_text(encoding="utf-8"))
+    assert record["kind"] == "workbook"
+    assert record["kind_source"].startswith("--kind"), record["kind_source"]
+
+
+@pytest.mark.usefixtures("pass_gate")
+def test_round3_medium5_kind_may_not_contradict_a_manifest_that_does_declare_one(
+    package: Path, migrations: Path
+) -> None:
+    """`--kind` fills a GAP; an operator overruling the engine's classification is a defect report."""
+    assert run(package, migrations, "--kind", "datasource") == pu.EXIT_CANNOT_ASSESS
+    assert not migrations.exists()
