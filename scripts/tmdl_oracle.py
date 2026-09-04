@@ -44,10 +44,21 @@ deploy run lock - not a new lock framework, an extension of the one already in t
 `RunLock`, which fails fast because two overlapping deploys must never both proceed, two processes
 racing to build the SAME oracle are not a conflict: waiting for the winner and reusing its DLL is the
 whole fix, so this variant blocks (bounded) instead of erroring immediately.
+
+Stale-lock reclaim carries the same ownership-safety requirement `.github/skills/pbip-model-refresh`'s
+`_ModelLock._reclaim()` was written to satisfy: a bare "old mtime -> unlink" can delete a SUCCESSOR's
+brand-new lock if that successor reclaimed and recreated it in the window between our stat and our
+unlink. `_reclaim_stale_lock` closes that by claiming the file at a private path via `os.rename` (only
+one racer's rename can win) and then verifying, by CONTENT not merely by path, that what it grabbed is
+still the lock it judged stale before discarding it - a mismatch means a live successor's fresh lock
+was grabbed by accident, and it is restored untouched. Every acquired lock also carries a unique
+token, and `_release_build_lock` deletes it only if that token is still there, so a process a
+predecessor mistakenly judged stale can never delete a new owner's lock on its own release either.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -55,6 +66,7 @@ import re
 import shutil
 import subprocess
 import time
+import uuid
 from pathlib import Path
 
 from tmdl_checks import TmdlFinding
@@ -136,10 +148,56 @@ def _sources_newer_than_build() -> bool:
     )
 
 
+def _read_lock_payload(path: Path) -> dict | None:
+    """The lock file's own claim of who holds it, or None if unreadable/torn/gone."""
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _reclaim_stale_lock(path: Path, observed: dict | None) -> bool:
+    """Attempt to reclaim a lock believed stale. Returns True only if it was genuinely discarded.
+
+    `os.rename` alone is NOT enough to make this safe: it moves whatever currently sits at `path`,
+    with no idea whether that is still the exact stale lock we stat'd a moment ago or one a
+    successor has since reclaimed-and-recreated for itself (that successor went through this same
+    function concurrently and won). So after claiming the file at a private path, its content is
+    compared against `observed` - what we read as evidence of staleness - before it is discarded.
+    A mismatch means we actually grabbed a LIVE successor's fresh lock out from under it; that must
+    be put back untouched, never deleted, so a legitimate new owner is never dispossessed and two
+    racers can never both believe they hold the mutex.
+    """
+    claim = path.with_name(f"{path.name}.reclaim.{os.getpid()}.{uuid.uuid4().hex}")
+    try:
+        os.rename(path, claim)
+    except OSError:
+        return False  # someone else already claimed/removed it first - nothing to do here
+    if observed is not None and _read_lock_payload(claim) == observed:
+        # Genuinely the same lock we judged stale by content, not merely by path - safe to discard.
+        with contextlib.suppress(OSError):
+            os.unlink(claim)
+        return True
+    # Either unreadable/torn (never confirmed stale) or a successor's fresh lock we grabbed by
+    # accident - restore it untouched so its rightful holder, if any, is not dispossessed.
+    try:
+        os.rename(claim, path)
+    except OSError:
+        # `path` is occupied again (a second restore race) - our private claim copy is now
+        # redundant either way; whatever lives at `path` is not ours to touch.
+        with contextlib.suppress(OSError):
+            os.unlink(claim)
+    return False
+
+
 def _acquire_build_lock(
     path: Path, *, wait: float = BUILD_LOCK_WAIT_SECONDS, poll: float = BUILD_LOCK_POLL_SECONDS
-) -> None:
+) -> str:
     """Take `path` as a bounded cross-process mutex for the build/restore critical section only.
+
+    Returns a per-acquisition ownership token that the caller must pass back to
+    `_release_build_lock` - a plain unconditional unlink on release would let a process that has
+    since been judged stale (see `_reclaim_stale_lock`) delete a SUCCESSOR's lock instead of its own.
 
     `O_CREAT | O_EXCL` rather than exists()-then-write, same as `deploy_estate.RunLock.acquire` -
     the check-then-act version has a window two simultaneous builders can both pass, which is
@@ -151,6 +209,7 @@ def _acquire_build_lock(
     """
     deadline = time.monotonic() + wait
     while True:
+        token = uuid.uuid4().hex
         try:
             handle = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError:
@@ -159,9 +218,9 @@ def _acquire_build_lock(
             except FileNotFoundError:
                 continue  # released between our open() failing and this stat - retry immediately
             if age > BUILD_LOCK_STALE_SECONDS:
-                # A live build cannot be this old; whatever took this lock is gone. Reclaim it
-                # rather than let a crashed builder block every later run forever.
-                path.unlink(missing_ok=True)
+                # A live build cannot be this old; whatever took this lock is gone - but see
+                # `_reclaim_stale_lock` for why that alone does not license an unconditional delete.
+                _reclaim_stale_lock(path, _read_lock_payload(path))
                 continue
             if time.monotonic() >= deadline:
                 raise OracleUnavailable(
@@ -172,13 +231,24 @@ def _acquire_build_lock(
             time.sleep(poll)
             continue
         with os.fdopen(handle, "w", encoding="utf-8") as stream:
-            json.dump({"pid": os.getpid(), "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, stream)
-        return
+            json.dump(
+                {"pid": os.getpid(), "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "token": token},
+                stream,
+            )
+        return token
 
 
-def _release_build_lock(path: Path) -> None:
-    """Best-effort release; a leftover lock is recoverable via the staleness check above."""
-    path.unlink(missing_ok=True)
+def _release_build_lock(path: Path, token: str) -> None:
+    """Remove the lock only if it still carries OUR token.
+
+    A predecessor that judged this run stale (e.g. after a false "crashed" verdict racing with a
+    slow write) could have reclaimed and recreated the lock for a new owner; unconditionally
+    unlinking would delete a lock we no longer own rather than our own.
+    """
+    held = _read_lock_payload(path)
+    if held is not None and held.get("token") == token:
+        with contextlib.suppress(OSError):
+            path.unlink()
 
 
 def ensure_built(dotnet: str) -> Path:
@@ -192,7 +262,7 @@ def ensure_built(dotnet: str) -> Path:
     if not _sources_newer_than_build():
         return DLL
     lock_path = PROJECT_DIR / ".oracle-build.lock"
-    _acquire_build_lock(lock_path)
+    token = _acquire_build_lock(lock_path)
     try:
         # Recheck: another process may have finished the build while we waited for the lock - a
         # waiter must reuse that DLL rather than rebuild it.
@@ -218,7 +288,7 @@ def ensure_built(dotnet: str) -> Path:
             )
         return DLL
     finally:
-        _release_build_lock(lock_path)
+        _release_build_lock(lock_path, token)
 
 
 def _run_batch(dotnet: str, dll: Path, definitions: list[Path]) -> dict:

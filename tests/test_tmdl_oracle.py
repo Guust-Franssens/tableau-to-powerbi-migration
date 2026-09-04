@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import json
 import os
-import string
 import subprocess
 import sys
 import textwrap
@@ -385,64 +384,67 @@ def test_a_bom_prefixed_tmdl_file_is_reported_not_normalised_away(tmp_path):
 # so the assertions are about how many times the SHARED build ran and whether every caller ended up
 # with the same result - never about `dotnet` itself.
 
-_LOCK_BARRIER_SCRIPT = string.Template(
-    textwrap.dedent(
-        """
-        import json
-        import os
-        import sys
-        import time
-        from pathlib import Path
+_LOCK_BARRIER_SCRIPT = textwrap.dedent(
+    """
+    import json
+    import os
+    import sys
+    import time
+    from pathlib import Path
 
-        sys.path.insert(0, "$repo_scripts")
-        import tmdl_oracle  # noqa: E402  pylint: disable=wrong-import-position
+    repo_scripts, project_dir, dll_path, project_file, build_log, delay, result_file = sys.argv[1:8]
 
-        tmdl_oracle.PROJECT_DIR = Path("$project_dir")
-        tmdl_oracle.DLL = Path("$dll_path")
-        tmdl_oracle.PROJECT_FILE = Path("$project_file")
+    sys.path.insert(0, repo_scripts)
+    import tmdl_oracle  # noqa: E402  pylint: disable=wrong-import-position
 
-        BUILD_LOG = "$build_log"
-        DELAY = $delay
+    tmdl_oracle.PROJECT_DIR = Path(project_dir)
+    tmdl_oracle.DLL = Path(dll_path)
+    tmdl_oracle.PROJECT_FILE = Path(project_file)
 
-
-        def fake_run(cmd, **kwargs):  # pylint: disable=unused-argument
-            fd = os.open(BUILD_LOG, os.O_CREAT | os.O_APPEND | os.O_WRONLY)
-            os.write(fd, b"build\\n")
-            os.close(fd)
-            time.sleep(DELAY)
-            dll = tmdl_oracle.DLL
-            dll.parent.mkdir(parents=True, exist_ok=True)
-            dll.write_text("fake dll", encoding="utf-8")
-
-            class Result:  # pylint: disable=too-few-public-methods
-                returncode = 0
-                stdout = ""
-                stderr = ""
-
-            return Result()
+    DELAY = float(delay)
 
 
-        tmdl_oracle.subprocess.run = fake_run
+    def fake_run(cmd, **kwargs):  # pylint: disable=unused-argument
+        fd = os.open(build_log, os.O_CREAT | os.O_APPEND | os.O_WRONLY)
+        os.write(fd, b"build\\n")
+        os.close(fd)
+        time.sleep(DELAY)
+        dll = tmdl_oracle.DLL
+        dll.parent.mkdir(parents=True, exist_ok=True)
+        dll.write_text("fake dll", encoding="utf-8")
 
-        result_file = Path("$result_file")
-        try:
-            built = tmdl_oracle.ensure_built("dotnet-stub")
-            result_file.write_text(json.dumps({"status": "ok", "dll": str(built)}), encoding="utf-8")
-        except Exception as exc:  # pylint: disable=broad-except
-            result_file.write_text(json.dumps({"status": "error", "message": str(exc)}), encoding="utf-8")
-        """
-    )
+        class Result:  # pylint: disable=too-few-public-methods
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return Result()
+
+
+    tmdl_oracle.subprocess.run = fake_run
+
+    result_path = Path(result_file)
+    try:
+        built = tmdl_oracle.ensure_built("dotnet-stub")
+        result_path.write_text(json.dumps({"status": "ok", "dll": str(built)}), encoding="utf-8")
+    except Exception as exc:  # pylint: disable=broad-except
+        result_path.write_text(json.dumps({"status": "error", "message": str(exc)}), encoding="utf-8")
+    """
 )
 
 
-def test_concurrent_processes_build_exactly_once_and_all_reuse_the_same_dll(tmp_path):
+def _run_lock_barrier(tmp_path, *, reverse: bool) -> None:
     """The issue #415 barrier: several independent OS processes start with no build output at all;
     exactly one of them invokes the (slow, observable) build, and every process ends up with the
-    same valid DLL.
+    same valid DLL - regardless of the order the workers happen to be launched in.
 
     Each worker is a genuinely separate `python` subprocess - not a thread, not a fork of this
     process that would inherit its already-monkeypatched module state - so this races the shared
-    lock FILE on disk across real processes, the same shape parallel pytest workers hit.
+    lock FILE on disk across real processes, the same shape parallel pytest workers hit. Parameters
+    are passed via argv, never interpolated into the script's source text: a raw Windows path
+    (backslashes, a stray `\\U...` sequence) embedded in a quoted Python string literal can produce
+    a `SyntaxError` or a silently wrong string, whereas `Popen`'s list form passes each argv element
+    through literally, with no shell parsing and no source-code embedding at all.
     """
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
@@ -451,24 +453,30 @@ def test_concurrent_processes_build_exactly_once_and_all_reuse_the_same_dll(tmp_
     dll_path = project_dir / "bin" / "Release" / "net9.0" / "tmdl_oracle.dll"
     build_log = tmp_path / "build.log"
 
+    indices = list(reversed(range(6))) if reverse else list(range(6))
+    script_path = tmp_path / "worker.py"
+    script_path.write_text(_LOCK_BARRIER_SCRIPT, encoding="utf-8")
+
     workers = []
-    for index in range(6):
-        script_path = tmp_path / f"worker_{index}.py"
+    for index in indices:
         result_path = tmp_path / f"result_{index}.json"
-        script_path.write_text(
-            _LOCK_BARRIER_SCRIPT.substitute(
-                repo_scripts=str(REPO_ROOT / "scripts"),
-                project_dir=str(project_dir),
-                dll_path=str(dll_path),
-                project_file=str(project_file),
-                build_log=str(build_log),
-                delay="0.5",
-                result_file=str(result_path),
-            ),
-            encoding="utf-8",
-        )
         workers.append(
-            (subprocess.Popen([sys.executable, str(script_path)]), result_path)  # pylint: disable=consider-using-with
+            (
+                subprocess.Popen(  # pylint: disable=consider-using-with
+                    [
+                        sys.executable,
+                        str(script_path),
+                        str(REPO_ROOT / "scripts"),
+                        str(project_dir),
+                        str(dll_path),
+                        str(project_file),
+                        str(build_log),
+                        "0.5",
+                        str(result_path),
+                    ]
+                ),
+                result_path,
+            )
         )
 
     for proc, _ in workers:
@@ -483,6 +491,11 @@ def test_concurrent_processes_build_exactly_once_and_all_reuse_the_same_dll(tmp_
     )
 
 
+@pytest.mark.parametrize("reverse", [False, True], ids=["normal-order", "reversed-order"])
+def test_concurrent_processes_build_exactly_once_and_all_reuse_the_same_dll(tmp_path, reverse):
+    _run_lock_barrier(tmp_path, reverse=reverse)
+
+
 def test_a_waiting_process_rechecks_after_the_lock_and_does_not_rebuild(monkeypatch, tmp_path):
     """A process that had to wait for the lock must recheck whether a build is still needed before
     building - otherwise every waiter rebuilds in turn once it is unblocked (issue #415).
@@ -494,12 +507,13 @@ def test_a_waiting_process_rechecks_after_the_lock_and_does_not_rebuild(monkeypa
     def fake_acquire(_path, **_kwargs):
         # Simulate: while we were waiting for the lock, another process finished the build.
         tmdl_oracle.DLL.write_text("built by the other process", encoding="utf-8")
+        return "fake-token"
 
     def fake_run(*_args, **_kwargs):
         raise AssertionError("must not rebuild - the recheck right after the lock should have seen the DLL")
 
     monkeypatch.setattr(tmdl_oracle, "_acquire_build_lock", fake_acquire)
-    monkeypatch.setattr(tmdl_oracle, "_release_build_lock", lambda _path: None)
+    monkeypatch.setattr(tmdl_oracle, "_release_build_lock", lambda _path, _token: None)
     monkeypatch.setattr(tmdl_oracle.subprocess, "run", fake_run)
 
     result = tmdl_oracle.ensure_built("dotnet-stub")
@@ -551,7 +565,48 @@ def test_a_stale_lock_is_reclaimed_instead_of_blocking_every_later_run(tmp_path)
     # A short wait proves the reclaim is immediate: were staleness not checked, this would have to
     # wait out the (much longer) full timeout instead.
     start = time.monotonic()
-    tmdl_oracle._acquire_build_lock(lock_path, wait=5, poll=0.05)
+    token = tmdl_oracle._acquire_build_lock(lock_path, wait=5, poll=0.05)
     elapsed = time.monotonic() - start
-    tmdl_oracle._release_build_lock(lock_path)
+    tmdl_oracle._release_build_lock(lock_path, token)
     assert elapsed < 2, "a stale lock must be reclaimed promptly, not waited out"
+
+
+def test_a_racer_reclaiming_the_same_stale_lock_never_believes_it_holds_the_mutex_twice(monkeypatch, tmp_path):
+    """Deterministic interleaving: B acquires between A's stale observation and A's reclamation.
+
+    A observes the lock as stale and starts to reclaim it; before A's own rename lands, B (also
+    racing for the same stale lock) wins the reclaim first and creates its OWN fresh lock at the
+    same path. A's rename call then unavoidably grabs whatever currently sits at that path - B's
+    brand-new lock, not the stale one A actually judged - so content, not merely path, must decide
+    whether to discard what was grabbed. A must detect the mismatch, restore B's lock untouched,
+    and retry; it must never believe it holds the mutex, and B's lock must survive intact.
+    """
+    lock_path = tmp_path / "race.lock"
+    stale_time = time.time() - (tmdl_oracle.BUILD_LOCK_STALE_SECONDS + 5)
+    lock_path.write_text(json.dumps({"pid": 999999, "token": "dead-owner"}), encoding="utf-8")
+    os.utime(lock_path, (stale_time, stale_time))
+
+    real_rename = os.rename
+    state = {"b_intervened": False}
+
+    def racer_rename(src, dst):
+        # The instant A calls os.rename to claim the lock it believes is stale, simulate B having
+        # already won the SAME reclaim a moment earlier: B's rename+discard already happened, and
+        # B has already created its own fresh (non-stale) lock at `lock_path`. A's own rename call
+        # proceeds on whatever real os.rename does with the CURRENT contents of `lock_path` - which
+        # is now B's lock, not the one A originally observed.
+        if not state["b_intervened"] and str(src) == str(lock_path):
+            state["b_intervened"] = True
+            fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump({"pid": os.getpid(), "token": "b-token"}, stream)
+        return real_rename(src, dst)
+
+    monkeypatch.setattr(tmdl_oracle.os, "rename", racer_rename)
+
+    with pytest.raises(OracleUnavailable, match="timed out"):
+        tmdl_oracle._acquire_build_lock(lock_path, wait=0.5, poll=0.05)
+
+    # B's lock must have survived A's failed reclaim attempt completely intact.
+    held = json.loads(lock_path.read_text(encoding="utf-8"))
+    assert held["token"] == "b-token", "A's reclaim must never discard a live successor's fresh lock"
