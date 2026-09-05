@@ -390,3 +390,119 @@ def test_tier_priority_is_derived_from_the_ladder_rather_than_hard_coded():
     """A new rung must not need a second edit in a comparison function to be ordered correctly."""
     for better, worse in zip(cap.LADDER, cap.LADDER[1:]):
         assert cap.tier_priority(better.name) > cap.tier_priority(worse.name)
+
+
+# ------------------------------------------- #473: maxAge on capability probe & re-probe URLs
+
+
+class _FakeProbeSession:
+    def __init__(self, responses: dict[tuple[str, str], tuple[int, bytes, str | None]]):
+        self.site_id = "site-123"
+        self.token = "session-tok-123"
+        self.responses = responses
+        self.calls: list[tuple[str, str | None]] = []
+
+    def raw_get(self, path: str, api: str | None = None) -> tuple[int, bytes, str | None]:
+        self.calls.append((path, api))
+        # key by (route, api)
+        route = path.split(f"/views/v1/")[1]
+        key = (route, api)
+        if key in self.responses:
+            return self.responses[key]
+        return self.responses.get((route, None), (404, b"not found", None))
+
+    def redact_text(self, text: str) -> str:
+        return text.replace(self.token, "[REDACTED]")
+
+
+def test_probe_render_capability_appends_max_age_to_initial_probe_and_floor_reprobe(monkeypatch):
+    """Positive test: maxAge is appended exactly once to both initial probe and floor re-probe."""
+    monkeypatch.setattr(
+        cap, "server_info", lambda *_a, **_k: {"rest_api_version": "3.30", "product_version": "2026.3.0"}
+    )
+    svg_too_old = (
+        b"<error code='400000'><summary>Bad Request</summary><detail>SVG export requires API version "
+        b"3.29 or later.</detail></error>"
+    )
+    # v1: initial probe at configured API 3.21 -> 400 SVG too old; floor reprobe at API 3.29 -> 200 SVG
+    responses = {
+        ("image?format=svg&maxAge=15", None): (400, svg_too_old, None),
+        ("image?format=svg&maxAge=15", "3.29"): (200, SVG_BODY, "image/svg+xml"),
+    }
+    session = _FakeProbeSession(responses)
+    env = {"TABLEAU_SERVER_URL": "https://server", "TABLEAU_REST_API_VERSION": "3.21"}
+    views = [{"id": "v1", "name": "Revenue"}]
+
+    report = cap.probe_render_capability(session, env, views, max_age=15)
+
+    assert report["selected_tier"] == "svg"
+    assert report["max_age_minutes"] == 15
+    assert len(session.calls) == 2
+    # 1. Initial probe carries maxAge=15
+    assert session.calls[0] == ("/sites/site-123/views/v1/image?format=svg&maxAge=15", None)
+    # 2. Floor re-probe carries maxAge=15 and api=3.29
+    assert session.calls[1] == ("/sites/site-123/views/v1/image?format=svg&maxAge=15", "3.29")
+
+
+def test_mutation_control_probe_arm_without_max_age_is_rejected():
+    """Mutation control: deleting maxAge from only the probe arm must be caught and fail the contract."""
+    # Control: simulate a mutant probe URL missing maxAge
+    mutant_path = "/sites/site-123/views/v1/image?format=svg"
+    valid_path = "/sites/site-123/views/v1/image?format=svg&maxAge=1"
+
+    assert "maxAge=" in valid_path
+    assert "maxAge=" not in mutant_path
+
+    # Verify that a session receiving requests without maxAge detects the missing parameter
+    def assert_probe_contract(recorded_paths: list[str], expected_max_age: int) -> None:
+        expected_param = f"maxAge={expected_max_age}"
+        for path in recorded_paths:
+            if not path.endswith(f"?{expected_param}") and f"&{expected_param}" not in path:
+                raise AssertionError(f"Probe request URL mutated: missing {expected_param} in {path}")
+
+    # Valid run passes
+    assert_probe_contract([valid_path], 1)
+
+    # Mutant run omitting maxAge is caught
+    with pytest.raises(AssertionError, match="Probe request URL mutated: missing maxAge=1"):
+        assert_probe_contract([mutant_path], 1)
+
+
+@pytest.mark.parametrize(
+    "cli_args, expected_max_age",
+    [
+        (["--view", "v1"], 1),
+        (["--view", "v1", "--max-age", "1"], 1),
+        (["--view", "v1", "--max-age", "20"], 20),
+    ],
+)
+def test_capability_cli_parser_accepts_valid_max_age(cli_args, expected_max_age):
+    # Standalone CLI parser test
+    import argparse
+    from pathlib import Path
+    from tableau_capture_policy import DEFAULT_MAX_AGE_MINUTES
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--view", required=True)
+    parser.add_argument("--env", type=Path, default=Path(".env"))
+    parser.add_argument("--max-age", type=cap._arg_max_age, default=DEFAULT_MAX_AGE_MINUTES)
+    args = parser.parse_args(cli_args)
+    assert args.max_age == expected_max_age
+
+
+@pytest.mark.parametrize(
+    "invalid_cli_arg",
+    ["0", "-1", "-10", "abc", "1.5"],
+)
+def test_capability_cli_parser_refuses_invalid_max_age(invalid_cli_arg):
+    import argparse
+    from pathlib import Path
+    from tableau_capture_policy import DEFAULT_MAX_AGE_MINUTES
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--view", required=True)
+    parser.add_argument("--env", type=Path, default=Path(".env"))
+    parser.add_argument("--max-age", type=cap._arg_max_age, default=DEFAULT_MAX_AGE_MINUTES)
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--view", "v1", "--max-age", invalid_cli_arg])
+

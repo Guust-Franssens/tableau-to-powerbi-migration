@@ -206,16 +206,17 @@ def build_retry_policy(
 
 
 def validate_max_age(value: Any) -> int:
-    """Validate that a max-age value is a non-negative integer (in minutes).
+    """Validate that a max-age value is an integer >= 1 (in minutes).
 
     Tableau REST API parameter ``maxAge`` specifies the maximum cache age in minutes.
+    Tableau's supported minimum is 1 minute.
     Non-integer values, boolean values (since ``bool`` is a subclass of ``int`` in Python),
-    and negative values are rejected.
+    and values < 1 are rejected.
     """
     if isinstance(value, bool):
-        raise TypeError(f"max_age must be an integer >= 0, got bool: {value!r}")
+        raise TypeError(f"max_age must be an integer >= 1, got bool: {value!r}")
     if not isinstance(value, int):
-        raise TypeError(f"max_age must be an integer >= 0, got {type(value).__name__}: {value!r}")
-    if value < 0:
-        raise ValueError(f"max_age must be >= 0, got {value}")
+        raise TypeError(f"max_age must be an integer >= 1, got {type(value).__name__}: {value!r}")
+    if value < 1:
+        raise ValueError(f"max_age must be an integer >= 1, got {value}")
     return value

@@ -2480,35 +2480,36 @@ def test_the_manifest_censuses_view_types_so_a_consumer_reads_it_once(tmp_path):
 
 # --- #473: maxAge query parameter, validation, and manifest persistence -------------------------
 #
-# Tableau REST query cache can silently serve /data, /image, and /pdf from a 6-hour cache.
+# Tableau REST query cache can silently serve /data, /image, and /pdf from cache.
 # The tests below pin:
-# 1. validate_max_age accepts non-negative ints and rejects negatives/bools/strings/floats.
-# 2. CLI parser accepts --max-age <int >= 0> and rejects negative or non-integer arguments.
+# 1. validate_max_age accepts integers >= 1 and rejects 0, negatives, bools, strings, and floats.
+# 2. CLI parser accepts --max-age <int >= 1> and rejects 0, negative, or non-integer arguments.
 # 3. HTTP request paths for /data, /image (png, svg), and /pdf include maxAge=<minutes>.
-# 4. Custom max-age propagates across all request paths and manifest output.
-# 5. Manifest records max_age_minutes at the top level, per view, and per leg.
+# 4. Custom max-age propagates across all request paths, capability probe URLs, and manifest output.
+# 5. Manifest records max_age_minutes at the top level, per view, per leg, and in render capability.
 # 6. Server rejection remains a capture failure / cannot assess, never silently retrying without maxAge.
 
 
-@pytest.mark.parametrize("valid_age", [0, 1, 15, 360])
-def test_validate_max_age_accepts_non_negative_integers(valid_age):
+@pytest.mark.parametrize("valid_age", [1, 15, 360])
+def test_validate_max_age_accepts_positive_integers(valid_age):
     assert oracle.validate_max_age(valid_age) == valid_age
 
 
 @pytest.mark.parametrize(
     "invalid_input, exc_type",
     [
+        (0, ValueError),
+        (-1, ValueError),
+        (-100, ValueError),
         (True, TypeError),
         (False, TypeError),
         (1.5, TypeError),
         ("15", TypeError),
         (None, TypeError),
         ([1], TypeError),
-        (-1, ValueError),
-        (-100, ValueError),
     ],
 )
-def test_validate_max_age_refuses_invalid_types_and_negative_values(invalid_input, exc_type):
+def test_validate_max_age_refuses_invalid_types_and_values_less_than_one(invalid_input, exc_type):
     with pytest.raises(exc_type):
         oracle.validate_max_age(invalid_input)
 
@@ -2517,8 +2518,8 @@ def test_validate_max_age_refuses_invalid_types_and_negative_values(invalid_inpu
     "cli_args, expected_max_age",
     [
         (["--out", "o"], 1),
+        (["--out", "o", "--max-age", "1"], 1),
         (["--out", "o", "--max-age", "15"], 15),
-        (["--out", "o", "--max-age", "0"], 0),
         (["--out", "o", "--max-age=120"], 120),
     ],
 )
@@ -2530,7 +2531,7 @@ def test_cli_parser_accepts_valid_max_age(cli_args, expected_max_age):
 
 @pytest.mark.parametrize(
     "invalid_cli_arg",
-    ["-1", "-5", "abc", "1.5", "None"],
+    ["0", "-1", "-5", "abc", "1.5", "None"],
 )
 def test_cli_parser_refuses_invalid_max_age(invalid_cli_arg):
     parser = oracle.build_parser()

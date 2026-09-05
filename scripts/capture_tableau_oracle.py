@@ -1141,7 +1141,7 @@ def _arg_max_age(val: str) -> int:
     try:
         parsed = int(val)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"--max-age must be an integer >= 0, got {val!r}") from exc
+        raise argparse.ArgumentTypeError(f"--max-age must be an integer >= 1, got {val!r}") from exc
     try:
         return validate_max_age(parsed)
     except (ValueError, TypeError) as exc:
@@ -1194,9 +1194,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_MAX_AGE_MINUTES,
         metavar="MIN",
         help=(
-            f"maximum cache age in minutes for Tableau server-side query cache (default {DEFAULT_MAX_AGE_MINUTES}). "
-            f"Passed as maxAge=<MIN> on /data, /image, and /pdf requests to ensure the captured baseline reflects "
-            f"fresh server computations rather than a stale cache."
+            f"maximum cache age in minutes for Tableau server-side query cache (default {DEFAULT_MAX_AGE_MINUTES}, "
+            f"minimum 1). Passed as maxAge=<MIN> on /data, /image, and /pdf requests to ensure the captured baseline "
+            f"reflects fresh server computations rather than a stale cache."
         ),
     )
     parser.add_argument(
@@ -1304,11 +1304,12 @@ def main() -> int:  # pylint: disable=too-many-locals
     out_dir.mkdir(parents=True, exist_ok=True)
     LOG.info("capturing %d view(s) -> %s", len(views), out_dir)
 
+    max_age = validate_max_age(args.max_age)
     capability_report = None
     wants = {kind for kind, on in (("png", args.images), ("svg", args.svg), ("pdf", args.pdf)) if on}
     api_overrides: dict[str, str] = {}
     if args.reference_best and views:
-        capability_report = capability.probe_render_capability(session, env, views)
+        capability_report = capability.probe_render_capability(session, env, views, max_age=max_age)
         capability.apply_selected_tier(capability_report, wants, api_overrides, env)
 
     records, started = [], time.perf_counter()
@@ -1317,7 +1318,6 @@ def main() -> int:  # pylint: disable=too-many-locals
     # record then reads `unknown`, and the reason is warned at the seam rather than carried as a
     # variable somebody has to remember to check (#402).
     tableau_view_types.resolve_and_stamp(session, views, LOG)
-    max_age = validate_max_age(args.max_age)
     for index, view in enumerate(views, 1):
         record = capture_view(session, view, out_dir, frozenset(wants), api_overrides, max_age=max_age)
         record["workbook_name"] = workbook_names.get(record["workbook_luid"])
