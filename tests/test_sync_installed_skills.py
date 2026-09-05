@@ -110,6 +110,20 @@ def test_missing_origin_ref_refuses_without_worktree_fallback(
     assert "Refusing to fall back to the caller's working tree" in output
 
 
+def test_env_plugin_root_override_is_honoured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _fixture_repo(tmp_path, monkeypatch)
+    plugin_root = _build_installed_from(repo, tmp_path)
+    monkeypatch.setenv(sync.PLUGIN_ROOT_ENV, str(plugin_root))
+
+    assert sync.main(["--check"]) == 0
+
+    output = capsys.readouterr().out
+    assert "IN_SYNC" in output
+    assert str(plugin_root / "skills") in output
+
+
 def test_source_ref_must_be_proven_merged_into_origin_master(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -127,6 +141,23 @@ def test_source_ref_must_be_proven_merged_into_origin_master(
     output = capsys.readouterr().out
     assert "'origin/feature' is not proven merged into 'origin/master'" in output
     assert "Refusing to fall back to the caller's working tree" in output
+
+
+def test_plugin_root_with_symlink_component_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _fixture_repo(tmp_path, monkeypatch)
+    plugin_root = _build_installed_from(repo, tmp_path)
+    link = tmp_path / "plugin-link"
+    try:
+        link.symlink_to(plugin_root, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable in this environment: {exc}")
+
+    assert sync.main(["--check", "--plugin-root", str(link)]) == 6
+
+    output = capsys.readouterr().out
+    assert "unsafe plugin path" in output
 
 
 def test_write_refuses_symlink_destination_that_escapes_installed_skills(

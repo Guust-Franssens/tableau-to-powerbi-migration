@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import filecmp
 import io
+import os
 import shutil
 import subprocess
 import sys
@@ -212,16 +213,29 @@ def _identity_from_root(plugin_root: Path) -> str:
 
 
 def _normalise_plugin_root(path: Path) -> Path:
-    resolved = path.expanduser().resolve()
-    if resolved.name == "skills":
-        return resolved.parent
-    return resolved
+    expanded = path.expanduser()
+    absolute = expanded if expanded.is_absolute() else Path.cwd() / expanded
+    if absolute.name == "skills":
+        return absolute.parent
+    return absolute
+
+
+def path_has_symlink_component(path: Path) -> bool:
+    """Return whether any existing component in ``path`` is itself a symlink."""
+    absolute = path.expanduser()
+    absolute = absolute if absolute.is_absolute() else Path.cwd() / absolute
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        if current.is_symlink():
+            return True
+    return False
 
 
 def _carries_reference_skill(skills_dir: Path, skill_names: tuple[str, ...]) -> bool:
     return any((skills_dir / skill / "SKILL.md").is_file() for skill in skill_names)
 
-
+# pylint: disable-next=too-many-return-statements
 def discover_skill_plugin(
     skill_names: tuple[str, ...],
     *,
@@ -231,6 +245,16 @@ def discover_skill_plugin(
     if plugin_root_override:
         plugin_root = _normalise_plugin_root(plugin_root_override)
         skills_dir = plugin_root / "skills"
+        if path_has_symlink_component(skills_dir):
+            return SkillPluginDiscovery(
+                status="unsafe",
+                plugin_root=plugin_root,
+                skills_dir=skills_dir,
+                candidates=(plugin_root,),
+                identity=_identity_from_root(plugin_root),
+                install_hint="Use the real installed plugin path; symlinked plugin paths are refused.",
+                detail=f"plugin path contains a symlink component: {skills_dir}",
+            )
         if not skills_dir.is_dir():
             return SkillPluginDiscovery(
                 status="missing",
@@ -252,10 +276,29 @@ def discover_skill_plugin(
         )
 
     root = (Path.home() / ".copilot" / "installed-plugins").expanduser().resolve()
+    unsafe = [
+        skills_dir.parent
+        for skills_dir in sorted(root.glob("*/*/skills"))
+        if skills_dir.is_dir()
+        and _carries_reference_skill(skills_dir, skill_names)
+        and path_has_symlink_component(skills_dir)
+    ]
+    if unsafe:
+        return SkillPluginDiscovery(
+            status="unsafe",
+            plugin_root=None,
+            skills_dir=None,
+            candidates=tuple(unsafe),
+            identity="unknown",
+            install_hint="Use a real installed plugin path; symlinked plugin paths are refused.",
+            detail="unsafe symlinked plugin path(s): " + "; ".join(str(path) for path in unsafe),
+        )
     candidates = [
         skills_dir.parent
         for skills_dir in sorted(root.glob("*/*/skills"))
-        if skills_dir.is_dir() and _carries_reference_skill(skills_dir, skill_names)
+        if skills_dir.is_dir()
+        and _carries_reference_skill(skills_dir, skill_names)
+        and not path_has_symlink_component(skills_dir)
     ]
     if len(candidates) == 1:
         plugin_root = candidates[0]
@@ -374,7 +417,15 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-bran
         src = reference.skills_dir
         print(f"SYNC: SOURCE - {reference.label}")
         skill_names = tuple(path.name for path in sorted(src.iterdir()) if path.is_dir())
-        discovery = discover_skill_plugin(skill_names, plugin_root_override=args.plugin_root)
+        plugin_root_override = args.plugin_root or (
+            Path(os.environ[PLUGIN_ROOT_ENV]) if os.environ.get(PLUGIN_ROOT_ENV) else None
+        )
+        discovery = discover_skill_plugin(skill_names, plugin_root_override=plugin_root_override)
+        if discovery.status == "unsafe":
+            print(f"SYNC: ERROR - unsafe plugin path ({discovery.detail})")
+            for candidate in discovery.candidates:
+                print(f"      {candidate}")
+            return 6
         if discovery.status == "multiple":
             print("SYNC: ERROR - multiple installed plugins carry these skill bundles")
             for candidate in discovery.candidates:
