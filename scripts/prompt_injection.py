@@ -47,8 +47,8 @@ _RULES: list[tuple[str, re.Pattern[str], str]] = [
         "role-marker",
         re.compile(
             r"(\[\[\s*(system|assistant|user)\s*\]\]|<\|[^|>]{0,20}\|>|"
-            r"^\s{0,4}###\s*(system|instruction)|\b(system|assistant)\s*:\s*(?=\w))",
-            re.I | re.M,
+            r"(?:^|\s)###\s*(system|instruction)|\b(system|assistant)\s*:\s*(?=\w))",
+            re.I,
         ),
         "a conversational role marker, used to fake a system/assistant turn",
     ),
@@ -94,8 +94,8 @@ _RULES: list[tuple[str, re.Pattern[str], str]] = [
             r"\b(?:run|execute|issue|perform)\b[^.\n]{0,40}\b(?:remove-item[^.\n]{0,40}-recurse|"
             r"rm\s+-rf|del\s+/[sfq]|format-volume|drop\s+(?:table|database|schema)|git\s+push\s+--force)\b|"
             r"\b(?:delete|remove)\b[^.\n]{0,40}\bremove-item[^.\n]{0,40}-recurse\b|"
-            r"\b(?:delete|remove|drop)\b[^.\n]{0,40}\b(?:data|table|database|schema)\b[^.\n]{0,20}"
-            r"\b(?:now|immediately|please)\b",
+            r"\b(?:delete|remove|drop)\s+(?:all\s+)?(?:data|database|schema|tables)\s+"
+            r"(?:now|immediately|please)\b",
             re.I,
         ),
         "an instruction to execute a destructive shell/SQL command",
@@ -129,17 +129,40 @@ _CONFUSABLES = str.maketrans(
 )
 
 
+def _normalise_for_matching(text: str) -> tuple[str, list[int]]:
+    """Return normalized text and its per-character original source offsets."""
+    normalized: list[str] = []
+    offsets: list[int] = []
+    for offset, character in enumerate(text):
+        transformed = unicodedata.normalize("NFKC", character).translate(_CONFUSABLES)
+        for normalized_character in transformed:
+            if normalized_character.isspace():
+                if normalized and normalized[-1] == " ":
+                    continue
+                normalized.append(" ")
+            else:
+                normalized.append(normalized_character)
+            offsets.append(offset)
+    return "".join(normalized), offsets
+
+
+def _excerpt(text: str, offsets: list[int], match: re.Match[str]) -> str:
+    """Return a bounded original-text excerpt centered on a normalized match."""
+    start = max(0, offsets[match.start()] - 40)
+    end = min(len(text), offsets[match.end() - 1] + 81)
+    return " ".join(text[start:end].split())[:120]
+
+
 def scan_text(text: str | None) -> list[tuple[str, str]]:
     """Return [(rule_id, matched_excerpt)] for one string ([] when nothing matches)."""
     if not text or len(text) < 12:
         return []
-    normalized = re.sub(r"\s+", " ", unicodedata.normalize("NFKC", text).translate(_CONFUSABLES))
+    normalized, offsets = _normalise_for_matching(text)
     hits = []
     for rule_id, pattern, _ in _RULES:
         match = pattern.search(normalized)
         if match:
-            excerpt = " ".join(text.split())[:120]
-            hits.append((rule_id, excerpt))
+            hits.append((rule_id, _excerpt(text, offsets, match)))
     return hits
 
 
