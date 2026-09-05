@@ -681,8 +681,9 @@ def write_manifest(  # pylint: disable=too-many-locals
 ) -> int:
     """Write the manifest and return the process exit code.
 
-    Codes: 0 all selected views captured, 1 partial non-credential failure, 2 credential-blocked,
-    3 total non-credential failure, 4 no views selected, **5 a reference render was required but none
+    Codes: 0 all selected views captured with assessable numeric evidence, 1 partial non-credential
+    failure or unassessable numeric evidence, 2 credential-blocked, 3 total non-credential failure or
+    unassessable numeric evidence, 4 no views selected, **5 a reference render was required but none
     was obtained**.
 
     Code 5 exists because the alternative is silence. With ``--reference-best`` and an UNDETERMINED
@@ -763,7 +764,8 @@ def write_manifest(  # pylint: disable=too-many-locals
         # measured is not a clean capture and not an empty one; before this it was reported as
         # neither, which meant it was reported as fine. `data_ok` deliberately still counts it --
         # the HTTP call DID succeed, and collapsing that into the numeric verdict would destroy a
-        # real distinction -- so this pair is what stops `data_ok` being read as evidence.
+        # real distinction -- but the exit code below is non-pass so a whole run of retained bytes
+        # cannot look clean to automation.
         "data_unassessable": len(sets["unassessable"]),
         "data_unassessable_views": data_unassessable_views(records),
         "image_ok": sum(1 for r in records if r.get("image", {}).get("status") == "ok"),
@@ -861,6 +863,8 @@ def write_manifest(  # pylint: disable=too-many-locals
         return 5
     if failed:
         return 1 if complete else 3
+    if sets["unassessable"]:
+        return 1 if complete else 3
     return 2 if blocked else 0
 
 
@@ -925,8 +929,8 @@ def _log_unassessable(unassessable: list[dict[str, Any]], redactor) -> None:
         return
     LOG.warning(
         "\n%d view(s) captured data that could NOT BE ASSESSED. The export succeeded, so these are "
-        "recorded status 'ok' and this run's exit code is unaffected -- but nothing established a "
-        "row count for them, so they are NOT counted as captured-complete and a numeric-fidelity "
+        "recorded status 'ok', but the run exits non-pass because nothing established a row count for "
+        "them. They are NOT counted as captured-complete and a numeric-fidelity "
         "finding cannot be made or refuted from them. This is not the same as an empty capture: an "
         "empty one measured zero rows, these measured nothing. Their retained bytes are kept under "
         "'%s/' and named '%s', never as data, so nothing downstream can read them as numbers. '%s' "
@@ -934,9 +938,9 @@ def _log_unassessable(unassessable: list[dict[str, Any]], redactor) -> None:
         "older manifest that DOES carry a count, taken before anything certified the body as CSV -- "
         "an error page counts as one row just as well, so re-capture rather than reading it; '%s' "
         "means the server or a proxy returned the body with no Content-Type, and '%s' that it "
-        "declared only text/plain, which an error banner is too. A CSV carries no signature, so "
-        "none of these establishes those bytes as data -- for the last two the fix is upstream of "
-        "this capture:",
+        "declared only text/plain, which an error banner is too. The transport_* reasons mean the "
+        "body framing or content coding could not defend a terminatorless CSV against truncation. A "
+        "CSV carries no signature, so none of these establishes those bytes as data:",
         len(unassessable),
         RETAINED_DIR,
         RETAINED_PATH_KEY,

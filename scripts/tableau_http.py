@@ -64,6 +64,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tableau_env import redacted_note  # noqa: E402  # pylint: disable=wrong-import-position
@@ -72,6 +73,16 @@ from tableau_env import redacted_note  # noqa: E402  # pylint: disable=wrong-imp
 # unusable redirect). Distinct from every real status so a caller's retry policy can treat a reset
 # connection and a gateway 503 alike without conflating either with a 2xx.
 NETWORK_ERROR_STATUS = 0
+RESPONSE_FRAMING_HEADER = "X-T2P-Response-Framing"
+RESPONSE_CONTENT_ENCODING_HEADER = "X-T2P-Content-Encoding"
+FRAMING_CHUNKED = "chunked"
+FRAMING_CONTENT_LENGTH = "content_length"
+FRAMING_CLOSE_DELIMITED = "transport_close_delimited"
+FRAMING_INVALID_CONTENT_LENGTH = "transport_invalid_content_length"
+FRAMING_CONFLICTING_CONTENT_LENGTH = "transport_conflicting_content_length"
+FRAMING_UNSUPPORTED_TRANSFER_ENCODING = "transport_unsupported_transfer_encoding"
+CONTENT_ENCODING_IDENTITY = "identity"
+CONTENT_ENCODING_UNSUPPORTED = "transport_unsupported_content_encoding"
 
 # An output cap on a diagnostic this module authors. It bounds the OUTPUT of redaction, never its
 # input -- `redacted_note` has already seen the whole message by the time this applies, so cutting it
@@ -115,6 +126,56 @@ def header_value(headers: dict[str, str], name: str) -> str | None:
         if key.casefold() == wanted:
             return value
     return None
+
+
+def _header_values(headers: Any, name: str) -> list[str]:
+    """All values for one header, preserving duplicates when the source exposes them."""
+    get_all = getattr(headers, "get_all", None)
+    if callable(get_all):
+        return [value for value in get_all(name, []) if value is not None]
+    value = header_value(headers, name)
+    return [] if value is None else [value]
+
+
+def response_framing(headers: Any, *, decoded_chunked: bool = False) -> str:
+    """How the peer delimited this response body, as a closed manifest-safe vocabulary.
+
+    Tableau Cloud was measured returning the exact decoded ``Transfer-Encoding: chunked`` shape for
+    both ``/data`` and ``/image`` exports (6/6 responses, REST 3.29). That decoded state is the
+    transport evidence that catches an early EOF for a CSV, not merely any header token list that
+    contains the word "chunked". When neither a valid length nor decoded chunked framing is present,
+    EOF is itself the delimiter and a truncated CSV prefix is indistinguishable from a complete body.
+    """
+    transfer_values = [value.strip().casefold() for value in _header_values(headers, "Transfer-Encoding")]
+    if decoded_chunked and transfer_values == ["chunked"]:
+        return FRAMING_CHUNKED
+    if transfer_values:
+        return FRAMING_UNSUPPORTED_TRANSFER_ENCODING
+    lengths = [value.strip() for value in _header_values(headers, "Content-Length")]
+    if len(lengths) > 1:
+        return FRAMING_CONFLICTING_CONTENT_LENGTH
+    if lengths:
+        return (
+            FRAMING_CONTENT_LENGTH if lengths[0].isascii() and lengths[0].isdigit() else FRAMING_INVALID_CONTENT_LENGTH
+        )
+    return FRAMING_CLOSE_DELIMITED
+
+
+def response_content_encoding(headers: Any) -> str:
+    """The response content coding, reduced to the only coding this capture consumes."""
+    values = [value.strip().casefold() for value in _header_values(headers, "Content-Encoding")]
+    values = [value for value in values if value]
+    if not values or values == [CONTENT_ENCODING_IDENTITY]:
+        return CONTENT_ENCODING_IDENTITY
+    return CONTENT_ENCODING_UNSUPPORTED
+
+
+def _headers_with_framing(headers: Any, *, decoded_chunked: bool = False) -> dict[str, str]:
+    """Flatten headers for callers while retaining the framing verdict before duplicates disappear."""
+    flattened = dict(headers or {})
+    flattened[RESPONSE_FRAMING_HEADER] = response_framing(headers or {}, decoded_chunked=decoded_chunked)
+    flattened[RESPONSE_CONTENT_ENCODING_HEADER] = response_content_encoding(headers or {})
+    return flattened
 
 
 def _read_bounded(stream, deadline: float | None, timeout: float) -> bytes:
@@ -617,7 +678,11 @@ def _request(
     """
     try:
         with _open(req, timeout, deadline) as resp:
-            return resp.status, _read_bounded(resp, deadline, timeout), dict(resp.headers)
+            return (
+                resp.status,
+                _read_bounded(resp, deadline, timeout),
+                _headers_with_framing(resp.headers, decoded_chunked=bool(getattr(resp, "chunked", False))),
+            )
     except urllib.error.HTTPError as exc:
         try:
             body = _read_bounded(exc, deadline, timeout)
