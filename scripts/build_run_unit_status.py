@@ -38,9 +38,9 @@ explicit citations for every status verdict.
 
 Exit codes
 ----------
-  0  Roll-up successfully generated
+  0  Roll-up successfully generated and all units assessed (zero cannot_assess rows)
   2  Usage error (invalid arguments or missing required survey / run)
-  3  Cannot assess (survey missing, unreadable, or malformed JSON)
+  3  Cannot assess (survey missing, unreadable, malformed, or one or more units cannot be assessed)
 """
 
 from __future__ import annotations
@@ -194,6 +194,40 @@ def _safe_json_load(path: Path) -> Any:
         raise CannotAssess(f"could not read JSON from {path}: {exc}") from exc
 
 
+def _extract_unit_name(item: dict[str, Any], key_name: str) -> str:
+    """Extract and validate the unit name from a survey entry."""
+    name = (
+        item.get("name")
+        or item.get("datasource_name")
+        or item.get("workbook_name")
+        or item.get("ds_name")
+        or item.get("wb_name")
+    )
+    if not name or not isinstance(name, str) or not name.strip():
+        raise CannotAssess(f"survey {key_name} entry is missing a valid name: {item}")
+    return name.strip()
+
+
+def _extract_project_name(item: dict[str, Any]) -> str | None:
+    """Extract and validate optional project name from a survey entry."""
+    val = (
+        item.get("project_name")
+        or item.get("project")
+        or item.get("projectName")
+    )
+    if val and isinstance(val, str) and val.strip():
+        return val.strip()
+    return None
+
+
+def _extract_luid(item: dict[str, Any]) -> str | None:
+    """Extract optional LUID/ID from a survey entry."""
+    val = item.get("luid") or item.get("id")
+    if val and isinstance(val, str) and val.strip():
+        return val.strip()
+    return None
+
+
 def _match_existing_unit(
     unit_item: UnitScope,
     existing: UnitScope,
@@ -234,102 +268,126 @@ def _append_survey_item(
 
 
 def _load_fetch_order(
-    raw_fetch_order: Any,
+    raw_fetch_order: list[Any],
     units: list[UnitScope],
 ) -> None:
     """Parse fetch_order list from survey."""
-    if not isinstance(raw_fetch_order, list):
-        return
     for item in raw_fetch_order:
         if isinstance(item, dict):
             kind = item.get("kind") or item.get("type")
             if not kind:
                 kind = KIND_DATASOURCE if ("datasource_name" in item or "ds_name" in item) else KIND_WORKBOOK
-            name = item.get("name") or item.get("datasource_name") or item.get("workbook_name") or ""
-            luid = item.get("luid") or item.get("id")
-            project = item.get("project") or item.get("projectName")
+            elif isinstance(kind, str):
+                kind = KIND_DATASOURCE if ("datasource" in kind.lower() or "ds" in kind.lower()) else KIND_WORKBOOK
+            else:
+                raise CannotAssess(f"fetch_order entry has invalid kind type: {type(kind).__name__}")
+            name = _extract_unit_name(item, "fetch_order")
+            luid = _extract_luid(item)
+            project = _extract_project_name(item)
             scope_item = UnitScope(order=0, kind=kind, name=name, luid=luid, project=project)
             _append_survey_item(units, scope_item)
         elif isinstance(item, str):
-            scope_item = UnitScope(order=0, kind=KIND_WORKBOOK, name=item)
+            if not item.strip():
+                raise CannotAssess("fetch_order contains empty string entry")
+            scope_item = UnitScope(order=0, kind=KIND_WORKBOOK, name=item.strip())
             _append_survey_item(units, scope_item)
+        else:
+            raise CannotAssess(f"fetch_order contains invalid entry type: {type(item).__name__}")
 
 
 def _load_named_list(
-    raw_items: Any,
+    raw_items: list[Any],
     default_kind: str,
     units: list[UnitScope],
 ) -> None:
     """Parse list of datasources or workbooks from survey."""
-    if not isinstance(raw_items, list):
-        return
-    name_keys = ("datasource_name", "workbook_name", "name")
     for item in raw_items:
         if isinstance(item, dict):
-            name = ""
-            for k in name_keys:
-                if k in item and item[k]:
-                    name = item[k]
-                    break
-            luid = item.get("luid") or item.get("id")
-            project = item.get("project") or item.get("projectName")
+            name = _extract_unit_name(item, default_kind)
+            luid = _extract_luid(item)
+            project = _extract_project_name(item)
             scope_item = UnitScope(order=0, kind=default_kind, name=name, luid=luid, project=project)
             _append_survey_item(units, scope_item)
         elif isinstance(item, str):
-            scope_item = UnitScope(order=0, kind=default_kind, name=item)
+            if not item.strip():
+                raise CannotAssess(f"{default_kind} list contains empty string entry")
+            scope_item = UnitScope(order=0, kind=default_kind, name=item.strip())
             _append_survey_item(units, scope_item)
+        else:
+            raise CannotAssess(f"{default_kind} list contains invalid entry type: {type(item).__name__}")
 
 
 def _load_unresolved_dependencies(
-    raw_unresolved: Any,
+    raw_unresolved: list[Any],
     units: list[UnitScope],
 ) -> None:
-    """Parse unresolved_dependencies from survey."""
-    if not isinstance(raw_unresolved, list):
-        return
+    """Parse unresolved_dependencies from survey.
+
+    Preserves every unresolved occurrence as its own identity. Never merges a resolved
+    datasource and an unresolved dependency by case-insensitive name alone.
+    """
     for unres in raw_unresolved:
         if not isinstance(unres, dict):
-            continue
-        ds_name = (unres.get("datasource_name") or unres.get("name") or "").strip()
+            raise CannotAssess(f"unresolved_dependencies entry must be a dict, got {type(unres).__name__}")
+        ds_name = _extract_unit_name(unres, "unresolved_dependencies")
         status = unres.get("status") or "not_found"
+        if not isinstance(status, str):
+            status = str(status)
         candidates = unres.get("candidates") or []
+        if not isinstance(candidates, list):
+            candidates = []
         wb_name = unres.get("workbook")
-        matched = False
-        for unit in units:
-            if unit.kind == KIND_DATASOURCE and unit.name.lower() == ds_name.lower():
-                if not unit.unresolved_status:
-                    unit.unresolved_status = status
-                    unit.unresolved_candidates = candidates
-                    unit.unresolved_workbook = wb_name
-                matched = True
-                break
-        if not matched and ds_name:
-            scope_item = UnitScope(
-                order=0,
-                kind=KIND_DATASOURCE,
-                name=ds_name,
-                unresolved_status=status,
-                unresolved_candidates=candidates,
-                unresolved_workbook=wb_name,
-            )
-            _append_survey_item(units, scope_item)
-            units[-1].unresolved_status = status
-            units[-1].unresolved_candidates = candidates
-            units[-1].unresolved_workbook = wb_name
+        if wb_name and not isinstance(wb_name, str):
+            wb_name = str(wb_name)
+        project = _extract_project_name(unres)
+        luid = _extract_luid(unres)
+
+        scope_item = UnitScope(
+            order=len(units) + 1,
+            kind=KIND_DATASOURCE,
+            name=ds_name,
+            luid=luid,
+            project=project,
+            unresolved_status=status,
+            unresolved_candidates=candidates,
+            unresolved_workbook=wb_name,
+        )
+        units.append(scope_item)
 
 
 def load_survey_scope(survey_path: Path) -> tuple[list[UnitScope], dict[str, Any]]:
-    """Enumerate all units in scope from `estate_survey.json` preserving order and identity."""
+    """Enumerate all units in scope from `estate_survey.json` strictly validating schema."""
     payload = _safe_json_load(survey_path)
     if not isinstance(payload, dict):
         raise CannotAssess(f"survey payload at {survey_path} is not a JSON object")
 
+    scope_keys = ("fetch_order", "required_datasources", "workbooks", "unresolved_dependencies")
+    present_keys = [k for k in scope_keys if k in payload]
+    if not present_keys:
+        raise CannotAssess(
+            f"survey payload at {survey_path} contains no recognized scope keys (expected one of {scope_keys})"
+        )
+
+    for k in present_keys:
+        val = payload[k]
+        if not isinstance(val, list):
+            raise CannotAssess(
+                f"survey field {k!r} at {survey_path} must be a JSON array (list), got {type(val).__name__}"
+            )
+
     units: list[UnitScope] = []
 
-    _load_fetch_order(payload.get("fetch_order"), units)
-    _load_named_list(payload.get("required_datasources"), KIND_DATASOURCE, units)
-    _load_named_list(payload.get("workbooks"), KIND_WORKBOOK, units)
-    _load_unresolved_dependencies(payload.get("unresolved_dependencies"), units)
+    if "fetch_order" in payload:
+        _load_fetch_order(payload["fetch_order"], units)
+    if "required_datasources" in payload:
+        _load_named_list(payload["required_datasources"], KIND_DATASOURCE, units)
+    if "workbooks" in payload:
+        _load_named_list(payload["workbooks"], KIND_WORKBOOK, units)
+    if "unresolved_dependencies" in payload:
+        _load_unresolved_dependencies(payload["unresolved_dependencies"], units)
+
+    if not units:
+        raise CannotAssess(f"survey at {survey_path} contains zero units or no valid scope declared")
 
     for idx, unit in enumerate(units, start=1):
         unit.order = idx
@@ -418,22 +476,28 @@ def _find_harvested_asset(assets_root: Path, unit: UnitScope) -> tuple[Path | No
     return None, None
 
 
-def _evaluate_promotion_record(
+def _evaluate_promotion_record(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches
     record_data: Any,
     unit: UnitScope,
+    deliv_dir: Path,
     rel_deliv: str,
+    repo_root: Path,
 ) -> tuple[str, str, str | None, str]:
-    """Evaluate promotion record dictionary into a status tuple."""
-    if not isinstance(record_data, dict):
+    """Evaluate promotion record dictionary into a status tuple.
+
+    Strictly validates schema, identity matching, boolean types, and durable deliverable presence.
+    """
+    if not isinstance(record_data, dict) or not record_data:
         return (
             STATUS_CANNOT_ASSESS,
             STATUS_LABELS[STATUS_CANNOT_ASSESS],
             None,
-            f"promotion-record.json at {rel_deliv} is not a JSON object",
+            f"promotion-record.json at {rel_deliv} is empty or not a JSON object",
         )
 
+    # 1. Validate kind
     rec_kind = record_data.get("kind")
-    if rec_kind and rec_kind.lower() != unit.kind.lower():
+    if not isinstance(rec_kind, str) or rec_kind.lower() != unit.kind.lower():
         return (
             STATUS_CANNOT_ASSESS,
             STATUS_LABELS[STATUS_CANNOT_ASSESS],
@@ -441,8 +505,76 @@ def _evaluate_promotion_record(
             f"promotion-record.json claims kind={rec_kind!r} which contradicts survey kind {unit.kind!r}",
         )
 
+    # 2. Validate unit / slug / LUID identity matching
+    rec_unit = str(record_data.get("unit") or "").strip().lower()
+    rec_slug = str(record_data.get("slug") or "").strip().lower()
+    unit_name = unit.name.strip().lower()
+    unit_slug = unit.slug.strip().lower()
+    unit_norm = sanitize_slug(unit.name).lower()
+    unit_luid = unit.luid.strip().lower() if unit.luid else None
+
+    valid_identifiers = {unit_name, unit_slug, unit_norm}
+    if unit_luid:
+        valid_identifiers.add(unit_luid)
+
+    matched = (rec_unit and rec_unit in valid_identifiers) or (rec_slug and rec_slug in valid_identifiers)
+    if not matched:
+        return (
+            STATUS_CANNOT_ASSESS,
+            STATUS_LABELS[STATUS_CANNOT_ASSESS],
+            None,
+            f"promotion-record.json unit={record_data.get('unit')!r} / slug={record_data.get('slug')!r} "
+            f"does not match surveyed unit {unit.name!r} ({unit.slug!r})",
+        )
+
+    # 3. Validate strict boolean type for forced
+    forced_val = record_data.get("forced")
+    if forced_val is not None and not isinstance(forced_val, bool):
+        return (
+            STATUS_CANNOT_ASSESS,
+            STATUS_LABELS[STATUS_CANNOT_ASSESS],
+            None,
+            f"promotion-record.json 'forced' field must be a boolean, got {type(forced_val).__name__} ({forced_val!r})",
+        )
+    forced = bool(forced_val)
+
+    # 4. Verify durable deliverables under fabric/
+    fabric_dir = deliv_dir / "fabric"
+    if not fabric_dir.is_dir() or not any(fabric_dir.iterdir()):
+        return (
+            STATUS_CANNOT_ASSESS,
+            STATUS_LABELS[STATUS_CANNOT_ASSESS],
+            None,
+            f"deliverable directory at {rel_deliv} is missing durable artifacts under fabric/",
+        )
+
+    # 5. Verify copied destination artifacts if declared
+    copied = record_data.get("copied")
+    if isinstance(copied, list):
+        for c in copied:
+            if isinstance(c, dict) and c.get("destination"):
+                dest_path = Path(str(c["destination"]))
+                if not dest_path.is_absolute():
+                    cand_repo = repo_root / dest_path
+                    cand_deliv = deliv_dir / dest_path
+                    if not cand_repo.exists() and not cand_deliv.exists():
+                        return (
+                            STATUS_CANNOT_ASSESS,
+                            STATUS_LABELS[STATUS_CANNOT_ASSESS],
+                            None,
+                            "promoted artifact destination declared in promotion-record.json missing on disk: "
+                            f"{dest_path}",
+                        )
+                elif not dest_path.exists():
+                    return (
+                        STATUS_CANNOT_ASSESS,
+                        STATUS_LABELS[STATUS_CANNOT_ASSESS],
+                        None,
+                        "promoted artifact destination declared in promotion-record.json missing on disk: "
+                        f"{dest_path}",
+                    )
+
     promoted_at = record_data.get("promoted_at")
-    forced = bool(record_data.get("forced"))
     check_unit_data = record_data.get("check_unit")
     exit_code = check_unit_data.get("exit_code") if isinstance(check_unit_data, dict) else None
     check_passed = check_unit_data.get("passed") if isinstance(check_unit_data, dict) else None
@@ -477,6 +609,8 @@ def _evaluate_promotion_record(
 def _check_deliverable(
     migrations_root: Path,
     unit: UnitScope,
+    slug_collisions: set[str],
+    repo_root: Path,
 ) -> tuple[str | None, str | None, str | None, str | None, str | None]:
     """Inspect deliverable folder in migrations/{workbooks,datasources}/<slug>/.
 
@@ -492,6 +626,16 @@ def _check_deliverable(
             return None, None, None, None, None
 
     rel_deliv = f"migrations/{kind_subdir}/{deliv_dir.name}"
+
+    if unit.slug in slug_collisions:
+        return (
+            STATUS_CANNOT_ASSESS,
+            STATUS_LABELS[STATUS_CANNOT_ASSESS],
+            None,
+            rel_deliv,
+            f"slug collision: multiple survey units map to deliverable slug {unit.slug!r}",
+        )
+
     record_path = deliv_dir / "promotion-record.json"
 
     if not record_path.is_file():
@@ -515,7 +659,9 @@ def _check_deliverable(
             f"promotion-record.json at {rel_deliv} is unreadable or malformed JSON: {exc}",
         )
 
-    status, label, promoted_at, evidence = _evaluate_promotion_record(record_data, unit, rel_deliv)
+    status, label, promoted_at, evidence = _evaluate_promotion_record(
+        record_data, unit, deliv_dir, rel_deliv, repo_root
+    )
     return status, label, promoted_at, rel_deliv, evidence
 
 
@@ -576,7 +722,7 @@ def _check_package(
 
     if isinstance(manifest_data, dict):
         m_kind = manifest_data.get("kind")
-        if m_kind and m_kind.lower() != unit.kind.lower():
+        if m_kind and isinstance(m_kind, str) and m_kind.lower() != unit.kind.lower():
             err_msg = f"package-manifest.json claims kind={m_kind!r} which contradicts survey kind {unit.kind!r}"
             pkg_status = STATUS_CANNOT_ASSESS
             pkg_evidence = err_msg
@@ -603,16 +749,62 @@ def _check_package(
     return None
 
 
-def derive_unit_status(
+def derive_unit_status(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches
     unit: UnitScope,
     ctx: StatusContext,
+    slug_collisions: set[str],
 ) -> UnitStatusRecord:
     """Derive the status of one unit from observable repository and run artifacts."""
-    # 1. Check Deliverables
-    status, status_label, recorded_at, deliverable_path, evidence = _check_deliverable(
-        ctx.migrations_root, unit
+    # 1. Collect evidence from all stages
+    deliv_status, deliv_label, deliv_time, deliv_path, deliv_ev = _check_deliverable(
+        ctx.migrations_root, unit, slug_collisions, ctx.repo_root
     )
-    if status is not None:
+    pkg_record = _check_package(unit, ctx)
+
+    bundle_evidence: str | None = None
+    if ctx.bundle_root is not None and ctx.bundle_root.exists():
+        _, bundle_evidence = _find_bundle_unit(ctx.bundle_root, unit)
+
+    asset_evidence: str | None = None
+    if ctx.assets_root is not None and ctx.assets_root.exists():
+        _, asset_evidence = _find_harvested_asset(ctx.assets_root, unit)
+
+    # 2. Check for stage contradictions
+    if deliv_status is not None:
+        if deliv_status == STATUS_CANNOT_ASSESS:
+            return UnitStatusRecord(
+                order=unit.order,
+                kind=unit.kind,
+                name=unit.name,
+                project=unit.project,
+                luid=unit.luid,
+                slug=unit.slug,
+                status=STATUS_CANNOT_ASSESS,
+                status_label=STATUS_LABELS[STATUS_CANNOT_ASSESS],
+                recorded_at=deliv_time,
+                deliverable_path=deliv_path,
+                evidence=deliv_ev or "",
+            )
+        if pkg_record is not None:
+            if pkg_record.status == STATUS_CANNOT_ASSESS:
+                return pkg_record
+            if pkg_record.kind != unit.kind:
+                return UnitStatusRecord(
+                    order=unit.order,
+                    kind=unit.kind,
+                    name=unit.name,
+                    project=unit.project,
+                    luid=unit.luid,
+                    slug=unit.slug,
+                    status=STATUS_CANNOT_ASSESS,
+                    status_label=STATUS_LABELS[STATUS_CANNOT_ASSESS],
+                    recorded_at=deliv_time,
+                    deliverable_path=deliv_path,
+                    evidence=(
+                        f"contradictory stage evidence: deliverable kind {unit.kind!r} "
+                        f"contradicts package kind {pkg_record.kind!r}"
+                    ),
+                )
         return UnitStatusRecord(
             order=unit.order,
             kind=unit.kind,
@@ -620,62 +812,80 @@ def derive_unit_status(
             project=unit.project,
             luid=unit.luid,
             slug=unit.slug,
-            status=status,
-            status_label=status_label or STATUS_LABELS.get(status, status),
-            recorded_at=recorded_at,
-            deliverable_path=deliverable_path,
-            evidence=evidence or "",
+            status=deliv_status,
+            status_label=deliv_label or STATUS_LABELS.get(deliv_status, deliv_status),
+            recorded_at=deliv_time,
+            deliverable_path=deliv_path,
+            evidence=deliv_ev or "",
         )
 
-    # 2. Check Packages
-    pkg_record = _check_package(unit, ctx)
     if pkg_record is not None:
+        if pkg_record.status == STATUS_CANNOT_ASSESS:
+            return pkg_record
+        if pkg_record.kind != unit.kind:
+            return UnitStatusRecord(
+                order=unit.order,
+                kind=unit.kind,
+                name=unit.name,
+                project=unit.project,
+                luid=unit.luid,
+                slug=unit.slug,
+                status=STATUS_CANNOT_ASSESS,
+                status_label=STATUS_LABELS[STATUS_CANNOT_ASSESS],
+                recorded_at=pkg_record.recorded_at,
+                deliverable_path="not-started",
+                evidence=(
+                    f"contradictory stage evidence: package kind {pkg_record.kind!r} "
+                    f"contradicts survey kind {unit.kind!r}"
+                ),
+            )
         return pkg_record
 
-    # 3. Check Conversion / Bundle
-    if ctx.bundle_root is not None and ctx.bundle_root.exists():
-        _, bundle_evidence = _find_bundle_unit(ctx.bundle_root, unit)
-        if bundle_evidence is not None:
-            return UnitStatusRecord(
-                order=unit.order,
-                kind=unit.kind,
-                name=unit.name,
-                project=unit.project,
-                luid=unit.luid,
-                slug=unit.slug,
-                status=STATUS_CONVERTED,
-                status_label=STATUS_LABELS[STATUS_CONVERTED],
-                recorded_at=None,
-                deliverable_path="not-started",
-                evidence=f"converted artifact in {bundle_evidence}",
-            )
+    if bundle_evidence is not None:
+        return UnitStatusRecord(
+            order=unit.order,
+            kind=unit.kind,
+            name=unit.name,
+            project=unit.project,
+            luid=unit.luid,
+            slug=unit.slug,
+            status=STATUS_CONVERTED,
+            status_label=STATUS_LABELS[STATUS_CONVERTED],
+            recorded_at=None,
+            deliverable_path="not-started",
+            evidence=f"converted artifact in {bundle_evidence}",
+        )
 
-    # 4. Check Harvested Assets
-    if ctx.assets_root is not None and ctx.assets_root.exists():
-        _, asset_evidence = _find_harvested_asset(ctx.assets_root, unit)
-        if asset_evidence is not None:
-            return UnitStatusRecord(
-                order=unit.order,
-                kind=unit.kind,
-                name=unit.name,
-                project=unit.project,
-                luid=unit.luid,
-                slug=unit.slug,
-                status=STATUS_HARVESTED,
-                status_label=STATUS_LABELS[STATUS_HARVESTED],
-                recorded_at=None,
-                deliverable_path="not-started",
-                evidence=f"harvested source asset in {asset_evidence}",
-            )
+    if asset_evidence is not None:
+        return UnitStatusRecord(
+            order=unit.order,
+            kind=unit.kind,
+            name=unit.name,
+            project=unit.project,
+            luid=unit.luid,
+            slug=unit.slug,
+            status=STATUS_HARVESTED,
+            status_label=STATUS_LABELS[STATUS_HARVESTED],
+            recorded_at=None,
+            deliverable_path="not-started",
+            evidence=f"harvested source asset in {asset_evidence}",
+        )
 
-    # 5. Check Unresolved Dependency or Not Started
     if unit.unresolved_status:
         wb_info = f" for workbook {unit.unresolved_workbook!r}" if unit.unresolved_workbook else ""
-        u_status = STATUS_UNRESOLVED_DEPENDENCY
-        u_evidence = f"unresolved dependency in estate_survey.json (status: {unit.unresolved_status}{wb_info})"
-    else:
-        u_status = STATUS_NOT_STARTED
-        u_evidence = f"in scope in estate_survey.json (order #{unit.order}); no run or repository artifacts found"
+        return UnitStatusRecord(
+            order=unit.order,
+            kind=unit.kind,
+            name=unit.name,
+            project=unit.project,
+            luid=unit.luid,
+            slug=unit.slug,
+            status=STATUS_UNRESOLVED_DEPENDENCY,
+            status_label=STATUS_LABELS[STATUS_UNRESOLVED_DEPENDENCY],
+            recorded_at=None,
+            deliverable_path="not-started",
+            evidence=f"unresolved dependency in estate_survey.json (status: {unit.unresolved_status}{wb_info})",
+        )
 
     return UnitStatusRecord(
         order=unit.order,
@@ -684,12 +894,26 @@ def derive_unit_status(
         project=unit.project,
         luid=unit.luid,
         slug=unit.slug,
-        status=u_status,
-        status_label=STATUS_LABELS[u_status],
+        status=STATUS_NOT_STARTED,
+        status_label=STATUS_LABELS[STATUS_NOT_STARTED],
         recorded_at=None,
         deliverable_path="not-started",
-        evidence=u_evidence,
+        evidence=f"in scope in estate_survey.json (order #{unit.order}); no run or repository artifacts found",
     )
+
+
+def _detect_slug_collisions(units: list[UnitScope]) -> set[str]:
+    """Identify slugs shared by multiple survey units of the same kind."""
+    slug_map: dict[tuple[str, str], list[UnitScope]] = {}
+    for unit in units:
+        key = (unit.kind, unit.slug)
+        slug_map.setdefault(key, []).append(unit)
+
+    collisions: set[str] = set()
+    for (_, slug), matched_units in slug_map.items():
+        if len(matched_units) > 1:
+            collisions.add(slug)
+    return collisions
 
 
 def _disambiguate_duplicate_names(
@@ -743,8 +967,9 @@ def build_status_rollup(
 ) -> dict[str, Any]:
     """Assemble the full status roll-up payload."""
     units, _ = load_survey_scope(survey_path)
+    slug_collisions = _detect_slug_collisions(units)
 
-    raw_records = [derive_unit_status(unit=unit, ctx=ctx) for unit in units]
+    raw_records = [derive_unit_status(unit=unit, ctx=ctx, slug_collisions=slug_collisions) for unit in units]
     records = _disambiguate_duplicate_names(raw_records, units)
 
     by_status: dict[str, int] = {st: 0 for st in STATUS_RANKS}
@@ -783,7 +1008,9 @@ def _format_unit_table_row(unit_dict: dict[str, Any]) -> str:
     """Format one unit row for Markdown table output."""
     order = unit_dict.get("order", "")
     kind = unit_dict.get("kind", "")
-    name = unit_dict.get("name", "").replace("|", "\\|")
+    name = str(unit_dict.get("name", "")).replace("|", "\\|")
+    slug = str(unit_dict.get("slug", "")).replace("|", "\\|")
+    luid = (unit_dict.get("luid") or "—").replace("|", "\\|")
     project = (unit_dict.get("project") or "—").replace("|", "\\|")
     status_label = unit_dict.get("status_label") or STATUS_LABELS.get(
         unit_dict.get("status", ""), unit_dict.get("status", "")
@@ -794,8 +1021,11 @@ def _format_unit_table_row(unit_dict: dict[str, Any]) -> str:
         if unit_dict.get("deliverable_path") and unit_dict.get("deliverable_path") != "not-started"
         else "not-started"
     )
-    evidence = (unit_dict.get("evidence") or "").replace("|", "\\|")
-    return f"| {order} | {kind} | {name} | {project} | {status_label} | {recorded} | {deliv} | {evidence} |"
+    evidence = str(unit_dict.get("evidence") or "").replace("|", "\\|")
+    return (
+        f"| {order} | {kind} | {name} | {slug} | {luid} | {project} | {status_label} | {recorded} | "
+        f"{deliv} | {evidence} |"
+    )
 
 
 def render_markdown_report(rollup: dict[str, Any]) -> str:
@@ -831,8 +1061,8 @@ def render_markdown_report(rollup: dict[str, Any]) -> str:
             "",
             "## Units",
             "",
-            "| # | Kind | Name | Project | Status | Recorded At | Deliverable | Evidence |",
-            "|---|---|---|---|---|---|---|---|",
+            "| # | Kind | Name | Slug | LUID | Project | Status | Recorded At | Deliverable | Evidence |",
+            "|---|---|---|---|---|---|---|---|---|---|",
         ]
     )
 
@@ -972,6 +1202,10 @@ def main(argv: list[str] | None = None) -> int:
         return 3
 
     _write_outputs(rollup, out_md, out_json, print_json=args.json, quiet=args.quiet)
+
+    if any(u.get("status") == STATUS_CANNOT_ASSESS for u in rollup.get("units", [])):
+        return 3
+
     return 0
 
 
