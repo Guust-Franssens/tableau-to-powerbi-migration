@@ -74,6 +74,7 @@ def _build_installed_from(repo: Path, destination: Path) -> Path:
 def test_default_check_uses_origin_master_not_dirty_feature_worktree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """Default checks compare installed skills with merged origin/master bytes."""
     repo = _fixture_repo(tmp_path, monkeypatch)
     plugin_root = _build_installed_from(repo, tmp_path)
 
@@ -91,6 +92,7 @@ def test_default_check_uses_origin_master_not_dirty_feature_worktree(
 def test_default_check_uses_origin_master_build_metadata_not_worktree_edit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """Build metadata comes from the selected merged ref, not local edits."""
     repo = _fixture_repo(tmp_path, monkeypatch)
     plugin_root = _build_installed_from(repo, tmp_path)
 
@@ -110,6 +112,7 @@ def test_default_check_uses_origin_master_build_metadata_not_worktree_edit(
 def test_missing_origin_ref_refuses_without_worktree_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """A missing merged ref refuses instead of falling back to worktree bytes."""
     repo = _fixture_repo(tmp_path, monkeypatch, with_origin_ref=False)
     plugin_root = _build_installed_from(repo, tmp_path)
 
@@ -123,6 +126,7 @@ def test_missing_origin_ref_refuses_without_worktree_fallback(
 def test_env_plugin_root_override_is_honoured(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """The documented plugin-root environment override remains effective."""
     repo = _fixture_repo(tmp_path, monkeypatch)
     plugin_root = _build_installed_from(repo, tmp_path)
     monkeypatch.setenv(sync.PLUGIN_ROOT_ENV, str(plugin_root))
@@ -137,6 +141,7 @@ def test_env_plugin_root_override_is_honoured(
 def test_source_ref_must_be_proven_merged_into_origin_master(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """A source ref outside origin/master ancestry is rejected."""
     repo = _fixture_repo(tmp_path, monkeypatch)
     plugin_root = _build_installed_from(repo, tmp_path)
     _run_git(repo, "checkout", "-b", "feature")
@@ -156,6 +161,7 @@ def test_source_ref_must_be_proven_merged_into_origin_master(
 def test_each_invocation_uses_a_private_reference_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """Concurrent invocations cannot overwrite one shared reference directory."""
     plugin_root = tmp_path / "installed" / "collection" / "plugin"
     skill_dir = plugin_root / "skills" / "sample"
     skill_dir.mkdir(parents=True)
@@ -185,12 +191,13 @@ def test_each_invocation_uses_a_private_reference_directory(
 def test_source_ref_archive_symlink_entry_is_refused_without_filesystem_symlink(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """Tracked archive links are rejected without privileged filesystem setup."""
     repo = _fixture_repo(tmp_path, monkeypatch)
     first_skill = build_plugin.SHIPPED_SKILLS[0]
     blob = _git_stdout(repo, "hash-object", "-w", "--stdin", input_text="SKILL.md")
-    _git_stdout(
-        repo, "update-index", "--index-info", input_text=f"120000 {blob}\t.github/skills/{first_skill}/LINK.md\n"
-    )
+    link_path = f".github/skills/{first_skill}/LINK.md"
+    _run_git(repo, "update-index", "--add", "--cacheinfo", f"120000,{blob},{link_path}")
+    assert _git_stdout(repo, "ls-files", "--stage", link_path).startswith(f"120000 {blob} ")
     _run_git(repo, "commit", "-m", "track symlink entry")
     _run_git(repo, "update-ref", "refs/remotes/origin/master", "HEAD")
 
@@ -204,6 +211,7 @@ def test_source_ref_archive_symlink_entry_is_refused_without_filesystem_symlink(
 def test_from_worktree_is_explicit_and_reports_unmerged_drift(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """The explicit worktree mode reports drift from unmerged local content."""
     repo = _fixture_repo(tmp_path, monkeypatch)
     plugin_root = _build_installed_from(repo, tmp_path)
     first_skill = build_plugin.SHIPPED_SKILLS[0]
