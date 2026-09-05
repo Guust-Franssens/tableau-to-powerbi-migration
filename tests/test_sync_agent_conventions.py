@@ -378,6 +378,7 @@ def test_no_near_cap_warning_when_nothing_is_in_the_band(tmp_path: Path, caplog)
 
 AGENTS_MD = REPO_ROOT / "AGENTS.md"
 AGENT_OPS_MD = REPO_ROOT / "docs" / "agent-operations.md"
+OPERATOR_RUNBOOK_MD = REPO_ROOT / "docs" / "operator-runbook.md"
 ORACLE_SCRIPT = REPO_ROOT / "scripts" / "capture_tableau_oracle.py"
 
 # Project TARGETS, tighter than `sac.PROMPT_CHAR_LIMIT`, measured with the repository's own gate
@@ -478,6 +479,22 @@ ROOT_CONTRACTS: dict[str, tuple[Path, tuple[str, ...]]] = {
             "**exit 3** is a total non-credential failure",
             "`3` total non-credential failure",
             "`4` no views selected",
+        ),
+    ),
+    "flat-package-layout-root": (
+        AGENTS_MD,
+        (
+            "`--out` names this directory itself",
+            "`packages/<Unit>/`",
+            "nested `packages/<batch>/<Unit>/` remains readable for compatibility",
+        ),
+    ),
+    "flat-package-layout-runbook": (
+        OPERATOR_RUNBOOK_MD,
+        (
+            "**`--out` now names the canonical `packages/` directory itself.**",
+            "Each unit lands directly at `packages/<Unit>/`.",
+            "Nested `packages/<batch>/<Unit>/` layouts remain readable for compatibility",
         ),
     ),
 }

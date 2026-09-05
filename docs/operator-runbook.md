@@ -715,22 +715,19 @@ unit path**, and getting one wrong is silent: `check_reference_readiness.py` ret
 me where the workbook is"* (issue #446).
 
 ```powershell
-python scripts\package_unit.py --bundle _bundle --out _runs\<NNN>-<slug>\packages\<batch> `
-    --json _runs\<NNN>-<slug>\packages\<batch>\packaging.json
+python scripts\package_unit.py --bundle _bundle --out _runs\<NNN>-<slug>\packages `
+    --json _runs\<NNN>-<slug>\packages\packaging.json
 # then, per unit, with NO flags at all:
-python scripts\check_reference_readiness.py _runs\<NNN>-<slug>\packages\<batch>\<Unit>
-python scripts\check_unit.py _runs\<NNN>-<slug>\packages\<batch>\<Unit>
+python scripts\check_reference_readiness.py _runs\<NNN>-<slug>\packages\<Unit>
+python scripts\check_unit.py _runs\<NNN>-<slug>\packages\<Unit>
 ```
 
-⚠️ **`--out` must sit outside the capture tree — so name a subdirectory INSIDE `packages/`, never
-`packages/` itself.** The readiness gate scans the target's *grandparent* for `oracle/` and
-`reference/`, so a package written beside the flat capture is matched against BOTH and every page
-drops from `ready` to `unverifiable` — worse than not packaging, and silent. That layout is refused
-with exit 2 rather than documented (`package_unit.conflicting_evidence_dirs`,
-`scripts/package_unit.py:819`). ✅ Measured 2026-09-03: `--out _runs\<NNN>-<slug>\packages` exits
-**2**, `--out _runs\<NNN>-<slug>\packages\<batch>` exits **0** and the readiness gate then reports 0
-unverifiable. `packages/` is a canonical run subdir (`scripts/work_dirs.py:72`), which is what makes
-`<batch>` the right depth; the shape is explained in
+**`--out` now names the canonical `packages/` directory itself.** Each unit lands directly at
+`packages/<Unit>/`. Both gates recognize a target beneath `packages/` as package-shaped even if an
+interrupted assembly has not written `package-manifest.json`, so it never borrows the run's flat
+`oracle/` or `reference/` evidence. A completed package's marker preserves the same isolation when
+the package is copied elsewhere. Nested `packages/<batch>/<Unit>/` layouts remain readable for
+compatibility, but are no longer the default. The evidence-discovery contract and controls are in
 [`docs/migration-phases.md`](migration-phases.md).
 
 What to check in the output:
@@ -741,7 +738,7 @@ What to check in the output:
   handover. Deriving the unit list from `pbip/` alone drops them silently.
 - **`handover.md` is the agent's entry point**, one finding per line with a stable prefix, emptied
   visuals first:
-  `Select-String -Path _runs\<NNN>-<slug>\packages\<batch>\<Unit>\handover.md -Pattern '^EMPTIED_VISUAL'`
+  `Select-String -Path _runs\<NNN>-<slug>\packages\<Unit>\handover.md -Pattern '^EMPTIED_VISUAL'`
   (this runbook's commands are PowerShell; `grep` is not available there). They render blank on a report
   that validates clean, and nothing else in the toolkit surfaces them.
 - **`package-manifest.json` carries every omission with its reason.** A render is attributed by
