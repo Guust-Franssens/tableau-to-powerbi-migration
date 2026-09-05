@@ -185,6 +185,24 @@ def engine_tests_not_checked_reason() -> str | None:
     return reason or None
 
 
+def _set_engine_ci_options(config: pytest.Config) -> None:
+    """Snapshot CI-only engine env vars, then keep them out of nested pytest runs."""
+    setattr(config, "_t2p_require_engine_tests", engine_tests_are_required())
+    setattr(config, "_t2p_engine_tests_not_checked_reason", engine_tests_not_checked_reason())
+    os.environ.pop(REQUIRE_ENGINE_TESTS_ENV, None)
+    os.environ.pop(ENGINE_TESTS_NOT_CHECKED_REASON_ENV, None)
+
+
+def _engine_tests_are_required(config: pytest.Config) -> bool:
+    """Whether this pytest session must execute engine-dependent tests."""
+    return bool(getattr(config, "_t2p_require_engine_tests", False))
+
+
+def _engine_tests_not_checked_reason(config: pytest.Config) -> str | None:
+    """The NOT_CHECKED reason captured for this pytest session, if any."""
+    return getattr(config, "_t2p_engine_tests_not_checked_reason", None)
+
+
 def _engine_dependency_map(config: pytest.Config) -> dict[str, str]:
     """Collected engine-dependent tests and the exact skip reason each declares."""
     return getattr(config, "_t2p_engine_dependency_reasons", {})
@@ -195,6 +213,16 @@ def _set_engine_dependency_map(config: pytest.Config, reasons: dict[str, str]) -
     setattr(config, "_t2p_engine_dependency_reasons", reasons)
 
 
+def _collected_nodeids(config: pytest.Config) -> set[str]:
+    """All collected tests, used to decide whether this run covers the engine denominator."""
+    return getattr(config, "_t2p_collected_nodeids", set())
+
+
+def _set_collected_nodeids(config: pytest.Config, nodeids: set[str]) -> None:
+    """Store all collected node ids on the config for terminal-summary validation."""
+    setattr(config, "_t2p_collected_nodeids", nodeids)
+
+
 def _map_delta_message(label: str, expected: dict[str, str], actual: dict[str, str]) -> str:
     """Human-readable exact-map mismatch for engine dependency checks."""
     missing = sorted(set(expected) - set(actual))
@@ -203,9 +231,11 @@ def _map_delta_message(label: str, expected: dict[str, str], actual: dict[str, s
     return f"{label} missing={missing}, extra={extra}, changed={changed}"
 
 
-def _engine_denominator_failure(collected_engine_dependencies: dict[str, str]) -> str | None:
+def _engine_denominator_failure(config: pytest.Config, collected_engine_dependencies: dict[str, str]) -> str | None:
     """Why the collected engine-dependent set is not the reviewed denominator, or None."""
-    if not (engine_tests_are_required() or engine_tests_not_checked_reason() is not None):
+    if not (_engine_tests_are_required(config) or _engine_tests_not_checked_reason(config) is not None):
+        return None
+    if not set(EXPECTED_ENGINE_SKIP_REASONS_BY_NODEID) & _collected_nodeids(config):
         return None
     if collected_engine_dependencies == EXPECTED_ENGINE_SKIP_REASONS_BY_NODEID:
         return None
@@ -216,12 +246,12 @@ def _engine_denominator_failure(collected_engine_dependencies: dict[str, str]) -
     )
 
 
-def _engine_skip_failure(engine_skips: dict[str, str]) -> str | None:
+def _engine_skip_failure(config: pytest.Config, engine_skips: dict[str, str]) -> str | None:
     """Why skipped engine-dependent tests fail this run, or None when they are explicit NOT_CHECKED."""
     if not engine_skips:
         return None
-    not_checked_reason = engine_tests_not_checked_reason()
-    if engine_tests_are_required():
+    not_checked_reason = _engine_tests_not_checked_reason(config)
+    if _engine_tests_are_required(config):
         return (
             f"{REQUIRE_ENGINE_TESTS_ENV}=1, so engine-dependent tests must execute; "
             "skipping them is a CI/test-environment failure."
@@ -241,7 +271,9 @@ def _engine_skip_failure(engine_skips: dict[str, str]) -> str | None:
     return None
 
 
-def _write_engine_skip_summary(terminalreporter: Any, engine_skips: dict[str, str], failure: str | None) -> None:
+def _write_engine_skip_summary(
+    terminalreporter: Any, config: pytest.Config, engine_skips: dict[str, str], failure: str | None
+) -> None:
     """Render engine-dependent skips as either explicit NOT_CHECKED or a failing skip block."""
     terminalreporter.write_sep(
         "!" if failure else "=",
@@ -259,7 +291,7 @@ def _write_engine_skip_summary(terminalreporter: Any, engine_skips: dict[str, st
         f"{len(engine_skips)} test cases requiring the engine plugin were skipped under @requires_engine:",
         *[f"  - {nodeid}: {engine_skips[nodeid]}" for nodeid in sorted(engine_skips)],
     ]
-    lines.append(failure or f"NOT_CHECKED reason: {engine_tests_not_checked_reason()}")
+    lines.append(failure or f"NOT_CHECKED reason: {_engine_tests_not_checked_reason(config)}")
     terminalreporter.write_line("\n".join(lines), yellow=not failure, red=bool(failure))
     terminalreporter.write_sep("!" if failure else "=", yellow=not failure, red=bool(failure))
 
@@ -365,6 +397,7 @@ def pytest_configure(config: pytest.Config) -> None:
     `numprocesses` may still be the string ``"auto"`` depending on hook ordering, so this tests
     truthiness rather than comparing to an int.
     """
+    _set_engine_ci_options(config)
     # Augment reportchars so 'f' and 'E' are always included even if caller passes -rs (issue #436).
     reportchars = getattr(config.option, "reportchars", "")
     for char in ("f", "E"):
@@ -409,6 +442,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     (``N passed, 14 deselected``) and keeps every worker's collection identical, since each applies
     the same rule to the same items.
     """
+    _set_collected_nodeids(config, {item.nodeid for item in items})
     engine_dependencies: dict[str, str] = {}
     for item in items:
         marker = item.get_closest_marker(ENGINE_DEPENDENCY_MARKER)
@@ -453,11 +487,11 @@ def pytest_terminal_summary(
         if not is_expected_skip_reason(reason):
             unexpected_skips.append((rep.nodeid, reason))
 
-    engine_skip_failure = _engine_skip_failure(engine_skips) or _engine_denominator_failure(
-        collected_engine_dependencies
+    engine_skip_failure = _engine_skip_failure(config, engine_skips) or _engine_denominator_failure(
+        config, collected_engine_dependencies
     )
     if engine_skips:
-        _write_engine_skip_summary(terminalreporter, engine_skips, engine_skip_failure)
+        _write_engine_skip_summary(terminalreporter, config, engine_skips, engine_skip_failure)
     elif engine_skip_failure:
         _write_engine_denominator_failure(terminalreporter, engine_skip_failure)
 
