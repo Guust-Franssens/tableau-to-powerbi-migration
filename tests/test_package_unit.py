@@ -4537,6 +4537,7 @@ def test_one_unit_raising_does_not_stop_the_units_after_it(
 def test_a_crash_diagnostic_redacts_host_locations_but_keeps_actionable_context(message: str, filename: str) -> None:
     """Crash reports may identify the frame, but never disclose the host that ran it."""
     namespace: dict[str, object] = {}
+    crash: pkg.UnitCrashed | None = None
     try:
         exec(compile(f"raise RuntimeError({message!r})", filename, "exec"), namespace)  # noqa: S102
     except RuntimeError as error:
@@ -4544,6 +4545,7 @@ def test_a_crash_diagnostic_redacts_host_locations_but_keeps_actionable_context(
     else:
         pytest.fail("the diagnostic fixture did not raise")
 
+    assert crash is not None
     report = f"{crash}\n{crash.traceback}"
     assert "NeutralCanary" not in report
     assert "RuntimeError" in report
@@ -4554,11 +4556,14 @@ def test_a_crash_diagnostic_redacts_host_locations_but_keeps_actionable_context(
 
 
 def test_crash_diagnostic_redacts_complete_spans_and_keeps_following_prose() -> None:
+    windows_path = str(PureWindowsPath("C:/", "Users", "Neutral Canary", "secret.csv"))
+    unc_path = str(PureWindowsPath("//server/Users", "Neutral Canary", "secret.csv"))
+    posix_path = str(PurePosixPath("/", "home", "Neutral Canary", "secret.csv"))
     for text in (
-        '"C:\\Users\\Neutral Canary\\secret.csv", retry failed',
-        "failure at C:\\Users\\Neutral Canary\\secret.csv; retry failed",
-        r"\\server\Users\Neutral Canary\secret.csv; retry failed",
-        "/home/Neutral Canary/secret.csv (retry failed)",
+        f'"{windows_path}", retry failed',
+        f"failure at {windows_path}; retry failed",
+        f"{unc_path}; retry failed",
+        f"{posix_path} (retry failed)",
     ):
         safe = pkg._sanitize_diagnostic(text)  # pylint: disable=protected-access
         assert "Neutral Canary" not in safe
