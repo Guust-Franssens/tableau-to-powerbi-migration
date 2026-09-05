@@ -59,6 +59,7 @@ Eligible files: tracked Markdown knowledge/navigation files, `.github/pbi.kb/**/
 | Browse showcase | [`docs/showcase/README.md`](../docs/showcase/README.md) | Map of rendered showcase outputs and variants. |
 | Use upstream repros | [`fixtures/upstream-repros/README.md`](../fixtures/upstream-repros/README.md) | Map of fixtures, upstream issues, and pinned engine behavior. |
 | Navigate migrations | [`migrations/README.md`](../migrations/README.md) | Map of workbook vs datasource migration folders. |
+| Understand run directory layout | [`_runs/README.md`](../_runs/README.md) | Map of canonical run directory stages, lifecycle, and self-contained package isolation. |
 | Check third-party notices | [`THIRD-PARTY-NOTICES.md`](../THIRD-PARTY-NOTICES.md) | License/notice questions. |
 | Handle conduct | [`CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md) | Conduct/community questions. |
 | Handle security reports | [`SECURITY.md`](../SECURITY.md) | Security disclosure routing. |

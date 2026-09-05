@@ -456,11 +456,11 @@ _runs/<NNN>-<slug>/
     assets/             harvest_estate_assets.py-shaped downloads
     bundle/              run_estate.py-shaped conversion output
     oracle/               capture_tableau_oracle.py-shaped reference capture
-    packages/              package_unit.py's per-unit handover packages — ⚠️ `--out` names a
-                            subdirectory INSIDE this one (`packages/<batch>/<Unit>/`), never
-                            `packages/` itself: `conflicting_evidence_dirs` refuses an `--out` whose
-                            parent holds `oracle/`, and a run root always does (measured: bare exits
-                            2, one level deeper exits 0). See `docs/migration-phases.md`
+    packages/              package_unit.py's per-unit handover packages — `--out` names this
+                            directory itself and writes `packages/<Unit>/`. Package-shaped targets
+                            never inherit run-level evidence, even before their completion marker;
+                            nested `packages/<batch>/<Unit>/` remains readable for compatibility.
+                            See `docs/migration-phases.md`
     deliverables/          operator-facing outputs meant for the CUSTOMER, never for git — the
                             `ses-prep/` near-miss (#322): a `connections.json` naming 17 real
                             customer servers landed unprefixed at the repo root, one `git add -A`

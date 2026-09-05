@@ -324,23 +324,17 @@ def test_packages_is_canonical_and_ordered_after_oracle_before_deliverables() ->
     assert CANONICAL_SUBDIRS.index("packages") < CANONICAL_SUBDIRS.index("deliverables")
 
 
-def test_package_out_must_be_a_child_of_packages_not_packages_itself(tmp_path: Path) -> None:
-    """The reason `docs/migration-phases.md` and `docs/operator-runbook.md` write
-    `packages/<batch>/` and never a bare `packages/`.
+def test_packages_dir_is_usable_directly_as_flat_package_root(tmp_path: Path) -> None:
+    """A run root's packages directory (`_runs/<NNN>/packages`) is directly usable as `--out`.
 
-    `package_unit.conflicting_evidence_dirs` refuses an `--out` that sits beside evidence the gates
-    also scan, checking `<out>` and `<out>.parent` for `reference/`/`oracle/`/`_oracle/`. A run root
-    ALWAYS holds `oracle/` (allocate_run creates every canonical subdir), so a bare
-    `--out <run>/packages` is refused - measured, exit 2 with "sits beside evidence the gates also
-    scan". One level deeper is accepted. This test is what keeps the documented command runnable.
+    Self-contained packages (`package-manifest.json`) search only their own evidence without
+    shadowing or double-matching against `_runs/<NNN>/oracle/`.
     """
-    from package_unit import conflicting_evidence_dirs  # local: keeps the import cost off collection
-
     run = allocate_run("acme", repo_root=tmp_path)
 
-    assert run.oracle.is_dir(), "the premise failed: a run root must hold oracle/ for this to prove anything"
-    assert conflicting_evidence_dirs(run.packages) == [run.oracle]
-    assert conflicting_evidence_dirs(run.packages / "coldrun") == []
+    assert run.oracle.is_dir(), "a run root holds oracle/"
+    assert run.packages.is_dir(), "a run root holds packages/"
+    assert run.packages.parent == run.root
 
 
 # --------------------------------------------------------------------------------------

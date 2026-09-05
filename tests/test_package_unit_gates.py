@@ -510,19 +510,117 @@ def _run_gate(script: str, arguments: list[str], cwd: Path) -> subprocess.Comple
     )
 
 
-def test_an_out_dir_inside_the_capture_tree_is_refused(tmp_path: Path) -> None:
-    """The silent downgrade this fixture layout produced: BOTH oracles visible, every page unverifiable.
+def test_completed_flat_out_dir_layout_is_accepted_and_gates_pass(tmp_path: Path) -> None:
+    """The flat `--out <run>/packages` layout is accepted and gate verdicts are clean.
 
-    Refused up front rather than documented, because the symptom - `unverifiable` instead of `ready` -
-    reads as a capture problem and points nowhere near the `--out` that caused it.
+    Because the package carries `package-manifest.json` (`is_self_contained`), it searches only its
+    own evidence and does not shadow or double-match against the run-root oracle.
     """
-    bundle, oracle, _ = _bundle(tmp_path, covered=None)
-    nested = oracle.parent / "units"
-    with pytest.raises(SystemExit) as excinfo:
-        pkg.main(["--bundle", str(bundle), "--out", str(nested), "--oracle", str(oracle), "--quiet"])
-    assert excinfo.value.code == 2
-    assert not any(nested.iterdir())
-    assert pkg.conflicting_evidence_dirs(nested) == [oracle]
+    bundle, oracle, objects = _bundle(tmp_path, covered=None)
+    run_oracle = tmp_path / "oracle"
+    if not run_oracle.exists():
+        shutil.copytree(oracle, run_oracle)
+    flat_packages = tmp_path / "packages"
+    exit_code = pkg.main(["--bundle", str(bundle), "--out", str(flat_packages), "--oracle", str(run_oracle), "--quiet"])
+    assert exit_code == 0
+    unit = flat_packages / UNIT
+    assert (unit / "package-manifest.json").is_file()
+
+    code, payload = _readiness(unit, tmp_path)
+    assert (code, payload["status"]) == (0, "READY")
+    assert payload["pages_ready"] == len(objects)
+
+    parity = check_unit.check_page_parity(unit, check_unit.load_exemptions(unit))
+    coverage = check_unit.check_oracle_coverage(unit, None, None)
+    assert parity["status"] == check_unit.STATUS_PASS
+    assert parity["expected_count"] == parity["actual_count"] == len(objects)
+    assert coverage["status"] == check_unit.STATUS_PASS
+    assert coverage["pages"] == coverage["visual_present"] == coverage["numeric_present"] > 0
+
+
+def test_incomplete_flat_package_without_manifest_fails_closed_when_ancestor_evidence_present(
+    tmp_path: Path,
+) -> None:
+    """An incomplete flat package without manifest and without local evidence refuses ancestor evidence."""
+    bundle, oracle, objects = _bundle(tmp_path, covered=None)
+    run_oracle = tmp_path / "oracle"
+    if not run_oracle.exists():
+        shutil.copytree(oracle, run_oracle)
+    flat_packages = tmp_path / "packages"
+    pkg.main(["--bundle", str(bundle), "--out", str(flat_packages), "--oracle", str(run_oracle), "--quiet"])
+    unit = flat_packages / UNIT
+
+    # Simulate incomplete package by removing both package-manifest.json AND local oracle evidence
+    (unit / "package-manifest.json").unlink()
+    shutil.rmtree(unit / "oracle")
+
+    # Entry gate refuses ancestor evidence: reports blind pages rather than READY
+    code, payload = _readiness(unit, tmp_path)
+    assert code in {1, 3}
+    assert payload["status"] in {"FINDINGS", "CANNOT_ESTABLISH"}
+    assert payload["pages_ready"] == 0
+    assert payload["pages_blind"] == len(objects)
+
+    # Exit gate refuses ancestor evidence: oracle-coverage is NOT_CHECKED with 0 evidence
+    coverage = check_unit.check_oracle_coverage(unit, None, None)
+    assert coverage["status"] == check_unit.STATUS_NOT_CHECKED
+    assert coverage["visual_present"] == 0
+    assert coverage["numeric_present"] == 0
+
+    run_report = check_unit.run_all(unit, scope=check_unit.SCOPE_REPORT)
+    checks = {c["id"]: c for c in run_report["checks"]}
+    assert checks["oracle-coverage"]["status"] == check_unit.STATUS_NOT_CHECKED
+
+
+def test_incomplete_nested_package_without_manifest_fails_closed_when_ancestor_evidence_present(
+    tmp_path: Path,
+) -> None:
+    """An incomplete nested package without manifest and without local evidence refuses ancestor evidence."""
+    bundle, oracle, objects = _bundle(tmp_path, covered=None)
+    run_oracle = tmp_path / "oracle"
+    if not run_oracle.exists():
+        shutil.copytree(oracle, run_oracle)
+    nested = tmp_path / "packages" / "coldrun2"
+    pkg.main(["--bundle", str(bundle), "--out", str(nested), "--oracle", str(run_oracle), "--quiet"])
+    unit = nested / UNIT
+
+    # Simulate incomplete package by removing both package-manifest.json AND local oracle evidence
+    (unit / "package-manifest.json").unlink()
+    shutil.rmtree(unit / "oracle")
+
+    code, payload = _readiness(unit, tmp_path)
+    assert code in {1, 3}
+    assert payload["status"] in {"FINDINGS", "CANNOT_ESTABLISH"}
+    assert payload["pages_ready"] == 0
+    assert payload["pages_blind"] == len(objects)
+
+    coverage = check_unit.check_oracle_coverage(unit, None, None)
+    assert coverage["status"] == check_unit.STATUS_NOT_CHECKED
+    assert coverage["visual_present"] == 0
+    assert coverage["numeric_present"] == 0
+
+    run_report = check_unit.run_all(unit, scope=check_unit.SCOPE_REPORT)
+    checks = {c["id"]: c for c in run_report["checks"]}
+    assert checks["oracle-coverage"]["status"] == check_unit.STATUS_NOT_CHECKED
+
+
+def test_nested_batch_out_dir_compatibility_is_preserved(tmp_path: Path) -> None:
+    """Existing nested batch layouts (--out <run>/packages/<batch>) remain fully compatible."""
+    bundle, oracle, objects = _bundle(tmp_path, covered=None)
+    nested = tmp_path / "packages" / "coldrun2"
+    exit_code = pkg.main(["--bundle", str(bundle), "--out", str(nested), "--oracle", str(oracle), "--quiet"])
+    assert exit_code == 0
+    unit = nested / UNIT
+    assert (unit / "package-manifest.json").is_file()
+
+    code, payload = _readiness(unit, tmp_path)
+    assert (code, payload["status"]) == (0, "READY")
+    assert payload["pages_ready"] == len(objects)
+
+    parity = check_unit.check_page_parity(unit, check_unit.load_exemptions(unit))
+    coverage = check_unit.check_oracle_coverage(unit, None, None)
+    assert parity["status"] == check_unit.STATUS_PASS
+    assert coverage["status"] == check_unit.STATUS_PASS
 
 
 # --------------------------------------------------------------------------------------------

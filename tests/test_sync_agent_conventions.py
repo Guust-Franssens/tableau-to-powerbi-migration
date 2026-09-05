@@ -378,6 +378,8 @@ def test_no_near_cap_warning_when_nothing_is_in_the_band(tmp_path: Path, caplog)
 
 AGENTS_MD = REPO_ROOT / "AGENTS.md"
 AGENT_OPS_MD = REPO_ROOT / "docs" / "agent-operations.md"
+OPERATOR_RUNBOOK_MD = REPO_ROOT / "docs" / "operator-runbook.md"
+README_MD = REPO_ROOT / "README.md"
 ORACLE_SCRIPT = REPO_ROOT / "scripts" / "capture_tableau_oracle.py"
 
 # Project TARGETS, tighter than `sac.PROMPT_CHAR_LIMIT`, measured with the repository's own gate
@@ -480,7 +482,37 @@ ROOT_CONTRACTS: dict[str, tuple[Path, tuple[str, ...]]] = {
             "`4` no views selected",
         ),
     ),
+    "flat-package-layout-root": (
+        AGENTS_MD,
+        (
+            "`--out` names this directory itself",
+            "`packages/<Unit>/`",
+            "nested `packages/<batch>/<Unit>/` remains readable for compatibility",
+        ),
+    ),
+    "flat-package-layout-runbook": (
+        OPERATOR_RUNBOOK_MD,
+        (
+            "**`--out` now names the canonical `packages/` directory itself.**",
+            "Each unit lands directly at `packages/<Unit>/`.",
+            "Nested `packages/<batch>/<Unit>/` layouts remain readable for compatibility",
+        ),
+    ),
+    "flat-package-layout-readme": (
+        README_MD,
+        (
+            "├── packages/<Unit>/",
+            "**2. Package for the agent** → `_runs/<NNN>-<slug>/packages/<Unit>/`",
+            "`packages/<batch>/<Unit>/` remains supported for compatibility, not as the default",
+        ),
+    ),
 }
+
+OBSOLETE_PACKAGE_DEFAULTS: tuple[tuple[Path, str], ...] = (
+    (OPERATOR_RUNBOOK_MD, "one subdirectory per packaging batch"),
+    (README_MD, "├── packages/<batch>/<Unit>/"),
+    (README_MD, "**2. Package for the agent** → `_runs/<NNN>-<slug>/packages/<batch>/<Unit>/`"),
+)
 
 ANCHOR_CASES = [
     pytest.param(contract, anchor, id=f"{contract}-{index}")
@@ -511,6 +543,12 @@ def _repo_texts() -> dict[Path, str]:
 def test_the_shipped_root_documents_carry_every_contract() -> None:
     """The positive case: AGENTS.md and its evidence doc satisfy the anchor set as committed."""
     assert _missing_contracts(_repo_texts()) == []
+
+
+def test_the_obsolete_batch_default_is_absent_from_authoritative_docs() -> None:
+    """Compatibility nesting must never reappear as the documented canonical layout."""
+    stale = [f"{path.name}: {claim}" for path, claim in OBSOLETE_PACKAGE_DEFAULTS if claim in _normalized(path)]
+    assert stale == []
 
 
 @pytest.mark.parametrize(("contract", "anchor"), ANCHOR_CASES)

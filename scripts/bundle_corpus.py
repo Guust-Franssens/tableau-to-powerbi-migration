@@ -41,6 +41,31 @@ def is_self_contained(target: Path) -> bool:
     return (target / PACKAGE_MARKER).is_file()
 
 
+def is_package_target(target: Path) -> bool:
+    """Whether ``target`` is a package target (flat, nested, or explicitly marked).
+
+    A package-shaped target (flat ``.../packages/<Unit>`` or nested
+    ``.../packages/<batch>/<Unit>``) must evaluate only its own local evidence and must not inherit
+    ancestor evidence even if incomplete (missing ``package-manifest.json`` or local evidence).
+    ``fabric/`` alone is not a package signal: ordinary migration units and bundle roots carry it
+    too and still need to discover run-level evidence.
+    """
+    if is_self_contained(target):
+        return True
+    try:
+        resolved = target.resolve()
+        parent = resolved.parent
+        if parent.name == "packages":
+            return True
+        if parent.parent.name == "packages":
+            return True
+    except (OSError, RuntimeError, ValueError):
+        pass
+    if target.parent.name == "packages" or target.parent.parent.name == "packages":
+        return True
+    return False
+
+
 def shipping_reports(root: Path) -> list[Path]:
     """Return `.Report` folders that ship under ``root``.
 
@@ -92,7 +117,7 @@ ANCESTOR_LEVELS = 3
 
 
 def evidence_dirs(target: Path, names: Sequence[str], *, also: Sequence[Path] = ()) -> list[Path]:
-    """Existing evidence directories for ``target``: beside it, then up to two ancestors.
+    """Existing evidence directories for ``target``: beside it, then up to three ancestors (``ANCESTOR_LEVELS``).
 
     WARNING: **The whole walk lives here, not just where it stops.** Round-1 review of PR #454:
     centralising only the *stop* condition left the two gates disagreeing about the *search* -
@@ -100,13 +125,13 @@ def evidence_dirs(target: Path, names: Sequence[str], *, also: Sequence[Path] = 
     unit at `<bundle>/pbip/<Unit>/` could not inherit the run's flat capture at all in the exit gate.
     A shared rule that covers half the behaviour is two rules wearing one name.
 
-    The ancestor portion is skipped for a self-contained package (:func:`is_self_contained`); the
-    target itself, and any ``also`` root a caller adds, are always searched. Results keep discovery
-    order, are de-duplicated by resolved path, and are returned unresolved so a caller still sees the
-    spelling it passed in.
+    The ancestor portion is skipped for a package target (:func:`is_package_target` /
+    :func:`is_self_contained`); the target itself, and any ``also`` root a caller adds, are always
+    searched. Results keep discovery order, are de-duplicated by resolved path, and are returned
+    unresolved so a caller still sees the spelling it passed in.
     """
     roots = [target, *also]
-    if not is_self_contained(target):
+    if not is_package_target(target):
         ancestor = target
         for _ in range(ANCESTOR_LEVELS):
             ancestor = ancestor.parent

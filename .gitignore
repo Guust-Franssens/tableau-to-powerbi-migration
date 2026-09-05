@@ -163,6 +163,9 @@ candidates.json
 # landed unprefixed and unignored. Scripts that emit customer-identifying data must refuse to write
 # to an unignored path (`refuse_unignored_output`), not rely on someone choosing a lucky name.
 /_*
+!/_runs/
+/_runs/*
+!/_runs/README.md
 
 # `connections_manifest.py` default output: customer infrastructure metadata (server/database names)
 # meant for the platform team, not for this public repo. The script refuses unignored in-repo output;

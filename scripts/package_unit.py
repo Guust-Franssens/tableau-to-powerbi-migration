@@ -1635,24 +1635,6 @@ can NEVER exit 0 from this package alone. Log it and build anyway.
 # --------------------------------------------------------------------------------------------
 
 
-def conflicting_evidence_dirs(out_root: Path) -> list[Path]:
-    """Evidence directories that would SHADOW every package written under ``out_root``.
-
-    `check_reference_readiness._collect_evidence` looks for `reference/`, `_oracle/` and `oracle/`
-    beside the target, beside its parent AND beside its grandparent - so a package at
-    `<out>/<Unit>/` also picks up anything at `<out>/` and `<out>/../`. Writing packages inside the
-    run directory therefore lets the gate see the packaged subset AND the original flat capture at
-    `_runs/<NNN>/oracle/`.
-
-    Measured while writing this file's own fixture: with both visible, every view is matched twice,
-    the gate refuses ("2 records share this name once normalized") and all four pages go from
-    **ready** to **unverifiable**. That is strictly worse than not packaging at all, and it is
-    silent, so it is refused up front rather than documented.
-    """
-    names = ("reference", "oracle", "_oracle")
-    return [base / name for base in (out_root, out_root.parent) for name in names if (base / name).is_dir()]
-
-
 def _copy_fabric(bundle: Path, unit: str, dest: Path) -> tuple[str | None, str | None]:
     """Copy the engine WORKING COPY into `<dest>/fabric/`; `(report name, model name)`.
 
@@ -2698,8 +2680,7 @@ def staging_dir(out_root: Path, unit: str) -> Path:
 
     Kept INSIDE `out_root` deliberately, against the issue's own suggestion of `tempfile.mkdtemp()`:
     the swap is `Path.rename`, which is atomic only within one volume and fails outright across
-    two - and a temp root would also move assembly outside the directory `conflicting_evidence_dirs`
-    has already cleared.
+    two.
 
     ⚠️ The name it returns is always :func:`is_reserved_packaging_name`, which is what makes the
     path un-nameable by a unit and therefore safe to `rmtree`.
@@ -3959,18 +3940,10 @@ def _measure_unit_budgets(
     return safe, budgets
 
 
-def _prepare_out(parser: argparse.ArgumentParser, requested: Path) -> Path:
-    """The resolved `--out`, created, having proved it does not shadow the evidence the gates scan."""
+def _prepare_out(requested: Path) -> Path:
+    """The resolved `--out`, created."""
     out_root = requested.resolve()
     out_root.mkdir(parents=True, exist_ok=True)
-    shadowing = conflicting_evidence_dirs(out_root)
-    if shadowing:
-        parser.error(
-            f"--out {requested} sits beside evidence the gates also scan "
-            f"({', '.join(str(path) for path in shadowing)}). A package there is matched against BOTH "
-            "its own oracle and that one, and every page becomes 'unverifiable' rather than ready. "
-            "Choose an --out outside the capture tree."
-        )
     return out_root
 
 
@@ -4003,7 +3976,7 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
     if unknown:
         parser.error(f"the bundle's report.json and pbip/ know nothing of: {', '.join(sorted(unknown))}")
 
-    out_root = _prepare_out(parser, args.out)
+    out_root = _prepare_out(args.out)
     if not units:
         return _refuse_zero_units(bundle, out_root, args.json)
 
