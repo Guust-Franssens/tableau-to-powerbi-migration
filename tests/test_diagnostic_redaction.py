@@ -757,6 +757,8 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
     ("scripts/tableau_lineage.py", "main"): {
         "len(datasources)": "NOT-A-STRING: integer count of returned datasource records",
         "datasources": "SCRUBBED-AT-SINK: scrubbed_datasources is a whole-tree scrub before plan construction or JSON persistence",
+        "scrub_tree({'site': site, 'datasources': datasources}, lambda text: redact(text, pat_name, pat_secret, session.token))[0]": "SCRUBBED-AT-SINK: whole save payload is scrubbed before json.dumps serializes it",
+        "json.dumps(scrub_tree({'site': site, 'datasources': datasources}, lambda text: redact(text, pat_name, pat_secret, session.token))[0], indent=2)": "SCRUBBED-AT-SINK: json.dumps receives only the whole-tree scrub result",
     },
     ("scripts/stamp_tableau_provenance.py", "_call"): {
         "path": "OUTBOUND: REST path assembled locally for the request",
@@ -2294,6 +2296,36 @@ def test_the_unparse_dialect_detector_can_actually_fire():
             "exactly one spelling must be this interpreter's normal form -- if neither or both are, "
             "the nested-literal hazard has changed shape and the gate above needs re-verifying"
         )
+
+
+# ------------------------------------- #419: newly gated credentialed scripts
+
+
+@pytest.mark.parametrize(
+    ("module", "anchor", "replacement"),
+    [
+        (
+            "scripts/assess_estate.py",
+            "scrubbed, _paths = scrub_tree(payload, redactor or (lambda text: text))",
+            "scrubbed = payload",
+        ),
+        (
+            "scripts/tableau_lineage.py",
+            "scrubbed_datasources, _paths = scrub_tree(\n"
+            "        datasources, lambda text: redact(text, pat_name, pat_secret, session.token)\n"
+            "    )",
+            "scrubbed_datasources = datasources",
+        ),
+    ],
+)
+def test_newly_gated_response_sinks_reject_a_removed_scrub(module, anchor, replacement):
+    """Mutation control: remove the named production scrub, not merely its registry entry."""
+    source = (REPO / module).read_text(encoding="utf-8")
+    assert source.count(anchor) == 1, f"{module}: mutation anchor moved or became ambiguous"
+    assert not uncertified_sinks(source, module), f"{module}: baseline is not certified"
+    assert uncertified_sinks(source.replace(anchor, replacement), module), (
+        f"{module}: removing its production scrub did not expose an uncertified response sink"
+    )
 
 
 # ---------------------------------------------- the manifest SINK, on the one path that reaches it

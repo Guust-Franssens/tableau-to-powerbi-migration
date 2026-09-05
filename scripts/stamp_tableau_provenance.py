@@ -154,7 +154,7 @@ class TableauLookup:
 
     def redact_text(self, text: str) -> str:
         """Redact credentials that an authenticated response might reflect."""
-        return redact(text, self._pat[1], self.token or "")
+        return redact(text, self._pat[0], self._pat[1], self.token or "")
 
     def workbooks(self) -> list[dict[str, Any]]:
         """Every workbook on the site (first page is enough to identify one by name)."""
@@ -315,8 +315,9 @@ def build(target: Path, env: dict[str, str]) -> dict[str, Any]:
             try:
                 origin = find_origin(lookup, path.stem, record["input"])
             except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-                origin, record["lookup_error"] = None, (
-                    f"{type(exc).__name__}: {redacted_note(str(exc), lookup.redact_text, limit=150)}"
+                origin, record["lookup_error"] = (
+                    None,
+                    (f"{type(exc).__name__}: {redacted_note(str(exc), lookup.redact_text, limit=150)}"),
                 )
             if origin is not None:
                 origin, _paths = scrub_tree(origin, lookup.redact_text)

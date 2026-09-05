@@ -360,7 +360,7 @@ class Site:  # pylint: disable=too-many-instance-attributes  # one client: crede
         both reach ``assessment.json``, ``report.md`` and now ``estate.db``, and a proxy or WAF that
         echoes the request writes the owner's PAT (or the live session token) into all three.
         """
-        return redact(text, self._pat[1], self.token or "")
+        return redact(text, self._pat[0], self._pat[1], self.token or "")
 
     def _scrub(self, payload: bytes) -> str:
         """Decode a response body with every credential known at this point removed.

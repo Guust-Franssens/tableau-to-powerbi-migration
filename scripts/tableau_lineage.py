@@ -307,9 +307,11 @@ def _resolution_gaps(data: dict[str, Any], unresolved_deps: int) -> list[str]:
     does not print the same 38 dependencies under two different sentences.
     """
     unresolved = _count(
-        data.get("unresolved_dependencies"),
-        _summary(data).get("unresolved_dependencies"),
-        unresolved_deps,
+        (
+            data.get("unresolved_dependencies"),
+            _summary(data).get("unresolved_dependencies"),
+            unresolved_deps,
+        )
     )
     if not unresolved:
         return []
@@ -425,6 +427,7 @@ class TableauSession(NamedTuple):
     token: str
     site_id: str
     api_version: str = DEFAULT_API_VERSION
+    pat_name: str = ""
     pat_secret: str = ""
 
     @property
@@ -463,7 +466,14 @@ def sign_in(server: str, site: str, pat_name: str, pat_secret: str, api_version:
     site_id = (creds.get("site") or {}).get("id")
     if not token or not site_id:
         raise RuntimeError("sign-in succeeded but returned no token/site id")
-    return TableauSession(server=server, token=token, site_id=site_id, api_version=api_version, pat_secret=pat_secret)
+    return TableauSession(
+        server=server,
+        token=token,
+        site_id=site_id,
+        api_version=api_version,
+        pat_name=pat_name,
+        pat_secret=pat_secret,
+    )
 
 
 def fetch_lineage(session: TableauSession) -> list[dict[str, Any]]:
@@ -473,7 +483,7 @@ def fetch_lineage(session: TableauSession) -> list[dict[str, Any]]:
         url,
         {"query": LINEAGE_QUERY},
         headers={"X-Tableau-Auth": session.token},
-        redactor=lambda text: redact(text, session.pat_secret, session.token),
+        redactor=lambda text: redact(text, session.pat_name, session.pat_secret, session.token),
     )
     if result.get("errors"):
         raise RuntimeError(
@@ -927,7 +937,7 @@ def _resolve_survey(path: Path | None) -> tuple[Survey | None, bool]:
         return None, False
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-locals
     """CLI entry point."""
     args = _build_parser().parse_args(argv)
 
@@ -954,14 +964,21 @@ def main(argv: list[str] | None = None) -> int:
 
     log.info("found %d published data source(s)", len(datasources))
     if args.save_json:
-        saved, _paths = scrub_tree(
-            {"site": site, "datasources": datasources},
-            lambda text: redact(text, pat_secret, session.token),
+        args.save_json.write_text(
+            json.dumps(
+                scrub_tree(
+                    {"site": site, "datasources": datasources},
+                    lambda text: redact(text, pat_name, pat_secret, session.token),
+                )[0],
+                indent=2,
+            ),
+            encoding="utf-8",
         )
-        args.save_json.write_text(json.dumps(saved, indent=2), encoding="utf-8")
         log.info("raw lineage saved to %s", args.save_json)
 
-    scrubbed_datasources, _paths = scrub_tree(datasources, lambda text: redact(text, pat_secret, session.token))
+    scrubbed_datasources, _paths = scrub_tree(
+        datasources, lambda text: redact(text, pat_name, pat_secret, session.token)
+    )
     plan = build_plan(scrubbed_datasources, site, survey)
     if args.plan or not args.download:
         print_plan(plan, survey)

@@ -251,6 +251,41 @@ def test_the_pat_secret_never_reaches_the_output(tmp_path):
     assert "SUPER-SECRET-VALUE" not in text
 
 
+def test_live_origin_fields_are_scrubbed_before_the_manifest_sink(tmp_path, monkeypatch):
+    """Positive and mutation controls for the response-derived provenance manifest path."""
+    secret = "SYNTHETIC_PROVENANCE_PAT_42"
+    _twbx(tmp_path, secret)
+
+    class ReflectingLookup(FakeLookup):
+        def __init__(self, _env):
+            super().__init__(
+                [{"id": "luid-1", "name": secret, "project": {"name": f"Project {secret}"}}],
+                remote_sha="different",
+            )
+            self.token = "token"
+
+        def sign_in(self):
+            pass
+
+        def redact_text(self, text):
+            return text.replace(secret, "[REDACTED]").replace(self.token, "[REDACTED]")
+
+    env = {
+        "TABLEAU_SERVER_URL": "https://x.online.tableau.com",
+        "TABLEAU_SITE": "site",
+        "TABLEAU_PAT_NAME": secret,
+        "TABLEAU_PAT_SECRET": "an-unrelated-long-pat-secret",
+    }
+    live_redactor = prov.TableauLookup(env)
+    assert secret not in live_redactor.redact_text(f"echo {secret}")
+
+    monkeypatch.setattr(prov, "TableauLookup", ReflectingLookup)
+    assert secret not in json.dumps(prov.build(tmp_path, env))
+
+    monkeypatch.setattr(prov, "scrub_tree", lambda value, _redactor: (value, []))
+    assert secret in json.dumps(prov.build(tmp_path, env)), "the production scrub mutation did not reopen the sink"
+
+
 @pytest.mark.parametrize("key", ["TABLEAU_SERVER_URL", "TABLEAU_PAT_NAME"])
 def test_partial_credentials_do_not_attempt_a_lookup(tmp_path, key):
     _twbx(tmp_path)
