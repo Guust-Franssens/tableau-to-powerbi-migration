@@ -143,9 +143,7 @@ def test_realistic_long_estate_is_refused_by_conservative_pbir_envelope() -> Non
     visual_tail = Path(run_estate._PBIR_VISUAL_TAIL)
     assert utf16_len(str(root)) == 90
     assert file_path["length"] == utf16_len(str(root)) + 1 + utf16_len(str(report_root / visual_tail))
-    assert directory["length"] == utf16_len(str(root)) + 1 + utf16_len(
-        str(report_root / visual_tail.parent)
-    )
+    assert directory["length"] == utf16_len(str(root)) + 1 + utf16_len(str(report_root / visual_tail.parent))
     assert projection["status"] == "over_ceiling"
 
 
