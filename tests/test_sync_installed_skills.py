@@ -91,6 +91,25 @@ def test_missing_origin_ref_refuses_without_worktree_fallback(
     assert "Refusing to fall back to the caller's working tree" in output
 
 
+def test_source_ref_must_be_proven_merged_into_origin_master(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _fixture_repo(tmp_path, monkeypatch)
+    plugin_root = _build_installed_from(repo, tmp_path)
+    _run_git(repo, "checkout", "-b", "feature")
+    first_skill = build_plugin.SHIPPED_SKILLS[0]
+    (repo / ".github" / "skills" / first_skill / "SKILL.md").write_text("unmerged feature\n", encoding="utf-8")
+    _run_git(repo, "add", ".")
+    _run_git(repo, "commit", "-m", "unmerged feature")
+    _run_git(repo, "update-ref", "refs/remotes/origin/feature", "HEAD")
+
+    assert sync.main(["--check", "--source-ref", "origin/feature", "--plugin-root", str(plugin_root)]) == 5
+
+    output = capsys.readouterr().out
+    assert "'origin/feature' is not proven merged into 'origin/master'" in output
+    assert "Refusing to fall back to the caller's working tree" in output
+
+
 def test_write_refuses_symlink_destination_that_escapes_installed_skills(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

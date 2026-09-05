@@ -87,6 +87,16 @@ def resolve_source_commit(source_ref: str) -> tuple[str, str]:
         )
     _git(["cat-file", "-e", f"{commit}:.github/skills"])
     _git(["cat-file", "-e", f"{commit}:scripts/build_plugin.py"])
+    default_commit = _git(["rev-parse", "--verify", f"{DEFAULT_SOURCE_REF}^{{commit}}"])
+    if commit != default_commit:
+        merged = subprocess.run(
+            ["git", "-C", str(REPO), "merge-base", "--is-ancestor", commit, default_commit],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if merged.returncode != 0:
+            raise SourceRefError(f"{source_ref!r} is not proven merged into {DEFAULT_SOURCE_REF!r}")
     return commit, full_ref
 
 
