@@ -300,6 +300,27 @@ The failure is in VizQL, **upstream of the output format**, so no format choice 
 final answer that names a human action — connect the sources on the Tableau site — and must never be
 retried. Only the offline `.twb` thumbnail path survives this, at 192×192.
 
+### Query cache freshness and `maxAge` (issue #473)
+
+Without an explicit `maxAge`, Tableau REST `/data`, `/image`, and `/pdf` endpoints are served from
+Tableau Server's server-side query cache (configured by admins via `vizqlserver.querycache.maxage`,
+commonly defaulting to 360 min / 6 hours). Because each endpoint maintains independent query cache
+entries, a capture after a workbook or data change could return a fresh render alongside stale data (or
+vice versa) with zero disclosure that cached results were served.
+
+To ensure oracle baselines reflect freshly computed server state:
+- **`capture_tableau_oracle.py` passes an explicit `maxAge` query parameter** on all `/data`, `/image`,
+  and `/pdf` requests, defaulting to **1 minute** (`DEFAULT_MAX_AGE_MINUTES = 1`).
+- **CLI option `--max-age <minutes>`** allows operators to tune the cache age (non-negative integers
+  `>= 0`).
+- **Machine-readable provenance** is persisted in `oracle-manifest.json`:
+  - Top-level `max_age_minutes` on the run.
+  - Per-view `max_age_minutes` on each view record.
+  - Per-leg `max_age_minutes` on each data and render (`png`, `svg`, `pdf`) record.
+- **Fail-closed on rejection**: If a server rejects the `maxAge` parameter (e.g., HTTP 400), the request
+  fails loudly and is recorded as a failure / unassessable leg — it is **never silently retried
+  without `maxAge`**.
+
 ### Practical consequence
 
 **Best available: `--reference-best`, which probes rather than assumes.** On Cloud that resolves to

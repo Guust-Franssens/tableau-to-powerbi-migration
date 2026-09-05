@@ -82,8 +82,9 @@ class _Session(oracle.TableauSession):
 
     def _request(self, method, path, *, body=None, accept=None, authed=True, api=None, deadline=None):  # noqa: ARG002
         self.paths.append(path)
+        bare_path = path.split("?")[0]
         for suffix, (status, payload) in self.responses.items():
-            if path.endswith(suffix):
+            if bare_path.endswith(suffix) or suffix in path:
                 return status, payload, {}
         raise AssertionError(f"unscripted path {path}")
 

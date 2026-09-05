@@ -529,7 +529,7 @@ class _FastFailDataThenTrickle(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def do_GET(self):  # noqa: N802
-        if self.path.endswith("/data"):
+        if self.path.split("?")[0].endswith("/data"):
             self.send_response(503)
             self.send_header("Content-Length", "2")
             self.end_headers()
@@ -691,7 +691,7 @@ class _TruncatedRender(BaseHTTPRequestHandler):
     PREFIXES = {"format=svg": b'<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"', "pdf": b"%PDF-1.7"}
 
     def do_GET(self):  # noqa: N802
-        if self.path.endswith("/data"):
+        if self.path.split("?")[0].endswith("/data"):
             self.send_response(400)
             self.send_header("Content-Length", "2")
             self.end_headers()
@@ -827,8 +827,9 @@ class _CloseDelimitedTruncatedRender(_TruncatedRender):
     protocol_version = "HTTP/1.0"
 
     def do_GET(self):  # noqa: N802
-        if self.path.endswith("/data"):
+        if self.path.split("?")[0].endswith("/data"):
             self.send_response(400)
+            self.send_header("Content-Length", "2")
             self.end_headers()
             self.wfile.write(b"no")
             return

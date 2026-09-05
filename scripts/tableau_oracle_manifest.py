@@ -31,6 +31,7 @@ from typing import Any
 # ladder's own numbers and the pure classifier that reads them.
 import tableau_render_capability as capability
 import tableau_view_types
+from tableau_capture_policy import DEFAULT_MAX_AGE_MINUTES
 from tableau_env import redacted_note, scrub_tree
 from tableau_payload_facts import (
     CSV_CERTIFIED,
@@ -668,6 +669,7 @@ class CaptureRun:
     started: float
     requested_renders: frozenset[str] = frozenset()
     reference_required: bool = False
+    max_age_minutes: int = DEFAULT_MAX_AGE_MINUTES
 
 
 # One local over the limit, and it is `gate` -- the three version numbers that decide WHY a refused
@@ -738,6 +740,7 @@ def write_manifest(  # pylint: disable=too-many-locals
         "server": run.env["TABLEAU_SERVER_URL"],
         "site": run.env["TABLEAU_SITE"],
         "rest_api_version": run.env.get("TABLEAU_REST_API_VERSION"),
+        "max_age_minutes": run.max_age_minutes,
         # The OTHER two numbers of the three-number reconciliation, so the evidence file answers
         # "could this site have done SVG at all?" on its own. `rest_api_version` above is the CLIENT
         # preference we sent; this is the ceiling the SERVER advertises, and `null` means it was not
