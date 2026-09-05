@@ -136,7 +136,10 @@ def _assert_engine_integration_job(workflow: str) -> None:
     assert "ref: main" not in checkout
 
     install = _workflow_step_block(job, name="Install pinned deterministic engine")
-    assert "$EXPECTED_ENGINE_VERSION" in install
+    assert (
+        'test "$(cat "$HOME/.copilot/installed-plugins/tableau-collection/'
+        'tableau-fabric-skills/skills/tableau-migration/VERSION")" = "$EXPECTED_ENGINE_VERSION"' in install
+    )
     assert "scripts/engine_source.py --json" in install
 
     test_command = _literal_run_command(_workflow_step_block(job, name="Tests (engine-dependent, pinned engine)"))
