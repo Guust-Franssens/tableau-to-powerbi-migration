@@ -632,7 +632,17 @@ TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
 # is: its return IS the response. It became load-bearing when `tableau_luid_census` stopped
 # making its own request -- taint propagation is intra-module, so a cross-module call's result
 # is invisible without this, and the gate went inert on a module that still looked gated.
-TAINTING_CALLS = {"_request", "fetch_payload", "export", "raw_get", "get_json", "read", "read1", "decode"}
+TAINTING_CALLS = {
+    "_request",
+    "_response_text",
+    "fetch_payload",
+    "export",
+    "raw_get",
+    "get_json",
+    "read",
+    "read1",
+    "decode",
+}
 # The ONE thing that clears taint. Not "any helper" -- see test_the_chokepoint_is_the_only_...
 UNTAINTING = {"redacted_note", "scrub_tree", "artifact_stem"}
 LOG_AND_RAISE = {"info", "warning", "error", "debug", "exception", "ExportFailed", "RuntimeError", "ValueError"}
@@ -741,17 +751,51 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "session.base": "OUTBOUND: the configured Tableau server URL is used only to build the request",
         "session.token": "OUTBOUND: the session token is sent only in the request header",
         "result['errors']": "REDACTED-UPSTREAM: redacted_note receives the complete response value before formatting",
-        "'Metadata API returned errors: ' + redacted_note(json.dumps(result['errors']), lambda text: redact(text, session.pat_secret, session.token), limit=400)": "REDACTED-UPSTREAM: the only raised response text is the redacted_note result",
+        "'Metadata API returned errors: ' + redacted_note(json.dumps(result['errors']), lambda text: redact(text, session.pat_name, session.pat_secret, session.token), limit=400)": "REDACTED-UPSTREAM: the only raised response text is the redacted_note result",
     },
     ("scripts/tableau_lineage.py", "download_datasource"): {
         "session.base": "OUTBOUND: configured Tableau server URL used only to build the request",
         "session.api_version": "OUTBOUND: configured REST API version used only to build the request",
         "session.site_id": "OUTBOUND: authenticated site identifier used only to build the request",
         "payload": "REFUSED-AT-SEAM: a payload reflecting the PAT or session token raises before write_bytes",
+        "luid": "SHAPE-VERIFIED: _download_stem accepts only a full UUID before it reaches the URL",
+        "dest": "SHAPE-VERIFIED: main constructs the destination from the full UUID returned by _download_stem",
+    },
+    ("scripts/tableau_lineage.py", "_entry"): {
+        "{_norm(w): w for w in survey_workbooks or []}": "SCRUBBED-AT-SINK: raw plan identities remain in memory for matching; main scrubs the complete plan before print_plan",
+        "dedup_key(site, name)": "SCRUBBED-AT-SINK: raw plan identities remain in memory for matching; main scrubs the complete plan before print_plan",
+        "downstream": "SCRUBBED-AT-SINK: raw plan identities remain in memory for matching; main scrubs the complete plan before print_plan",
+        "evidence": "FIXED-VOCABULARY: one of the module-authored source labels",
+        "len(downstream)": "NOT-A-STRING: an integer edge count",
+        "len(metadata_keys)": "NOT-A-STRING: an integer edge count",
+        "len(survey_keys)": "NOT-A-STRING: an integer edge count",
+        "matched_via": "FIXED-VOCABULARY: Survey.match returns only module-authored match labels",
+        "name": "SCRUBBED-AT-SINK: raw plan identities remain in memory for matching; main scrubs the complete plan before print_plan",
+        "sorted((seen[k] for k in metadata_keys - survey_keys), key=str.lower)": "SCRUBBED-AT-SINK: raw plan identities remain in memory for matching; main scrubs the complete plan before print_plan",
+        "sorted((seen[k] for k in survey_keys - metadata_keys), key=str.lower)": "SCRUBBED-AT-SINK: raw plan identities remain in memory for matching; main scrubs the complete plan before print_plan",
+        "source.get('has_extracts')": "NOT-A-STRING: a boolean or null response field",
+        "source.get('luid')": "SHAPE-VERIFIED: a LUID is used for a request only after _download_stem validates a full UUID",
+        "source.get('project')": "SCRUBBED-AT-SINK: raw plan identities remain in memory for matching; main scrubs the complete plan before print_plan",
+        "survey_workbooks is not None": "NOT-A-STRING: a boolean presence check",
+        "{seen[key]: _origin(key, metadata_keys, survey_keys) for key in seen}": "SCRUBBED-AT-SINK: raw plan identities remain in memory for matching; main scrubs the complete plan before print_plan",
+    },
+    ("scripts/tableau_lineage.py", "_survey_only_rows"): {
+        "row": "SCRUBBED-AT-SINK: raw plan identities remain in memory for matching; main scrubs the complete plan before print_plan",
+    },
+    ("scripts/tableau_lineage.py", "build_plan"): {
+        "entry": "SCRUBBED-AT-SINK: raw plan identities remain in memory for matching; main scrubs the complete plan before print_plan",
+        "survey_key": "SHAPE-VERIFIED: used only to look up the in-memory survey map",
+        "datasource.get('hasExtracts')": "NOT-A-STRING: a boolean or null response field",
+        "datasource.get('luid')": "SHAPE-VERIFIED: a LUID is used for a request only after _download_stem validates a full UUID",
+        "datasource.get('projectName')": "SCRUBBED-AT-SINK: raw plan identities remain in memory for matching; main scrubs the complete plan before print_plan",
+        "name": "SCRUBBED-AT-SINK: raw plan identities remain in memory for matching; main scrubs the complete plan before print_plan",
     },
     ("scripts/tableau_lineage.py", "main"): {
         "len(datasources)": "NOT-A-STRING: integer count of returned datasource records",
-        "datasources": "SCRUBBED-AT-SINK: scrubbed_datasources is a whole-tree scrub before plan construction or JSON persistence",
+        "datasources": "SCRUBBED-AT-SINK: the complete save payload is scrubbed before json.dumps serializes it",
+        "len(plan)": "NOT-A-STRING: integer count of in-memory plan rows",
+        "luid": "SHAPE-VERIFIED: _download_stem accepts only a full UUID before filename construction",
+        "dest": "SHAPE-VERIFIED: destination is constructed from the full UUID returned by _download_stem",
         "scrub_tree({'site': site, 'datasources': datasources}, lambda text: redact(text, pat_name, pat_secret, session.token))[0]": "SCRUBBED-AT-SINK: whole save payload is scrubbed before json.dumps serializes it",
         "json.dumps(scrub_tree({'site': site, 'datasources': datasources}, lambda text: redact(text, pat_name, pat_secret, session.token))[0], indent=2)": "SCRUBBED-AT-SINK: json.dumps receives only the whole-tree scrub result",
     },
@@ -1354,10 +1398,6 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
             "'records no row count' sentence"
         ),
     },
-    ("scripts/tableau_oracle_manifest.py", "read_manifest"): {
-        "manifest": _INTO_THE_MANIFEST_AGGREGATE,
-        "withhold_uncertified_evidence(manifest['views'])": _INTO_THE_MANIFEST_AGGREGATE,
-    },
     # #480 round 2. WHERE a data leg's bytes go and which key names them. `certification` arrives
     # from `certify_csv` across a module boundary, so it is a declared seed -- and everything built
     # from it here is a module literal or a mapping keyed by that closed vocabulary.
@@ -1462,6 +1502,19 @@ def _called(node: ast.AST) -> str | None:
     return node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", None)
 
 
+def _loads_response(node: ast.AST, local: set[str], returns_taint: set[str]) -> bool:
+    """Only a JSON parse whose operand came from a response carries response taint."""
+    return bool(
+        _called(node) == "loads"
+        and node.args
+        and (
+            _roots(node.args[0]) & local
+            or _called(node.args[0]) in TAINTING_CALLS
+            or _called(node.args[0]) in returns_taint
+        )
+    )
+
+
 def _functions(tree: ast.AST) -> list[ast.AST]:
     return [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
 
@@ -1518,14 +1571,23 @@ def taint_module(source: str, module: str) -> dict[str, set[str]]:
             for targets, value in _assignments(func):
                 if _called(value) in UNTAINTING:
                     continue
-                if _roots(value) & local or _called(value) in TAINTING_CALLS or _called(value) in returns_taint:
+                if (
+                    _roots(value) & local
+                    or _called(value) in TAINTING_CALLS
+                    or _called(value) in returns_taint
+                    or _loads_response(value, local, returns_taint)
+                ):
                     _bind(targets, local)
             for node in ast.walk(func):
                 if (
                     isinstance(node, ast.Return)
                     and node.value is not None
                     and _called(node.value) not in UNTAINTING
-                    and (_roots(node.value) & local or _called(node.value) in TAINTING_CALLS)
+                    and (
+                        _roots(node.value) & local
+                        or _called(node.value) in TAINTING_CALLS
+                        or _loads_response(node.value, local, returns_taint)
+                    )
                 ):
                     returns_taint.add(name)
             # Inter-procedural: a call passing a tainted argument taints the callee's parameter.
@@ -1672,6 +1734,19 @@ def test_the_chokepoint_is_the_only_thing_that_clears_taint():
     assert uncertified_sinks(clean, "scripts/tableau_payload_facts.py") == []
     laundered = 'def summarise_csv(payload):\n    note = str(payload)\n    return f"{note}"\n'
     assert uncertified_sinks(laundered, "scripts/tableau_payload_facts.py") == ["summarise_csv() f-string: note"]
+
+
+def test_json_loads_is_tainted_only_when_its_operand_is_response_derived():
+    """A local JSON file is not a response, while a response text helper remains tainted."""
+    source = (
+        "def response():\n"
+        "    value = json.loads(_response_text())\n"
+        '    return f"{value}"\n'
+        "def local(text):\n"
+        "    value = json.loads(text)\n"
+        '    return f"{value}"\n'
+    )
+    assert uncertified_sinks(source, "scripts/tableau_lineage.py") == ["response() f-string: value"]
 
 
 def test_taint_reaches_capture_view_without_a_hand_written_seed():
@@ -2301,10 +2376,8 @@ def test_the_unparse_dialect_detector_can_actually_fire():
         ),
         (
             "scripts/tableau_lineage.py",
-            "scrubbed_datasources, _paths = scrub_tree(\n"
-            "        datasources, lambda text: redact(text, pat_name, pat_secret, session.token)\n"
-            "    )",
-            "scrubbed_datasources = datasources",
+            "display_plan, _paths = scrub_tree(plan, lambda text: redact(text, pat_name, pat_secret, session.token))",
+            "display_plan = plan",
         ),
     ],
 )

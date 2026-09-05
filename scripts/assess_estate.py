@@ -1792,6 +1792,16 @@ def _log_server_ceiling(ceiling: dict[str, Any] | None) -> None:
         )
 
 
+def _write_final_artifacts(out: Path, raw: dict, assembled: dict, coverage_target: float, redactor) -> Path:
+    """Persist scrubbed assessment outputs and return the report path."""
+    scrubbed_raw, _paths = scrub_tree(raw, redactor)
+    scrubbed_assembled, _paths = scrub_tree(assembled, redactor)
+    report = out / "report.md"
+    report.write_text(render_report(scrubbed_assembled, scrubbed_raw, coverage_target), encoding="utf-8")
+    (out / "assessment.json").write_text(json.dumps(scrubbed_assembled, indent=2) + "\n", encoding="utf-8")
+    return report
+
+
 def main() -> int:
     """Assess the estate. Exit 1 when nothing could be assessed, 3 when a PRIMARY listing failed."""
     args = _build_parser().parse_args()
@@ -1823,11 +1833,7 @@ def main() -> int:
     assembled = assemble(raw, args.coverage_target)
     db = write_store(args.out, raw, assembled, site.scrub_text)
     site.sign_out()
-    scrubbed_raw, _paths = scrub_tree(raw, site.scrub_text)
-    scrubbed_assembled, _paths = scrub_tree(assembled, site.scrub_text)
-    report = args.out / "report.md"
-    report.write_text(render_report(scrubbed_assembled, scrubbed_raw, args.coverage_target), encoding="utf-8")
-    (args.out / "assessment.json").write_text(json.dumps(scrubbed_assembled, indent=2) + "\n", encoding="utf-8")
+    report = _write_final_artifacts(args.out, raw, assembled, args.coverage_target, site.scrub_text)
 
     counts: dict[str, int] = {}
     for row in assembled["workbooks"]:
