@@ -102,8 +102,21 @@ _CALC_GROUP_RE = re.compile(r"^\s*calculationGroup\b", re.MULTILINE)
 _SCALAR_KINDS = ("Column", "Measure")
 
 NUMERIC_DATA_TYPES = frozenset(
-    {"int64", "int32", "int16", "int8", "integer", "int", "double", "decimal", "currency",
-     "single", "float", "real", "numeric"}
+    {
+        "int64",
+        "int32",
+        "int16",
+        "int8",
+        "integer",
+        "int",
+        "double",
+        "decimal",
+        "currency",
+        "single",
+        "float",
+        "real",
+        "numeric",
+    }
 )
 STRING_DATA_TYPES = frozenset({"string", "text"})
 KNOWN_NON_STRING_NON_NUMERIC_DATA_TYPES = frozenset({"boolean", "bool", "datetime", "date", "time", "binary"})
@@ -999,9 +1012,7 @@ def _check_direct_color_fills(
         _check_direct_color_fill_item(model, ctx, item, findings)
 
 
-def check_visual_roles(
-    model: ModelFields, report_dir: Path
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def check_visual_roles(model: ModelFields, report_dir: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Check for role-type mismatches (e.g. non-numeric measures on numeric Y axis or direct color fills).
 
     Returns (violations, cannot_assess).

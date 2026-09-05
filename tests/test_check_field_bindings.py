@@ -934,26 +934,8 @@ def _visual_with_fill(expr: dict, visual_type: str = "clusteredColumnChart") -> 
         "name": "v1",
         "visual": {
             "visualType": visual_type,
-            "query": {
-                "queryState": {
-                    "Y": {"projections": [{"field": _measure("Metrics", "Numeric Revenue")}]}
-                }
-            },
-            "objects": {
-                "dataPoint": [
-                    {
-                        "properties": {
-                            "fill": {
-                                "solid": {
-                                    "color": {
-                                        "expr": expr
-                                    }
-                                }
-                            }
-                        }
-                    }
-                ]
-            },
+            "query": {"queryState": {"Y": {"projections": [{"field": _measure("Metrics", "Numeric Revenue")}]}}},
+            "objects": {"dataPoint": [{"properties": {"fill": {"solid": {"color": {"expr": expr}}}}}]},
         },
     }
 
@@ -1064,7 +1046,12 @@ def test_legitimate_conditional_formatting_rules_pass(tmp_path) -> None:
                     "Condition": {
                         "Comparison": {
                             "ComparisonKind": 0,
-                            "Left": {"Measure": {"Expression": {"SourceRef": {"Entity": "Metrics"}}, "Property": "Numeric Revenue"}},
+                            "Left": {
+                                "Measure": {
+                                    "Expression": {"SourceRef": {"Entity": "Metrics"}},
+                                    "Property": "Numeric Revenue",
+                                }
+                            },
                             "Right": {"Literal": {"Value": "100D"}},
                         }
                     },
@@ -1130,38 +1117,10 @@ def test_direct_fill_traversal_restricted_to_datapoint_not_legend_or_labels(tmp_
         "name": "v1",
         "visual": {
             "visualType": "clusteredColumnChart",
-            "query": {
-                "queryState": {
-                    "Y": {"projections": [{"field": _measure("Metrics", "Numeric Revenue")}]}
-                }
-            },
+            "query": {"queryState": {"Y": {"projections": [{"field": _measure("Metrics", "Numeric Revenue")}]}}},
             "objects": {
-                "legend": [
-                    {
-                        "properties": {
-                            "fill": {
-                                "solid": {
-                                    "color": {
-                                        "expr": expr
-                                    }
-                                }
-                            }
-                        }
-                    }
-                ],
-                "labels": [
-                    {
-                        "properties": {
-                            "fill": {
-                                "solid": {
-                                    "color": {
-                                        "expr": expr
-                                    }
-                                }
-                            }
-                        }
-                    }
-                ],
+                "legend": [{"properties": {"fill": {"solid": {"color": {"expr": expr}}}}}],
+                "labels": [{"properties": {"fill": {"solid": {"color": {"expr": expr}}}}}],
             },
         },
     }
@@ -1181,10 +1140,12 @@ def test_direct_fill_traversal_restricted_to_datapoint_not_legend_or_labels(tmp_
 )
 def test_direct_fill_with_known_non_string_types_is_clean(tmp_path, prop) -> None:
     """Mutation killed: classifying Boolean, DateTime, or numeric types as color string blockers."""
-    kind = _measure if "Measure" in prop or prop == "Numeric Revenue" else _column
-    expr = {"Measure" if "Measure" in prop or prop == "Numeric Revenue" else "Column": {
-        "Expression": {"SourceRef": {"Entity": "Metrics"}}, "Property": prop
-    }}
+    expr = {
+        "Measure" if "Measure" in prop or prop == "Numeric Revenue" else "Column": {
+            "Expression": {"SourceRef": {"Entity": "Metrics"}},
+            "Property": prop,
+        }
+    }
     bundle = _write_bundle(
         tmp_path,
         model_tmdl=ROLE_TEST_TMDL,
