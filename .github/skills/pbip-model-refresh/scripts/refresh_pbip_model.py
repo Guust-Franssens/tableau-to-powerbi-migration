@@ -1332,7 +1332,7 @@ def save(pid: int) -> tuple[bool, str]:
     if before is None:
         return False, f"no Desktop Bridge instance for pid {pid}"
     if not before.get("hasUnsavedChanges"):
-        return True, "nothing to save (hasUnsavedChanges already false)"
+        return True, "UI Automation save attempted (hasUnsavedChanges already false; verification pending)"
 
     script = f"""
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
@@ -1358,7 +1358,7 @@ Write-Output 'NO_INVOKABLE_SAVE'; exit 1
         time.sleep(SAVE_SETTLE_SECONDS)
         current = _instance(pid)
         if current is not None and not current.get("hasUnsavedChanges"):
-            return True, "saved via UI Automation (hasUnsavedChanges went false)"
+            return True, "UI Automation save attempted (hasUnsavedChanges went false; verification pending)"
     return False, (
         f"still dirty after {SAVE_TIMEOUT_SECONDS}s - Desktop may be showing a dialog. Ask the user "
         "to press Ctrl+S in Power BI Desktop, then re-run with --verify-only."
@@ -1754,7 +1754,7 @@ def _refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-br
     if not args.no_save:
         # Preferred: a real API call. Falls back to driving the UI only if it fails, so a change in the
         # engine can never leave the pipeline with no way to persist.
-        saved, save_message = (False, "no cache path resolved")
+        saved, save_message = (False, "no cache path resolved; falling back to UI")
         if cache is not None and not args.ui_save:
             try:
                 saved, save_message = image_save(port, cache, model_dir=cache.parent.parent)
@@ -1777,6 +1777,8 @@ def _refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-br
                 return 1
             except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
                 saved, save_message = False, f"ImageSave unavailable ({type(exc).__name__}); falling back to UI"
+        elif args.ui_save:
+            save_message = "ImageSave skipped (--ui-save requested); falling back to UI"
         if not saved:
             print(f"  save   : {save_message}")
             saved, save_message = save(pid)
