@@ -159,13 +159,15 @@ def _excerpt(text: str, offsets: list[int], match: re.Match[str]) -> str:
 
 
 def _mask_quoted_literals(text: str) -> str:
-    """Replace Tableau/DAX literals and bracketed identifiers with spaces."""
+    """Replace formula literals and identifiers, retaining unquoted comment text."""
     masked = list(text)
     quote: str | None = None
     index = 0
     while index < len(text):
         character = text[index]
         if quote is None:
+            if text[index : index + 2] in {"//", "/*"}:
+                return "".join(masked[:index]) + text[index:]
             if character == "[":
                 closing = text.find("]", index + 1)
                 if closing != -1:
