@@ -1998,7 +1998,7 @@ def test_a_POSIX_ROOTED_path_is_STILL_refused_after_the_root_check_was_added(tmp
     `declared.startswith("/")` test); it must remain refused now that `.root` is checked too, and the
     account name must still never ship.
     """
-    declared = "/Users/neutral-account/private/secret.log"
+    declared = str(PurePosixPath("/", "Users", "neutral-account", "private", "secret.log"))
     assert pkg._declares_non_relative(declared) is True  # pylint: disable=protected-access
 
     bundle, oracle = _bundle(tmp_path)

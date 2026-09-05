@@ -994,10 +994,7 @@ def _declares_non_relative(declared: str) -> bool:
     """
     candidate = PureWindowsPath(declared)
     return (
-        candidate.is_absolute()
-        or bool(candidate.drive)
-        or bool(candidate.root)
-        or declared.startswith(("\\\\", "/"))
+        candidate.is_absolute() or bool(candidate.drive) or bool(candidate.root) or declared.startswith(("\\\\", "/"))
     )
 
 
