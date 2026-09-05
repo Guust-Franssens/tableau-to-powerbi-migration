@@ -8,9 +8,10 @@ sides** — read each test's own docstring rather than assuming one lifetime for
   broken the test passes, and when upstream fixes it the test FAILS. ``#171`` is one — generated
   field-parameter support should break it, for review.
 * **Post-fix regression guards** hold the FIXED behaviour: they pass today and fail if the defect
-  returns. ``#168`` was reversed into one on 2026-09-03 against measured output at engine 2.356.0 —
-  its defect-direction pin fired exactly as designed, upstream had shipped the fix, and the pin was
-  turned around rather than deleted. ``#166`` was always this direction.
+  returns. ``#168`` was reversed into one on 2026-09-03 against measured output at engine 2.356.0,
+  then re-verified unchanged at 2.368.0 on 2026-09-05 — its defect-direction pin fired exactly as
+  designed, upstream had shipped the fix, and the pin was turned around rather than deleted. ``#166``
+  was always this direction.
 
 Either way a failure is a signal, not a verdict: verify against the current canonical engine, then
 update the expectation and the pinned engine version below.
@@ -56,7 +57,7 @@ import engine_source  # noqa: E402  # pylint: disable=wrong-import-position
 
 FIXTURES = REPO / "fixtures" / "upstream-repros"
 RUN_ROOT = REPO / ".pytest_cache" / "upstream-repro-pins"
-PINNED_ENGINE_VERSION = "2.356.0"
+PINNED_ENGINE_VERSION = "2.368.0"
 SIMULATE_ENGINE_ABSENT = "T2P_SIMULATE_ENGINE_ABSENT_FOR_TESTS"
 
 _ENGINE_RUN: dict[str, Any] | None = None
@@ -196,10 +197,11 @@ def test_engine_absence_contract_returns_none(monkeypatch: pytest.MonkeyPatch) -
 def test_issue_168_pins_partial_dispatcher_with_disclosure() -> None:
     """Post-fix regression guard: #168 shipped, so a return to the all-or-nothing stub is a REGRESSION.
 
-    ⚠️ **Direction reversed on 2026-09-03 (issue #486), against measured output at engine 2.356.0.**
-    This was a defect-direction pin asserting ``measure 'Selected KPI' = BLANK()``. It fired exactly
-    as designed — and was then invisible for weeks behind the harness version gate (module docstring).
-    Upstream ``Yarbrdab000/tableau-fabric-skills#168`` is CLOSED COMPLETED, and 2.356.0 emits a
+    ⚠️ **Direction reversed on 2026-09-03 (issue #486), against measured output at engine 2.356.0,
+    and re-verified unchanged at 2.368.0 on 2026-09-05.** This was a defect-direction pin asserting
+    ``measure 'Selected KPI' = BLANK()``. It fired exactly as designed — and was then invisible for
+    weeks behind the harness version gate (module docstring). Upstream
+    ``Yarbrdab000/tableau-fabric-skills#168`` is CLOSED COMPLETED, and the current engine emits a
     **partial** dispatcher plus the disclosure the maintainer said was blocking the fix::
 
         measure 'Selected KPI' = IF(EXACT([Select KPI Value], "Sales"), SUM('Orders'[SALES]), ...)

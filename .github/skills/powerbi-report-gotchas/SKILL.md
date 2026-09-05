@@ -28,7 +28,10 @@ raises an error dialog on open) or an offline `ajv` harness against the real 2.9
 > Audited 2026-09-03 (issue #486) against upstream `Yarbrdab000/tableau-fabric-skills` issue state,
 > on canonical plugin **2.353.0**, then re-verified 2026-09-03 after the plugin was upgraded to **2.356.0** (upstream `main`). Entries whose defect was fixed
 > upstream now carry a ⚠️ retraction or version-qualification **in place**, with the original
-> measurement kept visible. Two things that audit could **not** settle, so do not read silence as
+> measurement kept visible. A targeted roll-forward check on 2026-09-05 advanced the canonical
+> engine to **2.368.0**, re-ran the upstream behavior pins, and rechecked the #178 emitter source; it
+> was not a fresh audit of every entry below. Two things that the original audit could **not** settle,
+> so do not read silence as
 > currency: (a) claims naming an engine **source line** (`twb_to_pbir.py:2366`, `:14280`,
 > `_constant_mark_color_objects`) were pinned at 2.146.0–2.339.0 and the line numbers have certainly
 > moved — treat them as *where to look*, never as a citation; (b) an engine claim with **no upstream
@@ -192,25 +195,24 @@ These pass `validate` but render wrong. Only a live Desktop screenshot catches t
 
 ### A literal must carry the COLUMN's type — and the same mistake fails two opposite ways
 
-✅ **Re-measured 2026-09-04 in the canonical engine we actually run (2.356.0): this STILL REPRODUCES
-for us, and the evidence is the engine's code, not an issue's state.** `twb_to_pbir.py:10559`
-(`_data_point_colors`, the `scopeId` selector) emits
-`"Right": {"Literal": {"Value": _semantic_string_literal(m["value"])}}` unconditionally; the column's
-datatype is in scope a few lines above and is never consulted, so a boolean member is still written as
-the *string* `'true'`.
+⚠️ **Historical measurement:** this still reproduced in canonical engine 2.356.0 on 2026-09-04.
+`_data_point_colors` emitted every `scopeId` member through `_semantic_string_literal`, even though
+the column datatype was already in scope, so a boolean member became the *string* `'true'`.
 
-⚠️ **Upstream has FIXED it and we do not have the fix yet — so this bullet is version-scoped, not
-permanent.** [`Yarbrdab000/tableau-fabric-skills#178`](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/178)
-is **CLOSED COMPLETED (2026-09-03 20:48:36Z)**; closing commit `39276a08` reproduced it at **2.358.0**
-and shipped a datatype-keyed literal in **2.359.0** (upstream `VERSION` reads 2.365.0). Resolve the
-installed version with `python scripts/engine_source.py` before trusting this either way: at ≤ 2.358.0
-the defect is live, at ≥ 2.359.0 it is not.
+🟢 **Fixed in the canonical engine we now run (2.368.0), rechecked in source on 2026-09-05.**
+[`Yarbrdab000/tableau-fabric-skills#178`](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/178)
+is **CLOSED COMPLETED (2026-09-03 20:48:36Z)**; closing commit `39276a08` reproduced the defect at
+**2.358.0** and shipped the datatype-keyed `_scope_member_literal` path in **2.359.0**. Canonical
+2.368.0 calls that helper from `_data_point_colors`: boolean columns emit bare `true`/`false`, while
+genuine string members named `"true"`/`"false"` stay strings. Resolve the installed version with
+`python scripts/engine_source.py` before trusting this either way: at ≤ 2.358.0 the defect is live,
+at ≥ 2.359.0 it is not.
 
 ⚠️ **The previous wording said "#178 is OPEN … so this STILL REPRODUCES" — that inference was invalid
 even while its conclusion happened to be right**, and it was wrong about the state within a day. An
 issue's state is not a measurement in either direction (issue #486). Do not confuse this with
 `Yarbrdab000/tableau-fabric-skills#130` (§1's slicer bullet), which fixed the same string-quoted
-boolean in the *slicer pre-selection* path only; the **data-colour** slot below is untouched.
+boolean in the *slicer pre-selection* path only; #178 separately fixed the **data-colour** slot.
 
 🟢 render-verified (Desktop 2.157.828.0). PBIR encodes a literal's type in the string itself:
 `'x'` = string · `10L` = Int64 · `100D` = Double · bare `true` = boolean. Comparing a **boolean**
@@ -817,11 +819,13 @@ example there were **15**, sitting unremarked beside a 170-item `remediation_wor
 single highest-value thing the reader surfaces, and it is why `--severity` **never hides them** - a
 blank visual outranks any severity band the worklist assigns.
 
-⚠️ **"nothing else ranks them" is now FALSE at our engine — #189 shipped in 2.355.0 and we run
-2.356.0.** `Yarbrdab000/tableau-fabric-skills#189` sets `pbip_ref_drops[].severity` **structurally at
-the drop site** (`emptied: true` → `severity: "blocking"`), plus a `blocking` worklist rule in the
-`emptied_visual` category. A **partial** drop deliberately stays `high`, not `blocking`. **Prefer the
-engine's own `severity` now**; the reader still ranks them and remains correct on older bundles.
+⚠️ **"nothing else ranks them" became FALSE in engine 2.355.0, and was verified here on canonical
+2.356.0 on 2026-09-03.** `Yarbrdab000/tableau-fabric-skills#189` sets
+`pbip_ref_drops[].severity` **structurally at the drop site** (`emptied: true` →
+`severity: "blocking"`), plus a `blocking` worklist rule in the `emptied_visual` category. A
+**partial** drop deliberately stays `high`, not `blocking`. For engine >= 2.355.0, prefer the
+engine's own `severity`; the reader still ranks them and remains correct on older bundles. This
+entry was not separately re-measured during the targeted 2.368.0 roll-forward.
 ⚠️ Two caveats worth keeping: upstream's own corpus emits **zero** `pbip_ref_drops` entries, so this
 shipped on fixture coverage against *our* estate measurements and the maintainer explicitly asked how
 many of our 23 now carry `blocking` — **that number is still unmeasured here**; and `emptied` is set
