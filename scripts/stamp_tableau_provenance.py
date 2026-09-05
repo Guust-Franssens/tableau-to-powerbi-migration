@@ -60,7 +60,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from object_identity import RevisionKey, revision_key  # noqa: E402  # pylint: disable=wrong-import-position
-from tableau_env import pat_secret, resolve_env  # noqa: E402  # pylint: disable=wrong-import-position
+from tableau_env import env_redactor, pat_secret, redact, redacted_note, resolve_env, scrub_tree  # noqa: E402  # pylint: disable=wrong-import-position
 
 LOG = logging.getLogger("provenance")
 
@@ -152,12 +152,18 @@ class TableauLookup:
             self._call("POST", "/auth/signout")
             self.token = None
 
+    def redact_text(self, text: str) -> str:
+        """Redact credentials that an authenticated response might reflect."""
+        return redact(text, self._pat[1], self.token or "")
+
     def workbooks(self) -> list[dict[str, Any]]:
         """Every workbook on the site (first page is enough to identify one by name)."""
         status, payload = self._call("GET", f"/sites/{self.site_id}/workbooks?pageSize=1000", accept="application/json")
         if status != 200:
             raise RuntimeError(f"listing workbooks failed: HTTP {status}")
-        return json.loads(payload).get("workbooks", {}).get("workbook", [])
+        workbooks = json.loads(payload).get("workbooks", {}).get("workbook", [])
+        scrubbed, _paths = scrub_tree(workbooks, self.redact_text)
+        return scrubbed
 
     def content_sha256(self, workbook_id: str) -> str | None:
         """sha256 of the workbook as the server would hand it to us, or ``None`` if it cannot be read."""
@@ -289,12 +295,17 @@ def build(target: Path, env: dict[str, str]) -> dict[str, Any]:
     """Fingerprint every input, and attach its Tableau origin when credentials allow."""
     inputs = collect_inputs(target)
     lookup: TableauLookup | None = None
+    redactor = env_redactor(env)
     if env.get("TABLEAU_SERVER_URL") and env.get("TABLEAU_PAT_NAME"):
         try:
             lookup = TableauLookup(env)
             lookup.sign_in()
         except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-            LOG.warning("no Tableau lookup (%s: %s) - fingerprints only", type(exc).__name__, str(exc)[:120])
+            LOG.warning(
+                "no Tableau lookup (%s: %s) - fingerprints only",
+                type(exc).__name__,
+                redacted_note(str(exc), redactor, limit=120),
+            )
             lookup = None
 
     records = []
@@ -304,7 +315,11 @@ def build(target: Path, env: dict[str, str]) -> dict[str, Any]:
             try:
                 origin = find_origin(lookup, path.stem, record["input"])
             except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-                origin, record["lookup_error"] = None, f"{type(exc).__name__}: {str(exc)[:150]}"
+                origin, record["lookup_error"] = None, (
+                    f"{type(exc).__name__}: {redacted_note(str(exc), lookup.redact_text, limit=150)}"
+                )
+            if origin is not None:
+                origin, _paths = scrub_tree(origin, lookup.redact_text)
             record["origin"] = origin
             if origin is None:
                 record["origin_note"] = "no workbook of this LUID or name on the site - local-only input"
@@ -314,15 +329,17 @@ def build(target: Path, env: dict[str, str]) -> dict[str, Any]:
                     "figures measured here will not reproduce against it"
                 )
         records.append(record)
-    if lookup is not None:
-        lookup.sign_out()
-
-    return {
+    result = {
         "schema": "tableau-source-provenance/1",
         "stamped_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "input_count": len(records),
         "inputs": records,
     }
+    if lookup is not None:
+        scrubbed_result, _paths = scrub_tree(result, lookup.redact_text)
+        lookup.sign_out()
+        return scrubbed_result
+    return result
 
 
 def main() -> int:

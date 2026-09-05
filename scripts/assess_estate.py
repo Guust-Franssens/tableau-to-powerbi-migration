@@ -100,7 +100,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import resolve_datasource_target as target_resolution  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_render_capability as render_capability  # noqa: E402  # pylint: disable=wrong-import-position
-from tableau_env import env_source, pat_secret, redact, require, resolve_env  # noqa: E402  # pylint: disable=wrong-import-position
+from tableau_env import env_source, pat_secret, redact, require, resolve_env, scrub_tree  # noqa: E402  # pylint: disable=wrong-import-position
 
 LOG = logging.getLogger("assess")
 
@@ -427,7 +427,8 @@ class Site:  # pylint: disable=too-many-instance-attributes  # one client: crede
                     detail = f"HTTP 200 but the JSON body is {typename}, expected object"
                     return None, self._fail(_record(path, status, detail, attempt, started))
                 self.consecutive_transient_failures = 0
-                return parsed, None
+                scrubbed, _paths = scrub_tree(parsed, self.scrub_text)
+                return scrubbed, None
             if kind == "session_lost" and reauths < MAX_REAUTH:
                 reauths += 1
                 self.reauths += 1
@@ -1011,20 +1012,21 @@ def _degraded_contract(errors: list[dict], workbooks_total: int) -> dict[str, An
     }
 
 
-def _write_raw(out: Path, payload: dict[str, Any]) -> None:
+def _write_raw(out: Path, payload: dict[str, Any], redactor=None) -> None:
     """Write raw API responses as evidence. Called twice on purpose - see ``_checkpoint``."""
     (out / "raw").mkdir(parents=True, exist_ok=True)
-    for key, value in payload.items():
+    scrubbed, _paths = scrub_tree(payload, redactor or (lambda text: text))
+    for key, value in scrubbed.items():
         (out / "raw" / f"{key}.json").write_text(json.dumps(value, indent=2), encoding="utf-8")
 
 
-def _checkpoint(out: Path, inventory: dict[str, list]) -> None:
+def _checkpoint(out: Path, inventory: dict[str, list], redactor=None) -> None:
     """Persist the pass-1 inventory the moment it exists, before anything flakier runs.
 
     Nothing used to be written until ``main`` completed, so a failure in a secondary pass discarded
     a finished inventory of 273 workbooks and 1042 views - three times in one afternoon (#193).
     """
-    _write_raw(out, inventory)
+    _write_raw(out, inventory, redactor)
     LOG.info("  checkpoint: pass-1 inventory persisted to %s", out / "raw")
 
 
@@ -1077,7 +1079,7 @@ def _write_run_marker(conn: sqlite3.Connection, assembled: dict[str, Any]) -> No
     )
 
 
-def write_store(out: Path, raw: dict[str, Any], assembled: dict[str, Any]) -> Path:
+def write_store(out: Path, raw: dict[str, Any], assembled: dict[str, Any], redactor=None) -> Path:
     """Raw JSON as evidence, SQLite as the query layer.
 
     Raw responses are kept because an assessment is evidence for a COMMERCIAL decision - "retire
@@ -1102,6 +1104,7 @@ def write_store(out: Path, raw: dict[str, Any], assembled: dict[str, Any]) -> Pa
                 "structure",
             )
         },
+        redactor,
     )
 
     db_path = out / "estate.db"
@@ -1808,13 +1811,13 @@ def main() -> int:
     started = time.perf_counter()
     args.out.mkdir(parents=True, exist_ok=True)
     _clear_final_artifacts(args.out)
-    raw = collect(site, survey, checkpoint=lambda inventory: _checkpoint(args.out, inventory))
-    assembled = assemble(raw, args.coverage_target)
+    raw = collect(site, survey, checkpoint=lambda inventory: _checkpoint(args.out, inventory, site.scrub_text))
+    scrubbed_raw, _paths = scrub_tree(raw, site.scrub_text)
+    assembled = assemble(scrubbed_raw, args.coverage_target)
+    db = write_store(args.out, scrubbed_raw, assembled, site.scrub_text)
     site.sign_out()
-
-    db = write_store(args.out, raw, assembled)
     report = args.out / "report.md"
-    report.write_text(render_report(assembled, raw, args.coverage_target), encoding="utf-8")
+    report.write_text(render_report(assembled, scrubbed_raw, args.coverage_target), encoding="utf-8")
     (args.out / "assessment.json").write_text(json.dumps(assembled, indent=2) + "\n", encoding="utf-8")
 
     counts: dict[str, int] = {}

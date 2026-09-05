@@ -545,6 +545,9 @@ MODULES = (
     # `tableau_payload_facts.py`, it is not detected by `_credential_handling_scripts()` (it makes no
     # request and names no credential); MODULES is a superset of that detector, never a mirror of it.
     "scripts/tableau_oracle_manifest.py",
+    "scripts/assess_estate.py",
+    "scripts/tableau_lineage.py",
+    "scripts/stamp_tableau_provenance.py",
 )
 
 # Where response bytes ENTER, declared per function rather than inferred from a parameter's spelling.
@@ -616,6 +619,12 @@ TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
     ("scripts/tableau_payload_facts.py", "svg_facts"): {"payload"},
     ("scripts/tableau_payload_facts.py", "pdf_facts"): {"payload"},
     ("scripts/tableau_payload_facts.py", "payload_is_complete"): {"payload"},
+    ("scripts/assess_estate.py", "_write_raw"): {"payload"},
+    ("scripts/assess_estate.py", "_checkpoint"): {"inventory"},
+    ("scripts/tableau_lineage.py", "_post_json"): set(),
+    ("scripts/tableau_lineage.py", "fetch_lineage"): {"session"},
+    ("scripts/tableau_lineage.py", "download_datasource"): {"session"},
+    ("scripts/stamp_tableau_provenance.py", "build"): {"env"},
 }
 
 # Calls whose RESULT is response data.
@@ -623,7 +632,12 @@ TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
 # is: its return IS the response. It became load-bearing when `tableau_luid_census` stopped
 # making its own request -- taint propagation is intra-module, so a cross-module call's result
 # is invisible without this, and the gate went inert on a module that still looked gated.
-TAINTING_CALLS = {"_request", "fetch_payload", "export", "raw_get", "get_json", "read", "read1", "decode", "loads"}
+TAINTING_CALLS = {"_request", "fetch_payload", "export", "raw_get", "get_json", "read", "read1", "decode"}
+# ``json.loads`` is a parser, not a response source: it taints only the persisted capture manifest
+# that enters the guarded surface through ``read_manifest``. All HTTP responses are tainted at their
+# transport read, so treating every local JSON parse as hostile makes unrelated offline planning code
+# look credential-derived and obscures the actual response boundary.
+JSON_TAINT_SOURCES = {("scripts/tableau_oracle_manifest.py", "read_manifest")}
 # The ONE thing that clears taint. Not "any helper" -- see test_the_chokepoint_is_the_only_...
 UNTAINTING = {"redacted_note", "scrub_tree", "artifact_stem"}
 LOG_AND_RAISE = {"info", "warning", "error", "debug", "exception", "ExportFailed", "RuntimeError", "ValueError"}
@@ -725,6 +739,54 @@ _SVG_REMEDY = (
 )
 
 CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
+    ("scripts/tableau_lineage.py", "_post_json"): {
+        "headers": "OUTBOUND: request headers, including the session credential, are sent to Tableau and never persisted",
+    },
+    ("scripts/tableau_lineage.py", "fetch_lineage"): {
+        "session.base": "OUTBOUND: the configured Tableau server URL is used only to build the request",
+        "session.token": "OUTBOUND: the session token is sent only in the request header",
+        "result['errors']": "REDACTED-UPSTREAM: redacted_note receives the complete response value before formatting",
+        "'Metadata API returned errors: ' + redacted_note(json.dumps(result['errors']), lambda text: redact(text, session.pat_secret, session.token), limit=400)": "REDACTED-UPSTREAM: the only raised response text is the redacted_note result",
+    },
+    ("scripts/tableau_lineage.py", "download_datasource"): {
+        "session.base": "OUTBOUND: configured Tableau server URL used only to build the request",
+        "session.api_version": "OUTBOUND: configured REST API version used only to build the request",
+        "session.site_id": "OUTBOUND: authenticated site identifier used only to build the request",
+        "payload": "REFUSED-AT-SEAM: a payload reflecting the PAT or session token raises before write_bytes",
+    },
+    ("scripts/tableau_lineage.py", "main"): {
+        "len(datasources)": "NOT-A-STRING: integer count of returned datasource records",
+        "datasources": "SCRUBBED-AT-SINK: scrubbed_datasources is a whole-tree scrub before plan construction or JSON persistence",
+    },
+    ("scripts/stamp_tableau_provenance.py", "_call"): {
+        "path": "OUTBOUND: REST path assembled locally for the request",
+    },
+    ("scripts/stamp_tableau_provenance.py", "_content"): {
+        "workbook_id": "OUTBOUND: workbook LUID used only in the download request path",
+    },
+    ("scripts/stamp_tableau_provenance.py", "find_origin"): {
+        "workbook['id']": "SCRUBBED-AT-SINK: response-derived origin fields are scrubbed before being added to the manifest",
+        "workbook.get('name')": "SCRUBBED-AT-SINK: response-derived origin fields are scrubbed before being added to the manifest",
+        "(workbook.get('project') or {}).get('name')": "SCRUBBED-AT-SINK: response-derived origin fields are scrubbed before being added to the manifest",
+        "(workbook.get('owner') or {}).get('id')": "SCRUBBED-AT-SINK: response-derived origin fields are scrubbed before being added to the manifest",
+        "workbook.get('createdAt')": "SCRUBBED-AT-SINK: response-derived origin fields are scrubbed before being added to the manifest",
+        "workbook.get('updatedAt')": "SCRUBBED-AT-SINK: response-derived origin fields are scrubbed before being added to the manifest",
+        "lookup.base": "SCRUBBED-AT-SINK: origin result is scrubbed before manifest construction",
+        "lookup.site": "SCRUBBED-AT-SINK: origin result is scrubbed before manifest construction",
+        "lookup.product_version": "SCRUBBED-AT-SINK: origin result is scrubbed before manifest construction",
+        "lookup.version": "SCRUBBED-AT-SINK: origin result is scrubbed before manifest construction",
+        "remote_sha": "DERIVED-IRREVERSIBLY: SHA-256 digest cannot disclose the response bytes",
+        "remote_key.as_json() if remote_key is not None else None": "DERIVED-IRREVERSIBLY: revision digest cannot disclose the response bytes",
+        "'sha256' if remote_sha == local['sha256'] else 'name_only'": "FIXED-VOCABULARY: one of two module-authored match labels",
+        "None if agreement is None else 'same' if agreement else 'differs'": "FIXED-VOCABULARY: one of two module-authored comparison labels or None",
+        "sum((1 for wb in workbooks if wb.get('name') == workbook.get('name')))": "NOT-A-STRING: integer count of duplicate names",
+    },
+    ("scripts/stamp_tableau_provenance.py", "build"): {
+        "record": "SCRUBBED-AT-SINK: each response-derived origin is scrubbed before it enters this record",
+        "origin": "SCRUBBED-AT-SINK: whole origin tree is scrubbed before it enters the manifest record",
+        "origin['matched_by']": "FIXED-VOCABULARY: origin matching returns only luid, name, or sanitized_name",
+        "f'matched by {origin['matched_by']}, but the bytes DIFFER from the site copy - figures measured here will not reproduce against it'": "FIXED-VOCABULARY: interpolates only the closed matching-method vocabulary",
+    },
     ("scripts/capture_tableau_oracle.py", "classify_export_error"): {
         "match.group(1)": "REDACTED-UPSTREAM: the regex runs on `safe`, the redacted copy, never on `text`",
         "match.group(2).strip()": "REDACTED-UPSTREAM: same match, and `.strip()` runs after redaction",
@@ -1459,7 +1521,12 @@ def taint_module(source: str, module: str) -> dict[str, set[str]]:
             for targets, value in _assignments(func):
                 if _called(value) in UNTAINTING:
                     continue
-                if _roots(value) & local or _called(value) in TAINTING_CALLS or _called(value) in returns_taint:
+                if (
+                    _roots(value) & local
+                    or _called(value) in TAINTING_CALLS
+                    or _called(value) in returns_taint
+                    or (_called(value) == "loads" and (module, name) in JSON_TAINT_SOURCES)
+                ):
                     _bind(targets, local)
             for node in ast.walk(func):
                 if (
@@ -1737,14 +1804,6 @@ NON_HTTP_CREDENTIAL_SCRIPTS: dict[str, str] = {
 # waivers: a waiver claims safety, and for these the code contradicts the claim. Recorded as a named
 # gap with an issue so the gate states the truth rather than a comfortable fiction.
 KNOWN_GAPS: dict[str, str] = {
-    "scripts/assess_estate.py": "writes raw API responses to raw/<key>.json (assess_estate.py:1006) -- issue #419",
-    "scripts/tableau_lineage.py": (
-        "writes raw lineage (tableau_lineage.py:480, :933) and raises/logs raw response text "
-        "(:469, :928, :950) -- issue #419"
-    ),
-    "scripts/stamp_tableau_provenance.py": (
-        "writes a result JSON built from live responses (stamp_tableau_provenance.py:302) -- issue #419"
-    ),
     "scripts/provision_tableau_estate.py": (
         "MOVED here from GATE_WAIVERS in round 9, because both halves of its waiver were reproducibly "
         "false. (1) its `tableauserverclient` sign-in is uncaught at provision_tableau_estate.py:282, "

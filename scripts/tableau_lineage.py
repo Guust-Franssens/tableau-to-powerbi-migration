@@ -67,7 +67,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from tableau_env import require, resolve_env  # noqa: E402  # pylint: disable=wrong-import-position
+from tableau_env import redact, redacted_note, require, resolve_env, scrub_tree  # noqa: E402  # pylint: disable=wrong-import-position
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger("tableau_lineage")
@@ -222,7 +222,7 @@ def _summary(data: dict[str, Any]) -> dict[str, Any]:
     return summary if isinstance(summary, dict) else {}
 
 
-def _count(*values: Any) -> int:
+def _count(values: Sequence[Any]) -> int:
     """The largest of several counts of the SAME failure, ignoring anything that is not a count.
 
     `estate_survey.py` records one failure in more than one place (`connection_read_errors`, the
@@ -231,7 +231,7 @@ def _count(*values: Any) -> int:
     exactly what `build_survey()` produces when it is called directly, without `survey_site()`'s
     error bookkeeping.
     """
-    counts = [len(v) if isinstance(v, list) else v for v in values]
+    counts = [len(value) if isinstance(value, list) else value for value in values]
     return max((c for c in counts if isinstance(c, int) and not isinstance(c, bool)), default=0)
 
 
@@ -276,16 +276,18 @@ def _visibility_gaps(data: dict[str, Any]) -> list[str]:
     summary = _summary(data)
     workbooks = data.get("workbooks") or []
 
-    listing = _count(data.get("listing_errors"), summary.get("listing_errors"))
+    listing = _count((data.get("listing_errors"), summary.get("listing_errors")))
     if listing:
         gaps.append(
             f"{listing} site listing(s) failed - workbooks or data sources are MISSING from this survey entirely"
         )
     unread = _count(
-        data.get("connection_read_errors"),
-        summary.get("connection_read_errors"),
-        summary.get("dependencies_unknown"),
-        sum(1 for wb in workbooks if isinstance(wb, dict) and wb.get("dependencies_unknown")),
+        (
+            data.get("connection_read_errors"),
+            summary.get("connection_read_errors"),
+            summary.get("dependencies_unknown"),
+            sum(1 for wb in workbooks if isinstance(wb, dict) and wb.get("dependencies_unknown")),
+        )
     )
     if unread:
         gaps.append(f"{unread} workbook connection(s) could not be read")
@@ -423,6 +425,7 @@ class TableauSession(NamedTuple):
     token: str
     site_id: str
     api_version: str = DEFAULT_API_VERSION
+    pat_secret: str = ""
 
     @property
     def base(self) -> str:
@@ -430,14 +433,16 @@ class TableauSession(NamedTuple):
         return self.server.rstrip("/")
 
 
-def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
+def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str], redactor=None) -> dict[str, Any]:
     """POST JSON and return the decoded JSON response."""
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=body, method="POST")
     for key, value in {"Content-Type": "application/json", "Accept": "application/json", **headers}.items():
         req.add_header(key, value)
     with urllib.request.urlopen(req, timeout=120) as resp:  # noqa: S310 - URL comes from env config
-        return json.loads(resp.read().decode("utf-8"))
+        result = json.loads(resp.read().decode("utf-8"))
+    scrubbed, _paths = scrub_tree(result, redactor or (lambda text: text))
+    return scrubbed
 
 
 def sign_in(server: str, site: str, pat_name: str, pat_secret: str, api_version: str) -> TableauSession:
@@ -458,15 +463,27 @@ def sign_in(server: str, site: str, pat_name: str, pat_secret: str, api_version:
     site_id = (creds.get("site") or {}).get("id")
     if not token or not site_id:
         raise RuntimeError("sign-in succeeded but returned no token/site id")
-    return TableauSession(server=server, token=token, site_id=site_id, api_version=api_version)
+    return TableauSession(server=server, token=token, site_id=site_id, api_version=api_version, pat_secret=pat_secret)
 
 
 def fetch_lineage(session: TableauSession) -> list[dict[str, Any]]:
     """Run the Metadata API lineage query; return the publishedDatasources list."""
     url = f"{session.base}/api/metadata/graphql"
-    result = _post_json(url, {"query": LINEAGE_QUERY}, headers={"X-Tableau-Auth": session.token})
+    result = _post_json(
+        url,
+        {"query": LINEAGE_QUERY},
+        headers={"X-Tableau-Auth": session.token},
+        redactor=lambda text: redact(text, session.pat_secret, session.token),
+    )
     if result.get("errors"):
-        raise RuntimeError(f"Metadata API returned errors: {json.dumps(result['errors'])[:400]}")
+        raise RuntimeError(
+            "Metadata API returned errors: "
+            + redacted_note(
+                json.dumps(result["errors"]),
+                lambda text: redact(text, session.pat_secret, session.token),
+                limit=400,
+            )
+        )
     return result.get("data", {}).get("publishedDatasources", [])
 
 
@@ -477,7 +494,11 @@ def download_datasource(session: TableauSession, luid: str, dest: Path) -> Path:
     req.add_header("X-Tableau-Auth", session.token)
     dest.parent.mkdir(parents=True, exist_ok=True)
     with urllib.request.urlopen(req, timeout=300) as resp:  # noqa: S310 - URL comes from env config
-        dest.write_bytes(resp.read())
+        payload = resp.read()
+    response_text = payload.decode("utf-8", "replace")
+    if redact(response_text, session.pat_secret, session.token) != response_text:
+        raise RuntimeError("refusing to persist a datasource response that reflects a credential")
+    dest.write_bytes(payload)
     return dest
 
 
@@ -925,15 +946,23 @@ def main(argv: list[str] | None = None) -> int:
         log.info("signed in to %s (site '%s')", server, site or "<default>")
         datasources = fetch_lineage(session)
     except (urllib.error.URLError, urllib.error.HTTPError, RuntimeError) as exc:
-        log.error("Tableau API call failed: %s", exc)
+        log.error(
+            "Tableau API call failed: %s",
+            redacted_note(str(exc), lambda text: redact(text, pat_secret), limit=400),
+        )
         return 1
 
     log.info("found %d published data source(s)", len(datasources))
     if args.save_json:
-        args.save_json.write_text(json.dumps({"site": site, "datasources": datasources}, indent=2), encoding="utf-8")
+        saved, _paths = scrub_tree(
+            {"site": site, "datasources": datasources},
+            lambda text: redact(text, pat_secret, session.token),
+        )
+        args.save_json.write_text(json.dumps(saved, indent=2), encoding="utf-8")
         log.info("raw lineage saved to %s", args.save_json)
 
-    plan = build_plan(datasources, site, survey)
+    scrubbed_datasources, _paths = scrub_tree(datasources, lambda text: redact(text, pat_secret, session.token))
+    plan = build_plan(scrubbed_datasources, site, survey)
     if args.plan or not args.download:
         print_plan(plan, survey)
 
