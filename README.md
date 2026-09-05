@@ -271,9 +271,9 @@ accept with no flags**.
 
 **3. Ship** → `migrations/{workbooks,datasources}/<slug>/fabric/`
 
-The PBIP project a customer opens in Power BI Desktop.
-⚠️ Still a manual copy — no tool yet (issue
-[#458](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/458)).
+The PBIP project a customer opens in Power BI Desktop. The current phase-2 → phase-3 path is
+`python scripts/promote_unit.py --package <package> --slug <slug> ...`; manual copying remains only
+as a fallback/reference for operators who need to understand the mechanics by hand.
 
 Two gates sit on phase 2: `check_reference_readiness.py` is the **entry** gate (per report page, is
 there trustworthy Tableau reference evidence to start from?) and `check_unit.py` is the **exit** gate
@@ -291,8 +291,9 @@ why a unit is verified **before** it is promoted, not after.
 Three things about that flow are worth knowing before you touch it, and each has cost someone real
 work:
 
-- Inside `bundle/`, **`reports/` is the pristine engine-truth baseline and `pbip/` is a working
-  copy** agents edit. There is no `out/` level. (It is not the only one — see the third bullet.)
+- Inside `bundle/`, **`reports/` is the pristine engine baseline / model-unbound report pass and
+  `pbip/` is the model-bound working + shipped copy** agents edit. There is no `out/` level. (It is
+  not the only one — see the third bullet.)
 - **`bundle/semantic_models/` is not a per-workbook guarantee** — on our 62-unit reference run only
   **18** units had a model baseline. A missing counterpart is **BASELINE UNAVAILABLE**, never a
   clean diff.
