@@ -764,7 +764,11 @@ def _survey_only_rows(site: str, survey: Survey, by_key: dict[str, list[dict[str
             source = {
                 "name": seen.name,
                 "luid": luid,
-                "project": next(iter(seen.resolved_projects.get(luid, ())), None) if luid else None,
+                "project": (
+                    sorted(seen.resolved_projects.get(luid, ()))[0]
+                    if luid and seen.resolved_projects.get(luid)
+                    else None
+                ),
                 "has_extracts": None,
             }
             matched_via = "survey-only" if luid else "survey-only-ambiguous"

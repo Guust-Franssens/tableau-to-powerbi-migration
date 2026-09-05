@@ -602,8 +602,8 @@ def test_a_scoped_name_collision_does_not_guess_a_metadata_identity(tmp_path: Pa
     assert {entry["luid"] for entry in plan} == {"luid-finance", "luid-marketing"}
 
 
-def test_a_scoped_survey_only_name_collision_has_no_download_identity(tmp_path: Path) -> None:
-    """A collision absent from Metadata API remains explicit rather than choosing the first LUID."""
+def test_a_scoped_survey_only_keeps_each_resolved_identity(tmp_path: Path) -> None:
+    """Resolved survey identities remain independently downloadable when Metadata API is empty."""
     survey = load_survey(
         _survey_file(
             tmp_path,
