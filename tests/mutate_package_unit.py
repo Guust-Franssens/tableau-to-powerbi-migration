@@ -662,20 +662,6 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
         ["test_main_accounts_for_a_too_deep_unit_without_blocking_siblings"],
     ),
     (
-        "privacy: scan raw backslashes instead of the normalized host spelling",
-        PACKAGER,
-        '    scan_text = text.replace("\\\\", "/")',
-        "    scan_text = text",
-        ["test_a_crash_diagnostic_redacts_host_locations_but_keeps_actionable_context"],
-    ),
-    (
-        "privacy: stop redacting a spaced host-path continuation",
-        PACKAGER,
-        '            candidate = word.group().rstrip("\\"\'<>()[].,;:!?")',
-        '            candidate = ""',
-        ["test_crash_diagnostic_redacts_complete_spans_and_keeps_following_prose"],
-    ),
-    (
         "message: name the path but not its length, the ceiling or the overage (WinError 206's own failing)",
         PACKAGER,
         'f"  deepest: {worst.length} UTF-16 units, {worst.length - worst.ceiling} over the "\n'
@@ -796,6 +782,20 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
         ],
     ),
     # ---- #478: the batch continues, and every requested unit is accounted for -------------------
+    (
+        "privacy: preserve a diagnostic containing a host location instead of redacting the whole message",
+        PACKAGER,
+        '    return "[host location redacted]" if discloses_host_location(text) else text',
+        "    return text",
+        ["test_crash_diagnostic_redacts_whole_messages_with_host_locations"],
+    ),
+    (
+        "budget: drop the traceback from an unassessable path-budget failure",
+        PACKAGER,
+        "        self.traceback = _safe_traceback(error) if error is not None else None",
+        "        self.traceback = None",
+        ["test_a_budget_measurement_exception_is_unassessable_for_one_unit_only"],
+    ),
     (
         "#478: re-raise the unit's crash, so the first failure kills the batch again",
         PACKAGER,

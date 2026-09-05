@@ -3662,7 +3662,7 @@ def test_the_batch_budget_failures_name_every_offending_unit(
     assert pkg.main(["--bundle", str(bundle), "--out", str(out)]) == pkg.EXIT_UNIT_FAILED
     message = capsys.readouterr().out
     assert BUDGET_UNIT in message and "Second_Unit" in message
-    assert "Power BI Desktop refuses to open" in message
+    assert "[host location redacted]" in message
 
 
 def test_a_budget_measurement_exception_is_unassessable_for_one_unit_only(
@@ -3674,7 +3674,7 @@ def test_a_budget_measurement_exception_is_unassessable_for_one_unit_only(
 
     def fail_one(bundle_root: Path, unit: str, out_root: Path, **kwargs: object) -> pkg.PathBudget:
         if unit == BATCH_BOOM:
-            raise OSError("budget probe failed")
+            raise ValueError(r"C:\Users\Neutral Canary\budget probe failed")
         return real_budget(bundle_root, unit, out_root, **kwargs)
 
     monkeypatch.setattr(pkg, "path_budget", fail_one)
@@ -3683,6 +3683,12 @@ def test_a_budget_measurement_exception_is_unassessable_for_one_unit_only(
     payload = json.loads(report.read_text(encoding="utf-8"))
     assert [item["unit"] for item in payload["failed"]] == [BATCH_BOOM]
     assert payload["failed"][0]["state"] == "cannot_assess"
+    assert "builtins.ValueError" in payload["failed"][0]["reason"]
+    assert "Neutral Canary" not in payload["failed"][0]["reason"]
+    assert "builtins.ValueError" in (payload["failed"][0]["traceback"] or "")
+    assert "test_package_unit.py" in (payload["failed"][0]["traceback"] or "")
+    assert "fail_one" in (payload["failed"][0]["traceback"] or "")
+    assert "Neutral Canary" not in (payload["failed"][0]["traceback"] or "")
     assert (_out(tmp_path) / BATCH_LATE / pkg.MANIFEST_NAME).is_file()
 
 
@@ -4511,10 +4517,12 @@ def test_one_unit_raising_does_not_stop_the_units_after_it(
 
     assert [item["unit"] for item in payload["failed"]] == [BATCH_BOOM]
     assert payload["failed"][0]["state"] == "unit_failed"
-    assert "shutil.Error" in payload["failed"][0]["reason"] and "WinError 3" in payload["failed"][0]["reason"]
+    assert "shutil.Error" in payload["failed"][0]["reason"]
     assert "shutil.Error" in (payload["failed"][0]["traceback"] or ""), "a crash without its traceback is not a report"
+    assert "WinError 3" not in payload["failed"][0]["reason"]
     assert BATCH_BOOM not in {item["unit"] for item in payload["units"]}, "a failed unit was reported as packaged"
-    assert f"FAIL {BATCH_BOOM}" in summary and "WinError 3" in summary
+    assert f"FAIL {BATCH_BOOM}" in summary
+    assert "WinError 3" not in summary
     assert "UNIT FAILED: 1 unit(s) raised" in summary
     assert f"OK   {BATCH_LATE}" in summary
 
@@ -4555,7 +4563,7 @@ def test_a_crash_diagnostic_redacts_host_locations_but_keeps_actionable_context(
         assert "ordinary failure text" in report
 
 
-def test_crash_diagnostic_redacts_complete_spans_and_keeps_following_prose() -> None:
+def test_crash_diagnostic_redacts_whole_messages_with_host_locations() -> None:
     windows_path = str(PureWindowsPath("C:/", "Users", "Neutral Canary", "secret.csv"))
     unc_path = str(PureWindowsPath("//server/Users", "Neutral Canary", "secret.csv"))
     posix_path = str(PurePosixPath("/", "home", "Neutral Canary", "secret.csv"))
@@ -4564,17 +4572,15 @@ def test_crash_diagnostic_redacts_complete_spans_and_keeps_following_prose() -> 
         f"failure at {windows_path}; retry failed",
         f"{unc_path}; retry failed",
         f"{posix_path} (retry failed)",
+        r"C:\Users\neutral canary",
+        r"C:\Users\Neutral Canary\My Secret File.csv",
+        r"C:\Users\Alice Failed again",
     ):
         safe = pkg._sanitize_diagnostic(text)  # pylint: disable=protected-access
-        assert "Neutral Canary" not in safe
-        assert "Canary" not in safe
-        assert "secret.csv" not in safe
-        assert "retry failed" in safe
-    assert "survived cleanup" in pkg._sanitize_diagnostic(  # pylint: disable=protected-access
-        "staging /tmp/Neutral survived cleanup"
-    )
+        assert safe == "[host location redacted]"
 
     assert pkg._sanitize_diagnostic("/api/v1/Neutral Canary is unavailable") == "/api/v1/Neutral Canary is unavailable"  # pylint: disable=protected-access
+    assert pkg._sanitize_diagnostic("ordinary failure text") == "ordinary failure text"  # pylint: disable=protected-access
 
 
 def test_a_failed_unit_leaves_no_staging_tree_and_no_partial_package(
@@ -4627,7 +4633,7 @@ def test_a_staging_tree_that_survives_cleanup_fails_its_unit_rather_than_being_a
 
     assert code == pkg.EXIT_UNIT_FAILED
     assert [item["unit"] for item in payload["failed"]] == [BATCH_BOOM]
-    assert "survived cleanup" in payload["failed"][0]["reason"]
+    assert "[host location redacted]" in payload["failed"][0]["reason"]
     assert not (out_root / BATCH_BOOM).exists(), "a package was built out of another build's residue"
     assert sorted(item["unit"] for item in payload["units"]) == [name for name in BATCH_UNITS if name != BATCH_BOOM], (
         "the residue refusal stopped the rest of the batch"
@@ -4670,8 +4676,11 @@ def test_a_residue_found_while_a_unit_is_already_failing_does_not_replace_the_ro
     assert code == pkg.EXIT_UNIT_FAILED
     assert [item["unit"] for item in payload["failed"]] == [BATCH_BOOM]
     assert "shutil.Error" in payload["failed"][0]["reason"], "the residue message replaced the root cause"
-    assert "survived cleanup" in (payload["failed"][0]["traceback"] or ""), "the residue was not recorded at all"
-    assert "WARN: staging" in errors and "survived cleanup" in errors
+    assert "[host location redacted]" in (payload["failed"][0]["traceback"] or ""), (
+        "the residue was not recorded at all"
+    )
+    assert "[host location redacted]" in errors
+    assert str(staging) not in errors
     assert (_out(tmp_path) / BATCH_LATE / pkg.MANIFEST_NAME).is_file(), "the unit after the failure was skipped"
 
 

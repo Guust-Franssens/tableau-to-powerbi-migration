@@ -226,7 +226,6 @@ from check_path_ceiling import (  # noqa: E402  # pylint: disable=wrong-import-p
     platform_limits,
     utf16_len,
 )
-import host_paths  # noqa: E402  # pylint: disable=wrong-import-position
 from host_paths import discloses_host_location  # noqa: E402  # pylint: disable=wrong-import-position
 from manifest_scope import (  # noqa: E402  # pylint: disable=wrong-import-position
     ORACLE_MANIFEST_ALLOW,
@@ -478,10 +477,12 @@ class UnassessableInput(PackagingError):
     replaced by one built from input nobody could read.
     """
 
-    def __init__(self, unit: str, reasons: list[str]) -> None:
+    def __init__(self, unit: str, reasons: list[str], error: BaseException | None = None) -> None:
         self.unit, self.reasons = unit, reasons
+        self.traceback = _safe_traceback(error) if error is not None else None
+        safe_reasons = [_sanitize_diagnostic(reason) for reason in reasons]
         super().__init__(
-            f"cannot assess {unit}: " + "; ".join(reasons) + ". Nothing was packaged for it - a package "
+            f"cannot assess {unit}: " + "; ".join(safe_reasons) + ". Nothing was packaged for it - a package "
             "built from input that could not be read would carry a verdict nobody can stand behind."
         )
 
@@ -514,10 +515,11 @@ def _error_label(error: BaseException) -> str:
 
     `type(shutil.Error).__name__` is just `Error`, which names nothing an operator can act on and
     nothing a defect report can be filed against - the customer's failure was `shutil.Error:
-    [WinError 3]`, and the module is the half that says where to look.
+    [WinError 3]`, and the module is the half that says where to look. Builtins are qualified too,
+    so an unassessable `ValueError` retains the same diagnostic shape.
     """
     module = type(error).__module__
-    return type(error).__qualname__ if module in (None, "builtins") else f"{module}.{type(error).__qualname__}"
+    return type(error).__qualname__ if module is None else f"{module}.{type(error).__qualname__}"
 
 
 def _one_line(text: object) -> str:
@@ -528,38 +530,8 @@ def _one_line(text: object) -> str:
 
 
 def _sanitize_diagnostic(text: str) -> str:
-    """Redact host locations while retaining the useful non-path part of a diagnostic.
-
-    The existing containment predicate is deliberately the only path detector. A location may contain
-    spaces, so redacting whitespace-delimited words would leave the tail of a private path behind.
-    """
-    spans: list[tuple[int, int]] = []
-    scan_text = text.replace("\\", "/")
-    for match in host_paths._HOST_LOCATION_RE.finditer(scan_text):  # pylint: disable=protected-access
-        if not discloses_host_location(match.group()):
-            continue
-        end = match.end()
-        continuations = 0
-        while end < len(text) and text[end].isspace():
-            word_start = end
-            while word_start < len(text) and text[word_start].isspace():
-                word_start += 1
-            word = re.match(r"\S+", text[word_start:])
-            if word is None:
-                break
-            candidate = word.group().rstrip("\"'<>()[].,;:!?")
-            if (
-                not candidate
-                or (continuations and not any(separator in candidate for separator in _NAME_SEPARATORS))
-                or (not continuations and not candidate[0].isupper())
-            ):
-                break
-            end = word_start + len(candidate)
-            continuations += 1
-        spans.append((match.start(), end))
-    for start, end in reversed(spans):
-        text = text[:start] + "[host location redacted]" + text[end:]
-    return text
+    """Redact the whole diagnostic when it contains an absolute host location."""
+    return "[host location redacted]" if discloses_host_location(text) else text
 
 
 def _safe_frame_name(filename: str) -> str:
@@ -3206,7 +3178,10 @@ def _refuse_surviving_staging(unit: str, staging: Path) -> None:
     in_flight = sys.exception()
     if in_flight is not None:
         in_flight.add_note(f"staging {staging} survived cleanup ({left}); the next run of {unit} will refuse it")
-        print(f"WARN: staging {staging} survived cleanup ({left})", file=sys.stderr)
+        print(
+            _sanitize_diagnostic(f"WARN: staging {staging} survived cleanup ({left})"),
+            file=sys.stderr,
+        )
         return
     raise PackagingError(
         f"packaged {unit}, but its staging directory {staging} could not be removed ({left}). The package "
@@ -3849,10 +3824,10 @@ def _package_each(  # pylint: disable=too-many-arguments,too-many-positional-arg
                 )
             )
         except PackageEditsRefused as refusal:
-            print(str(refusal), file=sys.stderr)
+            print(_sanitize_diagnostic(str(refusal)), file=sys.stderr)
             refused.append(refusal)
         except PackagingError as failure:
-            print(str(failure), file=sys.stderr)
+            print(_sanitize_diagnostic(str(failure)), file=sys.stderr)
             if failed is None:
                 raise
             failure.unit = failure.unit or unit
@@ -3956,7 +3931,13 @@ def _measure_unit_budgets(
             failed.append(error)
             continue
         except Exception as error:  # pylint: disable=broad-exception-caught
-            failed.append(UnassessableInput(unit, [f"path budget could not be measured: {_one_line(error)}"]))
+            failed.append(
+                UnassessableInput(
+                    unit,
+                    [f"path budget could not be measured: {_error_label(error)}: {_one_line(error)}"],
+                    error,
+                )
+            )
             continue
         budgets.append(budget)
         if budget.refused:
@@ -4051,7 +4032,7 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
             {
                 "unit": _failed_unit(failure),
                 "state": "cannot_assess" if isinstance(failure, UnassessableInput) else "unit_failed",
-                "reason": str(failure),
+                "reason": _sanitize_diagnostic(str(failure)),
                 # Only a crash carries one: the modelled refusals ARE their reason, while "a unit
                 # raised" without the traceback is not a defect report anyone can act on (#478).
                 "traceback": getattr(failure, "traceback", None),
