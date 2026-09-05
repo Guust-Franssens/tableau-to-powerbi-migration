@@ -149,6 +149,7 @@ OUTPUT_ARTIFACTS = (
     "assets/harvested-datasource.tdsx",
     "parse-sweep.json",
     "parse-sweep.md",
+    "parse-sweep-totals.json",
 )
 
 # The remedy sentence, kept separate from the diagnosis so another tool can reuse the guard without
@@ -989,33 +990,81 @@ def parse_theirs(path: Path, scripts: Path) -> dict[str, Any]:
         return {"ok": False, "error": f"harness: {type(exc).__name__}: {exc}"}
 
 
+# Sentinel carried in the `workbook_project` slot of an edge tuple when the workbook end could not
+# be resolved to a SINGLE identity: the dependency's own `workbook_name` matched more than one real
+# workbook (different projects, no LUID to pick between them). Never a real project name - a null
+# byte cannot appear in Tableau project names - so it can never collide with a genuine project
+# called, say, "Ambiguous" (review of the #483 follow-up: "must not fuzzy-match... or guess").
+_AMBIGUOUS_WORKBOOK = "\x00AMBIGUOUS"
+
+
+def _normalized_name(name: str | None) -> str:
+    """Same equivalence the SQL fallback joins already use (`LOWER(TRIM(x))`), done in Python so the
+    workbook-name index below and the SQL text agree on what counts as "the same name"."""
+    return (name or "").strip().casefold()
+
+
 def dependency_edges(con: sqlite3.Connection) -> list[tuple[str, str, str, str, str]]:
     """Every `(workbook_luid, workbook_name, workbook_project, datasource_luid, datasource_name)`
     binding on the site.
 
-    Same join as `dependency_datasources` — LUID first, normalized name as the fallback an
-    unresolved survey edge needs — but it keeps the WORKBOOK end too, which is the end that matters
-    once a datasource has failed to download. `workbook_project` is carried alongside the LUID so
-    `orphaned_dependents()` has a project-plus-name identity to fall back to WITHOUT inventing one
-    (issue #483 follow-up): it is a plain `LEFT JOIN` on data this query already touches, not a new
-    table or a new identity abstraction.
+    The workbook end used to be an INNER JOIN on `workbook.luid = dependency.workbook_luid` with no
+    fallback at all - so a dependency row surveyed with a blank/unresolved `workbook_luid` (but a
+    real `workbook_name`) was dropped from the result BEFORE `orphaned_dependents()` ever saw it,
+    which defeated its documented project-plus-name/`UNIDENTIFIED-N` fallback entirely: there was no
+    row left to apply it to (review of the #483 follow-up, "the real query returns `edges=[]`").
+
+    Resolution order, same as the identity ladder `orphaned_dependents()` already implements:
+    1. exact `workbook_luid` match against the `workbook` table - unchanged, still wins outright;
+    2. else an EXACT (never fuzzy) match of `dependency.workbook_name` against `workbook.name`:
+       unique -> resolved to that workbook's own LUID/project; more than one workbook shares the
+       name (no LUID to pick between them) -> `_AMBIGUOUS_WORKBOOK`, an explicit "cannot tell which"
+       marker, never a guess at either one;
+    3. else the dependency row is still returned - workbook_luid/project both empty - so the caller
+       can report it as unidentified rather than the row silently vanishing.
     """
-    return list(
+    workbook_rows = list(
         con.execute(
             """
-            SELECT DISTINCT workbook.luid, workbook.name, project.name, datasource.luid, datasource.name
-            FROM dependency
-            JOIN workbook ON workbook.luid = dependency.workbook_luid
-            JOIN datasource ON dependency.datasource_luid = datasource.luid
-                OR (
-                    COALESCE(dependency.datasource_luid, '') = ''
-                    AND LOWER(TRIM(dependency.datasource_name)) = LOWER(TRIM(datasource.name))
-                )
+            SELECT workbook.luid, workbook.name, project.name
+            FROM workbook
             LEFT JOIN project ON project.luid = workbook.project_luid
-            ORDER BY datasource.name, workbook.name
             """
         )
     )
+    by_luid = {luid: (name or "", project or "") for luid, name, project in workbook_rows if luid}
+    by_name: dict[str, list[tuple[str, str, str]]] = {}
+    for luid, name, project in workbook_rows:
+        by_name.setdefault(_normalized_name(name), []).append((luid, name or "", project or ""))
+
+    raw = con.execute(
+        """
+        SELECT DISTINCT dependency.workbook_luid, dependency.workbook_name, datasource.luid, datasource.name
+        FROM dependency
+        JOIN datasource ON dependency.datasource_luid = datasource.luid
+            OR (
+                COALESCE(dependency.datasource_luid, '') = ''
+                AND LOWER(TRIM(dependency.datasource_name)) = LOWER(TRIM(datasource.name))
+            )
+        ORDER BY datasource.name, dependency.workbook_name
+        """
+    )
+    edges: list[tuple[str, str, str, str, str]] = []
+    for workbook_luid, dep_workbook_name, datasource_luid, datasource_name in raw:
+        resolved = by_luid.get(workbook_luid) if workbook_luid else None
+        if resolved:
+            name, project = resolved
+            edges.append((workbook_luid, name or dep_workbook_name or "", project, datasource_luid, datasource_name))
+            continue
+        candidates = by_name.get(_normalized_name(dep_workbook_name), []) if dep_workbook_name else []
+        if len(candidates) == 1:
+            luid, name, project = candidates[0]
+            edges.append((luid, name, project, datasource_luid, datasource_name))
+        elif len(candidates) > 1:
+            edges.append(("", dep_workbook_name or "", _AMBIGUOUS_WORKBOOK, datasource_luid, datasource_name))
+        else:
+            edges.append(("", dep_workbook_name or "", "", datasource_luid, datasource_name))
+    return edges
 
 
 def orphaned_dependents(
@@ -1031,13 +1080,14 @@ def orphaned_dependents(
     left out: it is already in the never-landed list and is not about to be converted.
 
     Each workbook entry carries its own IDENTITY beside its display name, never a bare name alone
-    (issue #483, and its follow-up review): two same-named workbooks in different projects must stay
-    two entries all the way to the human/machine output, not just inside this function's internal
-    grouping. The identity is, in order: the workbook LUID (the normal case — `dependency_edges`
-    resolves the workbook end by LUID with no fallback, so this is blank only for a hand-built edge);
-    else a project-qualified `"<project>::<name>"` built from data `dependency_edges` already
-    carries; else an explicit `UNIDENTIFIED-N` marker so an edge that resolves neither is still
-    reported instead of being silently dropped or coalesced with an unrelated one.
+    (issue #483, and its follow-up reviews): two same-named workbooks in different projects must
+    stay two entries all the way to the human/machine output, not just inside this function's
+    internal grouping. The identity is, in order: the workbook LUID (`dependency_edges` now resolves
+    this via an exact name match too, not just the survey's own LUID); else a project-qualified
+    `"<project>::<name>"` built from data `dependency_edges` already carries; else, when the name
+    matched more than one real workbook and there is no LUID to pick between them, an explicit
+    `"AMBIGUOUS::<name>"`; else an explicit `UNIDENTIFIED-N` marker so an edge that resolves nothing
+    at all is still reported instead of being silently dropped or coalesced with an unrelated one.
     """
     missing_ids = {id(r) for r in never_downloaded(results)}
     failed_datasources = {
@@ -1053,11 +1103,20 @@ def orphaned_dependents(
     by_datasource: dict[str, dict[str, tuple[str, str]]] = {}
     unidentified = 0
     for workbook_luid, workbook_name, workbook_project, datasource_luid, datasource_name in edges:
-        if datasource_luid not in failed_datasources or workbook_luid not in landed_workbooks:
+        if datasource_luid not in failed_datasources:
             continue
-        name = workbook_name or landed_workbooks[workbook_luid]
+        # A RESOLVED luid must still have landed - a workbook that itself failed to download is
+        # already in the never-landed list and is not about to be converted. An UNRESOLVED identity
+        # (blank luid: name-only, or genuinely ambiguous) has no real key to check `landed_workbooks`
+        # against at all, so it is reported unconditionally rather than dropped a second time - the
+        # exact failure mode this follow-up exists to close.
+        if workbook_luid and workbook_luid not in landed_workbooks:
+            continue
+        name = workbook_name or landed_workbooks.get(workbook_luid, "?")
         if workbook_luid:
             identity = workbook_luid
+        elif workbook_project == _AMBIGUOUS_WORKBOOK:
+            identity = f"AMBIGUOUS::{name}"
         elif workbook_project:
             identity = f"{workbook_project}::{name}"
         else:

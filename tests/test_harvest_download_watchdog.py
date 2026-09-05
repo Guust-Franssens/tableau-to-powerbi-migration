@@ -360,7 +360,7 @@ def test_the_cli_warns_when_the_stall_deadline_undercuts_the_fetcher(
         CREATE TABLE project (luid TEXT PRIMARY KEY, name TEXT);
         CREATE TABLE workbook (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
         CREATE TABLE datasource (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
-        CREATE TABLE dependency (workbook_luid TEXT, datasource_luid TEXT, datasource_name TEXT);
+        CREATE TABLE dependency (workbook_luid TEXT, workbook_name TEXT, datasource_luid TEXT, datasource_name TEXT);
         INSERT INTO workbook VALUES ('wb-ia', 'IA Redemptions', 'p');
         """
     )
@@ -954,7 +954,7 @@ def test_main_forwards_the_operator_s_timeouts_to_every_download(
         CREATE TABLE project (luid TEXT PRIMARY KEY, name TEXT);
         CREATE TABLE workbook (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
         CREATE TABLE datasource (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
-        CREATE TABLE dependency (workbook_luid TEXT, datasource_luid TEXT, datasource_name TEXT);
+        CREATE TABLE dependency (workbook_luid TEXT, workbook_name TEXT, datasource_luid TEXT, datasource_name TEXT);
         INSERT INTO workbook VALUES ('wb-ia', 'IA Redemptions', 'p');
         """
     )
@@ -1000,11 +1000,11 @@ def estate_with_a_binding(path: Path) -> Path:
         CREATE TABLE project (luid TEXT PRIMARY KEY, name TEXT);
         CREATE TABLE workbook (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
         CREATE TABLE datasource (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
-        CREATE TABLE dependency (workbook_luid TEXT, datasource_luid TEXT, datasource_name TEXT);
+        CREATE TABLE dependency (workbook_luid TEXT, workbook_name TEXT, datasource_luid TEXT, datasource_name TEXT);
         INSERT INTO workbook VALUES ('wb-ifc', 'IA IFC Sessions', 'p');
         INSERT INTO workbook VALUES ('wb-solo', 'Standalone', 'p');
         INSERT INTO datasource VALUES ('ds-sessions', 'DS_Sessions_by_Product', 'p');
-        INSERT INTO dependency VALUES ('wb-ifc', 'ds-sessions', 'DS_Sessions_by_Product');
+        INSERT INTO dependency VALUES ('wb-ifc', 'IA IFC Sessions', 'ds-sessions', 'DS_Sessions_by_Product');
         """
     )
     con.commit()
@@ -1070,7 +1070,7 @@ def test_an_edge_resolved_only_by_NAME_still_finds_the_dependent(tmp_path: Path)
     db = estate_with_a_binding(tmp_path / "estate.db")
     con = sqlite3.connect(db)
     con.execute("DELETE FROM dependency")
-    con.execute("INSERT INTO dependency VALUES ('wb-ifc', '', ' ds_sessions_by_product ')")
+    con.execute("INSERT INTO dependency VALUES ('wb-ifc', '', '', ' ds_sessions_by_product ')")
     con.commit()
     con.close()
     assert harvest.orphaned_dependents(binding_rows(), edges_from(db)) == [
@@ -1107,14 +1107,14 @@ def estate_with_two_same_named_workbooks(path: Path) -> Path:
         CREATE TABLE project (luid TEXT PRIMARY KEY, name TEXT);
         CREATE TABLE workbook (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
         CREATE TABLE datasource (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
-        CREATE TABLE dependency (workbook_luid TEXT, datasource_luid TEXT, datasource_name TEXT);
+        CREATE TABLE dependency (workbook_luid TEXT, workbook_name TEXT, datasource_luid TEXT, datasource_name TEXT);
         INSERT INTO project VALUES ('proj-a', 'Region A');
         INSERT INTO project VALUES ('proj-b', 'Region B');
         INSERT INTO workbook VALUES ('wb-a', 'Revenue Dashboard', 'proj-a');
         INSERT INTO workbook VALUES ('wb-b', 'Revenue Dashboard', 'proj-b');
         INSERT INTO datasource VALUES ('ds-sessions', 'DS_Sessions_by_Product', 'proj-a');
-        INSERT INTO dependency VALUES ('wb-a', 'ds-sessions', 'DS_Sessions_by_Product');
-        INSERT INTO dependency VALUES ('wb-b', 'ds-sessions', 'DS_Sessions_by_Product');
+        INSERT INTO dependency VALUES ('wb-a', 'Revenue Dashboard', 'ds-sessions', 'DS_Sessions_by_Product');
+        INSERT INTO dependency VALUES ('wb-b', 'Revenue Dashboard', 'ds-sessions', 'DS_Sessions_by_Product');
         """
     )
     con.commit()
@@ -1175,10 +1175,12 @@ def test_same_named_orphans_are_distinguishable_in_the_markdown_and_log(tmp_path
 
 
 def test_missing_luid_falls_back_to_project_plus_name_identity() -> None:
-    """When an edge cannot resolve a workbook LUID, the strongest identity left is the
-    project-qualified name -- never a bare display name, which is the exact collision #483 exists
-    to close. Built by hand: a real site survey never leaves `dependency_edges`' workbook LUID
-    blank (no fallback join on that side), so this exercises the defensive branch directly.
+    """When an edge cannot resolve a workbook LUID at all (no matching name either, so
+    `dependency_edges` cannot recover a project from the `workbook` table), the strongest identity
+    left is whatever project-qualified name the edge itself carries -- never a bare display name,
+    which is the exact collision #483 exists to close. Exercises `orphaned_dependents()` directly
+    with a hand-built edge; `test_an_unresolved_luid_is_preserved_and_resolved_by_a_unique_name_match`
+    below exercises the real SQL path that produces an edge like this in the first place.
     """
     results = [
         {"name": "DS_Sessions_by_Product", "kind": "datasource", "luid": "ds-sessions", "download_error": "500"},
@@ -1202,6 +1204,119 @@ def test_a_truly_unidentifiable_workbook_is_reported_not_dropped() -> None:
     identity, name = orphans[0][1][0]
     assert identity.startswith("UNIDENTIFIED-"), identity
     assert name == "Mystery Workbook"
+
+
+def estate_with_an_unresolved_workbook_luid(path: Path) -> Path:
+    """The dependency row carries the workbook's real NAME but a blank/unresolved `workbook_luid` --
+    the exact shape a real survey can produce when its dependency listing could not resolve the
+    workbook end. `IA IFC Sessions` itself exists, uniquely, in the workbook table."""
+    con = sqlite3.connect(path)
+    con.executescript(
+        """
+        CREATE TABLE project (luid TEXT PRIMARY KEY, name TEXT);
+        CREATE TABLE workbook (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        CREATE TABLE datasource (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        CREATE TABLE dependency (workbook_luid TEXT, workbook_name TEXT, datasource_luid TEXT, datasource_name TEXT);
+        INSERT INTO project VALUES ('proj-ifc', 'IFC');
+        INSERT INTO workbook VALUES ('wb-ifc', 'IA IFC Sessions', 'proj-ifc');
+        INSERT INTO datasource VALUES ('ds-sessions', 'DS_Sessions_by_Product', 'proj-ifc');
+        INSERT INTO dependency VALUES ('', 'IA IFC Sessions', 'ds-sessions', 'DS_Sessions_by_Product');
+        """
+    )
+    con.commit()
+    con.close()
+    return path
+
+
+def test_an_unresolved_luid_is_preserved_and_resolved_by_a_unique_name_match(tmp_path: Path) -> None:
+    """Negative control for the blocking finding: before this fix, `dependency_edges()`'s INNER JOIN
+    on `workbook.luid` dropped this row outright, so `orphaned_dependents()` never had a chance to
+    fall back to anything ("the real query returns `edges=[]`"). The workbook's NAME uniquely
+    identifies exactly one real workbook, so its real LUID is recovered rather than the edge being
+    reported as unidentified -- exact LUID still wins when present; this is the "may resolve" rung.
+    """
+    db = estate_with_an_unresolved_workbook_luid(tmp_path / "estate.db")
+    edges = edges_from(db)
+    assert edges, "the dependency row must survive the join, never vanish"
+    rows = [
+        {"name": "DS_Sessions_by_Product", "kind": "datasource", "luid": "ds-sessions", "download_error": "500"},
+        {
+            "name": "IA IFC Sessions",
+            "kind": "workbook",
+            "luid": "wb-ifc",
+            "ours": {"ok": True},
+            "theirs": {"ok": True},
+        },
+    ]
+    orphans = harvest.orphaned_dependents(rows, edges)
+    assert orphans == [("DS_Sessions_by_Product", [("wb-ifc", "IA IFC Sessions")])]
+
+
+def estate_with_an_unresolved_luid_matching_two_same_named_workbooks(path: Path) -> Path:
+    """The dependency row names 'Revenue Dashboard' but carries no LUID; TWO different, real
+    workbooks share that exact name in different projects, so the name alone cannot say which one
+    it means."""
+    con = sqlite3.connect(path)
+    con.executescript(
+        """
+        CREATE TABLE project (luid TEXT PRIMARY KEY, name TEXT);
+        CREATE TABLE workbook (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        CREATE TABLE datasource (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        CREATE TABLE dependency (workbook_luid TEXT, workbook_name TEXT, datasource_luid TEXT, datasource_name TEXT);
+        INSERT INTO project VALUES ('proj-a', 'Region A');
+        INSERT INTO project VALUES ('proj-b', 'Region B');
+        INSERT INTO workbook VALUES ('wb-a', 'Revenue Dashboard', 'proj-a');
+        INSERT INTO workbook VALUES ('wb-b', 'Revenue Dashboard', 'proj-b');
+        INSERT INTO datasource VALUES ('ds-sessions', 'DS_Sessions_by_Product', 'proj-a');
+        INSERT INTO dependency VALUES ('', 'Revenue Dashboard', 'ds-sessions', 'DS_Sessions_by_Product');
+        """
+    )
+    con.commit()
+    con.close()
+    return path
+
+
+def test_an_unresolved_luid_matching_two_workbooks_is_reported_ambiguous_not_guessed(tmp_path: Path) -> None:
+    """Same-name ambiguity control: two DIFFERENT real workbooks share the name, and the edge has no
+    LUID to pick between them. The harvester must not silently choose one, must not collapse them
+    into a single entry, and must not drop the row -- it must say, explicitly, that it cannot tell.
+    """
+    db = estate_with_an_unresolved_luid_matching_two_same_named_workbooks(tmp_path / "estate.db")
+    edges = edges_from(db)
+    assert edges, "an ambiguous edge must still be preserved, never silently dropped"
+    rows = [
+        {"name": "DS_Sessions_by_Product", "kind": "datasource", "luid": "ds-sessions", "download_error": "500"},
+        {"name": "Revenue Dashboard", "kind": "workbook", "luid": "wb-a", "ours": {"ok": True}, "theirs": {"ok": True}},
+        {"name": "Revenue Dashboard", "kind": "workbook", "luid": "wb-b", "ours": {"ok": True}, "theirs": {"ok": True}},
+    ]
+    orphans = harvest.orphaned_dependents(rows, edges)
+    assert len(orphans) == 1
+    identities = [identity for identity, _ in orphans[0][1]]
+    assert identities == ["AMBIGUOUS::Revenue Dashboard"], identities
+    assert "wb-a" not in identities and "wb-b" not in identities, "must not guess either real workbook"
+
+
+def test_a_dependency_row_with_no_luid_and_no_name_match_still_survives_the_join(tmp_path: Path) -> None:
+    """Third rung of the same ladder: the workbook LUID is blank AND the name matches nothing in the
+    `workbook` table at all. Before this fix the row vanished at the SQL layer regardless of which
+    rung applied; it must still come back from `dependency_edges` (with an empty LUID/project) so
+    `orphaned_dependents()` can apply its own `UNIDENTIFIED-N` fallback."""
+    path = tmp_path / "estate.db"
+    con = sqlite3.connect(path)
+    con.executescript(
+        """
+        CREATE TABLE project (luid TEXT PRIMARY KEY, name TEXT);
+        CREATE TABLE workbook (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        CREATE TABLE datasource (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        CREATE TABLE dependency (workbook_luid TEXT, workbook_name TEXT, datasource_luid TEXT, datasource_name TEXT);
+        INSERT INTO datasource VALUES ('ds-sessions', 'DS_Sessions_by_Product', NULL);
+        INSERT INTO dependency VALUES ('', 'Mystery Workbook', 'ds-sessions', 'DS_Sessions_by_Product');
+        """
+    )
+    con.commit()
+    con.close()
+    edges = edges_from(path)
+    assert edges == [("", "Mystery Workbook", "", "ds-sessions", "DS_Sessions_by_Product")]
 
 
 def test_an_estate_db_without_a_dependency_table_still_harvests(
@@ -1279,7 +1394,7 @@ def test_a_failed_download_reaches_parse_sweep_md_through_main(monkeypatch: pyte
         CREATE TABLE project (luid TEXT PRIMARY KEY, name TEXT);
         CREATE TABLE workbook (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
         CREATE TABLE datasource (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
-        CREATE TABLE dependency (workbook_luid TEXT, datasource_luid TEXT, datasource_name TEXT);
+        CREATE TABLE dependency (workbook_luid TEXT, workbook_name TEXT, datasource_luid TEXT, datasource_name TEXT);
         INSERT INTO workbook VALUES ('wb-ia', 'IA Redemptions by Campaign Report', 'p');
         """
     )
@@ -1373,7 +1488,7 @@ def test_a_totally_failed_harvest_exits_nonzero_through_main(monkeypatch: pytest
         CREATE TABLE project (luid TEXT PRIMARY KEY, name TEXT);
         CREATE TABLE workbook (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
         CREATE TABLE datasource (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
-        CREATE TABLE dependency (workbook_luid TEXT, datasource_luid TEXT, datasource_name TEXT);
+        CREATE TABLE dependency (workbook_luid TEXT, workbook_name TEXT, datasource_luid TEXT, datasource_name TEXT);
         INSERT INTO workbook VALUES ('wb-ia', 'IA Redemptions by Campaign Report', 'p');
         """
     )
@@ -1517,7 +1632,7 @@ def test_the_cli_warns_when_the_ceiling_undercuts_the_fetchers_retry_budget(
         CREATE TABLE project (luid TEXT PRIMARY KEY, name TEXT);
         CREATE TABLE workbook (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
         CREATE TABLE datasource (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
-        CREATE TABLE dependency (workbook_luid TEXT, datasource_luid TEXT, datasource_name TEXT);
+        CREATE TABLE dependency (workbook_luid TEXT, workbook_name TEXT, datasource_luid TEXT, datasource_name TEXT);
         INSERT INTO workbook VALUES ('wb-ia', 'IA Redemptions', 'p');
         """
     )

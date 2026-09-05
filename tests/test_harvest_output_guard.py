@@ -19,7 +19,9 @@ No customer data is used or created anywhere below: every fixture is an empty te
 from __future__ import annotations
 
 import ctypes
+import inspect
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -246,8 +248,22 @@ def test_guard_checks_every_artifact_not_just_the_downloads(repo: Path) -> None:
     """A rule covering only `assets/` still leaks the sweep, which lists every workbook name."""
     (repo / ".gitignore").write_text("/_partial/assets/\n", encoding="utf-8")
     unignored = h.unignored_output_paths(repo / "_partial")
-    assert [p.name for p in unignored] == ["parse-sweep.json", "parse-sweep.md"]
+    assert [p.name for p in unignored] == ["parse-sweep.json", "parse-sweep.md", "parse-sweep-totals.json"]
     assert h.refuse_unignored_output(repo / "_partial", allow_unignored=False) is True
+
+
+def test_every_out_slash_literal_write_target_is_a_protected_artifact() -> None:
+    """`parse-sweep-totals.json` shipped written by `summarise()` but absent from `OUTPUT_ARTIFACTS`,
+    so the guard above never saw it and it could land unignored (review of the #483 follow-up). Scan
+    the SOURCE for every literal `(out / "<name>").write_text(...)` call and assert each one is a
+    name the guard actually checks - so the next new sweep file fails HERE instead of shipping silently
+    unguarded, without needing a mutation harness to catch it.
+    """
+    source = inspect.getsource(h)
+    literal_targets = re.findall(r'\(out\s*/\s*"([^"]+)"\)\.write_text\(', source)
+    assert literal_targets, 'no `(out / "...").write_text(...)` calls found - the scan itself is broken'
+    missing = [name for name in literal_targets if name not in h.OUTPUT_ARTIFACTS]
+    assert not missing, f"written but not in OUTPUT_ARTIFACTS: {missing}"
 
 
 def test_override_flag_downgrades_the_refusal_to_a_warning(repo: Path, caplog) -> None:
