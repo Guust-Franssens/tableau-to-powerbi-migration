@@ -197,6 +197,11 @@ def destination_is_safe(root: Path, rel: Path, *, writing: bool) -> bool:
         return False
     root_resolved = root.resolve()
     target = root / rel
+    current = root
+    for part in rel.parent.parts:
+        current /= part
+        if current.is_symlink():
+            return False
     if not _is_relative_to(target.parent.resolve(), root_resolved):
         return False
     if writing and target.is_symlink():
