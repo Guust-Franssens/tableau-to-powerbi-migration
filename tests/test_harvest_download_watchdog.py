@@ -20,6 +20,7 @@ import sys
 import threading
 import time
 import tokenize
+from concurrent.futures import Future
 from pathlib import Path
 
 import pytest
@@ -359,7 +360,7 @@ def test_the_cli_warns_when_the_stall_deadline_undercuts_the_fetcher(
         CREATE TABLE project (luid TEXT PRIMARY KEY, name TEXT);
         CREATE TABLE workbook (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
         CREATE TABLE datasource (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
-        CREATE TABLE dependency (workbook_luid TEXT, datasource_luid TEXT, datasource_name TEXT);
+        CREATE TABLE dependency (workbook_luid TEXT, workbook_name TEXT, datasource_luid TEXT, datasource_name TEXT);
         INSERT INTO workbook VALUES ('wb-ia', 'IA Redemptions', 'p');
         """
     )
@@ -718,7 +719,10 @@ def test_the_header_arithmetic_closes(tmp_path: Path) -> None:
     assert f"never downloaded {len(harvest.never_downloaded(rows))}" in text
     closure = next(line for line in text.splitlines() if line.startswith("Disjoint buckets"))
     assert closure.rstrip(".").endswith(f"= {len(rows)}"), closure
-    assert "2 parsed by both + 1 ours only + 1 his only + 1 both parsers + 3 never downloaded" in closure
+    assert (
+        "2 parsed by both + 1 ours only + 1 his only + 1 both parsers + 0 invalid/indeterminate + 3 never downloaded"
+        in closure
+    )
 
 
 def test_the_parser_buckets_ignore_rows_that_never_reached_a_parser(tmp_path: Path) -> None:
@@ -741,6 +745,172 @@ def test_a_clean_sweep_still_says_none(tmp_path: Path) -> None:
     section = text.split("## Downloads that never landed", 1)[1]
     assert section.lstrip().startswith("_none_")
     assert "never downloaded 0" in text
+
+
+# --- issue #483: an `ok` that is not exactly `true`/`false` must not enter no bucket, or a false one
+
+
+def rows_with_ok(ours_ok: object, theirs_ok: object) -> list[dict]:
+    """One asset that DID download, with the given (possibly malformed) `ok` on each side."""
+    return [
+        {
+            "name": "Weird Verdict",
+            "kind": "workbook",
+            "luid": "wb-weird",
+            "ours": {"ok": ours_ok},
+            "theirs": {"ok": theirs_ok},
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "ours_ok",
+    [None, "true", "yes", 1, 0, [], ["partial"], {}],
+    ids=["none", "string-true", "string-yes", "int-1", "int-0", "empty-list", "list", "dict"],
+)
+def test_a_malformed_ok_is_invalid_not_a_silent_success_or_failure(tmp_path: Path, ours_ok: object) -> None:
+    """A truthy non-bool `ok` used to slip into `both_ok`; a falsy one used to slip past `is False`.
+
+    Neither is a real verdict. Both must land in the invalid/indeterminate bucket and nowhere else.
+    """
+    rows = rows_with_ok(ours_ok, True)
+    assert harvest.indeterminate_parser_outcomes(rows) == rows
+    text = harvest.summarise(rows, tmp_path)
+    assert "invalid/indeterminate outcome 1." in text
+    assert "both parsed 0" in text.splitlines()[2]
+    assert "Weird Verdict" in text.split("## Invalid/indeterminate parser outcome", 1)[1]
+
+
+def test_ok_key_missing_from_an_existing_ours_dict_is_invalid(tmp_path: Path) -> None:
+    """`{"ours": {}}` (no `ok` key at all) is a downloaded, parsed row with an incomplete verdict --
+    distinct from a row with no `ours` key at all, which `never_downloaded()` already owns.
+    """
+    rows = [{"name": "Weird Verdict", "kind": "workbook", "luid": "wb-weird", "ours": {}, "theirs": {"ok": True}}]
+    assert harvest.indeterminate_parser_outcomes(rows) == rows
+    assert harvest.never_downloaded(rows) == [], "this row DID download and reach both parsers"
+    text = harvest.summarise(rows, tmp_path)
+    assert "invalid/indeterminate outcome 1." in text
+
+
+def test_the_reproduction_both_sides_none_used_to_enter_no_bucket(tmp_path: Path) -> None:
+    """The issue's own repro: total 1, every bucket 0, and the closure never caught it."""
+    rows = rows_with_ok(None, None)
+    text = harvest.summarise(rows, tmp_path)
+    closure = next(line for line in text.splitlines() if line.startswith("Disjoint buckets"))
+    assert closure.rstrip(".").endswith("= 1"), closure
+    assert (
+        "0 parsed by both + 0 ours only + 0 his only + 0 both parsers + 1 invalid/indeterminate + 0 never downloaded"
+        in closure
+    )
+
+
+def test_a_valid_boolean_ok_is_never_misclassified_as_invalid(tmp_path: Path) -> None:
+    """`True`/`False` themselves must not trip the new check -- only non-booleans should."""
+    assert harvest.indeterminate_parser_outcomes(rows_with_ok(True, True)) == []
+    assert harvest.indeterminate_parser_outcomes(rows_with_ok(False, False)) == []
+    assert harvest.indeterminate_parser_outcomes(rows_with_ok(True, False)) == []
+
+
+def test_an_invalid_outcome_is_not_a_clean_exit(tmp_path: Path) -> None:
+    """The whole point: it must not exit 0 as a complete sweep."""
+    rows = sweep_rows_all_ok_plus_one_invalid()
+    assert harvest.sweep_exit_code(rows) == harvest.EXIT_PARTIAL
+
+
+def sweep_rows_all_ok_plus_one_invalid() -> list[dict]:
+    return [
+        {"name": "Fine A", "kind": "workbook", "ours": {"ok": True}, "theirs": {"ok": True}},
+        {"name": "Fine B", "kind": "workbook", "ours": {"ok": True}, "theirs": {"ok": True}},
+        {"name": "Weird", "kind": "workbook", "ours": {"ok": "yes"}, "theirs": {"ok": True}},
+    ]
+
+
+def test_main_exits_partial_not_ok_when_an_asset_has_a_malformed_ok(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """End to end: a real parser bug that returns a non-boolean `ok` must not read as a clean run."""
+    db = tmp_path / "estate.db"
+    con = sqlite3.connect(db)
+    con.executescript(
+        """
+        CREATE TABLE project (luid TEXT PRIMARY KEY, name TEXT);
+        CREATE TABLE workbook (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        CREATE TABLE datasource (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        INSERT INTO workbook VALUES ('wb-ia', 'IA Redemptions', 'p');
+        """
+    )
+    con.commit()
+    con.close()
+    out = tmp_path / "_sweep"
+    monkeypatch.setattr(harvest, "engine_scripts_dir", lambda: tmp_path / "engine")
+    monkeypatch.setattr(harvest, "resolve_env", lambda path: {"TABLEAU_SERVER_URL": "https://example.invalid"})
+    monkeypatch.setattr(harvest, "require", lambda env: None)
+    monkeypatch.setattr(harvest, "download", landing_download)
+    monkeypatch.setattr(harvest, "parse_asset", lambda path, scripts: ({"ok": "yes"}, {"ok": True}))
+    monkeypatch.setattr(
+        sys, "argv", ["harvest_estate_assets.py", "--out", str(out), "--db", str(db), "--allow-unignored-out"]
+    )
+    assert harvest.main() == harvest.EXIT_PARTIAL, "a malformed ok must not read as a complete sweep"
+    assert "invalid/indeterminate outcome 1." in (out / "parse-sweep.md").read_text(encoding="utf-8")
+
+
+# --- blind-review follow-up: the PER-ASSET parse line must use the same strict verdict -----------
+
+
+def _finished_future(result: tuple[dict, dict]) -> Future:
+    future: Future = Future()
+    future.set_result(result)
+    return future
+
+
+def test_record_parse_never_prints_ours_equals_ok_for_a_malformed_truthy_value(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A truthy-but-non-boolean `ok` (`"true"`, `1`, a list, a dict) used to print `ours=ok` here,
+    even though the SAME row was correctly routed to the invalid/indeterminate bucket by
+    `summarise()`. The two must never disagree about one row (blind-review follow-up to #483).
+    """
+    results: list[dict] = []
+    with caplog.at_level("INFO", logger="harvest_estate_assets"):
+        harvest.record_parse(
+            (1, {"name": "Weird"}, _finished_future(({"ok": "true"}, {"ok": True}))), results, 1, time.perf_counter()
+        )
+    messages = "\n".join(r.getMessage() for r in caplog.records)
+    assert "ours=ok" not in messages, messages
+    assert "ours=INVALID" in messages, messages
+    assert "his=ok" in messages, messages
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [None, "true", "yes", 1, 0, [], ["partial"], {}],
+    ids=["none", "string-true", "string-yes", "int-1", "int-0", "empty-list", "list", "dict"],
+)
+def test_record_parse_labels_every_malformed_ok_shape_as_invalid(
+    caplog: pytest.LogCaptureFixture, malformed: object
+) -> None:
+    """Every shape the summary-level test covers must ALSO be caught at the per-asset log line."""
+    results: list[dict] = []
+    with caplog.at_level("INFO", logger="harvest_estate_assets"):
+        harvest.record_parse(
+            (1, {"name": "Weird"}, _finished_future(({"ok": malformed}, {"ok": True}))), results, 1, time.perf_counter()
+        )
+    messages = "\n".join(r.getMessage() for r in caplog.records)
+    assert "ours=ok" not in messages and "ours=FAIL" not in messages, messages
+    assert "ours=INVALID" in messages, messages
+
+
+def test_record_parse_preserves_exact_true_false_wording(caplog: pytest.LogCaptureFixture) -> None:
+    """A real boolean verdict must still read exactly `ok`/`FAIL`, never `INVALID`."""
+    results: list[dict] = []
+    with caplog.at_level("INFO", logger="harvest_estate_assets"):
+        harvest.record_parse(
+            (1, {"name": "Clean"}, _finished_future(({"ok": True}, {"ok": False}))), results, 1, time.perf_counter()
+        )
+    messages = "\n".join(r.getMessage() for r in caplog.records)
+    assert "ours=ok" in messages, messages
+    assert "his=FAIL" in messages, messages
+    assert "INVALID" not in messages, messages
 
 
 def test_the_failed_downloads_are_reported_to_the_operator_at_the_end(caplog: pytest.LogCaptureFixture) -> None:
@@ -784,7 +954,7 @@ def test_main_forwards_the_operator_s_timeouts_to_every_download(
         CREATE TABLE project (luid TEXT PRIMARY KEY, name TEXT);
         CREATE TABLE workbook (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
         CREATE TABLE datasource (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
-        CREATE TABLE dependency (workbook_luid TEXT, datasource_luid TEXT, datasource_name TEXT);
+        CREATE TABLE dependency (workbook_luid TEXT, workbook_name TEXT, datasource_luid TEXT, datasource_name TEXT);
         INSERT INTO workbook VALUES ('wb-ia', 'IA Redemptions', 'p');
         """
     )
@@ -830,11 +1000,11 @@ def estate_with_a_binding(path: Path) -> Path:
         CREATE TABLE project (luid TEXT PRIMARY KEY, name TEXT);
         CREATE TABLE workbook (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
         CREATE TABLE datasource (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
-        CREATE TABLE dependency (workbook_luid TEXT, datasource_luid TEXT, datasource_name TEXT);
+        CREATE TABLE dependency (workbook_luid TEXT, workbook_name TEXT, datasource_luid TEXT, datasource_name TEXT);
         INSERT INTO workbook VALUES ('wb-ifc', 'IA IFC Sessions', 'p');
         INSERT INTO workbook VALUES ('wb-solo', 'Standalone', 'p');
         INSERT INTO datasource VALUES ('ds-sessions', 'DS_Sessions_by_Product', 'p');
-        INSERT INTO dependency VALUES ('wb-ifc', 'ds-sessions', 'DS_Sessions_by_Product');
+        INSERT INTO dependency VALUES ('wb-ifc', 'IA IFC Sessions', 'ds-sessions', 'DS_Sessions_by_Product');
         """
     )
     con.commit()
@@ -851,7 +1021,7 @@ def binding_rows() -> list[dict]:
     ]
 
 
-def edges_from(db: Path) -> list[tuple[str, str, str, str]]:
+def edges_from(db: Path) -> list[tuple[str, str, str, str, str]]:
     con = sqlite3.connect(db)
     try:
         return harvest.dependency_edges(con)
@@ -862,14 +1032,16 @@ def edges_from(db: Path) -> list[tuple[str, str, str, str]]:
 def test_a_failed_datasource_names_the_workbooks_it_orphans(tmp_path: Path) -> None:
     """Their agent worked this out BY HAND; the harvester already resolves the edge."""
     edges = edges_from(estate_with_a_binding(tmp_path / "estate.db"))
-    assert harvest.orphaned_dependents(binding_rows(), edges) == [("DS_Sessions_by_Product", ["IA IFC Sessions"])]
+    assert harvest.orphaned_dependents(binding_rows(), edges) == [
+        ("DS_Sessions_by_Product", [("wb-ifc", "IA IFC Sessions")])
+    ]
 
 
 def test_a_workbook_bound_to_NOTHING_that_failed_is_not_flagged(tmp_path: Path) -> None:
     """Flagging every workbook would make the warning worthless."""
     edges = edges_from(estate_with_a_binding(tmp_path / "estate.db"))
     orphans = harvest.orphaned_dependents(binding_rows(), edges)
-    assert "Standalone" not in [name for _, workbooks in orphans for name in workbooks]
+    assert "Standalone" not in [name for _, workbooks in orphans for _, name in workbooks]
 
 
 def test_a_workbook_that_ITSELF_failed_is_not_listed_as_an_orphan(tmp_path: Path) -> None:
@@ -898,11 +1070,11 @@ def test_an_edge_resolved_only_by_NAME_still_finds_the_dependent(tmp_path: Path)
     db = estate_with_a_binding(tmp_path / "estate.db")
     con = sqlite3.connect(db)
     con.execute("DELETE FROM dependency")
-    con.execute("INSERT INTO dependency VALUES ('wb-ifc', '', ' ds_sessions_by_product ')")
+    con.execute("INSERT INTO dependency VALUES ('wb-ifc', '', '', ' ds_sessions_by_product ')")
     con.commit()
     con.close()
     assert harvest.orphaned_dependents(binding_rows(), edges_from(db)) == [
-        ("DS_Sessions_by_Product", ["IA IFC Sessions"])
+        ("DS_Sessions_by_Product", [("wb-ifc", "IA IFC Sessions")])
     ]
 
 
@@ -914,12 +1086,301 @@ def test_the_orphans_reach_the_report_and_the_operator(tmp_path: Path, caplog: p
     messages = "\n".join(r.getMessage() for r in caplog.records)
     assert "## Do not convert yet" in text
     assert "IA IFC Sessions" in text.split("## Do not convert yet", 1)[1]
+    assert "wb-ifc" in text.split("## Do not convert yet", 1)[1], "the orphan's LUID must reach the report too"
     assert "DO NOT CONVERT YET" in messages
     assert "IA IFC Sessions" in messages
+    assert "wb-ifc" in messages, "the orphan's LUID must reach the operator's log line too"
 
 
 def test_the_section_is_absent_when_nothing_is_orphaned(tmp_path: Path) -> None:
     assert "## Do not convert yet" not in harvest.summarise(binding_rows(), tmp_path, [])
+
+
+# --- issue #483: two same-named workbooks in different projects must remain two orphans ----------
+
+
+def estate_with_two_same_named_workbooks(path: Path) -> Path:
+    """Two DIFFERENT workbooks, same display name, in different projects, both bound to one datasource."""
+    con = sqlite3.connect(path)
+    con.executescript(
+        """
+        CREATE TABLE project (luid TEXT PRIMARY KEY, name TEXT);
+        CREATE TABLE workbook (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        CREATE TABLE datasource (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        CREATE TABLE dependency (workbook_luid TEXT, workbook_name TEXT, datasource_luid TEXT, datasource_name TEXT);
+        INSERT INTO project VALUES ('proj-a', 'Region A');
+        INSERT INTO project VALUES ('proj-b', 'Region B');
+        INSERT INTO workbook VALUES ('wb-a', 'Revenue Dashboard', 'proj-a');
+        INSERT INTO workbook VALUES ('wb-b', 'Revenue Dashboard', 'proj-b');
+        INSERT INTO datasource VALUES ('ds-sessions', 'DS_Sessions_by_Product', 'proj-a');
+        INSERT INTO dependency VALUES ('wb-a', 'Revenue Dashboard', 'ds-sessions', 'DS_Sessions_by_Product');
+        INSERT INTO dependency VALUES ('wb-b', 'Revenue Dashboard', 'ds-sessions', 'DS_Sessions_by_Product');
+        """
+    )
+    con.commit()
+    con.close()
+    return path
+
+
+def duplicate_named_binding_rows() -> list[dict]:
+    """The datasource failed; BOTH same-named workbooks landed."""
+    return [
+        {"name": "DS_Sessions_by_Product", "kind": "datasource", "luid": "ds-sessions", "download_error": "500"},
+        {
+            "name": "Revenue Dashboard",
+            "kind": "workbook",
+            "luid": "wb-a",
+            "ours": {"ok": True},
+            "theirs": {"ok": True},
+        },
+        {
+            "name": "Revenue Dashboard",
+            "kind": "workbook",
+            "luid": "wb-b",
+            "ours": {"ok": True},
+            "theirs": {"ok": True},
+        },
+    ]
+
+
+def test_two_same_named_workbooks_in_different_projects_are_two_orphans(tmp_path: Path) -> None:
+    """Before the fix, `by_datasource` collected workbook NAMES into a `set`, so one 'Revenue
+    Dashboard' silently absorbed the other -- a real second workbook vanished from the report.
+    LUID must be kept in the return value, not just used internally and then thrown away, or the
+    two entries print identically and read as one duplicated line (blind-review follow-up).
+    """
+    edges = edges_from(estate_with_two_same_named_workbooks(tmp_path / "estate.db"))
+    orphans = harvest.orphaned_dependents(duplicate_named_binding_rows(), edges)
+    assert orphans == [("DS_Sessions_by_Product", [("wb-a", "Revenue Dashboard"), ("wb-b", "Revenue Dashboard")])]
+    assert len(orphans[0][1]) == 2, "two distinct workbook identities collapsed into one orphan"
+    assert len({identity for identity, _ in orphans[0][1]}) == 2, "both entries must carry a DISTINCT identity"
+
+
+def test_only_one_of_two_same_named_workbooks_landing_still_reports_just_that_one(tmp_path: Path) -> None:
+    """The LUID-keyed fix must not accidentally start double-counting a single landed workbook."""
+    rows = duplicate_named_binding_rows()
+    rows[2] = {"name": "Revenue Dashboard", "kind": "workbook", "luid": "wb-b", "download_error": "timeout"}
+    edges = edges_from(estate_with_two_same_named_workbooks(tmp_path / "estate.db"))
+    orphans = harvest.orphaned_dependents(rows, edges)
+    assert orphans == [("DS_Sessions_by_Product", [("wb-a", "Revenue Dashboard")])]
+
+
+def test_same_named_orphans_are_distinguishable_in_the_markdown_and_log(tmp_path: Path) -> None:
+    """The report/log MUST show the LUID beside the name, or the two lines read as one duplicate."""
+    edges = edges_from(estate_with_two_same_named_workbooks(tmp_path / "estate.db"))
+    orphans = harvest.orphaned_dependents(duplicate_named_binding_rows(), edges)
+    text = harvest.summarise(duplicate_named_binding_rows(), tmp_path, orphans)
+    section = text.split("## Do not convert yet", 1)[1]
+    assert "wb-a" in section and "wb-b" in section, "both distinct identities must reach the report"
+
+
+def test_missing_luid_falls_back_to_project_plus_name_identity() -> None:
+    """When an edge cannot resolve a workbook LUID at all (no matching name either, so
+    `dependency_edges` cannot recover a project from the `workbook` table), the strongest identity
+    left is whatever project-qualified name the edge itself carries -- never a bare display name,
+    which is the exact collision #483 exists to close. Exercises `orphaned_dependents()` directly
+    with a hand-built edge; `test_an_unresolved_luid_is_preserved_and_resolved_by_a_unique_name_match`
+    below exercises the real SQL path that produces an edge like this in the first place.
+    """
+    results = [
+        {"name": "DS_Sessions_by_Product", "kind": "datasource", "luid": "ds-sessions", "download_error": "500"},
+        {"name": "Revenue Dashboard", "kind": "workbook", "luid": "", "ours": {"ok": True}, "theirs": {"ok": True}},
+    ]
+    edges = [("", "Revenue Dashboard", "Region A", "ds-sessions", "DS_Sessions_by_Product")]
+    orphans = harvest.orphaned_dependents(results, edges)
+    assert orphans == [("DS_Sessions_by_Product", [("Region A::Revenue Dashboard", "Revenue Dashboard")])]
+
+
+def test_a_truly_unidentifiable_workbook_is_reported_not_dropped() -> None:
+    """No LUID and no project left either -- the row must still be reported, never silently
+    dropped, but it must also never be reported under a bare display name (issue #483)."""
+    results = [
+        {"name": "DS_Sessions_by_Product", "kind": "datasource", "luid": "ds-sessions", "download_error": "500"},
+        {"name": "Mystery Workbook", "kind": "workbook", "luid": "", "ours": {"ok": True}, "theirs": {"ok": True}},
+    ]
+    edges = [("", "Mystery Workbook", "", "ds-sessions", "DS_Sessions_by_Product")]
+    orphans = harvest.orphaned_dependents(results, edges)
+    assert len(orphans) == 1, "an unidentifiable workbook must not be dropped"
+    identity, name = orphans[0][1][0]
+    assert identity.startswith("UNIDENTIFIED-"), identity
+    assert name == "Mystery Workbook"
+
+
+def estate_with_an_unresolved_workbook_luid(path: Path) -> Path:
+    """The dependency row carries the workbook's real NAME but a blank/unresolved `workbook_luid` --
+    the exact shape a real survey can produce when its dependency listing could not resolve the
+    workbook end. `IA IFC Sessions` itself exists, uniquely, in the workbook table."""
+    con = sqlite3.connect(path)
+    con.executescript(
+        """
+        CREATE TABLE project (luid TEXT PRIMARY KEY, name TEXT);
+        CREATE TABLE workbook (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        CREATE TABLE datasource (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        CREATE TABLE dependency (workbook_luid TEXT, workbook_name TEXT, datasource_luid TEXT, datasource_name TEXT);
+        INSERT INTO project VALUES ('proj-ifc', 'IFC');
+        INSERT INTO workbook VALUES ('wb-ifc', 'IA IFC Sessions', 'proj-ifc');
+        INSERT INTO datasource VALUES ('ds-sessions', 'DS_Sessions_by_Product', 'proj-ifc');
+        INSERT INTO dependency VALUES ('', 'IA IFC Sessions', 'ds-sessions', 'DS_Sessions_by_Product');
+        """
+    )
+    con.commit()
+    con.close()
+    return path
+
+
+def test_an_unresolved_luid_is_preserved_and_resolved_by_a_unique_name_match(tmp_path: Path) -> None:
+    """Negative control for the blocking finding: before this fix, `dependency_edges()`'s INNER JOIN
+    on `workbook.luid` dropped this row outright, so `orphaned_dependents()` never had a chance to
+    fall back to anything ("the real query returns `edges=[]`"). The workbook's NAME uniquely
+    identifies exactly one real workbook, so its real LUID is recovered rather than the edge being
+    reported as unidentified -- exact LUID still wins when present; this is the "may resolve" rung.
+    """
+    db = estate_with_an_unresolved_workbook_luid(tmp_path / "estate.db")
+    edges = edges_from(db)
+    assert edges, "the dependency row must survive the join, never vanish"
+    rows = [
+        {"name": "DS_Sessions_by_Product", "kind": "datasource", "luid": "ds-sessions", "download_error": "500"},
+        {
+            "name": "IA IFC Sessions",
+            "kind": "workbook",
+            "luid": "wb-ifc",
+            "ours": {"ok": True},
+            "theirs": {"ok": True},
+        },
+    ]
+    orphans = harvest.orphaned_dependents(rows, edges)
+    assert orphans == [("DS_Sessions_by_Product", [("wb-ifc", "IA IFC Sessions")])]
+
+
+def estate_with_an_unresolved_luid_matching_two_same_named_workbooks(path: Path) -> Path:
+    """The dependency row names 'Revenue Dashboard' but carries no LUID; TWO different, real
+    workbooks share that exact name in different projects, so the name alone cannot say which one
+    it means."""
+    con = sqlite3.connect(path)
+    con.executescript(
+        """
+        CREATE TABLE project (luid TEXT PRIMARY KEY, name TEXT);
+        CREATE TABLE workbook (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        CREATE TABLE datasource (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        CREATE TABLE dependency (workbook_luid TEXT, workbook_name TEXT, datasource_luid TEXT, datasource_name TEXT);
+        INSERT INTO project VALUES ('proj-a', 'Region A');
+        INSERT INTO project VALUES ('proj-b', 'Region B');
+        INSERT INTO workbook VALUES ('wb-a', 'Revenue Dashboard', 'proj-a');
+        INSERT INTO workbook VALUES ('wb-b', 'Revenue Dashboard', 'proj-b');
+        INSERT INTO datasource VALUES ('ds-sessions', 'DS_Sessions_by_Product', 'proj-a');
+        INSERT INTO dependency VALUES ('', 'Revenue Dashboard', 'ds-sessions', 'DS_Sessions_by_Product');
+        """
+    )
+    con.commit()
+    con.close()
+    return path
+
+
+def test_an_unresolved_luid_matching_two_workbooks_is_reported_ambiguous_not_guessed(tmp_path: Path) -> None:
+    """Same-name ambiguity control: two DIFFERENT real workbooks share the name, and the edge has no
+    LUID to pick between them. The harvester must not silently choose one, must not collapse them
+    into a single entry, and must not drop the row -- it must say, explicitly, that it cannot tell.
+    """
+    db = estate_with_an_unresolved_luid_matching_two_same_named_workbooks(tmp_path / "estate.db")
+    edges = edges_from(db)
+    assert edges, "an ambiguous edge must still be preserved, never silently dropped"
+    rows = [
+        {"name": "DS_Sessions_by_Product", "kind": "datasource", "luid": "ds-sessions", "download_error": "500"},
+        {"name": "Revenue Dashboard", "kind": "workbook", "luid": "wb-a", "ours": {"ok": True}, "theirs": {"ok": True}},
+        {"name": "Revenue Dashboard", "kind": "workbook", "luid": "wb-b", "ours": {"ok": True}, "theirs": {"ok": True}},
+    ]
+    orphans = harvest.orphaned_dependents(rows, edges)
+    assert len(orphans) == 1
+    identities = [identity for identity, _ in orphans[0][1]]
+    assert identities == ["AMBIGUOUS::Revenue Dashboard"], identities
+    assert "wb-a" not in identities and "wb-b" not in identities, "must not guess either real workbook"
+
+
+def test_TWO_unresolved_dependency_rows_sharing_an_ambiguous_name_report_the_occurrence_count(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Blocking finding (#526 follow-up): two SEPARATE, textually-identical dependency rows -- both
+    unresolved, both matching the same two same-named real workbooks -- must not collapse into one
+    claimed workbook. `SELECT DISTINCT` used to fold them into a single raw edge before this
+    function ever ran; even with that fixed, grouping by the bare `AMBIGUOUS::<name>` identity would
+    still silently re-collapse them here. The real occurrence count (2) must reach the report.
+    """
+    path = tmp_path / "estate.db"
+    con = sqlite3.connect(path)
+    con.executescript(
+        """
+        CREATE TABLE project (luid TEXT PRIMARY KEY, name TEXT);
+        CREATE TABLE workbook (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        CREATE TABLE datasource (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        CREATE TABLE dependency (workbook_luid TEXT, workbook_name TEXT, datasource_luid TEXT, datasource_name TEXT);
+        INSERT INTO project VALUES ('proj-a', 'Region A');
+        INSERT INTO project VALUES ('proj-b', 'Region B');
+        INSERT INTO workbook VALUES ('wb-a', 'Revenue Dashboard', 'proj-a');
+        INSERT INTO workbook VALUES ('wb-b', 'Revenue Dashboard', 'proj-b');
+        INSERT INTO datasource VALUES ('ds-sessions', 'DS_Sessions_by_Product', 'proj-a');
+        INSERT INTO dependency VALUES ('', 'Revenue Dashboard', 'ds-sessions', 'DS_Sessions_by_Product');
+        INSERT INTO dependency VALUES ('', 'Revenue Dashboard', 'ds-sessions', 'DS_Sessions_by_Product');
+        """
+    )
+    con.commit()
+    con.close()
+    edges = edges_from(path)
+    assert len(edges) == 2, "both unresolved dependency rows must survive the join, not just one"
+    rows = [
+        {"name": "DS_Sessions_by_Product", "kind": "datasource", "luid": "ds-sessions", "download_error": "500"},
+        {"name": "Revenue Dashboard", "kind": "workbook", "luid": "wb-a", "ours": {"ok": True}, "theirs": {"ok": True}},
+        {"name": "Revenue Dashboard", "kind": "workbook", "luid": "wb-b", "ours": {"ok": True}, "theirs": {"ok": True}},
+    ]
+    orphans = harvest.orphaned_dependents(rows, edges)
+    assert len(orphans) == 1
+    entries = orphans[0][1]
+    assert len(entries) == 1, "an unresolvable ambiguity must not silently invent a second identity"
+    identity, name = entries[0]
+    assert identity == "AMBIGUOUS::Revenue Dashboard"
+    assert "2" in name and "cannot be individually attributed" in name, name
+    text = harvest.summarise(rows, tmp_path, orphans)
+    assert "blocks **1 workbook identity/ambiguity group(s)**" in text
+    caplog.set_level("WARNING", logger="harvest_estate_assets")
+    harvest.report_failed_downloads(rows, orphans)
+    assert "so 1 workbook identity/ambiguity group(s)" in caplog.text
+
+
+def test_a_single_ambiguous_occurrence_does_not_gain_a_spurious_count(tmp_path: Path) -> None:
+    """Exactly one unresolved dependency row must read as an ordinary ambiguity entry, never
+    "1 unresolved dependencies ..." noise -- the count text is reserved for genuine multiplicity."""
+    db = estate_with_an_unresolved_luid_matching_two_same_named_workbooks(tmp_path / "estate.db")
+    edges = edges_from(db)
+    rows = [
+        {"name": "DS_Sessions_by_Product", "kind": "datasource", "luid": "ds-sessions", "download_error": "500"},
+        {"name": "Revenue Dashboard", "kind": "workbook", "luid": "wb-a", "ours": {"ok": True}, "theirs": {"ok": True}},
+        {"name": "Revenue Dashboard", "kind": "workbook", "luid": "wb-b", "ours": {"ok": True}, "theirs": {"ok": True}},
+    ]
+    orphans = harvest.orphaned_dependents(rows, edges)
+    assert orphans == [("DS_Sessions_by_Product", [("AMBIGUOUS::Revenue Dashboard", "Revenue Dashboard")])]
+
+
+def test_a_dependency_row_with_no_luid_and_no_name_match_still_survives_the_join(tmp_path: Path) -> None:
+    """Third rung of the same ladder: the workbook LUID is blank AND the name matches nothing in the
+    `workbook` table at all. Before this fix the row vanished at the SQL layer regardless of which
+    rung applied; it must still come back from `dependency_edges` (with an empty LUID/project) so
+    `orphaned_dependents()` can apply its own `UNIDENTIFIED-N` fallback."""
+    path = tmp_path / "estate.db"
+    con = sqlite3.connect(path)
+    con.executescript(
+        """
+        CREATE TABLE project (luid TEXT PRIMARY KEY, name TEXT);
+        CREATE TABLE workbook (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        CREATE TABLE datasource (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        CREATE TABLE dependency (workbook_luid TEXT, workbook_name TEXT, datasource_luid TEXT, datasource_name TEXT);
+        INSERT INTO datasource VALUES ('ds-sessions', 'DS_Sessions_by_Product', NULL);
+        INSERT INTO dependency VALUES ('', 'Mystery Workbook', 'ds-sessions', 'DS_Sessions_by_Product');
+        """
+    )
+    con.commit()
+    con.close()
+    edges = edges_from(path)
+    assert edges == [("", "Mystery Workbook", "", "ds-sessions", "DS_Sessions_by_Product")]
 
 
 def test_an_estate_db_without_a_dependency_table_still_harvests(
@@ -956,7 +1417,9 @@ def test_an_estate_db_without_a_dependency_table_still_harvests(
         ["harvest_estate_assets.py", "--out", str(out), "--db", str(db), "--allow-unignored-out"],
     )
     assert harvest.main() == harvest.EXIT_OK
-    assert "never downloaded 0." in (out / "parse-sweep.md").read_text(encoding="utf-8")
+    assert "never downloaded 0, invalid/indeterminate outcome 0." in (out / "parse-sweep.md").read_text(
+        encoding="utf-8"
+    )
 
 
 def test_main_end_to_end_names_the_orphaned_workbook(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -995,7 +1458,7 @@ def test_a_failed_download_reaches_parse_sweep_md_through_main(monkeypatch: pyte
         CREATE TABLE project (luid TEXT PRIMARY KEY, name TEXT);
         CREATE TABLE workbook (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
         CREATE TABLE datasource (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
-        CREATE TABLE dependency (workbook_luid TEXT, datasource_luid TEXT, datasource_name TEXT);
+        CREATE TABLE dependency (workbook_luid TEXT, workbook_name TEXT, datasource_luid TEXT, datasource_name TEXT);
         INSERT INTO workbook VALUES ('wb-ia', 'IA Redemptions by Campaign Report', 'p');
         """
     )
@@ -1017,7 +1480,10 @@ def test_a_failed_download_reaches_parse_sweep_md_through_main(monkeypatch: pyte
     assert harvest.main() == harvest.EXIT_NOTHING_ASSESSED
 
     text = (out / "parse-sweep.md").read_text(encoding="utf-8")
-    assert "**1 asset(s)** — ours failed 0, his failed 0, both parsed 0, never downloaded 1." in text
+    assert (
+        "**1 asset(s)** — ours failed 0, his failed 0, both parsed 0, never downloaded 1, invalid/indeterminate outcome 0."
+        in text
+    )
     assert "IA Redemptions by Campaign Report" in text.split("## Downloads that never landed", 1)[1]
 
 
@@ -1086,7 +1552,7 @@ def test_a_totally_failed_harvest_exits_nonzero_through_main(monkeypatch: pytest
         CREATE TABLE project (luid TEXT PRIMARY KEY, name TEXT);
         CREATE TABLE workbook (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
         CREATE TABLE datasource (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
-        CREATE TABLE dependency (workbook_luid TEXT, datasource_luid TEXT, datasource_name TEXT);
+        CREATE TABLE dependency (workbook_luid TEXT, workbook_name TEXT, datasource_luid TEXT, datasource_name TEXT);
         INSERT INTO workbook VALUES ('wb-ia', 'IA Redemptions by Campaign Report', 'p');
         """
     )
@@ -1102,7 +1568,9 @@ def test_a_totally_failed_harvest_exits_nonzero_through_main(monkeypatch: pytest
     )
     assert harvest.main() == harvest.EXIT_NOTHING_ASSESSED
     # The report still has to be written: a non-zero exit must not cost the operator the evidence.
-    assert "never downloaded 1." in (out / "parse-sweep.md").read_text(encoding="utf-8")
+    assert "never downloaded 1, invalid/indeterminate outcome 0." in (out / "parse-sweep.md").read_text(
+        encoding="utf-8"
+    )
 
 
 def test_the_verdict_is_SAID_not_just_returned(
@@ -1168,6 +1636,7 @@ def test_the_blind_ceiling_is_not_below_the_childs_own_bounded_retry_budget() ->
     ), "the budget does not even cover one full read timeout per attempt"
 
 
+@pytest.mark.engine_dependency(expected_skip_reason="canonical engine not installed, so its constants cannot be read")
 def test_the_ceiling_constants_match_the_INSTALLED_engine() -> None:
     """The arithmetic is only sound while the engine's own numbers are what we think they are.
 
@@ -1180,8 +1649,8 @@ def test_the_ceiling_constants_match_the_INSTALLED_engine() -> None:
 
     try:
         fetch_tds = harvest.engine_scripts_dir() / "fetch_tds.py"
-    except Exception as exc:  # pylint: disable=broad-exception-caught
-        pytest.skip(f"canonical engine not installed, so its constants cannot be read: {exc}")
+    except Exception:  # pylint: disable=broad-exception-caught
+        pytest.skip("canonical engine not installed, so its constants cannot be read")
     if not fetch_tds.is_file():
         pytest.skip(f"{fetch_tds} is missing")
     tree = ast.parse(fetch_tds.read_text(encoding="utf-8"))
@@ -1228,7 +1697,7 @@ def test_the_cli_warns_when_the_ceiling_undercuts_the_fetchers_retry_budget(
         CREATE TABLE project (luid TEXT PRIMARY KEY, name TEXT);
         CREATE TABLE workbook (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
         CREATE TABLE datasource (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
-        CREATE TABLE dependency (workbook_luid TEXT, datasource_luid TEXT, datasource_name TEXT);
+        CREATE TABLE dependency (workbook_luid TEXT, workbook_name TEXT, datasource_luid TEXT, datasource_name TEXT);
         INSERT INTO workbook VALUES ('wb-ia', 'IA Redemptions', 'p');
         """
     )

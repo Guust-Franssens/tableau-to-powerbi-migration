@@ -143,12 +143,19 @@ EXIT_PARTIAL = 3
 #     shape people write. A file path underneath makes every parent a directory by construction.
 #   * it is the honest question: these are the paths a `git add -A` would stage.
 # `assets/` holds the downloaded workbooks/datasources; the sweep files record every asset's NAME
-# and LUID even under `--skip-download`, so all of them are checked, not just the downloads.
+# and LUID even under `--skip-download`, so all of them are checked, not just the downloads. Both
+# the PACKAGED (`.twbx`/`.tdsx`) and PLAIN (`.twb`/`.tds`) extensions are represented: the production
+# fetcher writes plain XML whenever the REST download is not a zip (`existing_asset()`'s docstring
+# measured this at 18/38 workbooks on a real harvest), so a guard that only knows the packaged
+# extension would miss most of what actually lands on disk (review of the #526 follow-up).
 OUTPUT_ARTIFACTS = (
     "assets/harvested-workbook.twbx",
     "assets/harvested-datasource.tdsx",
+    "assets/harvested-workbook.twb",
+    "assets/harvested-datasource.tds",
     "parse-sweep.json",
     "parse-sweep.md",
+    "parse-sweep-totals.json",
 )
 
 # The remedy sentence, kept separate from the diagnosis so another tool can reuse the guard without
@@ -989,32 +996,101 @@ def parse_theirs(path: Path, scripts: Path) -> dict[str, Any]:
         return {"ok": False, "error": f"harness: {type(exc).__name__}: {exc}"}
 
 
-def dependency_edges(con: sqlite3.Connection) -> list[tuple[str, str, str, str]]:
-    """Every `(workbook_luid, workbook_name, datasource_luid, datasource_name)` binding on the site.
+# Sentinel carried in the `workbook_project` slot of an edge tuple when the workbook end could not
+# be resolved to a SINGLE identity: the dependency's own `workbook_name` matched more than one real
+# workbook (different projects, no LUID to pick between them). Never a real project name - a null
+# byte cannot appear in Tableau project names - so it can never collide with a genuine project
+# called, say, "Ambiguous" (review of the #483 follow-up: "must not fuzzy-match... or guess").
+_AMBIGUOUS_WORKBOOK = "\x00AMBIGUOUS"
 
-    Same join as `dependency_datasources` — LUID first, normalized name as the fallback an
-    unresolved survey edge needs — but it keeps the WORKBOOK end too, which is the end that matters
-    once a datasource has failed to download.
+
+def _normalized_name(name: str | None) -> str:
+    """Same equivalence the SQL fallback joins already use (`LOWER(TRIM(x))`), done in Python so the
+    workbook-name index below and the SQL text agree on what counts as "the same name"."""
+    return (name or "").strip().casefold()
+
+
+def dependency_edges(con: sqlite3.Connection) -> list[tuple[str, str, str, str, str]]:
+    """Every `(workbook_luid, workbook_name, workbook_project, datasource_luid, datasource_name)`
+    binding on the site.
+
+    The workbook end used to be an INNER JOIN on `workbook.luid = dependency.workbook_luid` with no
+    fallback at all - so a dependency row surveyed with a blank/unresolved `workbook_luid` (but a
+    real `workbook_name`) was dropped from the result BEFORE `orphaned_dependents()` ever saw it,
+    which defeated its documented project-plus-name/`UNIDENTIFIED-N` fallback entirely: there was no
+    row left to apply it to (review of the #483 follow-up, "the real query returns `edges=[]`").
+
+    Resolution order, same as the identity ladder `orphaned_dependents()` already implements:
+    1. exact `workbook_luid` match against the `workbook` table - unchanged, still wins outright;
+    2. else an EXACT (never fuzzy) match of `dependency.workbook_name` against `workbook.name`:
+       unique -> resolved to that workbook's own LUID/project; more than one workbook shares the
+       name (no LUID to pick between them) -> `_AMBIGUOUS_WORKBOOK`, an explicit "cannot tell which"
+       marker, never a guess at either one;
+    3. else the dependency row is still returned - workbook_luid/project both empty - so the caller
+       can report it as unidentified rather than the row silently vanishing.
+
+    Every raw dependency ROW is returned as its own edge, even when several rows are textually
+    identical (blank LUID, same name, same datasource): the caller, not this function, decides
+    whether that multiplicity is real occurrences or a data-quality duplicate, and it can only do
+    that if the count survives to `orphaned_dependents()` (review of the #526 follow-up: `SELECT
+    DISTINCT` used to fold N unresolved dependency rows into one before that fallback ever ran).
     """
-    return list(
+    workbook_rows = list(
         con.execute(
             """
-            SELECT DISTINCT workbook.luid, workbook.name, datasource.luid, datasource.name
-            FROM dependency
-            JOIN workbook ON workbook.luid = dependency.workbook_luid
-            JOIN datasource ON dependency.datasource_luid = datasource.luid
-                OR (
-                    COALESCE(dependency.datasource_luid, '') = ''
-                    AND LOWER(TRIM(dependency.datasource_name)) = LOWER(TRIM(datasource.name))
-                )
-            ORDER BY datasource.name, workbook.name
+            SELECT workbook.luid, workbook.name, project.name
+            FROM workbook
+            LEFT JOIN project ON project.luid = workbook.project_luid
             """
         )
     )
+    by_luid = {luid: (name or "", project or "") for luid, name, project in workbook_rows if luid}
+    by_name: dict[str, list[tuple[str, str, str]]] = {}
+    for luid, name, project in workbook_rows:
+        by_name.setdefault(_normalized_name(name), []).append((luid, name or "", project or ""))
+
+    # No `DISTINCT` here on purpose (review of the #526 follow-up): the workbook end being unresolved
+    # does not make two dependency rows THE SAME occurrence - they could be two genuinely different,
+    # equally-unattributable bindings that merely look identical because there is no LUID to tell
+    # them apart. `DISTINCT` collapsed exactly that case to one row before `orphaned_dependents()`
+    # ever saw it, so it never had raw material to report "N unresolved dependencies share this name"
+    # - it always saw N=1. A resolved (LUID-matched) row still naturally collapses downstream, in
+    # `orphaned_dependents()`, because its identity is real and duplicate real edges key to the same
+    # identity there regardless of how many raw rows produced them.
+    raw = con.execute(
+        """
+        SELECT dependency.workbook_luid, dependency.workbook_name, datasource.luid, datasource.name
+        FROM dependency
+        JOIN datasource ON dependency.datasource_luid = datasource.luid
+            OR (
+                COALESCE(dependency.datasource_luid, '') = ''
+                AND LOWER(TRIM(dependency.datasource_name)) = LOWER(TRIM(datasource.name))
+            )
+        ORDER BY datasource.name, dependency.workbook_name
+        """
+    )
+    edges: list[tuple[str, str, str, str, str]] = []
+    for workbook_luid, dep_workbook_name, datasource_luid, datasource_name in raw:
+        resolved = by_luid.get(workbook_luid) if workbook_luid else None
+        if resolved:
+            name, project = resolved
+            edges.append((workbook_luid, name or dep_workbook_name or "", project, datasource_luid, datasource_name))
+            continue
+        candidates = by_name.get(_normalized_name(dep_workbook_name), []) if dep_workbook_name else []
+        if len(candidates) == 1:
+            luid, name, project = candidates[0]
+            edges.append((luid, name, project, datasource_luid, datasource_name))
+        elif len(candidates) > 1:
+            edges.append(("", dep_workbook_name or "", _AMBIGUOUS_WORKBOOK, datasource_luid, datasource_name))
+        else:
+            edges.append(("", dep_workbook_name or "", "", datasource_luid, datasource_name))
+    return edges
 
 
-def orphaned_dependents(results: list[dict], edges: list[tuple[str, str, str, str]]) -> list[tuple[str, list[str]]]:
-    """`[(failed datasource name, [workbooks that DID land and bind to it])]`.
+def orphaned_dependents(
+    results: list[dict], edges: list[tuple[str, str, str, str, str]]
+) -> list[tuple[str, list[tuple[str, str]]]]:
+    """`[(failed datasource name, [(workbook identity, workbook name) that DID land and bind to it])]`.
 
     A datasource that never downloaded does not fail alone: every workbook bound to it converts to
     an incomplete model, and a report against a model nobody migrated is the documented "empty
@@ -1022,6 +1098,24 @@ def orphaned_dependents(results: list[dict], edges: list[tuple[str, str, str, st
     (`dependency_datasources`) and then never looked at them again once one had failed, so catching
     it depended on the operator noticing (issue #472). A workbook that itself failed to download is
     left out: it is already in the never-landed list and is not about to be converted.
+
+    Each workbook entry carries its own IDENTITY beside its display name, never a bare name alone
+    (issue #483, and its follow-up reviews): two same-named workbooks in different projects must
+    stay two entries all the way to the human/machine output, not just inside this function's
+    internal grouping. The identity is, in order: the workbook LUID (`dependency_edges` now resolves
+    this via an exact name match too, not just the survey's own LUID); else a project-qualified
+    `"<project>::<name>"` built from data `dependency_edges` already carries; else, when the name
+    matched more than one real workbook and there is no LUID to pick between them, an explicit
+    `"AMBIGUOUS::<name>"`; else an explicit `UNIDENTIFIED-N` marker so an edge that resolves nothing
+    at all is still reported instead of being silently dropped or coalesced with an unrelated one.
+
+    An `AMBIGUOUS::<name>` group can itself be hit by more than one raw dependency row for the SAME
+    datasource (`dependency_edges` no longer collapses those via `SELECT DISTINCT` - review of the
+    #526 follow-up). This function must not silently re-collapse them either: it cannot invent a
+    second identity for a row it genuinely cannot distinguish from the first, so instead it reports
+    ONE ambiguity-group record whose display name states the EXACT occurrence count - "N unresolved
+    dependencies share this name and cannot be individually attributed" - rather than the count
+    quietly reading as one workbook when the underlying dependency data said N.
     """
     missing_ids = {id(r) for r in never_downloaded(results)}
     failed_datasources = {
@@ -1034,13 +1128,80 @@ def orphaned_dependents(results: list[dict], edges: list[tuple[str, str, str, st
         for r in results
         if id(r) not in missing_ids and r.get("kind") == "workbook"
     }
-    by_datasource: dict[str, set[str]] = {}
-    for workbook_luid, workbook_name, datasource_luid, datasource_name in edges:
-        if datasource_luid in failed_datasources and workbook_luid in landed_workbooks:
-            by_datasource.setdefault(datasource_name or failed_datasources[datasource_luid], set()).add(
-                workbook_name or landed_workbooks[workbook_luid]
-            )
-    return [(name, sorted(workbooks)) for name, workbooks in sorted(by_datasource.items())]
+    by_datasource, ambiguous_hits = _group_edges_by_datasource(edges, failed_datasources, landed_workbooks)
+    return [
+        (key, _finalize_orphan_entries(key, entries, ambiguous_hits)) for key, entries in sorted(by_datasource.items())
+    ]
+
+
+def _group_edges_by_datasource(
+    edges: list[tuple[str, str, str, str, str]],
+    failed_datasources: dict[str, str],
+    landed_workbooks: dict[str, str],
+) -> tuple[dict[str, dict[str, tuple[str, str]]], dict[tuple[str, str], int]]:
+    """The identity-resolution loop `orphaned_dependents()` used to run inline: pulled out so that
+    function's own local-variable count stays readable (pylint's `too-many-locals`), not for reuse.
+
+    Returns `(by_datasource, ambiguous_hits)`: entries grouped per failed datasource, keyed by each
+    workbook's resolved identity, plus a separate per-`(datasource, identity)` occurrence count for
+    the `AMBIGUOUS::<name>` groups specifically - the real multiplicity `_finalize_orphan_entries()`
+    needs to report rather than silently collapsing (review of the #526 follow-up).
+    """
+    by_datasource: dict[str, dict[str, tuple[str, str]]] = {}
+    ambiguous_hits: dict[tuple[str, str], int] = {}
+    unidentified = 0
+    for workbook_luid, workbook_name, workbook_project, datasource_luid, datasource_name in edges:
+        if datasource_luid not in failed_datasources:
+            continue
+        # A RESOLVED luid must still have landed - a workbook that itself failed to download is
+        # already in the never-landed list and is not about to be converted. An UNRESOLVED identity
+        # (blank luid: name-only, or genuinely ambiguous) has no real key to check `landed_workbooks`
+        # against at all, so it is reported unconditionally rather than dropped a second time - the
+        # exact failure mode this follow-up exists to close.
+        if workbook_luid and workbook_luid not in landed_workbooks:
+            continue
+        name = workbook_name or landed_workbooks.get(workbook_luid, "?")
+        key = datasource_name or failed_datasources[datasource_luid]
+        if workbook_luid:
+            identity = workbook_luid
+        elif workbook_project == _AMBIGUOUS_WORKBOOK:
+            identity = f"AMBIGUOUS::{name}"
+            ambiguous_hits[(key, identity)] = ambiguous_hits.get((key, identity), 0) + 1
+        elif workbook_project:
+            identity = f"{workbook_project}::{name}"
+        else:
+            unidentified += 1
+            identity = f"UNIDENTIFIED-{unidentified}"
+        by_datasource.setdefault(key, {})[identity] = (identity, name)
+    return by_datasource, ambiguous_hits
+
+
+def _finalize_orphan_entries(
+    key: str, entries: dict[str, tuple[str, str]], ambiguous_hits: dict[tuple[str, str], int]
+) -> list[tuple[str, str]]:
+    """One datasource's grouped `(identity, name)` entries, with any genuine ambiguity-group
+    multiplicity (`ambiguous_hits`) folded into the display name rather than silently dropped."""
+    finalized = []
+    for identity, name in entries.values():
+        occurrences = ambiguous_hits.get((key, identity), 0)
+        if occurrences > 1:
+            name = f"{name} ({occurrences} unresolved dependencies share this name, cannot be individually attributed)"
+        finalized.append((identity, name))
+    return sorted(finalized, key=lambda entry: (entry[0], entry[1]))
+
+
+def _format_orphan_workbook(entry: tuple[str, str]) -> str:
+    """`"<name> [<identity>]"` -- human-readable, but the identity is always visible beside it so a
+    duplicate display name never reads as a single workbook (issue #483 follow-up)."""
+    identity, name = entry
+    return f"{name} [{identity}]"
+
+
+def _orphan_scope_label(workbooks: list[tuple[str, str]]) -> str:
+    """Count resolved workbooks honestly without calling an ambiguity group one workbook."""
+    if any(identity.startswith("AMBIGUOUS::") for identity, _name in workbooks):
+        return f"{len(workbooks)} workbook identity/ambiguity group(s)"
+    return f"{len(workbooks)} workbook(s)"
 
 
 def never_downloaded(results: list[dict]) -> list[dict]:
@@ -1052,6 +1213,47 @@ def never_downloaded(results: list[dict]) -> list[dict]:
     arithmetic did not close (issue #472).
     """
     return [r for r in results if "ours" not in r or "theirs" not in r]
+
+
+def _strict_bool(value: object) -> bool | None:
+    """`True`/`False` only when `value` IS a boolean; `None` for everything else.
+
+    A parser's `ok` is meant to be exactly JSON/Python `true`/`false`. `value is False` (used below
+    for the overlapping ours/his-failed counts) already happens to be strict — `None is False` and
+    `"no" is False` are both `False` — but nothing previously caught the TRUTHY side: a non-bool
+    `ok` such as `"yes"`, `1`, or `["partial"]` passed the old `and`-based `both_ok` check as if it
+    were a real success. `bool` is a subclass of `int`, so this must check `isinstance(value, bool)`
+    and not merely `isinstance(value, int)`.
+    """
+    return value if isinstance(value, bool) else None
+
+
+def _verdict_label(strict_ok: bool | None) -> str:
+    """`"ok"` / `"FAIL"` for a real boolean verdict, `"INVALID"` for `_strict_bool`'s `None`.
+
+    Keeps a per-asset log line and `summarise()`'s bucket classification from disagreeing about the
+    SAME row (issue #483 follow-up): both now read the verdict through `_strict_bool()` first.
+    """
+    if strict_ok is None:
+        return "INVALID"
+    return "ok" if strict_ok else "FAIL"
+
+
+def indeterminate_parser_outcomes(results: list[dict]) -> list[dict]:
+    """Rows that DID download but whose `ours`/`theirs` `ok` is missing or not a strict boolean.
+
+    Before this existed, such a row entered NO bucket in `summarise()` while still inflating
+    `len(results)`: the closure arithmetic could read `total 1` while every bucket read `0`, without
+    the assertion in `summarise()` ever failing (issue #483). Every asset that reached a parser now
+    lands in exactly one of: both parsed, ours only failed, his only failed, both failed, or here.
+    """
+    missing_ids = {id(r) for r in never_downloaded(results)}
+    return [
+        r
+        for r in results
+        if id(r) not in missing_ids
+        and (_strict_bool(r.get("ours", {}).get("ok")) is None or _strict_bool(r.get("theirs", {}).get("ok")) is None)
+    ]
 
 
 def failure_shape(message: str) -> str:
@@ -1073,32 +1275,51 @@ def grouped_by_shape(rows: list[dict], detail: Callable[[dict], str]) -> list[tu
 
 
 def summarise(  # pylint: disable=too-many-locals,too-many-statements,too-many-branches
-    results: list[dict], out: Path, orphans: list[tuple[str, list[str]]] | None = None
+    results: list[dict], out: Path, orphans: list[tuple[str, list[tuple[str, str]]]] | None = None
 ) -> str:
     """Group failures by SHAPE, because one root cause repeated 12 times is one feature request."""
     missing = never_downloaded(results)
     missing_ids = {id(r) for r in missing}
     parsed = [r for r in results if id(r) not in missing_ids]
+    invalid = indeterminate_parser_outcomes(results)
+    invalid_ids = {id(r) for r in invalid}
+    valid = [r for r in parsed if id(r) not in invalid_ids]
+    # `ours_fail`/`theirs_fail` stay OVERLAPPING counts (an asset that defeats both parsers is in
+    # both), used only for the informational header line below -- unchanged from before #483.
     ours_fail = [r for r in parsed if r.get("ours", {}).get("ok") is False]
     theirs_fail = [r for r in parsed if r.get("theirs", {}).get("ok") is False]
-    both_ok = [r for r in parsed if r.get("ours", {}).get("ok") and r.get("theirs", {}).get("ok")]
     both_fail = [r for r in ours_fail if id(r) in {id(x) for x in theirs_fail}]
+    both_fail_ids = {id(r) for r in both_fail}
+    # From here down every row is DISJOINT: `valid` guarantees a strict boolean on both sides, so
+    # there are exactly four combinations (TT/FF/FT/TF) and each row lands in exactly one.
+    both_ok = [r for r in valid if r.get("ours", {}).get("ok") is True and r.get("theirs", {}).get("ok") is True]
+    ours_only = [r for r in valid if id(r) not in both_fail_ids and r.get("ours", {}).get("ok") is False]
+    theirs_only = [r for r in valid if id(r) not in both_fail_ids and r.get("theirs", {}).get("ok") is False]
+
+    disjoint_total = len(both_ok) + len(ours_only) + len(theirs_only) + len(both_fail) + len(invalid) + len(missing)
+    assert disjoint_total == len(results), (
+        f"disjoint outcome buckets summed to {disjoint_total}, not {len(results)} asset(s) -- "
+        "a row escaped every bucket (issue #483)"
+    )
 
     lines = ["# Estate parse sweep", ""]
     lines.append(
         f"**{len(results)} asset(s)** — ours failed {len(ours_fail)}, his failed {len(theirs_fail)}, "
-        f"both parsed {len(both_ok)}, never downloaded {len(missing)}."
+        f"both parsed {len(both_ok)}, never downloaded {len(missing)}, "
+        f"invalid/indeterminate outcome {len(invalid)}."
     )
     lines.append("")
     # The closure line is the audit: `ours failed`/`his failed` OVERLAP when one asset defeats both
-    # parsers, so those two numbers cannot be added to anything. These five are disjoint and must
-    # sum to the denominator -- which is the property that silently failed before issue #472.
+    # parsers, so those two numbers cannot be added to anything. These six are disjoint and must
+    # sum to the denominator -- which is the property that silently failed before issue #472, and
+    # again for a non-boolean `ok` before issue #483.
     lines.append(
         f"Disjoint buckets, which must add up to the {len(results)} above: "
-        f"{len(both_ok)} parsed by both + {len(ours_fail) - len(both_fail)} ours only + "
-        f"{len(theirs_fail) - len(both_fail)} his only + {len(both_fail)} both parsers + "
+        f"{len(both_ok)} parsed by both + {len(ours_only)} ours only + "
+        f"{len(theirs_only)} his only + {len(both_fail)} both parsers + "
+        f"{len(invalid)} invalid/indeterminate + "
         f"{len(missing)} never downloaded = "
-        f"{len(both_ok) + len(ours_fail) + len(theirs_fail) - len(both_fail) + len(missing)}."
+        f"{disjoint_total}."
     )
     lines.append("")
     lines.append(
@@ -1128,12 +1349,15 @@ def summarise(  # pylint: disable=too-many-locals,too-many-statements,too-many-b
         lines.append("")
         lines.append(
             "These workbooks downloaded fine, so nothing else here flags them. They would each "
-            "convert against a model nobody migrated, which is the documented **empty report**."
+            "convert against a model nobody migrated, which is the documented **empty report**. "
+            "Each is named with its identity (LUID, or a project fallback) so two same-named "
+            "workbooks in different projects stay distinguishable (issue #483)."
         )
         lines.append("")
         for datasource, workbooks in orphans:
-            lines.append(f"- `{datasource}` (failed) blocks **{len(workbooks)}** workbook(s):")
-            lines.append(f"  - {', '.join(workbooks[:8])}{' …' if len(workbooks) > 8 else ''}")
+            lines.append(f"- `{datasource}` (failed) blocks **{_orphan_scope_label(workbooks)}**:")
+            labels = [_format_orphan_workbook(w) for w in workbooks]
+            lines.append(f"  - {', '.join(labels[:8])}{' …' if len(labels) > 8 else ''}")
         lines.append("")
 
     for title, rows, key in (
@@ -1157,6 +1381,24 @@ def summarise(  # pylint: disable=too-many-locals,too-many-statements,too-many-b
             lines.append(f"  - {', '.join(names[:8])}{' …' if len(names) > 8 else ''}")
         lines.append("")
 
+    lines.append("## Invalid/indeterminate parser outcome")
+    lines.append("")
+    if not invalid:
+        lines.append("_none_")
+        lines.append("")
+    else:
+        lines.append(
+            f"**{len(invalid)} asset(s)** downloaded fine but `ok` was not exactly `true`/`false` on "
+            "at least one side. This is NOT a clean parse and NOT a clean failure -- treat it as "
+            "broken until a real parser verdict replaces it."
+        )
+        lines.append("")
+        for r in invalid:
+            ours_ok = r.get("ours", {}).get("ok")
+            theirs_ok = r.get("theirs", {}).get("ok")
+            lines.append(f"- `{r.get('name', '?')}` — ours.ok={ours_ok!r}, theirs.ok={theirs_ok!r}")
+        lines.append("")
+
     unsupported: dict[str, list[str]] = {}
     for r in results:
         for reason in (r.get("theirs", {}) or {}).get("unsupported", []) or []:
@@ -1173,6 +1415,18 @@ def summarise(  # pylint: disable=too-many-locals,too-many-statements,too-many-b
     text = "\n".join(lines) + "\n"
     (out / "parse-sweep.md").write_text(text, encoding="utf-8")
     (out / "parse-sweep.json").write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
+    # Machine-readable disjoint totals, so a caller can assert the closure without re-parsing the
+    # markdown -- the SAME assertion above is what guarantees these six sum to `total` (issue #483).
+    totals = {
+        "total": len(results),
+        "both_ok": len(both_ok),
+        "ours_only": len(ours_only),
+        "theirs_only": len(theirs_only),
+        "both_fail": len(both_fail),
+        "invalid": len(invalid),
+        "never_downloaded": len(missing),
+    }
+    (out / "parse-sweep-totals.json").write_text(json.dumps(totals, indent=2) + "\n", encoding="utf-8")
     return text
 
 
@@ -1336,19 +1590,33 @@ def record_parse(
     total: int,
     started: float,
 ) -> None:
-    """Collect one finished offline parse and log it, so progress interleaves with the downloads."""
+    """Collect one finished offline parse and log it, so progress interleaves with the downloads.
+
+    Uses the SAME `_strict_bool()` verdict as `summarise()`'s bucket classification (issue #483
+    follow-up): a truthy-but-non-boolean `ok` (`"true"`, `1`, a list, a dict) used to print as
+    `ours=ok`/`his=ok` here — an operator watching the run scroll by would read that as a clean
+    parse, while the eventual summary correctly routed the SAME row to the invalid/indeterminate
+    bucket. The two had to agree.
+    """
     index, row, future = entry
     row["ours"], row["theirs"] = future.result()
     results.append(row)
-    mark = "ok " if row["ours"].get("ok") and row["theirs"].get("ok") else "DIFF"
+    ours_ok = _strict_bool(row["ours"].get("ok"))
+    theirs_ok = _strict_bool(row["theirs"].get("ok"))
+    if ours_ok is None or theirs_ok is None:
+        mark = "IND "
+    elif ours_ok and theirs_ok:
+        mark = "ok "
+    else:
+        mark = "DIFF"
     LOG.info(
         "[%d/%d] %-46s %s ours=%s his=%s %s",
         index,
         total,
         row["name"][:46],
         mark,
-        "ok" if row["ours"].get("ok") else "FAIL",
-        "ok" if row["theirs"].get("ok") else "FAIL",
+        _verdict_label(ours_ok),
+        _verdict_label(theirs_ok),
         progress(len(results), total, started),
     )
 
@@ -1360,15 +1628,21 @@ def sweep_exit_code(results: list[dict]) -> int:
     harvest that assessed nothing exited 0 (issue #472; reproduced in the blind review of #482).
     An empty `results` is `EXIT_NOTHING_ASSESSED` for the same reason it always was non-zero: a
     sweep that looked at nothing has said nothing about the estate.
+
+    An asset with an invalid/indeterminate `ok` (issue #483) is ALSO not a clean sweep: it did not
+    fail cleanly and it did not parse cleanly either, so it must not let the run exit 0.
     """
     missing = len(never_downloaded(results))
     assessed = len(results) - missing
     if assessed <= 0:
         return EXIT_NOTHING_ASSESSED
-    return EXIT_PARTIAL if missing else EXIT_OK
+    invalid = len(indeterminate_parser_outcomes(results))
+    return EXIT_PARTIAL if missing or invalid else EXIT_OK
 
 
-def report_failed_downloads(results: list[dict], orphans: list[tuple[str, list[str]]] | None = None) -> list[dict]:
+def report_failed_downloads(
+    results: list[dict], orphans: list[tuple[str, list[tuple[str, str]]]] | None = None
+) -> list[dict]:
     """Say out loud, at the END of the run, which assets never landed. Returns those rows.
 
     The per-asset `DOWNLOAD FAILED` warning has already scrolled past a 47-line run by the time the
@@ -1386,12 +1660,12 @@ def report_failed_downloads(results: list[dict], orphans: list[tuple[str, list[s
         for row in missing:
             LOG.warning("  - %s (%s): %s", row.get("name", "?"), row.get("kind", "?"), row.get("download_error", "?"))
     for datasource, workbooks in orphans or []:
+        labels = [_format_orphan_workbook(w) for w in workbooks]
         LOG.warning(
-            "DO NOT CONVERT YET: '%s' never downloaded, so %d workbook(s) that DID land would "
-            "convert against a model nobody migrated: %s",
+            "DO NOT CONVERT YET: '%s' never downloaded, so %s would convert against a model nobody migrated: %s",
             datasource,
-            len(workbooks),
-            ", ".join(workbooks[:8]) + (" …" if len(workbooks) > 8 else ""),
+            _orphan_scope_label(workbooks),
+            ", ".join(labels[:8]) + (" …" if len(labels) > 8 else ""),
         )
     return missing
 

@@ -208,7 +208,11 @@ class _Session(oracle.TableauSession):
 
     def _request(self, method, path, *, body=None, accept=None, authed=True, api=None, deadline=None):  # noqa: ARG002
         if path.endswith("/data"):
-            return self.data_reply or (200, b"a\n1\n", {})
+            status, payload, headers = self.data_reply or (200, b"a\n1\n", {})
+            headers = dict(headers)
+            if status == 200 and "Content-Length" not in headers and "Transfer-Encoding" not in headers:
+                headers["Content-Length"] = str(len(payload))
+            return status, payload, headers
         return self.reply
 
 
@@ -610,6 +614,8 @@ TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
     # response-derived.
     ("scripts/tableau_http.py", "_request"): {"req", "redactor", "timeout", "deadline"},
     ("scripts/tableau_http.py", "header_value"): {"headers"},
+    ("scripts/tableau_http.py", "response_framing"): {"headers"},
+    ("scripts/tableau_http.py", "response_content_encoding"): {"headers"},
     ("scripts/tableau_payload_facts.py", "detect_format"): {"values"},
     ("scripts/tableau_payload_facts.py", "summarise_csv"): {"payload"},
     ("scripts/tableau_payload_facts.py", "certify_csv"): {"payload", "content_type"},
@@ -1115,6 +1121,16 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
             "it never reaches a file, a path or a log line, and only the closed-vocabulary VERDICT "
             "derived from it is recorded. Were a caller ever to keep it, `scrub_tree` covers the "
             "manifest whole immediately before serialisation"
+        ),
+        "header_value(headers, RESPONSE_FRAMING_HEADER) or response_framing(headers)": (
+            "FIXED-VOCABULARY: either the synthetic framing verdict the shared HTTP primitive already "
+            "reduced to one of this repo's three literals before flattening duplicate headers, or the "
+            "same closed-vocabulary helper applied to a scripted test session's headers"
+        ),
+        "content_encoding or response_content_encoding(headers)": (
+            "FIXED-VOCABULARY: either the synthetic content-coding verdict the shared HTTP primitive "
+            "already reduced to identity/unsupported, or the same closed-vocabulary helper applied "
+            "to a scripted test session's headers"
         ),
     },
     ("scripts/tableau_render_capability.py", "format_matches"): {

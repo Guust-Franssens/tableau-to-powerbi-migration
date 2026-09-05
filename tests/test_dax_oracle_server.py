@@ -39,7 +39,13 @@ def _contract():
     return dos._load_contract()
 
 
-requires_engine = pytest.mark.skipif(_contract() is None, reason="deterministic tier not installed")
+ENGINE_SKIP_REASON = "deterministic tier not installed"
+
+
+def requires_engine(test):
+    """Mark an engine-dependent test and skip it when the canonical engine is absent."""
+    test = pytest.mark.engine_dependency(expected_skip_reason=ENGINE_SKIP_REASON)(test)
+    return pytest.mark.skipif(_contract() is None, reason=ENGINE_SKIP_REASON)(test)
 
 
 # --- the contract, certified by HIS function --------------------------------------------------

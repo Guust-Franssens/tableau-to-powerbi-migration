@@ -1932,6 +1932,88 @@ def test_a_DRIVE_RELATIVE_path_is_refused_by_the_PARSE_half_alone(tmp_path: Path
     assert declared not in json.dumps(shipped)
 
 
+def test_a_SINGLE_ROOTED_backslash_path_is_refused_by_the_PARSE_half_alone(tmp_path: Path) -> None:
+    """Issue #516: a Windows path rooted by ONE leading backslash, with no drive letter, is
+    host-rooted - and neither `is_absolute()` nor `.drive` sees it.
+
+    `PureWindowsPath(r"\\Finance\\report.log")` reports `.root == "\\"` and `.drive == ""`: Windows
+    resolves this shape against whichever drive is current, so it is rooted without being pinned to
+    one. That is still a host location a customer package must never contain - it names a directory
+    on the operator's current drive exactly as `C:\\Finance\\report.log` would.
+
+    The discriminator mirrors :func:`test_a_DRIVE_RELATIVE_path_is_refused_by_the_PARSE_half_alone`:
+    `Finance` is not in `host_paths._POSIX_ROOTS`'s vocabulary, so `discloses_host_location` is silent
+    on it and only `_declares_non_relative` can refuse it. Measured::
+
+        \\Finance\\report.log -> _declares_non_relative=True  discloses_host_location=False
+
+    which is exactly the shape an anchor needs: one branch answers, the other cannot.
+    """
+    declared = "\\Finance\\report.log"
+    assert pkg._declares_non_relative(declared) is True  # pylint: disable=protected-access
+    assert hp.discloses_host_location(declared) is False, (
+        "the containment half must be silent, or this isolates nothing"
+    )
+
+    bundle, oracle = _bundle(tmp_path)
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    manifest["views"][0]["image"] = {"status": "ok", "path": declared, "sha256": "x", "bytes": 3}
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+
+    shipped = json.loads((_out(tmp_path) / UNIT / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    leg = shipped["views"][0]["image"]
+    assert leg["status"] == pkg.OMITTED_STATUS
+    assert leg["path"] == pkg.REFUSED_PATH, "the declared location must not be echoed back"
+    assert "non-relative" in leg["packaging_reason"], "only the PARSE half can diagnose this one"
+    assert declared not in json.dumps(shipped)
+
+
+def test_a_SINGLE_ROOTED_WINDOWS_path_never_leaks_the_ACCOUNT_NAME(tmp_path: Path) -> None:
+    """The customer-facing control for issue #516: a real single-rooted path names a real account.
+
+    `\\Users\\<account>\\...` is host-rooted with no drive letter - the exact shape the issue
+    reported as unrefused. Unlike the discriminator above, this one names an account under `Users`,
+    so `discloses_host_location` ALSO fires (defence in depth); what matters here is the observable
+    contract - the account name must never reach the shipped manifest under ANY diagnosis.
+    """
+    declared = "\\Users\\neutral-account\\private\\secret.log"
+    bundle, oracle = _bundle(tmp_path)
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    manifest["views"][0]["image"] = {"status": "ok", "path": declared, "sha256": "x", "bytes": 3}
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+
+    shipped_text = (_out(tmp_path) / UNIT / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8")
+    assert "neutral-account" not in shipped_text, "a real account name must never reach the package"
+    leg = json.loads(shipped_text)["views"][0]["image"]
+    assert leg["status"] == pkg.OMITTED_STATUS
+    assert leg["path"] == pkg.REFUSED_PATH
+
+
+def test_a_POSIX_ROOTED_path_is_STILL_refused_after_the_root_check_was_added(tmp_path: Path) -> None:
+    """Regression control: the new `bool(candidate.root)` disjunct must not change the POSIX verdict.
+
+    `/Users/<account>/...` was already refused before issue #516 (via the explicit
+    `declared.startswith("/")` test); it must remain refused now that `.root` is checked too, and the
+    account name must still never ship.
+    """
+    declared = str(PurePosixPath("/", "Users", "neutral-account", "private", "secret.log"))
+    assert pkg._declares_non_relative(declared) is True  # pylint: disable=protected-access
+
+    bundle, oracle = _bundle(tmp_path)
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    manifest["views"][0]["image"] = {"status": "ok", "path": declared, "sha256": "x", "bytes": 3}
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+
+    shipped_text = (_out(tmp_path) / UNIT / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8")
+    assert "neutral-account" not in shipped_text
+    leg = json.loads(shipped_text)["views"][0]["image"]
+    assert leg["status"] == pkg.OMITTED_STATUS
+    assert leg["path"] == pkg.REFUSED_PATH
+
+
 def test_a_symlink_out_of_the_capture_root_is_refused(tmp_path: Path) -> None:
     """Containment is checked on the RESOLVED path, so a link inside the capture cannot escape it."""
     bundle, oracle = _bundle(tmp_path)
@@ -3626,35 +3708,71 @@ def test_a_unit_no_out_can_fit_says_so_instead_of_naming_an_impossible_directory
     assert f"{-budget.out_root_budget} character(s) over" in message
 
 
-def test_main_refuses_a_too_deep_out_before_packaging_ANY_unit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """29 of 47 packages written, then a crash, was the expensive half of this defect.
-
-    A shorter `--out` moves every unit, so the estate would be repackaged wholesale anyway; the run
-    is refused whole and the offenders are named together with the one number that fixes all of them.
-    """
+def test_main_accounts_for_a_too_deep_unit_without_blocking_siblings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A budget refusal belongs to its unit; it must not turn into a batch usage error."""
     _pin_windows(monkeypatch)
     bundle = _pbir_bundle(tmp_path, BUDGET_UNIT, "Second_Unit")
     out = _padded_path(tmp_path, 200)
-    with pytest.raises(SystemExit) as excinfo:
-        pkg.main(["--bundle", str(bundle), "--out", str(out), "--quiet"])
-    assert excinfo.value.code == 2
-    assert list(out.iterdir()) == [], "nothing may be written when the run is refused"
+    report = tmp_path / "packaging.json"
+    attempted: list[str] = []
+    real_package_unit = pkg.package_unit
+
+    def spy_package_unit(bundle_root: Path, unit: str, out_root: Path, **kwargs: object) -> dict:
+        attempted.append(unit)
+        return real_package_unit(bundle_root, unit, out_root, **kwargs)
+
+    monkeypatch.setattr(pkg, "package_unit", spy_package_unit)
+    assert (
+        pkg.main(["--bundle", str(bundle), "--out", str(out), "--json", str(report), "--quiet"]) == pkg.EXIT_UNIT_FAILED
+    )
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert [item["unit"] for item in payload["failed"]] == sorted([BUDGET_UNIT, "Second_Unit"])
+    assert payload["totals"]["requested"] == 2
+    assert attempted == []
+    assert not list(out.glob("*/package-manifest.json"))
 
 
-def test_the_batch_refusal_names_every_offending_unit_and_one_number_that_fixes_them(
+def test_the_batch_budget_failures_name_every_offending_unit(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """One unit at a time is how the field run discovered them - 29 packages apart."""
+    """Every over-budget unit is reported without aborting the request."""
     _pin_windows(monkeypatch)
     bundle = _pbir_bundle(tmp_path, BUDGET_UNIT, "Second_Unit")
     out = _padded_path(tmp_path, 200)
-    with pytest.raises(SystemExit):
-        pkg.main(["--bundle", str(bundle), "--out", str(out), "--quiet"])
-    message = capsys.readouterr().err
-    assert "2 of 2 unit(s)" in message
+    assert pkg.main(["--bundle", str(bundle), "--out", str(out)]) == pkg.EXIT_UNIT_FAILED
+    message = capsys.readouterr().out
     assert BUDGET_UNIT in message and "Second_Unit" in message
-    assert "NOTHING was packaged" in message
-    assert re.search(r"it must be at most (-?\d+) \((\d+) shorter\) for every unit to fit", message), message
+    assert "[host location redacted]" in message
+
+
+def test_a_budget_measurement_exception_is_unassessable_for_one_unit_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unexpected preflight failure must preserve sibling packaging and complete accounting."""
+    bundle, oracle = _batch_bundle(tmp_path)
+    real_budget = pkg.path_budget
+
+    def fail_one(bundle_root: Path, unit: str, out_root: Path, **kwargs: object) -> pkg.PathBudget:
+        if unit == BATCH_BOOM:
+            budget_path = PureWindowsPath("C:/", "Users", "Neutral Canary", "budget probe failed")
+            raise ValueError(str(budget_path))
+        return real_budget(bundle_root, unit, out_root, **kwargs)
+
+    monkeypatch.setattr(pkg, "path_budget", fail_one)
+    report = tmp_path / "packaging.json"
+    assert _batch_main(tmp_path, bundle, oracle, report, "--quiet") == pkg.EXIT_CANNOT_ASSESS
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert [item["unit"] for item in payload["failed"]] == [BATCH_BOOM]
+    assert payload["failed"][0]["state"] == "cannot_assess"
+    assert "builtins.ValueError" in payload["failed"][0]["reason"]
+    assert "Neutral Canary" not in payload["failed"][0]["reason"]
+    assert "builtins.ValueError" in (payload["failed"][0]["traceback"] or "")
+    assert "test_package_unit.py" in (payload["failed"][0]["traceback"] or "")
+    assert "fail_one" in (payload["failed"][0]["traceback"] or "")
+    assert "Neutral Canary" not in (payload["failed"][0]["traceback"] or "")
+    assert (_out(tmp_path) / BATCH_LATE / pkg.MANIFEST_NAME).is_file()
 
 
 # --------------------------------------------------------------------------------------------
@@ -4380,9 +4498,9 @@ def test_a_byConnection_report_makes_no_containment_claim(tmp_path: Path) -> Non
 def test_the_exit_codes_are_distinct_and_the_docstring_names_every_one() -> None:
     """5 and 6 mean different things, and neither collides with anything already allocated.
 
-    PR #487 has this branch as its base and allocated 5 to `EXIT_UNIT_FAILED`; this file uses the
-    same number for the same meaning deliberately, so the two do not have to be reconciled after a
-    merge. 6 is the cannot-assess state, which must never collapse into either 0 or 5.
+    5 is "a unit raised - through a modelled refusal or any other exception - and nothing was written
+    for it" (#478). 6 is the cannot-assess state, which must never collapse into either 0 or 5, and
+    which a requested unit nobody can account for also lands in.
     """
     codes = {
         pkg.EXIT_OK: "EXIT_OK",
@@ -4397,3 +4515,398 @@ def test_the_exit_codes_are_distinct_and_the_docstring_names_every_one() -> None
     assert (pkg.EXIT_UNIT_FAILED, pkg.EXIT_CANNOT_ASSESS) == (5, 6)
     for number in codes:
         assert re.search(rf"^\| {number} \|", pkg.__doc__ or "", re.MULTILINE), f"exit {number} is undocumented"
+
+
+# --------------------------------------------------------------------------------------------
+# the BATCH contract (#478): one unit's failure costs that unit, and nothing else
+# --------------------------------------------------------------------------------------------
+#
+# Packaging a 47-unit estate is ONE command. Measured on the SES estate (47 assets, 2026-09-03): 29
+# units packaged, then `IA_Operation_Health_Summary_Dashboard` raised `shutil.Error: [WinError 3]`
+# out of a comprehension over `sorted(units)`, and every alphabetically later unit was never
+# attempted and never reported. The tests below pin the two halves of the fix that can each fail
+# silently: every requested unit is ATTEMPTED, and every requested unit is ACCOUNTED FOR.
+
+BATCH_EARLY = "IA_Alpha_Dashboard"
+BATCH_BOOM = "IA_Operation_Health_Summary_Dashboard"
+BATCH_LATE = "IA_Policy_Change_Report"
+BATCH_UNITS = sorted([UNIT, BATCH_EARLY, BATCH_BOOM, BATCH_LATE])
+
+
+def _batch_bundle(tmp_path: Path) -> tuple[Path, Path]:
+    """The SES shape: four real units, with the one that will raise sitting THIRD in sorted order.
+
+    `main` packages `sorted(units)`, which is exactly what made the customer's cut-off alphabetical.
+    `IA_Policy_Change_Report` exists so "later units still run" is measured on a unit that really is
+    later, rather than merely on a second one.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    assets = tmp_path / "assets"
+    write_engine_report(bundle, workbooks=BATCH_UNITS)
+    for name in (BATCH_EARLY, BATCH_BOOM, BATCH_LATE):
+        source = write_workbook(assets / f"{name}.twb", worksheets=["Sales"])
+        write_handover(bundle, name, source_id=str(Path("_runs") / "999-x" / "assets" / f"{name}.twb"))
+        write_report(bundle, name, _page_ids(source))
+    return bundle, oracle
+
+
+def _arm_boom(monkeypatch: pytest.MonkeyPatch, boom: str, attempted: list[str]) -> None:
+    """Make ``boom`` raise the CUSTOMER's exception, and record every unit assembly is attempted for.
+
+    The spy is the only way to tell "the unit after the failure was attempted and succeeded" from "it
+    happened to be on disk already" - a package directory answers only the second question. The
+    exception is deliberately `shutil.Error`, which is NOT a `PackagingError`: the modelled refusals
+    were already collected before this fix, and the field failure was not one of them.
+    """
+    real = pkg._assemble_unit  # noqa: SLF001  # pylint: disable=protected-access
+
+    def spy(bundle: Path, unit: str, dest: Path, **kwargs: object) -> dict:
+        attempted.append(unit)
+        if unit == boom:
+            raise shutil.Error(f"[WinError 3] The system cannot find the path specified: '{dest}'")
+        return real(bundle, unit, dest, **kwargs)
+
+    monkeypatch.setattr(pkg, "_assemble_unit", spy)
+
+
+def _batch_main(tmp_path: Path, bundle: Path, oracle: Path, report: Path, *extra: str) -> int:
+    return pkg.main(
+        ["--bundle", str(bundle), "--out", str(_out(tmp_path)), "--oracle", str(oracle), "--json", str(report), *extra]
+    )
+
+
+def test_one_unit_raising_does_not_stop_the_units_after_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The #478 shape end to end: attempt every unit, report the failure, still exit non-zero.
+
+    Four separate ways this could fail-open are asserted, because passing three of them and failing
+    the fourth is what the operator actually hit: the later unit could be skipped, the failed unit
+    could be reported as packaged, the failure could vanish from the report, or the run could exit 0.
+    """
+    bundle, oracle = _batch_bundle(tmp_path)
+    attempted: list[str] = []
+    _arm_boom(monkeypatch, BATCH_BOOM, attempted)
+    report = tmp_path / "packaging.json"
+
+    code = _batch_main(tmp_path, bundle, oracle, report)
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    summary = capsys.readouterr().out
+
+    assert attempted == BATCH_UNITS, "a unit after the failure was never attempted"
+    assert (_out(tmp_path) / BATCH_LATE / pkg.MANIFEST_NAME).is_file(), "the unit after the failure was not packaged"
+    assert not (_out(tmp_path) / BATCH_BOOM).exists(), "the failed unit left a package behind"
+    assert code == pkg.EXIT_UNIT_FAILED, "a batch with a failed unit exited as if nothing had gone wrong"
+
+    assert [item["unit"] for item in payload["failed"]] == [BATCH_BOOM]
+    assert payload["failed"][0]["state"] == "unit_failed"
+    assert "shutil.Error" in payload["failed"][0]["reason"]
+    assert "shutil.Error" in (payload["failed"][0]["traceback"] or ""), "a crash without its traceback is not a report"
+    assert "WinError 3" not in payload["failed"][0]["reason"]
+    assert BATCH_BOOM not in {item["unit"] for item in payload["units"]}, "a failed unit was reported as packaged"
+    assert f"FAIL {BATCH_BOOM}" in summary
+    assert "WinError 3" not in summary
+    assert "UNIT FAILED: 1 unit(s) raised" in summary
+    assert f"OK   {BATCH_LATE}" in summary
+
+
+@pytest.mark.parametrize(
+    ("message", "filename"),
+    [
+        (
+            str(PureWindowsPath("C:/", "Users", "Neutral Canary", "secret.csv")),
+            str(PureWindowsPath("C:/", "Users", "Neutral Canary", "package.py")),
+        ),
+        (r"\\server\share\NeutralCanary\secret.csv", r"\\server\share\NeutralCanary\package.py"),
+        (
+            str(PurePosixPath("/", "home", "NeutralCanary", "secret.csv")),
+            str(PurePosixPath("/", "home", "NeutralCanary", "package.py")),
+        ),
+        ("ordinary failure text", str(PurePosixPath("project", "package.py"))),
+    ],
+)
+def test_a_crash_diagnostic_redacts_host_locations_but_keeps_actionable_context(message: str, filename: str) -> None:
+    """Crash reports may identify the frame, but never disclose the host that ran it."""
+    namespace: dict[str, object] = {}
+    crash: pkg.UnitCrashed | None = None
+    try:
+        exec(compile(f"raise RuntimeError({message!r})", filename, "exec"), namespace)  # noqa: S102
+    except RuntimeError as error:
+        crash = pkg.UnitCrashed("NeutralUnit", error)
+    else:
+        pytest.fail("the diagnostic fixture did not raise")
+
+    assert crash is not None
+    report = f"{crash}\n{crash.traceback}"
+    assert "NeutralCanary" not in report
+    assert "RuntimeError" in report
+    assert "line 1, in <module>" in crash.traceback
+    assert Path(filename.replace("\\", "/")).name in crash.traceback
+    if "ordinary" in message:
+        assert "ordinary failure text" in report
+
+
+def test_crash_diagnostic_redacts_whole_messages_with_host_locations() -> None:
+    windows_path = str(PureWindowsPath("C:/", "Users", "Neutral Canary", "secret.csv"))
+    unc_path = str(PureWindowsPath("//server/Users", "Neutral Canary", "secret.csv"))
+    posix_path = str(PurePosixPath("/", "home", "Neutral Canary", "secret.csv"))
+    lowercase_account = str(PureWindowsPath("C:/", "Users", "neutral canary"))
+    spaced_filename = str(PureWindowsPath("C:/", "Users", "Neutral Canary", "My Secret File.csv"))
+    followed_by_prose = f"{PureWindowsPath('C:/', 'Users', 'Alice')} Failed again"
+    for text in (
+        f'"{windows_path}", retry failed',
+        f"failure at {windows_path}; retry failed",
+        f"{unc_path}; retry failed",
+        f"{posix_path} (retry failed)",
+        lowercase_account,
+        spaced_filename,
+        followed_by_prose,
+    ):
+        safe = pkg._sanitize_diagnostic(text)  # pylint: disable=protected-access
+        assert safe == "[host location redacted]"
+
+    assert pkg._sanitize_diagnostic("/api/v1/Neutral Canary is unavailable") == "/api/v1/Neutral Canary is unavailable"  # pylint: disable=protected-access
+    assert pkg._sanitize_diagnostic("ordinary failure text") == "ordinary failure text"  # pylint: disable=protected-access
+
+
+def test_a_failed_unit_leaves_no_staging_tree_and_no_partial_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Continuation is only safe because a unit that raises leaves NOTHING behind.
+
+    A previously good package at the same path must also survive the failed re-run: assembly happens
+    in a per-unit staging directory and the swap only happens on success, so the second run's crash
+    can neither ship a half-package nor destroy the first run's.
+    """
+    bundle, oracle = _batch_bundle(tmp_path)
+    assert _batch_main(tmp_path, bundle, oracle, tmp_path / "first.json", "--quiet") == pkg.EXIT_OK
+    before = (_out(tmp_path) / BATCH_BOOM / pkg.MANIFEST_NAME).read_text(encoding="utf-8")
+    _arm_boom(monkeypatch, BATCH_BOOM, [])
+
+    code = _batch_main(tmp_path, bundle, oracle, tmp_path / "second.json", "--quiet", "--discard-package-edits")
+
+    assert code == pkg.EXIT_UNIT_FAILED
+    assert (_out(tmp_path) / BATCH_BOOM / pkg.MANIFEST_NAME).read_text(encoding="utf-8") == before
+    assert not [path for path in _out(tmp_path).glob(".*") if path.is_dir()], "a staging tree outlived the batch"
+
+
+def test_a_staging_tree_that_survives_cleanup_fails_its_unit_rather_than_being_assembled_into(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`rmtree(..., ignore_errors=True)` reported a FAILED removal as a success, and continuation
+    is what made that reachable: the batch now goes on to build more units after a failure, and a
+    build landing on a stale staging path assembled *into* it and swapped the combined contents into
+    its own package - a success carrying files the current input never produced.
+    """
+    bundle, oracle = _batch_bundle(tmp_path)
+    out_root = _out(tmp_path)
+    out_root.mkdir(parents=True, exist_ok=True)
+    staging = pkg.staging_dir(out_root, BATCH_BOOM)
+    staging.mkdir(parents=True)
+    (staging / "left-behind.json").write_text('{"from": "an earlier build"}', encoding="utf-8")
+    real_rmtree = shutil.rmtree
+
+    def stubborn(path: object, *args: object, **kwargs: object) -> None:
+        if Path(str(path)) == staging:
+            return
+        real_rmtree(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(pkg.shutil, "rmtree", stubborn)
+    report = tmp_path / "packaging.json"
+
+    code = _batch_main(tmp_path, bundle, oracle, report, "--quiet")
+    payload = json.loads(report.read_text(encoding="utf-8"))
+
+    assert code == pkg.EXIT_UNIT_FAILED
+    assert [item["unit"] for item in payload["failed"]] == [BATCH_BOOM]
+    assert "[host location redacted]" in payload["failed"][0]["reason"]
+    assert not (out_root / BATCH_BOOM).exists(), "a package was built out of another build's residue"
+    assert sorted(item["unit"] for item in payload["units"]) == [name for name in BATCH_UNITS if name != BATCH_BOOM], (
+        "the residue refusal stopped the rest of the batch"
+    )
+
+
+def test_a_residue_found_while_a_unit_is_already_failing_does_not_replace_the_root_cause(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The residue is recorded ON the in-flight failure, never raised out of the `finally`.
+
+    An exception raised from a `finally` REPLACES the one already propagating, and the in-flight one
+    is the root cause the operator needs - the report would name a staging directory instead of the
+    `shutil.Error` that actually killed the unit.
+    """
+    bundle, oracle = _batch_bundle(tmp_path)
+    staging = pkg.staging_dir(_out(tmp_path), BATCH_BOOM)
+    real_assemble, real_rmtree = pkg._assemble_unit, shutil.rmtree  # noqa: SLF001  # pylint: disable=protected-access
+
+    def half_build_then_raise(bundle_root: Path, unit: str, dest: Path, **kwargs: object) -> dict:
+        if unit != BATCH_BOOM:
+            return real_assemble(bundle_root, unit, dest, **kwargs)
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "half-built.json").write_text("{}", encoding="utf-8")
+        raise shutil.Error("[WinError 3] The system cannot find the path specified")
+
+    def stubborn(path: object, *args: object, **kwargs: object) -> None:
+        if Path(str(path)) == staging:
+            return
+        real_rmtree(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(pkg, "_assemble_unit", half_build_then_raise)
+    monkeypatch.setattr(pkg.shutil, "rmtree", stubborn)
+    report = tmp_path / "packaging.json"
+
+    code = _batch_main(tmp_path, bundle, oracle, report, "--quiet")
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    errors = capsys.readouterr().err
+
+    assert code == pkg.EXIT_UNIT_FAILED
+    assert [item["unit"] for item in payload["failed"]] == [BATCH_BOOM]
+    assert "shutil.Error" in payload["failed"][0]["reason"], "the residue message replaced the root cause"
+    assert "[host location redacted]" in (payload["failed"][0]["traceback"] or ""), (
+        "the residue was not recorded at all"
+    )
+    assert "[host location redacted]" in errors
+    assert str(staging) not in errors
+    assert (_out(tmp_path) / BATCH_LATE / pkg.MANIFEST_NAME).is_file(), "the unit after the failure was skipped"
+
+
+def test_the_batch_buckets_partition_the_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Every requested unit is in EXACTLY one bucket, and the totals are measured against the REQUEST.
+
+    Asserted as a set union against `requested[]` rather than by re-adding the same three lengths the
+    summary already added: `n = a + b + c` proves nothing about a row that entered no bucket at all.
+    """
+    bundle, oracle = _batch_bundle(tmp_path)
+    _arm_boom(monkeypatch, BATCH_BOOM, [])
+    report = tmp_path / "packaging.json"
+
+    _batch_main(tmp_path, bundle, oracle, report)
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    summary = capsys.readouterr().out
+    buckets = (
+        [item["unit"] for item in payload["units"]]
+        + [item["unit"] for item in payload["failed"]]
+        + [item["unit"] for item in payload["refused"]]
+    )
+
+    assert payload["requested"] == BATCH_UNITS
+    assert sorted(buckets) == payload["requested"], "a requested unit reached no bucket, or reached two"
+    assert len(buckets) == len(set(buckets)) == payload["totals"]["requested"]
+    assert payload["totals"] == {"requested": 4, "units": 3, "failed": 1, "refused": 0, "unaccounted": 0}
+    assert payload["unaccounted"] == []
+    assert "package_unit: 4 unit(s)" in summary, "the denominator shrank to whatever survived the run"
+    assert "packaged 3/4" in summary
+    assert "4 requested = 3 attempted + 1 failed + 0 kept" in summary
+    assert "UNACCOUNTED" not in summary
+
+
+def test_a_requested_unit_in_no_bucket_is_named_rather_than_counted_clean() -> None:
+    """The tripwire behind the totals line, exercised directly - both directions are a gap.
+
+    A unit that vanished before it could be recorded anywhere would otherwise shrink the denominator,
+    and the run would read as a clean pass over a smaller estate.
+    """
+    packaged = [{"unit": "A"}]
+    failed = [pkg.UnitCrashed("B", RuntimeError("boom"))]
+    refusal = pkg.PackageEditsRefused("C", Path("C"), [], None)
+
+    assert pkg.partition_gaps(["A", "B", "C"], packaged, failed, [refusal]) == []
+    assert pkg.partition_gaps(["A", "B", "C", "D"], packaged, failed, [refusal]) == [
+        {"unit": "D", "state": "not_attempted", "reason": "requested but recorded in no outcome bucket"}
+    ]
+    assert pkg.partition_gaps(["A", "B"], packaged, failed, [refusal]) == [
+        {"unit": "C", "state": "never_requested", "reason": "recorded although it was never requested"}
+    ]
+    assert pkg.partition_gaps(["A"], packaged + packaged, [], []) == [
+        {"unit": "A", "state": "recorded_twice", "reason": "recorded in 2 buckets"}
+    ]
+
+
+def test_an_unaccounted_unit_is_reported_and_cannot_exit_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """If the loop ever loses a unit again, the run SAYS so and refuses to exit 0.
+
+    `_package_each` is stubbed out entirely, which is the crudest possible version of the defect:
+    every requested unit silently disappears. `packaged 0/1` at exit 0 would be the fail-open shape.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    monkeypatch.setattr(pkg, "_package_each", lambda *args, **kwargs: None)
+    report = tmp_path / "packaging.json"
+
+    code = _batch_main(tmp_path, bundle, oracle, report)
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    summary = capsys.readouterr().out
+
+    assert payload["unaccounted"] == [
+        {"unit": UNIT, "state": "not_attempted", "reason": "requested but recorded in no outcome bucket"}
+    ]
+    assert payload["totals"] == {"requested": 1, "units": 0, "failed": 0, "refused": 0, "unaccounted": 1}
+    assert "1 requested = 0 attempted + 0 failed + 0 kept + 1 UNACCOUNTED" in summary
+    assert "UNACCOUNTED: 1 requested unit(s)" in summary and UNIT in summary
+    assert code == pkg.EXIT_CANNOT_ASSESS, "a unit nobody can account for left the run clean"
+
+
+def test_a_crash_outranks_a_refusal_and_neither_hides_the_other(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A refused unit must not mask a crashed one: both are reported, and the harder verdict wins."""
+    bundle, oracle = _batch_bundle(tmp_path)
+    assert _batch_main(tmp_path, bundle, oracle, tmp_path / "first.json", "--quiet") == pkg.EXIT_OK
+    edited = _out(tmp_path) / BATCH_EARLY / "fabric" / f"{BATCH_EARLY}.Report" / "definition" / "agent.json"
+    edited.parent.mkdir(parents=True, exist_ok=True)
+    edited.write_text('{"name": "agent"}', encoding="utf-8")
+    _arm_boom(monkeypatch, BATCH_BOOM, [])
+    report = tmp_path / "packaging.json"
+
+    code = _batch_main(tmp_path, bundle, oracle, report)
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    summary = capsys.readouterr().out
+
+    assert code == pkg.EXIT_UNIT_FAILED
+    assert [item["unit"] for item in payload["refused"]] == [BATCH_EARLY]
+    assert [item["unit"] for item in payload["failed"]] == [BATCH_BOOM]
+    assert payload["unaccounted"] == []
+    assert "4 requested = 2 attempted + 1 failed + 1 kept" in summary
+    assert edited.is_file(), "the refused unit's edit was destroyed by a batch that continued past it"
+
+
+def test_an_operator_interrupt_still_ends_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The broad clause catches `Exception`, NOT `BaseException`.
+
+    Ctrl-C is the operator ending the run, not a unit failing - swallowing it would make a 47-unit
+    batch un-interruptible, one caught `KeyboardInterrupt` per remaining unit.
+    """
+    bundle, oracle = _batch_bundle(tmp_path)
+    real = pkg._assemble_unit  # noqa: SLF001  # pylint: disable=protected-access
+
+    def spy(bundle_root: Path, unit: str, dest: Path, **kwargs: object) -> dict:
+        if unit == BATCH_BOOM:
+            raise KeyboardInterrupt
+        return real(bundle_root, unit, dest, **kwargs)
+
+    monkeypatch.setattr(pkg, "_assemble_unit", spy)
+
+    with pytest.raises(KeyboardInterrupt):
+        _batch_main(tmp_path, bundle, oracle, tmp_path / "packaging.json", "--quiet")
+
+
+def test_a_single_unit_run_is_unchanged_by_the_batch_contract(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The negative control: nothing fails, so the report reads exactly as it did before (#478)."""
+    bundle, oracle = _bundle(tmp_path)
+    report = tmp_path / "packaging.json"
+
+    code = _batch_main(tmp_path, bundle, oracle, report)
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    summary = capsys.readouterr().out
+
+    assert code == pkg.EXIT_OK
+    assert payload["requested"] == [UNIT] and payload["failed"] == [] and payload["unaccounted"] == []
+    assert [item["unit"] for item in payload["units"]] == [UNIT]
+    assert "packaged 1/1" in summary
+    assert "1 requested = 1 attempted + 0 failed + 0 kept" in summary
+    assert "FAIL" not in summary and "UNACCOUNTED" not in summary
