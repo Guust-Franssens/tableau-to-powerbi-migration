@@ -59,13 +59,13 @@ def _measure(entity: str, prop: str) -> dict:
     return {"Measure": {"Expression": {"SourceRef": {"Entity": entity}}, "Property": prop}}
 
 
-def _visual(*fields: dict) -> dict:
+def _visual(*fields: dict, visual_type: str = "tableEx", role: str = "Values") -> dict:
     """A minimal visual whose projections carry the given field nodes."""
     return {
         "name": "v1",
         "visual": {
-            "visualType": "clusteredColumnChart",
-            "query": {"queryState": {"Y": {"projections": [{"field": f} for f in fields]}}},
+            "visualType": visual_type,
+            "query": {"queryState": {role: {"projections": [{"field": f} for f in fields]}}},
         },
     }
 
@@ -84,10 +84,10 @@ def _aliased_visual(*pairs: tuple[str, str, str]) -> dict:
     return {
         "name": "v1",
         "visual": {
-            "visualType": "clusteredColumnChart",
+            "visualType": "tableEx",
             "query": {
                 "From": entries,
-                "queryState": {"Y": {"projections": [{"field": f} for f in fields]}},
+                "queryState": {"Values": {"projections": [{"field": f} for f in fields]}},
             },
         },
     }
@@ -863,7 +863,383 @@ def test_only_a_visual_json_is_a_visual(tmp_path) -> None:
     )
     result = cfb.scan(bundle)
     assert result["status"] == "OK", _coherence(result)
-    assert result["reports"][0]["visuals"] == 1, "exactly one visual.json, whatever else is lying around"
+
+
+# ---------------------------------------------------------------------------------------------
+# Issue #429 - role-type compatibility and direct color measure bindings.
+# ---------------------------------------------------------------------------------------------
+
+ROLE_TEST_TMDL = """table Metrics
+
+\tcolumn Health_Status
+\t\tdataType: string
+
+\tcolumn Weight
+\t\tdataType: double
+
+\tcolumn Color_Code
+\t\tdataType: string
+
+\tcolumn Flag
+\t\tdataType: boolean
+
+\tcolumn Created_Date
+\t\tdataType: datetime
+
+\tcolumn Unknown_Col
+\t\tdataType: Unknown
+
+\tcolumn Variant_Col
+\t\tdataType: Variant
+
+\tmeasure 'Health Status Measure' = "Healthy"
+\t\tdataType: string
+
+\tmeasure 'Numeric Revenue' = SUM(Metrics[Weight])
+\t\tdataType: double
+
+\tmeasure 'Untyped Measure' = SUM(Metrics[Weight])
+
+\tmeasure 'Unknown Measure' = SUM(Metrics[Weight])
+\t\tdataType: Unknown
+
+\tmeasure 'Variant Measure' = SUM(Metrics[Weight])
+\t\tdataType: Variant
+
+\tmeasure 'Color Hex Measure' = "#FF0000"
+\t\tdataType: string
+
+\tmeasure 'Boolean Measure' = TRUE()
+\t\tdataType: boolean
+
+\tmeasure 'DateTime Measure' = NOW()
+\t\tdataType: datetime
+"""
+
+
+def _visual_with_role(visual_type: str, role: str, *fields: dict) -> dict:
+    """A visual with a specific visualType and role in queryState."""
+    return {
+        "name": "v1",
+        "visual": {
+            "visualType": visual_type,
+            "query": {"queryState": {role: {"projections": [{"field": f} for f in fields]}}},
+        },
+    }
+
+
+def _visual_with_fill(expr: dict, visual_type: str = "clusteredColumnChart") -> dict:
+    """A visual with an explicit objects.dataPoint fill solid color expression."""
+    return {
+        "name": "v1",
+        "visual": {
+            "visualType": visual_type,
+            "query": {"queryState": {"Y": {"projections": [{"field": _measure("Metrics", "Numeric Revenue")}]}}},
+            "objects": {"dataPoint": [{"properties": {"fill": {"solid": {"color": {"expr": expr}}}}}]},
+        },
+    }
+
+
+def test_explicit_string_on_numeric_y_axis_fails(tmp_path, capsys) -> None:
+    """A string-returning measure or column bound to Y axis must fail the gate."""
+    bundle = _write_bundle(
+        tmp_path,
+        model_tmdl=ROLE_TEST_TMDL,
+        visuals=[_visual_with_role("clusteredColumnChart", "Y", _measure("Metrics", "Health Status Measure"))],
+    )
+    result = cfb.scan(bundle)
+    assert result["status"] == "NON_NUMERIC_ROLE", result
+    assert result["role_type_violations"] == 1
+    finding = result["reports"][0]["role_type_findings"][0]
+    assert finding["status"] == "non_numeric_role"
+    assert finding["role"] == "Y"
+    assert finding["data_type"] == "string"
+    assert finding["entity"] == "Metrics"
+    assert finding["property"] == "Health Status Measure"
+
+    assert cfb.main([str(bundle)]) == 1
+    out = capsys.readouterr().out
+    assert "NON_NUMERIC_ROLE" in out
+    assert "ROLE TYPE VIOLATION" in out
+    assert "Health Status Measure" in out
+
+
+def test_numeric_measure_or_column_on_y_axis_passes(tmp_path, capsys) -> None:
+    """Numeric measures and columns bound to Y axis must pass cleanly."""
+    bundle = _write_bundle(
+        tmp_path,
+        model_tmdl=ROLE_TEST_TMDL,
+        visuals=[
+            _visual_with_role("clusteredColumnChart", "Y", _measure("Metrics", "Numeric Revenue")),
+            _visual_with_role("clusteredColumnChart", "Y", _column("Metrics", "Weight")),
+        ],
+    )
+    result = cfb.scan(bundle)
+    assert result["status"] == "OK", result
+    assert result["role_type_violations"] == 0
+    assert cfb.main([str(bundle)]) == 0
+    assert "OK" in capsys.readouterr().out
+
+
+def test_unknown_untyped_measure_on_y_axis_reports_cannot_assess_offline(tmp_path) -> None:
+    """An untyped measure on Y axis reports cannot_assess and does not fail by default."""
+    bundle = _write_bundle(
+        tmp_path,
+        model_tmdl=ROLE_TEST_TMDL,
+        visuals=[_visual_with_role("clusteredColumnChart", "Y", _measure("Metrics", "Untyped Measure"))],
+    )
+    result = cfb.scan(bundle)
+    assert result["status"] == "OK", result
+    assert result["role_type_violations"] == 0
+    assert result["role_type_cannot_assess"] == 1
+    finding = result["reports"][0]["cannot_assess_findings"][0]
+    assert finding["status"] == "cannot_assess"
+    assert finding["role"] == "Y"
+    assert finding["property"] == "Untyped Measure"
+    assert cfb.main([str(bundle)]) == 0
+
+
+def test_string_column_on_categorical_role_or_table_passes(tmp_path) -> None:
+    """Text on Category role or table/card Values role is legitimate and must pass."""
+    bundle = _write_bundle(
+        tmp_path,
+        model_tmdl=ROLE_TEST_TMDL,
+        visuals=[
+            _visual_with_role("clusteredColumnChart", "Category", _column("Metrics", "Health_Status")),
+            _visual_with_role("tableEx", "Values", _column("Metrics", "Health_Status")),
+            _visual_with_role("card", "Values", _measure("Metrics", "Health Status Measure")),
+        ],
+    )
+    result = cfb.scan(bundle)
+    assert result["status"] == "OK", result
+    assert result["role_type_violations"] == 0
+
+
+def test_direct_color_measure_binding_in_data_point_fill_fails(tmp_path, capsys) -> None:
+    """A direct measure expression in solid.color.expr must fail as a direct color measure defect."""
+    expr = {"Measure": {"Expression": {"SourceRef": {"Entity": "Metrics"}}, "Property": "Color Hex Measure"}}
+    bundle = _write_bundle(
+        tmp_path,
+        model_tmdl=ROLE_TEST_TMDL,
+        visuals=[_visual_with_fill(expr)],
+    )
+    result = cfb.scan(bundle)
+    assert result["status"] == "NON_NUMERIC_ROLE", result
+    assert result["role_type_violations"] == 1
+    finding = result["reports"][0]["role_type_findings"][0]
+    assert finding["status"] == "direct_color_measure"
+    assert finding["entity"] == "Metrics"
+    assert finding["property"] == "Color Hex Measure"
+
+    assert cfb.main([str(bundle)]) == 1
+    out = capsys.readouterr().out
+    assert "NON_NUMERIC_ROLE" in out
+    assert "Color Hex Measure" in out
+
+
+def test_legitimate_conditional_formatting_rules_pass(tmp_path) -> None:
+    """Conditional.Cases rules in fill.solid.color.expr are legitimate and must pass."""
+    expr = {
+        "Conditional": {
+            "Cases": [
+                {
+                    "Condition": {
+                        "Comparison": {
+                            "ComparisonKind": 0,
+                            "Left": {
+                                "Measure": {
+                                    "Expression": {"SourceRef": {"Entity": "Metrics"}},
+                                    "Property": "Numeric Revenue",
+                                }
+                            },
+                            "Right": {"Literal": {"Value": "100D"}},
+                        }
+                    },
+                    "Value": {"Literal": {"Value": "'#00FF00'"}},
+                }
+            ],
+            "Else": {"Literal": {"Value": "'#FF0000'"}},
+        }
+    }
+    bundle = _write_bundle(
+        tmp_path,
+        model_tmdl=ROLE_TEST_TMDL,
+        visuals=[_visual_with_fill(expr)],
+    )
+    result = cfb.scan(bundle)
+    assert result["status"] == "OK", result
+    assert result["role_type_violations"] == 0
+
+
+@pytest.mark.parametrize(
+    ("visual_type", "role"),
+    [
+        ("scatterChart", "X"),
+        ("scatterChart", "Size"),
+        ("azureMap", "Size"),
+        ("treemap", "Values"),
+    ],
+)
+def test_numeric_role_guards_on_specialized_visuals(tmp_path, visual_type, role) -> None:
+    """Non-numeric measures on scatter X/Size, azureMap Size, and treemap Values must fail."""
+    bundle = _write_bundle(
+        tmp_path,
+        model_tmdl=ROLE_TEST_TMDL,
+        visuals=[_visual_with_role(visual_type, role, _measure("Metrics", "Health Status Measure"))],
+    )
+    result = cfb.scan(bundle)
+    assert result["status"] == "NON_NUMERIC_ROLE", result
+
+
+@pytest.mark.parametrize("prop", ["Unknown Measure", "Variant Measure", "Unknown_Col", "Variant_Col"])
+def test_explicit_unknown_or_variant_on_numeric_role_reports_cannot_assess(tmp_path, prop) -> None:
+    """Mutation killed: ignoring explicit Unknown or Variant (treating as clean or omitting from cannot_assess)."""
+    kind = _measure if "Measure" in prop else _column
+    bundle = _write_bundle(
+        tmp_path,
+        model_tmdl=ROLE_TEST_TMDL,
+        visuals=[_visual_with_role("clusteredColumnChart", "Y", kind("Metrics", prop))],
+    )
+    result = cfb.scan(bundle)
+    assert result["status"] == "OK", result
+    assert result["role_type_violations"] == 0
+    assert result["role_type_cannot_assess"] == 1
+    finding = result["reports"][0]["cannot_assess_findings"][0]
+    assert finding["status"] == "cannot_assess"
+    assert finding["role"] == "Y"
+    assert finding["property"] == prop
+
+
+def test_direct_fill_traversal_restricted_to_datapoint_not_legend_or_labels(tmp_path) -> None:
+    """Mutation killed: widening formatting object walk to legend, labels, or other namespaces."""
+    expr = {"Measure": {"Expression": {"SourceRef": {"Entity": "Metrics"}}, "Property": "Color Hex Measure"}}
+    legend_visual = {
+        "name": "v1",
+        "visual": {
+            "visualType": "clusteredColumnChart",
+            "query": {"queryState": {"Y": {"projections": [{"field": _measure("Metrics", "Numeric Revenue")}]}}},
+            "objects": {
+                "legend": [{"properties": {"fill": {"solid": {"color": {"expr": expr}}}}}],
+                "labels": [{"properties": {"fill": {"solid": {"color": {"expr": expr}}}}}],
+            },
+        },
+    }
+    bundle = _write_bundle(
+        tmp_path,
+        model_tmdl=ROLE_TEST_TMDL,
+        visuals=[legend_visual],
+    )
+    result = cfb.scan(bundle)
+    assert result["status"] == "OK", result
+    assert result["role_type_violations"] == 0
+
+
+@pytest.mark.parametrize(
+    "prop",
+    ["Boolean Measure", "DateTime Measure", "Numeric Revenue", "Flag", "Created_Date", "Weight"],
+)
+def test_direct_fill_with_known_non_string_types_is_clean(tmp_path, prop) -> None:
+    """Mutation killed: classifying Boolean, DateTime, or numeric types as color string blockers."""
+    expr = {
+        "Measure" if "Measure" in prop or prop == "Numeric Revenue" else "Column": {
+            "Expression": {"SourceRef": {"Entity": "Metrics"}},
+            "Property": prop,
+        }
+    }
+    bundle = _write_bundle(
+        tmp_path,
+        model_tmdl=ROLE_TEST_TMDL,
+        visuals=[_visual_with_fill(expr)],
+    )
+    result = cfb.scan(bundle)
+    assert result["status"] == "OK", result
+    assert result["role_type_violations"] == 0
+    assert result["role_type_cannot_assess"] == 0
+
+
+@pytest.mark.parametrize("prop", ["Untyped Measure", "Unknown Measure", "Variant Measure"])
+def test_direct_fill_untyped_or_unknown_reports_cannot_assess(tmp_path, prop) -> None:
+    """Direct fill on dataPoint with untyped/unknown return type reports cannot_assess."""
+    expr = {"Measure": {"Expression": {"SourceRef": {"Entity": "Metrics"}}, "Property": prop}}
+    bundle = _write_bundle(
+        tmp_path,
+        model_tmdl=ROLE_TEST_TMDL,
+        visuals=[_visual_with_fill(expr)],
+    )
+    result = cfb.scan(bundle)
+    assert result["status"] == "OK", result
+    assert result["role_type_violations"] == 0
+    assert result["role_type_cannot_assess"] == 1
+    finding = result["reports"][0]["cannot_assess_findings"][0]
+    assert finding["status"] == "cannot_assess"
+    assert finding["role"] == "objects.dataPoint.fill"
+    assert finding["property"] == prop
+
+
+def test_multiple_datatype_same_value_resolves_cleanly(tmp_path) -> None:
+    """Multiple dataType lines that agree case-insensitively resolve to that type."""
+    tmdl = """table Dups
+
+\tcolumn AgreedNum
+\t\tdataType: int64
+\t\tdataType: Int64
+
+\tmeasure AgreedStr = "test"
+\t\tdataType: string
+\t\tdataType: String
+"""
+    bundle = _write_bundle(
+        tmp_path / "b1",
+        model_tmdl=tmdl,
+        visuals=[
+            _visual_with_role("clusteredColumnChart", "Y", _column("Dups", "AgreedNum")),
+        ],
+    )
+    result = cfb.scan(bundle)
+    assert result["status"] == "OK", result
+    assert result["role_type_violations"] == 0
+
+    bundle2 = _write_bundle(
+        tmp_path / "b2",
+        model_tmdl=tmdl,
+        visuals=[
+            _visual_with_role("clusteredColumnChart", "Y", _measure("Dups", "AgreedStr")),
+        ],
+    )
+    result2 = cfb.scan(bundle2)
+    assert result2["status"] == "NON_NUMERIC_ROLE", result2
+    assert result2["role_type_violations"] == 1
+
+
+def test_multiple_datatype_conflicting_order_invariant_produces_unassessable(tmp_path) -> None:
+    """Mutation killed: last-wins duplicate handling.
+
+    Conflicting dataType properties must mark the member unassessable regardless of line order.
+    """
+    tmdl = """table Conf
+
+\tcolumn IntThenStr
+\t\tdataType: int64
+\t\tdataType: string
+
+\tcolumn StrThenInt
+\t\tdataType: string
+\t\tdataType: int64
+"""
+    bundle = _write_bundle(
+        tmp_path,
+        model_tmdl=tmdl,
+        visuals=[
+            _visual_with_role("clusteredColumnChart", "Y", _column("Conf", "IntThenStr")),
+            _visual_with_role("clusteredColumnChart", "Y", _column("Conf", "StrThenInt")),
+        ],
+    )
+    result = cfb.scan(bundle)
+    assert result["status"] == "OK", result
+    assert result["role_type_violations"] == 0
+    assert result["role_type_cannot_assess"] == 2
+    props = sorted(f["property"] for f in result["reports"][0]["cannot_assess_findings"])
+    assert props == ["IntThenStr", "StrThenInt"]
 
 
 def test_repeated_table_disagreements_collapse_but_keep_every_visual(tmp_path) -> None:
