@@ -127,6 +127,7 @@ from __future__ import annotations
 # pylint: disable=too-many-lines
 
 import argparse
+import hashlib
 import json
 import logging
 import re
@@ -192,32 +193,54 @@ _PBIR_VISUAL_FILE = "visual" + ".json"
 _PBIR_VISUAL_TAIL = f"definition/pages/{_PBIR_PAGE_ID}/visuals/{_PBIR_VISUAL_ID}/{_PBIR_VISUAL_FILE}"
 
 
-_ENGINE_FOLDER_MAX_UTF16 = 60
-_ENGINE_FOLDER_INVALID = re.compile(r"[^0-9A-Za-z _.-]+")
+_ENGINE_FOLDER_MAX_UTF16 = 64
+_ENGINE_FOLDER_INVALID = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _ENGINE_SOURCE_SUFFIXES = {".twb": ".twb", ".twbx": ".twb", ".tds": ".tds", ".tdsx": ".tds"}
 
 
 def _engine_safe_folder(name: str) -> str:
-    """Conservatively reproduce the engine's filesystem-safe folder component."""
+    """Conservatively reproduce the engine's folder length without dropping Unicode characters.
+
+    The engine preserves a 64-unit hash-bearing prefix for long names. Keeping every non-invalid
+    source character here is intentionally conservative for names the engine may normalize away.
+    """
     safe = _ENGINE_FOLDER_INVALID.sub("_", name).strip(" .")
-    return (safe or "unnamed")[:_ENGINE_FOLDER_MAX_UTF16]
+    if not safe:
+        return "unnamed"
+    if utf16_len(safe) <= _ENGINE_FOLDER_MAX_UTF16:
+        return safe
+    digest = hashlib.sha256(safe.encode("utf-8")).hexdigest()[:8]
+    return _take_utf16_units(safe, _ENGINE_FOLDER_MAX_UTF16 - len(digest)) + digest
+
+
+def _take_utf16_units(text: str, units: int) -> str:
+    """Keep a prefix without splitting a supplementary character."""
+    result = []
+    used = 0
+    for character in text:
+        width = utf16_len(character)
+        if used + width > units:
+            break
+        result.append(character)
+        used += width
+    return "".join(result)
 
 
 def _readable_source(path: Path) -> bool:
     """Prove a source and its required Tableau document can be opened before conversion."""
     try:
         if path.suffix.lower() in {".twb", ".tds"}:
-            with path.open("rb"):
-                return True
+            path.read_bytes().decode("utf-8-sig")
+            return True
         required = _ENGINE_SOURCE_SUFFIXES[path.suffix.lower()]
         with zipfile.ZipFile(path) as archive:
             for info in archive.infolist():
                 if not info.is_dir() and Path(info.filename).suffix.lower() == required:
                     with archive.open(info) as document:
-                        document.read(1)
+                        document.read().decode("utf-8-sig")
                     return True
             return False
-    except (OSError, KeyError, zipfile.BadZipFile):
+    except (OSError, KeyError, UnicodeDecodeError, zipfile.BadZipFile):
         return False
 
 
@@ -255,13 +278,13 @@ def project_estate_path_ceiling(output_root: Path, unit_names: list[str] | None)
     used_names: set[str] = set()
     projected_names = []
     for name in unit_names:
-        base = str(name)
+        base = _engine_safe_folder(str(name))
         occurrence = 1
-        unit = base[:_ENGINE_FOLDER_MAX_UTF16]
+        unit = base
         while unit.casefold() in used_names:
             occurrence += 1
             suffix = f"_{occurrence}"
-            unit = f"{base[: _ENGINE_FOLDER_MAX_UTF16 - len(suffix)]}{suffix}"
+            unit = f"{_take_utf16_units(base, _ENGINE_FOLDER_MAX_UTF16 - len(suffix))}{suffix}"
         used_names.add(unit.casefold())
         projected_names.append(unit)
     for unit in projected_names:

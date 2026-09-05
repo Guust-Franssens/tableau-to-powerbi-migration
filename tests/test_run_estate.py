@@ -12,6 +12,7 @@ import os
 import shutil
 import sys
 import time
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -133,6 +134,32 @@ def test_projected_names_allocate_suffixes_globally_after_truncation() -> None:
         prefix,
         f"{prefix[:-2]}_2",
     ]
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["x" * 64, "x" * 100, "é" * 10, "550e8400-e29b-41d4-a716-446655440000_Sales"],
+)
+def test_engine_name_bound_preserves_or_overbounds_name_length(name: str) -> None:
+    projected = run_estate._engine_safe_folder(name)
+
+    assert utf16_len(projected) >= min(utf16_len(name), run_estate._ENGINE_FOLDER_MAX_UTF16)
+    assert utf16_len(projected) <= run_estate._ENGINE_FOLDER_MAX_UTF16
+
+
+def test_packaged_source_requires_full_utf8_decode(tmp_path: Path) -> None:
+    source = tmp_path / "Broken.twbx"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("workbook.twb", b"<workbook>\xff</workbook>")
+
+    assert run_estate._readable_source(source) is False
+
+
+def test_loose_source_requires_full_utf8_decode(tmp_path: Path) -> None:
+    source = tmp_path / "Broken.twb"
+    source.write_bytes(b"<workbook>\xff</workbook>")
+
+    assert run_estate._readable_source(source) is False
 
 
 def test_unreadable_source_cannot_pass_path_preflight(tmp_path: Path, monkeypatch) -> None:
