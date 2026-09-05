@@ -118,16 +118,18 @@ on" versus "what did we download" — so a mismatch between them is not a defect
 
 ### Two things about `bundle/` that mislead people
 
-**1. `reports/` is the pristine engine baseline / model-unbound pass and must never be edited; `pbip/` is the model-bound working and shipped pass.**
+**1. `reports/` is the pristine engine baseline / model-unbound pass and must never be edited; `pbip/` is the model-bound engine working pass and the source lineage used for packaging.**
 There is **no `out/` level** — a bundle is `{pbip,reports,semantic_models,handover,data}`. Per
 `AGENTS.md:773` agents edit `pbip/` before packaging, but `reports/` stays pristine so the engine-gap
-Delta remains attributable. The shipped artifact is the `pbip/` tree, not the earlier unbound report
-pass. `shipped_tree_divergence` is disclosure, not fidelity proof: a report can legitimately diverge
-from the baseline and still be broken in the shipped visual, so the validator must inspect the shipped
-PBIP and treat divergence as a finding. Once a phase-2 package exists, `<package>/fabric/` is the
-canonical edit tree and phase 3 promotes it via `scripts/promote_unit.py` (#460, settled; phase 3
-below). Compare the baseline/working pair with `git diff --no-index --stat`, never PowerShell's
-`diff` (which is an alias for `Compare-Object` and compares the two path *strings*). Source:
+Delta remains attributable. Once a phase-2 package exists, `<package>/fabric/` is the canonical edit
+and ship tree, and phase 3 promotes it via `scripts/promote_unit.py` into
+`migrations/{workbooks,datasources}/<slug>/fabric/` (#460, settled; phase 3 below). The actual
+agent-edited and shipped bytes live in the package and the promoted destination, not in a potentially
+stale bundle copy. `shipped_tree_divergence` is disclosure, not fidelity proof: a report can
+legitimately diverge from the baseline and still be broken in the shipped visual, so the validator
+must inspect the package or promoted destination and treat divergence as a finding. Compare the
+baseline/working pair with `git diff --no-index --stat`, never PowerShell's `diff` (which is an
+alias for `Compare-Object` and compares the two path *strings*). Source:
 [`.github/skills/powerbi-report-gotchas/SKILL.md` §3](../.github/skills/powerbi-report-gotchas/SKILL.md).
 
 **2. `semantic_models/` is NOT a per-workbook guarantee.** ✅ Measured on run 408: **18 model
