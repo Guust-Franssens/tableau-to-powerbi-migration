@@ -509,8 +509,8 @@ path**).*
    `rechecked_after_row_predicate_wrap: true`. **Filed** as
    [`tableau-fabric-skills#183`](https://github.com/Yarbrdab000/tableau-fabric-skills/issues/183) — a
    regression from the fix for upstream #177 that retracts the disclosure upstream #141 added —
-   and **fixed in engine 2.340.0**, below our canonical 2.353.0, so both keys now survive the
-   re-check. Kept here because the finding is what produced the fix (audit: issue #486).
+   and **fixed in engine >= 2.340.0**, so both keys now survive the re-check. Kept here because the
+   finding is what produced the fix (audit: issue #486).
 7. 🟠 **No rebase seam** — absolute paths are correct but unrelocatable; a `SourceFolder` parameter
    fixes it upstream for everyone.
 8. 🟡 **Contradictory counters** — `workbooks_viz_warned = 0` vs `visuals_warned = 56`.

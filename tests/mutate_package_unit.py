@@ -655,36 +655,11 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
         ["test_the_retired_package_is_never_named_after_the_package_it_retires"],
     ),
     (
-        "budget: package the unit anyway, reproducing the mid-assembly WinError 206",
+        "budget: drop an over-budget unit from outcome accounting",
         PACKAGER,
-        "    budget = path_budget(bundle, unit, out_root, limits=limits, assets_dir=assets_dir)\n"
-        "    if budget.refused:\n        raise PackagePathTooLong(budget)",
-        "    budget = path_budget(bundle, unit, out_root, limits=limits, assets_dir=assets_dir)\n"
-        "    if False:  # noqa\n        raise PackagePathTooLong(budget)",
-        [
-            "test_a_unit_whose_paths_exceed_the_ceiling_is_refused_BEFORE_anything_is_written",
-            "test_the_refusal_names_the_path_its_length_the_ceiling_and_the_characters_to_reclaim",
-        ],
-    ),
-    (
-        "budget: measure only the FINAL tree, missing a unit that fits once renamed and not before",
-        PACKAGER,
-        "    return (final, staging_dir(out_root, unit), retired_dir(final))",
-        "    return (final,)",
-        [
-            "test_the_budget_measures_the_STAGED_tree_too_not_only_the_final_one",
-            "test_the_budget_measures_both_the_staged_and_the_final_tree",
-        ],
-    ),
-    (
-        "budget: let the batch run start, so the estate fails one unit at a time again",
-        PACKAGER,
-        "        parser.error(render_out_too_deep(too_deep, len(units)))",
-        "        pass",
-        [
-            "test_main_refuses_a_too_deep_out_before_packaging_ANY_unit",
-            "test_the_batch_refusal_names_every_offending_unit_and_one_number_that_fixes_them",
-        ],
+        "            failed.append(failure)\n        else:\n            safe.append(unit)",
+        "            pass\n        else:\n            safe.append(unit)",
+        ["test_main_accounts_for_a_too_deep_unit_without_blocking_siblings"],
     ),
     (
         "message: name the path but not its length, the ceiling or the overage (WinError 206's own failing)",
@@ -806,9 +781,105 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
             "test_the_packager_budgets_against_those_same_two_literals",
         ],
     ),
+    # ---- #478: the batch continues, and every requested unit is accounted for -------------------
+    (
+        "privacy: preserve a diagnostic containing a host location instead of redacting the whole message",
+        PACKAGER,
+        '    return "[host location redacted]" if discloses_host_location(text) else text',
+        "    return text",
+        ["test_crash_diagnostic_redacts_whole_messages_with_host_locations"],
+    ),
+    (
+        "budget: drop the traceback from an unassessable path-budget failure",
+        PACKAGER,
+        "        self.traceback = _safe_traceback(error) if error is not None else None",
+        "        self.traceback = None",
+        ["test_a_budget_measurement_exception_is_unassessable_for_one_unit_only"],
+    ),
+    (
+        "#478: re-raise the unit's crash, so the first failure kills the batch again",
+        PACKAGER,
+        "            crash = UnitCrashed(unit, error)",
+        "            raise error",
+        ["test_one_unit_raising_does_not_stop_the_units_after_it"],
+    ),
+    (
+        "#478: narrow the clause to a modelled refusal, so the FIELD failure still aborts the batch",
+        PACKAGER,
+        "        except Exception as error:  # pylint: disable=broad-exception-caught\n"
+        "            if failed is None:\n"
+        "                raise\n"
+        "            crash = UnitCrashed(unit, error)",
+        "        except PackagePathTooLong as error:  # pylint: disable=broad-exception-caught\n"
+        "            if failed is None:\n"
+        "                raise\n"
+        "            crash = UnitCrashed(unit, error)",
+        ["test_one_unit_raising_does_not_stop_the_units_after_it"],
+    ),
+    (
+        "#478: stop measuring the buckets against the request, so a lost unit is never named",
+        PACKAGER,
+        "    counted = Counter(_bucketed_units(results, failed, refused))",
+        "    counted = Counter(requested)",
+        [
+            "test_an_unaccounted_unit_is_reported_and_cannot_exit_zero",
+            "test_a_requested_unit_in_no_bucket_is_named_rather_than_counted_clean",
+        ],
+    ),
+    (
+        "#478: let an unaccounted unit leave the run clean",
+        PACKAGER,
+        "    if gaps or any(isinstance(failure, UnassessableInput) for failure in failed):",
+        "    if any(isinstance(failure, UnassessableInput) for failure in failed):",
+        ["test_an_unaccounted_unit_is_reported_and_cannot_exit_zero"],
+    ),
+    (
+        "#478: denominate the totals in what SURVIVED the run instead of what was requested",
+        PACKAGER,
+        "    requested = list(requested) if requested is not None else _bucketed_units(results, failed, refused)",
+        "    requested = _bucketed_units(results, failed, refused)",
+        ["test_an_unaccounted_unit_is_reported_and_cannot_exit_zero"],
+    ),
+    (
+        "#478: restore rmtree(ignore_errors=True), so a staging tree that survived is assembled into",
+        PACKAGER,
+        "    reason: str | None = None\n    for attempt in range(_SCRATCH_CLEAR_ATTEMPTS):",
+        "    shutil.rmtree(path, ignore_errors=True)\n    return None\n"
+        "    reason: str | None = None\n    for attempt in range(_SCRATCH_CLEAR_ATTEMPTS):",
+        ["test_a_staging_tree_that_survives_cleanup_fails_its_unit_rather_than_being_assembled_into"],
+    ),
+    (
+        "#478: drop the pre-assembly residue refusal, keeping only the one on the way out",
+        PACKAGER,
+        "    residue = _discard_scratch(staging)\n    if residue:",
+        "    residue = None\n    if residue:",
+        ["test_a_staging_tree_that_survives_cleanup_fails_its_unit_rather_than_being_assembled_into"],
+    ),
+    (
+        "#478: raise the residue out of the finally, replacing the root cause the operator needs",
+        PACKAGER,
+        "    in_flight = sys.exception()",
+        "    in_flight = None",
+        ["test_a_residue_found_while_a_unit_is_already_failing_does_not_replace_the_root_cause"],
+    ),
+    (
+        f"{NEGATIVE_CONTROL} (#478): a comment-only edit inside the batch loop",
+        PACKAGER,
+        '            # Only a crash carries one: the modelled refusals ARE their reason, while "a unit',
+        '            # (control) Only a crash carries one: the modelled refusals ARE their reason, while "a unit',
+        ["test_one_unit_raising_does_not_stop_the_units_after_it"],
+    ),
 ]
 
-_FAILED = re.compile(r"(\d+) failed")
+#: pytest's own `-q` verdict line, matched at the START of a line and required to be NON-ZERO.
+#:
+#: ⚠️ A bare `(\d+) failed` reads any occurrence anywhere in the tail, and an assertion DIFF is part
+#: of that tail. Measured 2026-09-04 while adding the #478 batch mutations: two of them scored
+#: `CAUGHT (0 failed)` because the failing assertion printed this packager's own summary line,
+#: `1 requested = 0 attempted + 0 failed + 0 kept + 1 UNACCOUNTED`. Those two were genuinely caught -
+#: a passing `-q` run prints no such text - but "0 failed" is a verdict a harness must never report,
+#: because the same read would score a CAUGHT off a run that failed nothing at all.
+_FAILED = re.compile(r"^([1-9]\d*) failed", re.MULTILINE)
 _ERROR = re.compile(r"(\d+) errors?\b|^(?:ERROR|INTERNALERROR)\b", re.IGNORECASE | re.MULTILINE)
 
 

@@ -143,9 +143,10 @@ LAZY_SUBDIRS: frozenset[str] = frozenset({"deliverables"})
 
 _RUN_DIR_RE = re.compile(r"^(\d+)(?:-.*)?$")
 _RESERVATIONS_DIR_NAME = ".run-number-reservations"
-# Matches the Fabric artifact-name ceiling used elsewhere in this org's conventions (table names
-# under 60 chars) - the slug is decoration, not identity, so there is no reason to let it run long.
-_MAX_UNIT_KEY_LEN = 60
+# Run numbers are the permanent identity; slugs are decorative. Keep new slugs short enough that
+# the canonical run layout leaves room for the PBIR paths below it. Existing run directories are
+# never renamed, so this cap applies only when allocating a new run.
+_MAX_NEW_RUN_SLUG_LEN = 15
 _MAX_ALLOCATION_ATTEMPTS = 50  # generous; a genuine collision only ever needs one retry
 
 #: Manifest key under which `allocate_run` records the directory NAME (`<NNN>-<slug>`) it allocated.
@@ -230,7 +231,7 @@ MANIFEST_DETAIL_KEY = "manifest_detail"
 def sanitize_unit_key(name: str) -> str:
     """Turn an arbitrary unit name (a Tableau workbook/site/project display name) into a
     filesystem- and path-safe slug: lowercase ASCII, `-`-separated, never empty, capped at
-    `_MAX_UNIT_KEY_LEN` characters.
+    `_MAX_NEW_RUN_SLUG_LEN` characters.
 
     A display name is NEVER load-bearing for identity (issue #234, rule 2 - two projects or two
     workbooks can legitimately share a name; `tests/test_harvest_project_scope.py` already fixtures
@@ -245,7 +246,7 @@ def sanitize_unit_key(name: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", normalized).strip("-").lower()
     if not slug:
         return "unit"
-    return slug[:_MAX_UNIT_KEY_LEN].strip("-")
+    return slug[:_MAX_NEW_RUN_SLUG_LEN].strip("-")
 
 
 def runs_root(repo_root: Path | None = None) -> Path:

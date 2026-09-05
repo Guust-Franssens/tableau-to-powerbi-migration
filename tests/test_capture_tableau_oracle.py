@@ -18,6 +18,7 @@ The two rules the tests exist to pin:
 from __future__ import annotations
 
 import ast
+import gzip
 import inspect
 import json
 import logging
@@ -71,11 +72,75 @@ class FakeSession(oracle.TableauSession):
     def _request(self, method, path, *, body=None, accept=None, authed=True, api=None, deadline=None):  # noqa: ARG002
         self.calls.append(path)
         status, payload, headers = self.responses.pop(0)
-        return status, payload.encode() if isinstance(payload, str) else payload, headers
+        payload = payload.encode() if isinstance(payload, str) else payload
+        headers = dict(headers)
+        if status == 200 and "Content-Length" not in headers and "Transfer-Encoding" not in headers:
+            headers["Content-Length"] = str(len(payload))
+        return status, payload, headers
 
     def sign_in(self):
         self.signin_count += 1
         self.token, self.site_id = "tok", "sid"
+
+
+class CloseDelimitedFakeSession(FakeSession):
+    """A scripted successful response with EOF-as-framing, for the one case FakeSession defaults away."""
+
+    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None, deadline=None):  # noqa: ARG002
+        self.calls.append(path)
+        status, payload, headers = self.responses.pop(0)
+        payload = payload.encode() if isinstance(payload, str) else payload
+        return status, payload, headers
+
+
+class _LoopbackDataExport(BaseHTTPRequestHandler):
+    """One scripted `/data` response over the real urllib/http.client path."""
+
+    protocol_version = "HTTP/1.1"
+    response_headers: list[tuple[str, str]] = []
+    body = b""
+
+    def do_GET(self):  # noqa: N802
+        self.wfile.write(b"HTTP/1.1 200 OK\r\n")
+        for name, value in self.response_headers:
+            self.wfile.write(f"{name}: {value}\r\n".encode())
+        self.wfile.write(b"Connection: close\r\n\r\n")
+        self.wfile.write(self.body)
+        self.wfile.flush()
+        self.close_connection = True
+
+    def log_message(self, _format, *_args):  # noqa: A002
+        return
+
+
+def _loopback_capture(tmp_path: Path, headers: list[tuple[str, str]], body: bytes) -> tuple[int, dict]:
+    handler = type("_ScriptedLoopbackDataExport", (_LoopbackDataExport,), {"response_headers": headers, "body": body})
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        port = server.server_address[1]
+        session = oracle.TableauSession(
+            oracle.SiteCredentials(
+                base=f"http://127.0.0.1:{port}",
+                site="site",
+                pat_name="name",
+                pat_secret="secret-value",
+                version="3.29",
+            ),
+            oracle.RetryPolicy(max_attempts=1, budget_sec=1),
+        )
+        session.token, session.site_id = "tok", "sid"
+        view = {
+            "id": "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa",
+            "name": "Real Time Availability",
+            "workbook": {"id": "wb"},
+        }
+        record = oracle.capture_view(session, view, tmp_path, frozenset(), None)
+        record["workbook_name"] = "Network Ops"
+        return _named_manifest(tmp_path, [record])
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 @pytest.fixture(autouse=True)
@@ -718,7 +783,7 @@ def test_an_older_record_with_no_row_count_is_not_claimed_empty(tmp_path):
     """
     old = {"view_name": "V", "workbook_name": "W", "data": {"status": "ok"}}
     code, manifest = _named_manifest(tmp_path, [old])
-    assert code == 0
+    assert code == 3
     assert manifest["data_empty"] == 0
     assert manifest["data_empty_views"] == []
     assert manifest["views"][0]["flags"] == [verdict.FLAG_DATA_UNASSESSABLE, verdict.UNASSESSABLE_NO_ROW_COUNT]
@@ -753,7 +818,7 @@ REVIEW_RECORD = {"view_name": "V", "workbook_name": "W", "data": {"status": "ok"
 def test_a_row_count_that_was_never_recorded_is_UNASSESSABLE_not_clean(tmp_path):
     """The reproduction record. Every observed value in the reviewer's table, asserted."""
     code, manifest = _named_manifest(tmp_path, [dict(REVIEW_RECORD)])
-    assert code == 0, "the transport succeeded, so this is a diagnostic and not a failure"
+    assert code == 3, "unassessable numeric evidence is a non-pass, even though the transport succeeded"
     assert manifest["views"][0]["data"]["status"] == "ok", "the HTTP call DID succeed -- keep that distinction"
     assert manifest["data_ok"] == 1
     assert manifest["captured_complete"] == 0, "was 1 -- an unmeasured view was counted evidence-complete"
@@ -781,10 +846,10 @@ def test_a_failed_data_leg_is_not_reported_unassessable_either(tmp_path):
     assert manifest["data_unassessable_views"] == []
 
 
-def test_an_unassessable_capture_never_moves_the_exit_code(tmp_path):
-    """It is a DIAGNOSTIC, exactly like an empty capture: legibility and exit status are separate."""
+def test_an_unassessable_capture_makes_an_otherwise_clean_exit_partial(tmp_path):
+    """Unassessable numeric evidence is retained, but automation must not read the run as clean."""
     assert _write(tmp_path, [_record("ok")]) == 0, "the baseline moved -- this test proves nothing"
-    assert _write(tmp_path, [_record("ok"), dict(REVIEW_RECORD)]) == 0
+    assert _write(tmp_path, [_record("ok"), dict(REVIEW_RECORD)]) == 1
 
 
 def test_the_per_view_line_for_an_unassessable_capture_is_a_WARNING_and_does_not_raise(caplog):
@@ -989,6 +1054,186 @@ def test_a_real_CSV_declared_as_CSV_is_still_certified_and_still_counted(tmp_pat
     assert manifest["captured_complete"] == 1
 
 
+@pytest.mark.parametrize(
+    ("headers", "expected_framing"),
+    [
+        ({"Content-Type": "text/csv", "Content-Length": "32"}, "content_length"),
+        ({"Content-Type": "text/csv", oracle.RESPONSE_FRAMING_HEADER: "chunked"}, "chunked"),
+    ],
+)
+def test_a_csv_capture_is_evidence_only_when_transport_framing_can_detect_early_eof(
+    tmp_path, headers, expected_framing
+):
+    """Content-Length and chunked framing are the two defended transport regimes for terminatorless CSV."""
+    body = "Region,Sales\r\nWest,10\r\nEast,20\r\n"
+    session = FakeSession([(200, body, headers)])
+    view = {"id": "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", "name": "Real Time Availability", "workbook": {"id": "wb"}}
+    record = oracle.capture_view(session, view, tmp_path, frozenset(), None)
+    record["workbook_name"] = "Network Ops"
+
+    data = record["data"]
+    assert data["status"] == "ok"
+    assert data["certification"] == payload_facts.CSV_CERTIFIED
+    assert data["row_count"] == 2
+    assert data["response_framing"] == expected_framing
+
+    code, manifest = _named_manifest(tmp_path, [record])
+    assert code == 0
+    assert manifest["captured_complete"] == 1
+
+
+def test_a_close_delimited_csv_capture_is_retained_but_not_numeric_evidence(tmp_path):
+    """EOF-as-framing cannot distinguish a complete CSV from a truncated prefix, so it is unassessable."""
+    body = "Region,Sales\r\nWest,10\r\nEast,20\r\n"
+    session = CloseDelimitedFakeSession([(200, body, {"Content-Type": "text/csv"})])
+    view = {"id": "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", "name": "Real Time Availability", "workbook": {"id": "wb"}}
+    record = oracle.capture_view(session, view, tmp_path, frozenset(), None)
+    record["workbook_name"] = "Network Ops"
+
+    data = record["data"]
+    assert data["status"] == "ok", "the HTTP request returned bytes; only numeric evidence is withheld"
+    assert data["certification"] == payload_facts.CSV_TRANSPORT_CLOSE_DELIMITED
+    assert data["response_framing"] == payload_facts.CSV_TRANSPORT_CLOSE_DELIMITED
+    assert "row_count" not in data and "path" not in data
+    assert data[verdict.RETAINED_PATH_KEY].startswith(f"{verdict.RETAINED_DIR}/")
+
+    code, manifest = _named_manifest(tmp_path, [record])
+    assert code == 3
+    assert manifest["captured_complete"] == 0
+    assert manifest["data_unassessable"] == 1
+    assert manifest["data_unassessable_views"][0]["reason"] == payload_facts.CSV_TRANSPORT_CLOSE_DELIMITED
+    assert _naive_numeric_consumer(tmp_path) == []
+
+
+@pytest.mark.parametrize("content_length", ["", "abc", "-1"])
+def test_an_invalid_content_length_does_not_count_as_csv_completeness_evidence(tmp_path, content_length):
+    """An unusable length falls back to EOF-as-framing in Python, so it is not defended evidence."""
+    body = "Region,Sales\r\nWest,10\r\n"
+    session = CloseDelimitedFakeSession([(200, body, {"Content-Type": "text/csv", "Content-Length": content_length})])
+    view = {"id": "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", "name": "Real Time Availability", "workbook": {"id": "wb"}}
+    record = oracle.capture_view(session, view, tmp_path, frozenset(), None)
+
+    data = record["data"]
+    assert data["certification"] == payload_facts.CSV_TRANSPORT_INVALID_CONTENT_LENGTH
+    assert data["response_framing"] == payload_facts.CSV_TRANSPORT_INVALID_CONTENT_LENGTH
+    assert "row_count" not in data and "path" not in data
+
+
+def test_loopback_exact_chunked_csv_is_decoded_and_counts_as_numeric_evidence(tmp_path):
+    body = b"Region,Sales\r\nWest,10\r\n"
+    wire = f"{len(body):X}\r\n".encode() + body + b"\r\n0\r\n\r\n"
+    code, manifest = _loopback_capture(
+        tmp_path,
+        [("Content-Type", "text/csv"), ("Transfer-Encoding", "chunked")],
+        wire,
+    )
+
+    data = manifest["views"][0]["data"]
+    assert code == 0
+    assert data["response_framing"] == "chunked"
+    assert data["certification"] == payload_facts.CSV_CERTIFIED
+    assert data["row_count"] == 1
+    assert _naive_numeric_consumer(tmp_path)
+
+
+def test_loopback_exact_content_length_csv_counts_as_numeric_evidence(tmp_path):
+    body = b"Region,Sales\r\nWest,10\r\n"
+    code, manifest = _loopback_capture(
+        tmp_path,
+        [("Content-Type", "text/csv"), ("Content-Length", str(len(body)))],
+        body,
+    )
+
+    data = manifest["views"][0]["data"]
+    assert code == 0
+    assert data["response_framing"] == "content_length"
+    assert data["certification"] == payload_facts.CSV_CERTIFIED
+    assert data["row_count"] == 1
+    assert _naive_numeric_consumer(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("headers", "wire_body", "reason"),
+    [
+        (
+            [("Content-Type", "text/csv"), ("Transfer-Encoding", "gzip, chunked")],
+            b"17\r\nRegion,Sales\r\nWest,10\r\n\r\n0\r\n\r\n",
+            payload_facts.CSV_TRANSPORT_UNSUPPORTED_TRANSFER_ENCODING,
+        ),
+        (
+            [("Content-Type", "text/csv"), ("Transfer-Encoding", "chunked, gzip")],
+            b"17\r\nRegion,Sales\r\nWest,10\r\n\r\n0\r\n\r\n",
+            payload_facts.CSV_TRANSPORT_UNSUPPORTED_TRANSFER_ENCODING,
+        ),
+        (
+            [("Content-Type", "text/csv"), ("Transfer-Encoding", "chunked"), ("Transfer-Encoding", "chunked")],
+            b"17\r\nRegion,Sales\r\nWest,10\r\n\r\n0\r\n\r\n",
+            payload_facts.CSV_TRANSPORT_UNSUPPORTED_TRANSFER_ENCODING,
+        ),
+        (
+            [
+                ("Content-Type", "text/csv"),
+                ("Content-Encoding", "gzip"),
+                ("Content-Length", str(len(gzip.compress(b"Region,Sales\r\nWest,10\r\n")))),
+            ],
+            gzip.compress(b"Region,Sales\r\nWest,10\r\n"),
+            payload_facts.CSV_TRANSPORT_UNSUPPORTED_CONTENT_ENCODING,
+        ),
+        (
+            [("Content-Type", "text/csv"), ("Content-Length", "abc")],
+            b"Region,Sales\r\nWest,10\r\n",
+            payload_facts.CSV_TRANSPORT_INVALID_CONTENT_LENGTH,
+        ),
+        (
+            [("Content-Type", "text/csv"), ("Content-Length", "5"), ("Content-Length", "23")],
+            b"Region,Sales\r\nWest,10\r\n",
+            payload_facts.CSV_TRANSPORT_CONFLICTING_CONTENT_LENGTH,
+        ),
+        (
+            [("Content-Type", "text/csv")],
+            b"Region,Sales\r\nWest,10\r\n",
+            payload_facts.CSV_TRANSPORT_CLOSE_DELIMITED,
+        ),
+        (
+            [("Content-Type", "text/csv")],
+            b"Region,Sales\r\nWest",
+            payload_facts.CSV_TRANSPORT_CLOSE_DELIMITED,
+        ),
+    ],
+)
+def test_loopback_unsupported_or_unknowable_csv_framing_is_retained_not_evidence(tmp_path, headers, wire_body, reason):
+    code, manifest = _loopback_capture(tmp_path, headers, wire_body)
+
+    data = manifest["views"][0]["data"]
+    assert code == 3
+    assert data["status"] == "ok"
+    assert data["certification"] == reason
+    assert "row_count" not in data and "path" not in data
+    assert data[verdict.RETAINED_PATH_KEY].startswith(f"{verdict.RETAINED_DIR}/")
+    assert manifest["captured_complete"] == 0
+    assert manifest["data_unassessable"] == 1
+    assert manifest["data_unassessable_views"][0]["reason"] == reason
+    assert _naive_numeric_consumer(tmp_path) == []
+
+
+@pytest.mark.parametrize("framing", ["Content-Length", "Transfer-Encoding: chunked"])
+def test_an_early_eof_csv_capture_is_a_failed_manifest_not_unassessable_evidence(tmp_path, framing):
+    """The transport catches truncation under defended framing before `_capture_data` can write bytes."""
+    retry = oracle.RetryPolicy(max_attempts=1, budget_sec=1)
+    session = FakeSession([(oracle.NETWORK_ERROR_STATUS, f"IncompleteRead from {framing}", {})], retry=retry)
+    view = {"id": "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", "name": "Real Time Availability", "workbook": {"id": "wb"}}
+    record = oracle.capture_view(session, view, tmp_path, frozenset(), None)
+    record["workbook_name"] = "Network Ops"
+
+    assert record["data"]["status"] == "transient"
+    assert "path" not in record["data"] and not list((tmp_path / "data").glob("*.csv"))
+
+    code, manifest = _named_manifest(tmp_path, [record])
+    assert code == 3
+    assert manifest["failed"] == 1
+    assert manifest["captured_complete"] == 0
+
+
 def test_a_200_with_no_Content_Type_is_kept_but_reported_UNASSESSABLE(tmp_path):
     """The seam between the two findings, and the honest answer to "we cannot certify this".
 
@@ -1012,7 +1257,7 @@ def test_a_200_with_no_Content_Type_is_kept_but_reported_UNASSESSABLE(tmp_path):
     assert not retained.startswith("data/") and not retained.endswith(".csv")
 
     code, manifest = _named_manifest(tmp_path, [record])
-    assert code == 0, "an unassessable capture is a diagnostic, not a failure"
+    assert code == 3, "unassessable numeric evidence is a non-pass, even though the transport succeeded"
     assert manifest["data_ok"] == 1
     assert manifest["captured_complete"] == 0
     assert manifest["data_unassessable"] == 1
@@ -1041,6 +1286,7 @@ def test_an_error_page_with_the_Content_Type_STRIPPED_is_still_refused(tmp_path)
         (b"", payload_facts.CSV_CERTIFIED),
         (b"\r\n", payload_facts.CSV_CERTIFIED),
         (b'Region,Sales\r\nWest,"quoted, value"\r\n', payload_facts.CSV_CERTIFIED),
+        (b'Region,Notes\r\nWest,"quoted\r\nmultiline value"\r\n', payload_facts.CSV_CERTIFIED),
         (b'Size\r\n"5"" pipe"\r\n', payload_facts.CSV_CERTIFIED),
         (b"<html><body>Error</body></html>", payload_facts.CSV_NOT_TABULAR),
         (b'{"error": {"code": "401002"}}', payload_facts.CSV_NOT_TABULAR),

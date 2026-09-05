@@ -12,6 +12,7 @@ import os
 import shutil
 import sys
 import time
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import run_estate  # noqa: E402  # pylint: disable=wrong-import-position
+from check_path_ceiling import DIR_CEILING, FILE_CEILING, utf16_len  # noqa: E402
+from check_reference_readiness import engine_page_id  # noqa: E402
 
 
 def _report(workbooks=None, dod_status="pass", gates=None) -> dict:
@@ -56,6 +59,20 @@ def _write(path: Path, text: str = "x") -> Path:
     return path
 
 
+def _root_for_length(length: int) -> Path:
+    """A synthetic resolved root with an exact UTF-16 length on the current host."""
+    anchor = Path.cwd().anchor
+    return Path(anchor + "r" * (length - utf16_len(anchor))).resolve()
+
+
+def _boundary_root(unit: str, ceiling: int) -> Path:
+    probe_root = Path("/r").resolve()
+    probe = run_estate.project_estate_path_ceiling(probe_root, [unit])
+    file_length = next(path["length"] for path in probe["paths"] if path["kind"] == "file")
+    target_length = utf16_len(str(probe_root)) + ceiling - file_length
+    return _root_for_length(target_length)
+
+
 # ---------------------------------------------------------------------------
 # The reason this script exists at all
 # ---------------------------------------------------------------------------
@@ -72,6 +89,180 @@ def test_a_failed_definition_of_done_is_not_a_pass() -> None:
     ok, detail = run_estate.check_definition_of_done(_report(dod_status="failed"))
     assert ok is False
     assert "failed" in detail
+
+
+def test_projected_path_uses_utf16_and_accepts_the_measured_file_boundary() -> None:
+    unit = "A" * 20
+    root = _boundary_root(unit, FILE_CEILING)
+    projection = run_estate.project_estate_path_ceiling(root, [unit])
+    file_path = next(path for path in projection["paths"] if path["kind"] == "file")
+    assert file_path["length"] == FILE_CEILING
+    assert projection["status"] == "ok"
+
+
+def test_projected_path_refuses_the_next_file_and_directory_boundaries() -> None:
+    unit = "A" * 20
+    root = _boundary_root(unit, FILE_CEILING + 1)
+    projection = run_estate.project_estate_path_ceiling(root, [unit])
+    assert projection["status"] == "over_ceiling"
+    assert any(path["length"] == FILE_CEILING + 1 for path in projection["offenders"])
+    assert any(path["length"] == DIR_CEILING + 1 for path in projection["offenders"])
+
+
+def test_projected_path_counts_supplementary_characters_as_two_units() -> None:
+    unit = "😀" * 20
+    projection = run_estate.project_estate_path_ceiling(Path("/r"), [unit])
+    file_path = next(path for path in projection["paths"] if path["kind"] == "file")
+    assert file_path["length"] == utf16_len(file_path["path"])
+    assert file_path["length"] > len(file_path["path"])
+
+
+def test_projected_names_include_engine_collision_suffixes() -> None:
+    projection = run_estate.project_estate_path_ceiling(Path("/short"), ["Sales", "sales"])
+
+    assert projection["status"] == "cannot_establish"
+
+
+def test_projected_names_are_supplied_by_the_selected_engine(tmp_path: Path) -> None:
+    engine = _versioned_engine(tmp_path / "engine", "test")
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "Sales.tds").write_text("<datasource />", encoding="utf-8")
+    (source / "Sales.twb").write_text("<workbook />", encoding="utf-8")
+
+    assert run_estate._engine_unit_names(engine, source) == ["Sales", "Sales_2"]
+
+
+def test_selected_engine_controls_naming(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "Sales.twb").write_text("<workbook />", encoding="utf-8")
+    canonical = _versioned_engine(tmp_path / "canonical", "test")
+    override = _versioned_engine(tmp_path / "override", "test")
+    helper = override / "skills" / "tableau-migration" / "scripts" / "migrate_estate.py"
+    helper.write_text(
+        helper.read_text(encoding="utf-8").replace("return candidate\n", 'return "override_" + candidate\n'),
+        encoding="utf-8",
+    )
+
+    assert run_estate._engine_unit_names(canonical, source) == ["Sales"]
+    assert run_estate._engine_unit_names(override, source) == ["override_Sales"]
+
+
+def test_engine_helper_failure_cannot_assess(tmp_path: Path) -> None:
+    engine = tmp_path / "engine"
+    scripts = engine / "skills" / "tableau-migration" / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "migrate_estate.py").write_text("raise RuntimeError('changed helper')\n", encoding="utf-8")
+    source = tmp_path / "source.twb"
+    source.write_text("<workbook />", encoding="utf-8")
+
+    assert run_estate._engine_unit_names(engine, source) is None
+
+
+def test_packaged_source_requires_full_utf8_decode(tmp_path: Path) -> None:
+    source = tmp_path / "Broken.twbx"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("workbook.twb", b"<workbook>\xff</workbook>")
+
+    assert run_estate._readable_source(source) is False
+
+
+def test_loose_source_requires_full_utf8_decode(tmp_path: Path) -> None:
+    source = tmp_path / "Broken.twb"
+    source.write_bytes(b"<workbook>\xff</workbook>")
+
+    assert run_estate._readable_source(source) is False
+
+
+def test_unreadable_source_cannot_pass_path_preflight(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "Locked.twb"
+    source.write_text("<workbook />", encoding="utf-8")
+    monkeypatch.setattr(run_estate, "_readable_source", lambda _path: False)
+
+    ok, detail = run_estate.preflight_estate_path_ceiling(source, Path("/short"))
+
+    assert ok is False
+    assert "CANNOT ASSESS" in detail
+
+
+def test_pbir_envelope_is_pinned_to_committed_artifacts() -> None:
+    """The projection must remain above the largest committed page/visual directory identifiers."""
+    paths = list((Path(__file__).resolve().parents[1] / "examples").rglob("visual.json"))
+    paths += list((Path(__file__).resolve().parents[1] / "migrations").rglob("visual.json"))
+    identifiers = []
+    for path in paths:
+        parts = path.parts
+        page_index = parts.index("pages")
+        visual_index = parts.index("visuals")
+        identifiers.append((utf16_len(parts[page_index + 1]), utf16_len(parts[visual_index + 1])))
+    assert len(identifiers) == 869
+    assert max(page for page, _ in identifiers) == 20
+    assert run_estate._PBIR_MAX_PAGE_ID_UTF16 == 24
+    assert max(visual for _, visual in identifiers) == run_estate._PBIR_MAX_VISUAL_ID_UTF16
+    assert utf16_len(engine_page_id("x" * 100)) == run_estate._PBIR_MAX_PAGE_ID_UTF16
+
+
+def test_realistic_long_estate_is_refused_by_conservative_pbir_envelope() -> None:
+    root = _root_for_length(90)
+    unit = "u" * 37
+    projection = run_estate.project_estate_path_ceiling(root, [unit])
+    file_path = next(path for path in projection["paths"] if path["kind"] == "file")
+    directory = next(path for path in projection["paths"] if path["kind"] == "directory")
+    report_root = Path("pbip") / unit / f"{unit}.Report"
+    visual_tail = Path(run_estate._PBIR_VISUAL_TAIL)
+    assert utf16_len(str(root)) == 90
+    assert file_path["length"] == utf16_len(str(root)) + 1 + utf16_len(str(report_root / visual_tail))
+    assert directory["length"] == utf16_len(str(root)) + 1 + utf16_len(str(report_root / visual_tail.parent))
+    assert projection["status"] == "over_ceiling"
+
+
+@pytest.mark.parametrize("unreadable", [False, True])
+def test_main_refuses_path_preflight_before_engine(tmp_path: Path, monkeypatch, unreadable: bool) -> None:
+    engine = _versioned_engine(tmp_path / "engine", "2.126.0")
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "Sales.twb").write_text("<workbook />", encoding="utf-8")
+    calls: list[Path] = []
+    monkeypatch.setattr(run_estate, "run_engine", lambda *args: calls.append(args[0]) or (0, ""))
+    if unreadable:
+        monkeypatch.setattr(run_estate, "_readable_source", lambda _path: False)
+        output = tmp_path / "short"
+    else:
+        output = _boundary_root("Sales", FILE_CEILING + 1)
+
+    code = run_estate.main(
+        [
+            "--engine",
+            str(engine),
+            "--allow-noncanonical-engine",
+            "--input",
+            str(source),
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert code == run_estate.EXIT_PATH_CEILING
+    assert not calls
+    assert not output.exists()
+
+
+def test_estate_path_preflight_accepts_short_root_and_refuses_long_root(tmp_path: Path) -> None:
+    source = tmp_path / ("A" * 20 + ".twb")
+    source.write_text("<workbook />", encoding="utf-8")
+    engine = _versioned_engine(tmp_path / "engine", "test")
+    assert run_estate.preflight_estate_path_ceiling(source, Path("/short"), engine)[0] is True
+    ok, detail = run_estate.preflight_estate_path_ceiling(source, _boundary_root("A" * 20, FILE_CEILING + 1), engine)
+    assert ok is False
+    assert "shorter run/output root" in detail
+
+
+def test_estate_path_preflight_cannot_assess_missing_input(tmp_path: Path) -> None:
+    engine = _versioned_engine(tmp_path / "engine", "test")
+    ok, detail = run_estate.preflight_estate_path_ceiling(tmp_path / "missing", Path("/short"), engine)
+    assert ok is False
+    assert "CANNOT ASSESS" in detail
 
 
 def test_warn_is_allowed_through() -> None:
@@ -225,6 +416,8 @@ def test_the_generated_manifest_is_written_before_the_engine_receipt(tmp_path: P
     monkeypatch.setattr(run_estate, "run_engine", _fake_engine)
     src = tmp_path / "src"
     src.mkdir()
+    (src / "unit.twb").write_text("<workbook />", encoding="utf-8")
+    _versioned_engine(tmp_path / "engine", "test")
     argv = [
         "--engine",
         str(tmp_path / "engine"),
@@ -268,9 +461,7 @@ def test_a_noncanonical_engine_stops_the_run_instead_of_running_it(tmp_path: Pat
 
 def test_the_bundle_records_which_engine_built_it(tmp_path: Path, monkeypatch) -> None:
     """#107's acceptance criterion: the artifact answers "what built me?" without the machine."""
-    engine = tmp_path / "engine"
-    (engine / "skills" / "tableau-migration").mkdir(parents=True)
-    (engine / "skills" / "tableau-migration" / "VERSION").write_text("2.126.0\n", encoding="utf-8")
+    engine = _versioned_engine(tmp_path / "engine", "2.126.0")
 
     out = tmp_path / "bundle"
 
@@ -282,6 +473,7 @@ def test_the_bundle_records_which_engine_built_it(tmp_path: Path, monkeypatch) -
     monkeypatch.setattr(run_estate, "run_engine", _fake_engine)
     src = tmp_path / "src"
     src.mkdir()
+    (src / "unit.twb").write_text("<workbook />", encoding="utf-8")
     argv = ["--engine", str(engine), "--allow-noncanonical-engine", "--input", str(src), "--output", str(out)]
     assert run_estate.main(argv) == run_estate.EXIT_OK
 
@@ -732,8 +924,59 @@ def test_the_coordinator_never_emits_model_content() -> None:
 def _versioned_engine(root: Path, version: str) -> Path:
     """An engine tree whose VERSION is what `engine_provenance` reads back off disk."""
     skill = root / "skills" / "tableau-migration"
-    skill.mkdir(parents=True, exist_ok=True)
+    scripts = skill / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
     (skill / "VERSION").write_text(version + "\n", encoding="utf-8")
+    (scripts / "migrate_estate.py").write_text(
+        """
+import json
+import re
+import sys
+from pathlib import Path
+
+class LocalFilesSource:
+    def __init__(self, root):
+        self.root = Path(root)
+
+    def _files(self, suffixes):
+        if self.root.is_file():
+            return [self.root] if self.root.suffix.lower() in suffixes else []
+        return sorted(
+            path for path in self.root.rglob("*")
+            if path.is_file() and path.suffix.lower() in suffixes
+        )
+
+    def list_datasources(self):
+        return self._files({".tds", ".tdsx"})
+
+    def list_workbooks(self):
+        return self._files({".twb", ".twbx"})
+
+    def asset_name(self, asset_id):
+        return Path(asset_id).stem
+
+def _safe_folder(name, used):
+    base = re.sub(r'[<>:"/\\\\|?*\\x00-\\x1f]', "_", name).strip().rstrip(".") or "datasource"
+    candidate = base
+    number = 2
+    while candidate.casefold() in used:
+        candidate = f"{base}_{number}"
+        number += 1
+    used.add(candidate.casefold())
+    return candidate
+
+if __name__ == "__main__":
+    source = LocalFilesSource(sys.argv[2])
+    used = set()
+    names = [
+        _safe_folder(source.asset_name(asset), used)
+        for asset in (*source.list_datasources(), *source.list_workbooks())
+    ]
+    print(json.dumps(names))
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
     return root
 
 
@@ -795,6 +1038,7 @@ def _first_run(tmp_path: Path, monkeypatch, version: str = "2.339.0") -> tuple[P
     out = tmp_path / "bundle"
     src = tmp_path / "src"
     src.mkdir(exist_ok=True)
+    (src / "unit.twb").write_text("<workbook />", encoding="utf-8")
     monkeypatch.setattr(run_estate, "run_engine", _bundle_engine())
     assert run_estate.main(_landing_argv(engine, src, out)) == run_estate.EXIT_OK
     return engine, src, out
@@ -929,6 +1173,7 @@ def test_a_slice_only_backfill_cannot_bless_downstream_work_as_engine_output(tmp
     out = tmp_path / "bundle"
     src = tmp_path / "src"
     src.mkdir()
+    (src / "unit.twb").write_text("<workbook />", encoding="utf-8")
     _write(out / "report.json", json.dumps(_report()))
     sentinel = _write(out / "pbip" / "WB" / "WB.SemanticModel" / "definition" / "tables" / "Hand.tmdl", "table Hand")
 
@@ -989,6 +1234,7 @@ def test_a_bundle_with_no_baseline_blocks_rather_than_reporting_clean(tmp_path: 
     out = tmp_path / "bundle"
     src = tmp_path / "src"
     src.mkdir()
+    (src / "unit.twb").write_text("<workbook />", encoding="utf-8")
     _write(out / "report.json", json.dumps(_report()))
     sentinel = _write(out / "pbip" / "WB" / "WB.SemanticModel" / "definition" / "tables" / "Hand.tmdl", "table Hand")
     calls = _relanding(monkeypatch)
@@ -1006,6 +1252,7 @@ def test_an_unassessable_bundle_is_recoverable_with_both_acknowledgements(tmp_pa
     out = tmp_path / "bundle"
     src = tmp_path / "src"
     src.mkdir()
+    (src / "unit.twb").write_text("<workbook />", encoding="utf-8")
     _write(out / "report.json", json.dumps(_report()))
     _write(out / "pbip" / "WB" / "WB.SemanticModel" / "definition" / "tables" / "Hand.tmdl", "table Hand")
     calls = _relanding(monkeypatch)
@@ -1250,7 +1497,7 @@ def test_an_engine_tree_with_no_version_is_indeterminate_not_unchanged(tmp_path:
     (nameless / "skills" / "tableau-migration" / "scripts").mkdir(parents=True)
     calls = _relanding(monkeypatch)
 
-    assert run_estate.main(_landing_argv(nameless, src, out)) == run_estate.EXIT_BUNDLE_REWRITE
+    assert run_estate.main(_landing_argv(nameless, src, out)) == run_estate.EXIT_PATH_CEILING
     assert calls == []
 
 
@@ -1331,6 +1578,7 @@ def test_an_existing_but_non_bundle_output_folder_is_not_treated_as_a_bundle(tmp
     out = tmp_path / "bundle"
     src = tmp_path / "src"
     src.mkdir()
+    (src / "unit.twb").write_text("<workbook />", encoding="utf-8")
     _write(out / "notes.md", "operator scratch, nothing the engine wrote")
     calls = _relanding(monkeypatch)
 
