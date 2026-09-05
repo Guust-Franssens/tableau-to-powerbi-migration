@@ -191,9 +191,7 @@ def _acquire_build_lock(
                     age_note = f" ({age:.0f}s old)"
                 except FileNotFoundError:
                     age_note = ""
-                pid_note = (
-                    f" (recorded pid {held['pid']})" if isinstance(held, dict) and "pid" in held else ""
-                )
+                pid_note = f" (recorded pid {held['pid']})" if isinstance(held, dict) and "pid" in held else ""
                 raise OracleUnavailable(
                     f"timed out after {wait:.0f}s waiting for {path}{age_note} - another process "
                     f"appears to be building the TMDL oracle{pid_note}, or a previous builder "
