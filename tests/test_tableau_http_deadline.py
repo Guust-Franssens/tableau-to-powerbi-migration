@@ -70,8 +70,9 @@ def test_response_framing_requires_an_unambiguous_usable_content_length():
     headers.add_header("Content-Length", "5")
     headers.add_header("Content-Length", "10")
 
-    assert th.response_framing(headers) == "close_delimited"
-    assert th.response_framing({"Content-Length": "abc"}) == "close_delimited"
+    assert th.response_framing(headers) == "transport_conflicting_content_length"
+    assert th.response_framing({"Content-Length": "abc"}) == "transport_invalid_content_length"
+    assert th.response_framing({"Content-Length": "²"}) == "transport_invalid_content_length"
     assert th.response_framing({"Content-Length": "5"}) == "content_length"
 
 

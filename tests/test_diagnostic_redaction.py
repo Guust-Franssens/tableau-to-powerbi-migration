@@ -614,6 +614,7 @@ TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
     ("scripts/tableau_http.py", "_request"): {"req", "redactor", "timeout", "deadline"},
     ("scripts/tableau_http.py", "header_value"): {"headers"},
     ("scripts/tableau_http.py", "response_framing"): {"headers"},
+    ("scripts/tableau_http.py", "response_content_encoding"): {"headers"},
     ("scripts/tableau_payload_facts.py", "detect_format"): {"values"},
     ("scripts/tableau_payload_facts.py", "summarise_csv"): {"payload"},
     ("scripts/tableau_payload_facts.py", "certify_csv"): {"payload", "content_type"},
@@ -1056,6 +1057,11 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
             "FIXED-VOCABULARY: either the synthetic framing verdict the shared HTTP primitive already "
             "reduced to one of this repo's three literals before flattening duplicate headers, or the "
             "same closed-vocabulary helper applied to a scripted test session's headers"
+        ),
+        "content_encoding or response_content_encoding(headers)": (
+            "FIXED-VOCABULARY: either the synthetic content-coding verdict the shared HTTP primitive "
+            "already reduced to identity/unsupported, or the same closed-vocabulary helper applied "
+            "to a scripted test session's headers"
         ),
     },
     ("scripts/tableau_render_capability.py", "format_matches"): {

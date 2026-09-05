@@ -142,7 +142,7 @@ from tableau_payload_facts import (  # noqa: E402  # pylint: disable=wrong-impor
     CSV_CERTIFIED,
     CSV_REFUSAL_DETAIL,
     CSV_REFUSALS,
-    CSV_TRANSPORT_COMPLETENESS_UNESTABLISHED,
+    CSV_TRANSPORT_UNSUPPORTED_CONTENT_ENCODING,
     certify_csv,
     payload_is_complete,
     pdf_facts,
@@ -218,10 +218,15 @@ from tableau_capture_policy import (  # noqa: E402  # pylint: disable=wrong-impo
 # The module-level `_request` and this class's `_request` method are deliberately the same name: the
 # method is now a thin adapter that builds the Request and delegates to the one hardened round trip.
 from tableau_http import (  # noqa: E402  # pylint: disable=wrong-import-position
+    CONTENT_ENCODING_UNSUPPORTED,
+    FRAMING_CHUNKED,
+    FRAMING_CONTENT_LENGTH,
     NETWORK_ERROR_STATUS,
+    RESPONSE_CONTENT_ENCODING_HEADER,
     RESPONSE_FRAMING_HEADER,
     _request,
     header_value,
+    response_content_encoding,
     response_framing,
 )
 
@@ -512,15 +517,16 @@ class TableauSession:
         what made the stated "at most one timeout" salvage bound false.
 
         Returns ``(body, elapsed_sec, stats)`` where ``stats`` records how much recovery was needed --
-        ``reauths``, ``retries`` and the reasons -- plus the response's declared ``content_type`` and
-        body framing.
+        ``reauths``, ``retries`` and the reasons -- plus the response's declared ``content_type``,
+        body framing and content coding.
         Recovery is deliberately **recorded, not silent**: a capture that quietly healed itself looks
         identical to one that never had a problem, which is exactly how a partially-truncated result
         comes to be trusted. ``content_type`` rides here because a CSV carries no signature, so the
         declaration is the only thing that can certify a ``/data`` body as data. ``response_framing``
         rides beside it because syntactically valid CSV has no terminator: Tableau Cloud was measured
-        chunked on 6/6 data/image exports, and that chunk terminator -- not a Content-Length Tableau
-        does not send there -- is what makes early EOF detectable.
+        as the exact decoded chunked shape on 6/6 data/image exports, and that chunk terminator -- not
+        a Content-Length Tableau does not send there -- is what makes early EOF detectable. The content
+        coding is reduced to ``identity`` versus unsupported rather than decompressed in this PR.
 
         Raises :class:`ExportFailed` for anything not worth retrying, so a genuinely broken view is
         never recorded as an empty success.
@@ -555,7 +561,11 @@ class TableauSession:
                 # Response data, so both callers POP it before merging the rest into a leg record.
                 # It rides in `stats` so every caller keeps unpacking three values.
                 stats["content_type"] = header_value(headers, "Content-Type")
-                stats["response_framing"] = header_value(headers, RESPONSE_FRAMING_HEADER) or response_framing(headers)
+                stats["response_framing"] = header_value(headers, RESPONSE_FRAMING_HEADER) or response_framing(
+                    headers
+                )
+                content_encoding = header_value(headers, RESPONSE_CONTENT_ENCODING_HEADER)
+                stats["content_encoding"] = content_encoding or response_content_encoding(headers)
                 return payload, elapsed, stats
             raw = payload.decode("utf-8", "replace")
             # ONE call, with the redactor inside. `classify_export_error` classifies on the raw text
@@ -883,7 +893,14 @@ def _capture_data(session: TableauSession, view_luid: str, out_dir: Path, stem: 
     except ExportFailed as exc:
         return {"status": exc.kind, "error": str(exc), "detail": exc.detail}
     framing = stats.get("response_framing")
-    certification = certify_csv(payload, stats.pop("content_type", None))
+    content_encoding = stats.get("content_encoding")
+    content_type = stats.pop("content_type", None)
+    if content_encoding == CONTENT_ENCODING_UNSUPPORTED:
+        certification = CSV_TRANSPORT_UNSUPPORTED_CONTENT_ENCODING
+    elif framing not in {FRAMING_CHUNKED, FRAMING_CONTENT_LENGTH}:
+        certification = str(framing)
+    else:
+        certification = certify_csv(payload, content_type)
     if certification in CSV_REFUSALS:
         return {
             "status": "format_mismatch",
@@ -893,8 +910,6 @@ def _capture_data(session: TableauSession, view_luid: str, out_dir: Path, stem: 
             "elapsed_sec": round(elapsed, 2),
             **stats,
         }
-    if certification == CSV_CERTIFIED and framing == "close_delimited":
-        certification = CSV_TRANSPORT_COMPLETENESS_UNESTABLISHED
     path, naming = data_leg_fields(out_dir, stem, certification)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(payload)

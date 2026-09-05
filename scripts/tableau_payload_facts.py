@@ -102,7 +102,11 @@ CSV_CONTENT_TYPE_NOT_CSV = "content_type_not_csv"
 CSV_NOT_TABULAR = "payload_not_tabular"
 CSV_MALFORMED = "payload_malformed_csv"
 CSV_RAGGED = "payload_ragged_rows"
-CSV_TRANSPORT_COMPLETENESS_UNESTABLISHED = "transport_completeness_unestablished"
+CSV_TRANSPORT_CLOSE_DELIMITED = "transport_close_delimited"
+CSV_TRANSPORT_INVALID_CONTENT_LENGTH = "transport_invalid_content_length"
+CSV_TRANSPORT_CONFLICTING_CONTENT_LENGTH = "transport_conflicting_content_length"
+CSV_TRANSPORT_UNSUPPORTED_TRANSFER_ENCODING = "transport_unsupported_transfer_encoding"
+CSV_TRANSPORT_UNSUPPORTED_CONTENT_ENCODING = "transport_unsupported_content_encoding"
 
 #: A verdict that REFUSES the payload outright: these bytes were never established to be a CSV, so
 #: nothing may be derived from them -- not a row count, not a header, and above all not a diagnosis.
@@ -113,7 +117,15 @@ CSV_REFUSALS = frozenset({CSV_CONTENT_TYPE_NOT_CSV, CSV_NOT_TABULAR, CSV_MALFORM
 #: :data:`tableau_oracle_manifest.RETAINED_PATH_KEY`) it is not written where a numeric-oracle
 #: consumer looks for evidence.
 CSV_UNCERTIFIED = frozenset(
-    {CSV_CONTENT_TYPE_ABSENT, CSV_CONTENT_TYPE_UNSPECIFIC, CSV_TRANSPORT_COMPLETENESS_UNESTABLISHED}
+    {
+        CSV_CONTENT_TYPE_ABSENT,
+        CSV_CONTENT_TYPE_UNSPECIFIC,
+        CSV_TRANSPORT_CLOSE_DELIMITED,
+        CSV_TRANSPORT_INVALID_CONTENT_LENGTH,
+        CSV_TRANSPORT_CONFLICTING_CONTENT_LENGTH,
+        CSV_TRANSPORT_UNSUPPORTED_TRANSFER_ENCODING,
+        CSV_TRANSPORT_UNSUPPORTED_CONTENT_ENCODING,
+    }
 )
 #: Every value `certify_csv` can produce, so a consumer reading one off an older manifest can check
 #: it against a closed set instead of trusting whatever string is in the field.
@@ -161,12 +173,33 @@ CSV_UNCERTIFIED_DETAIL = {
         "inspection and are NOT placed where a numeric-oracle consumer reads evidence; a row count "
         "or a first-line classification taken from them would be confidently wrong."
     ),
-    CSV_TRANSPORT_COMPLETENESS_UNESTABLISHED: (
+    CSV_TRANSPORT_CLOSE_DELIMITED: (
         "the export returned HTTP 200 over close-delimited framing: no Content-Length and no chunked "
         "terminator. EOF is the delimiter in that regime, so a truncated CSV prefix cannot be "
         "distinguished from a complete export. The bytes are retained for inspection and are NOT "
         "placed where a numeric-oracle consumer reads evidence; re-capture through a path that keeps "
         "Content-Length or Transfer-Encoding: chunked."
+    ),
+    CSV_TRANSPORT_INVALID_CONTENT_LENGTH: (
+        "the export returned HTTP 200 with an invalid Content-Length. Python treats that as no usable "
+        "declared length, so a truncated CSV prefix cannot be distinguished from a complete export. "
+        "The bytes are retained for inspection and are NOT placed where a numeric-oracle consumer "
+        "reads evidence."
+    ),
+    CSV_TRANSPORT_CONFLICTING_CONTENT_LENGTH: (
+        "the export returned HTTP 200 with multiple Content-Length values. That framing is ambiguous, "
+        "so a truncated CSV prefix cannot be trusted as a complete export. The bytes are retained for "
+        "inspection and are NOT placed where a numeric-oracle consumer reads evidence."
+    ),
+    CSV_TRANSPORT_UNSUPPORTED_TRANSFER_ENCODING: (
+        "the export returned HTTP 200 with Transfer-Encoding that this Python HTTP client did not "
+        "decode as the exact supported chunked response shape. The bytes are retained for inspection "
+        "and are NOT placed where a numeric-oracle consumer reads evidence."
+    ),
+    CSV_TRANSPORT_UNSUPPORTED_CONTENT_ENCODING: (
+        "the export returned HTTP 200 with a non-identity Content-Encoding. This capture does not "
+        "decompress encoded CSV bodies, so the bytes are retained for inspection and are NOT placed "
+        "where a numeric-oracle consumer reads evidence."
     ),
 }
 
