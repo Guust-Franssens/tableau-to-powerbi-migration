@@ -72,8 +72,8 @@ Three locations, one direction (from `AGENTS.md`, and it is enforced):
 
 | stage | path | rule |
 |---|---|---|
-| engine truth | `<bundle>/reports/` (reliable); `<bundle>/semantic_models/` (only if emitted) | **never edit an existing baseline** |
-| working copy | `<bundle>/pbip/` | agents edit here; this is what `deploy_estate.py` reads |
+| pristine engine baseline / unbound pass | `<bundle>/reports/` (reliable); `<bundle>/semantic_models/` (only if emitted) | **never edit an existing baseline**; it is not the shipped visual |
+| working copy | `<bundle>/pbip/` | model-bound working and shipped pass; agents edit here before package promotion |
 | deliverable | `migrations/{workbooks,datasources}/<slug>/fabric/` | copied at sign-off |
 
 Automated inventory command by phase:

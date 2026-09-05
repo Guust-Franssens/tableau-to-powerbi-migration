@@ -203,9 +203,9 @@ _runs/<NNN>-<slug>/                     ◀── PHASE 1  collect & convert  (g
 │   ├── images/  data/                        ⚠️ only for views that captured — 288 of 360 here
 │   └── oracle-manifest.json                  every view: captured, or not — with status and reason
 ├── bundle/                                 the deterministic engine's conversion output
-│   ├── reports/<WB>.Report/                  ⚠️ engine truth — NEVER edit
-│   ├── semantic_models/<Model>.SemanticModel/ ⚠️ engine truth — NEVER edit; 18 for 62 pbip/ units
-│   ├── pbip/<Unit>/                          the working copy: .Report + .SemanticModel + .pbip
+│   ├── reports/<WB>.Report/                  ⚠️ pristine engine baseline / model-unbound pass — NEVER edit
+│   ├── semantic_models/<Model>.SemanticModel/ ⚠️ pristine engine baseline / model-unbound pass — NEVER edit; 18 for 62 pbip/ units
+│   ├── pbip/<Unit>/                          the model-bound working + shipped pass: .Report + .SemanticModel + .pbip
 │   ├── handover/<WB>.json                    the per-workbook remediation queue
 │   ├── data/                                 materialised extract rows
 │   └── engine-output-receipt.json            which engine version built this, and from where
@@ -246,10 +246,12 @@ The tree shows selected entries, not an exhaustive listing.
 ⚠️ **Phase 3 is *trackable*, not automatically committed** — `data/` and customer-prefixed units are
 gitignored, so commit only what is public-safe.
 
-⚠️ **Which copy to edit is currently unsettled** ([#460](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/460)):
-`AGENTS.md` says `bundle/pbip/`, the generated package README says `<package>/fabric/`, and the
-package is a physical copy, so the two diverge the moment either is edited. Promote from whichever
-one carries the edits, and verify before and after.
+⚠️ **The canonical edit and ship path is settled**: once phase 2 packages a unit, `<package>/fabric/`
+is the canonical working tree and `scripts/promote_unit.py` is the current phase-2 → phase-3 path.
+The `bundle/reports/` tree is a pristine engine baseline / model-unbound pass; it is never the
+shipped artifact. A `shipped_tree_divergence` result means the bundle and the shipped PBIP differ and
+must be inspected — it is disclosure, not fidelity proof. Manual copying remains only as a
+fallback/reference for operators who need to understand the mechanics by hand.
 
 A **shared** datasource ships once to `migrations/datasources/<ds-slug>/fabric/` instead, and every
 report that uses it keeps a rewritten `definition.pbir` pointing four levels up at it.
