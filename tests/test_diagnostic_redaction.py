@@ -591,6 +591,11 @@ TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
     # console line in that module would be analysed as clean.
     ("scripts/tableau_oracle_manifest.py", "write_manifest"): {"records", "capability_report", "server_info"},
     ("scripts/tableau_oracle_manifest.py", "log_progress"): {"record", "index", "total"},
+    # `_capture_data` hands the verdict layer the `certify_csv` result -- a closed vocabulary, but it
+    # crosses a module boundary, so it is declared rather than assumed. ⚠️ `stem` is deliberately NOT
+    # seeded: it is untainted TODAY (`artifact_stem` of a validated LUID), and seeding it would make
+    # the round-6 regression -- a stem built from a view NAME -- arrive pre-declared and invisible.
+    ("scripts/tableau_oracle_manifest.py", "data_leg_fields"): {"certification"},
     # ⚠️ Seeding `records` WIDENS this gate rather than preserving it. On master the list itself was
     # never tainted: `main` binds it with `records, started = [], time.perf_counter()` and then grows
     # it with `records.append(record)`, and `_bind` fires on ASSIGNMENT, not on a container-store call
@@ -606,6 +611,7 @@ TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
     ("scripts/tableau_http.py", "header_value"): {"headers"},
     ("scripts/tableau_payload_facts.py", "detect_format"): {"values"},
     ("scripts/tableau_payload_facts.py", "summarise_csv"): {"payload"},
+    ("scripts/tableau_payload_facts.py", "certify_csv"): {"payload", "content_type"},
     ("scripts/tableau_payload_facts.py", "png_dimensions"): {"payload"},
     ("scripts/tableau_payload_facts.py", "svg_facts"): {"payload"},
     ("scripts/tableau_payload_facts.py", "pdf_facts"): {"payload"},
@@ -890,9 +896,10 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "view.get('updatedAt')": _INTO_THE_MANIFEST,
         "(view.get('project') or {}).get('name')": _INTO_THE_MANIFEST,
         "workbook.get('id')": _INTO_THE_MANIFEST,
-        "_capture_data(session, view_luid, out_dir / 'data' / f'{stem}.csv', out_dir)": (
-            "SCRUBBED-AT-SINK: the returned leg record, whose own fields are certified in _capture_data; "
-            "the PATH argument is built from `stem`, which comes only from `artifact_stem`"
+        "_capture_data(session, view_luid, out_dir, stem)": (
+            "SCRUBBED-AT-SINK: the returned leg record, whose own fields are certified in "
+            "_capture_data; `stem` comes only from `artifact_stem` and `out_dir` is the CLI's "
+            "capture root, so neither argument is response-derived"
         ),
     },
     ("scripts/capture_tableau_oracle.py", "_capture_renders"): {
@@ -929,7 +936,21 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "status": "FIXED-VOCABULARY: one of classify_export_error's status literals",
         "data.get('detail')": "REDACTED-UPSTREAM: classify_export_error builds every detail from `safe`",
         "data['row_count']": "NOT-A-STRING: an integer row count",
+        "empty": (
+            "FIXED-VOCABULARY: one of `empty_classification`'s two EMPTY_* literals, chosen by "
+            "whether the recorded CSV header was empty -- never built from the header's contents"
+        ),
+        "unassessable": (
+            "FIXED-VOCABULARY: one of `UNASSESSABLE_REASONS`, a closed set this repo authors. "
+            "`unassessable_reason` returns a recorded `certification` only after checking membership, "
+            "so an unrecognised string in an older manifest is replaced by the module's own default "
+            "rather than printed"
+        ),
         "data['elapsed_sec']": "NOT-A-STRING: a float duration in seconds",
+        "data.get('elapsed_sec', 0.0)": (
+            "NOT-A-STRING: the same float duration, defaulted -- an unassessable record may predate "
+            "the field, and this line must not raise the KeyError the row-count line did"
+        ),
         "data['reauths']": "NOT-A-STRING: an integer counter",
         "data['retries']": "NOT-A-STRING: an integer counter",
     },
@@ -946,6 +967,32 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
             "the residual PAT-name case in both the values and the `format_hints` KEYS"
         ),
         "stats": "REDACTED-UPSTREAM: counters, plus `retry_reasons` whose entries are redacted details",
+        "certification": (
+            "FIXED-VOCABULARY: one of `tableau_payload_facts.CSV_VERDICTS` -- seven literals that "
+            "module authors. `certify_csv` is documented never to echo the payload or the received "
+            "header, and it returns a verdict ABOUT them rather than any part of either"
+        ),
+        "naming": (
+            "SHAPE-VERIFIED: `tableau_oracle_manifest.data_leg_fields`' return -- one or two module "
+            "literal KEYS ('path', or 'retained_path' plus 'evidence_withheld'), whose values are "
+            "`stem` (from `artifact_stem`, a validated LUID) plus a module-literal directory, and an "
+            "authored sentence selected by a `certify_csv` verdict. Certified there as well"
+        ),
+        "path": (
+            "SHAPE-VERIFIED: `<out_dir>/data/<stem>.csv` or `<out_dir>/unassessable/<stem>.bin`. It "
+            "is tainted only because `data_leg_fields` CHOOSES between the two from the certification "
+            "verdict; every component is a module literal or `stem`, which comes from `artifact_stem` "
+            "and a validated LUID. ⚠️ That premise is what the boundary check enforces -- `stem` is "
+            "deliberately not a declared seed of `data_leg_fields`, so a stem built from a view name "
+            "is reported there rather than silently satisfying this certification"
+        ),
+        "CSV_REFUSAL_DETAIL[certification]": (
+            "FIXED-VOCABULARY: a sentence `tableau_payload_facts` authors, selected by a "
+            "`certify_csv` verdict. The mapping's keys are that closed vocabulary and its values are "
+            "module literals, so nothing the server sent can reach the message -- which is the "
+            "point: a refusal that quoted the body it refused would put the refused bytes in the "
+            "manifest"
+        ),
         "hashlib.sha256(payload).hexdigest()": "DERIVED-IRREVERSIBLY: a one-way digest, not the payload",
         "len(payload)": "NOT-A-STRING: an integer byte count",
         "round(elapsed, 2)": "NOT-A-STRING: a float duration in seconds",
@@ -991,6 +1038,14 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "detail[:80]": "REDACTED-UPSTREAM: classify_export_error builds it from `safe`; the slice is after",
         "detail or redacted_note(payload, self._redact_response, limit=200)": (
             "REDACTED-UPSTREAM: both arms are redacted -- `detail` from `safe`, the fallback by the chokepoint"
+        ),
+        "header_value(headers, 'Content-Type')": (
+            "SCRUBBED-AT-SINK: #480. The response's DECLARED Content-Type, returned in `stats` so the "
+            "data leg can certify a CSV that carries no signature of its own. It is response-derived "
+            "and is treated as such: both callers POP it before merging `stats` into a leg record, so "
+            "it never reaches a file, a path or a log line, and only the closed-vocabulary VERDICT "
+            "derived from it is recorded. Were a caller ever to keep it, `scrub_tree` covers the "
+            "manifest whole immediately before serialisation"
         ),
     },
     ("scripts/tableau_render_capability.py", "format_matches"): {
@@ -1149,6 +1204,9 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "tableau_view_types.census(records)": _CENSUS_COUNTS,
         "len(unestablished)": _A_COUNT,
         "unestablished": _INTO_THE_MANIFEST_AGGREGATE,
+        "empty_views": _INTO_THE_MANIFEST_AGGREGATE,
+        "data_unassessable_views(records)": _INTO_THE_MANIFEST_AGGREGATE,
+        "len(sets['unassessable'])": _A_COUNT,
         "len(records)": _A_COUNT,
         "len(blocked)": _A_COUNT,
         "len(complete)": _A_COUNT,
@@ -1168,13 +1226,104 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
     },
     ("scripts/tableau_oracle_manifest.py", "_partition"): {
         "ok": _INTO_THE_MANIFEST_AGGREGATE,
-        "[r for r in ok if r['data']['row_count'] == 0]": _INTO_THE_MANIFEST_AGGREGATE,
-        "[r for r in records if r.get('data', {}).get('status') == 'ok' and all((s == 'ok' for s in "
-        "_render_statuses(r, requested)))]": _INTO_THE_MANIFEST_AGGREGATE,
+        "[r for r in ok if empty_classification(r)]": _INTO_THE_MANIFEST_AGGREGATE,
+        "[r for r in ok if unassessable_reason(r)]": _INTO_THE_MANIFEST_AGGREGATE,
+        "[r for r in records if r.get('data', {}).get('status') == 'ok' and (not unassessable_reason(r)) and "
+        "all((s == 'ok' for s in _render_statuses(r, requested)))]": _INTO_THE_MANIFEST_AGGREGATE,
         "[r for r in records if 'source_credential' in {r.get('data', {}).get('status'), "
         "*_render_statuses(r, requested)}]": _INTO_THE_MANIFEST_AGGREGATE,
         "[r for r in records if any((status not in {'ok', 'source_credential'} for status in "
         "(r.get('data', {}).get('status'), *_render_statuses(r, requested))))]": _INTO_THE_MANIFEST_AGGREGATE,
+    },
+    # #471. `flag_empty` copies a record and adds a per-view flag; `data_empty_views` names the
+    # views a numeric-fidelity finding cannot be made from. Both build values that land in the
+    # manifest, so `scrub_tree` covers them -- and neither reaches a path or a raw log line.
+    ("scripts/tableau_oracle_manifest.py", "flag_empty"): {
+        "record": _INTO_THE_MANIFEST_AGGREGATE,
+        "flags": (
+            "SCRUBBED-AT-SINK: this module's own two flag literals, plus any flag a record already "
+            "carried, on their way into the manifest record; `scrub_tree` walks the tree whole, "
+            "values and keys, immediately before serialisation"
+        ),
+        "{**record, 'flags': flags}": _INTO_THE_MANIFEST_AGGREGATE,
+    },
+    # #480. The shared projection behind every counted-AND-named list. One certification, because one
+    # function: `data_empty_views` and `data_unassessable_views` differ only in which predicate they
+    # pass and what the reason field is called.
+    ("scripts/tableau_oracle_manifest.py", "_named_views"): {
+        "record.get('view_luid')": _INTO_THE_MANIFEST,
+        "record.get('view_name')": _INTO_THE_MANIFEST,
+        "record.get('workbook_name')": _INTO_THE_MANIFEST,
+        "record.get('view_type')": (
+            "FIXED-VOCABULARY: exactly one of tableau_view_types' three module constants - "
+            "'dashboard', 'worksheet' or 'unknown'. `tableau_view_types.stamp` writes only "
+            "`mapping.get(luid, UNKNOWN)`, so no response text can arrive here; and it reaches the "
+            "manifest, where `scrub_tree` covers it anyway"
+        ),
+        "reason": (
+            "FIXED-VOCABULARY: whatever the predicate returned, and both predicates return only "
+            "module literals -- `empty_classification` one of two EMPTY_* values chosen by whether "
+            "the recorded CSV header was empty, `unassessable_reason` one of `UNASSESSABLE_REASONS`, "
+            "a closed set checked by membership before it is returned so an unrecognised string in "
+            "an older record is replaced rather than echoed"
+        ),
+        "{'view_luid': record.get('view_luid'), 'view_name': record.get('view_name'), 'workbook_name': "
+        "record.get('workbook_name'), 'view_type': record.get('view_type'), key: reason}": (
+            _INTO_THE_MANIFEST_AGGREGATE
+        ),
+    },
+    # #480 round 2. `withhold_uncertified_evidence` moves a data leg's `path` to `retained_path` when
+    # nothing certified the bytes, and `read_manifest` applies the same rule to a manifest loaded
+    # from disk. Both only ever MOVE or COPY values that were already in a record; neither derives a
+    # new string from a response, and neither reaches a log line or a filesystem path.
+    ("scripts/tableau_oracle_manifest.py", "withhold_uncertified_evidence"): {
+        "record": _INTO_THE_MANIFEST_AGGREGATE,
+        "demoted": _INTO_THE_MANIFEST_AGGREGATE,
+        "{**record, 'data': demoted}": _INTO_THE_MANIFEST_AGGREGATE,
+        "data[EVIDENCE_PATH_KEY]": (
+            "SCRUBBED-AT-SINK: the leg's OWN recorded relative path, moved from one key to another "
+            "within the same record. On the write side it is `stem` plus two module literals and the "
+            "sink scrubs the tree whole; on the read side it was already scrubbed when the manifest "
+            "it came from was written"
+        ),
+        "UNASSESSABLE_DETAIL.get(reason, RETAINED_DETAIL_DEFAULT)": (
+            "FIXED-VOCABULARY: a sentence this repo authors, selected by `unassessable_reason`'s own "
+            "closed return set (UNASSESSABLE_REASONS), with a module literal as the default -- so a "
+            "reason outside that set still selects our own sentence rather than being echoed. Keyed "
+            "on the REASON since #480 round 3, not on the raw `certification`: keying on the "
+            "certification is how a legacy record carrying `row_count: 900` came to be handed the "
+            "'records no row count' sentence"
+        ),
+    },
+    ("scripts/tableau_oracle_manifest.py", "read_manifest"): {
+        "manifest": _INTO_THE_MANIFEST_AGGREGATE,
+        "withhold_uncertified_evidence(manifest['views'])": _INTO_THE_MANIFEST_AGGREGATE,
+    },
+    # #480 round 2. WHERE a data leg's bytes go and which key names them. `certification` arrives
+    # from `certify_csv` across a module boundary, so it is a declared seed -- and everything built
+    # from it here is a module literal or a mapping keyed by that closed vocabulary.
+    ("scripts/tableau_oracle_manifest.py", "data_leg_fields"): {
+        "CSV_UNCERTIFIED_DETAIL[certification]": (
+            "FIXED-VOCABULARY: an authored sentence selected by a `certify_csv` verdict; the "
+            "mapping's keys are that closed vocabulary and its values are `tableau_payload_facts` "
+            "literals, so nothing the server sent can reach it"
+        ),
+    },
+    ("scripts/tableau_oracle_manifest.py", "_log_empty"): {
+        "len(empty)": _A_COUNT,
+        "entry.get('classification')": (
+            "FIXED-VOCABULARY: one of this module's two EMPTY_* literals; the view and workbook NAMES "
+            "on the same line go through `redacted_note`, which is the only response-derived value "
+            "in this warning"
+        ),
+    },
+    ("scripts/tableau_oracle_manifest.py", "_log_unassessable"): {
+        "len(unassessable)": _A_COUNT,
+        "entry.get('reason')": (
+            "FIXED-VOCABULARY: one of `UNASSESSABLE_REASONS`, checked by membership in "
+            "`unassessable_reason` before it is ever recorded; the view and workbook NAMES on the "
+            "same line go through `redacted_note`, which is the only response-derived value here"
+        ),
     },
     ("scripts/tableau_oracle_manifest.py", "render_unestablished"): {
         "record.get('view_luid')": _INTO_THE_MANIFEST,
@@ -1892,6 +2041,21 @@ def test_every_cross_module_call_carrying_tainted_data_lands_on_a_declared_seed(
     through a variable or a dispatch table; no such call exists in these modules.
     """
     source = (REPO / module).read_text(encoding="utf-8")
+    undeclared = undeclared_boundary_crossings(source, module)
+    assert not undeclared, (
+        f"{module} passes response-derived data across a module boundary into a parameter with no "
+        f"declared taint seed, so it arrives untracked: {undeclared}. Add it to TAINT_SEEDS."
+    )
+
+
+def undeclared_boundary_crossings(source: str, module: str) -> list[str]:
+    """Tainted arguments this module hands to a cross-module parameter with no declared seed.
+
+    Extracted from the test above so the round-6 regression test can measure the SAME check. A
+    filesystem path built inside another module is invisible to `uncertified_sinks`, which analyses
+    one file; this is the check that still sees it, and a regression test that asserted only the
+    other one would silently stop covering the data leg (#480 round 2).
+    """
     tree = ast.parse(source)
     imported = _guarded_imports(tree)
     tainted = taint_module(source, module)
@@ -1921,10 +2085,7 @@ def test_every_cross_module_call_carrying_tainted_data_lands_on_a_declared_seed(
             for keyword in node.keywords:
                 if keyword.arg and _roots(keyword.value) & local and keyword.arg not in declared:
                     undeclared.append(f"{func.name}() -> {owner}:{name}() keyword {keyword.arg!r}")
-    assert not sorted(set(undeclared)), (
-        f"{module} passes response-derived data across a module boundary into a parameter with no "
-        f"declared taint seed, so it arrives untracked: {sorted(set(undeclared))}. Add it to TAINT_SEEDS."
-    )
+    return sorted(set(undeclared))
 
 
 def test_the_static_gate_would_now_catch_the_round_6_PATH_defect(tmp_path):
@@ -1933,7 +2094,15 @@ def test_the_static_gate_would_now_catch_the_round_6_PATH_defect(tmp_path):
     Measured before `view` was seeded: reintroducing `safe_slug(view["name"])` as the artifact stem
     produced **zero** findings. That is a gate that could not see the escape it exists to prevent, so
     `view` -- a dict straight off `list_views()` -> `get_json` -- is now a declared taint seed, and the
-    same regression reaches the `write-path` exit at both write sites.
+    same regression reaches a static finding at every write site.
+
+    ⚠️ **The DATA leg's finding moved to a different static check with #480 round 2, and asserting
+    only the old one would have been a silent loss of coverage.** That leg's filename is now chosen
+    by `tableau_oracle_manifest.data_leg_fields`, so it is not an expression in THIS file and
+    `uncertified_sinks` -- which analyses one module -- cannot see it. What sees it is the boundary
+    check: `stem` is deliberately NOT a declared seed of that function, so a stem built from a view
+    NAME arrives as an undeclared tainted crossing. Both checks are asserted, and the data leg is
+    asserted by name, because "the regression produces no finding at all" is the only real failure.
     """
     _ = tmp_path
     module = "scripts/capture_tableau_oracle.py"
@@ -1944,7 +2113,14 @@ def test_the_static_gate_would_now_catch_the_round_6_PATH_defect(tmp_path):
         anchor, '        stem = re.sub(r"[^A-Za-z0-9._-]+", "_", view.get("name", "")).strip("_")[:60]'
     )
     new = set(uncertified_sinks(regressed, module)) - set(uncertified_sinks(source, module))
-    assert {"_capture_data() write-path: path", "_capture_render() write-path: path"} <= new, sorted(new)
+    assert {"_capture_render() write-path: path", "_capture_renders() f-string: targets.stem"} <= new, sorted(new)
+
+    crossings = set(undeclared_boundary_crossings(regressed, module)) - set(
+        undeclared_boundary_crossings(source, module)
+    )
+    assert "_capture_data() -> scripts/tableau_oracle_manifest.py:data_leg_fields() parameter 'stem'" in crossings, (
+        f"the DATA leg's filename is built from a view name and nothing objected: {sorted(crossings)}"
+    )
 
 
 def test_a_bound_method_call_maps_argument_0_onto_parameter_1_not_onto_self():
@@ -2067,7 +2243,11 @@ def test_the_unparse_dialect_detector_can_actually_fire():
 def _pat_name_capture(planted, tmp_path, wants=frozenset()):
     """A capture whose PAT NAME appears in a SUCCESSFUL CSV. Returns (manifest dict, csv text)."""
     session = _Session("an-unrelated-long-pat-secret", (200, b""), pat_name=planted)
-    session.data_reply = (200, f"{planted}\nvalue\n".encode(), {})
+    # ⚠️ The Content-Type is not decoration and this fixture stops working without it (#480): a
+    # `/data` body with no declared type is no longer certifiable as CSV, so no `columns` would be
+    # recorded and the leak this test drives through the sink would never be created. A real Tableau
+    # `/views/<luid>/data` response declares `text/csv`, so the fixture is now the honest shape.
+    session.data_reply = (200, f"{planted}\nvalue\n".encode(), {"Content-Type": "text/csv"})
     record = oracle.capture_view(session, VIEW, tmp_path, wants)
     record["workbook_name"] = "W"
     counter = _Counter()
@@ -2116,7 +2296,10 @@ def test_the_progress_line_redacts_a_view_name_before_it_truncates_it(caplog):
     token = "SYNTHETIC_SESSION_TOKEN_42_LONG_ENOUGH_TO_BE_TRUNCATED"
     session = _Session("an-unrelated-long-pat-secret")
     session.token = token
-    record = {"view_name": token, "data": {"status": "ok", "row_count": 1, "elapsed_sec": 0.1}}
+    record = {
+        "view_name": token,
+        "data": {"status": "ok", "certification": "certified", "row_count": 1, "elapsed_sec": 0.1},
+    }
     with caplog.at_level(logging.INFO, logger="tableau-oracle"):
         oracle.log_progress(1, 1, record, session.redact_text)
     assert longest_surviving_run(token, caplog.text) == ""

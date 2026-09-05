@@ -57,6 +57,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 from mutation_harness import (  # noqa: E402  # pylint: disable=wrong-import-position
     PY,
+    anchors_that_missed,
     last_line,
     observed_mutation,
     run,
@@ -983,9 +984,18 @@ h._abort_socket = abort
     # capture check SURVIVED, because the transport had already refused the body and the guard was
     # never reached.
     "eof-ignores-an-outstanding-content-length": (
+        # ⚠️ ONE anchor. The end-to-end companion
+        # `test_a_render_the_peer_TRUNCATED_is_never_recorded_as_evidence` was declared here too
+        # and does NOT observe this mutation -- measured with each anchor run alone (#480 round 4):
+        # `observed=True exit=1` for the transport anchor, `observed=False exit=0 (1 passed)` for
+        # the end-to-end one. It is the same non-redundancy the comment above describes, in the
+        # other direction: remove the TRANSPORT check and the truncated body is still refused by
+        # the FORMAT check (8 bytes with a valid magic number is not a complete PNG), so the
+        # end-to-end record still reads `status != ok` and the anchor passes. Both anchors ran in
+        # one `-x` invocation until round 4, so the first one's failure ended the run and this was
+        # never visible.
         (
             "tests/test_tableau_http_deadline.py::test_the_truncation_is_caught_by_the_TRANSPORT_not_only_by_the_format_check",
-            "tests/test_tableau_http_deadline.py::test_a_render_the_peer_TRUNCATED_is_never_recorded_as_evidence",
         ),
         """
 import http.client
@@ -1084,10 +1094,14 @@ f._COMPLETENESS_CHECKS["pdf"] = pdf_complete
 """,
     ),
     "svg-entity-scan-bounded-by-the-first-svg": (
-        (
-            "tests/test_payload_completeness.py::test_an_entity_declaration_is_refused_WHEREVER_it_sits",
-            "tests/test_payload_completeness.py::test_no_external_entity_can_reach_the_network",
-        ),
+        # ⚠️ ONE anchor. `test_no_external_entity_can_reach_the_network` was declared beside it and
+        # cannot observe this mutation, because its fixture puts the `<!DOCTYPE ... <!ENTITY ...>`
+        # BEFORE the first `<svg` -- exactly where a scan bounded by the first `<svg` still looks.
+        # Measured with each anchor alone (#480 round 4): `observed=True exit=1` for the
+        # WHEREVER_it_sits anchor, `observed=False exit=0 (1 passed)` for the network one. The
+        # anchor that pins this behaviour is the one that moves the declaration; the SSRF anchor
+        # pins a different property and keeps its own mutation.
+        ("tests/test_payload_completeness.py::test_an_entity_declaration_is_refused_WHEREVER_it_sits",),
         """
 import re
 from xml.etree import ElementTree
@@ -1158,10 +1172,15 @@ f._COMPLETENESS_CHECKS["svg"] = svg_complete
 """,
     ),
     "svg-parse-is-not-required-to-reach-the-end": (
-        (
-            "tests/test_payload_completeness.py::test_an_svg_cut_short_is_refused_although_its_root_element_is_perfect",
-            "tests/test_payload_completeness.py::test_no_completeness_check_can_be_satisfied_by_bytes_that_are_not_the_end",
-        ),
+        # ⚠️ ONE anchor. The cross-format invariant
+        # `test_no_completeness_check_can_be_satisfied_by_bytes_that_are_not_the_end` was declared
+        # beside it and cannot observe this mutation: it APPENDS junk to a complete payload, and
+        # `Parse(payload, False)` still raises on bytes after the root element, so the refusal
+        # stands. Two thirds of its parametrizations are png/pdf, which never reach the SVG path at
+        # all. Measured with each anchor alone (#480 round 4): `observed=True exit=1` for the
+        # cut-short anchor, `observed=False exit=0 (12 passed)` for the invariant. Truncation and
+        # trailing junk are different claims; only the first one pins `isfinal=True`.
+        ("tests/test_payload_completeness.py::test_an_svg_cut_short_is_refused_although_its_root_element_is_perfect",),
         """
 from xml.parsers import expat
 import tableau_payload_facts as f
@@ -1975,6 +1994,12 @@ def classify(name: str, code: str, target: tuple[str, ...]) -> tuple[str, str]:
         return verdict, detail
     if session_is_trustworthy(outcomes):
         return "SURVIVED", detail
+    if anchors_that_missed(outcomes):
+        # #480 round 4. One declared anchor observed the mutation and another did not. Before every
+        # anchor got its own pytest invocation this scored CAUGHT on the first anchor's failure, so
+        # a mutation could be credited to an anchor that never ran. It is a finding about the
+        # anchor list, not an instrument fault, so it is not folded into HARNESS-ERROR.
+        return "PARTIAL-ANCHOR", detail
     if not outcomes.get("recorded") and not outcomes.get("session_finished"):
         # pytest never started, so the patch never ran and NO verdict about the suite is possible.
         # Distinguished from HARNESS-ERROR deliberately: a real mutation landing here is reported as
@@ -2030,7 +2055,8 @@ def main() -> int:
             print(f"  {item}")
         return 1
     print(
-        f"all {len(MUTATIONS)} mutations scored as declared, each against its OWN anchor(s) "
+        f"all {len(MUTATIONS)} mutations scored as declared, each anchor run in its OWN pytest "
+        f"invocation and EVERY declared anchor required to observe the mutation "
         f"({sum(1 for v in EXPECTED.values() if v == 'CAUGHT')} caught, "
         f"{sum(1 for v in EXPECTED.values() if v == 'SURVIVED')} cosmetic controls survived, "
         f"{sum(1 for v in EXPECTED.values() if v == 'INVALID')} absent-anchor controls invalid); "

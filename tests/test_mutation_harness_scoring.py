@@ -315,6 +315,110 @@ def test_a_setup_report_alone_does_not_prove_a_test_body_ran() -> None:
     assert is_harness_error(outcomes) is True
 
 
+# ---------------------------------------------------------------------------------------------
+# #480 round 4: a multi-anchor mutation must be observed by EVERY anchor it declares
+# ---------------------------------------------------------------------------------------------
+
+#: A throwaway module the probe tests read, so a mutation has something to patch that is bound as
+#: a module ATTRIBUTE (patching a `from x import y` name would not reach the test's own binding).
+PROBE_SUPPORT = "def value():\n    return 1\n"
+
+#: Two tests: one reads the patched value, one does not. Under a single `-x` invocation pytest
+#: stops at the first failure and the second never runs -- which is the whole defect.
+PROBE_TESTS = (
+    "import _harness_probe_support as s\n\n\n"
+    "def test_reads_the_patched_value():\n    assert s.value() == 1\n\n\n"
+    "def test_reads_nothing_of_the_kind():\n    assert 2 + 2 == 4\n"
+)
+
+#: Patches the probe module's function. The first probe test observes it; the second cannot.
+PROBE_MUTATION = "import _harness_probe_support as s\ns.value = lambda: 99\n"
+
+
+def _probe_files() -> tuple[Path, Path]:
+    """Write the probe module and its test file into `tests/`, where the harness puts them on path."""
+    here = Path(__file__).resolve().parent
+    support = here / "_harness_probe_support.py"
+    tests = here / "_harness_probe_tests.py"
+    support.write_text(PROBE_SUPPORT, encoding="utf-8")
+    tests.write_text(PROBE_TESTS, encoding="utf-8")
+    return support, tests
+
+
+def test_a_mutation_only_ONE_declared_anchor_can_see_is_not_scored_as_caught() -> None:
+    """#480 round 4, finding 2 -- and the campaign banner that claimed otherwise.
+
+    The harness ran every declared anchor in ONE pytest invocation under `-x`, so it stopped at
+    the first failure and credited the mutation to the whole anchor list. The measured shape was
+    `BOTH ANCHORS WITH -x: first anchor failed` / `SECOND ANCHOR ALONE: 1 passed`, while the
+    campaign printed *"each against its OWN anchor(s)"*. That sentence had already misled a human
+    into trusting an anchor that never ran.
+    """
+    support, tests = _probe_files()
+    observing = "tests/_harness_probe_tests.py::test_reads_the_patched_value"
+    blind = "tests/_harness_probe_tests.py::test_reads_nothing_of_the_kind"
+    try:
+        _name, _rc, detail, outcomes = mutation_harness.run("probe", PROBE_MUTATION, (observing, blind))
+    finally:
+        support.unlink(missing_ok=True)
+        tests.unlink(missing_ok=True)
+
+    assert outcomes["targets"] == [observing, blind], "each declared anchor gets its own invocation"
+    assert outcomes["targets_observing"] == [observing]
+    assert observed_mutation(outcomes) is False, "one anchor out of two is not 'its OWN anchor(s)'"
+    assert mutation_harness.anchors_that_missed(outcomes) == [blind]
+    assert "only 1/2" in detail and "test_reads_nothing_of_the_kind" in detail
+
+
+def test_a_mutation_EVERY_declared_anchor_sees_is_still_scored_as_caught() -> None:
+    """Positive control. Requiring all anchors must not make a genuine multi-anchor kill unprovable."""
+    support, tests = _probe_files()
+    tests.write_text(PROBE_TESTS.replace("assert 2 + 2 == 4", "assert s.value() == 1"), encoding="utf-8")
+    anchors = (
+        "tests/_harness_probe_tests.py::test_reads_the_patched_value",
+        "tests/_harness_probe_tests.py::test_reads_nothing_of_the_kind",
+    )
+    try:
+        _name, _rc, detail, outcomes = mutation_harness.run("probe", PROBE_MUTATION, anchors)
+    finally:
+        support.unlink(missing_ok=True)
+        tests.unlink(missing_ok=True)
+
+    assert outcomes["targets_observing"] == list(anchors)
+    assert observed_mutation(outcomes) is True
+    assert mutation_harness.anchors_that_missed(outcomes) == []
+    assert "only" not in detail
+
+
+def test_a_record_with_no_per_target_history_keeps_the_any_evidence_rule() -> None:
+    """Backwards compatibility, stated as a test: the hand-built records above have no `targets`.
+
+    Narrowing `observed_mutation` must not invent per-target facts nobody recorded -- otherwise
+    every older caller silently loses its detections.
+    """
+    assert observed_mutation(record(call_failed=["test_x"])) is True
+    assert mutation_harness.anchors_that_missed(record(call_failed=["test_x"])) == []
+
+
+def test_merging_two_sessions_keeps_evidence_and_demands_completeness_from_both() -> None:
+    """The merge rule, stated directly: evidence concatenates, completeness must hold everywhere.
+
+    A survival verdict is a claim about EVERY anchor, so one incomplete session must be enough to
+    deny it -- while a detection anywhere is durable and survives the merge.
+    """
+    merged = mutation_harness.merge_target_outcomes(
+        {"a": record(call_failed=["test_a"], exitstatus=1, process_returncode=1), "b": record()}
+    )
+
+    assert merged["call_failed"] == ["test_a"]
+    assert merged["targets_observing"] == ["a"]
+    assert session_is_trustworthy(merged) is False, "one session failed, so nothing survived"
+
+    incomplete = mutation_harness.merge_target_outcomes({"a": record(), "b": record(runtest_loop_completed=False)})
+    assert session_is_trustworthy(incomplete) is False
+    assert session_is_trustworthy(mutation_harness.merge_target_outcomes({"a": record(), "b": record()})) is True
+
+
 def test_package_unit_campaign_reports_partial_anchor_when_only_one_anchor_fails(monkeypatch) -> None:
     calls: list[str] = []
 
