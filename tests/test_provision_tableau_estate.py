@@ -1079,7 +1079,9 @@ def test_the_guard_asks_about_the_files_CAPTURE_actually_writes(tmp_path, captur
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True, capture_output=True)
-    (repo / ".gitignore").write_text("*.twbx\n*.tdsx\nparse-sweep.*\nparse-sweep-totals.json\n", encoding="utf8")
+    (repo / ".gitignore").write_text(
+        "*.twb\n*.twbx\n*.tds\n*.tdsx\nparse-sweep.*\nparse-sweep-totals.json\n", encoding="utf8"
+    )
     out = repo / "estate"
 
     assert harvest.refuse_unignored_output(out, allow_unignored=False) is False, (
