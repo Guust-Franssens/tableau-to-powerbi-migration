@@ -10,7 +10,10 @@ These tests verify that:
 
 from __future__ import annotations
 
+import os
+import re
 from pathlib import Path
+import subprocess
 import sys
 import pytest
 
@@ -21,6 +24,136 @@ pytest_plugins = ("pytester",)
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 import engine_source  # noqa: E402  # pylint: disable=wrong-import-position,wrong-import-order
+
+PINNED_ENGINE_SHA = "962d16cfe6f711622d419a567f992da8d90c8781"
+PINNED_ENGINE_VERSION = "2.356.0"
+ENGINE_TEST_TARGETS = (
+    "tests/test_issue_424_chart_type_pin.py",
+    "tests/test_dax_oracle_server.py",
+    "tests/test_upstream_repro_pins.py",
+    "tests/test_harvest_download_watchdog.py::test_the_ceiling_constants_match_the_INSTALLED_engine",
+)
+ENGINE_TEST_TARGET_COMMAND = " ".join(ENGINE_TEST_TARGETS)
+
+
+def _conftest_for_pytester(expected: dict[str, str]) -> str:
+    """Copy the real conftest but replace the engine denominator for an isolated pytester run."""
+    conftest_code = (REPO_ROOT / "conftest.py").read_text(encoding="utf-8")
+    return conftest_code + f"\nEXPECTED_ENGINE_SKIP_REASONS_BY_NODEID = {expected!r}\n"
+
+
+def _make_engine_case(
+    pytester: pytest.Pytester,
+    *,
+    marked: bool = True,
+    skip_reason: str = "deterministic tier not installed",
+    expected_reason: str = "deterministic tier not installed",
+) -> str:
+    """Create one synthetic engine-dependent test and return its node id."""
+    decorator = (
+        f"@pytest.mark.{conftest.ENGINE_DEPENDENCY_MARKER}(expected_skip_reason={expected_reason!r})\n"
+        if marked
+        else ""
+    )
+    pytester.makepyfile(
+        test_engine_cases=(f"import pytest\n\n{decorator}def test_engine_one():\n    pytest.skip({skip_reason!r})\n")
+    )
+    return "test_engine_cases.py::test_engine_one"
+
+
+def _workflow_text() -> str:
+    return (REPO_ROOT / ".github" / "workflows" / "checks.yml").read_text(encoding="utf-8")
+
+
+def _workflow_job_block(workflow: str, job: str) -> str:
+    lines = workflow.splitlines()
+    start = next((index for index, line in enumerate(lines) if line == f"  {job}:"), None)
+    assert start is not None, f"workflow job {job!r} not found"
+    end = start + 1
+    while end < len(lines):
+        line = lines[end]
+        if line.startswith("  ") and not line.startswith("    ") and line.strip().endswith(":"):
+            break
+        end += 1
+    return "\n".join(lines[start:end])
+
+
+def _workflow_step_block(
+    job_block: str, *, name: str | None = None, uses: str | None = None, contains: str | None = None
+) -> str:
+    lines = job_block.splitlines()
+    for index, line in enumerate(lines):
+        if not line.startswith("      - "):
+            continue
+        if name is not None and line.strip() != f"- name: {name}":
+            continue
+        if uses is not None and line.strip() != f"- uses: {uses}":
+            continue
+        end = index + 1
+        while end < len(lines) and not lines[end].startswith("      - "):
+            end += 1
+        block = "\n".join(lines[index:end])
+        if contains is not None and contains not in block:
+            continue
+        return block
+    wanted = name if name is not None else uses
+    raise AssertionError(f"workflow step {wanted!r} not found in job block:\n{job_block}")
+
+
+def _literal_run_command(step_block: str) -> str:
+    match = re.search(r"^\s+run: (?P<command>.*)$", step_block, re.MULTILINE)
+    assert match, f"step has no single-line run command:\n{step_block}"
+    return match.group("command")
+
+
+def _literal_env(job_block: str) -> dict[str, str]:
+    env: dict[str, str] = {}
+    in_env = False
+    for line in job_block.splitlines():
+        if line == "    env:":
+            in_env = True
+            continue
+        if in_env and line.startswith("      ") and ":" in line:
+            key, value = line.strip().split(":", 1)
+            env[key] = value.strip().strip("'\"")
+            continue
+        if in_env and line.startswith("    ") and not line.startswith("      "):
+            break
+    return env
+
+
+def _assert_engine_integration_job(workflow: str) -> None:
+    job = _workflow_job_block(workflow, "engine-integration")
+    env = _literal_env(job)
+    assert env["EXPECTED_ENGINE_VERSION"] == PINNED_ENGINE_VERSION
+    assert env["PINNED_ENGINE_REF"] == PINNED_ENGINE_SHA
+
+    checkout = _workflow_step_block(
+        job, uses="actions/checkout@v4", contains="repository: Yarbrdab000/tableau-fabric-skills"
+    )
+    assert "repository: Yarbrdab000/tableau-fabric-skills" in checkout
+    assert "ref: ${{ env.PINNED_ENGINE_REF }}" in checkout
+    assert "ref: main" not in checkout
+
+    install = _workflow_step_block(job, name="Install pinned deterministic engine")
+    assert "$EXPECTED_ENGINE_VERSION" in install
+    assert "scripts/engine_source.py --json" in install
+
+    test_command = _literal_run_command(_workflow_step_block(job, name="Tests (engine-dependent, pinned engine)"))
+    assert test_command == f"{conftest.REQUIRE_ENGINE_TESTS_ENV}=1 uv run pytest -q {ENGINE_TEST_TARGET_COMMAND}"
+
+
+def _assert_engine_drift_job(workflow: str) -> None:
+    job = _workflow_job_block(workflow, "engine-drift")
+    checkout = _workflow_step_block(
+        job, uses="actions/checkout@v4", contains="repository: Yarbrdab000/tableau-fabric-skills"
+    )
+    assert "repository: Yarbrdab000/tableau-fabric-skills" in checkout
+    assert "ref: main" in checkout
+    test_command = _literal_run_command(
+        _workflow_step_block(job, name="Tests (engine-dependent, latest engine drift signal)")
+    )
+    assert test_command == f"{conftest.REQUIRE_ENGINE_TESTS_ENV}=1 uv run pytest -q {ENGINE_TEST_TARGET_COMMAND}"
 
 
 def test_expected_skip_reasons_contain_known_entries() -> None:
@@ -115,16 +248,8 @@ def test_engine_skips_without_an_allowed_not_checked_reason_fail(
     """Engine-dependent skips are not an ordinary green skip baseline."""
     monkeypatch.delenv(conftest.REQUIRE_ENGINE_TESTS_ENV, raising=False)
     monkeypatch.delenv(conftest.ENGINE_TESTS_NOT_CHECKED_REASON_ENV, raising=False)
-    conftest_code = (REPO_ROOT / "conftest.py").read_text(encoding="utf-8")
-    pytester.makeconftest(conftest_code)
-    pytester.makepyfile(
-        """
-        import pytest
-
-        def test_engine_one():
-            pytest.skip("deterministic tier not installed")
-        """
-    )
+    nodeid = _make_engine_case(pytester)
+    pytester.makeconftest(_conftest_for_pytester({nodeid: "deterministic tier not installed"}))
     result = pytester.runpytest()
     assert result.ret == pytest.ExitCode.TESTS_FAILED
     result.stdout.fnmatch_lines(
@@ -141,16 +266,8 @@ def test_engine_skips_with_an_unknown_not_checked_reason_fail(
     """A misspelled NOT_CHECKED reason must not become a new green baseline."""
     monkeypatch.delenv(conftest.REQUIRE_ENGINE_TESTS_ENV, raising=False)
     monkeypatch.setenv(conftest.ENGINE_TESTS_NOT_CHECKED_REASON_ENV, "engine-maybe-missing")
-    conftest_code = (REPO_ROOT / "conftest.py").read_text(encoding="utf-8")
-    pytester.makeconftest(conftest_code)
-    pytester.makepyfile(
-        """
-        import pytest
-
-        def test_engine_one():
-            pytest.skip("deterministic tier not installed")
-        """
-    )
+    nodeid = _make_engine_case(pytester)
+    pytester.makeconftest(_conftest_for_pytester({nodeid: "deterministic tier not installed"}))
     result = pytester.runpytest()
     assert result.ret == pytest.ExitCode.TESTS_FAILED
     assert "Set one of: covered-by-pinned-engine-integration-job" in result.stdout.str()
@@ -162,15 +279,20 @@ def test_engine_skips_with_an_allowed_not_checked_reason_are_reported(
     """The ordinary Linux CI job may report a deliberate NOT_CHECKED reason, not a silent pass."""
     monkeypatch.delenv(conftest.REQUIRE_ENGINE_TESTS_ENV, raising=False)
     monkeypatch.setenv(conftest.ENGINE_TESTS_NOT_CHECKED_REASON_ENV, "covered-by-pinned-engine-integration-job")
-    conftest_code = (REPO_ROOT / "conftest.py").read_text(encoding="utf-8")
-    pytester.makeconftest(conftest_code)
+    expected = {
+        "test_engine_cases.py::test_engine_one": "deterministic tier not installed",
+        "test_engine_cases.py::test_engine_two": "deterministic tier not installed",
+    }
+    pytester.makeconftest(_conftest_for_pytester(expected))
     pytester.makepyfile(
-        """
+        test_engine_cases="""
         import pytest
 
+        @pytest.mark.engine_dependency(expected_skip_reason="deterministic tier not installed")
         def test_engine_one():
             pytest.skip("deterministic tier not installed")
 
+        @pytest.mark.engine_dependency(expected_skip_reason="deterministic tier not installed")
         def test_engine_two():
             pytest.skip("deterministic tier not installed")
         """
@@ -194,16 +316,8 @@ def test_required_engine_run_fails_if_engine_tests_skip(
     """The engine-integration and drift jobs must fail closed when the engine did not install."""
     monkeypatch.setenv(conftest.REQUIRE_ENGINE_TESTS_ENV, "1")
     monkeypatch.setenv(conftest.ENGINE_TESTS_NOT_CHECKED_REASON_ENV, "covered-by-pinned-engine-integration-job")
-    conftest_code = (REPO_ROOT / "conftest.py").read_text(encoding="utf-8")
-    pytester.makeconftest(conftest_code)
-    pytester.makepyfile(
-        """
-        import pytest
-
-        def test_engine_one():
-            pytest.skip("deterministic tier not installed")
-        """
-    )
+    nodeid = _make_engine_case(pytester, skip_reason="Windows-specific path spelling")
+    pytester.makeconftest(_conftest_for_pytester({nodeid: "deterministic tier not installed"}))
     result = pytester.runpytest()
     assert result.ret == pytest.ExitCode.TESTS_FAILED
     result.stdout.fnmatch_lines(
@@ -212,6 +326,32 @@ def test_required_engine_run_fails_if_engine_tests_skip(
             f"*{conftest.REQUIRE_ENGINE_TESTS_ENV}=1*",
         ]
     )
+
+
+def test_not_checked_run_fails_if_engine_marker_is_removed(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation control: an engine test without the marker cannot disappear from the denominator."""
+    monkeypatch.delenv(conftest.REQUIRE_ENGINE_TESTS_ENV, raising=False)
+    monkeypatch.setenv(conftest.ENGINE_TESTS_NOT_CHECKED_REASON_ENV, "covered-by-pinned-engine-integration-job")
+    nodeid = _make_engine_case(pytester, marked=False)
+    pytester.makeconftest(_conftest_for_pytester({nodeid: "deterministic tier not installed"}))
+    result = pytester.runpytest()
+    assert result.ret == pytest.ExitCode.TESTS_FAILED
+    assert "engine-dependent test collection does not match the reviewed denominator" in result.stdout.str()
+
+
+def test_not_checked_run_fails_if_engine_skip_reason_changes(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutation control: a classified engine test skipped for a different reason is non-clean."""
+    monkeypatch.delenv(conftest.REQUIRE_ENGINE_TESTS_ENV, raising=False)
+    monkeypatch.setenv(conftest.ENGINE_TESTS_NOT_CHECKED_REASON_ENV, "covered-by-pinned-engine-integration-job")
+    nodeid = _make_engine_case(pytester, skip_reason="Windows-specific path spelling")
+    pytester.makeconftest(_conftest_for_pytester({nodeid: "deterministic tier not installed"}))
+    result = pytester.runpytest()
+    assert result.ret == pytest.ExitCode.TESTS_FAILED
+    assert "exact node-id-to-reason map" in result.stdout.str()
 
 
 def test_unexpected_skip_with_xdist_fails_pytest_session(pytester: pytest.Pytester) -> None:
@@ -266,24 +406,29 @@ def test_all_engine_dependent_tests_are_accounted_for() -> None:
     The skip-reason classifier also treats the installed-engine-constants watchdog as engine-backed,
     so the engine jobs must run that one too instead of marking it NOT_CHECKED in the main job.
     """
-    expected_modules = {
-        "tests/test_dax_oracle_server.py": 4,
-        "tests/test_issue_424_chart_type_pin.py": 8,
-        "tests/test_upstream_repro_pins.py": 3,
-        "tests/test_harvest_download_watchdog.py": 1,
-    }
-
-    total_engine_tests = sum(expected_modules.values())
-    assert total_engine_tests == 16
-
-    for rel_path, expected_count in expected_modules.items():
-        file_path = REPO_ROOT / rel_path
-        assert file_path.is_file(), f"missing test module {rel_path}"
-        content = file_path.read_text(encoding="utf-8")
-        assert any(reason in content for reason in conftest.ENGINE_SKIP_REASONS), (
-            f"{rel_path} must declare an engine skip reason"
-        )
-        assert expected_count > 0, f"{rel_path} must have positive expected count"
+    env = dict(os.environ)
+    env[engine_source.SIMULATE_ENGINE_ABSENT_ENV] = "1"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "--collect-only",
+            "-q",
+            "-m",
+            conftest.ENGINE_DEPENDENCY_MARKER,
+            *ENGINE_TEST_TARGETS,
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    collected = {line.strip() for line in result.stdout.splitlines() if "::" in line}
+    assert collected == set(conftest.EXPECTED_ENGINE_SKIP_REASONS_BY_NODEID)
 
 
 def test_caller_passing_rs_still_sees_failure_and_error_node_ids(pytester: pytest.Pytester) -> None:
@@ -336,15 +481,34 @@ def test_synthetic_installed_engine_root_under_simulation_env(tmp_path: Path, mo
 
 def test_workflow_runs_engine_dependent_tests_in_required_jobs() -> None:
     """The production workflow must reach the fail-closed engine-test path (issue #435)."""
-    workflow = (REPO_ROOT / ".github" / "workflows" / "checks.yml").read_text(encoding="utf-8")
-    target = "tests/test_issue_424_chart_type_pin.py tests/test_dax_oracle_server.py tests/test_upstream_repro_pins.py"
-    target = target + " tests/test_harvest_download_watchdog.py::test_the_ceiling_constants_match_the_INSTALLED_engine"
+    workflow = _workflow_text()
 
     assert "schedule:" in workflow, "latest-engine drift pins need a scheduled job"
-    assert "engine-integration:" in workflow
-    assert "engine-drift:" in workflow
-    assert "962d16cfe6f711622d419a567f992da8d90c8781" in workflow
-    assert "EXPECTED_ENGINE_VERSION: '2.356.0'" in workflow
-    assert "ref: main" in workflow
-    assert f"{conftest.REQUIRE_ENGINE_TESTS_ENV}=1 uv run pytest -q {target}" in workflow
+    _assert_engine_integration_job(workflow)
+    _assert_engine_drift_job(workflow)
     assert "covered-by-pinned-engine-integration-job uv run pytest -q" in workflow
+
+
+def test_workflow_check_fails_if_engine_integration_omits_a_node() -> None:
+    """Mutation control: one missing engine node in integration is not masked by drift."""
+    workflow = _workflow_text().replace(
+        " tests/test_harvest_download_watchdog.py::test_the_ceiling_constants_match_the_INSTALLED_engine",
+        "",
+        1,
+    )
+    with pytest.raises(AssertionError):
+        _assert_engine_integration_job(workflow)
+
+
+def test_workflow_check_fails_if_engine_integration_drops_required_env() -> None:
+    """Mutation control: the integration job must opt into fail-closed engine skips itself."""
+    workflow = _workflow_text().replace(f"{conftest.REQUIRE_ENGINE_TESTS_ENV}=1 ", "", 1)
+    with pytest.raises(AssertionError):
+        _assert_engine_integration_job(workflow)
+
+
+def test_workflow_check_fails_if_engine_integration_checkout_moves_to_main() -> None:
+    """Mutation control: drift's `main` checkout is not evidence for the pinned integration job."""
+    workflow = _workflow_text().replace("ref: ${{ env.PINNED_ENGINE_REF }}", "ref: main", 1)
+    with pytest.raises(AssertionError):
+        _assert_engine_integration_job(workflow)

@@ -107,7 +107,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: Yarbrdab000/tableau-fabric-skills
-          ref: 962d16cfe6f711622d419a567f992da8d90c8781
+          ref: ${{ env.PINNED_ENGINE_REF }}
           path: _engine-source
 
       - uses: astral-sh/setup-uv@v5
