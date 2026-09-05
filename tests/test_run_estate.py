@@ -255,7 +255,7 @@ def test_estate_path_preflight_accepts_short_root_and_refuses_long_root(tmp_path
     assert run_estate.preflight_estate_path_ceiling(source, Path("/short"), engine)[0] is True
     ok, detail = run_estate.preflight_estate_path_ceiling(source, _boundary_root("A" * 20, FILE_CEILING + 1), engine)
     assert ok is False
-    assert "shorter run/output root" in detail
+    assert "--runs-parent" in detail, "the refusal must name the actual supported escape command (issue #479)"
 
 
 def test_estate_path_preflight_cannot_assess_missing_input(tmp_path: Path) -> None:

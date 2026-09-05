@@ -37,3 +37,18 @@ python scripts\package_unit.py --bundle _runs\<NNN>-<slug>\bundle `
 ## Retention and privacy
 
 Everything under `_runs/` is gitignored by `.gitignore` (`/_*`), protecting customer workbooks, credentials, manifests, and reference captures from accidental commits.
+
+## Short-root escape (issue #479)
+
+If this repo's own checkout path is deep enough that `_runs/<NNN>-<slug>/bundle/pbip/...` projects
+over Power BI Desktop's path ceiling (`run_estate.py` exit `10`, `EXIT_PATH_CEILING`), allocate the
+same canonical tree under a short EXTERNAL parent instead of a second, hand-maintained tree:
+
+```powershell
+python scripts\work_dirs.py <unit-name> --runs-parent C:\short\path --json
+python scripts\work_dirs.py --verify --runs-parent C:\short\path
+```
+
+`--runs-parent` is a same-plumbing alias for `--repo-root` — it need not be a git checkout, and the
+run it allocates has an identical `run.json`, subdirectory layout and `--verify` contract to a
+repo-local run.

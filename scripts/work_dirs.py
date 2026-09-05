@@ -8,8 +8,22 @@ purpose: single source of truth for the canonical PRE-BUNDLE work layout - resol
          front (issue #481) - see `LAZY_SUBDIRS`.
 usage:   python scripts/work_dirs.py <unit-name> [--repo-root PATH] [--json]
          python scripts/work_dirs.py --verify [--repo-root PATH] [--json]
+         python scripts/work_dirs.py <unit-name> --runs-parent PATH [--json]
+         python scripts/work_dirs.py --verify --runs-parent PATH [--json]
          from work_dirs import allocate_run, sanitize_unit_key, runs_root, list_runs
          from work_dirs import check_run_location
+
+`--runs-parent` (issue #479, second reopen) is a same-plumbing ALIAS for `--repo-root`, spelled for
+the case that actually needs it: an operator whose canonical `<repo>/_runs/<NNN>-<slug>/...` path
+already projects over Desktop's UTF-16 ceiling (`run_estate.py`'s pre-engine path-ceiling refusal)
+and needs one supported short EXTERNAL root - not a second, hand-maintained tree. The two flags are
+mutually exclusive and both feed the same `repo_root=` parameter `runs_root()`/`allocate_run()`
+already take: `runs_root(repo_root) == (repo_root or REPO_ROOT) / "_runs"` never cared whether
+`repo_root` was a git checkout, so an arbitrary short directory such as `C:\tfmig` needs no new
+allocation logic, no junction, no symlink and no drive mapping - it allocates the identical
+`_runs/<NNN>-<slug>/{assessment,assets,bundle,...}/` tree, with the identical `run.json`,
+`allocated_abs_path` and `--verify` semantics, just rooted somewhere with more path budget to spare.
+Existing default (repo-local) behavior is unchanged when neither flag is given.
 
 Scope of THIS module - deliberately narrow (see the PR that landed it, Refs #291)
 ----------------------------------------------------------------------------------
@@ -1103,7 +1117,20 @@ def main() -> int:
     """CLI: allocate one run for `unit` and print its canonical paths, or `--verify` the tree."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("unit", nargs="?", help="unit name/key to allocate a run for (e.g. a workbook or site slug)")
-    parser.add_argument("--repo-root", type=Path, default=None)
+    root_group = parser.add_mutually_exclusive_group()
+    root_group.add_argument("--repo-root", dest="repo_root", type=Path, default=None)
+    root_group.add_argument(
+        "--runs-parent",
+        dest="repo_root",
+        type=Path,
+        default=None,
+        help=(
+            "allocate the run tree under PATH/_runs instead of the repo's own _runs/ - a same-"
+            "plumbing alias for --repo-root, spelled for a short EXTERNAL root chosen to keep the "
+            "downstream bundle under Power BI Desktop's path ceiling (issue #479). Need not be a "
+            "git checkout. Mutually exclusive with --repo-root (they set the same value)."
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="print the allocated paths as JSON")
     parser.add_argument(
         "--verify",
@@ -1126,7 +1153,11 @@ def main() -> int:
     if not args.unit:
         parser.error("unit is required unless --verify is given")
 
-    run = allocate_run(args.unit, repo_root=args.repo_root)
+    try:
+        run = allocate_run(args.unit, repo_root=args.repo_root)
+    except OSError as exc:
+        print(f"cannot allocate a run under {runs_root(args.repo_root)}: {exc}", file=sys.stderr)
+        return 1
     subdirs = {name: str(run.subdir(name)) for name in CANONICAL_SUBDIRS}
     if args.json:
         print(
