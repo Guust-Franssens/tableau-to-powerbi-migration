@@ -350,6 +350,140 @@ def test_survey_promotes_a_metadata_api_orphan_into_phase_1(tmp_path: Path) -> N
     assert [step["name"] for step in build_order(plan) if step["kind"] == "datasource"][:1] == [SALES_DS]
 
 
+def test_a_project_scoped_survey_excludes_unrelated_metadata_sources(tmp_path: Path) -> None:
+    """A filtered survey is the denominator, not merely another source of edges."""
+    survey = load_survey(
+        _survey_file(
+            tmp_path,
+            [_survey_workbook(FINANCE_WB, [(SALES_DS, None)], project="Finance")],
+            scope={"type": "project", "projects": ["Finance"]},
+        )
+    )
+    plan = build_plan(
+        [
+            _metadata(SALES_DS, project="Finance"),
+            _metadata("Marketing DS", project="Marketing"),
+        ],
+        "",
+        survey,
+    )
+
+    assert [entry["name"] for entry in plan] == [SALES_DS]
+
+
+def test_a_project_scoped_survey_keeps_a_required_datasource_from_another_project(tmp_path: Path) -> None:
+    """A selected workbook's model prerequisite remains in the plan across project boundaries."""
+    survey = load_survey(
+        _survey_file(
+            tmp_path,
+            [_survey_workbook(FINANCE_WB, [(SHARED_DS, None)], project="Finance")],
+            scope={"type": "project", "projects": ["Finance"]},
+        )
+    )
+    plan = build_plan([_metadata(SHARED_DS, project="Certified Sources")], "", survey)
+
+    assert _by_name(plan)[SHARED_DS]["downstream_workbooks"] == [FINANCE_WB]
+    assert _by_name(plan)[SHARED_DS]["project"] == "Certified Sources"
+
+
+def test_a_site_wide_survey_keeps_metadata_only_sources(tmp_path: Path) -> None:
+    """The default site-wide survey behavior remains unchanged."""
+    survey = load_survey(_survey_file(tmp_path, [_survey_workbook(FINANCE_WB, [(SALES_DS, None)])]))
+    plan = build_plan([_metadata(SALES_DS), _metadata("Marketing DS", project="Marketing")], "", survey)
+
+    assert {entry["name"] for entry in plan} == {SALES_DS, "Marketing DS"}
+
+
+def test_a_project_and_workbook_scoped_survey_keeps_selected_metadata_edges(tmp_path: Path) -> None:
+    """A composed project/workbook filter retains a metadata edge to the selected workbook."""
+    survey = load_survey(
+        _survey_file(
+            tmp_path,
+            [_survey_workbook(FINANCE_WB, [], project="Finance")],
+            scope={"type": "workbook", "projects": ["Finance"], "workbooks": [FINANCE_WB]},
+        )
+    )
+    plan = build_plan([_metadata("Finance-only Metadata DS", downstream=[FINANCE_WB], project="Finance")], "", survey)
+
+    assert _by_name(plan)["Finance-only Metadata DS"]["downstream_workbooks"] == [FINANCE_WB]
+
+
+def test_an_incomplete_project_scoped_survey_falls_back_site_wide_with_disclosure(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An incomplete filtered survey must not silently hide Metadata API rows."""
+    survey = load_survey(
+        _survey_file(
+            tmp_path,
+            [_survey_workbook(FINANCE_WB, [(SALES_DS, None)], project="Finance")],
+            scope={"type": "project", "projects": ["Finance"]},
+            degraded=True,
+        )
+    )
+    datasources = [_metadata(SALES_DS, project="Finance"), _metadata("Marketing DS", project="Marketing")]
+    plan = build_plan(datasources, "", survey)
+    output = _rendered(caplog, plan, survey)
+
+    assert {entry["name"] for entry in plan} == {SALES_DS, "Marketing DS"}
+    assert "SCOPED SURVEY FILTER DISABLED" in output
+
+
+def test_a_scoped_name_collision_does_not_guess_a_metadata_identity(tmp_path: Path) -> None:
+    """An ambiguous survey name cannot select either of two distinct Metadata API LUIDs."""
+    survey = load_survey(
+        _survey_file(
+            tmp_path,
+            [
+                _survey_workbook(FINANCE_WB, [(SHARED_DS, "luid-finance")], project="Finance"),
+                _survey_workbook("Collision Evidence", [(SHARED_DS, "luid-marketing")], project="Finance"),
+            ],
+            scope={"type": "project", "projects": ["Finance"]},
+        )
+    )
+    plan = build_plan(
+        [
+            _metadata(SHARED_DS, luid="luid-finance", project="Finance"),
+            _metadata(SHARED_DS, luid="luid-marketing", project="Marketing"),
+        ],
+        "",
+        survey,
+    )
+
+    assert {entry["luid"] for entry in plan} == {"luid-finance"}
+
+
+def test_a_scoped_survey_only_name_collision_has_no_download_identity(tmp_path: Path) -> None:
+    """A collision absent from Metadata API remains explicit rather than choosing the first LUID."""
+    survey = load_survey(
+        _survey_file(
+            tmp_path,
+            [
+                _survey_workbook(FINANCE_WB, [(SHARED_DS, "luid-finance")], project="Finance"),
+                _survey_workbook("Collision Evidence", [(SHARED_DS, "luid-marketing")], project="Finance"),
+            ],
+            scope={"type": "project", "projects": ["Finance"]},
+        )
+    )
+    plan = build_plan([], "", survey)
+
+    assert plan[0]["luid"] is None
+    assert plan[0]["matched_via"] == "survey-only-ambiguous"
+
+
+def test_a_declared_non_site_scope_is_not_treated_as_site_wide(tmp_path: Path) -> None:
+    """A malformed selector must not silently widen a declared bounded scope."""
+    survey = load_survey(
+        _survey_file(
+            tmp_path,
+            [_survey_workbook(FINANCE_WB, [(SALES_DS, None)])],
+            scope={"type": "project"},
+        )
+    )
+    plan = build_plan([_metadata(SALES_DS), _metadata("Marketing DS", project="Marketing")], "", survey)
+
+    assert [entry["name"] for entry in plan] == [SALES_DS]
+
+
 def test_without_a_survey_the_same_estate_still_reports_the_orphans(tmp_path: Path) -> None:
     """The degraded path must stay HONEST, not silently wrong: the edges are simply not visible."""
     datasources, _ = _sqlproxy_estate(tmp_path)

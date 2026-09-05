@@ -193,6 +193,7 @@ class Survey:
     by_luid: dict[str, str] = field(default_factory=dict)
     workbooks_total: int = 0
     gaps: tuple[str, ...] = ()
+    scoped: bool = False
 
     @property
     def complete(self) -> bool:
@@ -219,6 +220,30 @@ class Survey:
         if not entry:
             return []
         return sorted((self.workbook_names.get(w, w) for w in entry.consumers), key=str.lower)
+
+    def includes_metadata_source(
+        self, datasource_luid: str | None, survey_key: str | None, downstream_workbooks: Sequence[str]
+    ) -> bool:
+        """Whether a Metadata API row belongs to a complete, filtered survey.
+
+        A survey dependency with a stable LUID is matched by identity. Name-only dependencies are
+        intentionally accepted only when the survey could not resolve any LUID; an ambiguous name
+        must not select an arbitrary Metadata API row. A Metadata edge to a selected workbook is
+        retained even when the datasource itself is outside the selected project.
+        """
+        selected_workbooks = {_norm(workbook) for workbook in self.workbook_names}
+        if any(_norm(workbook) in selected_workbooks for workbook in downstream_workbooks):
+            return True
+        if survey_key is None:
+            return False
+        entry = self.datasources.get(survey_key)
+        if not entry:
+            return False
+        if datasource_luid and entry.luid:
+            return datasource_luid == entry.luid
+        if datasource_luid and entry.luids:
+            return False
+        return not entry.luids
 
 
 def _summary(data: dict[str, Any]) -> dict[str, Any]:
@@ -337,6 +362,20 @@ def _survey_gaps(data: dict[str, Any], unresolved_deps: int) -> tuple[str, ...]:
     return tuple(_flag_gaps(data, observed) + observed)
 
 
+def _survey_scope(data: dict[str, Any]) -> bool:
+    """Return whether the engine declared this survey narrower than the whole site."""
+    scope = data.get("scope")
+    if isinstance(scope, str):
+        return _norm(scope) not in {"", "site", "site-wide", "sitewide", "all"}
+    if not isinstance(scope, dict):
+        return False
+    if scope.get("site_wide") is True or _norm(scope.get("type")) in {"site", "site-wide", "sitewide", "all"}:
+        return False
+    return bool(
+        _norm(scope.get("type")) or any(scope.get(key) for key in ("projects", "project", "workbooks", "workbook"))
+    )
+
+
 def _read_survey_edges(
     workbooks: list[dict[str, Any]],
     datasources: dict[str, SurveyDatasource],
@@ -422,6 +461,7 @@ def load_survey(path: Path) -> Survey:
         by_luid={ds.luid: key for key, ds in datasources.items() if ds.luid},
         workbooks_total=len(workbooks),
         gaps=_survey_gaps(data, unresolved),
+        scoped=_survey_scope(data),
     )
 
 
@@ -656,8 +696,14 @@ def _survey_only_rows(site: str, survey: Survey, by_key: dict[str, list[dict[str
     for key, seen in survey.datasources.items():
         if key in by_key:
             continue
-        source = {"name": seen.name, "luid": seen.luid, "project": seen.project, "has_extracts": None}
-        row = _entry(site, source, [], survey.consumers(key), "survey-only")
+        ambiguous = survey.scoped and survey.complete and len(seen.luids) > 1
+        source = {
+            "name": seen.name,
+            "luid": None if ambiguous else seen.luid,
+            "project": None if ambiguous else seen.project,
+            "has_extracts": None,
+        }
+        row = _entry(site, source, [], survey.consumers(key), "survey-only-ambiguous" if ambiguous else "survey-only")
         rows.append(row)
         by_key.setdefault(key, []).append(row)
     return rows
@@ -677,10 +723,13 @@ def build_plan(datasources: list[dict[str, Any]], site: str, survey: Survey | No
     """
     plan: list[dict[str, Any]] = []
     by_key: dict[str, list[dict[str, Any]]] = {}
+    apply_scope = bool(survey and survey.scoped and survey.complete)
     for datasource in datasources:
         name = datasource.get("name") or ""
         downstream = [w.get("name") or "?" for w in datasource.get("downstreamWorkbooks") or []]
         survey_key, matched_via = survey.match(datasource.get("luid"), name) if survey else (None, None)
+        if apply_scope and not survey.includes_metadata_source(datasource.get("luid"), survey_key, downstream):
+            continue
         source = {
             "name": name,
             "luid": datasource.get("luid"),
@@ -739,6 +788,11 @@ def _print_sources(survey: Survey | None) -> None:
             log.info("%s", line)
         if survey.gaps:
             log.info("SURVEY IS INCOMPLETE: %s.", "; ".join(survey.gaps))
+            if survey.scoped:
+                log.info(
+                    "SCOPED SURVEY FILTER DISABLED: incomplete scope falls back to the full Metadata API "
+                    "plan; narrowing it would silently hide dependencies."
+                )
     else:
         log.info("SOURCES: Metadata API (GraphQL) only")
         for line in NO_SURVEY_WARNING.splitlines():
