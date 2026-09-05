@@ -1197,6 +1197,13 @@ def _format_orphan_workbook(entry: tuple[str, str]) -> str:
     return f"{name} [{identity}]"
 
 
+def _orphan_scope_label(workbooks: list[tuple[str, str]]) -> str:
+    """Count resolved workbooks honestly without calling an ambiguity group one workbook."""
+    if any(identity.startswith("AMBIGUOUS::") for identity, _name in workbooks):
+        return f"{len(workbooks)} workbook identity/ambiguity group(s)"
+    return f"{len(workbooks)} workbook(s)"
+
+
 def never_downloaded(results: list[dict]) -> list[dict]:
     """Rows that never reached a parser at all, i.e. the downloads that did not land.
 
@@ -1348,7 +1355,7 @@ def summarise(  # pylint: disable=too-many-locals,too-many-statements,too-many-b
         )
         lines.append("")
         for datasource, workbooks in orphans:
-            lines.append(f"- `{datasource}` (failed) blocks **{len(workbooks)}** workbook(s):")
+            lines.append(f"- `{datasource}` (failed) blocks **{_orphan_scope_label(workbooks)}**:")
             labels = [_format_orphan_workbook(w) for w in workbooks]
             lines.append(f"  - {', '.join(labels[:8])}{' …' if len(labels) > 8 else ''}")
         lines.append("")
@@ -1655,10 +1662,9 @@ def report_failed_downloads(
     for datasource, workbooks in orphans or []:
         labels = [_format_orphan_workbook(w) for w in workbooks]
         LOG.warning(
-            "DO NOT CONVERT YET: '%s' never downloaded, so %d workbook(s) that DID land would "
-            "convert against a model nobody migrated: %s",
+            "DO NOT CONVERT YET: '%s' never downloaded, so %s would convert against a model nobody migrated: %s",
             datasource,
-            len(workbooks),
+            _orphan_scope_label(workbooks),
             ", ".join(labels[:8]) + (" …" if len(labels) > 8 else ""),
         )
     return missing

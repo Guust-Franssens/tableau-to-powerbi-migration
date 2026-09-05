@@ -1298,6 +1298,7 @@ def test_an_unresolved_luid_matching_two_workbooks_is_reported_ambiguous_not_gue
 
 def test_TWO_unresolved_dependency_rows_sharing_an_ambiguous_name_report_the_occurrence_count(
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Blocking finding (#526 follow-up): two SEPARATE, textually-identical dependency rows -- both
     unresolved, both matching the same two same-named real workbooks -- must not collapse into one
@@ -1338,6 +1339,11 @@ def test_TWO_unresolved_dependency_rows_sharing_an_ambiguous_name_report_the_occ
     identity, name = entries[0]
     assert identity == "AMBIGUOUS::Revenue Dashboard"
     assert "2" in name and "cannot be individually attributed" in name, name
+    text = harvest.summarise(rows, tmp_path, orphans)
+    assert "blocks **1 workbook identity/ambiguity group(s)**" in text
+    caplog.set_level("WARNING", logger="harvest_estate_assets")
+    harvest.report_failed_downloads(rows, orphans)
+    assert "so 1 workbook identity/ambiguity group(s)" in caplog.text
 
 
 def test_a_single_ambiguous_occurrence_does_not_gain_a_spurious_count(tmp_path: Path) -> None:
