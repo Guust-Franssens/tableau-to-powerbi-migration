@@ -2524,9 +2524,7 @@ Write-Output ('<<<PROBE-JSON>>>' + (ConvertTo-Json $payload -Compress -Depth 4))
 
 
 def _powershell() -> str:
-    """Path to Windows PowerShell, or skip - this arbiter is Windows-only by construction."""
-    if os.name != "nt":
-        pytest.skip("probe_desktop_credential.ps1 is a Windows-only UI Automation arbiter")
+    """Path to Windows PowerShell or PowerShell Core (pwsh), or skip if unavailable."""
     exe = shutil.which("powershell") or shutil.which("pwsh")
     if not exe:
         pytest.skip("no PowerShell interpreter on PATH")
@@ -2557,7 +2555,13 @@ def _window(**overrides) -> dict:
     return window
 
 
-def classify(tmp_path: Path, windows: list[dict], *, refresh_in_flight: bool = False) -> dict:
+def classify(
+    tmp_path: Path,
+    windows: list[dict],
+    *,
+    refresh_in_flight: bool = False,
+    probe_ps1: Path | None = None,
+) -> dict:
     """Run the SHIPPED classifiers over ``windows`` and return their verdict as a dict.
 
     Deliberately routed through files and `-File` rather than `-Command`: a quoting slip in an inline
@@ -2570,7 +2574,8 @@ def classify(tmp_path: Path, windows: list[dict], *, refresh_in_flight: bool = F
     harness.write_text(_HARNESS, encoding="utf-8")
     payload = tmp_path / "windows.json"
     payload.write_text(json.dumps(windows), encoding="utf-8")
-    argv = [exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness), "-Probe", str(PROBE_PS1)]
+    target_probe = probe_ps1 if probe_ps1 is not None else PROBE_PS1
+    argv = [exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness), "-Probe", str(target_probe)]
     argv += ["-WindowsJson", str(payload)]
     if refresh_in_flight:
         argv.append("-RefreshInFlight")
@@ -2600,7 +2605,7 @@ def harvest_result(tmp_path: Path, payload, *, exit_code: int = 0) -> dict:
 REFRESH_PROGRESS = _window(
     Title="Refresh",
     ClassName="HwndWrapper[PBIDesktop.exe;;refresh]",
-    Texts=["Refresh", "Orders", "1,204 rows loaded", "Cancel"],
+    Texts=["Refresh", "1,204 rows loaded", "Cancel"],
     InteractiveTexts=["Cancel"],
     # A Power BI refresh dialog DOES disable its owner, so modality alone cannot tell it from a
     # credential modal. Pinned false on purpose: the fix must not lean on the owner test.
@@ -3545,11 +3550,13 @@ def test_unaccounted_prose_beside_progress_text_is_not_suppressed(tmp_path: Path
 
 
 def test_short_data_labels_beside_progress_text_do_not_block_suppression(tmp_path: Path) -> None:
-    """Positive control. Without this, "scan everything" could degenerate into "never suppress".
+    """Issue #406 tradeoff test. Without length amnesty ($MinPromptWords removed), short data labels
 
-    A real refresh dialog lists table names and row counts next to its status text. Those are short
-    data labels, not prose, and they must not veto - otherwise the benign path is unreachable and the
-    probe can never return CREDENTIAL_PRESENT while Desktop shows its own refresh dialog.
+    (such as table names 'Orders', 'Customers') are no longer excused as benign. Every non-empty content
+    element must be either recognised status or enumerated chrome; unrecognised data labels veto benign
+    suppression and yield DIALOG_UNRECOGNIZED (exit 3) both at t=0 and under -RefreshInFlight.
+    This reachability cost is accepted to ensure short prompts like 'Password:' or 'Please enter your password'
+    are never suppressed in flight.
     """
     window = _window(
         Title="Refresh",
@@ -3558,8 +3565,170 @@ def test_short_data_labels_beside_progress_text_do_not_block_suppression(tmp_pat
         OwnerEnabled=False,
     )
 
-    assert classify(tmp_path, [window], refresh_in_flight=True)["verdict"] is None
-    assert classify(tmp_path, [window])["verdict"] == "REFRESH_IN_PROGRESS"
+    result_flight = classify(tmp_path, [window], refresh_in_flight=True)
+    assert result_flight["kind"] == "mixed-content"
+    assert result_flight["verdict"] == "DIALOG_UNRECOGNIZED"
+    assert result_flight["exit_code"] == 3
+    assert result_flight["evidence"] in ("Orders", "Customers")
+
+    result_t0 = classify(tmp_path, [window])
+    assert result_t0["kind"] == "mixed-content"
+    assert result_t0["verdict"] == "DIALOG_UNRECOGNIZED"
+    assert result_t0["exit_code"] == 3
+    assert result_t0["evidence"] in ("Orders", "Customers")
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "Please enter your password",  # 4 words - under old MIN_PROMPT_WORDS amnesty
+        "Password:",  # 2 words
+        "Sign in",
+        "Enter password",
+    ],
+)
+def test_powershell_short_prompt_beside_progress_text_is_never_dismissed(tmp_path: Path, prompt: str) -> None:
+    """Issue #406. Length is not evidence of harmlessness.
+
+    $MinPromptWords = 5 accepted every unmatched element under 5 words, so short prompts like "Password:"
+    or "Please enter your password" sitting beside "Evaluating" classified as benign and were suppressed
+    in flight ($null verdict). Without length amnesty, any unrecognised content text vetoes benign suppression.
+    """
+    window = _window(
+        Title="Refresh",
+        Texts=["Refresh", "Evaluating", prompt],
+        InteractiveTexts=["Cancel"],
+        OwnerEnabled=False,
+    )
+
+    in_flight = classify(tmp_path, [window], refresh_in_flight=True)
+    assert in_flight["kind"] == "mixed-content"
+    assert in_flight["verdict"] == "DIALOG_UNRECOGNIZED"
+    assert in_flight["exit_code"] == 3
+    assert in_flight["evidence"] == prompt
+
+    t0 = classify(tmp_path, [window])
+    assert t0["kind"] == "mixed-content"
+    assert t0["verdict"] == "DIALOG_UNRECOGNIZED"
+    assert t0["exit_code"] == 3
+    assert t0["evidence"] == prompt
+
+
+def test_powershell_only_enumerated_chrome_is_excused_beside_progress_text(tmp_path: Path) -> None:
+    """Issue #406. Benign suppression requires enumerated chrome (Cancel/OK/Close), not arbitrary short strings."""
+    chrome_cancel = _window(
+        Title="Refresh",
+        Texts=["Refresh", "Evaluating", "Cancel"],
+        InteractiveTexts=["Cancel"],
+        OwnerEnabled=False,
+    )
+    chrome_ok = _window(
+        Title="Refresh",
+        Texts=["Refresh", "Evaluating", "OK"],
+        InteractiveTexts=["OK"],
+        OwnerEnabled=False,
+    )
+    chrome_close = _window(
+        Title="Refresh",
+        Texts=["Refresh", "Evaluating", "Close"],
+        InteractiveTexts=["Close"],
+        OwnerEnabled=False,
+    )
+
+    for w in [chrome_cancel, chrome_ok, chrome_close]:
+        res_flight = classify(tmp_path, [w], refresh_in_flight=True)
+        assert res_flight["verdict"] is None
+
+        res_t0 = classify(tmp_path, [w])
+        assert res_t0["kind"] == "benign"
+        assert res_t0["verdict"] == "REFRESH_IN_PROGRESS"
+
+
+def _setup_probe_copy(tmp_path: Path) -> Path:
+    """Copy probe_desktop_credential.ps1 and its sibling regex files into tmp_path."""
+    probe_dir = tmp_path / "probe_copy"
+    probe_dir.mkdir(exist_ok=True)
+    src_dir = PROBE_PS1.parent
+    for fname in [
+        "probe_desktop_credential.ps1",
+        "credential_modal_signature.regex",
+        "benign_dialog_signature.regex",
+        "benign_chrome_signature.regex",
+        "blocking_prompt_signature.regex",
+    ]:
+        (probe_dir / fname).write_text((src_dir / fname).read_text(encoding="utf-8"), encoding="utf-8")
+    return probe_dir / "probe_desktop_credential.ps1"
+
+
+def test_powershell_mutation_restore_amnesty(tmp_path: Path) -> None:
+    """Mutation test 1: restore $MinPromptWords amnesty. Must fail named assertions."""
+    mutated_script = _setup_probe_copy(tmp_path)
+    content = mutated_script.read_text(encoding="utf-8")
+    old_code = """    if ($t -match $chromeSig) {
+      continue
+    }"""
+    new_code = """    $words = @($t -split '\\s+' | Where-Object { $_ })
+    if ($words.Count -lt 5) { continue }"""
+    assert old_code in content, "mutation target anchor missing in probe script"
+    mutated_script.write_text(content.replace(old_code, new_code), encoding="utf-8")
+    assert "$words.Count -lt 5" in mutated_script.read_text(encoding="utf-8"), "mutation 1 failed to land on disk"
+
+    cases = [
+        _window(Title="Refresh", Texts=["Refresh", "Evaluating", "Please enter your password"], OwnerEnabled=False),
+        _window(Title="Refresh", Texts=["Refresh", "Evaluating", "Password:"], OwnerEnabled=False),
+    ]
+
+    failed_count = 0
+    for w in cases:
+        res = classify(tmp_path, [w], refresh_in_flight=True, probe_ps1=mutated_script)
+        if res["verdict"] != "DIALOG_UNRECOGNIZED":
+            failed_count += 1
+
+    assert failed_count == 2, f"Mutation score: expected 2 failed, got {failed_count} failed"
+
+
+def test_powershell_mutation_widen_allowlist(tmp_path: Path) -> None:
+    """Mutation test 2: widen chrome allowlist to .* . Must fail named assertions."""
+    mutated_script = _setup_probe_copy(tmp_path)
+    chrome_regex = mutated_script.parent / "benign_chrome_signature.regex"
+    chrome_regex.write_text(".*\n", encoding="utf-8")
+    assert chrome_regex.read_text(encoding="utf-8").strip() == ".*", "mutation 2 failed to land on disk"
+
+    cases = [
+        _window(Title="Refresh", Texts=["Refresh", "Evaluating", "Please enter your password"], OwnerEnabled=False),
+        _window(Title="Refresh", Texts=["Refresh", "Evaluating", "Password:"], OwnerEnabled=False),
+        _window(Title="Refresh", Texts=["Refresh", "Evaluating", "Orders"], OwnerEnabled=False),
+    ]
+
+    failed_count = 0
+    for w in cases:
+        res = classify(tmp_path, [w], refresh_in_flight=True, probe_ps1=mutated_script)
+        if res["verdict"] != "DIALOG_UNRECOGNIZED":
+            failed_count += 1
+
+    assert failed_count == 3, f"Mutation score: expected 3 failed, got {failed_count} failed"
+
+
+def test_powershell_mutation_remove_allowlist(tmp_path: Path) -> None:
+    """Mutation test 3: remove chrome allowlist entirely. Must fail named assertions."""
+    mutated_script = _setup_probe_copy(tmp_path)
+    chrome_regex = mutated_script.parent / "benign_chrome_signature.regex"
+    chrome_regex.write_text("$^\n", encoding="utf-8")
+    assert chrome_regex.read_text(encoding="utf-8").strip() == "$^", "mutation 3 failed to land on disk"
+
+    cases = [
+        _window(Title="Refresh", Texts=["Refresh", "Evaluating", "Cancel"], OwnerEnabled=False),
+        _window(Title="Refresh", Texts=["Refresh", "Evaluating", "OK"], OwnerEnabled=False),
+        _window(Title="Refresh", Texts=["Refresh", "Evaluating", "Close"], OwnerEnabled=False),
+    ]
+
+    failed_count = 0
+    for w in cases:
+        res = classify(tmp_path, [w], refresh_in_flight=True, probe_ps1=mutated_script)
+        if res["verdict"] is not None:
+            failed_count += 1
+
+    assert failed_count == 3, f"Mutation score: expected 3 failed, got {failed_count} failed"
 
 
 def test_the_benign_signature_matches_whole_elements_not_substrings() -> None:

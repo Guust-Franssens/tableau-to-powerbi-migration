@@ -143,19 +143,17 @@ $sig = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'credential_modal_sign
 # dialog to be ignored, so a broad pattern here is the one way to hide a genuine blocker.
 $benignSig = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'benign_dialog_signature.regex') -Raw).Trim()
 
+# Enumerated allowlist of window chrome control labels that carry no prompt (Cancel/OK/Close).
+# Every non-empty content element must be either recognised status or matched by this allowlist;
+# length is not evidence and short unknown text (e.g. "Password:") is never excused as benign.
+$chromeSig = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'benign_chrome_signature.regex') -Raw).Trim()
+
 # Prompts that are KNOWN to need a human but are NOT credential prompts - the native-database-query
 # approval modal above all. Migrated custom-SQL sources emit exactly the shape that triggers it, and
 # SKILL.md's standing instruction is to check for it before concluding anything about credentials; a
 # probe that suppressed it would make this bundle contradict its own documentation. Matched BEFORE
 # benign, so one progress element in the same window cannot erase it (review round 3).
 $blockingSig = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'blocking_prompt_signature.regex') -Raw).Trim()
-
-# A content element with at least this many words is PROSE - something written to be read by a human.
-# If it is not itself a recognised progress status, it is unaccounted for, and a window with
-# unaccounted prose is not provably a progress dialog however much progress text sits beside it.
-# This is the backstop for prompts that are in NEITHER signature; the cost of it firing wrongly is one
-# more exit 3, which is loud and recoverable.
-$MinPromptWords = 5
 
 function Get-NormalizedText {
   <# Whitespace-normalised, de-duplicated, order-preserving text. #>
@@ -250,8 +248,8 @@ function Get-DialogClassification {
                       window, so `Evaluating` beside
                       `Permission is required to run this native database query` cleared it at exit 0.
                       The entire content is now scanned before benign can be concluded.
-    benign            every content element is either recognised progress status or too short to be a
-                      human-directed prompt, at least one IS progress status, AND the harvest
+    benign            every content element is either recognised progress status or enumerated
+                      chrome, at least one IS progress status, AND the harvest
                       completed -> Power BI is working. The one suppressible kind.
     benign-unverified as `benign`, but the harvest was truncated, timed out, or hit a pattern it could
                       not read. Benign-LOOKING is not benign.
@@ -287,9 +285,11 @@ function Get-DialogClassification {
       if ($null -eq $benignHit) { $benignHit = $t }
       continue
     }
+    if ($t -match $chromeSig) {
+      continue
+    }
     if ($null -eq $unaccounted) {
-      $words = @($t -split '\s+' | Where-Object { $_ })
-      if ($words.Count -ge $MinPromptWords) { $unaccounted = $t }
+      $unaccounted = $t
     }
   }
   if ($benignHit) {
