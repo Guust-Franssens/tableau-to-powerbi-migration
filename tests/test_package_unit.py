@@ -3674,7 +3674,8 @@ def test_a_budget_measurement_exception_is_unassessable_for_one_unit_only(
 
     def fail_one(bundle_root: Path, unit: str, out_root: Path, **kwargs: object) -> pkg.PathBudget:
         if unit == BATCH_BOOM:
-            raise ValueError(r"C:\Users\Neutral Canary\budget probe failed")
+            budget_path = PureWindowsPath("C:/", "Users", "Neutral Canary", "budget probe failed")
+            raise ValueError(str(budget_path))
         return real_budget(bundle_root, unit, out_root, **kwargs)
 
     monkeypatch.setattr(pkg, "path_budget", fail_one)
@@ -4567,14 +4568,17 @@ def test_crash_diagnostic_redacts_whole_messages_with_host_locations() -> None:
     windows_path = str(PureWindowsPath("C:/", "Users", "Neutral Canary", "secret.csv"))
     unc_path = str(PureWindowsPath("//server/Users", "Neutral Canary", "secret.csv"))
     posix_path = str(PurePosixPath("/", "home", "Neutral Canary", "secret.csv"))
+    lowercase_account = str(PureWindowsPath("C:/", "Users", "neutral canary"))
+    spaced_filename = str(PureWindowsPath("C:/", "Users", "Neutral Canary", "My Secret File.csv"))
+    followed_by_prose = f"{PureWindowsPath('C:/', 'Users', 'Alice')} Failed again"
     for text in (
         f'"{windows_path}", retry failed',
         f"failure at {windows_path}; retry failed",
         f"{unc_path}; retry failed",
         f"{posix_path} (retry failed)",
-        r"C:\Users\neutral canary",
-        r"C:\Users\Neutral Canary\My Secret File.csv",
-        r"C:\Users\Alice Failed again",
+        lowercase_account,
+        spaced_filename,
+        followed_by_prose,
     ):
         safe = pkg._sanitize_diagnostic(text)  # pylint: disable=protected-access
         assert safe == "[host location redacted]"
