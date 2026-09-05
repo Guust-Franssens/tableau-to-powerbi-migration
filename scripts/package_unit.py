@@ -548,7 +548,11 @@ def _sanitize_diagnostic(text: str) -> str:
             if word is None:
                 break
             candidate = word.group().rstrip("\"'<>()[].,;:!?")
-            if not candidate or (continuations and not any(separator in candidate for separator in _NAME_SEPARATORS)):
+            if (
+                not candidate
+                or (continuations and not any(separator in candidate for separator in _NAME_SEPARATORS))
+                or (not continuations and not candidate[0].isupper())
+            ):
                 break
             end = word_start + len(candidate)
             continuations += 1

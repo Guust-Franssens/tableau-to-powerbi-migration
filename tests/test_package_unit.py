@@ -4565,6 +4565,9 @@ def test_crash_diagnostic_redacts_complete_spans_and_keeps_following_prose() -> 
         assert "Canary" not in safe
         assert "secret.csv" not in safe
         assert "retry failed" in safe
+    assert "survived cleanup" in pkg._sanitize_diagnostic(  # pylint: disable=protected-access
+        "staging /tmp/Neutral survived cleanup"
+    )
 
     assert pkg._sanitize_diagnostic("/api/v1/Neutral Canary is unavailable") == "/api/v1/Neutral Canary is unavailable"  # pylint: disable=protected-access
 
