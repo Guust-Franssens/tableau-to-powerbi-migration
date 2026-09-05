@@ -211,6 +211,7 @@ def test_source_ref_archive_symlink_entry_is_refused_without_filesystem_symlink(
 def test_source_ref_gitlink_entry_is_refused_without_omitting_empty_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """Tracked Git links are rejected instead of vanishing from the reference."""
     repo = _fixture_repo(tmp_path, monkeypatch)
     first_skill = build_plugin.SHIPPED_SKILLS[0]
     _run_git(
