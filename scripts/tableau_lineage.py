@@ -77,6 +77,7 @@ log = logging.getLogger("tableau_lineage")
 
 DEFAULT_API_VERSION = "3.19"
 _LUID = re.compile(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}", re.IGNORECASE)
+_TEXTUAL_ARCHIVE_MEMBERS = (".twb", ".tds", ".xml", ".txt", ".json", ".csv", ".ini", ".log", ".yaml", ".yml")
 
 # How an edge (data source -> workbook) was learned. Printed next to every edge so a plan is
 # self-describing: an operator never has to guess which system made which claim.
@@ -522,19 +523,30 @@ def download_datasource(session: TableauSession, luid: str, dest: Path) -> Path:
 
 
 def _contains_credential(payload: bytes, session: TableauSession) -> bool:
-    """Inspect raw XML or every textual member of a .tds/.tdsx before persistence."""
+    """Inspect raw XML and persisted .tdsx metadata before persistence."""
     secrets = (session.pat_name, session.pat_secret, session.token)
 
     def reflected(value: bytes) -> bool:
         text = value.decode("utf-8", "replace")
         return redact(text, *secrets) != text
 
+    if reflected(payload):
+        return True
     if not payload.startswith(b"PK"):
-        return reflected(payload)
+        return False
     try:
         with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            if reflected(archive.comment):
+                return True
+            for member in archive.infolist():
+                if (
+                    redact(member.filename, *secrets) != member.filename
+                    or reflected(member.comment)
+                    or reflected(member.extra)
+                ):
+                    return True
             members = [
-                member for member in archive.infolist() if member.filename.lower().endswith((".twb", ".tds", ".xml"))
+                member for member in archive.infolist() if member.filename.lower().endswith(_TEXTUAL_ARCHIVE_MEMBERS)
             ]
             if not members:
                 raise RuntimeError("refusing to persist an archive with no assessable Tableau XML member")

@@ -740,7 +740,7 @@ def _listing(site: Site, spec: Listing) -> tuple[list[dict], dict | None]:
     a working one for 180 s, then produced a traceback.
     """
     path = f"/sites/{site.site_id}{spec.path}"
-    LOG.info("  %-14s reading %s", spec.label, path)
+    LOG.info("  %-14s reading %s", spec.label, site.scrub_text(path))
     started = time.monotonic()
     rows, error = site.paged(path, spec.collection, spec.item)
     if error:
@@ -1155,7 +1155,7 @@ def write_store(out: Path, raw: dict[str, Any], assembled: dict[str, Any], redac
             for d in scrubbed_raw["datasources"]
         ],
     )
-    for ds in raw["structure"].get("publishedDatasources") or []:
+    for ds in scrubbed_raw["structure"].get("publishedDatasources") or []:
         conn.execute(
             "UPDATE datasource SET is_certified=?, has_extracts=?, extract_last_refresh=? WHERE name=?",
             (
@@ -1171,28 +1171,34 @@ def write_store(out: Path, raw: dict[str, Any], assembled: dict[str, Any], redac
         )
     conn.executemany(
         "INSERT INTO dependency VALUES (:workbook_name,:workbook_luid,:datasource_name,:datasource_luid,:source)",
-        assembled["dependencies"],
+        scrubbed_assembled["dependencies"],
     )
     conn.executemany(
         "INSERT OR REPLACE INTO project VALUES (?,?,?,?)",
-        [(p["id"], p.get("name"), p.get("parentProjectId"), p.get("contentPermissions")) for p in raw["projects"]],
+        [
+            (p["id"], p.get("name"), p.get("parentProjectId"), p.get("contentPermissions"))
+            for p in scrubbed_raw["projects"]
+        ],
     )
     conn.executemany(
         "INSERT OR REPLACE INTO grp VALUES (?,?,?,?)",
         # `_members` is NULL, not 0, for a group whose membership could not be read: 0 reads as a
         # finding ("this group is empty"), and that is the opposite of what we know.
-        [(g["id"], g.get("name"), (g.get("domain") or {}).get("name"), g.get("_members")) for g in raw["groups"]],
+        [
+            (g["id"], g.get("name"), (g.get("domain") or {}).get("name"), g.get("_members"))
+            for g in scrubbed_raw["groups"]
+        ],
     )
     conn.executemany(
         "INSERT INTO permission VALUES (:object_type,:object_luid,:object_name,:grantee_type,"
         ":grantee_luid,:capability,:mode)",
-        raw["permissions"],
+        scrubbed_raw["permissions"],
     )
     conn.executemany(
         "INSERT OR REPLACE INTO flow VALUES (?,?,?)",
-        [(f["id"], f.get("name"), (f.get("project") or {}).get("name")) for f in raw["flows"]],
+        [(f["id"], f.get("name"), (f.get("project") or {}).get("name")) for f in scrubbed_raw["flows"]],
     )
-    _write_run_marker(conn, assembled)
+    _write_run_marker(conn, scrubbed_assembled)
     conn.commit()
     conn.close()
     return db_path

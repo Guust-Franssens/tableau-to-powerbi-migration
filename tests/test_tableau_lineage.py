@@ -275,6 +275,55 @@ def test_download_payload_checks_plain_and_compressed_text_for_credentials() -> 
     assert not _contains_credential(b"<datasource>safe</datasource>", session)
 
 
+def test_download_payload_checks_archive_metadata_for_credentials() -> None:
+    """ZIP metadata persists with the archive, so it is checked before writing."""
+    session = TableauSession(
+        "https://example.invalid", "SESSION_TOKEN", "site", pat_name="PAT_NAME", pat_secret="PAT_SECRET"
+    )
+    archive = BytesIO()
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
+        member = zipfile.ZipInfo("PAT_SECRET.tds")
+        member.comment = b"SESSION_TOKEN"
+        member.extra = b"\xfe\xca\n\x00PAT_SECRET"
+        bundle.writestr(member, "<datasource>safe</datasource>")
+        bundle.comment = b"PAT_NAME"
+    assert _contains_credential(archive.getvalue(), session)
+
+
+def test_download_payload_checks_compressed_textual_sidecars_for_credentials() -> None:
+    """Persisted textual sidecars are decompressed and inspected as well as Tableau XML."""
+    session = TableauSession(
+        "https://example.invalid", "SESSION_TOKEN", "site", pat_name="PAT_NAME", pat_secret="PAT_SECRET"
+    )
+    archive = BytesIO()
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
+        bundle.writestr("source.tds", "<datasource>safe</datasource>")
+        bundle.writestr("proxy-note.txt", "PAT_SECRET")
+    assert _contains_credential(archive.getvalue(), session)
+
+
+@pytest.mark.parametrize("payload", [b"PK not a zip", b"PK\x03\x04"])
+def test_download_payload_refuses_unreadable_archives(payload: bytes) -> None:
+    """A ZIP-looking payload that cannot be inspected must not be persisted."""
+    session = TableauSession(
+        "https://example.invalid", "SESSION_TOKEN", "site", pat_name="PAT_NAME", pat_secret="PAT_SECRET"
+    )
+    with pytest.raises(RuntimeError, match="unreadable datasource archive"):
+        _contains_credential(payload, session)
+
+
+def test_download_payload_refuses_archive_without_supported_text_members() -> None:
+    """A valid archive still fails closed if no persisted Tableau text can be assessed."""
+    session = TableauSession(
+        "https://example.invalid", "SESSION_TOKEN", "site", pat_name="PAT_NAME", pat_secret="PAT_SECRET"
+    )
+    archive = BytesIO()
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("data.hyper", b"opaque")
+    with pytest.raises(RuntimeError, match="no assessable Tableau XML member"):
+        _contains_credential(archive.getvalue(), session)
+
+
 def test_download_stem_requires_a_full_uuid() -> None:
     """Only the validated response identifier can name a downloaded artifact."""
     luid = "8f6e1d3c-2b4a-4d8e-9f01-123456789abc"
