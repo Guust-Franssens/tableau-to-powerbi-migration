@@ -60,26 +60,53 @@ def test_evidence_dirs_searches_target_and_up_to_three_ancestor_levels(tmp_path:
     assert (tmp_path / "oracle") not in found
 
 
-def test_evidence_dirs_stops_ancestor_walk_when_target_is_self_contained(tmp_path: Path) -> None:
-    """A self-contained package carries package-manifest.json and stops the ancestor walk."""
+def test_is_package_target_recognizes_flat_nested_and_structural_packages(tmp_path: Path) -> None:
+    """Package targets (flat, nested, structural, or marked) are recognized independently."""
+    flat_target = tmp_path / "run" / "packages" / "Minimal"
+    nested_target = tmp_path / "run" / "packages" / "batch1" / "Minimal"
+    unpackaged_unit = tmp_path / "run" / "bundle" / "pbip" / "Minimal"
+    structural_target = tmp_path / "isolated" / "Minimal"
+    (structural_target / "fabric").mkdir(parents=True)
+
+    assert bundle_corpus.is_package_target(flat_target) is True
+    assert bundle_corpus.is_package_target(nested_target) is True
+    assert bundle_corpus.is_package_target(structural_target) is True
+    assert bundle_corpus.is_package_target(unpackaged_unit) is False
+
+
+def test_evidence_dirs_prohibits_ancestor_evidence_for_flat_and_nested_packages(tmp_path: Path) -> None:
+    """Flat and nested package targets never search ancestors, even without package-manifest.json."""
     run_root = tmp_path / "run"
     packages_dir = run_root / "packages"
-    target = packages_dir / "Minimal"
+    flat_target = packages_dir / "FlatUnit"
+    nested_target = packages_dir / "batch1" / "NestedUnit"
 
-    (target / "oracle").mkdir(parents=True)
-    (packages_dir / "oracle").mkdir()
+    flat_target.mkdir(parents=True)
+    nested_target.mkdir(parents=True)
     (run_root / "oracle").mkdir()
 
-    # Before manifest: un-packaged / incomplete target searches ancestors
-    assert bundle_corpus.is_self_contained(target) is False
-    assert bundle_corpus.evidence_dirs(target, ("oracle",)) == [
-        target / "oracle",
-        packages_dir / "oracle",
-        run_root / "oracle",
-    ]
+    # Without package-manifest.json and without local evidence: no ancestor evidence is inherited
+    assert bundle_corpus.is_self_contained(flat_target) is False
+    assert bundle_corpus.is_package_target(flat_target) is True
+    assert bundle_corpus.evidence_dirs(flat_target, ("oracle",)) == []
 
-    # After manifest: self-contained target searches only itself
-    (target / bundle_corpus.PACKAGE_MARKER).write_text("{}", encoding="utf-8")
-    assert bundle_corpus.is_self_contained(target) is True
-    assert bundle_corpus.evidence_dirs(target, ("oracle",)) == [target / "oracle"]
+    assert bundle_corpus.is_self_contained(nested_target) is False
+    assert bundle_corpus.is_package_target(nested_target) is True
+    assert bundle_corpus.evidence_dirs(nested_target, ("oracle",)) == []
+
+    # When local evidence is present, only local evidence is returned
+    (flat_target / "oracle").mkdir()
+    assert bundle_corpus.evidence_dirs(flat_target, ("oracle",)) == [flat_target / "oracle"]
+
+
+def test_evidence_dirs_searches_ancestors_only_for_unpackaged_units(tmp_path: Path) -> None:
+    """An unpackaged unit under bundle/pbip/<Unit> still inherits run-level ancestor evidence."""
+    run_root = tmp_path / "run"
+    target = run_root / "bundle" / "pbip" / "Minimal"
+    target.mkdir(parents=True)
+    (run_root / "oracle").mkdir()
+
+    assert bundle_corpus.is_package_target(target) is False
+    assert bundle_corpus.evidence_dirs(target, ("oracle",)) == [run_root / "oracle"]
+
 

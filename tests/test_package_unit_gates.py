@@ -543,8 +543,8 @@ def test_completed_flat_out_dir_layout_is_accepted_and_gates_pass(tmp_path: Path
 def test_incomplete_flat_package_without_manifest_fails_closed_when_ancestor_evidence_present(
     tmp_path: Path,
 ) -> None:
-    """A failed/incomplete package without package-manifest.json fails closed and does not pass."""
-    bundle, oracle, _ = _bundle(tmp_path, covered=None)
+    """An incomplete flat package without manifest and without local evidence refuses ancestor evidence."""
+    bundle, oracle, objects = _bundle(tmp_path, covered=None)
     run_oracle = tmp_path / "oracle"
     if not run_oracle.exists():
         shutil.copytree(oracle, run_oracle)
@@ -552,14 +552,58 @@ def test_incomplete_flat_package_without_manifest_fails_closed_when_ancestor_evi
     pkg.main(["--bundle", str(bundle), "--out", str(flat_packages), "--oracle", str(run_oracle), "--quiet"])
     unit = flat_packages / UNIT
 
-    # Simulate incomplete package by removing package-manifest.json
+    # Simulate incomplete package by removing both package-manifest.json AND local oracle evidence
     (unit / "package-manifest.json").unlink()
+    shutil.rmtree(unit / "oracle")
 
-    # Without manifest, ancestor evidence is walked and duplicate records make pages unverifiable
+    # Entry gate refuses ancestor evidence: reports blind pages rather than READY
     code, payload = _readiness(unit, tmp_path)
-    assert (code, payload["status"]) == (1, "FINDINGS")
-    readiness_states = {row["readiness"] for unit_row in payload["units"] for row in unit_row["pages"]}
-    assert "unverifiable" in readiness_states
+    assert code in {1, 3}
+    assert payload["status"] in {"FINDINGS", "CANNOT_ESTABLISH"}
+    assert payload["pages_ready"] == 0
+    assert payload["pages_blind"] == len(objects)
+
+    # Exit gate refuses ancestor evidence: oracle-coverage is NOT_CHECKED with 0 evidence
+    coverage = check_unit.check_oracle_coverage(unit, None, None)
+    assert coverage["status"] == check_unit.STATUS_NOT_CHECKED
+    assert coverage["visual_present"] == 0
+    assert coverage["numeric_present"] == 0
+
+    run_report = check_unit.run_all(unit, scope=check_unit.SCOPE_REPORT)
+    checks = {c["id"]: c for c in run_report["checks"]}
+    assert checks["oracle-coverage"]["status"] == check_unit.STATUS_NOT_CHECKED
+
+
+def test_incomplete_nested_package_without_manifest_fails_closed_when_ancestor_evidence_present(
+    tmp_path: Path,
+) -> None:
+    """An incomplete nested package without manifest and without local evidence refuses ancestor evidence."""
+    bundle, oracle, objects = _bundle(tmp_path, covered=None)
+    run_oracle = tmp_path / "oracle"
+    if not run_oracle.exists():
+        shutil.copytree(oracle, run_oracle)
+    nested = tmp_path / "packages" / "coldrun2"
+    pkg.main(["--bundle", str(bundle), "--out", str(nested), "--oracle", str(run_oracle), "--quiet"])
+    unit = nested / UNIT
+
+    # Simulate incomplete package by removing both package-manifest.json AND local oracle evidence
+    (unit / "package-manifest.json").unlink()
+    shutil.rmtree(unit / "oracle")
+
+    code, payload = _readiness(unit, tmp_path)
+    assert code in {1, 3}
+    assert payload["status"] in {"FINDINGS", "CANNOT_ESTABLISH"}
+    assert payload["pages_ready"] == 0
+    assert payload["pages_blind"] == len(objects)
+
+    coverage = check_unit.check_oracle_coverage(unit, None, None)
+    assert coverage["status"] == check_unit.STATUS_NOT_CHECKED
+    assert coverage["visual_present"] == 0
+    assert coverage["numeric_present"] == 0
+
+    run_report = check_unit.run_all(unit, scope=check_unit.SCOPE_REPORT)
+    checks = {c["id"]: c for c in run_report["checks"]}
+    assert checks["oracle-coverage"]["status"] == check_unit.STATUS_NOT_CHECKED
 
 
 def test_nested_batch_out_dir_compatibility_is_preserved(tmp_path: Path) -> None:
