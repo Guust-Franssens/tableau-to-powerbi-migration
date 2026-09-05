@@ -94,6 +94,7 @@ _RULES: list[tuple[str, re.Pattern[str], str]] = [
             r"\b(?:run|execute|issue|perform)\b[^.\n]{0,40}\b(?:remove-item[^.\n]{0,40}-recurse|"
             r"rm\s+-rf|del\s+/[sfq]|format-volume|drop\s+(?:table|database|schema)|git\s+push\s+--force)\b|"
             r"\b(?:delete|remove)\b[^.\n]{0,40}\bremove-item[^.\n]{0,40}-recurse\b|"
+            r"\b(?:drop|delete)\s+table\s+(?!(?:calculation|formatting|label)\b)[a-z_][\w$.-]*\b|"
             r"\b(?:delete|remove|drop)\s+(?:all\s+)?(?:data|database|schema|tables)\s+"
             r"(?:now|immediately|please)\b",
             re.I,
@@ -153,6 +154,30 @@ def _excerpt(text: str, offsets: list[int], match: re.Match[str]) -> str:
     return " ".join(text[start:end].split())[:120]
 
 
+def _mask_quoted_literals(text: str) -> str:
+    """Replace Tableau/DAX single- and double-quoted literal content with spaces."""
+    masked = list(text)
+    quote: str | None = None
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if quote is None:
+            if character in {"'", '"'}:
+                quote = character
+                masked[index] = " "
+        elif character == quote:
+            masked[index] = " "
+            if index + 1 < len(text) and text[index + 1] == quote:
+                masked[index + 1] = " "
+                index += 1
+            else:
+                quote = None
+        else:
+            masked[index] = " "
+        index += 1
+    return "".join(masked)
+
+
 def scan_text(text: str | None) -> list[tuple[str, str]]:
     """Return [(rule_id, matched_excerpt)] for one string ([] when nothing matches)."""
     if not text or len(text) < 12:
@@ -160,7 +185,8 @@ def scan_text(text: str | None) -> list[tuple[str, str]]:
     normalized, offsets = _normalise_for_matching(text)
     hits = []
     for rule_id, pattern, _ in _RULES:
-        match = pattern.search(normalized)
+        matching_view = _mask_quoted_literals(normalized) if rule_id == "destructive-command" else normalized
+        match = pattern.search(matching_view)
         if match:
             hits.append((rule_id, _excerpt(text, offsets, match)))
     return hits
