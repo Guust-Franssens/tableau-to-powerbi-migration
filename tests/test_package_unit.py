@@ -4493,10 +4493,16 @@ def test_one_unit_raising_does_not_stop_the_units_after_it(
 @pytest.mark.parametrize(
     ("message", "filename"),
     [
-        (r"C:\Users\Neutral Canary\secret.csv", r"C:\Users\Neutral Canary\package.py"),
+        (
+            str(PureWindowsPath("C:/", "Users", "Neutral Canary", "secret.csv")),
+            str(PureWindowsPath("C:/", "Users", "Neutral Canary", "package.py")),
+        ),
         (r"\\server\share\NeutralCanary\secret.csv", r"\\server\share\NeutralCanary\package.py"),
-        ("/home/NeutralCanary/secret.csv", "/home/NeutralCanary/package.py"),
-        ("ordinary failure text", "/home/project/package.py"),
+        (
+            str(PurePosixPath("/", "home", "NeutralCanary", "secret.csv")),
+            str(PurePosixPath("/", "home", "NeutralCanary", "package.py")),
+        ),
+        ("ordinary failure text", str(PurePosixPath("project", "package.py"))),
     ],
 )
 def test_a_crash_diagnostic_redacts_host_locations_but_keeps_actionable_context(message: str, filename: str) -> None:
