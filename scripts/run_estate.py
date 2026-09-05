@@ -129,10 +129,12 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import subprocess
 import sys
 import time
 import uuid
+import zipfile
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -190,8 +192,37 @@ _PBIR_VISUAL_FILE = "visual" + ".json"
 _PBIR_VISUAL_TAIL = f"definition/pages/{_PBIR_PAGE_ID}/visuals/{_PBIR_VISUAL_ID}/{_PBIR_VISUAL_FILE}"
 
 
+_ENGINE_FOLDER_MAX_UTF16 = 60
+_ENGINE_FOLDER_INVALID = re.compile(r"[^0-9A-Za-z _.-]+")
+_ENGINE_SOURCE_SUFFIXES = {".twb": ".twb", ".twbx": ".twb", ".tds": ".tds", ".tdsx": ".tds"}
+
+
+def _engine_safe_folder(name: str) -> str:
+    """Conservatively reproduce the engine's filesystem-safe folder component."""
+    safe = _ENGINE_FOLDER_INVALID.sub("_", name).strip(" .")
+    return (safe or "unnamed")[:_ENGINE_FOLDER_MAX_UTF16]
+
+
+def _readable_source(path: Path) -> bool:
+    """Prove a source and its required Tableau document can be opened before conversion."""
+    try:
+        if path.suffix.lower() in {".twb", ".tds"}:
+            with path.open("rb"):
+                return True
+        required = _ENGINE_SOURCE_SUFFIXES[path.suffix.lower()]
+        with zipfile.ZipFile(path) as archive:
+            for info in archive.infolist():
+                if not info.is_dir() and Path(info.filename).suffix.lower() == required:
+                    with archive.open(info) as document:
+                        document.read(1)
+                    return True
+            return False
+    except (OSError, KeyError, zipfile.BadZipFile):
+        return False
+
+
 def _input_unit_names(input_dir: Path) -> list[str] | None:
-    """Return source names available before conversion, or ``None`` when the input is not assessable."""
+    """Return engine-shaped source names, or ``None`` when any input is not assessable."""
     if input_dir.is_file():
         candidates = [input_dir]
     elif input_dir.is_dir():
@@ -202,7 +233,9 @@ def _input_unit_names(input_dir: Path) -> list[str] | None:
         )
     else:
         return None
-    return [path.stem for path in candidates] or None
+    if not candidates or any(not _readable_source(path) for path in candidates):
+        return None
+    return [_engine_safe_folder(path.stem) for path in candidates]
 
 
 def project_estate_path_ceiling(output_root: Path, unit_names: list[str] | None) -> dict:
@@ -219,8 +252,19 @@ def project_estate_path_ceiling(output_root: Path, unit_names: list[str] | None)
             "output_root": str(output_root),
         }
     records = []
+    used_names: set[str] = set()
+    projected_names = []
     for name in unit_names:
-        unit = str(name)
+        base = str(name)
+        occurrence = 1
+        unit = base[:_ENGINE_FOLDER_MAX_UTF16]
+        while unit.casefold() in used_names:
+            occurrence += 1
+            suffix = f"_{occurrence}"
+            unit = f"{base[: _ENGINE_FOLDER_MAX_UTF16 - len(suffix)]}{suffix}"
+        used_names.add(unit.casefold())
+        projected_names.append(unit)
+    for unit in projected_names:
         report = f"{unit}.Report"
         report_root = output_root / "pbip" / unit / report
         directory = report_root / _PBIR_VISUAL_TAIL.rsplit("/", 1)[0]
@@ -245,7 +289,8 @@ def project_estate_path_ceiling(output_root: Path, unit_names: list[str] | None)
     return {
         "status": "over_ceiling" if offenders else "ok",
         "output_root": str(output_root),
-        "longest_unit": max(unit_names, key=utf16_len),
+        "longest_unit": max(projected_names, key=utf16_len),
+        "projected_units": projected_names,
         "paths": records,
         "offenders": offenders,
     }

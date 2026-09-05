@@ -116,6 +116,36 @@ def test_projected_path_counts_supplementary_characters_as_two_units() -> None:
     assert file_path["length"] > len(file_path["path"])
 
 
+def test_projected_names_include_engine_collision_suffixes() -> None:
+    projection = run_estate.project_estate_path_ceiling(Path("/short"), ["Sales", "sales"])
+
+    assert projection["projected_units"] == ["Sales", "sales_2"]
+
+
+def test_projected_names_allocate_suffixes_globally_after_truncation() -> None:
+    prefix = "x" * run_estate._ENGINE_FOLDER_MAX_UTF16
+    projection = run_estate.project_estate_path_ceiling(Path("/short"), ["Sales", "Sales", "Sales_2", prefix, prefix])
+
+    assert projection["projected_units"] == [
+        "Sales",
+        "Sales_2",
+        "Sales_2_2",
+        prefix,
+        f"{prefix[:-2]}_2",
+    ]
+
+
+def test_unreadable_source_cannot_pass_path_preflight(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "Locked.twb"
+    source.write_text("<workbook />", encoding="utf-8")
+    monkeypatch.setattr(run_estate, "_readable_source", lambda _path: False)
+
+    ok, detail = run_estate.preflight_estate_path_ceiling(source, Path("/short"))
+
+    assert ok is False
+    assert "CANNOT ASSESS" in detail
+
+
 def test_pbir_envelope_is_pinned_to_committed_artifacts() -> None:
     """The projection must remain above the largest committed page/visual directory identifiers."""
     paths = list((Path(__file__).resolve().parents[1] / "examples").rglob("visual.json"))
@@ -145,6 +175,39 @@ def test_realistic_long_estate_is_refused_by_conservative_pbir_envelope() -> Non
     assert file_path["length"] == utf16_len(str(root)) + 1 + utf16_len(str(report_root / visual_tail))
     assert directory["length"] == utf16_len(str(root)) + 1 + utf16_len(str(report_root / visual_tail.parent))
     assert projection["status"] == "over_ceiling"
+
+
+@pytest.mark.parametrize("unreadable", [False, True])
+def test_main_refuses_path_preflight_before_engine(tmp_path: Path, monkeypatch, unreadable: bool) -> None:
+    engine = tmp_path / "engine"
+    (engine / "skills" / "tableau-migration").mkdir(parents=True)
+    (engine / "skills" / "tableau-migration" / "VERSION").write_text("2.126.0\n", encoding="utf-8")
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "Sales.twb").write_text("<workbook />", encoding="utf-8")
+    calls: list[Path] = []
+    monkeypatch.setattr(run_estate, "run_engine", lambda *args: calls.append(args[0]) or (0, ""))
+    if unreadable:
+        monkeypatch.setattr(run_estate, "_readable_source", lambda _path: False)
+        output = tmp_path / "short"
+    else:
+        output = _boundary_root("Sales", FILE_CEILING + 1)
+
+    code = run_estate.main(
+        [
+            "--engine",
+            str(engine),
+            "--allow-noncanonical-engine",
+            "--input",
+            str(source),
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert code == run_estate.EXIT_PATH_CEILING
+    assert not calls
+    assert not output.exists()
 
 
 def test_estate_path_preflight_accepts_short_root_and_refuses_long_root(tmp_path: Path) -> None:
