@@ -3932,7 +3932,9 @@ def test_powershell_mutation_drop_caption_accounting(tmp_path: Path) -> None:
     new_code = "  # dropped caption accounting"
     assert old_code in content, "mutation target anchor missing in probe script"
     mutated_script.write_text(content.replace(old_code, new_code), encoding="utf-8")
-    assert "# dropped caption accounting" in mutated_script.read_text(encoding="utf-8"), "mutation 4 failed to land on disk"
+    assert "# dropped caption accounting" in mutated_script.read_text(encoding="utf-8"), (
+        "mutation 4 failed to land on disk"
+    )
 
     cases = [
         _window(Title="Password:", Texts=["Password:", "Evaluating", "Cancel"], OwnerEnabled=False),
