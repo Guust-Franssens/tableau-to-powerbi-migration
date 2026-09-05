@@ -138,18 +138,35 @@ Exit codes
       visible in every gate's verdict while this is not: a model missing its rows loads, validates
       and passes `check_datamodel.py`, and `powerbi-report-author validate` returns `errorCount: 0`
       for a `byPath` naming a model that exists nowhere. |
-| 5 | at least one unit hit a CONTRADICTION this packager refuses to ship past, and NOTHING was
-      written for it: a source whose bytes do not match the digest `input_manifest.json` declares, a
-      unit name that would write outside `--out`, or a host path that could not be contained in the
-      model. Other requested units were still packaged. Deliberately the same number and meaning as
-      PR #487's `EXIT_UNIT_FAILED`, since that PR has this branch as its base. |
+| 5 | at least one unit hit a CONTRADICTION this packager refuses to ship past, or RAISED while it
+      was being packaged, and NOTHING was written for it: a source whose bytes do not match the
+      digest `input_manifest.json` declares, a unit name that would write outside `--out`, a host
+      path that could not be contained in the model, or any other exception (issue #478's field
+      failure was `shutil.Error: [WinError 3]`). Every OTHER requested unit was still attempted. |
 | 6 | at least one unit - or the bundle itself - CANNOT BE ASSESSED: an input that had to be read
-      exists and is unreadable, a report declares pages while its source asset cannot be resolved, or
-      the bundle names no units at all. Nothing was written for those units. Ranked ABOVE every other
-      outcome because every other code is a verdict about content, and "I could not read the input"
-      is not a verdict - collapsing it into 0 is the defect class this repository keeps re-finding
-      (measured on this branch: a truncated `report.json`, a truncated handover slice, a deleted
-      source asset and a zero-unit bundle all exited 0). |
+      exists and is unreadable, a report declares pages while its source asset cannot be resolved,
+      the bundle names no units at all, or a requested unit reached NO outcome bucket at all.
+      Nothing was written for those units. Ranked ABOVE every other outcome because every other code
+      is a verdict about content, and "I could not read the input" is not a verdict - collapsing it
+      into 0 is the defect class this repository keeps re-finding (measured on this branch: a
+      truncated `report.json`, a truncated handover slice, a deleted source asset and a zero-unit
+      bundle all exited 0). |
+
+The batch contract (#478)
+-------------------------
+Packaging a 47-unit estate is ONE command, so one unit's crash must cost that unit and nothing else.
+Measured on the SES estate (47 assets, 2026-09-03): 29 units packaged, then
+`IA_Operation_Health_Summary_Dashboard` raised `shutil.Error: [WinError 3]` out of a plain
+comprehension over `sorted(units)`, and every alphabetically later unit was **never attempted and
+never reported** - the operator could not tell *"not packaged"* from *"packaged and fine"* without
+diffing directories by hand. Every requested unit is now attempted in deterministic (sorted) order,
+a raise is caught per unit and carried in `--json` under `failed[]` with its traceback, and the run
+still exits 5.
+
+Every requested unit lands in EXACTLY ONE bucket - `units[]` (attempted), `failed[]` or `refused[]` -
+and `unaccounted[]` names any that did not, in either direction. The totals are measured against the
+REQUEST, never against whatever survived it: a unit that raised before it could be recorded anywhere
+would otherwise shrink the denominator and read as a clean run of a smaller estate.
 
 An oracle omission INSIDE a package is not exit 1, 4 or 6: a unit whose oracle genuinely has no
 render for a page is the negative control, and it must package successfully and still report that
@@ -182,7 +199,9 @@ import shutil
 import subprocess
 import sys
 import time
+import traceback
 import uuid
+from collections import Counter
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
@@ -342,11 +361,12 @@ BIND_COMMAND = "python scripts/set_data_folder.py --package <path-to-this-folder
 #: ⚠️ **5 and 6 are allocated to two DIFFERENT refusals, and the difference is the whole point.**
 #: 5 is "a unit raised and nothing was written for it" - a definite contradiction this packager
 #: measured (a declared digest that does not match the bytes, a unit name that escapes `--out`, a
-#: host path that could not be contained). 6 is "an input that had to be read could not be
-#: assessed", which is not a verdict about the package at all. Collapsing them re-creates the defect
-#: class this repo keeps re-finding: unassessable input reaching a clean - or a merely-incomplete -
-#: verdict. 5 also deliberately matches PR #487's `EXIT_UNIT_FAILED`, which this branch is the base
-#: of, so the two do not have to be reconciled after the fact.
+#: host path that could not be contained), or any other exception the unit raised (#478). 6 is "an
+#: input that had to be read could not be assessed", which is not a verdict about the package at
+#: all - and it also covers a requested unit that reached no outcome bucket, because "I do not know
+#: what happened to this unit" is the same third state. Collapsing them re-creates the defect class
+#: this repo keeps re-finding: unassessable input reaching a clean - or a merely-incomplete -
+#: verdict.
 EXIT_OK = 0
 EXIT_NO_WORKING_COPY = 1
 EXIT_USAGE = 2
@@ -382,6 +402,11 @@ _UNSAFE = re.compile(r"[^A-Za-z0-9._ -]+")
 #: sit under `<out>/<Unit>/oracle/<kind>/images/`, which is already five segments deep.
 _MAX_OBJECT_NAME = 60
 
+#: Cap for one FAIL line in the rendered summary. The full message and the traceback stay in
+#: `--json`; `shutil.Error` in particular carries one line per file it could not copy, and a 47-unit
+#: batch whose summary is unreadable is only marginally better than one that reported nothing.
+_MAX_ERROR_LINE = 200
+
 KIND_WORKBOOK = "workbook"
 KIND_DATASOURCE = "datasource"
 KIND_UNCLASSIFIED = "unclassified"
@@ -394,7 +419,15 @@ class PackagingError(RuntimeError):
     on one packaged path, or a parameter declared twice. Prevention is the fix; this exists so that
     a future edit which re-opens one fails loudly at packaging time instead of shipping a package
     whose partitions read another table's rows or whose model AMO refuses to load.
+
+    ``unit`` is declared here, and defaults to None, because the BATCH has to attribute every failure
+    to exactly one requested unit (#478): several of these are raised from helpers that never learned
+    which unit they were serving, and an unattributable failure is what makes a bucket stop
+    partitioning the request. :func:`_package_each` fills it in from the loop it caught the failure
+    in, which is the one place that always knows.
     """
+
+    unit: str | None = None
 
 
 class PackageEditsRefused(PackagingError):
@@ -444,10 +477,12 @@ class UnassessableInput(PackagingError):
     replaced by one built from input nobody could read.
     """
 
-    def __init__(self, unit: str, reasons: list[str]) -> None:
+    def __init__(self, unit: str, reasons: list[str], error: BaseException | None = None) -> None:
         self.unit, self.reasons = unit, reasons
+        self.traceback = _safe_traceback(error) if error is not None else None
+        safe_reasons = [_sanitize_diagnostic(reason) for reason in reasons]
         super().__init__(
-            f"cannot assess {unit}: " + "; ".join(reasons) + ". Nothing was packaged for it - a package "
+            f"cannot assess {unit}: " + "; ".join(safe_reasons) + ". Nothing was packaged for it - a package "
             "built from input that could not be read would carry a verdict nobody can stand behind."
         )
 
@@ -472,6 +507,72 @@ class UnsafeUnitName(PackagingError):
             f"refusing to package {unit!r}: {reason}. A unit name must be a single path component, so "
             "that a name taken from the customer's own workbook titles cannot choose where this "
             "packager writes."
+        )
+
+
+def _error_label(error: BaseException) -> str:
+    """`shutil.Error` / `OSError` - MODULE-QUALIFIED, because several exception types are bare `Error`.
+
+    `type(shutil.Error).__name__` is just `Error`, which names nothing an operator can act on and
+    nothing a defect report can be filed against - the customer's failure was `shutil.Error:
+    [WinError 3]`, and the module is the half that says where to look. Builtins are qualified too,
+    so an unassessable `ValueError` retains the same diagnostic shape.
+    """
+    module = type(error).__module__
+    return type(error).__qualname__ if module is None else f"{module}.{type(error).__qualname__}"
+
+
+def _one_line(text: object) -> str:
+    """One greppable line for a message that may carry newlines - `shutil.Error` carries several."""
+    flattened = " ".join(str(text).split())
+    safe = _sanitize_diagnostic(flattened)
+    return safe if len(safe) <= _MAX_ERROR_LINE else safe[: _MAX_ERROR_LINE - 1] + "…"
+
+
+def _sanitize_diagnostic(text: str) -> str:
+    """Redact the whole diagnostic when it contains an absolute host location."""
+    return "[host location redacted]" if discloses_host_location(text) else text
+
+
+def _safe_frame_name(filename: str) -> str:
+    """Keep traceback frame identity without carrying the machine path that led to it."""
+    return re.split(r"[\\/]", filename.rstrip("/\\"))[-1] or "<frame>"
+
+
+def _safe_traceback(error: BaseException) -> str:
+    """Render actionable traceback frames while applying the shipped-artifact path rule to text."""
+    lines = ["Traceback (most recent call last):"]
+    for frame in traceback.extract_tb(error.__traceback__):
+        lines.append(f'  File "{_safe_frame_name(frame.filename)}", line {frame.lineno}, in {frame.name}')
+        if frame.line:
+            lines.append(f"    {_sanitize_diagnostic(frame.line.strip())}")
+    lines.append(f"{_error_label(error)}: {_one_line(error)}")
+    lines.extend(_sanitize_diagnostic(note) for note in getattr(error, "__notes__", ()))
+    return "\n".join(lines) + "\n"
+
+
+class UnitCrashed(PackagingError):
+    """One unit raised something this packager does not model, recorded so the BATCH survives it (#478).
+
+    ⚠️ **The clause that produces this is deliberately broad.** The blast radius of ANY failure - a
+    locked file, a malformed visual, a missing model, `shutil.Error: [WinError 3]` - must be the one
+    unit; a narrower clause would let the next unforeseen exception type abort the batch again, which
+    is the defect itself. `BaseException` (`KeyboardInterrupt`, `SystemExit`) still passes through,
+    because those are the operator ending the run rather than a unit failing.
+
+    It is a :class:`PackagingError` so it travels the path every other per-unit refusal already
+    travels - `failed[]`, the `FAIL` line, `EXIT_UNIT_FAILED` - rather than opening a second one.
+    The original exception and its traceback are kept, because "a unit raised" without the traceback
+    is not a defect report anyone can act on.
+    """
+
+    def __init__(self, unit: str, error: BaseException) -> None:
+        self.unit, self.error = unit, error
+        self.label = _error_label(error)
+        self.traceback = _safe_traceback(error)
+        super().__init__(
+            f"packaging {unit} FAILED and nothing was written for it ({self.label}: {_one_line(error)}). "
+            "Every other requested unit was still attempted; see the traceback in --json under failed[]."
         )
 
 
@@ -882,9 +983,19 @@ def _declares_non_relative(declared: str) -> bool:
     mutation is anchored. The pattern to keep noticing: **each time a wider layer lands above this
     one, the proof that this one still runs has to be re-isolated, or the branch quietly becomes
     unfalsifiable.**
+
+    ⚠️ **Issue #516: a single-rooted Windows path (`\\Users\\<account>\\x`, one leading backslash, no
+    drive letter) is host-rooted with no `..` involved, and neither `is_absolute()` nor `.drive` sees
+    it.** `PureWindowsPath` calls this shape rooted-but-relative-to-the-current-drive - `.root` is
+    `'\\'` while `.drive` is `''` - because Windows itself resolves it against whatever drive is
+    current, not a fixed one. That is still a host location, never something a customer package may
+    contain, so `.root` is checked directly rather than folded into `is_absolute()`, which stays
+    `False` for exactly this shape by design.
     """
     candidate = PureWindowsPath(declared)
-    return candidate.is_absolute() or bool(candidate.drive) or declared.startswith(("\\\\", "/"))
+    return (
+        candidate.is_absolute() or bool(candidate.drive) or bool(candidate.root) or declared.startswith(("\\\\", "/"))
+    )
 
 
 def _declares_unsafe_path(declared: str) -> bool:
@@ -2541,6 +2652,13 @@ def _short_stem(name: str) -> str:
 #: The suffix that distinguishes a package being RETIRED mid-swap from a unit being STAGED.
 _RETIRED_SUFFIX = "~"
 
+#: Bounded budget for VERIFYING that a scratch directory is gone. Windows denies a delete while
+#: anything still holds a handle inside the tree, and a scanner routinely does for a moment after a
+#: large write - so a first failure is a race, not a verdict. It is bounded because "could not clear
+#: it" is a verdict this packager acts on rather than something to wait on forever.
+_SCRATCH_CLEAR_ATTEMPTS = 3
+_SCRATCH_CLEAR_BACKOFF_SEC = 0.1
+
 #: The one shape every scratch directory this packager creates inside `--out` has: a dot, the digest
 #: of a name, and optionally the retired marker. Written as a pattern because BOTH directions are
 #: enforced from it - see :func:`is_reserved_packaging_name`.
@@ -2598,13 +2716,25 @@ def retired_dir(final: Path) -> Path:
     return final.with_name(f".{_short_stem(final.name)}{_RETIRED_SUFFIX}")
 
 
-def _discard_scratch(path: Path) -> None:
+def _discard_scratch(path: Path) -> str | None:
     """`rmtree` a directory this packager NAMED, and refuse to touch anything else.
+
+    Returns the REASON the directory survived, or ``None`` once it is gone.
 
     The tripwire behind :func:`is_reserved_packaging_name`'s first half. Prevention is the fix - a
     unit may not be named like a scratch directory - and this is asserted anyway for the reason every
     tripwire in this file exists: the consequence is invisible here and lands on someone else, as a
     package that was reported shipped and is not on disk.
+
+    ⚠️ **Removal is VERIFIED rather than assumed, and that is a consequence of #478.**
+    `shutil.rmtree(..., ignore_errors=True)` turns *"I could not remove this"* into *"everything is
+    fine"*. While the first raise killed the process, a surviving staging tree was academic; once the
+    batch continues past a failure, the run goes on to assemble MORE units, and a build landing on a
+    stale staging path assembles *into* it and swaps the combined contents into its own package -
+    reported as a success while carrying files the current input never produced. So the removal is
+    retried on a bounded budget (Windows denies a delete while anything still holds a handle inside
+    the tree - the same race :data:`_SWAP_ATTEMPTS` exists for), judged by ``exists()``, and the
+    `OSError` text is carried out as the reason instead of being discarded.
     """
     if not is_reserved_packaging_name(path.name):
         raise PackagingError(
@@ -2612,7 +2742,18 @@ def _discard_scratch(path: Path) -> None:
             "scratch directories, so removing it could destroy a finished package. Staging and "
             "retired trees are named `.<digest>` and `.<digest>~`; nothing else may be swept."
         )
-    shutil.rmtree(path, ignore_errors=True)
+    reason: str | None = None
+    for attempt in range(_SCRATCH_CLEAR_ATTEMPTS):
+        if not path.exists():
+            return None
+        try:
+            shutil.rmtree(path)
+        except OSError as error:
+            reason = f"{_error_label(error)}: {error}"
+        if not path.exists():
+            return None
+        time.sleep(_SCRATCH_CLEAR_BACKOFF_SEC * (attempt + 1))
+    return reason or f"it still exists after {_SCRATCH_CLEAR_ATTEMPTS} removal attempts"
 
 
 def _predicted_asset(bundle: Path, unit: str, assets_dir: Path | None) -> Path | None:
@@ -2998,6 +3139,11 @@ def package_unit(  # pylint: disable=too-many-arguments
     ``limits`` defaults to the HOST's ceilings (:func:`platform_limits`); it is a parameter so that a
     caller - or a test on either CI runner - can state which platform's arithmetic it means rather
     than inheriting the one it happens to run on.
+
+    ⚠️ **A staging directory that SURVIVED cleanup fails this unit rather than being assembled
+    into** (#478). Per-unit continuation is what made that reachable: the batch now goes on to build
+    more units after a failure, and a build landing on a stale staging path used to assemble into it
+    and swap the combined contents into its own package - a success carrying another build's files.
     """
     limits = platform_limits() if limits is None else limits
     final = assert_package_destination(out_root, unit)
@@ -3007,7 +3153,13 @@ def package_unit(  # pylint: disable=too-many-arguments
     if final.is_dir() and not discard_edits:
         _refuse_if_edited(unit, final)
     staging = staging_dir(out_root, unit)
-    _discard_scratch(staging)
+    residue = _discard_scratch(staging)
+    if residue:
+        raise PackagingError(
+            f"refusing to assemble {unit} into {staging}: it survived cleanup, so this package would "
+            f"inherit whatever an earlier build left there and still be reported as a success ({residue}). "
+            "Remove it and re-run that unit."
+        )
     try:
         result = _assemble_unit(bundle, unit, staging, final=final, oracle_dir=oracle_dir, assets_dir=assets_dir)
         assert_assembled_fits(unit, staging, final, out_root, limits)
@@ -3018,8 +3170,34 @@ def package_unit(  # pylint: disable=too-many-arguments
             raise
         raise refusal from failure
     finally:
-        _discard_scratch(staging)
+        _refuse_surviving_staging(unit, staging)
     return result
+
+
+def _refuse_surviving_staging(unit: str, staging: Path) -> None:
+    """Remove ``staging`` on the way out, and refuse to call the unit clean if it is still there.
+
+    ⚠️ **Never raises over an exception that is already propagating.** An exception raised out of a
+    `finally` REPLACES the one in flight, and the in-flight one is the root cause the operator needs;
+    the residue is recorded on it as a note plus a stderr `WARN` instead, and the pre-assembly
+    refusal in :func:`package_unit` removes its consequence on the next run.
+    """
+    left = _discard_scratch(staging)
+    if not left:
+        return
+    in_flight = sys.exception()
+    if in_flight is not None:
+        in_flight.add_note(f"staging {staging} survived cleanup ({left}); the next run of {unit} will refuse it")
+        print(
+            _sanitize_diagnostic(f"WARN: staging {staging} survived cleanup ({left})"),
+            file=sys.stderr,
+        )
+        return
+    raise PackagingError(
+        f"packaged {unit}, but its staging directory {staging} could not be removed ({left}). The package "
+        "itself is complete on disk; this unit is reported failed because a staging directory that "
+        "outlives its build is what a later build would silently assemble into."
+    )
 
 
 def _refuse_if_edited(unit: str, package: Path) -> None:
@@ -3480,11 +3658,12 @@ def _run_totals(
             "so nothing was packaged for them - this is neither a clean nor a failed verdict: "
             f"{', '.join(unassessable)}"
         )
-    hard = sorted(getattr(item, "unit", "?") for item in failed if not isinstance(item, UnassessableInput))
+    hard = sorted(_failed_unit(item) for item in failed if not isinstance(item, UnassessableInput))
     if hard:
         lines.append(
-            f"UNIT FAILED: {len(hard)} unit(s) hit a contradiction this packager refuses to ship past, "
-            f"so nothing was written for them: {', '.join(hard)}"
+            f"UNIT FAILED: {len(hard)} unit(s) raised, or hit a contradiction this packager refuses to "
+            f"ship past, so nothing was written for them; every other requested unit was still "
+            f"attempted: {', '.join(hard)}"
         )
     incomplete = sorted(result["unit"] for result in results if not result.get("self_contained", True))
     if incomplete:
@@ -3507,29 +3686,104 @@ def render(
     out_root: Path,
     refused: list[PackageEditsRefused] | None = None,
     failed: list[PackagingError] | None = None,
+    requested: list[str] | None = None,
 ) -> str:
-    """The human verdict: one line per unit, then the totals that make an omission visible."""
-    lines = [f"package_unit: {len(results)} unit(s) -> {out_root}"]
-    for result in sorted(results, key=lambda item: item["unit"]):
-        oracle = result["oracle"]
-        objects = oracle.get("objects") or []
-        untyped = sum(1 for obj in objects if obj["view_type"] == KIND_UNKNOWN)
-        detail = f"{len(objects)} oracle object(s) via {oracle.get('route')}" if objects else "no oracle evidence"
-        lines.append(
-            f"  {'OK  ' if result['packaged'] else 'MISS'} {result['unit']} [{result['kind']}] - {detail}"
-            + (f", {untyped} untyped" if untyped else "")
-            + (f"; {len(result['notes'])} note(s)" if result["notes"] else "")
-        )
-    for refusal in sorted(refused or [], key=lambda item: item.unit):
+    """The human verdict: one line per unit, then the totals that make an omission visible.
+
+    ``requested`` is the units the operator ASKED for. It is passed rather than inferred so the
+    totals are measured against the REQUEST, not against whatever survived it: a unit that vanished
+    before it could be recorded anywhere would otherwise shrink the denominator and read as a clean
+    run of a smaller estate (#478).
+    """
+    refused, failed = refused or [], failed or []
+    requested = list(requested) if requested is not None else _bucketed_units(results, failed, refused)
+    lines = [f"package_unit: {len(requested)} unit(s) -> {out_root}"]
+    lines += [_unit_line(result) for result in sorted(results, key=lambda item: item["unit"])]
+    for refusal in sorted(refused, key=lambda item: item.unit):
         lines.append(f"  KEPT {refusal.unit} - not repackaged, the existing package carries edits")
-    for failure in sorted(failed or [], key=lambda item: getattr(item, "unit", "")):
+    for failure in sorted(failed, key=_failed_unit):
         label = "CANT" if isinstance(failure, UnassessableInput) else "FAIL"
-        lines.append(f"  {label} {getattr(failure, 'unit', '?')} - NOT packaged: {failure}")
+        lines.append(f"  {label} {_failed_unit(failure)} - NOT packaged: {_one_line(failure)}")
+    gaps = partition_gaps(requested, results, failed, refused)
+    for gap in gaps:
+        lines.append(f"  GAP  {gap['unit']} - {gap['reason']}")
     packaged = sum(1 for result in results if result["packaged"])
     with_oracle = sum(1 for result in results if result["oracle"].get("objects"))
-    lines.append(f"packaged {packaged}/{len(results)}; {with_oracle} carry oracle evidence")
-    lines.extend(_run_totals(results, refused or [], failed or []))
+    lines.append(f"packaged {packaged}/{len(requested)}; {with_oracle} carry oracle evidence")
+    lines.append(
+        f"{len(requested)} requested = {len(results)} attempted + {len(failed)} failed + {len(refused)} kept"
+        + (f" + {len(gaps)} UNACCOUNTED" if gaps else "")
+    )
+    lines.extend(_run_totals(results, refused, failed))
+    if gaps:
+        lines.append(
+            f"UNACCOUNTED: {len(gaps)} requested unit(s) reached no outcome bucket or more than one, so "
+            "what happened to them is unknown and this run is NOT clean: "
+            + "; ".join(f"{gap['unit']} ({gap['state']})" for gap in gaps)
+        )
     return "\n".join(lines)
+
+
+def _unit_line(result: dict[str, Any]) -> str:
+    """The summary line for one ATTEMPTED unit - `OK` or `MISS`, never a failure (those are `FAIL`)."""
+    oracle = result["oracle"]
+    objects = oracle.get("objects") or []
+    untyped = sum(1 for obj in objects if obj["view_type"] == KIND_UNKNOWN)
+    detail = f"{len(objects)} oracle object(s) via {oracle.get('route')}" if objects else "no oracle evidence"
+    return (
+        f"  {'OK  ' if result['packaged'] else 'MISS'} {result['unit']} [{result['kind']}] - {detail}"
+        + (f", {untyped} untyped" if untyped else "")
+        + (f"; {len(result['notes'])} note(s)" if result["notes"] else "")
+    )
+
+
+def _failed_unit(failure: PackagingError) -> str:
+    """The unit a failure belongs to. `?` only if nothing ever attributed it - which is itself a gap."""
+    return getattr(failure, "unit", None) or "?"
+
+
+def _bucketed_units(
+    results: list[dict[str, Any]], failed: list[PackagingError], refused: list[PackageEditsRefused]
+) -> list[str]:
+    """Every unit name any bucket recorded, duplicates included - the raw material of the partition."""
+    return (
+        [result["unit"] for result in results]
+        + [_failed_unit(failure) for failure in failed]
+        + [refusal.unit for refusal in refused]
+    )
+
+
+def partition_gaps(
+    requested: list[str],
+    results: list[dict[str, Any]],
+    failed: list[PackagingError],
+    refused: list[PackageEditsRefused],
+) -> list[dict[str, str]]:
+    """Every requested unit that did NOT land in exactly one bucket, named with what went wrong.
+
+    ⚠️ **This is the check the totals line is not.** A line reading `n = a + b + c` proves nothing
+    unless something independently establishes that every input reached a bucket - a row with an
+    indeterminate status enters none of them, and the arithmetic still adds up. Both directions are
+    gaps: a unit recorded nowhere silently shrinks the denominator into a clean run of a smaller
+    estate, and a unit recorded twice inflates it.
+    """
+    counted = Counter(_bucketed_units(results, failed, refused))
+    asked = set(requested)
+    gaps = [
+        {"unit": unit, "state": "not_attempted", "reason": "requested but recorded in no outcome bucket"}
+        for unit in sorted(asked)
+        if not counted[unit]
+    ]
+    gaps += [
+        {"unit": unit, "state": "recorded_twice", "reason": f"recorded in {count} buckets"}
+        for unit, count in sorted(counted.items())
+        if count > 1
+    ]
+    gaps += [
+        {"unit": unit, "state": "never_requested", "reason": "recorded although it was never requested"}
+        for unit in sorted(set(counted) - asked)
+    ]
+    return gaps
 
 
 def _package_each(  # pylint: disable=too-many-arguments,too-many-positional-arguments
@@ -3543,10 +3797,15 @@ def _package_each(  # pylint: disable=too-many-arguments,too-many-positional-arg
     refused: list[PackageEditsRefused],
     failed: list[PackagingError] | None = None,
 ) -> None:
-    """Package each unit, collecting refusals instead of stopping at the first one.
+    """Package each unit, in deterministic order, collecting failures instead of stopping at one.
 
-    One unit's edits must not stop the rest of the estate being packaged; `main` still returns 3 for
-    any refusal, so this cannot pass unnoticed.
+    One unit's edits, and one unit's CRASH, must not stop the rest of the estate being packaged.
+    Measured on the SES estate (47 assets, 2026-09-03): 29 units packaged, then
+    `IA_Operation_Health_Summary_Dashboard` raised `shutil.Error: [WinError 3]` out of a plain
+    comprehension over `sorted(units)`, and every alphabetically later unit was never attempted and
+    never reported - the operator could not tell "not packaged" from "packaged and fine" without
+    diffing directories by hand (#478). `main` still returns 5 for any failure and 3 for any
+    refusal, so neither can pass unnoticed.
 
     ⚠️ **Every :class:`PackagingError` is collected, not just the edit refusal.** Before this, an
     unassessable input, an unsafe unit name or a containment tripwire escaped as an uncaught
@@ -3554,6 +3813,13 @@ def _package_each(  # pylint: disable=too-many-arguments,too-many-positional-arg
     remaining units of an estate were never packaged at all. Collecting them keeps the run going and
     gives each class its own exit code; nothing is written for a unit that raises, because assembly
     happens in a staging directory that the `finally` in :func:`package_unit` removes.
+
+    ⚠️ **And the last clause is deliberately BROAD**, because the field failure was not a
+    `PackagingError` at all: the blast radius of ANY exception must be one unit, and a narrower
+    clause leaves the next unforeseen type free to abort the batch again. It is wrapped in
+    :class:`UnitCrashed` so it travels the path the modelled refusals already travel, with the
+    traceback kept. `BaseException` - `KeyboardInterrupt`, `SystemExit` - still passes through,
+    because that is the operator ending the run rather than a unit failing.
     """
     for unit in units:
         try:
@@ -3568,13 +3834,20 @@ def _package_each(  # pylint: disable=too-many-arguments,too-many-positional-arg
                 )
             )
         except PackageEditsRefused as refusal:
-            print(str(refusal), file=sys.stderr)
+            print(_sanitize_diagnostic(str(refusal)), file=sys.stderr)
             refused.append(refusal)
         except PackagingError as failure:
-            print(str(failure), file=sys.stderr)
+            print(_sanitize_diagnostic(str(failure)), file=sys.stderr)
             if failed is None:
                 raise
+            failure.unit = failure.unit or unit
             failed.append(failure)
+        except Exception as error:  # pylint: disable=broad-exception-caught
+            if failed is None:
+                raise
+            crash = UnitCrashed(unit, error)
+            print(str(crash), file=sys.stderr)
+            failed.append(crash)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -3616,9 +3889,11 @@ def _refuse_zero_units(bundle: Path, out_root: Path, json_path: Path | None) -> 
                 "id": "package-unit",
                 "bundle": str(bundle),
                 "out": str(out_root),
+                "requested": [],
                 "units": [],
                 "refused": [],
                 "failed": [],
+                "unaccounted": [],
                 "cannot_assess": ["the bundle names no units"],
             },
         )
@@ -3626,15 +3901,22 @@ def _refuse_zero_units(bundle: Path, out_root: Path, json_path: Path | None) -> 
 
 
 def _run_verdict(
-    results: list[dict[str, Any]], refused: list[PackageEditsRefused], failed: list[PackagingError]
+    results: list[dict[str, Any]],
+    refused: list[PackageEditsRefused],
+    failed: list[PackagingError],
+    gaps: list[dict[str, str]] | None = None,
 ) -> int:
     """The run's exit code, worst first.
 
     The two "nothing was written" states rank ABOVE every verdict about content: a verdict computed
     from input that could not be read, or reported alongside a unit that never got packaged at all,
     is the fail-open shape this ordering exists to make impossible.
+
+    ⚠️ **An UNACCOUNTED unit ranks with cannot-assess, at the top.** A requested unit that reached no
+    outcome bucket is not "fine" and it is not "failed" - nobody knows what happened to it, which is
+    the same third state, and it must never be able to leave a run clean (#478).
     """
-    if any(isinstance(failure, UnassessableInput) for failure in failed):
+    if gaps or any(isinstance(failure, UnassessableInput) for failure in failed):
         return EXIT_CANNOT_ASSESS
     if failed:
         return EXIT_UNIT_FAILED
@@ -3645,23 +3927,36 @@ def _run_verdict(
     return EXIT_OK if all(result["packaged"] for result in results) else EXIT_NO_WORKING_COPY
 
 
-def _refuse_out_too_deep(
-    parser: argparse.ArgumentParser, bundle: Path, units: list[str], out_root: Path, assets_dir: Path | None
-) -> list[PathBudget]:
-    """Refuse the WHOLE run when any unit's projected paths would not fit under ``out_root`` (#476).
-
-    Measured for EVERY unit before ANY of them is assembled. The field failure this replaces crashed
-    with `[WinError 206]` having already written 29 of 47 packages, so the operator paid for 29 units
-    of work AND still had to repackage the estate under a shorter `--out`.
-
-    Returns the budgets so the shipping advisory reads the same measurement rather than taking it
-    twice and risking a different answer.
-    """
-    budgets = [path_budget(bundle, unit, out_root, assets_dir=assets_dir) for unit in units]
-    too_deep = [budget for budget in budgets if budget.refused]
-    if too_deep:
-        parser.error(render_out_too_deep(too_deep, len(units)))
-    return budgets
+def _measure_unit_budgets(
+    bundle: Path, units: list[str], out_root: Path, assets_dir: Path | None, failed: list[PackagingError]
+) -> tuple[list[str], list[PathBudget]]:
+    """Measure every requested unit, keeping unit-specific budget failures in the batch accounting."""
+    safe: list[str] = []
+    budgets: list[PathBudget] = []
+    for unit in units:
+        try:
+            budget = path_budget(bundle, unit, out_root, assets_dir=assets_dir)
+        except PackagingError as error:
+            error.unit = unit
+            failed.append(error)
+            continue
+        except Exception as error:  # pylint: disable=broad-exception-caught
+            failed.append(
+                UnassessableInput(
+                    unit,
+                    [f"path budget could not be measured: {_error_label(error)}: {_one_line(error)}"],
+                    error,
+                )
+            )
+            continue
+        budgets.append(budget)
+        if budget.refused:
+            failure = PackagePathTooLong(budget)
+            failure.unit = unit
+            failed.append(failure)
+        else:
+            safe.append(unit)
+    return safe, budgets
 
 
 def _prepare_out(parser: argparse.ArgumentParser, requested: Path) -> Path:
@@ -3686,8 +3981,13 @@ def _warn_shipping(budgets: list[PathBudget]) -> None:
         print(advisory, file=sys.stderr)
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Package the requested units and report what each one carries."""
+def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-locals
+    """Package the requested units and report what each one carries.
+
+    The three outcome buckets are separate local lists on purpose: `_package_each` fills them, and
+    :func:`partition_gaps` then measures them against the REQUEST, so "every requested unit reached
+    exactly one bucket" is checked rather than asserted in prose (#478).
+    """
     parser = _build_parser()
     args = parser.parse_args(argv)
 
@@ -3707,14 +4007,18 @@ def main(argv: list[str] | None = None) -> int:
     if not units:
         return _refuse_zero_units(bundle, out_root, args.json)
 
-    budgets = _refuse_out_too_deep(parser, bundle, sorted(units), out_root, assets_dir)
-    _warn_shipping(budgets)
+    # Sorted once, and the SAME list is packaged, reported against and measured against: the request
+    # is what the totals are denominated in, so it cannot be re-derived from whatever survived.
+    requested = sorted(units)
     results: list[dict[str, Any]] = []
     refused: list[PackageEditsRefused] = []
     failed: list[PackagingError] = []
+    packageable, budgets = _measure_unit_budgets(bundle, requested, out_root, assets_dir, failed)
+    _warn_shipping(budgets)
     _package_each(
-        sorted(units), bundle, out_root, oracle_dir, assets_dir, args.discard_package_edits, results, refused, failed
+        packageable, bundle, out_root, oracle_dir, assets_dir, args.discard_package_edits, results, refused, failed
     )
+    gaps = partition_gaps(requested, results, failed, refused)
 
     payload = {
         "id": "package-unit",
@@ -3722,18 +4026,30 @@ def main(argv: list[str] | None = None) -> int:
         "out": str(out_root),
         "oracle": str(oracle_dir) if oracle_dir else None,
         "assets": str(assets_dir) if assets_dir else None,
+        "requested": requested,
+        "totals": {
+            "requested": len(requested),
+            "units": len(results),
+            "failed": len(failed),
+            "refused": len(refused),
+            "unaccounted": len(gaps),
+        },
         "units": results,
         "refused": [
             {"unit": refusal.unit, "changed": refusal.changed, "reason": refusal.reason} for refusal in refused
         ],
         "failed": [
             {
-                "unit": getattr(failure, "unit", None),
+                "unit": _failed_unit(failure),
                 "state": "cannot_assess" if isinstance(failure, UnassessableInput) else "unit_failed",
-                "reason": str(failure),
+                "reason": _sanitize_diagnostic(str(failure)),
+                # Only a crash carries one: the modelled refusals ARE their reason, while "a unit
+                # raised" without the traceback is not a defect report anyone can act on (#478).
+                "traceback": getattr(failure, "traceback", None),
             }
             for failure in failed
         ],
+        "unaccounted": gaps,
         # The relocation number, per unit, travelling WITH the report: how long a Windows root each
         # package still tolerates. Nothing downstream re-measures it, and it is the one figure that
         # says whether a package that is valid here will open where a customer unpacks it.
@@ -3742,8 +4058,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         write_json(args.json, payload)
     if not args.quiet:
-        print(render(results, out_root, refused, failed))
-    return _run_verdict(results, refused, failed)
+        print(render(results, out_root, refused, failed, requested))
+    return _run_verdict(results, refused, failed, gaps)
 
 
 if __name__ == "__main__":

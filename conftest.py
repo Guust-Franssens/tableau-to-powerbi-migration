@@ -49,9 +49,17 @@ INCLUDE_CONTENDED = "--include-contended"
 # `serial`/`timing` this is excluded from EVERY tier, not just the parallel one, so the exclusion
 # below is unconditional and the opt-in has to be explicit.
 GUI_MARKER = "gui"
+ENGINE_DEPENDENCY_MARKER = "engine_dependency"
 RUN_GUI = "--run-gui"
 RUN_GUI_ENV = "T2P_RUN_GUI"
+REQUIRE_ENGINE_TESTS_ENV = "T2P_REQUIRE_ENGINE_TESTS"
+ENGINE_TESTS_NOT_CHECKED_REASON_ENV = "T2P_ENGINE_TESTS_NOT_CHECKED_REASON"
 TRUTHY = {"1", "true", "yes", "on"}
+EXPECTED_ENGINE_NOT_CHECKED_REASONS: frozenset[str] = frozenset(
+    {
+        "covered-by-pinned-engine-integration-job",
+    }
+)
 
 # Exact expected skip reasons (issues #435, #436).
 EXPECTED_EXACT_SKIP_REASONS: frozenset[str] = frozenset(
@@ -88,6 +96,7 @@ EXPECTED_EXACT_SKIP_REASONS: frozenset[str] = frozenset(
         "filesystem will not store a combining-character filename unchanged",
         "reproduces the WINDOWS half: Path resolves / against the current drive",
         "case-sensitive filesystem: 'FOO' and 'foo' are not the same deliverable",
+        "canonical engine not installed, so its constants cannot be read",
     }
 )
 
@@ -103,7 +112,52 @@ EXPECTED_PREFIX_SKIP_REASONS: tuple[str, ...] = (
 ENGINE_SKIP_REASONS: tuple[str, ...] = (
     "deterministic tier not installed",
     "canonical engine not installed, so its constants cannot be read:",
+    "canonical engine not installed, so its constants cannot be read",
 )
+EXPECTED_ENGINE_SKIP_REASONS_BY_NODEID: dict[str, str] = {
+    "tests/test_dax_oracle_server.py::test_extract_scalar_reads_our_row_shape": "deterministic tier not installed",
+    "tests/test_dax_oracle_server.py::test_our_oracle_conforms_to_the_engines_own_contract": (
+        "deterministic tier not installed"
+    ),
+    "tests/test_dax_oracle_server.py::test_reconcile_reaches_BOTH_verified_and_mismatch_through_us": (
+        "deterministic tier not installed"
+    ),
+    "tests/test_dax_oracle_server.py::test_the_full_wiring_works_over_a_real_subprocess": (
+        "deterministic tier not installed"
+    ),
+    "tests/test_harvest_download_watchdog.py::test_the_ceiling_constants_match_the_INSTALLED_engine": (
+        "canonical engine not installed, so its constants cannot be read"
+    ),
+    "tests/test_issue_424_chart_type_pin.py::test_permanent_invariant_survives_any_future_fix["
+    "issue-424-b-continuous-date-trunc]": "deterministic tier not installed",
+    "tests/test_issue_424_chart_type_pin.py::test_permanent_invariant_survives_any_future_fix["
+    "issue-424-c-explicit-line-mark]": "deterministic tier not installed",
+    "tests/test_issue_424_chart_type_pin.py::test_permanent_invariant_survives_any_future_fix["
+    "issue-424-d-explicit-bar-mark]": "deterministic tier not installed",
+    "tests/test_issue_424_chart_type_pin.py::test_permanent_invariant_survives_any_future_fix["
+    "issue-424-h-non-date-dimension]": "deterministic tier not installed",
+    "tests/test_issue_424_chart_type_pin.py::test_the_engine_reports_the_rebuilt_line_cleanly": (
+        "deterministic tier not installed"
+    ),
+    "tests/test_issue_424_chart_type_pin.py::test_the_fixture_set_discriminates_between_candidate_remedies": (
+        "deterministic tier not installed"
+    ),
+    "tests/test_issue_424_chart_type_pin.py::test_the_shared_visual_id_is_input_derived_not_an_engine_inconsistency": (
+        "deterministic tier not installed"
+    ),
+    "tests/test_issue_424_chart_type_pin.py::test_variant_a_emits_a_line_and_keeps_the_reproduction_binding": (
+        "deterministic tier not installed"
+    ),
+    "tests/test_upstream_repro_pins.py::test_issue_166_pins_negative_custom_sql_binding_shape": (
+        "deterministic tier not installed"
+    ),
+    "tests/test_upstream_repro_pins.py::test_issue_168_pins_partial_dispatcher_with_disclosure": (
+        "deterministic tier not installed"
+    ),
+    "tests/test_upstream_repro_pins.py::test_issue_171_pins_partial_measure_names_parameter_gap": (
+        "deterministic tier not installed"
+    ),
+}
 
 
 def is_expected_skip_reason(reason: str) -> bool:
@@ -118,6 +172,140 @@ def is_engine_skip(reason: str) -> bool:
     """Whether a skip reason is an engine-dependent test skip (issue #435)."""
     clean = reason.strip()
     return any(clean == r or clean.startswith(r) for r in ENGINE_SKIP_REASONS)
+
+
+def engine_tests_are_required() -> bool:
+    """Whether this run must execute engine-dependent tests rather than reporting NOT_CHECKED."""
+    return os.environ.get(REQUIRE_ENGINE_TESTS_ENV, "").strip().lower() in TRUTHY
+
+
+def engine_tests_not_checked_reason() -> str | None:
+    """The explicit allowed reason this run is allowed to report engine tests as NOT_CHECKED."""
+    reason = os.environ.get(ENGINE_TESTS_NOT_CHECKED_REASON_ENV, "").strip()
+    return reason or None
+
+
+def _set_engine_ci_options(config: pytest.Config) -> None:
+    """Snapshot CI-only engine env vars, then keep them out of nested pytest runs."""
+    setattr(config, "_t2p_require_engine_tests", engine_tests_are_required())
+    setattr(config, "_t2p_engine_tests_not_checked_reason", engine_tests_not_checked_reason())
+    os.environ.pop(REQUIRE_ENGINE_TESTS_ENV, None)
+    os.environ.pop(ENGINE_TESTS_NOT_CHECKED_REASON_ENV, None)
+
+
+def _engine_tests_are_required(config: pytest.Config) -> bool:
+    """Whether this pytest session must execute engine-dependent tests."""
+    return bool(getattr(config, "_t2p_require_engine_tests", False))
+
+
+def _engine_tests_not_checked_reason(config: pytest.Config) -> str | None:
+    """The NOT_CHECKED reason captured for this pytest session, if any."""
+    return getattr(config, "_t2p_engine_tests_not_checked_reason", None)
+
+
+def _engine_dependency_map(config: pytest.Config) -> dict[str, str]:
+    """Collected engine-dependent tests and the exact skip reason each declares."""
+    return getattr(config, "_t2p_engine_dependency_reasons", {})
+
+
+def _set_engine_dependency_map(config: pytest.Config, reasons: dict[str, str]) -> None:
+    """Store collected engine-dependent tests on the config for terminal-summary validation."""
+    setattr(config, "_t2p_engine_dependency_reasons", reasons)
+
+
+def _collected_nodeids(config: pytest.Config) -> set[str]:
+    """All collected tests, used to decide whether this run covers the engine denominator."""
+    return getattr(config, "_t2p_collected_nodeids", set())
+
+
+def _set_collected_nodeids(config: pytest.Config, nodeids: set[str]) -> None:
+    """Store all collected node ids on the config for terminal-summary validation."""
+    setattr(config, "_t2p_collected_nodeids", nodeids)
+
+
+def _map_delta_message(label: str, expected: dict[str, str], actual: dict[str, str]) -> str:
+    """Human-readable exact-map mismatch for engine dependency checks."""
+    missing = sorted(set(expected) - set(actual))
+    extra = sorted(set(actual) - set(expected))
+    changed = sorted(nodeid for nodeid, reason in actual.items() if nodeid in expected and expected[nodeid] != reason)
+    return f"{label} missing={missing}, extra={extra}, changed={changed}"
+
+
+def _engine_denominator_failure(config: pytest.Config, collected_engine_dependencies: dict[str, str]) -> str | None:
+    """Why the collected engine-dependent set is not the reviewed denominator, or None."""
+    if not (_engine_tests_are_required(config) or _engine_tests_not_checked_reason(config) is not None):
+        return None
+    if not set(EXPECTED_ENGINE_SKIP_REASONS_BY_NODEID) & _collected_nodeids(config):
+        return None
+    if collected_engine_dependencies == EXPECTED_ENGINE_SKIP_REASONS_BY_NODEID:
+        return None
+    return _map_delta_message(
+        "engine-dependent test collection does not match the reviewed denominator.",
+        EXPECTED_ENGINE_SKIP_REASONS_BY_NODEID,
+        collected_engine_dependencies,
+    )
+
+
+def _engine_skip_failure(config: pytest.Config, engine_skips: dict[str, str]) -> str | None:
+    """Why skipped engine-dependent tests fail this run, or None when they are explicit NOT_CHECKED."""
+    if not engine_skips:
+        return None
+    not_checked_reason = _engine_tests_not_checked_reason(config)
+    if _engine_tests_are_required(config):
+        return (
+            f"{REQUIRE_ENGINE_TESTS_ENV}=1, so engine-dependent tests must execute; "
+            "skipping them is a CI/test-environment failure."
+        )
+    if not_checked_reason not in EXPECTED_ENGINE_NOT_CHECKED_REASONS:
+        allowed = ", ".join(sorted(EXPECTED_ENGINE_NOT_CHECKED_REASONS))
+        return (
+            f"engine-dependent tests skipped without an allowed {ENGINE_TESTS_NOT_CHECKED_REASON_ENV}. "
+            f"Set one of: {allowed}."
+        )
+    if engine_skips != EXPECTED_ENGINE_SKIP_REASONS_BY_NODEID:
+        return _map_delta_message(
+            "engine-dependent tests are NOT_CHECKED only when the exact node-id-to-reason map matches.",
+            EXPECTED_ENGINE_SKIP_REASONS_BY_NODEID,
+            engine_skips,
+        )
+    return None
+
+
+def _write_engine_skip_summary(
+    terminalreporter: Any, config: pytest.Config, engine_skips: dict[str, str], failure: str | None
+) -> None:
+    """Render engine-dependent skips as either explicit NOT_CHECKED or a failing skip block."""
+    terminalreporter.write_sep(
+        "!" if failure else "=",
+        (
+            f"ENGINE-DEPENDENT TESTS SKIPPED ({len(engine_skips)} test cases did not run)"
+            if failure
+            else f"ENGINE-DEPENDENT TESTS NOT_CHECKED ({len(engine_skips)} test cases did not run)"
+        ),
+        yellow=not failure,
+        red=bool(failure),
+        bold=True,
+    )
+    lines = [
+        "The deterministic conversion engine plugin (tableau-fabric-skills) is not installed.",
+        f"{len(engine_skips)} test cases requiring the engine plugin were skipped under @requires_engine:",
+        *[f"  - {nodeid}: {engine_skips[nodeid]}" for nodeid in sorted(engine_skips)],
+    ]
+    lines.append(failure or f"NOT_CHECKED reason: {_engine_tests_not_checked_reason(config)}")
+    terminalreporter.write_line("\n".join(lines), yellow=not failure, red=bool(failure))
+    terminalreporter.write_sep("!" if failure else "=", yellow=not failure, red=bool(failure))
+
+
+def _write_engine_denominator_failure(terminalreporter: Any, failure: str) -> None:
+    """Render an engine-dependent denominator mismatch when no engine test skipped."""
+    terminalreporter.write_sep(
+        "!",
+        "ENGINE-DEPENDENT TEST DENOMINATOR MISMATCH",
+        red=True,
+        bold=True,
+    )
+    terminalreporter.write_line(failure, red=True)
+    terminalreporter.write_sep("!", red=True)
 
 
 def _extract_skip_reason(rep: Any) -> str:
@@ -209,12 +397,17 @@ def pytest_configure(config: pytest.Config) -> None:
     `numprocesses` may still be the string ``"auto"`` depending on hook ordering, so this tests
     truthiness rather than comparing to an int.
     """
+    _set_engine_ci_options(config)
     # Augment reportchars so 'f' and 'E' are always included even if caller passes -rs (issue #436).
     reportchars = getattr(config.option, "reportchars", "")
     for char in ("f", "E"):
         if char not in reportchars:
             reportchars += char
     config.option.reportchars = reportchars
+    config.addinivalue_line(
+        "markers",
+        f"{ENGINE_DEPENDENCY_MARKER}(expected_skip_reason): test depends on the deterministic engine",
+    )
 
     if not getattr(config.option, "numprocesses", None):
         return
@@ -249,6 +442,16 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     (``N passed, 14 deselected``) and keeps every worker's collection identical, since each applies
     the same rule to the same items.
     """
+    _set_collected_nodeids(config, {item.nodeid for item in items})
+    engine_dependencies: dict[str, str] = {}
+    for item in items:
+        marker = item.get_closest_marker(ENGINE_DEPENDENCY_MARKER)
+        if marker is None:
+            continue
+        reason = str(marker.kwargs.get("expected_skip_reason", "")).strip()
+        engine_dependencies[item.nodeid] = reason
+    _set_engine_dependency_map(config, engine_dependencies)
+
     drop_gui = not gui_is_opted_in(config)
     drop_contended = _xdist_is_active(config) and not config.getoption("include_contended")
     if not (drop_gui or drop_contended):
@@ -268,40 +471,35 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 def pytest_terminal_summary(
     terminalreporter: Any,
     exitstatus: int,  # pylint: disable=unused-argument
-    config: pytest.Config,  # pylint: disable=unused-argument
+    config: pytest.Config,
 ) -> None:
     """Assert skip reasons match expected baseline and report engine skips loudly (issues #435, #436)."""
     skipped_reports = terminalreporter.stats.get("skipped", [])
-    if not skipped_reports:
-        return
 
     unexpected_skips: list[tuple[str, str]] = []
-    engine_skips: list[str] = []
+    engine_skips: dict[str, str] = {}
+    collected_engine_dependencies = _engine_dependency_map(config)
 
     for rep in skipped_reports:
         reason = _extract_skip_reason(rep)
-        if is_engine_skip(reason):
-            engine_skips.append(rep.nodeid)
+        if rep.nodeid in collected_engine_dependencies:
+            engine_skips[rep.nodeid] = reason
         if not is_expected_skip_reason(reason):
             unexpected_skips.append((rep.nodeid, reason))
 
-    # Loud reporting for engine skips (issue #435)
+    engine_skip_failure = _engine_skip_failure(config, engine_skips) or _engine_denominator_failure(
+        config, collected_engine_dependencies
+    )
     if engine_skips:
-        terminalreporter.write_sep(
-            "=",
-            f"ENGINE-DEPENDENT TESTS SKIPPED ({len(engine_skips)} test cases did not run)",
-            yellow=True,
-            bold=True,
-        )
-        terminalreporter.write_line(
-            "The deterministic conversion engine plugin (tableau-fabric-skills) is not installed.\n"
-            f"{len(engine_skips)} test cases requiring the engine plugin were skipped under @requires_engine:\n"
-            + "\n".join(f"  - {nodeid}" for nodeid in sorted(engine_skips)),
-            yellow=True,
-        )
-        terminalreporter.write_sep("=", yellow=True)
+        _write_engine_skip_summary(terminalreporter, config, engine_skips, engine_skip_failure)
+    elif engine_skip_failure:
+        _write_engine_denominator_failure(terminalreporter, engine_skip_failure)
 
     # Fail the run if any unexpected skip reason is encountered (issue #436)
+    if engine_skip_failure or unexpected_skips:
+        if engine_skip_failure:
+            # pylint: disable=protected-access
+            terminalreporter._session.exitstatus = pytest.ExitCode.TESTS_FAILED
     if unexpected_skips:
         terminalreporter.write_sep(
             "!",

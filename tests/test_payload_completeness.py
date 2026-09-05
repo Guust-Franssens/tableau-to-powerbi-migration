@@ -219,14 +219,12 @@ def test_a_pdf_whose_trailer_is_far_from_the_end_is_refused():
     assert ok is False and "%%EOF" in why, why
 
 
-def test_an_unknown_kind_is_never_refused():
-    """The checker states what it can prove and invents nothing about a format it cannot read.
-
-    The CSV data leg is the live case: it has no terminator, so truncation there is the transport's
-    `Content-Length` check to catch, not this one's.
-    """
+def test_csv_is_the_only_payload_kind_explicitly_without_a_payload_completeness_check():
+    """A future leg must not inherit CSV's no-terminator exception silently."""
     assert payload_is_complete("csv", b"a,b\n1,2\n") == (True, "")
-    assert payload_is_complete("", b"") == (True, "")
+    ok, why = payload_is_complete("", b"")
+    assert ok is False
+    assert why == "no payload completeness check is registered for this kind"
 
 
 def test_a_declared_chunk_length_beyond_the_payload_costs_no_allocation():
