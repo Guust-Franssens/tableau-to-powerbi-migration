@@ -102,35 +102,13 @@ _CALC_GROUP_RE = re.compile(r"^\s*calculationGroup\b", re.MULTILINE)
 _SCALAR_KINDS = ("Column", "Measure")
 
 NUMERIC_DATA_TYPES = frozenset(
-    {
-        "int64",
-        "int32",
-        "int16",
-        "int8",
-        "integer",
-        "int",
-        "double",
-        "decimal",
-        "currency",
-        "single",
-        "float",
-        "real",
-        "numeric",
-    }
+    {"int64", "int32", "int16", "int8", "integer", "int", "double", "decimal", "currency",
+     "single", "float", "real", "numeric"}
 )
-
-NON_NUMERIC_DATA_TYPES = frozenset(
-    {
-        "string",
-        "text",
-        "boolean",
-        "bool",
-        "datetime",
-        "date",
-        "time",
-        "binary",
-    }
-)
+STRING_DATA_TYPES = frozenset({"string", "text"})
+KNOWN_NON_STRING_NON_NUMERIC_DATA_TYPES = frozenset({"boolean", "bool", "datetime", "date", "time", "binary"})
+NON_NUMERIC_DATA_TYPES = frozenset(STRING_DATA_TYPES | KNOWN_NON_STRING_NON_NUMERIC_DATA_TYPES)
+KNOWN_NON_STRING_DATA_TYPES = frozenset(NUMERIC_DATA_TYPES | KNOWN_NON_STRING_NON_NUMERIC_DATA_TYPES)
 
 
 @dataclass
@@ -140,8 +118,8 @@ class TableFields:
     columns: set[str] = field(default_factory=set)
     measures: set[str] = field(default_factory=set)
     hierarchies: dict[str, set[str]] = field(default_factory=dict)
-    column_types: dict[str, str] = field(default_factory=dict)
-    measure_types: dict[str, str] = field(default_factory=dict)
+    column_types: dict[str, str | None] = field(default_factory=dict)
+    measure_types: dict[str, str | None] = field(default_factory=dict)
 
 
 @dataclass
@@ -403,6 +381,16 @@ class _TableParseState:
     current_member: str | None = None
 
 
+def _record_data_type(types_map: dict[str, str | None], member: str, val: str) -> None:
+    """Record dataType for a member; conflicting duplicates mark the type as unassessable (None)."""
+    if member not in types_map:
+        types_map[member] = val
+        return
+    existing = types_map[member]
+    if existing is not None and existing.casefold() != val.casefold():
+        types_map[member] = None
+
+
 def _process_table_line(
     line: str,
     member_indent: int,
@@ -432,9 +420,9 @@ def _process_table_line(
         val = prop_match.group("value").strip()
         if key.casefold() == "datatype":
             if state.current_kind == "column":
-                fields_.column_types[state.current_member] = val
+                _record_data_type(fields_.column_types, state.current_member, val)
             elif state.current_kind == "measure":
-                fields_.measure_types[state.current_member] = val
+                _record_data_type(fields_.measure_types, state.current_member, val)
 
 
 def _parse_table_block(name: str, body: list[str], model: ModelFields) -> None:
@@ -845,7 +833,10 @@ def _evaluate_role_field(
     if kind is None:
         return
     if data_type is not None:
-        if data_type.casefold() in NON_NUMERIC_DATA_TYPES:
+        normalized = data_type.casefold()
+        if normalized in NUMERIC_DATA_TYPES:
+            return
+        if normalized in NON_NUMERIC_DATA_TYPES:
             findings.violations.append(
                 {
                     "status": "non_numeric_role",
@@ -864,23 +855,26 @@ def _evaluate_role_field(
                     ),
                 }
             )
-    else:
-        findings.cannot_assess.append(
-            {
-                "status": "cannot_assess",
-                "visual": ctx.visual_name,
-                "visual_type": ctx.visual_type,
-                "role": role,
-                "kind": kind,
-                "entity": ref.entity,
-                "property": ref.prop,
-                "file": str(ctx.path),
-                "detail": (
-                    f"{kind.lower()} '{ref.entity}[{ref.prop}]' on numeric role '{role}' "
-                    f"has no static dataType in TMDL; cannot assess return type offline"
-                ),
-            }
-        )
+            return
+
+    # Missing (None), explicit Unknown, Variant, or unsupported type -> cannot_assess
+    type_desc = f"(dataType: {data_type}) " if data_type is not None else "has no static dataType in TMDL; "
+    findings.cannot_assess.append(
+        {
+            "status": "cannot_assess",
+            "visual": ctx.visual_name,
+            "visual_type": ctx.visual_type,
+            "role": role,
+            "kind": kind,
+            "entity": ref.entity,
+            "property": ref.prop,
+            "file": str(ctx.path),
+            "detail": (
+                f"{kind.lower()} '{ref.entity}[{ref.prop}]' {type_desc}"
+                f"on numeric role '{role}'; cannot assess return type offline"
+            ),
+        }
+    )
 
 
 def _check_role_projections(
@@ -931,11 +925,10 @@ def _extract_scalar_fill_prop(item: dict[str, Any], scope: dict[str, str]) -> tu
 def _check_direct_color_fill_item(
     model: ModelFields,
     ctx: _VisualContext,
-    obj_name: str,
     item: dict[str, Any],
     findings: _RoleFindings,
 ) -> None:
-    """Check a single formatting object item for direct color measure bindings."""
+    """Check a single dataPoint formatting object item for direct color measure bindings."""
     target = _extract_scalar_fill_prop(item, ctx.scope)
     if target is None:
         return
@@ -943,43 +936,50 @@ def _check_direct_color_fill_item(
     kind, data_type = model.field_type(entity, prop)
     if kind is None:
         return
-    if data_type is not None and data_type.casefold() in NON_NUMERIC_DATA_TYPES:
-        findings.violations.append(
-            {
-                "status": "direct_color_measure",
-                "visual": ctx.visual_name,
-                "visual_type": ctx.visual_type,
-                "role": f"objects.{obj_name}.fill",
-                "kind": kind,
-                "entity": entity,
-                "property": prop,
-                "data_type": data_type,
-                "file": str(ctx.path),
-                "detail": (
-                    f"direct {kind.lower()} '{entity}[{prop}]' (dataType: {data_type}) bound as "
-                    f"fill.solid.color.expr on {ctx.visual_type} visual '{ctx.visual_name}'; literal color "
-                    f"string measures cannot be bound directly into solid.color.expr (use "
-                    f"Conditional.Cases rule or Field Value binding)"
-                ),
-            }
-        )
-    elif data_type is None:
-        findings.cannot_assess.append(
-            {
-                "status": "cannot_assess",
-                "visual": ctx.visual_name,
-                "visual_type": ctx.visual_type,
-                "role": f"objects.{obj_name}.fill",
-                "kind": kind,
-                "entity": entity,
-                "property": prop,
-                "file": str(ctx.path),
-                "detail": (
-                    f"direct {kind.lower()} '{entity}[{prop}]' bound as fill.solid.color.expr has "
-                    f"no static dataType in TMDL; cannot assess return type offline"
-                ),
-            }
-        )
+    if data_type is not None:
+        normalized = data_type.casefold()
+        if normalized in STRING_DATA_TYPES:
+            findings.violations.append(
+                {
+                    "status": "direct_color_measure",
+                    "visual": ctx.visual_name,
+                    "visual_type": ctx.visual_type,
+                    "role": "objects.dataPoint.fill",
+                    "kind": kind,
+                    "entity": entity,
+                    "property": prop,
+                    "data_type": data_type,
+                    "file": str(ctx.path),
+                    "detail": (
+                        f"direct {kind.lower()} '{entity}[{prop}]' (dataType: {data_type}) bound as "
+                        f"fill.solid.color.expr on {ctx.visual_type} visual '{ctx.visual_name}'; literal color "
+                        f"string measures cannot be bound directly into solid.color.expr (use "
+                        f"Conditional.Cases rule or Field Value binding)"
+                    ),
+                }
+            )
+            return
+        if normalized in KNOWN_NON_STRING_DATA_TYPES:
+            return
+
+    # Missing (None), explicit Unknown, Variant, or unsupported type -> cannot_assess
+    type_desc = f"(dataType: {data_type}) " if data_type is not None else "has no static dataType in TMDL; "
+    findings.cannot_assess.append(
+        {
+            "status": "cannot_assess",
+            "visual": ctx.visual_name,
+            "visual_type": ctx.visual_type,
+            "role": "objects.dataPoint.fill",
+            "kind": kind,
+            "entity": entity,
+            "property": prop,
+            "file": str(ctx.path),
+            "detail": (
+                f"direct {kind.lower()} '{entity}[{prop}]' {type_desc}"
+                f"bound as fill.solid.color.expr; cannot assess return type offline"
+            ),
+        }
+    )
 
 
 def _check_direct_color_fills(
@@ -988,15 +988,15 @@ def _check_direct_color_fills(
     visual: dict[str, Any],
     findings: _RoleFindings,
 ) -> None:
-    """Check formatting objects for direct color measure bindings."""
+    """Check dataPoint formatting objects for direct color measure bindings."""
     objects = visual.get("objects")
     if not isinstance(objects, dict):
         return
-    for obj_name, obj_items in objects.items():
-        if not isinstance(obj_items, list):
-            continue
-        for item in obj_items:
-            _check_direct_color_fill_item(model, ctx, obj_name, item, findings)
+    data_points = objects.get("dataPoint")
+    if not isinstance(data_points, list):
+        return
+    for item in data_points:
+        _check_direct_color_fill_item(model, ctx, item, findings)
 
 
 def check_visual_roles(
