@@ -22,6 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from host_paths import HOST_PROFILE_PATH_RE  # noqa: E402  # pylint: disable=wrong-import-position
 from path_flavour import join as flavour_join  # noqa: E402  # pylint: disable=wrong-import-position
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -40,17 +41,9 @@ PACKAGE_PLACEHOLDER = "<PACKAGE_ROOT>"
 #: parameter anything at all, so a name list can only ever be the cases someone remembered. The
 #: value's SHAPE identifies a data-folder parameter, so that is what is tested (:func:`_data_tail`).
 EXPRESSION_RE = re.compile(r'(expression\s+(?:#"[^"]+"|[^\s=]+)\s*=\s*")([^"]*)(")')
-# A leaked absolute path under a user profile. Covers the forms that actually show up in this repo's
-# artifacts: `C:\Users\x`, `C:/Users/x` (M/Power Query), `C:\\Users\\x` (JSON-escaped), `\\host\Users\x`
-# (UNC), plus POSIX `/Users/x` and `/home/x`.
-# Only *syntactically unambiguous* placeholders are exempt - `...`, `<anything>`, `%ANY_VAR%` - because
-# SECURITY.md and the READMEs have to show the pattern they warn about. Bare words like `user`, `you`
-# or `username` are NOT exempt: they are all real, registrable account names.
-ABSOLUTE_USER_PATH_RE = re.compile(
-    r"(?:[A-Za-z]:[\\/]{1,2}Users|\\\\[^\\/\"']+[\\/]{1,2}Users|(?<![\w.])/Users|(?<![\w.])/home)"
-    r"[\\/]{1,2}(?!\.\.\.|<|%)[^\\/\"'\s]+",
-    re.IGNORECASE,
-)
+# The repo commit gate intentionally asks the narrower profile-path question. Customer-shipped
+# artifacts use host_paths.discloses_host_location, which is a strict superset.
+ABSOLUTE_USER_PATH_RE = HOST_PROFILE_PATH_RE
 #: The directory every generated model reads its rows from - the convention `package_unit.py` writes
 #: and this script re-roots onto. It is the segment the rewrite pivots on, never a whole value.
 DATA_SEGMENT = "data"

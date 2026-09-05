@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import group_oracle_by_workbook as grp  # noqa: E402  # pylint: disable=wrong-import-position
 
 
-def _view(workbook: str, name: str, luid: str, *, data="ok", image="ok"):
+def _view(workbook: str, name: str, luid: str, *, data="ok", image="ok", rows: int = 5, columns=("a", "b")):
     stem = f"{name}__{luid}"
     view: dict = {
         "view_luid": luid,
@@ -31,7 +31,22 @@ def _view(workbook: str, name: str, luid: str, *, data="ok", image="ok"):
         "workbook_luid": f"wb-{workbook}",
         "workbook_name": workbook,
     }
-    view["data"] = {"status": "ok", "path": f"data/{stem}.csv", "row_count": 5} if data == "ok" else {"status": data}
+    view["data"] = (
+        # ⚠️ `certification` is what makes this a CURRENT capture rather than a legacy one. Since
+        # #480 round 3 a recorded `row_count` alone does not license an evidence `path` -- every
+        # pre-certification manifest has one -- so a fixture that omits it is exercising the
+        # unassessable path, not the happy one. The negative half is asserted deliberately in
+        # `test_a_legacy_row_count_without_a_certification_is_not_evidence`.
+        {
+            "status": "ok",
+            "certification": "certified",
+            "path": f"data/{stem}.csv",
+            "row_count": rows,
+            "columns": list(columns),
+        }
+        if data == "ok"
+        else {"status": data}
+    )
     view["image"] = {"status": "ok", "path": f"images/{stem}.png"} if image == "ok" else {"status": image}
     return view
 
@@ -148,6 +163,92 @@ def test_the_workbook_manifest_carries_capture_provenance(tmp_path):
     assert subset["grouped_from"] == "tableau-oracle/1"
     assert subset["captured_at"] == "2026-08-18T00:00:00Z"
     assert subset["workbook_luid"] == "wb-Sales"
+
+
+def test_a_zero_row_view_is_counted_AND_named_in_the_workbook_manifest(tmp_path):
+    """#471 at this level too. A per-workbook subset that only COUNTS empties is the capture-wide
+    defect one folder down: the reviewer working from `migrations/<slug>/reference/` is exactly the
+    reader who has to know which page carries no evidence."""
+    views = [_view("Sales", "Good", "aaa"), _view("Sales", "Blank", "bbb", rows=0, columns=("Region",))]
+    oracle = _capture(tmp_path, views)
+    root = _migrations(tmp_path, "sales")
+    grp.run(oracle, root, dry_run=False)
+    subset = json.loads((root / "sales" / "reference" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    assert subset["data_ok"] == 2, "an empty capture is still a SUCCESSFUL capture"
+    assert subset["data_empty"] == 1
+    assert [entry["view_name"] for entry in subset["data_empty_views"]] == ["Blank"]
+    assert subset["data_empty_views"][0]["classification"] == "empty_query_no_rows"
+
+
+def test_the_workbook_subset_uses_the_SAME_empty_predicate_as_the_capture(tmp_path):
+    """Positive control plus the anti-drift claim. This module used to carry its own copy of
+    `row_count == 0`, which is how a subset and the capture it came from disagree about the same
+    views -- and that copy raised KeyError on a record that never recorded a row count."""
+    no_row_count = _view("Sales", "Old", "ccc")
+    del no_row_count["data"]["row_count"]
+    oracle = _capture(tmp_path, [_view("Sales", "Good", "aaa"), no_row_count])
+    root = _migrations(tmp_path, "sales")
+    assert grp.run(oracle, root, dry_run=False) == 0
+    subset = json.loads((root / "sales" / "reference" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    assert subset["data_empty"] == 0, "absence of a row count is not a zero"
+    assert subset["data_empty_views"] == []
+
+
+def test_a_view_with_no_row_count_is_counted_AND_named_UNASSESSABLE_in_the_workbook_manifest(tmp_path):
+    """#480 finding 1, at this level. The reviewer ran their record through `subset_manifest()` and
+    got `data_ok=1 data_empty=0 data_empty_views=[] failed=0` -- which is what a good capture looks
+    like. "Not empty" was being read as "fine", so a per-workbook reader saw four clean captures
+    where nothing had measured the rows of one of them.
+
+    `data_ok` deliberately stays as it was: the export DID succeed, and the new pair beside it is
+    what stops that number being read as evidence."""
+    no_row_count = _view("Sales", "Old", "ccc")
+    del no_row_count["data"]["row_count"]
+    subset = grp.subset_manifest({"schema": "tableau-oracle/1"}, "Sales", [_view("Sales", "Good", "aaa"), no_row_count])
+    assert subset["data_ok"] == 2
+    assert subset["data_empty"] == 0
+    assert subset["data_empty_views"] == []
+    assert subset["data_unassessable"] == 1
+    assert [entry["view_name"] for entry in subset["data_unassessable_views"]] == ["Old"]
+    assert subset["data_unassessable_views"][0]["reason"] == "row_count_unrecorded"
+
+
+def test_the_workbook_subset_reports_no_unassessable_views_when_every_row_count_was_measured(tmp_path):
+    """Control for the test above: a list that names every view is a view count renamed."""
+    subset = grp.subset_manifest(
+        {"schema": "tableau-oracle/1"}, "Sales", [_view("Sales", "Good", "aaa"), _view("Sales", "Blank", "bbb", rows=0)]
+    )
+    assert subset["data_unassessable"] == 0
+    assert subset["data_unassessable_views"] == []
+
+
+def test_a_legacy_row_count_without_a_certification_is_not_evidence(tmp_path):
+    """#480 round 3 at this level: the per-workbook subset must not copy an uncertified CSV either.
+
+    ⚠️ This is the shape EVERY pre-#480 capture on disk has -- `origin/master` summarised the body of
+    every HTTP 200 and wrote its `row_count`, certifying nothing -- so it is the shape a grouping run
+    over a customer's existing `_oracle/` will actually meet. `copy_view_files` keys on `path` and
+    needs no knowledge of certification; what changes is that the record has no `path` to offer it.
+    """
+    legacy = _view("Sales", "Old", "ccc")
+    del legacy["data"]["certification"]
+    oracle = _capture(tmp_path, [_view("Sales", "Good", "aaa"), legacy])
+    root = _migrations(tmp_path, "sales")
+    assert grp.run(oracle, root, dry_run=False) == 0
+
+    reference = root / "sales" / "reference"
+    subset = json.loads((reference / "oracle-manifest.json").read_text(encoding="utf-8"))
+    by_name = {view["view_name"]: view["data"] for view in subset["views"]}
+    assert "path" not in by_name["Old"], "a legacy row count must not license an evidence path"
+    assert by_name["Old"]["row_count"] == 5, "the number is kept for forensics, not deleted"
+    assert by_name["Good"]["path"], "the certified view is untouched, or this proves only that copying broke"
+
+    assert subset["data_unassessable"] == 1
+    assert [entry["view_name"] for entry in subset["data_unassessable_views"]] == ["Old"]
+    assert subset["data_unassessable_views"][0]["reason"] == "certification_unestablished"
+    copied = sorted(p.name for p in (reference / "data").glob("*")) if (reference / "data").is_dir() else []
+    assert not any("Old" in name for name in copied), "the uncertified bytes must not be copied as data"
+    assert any("Good" in name for name in copied), "the certified bytes must still be copied"
 
 
 def test_a_view_whose_file_vanished_is_reported_and_never_claimed_as_copied(tmp_path):

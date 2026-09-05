@@ -158,6 +158,12 @@ the entry gate reports it, correctly, at exit 1 FINDINGS. Exit 4 is about what t
 promises to carry, nothing else.
 """
 
+# Packaging, the evidence walk, path containment and the CLI deliberately live together: this module
+# IS the per-unit handover boundary, and splitting it would put the containment predicates a hop away
+# from the copy that must obey them - which is exactly how `retained_path` escaped the `path` guard.
+# Nine sibling scripts carry the same waiver (`check_unit.py`, `run_estate.py`, `parse_tableau.py`, ...).
+# ⚠️ Revisit when issue #497 restructures staging; that work reopens this file anyway.
+# pylint: disable=too-many-lines
 from __future__ import annotations
 
 # The assembler, its scoping helpers and the CLI intentionally live together: the module IS the
@@ -185,6 +191,7 @@ from typing import Any, NamedTuple
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import read_handover  # noqa: E402  # pylint: disable=wrong-import-position
+import tableau_oracle_manifest  # noqa: E402  # pylint: disable=wrong-import-position
 
 # The path budget is measured by `check_path_ceiling.py` and NOWHERE else (#476). Its ceilings were
 # taken end to end against Power BI Desktop 2.157.828.0, and its `utf16_len` counts the UTF-16 code
@@ -200,6 +207,7 @@ from check_path_ceiling import (  # noqa: E402  # pylint: disable=wrong-import-p
     platform_limits,
     utf16_len,
 )
+from host_paths import discloses_host_location  # noqa: E402  # pylint: disable=wrong-import-position
 from manifest_scope import (  # noqa: E402  # pylint: disable=wrong-import-position
     ORACLE_MANIFEST_ALLOW,
     project,
@@ -843,6 +851,217 @@ def object_filename(name: str, luid: str, taken: set[str]) -> str:
     return stem
 
 
+def _declares_non_relative(declared: str) -> bool:
+    """True when a DECLARED string names an absolute, drive-relative or UNC location.
+
+    Extracted so the containment rule has exactly ONE definition. It was inline in
+    :func:`_resolve_capture_file`, keyed to the `path` field, and that is precisely how round-4
+    review walked around it: `withhold_uncertified_evidence` renames `path` to `retained_path`
+    BEFORE the packager looks, so a legacy record's absolute host path met no check at all.
+
+    ⚠️ **Judged on `PureWindowsPath`, never on `Path`, and that is the whole point** (round 7). A
+    capture is taken on the operator's Windows host and may be packaged anywhere - this repo's own CI
+    is Linux - so the string is Windows-shaped whatever OS reads it. `Path` is the RUNNING platform's
+    flavour, and `PurePosixPath` sees `<drive>:\\Users\\<account>\\x` as an ordinary relative filename
+    that merely contains backslashes: measured, `is_absolute()`/`.drive` both answer False there and
+    the guard silently stopped containing on Linux while passing every assertion on Windows. A guard
+    whose protection depends on the OS running it is not a guard. `PureWindowsPath` recognises both
+    conventions - `C:\\…`, `C:/…`, `\\\\server\\share\\…` and, with the explicit prefix test beside it,
+    POSIX `/home/<user>` and `/Users/<user>` - identically on either host. Same idiom, same reason, as
+    `promote_unit.slug_problem`.
+
+    ⚠️ **Round 9 masked this branch a SECOND time, and it is re-anchored again rather than deleted.**
+    Round 7 gave the packager a containment question and round 8 isolated this parse with a build
+    drive, because containment was silent on one. Round 9's containment covers every absolute
+    location, so a build drive no longer isolates anything. What remains ONLY this branch's is a
+    **drive-relative** path - `<drive>:secret.png`, a drive with no root separator, which Windows
+    resolves against that drive's current directory. It is a real and dangerous shape for
+    :func:`_resolve_capture_file` and the containment predicate is silent on it by construction
+    (nothing is *rooted*), so it is what
+    :func:`test_a_DRIVE_RELATIVE_path_is_refused_by_the_PARSE_half_alone` drives and where the
+    mutation is anchored. The pattern to keep noticing: **each time a wider layer lands above this
+    one, the proof that this one still runs has to be re-isolated, or the branch quietly becomes
+    unfalsifiable.**
+    """
+    candidate = PureWindowsPath(declared)
+    return candidate.is_absolute() or bool(candidate.drive) or declared.startswith(("\\\\", "/"))
+
+
+def _declares_unsafe_path(declared: str) -> bool:
+    """True when a declared string may not ship in the packaged manifest under ANY field name.
+
+    Three disqualifications, and the third is a CONTAINMENT test rather than a parse:
+
+    * **non-relative** - a host path, which names the customer's server, project and operator;
+    * **a `..` component** - which claims a location outside the capture;
+    * **an absolute location disclosed ANYWHERE INSIDE the string** -
+      :func:`host_paths.discloses_host_location`.
+
+    Deliberately a predicate over a VALUE, not a list of blessed field names: a second field name was
+    the round-4 defect, and a third one must not reopen it.
+
+    ⚠️ **Round-7 blind-review finding B1: the first two questions are both parses, and a parse is the
+    wrong tool for prose.** They ask *"is this string a path?"*, so any prefix hides the answer.
+    `classify_export_error` prepends the HTTP status to a server diagnostic and persists it in
+    `retry_reasons[]` (`capture_tableau_oracle.py:278,597`), which is precisely where a real customer
+    path arrives wrapped in a sentence. Measured on the round-7 tip, one host path, four spellings::
+
+        <profile>\\private\\retry.log                       -> refused
+        "HTTP 503: " + it + " could not be opened"         -> SHIPPED into oracle/oracle-manifest.json
+        '"' + it + '"'                                     -> SHIPPED
+        file:///<drive>/Users/<account>/private/retry.log  -> SHIPPED
+
+    So the question the artifact has to answer is *"does this text DISCLOSE a host path?"*, and it is
+    asked with :mod:`host_paths` - imported rather than re-spelled. A package must not be able to ship
+    what a commit could not, and three competing definitions of one question is how this class
+    survived six rounds.
+
+    ⚠️ **Round-9 blind-review finding: the containment half matched a SPELLING, not the property.**
+    It recognised a *profile* root only, so every other absolute location shipped the moment it was
+    wrapped in prose - including a real profile path with a real account name, re-spelled as an
+    administrative-share UNC or percent-encoded. It now asks
+    :func:`host_paths.discloses_host_location`, which normalises the spelling away and then asks one
+    question about every rooted form. Measured on the round-8 tip, one wrapper over five locations::
+
+        HTTP 503: <drive>:\\builds\\out\\secret.log ...                      -> SHIPPED
+        HTTP 503: \\\\customer-server\\finance-share\\secret.log ...            -> SHIPPED
+        HTTP 503: /var/lib/tableau/secret.log ...                          -> SHIPPED
+        HTTP 503: \\\\server\\C$\\Users\\<account>\\private\\secret.log ...        -> SHIPPED
+        HTTP 503: C%3A%5CUsers%5C<account>%5Cprivate%5Csecret.log ...      -> SHIPPED
+
+    ⚠️ The `..` split is `PureWindowsPath` for the reason in :func:`_declares_non_relative`:
+    `PurePosixPath` does not treat `\\` as a separator, so a Windows-shaped `sub\\..\\x` presents as
+    ONE component on Linux and the traversal test answers False there while answering True on
+    Windows.
+    """
+    return (
+        _declares_non_relative(declared) or discloses_host_location(declared) or ".." in PureWindowsPath(declared).parts
+    )
+
+
+def _contain_unsafe_key(key: Any, taken: dict[str, Any]) -> tuple[Any, bool]:
+    """`(key safe to ship, was it refused)` - one dictionary key, collision-disambiguated.
+
+    ⚠️ **Round-7 blind-review finding B2.** :func:`_contain_unsafe_strings` cleaned dictionary VALUES
+    and preserved raw KEYS, and `manifest_scope.project` then turns an unenumerated key into a
+    diagnostic path that ships in `scope.dropped_fields`. Injected as a view field, measured::
+
+        "<drive>:\\Users\\<account>\\private\\secret": "safe scalar"
+          -> "scope": {"dropped_fields": ["views[].<drive>:\\Users\\<account>\\private\\secret"]}
+
+    A key is untrusted input exactly as a value is; the manifest is written by a separate tool against
+    a live Tableau server.
+
+    Two properties are copied from :func:`tableau_env._scrub_key`, which already solved this for the
+    credential sink and documents why (`tableau_env.py:461-478`):
+
+    * **a collision is disambiguated, never silently dropped** - two distinct unsafe keys both contain
+      to the sentinel, and `dict` would keep the last and lose the rest, turning containment into data
+      loss;
+    * the caller builds its reported path from the CONTAINED key, so the guard cannot re-emit what it
+      just caught.
+
+    Non-string keys (JSON has none, but a Python payload may) pass through untouched. An
+    already-contained key reports refused, so the walk stays idempotent - including its `#2` collision
+    spelling, which a second pass must not re-count as a fresh, safe key.
+    """
+    if not isinstance(key, str):
+        return key, False
+    if key == REFUSED_PATH or key.startswith(f"{REFUSED_PATH}#"):
+        return key, True
+    if not _declares_unsafe_path(key):
+        return key, False
+    unique, suffix = REFUSED_PATH, 2
+    while unique in taken:
+        unique, suffix = f"{REFUSED_PATH}#{suffix}", suffix + 1
+    return unique, True
+
+
+def _contain_unsafe_strings(value: Any, prefix: str = "") -> tuple[Any, list[str]]:
+    """`(value with EVERY unsafe declared string refused, the JSON paths refused)` - recursive.
+
+    ⚠️ **Round-5 finding.** Rounds 3 and 4 each moved the boundary instead of removing it: round 3
+    guarded the `path` NAME, so `retained_path` walked around it; round 4 made the check a predicate
+    over a VALUE but iterated `leg.items()` only, so a string inside a retained CONTAINER walked
+    around that. Measured on the tip, one absolute host path per shape::
+
+        image.retry_reasons[0]   -> shipped verbatim   (allowlisted SCALAR_LIST)
+        image.dimensions_px[0]   -> shipped verbatim   (allowlisted SCALAR_LIST)
+        views[].flags[0]         -> shipped verbatim   (view level, never reached the leg guard)
+        views[].view_name        -> shipped verbatim   (view level, plain scalar)
+
+    So the invariant is neither a field name nor a top-level value: **no string reachable from a
+    shipped document may declare a non-relative or escaping path, wherever it sits.** This walks
+    strings in dicts, lists, tuples and any nesting of them, which is why a fourth allowlisted
+    container, a nested dict, or a list of dicts cannot reopen it - there is no level left that is
+    not visited. Non-string scalars are returned untouched, so counts, verdicts and flags survive.
+
+    ⚠️ **An ALREADY-refused string reports its path too** (round 6). Containment now happens once at
+    the source, so by the time a later reader walks the same value the sentinel is all that is left -
+    and a walk that reported nothing would silently retire two things this package needs: the leg's
+    `ORACLE_OMISSION` diagnosis, and `scope.refused_fields`. Reporting the sentinel makes the walk
+    idempotent: running it twice refuses the same set, so containment can move earlier without any
+    downstream reader losing what it could previously see.
+
+    ⚠️ **KEYS are contained too, and the reported path is built from the CONTAINED key** (round 7,
+    finding B2). A values-only walk left a dictionary key raw, and `manifest_scope.project` re-emitted
+    it as a diagnostic `dropped_fields` entry - the guard shipping what it was walking over. This is
+    the rule `tableau_env.scrub_tree` already states for the credential sink and for the same reason:
+    the field nobody thought about is the one that leaks, and a path built from the RAW key puts the
+    secret straight back into the record of having caught it. Collisions are disambiguated by
+    :func:`_contain_unsafe_key` rather than letting `dict` drop a field.
+    """
+    if isinstance(value, str):
+        if value == REFUSED_PATH:
+            return value, [prefix or "."]
+        return (REFUSED_PATH, [prefix or "."]) if _declares_unsafe_path(value) else (value, [])
+    if isinstance(value, dict):
+        kept: dict[str, Any] = {}
+        refused: list[str] = []
+        for key, item in value.items():
+            safe_key, key_refused = _contain_unsafe_key(key, kept)
+            here = f"{prefix}.{safe_key}" if prefix else str(safe_key)
+            if key_refused:
+                refused.append(f"{here} (key)")
+            cleaned, hit = _contain_unsafe_strings(item, here)
+            kept[safe_key] = cleaned
+            refused.extend(hit)
+        return kept, refused
+    if isinstance(value, (list, tuple)):
+        rows: list[Any] = []
+        refused = []
+        for index, item in enumerate(value):
+            cleaned, hit = _contain_unsafe_strings(item, f"{prefix}[{index}]")
+            rows.append(cleaned)
+            refused.extend(hit)
+        return (tuple(rows) if isinstance(value, tuple) else rows), refused
+    return value, []
+
+
+def _contain_declared_paths(leg: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+    """`(leg with every unsafe declared string refused, diagnosis)` - the field-AGNOSTIC guard.
+
+    ⚠️ **Round-4 finding 1.** `_resolve_capture_file` protects the `path` field only, so it is a
+    guard on one NAME rather than on the manifest. `withhold_uncertified_evidence` demotes an
+    uncertified data leg's `path` to `retained_path` before packaging (correctly - the bytes are not
+    evidence), and the packager then shipped that value verbatim, allowlisted by `manifest_scope`.
+    The measured differential, one certified and one legacy record declaring the SAME absolute path:
+
+        certified_data.path=<refused-by-packager>      # guarded
+        legacy_data.retained_path=C:\\Users\\...\\oracle.csv   # shipped
+
+    That is #461's class - a customer package carrying an absolute host path - and this repo is
+    public. So the check runs over every string the manifest declared, whatever it called the field.
+    Values this packager writes itself (`path`, `packaged_from`) are already normalised and
+    capture-relative, so re-checking them is free and keeps the rule unconditional.
+    """
+    contained, refused = _contain_unsafe_strings(leg)
+    if not refused:
+        return leg, None
+    fields = ", ".join(f"'{name}'" for name in sorted(refused))
+    return contained, f"capture declares a non-relative or escaping path in {fields} ({REFUSED_PATH}) - refused"
+
+
 def _resolve_capture_file(oracle_root: Path, declared: str) -> tuple[Path | None, str | None]:
     """`(resolved file, refusal reason)` for a capture-relative path the MANIFEST asked us to copy.
 
@@ -854,19 +1073,35 @@ def _resolve_capture_file(oracle_root: Path, declared: str) -> tuple[Path | None
     * an absolute path - copied, AND written verbatim into the packaged manifest.
 
     So the check is containment, not sanitisation of the string: reject an absolute or drive-relative
-    path outright, resolve **strictly** (which follows symlinks and normalises `..`), and require the
-    result to stay under the resolved capture root. Resolving both sides is what closes the symlink
-    route - a link inside the capture pointing outside it normalises to an outside path, and
-    comparing unresolved strings would not see that.
+    path outright, resolve (which follows symlinks and normalises `..`), and require the result to
+    stay under the resolved capture root. Resolving both sides is what closes the symlink route - a
+    link inside the capture pointing outside it normalises to an outside path, and comparing
+    unresolved strings would not see that.
+
+    ⚠️ **The candidate resolves NON-strictly, and the strictness lives in `is_file()` below**
+    (round 7). `resolve(strict=True)` is platform-dependent in exactly the case this guard exists
+    for: POSIX `realpath` `lstat`s every component, so `sub/../../outside-secret.png` raises
+    `FileNotFoundError` on the missing `sub` and was diagnosed as *"does not resolve to a file"* on
+    Linux, while Windows normalises `..` textually first, resolves, and correctly reports *"escapes
+    the capture root"*. Measured by driving `posixpath.realpath` directly: strict raises, non-strict
+    returns the escaping path both times. The traversal was refused either way - `resolved` is `None`
+    in both branches - but the DIAGNOSIS flipped, and a refusal that cannot say it refused a
+    traversal is one nobody can tell from a missing file. Non-strict resolution still follows every
+    symlink that exists, so the containment claim is unchanged; `resolved.is_file()` is what a
+    non-existent path now fails, and it fails it identically on both hosts.
     """
     if not declared:
         return None, "capture declares an empty path"
     candidate = Path(declared)
-    if candidate.is_absolute() or candidate.drive or declared.startswith(("\\\\", "/")):
+    if _declares_non_relative(declared) or declared == REFUSED_PATH:
+        # The sentinel means source containment (round 6) already refused this string, so the
+        # declared form no longer exists here. It is diagnosed as the refusal it is, rather than
+        # left to `resolve(strict=True)` to report as a missing file - which would read to an
+        # operator as a capture defect instead of a refusal this packager made deliberately.
         return None, f"capture declares a non-relative path ({REFUSED_PATH}) - refused"
     try:
         root = oracle_root.resolve(strict=True)
-        resolved = (root / candidate).resolve(strict=True)
+        resolved = (root / candidate).resolve()
     except OSError:
         return None, "capture path does not resolve to a file"
     if not resolved.is_relative_to(root):
@@ -879,18 +1114,25 @@ def _resolve_capture_file(oracle_root: Path, declared: str) -> tuple[Path | None
 def _copy_leg(
     source_dir: Path, dest_dir: Path, leg: Any, target: Path, rel_prefix: str
 ) -> tuple[dict[str, Any] | None, str | None]:
-    """`(rewritten leg, omission reason)` for one render or data leg."""
+    """`(rewritten leg, omission reason)` for one render or data leg.
+
+    ⚠️ Every branch returns through :func:`_contain_declared_paths`, including the ones that copy
+    nothing. A leg the packager declines to copy is not a leg it may echo verbatim - that was
+    round-4 finding 1, where an uncertified data leg's `retained_path` reached the packaged manifest
+    without meeting any check.
+    """
     if not isinstance(leg, dict):
         return None, None
     if leg.get("status") != "ok" or not isinstance(leg.get("path"), str):
-        return dict(leg), None
+        return _contain_declared_paths(_state_withheld_bytes(dict(leg)))
     origin, refusal = _resolve_capture_file(source_dir, leg["path"])
     if origin is None:
         rewritten = dict(leg)
         rewritten["status"] = OMITTED_STATUS
         rewritten["packaging_reason"] = refusal or "capture path unusable"
         rewritten["path"] = REFUSED_PATH
-        return rewritten, rewritten["packaging_reason"]
+        contained, _ = _contain_declared_paths(rewritten)
+        return contained, rewritten["packaging_reason"]
     destination = dest_dir / target
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(origin, destination)
@@ -899,7 +1141,31 @@ def _copy_leg(
     # Normalised and capture-RELATIVE, never the declared string: the declared form is attacker-
     # controlled and was how an absolute host path reached the packaged manifest.
     rewritten["packaged_from"] = origin.resolve().relative_to(source_dir.resolve()).as_posix()
-    return rewritten, None
+    return _contain_declared_paths(rewritten)
+
+
+def _state_withheld_bytes(leg: dict[str, Any]) -> dict[str, Any]:
+    """Say, in the packaged leg itself, that withheld bytes are NOT in this package.
+
+    ⚠️ Round-4 finding 1, second half: `retained_path` survives packaging while the bytes it names
+    deliberately do not, so read against the package the reference dangles. The bytes cannot be
+    copied - they are uncertified, and shipping them under `<kind>/data/` is the fail-open #480
+    exists to close - and dropping the pointer would lose the operator's only route back to them in
+    the capture they still hold. So the reference is KEPT and disambiguated: it is capture-relative,
+    and the leg says so rather than leaving a consumer to discover it by a failed open.
+
+    Keyed on `tableau_oracle_manifest`'s own constant, not on a name this module invents, so the
+    vocabulary stays owned by the module that writes it.
+    """
+    if not isinstance(leg.get(tableau_oracle_manifest.RETAINED_PATH_KEY), str):
+        return leg
+    return {
+        **leg,
+        "packaging_reason": (
+            "uncertified bytes are retained in the CAPTURE and are deliberately not packaged; "
+            f"'{tableau_oracle_manifest.RETAINED_PATH_KEY}' is relative to that capture, not to this package"
+        ),
+    }
 
 
 def package_oracle(  # pylint: disable=too-many-locals
@@ -910,13 +1176,35 @@ def package_oracle(  # pylint: disable=too-many-locals
     Bytes are copied verbatim, so every `sha256`/`bytes` the capture recorded still verifies -
     `reference_evidence.render_facts` checks exactly those, and a re-encoded copy would be rejected.
     Only `path` changes.
+
+    ⚠️ An UNASSESSABLE data leg is normalised BEFORE anything is copied (#480). `_copy_leg` keys on
+    `path`, so a leg that still names uncertified bytes there - which is every such leg in a capture
+    written before the rule - would be copied into `<kind>/data/<stem>.csv` and shipped to the
+    consumer as numbers. Demoting first means those bytes simply have no `path` to copy, and the
+    packaged manifest carries `retained_path` plus the reason instead.
+    ⚠️ **Round 6 contains the view at the SOURCE, not at each consumer.** Rounds 3, 4 and 5 each
+    contained a value at the reader that had just leaked - a field name, a top-level value, then the
+    scoped `oracle-manifest.json` document - and each was followed by a reader nobody had enumerated.
+    Measured on the tip of round 5, with `view_luid` and `view_type` declaring host paths::
+
+        oracle-manifest view_luid:                     <refused-by-packager>   # swept
+        package-manifest oracle.objects[0].view_luid:  <drive>:\\Users\\...    # built beside it
+        handover.md: UNTYPED_RENDER ... luid=<drive>:\\Users\\...              # rendered from it
+
+    So the view is contained ONCE here, before any field of it is read, and `objects`, `omissions`,
+    the packaged record, the filename stem and every artifact derived from them are contained BY
+    CONSTRUCTION. A consumer added later inherits that rather than needing a sixth guard. Legs keep
+    their own diagnosis because :func:`_contain_unsafe_strings` reports an already-refused string as
+    refused, so the walk is idempotent and `_copy_leg` still says WHICH field it refused and why.
     """
+    views = tableau_oracle_manifest.withhold_uncertified_evidence(views)
     taken: set[str] = set()
     packaged: list[dict[str, Any]] = []
     objects: list[dict[str, Any]] = []
     omissions: list[dict[str, Any]] = []
 
-    for view in views:
+    for raw_view in views:
+        view = _contain_unsafe_strings(raw_view)[0]
         kind = view_kind(view)
         luid = str(view.get("view_luid") or "")
         stem = object_filename(str(view.get("view_name") or view.get("view_url_name") or ""), luid, taken)
@@ -942,8 +1230,13 @@ def package_oracle(  # pylint: disable=too-many-locals
             record["data"] = rewritten
         if reason:
             omissions.append({"view_luid": luid, "leg": "data", "reason": reason})
+        # `.get`, not `[...]`: an UNASSESSABLE leg is `status: ok` with NO `path` (#480), and that is
+        # exactly the record that must ship no numbers. Subscripting it raised `KeyError` here, which
+        # is fail-closed but crashes the packager on a capture it is meant to handle.
         numbers = (
-            str(rewritten["path"]) if rewritten is not None and rewritten.get("status") == "ok" and not reason else None
+            str(rewritten.get("path"))
+            if rewritten is not None and rewritten.get("status") == "ok" and rewritten.get("path") and not reason
+            else None
         )
 
         record["packaged_object_stem"] = stem
@@ -991,7 +1284,13 @@ def _scope_oracle_manifest(
       omitting it.
     """
     narrowed = dict(manifest if isinstance(manifest, dict) else {})
-    narrowed["views"] = packaged
+    # ⚠️ DERIVED here, not merely carried (#480). A capture written by a current run already flags
+    # its own views, but an OLDER `oracle-manifest.json` predates the flag entirely -- and that is
+    # exactly the input the review's reproduction used: a `status: ok` data leg with no `row_count`,
+    # shipped with `flags` absent, which is what a clean capture looks like. The estate-wide COUNTS
+    # stay dropped because this packager cannot reconstruct them, but the per-view rule needs no
+    # estate context, so it is applied from the SHARED predicate rather than re-implemented.
+    narrowed["views"] = tableau_oracle_manifest.flag_empty(packaged)
     scoped, dropped = project(narrowed, ORACLE_MANIFEST_ALLOW)
 
     shipped = scoped.get("views") or []
@@ -1004,7 +1303,28 @@ def _scope_oracle_manifest(
         scoped[f"{leg}_ok"] = sum(
             1 for view in shipped if isinstance(view.get(leg), dict) and view[leg].get("status") == "ok"
         )
-    return stamp_scope(scoped, unit, dropped, "oracle-manifest.json views filtered to this unit, counts recomputed")
+    stamped = stamp_scope(scoped, unit, dropped, "oracle-manifest.json views filtered to this unit, counts recomputed")
+    # ⚠️ #480 round 5. Containment is a property of the DOCUMENT, not of a leg. `_copy_leg` guards
+    # the four legs it copies, so a string the allowlist retains anywhere ELSE - `views[].flags[]`
+    # and `views[].view_name` both measured shipping an absolute host path - never met a check at
+    # all. Sweeping the document closes every level at once, including any field a future allowlist
+    # entry adds, and the refusals are RECORDED rather than silently scrubbed.
+    #
+    # ⚠️ **Round-7 finding B2, second half: this sweep runs LAST, after `stamp_scope`, and nothing
+    # may be appended to the document after it.** It used to run on `scoped` and `stamp_scope` then
+    # appended `scope.dropped_fields` - field PATHS built by `project()` from the untrusted
+    # manifest's own key names - so a key nobody enumerated shipped verbatim inside the record of
+    # having dropped it. Sweeping `scoped` and then adding to it means "contained by construction"
+    # was false for every later stage; sweeping the STAMPED document makes it true for `scope.unit`,
+    # `scope.kept_fields` and `scope.dropped_fields` alike, and for whatever a future `stamp_scope`
+    # adds. `refused_fields` is the ONE thing written afterwards and it is safe BY CONSTRUCTION, not
+    # by inspection: every entry is a JSON path this walk built from CONTAINED keys and integer
+    # indexes, which is exactly the `tableau_env.scrub_tree` rule - the report of a catch must not
+    # re-emit what was caught.
+    stamped, refused = _contain_unsafe_strings(stamped)
+    if refused:
+        stamped["scope"]["refused_fields"] = sorted(refused)
+    return stamped
 
 
 # --------------------------------------------------------------------------------------------
@@ -3064,6 +3384,15 @@ def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
         notes.append(asset_note)
 
     _payload, entries = scope_provenance(read_json(bundle / "source-provenance.json"), sha256_of(asset))
+    # #480 round 6, the SECOND untrusted document, contained at its own intake for the same reason as
+    # the oracle capture. Its `origin.workbook_luid` is server-supplied, and three consumers read it
+    # before anything sweeps it: `shippable_provenance` ships it, `render_handover` interpolates it
+    # into `ORACLE_ATTRIBUTION luid=`, and `workbook_identity`'s conflict diagnosis quotes it INTO a
+    # sentence - which `absolute_host_paths` cannot see, because the value is no longer a value.
+    # Measured before this line existed: `scope.suppressed_reason` and `handover.md` both carried
+    # `<drive>:\Users\<account>\private\leak.log`. Containing at intake means every one of them is
+    # fed a contained value, exactly as `package_oracle` is.
+    entries = _contain_unsafe_strings(entries)[0]
     identity = workbook_identity(entries, asset)
     write_json(dest / "source-provenance.json", shippable_provenance(entries, identity, unit))
     write_json(dest / "report.json", scope_report(engine_report, unit))

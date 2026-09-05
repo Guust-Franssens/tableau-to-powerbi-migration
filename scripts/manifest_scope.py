@@ -49,8 +49,13 @@ Two mechanisms, deliberately different in kind
 
 from __future__ import annotations
 
-import re
+import sys
+from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from host_paths import discloses_host_location, discloses_host_path  # noqa: E402  # pylint: disable=wrong-import-position
 
 
 class UnscopedStructure(TypeError):
@@ -138,7 +143,7 @@ def project(payload: Any, spec: Any, *, prefix: str = "") -> tuple[Any, list[str
         kept: dict[str, Any] = {}
         dropped = []
         for key, value in payload.items():
-            path = f"{prefix}.{key}" if prefix else key
+            path = f"{prefix}.{_safe_path_segment(key)}" if prefix else _safe_path_segment(key)
             if key not in spec:
                 dropped.append(path)
                 continue
@@ -149,40 +154,108 @@ def project(payload: Any, spec: Any, *, prefix: str = "") -> tuple[Any, list[str
     raise TypeError(f"unusable allowlist spec at {prefix or '.'}: {spec!r}")
 
 
+def _safe_path_segment(key: Any) -> str:
+    """One dropped-path segment, with a host-path-disclosing KEY redacted before it is built into it.
+
+    ⚠️ **#480 round-7 finding B2.** `project()`'s whole job is to refuse an unenumerated field, and it
+    then named the refusal using the field's own key - so an *untrusted* key was re-emitted verbatim
+    in `scope.dropped_fields`, which ships. Measured, one injected view field::
+
+        "<drive>:\\Users\\<account>\\private\\secret": "safe scalar"
+          -> "dropped_fields": ["views[].<drive>:\\Users\\<account>\\private\\secret"]
+
+    The rule applied here is the one `tableau_env.scrub_tree` (:461-478) already states for the
+    credential sink: **keys are scrubbed, and a diagnostic path is built from the SCRUBBED key.** The
+    guard must not become the disclosure channel. The `views[]` prefix survives, so the operator still
+    learns at which LEVEL an unnameable field was dropped - redaction here costs the key, not the
+    location.
+
+    ⚠️ **This one stays on the NARROW, profile-only predicate, and that is deliberate** (round 9).
+    Everything that SHIPS is judged by :func:`host_paths.discloses_host_location`; this is not a
+    shipping decision but a pre-scrub applied while a diagnostic is being BUILT, and the mitigation
+    is the packager's final sweep over the stamped document, which is wide. Widening this one too
+    would MASK that sweep - `test_NOTHING_is_appended_to_the_oracle_manifest_after_its_last_containment_pass`
+    discriminates the two guards precisely by driving a key this one is silent on, and with both wide
+    the ordering claim becomes unobservable. That is the same trap round 9 documents for the parse
+    anchor in `package_unit._declares_non_relative`: a wider layer above an existing one retires the
+    proof that the lower one still runs. Nothing leaks by keeping it narrow - the sweep refuses the
+    raw key either way.
+    """
+    text = str(key)
+    return REDACTED if discloses_host_path(text) else text
+
+
 # --------------------------------------------------------------------------------------------
-# the value-shaped half: absolute host paths, wherever they appear
+# the value-shaped half: absolute host locations, wherever they appear
 # --------------------------------------------------------------------------------------------
 
-#: An absolute path under a user profile, in the forms this repo's artifacts actually produce.
-#: Deliberately the same shape `scripts/set_data_folder.py` gates the repo on, so a package cannot
-#: ship what a commit could not. Matched against a PARSED string value, never against serialized
-#: text - `json.dumps` doubles each separator, and grepping the render for the single-separator form
-#: is how an earlier assertion in this feature was silently vacuous.
-#:
-#: ⚠️ The POSIX segments are assembled from parts rather than written inline: spelled out, this
-#: pattern is itself an absolute-user-path literal, and the repo's own privacy gate
-#: (`set_data_folder.py --check`, a CI step) flagged this file - the detector tripping the detector.
-_POSIX_PROFILE_DIRS = ("Users", "home")
-HOST_PATH_RE = re.compile(
-    r"^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/]|" + "|".join(f"/{name}/" for name in _POSIX_PROFILE_DIRS) + ")",
-)
 REDACTED = "<redacted-absolute-path>"
 
 
+def _redacted_key(key: Any, taken: dict[str, Any]) -> tuple[Any, bool]:
+    """`(key safe to ship, was it redacted)` - one dictionary key, collision-disambiguated.
+
+    ⚠️ **#480 round 9, leak 2.** :func:`redact_host_paths` cleaned dictionary VALUES and preserved
+    raw KEYS, so the handover slice - the one artifact that ships WHOLE - carried whatever a key
+    spelled. Round 8 declined this citing *"engine-authored keys, no reproduction"*; a reproduction
+    now exists, built with the same hypothetical-future-field method the slice's own value-redaction
+    test already uses::
+
+        {"workbook": {"<a profile path>": "safe scalar"}}
+          -> handover/Book.json ships the key, and the account name, verbatim
+
+    "Engine-authored" describes a key's ORIGIN; it does not enforce the shipping invariant, and the
+    packager's own manifest walk (`package_unit._contain_unsafe_key`) had already concluded the same
+    thing one artifact over. The two properties below are copied from there, and from
+    `tableau_env._scrub_key` before it:
+
+    * **a collision is disambiguated, never silently dropped** - two distinct unsafe keys would
+      otherwise both redact to one sentinel and `dict` would keep the last, turning redaction into
+      data loss in the agent's actual work queue;
+    * an **already-redacted** key reports redacted, so the walk stays idempotent and a second pass
+      cannot read the sentinel as a fresh, safe key.
+    """
+    if not isinstance(key, str):
+        return key, False
+    if key == REDACTED or key.startswith(f"{REDACTED}#"):
+        return key, True
+    if not discloses_host_location(key):
+        return key, False
+    unique, suffix = REDACTED, 2
+    while unique in taken:
+        unique, suffix = f"{REDACTED}#{suffix}", suffix + 1
+    return unique, True
+
+
 def redact_host_paths(payload: Any, *, prefix: str = "") -> tuple[Any, list[str]]:
-    """`(payload with absolute host paths replaced, JSON paths redacted)`.
+    """`(payload with absolute host locations replaced, JSON paths redacted)`.
 
     The complement to `project()`, for documents that must ship whole. It closes by VALUE SHAPE, so
     a field name nobody predicted cannot evade it - which is precisely the property the three
     name-shaped rounds lacked. It redacts rather than drops: the handover slice is the agent's work
     queue, and deleting a key it reads would trade a leak for a broken deliverable.
+
+    ⚠️ **ONE question, asked once** (#480 round 9). Round 7 unioned an anchored `HOST_PATH_RE.match`
+    ("does this value START as a location") with a profile-only containment test, because neither
+    alone covered the other. Both were spelling tests, and round 9 measured the gap between them:
+    `HTTP 503: ` + a non-profile absolute passed BOTH. :func:`host_paths.discloses_host_location`
+    normalises the spelling away and then asks a single question, and it is a strict superset of the
+    anchored predicate it replaced - so that predicate is deleted rather than kept beside it. Two
+    overlapping definitions of one question is what six rounds of this PR have been.
+
+    ⚠️ **KEYS are redacted too** (round 9, leak 2), by :func:`_redacted_key`, and the reported path
+    is built from the REDACTED key so the record of the catch cannot re-emit what was caught.
     """
     if isinstance(payload, dict):
         out: dict[str, Any] = {}
         hit: list[str] = []
         for key, value in payload.items():
-            cleaned, found = redact_host_paths(value, prefix=f"{prefix}.{key}")
-            out[key] = cleaned
+            safe_key, key_redacted = _redacted_key(key, out)
+            here = f"{prefix}.{safe_key}"
+            if key_redacted:
+                hit.append(f"{here} (key)")
+            cleaned, found = redact_host_paths(value, prefix=here)
+            out[safe_key] = cleaned
             hit.extend(found)
         return out, hit
     if isinstance(payload, list):
@@ -193,7 +266,7 @@ def redact_host_paths(payload: Any, *, prefix: str = "") -> tuple[Any, list[str]
             rows.append(cleaned)
             hit.extend(found)
         return rows, hit
-    if isinstance(payload, str) and HOST_PATH_RE.match(payload):
+    if isinstance(payload, str) and discloses_host_location(payload):
         return REDACTED, [prefix or "."]
     return payload, []
 
@@ -269,6 +342,16 @@ ORACLE_LEG_ALLOW = _fields(
     "image_elements",
     "external_refs",
     "row_count",
+    # #480. The data leg's CSV certification verdict -- one of `tableau_payload_facts.CSV_VERDICTS`,
+    # this repo's own closed vocabulary. It ships for the same reason `flags` does: without it a
+    # packaged unit carries `status: ok` with no `row_count` and nothing anywhere saying the body
+    # was never established as CSV, which is the fail-open this field exists to close.
+    "certification",
+    # #480 round 2. WHERE uncertified bytes were retained, and the authored sentence saying why they
+    # are not evidence. They ship together and they ship instead of `path`: a data leg that names a
+    # file here is one no consumer may read as numbers, which is the whole structural point.
+    "retained_path",
+    "evidence_withheld",
     "packaged_from",
     "packaging_reason",
 )
@@ -290,6 +373,13 @@ ORACLE_VIEW_ALLOW: dict[str, Any] = {
         "updated_at",
         "packaged_object_stem",
     ),
+    # #471. A PER-VIEW fact, which is why it ships where the estate-wide `data_empty` count is
+    # dropped: this packager cannot honestly recompute "how much of the capture was empty" for one
+    # unit, but "this view returned no rows" is true of the view regardless of which unit ships it.
+    # The values are `tableau_oracle_manifest`'s own literals -- no foreign identity, no free text --
+    # and without this line the diagnostic would be silently dropped at the package boundary, which
+    # is moving the failure rather than fixing it.
+    "flags": SCALAR_LIST,
     **{leg: ORACLE_LEG_SPEC for leg in ("image", "svg", "pdf", "data")},
 }
 

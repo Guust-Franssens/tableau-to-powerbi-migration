@@ -27,6 +27,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILLS_DIR = REPO_ROOT / ".github" / "skills"
 SKILL_FILES = sorted(SKILLS_DIR.glob("*/SKILL.md"))
 BUNDLED_SKILLS = sorted(skill.parent for skill in SKILL_FILES if (skill.parent / "tests").is_dir())
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+import build_plugin  # noqa: E402
 
 # A markdown link whose target is a relative path, i.e. not http(s):, mailto: or a #fragment.
 MD_LINK_RE = re.compile(r"\[[^\]]*\]\((?!https?:|mailto:|#)([^)\s]+)\)")
@@ -46,12 +48,38 @@ SECTION_TEMPLATE_CANARY = "## Business terminology and defaults"
 SECTION_TEMPLATE_HOME = SKILLS_DIR / "powerbi-ai-readiness" / "SKILL.md"
 REPORT_GOTCHAS = SKILLS_DIR / "powerbi-report-gotchas" / "SKILL.md"
 AZURE_MAP_COOKBOOK = REPO_ROOT / ".github" / "pbi.kb" / "visuals" / "azureMap.md"
+SEMANTIC_GOTCHAS = SKILLS_DIR / "powerbi-semantic-model-gotchas" / "SKILL.md"
+BUNDLED_PATH_CLAIM_RE = re.compile(r"\bbundled(?:\s+in\s+this skill's)?\s+[`']([^`']+)[`']")
 
 
 def test_the_skills_directory_is_not_empty() -> None:
     """Guards the collection itself: `SKILL_FILES` drives parametrization, and an empty glob would
     turn every test below into a silent no-op that still reports green."""
     assert SKILL_FILES, f"no SKILL.md found under {SKILLS_DIR}"
+
+
+def test_semantic_model_gotchas_uses_live_validation_and_no_dead_bundled_claims(tmp_path: Path) -> None:
+    """Keep issue #411's retired artifact claims out of both published copies of the skill."""
+    source = SEMANTIC_GOTCHAS.read_text(encoding="utf-8")
+    assert "scripts/_tools/TabularEditor/" not in source
+    assert "bpa.ps1" not in source
+
+    command = "python scripts/check_datamodel.py <SemanticModel>"
+    assert command in source
+    assert (REPO_ROOT / "scripts" / "check_datamodel.py").is_file()
+
+    output = tmp_path / "marketplace"
+    build_plugin.build(output)
+    published = output / "plugins" / build_plugin.PLUGIN_NAME / "skills" / "powerbi-semantic-model-gotchas" / "SKILL.md"
+    published_text = published.read_text(encoding="utf-8")
+    assert command in published_text
+    assert "scripts/_tools/TabularEditor/" not in published_text
+    assert "bpa.ps1" not in published_text
+
+    # Only prose that explicitly calls a relative path bundled by this skill is in scope here.
+    for relative in BUNDLED_PATH_CLAIM_RE.findall(source):
+        assert (SEMANTIC_GOTCHAS.parent / relative).exists(), f"missing source bundled path: {relative}"
+        assert (published.parent / relative).exists(), f"missing published bundled path: {relative}"
 
 
 def test_every_skill_that_ships_code_also_ships_the_tests_that_travel_with_it() -> None:

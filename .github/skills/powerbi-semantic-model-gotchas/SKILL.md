@@ -237,13 +237,11 @@ Desktop on open** — they only surface when the PBIP is actually opened, not fr
   (invisible to `validate` and TMDL structural checks; the report shows "Something's wrong with one or
   more fields" in Desktop). Hoist the measure into a `VAR` and compare the column to the VAR. Found in
   58 CM/CY/PM measures of the Airline build. See `docs/tableau-dax-translation-guide.md` §4.
-- **Validate before reporting success.** After writing TMDL files, load
-  `Microsoft.AnalysisServices.Tabular.dll` (ships with Tabular Editor, bundled in this skill's
-  `scripts/_tools/TabularEditor/`) and call
-  `[Microsoft.AnalysisServices.Tabular.TmdlSerializer]::DeserializeDatabaseFromFolder(<path>)` — this
-  is the same parser Power BI Desktop uses, and it catches syntax errors (though not the
-  naming-collision one above, which only surfaces on actual model commit) without needing to launch
-  the full Desktop UI.
+- **Validate before reporting success.** In this repository, after writing TMDL files, run
+  `python scripts/check_datamodel.py <SemanticModel>`. It invokes `tools/tmdl_oracle` and
+  `TmdlSerializer`, the same parser Power BI Desktop uses, and requires the .NET SDK. This catches
+  syntax errors (though not the naming-collision one above, which only surfaces on actual model
+  commit) without needing to launch the full Desktop UI.
 
 ## 3. MCP / Desktop operational gotchas
 
@@ -568,8 +566,8 @@ measure, **`sortByColumn` is the mechanism that works** — and it is the model'
   `WA-SNO457`) must be forced to **String** in the M type step or refresh nulls the alphanumeric ids.
 - **BPA "Hide fact table columns" is an EXPECTED deviation for faithful Tableau migrations** — keep base
   numerics visible with `summarizeBy=sum` (Tableau exposed them as draggable measures); don't "fix" it.
-  The bundled `bpa.ps1` runs Tabular Editor with `-G` (silent stdout, exit 0 even on violations) — to see
-  the human-readable list, run `TabularEditor.exe <def> -A <rules>` **without** `-G`.
+  This repository and this skill ship no BPA runner. If BPA analysis is needed, use an independently
+  installed and approved runner, and record that external dependency in the migration limitations.
 
 ## 5. Live sources: prove reachability first, and never self-supply a credential
 
