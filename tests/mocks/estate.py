@@ -108,6 +108,35 @@ def sanitise(name):
     return "".join(c if (c.isalnum() or c in " -_") else "_" for c in name).strip()
 
 
+class LocalFilesSource:
+    """The selected-engine naming surface consumed by run_estate's path preflight."""
+
+    def __init__(self, root):
+        self.root = Path(root)
+
+    def list_datasources(self):
+        return sorted(list(self.root.glob("*.tds")) + list(self.root.glob("*.tdsx")))
+
+    def list_workbooks(self):
+        return sorted(list(self.root.glob("*.twb")) + list(self.root.glob("*.twbx")))
+
+    @staticmethod
+    def asset_name(asset_id):
+        return Path(asset_id).stem
+
+
+def _safe_folder(name, used):
+    """Allocate names exactly as this stand-in's own output loop does."""
+    base = sanitise(name) or "datasource"
+    candidate = base
+    index = 2
+    while candidate.lower() in used:
+        candidate = f"{{base}}_{{index}}"
+        index += 1
+    used.add(candidate.lower())
+    return candidate
+
+
 def emit(spec, out, name):
     """Write one workbook's PBIP: a model and a report bound to it BY PATH (Git-integration shape)."""
     project = out / "pbip" / name
@@ -216,8 +245,12 @@ def main():
 
     args.output.mkdir(parents=True, exist_ok=True)
     workbooks, bound, failed = [], 0, 0
-    for source in sorted(list(args.input.glob("*.twb")) + list(args.input.glob("*.twbx"))):
-        name = sanitise(source.stem)
+    local_source = LocalFilesSource(args.input)
+    used_names = set()
+    for source in local_source.list_datasources():
+        _safe_folder(local_source.asset_name(source), used_names)
+    for source in local_source.list_workbooks():
+        name = _safe_folder(local_source.asset_name(source), used_names)
         try:
             spec = parse_workbook(source)
         except Exception as exc:  # a parse failure is a workbook-level error, never a batch abort

@@ -560,6 +560,7 @@ and 2/5 reproduced by running the command:
 | `7` | `EXIT_INVALID_PBIR` | **live** ✅ reproduced — a shipped report FAILS the first-party `powerbi-report-author validate` (measured: `PBIR_ROLE_REQUIRED_MISSING` from a stubbed calc whose projection was dropped) | read `<bundle>/pbir-validity-check.json`; **bind the stub**, do not delete the visual |
 | `8` | `EXIT_BLANK_PLACEHOLDER` | **live** ✅ reproduced — a handover-backed `BLANK()` placeholder is consumed by a report filter or visual field binding | read `<bundle>/blank-placeholder-check.json`; translate the calc or remove the consuming report dependency knowingly |
 | `9` | `EXIT_BUNDLE_REWRITE` | **pre-engine refusal** (#250) — the `--output` bundle holds work an engine re-run would delete, a **different engine version** built it, **or the barrier cannot assess either question** (missing/empty/truncated baseline, `--slice-only`-backfilled baseline, unreadable engine version) | land into a FRESH `--output`, or acknowledge with `--accept-bundle-rewrite` / `--accept-engine-version-change`; the acknowledgement, the destroyed files **and the coverage gaps** are written to `<bundle>/bundle-rewrite-acknowledgement.json` |
+| `10` | `EXIT_PATH_CEILING` | **pre-engine refusal** (#479) — the projected canonical PBIP path exceeds Power BI Desktop's measured UTF-16 file or directory ceiling, or the estate cannot be assessed safely | allocate/use a shorter run/output root; `LongPathsEnabled` and `\\?\` prefixes do not make Desktop accept these paths |
 
 ❌ **Correction: exits 5 and 6 are NOT "pending branch only"** — the previous edition said so, and
 §5.1 check 10 was written against the same stale assumption. Both shipped 2026-08-13 (#109, #111).
@@ -1456,12 +1457,12 @@ Placeholders used in this document — and where the real value lives:
 
 `—` means that script cannot return that exit code.
 
-| script | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |
-|---|---|---|---|---|---|---|---|---|---|---|
-| `preflight.ps1` | ready | critical missing | — | — | — | — | — | — | — | — |
-| `assess_estate.py` | assessed (may be secondary-degraded) | nothing assessed · sign-in refused (raises) | usage | **a PRIMARY listing is incomplete** | — | — | — | — | — | — |
-| `run_estate.py` | READY | engine failed | usage | **DoD failed** | approval collision | non-canonical engine | **empty model** | **invalid PBIR** | **BLANK() placeholder** | **bundle rewrite refused** |
-| `deploy_estate.py` | all deployed | item failed / refused | preflight | **incomplete by skip** | — | — | — | — | — | — |
+| script | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `preflight.ps1` | ready | critical missing | — | — | — | — | — | — | — | — | — |
+| `assess_estate.py` | assessed (may be secondary-degraded) | nothing assessed · sign-in refused (raises) | usage | **a PRIMARY listing is incomplete** | — | — | — | — | — | — | — |
+| `run_estate.py` | READY | engine failed | usage | **DoD failed** | approval collision | non-canonical engine | **empty model** | **invalid PBIR** | **BLANK() placeholder** | **bundle rewrite refused** | **path ceiling / cannot assess** |
+| `deploy_estate.py` | all deployed | item failed / refused | preflight | **incomplete by skip** | — | — | — | — | — | — | — |
 
 One run returns **one** code, in the order collision → DoD → invalid PBIR → BLANK() placeholder →
 empty model — so a bundle can trip a gate the exit code never mentions. Read the log body,
