@@ -4,7 +4,7 @@ A skip is not a pass. An unexpected skip is a defect that would otherwise silent
 These tests verify that:
 1. Skips matching the registered baseline reasons are allowed.
 2. Skips with unexpected reasons fail the pytest session with exit code 1.
-3. Engine-dependent skips are loudly reported with their count and node IDs.
+3. Engine-dependent skips are NOT_CHECKED only with an explicit allowed reason.
 4. Exactly 15 engine-dependent test cases exist across the 3 known modules.
 """
 
@@ -65,6 +65,11 @@ def test_is_engine_skip_identifies_canonical_reason() -> None:
     assert not conftest.is_engine_skip("Windows-specific path spelling")
 
 
+def test_engine_not_checked_reasons_are_closed() -> None:
+    """Only named, reviewed NOT_CHECKED reasons can keep an engine skip from failing."""
+    assert conftest.EXPECTED_ENGINE_NOT_CHECKED_REASONS == {"covered-by-pinned-engine-integration-job"}
+
+
 def test_unexpected_skip_fails_the_pytest_session(pytester: pytest.Pytester) -> None:
     """A test skipping with an unregistered reason must fail the pytest session."""
     conftest_code = (REPO_ROOT / "conftest.py").read_text(encoding="utf-8")
@@ -104,8 +109,59 @@ def test_expected_skip_passes_the_pytest_session(pytester: pytest.Pytester) -> N
     assert "UNEXPECTED TEST SKIPS DETECTED" not in result.stdout.str()
 
 
-def test_engine_skips_are_loudly_reported(pytester: pytest.Pytester) -> None:
-    """Engine-dependent skips print a prominent banner and itemize the skipped tests."""
+def test_engine_skips_without_an_allowed_not_checked_reason_fail(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Engine-dependent skips are not an ordinary green skip baseline."""
+    monkeypatch.delenv(conftest.REQUIRE_ENGINE_TESTS_ENV, raising=False)
+    monkeypatch.delenv(conftest.ENGINE_TESTS_NOT_CHECKED_REASON_ENV, raising=False)
+    conftest_code = (REPO_ROOT / "conftest.py").read_text(encoding="utf-8")
+    pytester.makeconftest(conftest_code)
+    pytester.makepyfile(
+        """
+        import pytest
+
+        def test_engine_one():
+            pytest.skip("deterministic tier not installed")
+        """
+    )
+    result = pytester.runpytest()
+    assert result.ret == pytest.ExitCode.TESTS_FAILED
+    result.stdout.fnmatch_lines(
+        [
+            "*ENGINE-DEPENDENT TESTS SKIPPED (1 test cases did not run)*",
+            f"*{conftest.ENGINE_TESTS_NOT_CHECKED_REASON_ENV}*",
+        ]
+    )
+
+
+def test_engine_skips_with_an_unknown_not_checked_reason_fail(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A misspelled NOT_CHECKED reason must not become a new green baseline."""
+    monkeypatch.delenv(conftest.REQUIRE_ENGINE_TESTS_ENV, raising=False)
+    monkeypatch.setenv(conftest.ENGINE_TESTS_NOT_CHECKED_REASON_ENV, "engine-maybe-missing")
+    conftest_code = (REPO_ROOT / "conftest.py").read_text(encoding="utf-8")
+    pytester.makeconftest(conftest_code)
+    pytester.makepyfile(
+        """
+        import pytest
+
+        def test_engine_one():
+            pytest.skip("deterministic tier not installed")
+        """
+    )
+    result = pytester.runpytest()
+    assert result.ret == pytest.ExitCode.TESTS_FAILED
+    assert "Set one of: covered-by-pinned-engine-integration-job" in result.stdout.str()
+
+
+def test_engine_skips_with_an_allowed_not_checked_reason_are_reported(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ordinary Linux CI job may report a deliberate NOT_CHECKED reason, not a silent pass."""
+    monkeypatch.delenv(conftest.REQUIRE_ENGINE_TESTS_ENV, raising=False)
+    monkeypatch.setenv(conftest.ENGINE_TESTS_NOT_CHECKED_REASON_ENV, "covered-by-pinned-engine-integration-job")
     conftest_code = (REPO_ROOT / "conftest.py").read_text(encoding="utf-8")
     pytester.makeconftest(conftest_code)
     pytester.makepyfile(
@@ -123,10 +179,37 @@ def test_engine_skips_are_loudly_reported(pytester: pytest.Pytester) -> None:
     assert result.ret == pytest.ExitCode.OK
     result.stdout.fnmatch_lines(
         [
-            "*ENGINE-DEPENDENT TESTS SKIPPED (2 test cases did not run)*",
+            "*ENGINE-DEPENDENT TESTS NOT_CHECKED (2 test cases did not run)*",
             "*The deterministic conversion engine plugin (tableau-fabric-skills) is not installed.*",
             "*test_engine_one*",
             "*test_engine_two*",
+            "*NOT_CHECKED reason: covered-by-pinned-engine-integration-job*",
+        ]
+    )
+
+
+def test_required_engine_run_fails_if_engine_tests_skip(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The engine-integration and drift jobs must fail closed when the engine did not install."""
+    monkeypatch.setenv(conftest.REQUIRE_ENGINE_TESTS_ENV, "1")
+    monkeypatch.setenv(conftest.ENGINE_TESTS_NOT_CHECKED_REASON_ENV, "covered-by-pinned-engine-integration-job")
+    conftest_code = (REPO_ROOT / "conftest.py").read_text(encoding="utf-8")
+    pytester.makeconftest(conftest_code)
+    pytester.makepyfile(
+        """
+        import pytest
+
+        def test_engine_one():
+            pytest.skip("deterministic tier not installed")
+        """
+    )
+    result = pytester.runpytest()
+    assert result.ret == pytest.ExitCode.TESTS_FAILED
+    result.stdout.fnmatch_lines(
+        [
+            "*ENGINE-DEPENDENT TESTS SKIPPED (1 test cases did not run)*",
+            f"*{conftest.REQUIRE_ENGINE_TESTS_ENV}=1*",
         ]
     )
 
@@ -243,3 +326,18 @@ def test_synthetic_installed_engine_root_under_simulation_env(tmp_path: Path, mo
     with pytest.raises(engine_source.NonCanonicalEngineError):
         engine_source.resolve_engine(other)
     assert engine_source.resolve_engine(other, allow_noncanonical=True) == other
+
+
+def test_workflow_runs_engine_dependent_tests_in_required_jobs() -> None:
+    """The production workflow must reach the fail-closed engine-test path (issue #435)."""
+    workflow = (REPO_ROOT / ".github" / "workflows" / "checks.yml").read_text(encoding="utf-8")
+    target = "tests/test_issue_424_chart_type_pin.py tests/test_dax_oracle_server.py tests/test_upstream_repro_pins.py"
+
+    assert "schedule:" in workflow, "latest-engine drift pins need a scheduled job"
+    assert "engine-integration:" in workflow
+    assert "engine-drift:" in workflow
+    assert "962d16cfe6f711622d419a567f992da8d90c8781" in workflow
+    assert "EXPECTED_ENGINE_VERSION: '2.356.0'" in workflow
+    assert "ref: main" in workflow
+    assert f"{conftest.REQUIRE_ENGINE_TESTS_ENV}=1 uv run pytest -q {target}" in workflow
+    assert "covered-by-pinned-engine-integration-job uv run pytest -q" in workflow

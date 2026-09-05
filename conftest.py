@@ -51,7 +51,14 @@ INCLUDE_CONTENDED = "--include-contended"
 GUI_MARKER = "gui"
 RUN_GUI = "--run-gui"
 RUN_GUI_ENV = "T2P_RUN_GUI"
+REQUIRE_ENGINE_TESTS_ENV = "T2P_REQUIRE_ENGINE_TESTS"
+ENGINE_TESTS_NOT_CHECKED_REASON_ENV = "T2P_ENGINE_TESTS_NOT_CHECKED_REASON"
 TRUTHY = {"1", "true", "yes", "on"}
+EXPECTED_ENGINE_NOT_CHECKED_REASONS: frozenset[str] = frozenset(
+    {
+        "covered-by-pinned-engine-integration-job",
+    }
+)
 
 # Exact expected skip reasons (issues #435, #436).
 EXPECTED_EXACT_SKIP_REASONS: frozenset[str] = frozenset(
@@ -118,6 +125,17 @@ def is_engine_skip(reason: str) -> bool:
     """Whether a skip reason is an engine-dependent test skip (issue #435)."""
     clean = reason.strip()
     return any(clean == r or clean.startswith(r) for r in ENGINE_SKIP_REASONS)
+
+
+def engine_tests_are_required() -> bool:
+    """Whether this run must execute engine-dependent tests rather than reporting NOT_CHECKED."""
+    return os.environ.get(REQUIRE_ENGINE_TESTS_ENV, "").strip().lower() in TRUTHY
+
+
+def engine_tests_not_checked_reason() -> str | None:
+    """The explicit allowed reason this run is allowed to report engine tests as NOT_CHECKED."""
+    reason = os.environ.get(ENGINE_TESTS_NOT_CHECKED_REASON_ENV, "").strip()
+    return reason or None
 
 
 def _extract_skip_reason(rep: Any) -> str:
@@ -285,23 +303,57 @@ def pytest_terminal_summary(
         if not is_expected_skip_reason(reason):
             unexpected_skips.append((rep.nodeid, reason))
 
+    engine_skip_failure: str | None = None
+
     # Loud reporting for engine skips (issue #435)
     if engine_skips:
+        not_checked_reason = engine_tests_not_checked_reason()
+        if engine_tests_are_required():
+            engine_skip_failure = (
+                f"{REQUIRE_ENGINE_TESTS_ENV}=1, so engine-dependent tests must execute; "
+                "skipping them is a CI/test-environment failure."
+            )
+        elif not_checked_reason not in EXPECTED_ENGINE_NOT_CHECKED_REASONS:
+            allowed = ", ".join(sorted(EXPECTED_ENGINE_NOT_CHECKED_REASONS))
+            engine_skip_failure = (
+                f"engine-dependent tests skipped without an allowed {ENGINE_TESTS_NOT_CHECKED_REASON_ENV}. "
+                f"Set one of: {allowed}."
+            )
+
         terminalreporter.write_sep(
-            "=",
-            f"ENGINE-DEPENDENT TESTS SKIPPED ({len(engine_skips)} test cases did not run)",
-            yellow=True,
+            "!" if engine_skip_failure else "=",
+            (
+                f"ENGINE-DEPENDENT TESTS SKIPPED ({len(engine_skips)} test cases did not run)"
+                if engine_skip_failure
+                else f"ENGINE-DEPENDENT TESTS NOT_CHECKED ({len(engine_skips)} test cases did not run)"
+            ),
+            yellow=not engine_skip_failure,
+            red=bool(engine_skip_failure),
             bold=True,
         )
+        lines = [
+            "The deterministic conversion engine plugin (tableau-fabric-skills) is not installed.",
+            f"{len(engine_skips)} test cases requiring the engine plugin were skipped under @requires_engine:",
+            *[f"  - {nodeid}" for nodeid in sorted(engine_skips)],
+        ]
+        if engine_skip_failure:
+            lines.append(engine_skip_failure)
+        else:
+            lines.append(f"NOT_CHECKED reason: {not_checked_reason}")
         terminalreporter.write_line(
-            "The deterministic conversion engine plugin (tableau-fabric-skills) is not installed.\n"
-            f"{len(engine_skips)} test cases requiring the engine plugin were skipped under @requires_engine:\n"
-            + "\n".join(f"  - {nodeid}" for nodeid in sorted(engine_skips)),
-            yellow=True,
+            "\n".join(lines),
+            yellow=not engine_skip_failure,
+            red=bool(engine_skip_failure),
         )
-        terminalreporter.write_sep("=", yellow=True)
+        terminalreporter.write_sep(
+            "!" if engine_skip_failure else "=", yellow=not engine_skip_failure, red=bool(engine_skip_failure)
+        )
 
     # Fail the run if any unexpected skip reason is encountered (issue #436)
+    if engine_skip_failure or unexpected_skips:
+        if engine_skip_failure:
+            # pylint: disable=protected-access
+            terminalreporter._session.exitstatus = pytest.ExitCode.TESTS_FAILED
     if unexpected_skips:
         terminalreporter.write_sep(
             "!",

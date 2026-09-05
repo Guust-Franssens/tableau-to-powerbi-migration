@@ -8,6 +8,9 @@ on:
   push:
     branches: [master]
   pull_request:
+  schedule:
+    # Drift signal for engine-dependent tests: current upstream engine, allowed to go red.
+    - cron: '17 4 * * *'
   workflow_dispatch:
 
 permissions:
@@ -64,7 +67,7 @@ jobs:
           uv run pylint conftest.py
 
       - name: Tests
-        run: uv run pytest -q
+        run: T2P_ENGINE_TESTS_NOT_CHECKED_REASON=covered-by-pinned-engine-integration-job uv run pytest -q
 
       - name: Migration spec contract gate
         run: uv run python scripts/validate_spec.py --all --check
@@ -93,7 +96,67 @@ jobs:
         # .github/skills/powerbi-ai-readiness/SKILL.md.
         run: uv run python scripts/set_ai_instructions.py --check
 
-  # The job above runs on Linux. The pbip-model-refresh bundle does not: `SKILL.md` line 8 says
+  engine-integration:
+    runs-on: ubuntu-latest
+    env:
+      EXPECTED_ENGINE_VERSION: '2.356.0'
+      PINNED_ENGINE_REF: '962d16cfe6f711622d419a567f992da8d90c8781'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: Yarbrdab000/tableau-fabric-skills
+          ref: 962d16cfe6f711622d419a567f992da8d90c8781
+          path: _engine-source
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Install pinned deterministic engine
+        run: |
+          mkdir -p "$HOME/.copilot/installed-plugins/tableau-collection/tableau-fabric-skills"
+          cp -a _engine-source/. "$HOME/.copilot/installed-plugins/tableau-collection/tableau-fabric-skills/"
+          uv run python scripts/engine_source.py --json
+          test "$(cat "$HOME/.copilot/installed-plugins/tableau-collection/tableau-fabric-skills/skills/tableau-migration/VERSION")" = "$EXPECTED_ENGINE_VERSION"
+
+      - name: Tests (engine-dependent, pinned engine)
+        run: T2P_REQUIRE_ENGINE_TESTS=1 uv run pytest -q tests/test_issue_424_chart_type_pin.py tests/test_dax_oracle_server.py tests/test_upstream_repro_pins.py
+
+  engine-drift:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: Yarbrdab000/tableau-fabric-skills
+          ref: main
+          path: _engine-source
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Install latest deterministic engine
+        run: |
+          mkdir -p "$HOME/.copilot/installed-plugins/tableau-collection/tableau-fabric-skills"
+          cp -a _engine-source/. "$HOME/.copilot/installed-plugins/tableau-collection/tableau-fabric-skills/"
+          uv run python scripts/engine_source.py --json
+          echo "Current engine version: $(cat "$HOME/.copilot/installed-plugins/tableau-collection/tableau-fabric-skills/skills/tableau-migration/VERSION")"
+
+      - name: Tests (engine-dependent, latest engine drift signal)
+        run: T2P_REQUIRE_ENGINE_TESTS=1 uv run pytest -q tests/test_issue_424_chart_type_pin.py tests/test_dax_oracle_server.py tests/test_upstream_repro_pins.py
+
+  # The main checks job runs on Linux. The pbip-model-refresh bundle does not: `SKILL.md` line 8 says
   # "Windows only." That mismatch is not cosmetic - it makes the Linux job STRUCTURALLY incapable of
   # failing on this bundle's most important code path.
   #
