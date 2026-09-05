@@ -40,6 +40,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -103,9 +104,7 @@ def resolve_source_commit(source_ref: str) -> tuple[str, str]:
     commit = _git(["rev-parse", "--verify", f"{source_ref}^{{commit}}"])
     full_ref = _git(["rev-parse", "--symbolic-full-name", source_ref])
     if not full_ref.startswith("refs/remotes/"):
-        raise SourceRefError(
-            f"{source_ref!r} resolves to {full_ref!r}, not a remote-tracking default/merged ref"
-        )
+        raise SourceRefError(f"{source_ref!r} resolves to {full_ref!r}, not a remote-tracking default/merged ref")
     _git(["cat-file", "-e", f"{commit}:.github/skills"])
     _git(["cat-file", "-e", f"{commit}:scripts/build_plugin.py"])
     default_commit = _git(["rev-parse", "--verify", f"{DEFAULT_SOURCE_REF}^{{commit}}"])
@@ -144,6 +143,10 @@ def _extract_ref(commit: str, destination: Path) -> None:
                     raise SourceRefError(f"git archive could not extract {member.name!r}")
                 with extracted, target.open("wb") as output:
                     shutil.copyfileobj(extracted, output)
+            elif member.issym() or member.islnk():
+                raise SourceRefError(f"git archive contains unsupported link entry {member.name!r}")
+            else:
+                raise SourceRefError(f"git archive contains unsupported entry {member.name!r}")
 
 
 def _build_reference_from(workdir: Path, repo_root: Path) -> Path:
@@ -190,16 +193,14 @@ def diff_tree(src: Path, dst: Path) -> tuple[list[Path], list[Path]]:
         # shallow=False: compare CONTENT, not size+mtime. An install copies files with fresh
         # mtimes, so a shallow compare reports differences that do not exist - and worse, could
         # miss a same-size edit.
-        if not target.exists() or target.is_symlink() or not filecmp.cmp(path, target, shallow=False):
+        if not target.exists() or not filecmp.cmp(path, target, shallow=False):
             changed.append(rel)
 
     extra: list[Path] = []
     if dst.is_dir():
         src_files = {p.relative_to(src) for p in src.rglob("*") if p.is_file()}
         extra = sorted(
-            p.relative_to(dst)
-            for p in dst.rglob("*")
-            if (p.is_file() or p.is_symlink()) and p.relative_to(dst) not in src_files
+            p.relative_to(dst) for p in dst.rglob("*") if p.is_file() and p.relative_to(dst) not in src_files
         )
     return changed, extra
 
@@ -213,27 +214,15 @@ def _identity_from_root(plugin_root: Path) -> str:
 
 
 def _normalise_plugin_root(path: Path) -> Path:
-    expanded = path.expanduser()
-    absolute = expanded if expanded.is_absolute() else Path.cwd() / expanded
-    if absolute.name == "skills":
-        return absolute.parent
-    return absolute
-
-
-def path_has_symlink_component(path: Path) -> bool:
-    """Return whether any existing component in ``path`` is itself a symlink."""
-    absolute = path.expanduser()
-    absolute = absolute if absolute.is_absolute() else Path.cwd() / absolute
-    current = Path(absolute.anchor)
-    for part in absolute.parts[1:]:
-        current /= part
-        if current.is_symlink():
-            return True
-    return False
+    resolved = path.expanduser().resolve()
+    if resolved.name == "skills":
+        return resolved.parent
+    return resolved
 
 
 def _carries_reference_skill(skills_dir: Path, skill_names: tuple[str, ...]) -> bool:
     return any((skills_dir / skill / "SKILL.md").is_file() for skill in skill_names)
+
 
 # pylint: disable-next=too-many-return-statements
 def discover_skill_plugin(
@@ -245,16 +234,6 @@ def discover_skill_plugin(
     if plugin_root_override:
         plugin_root = _normalise_plugin_root(plugin_root_override)
         skills_dir = plugin_root / "skills"
-        if path_has_symlink_component(skills_dir):
-            return SkillPluginDiscovery(
-                status="unsafe",
-                plugin_root=plugin_root,
-                skills_dir=skills_dir,
-                candidates=(plugin_root,),
-                identity=_identity_from_root(plugin_root),
-                install_hint="Use the real installed plugin path; symlinked plugin paths are refused.",
-                detail=f"plugin path contains a symlink component: {skills_dir}",
-            )
         if not skills_dir.is_dir():
             return SkillPluginDiscovery(
                 status="missing",
@@ -276,29 +255,10 @@ def discover_skill_plugin(
         )
 
     root = (Path.home() / ".copilot" / "installed-plugins").expanduser().resolve()
-    unsafe = [
-        skills_dir.parent
-        for skills_dir in sorted(root.glob("*/*/skills"))
-        if skills_dir.is_dir()
-        and _carries_reference_skill(skills_dir, skill_names)
-        and path_has_symlink_component(skills_dir)
-    ]
-    if unsafe:
-        return SkillPluginDiscovery(
-            status="unsafe",
-            plugin_root=None,
-            skills_dir=None,
-            candidates=tuple(unsafe),
-            identity="unknown",
-            install_hint="Use a real installed plugin path; symlinked plugin paths are refused.",
-            detail="unsafe symlinked plugin path(s): " + "; ".join(str(path) for path in unsafe),
-        )
     candidates = [
         skills_dir.parent
         for skills_dir in sorted(root.glob("*/*/skills"))
-        if skills_dir.is_dir()
-        and _carries_reference_skill(skills_dir, skill_names)
-        and not path_has_symlink_component(skills_dir)
+        if skills_dir.is_dir() and _carries_reference_skill(skills_dir, skill_names)
     ]
     if len(candidates) == 1:
         plugin_root = candidates[0]
@@ -332,41 +292,11 @@ def discover_skill_plugin(
     )
 
 
-def _is_relative_to(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-        return True
-    except ValueError:
-        return False
-
-
-def destination_is_safe(root: Path, rel: Path, *, writing: bool) -> bool:
-    """Return whether touching ``root / rel`` cannot escape the installed skills directory."""
-    if rel.is_absolute() or ".." in rel.parts:
-        return False
-    root_resolved = root.resolve()
-    target = root / rel
-    current = root
-    for part in rel.parent.parts:
-        current /= part
-        if current.is_symlink():
-            return False
-    if not _is_relative_to(target.parent.resolve(), root_resolved):
-        return False
-    if target.is_symlink():
-        return False
-    if writing and target.exists() and not _is_relative_to(target.resolve(), root_resolved):
-        return False
-    return True
-
-
-def unsafe_destination_paths(src: Path, dst: Path) -> list[Path]:
-    """Return source-relative files whose destination path would escape or redirect writes."""
-    return [
-        path.relative_to(src)
-        for path in sorted(p for p in src.rglob("*") if p.is_file())
-        if not destination_is_safe(dst, path.relative_to(src), writing=True)
-    ]
+def make_reference_workdir(base: Path | None = None) -> Path:
+    """Allocate a private reference directory for one sync invocation."""
+    root = REFERENCE_BUILD if base is None else base
+    root.parent.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix=f"{root.name}-", dir=root.parent))
 
 
 def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-branches,too-many-locals,too-many-return-statements,too-many-statements
@@ -395,14 +325,13 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-bran
         print("SYNC: ERROR - --from-worktree and --source-ref are mutually exclusive")
         return 5
 
-    if REFERENCE_BUILD.exists():
-        shutil.rmtree(REFERENCE_BUILD)
+    reference_build = make_reference_workdir()
     try:
         if args.from_worktree:
             print("SYNC: WORKTREE SOURCE - explicit --from-worktree is serving unmerged local bytes")
         try:
             reference = build_reference_copy(
-                REFERENCE_BUILD,
+                reference_build,
                 source_ref=source_ref,
                 from_worktree=args.from_worktree,
             )
@@ -410,8 +339,7 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-bran
             print(f"SYNC: ERROR - cannot verify publication source {source_ref!r}")
             print(f"      {exc}")
             print(
-                "      Refusing to fall back to the caller's working tree; "
-                "use --from-worktree explicitly to test it."
+                "      Refusing to fall back to the caller's working tree; use --from-worktree explicitly to test it."
             )
             return 5
         src = reference.skills_dir
@@ -421,11 +349,6 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-bran
             Path(os.environ[PLUGIN_ROOT_ENV]) if os.environ.get(PLUGIN_ROOT_ENV) else None
         )
         discovery = discover_skill_plugin(skill_names, plugin_root_override=plugin_root_override)
-        if discovery.status == "unsafe":
-            print(f"SYNC: ERROR - unsafe plugin path ({discovery.detail})")
-            for candidate in discovery.candidates:
-                print(f"      {candidate}")
-            return 6
         if discovery.status == "multiple":
             print("SYNC: ERROR - multiple installed plugins carry these skill bundles")
             for candidate in discovery.candidates:
@@ -438,10 +361,6 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-bran
             return 2
 
         installed = discovery.skills_dir
-        unsafe = unsafe_destination_paths(src, installed)
-        if unsafe:
-            print(f"SYNC: ERROR - unsafe destination path: {unsafe[0].as_posix()}")
-            return 6
         changed, extra = diff_tree(src, installed)
 
         if not changed and not extra:
@@ -458,16 +377,10 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-bran
             return 1
 
         for rel in changed:
-            if not destination_is_safe(installed, rel, writing=True):
-                print(f"SYNC: ERROR - unsafe destination path: {rel.as_posix()}")
-                return 6
             target = installed / rel
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src / rel, target)
         for rel in extra:
-            if not destination_is_safe(installed, rel, writing=False):
-                print(f"SYNC: ERROR - unsafe stale path: {rel.as_posix()}")
-                return 6
             (installed / rel).unlink()
 
         # Re-diff rather than trusting the copies. The whole reason this script exists is a lock
@@ -484,8 +397,8 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-bran
         print("      copy in memory. New sessions (and subagents they spawn) get this one.")
         return 0
     finally:
-        if REFERENCE_BUILD.exists():
-            shutil.rmtree(REFERENCE_BUILD)
+        if reference_build.exists():
+            shutil.rmtree(reference_build)
 
 
 if __name__ == "__main__":

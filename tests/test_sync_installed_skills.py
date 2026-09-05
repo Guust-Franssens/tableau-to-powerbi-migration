@@ -22,6 +22,16 @@ def _run_git(repo: Path, *args: str) -> None:
     subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
 
 
+def _git_stdout(repo: Path, *args: str, input_text: str | None = None) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        input=input_text,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
 def _write_repo(repo: Path, marker: str) -> None:
     (repo / "scripts").mkdir(parents=True, exist_ok=True)
     shutil.copy2(SCRIPTS / "build_plugin.py", repo / "scripts" / "build_plugin.py")
@@ -143,130 +153,52 @@ def test_source_ref_must_be_proven_merged_into_origin_master(
     assert "Refusing to fall back to the caller's working tree" in output
 
 
-def test_plugin_root_with_symlink_component_is_refused(
+def test_each_invocation_uses_a_private_reference_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    plugin_root = tmp_path / "installed" / "collection" / "plugin"
+    skill_dir = plugin_root / "skills" / "sample"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# sample\n", encoding="utf-8")
+    seen: list[Path] = []
+
+    def fake_build(workdir: Path, *, source_ref: str, from_worktree: bool) -> sync.ReferenceCopy:
+        del source_ref, from_worktree
+        seen.append(workdir)
+        ref_skill = workdir / "reference" / "plugins" / "plugin" / "skills" / "sample"
+        ref_skill.mkdir(parents=True)
+        (ref_skill / "SKILL.md").write_text("# sample\n", encoding="utf-8")
+        return sync.ReferenceCopy(ref_skill.parent, f"fake {len(seen)}")
+
+    monkeypatch.setattr(sync, "REFERENCE_BUILD", tmp_path / "reference-build")
+    monkeypatch.setattr(sync, "build_reference_copy", fake_build)
+
+    assert sync.main(["--check", "--plugin-root", str(plugin_root)]) == 0
+    assert sync.main(["--check", "--plugin-root", str(plugin_root)]) == 0
+
+    capsys.readouterr()
+    assert len(seen) == 2
+    assert seen[0] != seen[1]
+    assert all(not path.exists() for path in seen)
+
+
+def test_source_ref_archive_symlink_entry_is_refused_without_filesystem_symlink(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     repo = _fixture_repo(tmp_path, monkeypatch)
-    plugin_root = _build_installed_from(repo, tmp_path)
-    link = tmp_path / "plugin-link"
-    try:
-        link.symlink_to(plugin_root, target_is_directory=True)
-    except OSError as exc:
-        pytest.skip(f"symlinks unavailable in this environment: {exc}")
-
-    assert sync.main(["--check", "--plugin-root", str(link)]) == 6
-
-    output = capsys.readouterr().out
-    assert "unsafe plugin path" in output
-
-
-def test_write_refuses_symlink_destination_that_escapes_installed_skills(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    repo = _fixture_repo(tmp_path, monkeypatch)
-    plugin_root = _build_installed_from(repo, tmp_path)
-    outside = tmp_path / "outside.md"
-    outside.write_text("do not overwrite\n", encoding="utf-8")
     first_skill = build_plugin.SHIPPED_SKILLS[0]
-    target = plugin_root / "skills" / first_skill / "SKILL.md"
-    target.unlink()
-    try:
-        target.symlink_to(outside)
-    except OSError as exc:
-        pytest.skip(f"symlinks unavailable in this environment: {exc}")
+    blob = _git_stdout(repo, "hash-object", "-w", "--stdin", input_text="SKILL.md")
+    _git_stdout(
+        repo, "update-index", "--index-info", input_text=f"120000 {blob}\t.github/skills/{first_skill}/LINK.md\n"
+    )
+    _run_git(repo, "commit", "-m", "track symlink entry")
+    _run_git(repo, "update-ref", "refs/remotes/origin/master", "HEAD")
 
-    assert sync.main(["--plugin-root", str(plugin_root)]) == 6
-
-    output = capsys.readouterr().out
-    assert "unsafe destination path" in output
-    assert outside.read_text(encoding="utf-8") == "do not overwrite\n"
-
-
-def test_write_refuses_in_tree_symlink_destination_without_overwriting_target(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    repo = _fixture_repo(tmp_path, monkeypatch)
-    plugin_root = _build_installed_from(repo, tmp_path)
-    first_skill, second_skill = build_plugin.SHIPPED_SKILLS[:2]
-    target = plugin_root / "skills" / first_skill / "SKILL.md"
-    redirected = plugin_root / "skills" / second_skill / "SKILL.md"
-    original_redirected = redirected.read_text(encoding="utf-8")
-    target.unlink()
-    try:
-        target.symlink_to(redirected)
-    except OSError as exc:
-        pytest.skip(f"symlinks unavailable in this environment: {exc}")
-
-    assert sync.main(["--plugin-root", str(plugin_root)]) == 6
+    assert sync.main(["--check", "--plugin-root", str(tmp_path / "missing-plugin")]) == 5
 
     output = capsys.readouterr().out
-    assert "unsafe destination path" in output
-    assert redirected.read_text(encoding="utf-8") == original_redirected
-
-
-def test_write_refuses_symlink_parent_without_overwriting_redirected_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    repo = _fixture_repo(tmp_path, monkeypatch)
-    plugin_root = _build_installed_from(repo, tmp_path)
-    first_skill, second_skill = build_plugin.SHIPPED_SKILLS[:2]
-    first_dir = plugin_root / "skills" / first_skill
-    redirected = plugin_root / "skills" / second_skill / "SKILL.md"
-    original_redirected = redirected.read_text(encoding="utf-8")
-    shutil.rmtree(first_dir)
-    try:
-        first_dir.symlink_to(plugin_root / "skills" / second_skill, target_is_directory=True)
-    except OSError as exc:
-        pytest.skip(f"symlinks unavailable in this environment: {exc}")
-
-    assert sync.main(["--plugin-root", str(plugin_root)]) == 6
-
-    output = capsys.readouterr().out
-    assert "unsafe destination path" in output
-    assert redirected.read_text(encoding="utf-8") == original_redirected
-
-
-def test_write_refuses_matching_symlinked_skill_directory_before_stale_removal(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    repo = _fixture_repo(tmp_path, monkeypatch)
-    plugin_root = _build_installed_from(repo, tmp_path)
-    first_skill = build_plugin.SHIPPED_SKILLS[0]
-    first_dir = plugin_root / "skills" / first_skill
-    redirect_dir = plugin_root / "skills" / "redirect-target"
-    shutil.copytree(first_dir, redirect_dir)
-    shutil.rmtree(first_dir)
-    try:
-        first_dir.symlink_to(redirect_dir, target_is_directory=True)
-    except OSError as exc:
-        pytest.skip(f"symlinks unavailable in this environment: {exc}")
-
-    assert sync.main(["--plugin-root", str(plugin_root)]) == 6
-
-    output = capsys.readouterr().out
-    assert "unsafe destination path" in output
-    assert first_dir.is_symlink()
-    assert redirect_dir.is_dir()
-
-
-def test_write_refuses_stale_symlink_leaf_instead_of_unlinking_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    repo = _fixture_repo(tmp_path, monkeypatch)
-    plugin_root = _build_installed_from(repo, tmp_path)
-    target_dir = plugin_root / "skills" / "redirect-target"
-    target_dir.mkdir()
-    stale_link = plugin_root / "skills" / "stale-skill"
-    try:
-        stale_link.symlink_to(target_dir, target_is_directory=True)
-    except OSError as exc:
-        pytest.skip(f"symlinks unavailable in this environment: {exc}")
-
-    assert sync.main(["--plugin-root", str(plugin_root)]) == 6
-
-    output = capsys.readouterr().out
-    assert "unsafe stale path" in output
-    assert stale_link.is_symlink()
+    assert "unsupported link entry" in output
+    assert "Refusing to fall back to the caller's working tree" in output
 
 
 def test_from_worktree_is_explicit_and_reports_unmerged_drift(
