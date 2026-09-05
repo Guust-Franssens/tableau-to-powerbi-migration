@@ -1296,6 +1296,64 @@ def test_an_unresolved_luid_matching_two_workbooks_is_reported_ambiguous_not_gue
     assert "wb-a" not in identities and "wb-b" not in identities, "must not guess either real workbook"
 
 
+def test_TWO_unresolved_dependency_rows_sharing_an_ambiguous_name_report_the_occurrence_count(
+    tmp_path: Path,
+) -> None:
+    """Blocking finding (#526 follow-up): two SEPARATE, textually-identical dependency rows -- both
+    unresolved, both matching the same two same-named real workbooks -- must not collapse into one
+    claimed workbook. `SELECT DISTINCT` used to fold them into a single raw edge before this
+    function ever ran; even with that fixed, grouping by the bare `AMBIGUOUS::<name>` identity would
+    still silently re-collapse them here. The real occurrence count (2) must reach the report.
+    """
+    path = tmp_path / "estate.db"
+    con = sqlite3.connect(path)
+    con.executescript(
+        """
+        CREATE TABLE project (luid TEXT PRIMARY KEY, name TEXT);
+        CREATE TABLE workbook (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        CREATE TABLE datasource (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        CREATE TABLE dependency (workbook_luid TEXT, workbook_name TEXT, datasource_luid TEXT, datasource_name TEXT);
+        INSERT INTO project VALUES ('proj-a', 'Region A');
+        INSERT INTO project VALUES ('proj-b', 'Region B');
+        INSERT INTO workbook VALUES ('wb-a', 'Revenue Dashboard', 'proj-a');
+        INSERT INTO workbook VALUES ('wb-b', 'Revenue Dashboard', 'proj-b');
+        INSERT INTO datasource VALUES ('ds-sessions', 'DS_Sessions_by_Product', 'proj-a');
+        INSERT INTO dependency VALUES ('', 'Revenue Dashboard', 'ds-sessions', 'DS_Sessions_by_Product');
+        INSERT INTO dependency VALUES ('', 'Revenue Dashboard', 'ds-sessions', 'DS_Sessions_by_Product');
+        """
+    )
+    con.commit()
+    con.close()
+    edges = edges_from(path)
+    assert len(edges) == 2, "both unresolved dependency rows must survive the join, not just one"
+    rows = [
+        {"name": "DS_Sessions_by_Product", "kind": "datasource", "luid": "ds-sessions", "download_error": "500"},
+        {"name": "Revenue Dashboard", "kind": "workbook", "luid": "wb-a", "ours": {"ok": True}, "theirs": {"ok": True}},
+        {"name": "Revenue Dashboard", "kind": "workbook", "luid": "wb-b", "ours": {"ok": True}, "theirs": {"ok": True}},
+    ]
+    orphans = harvest.orphaned_dependents(rows, edges)
+    assert len(orphans) == 1
+    entries = orphans[0][1]
+    assert len(entries) == 1, "an unresolvable ambiguity must not silently invent a second identity"
+    identity, name = entries[0]
+    assert identity == "AMBIGUOUS::Revenue Dashboard"
+    assert "2" in name and "cannot be individually attributed" in name, name
+
+
+def test_a_single_ambiguous_occurrence_does_not_gain_a_spurious_count(tmp_path: Path) -> None:
+    """Exactly one unresolved dependency row must read as an ordinary ambiguity entry, never
+    "1 unresolved dependencies ..." noise -- the count text is reserved for genuine multiplicity."""
+    db = estate_with_an_unresolved_luid_matching_two_same_named_workbooks(tmp_path / "estate.db")
+    edges = edges_from(db)
+    rows = [
+        {"name": "DS_Sessions_by_Product", "kind": "datasource", "luid": "ds-sessions", "download_error": "500"},
+        {"name": "Revenue Dashboard", "kind": "workbook", "luid": "wb-a", "ours": {"ok": True}, "theirs": {"ok": True}},
+        {"name": "Revenue Dashboard", "kind": "workbook", "luid": "wb-b", "ours": {"ok": True}, "theirs": {"ok": True}},
+    ]
+    orphans = harvest.orphaned_dependents(rows, edges)
+    assert orphans == [("DS_Sessions_by_Product", [("AMBIGUOUS::Revenue Dashboard", "Revenue Dashboard")])]
+
+
 def test_a_dependency_row_with_no_luid_and_no_name_match_still_survives_the_join(tmp_path: Path) -> None:
     """Third rung of the same ladder: the workbook LUID is blank AND the name matches nothing in the
     `workbook` table at all. Before this fix the row vanished at the SQL layer regardless of which

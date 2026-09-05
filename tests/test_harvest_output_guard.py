@@ -252,6 +252,28 @@ def test_guard_checks_every_artifact_not_just_the_downloads(repo: Path) -> None:
     assert h.refuse_unignored_output(repo / "_partial", allow_unignored=False) is True
 
 
+def test_representative_plain_extensions_are_registered_artifacts() -> None:
+    """The production fetcher writes PLAIN `.twb`/`.tds` whenever a REST download is not a zip
+    (`existing_asset()`'s docstring measured 18/38 workbooks doing exactly that on a real harvest),
+    not just the packaged `.twbx`/`.tdsx` this guard used to know about (review of the #526
+    follow-up)."""
+    assert "assets/harvested-workbook.twb" in h.OUTPUT_ARTIFACTS
+    assert "assets/harvested-datasource.tds" in h.OUTPUT_ARTIFACTS
+
+
+def test_ignoring_only_the_packaged_extension_still_refuses_on_the_plain_one(repo: Path) -> None:
+    """A `.gitignore` rule narrow enough to cover `.twbx`/`.tdsx` but not `.twb`/`.tds` must still be
+    refused: those plain files are exactly as committable as the packaged ones, and are what a real
+    harvest writes almost half the time."""
+    (repo / ".gitignore").write_text(
+        "/_selective/assets/*.twbx\n/_selective/assets/*.tdsx\n/_selective/parse-sweep*\n",
+        encoding="utf-8",
+    )
+    unignored = h.unignored_output_paths(repo / "_selective")
+    assert {p.name for p in unignored} == {"harvested-workbook.twb", "harvested-datasource.tds"}, unignored
+    assert h.refuse_unignored_output(repo / "_selective", allow_unignored=False) is True
+
+
 def test_every_out_slash_literal_write_target_is_a_protected_artifact() -> None:
     """`parse-sweep-totals.json` shipped written by `summarise()` but absent from `OUTPUT_ARTIFACTS`,
     so the guard above never saw it and it could land unignored (review of the #483 follow-up). Scan

@@ -143,10 +143,16 @@ EXIT_PARTIAL = 3
 #     shape people write. A file path underneath makes every parent a directory by construction.
 #   * it is the honest question: these are the paths a `git add -A` would stage.
 # `assets/` holds the downloaded workbooks/datasources; the sweep files record every asset's NAME
-# and LUID even under `--skip-download`, so all of them are checked, not just the downloads.
+# and LUID even under `--skip-download`, so all of them are checked, not just the downloads. Both
+# the PACKAGED (`.twbx`/`.tdsx`) and PLAIN (`.twb`/`.tds`) extensions are represented: the production
+# fetcher writes plain XML whenever the REST download is not a zip (`existing_asset()`'s docstring
+# measured this at 18/38 workbooks on a real harvest), so a guard that only knows the packaged
+# extension would miss most of what actually lands on disk (review of the #526 follow-up).
 OUTPUT_ARTIFACTS = (
     "assets/harvested-workbook.twbx",
     "assets/harvested-datasource.tdsx",
+    "assets/harvested-workbook.twb",
+    "assets/harvested-datasource.tds",
     "parse-sweep.json",
     "parse-sweep.md",
     "parse-sweep-totals.json",
@@ -1022,6 +1028,12 @@ def dependency_edges(con: sqlite3.Connection) -> list[tuple[str, str, str, str, 
        marker, never a guess at either one;
     3. else the dependency row is still returned - workbook_luid/project both empty - so the caller
        can report it as unidentified rather than the row silently vanishing.
+
+    Every raw dependency ROW is returned as its own edge, even when several rows are textually
+    identical (blank LUID, same name, same datasource): the caller, not this function, decides
+    whether that multiplicity is real occurrences or a data-quality duplicate, and it can only do
+    that if the count survives to `orphaned_dependents()` (review of the #526 follow-up: `SELECT
+    DISTINCT` used to fold N unresolved dependency rows into one before that fallback ever ran).
     """
     workbook_rows = list(
         con.execute(
@@ -1037,9 +1049,17 @@ def dependency_edges(con: sqlite3.Connection) -> list[tuple[str, str, str, str, 
     for luid, name, project in workbook_rows:
         by_name.setdefault(_normalized_name(name), []).append((luid, name or "", project or ""))
 
+    # No `DISTINCT` here on purpose (review of the #526 follow-up): the workbook end being unresolved
+    # does not make two dependency rows THE SAME occurrence - they could be two genuinely different,
+    # equally-unattributable bindings that merely look identical because there is no LUID to tell
+    # them apart. `DISTINCT` collapsed exactly that case to one row before `orphaned_dependents()`
+    # ever saw it, so it never had raw material to report "N unresolved dependencies share this name"
+    # - it always saw N=1. A resolved (LUID-matched) row still naturally collapses downstream, in
+    # `orphaned_dependents()`, because its identity is real and duplicate real edges key to the same
+    # identity there regardless of how many raw rows produced them.
     raw = con.execute(
         """
-        SELECT DISTINCT dependency.workbook_luid, dependency.workbook_name, datasource.luid, datasource.name
+        SELECT dependency.workbook_luid, dependency.workbook_name, datasource.luid, datasource.name
         FROM dependency
         JOIN datasource ON dependency.datasource_luid = datasource.luid
             OR (
@@ -1088,6 +1108,14 @@ def orphaned_dependents(
     matched more than one real workbook and there is no LUID to pick between them, an explicit
     `"AMBIGUOUS::<name>"`; else an explicit `UNIDENTIFIED-N` marker so an edge that resolves nothing
     at all is still reported instead of being silently dropped or coalesced with an unrelated one.
+
+    An `AMBIGUOUS::<name>` group can itself be hit by more than one raw dependency row for the SAME
+    datasource (`dependency_edges` no longer collapses those via `SELECT DISTINCT` - review of the
+    #526 follow-up). This function must not silently re-collapse them either: it cannot invent a
+    second identity for a row it genuinely cannot distinguish from the first, so instead it reports
+    ONE ambiguity-group record whose display name states the EXACT occurrence count - "N unresolved
+    dependencies share this name and cannot be individually attributed" - rather than the count
+    quietly reading as one workbook when the underlying dependency data said N.
     """
     missing_ids = {id(r) for r in never_downloaded(results)}
     failed_datasources = {
@@ -1100,7 +1128,27 @@ def orphaned_dependents(
         for r in results
         if id(r) not in missing_ids and r.get("kind") == "workbook"
     }
+    by_datasource, ambiguous_hits = _group_edges_by_datasource(edges, failed_datasources, landed_workbooks)
+    return [
+        (key, _finalize_orphan_entries(key, entries, ambiguous_hits)) for key, entries in sorted(by_datasource.items())
+    ]
+
+
+def _group_edges_by_datasource(
+    edges: list[tuple[str, str, str, str, str]],
+    failed_datasources: dict[str, str],
+    landed_workbooks: dict[str, str],
+) -> tuple[dict[str, dict[str, tuple[str, str]]], dict[tuple[str, str], int]]:
+    """The identity-resolution loop `orphaned_dependents()` used to run inline: pulled out so that
+    function's own local-variable count stays readable (pylint's `too-many-locals`), not for reuse.
+
+    Returns `(by_datasource, ambiguous_hits)`: entries grouped per failed datasource, keyed by each
+    workbook's resolved identity, plus a separate per-`(datasource, identity)` occurrence count for
+    the `AMBIGUOUS::<name>` groups specifically - the real multiplicity `_finalize_orphan_entries()`
+    needs to report rather than silently collapsing (review of the #526 follow-up).
+    """
     by_datasource: dict[str, dict[str, tuple[str, str]]] = {}
+    ambiguous_hits: dict[tuple[str, str], int] = {}
     unidentified = 0
     for workbook_luid, workbook_name, workbook_project, datasource_luid, datasource_name in edges:
         if datasource_luid not in failed_datasources:
@@ -1113,21 +1161,33 @@ def orphaned_dependents(
         if workbook_luid and workbook_luid not in landed_workbooks:
             continue
         name = workbook_name or landed_workbooks.get(workbook_luid, "?")
+        key = datasource_name or failed_datasources[datasource_luid]
         if workbook_luid:
             identity = workbook_luid
         elif workbook_project == _AMBIGUOUS_WORKBOOK:
             identity = f"AMBIGUOUS::{name}"
+            ambiguous_hits[(key, identity)] = ambiguous_hits.get((key, identity), 0) + 1
         elif workbook_project:
             identity = f"{workbook_project}::{name}"
         else:
             unidentified += 1
             identity = f"UNIDENTIFIED-{unidentified}"
-        key = datasource_name or failed_datasources[datasource_luid]
         by_datasource.setdefault(key, {})[identity] = (identity, name)
-    return [
-        (name, sorted(entries.values(), key=lambda entry: (entry[0], entry[1])))
-        for name, entries in sorted(by_datasource.items())
-    ]
+    return by_datasource, ambiguous_hits
+
+
+def _finalize_orphan_entries(
+    key: str, entries: dict[str, tuple[str, str]], ambiguous_hits: dict[tuple[str, str], int]
+) -> list[tuple[str, str]]:
+    """One datasource's grouped `(identity, name)` entries, with any genuine ambiguity-group
+    multiplicity (`ambiguous_hits`) folded into the display name rather than silently dropped."""
+    finalized = []
+    for identity, name in entries.values():
+        occurrences = ambiguous_hits.get((key, identity), 0)
+        if occurrences > 1:
+            name = f"{name} ({occurrences} unresolved dependencies share this name, cannot be individually attributed)"
+        finalized.append((identity, name))
+    return sorted(finalized, key=lambda entry: (entry[0], entry[1]))
 
 
 def _format_orphan_workbook(entry: tuple[str, str]) -> str:
