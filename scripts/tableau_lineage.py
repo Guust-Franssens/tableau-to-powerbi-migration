@@ -144,12 +144,18 @@ class SurveyDatasource:
     project: str | None = None
     consumers: set[str] = field(default_factory=set)
     projects: set[str] = field(default_factory=set)
-    luids: set[str] = field(default_factory=set)
+    resolved_luids: set[str] = field(default_factory=set)
+    candidate_luids: set[str] = field(default_factory=set)
+
+    @property
+    def luids(self) -> set[str]:
+        """All identities observed, including candidates retained only as collision evidence."""
+        return self.resolved_luids | self.candidate_luids
 
     def observe(self, luid: str | None, project: str | None) -> None:
         """Record a RESOLVED sighting: this is the identity the download step will use."""
         if luid:
-            self.luids.add(luid)
+            self.resolved_luids.add(luid)
             self.luid = self.luid or luid
         if project:
             self.projects.add(project)
@@ -165,18 +171,18 @@ class SurveyDatasource:
         fetching whichever candidate happened to be listed first.
         """
         if luid:
-            self.luids.add(luid)
+            self.candidate_luids.add(luid)
         if project:
             self.projects.add(project)
 
     @property
     def ambiguous(self) -> bool:
         """True when this ONE key covers several data sources that merely share a name."""
-        return len(self.projects) > 1 or len(self.luids) > 1
+        return len(self.projects) > 1 or len(self.resolved_luids) > 1 or len(self.candidate_luids) > 1
 
 
 @dataclass(frozen=True)
-class Survey:
+class Survey:  # pylint: disable=too-many-instance-attributes
     """The REST-derived dependency graph from `estate_survey.py --json`.
 
     This is GROUND TRUTH for whether a dependency exists: it was read from each workbook's own
@@ -190,10 +196,13 @@ class Survey:
     path: Path
     datasources: dict[str, SurveyDatasource] = field(default_factory=dict)
     workbook_names: dict[str, str] = field(default_factory=dict)
+    workbook_luids: dict[str, set[str]] = field(default_factory=dict)
     by_luid: dict[str, str] = field(default_factory=dict)
     workbooks_total: int = 0
     gaps: tuple[str, ...] = ()
     scoped: bool = False
+    scope_unmatched: tuple[str, ...] = ()
+    scoped_empty: bool = False
 
     @property
     def complete(self) -> bool:
@@ -222,7 +231,10 @@ class Survey:
         return sorted((self.workbook_names.get(w, w) for w in entry.consumers), key=str.lower)
 
     def includes_metadata_source(
-        self, datasource_luid: str | None, survey_key: str | None, downstream_workbooks: Sequence[str]
+        self,
+        datasource_luid: str | None,
+        survey_key: str | None,
+        downstream_workbooks: Sequence[dict[str, Any]],
     ) -> bool:
         """Whether a Metadata API row belongs to a complete, filtered survey.
 
@@ -231,19 +243,25 @@ class Survey:
         must not select an arbitrary Metadata API row. A Metadata edge to a selected workbook is
         retained even when the datasource itself is outside the selected project.
         """
-        selected_workbooks = {_norm(workbook) for workbook in self.workbook_names}
-        if any(_norm(workbook) in selected_workbooks for workbook in downstream_workbooks):
-            return True
+        selected_workbooks = set(self.workbook_names)
+        selected_luids = set(self.workbook_luids)
+        for workbook in downstream_workbooks:
+            workbook_luid = workbook.get("luid")
+            workbook_name = _norm(workbook.get("name"))
+            if workbook_luid and selected_luids:
+                if workbook_luid in selected_luids:
+                    return True
+                continue
+            if workbook_name in selected_workbooks:
+                return True
         if survey_key is None:
             return False
         entry = self.datasources.get(survey_key)
         if not entry:
             return False
-        if datasource_luid and entry.luid:
-            return datasource_luid == entry.luid
-        if datasource_luid and entry.luids:
-            return False
-        return not entry.luids
+        if datasource_luid:
+            return datasource_luid in entry.resolved_luids
+        return not entry.resolved_luids
 
 
 def _summary(data: dict[str, Any]) -> dict[str, Any]:
@@ -321,12 +339,26 @@ def _visibility_gaps(data: dict[str, Any]) -> list[str]:
     )
     if unread:
         gaps.append(f"{unread} workbook connection(s) could not be read")
-    if not workbooks:
+    if not workbooks and not _scoped_empty_selection(data):
         gaps.append("the survey lists no workbooks at all, so it observed no consumer edge")
     total = summary.get("workbooks_total")
     if isinstance(total, int) and total > len(workbooks):
         gaps.append(f"the survey lists {len(workbooks)} of the {total} workbook(s) it counted")
     return gaps
+
+
+def _scope_payload(data: dict[str, Any]) -> dict[str, Any]:
+    scope = data.get("scope")
+    return scope if isinstance(scope, dict) else {}
+
+
+def _scoped_empty_selection(data: dict[str, Any]) -> bool:
+    """Whether a scoped selector was evaluated successfully and selected zero workbooks."""
+    scope = _scope_payload(data)
+    if not _survey_scope(data) or scope.get("unmatched"):
+        return False
+    selected = scope.get("workbooks_selected")
+    return selected == 0
 
 
 def _resolution_gaps(data: dict[str, Any], unresolved_deps: int) -> list[str]:
@@ -358,7 +390,14 @@ def _survey_gaps(data: dict[str, Any], unresolved_deps: int) -> tuple[str, ...]:
     original ("Both the Metadata API and the survey found no consumer"). The missing workbook is
     precisely the consumer that would have disproved it.
     """
-    observed = _visibility_gaps(data) + _resolution_gaps(data, unresolved_deps)
+    scope = _scope_payload(data)
+    unmatched = scope.get("unmatched") or []
+    scope_gaps = (
+        [f"scope selector(s) did not match: {', '.join(map(str, unmatched))}"]
+        if isinstance(unmatched, list) and unmatched
+        else []
+    )
+    observed = _visibility_gaps(data) + _resolution_gaps(data, unresolved_deps) + scope_gaps
     return tuple(_flag_gaps(data, observed) + observed)
 
 
@@ -380,6 +419,7 @@ def _read_survey_edges(
     workbooks: list[dict[str, Any]],
     datasources: dict[str, SurveyDatasource],
     workbook_names: dict[str, str],
+    workbook_luids: dict[str, set[str]],
 ) -> int:
     """Index every workbook -> published data source edge the survey recorded.
 
@@ -388,7 +428,10 @@ def _read_survey_edges(
     unresolved = 0
     for workbook in workbooks:
         wb_display = workbook.get("name") or "?"
-        workbook_names[_norm(wb_display)] = wb_display
+        workbook_key = _norm(wb_display)
+        workbook_names[workbook_key] = wb_display
+        if workbook.get("luid"):
+            workbook_luids.setdefault(workbook.get("luid"), set()).add(workbook_key)
         for dep in workbook.get("published_dependencies") or []:
             if not isinstance(dep, dict):
                 continue
@@ -433,7 +476,8 @@ def load_survey(path: Path) -> Survey:
     workbooks = data.get("workbooks") or []
     datasources: dict[str, SurveyDatasource] = {}
     workbook_names: dict[str, str] = {}
-    unresolved = _read_survey_edges(workbooks, datasources, workbook_names)
+    workbook_luids: dict[str, set[str]] = {}
+    unresolved = _read_survey_edges(workbooks, datasources, workbook_names, workbook_luids)
 
     # `required_datasources` names the same data sources again, with the LUID/project the download
     # step needs. It also keeps a required data source in the plan when its consumers were listed
@@ -458,10 +502,13 @@ def load_survey(path: Path) -> Survey:
         path=path,
         datasources=datasources,
         workbook_names=workbook_names,
-        by_luid={ds.luid: key for key, ds in datasources.items() if ds.luid},
+        workbook_luids=workbook_luids,
+        by_luid={luid: key for key, ds in datasources.items() for luid in ds.resolved_luids},
         workbooks_total=len(workbooks),
         gaps=_survey_gaps(data, unresolved),
         scoped=_survey_scope(data),
+        scope_unmatched=tuple(_scope_payload(data).get("unmatched") or ()),
+        scoped_empty=_scoped_empty_selection(data),
     )
 
 
@@ -696,7 +743,7 @@ def _survey_only_rows(site: str, survey: Survey, by_key: dict[str, list[dict[str
     for key, seen in survey.datasources.items():
         if key in by_key:
             continue
-        ambiguous = survey.scoped and survey.complete and len(seen.luids) > 1
+        ambiguous = survey.scoped and survey.complete and len(seen.resolved_luids) > 1
         source = {
             "name": seen.name,
             "luid": None if ambiguous else seen.luid,
@@ -726,9 +773,13 @@ def build_plan(datasources: list[dict[str, Any]], site: str, survey: Survey | No
     apply_scope = bool(survey and survey.scoped and survey.complete)
     for datasource in datasources:
         name = datasource.get("name") or ""
-        downstream = [w.get("name") or "?" for w in datasource.get("downstreamWorkbooks") or []]
+        downstream_rows = [
+            {"luid": w.get("luid"), "name": w.get("name") or "?"}
+            for w in datasource.get("downstreamWorkbooks") or []
+        ]
+        downstream = [w["name"] for w in downstream_rows]
         survey_key, matched_via = survey.match(datasource.get("luid"), name) if survey else (None, None)
-        if apply_scope and not survey.includes_metadata_source(datasource.get("luid"), survey_key, downstream):
+        if apply_scope and not survey.includes_metadata_source(datasource.get("luid"), survey_key, downstream_rows):
             continue
         source = {
             "name": name,

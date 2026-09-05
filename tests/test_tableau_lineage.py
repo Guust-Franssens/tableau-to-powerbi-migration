@@ -97,6 +97,7 @@ def _survey_workbook(
     project: str = "Certified Sources",
     unknown: bool = False,
     candidates: dict[str, list[tuple[str, str]]] | None = None,
+    luid: str | None = None,
 ) -> dict[str, Any]:
     """One workbook entry as `estate_survey.py --json` writes it.
 
@@ -141,7 +142,7 @@ def _survey_workbook(
         )
     return {
         "name": name,
-        "luid": f"wb-{name}",
+        "luid": luid or f"wb-{name}",
         "project": "Reports",
         "published_dependencies": deps,
         # `build_survey` stamps both of these on every workbook row; the fixtures carry them so a
@@ -371,6 +372,108 @@ def test_a_project_scoped_survey_excludes_unrelated_metadata_sources(tmp_path: P
     assert [entry["name"] for entry in plan] == [SALES_DS]
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+def test_a_scoped_survey_keeps_every_resolved_same_name_datasource_luid(
+    tmp_path: Path, reverse: bool
+) -> None:
+    """Resolved identities, not first-seen captions, define the scoped datasource denominator."""
+    workbooks = [
+        _survey_workbook(FINANCE_WB, [(SHARED_DS, "ds-finance")], project="Finance"),
+        _survey_workbook(MARKETING_WB, [(SHARED_DS, "ds-marketing")], project="Marketing"),
+    ]
+    if reverse:
+        workbooks.reverse()
+    survey = load_survey(
+        _survey_file(tmp_path, workbooks, scope={"type": "project", "projects": ["Finance", "Marketing"]})
+    )
+    plan = build_plan(
+        [
+            _metadata(SHARED_DS, luid="ds-finance", project="Finance"),
+            _metadata(SHARED_DS, luid="ds-marketing", project="Marketing"),
+        ],
+        "",
+        survey,
+    )
+
+    assert {entry["luid"] for entry in plan} == {"ds-finance", "ds-marketing"}
+
+
+def test_a_selected_workbook_is_matched_by_luid_before_name(tmp_path: Path) -> None:
+    """A renamed selected workbook is retained while a foreign same-caption workbook is excluded."""
+    survey = load_survey(
+        _survey_file(
+            tmp_path,
+            [_survey_workbook(FINANCE_WB, [], project="Finance", luid="wb-1")],
+            scope={"type": "workbook", "workbooks": [FINANCE_WB]},
+        )
+    )
+    finance_source = _metadata("Finance Source")
+    finance_source["downstreamWorkbooks"] = [{"luid": "wb-1", "name": "Renamed Finance Report"}]
+    foreign_source = _metadata("Foreign Source")
+    foreign_source["downstreamWorkbooks"] = [{"luid": "wb-2", "name": FINANCE_WB}]
+
+    plan = build_plan([finance_source, foreign_source], "", survey)
+
+    assert [entry["name"] for entry in plan] == ["Finance Source"]
+
+
+def test_a_scoped_survey_with_an_unmatched_selector_falls_back_site_wide(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A partial selector result is incomplete even when another selector matched."""
+    survey = load_survey(
+        _survey_file(
+            tmp_path,
+            [_survey_workbook(FINANCE_WB, [(SALES_DS, None)], project="Finance")],
+            scope={"type": "project", "projects": ["Finance"], "unmatched": ["Typo"]},
+        )
+    )
+    datasources = [_metadata(SALES_DS, project="Finance"), _metadata("Marketing DS", project="Marketing")]
+
+    plan = build_plan(datasources, "", survey)
+    output = _rendered(caplog, plan, survey)
+
+    assert {entry["name"] for entry in plan} == {SALES_DS, "Marketing DS"}
+    assert "scope selector(s) did not match: Typo" in output
+    assert "SCOPED SURVEY FILTER DISABLED" in output
+
+
+def test_a_valid_empty_scoped_selection_has_an_empty_denominator(tmp_path: Path) -> None:
+    """A successful zero-result scope is not the same as a failed site-wide survey."""
+    survey = load_survey(
+        _survey_file(
+            tmp_path,
+            [],
+            scope={"type": "project", "projects": ["Finance"], "workbooks_selected": 0},
+        )
+    )
+
+    assert survey.complete
+    assert survey.scoped_empty
+    assert build_plan([_metadata(SALES_DS), _metadata("Marketing DS")], "", survey) == []
+
+
+def test_a_degraded_zero_workbook_scope_falls_back_site_wide(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A zero-result scope with a failure remains incomplete and must not narrow."""
+    survey = load_survey(
+        _survey_file(
+            tmp_path,
+            [],
+            scope={"type": "project", "projects": ["Finance"], "workbooks_selected": 0},
+            degraded=True,
+        )
+    )
+    datasources = [_metadata(SALES_DS), _metadata("Marketing DS")]
+
+    plan = build_plan(datasources, "", survey)
+    output = _rendered(caplog, plan, survey)
+
+    assert {entry["name"] for entry in plan} == {SALES_DS, "Marketing DS"}
+    assert "SCOPED SURVEY FILTER DISABLED" in output
+
+
 def test_a_project_scoped_survey_keeps_a_required_datasource_from_another_project(tmp_path: Path) -> None:
     """A selected workbook's model prerequisite remains in the plan across project boundaries."""
     survey = load_survey(
@@ -449,7 +552,7 @@ def test_a_scoped_name_collision_does_not_guess_a_metadata_identity(tmp_path: Pa
         survey,
     )
 
-    assert {entry["luid"] for entry in plan} == {"luid-finance"}
+    assert {entry["luid"] for entry in plan} == {"luid-finance", "luid-marketing"}
 
 
 def test_a_scoped_survey_only_name_collision_has_no_download_identity(tmp_path: Path) -> None:
