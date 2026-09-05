@@ -98,6 +98,7 @@ def _survey_workbook(
     unknown: bool = False,
     candidates: dict[str, list[tuple[str, str]]] | None = None,
     luid: str | None = None,
+    has_luid: bool = True,
 ) -> dict[str, Any]:
     """One workbook entry as `estate_survey.py --json` writes it.
 
@@ -142,7 +143,7 @@ def _survey_workbook(
         )
     return {
         "name": name,
-        "luid": luid or f"wb-{name}",
+        "luid": (luid or f"wb-{name}") if has_luid else "",
         "project": "Reports",
         "published_dependencies": deps,
         # `build_survey` stamps both of these on every workbook row; the fixtures carry them so a
@@ -398,6 +399,28 @@ def test_a_scoped_survey_keeps_every_resolved_same_name_datasource_luid(
     assert {entry["luid"] for entry in plan} == {"ds-finance", "ds-marketing"}
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+def test_a_scoped_survey_only_keeps_each_resolved_identity_and_project(
+    tmp_path: Path, reverse: bool
+) -> None:
+    """Survey-only prerequisites remain independently downloadable in either input order."""
+    workbooks = [
+        _survey_workbook(FINANCE_WB, [(SHARED_DS, "ds-finance")], project="Finance"),
+        _survey_workbook(MARKETING_WB, [(SHARED_DS, "ds-marketing")], project="Marketing"),
+    ]
+    if reverse:
+        workbooks.reverse()
+    survey = load_survey(
+        _survey_file(tmp_path, workbooks, scope={"type": "project", "projects": ["Finance", "Marketing"]})
+    )
+    plan = build_plan([], "", survey)
+
+    assert {(entry["luid"], entry["project"]) for entry in plan} == {
+        ("ds-finance", "Finance"),
+        ("ds-marketing", "Marketing"),
+    }
+
+
 def test_a_selected_workbook_is_matched_by_luid_before_name(tmp_path: Path) -> None:
     """A renamed selected workbook is retained while a foreign same-caption workbook is excluded."""
     survey = load_survey(
@@ -415,6 +438,30 @@ def test_a_selected_workbook_is_matched_by_luid_before_name(tmp_path: Path) -> N
     plan = build_plan([finance_source, foreign_source], "", survey)
 
     assert [entry["name"] for entry in plan] == ["Finance Source"]
+
+
+def test_a_mixed_known_and_legacy_workbook_selection_uses_name_fallback_per_workbook(
+    tmp_path: Path,
+) -> None:
+    """A legacy selected workbook may fall back by name without weakening known identities."""
+    survey = load_survey(
+        _survey_file(
+            tmp_path,
+            [
+                _survey_workbook("Known", [], project="Finance", luid="wb-known"),
+                _survey_workbook("Legacy", [], project="Finance", has_luid=False),
+            ],
+            scope={"type": "workbook", "workbooks": ["Known", "Legacy"]},
+        )
+    )
+    legacy_source = _metadata("Legacy Source")
+    legacy_source["downstreamWorkbooks"] = [{"luid": "wb-legacy", "name": "Legacy"}]
+    foreign_known_name = _metadata("Foreign Known Caption")
+    foreign_known_name["downstreamWorkbooks"] = [{"luid": "wb-foreign", "name": "Known"}]
+
+    plan = build_plan([legacy_source, foreign_known_name], "", survey)
+
+    assert [entry["name"] for entry in plan] == ["Legacy Source"]
 
 
 def test_a_scoped_survey_with_an_unmatched_selector_falls_back_site_wide(
@@ -569,8 +616,7 @@ def test_a_scoped_survey_only_name_collision_has_no_download_identity(tmp_path: 
     )
     plan = build_plan([], "", survey)
 
-    assert plan[0]["luid"] is None
-    assert plan[0]["matched_via"] == "survey-only-ambiguous"
+    assert {entry["luid"] for entry in plan} == {"luid-finance", "luid-marketing"}
 
 
 def test_a_declared_non_site_scope_is_not_treated_as_site_wide(tmp_path: Path) -> None:
@@ -1221,7 +1267,7 @@ def test_a_collision_the_metadata_api_cannot_see_at_all_is_still_reported(
     plan = build_plan([], "", survey)
     output = _rendered(caplog, plan, survey)
 
-    assert [entry["matched_via"] for entry in plan] == ["survey-only"]
+    assert [entry["matched_via"] for entry in plan] == ["survey-only-ambiguous"]
     assert plan[0]["name_collision"] == ["Finance", "Marketing"]
     assert "NAME COLLISION" in output
     assert f"{SHARED_DS!r} exists in 2 project(s) (Finance, Marketing)" in output

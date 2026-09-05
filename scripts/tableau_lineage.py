@@ -136,7 +136,7 @@ def _norm(name: str | None) -> str:
 
 
 @dataclass
-class SurveyDatasource:
+class SurveyDatasource:  # pylint: disable=too-many-instance-attributes
     """One published data source as the survey saw it, with every workbook that binds to it."""
 
     name: str
@@ -146,6 +146,7 @@ class SurveyDatasource:
     projects: set[str] = field(default_factory=set)
     resolved_luids: set[str] = field(default_factory=set)
     candidate_luids: set[str] = field(default_factory=set)
+    resolved_projects: dict[str, set[str]] = field(default_factory=dict)
 
     @property
     def luids(self) -> set[str]:
@@ -157,6 +158,8 @@ class SurveyDatasource:
         if luid:
             self.resolved_luids.add(luid)
             self.luid = self.luid or luid
+            if project:
+                self.resolved_projects.setdefault(luid, set()).add(project)
         if project:
             self.projects.add(project)
             self.project = self.project or project
@@ -197,6 +200,7 @@ class Survey:  # pylint: disable=too-many-instance-attributes
     datasources: dict[str, SurveyDatasource] = field(default_factory=dict)
     workbook_names: dict[str, str] = field(default_factory=dict)
     workbook_luids: dict[str, set[str]] = field(default_factory=dict)
+    workbook_known_names: set[str] = field(default_factory=set)
     by_luid: dict[str, str] = field(default_factory=dict)
     workbooks_total: int = 0
     gaps: tuple[str, ...] = ()
@@ -230,7 +234,7 @@ class Survey:  # pylint: disable=too-many-instance-attributes
             return []
         return sorted((self.workbook_names.get(w, w) for w in entry.consumers), key=str.lower)
 
-    def includes_metadata_source(
+    def includes_metadata_source(  # pylint: disable=too-many-return-statements
         self,
         datasource_luid: str | None,
         survey_key: str | None,
@@ -244,12 +248,15 @@ class Survey:  # pylint: disable=too-many-instance-attributes
         retained even when the datasource itself is outside the selected project.
         """
         selected_workbooks = set(self.workbook_names)
-        selected_luids = set(self.workbook_luids)
         for workbook in downstream_workbooks:
             workbook_luid = workbook.get("luid")
             workbook_name = _norm(workbook.get("name"))
-            if workbook_luid and selected_luids:
-                if workbook_luid in selected_luids:
+            if workbook_luid:
+                if workbook_luid in self.workbook_luids:
+                    return True
+                if workbook_name in self.workbook_known_names:
+                    continue
+                if workbook_name in selected_workbooks:
                     return True
                 continue
             if workbook_name in selected_workbooks:
@@ -420,6 +427,7 @@ def _read_survey_edges(
     datasources: dict[str, SurveyDatasource],
     workbook_names: dict[str, str],
     workbook_luids: dict[str, set[str]],
+    workbook_known_names: set[str],
 ) -> int:
     """Index every workbook -> published data source edge the survey recorded.
 
@@ -432,6 +440,7 @@ def _read_survey_edges(
         workbook_names[workbook_key] = wb_display
         if workbook.get("luid"):
             workbook_luids.setdefault(workbook.get("luid"), set()).add(workbook_key)
+            workbook_known_names.add(workbook_key)
         for dep in workbook.get("published_dependencies") or []:
             if not isinstance(dep, dict):
                 continue
@@ -477,7 +486,10 @@ def load_survey(path: Path) -> Survey:
     datasources: dict[str, SurveyDatasource] = {}
     workbook_names: dict[str, str] = {}
     workbook_luids: dict[str, set[str]] = {}
-    unresolved = _read_survey_edges(workbooks, datasources, workbook_names, workbook_luids)
+    workbook_known_names: set[str] = set()
+    unresolved = _read_survey_edges(
+        workbooks, datasources, workbook_names, workbook_luids, workbook_known_names
+    )
 
     # `required_datasources` names the same data sources again, with the LUID/project the download
     # step needs. It also keeps a required data source in the plan when its consumers were listed
@@ -503,6 +515,7 @@ def load_survey(path: Path) -> Survey:
         datasources=datasources,
         workbook_names=workbook_names,
         workbook_luids=workbook_luids,
+        workbook_known_names=workbook_known_names,
         by_luid={luid: key for key, ds in datasources.items() for luid in ds.resolved_luids},
         workbooks_total=len(workbooks),
         gaps=_survey_gaps(data, unresolved),
@@ -743,16 +756,21 @@ def _survey_only_rows(site: str, survey: Survey, by_key: dict[str, list[dict[str
     for key, seen in survey.datasources.items():
         if key in by_key:
             continue
-        ambiguous = survey.scoped and survey.complete and len(seen.resolved_luids) > 1
-        source = {
-            "name": seen.name,
-            "luid": None if ambiguous else seen.luid,
-            "project": None if ambiguous else seen.project,
-            "has_extracts": None,
-        }
-        row = _entry(site, source, [], survey.consumers(key), "survey-only-ambiguous" if ambiguous else "survey-only")
-        rows.append(row)
-        by_key.setdefault(key, []).append(row)
+        if seen.resolved_luids:
+            identities = sorted(seen.resolved_luids)
+        else:
+            identities = [None]
+        for luid in identities:
+            source = {
+                "name": seen.name,
+                "luid": luid,
+                "project": next(iter(seen.resolved_projects.get(luid, ())), None) if luid else None,
+                "has_extracts": None,
+            }
+            matched_via = "survey-only" if luid else "survey-only-ambiguous"
+            row = _entry(site, source, [], survey.consumers(key), matched_via)
+            rows.append(row)
+            by_key.setdefault(key, []).append(row)
     return rows
 
 
