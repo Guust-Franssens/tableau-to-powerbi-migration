@@ -1596,6 +1596,33 @@ def test_caption_accounting_python() -> None:
     in_flight_6 = _credential_modal.dialog_verdict([main_window(), w_cred_title], operation_in_flight=True)
     assert in_flight_6 is not None and in_flight_6.verdict == "CREDENTIAL_MISSING"
 
+    # 7. exact parity case: case-insensitive title deduplication with only chrome in content
+    w_parity_refresh = owned_dialog(("REFRESH", "Cancel"), title="  Refresh  ")
+    res_parity = classify_dialog(w_parity_refresh)
+    assert res_parity.kind == "benign-title-only"
+    assert res_parity.verdict == "DIALOG_UNREADABLE"
+    in_flight_parity = _credential_modal.dialog_verdict([main_window(), w_parity_refresh], operation_in_flight=True)
+    assert in_flight_parity is not None and in_flight_parity.verdict == "DIALOG_UNREADABLE"
+
+    # 8. mixed-case unknown/password caption with duplicate title in content
+    w_mixed_pwd = owned_dialog(
+        ("PLEASE ENTER YOUR PASSWORD", "Evaluating", "Cancel"), title="  Please Enter Your Password  "
+    )
+    res_mixed_pwd = classify_dialog(w_mixed_pwd)
+    assert res_mixed_pwd.kind == "mixed-content"
+    assert res_mixed_pwd.verdict == "DIALOG_UNRECOGNIZED"
+    assert res_mixed_pwd.evidence == "Please Enter Your Password"
+    in_flight_mixed_pwd = _credential_modal.dialog_verdict([main_window(), w_mixed_pwd], operation_in_flight=True)
+    assert in_flight_mixed_pwd is not None and in_flight_mixed_pwd.verdict == "DIALOG_UNRECOGNIZED"
+
+    # 9. control with a genuinely independent progress element beside case-insensitive title duplicate
+    w_ctrl_refresh = owned_dialog(("REFRESH", "Evaluating", "Cancel"), title="  Refresh  ")
+    res_ctrl = classify_dialog(w_ctrl_refresh)
+    assert res_ctrl.kind == "benign"
+    assert res_ctrl.verdict == "REFRESH_IN_PROGRESS"
+    in_flight_ctrl = _credential_modal.dialog_verdict([main_window(), w_ctrl_refresh], operation_in_flight=True)
+    assert in_flight_ctrl is None  # Suppressed in flight
+
 
 def test_python_mutation_drop_caption_accounting(monkeypatch: pytest.MonkeyPatch) -> None:
     """Mutation test (Python): drop caption accounting in classify_dialog. Must fail named assertions."""
@@ -3831,6 +3858,40 @@ def test_caption_accounting_powershell(tmp_path: Path) -> None:
     assert res_6_flight["kind"] == "credential"
     assert res_6_flight["verdict"] == "CREDENTIAL_MISSING"
     assert res_6_flight["exit_code"] == 1
+
+    # 7. exact parity case: case-insensitive title deduplication with only chrome in content
+    w_parity_refresh = _window(Title="  Refresh  ", Texts=["REFRESH", "Cancel"], OwnerEnabled=False)
+    res_p_parity_t0 = classify(tmp_path, [w_parity_refresh])
+    assert res_p_parity_t0["kind"] == "benign-title-only"
+    assert res_p_parity_t0["verdict"] == "DIALOG_UNREADABLE"
+    assert res_p_parity_t0["exit_code"] == 3
+    res_p_parity_flight = classify(tmp_path, [w_parity_refresh], refresh_in_flight=True)
+    assert res_p_parity_flight["kind"] == "benign-title-only"
+    assert res_p_parity_flight["verdict"] == "DIALOG_UNREADABLE"
+    assert res_p_parity_flight["exit_code"] == 3
+
+    # 8. mixed-case unknown/password caption with duplicate title in content
+    w_mixed_pwd = _window(
+        Title="  Please Enter Your Password  ", Texts=["PLEASE ENTER YOUR PASSWORD", "Evaluating", "Cancel"], OwnerEnabled=False
+    )
+    res_p_mixed_t0 = classify(tmp_path, [w_mixed_pwd])
+    assert res_p_mixed_t0["kind"] == "mixed-content"
+    assert res_p_mixed_t0["verdict"] == "DIALOG_UNRECOGNIZED"
+    assert res_p_mixed_t0["exit_code"] == 3
+    assert res_p_mixed_t0["evidence"] == "Please Enter Your Password"
+    res_p_mixed_flight = classify(tmp_path, [w_mixed_pwd], refresh_in_flight=True)
+    assert res_p_mixed_flight["kind"] == "mixed-content"
+    assert res_p_mixed_flight["verdict"] == "DIALOG_UNRECOGNIZED"
+    assert res_p_mixed_flight["exit_code"] == 3
+
+    # 9. control with a genuinely independent progress element beside case-insensitive title duplicate
+    w_ctrl_refresh = _window(Title="  Refresh  ", Texts=["REFRESH", "Evaluating", "Cancel"], OwnerEnabled=False)
+    res_p_ctrl_t0 = classify(tmp_path, [w_ctrl_refresh])
+    assert res_p_ctrl_t0["kind"] == "benign"
+    assert res_p_ctrl_t0["verdict"] == "REFRESH_IN_PROGRESS"
+    assert res_p_ctrl_t0["exit_code"] == 3
+    res_p_ctrl_flight = classify(tmp_path, [w_ctrl_refresh], refresh_in_flight=True)
+    assert res_p_ctrl_flight["verdict"] is None
 
 
 def _setup_probe_copy(tmp_path: Path) -> Path:

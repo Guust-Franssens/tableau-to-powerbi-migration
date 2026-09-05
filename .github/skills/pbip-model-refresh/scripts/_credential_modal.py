@@ -360,11 +360,16 @@ def blocking_prompt_signature() -> re.Pattern[str]:
 def normalize_texts(texts: Iterable[str]) -> tuple[str, ...]:
     """Whitespace-normalised, de-duplicated, order-preserving text (mirrors ``Get-NormalizedText``)."""
     clean: list[str] = []
+    seen: set[str] = set()
     for text in texts:
         if not text:
             continue
         normalized = re.sub(r"\s+", " ", str(text)).strip()
-        if normalized and normalized not in clean:
+        if not normalized:
+            continue
+        key = normalized.casefold()
+        if key not in seen:
+            seen.add(key)
             clean.append(normalized)
     return tuple(clean)
 
@@ -381,7 +386,8 @@ def dialog_text_set(window: DesktopWindow) -> tuple[str, tuple[str, ...], tuple[
     title = re.sub(r"\s+", " ", window.title or "").strip()
     raw_texts = ([title] if title else []) + list(window.texts or ())
     all_texts = normalize_texts(raw_texts)
-    content = tuple(text for text in all_texts if text != title)
+    title_key = title.casefold()
+    content = tuple(text for text in all_texts if text.casefold() != title_key)
     return title, all_texts, content
 
 
