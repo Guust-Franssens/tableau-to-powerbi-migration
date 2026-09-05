@@ -123,6 +123,7 @@ def resolve_source_commit(source_ref: str) -> tuple[str, str]:
 def _extract_ref(commit: str, destination: Path) -> None:
     """Extract committed repository bytes for ``commit`` into ``destination``."""
     destination.mkdir(parents=True)
+    _validate_source_tree(commit)
     archive = subprocess.run(
         ["git", "-C", str(REPO), "archive", "--format=tar", commit],
         check=True,
@@ -147,6 +148,26 @@ def _extract_ref(commit: str, destination: Path) -> None:
                 raise SourceRefError(f"git archive contains unsupported link entry {member.name!r}")
             else:
                 raise SourceRefError(f"git archive contains unsupported entry {member.name!r}")
+
+
+def _validate_source_tree(commit: str) -> None:
+    """Reject selected-ref tree entries the filesystem copy cannot faithfully reproduce."""
+    result = subprocess.run(
+        ["git", "-C", str(REPO), "ls-tree", "-rz", "-r", commit],
+        check=False,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        raise SourceRefError(detail or f"git ls-tree failed for {commit}")
+    for record in result.stdout.split(b"\0"):
+        if not record:
+            continue
+        metadata, raw_path = record.split(b"\t", 1)
+        mode = metadata.split(b" ", 1)[0].decode("ascii", errors="replace")
+        if mode not in {"100644", "100755"}:
+            path = raw_path.decode("utf-8", errors="replace")
+            raise SourceRefError(f"git tree contains unsupported mode {mode} at {path!r}")
 
 
 def _build_reference_from(workdir: Path, repo_root: Path) -> Path:
