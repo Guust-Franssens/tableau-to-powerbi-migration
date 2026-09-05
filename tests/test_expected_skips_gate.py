@@ -5,7 +5,7 @@ These tests verify that:
 1. Skips matching the registered baseline reasons are allowed.
 2. Skips with unexpected reasons fail the pytest session with exit code 1.
 3. Engine-dependent skips are NOT_CHECKED only with an explicit allowed reason.
-4. Exactly 15 engine-dependent test cases exist across the 3 known modules.
+4. Every engine-dependent skip reason in CI is covered by the required engine jobs.
 """
 
 from __future__ import annotations
@@ -255,28 +255,34 @@ def test_headroom_padding_is_deterministic_across_path_lengths() -> None:
         assert pad == 2, f"pad was {pad} for root_len {root_len}"
 
 
-def test_all_15_engine_dependent_tests_are_accounted_for() -> None:
-    """Pin the 15 engine-dependent tests across the 3 consumer modules (issue #435).
+def test_all_engine_dependent_tests_are_accounted_for() -> None:
+    """Pin the engine-dependent tests covered by required engine jobs (issue #435).
 
-    The 15 tests are:
+    The original issue counted 15 tests:
     - 4 in tests/test_dax_oracle_server.py
     - 8 in tests/test_issue_424_chart_type_pin.py (5 decorators, one 4x parametrized)
     - 3 in tests/test_upstream_repro_pins.py
+
+    The skip-reason classifier also treats the installed-engine-constants watchdog as engine-backed,
+    so the engine jobs must run that one too instead of marking it NOT_CHECKED in the main job.
     """
     expected_modules = {
         "tests/test_dax_oracle_server.py": 4,
         "tests/test_issue_424_chart_type_pin.py": 8,
         "tests/test_upstream_repro_pins.py": 3,
+        "tests/test_harvest_download_watchdog.py": 1,
     }
 
     total_engine_tests = sum(expected_modules.values())
-    assert total_engine_tests == 15
+    assert total_engine_tests == 16
 
     for rel_path, expected_count in expected_modules.items():
         file_path = REPO_ROOT / rel_path
         assert file_path.is_file(), f"missing test module {rel_path}"
         content = file_path.read_text(encoding="utf-8")
-        assert "requires_engine" in content, f"{rel_path} must declare requires_engine"
+        assert any(reason in content for reason in conftest.ENGINE_SKIP_REASONS), (
+            f"{rel_path} must declare an engine skip reason"
+        )
         assert expected_count > 0, f"{rel_path} must have positive expected count"
 
 
@@ -332,6 +338,7 @@ def test_workflow_runs_engine_dependent_tests_in_required_jobs() -> None:
     """The production workflow must reach the fail-closed engine-test path (issue #435)."""
     workflow = (REPO_ROOT / ".github" / "workflows" / "checks.yml").read_text(encoding="utf-8")
     target = "tests/test_issue_424_chart_type_pin.py tests/test_dax_oracle_server.py tests/test_upstream_repro_pins.py"
+    target = target + " tests/test_harvest_download_watchdog.py::test_the_ceiling_constants_match_the_INSTALLED_engine"
 
     assert "schedule:" in workflow, "latest-engine drift pins need a scheduled job"
     assert "engine-integration:" in workflow

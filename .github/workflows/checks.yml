@@ -125,7 +125,7 @@ jobs:
           test "$(cat "$HOME/.copilot/installed-plugins/tableau-collection/tableau-fabric-skills/skills/tableau-migration/VERSION")" = "$EXPECTED_ENGINE_VERSION"
 
       - name: Tests (engine-dependent, pinned engine)
-        run: T2P_REQUIRE_ENGINE_TESTS=1 uv run pytest -q tests/test_issue_424_chart_type_pin.py tests/test_dax_oracle_server.py tests/test_upstream_repro_pins.py
+        run: T2P_REQUIRE_ENGINE_TESTS=1 uv run pytest -q tests/test_issue_424_chart_type_pin.py tests/test_dax_oracle_server.py tests/test_upstream_repro_pins.py tests/test_harvest_download_watchdog.py::test_the_ceiling_constants_match_the_INSTALLED_engine
 
   engine-drift:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -154,7 +154,7 @@ jobs:
           echo "Current engine version: $(cat "$HOME/.copilot/installed-plugins/tableau-collection/tableau-fabric-skills/skills/tableau-migration/VERSION")"
 
       - name: Tests (engine-dependent, latest engine drift signal)
-        run: T2P_REQUIRE_ENGINE_TESTS=1 uv run pytest -q tests/test_issue_424_chart_type_pin.py tests/test_dax_oracle_server.py tests/test_upstream_repro_pins.py
+        run: T2P_REQUIRE_ENGINE_TESTS=1 uv run pytest -q tests/test_issue_424_chart_type_pin.py tests/test_dax_oracle_server.py tests/test_upstream_repro_pins.py tests/test_harvest_download_watchdog.py::test_the_ceiling_constants_match_the_INSTALLED_engine
 
   # The main checks job runs on Linux. The pbip-model-refresh bundle does not: `SKILL.md` line 8 says
   # "Windows only." That mismatch is not cosmetic - it makes the Linux job STRUCTURALLY incapable of
