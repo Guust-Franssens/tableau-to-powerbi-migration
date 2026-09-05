@@ -32,3 +32,54 @@ def test_shipping_models_exclude_standalone_by_default_and_can_include_it(tmp_pa
         shipping.resolve(),
         standalone.resolve(),
     ]
+
+
+def test_evidence_dirs_searches_target_and_up_to_three_ancestor_levels(tmp_path: Path) -> None:
+    """Pins ANCESTOR_LEVELS = 3: searches target (level 0) and 3 ancestors, excluding level 4+."""
+    assert bundle_corpus.ANCESTOR_LEVELS == 3
+
+    run_root = tmp_path / "run"
+    bundle_dir = run_root / "bundle"
+    pbip_dir = bundle_dir / "pbip"
+    target = pbip_dir / "Minimal"
+
+    target.mkdir(parents=True)
+    (target / "oracle").mkdir()
+    (pbip_dir / "oracle").mkdir()
+    (bundle_dir / "oracle").mkdir()
+    (run_root / "oracle").mkdir()
+    (tmp_path / "oracle").mkdir()  # 4th ancestor above target
+
+    found = bundle_corpus.evidence_dirs(target, ("oracle",))
+    assert found == [
+        target / "oracle",
+        pbip_dir / "oracle",
+        bundle_dir / "oracle",
+        run_root / "oracle",
+    ]
+    assert (tmp_path / "oracle") not in found
+
+
+def test_evidence_dirs_stops_ancestor_walk_when_target_is_self_contained(tmp_path: Path) -> None:
+    """A self-contained package carries package-manifest.json and stops the ancestor walk."""
+    run_root = tmp_path / "run"
+    packages_dir = run_root / "packages"
+    target = packages_dir / "Minimal"
+
+    (target / "oracle").mkdir(parents=True)
+    (packages_dir / "oracle").mkdir()
+    (run_root / "oracle").mkdir()
+
+    # Before manifest: un-packaged / incomplete target searches ancestors
+    assert bundle_corpus.is_self_contained(target) is False
+    assert bundle_corpus.evidence_dirs(target, ("oracle",)) == [
+        target / "oracle",
+        packages_dir / "oracle",
+        run_root / "oracle",
+    ]
+
+    # After manifest: self-contained target searches only itself
+    (target / bundle_corpus.PACKAGE_MARKER).write_text("{}", encoding="utf-8")
+    assert bundle_corpus.is_self_contained(target) is True
+    assert bundle_corpus.evidence_dirs(target, ("oracle",)) == [target / "oracle"]
+

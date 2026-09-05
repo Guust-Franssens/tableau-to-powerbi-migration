@@ -109,11 +109,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 #   bundle/       run_estate.py-shaped conversion output (report.json, pbip/, handover/)
 #   oracle/       capture_tableau_oracle.py-shaped visual + numeric reference capture
 #   packages/     package_unit.py-shaped per-unit, agent-facing handover packages (issue #446).
-#                 ⚠️ `--out` must name a subdirectory INSIDE this one (one per packaging batch,
-#                 e.g. `packages/<bundle-name>/<Unit>/`), never `packages/` itself:
-#                 `package_unit.conflicting_evidence_dirs` refuses an `--out` whose parent holds
-#                 `oracle/`, and this run root always does. Measured: `--out <run>/packages` exits
-#                 2, `--out <run>/packages/<batch>` exits 0. See `tests/test_work_dirs.py`.
+#                 `--out <run>/packages` writes flat per-unit folders (`packages/<Unit>/`).
+#                 Optional nested batches (`packages/<batch>/<Unit>/`) remain supported.
+#                 Self-contained packages (`package-manifest.json`) search only their own evidence
+#                 without shadowing or double-matching against run ancestors.
 #   deliverables/ operator-facing outputs meant for the customer, never for git (issue #322).
 #                 ⚠️ NOT eagerly created (issue #481) - see LAZY_SUBDIRS below. Nothing in this
 #                 repo writes here today, so an eagerly-created copy is an always-empty folder

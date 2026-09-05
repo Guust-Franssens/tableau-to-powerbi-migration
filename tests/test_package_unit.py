@@ -144,13 +144,7 @@ def _default_views() -> list[dict]:
 
 
 def _out(tmp_path: Path) -> Path:
-    """Package root, deliberately TWO levels below `tmp_path`.
-
-    `check_reference_readiness._collect_evidence` scans the target's grandparent, so a package at
-    `<tmp>/out/<Unit>` would also match the fixture capture at `<tmp>/_oracle` - the shadowing
-    `package_unit.conflicting_evidence_dirs` refuses. Nesting one level deeper keeps `--oracle`
-    auto-discovery (which looks beside the BUNDLE) exercised without tripping it.
-    """
+    """Package root under `tmp_path`."""
     return tmp_path / "packages" / "out"
 
 

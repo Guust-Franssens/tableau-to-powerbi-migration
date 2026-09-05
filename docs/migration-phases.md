@@ -25,7 +25,7 @@ The pipeline has three locations, and the direction is one-way:
             │
             │  PHASE 2 — package for the agent  (scripts/package_unit.py)
             ▼
-   _runs/<NNN>-<slug>/packages/<batch>/<Unit>/
+   _runs/<NNN>-<slug>/packages/<Unit>/
        one self-contained folder per migration unit; BOTH gates accept it with NO flags
             │            entry gate: check_reference_readiness.py   (ready / blind)
             │            exit  gate: check_unit.py                  (is this unit done?)
@@ -195,34 +195,26 @@ package (*"Promoting FROM the package is settled (#460)"*, `scripts/promote_unit
 and again under the swap. The shared-conventions `working copy` row's *"agents edit `pbip/`"* governs the window **before**
 packaging; after it, work in the package. See phase 3 below for the promotion mechanics.
 
-### Where `packages/` goes, and the constraint that decides it
+### Where `packages/` goes, and the self-contained marker
 
 ```powershell
 python scripts\package_unit.py --bundle _runs\<NNN>-<slug>\bundle `
-    --out _runs\<NNN>-<slug>\packages\<batch> `
-    --json _runs\<NNN>-<slug>\packages\<batch>\packaging.json
+    --out _runs\<NNN>-<slug>\packages `
+    --json _runs\<NNN>-<slug>\packages\packaging.json
 # then, per unit, with NO flags at all:
-python scripts\check_reference_readiness.py _runs\<NNN>-<slug>\packages\<batch>\<Unit>
-python scripts\check_unit.py                _runs\<NNN>-<slug>\packages\<batch>\<Unit>
+python scripts\check_reference_readiness.py _runs\<NNN>-<slug>\packages\<Unit>
+python scripts\check_unit.py                _runs\<NNN>-<slug>\packages\<Unit>
 ```
 
-⚠️ **`--out` must name a subdirectory INSIDE `packages/`, never `packages/` itself.** The gates
-discover evidence by scanning the target, its parent **and its grandparent** for `reference/` /
-`oracle/` / `_oracle/`, so `package_unit.conflicting_evidence_dirs`
-(`scripts/package_unit.py:819`) refuses an `--out` whose parent already holds one. A run root
-*always* holds `oracle/`, because `allocate_run` creates every canonical subdir.
+`--out` directly targets `_runs/<NNN>-<slug>/packages` (flat layout, creating `packages/<Unit>/`).
+Optional nested batch folders (`packages/<batch>/<Unit>/`) remain supported for compatibility.
 
-✅ Measured 2026-09-03 against run 408's bundle:
-
-| `--out` | exit | outcome |
-|---|---|---|
-| `_runs/<NNN>-<slug>/packages` | **2** | refused: *"sits beside evidence the gates also scan … Choose an `--out` outside the capture tree"* |
-| `_runs/<NNN>-<slug>/packages/<batch>` | **0** | packaged; the readiness gate then reports **0 unverifiable**, i.e. no shadowing |
-
-Were the bare form used, every page would silently drop from `ready` to `unverifiable` — strictly
-worse than not packaging at all — which is why it is refused rather than documented.
-`tests/test_work_dirs.py::test_package_out_must_be_a_child_of_packages_not_packages_itself` pins
-this so the command above stays runnable.
+Completed packages carry `package-manifest.json` (`bundle_corpus.is_self_contained`), which
+declares that the package carries its own evidence and stops the ancestor walk in both gates
+(`check_reference_readiness.py` and `check_unit.py`). The package matches only its own scoped oracle
+evidence and never borrows omitted renders or double-matches against run-root captures at
+`_runs/<NNN>-<slug>/oracle/`. An incomplete or failed package lacking `package-manifest.json` fails
+closed.
 
 ### The two gates
 
@@ -285,10 +277,10 @@ bundle:
 ```powershell
 # BEFORE promoting — has anyone edited the tree we are NOT promoting from?
 git diff --no-index --stat <bundle>\reports\<WB>.Report <bundle>\pbip\<WB>\<WB>.Report
-git diff --no-index --stat <bundle>\pbip\<WB> <run>\packages\<batch>\<Unit>\fabric
+git diff --no-index --stat <bundle>\pbip\<WB> <run>\packages\<Unit>\fabric
 
 # AFTER promoting, model per workbook — ONE comparison
-git diff --no-index --stat <run>\packages\<batch>\<Unit>\fabric migrations\workbooks\<slug>\fabric
+git diff --no-index --stat <run>\packages\<Unit>\fabric migrations\workbooks\<slug>\fabric
 
 # AFTER promoting, shared datasource — TWO comparisons, because the halves split up
 git diff --no-index --stat <source>\<Name>.Report        migrations\workbooks\<slug>\fabric\<Name>.Report

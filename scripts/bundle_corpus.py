@@ -92,7 +92,7 @@ ANCESTOR_LEVELS = 3
 
 
 def evidence_dirs(target: Path, names: Sequence[str], *, also: Sequence[Path] = ()) -> list[Path]:
-    """Existing evidence directories for ``target``: beside it, then up to two ancestors.
+    """Existing evidence directories for ``target``: beside it, then up to three ancestors (``ANCESTOR_LEVELS``).
 
     WARNING: **The whole walk lives here, not just where it stops.** Round-1 review of PR #454:
     centralising only the *stop* condition left the two gates disagreeing about the *search* -
