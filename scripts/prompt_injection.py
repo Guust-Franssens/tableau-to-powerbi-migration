@@ -94,7 +94,6 @@ _RULES: list[tuple[str, re.Pattern[str], str]] = [
             r"\b(?:run|execute|issue|perform)\b[^.\n]{0,40}\b(?:remove-item[^.\n]{0,40}-recurse|"
             r"rm\s+-rf|del\s+/[sfq]|format-volume|drop\s+(?:table|database|schema)|git\s+push\s+--force)\b|"
             r"\b(?:delete|remove)\b[^.\n]{0,40}\bremove-item[^.\n]{0,40}-recurse\b|"
-            r"\b(?:drop|delete)\s+table\s+(?!(?:calculation|formatting|label)\b)[a-z_][\w$.-]*\b|"
             r"\b(?:delete|remove|drop)\s+(?:all\s+)?(?:data|database|schema|tables)\s+"
             r"(?:now|immediately|please)\b",
             re.I,
@@ -102,6 +101,11 @@ _RULES: list[tuple[str, re.Pattern[str], str]] = [
         "an instruction to execute a destructive shell/SQL command",
     ),
 ]
+
+_BARE_DESTRUCTIVE_COMMAND_RE = re.compile(
+    r"(?<!\[)\b(?:drop|delete)\s+table\s+(?!(?:calculation|formatting|label)\b)[a-z_][\w$.-]*\b",
+    re.I,
+)
 
 _CONFUSABLES = str.maketrans(
     {
@@ -185,8 +189,9 @@ def scan_text(text: str | None) -> list[tuple[str, str]]:
     normalized, offsets = _normalise_for_matching(text)
     hits = []
     for rule_id, pattern, _ in _RULES:
-        matching_view = _mask_quoted_literals(normalized) if rule_id == "destructive-command" else normalized
-        match = pattern.search(matching_view)
+        match = pattern.search(normalized)
+        if rule_id == "destructive-command" and match is None:
+            match = _BARE_DESTRUCTIVE_COMMAND_RE.search(_mask_quoted_literals(normalized))
         if match:
             hits.append((rule_id, _excerpt(text, offsets, match)))
     return hits
