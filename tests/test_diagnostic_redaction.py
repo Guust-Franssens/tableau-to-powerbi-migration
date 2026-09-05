@@ -545,9 +545,7 @@ MODULES = (
     # `tableau_payload_facts.py`, it is not detected by `_credential_handling_scripts()` (it makes no
     # request and names no credential); MODULES is a superset of that detector, never a mirror of it.
     "scripts/tableau_oracle_manifest.py",
-    "scripts/assess_estate.py",
     "scripts/tableau_lineage.py",
-    "scripts/stamp_tableau_provenance.py",
 )
 
 # Where response bytes ENTER, declared per function rather than inferred from a parameter's spelling.
@@ -619,12 +617,9 @@ TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
     ("scripts/tableau_payload_facts.py", "svg_facts"): {"payload"},
     ("scripts/tableau_payload_facts.py", "pdf_facts"): {"payload"},
     ("scripts/tableau_payload_facts.py", "payload_is_complete"): {"payload"},
-    ("scripts/assess_estate.py", "_write_raw"): {"payload"},
-    ("scripts/assess_estate.py", "_checkpoint"): {"inventory"},
     ("scripts/tableau_lineage.py", "_post_json"): set(),
     ("scripts/tableau_lineage.py", "fetch_lineage"): {"session"},
     ("scripts/tableau_lineage.py", "download_datasource"): {"session"},
-    ("scripts/stamp_tableau_provenance.py", "build"): {"env"},
 }
 
 # Calls whose RESULT is response data.
@@ -798,35 +793,6 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "dest": "SHAPE-VERIFIED: destination is constructed from the full UUID returned by _download_stem",
         "scrub_tree({'site': site, 'datasources': datasources}, lambda text: redact(text, pat_name, pat_secret, session.token))[0]": "SCRUBBED-AT-SINK: whole save payload is scrubbed before json.dumps serializes it",
         "json.dumps(scrub_tree({'site': site, 'datasources': datasources}, lambda text: redact(text, pat_name, pat_secret, session.token))[0], indent=2)": "SCRUBBED-AT-SINK: json.dumps receives only the whole-tree scrub result",
-    },
-    ("scripts/stamp_tableau_provenance.py", "_call"): {
-        "path": "OUTBOUND: REST path assembled locally for the request",
-    },
-    ("scripts/stamp_tableau_provenance.py", "_content"): {
-        "workbook_id": "OUTBOUND: workbook LUID used only in the download request path",
-    },
-    ("scripts/stamp_tableau_provenance.py", "find_origin"): {
-        "workbook['id']": "SCRUBBED-AT-SINK: response-derived origin fields are scrubbed before being added to the manifest",
-        "workbook.get('name')": "SCRUBBED-AT-SINK: response-derived origin fields are scrubbed before being added to the manifest",
-        "(workbook.get('project') or {}).get('name')": "SCRUBBED-AT-SINK: response-derived origin fields are scrubbed before being added to the manifest",
-        "(workbook.get('owner') or {}).get('id')": "SCRUBBED-AT-SINK: response-derived origin fields are scrubbed before being added to the manifest",
-        "workbook.get('createdAt')": "SCRUBBED-AT-SINK: response-derived origin fields are scrubbed before being added to the manifest",
-        "workbook.get('updatedAt')": "SCRUBBED-AT-SINK: response-derived origin fields are scrubbed before being added to the manifest",
-        "lookup.base": "SCRUBBED-AT-SINK: origin result is scrubbed before manifest construction",
-        "lookup.site": "SCRUBBED-AT-SINK: origin result is scrubbed before manifest construction",
-        "lookup.product_version": "SCRUBBED-AT-SINK: origin result is scrubbed before manifest construction",
-        "lookup.version": "SCRUBBED-AT-SINK: origin result is scrubbed before manifest construction",
-        "remote_sha": "DERIVED-IRREVERSIBLY: SHA-256 digest cannot disclose the response bytes",
-        "remote_key.as_json() if remote_key is not None else None": "DERIVED-IRREVERSIBLY: revision digest cannot disclose the response bytes",
-        "'sha256' if remote_sha == local['sha256'] else 'name_only'": "FIXED-VOCABULARY: one of two module-authored match labels",
-        "None if agreement is None else 'same' if agreement else 'differs'": "FIXED-VOCABULARY: one of two module-authored comparison labels or None",
-        "sum((1 for wb in workbooks if wb.get('name') == workbook.get('name')))": "NOT-A-STRING: integer count of duplicate names",
-    },
-    ("scripts/stamp_tableau_provenance.py", "build"): {
-        "record": "SCRUBBED-AT-SINK: each response-derived origin is scrubbed before it enters this record",
-        "origin": "SCRUBBED-AT-SINK: whole origin tree is scrubbed before it enters the manifest record",
-        "origin['matched_by']": "FIXED-VOCABULARY: origin matching returns only luid, name, or sanitized_name",
-        "f'matched by {origin['matched_by']}, but the bytes DIFFER from the site copy - figures measured here will not reproduce against it'": "FIXED-VOCABULARY: interpolates only the closed matching-method vocabulary",
     },
     ("scripts/capture_tableau_oracle.py", "classify_export_error"): {
         "match.group(1)": "REDACTED-UPSTREAM: the regex runs on `safe`, the redacted copy, never on `text`",
@@ -1871,6 +1837,16 @@ NON_HTTP_CREDENTIAL_SCRIPTS: dict[str, str] = {
 # waivers: a waiver claims safety, and for these the code contradicts the claim. Recorded as a named
 # gap with an issue so the gate states the truth rather than a comfortable fiction.
 KNOWN_GAPS: dict[str, str] = {
+    "scripts/assess_estate.py": (
+        "Direct product sink regressions cover raw files, SQLite, reports, and request logging, but "
+        "the static gate cannot trace the parsed HTTP response helper through its tuple return. It "
+        "must not claim certification until that proof is structural -- issue #419"
+    ),
+    "scripts/stamp_tableau_provenance.py": (
+        "Direct product sink regressions cover live-origin manifests and lookup diagnostics, but the "
+        "static gate cannot trace the parsed HTTP response helper through its tuple return. It must "
+        "not claim certification until that proof is structural -- issue #419"
+    ),
     "scripts/provision_tableau_estate.py": (
         "MOVED here from GATE_WAIVERS in round 9, because both halves of its waiver were reproducibly "
         "false. (1) its `tableauserverclient` sign-in is uncaught at provision_tableau_estate.py:282, "
@@ -2369,11 +2345,6 @@ def test_the_unparse_dialect_detector_can_actually_fire():
 @pytest.mark.parametrize(
     ("module", "anchor", "replacement"),
     [
-        (
-            "scripts/assess_estate.py",
-            "scrubbed, _paths = scrub_tree(payload, redactor or (lambda text: text))",
-            "scrubbed = payload",
-        ),
         (
             "scripts/tableau_lineage.py",
             "display_plan, _paths = scrub_tree(plan, lambda text: redact(text, pat_name, pat_secret, session.token))",
@@ -3107,6 +3078,15 @@ def test_provision_is_classified_as_a_known_gap_not_as_safe():
     assert "scripts/provision_tableau_estate.py" in KNOWN_GAPS
     assert "scripts/provision_tableau_estate.py" not in GATE_WAIVERS
     assert "scripts/provision_tableau_estate.py" not in NON_HTTP_CREDENTIAL_SCRIPTS
+
+
+@pytest.mark.parametrize("module", ["scripts/assess_estate.py", "scripts/stamp_tableau_provenance.py"])
+def test_unproven_response_parsers_are_classified_as_known_gaps(module):
+    """Direct regressions exist, but these modules are not falsely certified by this static gate."""
+    assert module in KNOWN_GAPS
+    assert module not in MODULES
+    assert module not in GATE_WAIVERS
+    assert module not in NON_HTTP_CREDENTIAL_SCRIPTS
 
 
 def test_the_provision_signin_gap_is_still_real_and_still_uncaught(tmp_path):

@@ -286,6 +286,36 @@ def test_live_origin_fields_are_scrubbed_before_the_manifest_sink(tmp_path, monk
     assert secret in json.dumps(prov.build(tmp_path, env)), "the production scrub mutation did not reopen the sink"
 
 
+def test_live_lookup_errors_are_scrubbed_before_the_manifest_sink(tmp_path, monkeypatch):
+    """A response error after sign-in is redacted before becoming a provenance record."""
+    secret = "SYNTHETIC_LOOKUP_ERROR_PAT_42"
+    _twbx(tmp_path)
+
+    class ReflectingLookup(FakeLookup):
+        def __init__(self, _env):
+            super().__init__([])
+
+        def sign_in(self):
+            self.token = "token"
+
+        def redact_text(self, text):
+            return text.replace(secret, "[REDACTED]")
+
+    def fail_origin(*_args):
+        raise RuntimeError(f"Tableau reflected {secret}")
+
+    monkeypatch.setattr(prov, "TableauLookup", ReflectingLookup)
+    monkeypatch.setattr(prov, "find_origin", fail_origin)
+    env = {
+        "TABLEAU_SERVER_URL": "https://x.online.tableau.com",
+        "TABLEAU_PAT_NAME": "pat",
+        "TABLEAU_PAT_SECRET": secret,
+    }
+    result = prov.build(tmp_path, env)
+    assert secret not in json.dumps(result)
+    assert "[REDACTED]" in result["inputs"][0]["lookup_error"]
+
+
 @pytest.mark.parametrize("key", ["TABLEAU_SERVER_URL", "TABLEAU_PAT_NAME"])
 def test_partial_credentials_do_not_attempt_a_lookup(tmp_path, key):
     _twbx(tmp_path)
