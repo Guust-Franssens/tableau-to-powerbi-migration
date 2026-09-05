@@ -71,11 +71,25 @@ class FakeSession(oracle.TableauSession):
     def _request(self, method, path, *, body=None, accept=None, authed=True, api=None, deadline=None):  # noqa: ARG002
         self.calls.append(path)
         status, payload, headers = self.responses.pop(0)
-        return status, payload.encode() if isinstance(payload, str) else payload, headers
+        payload = payload.encode() if isinstance(payload, str) else payload
+        headers = dict(headers)
+        if status == 200 and "Content-Length" not in headers and "Transfer-Encoding" not in headers:
+            headers["Content-Length"] = str(len(payload))
+        return status, payload, headers
 
     def sign_in(self):
         self.signin_count += 1
         self.token, self.site_id = "tok", "sid"
+
+
+class CloseDelimitedFakeSession(FakeSession):
+    """A scripted successful response with EOF-as-framing, for the one case FakeSession defaults away."""
+
+    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None, deadline=None):  # noqa: ARG002
+        self.calls.append(path)
+        status, payload, headers = self.responses.pop(0)
+        payload = payload.encode() if isinstance(payload, str) else payload
+        return status, payload, headers
 
 
 @pytest.fixture(autouse=True)
@@ -989,6 +1003,77 @@ def test_a_real_CSV_declared_as_CSV_is_still_certified_and_still_counted(tmp_pat
     assert manifest["captured_complete"] == 1
 
 
+@pytest.mark.parametrize(
+    ("headers", "expected_framing"),
+    [
+        ({"Content-Type": "text/csv", "Content-Length": "32"}, "content_length"),
+        ({"Content-Type": "text/csv", "Transfer-Encoding": "chunked"}, "chunked"),
+    ],
+)
+def test_a_csv_capture_is_evidence_only_when_transport_framing_can_detect_early_eof(
+    tmp_path, headers, expected_framing
+):
+    """Content-Length and chunked framing are the two defended transport regimes for terminatorless CSV."""
+    body = "Region,Sales\r\nWest,10\r\nEast,20\r\n"
+    session = FakeSession([(200, body, headers)])
+    view = {"id": "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", "name": "Real Time Availability", "workbook": {"id": "wb"}}
+    record = oracle.capture_view(session, view, tmp_path, frozenset(), None)
+    record["workbook_name"] = "Network Ops"
+
+    data = record["data"]
+    assert data["status"] == "ok"
+    assert data["certification"] == payload_facts.CSV_CERTIFIED
+    assert data["row_count"] == 2
+    assert data["response_framing"] == expected_framing
+
+    code, manifest = _named_manifest(tmp_path, [record])
+    assert code == 0
+    assert manifest["captured_complete"] == 1
+
+
+def test_a_close_delimited_csv_capture_is_retained_but_not_numeric_evidence(tmp_path):
+    """EOF-as-framing cannot distinguish a complete CSV from a truncated prefix, so it is unassessable."""
+    body = "Region,Sales\r\nWest,10\r\nEast,20\r\n"
+    session = CloseDelimitedFakeSession([(200, body, {"Content-Type": "text/csv"})])
+    view = {"id": "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", "name": "Real Time Availability", "workbook": {"id": "wb"}}
+    record = oracle.capture_view(session, view, tmp_path, frozenset(), None)
+    record["workbook_name"] = "Network Ops"
+
+    data = record["data"]
+    assert data["status"] == "ok", "the HTTP request returned bytes; only numeric evidence is withheld"
+    assert data["certification"] == payload_facts.CSV_TRANSPORT_COMPLETENESS_UNESTABLISHED
+    assert data["response_framing"] == "close_delimited"
+    assert "row_count" not in data and "path" not in data
+    assert data[verdict.RETAINED_PATH_KEY].startswith(f"{verdict.RETAINED_DIR}/")
+
+    code, manifest = _named_manifest(tmp_path, [record])
+    assert code == 0
+    assert manifest["captured_complete"] == 0
+    assert manifest["data_unassessable"] == 1
+    assert manifest["data_unassessable_views"][0]["reason"] == (
+        payload_facts.CSV_TRANSPORT_COMPLETENESS_UNESTABLISHED
+    )
+    assert _naive_numeric_consumer(tmp_path) == []
+
+
+@pytest.mark.parametrize("framing", ["Content-Length", "Transfer-Encoding: chunked"])
+def test_an_early_eof_csv_capture_is_a_failed_manifest_not_unassessable_evidence(tmp_path, framing):
+    """The transport catches truncation under defended framing before `_capture_data` can write bytes."""
+    retry = oracle.RetryPolicy(max_attempts=1, budget_sec=1)
+    session = FakeSession([(oracle.NETWORK_ERROR_STATUS, f"IncompleteRead from {framing}", {})], retry=retry)
+    view = {"id": "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", "name": "Real Time Availability", "workbook": {"id": "wb"}}
+    record = oracle.capture_view(session, view, tmp_path, frozenset(), None)
+    record["workbook_name"] = "Network Ops"
+
+    assert record["data"]["status"] == "transient"
+    assert "path" not in record["data"] and not list((tmp_path / "data").glob("*.csv"))
+
+    code, manifest = _named_manifest(tmp_path, [record])
+    assert code == 3
+    assert manifest["failed"] == 1
+    assert manifest["captured_complete"] == 0
+
+
 def test_a_200_with_no_Content_Type_is_kept_but_reported_UNASSESSABLE(tmp_path):
     """The seam between the two findings, and the honest answer to "we cannot certify this".
 
@@ -1041,6 +1126,7 @@ def test_an_error_page_with_the_Content_Type_STRIPPED_is_still_refused(tmp_path)
         (b"", payload_facts.CSV_CERTIFIED),
         (b"\r\n", payload_facts.CSV_CERTIFIED),
         (b'Region,Sales\r\nWest,"quoted, value"\r\n', payload_facts.CSV_CERTIFIED),
+        (b'Region,Notes\r\nWest,"quoted\r\nmultiline value"\r\n', payload_facts.CSV_CERTIFIED),
         (b'Size\r\n"5"" pipe"\r\n', payload_facts.CSV_CERTIFIED),
         (b"<html><body>Error</body></html>", payload_facts.CSV_NOT_TABULAR),
         (b'{"error": {"code": "401002"}}', payload_facts.CSV_NOT_TABULAR),

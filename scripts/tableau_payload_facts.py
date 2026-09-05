@@ -102,6 +102,7 @@ CSV_CONTENT_TYPE_NOT_CSV = "content_type_not_csv"
 CSV_NOT_TABULAR = "payload_not_tabular"
 CSV_MALFORMED = "payload_malformed_csv"
 CSV_RAGGED = "payload_ragged_rows"
+CSV_TRANSPORT_COMPLETENESS_UNESTABLISHED = "transport_completeness_unestablished"
 
 #: A verdict that REFUSES the payload outright: these bytes were never established to be a CSV, so
 #: nothing may be derived from them -- not a row count, not a header, and above all not a diagnosis.
@@ -111,7 +112,9 @@ CSV_REFUSALS = frozenset({CSV_CONTENT_TYPE_NOT_CSV, CSV_NOT_TABULAR, CSV_MALFORM
 #: header and no diagnosis may be taken from it, and (see
 #: :data:`tableau_oracle_manifest.RETAINED_PATH_KEY`) it is not written where a numeric-oracle
 #: consumer looks for evidence.
-CSV_UNCERTIFIED = frozenset({CSV_CONTENT_TYPE_ABSENT, CSV_CONTENT_TYPE_UNSPECIFIC})
+CSV_UNCERTIFIED = frozenset(
+    {CSV_CONTENT_TYPE_ABSENT, CSV_CONTENT_TYPE_UNSPECIFIC, CSV_TRANSPORT_COMPLETENESS_UNESTABLISHED}
+)
 #: Every value `certify_csv` can produce, so a consumer reading one off an older manifest can check
 #: it against a closed set instead of trusting whatever string is in the field.
 CSV_VERDICTS = frozenset({CSV_CERTIFIED}) | CSV_UNCERTIFIED | CSV_REFUSALS
@@ -157,6 +160,13 @@ CSV_UNCERTIFIED_DETAIL = {
         "of a plain-text error banner, so it is not a CSV declaration. The bytes are retained for "
         "inspection and are NOT placed where a numeric-oracle consumer reads evidence; a row count "
         "or a first-line classification taken from them would be confidently wrong."
+    ),
+    CSV_TRANSPORT_COMPLETENESS_UNESTABLISHED: (
+        "the export returned HTTP 200 over close-delimited framing: no Content-Length and no chunked "
+        "terminator. EOF is the delimiter in that regime, so a truncated CSV prefix cannot be "
+        "distinguished from a complete export. The bytes are retained for inspection and are NOT "
+        "placed where a numeric-oracle consumer reads evidence; re-capture through a path that keeps "
+        "Content-Length or Transfer-Encoding: chunked."
     ),
 }
 
@@ -505,6 +515,7 @@ def _pdf_is_complete(payload: bytes) -> tuple[bool, str]:  # pylint: disable=too
 
 
 _COMPLETENESS_CHECKS = {"png": _png_is_complete, "svg": _svg_is_complete, "pdf": _pdf_is_complete}
+_KINDS_WITHOUT_PAYLOAD_COMPLETENESS = {"csv"}
 
 
 def payload_is_complete(kind: str, payload: bytes) -> tuple[bool, str]:
@@ -545,12 +556,16 @@ def payload_is_complete(kind: str, payload: bytes) -> tuple[bool, str]:
     :func:`tableau_env.redacted_note` because it quoted response bytes. This one quotes none, which is
     why it needs no redactor -- a property the taint gate checks rather than takes on trust.
 
-    An unknown ``kind`` returns ``True``: this function refuses what it can PROVE is broken and never
-    invents a verdict about a format it cannot read. The CSV data leg is deliberately absent for the
-    same reason -- a CSV has no terminator, so truncation there is caught by the transport's
-    ``Content-Length`` check in :func:`tableau_http._read_bounded`, not by parsing.
+    ``csv`` is the one explicitly enumerated format with no payload terminator. Its completeness
+    depends on syntactic CSV certification plus transport framing that can detect early EOF --
+    measured Tableau Cloud responses used chunked framing for 6/6 ``/data`` and ``/image`` exports,
+    while ``Content-Length`` is only the alternate defended case. Close-delimited CSV is therefore
+    unassessable at the capture layer rather than clean. A truly unknown ``kind`` is refused here so a
+    future leg cannot inherit "no payload check" silently.
     """
     check = _COMPLETENESS_CHECKS.get(kind)
     if check is None:
-        return True, ""
+        if kind in _KINDS_WITHOUT_PAYLOAD_COMPLETENESS:
+            return True, ""
+        return False, "no payload completeness check is registered for this kind"
     return check(payload)

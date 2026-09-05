@@ -117,6 +117,23 @@ def header_value(headers: dict[str, str], name: str) -> str | None:
     return None
 
 
+def response_framing(headers: dict[str, str]) -> str:
+    """How the peer delimited this response body, as a closed manifest-safe vocabulary.
+
+    Tableau Cloud was measured returning ``Transfer-Encoding: chunked`` for both ``/data`` and
+    ``/image`` exports (6/6 responses, REST 3.29). That is the transport evidence that catches an
+    early EOF for a CSV, not ``Content-Length``. When neither a length nor chunked framing is present,
+    EOF is itself the delimiter and a truncated CSV prefix is indistinguishable from a complete body.
+    """
+    transfer_encoding = header_value(headers, "Transfer-Encoding") or ""
+    codings = [coding.strip().casefold() for coding in transfer_encoding.split(",")]
+    if "chunked" in codings:
+        return "chunked"
+    if header_value(headers, "Content-Length") is not None:
+        return "content_length"
+    return "close_delimited"
+
+
 def _read_bounded(stream, deadline: float | None, timeout: float) -> bytes:
     """Read a response body, optionally under an END-TO-END deadline.
 

@@ -142,6 +142,7 @@ from tableau_payload_facts import (  # noqa: E402  # pylint: disable=wrong-impor
     CSV_CERTIFIED,
     CSV_REFUSAL_DETAIL,
     CSV_REFUSALS,
+    CSV_TRANSPORT_COMPLETENESS_UNESTABLISHED,
     certify_csv,
     payload_is_complete,
     pdf_facts,
@@ -220,6 +221,7 @@ from tableau_http import (  # noqa: E402  # pylint: disable=wrong-import-positio
     NETWORK_ERROR_STATUS,
     _request,
     header_value,
+    response_framing,
 )
 
 LOG = logging.getLogger("tableau-oracle")
@@ -509,11 +511,15 @@ class TableauSession:
         what made the stated "at most one timeout" salvage bound false.
 
         Returns ``(body, elapsed_sec, stats)`` where ``stats`` records how much recovery was needed --
-        ``reauths``, ``retries`` and the reasons -- plus the response's declared ``content_type``.
+        ``reauths``, ``retries`` and the reasons -- plus the response's declared ``content_type`` and
+        body framing.
         Recovery is deliberately **recorded, not silent**: a capture that quietly healed itself looks
         identical to one that never had a problem, which is exactly how a partially-truncated result
         comes to be trusted. ``content_type`` rides here because a CSV carries no signature, so the
-        declaration is the only thing that can certify a ``/data`` body as data.
+        declaration is the only thing that can certify a ``/data`` body as data. ``response_framing``
+        rides beside it because syntactically valid CSV has no terminator: Tableau Cloud was measured
+        chunked on 6/6 data/image exports, and that chunk terminator -- not a Content-Length Tableau
+        does not send there -- is what makes early EOF detectable.
 
         Raises :class:`ExportFailed` for anything not worth retrying, so a genuinely broken view is
         never recorded as an empty success.
@@ -548,6 +554,7 @@ class TableauSession:
                 # Response data, so both callers POP it before merging the rest into a leg record.
                 # It rides in `stats` so every caller keeps unpacking three values.
                 stats["content_type"] = header_value(headers, "Content-Type")
+                stats["response_framing"] = response_framing(headers)
                 return payload, elapsed, stats
             raw = payload.decode("utf-8", "replace")
             # ONE call, with the redactor inside. `classify_export_error` classifies on the raw text
@@ -874,6 +881,7 @@ def _capture_data(session: TableauSession, view_luid: str, out_dir: Path, stem: 
         payload, elapsed, stats = session.export(f"/sites/{session.site_id}/views/{view_luid}/data")
     except ExportFailed as exc:
         return {"status": exc.kind, "error": str(exc), "detail": exc.detail}
+    framing = stats.get("response_framing")
     certification = certify_csv(payload, stats.pop("content_type", None))
     if certification in CSV_REFUSALS:
         return {
@@ -884,6 +892,8 @@ def _capture_data(session: TableauSession, view_luid: str, out_dir: Path, stem: 
             "elapsed_sec": round(elapsed, 2),
             **stats,
         }
+    if certification == CSV_CERTIFIED and framing == "close_delimited":
+        certification = CSV_TRANSPORT_COMPLETENESS_UNESTABLISHED
     path, naming = data_leg_fields(out_dir, stem, certification)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(payload)
