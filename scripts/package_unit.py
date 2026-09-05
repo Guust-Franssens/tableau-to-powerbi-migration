@@ -226,6 +226,7 @@ from check_path_ceiling import (  # noqa: E402  # pylint: disable=wrong-import-p
     platform_limits,
     utf16_len,
 )
+import host_paths  # noqa: E402  # pylint: disable=wrong-import-position
 from host_paths import discloses_host_location  # noqa: E402  # pylint: disable=wrong-import-position
 from manifest_scope import (  # noqa: E402  # pylint: disable=wrong-import-position
     ORACLE_MANIFEST_ALLOW,
@@ -532,17 +533,29 @@ def _sanitize_diagnostic(text: str) -> str:
     The existing containment predicate is deliberately the only path detector. A location may contain
     spaces, so redacting whitespace-delimited words would leave the tail of a private path behind.
     """
-    parts = re.split(r"(\s+)", text)
-    redacting_path_tail = False
-    for index, part in enumerate(parts):
-        if not part or part.isspace():
+    spans: list[tuple[int, int]] = []
+    scan_text = text.replace("\\", "/")
+    for match in host_paths._HOST_LOCATION_RE.finditer(scan_text):  # pylint: disable=protected-access
+        if not discloses_host_location(match.group()):
             continue
-        redact = discloses_host_location(part) or (
-            redacting_path_tail and any(separator in part for separator in _NAME_SEPARATORS)
-        )
-        parts[index] = "[host location redacted]" if redact else part
-        redacting_path_tail = redact
-    return "".join(parts)
+        end = match.end()
+        continuations = 0
+        while end < len(text) and text[end].isspace():
+            word_start = end
+            while word_start < len(text) and text[word_start].isspace():
+                word_start += 1
+            word = re.match(r"\S+", text[word_start:])
+            if word is None:
+                break
+            candidate = word.group().rstrip("\"'<>()[].,;:!?")
+            if not candidate or (continuations and not any(separator in candidate for separator in _NAME_SEPARATORS)):
+                break
+            end = word_start + len(candidate)
+            continuations += 1
+        spans.append((match.start(), end))
+    for start, end in reversed(spans):
+        text = text[:start] + "[host location redacted]" + text[end:]
+    return text
 
 
 def _safe_frame_name(filename: str) -> str:
@@ -3925,23 +3938,30 @@ def _run_verdict(
     return EXIT_OK if all(result["packaged"] for result in results) else EXIT_NO_WORKING_COPY
 
 
-def _refuse_out_too_deep(
-    parser: argparse.ArgumentParser, bundle: Path, units: list[str], out_root: Path, assets_dir: Path | None
-) -> list[PathBudget]:
-    """Refuse the WHOLE run when any unit's projected paths would not fit under ``out_root`` (#476).
-
-    Measured for EVERY unit before ANY of them is assembled. The field failure this replaces crashed
-    with `[WinError 206]` having already written 29 of 47 packages, so the operator paid for 29 units
-    of work AND still had to repackage the estate under a shorter `--out`.
-
-    Returns the budgets so the shipping advisory reads the same measurement rather than taking it
-    twice and risking a different answer.
-    """
-    budgets = [path_budget(bundle, unit, out_root, assets_dir=assets_dir) for unit in units]
-    too_deep = [budget for budget in budgets if budget.refused]
-    if too_deep:
-        parser.error(render_out_too_deep(too_deep, len(units)))
-    return budgets
+def _measure_unit_budgets(
+    bundle: Path, units: list[str], out_root: Path, assets_dir: Path | None, failed: list[PackagingError]
+) -> tuple[list[str], list[PathBudget]]:
+    """Measure every requested unit, keeping unit-specific budget failures in the batch accounting."""
+    safe: list[str] = []
+    budgets: list[PathBudget] = []
+    for unit in units:
+        try:
+            budget = path_budget(bundle, unit, out_root, assets_dir=assets_dir)
+        except PackagingError as error:
+            error.unit = unit
+            failed.append(error)
+            continue
+        except Exception as error:  # pylint: disable=broad-exception-caught
+            failed.append(UnassessableInput(unit, [f"path budget could not be measured: {_one_line(error)}"]))
+            continue
+        budgets.append(budget)
+        if budget.refused:
+            failure = PackagePathTooLong(budget)
+            failure.unit = unit
+            failed.append(failure)
+        else:
+            safe.append(unit)
+    return safe, budgets
 
 
 def _prepare_out(parser: argparse.ArgumentParser, requested: Path) -> Path:
@@ -3992,16 +4012,16 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
     if not units:
         return _refuse_zero_units(bundle, out_root, args.json)
 
-    budgets = _refuse_out_too_deep(parser, bundle, sorted(units), out_root, assets_dir)
-    _warn_shipping(budgets)
     # Sorted once, and the SAME list is packaged, reported against and measured against: the request
     # is what the totals are denominated in, so it cannot be re-derived from whatever survived.
     requested = sorted(units)
     results: list[dict[str, Any]] = []
     refused: list[PackageEditsRefused] = []
     failed: list[PackagingError] = []
+    packageable, budgets = _measure_unit_budgets(bundle, requested, out_root, assets_dir, failed)
+    _warn_shipping(budgets)
     _package_each(
-        requested, bundle, out_root, oracle_dir, assets_dir, args.discard_package_edits, results, refused, failed
+        packageable, bundle, out_root, oracle_dir, assets_dir, args.discard_package_edits, results, refused, failed
     )
     gaps = partition_gaps(requested, results, failed, refused)
 

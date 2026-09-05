@@ -3626,35 +3626,64 @@ def test_a_unit_no_out_can_fit_says_so_instead_of_naming_an_impossible_directory
     assert f"{-budget.out_root_budget} character(s) over" in message
 
 
-def test_main_refuses_a_too_deep_out_before_packaging_ANY_unit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """29 of 47 packages written, then a crash, was the expensive half of this defect.
-
-    A shorter `--out` moves every unit, so the estate would be repackaged wholesale anyway; the run
-    is refused whole and the offenders are named together with the one number that fixes all of them.
-    """
+def test_main_accounts_for_a_too_deep_unit_without_blocking_siblings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A budget refusal belongs to its unit; it must not turn into a batch usage error."""
     _pin_windows(monkeypatch)
     bundle = _pbir_bundle(tmp_path, BUDGET_UNIT, "Second_Unit")
     out = _padded_path(tmp_path, 200)
-    with pytest.raises(SystemExit) as excinfo:
-        pkg.main(["--bundle", str(bundle), "--out", str(out), "--quiet"])
-    assert excinfo.value.code == 2
-    assert list(out.iterdir()) == [], "nothing may be written when the run is refused"
+    report = tmp_path / "packaging.json"
+    attempted: list[str] = []
+    real_package_unit = pkg.package_unit
+
+    def spy_package_unit(bundle_root: Path, unit: str, out_root: Path, **kwargs: object) -> dict:
+        attempted.append(unit)
+        return real_package_unit(bundle_root, unit, out_root, **kwargs)
+
+    monkeypatch.setattr(pkg, "package_unit", spy_package_unit)
+    assert (
+        pkg.main(["--bundle", str(bundle), "--out", str(out), "--json", str(report), "--quiet"]) == pkg.EXIT_UNIT_FAILED
+    )
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert [item["unit"] for item in payload["failed"]] == sorted([BUDGET_UNIT, "Second_Unit"])
+    assert payload["totals"]["requested"] == 2
+    assert attempted == []
+    assert not list(out.glob("*/package-manifest.json"))
 
 
-def test_the_batch_refusal_names_every_offending_unit_and_one_number_that_fixes_them(
+def test_the_batch_budget_failures_name_every_offending_unit(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """One unit at a time is how the field run discovered them - 29 packages apart."""
+    """Every over-budget unit is reported without aborting the request."""
     _pin_windows(monkeypatch)
     bundle = _pbir_bundle(tmp_path, BUDGET_UNIT, "Second_Unit")
     out = _padded_path(tmp_path, 200)
-    with pytest.raises(SystemExit):
-        pkg.main(["--bundle", str(bundle), "--out", str(out), "--quiet"])
-    message = capsys.readouterr().err
-    assert "2 of 2 unit(s)" in message
+    assert pkg.main(["--bundle", str(bundle), "--out", str(out)]) == pkg.EXIT_UNIT_FAILED
+    message = capsys.readouterr().out
     assert BUDGET_UNIT in message and "Second_Unit" in message
-    assert "NOTHING was packaged" in message
-    assert re.search(r"it must be at most (-?\d+) \((\d+) shorter\) for every unit to fit", message), message
+    assert "Power BI Desktop refuses to open" in message
+
+
+def test_a_budget_measurement_exception_is_unassessable_for_one_unit_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unexpected preflight failure must preserve sibling packaging and complete accounting."""
+    bundle, oracle = _batch_bundle(tmp_path)
+    real_budget = pkg.path_budget
+
+    def fail_one(bundle_root: Path, unit: str, out_root: Path, **kwargs: object) -> pkg.PathBudget:
+        if unit == BATCH_BOOM:
+            raise OSError("budget probe failed")
+        return real_budget(bundle_root, unit, out_root, **kwargs)
+
+    monkeypatch.setattr(pkg, "path_budget", fail_one)
+    report = tmp_path / "packaging.json"
+    assert _batch_main(tmp_path, bundle, oracle, report, "--quiet") == pkg.EXIT_CANNOT_ASSESS
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert [item["unit"] for item in payload["failed"]] == [BATCH_BOOM]
+    assert payload["failed"][0]["state"] == "cannot_assess"
+    assert (_out(tmp_path) / BATCH_LATE / pkg.MANIFEST_NAME).is_file()
 
 
 # --------------------------------------------------------------------------------------------
@@ -4522,6 +4551,22 @@ def test_a_crash_diagnostic_redacts_host_locations_but_keeps_actionable_context(
     assert Path(filename.replace("\\", "/")).name in crash.traceback
     if "ordinary" in message:
         assert "ordinary failure text" in report
+
+
+def test_crash_diagnostic_redacts_complete_spans_and_keeps_following_prose() -> None:
+    for text in (
+        '"C:\\Users\\Neutral Canary\\secret.csv", retry failed',
+        "failure at C:\\Users\\Neutral Canary\\secret.csv; retry failed",
+        r"\\server\Users\Neutral Canary\secret.csv; retry failed",
+        "/home/Neutral Canary/secret.csv (retry failed)",
+    ):
+        safe = pkg._sanitize_diagnostic(text)  # pylint: disable=protected-access
+        assert "Neutral Canary" not in safe
+        assert "Canary" not in safe
+        assert "secret.csv" not in safe
+        assert "retry failed" in safe
+
+    assert pkg._sanitize_diagnostic("/api/v1/Neutral Canary is unavailable") == "/api/v1/Neutral Canary is unavailable"  # pylint: disable=protected-access
 
 
 def test_a_failed_unit_leaves_no_staging_tree_and_no_partial_package(

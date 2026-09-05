@@ -655,36 +655,25 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
         ["test_the_retired_package_is_never_named_after_the_package_it_retires"],
     ),
     (
-        "budget: package the unit anyway, reproducing the mid-assembly WinError 206",
+        "budget: drop an over-budget unit from outcome accounting",
         PACKAGER,
-        "    budget = path_budget(bundle, unit, out_root, limits=limits, assets_dir=assets_dir)\n"
-        "    if budget.refused:\n        raise PackagePathTooLong(budget)",
-        "    budget = path_budget(bundle, unit, out_root, limits=limits, assets_dir=assets_dir)\n"
-        "    if False:  # noqa\n        raise PackagePathTooLong(budget)",
-        [
-            "test_a_unit_whose_paths_exceed_the_ceiling_is_refused_BEFORE_anything_is_written",
-            "test_the_refusal_names_the_path_its_length_the_ceiling_and_the_characters_to_reclaim",
-        ],
+        "            failed.append(failure)\n        else:\n            safe.append(unit)",
+        "            pass\n        else:\n            safe.append(unit)",
+        ["test_main_accounts_for_a_too_deep_unit_without_blocking_siblings"],
     ),
     (
-        "budget: measure only the FINAL tree, missing a unit that fits once renamed and not before",
+        "privacy: scan raw backslashes instead of the normalized host spelling",
         PACKAGER,
-        "    return (final, staging_dir(out_root, unit), retired_dir(final))",
-        "    return (final,)",
-        [
-            "test_the_budget_measures_the_STAGED_tree_too_not_only_the_final_one",
-            "test_the_budget_measures_both_the_staged_and_the_final_tree",
-        ],
+        '    scan_text = text.replace("\\\\", "/")',
+        "    scan_text = text",
+        ["test_a_crash_diagnostic_redacts_host_locations_but_keeps_actionable_context"],
     ),
     (
-        "budget: let the batch run start, so the estate fails one unit at a time again",
+        "privacy: stop redacting a spaced host-path continuation",
         PACKAGER,
-        "        parser.error(render_out_too_deep(too_deep, len(units)))",
-        "        pass",
-        [
-            "test_main_refuses_a_too_deep_out_before_packaging_ANY_unit",
-            "test_the_batch_refusal_names_every_offending_unit_and_one_number_that_fixes_them",
-        ],
+        '            candidate = word.group().rstrip("\\"\'<>()[].,;:!?")',
+        '            candidate = ""',
+        ["test_crash_diagnostic_redacts_complete_spans_and_keeps_following_prose"],
     ),
     (
         "message: name the path but not its length, the ceiling or the overage (WinError 206's own failing)",
@@ -817,8 +806,14 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
     (
         "#478: narrow the clause to a modelled refusal, so the FIELD failure still aborts the batch",
         PACKAGER,
-        "        except Exception as error:  # pylint: disable=broad-exception-caught",
-        "        except PackagePathTooLong as error:  # pylint: disable=broad-exception-caught",
+        "        except Exception as error:  # pylint: disable=broad-exception-caught\n"
+        "            if failed is None:\n"
+        "                raise\n"
+        "            crash = UnitCrashed(unit, error)",
+        "        except PackagePathTooLong as error:  # pylint: disable=broad-exception-caught\n"
+        "            if failed is None:\n"
+        "                raise\n"
+        "            crash = UnitCrashed(unit, error)",
         ["test_one_unit_raising_does_not_stop_the_units_after_it"],
     ),
     (
