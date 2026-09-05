@@ -197,7 +197,31 @@ def test_source_ref_archive_symlink_entry_is_refused_without_filesystem_symlink(
     assert sync.main(["--check", "--plugin-root", str(tmp_path / "missing-plugin")]) == 5
 
     output = capsys.readouterr().out
-    assert "unsupported link entry" in output
+    assert "unsupported mode 120000" in output
+    assert "Refusing to fall back to the caller's working tree" in output
+
+
+def test_source_ref_gitlink_entry_is_refused_without_omitting_empty_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _fixture_repo(tmp_path, monkeypatch)
+    first_skill = build_plugin.SHIPPED_SKILLS[0]
+    _run_git(
+        repo,
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        "160000",
+        "0123456789012345678901234567890123456789",
+        f".github/skills/{first_skill}/submodule",
+    )
+    _run_git(repo, "commit", "-m", "track gitlink entry")
+    _run_git(repo, "update-ref", "refs/remotes/origin/master", "HEAD")
+
+    assert sync.main(["--check", "--plugin-root", str(tmp_path / "missing-plugin")]) == 5
+
+    output = capsys.readouterr().out
+    assert "unsupported mode 160000" in output
     assert "Refusing to fall back to the caller's working tree" in output
 
 
