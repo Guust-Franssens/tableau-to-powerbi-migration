@@ -421,6 +421,64 @@ def test_a_scoped_survey_only_keeps_each_resolved_identity_and_project(
     }
 
 
+def test_a_scoped_survey_only_restores_a_resolved_identity_missing_from_metadata(
+    tmp_path: Path,
+) -> None:
+    """A partial Metadata API response cannot suppress a required survey identity."""
+    survey = load_survey(
+        _survey_file(
+            tmp_path,
+            [
+                _survey_workbook(FINANCE_WB, [(SHARED_DS, "ds-finance")], project="Finance"),
+                _survey_workbook(MARKETING_WB, [(SHARED_DS, "ds-marketing")], project="Marketing"),
+            ],
+            scope={"type": "project", "projects": ["Finance", "Marketing"]},
+        )
+    )
+
+    plan = build_plan([_metadata(SHARED_DS, luid="ds-finance", project="Finance")], "", survey)
+
+    assert {(entry["luid"], entry["project"]) for entry in plan} == {
+        ("ds-finance", "Finance"),
+        ("ds-marketing", "Marketing"),
+    }
+
+
+def test_same_name_plan_rows_have_stable_luid_order(tmp_path: Path) -> None:
+    """Equivalent Metadata API responses produce the same order for duplicate captions."""
+    survey = load_survey(
+        _survey_file(
+            tmp_path,
+            [_survey_workbook(FINANCE_WB, [], project="Finance")],
+        )
+    )
+    first = build_plan(
+        [
+            _metadata(SHARED_DS, luid="ds-b", project="Finance"),
+            _metadata(SHARED_DS, luid="ds-a", project="Finance"),
+        ],
+        "",
+        survey,
+    )
+    second = build_plan(
+        [
+            _metadata(SHARED_DS, luid="ds-a", project="Finance"),
+            _metadata(SHARED_DS, luid="ds-b", project="Finance"),
+        ],
+        "",
+        survey,
+    )
+
+    assert [(entry["name"], entry["luid"]) for entry in first] == [
+        (SHARED_DS, "ds-a"),
+        (SHARED_DS, "ds-b"),
+    ]
+    assert [(entry["name"], entry["luid"]) for entry in second] == [
+        (SHARED_DS, "ds-a"),
+        (SHARED_DS, "ds-b"),
+    ]
+
+
 def test_a_selected_workbook_is_matched_by_luid_before_name(tmp_path: Path) -> None:
     """A renamed selected workbook is retained while a foreign same-caption workbook is excluded."""
     survey = load_survey(

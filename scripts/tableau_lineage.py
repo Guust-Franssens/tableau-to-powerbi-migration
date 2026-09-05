@@ -745,7 +745,7 @@ def _flag_name_collisions(by_key: dict[str, list[dict[str, Any]]], survey: Surve
 
 
 def _survey_only_rows(site: str, survey: Survey, by_key: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
-    """Plan rows for data sources the Metadata API never listed at all.
+    """Plan rows for survey identities the Metadata API did not fully list.
 
     They are registered in `by_key` as well, not merely appended to the plan: a collision the
     Metadata API cannot see (it lists at most one row for the name - and for a `sqlproxy` source,
@@ -754,10 +754,11 @@ def _survey_only_rows(site: str, survey: Survey, by_key: dict[str, list[dict[str
     """
     rows: list[dict[str, Any]] = []
     for key, seen in survey.datasources.items():
-        if key in by_key:
-            continue
+        existing_luids = {row.get("luid") for row in by_key.get(key, ()) if row.get("luid")}
         if seen.resolved_luids:
-            identities = sorted(seen.resolved_luids)
+            identities = sorted(seen.resolved_luids - existing_luids)
+        elif key in by_key:
+            identities = []
         else:
             identities = [None]
         for luid in identities:
@@ -819,7 +820,15 @@ def build_plan(datasources: list[dict[str, Any]], site: str, survey: Survey | No
         plan.extend(_survey_only_rows(site, survey, by_key))
         _flag_name_collisions(by_key, survey)
 
-    return sorted(plan, key=lambda p: (-p["downstream_count"], (p["name"] or "").lower()))
+    return sorted(
+        plan,
+        key=lambda p: (
+            -p["downstream_count"],
+            (p["name"] or "").lower(),
+            (p.get("luid") or "").lower(),
+            (p.get("project") or "").lower(),
+        ),
+    )
 
 
 def build_order(plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
