@@ -217,7 +217,7 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 9ae7206393ac99c216de34528936d2f0aa7a8542e200f6bced762618375e1ff7  ## Skills you use, in this order
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-7ef62a988df7456a3726ddcc0d8601ca214f02f750340138354b24525e45bbe3  0. **`powerbi-report-gotchas`** ~ read **first**, before pla
+ccdbeb71c305d9dde1c04c84c9e511643e41649cd2ab09c13dbcadc834d50537  0. **`powerbi-report-gotchas`** ~ read **first**, before pla
 b96b1be9c52837e1e7e197e1644e0e319fde264c551e1930ba76950c12a441b5  1. **`powerbi-report-planning`** ~ **`powerbi-report-design`
 b44deb03c3e051d509a6937b6dcd97dd6cd9b345fca1cf1931495071c7a60069  2. **`powerbi-report-author` CLI** ~ the live vocabulary and
 ae40d45becbd9f6fa6a1d7c19fee3eda2be4ab6f9a7e6e6763e183a889a7be6a  3. **Read-only DAX ~ several of your own rules require it.**
@@ -235,7 +235,7 @@ e27366c2b7da8cfb3440a33003343413d20067e7731fe7d2751f397183eea523  | `migration-s
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 5e05e10ede86d10354088b9208e1602f63b94c301cc56b2b3b6bcbff664d5736  ~~ **Judge the shipped `<bundle>/pbip/` bytes.** The model-u
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-734f705adc70bcca1fa519f6a7294d4971afb14faa4f2153c51c6782198910cf  ~~ **Never repair a `viz_fidelity` row on its own say-so.** 
+23590ba81be1017dbe192a1740a50179cfcd762eb80b99816b518bea98b3db0d  ~~ **Never repair a `viz_fidelity` row on its own say-so.** 
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 0f30d8f4701bcf2658d17a1e28d0c661bfd22c38b1e87dfb60afb5b08c4471c7  ### Every edit is a re-runnable `_build/` script ~ and DECLA
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
@@ -245,7 +245,7 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 1f1887b9bc4bb382100c433d034c80a28da7a27de01a20226b3fe72a1f9a62b9  - **touches only what it claims to**, so two fixes can be re
 900b8cfdd02cd15185034257d4c762a9d66d98cab9fc1d8edb2330c6aed16cab  - **is idempotent** ~ twice equals once, which is what makes
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-b6f9a379b1dd4639194d8c5ab3c8650ebf68191e21c969201a229ece0cd1bd5e  ~~ **A `_build/` script is only half of it.** `check_migrati
+8a4fba62a0b0ff7be078b9b00ec7d1b19b1d5cd8843304a5cb8738bb98a19925  ~~ **A `_build/` script is only half of it.** `check_migrati
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 7136000e494604c07769c55da3f0ec4ea85eef9508d8840bc71ec8a6e745b742  ## Workflow
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
@@ -254,13 +254,13 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 706a34fddb12ff9704ba01adfb7c2b83341d207f88af403a6c5d81474883599e  2. **Read the baseline before changing anything.** Open the 
 ff1940b503b4bef0c29cfca93fdf676fa28a6df4e687509d924994336c59e118  3. **For broken bindings, run `python scripts/check_unit.py 
 632fbc62e608418e49268c769bfb8afb4bc9d3fe71ec0325a85bf125ab8cc6d5  4. **Take the validator's classification of `viz_fidelity`, 
-4f41912fce4baa1ba4412554b84cbe98ea90d19b6cada509e5b57a2412f21477  5. **Fix with the smallest blast radius first.** Prefer form
+3d4777eec99cdce286deeb6e19a72b01a157f644ffe681be645a97c1bbe790d7  5. **Fix with the smallest blast radius first.** Prefer form
 86ea080c45576ae9f17898f67fa16293ef7ef55bcb4b684deb752f34bae7cd93  6. Wire the source intent the engine's input format cannot c
 ee005084dfa5dadca9a52d0914548f08dc570a216e33c74fb1adc5386a57b5ee  7. **Validate structurally (below), then re-screenshot.** St
-d5e9b1f1ed85d02bf2dbd134792b2ba9092163f38449027e1e229dc6e15db430  8. **Write the change as a `_build/fix_*.py` and declare it*
+a9f62166fd6821ad5ccc8f14a26a39c1c74f56a22d962f672e0685c23d7c335f  8. **Write the change as a `_build/fix_*.py` and declare it*
 55a97bd81a591e72a526a24ffc9b0d715d870e3725e1f449a72741e7a2e09a13  9. **Report back**: what you repaired, what you left as an a
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-d729261984a80823ca871a505a6340edaef6162899e3f0f57c618a68f39cf82d  **If a page must be built from scratch** (rare), fall back t
+0f529bcfbc65de91f5cdcf82dfcf3f31a2d791b0adb58ea65b864a27892274af  **If a page must be built from scratch** (rare), fall back t
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 42ea29f482eefe3c0d5cad54cff000597de7f59df7153049fac8a2b954365f3e  ## Mandatory validation (before any screenshot review)
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)

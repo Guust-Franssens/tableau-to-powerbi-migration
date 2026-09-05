@@ -97,9 +97,8 @@ You repair and finish the PBIR report the deterministic tier already emitted and
 ## Skills you use, in this order
 
 0. **`powerbi-report-gotchas`** — read **first**, before planning turns into authoring. It owns the
-   PBIR/Desktop craft this file does not repeat: visual encoding and the per-idiom research procedure
-   (§9), chart-type traps (§5 maps, §4 crosstabs, §6 scatter), conditional formatting (§2), and the
-   generated-edit declaration mechanics (§3). [SKILL.md](../skills/powerbi-report-gotchas/SKILL.md).
+   PBIR/Desktop craft this file does not repeat; the generated section index under "Gotchas" routes
+   you. [SKILL.md](../skills/powerbi-report-gotchas/SKILL.md).
 1. **`powerbi-report-planning`** → **`powerbi-report-design`** → **`powerbi-report-authoring`** — the
    full chain, needed only where a page must be built **from scratch** (rare). Point the design skill
    at the model `pbi-semantic-builder` handed over.
@@ -132,8 +131,7 @@ reference-only and never edited, and `viz_fidelity.status: "rebuilt"` is a claim
 ⚠️ **Never repair a `viz_fidelity` row on its own say-so.** Some entries describe a deferral that
 **must not** be recreated — e.g. a `LAST` table-calc filter that runs after aggregation and HIDES
 marks; re-adding it as an ordinary filter silently re-scopes the other table calcs sharing that view
-(`powerbi-report-gotchas` §10). **The validator classifies each row as fixable /
-accepted-limitation / false-claim; you repair only what it routes to you.**
+(`powerbi-report-gotchas` §10).
 
 ### Every edit is a re-runnable `_build/` script — and DECLARED
 
@@ -154,8 +152,8 @@ There is no `--approved-viz` landing channel upstream, and a landing re-run (`--
 exits **1** on any `*.Report` file that changed without a declaration, and
 `scripts/declare_generated_edit.py` is the only thing that writes one — it runs your script and
 records the before/after hashes. Its exact invocation and three failure modes (one `--target` per
-run, never hand-edit first, declare before the sealing refresh) are in `powerbi-report-gotchas` §3;
-`--tamper` must exit 0.
+run, never hand-edit first, **declare LAST** — touching the target again after declaring invalidates
+its hash) are in `powerbi-report-gotchas` §3; `--tamper` must exit 0.
 
 ## Workflow
 
@@ -189,26 +187,26 @@ run, never hand-edit first, declare before the sealing refresh) are in `powerbi-
    type or field wells — a type change re-opens the encoding question the engine already answered.
    Where you do change it, justify against the reference, not taste, and research the mapping per
    *idiom* through `powerbi-report-gotchas` §9 plus the live CLI. Never write field-well or formatting
-   JSON from memory.
+   JSON from memory. ⚠️ **An encoding the CLI and the cached §9 guidance cannot establish is a HUMAN
+   STOP, not a guess.** Ask a human to configure that one visual in Desktop, read the resulting
+   `visual.json` as ground truth, then record it (skill `visuals/<type>.md`) so nobody re-asks.
 6. Wire the source intent the engine's input format cannot carry: the parameter-equality idiom (a
    single-select **slicer** on the dimension named in the filter's `note`, never a filter card), and
    `measure_names_values_pivot` (bind each field in `pivoted_field_ids` **directly**; never recreate
    Tableau's Measure Names/Values column).
 7. **Validate structurally (below), then re-screenshot.** Structure and render are different claims.
-8. **Write the change as a `_build/fix_*.py` and declare it** (see above) — a bundle-only or
-   undeclared edit does not survive a landing re-run and blocks sign-off.
+8. **Write the change as a `_build/fix_*.py` and declare it** (see above).
 9. **Report back**: what you repaired, what you left as an accepted limitation *and why*, any
    `viz_fidelity` row you believe is a false claim (route it back, never silently fix), and new
    `limitations_encountered` entries (`stage: "report_build"`). On the parser path rerun `python
    scripts/validate_spec.py <spec>`; with no spec, say that gate is not applicable and run
    `check_unit.py --scope report`, then `--scope integration`.
 
-**If a page must be built from scratch** (rare), fall back to the full chain:
-`powerbi-report-planning` → `powerbi-report-design` → **an empty layout skeleton, gestalt-checked
-against the reference before binding any field** → `powerbi-report-authoring`. When *fixing* an
-existing report, re-follow that skill's "Edit an existing report" workflow instead of a one-off direct
-edit — measured, 5+ checkpoints of ad hoc PBIR/MCP edits ran none of the validation, anti-pattern or
-design-consistency guardrails.
+**If a page must be built from scratch** (rare), fall back to the full chain (skill 1), inserting
+**an empty layout skeleton, gestalt-checked against the reference before any field is bound**. When
+*fixing* an existing report, re-follow `powerbi-report-authoring`'s "Edit an existing report"
+workflow instead of a one-off direct edit — measured, 5+ checkpoints of ad hoc PBIR/MCP edits ran
+none of the validation, anti-pattern or design-consistency guardrails.
 
 ## Mandatory validation (before any screenshot review)
 
