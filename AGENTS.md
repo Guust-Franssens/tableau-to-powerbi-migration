@@ -233,7 +233,7 @@ source:**
 | Source | Capture command | Notes |
 |---|---|---|
 | **Tableau Public URL, or a local `.twb`/`.twbx`** | `python scripts/capture_tableau_reference.py migrations/workbooks/<slug> [--public-url <url> --view <view>]` | Writes a provenance-stamped `reference/manifest.json` — a `capabilities`-carrying `validation_grade` source; its `manual` provider also adopts user-dropped `tableau-*.png` in `reference/`. An existing manifest **short-circuits to exit 0** — re-run with `--force`. |
-| **Tableau Server/Cloud** (`TABLEAU_SERVER_URL` configured) | `python scripts/capture_tableau_oracle.py --out _oracle --images [--reference-best] [--workbook "<published name>"]` | The command on the left **exits 3** on an empty target when the URL is set (URL unset → 1): that is *"wrong tool for this source"*, **NOT** "capture is impossible" — misreading it is the whole of #198. Use the oracle, which does the live REST image export. |
+| **Tableau Server/Cloud** (`TABLEAU_SERVER_URL` configured) | `python scripts/capture_tableau_oracle.py --out _oracle --images [--reference-best] [--workbook "<published name>"]` | This row **is** the oracle route: it does the live REST image export. **Exit 4 is "no views selected"** — a wrong or over-narrow target (usually a `--workbook` filter matching nothing), **NOT** "capture is impossible"; **exit 3** is a total non-credential failure. Reading a selection miss as an impossibility is the whole of #198. Full code list below. |
 
 Three oracle traps, all verified in `scripts/capture_tableau_oracle.py`:
 
