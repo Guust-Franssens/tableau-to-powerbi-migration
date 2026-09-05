@@ -13,34 +13,36 @@ fff45165ef8fea61a8f5bea9d88ca97eae763e191dbb3fa4085ad9abcb2b9ee3  > Step 0: read
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 8eebd971bb11ec847966f6ccd681526f49152de79aa53fc0f22cc223776301a0  ## Shared agent conventions (all agents inherit these)
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-108aee2bbf5d303f06236d7a03c11a31d177fb183b661fa9a5e05b2f70e06157  - **Cite your source ~ and say WHOSE.** Every capability cla
-21da06636652ac2cc2fe35278078f41f34a308711381fe4874edb61dfc6e888a  - **Use confidence markers** ~ ~ verified / ~~ inferred, nee
+673636768bdfd417a2811bcd9ab4a5985bd0d3fc6df823bf9c21692c920df09c  - **Cite your source ~ and say WHOSE.** Every capability cla
+e3ef3567d1bbb300a69d9e4770e2380215437e5b680ff1eb1fbf32ae0c6c78a7  - **Use confidence markers** ~ ~ verified / ~~ inferred, nee
 7e67ae690f0e74e5cd97bc35851c04731b18ba7716a64a095cc9cfa81483a8fa  - **Own your layer; don't cross it.** `pbi-semantic-builder`
-2d44f740fbebba52a10b67edd833c426867b7556814e7f38f9efcade0b6c9526  - **Three locations, one direction: engine truth ~ working c
+cd75e36e80438672dfdc14d1cf6dd91d32ad726fd6496f1eabb597260742121b  - **Three stages, one direction: pristine baseline ~ working
 7752e0cf2f54fbbf923c7b5d9099edc5e6ea28d035c5e93a5c70b9b26006bfe8  | stage | location | rule |
 11bd5f873fa004793229f9931b6d90ec5eff770f738b716c6198d6daabd03235  |---|---|---|
-bb4d1ac6af343d9fb2ddb1ae34c8d271b135e6a9c40799d23318095961436d82  | engine truth | `<bundle>/reports/`; `<bundle>/semantic_mod
-776ea33b29b12bfb41ecb9d0c27ccea6dcab14470abf82c017f1f8c6fb83a37d  | working copy | `<bundle>/pbip/`, or `<package>/fabric/` wh
-bbc9c2fce4ae80dbec0f86aa181476faaf26ec3aadb2357ae73484eca318e61a  | deliverable | `migrations/{workbooks,datasources}/<slug>/f
+e22324daf3d3dce163e0ac0c817ee466aa7e697cfbf29e40a741ba1155f2fd45  | pristine baseline | `<bundle>/reports/` (the model-unbound
+145e6995d1db3a5d3c45ab3b4f28691db7b153f3a804db4ae46bcec62b10da6f  | working copy | `<bundle>/pbip/` (the model-bound working/s
+cb2cef030bbb133e63e86d620d70f5c68924a45d9072c6c2f723794221678483  | deliverable | `migrations/{workbooks,datasources}/<slug>/f
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-c6fd237095a5ae341dc8f56a0cb0d2a91734129d2a9b050c95323d0af15b42b1  A bundle may contain `<bundle>/{pbip,reports,semantic_models
+eb27287345be286c89b90b89fd60d9fc200a1d4f94498f9582c1cd056d0b3877  A bundle may contain `<bundle>/{pbip,reports,semantic_models
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-1690789c8feaa2b1349772bd3389964b47328b84f5dd2a8486f39722eaf79127  ~~ **The copy must keep `definition.pbir`'s `byPath` resolvi
+d0191f7ef88f7eaba5fe7a5df29b0eac97379ef5de8bed569b5007d333f6663a  ~~ **The two report passes can diverge by design, so neither
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-d1590974a828f96fe221c0aa9c43f4265735e26b08e12cb83a4bce562dfa2b2a  - **Structural validation is necessary, not sufficient.** A 
-d6af19774647480f54397f7bf38b02c6f1d1b70cb1e18710278d2935ce71f50e  - **Keep `limitations_encountered` alive** through the whole
+7a4fc25c60da284e7c33e3318bc43e5e815848b16b6688f5fe35876fc9671396  ~~ Promotion must keep `definition.pbir`'s `byPath` resolvin
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+a51a9a32298b5250de40db3bdc108c3f305d7b8bc25e0ea2408f633dc60ac0be  - **Structural validation is necessary, not sufficient.** A 
+cb21982d44fa42c19b0fe01857edf4b6e47ffa38e08f82e25874db1e9b5add68  - **Keep `limitations_encountered` alive** through the whole
 35c45012ca2fca732fd8d5484db7af47ffc3d8854c3b21b84e2b00ce2b749bfa  - **Declare generated edits.** TMDL/PBIR/`.pbip`: file/chang
-39ec2e6c57993e212244e728e49db781e209c34019bd572265ea50e79b2c18df  - **Surface complexity mismatches proactively.** If the pars
-80eee10386db0e21f7a1c2d60015488b351f5571f04964236105bacadd334a62  - **NEVER block silently on an external system ~ time-box it
-44dfa127dfacaa3f817b9bea57d18a939769a2b6720b344accd30565606596e7  - **Cap it: ~2 minutes or 3 attempts, whichever comes first*
-c264726a704ea65ab7e370e7cc2ef7803ce2a063e49d5e4596df09e152dfc671  - **Unless the tool tells you it IS the timer** ~ some of ou
-b5882102ac393376b693825c13246ca34f80847841ec5a2f673ccea12b0161dc  - **A MISSING CREDENTIAL is not transient ~ try ONCE.** The 
-f3478d2e31818aad8a20faf69747475050771b422cf59a931912ff21fe2f3429  - **AUTOPILOT / auto-approve DOES NOT override a credential 
+7f84d9b33171068ee1749ce30a7c292044f1a842a04b837371a1f8da52c7c5e7  - **Surface complexity mismatches proactively.** If the pars
+6219b337903decdb2aaf2efa84c8a1de2555b3c8faf54934641efbb28a96111d  - **NEVER block silently on an external system ~ time-box it
+8e707b79fd53cba431d981353b74d9f7c7bf702766e6335d186d0396ae801c53  - **Cap it: ~2 minutes or 3 attempts, whichever comes first*
+ea6da7a18d7de674ec6ae089f773bad8e34c5b0ee66b88a221ec2d9155c4c7c6  - **Unless the tool tells you it IS the timer** ~ some scrip
+e81a04f9635331f4b0b7d864a3e50caf047681a7791231c5ab6685061ad3f750  - **A MISSING CREDENTIAL is not transient ~ try ONCE.** The 
+a20683f57acd1d70225876a96b1be82b2f8b56a541c594a9ea2f3c55d612464d  - **AUTOPILOT / auto-approve DOES NOT override a credential 
 fcf8a75033189636cf2cf0d2649e9eb5b1d98aa08655d14d01a4523a6a580e58  - On hitting the cap, **STOP and ask a specific, actionable 
 f548e1f4c08b94769618e89c284056ae280b36f9397daf1681c3ff9be855b15c  - **Report elapsed time** whenever an operation exceeds ~60 
 7113ea344407d2886d52f848e0e877dd7d14342db7ef6260f7d153419632ebe8  - **End every message with a clear next step or an explicit 
-18a323a4fcb2b111870a872ab65c4fae18af3136c887180d9d88ed91a4f5c4ee  - **Durable learnings go in committed files** (the agent `Go
-956c88decb154e2149f0fbc762bd9ba37a7b1fd4c216cd2d14b39a4445f7f7bc  - **Power BI Desktop cleanup is PID-scoped.** Concurrent ins
+db36d90cff4e07f5fefa80e8167ada5c1035dcffbf15ae72fcf17f970a772043  - **Durable learnings go in committed files** (agent `Gotcha
+0d0af1db0161518ddc296dbc64e7d32eca53791608e4d29779e3692de3daef21  - **Power BI Desktop cleanup is PID-scoped.** Concurrent ins
 f1d6acb7da4d733442fd76495ad69852e529e1ecd2a428ab1fa393e0374484d8  <!-- END:shared-conventions -->
 
 [dry-run-operator.agent.md]

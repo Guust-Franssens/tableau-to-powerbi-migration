@@ -19,69 +19,70 @@ translation guide is your reference for every calculated field.
 
 ## Shared agent conventions (all agents inherit these)
 
-- **Cite your source — and say WHOSE.** Every capability claim, mapping decision, or numeric result
+- **Cite your source — and say WHOSE.** Every capability claim, mapping decision or numeric result
   names its evidence: a `migration-spec.json` field, a TMDL/PBIR path + line, a live `EVALUATE`
   result, or a doc URL. "It renders / it returned a number" is not verification; "it matches the
-  Tableau value" is. **A number also names the estate it was measured on** — ours (the reference
-  bundle) or the customer's. Never present ours as theirs: measured 2026-08-21, five did in one day.
+  Tableau value" is. **A number also names the estate it was measured on** — ours or the customer's;
+  never present ours as theirs.
 - **Use confidence markers** — ✅ verified / ⚠️ inferred, needs check / ❌ known gap — on any fidelity,
-  mapping, or capability statement.
+  mapping or capability statement.
 - **Own your layer; don't cross it.** `pbi-semantic-builder` owns TMDL/DAX, `pbi-report-builder` owns
   PBIR/visuals, `pbi-migration-validator` is read-only and never edits. A subagent never "just fixes"
   a finding another agent owns — it reports; the orchestrator routes.
-- **Three locations, one direction: engine truth → working copy → deliverable. Never edit upstream of
-  where you are.**
+- **Three stages, one direction: pristine baseline → working/shipped pass → deliverable. Never edit
+  upstream of where you are.**
   | stage | location | rule |
   |---|---|---|
-  | engine truth | `<bundle>/reports/`; `<bundle>/semantic_models/` (if emitted) | **NEVER edit an existing baseline** |
-  | working copy | `<bundle>/pbip/`, or `<package>/fabric/` when you were handed a PACKAGE | agents edit **here**; whichever tree you were handed is CANONICAL. `declare_generated_edit.py` / `--tamper` cover BUNDLE work only (#460) |
-  | deliverable | `migrations/{workbooks,datasources}/<slug>/fabric/` | **COPIED at sign-off**, so the bundle survives as evidence |
+  | pristine baseline | `<bundle>/reports/` (the model-unbound report pass); `<bundle>/semantic_models/` when emitted | **NEVER edit.** Evidence for the engine-gap diff only — and an absent baseline is BASELINE UNAVAILABLE, never "no changes" |
+  | working copy | `<bundle>/pbip/` (the model-bound working/shipped pass), or `<package>/fabric/` when you were handed a PACKAGE | agents edit **here**; whichever tree you were handed is CANONICAL. `declare_generated_edit.py` / `--tamper` cover BUNDLE work only (#460) |
+  | deliverable | `migrations/{workbooks,datasources}/<slug>/fabric/` | promoted at sign-off (`promote_unit.py`), so the bundle survives as evidence |
 
   A bundle may contain `<bundle>/{pbip,reports,semantic_models,handover,data}` — **no `out/` level**;
-  `<bundle>/semantic_models/` is conditional (absent for 8/12 workbooks), and absent baseline ≠ no
-  changes — see `AGENTS.md`.
+  `<bundle>/semantic_models/` is conditional (absent for 8 of 12 workbooks in one audited estate).
 
-  ⚠️ **The copy must keep
-  `definition.pbir`'s `byPath` resolving** — plain copy for a per-workbook model, path rewrite for a
-  shared datasource; never ship `<bundle>/reports/` (reference-only: no model beside it) and never
-  edit it - keep it pristine and diff it with git. Mechanics: `powerbi-report-gotchas` §3.
+  ⚠️ **The two report passes can diverge by design, so neither is fidelity proof.**
+  `shipped_tree_divergence` discloses a difference to inspect, not a faithful pass;
+  `viz_fidelity.status: "rebuilt"` is a claim about what the engine did, not render or
+  shipped-artifact proof. **Judge fidelity on the shipped bytes** — the `pbip/` or package tree —
+  against the Tableau evidence.
+
+  ⚠️ Promotion must keep `definition.pbir`'s `byPath` resolving: plain copy for a per-workbook model,
+  path rewrite for a shared datasource. Never ship `<bundle>/reports/` (reference-only: no model
+  beside it). Mechanics: `powerbi-report-gotchas` §3.
 
 - **Structural validation is necessary, not sufficient.** A clean parse/validate proves shape, not
   correctness: TMDL deserialization and `powerbi-report-author validate` both pass defects that only
-  surface in Desktop **with data**. Never declare something done on a green validator alone. (The
-  PBIR and TMDL specifics live in the `powerbi-report-gotchas` and `powerbi-semantic-model-gotchas`
-  skills, which the owning agents invoke.)
-- **Keep `limitations_encountered` alive** through the whole build **and** fix phase; every bug found
-  and fixed later is itself worth recording. Regenerate it from the final artifacts before sign-off so
-  stale entries don't mislead the validator.
+  surface in Desktop **with data**. Never declare something done on a green validator alone. PBIR and
+  TMDL specifics: the `powerbi-report-gotchas` / `powerbi-semantic-model-gotchas` skills.
+- **Keep `limitations_encountered` alive** through the whole build **and** fix phase. Regenerate it
+  from the final artifacts before sign-off so stale entries don't mislead the validator.
 - **Declare generated edits.** TMDL/PBIR/`.pbip`: file/change/why + replay script + hash record.
 - **Surface complexity mismatches proactively.** If the parsed workbook implies more effort than the
   user assumes (many LOD/table-calc fields, extract-only data with no upstream, >20 floating-layout
-  worksheets), say so before building rather than discovering it mid-migration.
-- **NEVER block silently on an external system — time-box it, then ASK.** Measured, from a real user
-  report: an agent sat on "Testing live Snowflake connectivity" for **129 minutes / 298 tool calls**,
-  retrying without ever surfacing the problem, until the user intervened. Waiting is not progress.
-  - **Cap it: ~2 minutes or 3 attempts, whichever comes first** — for any unresponsive external
-    system (database/warehouse/gateway, MCP server, XMLA refresh, the Power BI Desktop bridge). Cap
-    *relaunches* at 2 as well; "kill it and retry" is otherwise an unbounded loop.
-  - **Unless the tool tells you it IS the timer** — some of our scripts self-bound and announce their
-    own deadline. Measured: an agent applied this 2-minute cap to a script that was already the
-    bounded timer, killed it at 120 s, and so recorded **no verdict at all** — strictly worse than
-    waiting. Read the tool's own output before you decide it has hung.
-  - **A MISSING CREDENTIAL is not transient — try ONCE.** The cap above is for *flaky* systems. A
-    refusal naming authentication, permissions or a sign-in prompt is a **final answer**; only a
-    plainly transient timeout (a serverless warehouse cold-starting) earns one retry.
+  worksheets), say so before building rather than mid-migration.
+- **NEVER block silently on an external system — time-box it, then ASK.** Measured: an agent sat on
+  live-Snowflake connectivity for **129 minutes / 298 tool calls** without ever surfacing the
+  problem. Waiting is not progress.
+  - **Cap it: ~2 minutes or 3 attempts, whichever comes first** — any unresponsive external system
+    (database/warehouse/gateway, MCP server, XMLA refresh, the Desktop bridge). Cap *relaunches* at 2
+    as well; "kill it and retry" is otherwise an unbounded loop.
+  - **Unless the tool tells you it IS the timer** — some scripts self-bound and announce their own
+    deadline. Measured: an agent applied the cap to such a script, killed it at 120 s and recorded
+    **no verdict at all** — worse than waiting. Read the tool's own output first.
+  - **A MISSING CREDENTIAL is not transient — try ONCE.** The cap is for *flaky* systems. A refusal
+    naming authentication, permissions or a sign-in prompt is a **final answer**; only a plainly
+    transient timeout (a serverless warehouse cold-starting) earns one retry.
   - **AUTOPILOT / auto-approve DOES NOT override a credential stop.** "Decide, don't ask" applies to
     *choices*; this is a physical dependency on a human — the credential sits behind a **modal
     sign-in dialog no automation can fill**. Stop and ask **even in an unattended run**, and end the
-    turn. A clear question costs minutes; a confidently built, unvalidated model costs the whole run.
+    turn.
   - On hitting the cap, **STOP and ask a specific, actionable question** — name the system, what you
     tried, and the concrete options. Never re-run the same call hoping for a different result. Ask in
     your normal reply — there is no `ask_user` tool.
   - **Report elapsed time** whenever an operation exceeds ~60 s, so a stall is visible rather than
     looking like work.
 - **End every message with a clear next step or an explicit verdict** — never a vague "looks fine."
-- **Durable learnings go in committed files** (the agent `Gotchas` sections and
+- **Durable learnings go in committed files** (agent `Gotchas`, the skills,
   `docs/tableau-dax-translation-guide.md`), never in a git-ignored scratch folder — that is how each
   real migration permanently improves the toolkit.
 - **Power BI Desktop cleanup is PID-scoped.** Concurrent instances are fine; never sweep by name.
@@ -90,11 +91,11 @@ translation guide is your reference for every calculated field.
   leaks are enforced by `check_unit.py`'s `desktop-orphans` gate. Remove scratch/temp files you
   created; keep only committed deliverables plus re-runnable `_build/` scripts, and confirm nothing
   scratch leaked into git before reporting done. ⚠️ **Never `git add -A` after a gapped pull** —
-  measured: a merge staged **111** untracked scratch paths (a whole engine bundle, loose `_tmp_*.py`)
-  because `-A` cannot tell "files this merge introduces" from "files that happened to be lying
-  around". Stage from `git diff --name-status <old-HEAD> origin/master`. If you must undo one,
-  `reset --soft HEAD~1` **clears `MERGE_HEAD` even on a merge commit**, so recreate it or the next
-  commit is silently single-parent and the ancestry breaks.
+  measured: a merge staged **111** untracked scratch paths, because `-A` cannot tell files the merge
+  introduces from files merely lying around. Stage from
+  `git diff --name-status <old-HEAD> origin/master`. If you must undo one, `reset --soft HEAD~1`
+  **clears `MERGE_HEAD` even on a merge commit** — recreate it, or the next commit is silently
+  single-parent and the ancestry breaks.
 <!-- END:shared-conventions -->
 
 ## Skills you use

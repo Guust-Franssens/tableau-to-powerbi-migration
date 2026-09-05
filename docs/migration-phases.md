@@ -120,7 +120,8 @@ on" versus "what did we download" — so a mismatch between them is not a defect
 
 **1. `reports/` is the pristine engine baseline / model-unbound pass and must never be edited; `pbip/` is the model-bound engine working pass and the source lineage used for packaging.**
 There is **no `out/` level** — a bundle is `{pbip,reports,semantic_models,handover,data}`. Per
-`AGENTS.md:773` agents edit `pbip/` before packaging, but `reports/` stays pristine so the engine-gap
+`AGENTS.md`'s shared-conventions three-stages table (the `working copy` row), agents edit `pbip/`
+before packaging, but `reports/` stays pristine so the engine-gap
 Delta remains attributable. Once a phase-2 package exists, `<package>/fabric/` is the canonical edit
 and ship tree, and phase 3 promotes it via `scripts/promote_unit.py` into
 `migrations/{workbooks,datasources}/<slug>/fabric/` (#460, settled; phase 3 below). The actual
@@ -191,7 +192,7 @@ authoritative is SETTLED (#460): once a package exists, `<package>/fabric/` is c
 pieces of code enforce it rather than merely documenting it — `promote_unit.py` ships FROM the
 package (*"Promoting FROM the package is settled (#460)"*, `scripts/promote_unit.py:60`), and
 `package_unit.py` refuses to repackage over a package that carries edits, checking the digest twice
-and again under the swap. `AGENTS.md:773`'s *"agents edit `pbip/`"* governs the window **before**
+and again under the swap. The shared-conventions `working copy` row's *"agents edit `pbip/`"* governs the window **before**
 packaging; after it, work in the package. See phase 3 below for the promotion mechanics.
 
 ### Where `packages/` goes, and the constraint that decides it
@@ -264,7 +265,7 @@ this is not a documentation preference:
 | [`scripts/package_unit.py`](../scripts/package_unit.py) | refuses to repackage over a package that carries edits (`PackageEditsRefused`), checking the digest before assembly **and again under the swap** — the package is the tree it protects |
 | [`scripts/check_migration_progress.py`](../scripts/check_migration_progress.py) | `--tamper` and progress mode both scan the packages beside the bundle; an edited canonical package is `PACKAGE_DRIFT` (exit 1), never `CLEAN` |
 
-`AGENTS.md:773`'s *"agents edit `<bundle>/pbip/`"* governs the window **before** packaging — there is
+`AGENTS.md`'s shared-conventions `working copy` row (*"agents edit `<bundle>/pbip/`"*) governs the window **before** packaging — there is
 no package yet to edit. After phase 2 the package is where the work goes, and `pbip/` is left as the
 engine's own copy.
 

@@ -8,6 +8,12 @@ anything under `.github/agents/`.
 Last verified **2026-07-31**, by fetching the primary sources directly (not via a research summary)
 and by running the §6.1 subagent experiment. This area moves fast; re-check before relying on a claim.
 
+> **Scope split.** This file answers *what text reaches an agent, and how to change it*. What a
+> delegating session owes a **running** subagent — verifying its claims, host and Desktop concurrency
+> budgets, post-crash file forensics — lives in
+> [`docs/agent-operations.md`](agent-operations.md), with the rules themselves in
+> [`AGENTS.md`](../AGENTS.md).
+
 > **Corrections landed 2026-07-31.** Three claims in the previous revision were wrong and had been
 > written from an unverified research summary: (a) "there is no `skills` property" — there is one, on
 > the SDK surface (§2); (b) the 10 KB `additionalContext` cap was attributed to hooks generally — it
@@ -268,20 +274,21 @@ record it here rather than quietly reverting.
 stays inline unless it moves somewhere the agent can *actively reach and be told to reach*. A hook
 still does not qualify.
 
-Budget after the 2026-07-31 extraction — **all four now fit** (`sync_agent_conventions.py --check`
-exits 0):
+Budget after the 2026-07-31 extraction — **all four fit** (`sync_agent_conventions.py --check` exits
+0). Re-measured 2026-09-05 after issue #536 slimmed the personas and this file's shared block:
 
-| Persona | chars | % of 30k cap | was |
-|---|---|---|---|
-| `tableau-migrator` | 29,992 | 99% | 108% |
-| `pbi-report-builder` | 29,953 | 99% | 153% |
-| `pbi-semantic-builder` | 29,728 | 99% | 141% (peak 160%) |
-| `pbi-migration-validator` | 17,677 | 58% | 58% |
+| Persona | chars (2026-09-05) | % of 30k cap | at the 2026-07-31 extraction | before it |
+|---|---|---|---|---|
+| `pbi-semantic-builder` | 21,956 | 73% | 29,728 (99%) | 141% (peak 160%) |
+| `pbi-migration-validator` | 21,934 | 73% | 17,677 (58%) | 58% |
+| `tableau-migrator` | 21,927 | 73% | 29,992 (99%) | 108% |
+| `pbi-report-builder` | 21,868 | 72% | 29,953 (99%) | 153% |
 
-There is now **no headroom**: at ~98–99% a single appended gotcha puts a persona back over, and
-`sync_agent_conventions.py --check` now **fails** on that rather than warning (§2). That is
-deliberate — new craft learnings belong in the bundles (orchestrator step 12 routes them there), not
-back in a persona.
+⚠️ **The headroom is deliberate, not spare capacity.** #536 targeted **22,000** — well under the
+30,000 hard cap — precisely because the shared block is generated: an edit aimed at `AGENTS.md`
+propagates into every persona at once, so a persona sitting at 99% turns an unrelated one-word
+convention edit into a red build. New craft learnings still belong in the skill bundles
+(orchestrator step 12 routes them there), not back in a persona.
 
 ## 6. Experiments
 
