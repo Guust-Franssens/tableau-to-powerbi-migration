@@ -69,7 +69,10 @@ Counts are from the 820-sentinel stamped run; channels in brackets come from the
 | `<bundle>/report.json` | **yes** — column captions, datasource caption, **formulas verbatim**, and engine prose (`reason`, `note`, `pbip_warnings`) that *interpolates* customer names | 75 sentinels | `tableau-migrator` |
 | `<bundle>/handover/<wb>.json` | **yes** — an exact cut of `report.json` | 75 sentinels (same set) | **all four personas, first thing every turn** |
 | PBIP **TMDL** | **yes** — table/column/measure **names**, `displayFolder`, DAX string literals, `annotation TableauFormula` (the formula **including its comment**), M partition source, **and the `.SemanticModel` folder + per-table file names** | 66 sentinels over 5 files | `pbi-semantic-builder` |
-| `<bundle>/reports/` PBIR (engine truth) | **yes** — `visual.json` titles, `page.json` `displayName`, textbox `textRuns[].value`, `definition.pbir` `byPath` | 41 sentinels over 21 files | `pbi-report-builder` |
+| `<bundle>/reports/` PBIR (pristine engine baseline / model-unbound pass) | **yes** — `visual.json` titles, `page.json` `displayName`, textbox `textRuns[].value`, `definition.pbir` `byPath` | 41 sentinels over 21 files | `pbi-report-builder` |
+
+> The model-bound engine working pass is `<bundle>/pbip/`, which is the source lineage for packaging; the actual agent-edited and shipped bytes are canonical `<package>/fabric/` and the promoted `migrations/.../fabric/` destination. Fidelity review after packaging inspects the package or promoted destination, not a potentially stale bundle copy.
+> A `shipped_tree_divergence` signal is a disclosure and a finding to inspect, not a fidelity proof.
 | PBIP PBIR (working copy) | **yes** — same channels | 34 sentinels over 17 files | `pbi-report-builder` |
 | `<bundle>/summary.md` | yes — datasource caption only | 1 | orchestrator / dispatcher |
 | bundle manifests (`input_manifest.json`, `engine-output-receipt.json`, `source-provenance.json`) | yes — workbook and datasource names only | 2 | `check_migration_progress.py --tamper` (a script, not a persona) |
