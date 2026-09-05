@@ -17,6 +17,9 @@ The through-line: a fix that stops rejecting files by also stopping rejecting `o
 outcome, so the negative case is asserted beside every positive one.
 """
 
+# Test names and explicit empty-list comparisons carry the boundary language this module pins.
+# pylint: disable=invalid-name,missing-function-docstring,use-implicit-booleaness-not-comparison
+
 from __future__ import annotations
 
 import logging
