@@ -211,7 +211,16 @@ def destination_is_safe(root: Path, rel: Path, *, writing: bool) -> bool:
     return True
 
 
-def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-branches,too-many-return-statements,too-many-statements
+def unsafe_destination_paths(src: Path, dst: Path) -> list[Path]:
+    """Return source-relative files whose destination path would escape or redirect writes."""
+    return [
+        path.relative_to(src)
+        for path in sorted(p for p in src.rglob("*") if p.is_file())
+        if not destination_is_safe(dst, path.relative_to(src), writing=True)
+    ]
+
+
+def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-branches,too-many-locals,too-many-return-statements,too-many-statements
     """Sync the installed bundles from the repo, or report drift under --check."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--check", action="store_true", help="report drift and exit 1; change nothing")
@@ -271,6 +280,10 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-bran
             return 5
         src = reference.skills_dir
         print(f"SYNC: SOURCE - {reference.label}")
+        unsafe = unsafe_destination_paths(src, installed)
+        if unsafe:
+            print(f"SYNC: ERROR - unsafe destination path: {unsafe[0].as_posix()}")
+            return 6
         changed, extra = diff_tree(src, installed)
 
         if not changed and not extra:

@@ -176,6 +176,29 @@ def test_write_refuses_symlink_parent_without_overwriting_redirected_file(
     assert redirected.read_text(encoding="utf-8") == original_redirected
 
 
+def test_write_refuses_matching_symlinked_skill_directory_before_stale_removal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _fixture_repo(tmp_path, monkeypatch)
+    plugin_root = _build_installed_from(repo, tmp_path)
+    first_skill = build_plugin.SHIPPED_SKILLS[0]
+    first_dir = plugin_root / "skills" / first_skill
+    redirect_dir = plugin_root / "skills" / "redirect-target"
+    shutil.copytree(first_dir, redirect_dir)
+    shutil.rmtree(first_dir)
+    try:
+        first_dir.symlink_to(redirect_dir, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable in this environment: {exc}")
+
+    assert sync.main(["--plugin-root", str(plugin_root)]) == 6
+
+    output = capsys.readouterr().out
+    assert "unsafe destination path" in output
+    assert first_dir.is_symlink()
+    assert redirect_dir.is_dir()
+
+
 def test_from_worktree_is_explicit_and_reports_unmerged_drift(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
