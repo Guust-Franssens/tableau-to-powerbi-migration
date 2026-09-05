@@ -2640,7 +2640,9 @@ def test_max_age_is_persisted_in_leg_records_across_failure_and_skip_outcomes(tm
 
 def test_server_rejection_of_max_age_remains_a_failure_and_never_retries_without_parameter(tmp_path):
     """Invariant: if the server rejects a request with maxAge, it fails loudly and never strips the param."""
-    server_rejection = "<error code='400000'><summary>Bad Request</summary><detail>Invalid parameter: maxAge</detail></error>"
+    server_rejection = (
+        "<error code='400000'><summary>Bad Request</summary><detail>Invalid parameter: maxAge</detail></error>"
+    )
     session = FakeSession(
         [
             (400, server_rejection, {}),
@@ -2660,4 +2662,3 @@ def test_server_rejection_of_max_age_remains_a_failure_and_never_retries_without
     # Ensure there was exactly 1 call and it had maxAge=1 (no second call without maxAge)
     assert len(session.calls) == 1
     assert "maxAge=1" in session.calls[0]
-

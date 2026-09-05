@@ -921,9 +921,7 @@ def _capture_data(  # pylint: disable=too-many-locals
     """
     max_age = validate_max_age(max_age)
     try:
-        payload, elapsed, stats = session.export(
-            f"/sites/{session.site_id}/views/{view_luid}/data?maxAge={max_age}"
-        )
+        payload, elapsed, stats = session.export(f"/sites/{session.site_id}/views/{view_luid}/data?maxAge={max_age}")
     except ExportFailed as exc:
         return {"status": exc.kind, "error": str(exc), "detail": exc.detail, "max_age_minutes": max_age}
     framing = stats.get("response_framing")

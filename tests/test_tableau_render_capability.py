@@ -405,7 +405,7 @@ class _FakeProbeSession:
     def raw_get(self, path: str, api: str | None = None) -> tuple[int, bytes, str | None]:
         self.calls.append((path, api))
         # key by (route, api)
-        route = path.split(f"/views/v1/")[1]
+        route = path.split("/views/v1/")[1]
         key = (route, api)
         if key in self.responses:
             return self.responses[key]
@@ -505,4 +505,3 @@ def test_capability_cli_parser_refuses_invalid_max_age(invalid_cli_arg):
     parser.add_argument("--max-age", type=cap._arg_max_age, default=DEFAULT_MAX_AGE_MINUTES)
     with pytest.raises(SystemExit):
         parser.parse_args(["--view", "v1", "--max-age", invalid_cli_arg])
-
