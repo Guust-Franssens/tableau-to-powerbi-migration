@@ -122,14 +122,16 @@ def response_framing(headers: dict[str, str]) -> str:
 
     Tableau Cloud was measured returning ``Transfer-Encoding: chunked`` for both ``/data`` and
     ``/image`` exports (6/6 responses, REST 3.29). That is the transport evidence that catches an
-    early EOF for a CSV, not ``Content-Length``. When neither a length nor chunked framing is present,
-    EOF is itself the delimiter and a truncated CSV prefix is indistinguishable from a complete body.
+    early EOF for a CSV, not merely the alternate defended case of a syntactically usable
+    ``Content-Length``. When neither a valid length nor chunked framing is present, EOF is itself the
+    delimiter and a truncated CSV prefix is indistinguishable from a complete body.
     """
     transfer_encoding = header_value(headers, "Transfer-Encoding") or ""
     codings = [coding.strip().casefold() for coding in transfer_encoding.split(",")]
     if "chunked" in codings:
         return "chunked"
-    if header_value(headers, "Content-Length") is not None:
+    content_length = header_value(headers, "Content-Length")
+    if content_length is not None and content_length.strip().isdigit():
         return "content_length"
     return "close_delimited"
 

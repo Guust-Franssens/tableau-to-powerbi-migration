@@ -1056,6 +1056,20 @@ def test_a_close_delimited_csv_capture_is_retained_but_not_numeric_evidence(tmp_
     assert _naive_numeric_consumer(tmp_path) == []
 
 
+@pytest.mark.parametrize("content_length", ["", "abc", "-1"])
+def test_an_invalid_content_length_does_not_count_as_csv_completeness_evidence(tmp_path, content_length):
+    """An unusable length falls back to EOF-as-framing in Python, so it is not defended evidence."""
+    body = "Region,Sales\r\nWest,10\r\n"
+    session = CloseDelimitedFakeSession([(200, body, {"Content-Type": "text/csv", "Content-Length": content_length})])
+    view = {"id": "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", "name": "Real Time Availability", "workbook": {"id": "wb"}}
+    record = oracle.capture_view(session, view, tmp_path, frozenset(), None)
+
+    data = record["data"]
+    assert data["certification"] == payload_facts.CSV_TRANSPORT_COMPLETENESS_UNESTABLISHED
+    assert data["response_framing"] == "close_delimited"
+    assert "row_count" not in data and "path" not in data
+
+
 @pytest.mark.parametrize("framing", ["Content-Length", "Transfer-Encoding: chunked"])
 def test_an_early_eof_csv_capture_is_a_failed_manifest_not_unassessable_evidence(tmp_path, framing):
     """The transport catches truncation under defended framing before `_capture_data` can write bytes."""
