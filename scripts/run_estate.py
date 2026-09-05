@@ -127,10 +127,8 @@ from __future__ import annotations
 # pylint: disable=too-many-lines
 
 import argparse
-import hashlib
 import json
 import logging
-import re
 import subprocess
 import sys
 import time
@@ -193,37 +191,7 @@ _PBIR_VISUAL_FILE = "visual" + ".json"
 _PBIR_VISUAL_TAIL = f"definition/pages/{_PBIR_PAGE_ID}/visuals/{_PBIR_VISUAL_ID}/{_PBIR_VISUAL_FILE}"
 
 
-_ENGINE_FOLDER_MAX_UTF16 = 64
-_ENGINE_FOLDER_INVALID = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _ENGINE_SOURCE_SUFFIXES = {".twb": ".twb", ".twbx": ".twb", ".tds": ".tds", ".tdsx": ".tds"}
-
-
-def _engine_safe_folder(name: str) -> str:
-    """Conservatively reproduce the engine's folder length without dropping Unicode characters.
-
-    The engine preserves a 64-unit hash-bearing prefix for long names. Keeping every non-invalid
-    source character here is intentionally conservative for names the engine may normalize away.
-    """
-    safe = _ENGINE_FOLDER_INVALID.sub("_", name).strip(" .")
-    if not safe:
-        return "unnamed"
-    if utf16_len(safe) <= _ENGINE_FOLDER_MAX_UTF16:
-        return safe
-    digest = hashlib.sha256(safe.encode("utf-8")).hexdigest()[:8]
-    return _take_utf16_units(safe, _ENGINE_FOLDER_MAX_UTF16 - len(digest)) + digest
-
-
-def _take_utf16_units(text: str, units: int) -> str:
-    """Keep a prefix without splitting a supplementary character."""
-    result = []
-    used = 0
-    for character in text:
-        width = utf16_len(character)
-        if used + width > units:
-            break
-        result.append(character)
-        used += width
-    return "".join(result)
 
 
 def _readable_source(path: Path) -> bool:
@@ -244,8 +212,7 @@ def _readable_source(path: Path) -> bool:
         return False
 
 
-def _input_unit_names(input_dir: Path) -> list[str] | None:
-    """Return engine-shaped source names, or ``None`` when any input is not assessable."""
+def _input_candidates(input_dir: Path) -> list[Path] | None:
     if input_dir.is_file():
         candidates = [input_dir]
     elif input_dir.is_dir():
@@ -258,7 +225,48 @@ def _input_unit_names(input_dir: Path) -> list[str] | None:
         return None
     if not candidates or any(not _readable_source(path) for path in candidates):
         return None
-    return [_engine_safe_folder(path.stem) for path in candidates]
+    return candidates
+
+
+def _engine_unit_names(engine: Path, input_dir: Path) -> list[str] | None:
+    """Ask the selected engine for its real datasource-then-workbook folder allocation."""
+    scripts_dir = engine / "skills" / "tableau-migration" / "scripts"
+    if not (scripts_dir / "migrate_estate.py").is_file():
+        return None
+    adapter = (
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "from migrate_estate import LocalFilesSource, _safe_folder\n"
+        "source = LocalFilesSource(Path(sys.argv[2]))\n"
+        "used = set()\n"
+        "names = []\n"
+        "for asset_id in source.list_datasources():\n"
+        "    names.append(_safe_folder(source.asset_name(asset_id), used))\n"
+        "for asset_id in source.list_workbooks():\n"
+        "    names.append(_safe_folder(source.asset_name(asset_id), used))\n"
+        "print(json.dumps(names, ensure_ascii=False))\n"
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", adapter, str(scripts_dir), str(input_dir)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            return None
+        names = json.loads(result.stdout)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if (
+        not isinstance(names, list)
+        or not names
+        or any(not isinstance(name, str) or not name for name in names)
+        or len({name.casefold() for name in names}) != len(names)
+    ):
+        return None
+    return names
 
 
 def project_estate_path_ceiling(output_root: Path, unit_names: list[str] | None) -> dict:
@@ -275,18 +283,15 @@ def project_estate_path_ceiling(output_root: Path, unit_names: list[str] | None)
             "output_root": str(output_root),
         }
     records = []
-    used_names: set[str] = set()
-    projected_names = []
-    for name in unit_names:
-        base = _engine_safe_folder(str(name))
-        occurrence = 1
-        unit = base
-        while unit.casefold() in used_names:
-            occurrence += 1
-            suffix = f"_{occurrence}"
-            unit = f"{_take_utf16_units(base, _ENGINE_FOLDER_MAX_UTF16 - len(suffix))}{suffix}"
-        used_names.add(unit.casefold())
-        projected_names.append(unit)
+    projected_names = list(unit_names)
+    if any(not isinstance(name, str) or not name for name in projected_names) or len(
+        {name.casefold() for name in projected_names}
+    ) != len(projected_names):
+        return {
+            "status": "cannot_establish",
+            "reason": "the selected engine returned an invalid unit name",
+            "output_root": str(output_root),
+        }
     for unit in projected_names:
         report = f"{unit}.Report"
         report_root = output_root / "pbip" / unit / report
@@ -319,10 +324,11 @@ def project_estate_path_ceiling(output_root: Path, unit_names: list[str] | None)
     }
 
 
-def preflight_estate_path_ceiling(input_dir: Path, output_root: Path) -> tuple[bool, str]:
+def preflight_estate_path_ceiling(input_dir: Path, output_root: Path, engine: Path | None = None) -> tuple[bool, str]:
     """Refuse an estate whose canonical downstream PBIP skeleton exceeds Desktop's ceilings."""
     try:
-        names = _input_unit_names(input_dir)
+        candidates = _input_candidates(input_dir)
+        names = _engine_unit_names(engine, input_dir) if engine and candidates else None
         projection = project_estate_path_ceiling(output_root, names)
     except (OSError, RuntimeError, UnicodeEncodeError, ValueError) as exc:
         return False, (
@@ -1267,7 +1273,7 @@ def resolve_run_engine(args: argparse.Namespace) -> tuple[Path | None, int]:
         "canonical plugin" if provenance["canonical"] else "NON-CANONICAL OVERRIDE",
     )
     if args.input:
-        path_ok, path_detail = preflight_estate_path_ceiling(args.input, args.output)
+        path_ok, path_detail = preflight_estate_path_ceiling(args.input, args.output, engine)
         print(path_detail)
         if not path_ok:
             return None, EXIT_PATH_CEILING
