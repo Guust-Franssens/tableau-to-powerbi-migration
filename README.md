@@ -210,7 +210,7 @@ _runs/<NNN>-<slug>/                     ◀── PHASE 1  collect & convert  (g
 │   ├── data/                                 materialised extract rows
 │   └── engine-output-receipt.json            which engine version built this, and from where
 │
-├── packages/<batch>/<Unit>/            ◀── PHASE 2  one self-contained folder per unit
+├── packages/<Unit>/                    ◀── PHASE 2  one self-contained folder per unit
 │   ├── README.md  handover.md              start here — the gate commands, pre-scoped
 │   ├── migration-spec.json                 the parsed source                    (64 of 67)
 │   ├── fabric/                             the packaged copy of bundle/pbip/    (62 of 67)
@@ -263,11 +263,12 @@ Run `run_engine_survey.py` → `assess_estate.py` → `harvest_estate_assets.py`
 migration order), `assets/` (the downloads), `bundle/` (the engine's conversion output) and
 `oracle/` (Tableau's own renders and numbers).
 
-**2. Package for the agent** → `_runs/<NNN>-<slug>/packages/<batch>/<Unit>/`
+**2. Package for the agent** → `_runs/<NNN>-<slug>/packages/<Unit>/`
 
 [`scripts/package_unit.py`](scripts/package_unit.py) emits one self-contained folder per migration
 unit — source, engine output, handover queue and reference evidence together — which **both gates
-accept with no flags**.
+accept with no flags**. The command targets the `packages/` directory itself; nested
+`packages/<batch>/<Unit>/` remains supported for compatibility, not as the default.
 
 **3. Ship** → `migrations/{workbooks,datasources}/<slug>/fabric/`
 

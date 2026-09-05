@@ -1380,8 +1380,9 @@ The whole tree is ignored by construction (`/_*` in
 `deliverables/` is specifically for operator-facing outputs that name real customer infrastructure
 (e.g. `connections_manifest.py`'s `connections.json`/`.md`) — the `ses-prep/` near-miss (#322) landed
 exactly that kind of output unprefixed and unignored at the repo root. `packages/` holds
-`package_unit.py`'s per-unit agent-facing packages, one subdirectory per packaging batch (§ *Package
-one folder per unit*); the whole shape is explained in
+`package_unit.py`'s agent-facing packages, one subdirectory per unit directly under `packages/`
+(§ *Package one folder per unit*). Nested batch directories remain compatibility-only; the whole
+shape is explained in
 [`docs/migration-phases.md`](migration-phases.md).
 
 ⚠️ **Today's tools have not been migrated onto this yet.** `assess_estate.py --out _assessment`,
