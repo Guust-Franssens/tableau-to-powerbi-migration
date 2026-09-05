@@ -93,9 +93,7 @@ _RULES: list[tuple[str, re.Pattern[str], str]] = [
         re.compile(
             r"\b(?:run|execute|issue|perform)\b[^.\n]{0,40}\b(?:remove-item[^.\n]{0,40}-recurse|"
             r"rm\s+-rf|del\s+/[sfq]|format-volume|drop\s+(?:table|database|schema)|git\s+push\s+--force)\b|"
-            r"\b(?:delete|remove)\b[^.\n]{0,40}\bremove-item[^.\n]{0,40}-recurse\b|"
-            r"\b(?:delete|remove|drop)\s+(?:all\s+)?(?:data|database|schema|tables)\s+"
-            r"(?:now|immediately|please)\b",
+            r"\b(?:delete|remove)\b[^.\n]{0,40}\bremove-item[^.\n]{0,40}-recurse\b",
             re.I,
         ),
         "an instruction to execute a destructive shell/SQL command",
@@ -103,7 +101,9 @@ _RULES: list[tuple[str, re.Pattern[str], str]] = [
 ]
 
 _BARE_DESTRUCTIVE_COMMAND_RE = re.compile(
-    r"(?<!\[)\b(?:drop|delete)\s+table\s+(?!(?:calculation|formatting|label)\b)[a-z_][\w$.-]*\b",
+    r"\b(?:drop|delete)\s+table\s+(?!(?:calculation|formatting|label)\b)[a-z_][\w$.-]*\b|"
+    r"\b(?:delete|remove|drop)\s+(?:all\s+)?(?:data|database|schema|tables)\s+"
+    r"(?:now|immediately|please)\b",
     re.I,
 )
 
@@ -159,14 +159,19 @@ def _excerpt(text: str, offsets: list[int], match: re.Match[str]) -> str:
 
 
 def _mask_quoted_literals(text: str) -> str:
-    """Replace Tableau/DAX single- and double-quoted literal content with spaces."""
+    """Replace Tableau/DAX literals and bracketed identifiers with spaces."""
     masked = list(text)
     quote: str | None = None
     index = 0
     while index < len(text):
         character = text[index]
         if quote is None:
-            if character in {"'", '"'}:
+            if character == "[":
+                closing = text.find("]", index + 1)
+                if closing != -1:
+                    masked[index : closing + 1] = " " * (closing - index + 1)
+                    index = closing
+            elif character == '"' or (character == "'" and (index == 0 or not text[index - 1].isalnum())):
                 quote = character
                 masked[index] = " "
         elif character == quote:

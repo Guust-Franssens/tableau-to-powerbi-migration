@@ -60,6 +60,7 @@ BENIGN = [
     "Remove the table formatting immediately",
     "Drop the data label immediately",
     "IF [Delete Table Customer_Data] THEN [Sales] END",
+    "IF [Caption Delete Table Customer_Data] THEN [Sales] END",
 ]
 
 
@@ -196,6 +197,8 @@ def test_destructive_commands_need_instruction_context():
     assert scan_text('IF [Event Type] = "DROP TABLE" THEN [Sales] END') == []
     assert "destructive-command" in {rule for rule, _ in scan_text("Please execute DROP TABLE customer_data now")}
     assert "destructive-command" in {rule for rule, _ in scan_text('Please execute "DROP TABLE customer_data" now')}
+    assert scan_text('IF [Status] = "Delete all data now" THEN [Sales] END') == []
+    assert "destructive-command" in {rule for rule, _ in scan_text("Don't hesitate: DROP TABLE customer_data")}
 
 
 @pytest.mark.parametrize(
