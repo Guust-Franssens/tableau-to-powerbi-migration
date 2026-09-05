@@ -32,30 +32,45 @@ normalises away. Issue #404 tracks it, with the measurement and the three mechan
 Requires the .NET SDK. `scripts/preflight.ps1` checks for it. If it is missing the gate reports
 UNASSESSABLE (a distinct exit code) rather than a pass - see check_datamodel.EXIT_UNASSESSABLE.
 
-Locking (issue #415, first-build part only - fail-closed serialization, not automatic recovery)
---------------------------------------------------------------------------------------------------
+Locking (issue #415, first-build part only - bounded, fail-closed serialization)
+----------------------------------------------------------------------------------
 `ensure_built()` used to be an unlocked check-then-build: every parallel pytest worker that saw the
 DLL missing or stale would launch its own `dotnet build` into the SAME output directory. On Windows
 that is file-locking roulette - one or more builds fail even though the source is valid, and the
 usual "fix" is a confused rerun that only passes because one process happened to finish the shared
-build first. `_acquire_build_lock`/`_release_build_lock` below serialize just that critical section
-using the same `O_CREAT|O_EXCL` atomic-file convention `deploy_estate.RunLock` already uses for the
-deploy run lock - not a new lock framework, an extension of the one already in this repo. Unlike
-`RunLock`, which fails fast because two overlapping deploys must never both proceed, two processes
-racing to build the SAME oracle are not a conflict: waiting for the winner and reusing its DLL is the
-whole fix, so this variant blocks (bounded) instead of erroring immediately.
+build first. `_acquire_build_lock`/`_release_build_lock` below serialize just that critical section.
 
-This is deliberately fail-CLOSED, not self-healing: a dead/crashed builder's lock is never removed
-automatically. An earlier revision reclaimed a stale lock (age-based) inside `_acquire_build_lock`
-itself, adapting `.github/skills/pbip-model-refresh`'s `_ModelLock._reclaim()` rename-and-verify
-pattern to avoid one racer deleting a live successor's fresh lock - but that is a second, more
-elaborate mutex mechanism, and review scoped it back out: a hung/dead builder now surfaces as a
-bounded, explicit `OracleUnavailable` naming the lock path and the manual recovery (confirm no build
-process is actually running, then delete the lock file), never a silent automatic reclaim and never
-a hang or a clean result. Every acquired lock still carries a unique ownership token, and
-`_release_build_lock` only deletes the file if it still carries that exact token - so a process
-racing to release after an operator has manually cleared and someone else has re-acquired the lock
-can never delete a new owner's lock instead of its own.
+Two earlier revisions used a PATHNAME as the lock: `O_CREAT|O_EXCL` to create it, then read-and-
+compare JSON content written into it to decide who owned it and whether it was safe to delete. Both
+were TOCTOU-shaped by construction - a lock's identity was a name plus a content comparison, and
+between reading that content and acting on it (deleting a stale lock, or checking a token before
+unlinking) another process could replace what lived at that name. A reviewer-reproduced sequence
+made the second revision's own release routine unlink a SUCCESSOR's freshly-acquired lock. Patching
+that again would only add a third compare-then-act step to the same shape.
+
+So this revision does not use the pathname, or anything written inside the file, to decide ownership
+at all. `_acquire_build_lock` opens (creating if needed) a PERSISTENT file at `path` and takes an OS
+advisory lock on the OPEN FILE DESCRIPTOR itself - `fcntl.flock` on POSIX, a locked byte range via
+`msvcrt.locking` on Windows (the two platforms' native primitives for exactly this, chosen once in
+`_platform_lock_ops`, not a new hand-rolled protocol). Ownership is then just "do I hold the lock on
+the descriptor I have open" - nothing to read, nothing to compare, nothing for another process's
+write to race against. A crash simply closes the descriptor, and the OS releases the lock with it;
+no separate "is this stale" heuristic is needed, and the pathname is never unlinked by this code at
+all (an operator's manual delete-and-retry, named in the timeout message below, is still available,
+but the code itself never automates it - see the module's #529/#539 review history). Whatever JSON a
+successful acquirer writes into the file afterwards is diagnostics for a human inspecting a stuck
+lock - never re-read by any code here, so malformed/binary/non-UTF-8 bytes already on disk cannot
+affect locking at all, let alone crash it.
+
+`flock`/`msvcrt.locking` block indefinitely by default, which is unusable for a BOUNDED wait, so
+acquisition polls a NON-blocking attempt (`LOCK_NB` / `LK_NBLCK`) against a deadline instead. Timeout
+raises `OracleUnavailable` naming the lock path - never hangs, never returns having failed to lock.
+Release (`_release_build_lock`) unlocks and closes that same descriptor and nothing else; since two
+independent `open()` calls on one path are independent OS lock instances, releasing OUR descriptor
+cannot free or otherwise affect a different process's descriptor on the same path, even if the
+pathname was deleted and recreated in between (a dedicated regression test reproduces that exact
+sequence). Any failure while unlocking or closing is swallowed rather than raised, so a release
+never masks whatever `ensure_built` is already propagating - most importantly, a build failure.
 """
 
 from __future__ import annotations
@@ -67,8 +82,8 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
-import uuid
 from pathlib import Path
 
 from tmdl_checks import TmdlFinding
@@ -89,11 +104,6 @@ BATCH_SIZE = 32
 # verdict - so the wait ceiling is the build timeout plus a margin, never unbounded.
 BUILD_LOCK_WAIT_SECONDS = BUILD_TIMEOUT_SECONDS + 60
 BUILD_LOCK_POLL_SECONDS = 0.2
-# `subprocess.run` inside ensure_built already bounds a live build to BUILD_TIMEOUT_SECONDS, so a
-# lock file older than that (plus margin) cannot belong to a still-running build - its owner
-# crashed. This is used only to make the timeout message more actionable (naming how old the lock
-# is); it does NOT license removing the lock automatically - see the module docstring.
-BUILD_LOCK_STALE_SECONDS = BUILD_TIMEOUT_SECONDS + 30
 
 log = logging.getLogger("tmdl_oracle")
 
@@ -150,75 +160,135 @@ def _sources_newer_than_build() -> bool:
     )
 
 
-def _read_lock_payload(path: Path) -> dict | None:
-    """The lock file's own claim of who holds it, or None if unreadable/torn/gone."""
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
+def _platform_lock_ops():
+    """Return a `(lock, unlock)` pair of callables for the OS's own advisory file locking.
+
+    Resolved through this ONE seam (rather than importing `fcntl`/`msvcrt` at call sites) for two
+    reasons: the platform-specific module can only be imported on its own platform, so pylint on
+    this repo's Linux runner would flag a top-level `import msvcrt` as unresolvable even though it
+    is correctly guarded - `scripts/check_path_ceiling.py`'s `winreg` import uses the same
+    function-local pattern for the same reason; and it gives tests a single place to substitute
+    both functions (`monkeypatch.setattr(tmdl_oracle, "_platform_lock_ops", ...)`) to deterministically
+    simulate a lock/unlock failure on any platform, including this one.
+    """
+    if sys.platform == "win32":
+        import msvcrt  # pylint: disable=import-outside-toplevel,import-error
+
+        def _lock(fd: int) -> None:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+
+        def _unlock(fd: int) -> None:
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+
+    else:
+        import fcntl  # pylint: disable=import-outside-toplevel,import-error
+
+        def _lock(fd: int) -> None:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        def _unlock(fd: int) -> None:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+
+    return _lock, _unlock
+
+
+def _ensure_lockable_byte(fd: int) -> None:
+    """Make sure the open file has at least one byte at offset 0 to lock.
+
+    POSIX `flock` locks the whole file regardless of size, but Windows `msvcrt.locking` locks a
+    BYTE RANGE starting at the file's current position, and an empty file has no byte there to lock
+    at all. Writing this unconditionally on both platforms (rather than branching) keeps the lock
+    file identical everywhere and keeps `_platform_lock_ops` this module's only platform branch.
+    """
+    if os.fstat(fd).st_size < 1:
+        os.write(fd, b"\0")
+    os.lseek(fd, 0, os.SEEK_SET)
+
+
+def _write_diagnostics(fd: int) -> None:
+    """Write best-effort diagnostics (pid, timestamp) for a human inspecting a stuck lock.
+
+    NEVER a decision input: nothing in this module ever reads this back to decide ownership (see
+    the module docstring), so a write failure here, or the bytes already on disk being unreadable
+    garbage from a previous acquisition, must never affect - or be allowed to fail - locking itself.
+    """
+    with contextlib.suppress(OSError, ValueError):
+        payload = json.dumps({"pid": os.getpid(), "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}).encode(
+            "utf-8"
+        )
+        os.lseek(fd, 1, os.SEEK_SET)  # offset 0 holds the lock byte itself - never overwritten here
+        os.write(fd, payload)
+        os.ftruncate(fd, 1 + len(payload))
+        os.lseek(fd, 0, os.SEEK_SET)
 
 
 def _acquire_build_lock(
     path: Path, *, wait: float = BUILD_LOCK_WAIT_SECONDS, poll: float = BUILD_LOCK_POLL_SECONDS
-) -> str:
-    """Take `path` as a bounded cross-process mutex for the build/restore critical section only.
+) -> int:
+    """Take an OS advisory lock on `path` as a bounded cross-process mutex, returning the held fd.
 
-    Returns a per-acquisition ownership token that the caller must pass back to
-    `_release_build_lock` - a plain unconditional unlink on release could delete a lock this
-    process no longer owns if an operator manually cleared it and a new owner has since acquired it.
+    The caller must pass the returned descriptor back to `_release_build_lock` - ownership here is
+    the OS lock on THIS open file description, never the pathname or any content written into the
+    file, so there is nothing for another process to race by replacing what lives at `path` (see
+    the module docstring). Blocks (bounded), rather than failing on first contention: a second
+    process wanting the SAME build should wait for the winner and reuse its DLL.
 
-    `O_CREAT | O_EXCL` rather than exists()-then-write, same as `deploy_estate.RunLock.acquire` -
-    the check-then-act version has a window two simultaneous builders can both pass, which is
-    exactly the failure this exists to prevent. Unlike `RunLock`, this blocks (bounded) rather than
-    failing on first contention: a second process wanting the SAME build should wait for the
-    winner and reuse its DLL, not be told to go away.
-
-    Fail-CLOSED on a stale/dead lock, deliberately: this never reclaims or removes a lock file
-    automatically, however old it is - see the module docstring for why. Raises OracleUnavailable
-    on timeout, naming the lock path and the manual recovery, never hangs, never returns having
-    failed to lock.
+    `flock`/`msvcrt.locking` have no built-in timeout, so this polls the NON-blocking variant
+    against a deadline. Raises `OracleUnavailable` on timeout, naming the lock path and the manual
+    recovery, never hangs, never returns having failed to lock.
     """
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_RDWR)
+    except OSError as exc:
+        raise OracleUnavailable(f"could not open the build lock {path}: {exc}") from exc
+    try:
+        _ensure_lockable_byte(fd)
+    except OSError as exc:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        raise OracleUnavailable(f"could not prepare the build lock {path}: {exc}") from exc
+
+    lock, _unlock = _platform_lock_ops()
     deadline = time.monotonic() + wait
-    token = uuid.uuid4().hex
     while True:
         try:
-            handle = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
+            lock(fd)
+        except OSError:
             if time.monotonic() >= deadline:
-                held = _read_lock_payload(path)
+                with contextlib.suppress(OSError):
+                    os.close(fd)
                 try:
-                    age = time.time() - path.stat().st_mtime
-                    age_note = f" ({age:.0f}s old)"
-                except FileNotFoundError:
+                    age_note = f" ({time.time() - path.stat().st_mtime:.0f}s old)"
+                except OSError:
                     age_note = ""
-                pid_note = f" (recorded pid {held['pid']})" if isinstance(held, dict) and "pid" in held else ""
                 raise OracleUnavailable(
-                    f"timed out after {wait:.0f}s waiting for {path}{age_note} - another process "
-                    f"appears to be building the TMDL oracle{pid_note}, or a previous builder "
-                    "crashed without releasing the lock. Verify no oracle build process is still "
-                    f"active, then remove {path} and re-run."
+                    f"timed out after {wait:.0f}s waiting for the build lock {path}{age_note} - "
+                    "another process appears to be building the TMDL oracle, or a previous builder "
+                    "crashed while holding it. The OS releases a crashed process's lock the instant "
+                    f"that process exits; if nothing is actually building, delete {path} and re-run."
                 ) from None
             time.sleep(poll)
             continue
-        with os.fdopen(handle, "w", encoding="utf-8") as stream:
-            json.dump(
-                {"pid": os.getpid(), "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "token": token},
-                stream,
-            )
-        return token
+        _write_diagnostics(fd)
+        return fd
 
 
-def _release_build_lock(path: Path, token: str) -> None:
-    """Remove the lock only if it still carries OUR token.
+def _release_build_lock(fd: int) -> None:
+    """Unlock and close the descriptor `_acquire_build_lock` returned - nothing else.
 
-    A different process could have manually cleared a stale lock (per the operator recovery in
-    `_acquire_build_lock`'s timeout message) and acquired it as a new owner; unconditionally
-    unlinking here would delete a lock we no longer own rather than our own.
+    Tied solely to that held descriptor, never to the pathname or to any content read from the
+    file: two independent `open()` calls on one path are independent OS lock instances, so this can
+    never free or otherwise affect a different process's (or a successor's) lock on the same path,
+    even if the pathname was deleted and recreated in between (a dedicated regression test
+    reproduces that exact sequence). Any failure to unlock or close is swallowed rather than
+    raised, so a release never masks whatever `ensure_built` is already propagating - most
+    importantly, a build failure.
     """
-    held = _read_lock_payload(path)
-    if isinstance(held, dict) and held.get("token") == token:
-        with contextlib.suppress(OSError):
-            path.unlink()
+    _, unlock = _platform_lock_ops()
+    with contextlib.suppress(OSError):
+        unlock(fd)
+    with contextlib.suppress(OSError):
+        os.close(fd)
 
 
 def ensure_built(dotnet: str) -> Path:
@@ -232,7 +302,7 @@ def ensure_built(dotnet: str) -> Path:
     if not _sources_newer_than_build():
         return DLL
     lock_path = PROJECT_DIR / ".oracle-build.lock"
-    token = _acquire_build_lock(lock_path)
+    fd = _acquire_build_lock(lock_path)
     try:
         # Recheck: another process may have finished the build while we waited for the lock - a
         # waiter must reuse that DLL rather than rebuild it.
@@ -258,7 +328,7 @@ def ensure_built(dotnet: str) -> Path:
             )
         return DLL
     finally:
-        _release_build_lock(lock_path, token)
+        _release_build_lock(fd)
 
 
 def _run_batch(dotnet: str, dll: Path, definitions: list[Path]) -> dict:
