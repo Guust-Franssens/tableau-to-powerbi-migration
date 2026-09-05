@@ -39,6 +39,8 @@ from __future__ import annotations
 import json
 import logging
 import sys
+import zipfile
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -48,7 +50,16 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 # ruff: noqa: E402  (the sys.path insert above must precede these imports)
-from tableau_lineage import build_order, build_plan, load_survey, main, print_plan
+from tableau_lineage import (
+    TableauSession,
+    _contains_credential,
+    _download_stem,
+    build_order,
+    build_plan,
+    load_survey,
+    main,
+    print_plan,
+)
 
 SALES_DS = "Lakeside Sales (Live Warehouse)"
 TRIPS_DS = "Lakeside Trips (Live Lakehouse)"
@@ -248,6 +259,78 @@ def _rendered(caplog: pytest.LogCaptureFixture, plan: list[dict[str, Any]], surv
     with caplog.at_level(logging.INFO, logger="tableau_lineage"):
         print_plan(plan, survey)
     return "\n".join(record.getMessage() for record in caplog.records)
+
+
+def test_download_payload_checks_plain_and_compressed_text_for_credentials() -> None:
+    """A reflected credential must be refused before either supported payload can persist."""
+    session = TableauSession(
+        "https://example.invalid", "SESSION_TOKEN", "site", pat_name="PAT_NAME", pat_secret="PAT_SECRET"
+    )
+    assert _contains_credential(b"<datasource>PAT_SECRET</datasource>", session)
+
+    archive = BytesIO()
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
+        bundle.writestr("source.tds", "<datasource>SESSION_TOKEN</datasource>")
+    assert _contains_credential(archive.getvalue(), session)
+    assert not _contains_credential(b"<datasource>safe</datasource>", session)
+
+
+def test_download_payload_checks_archive_metadata_for_credentials() -> None:
+    """ZIP metadata persists with the archive, so it is checked before writing."""
+    session = TableauSession(
+        "https://example.invalid", "SESSION_TOKEN", "site", pat_name="PAT_NAME", pat_secret="PAT_SECRET"
+    )
+    archive = BytesIO()
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
+        member = zipfile.ZipInfo("PAT_SECRET.tds")
+        member.comment = b"SESSION_TOKEN"
+        member.extra = b"\xfe\xca\n\x00PAT_SECRET"
+        bundle.writestr(member, "<datasource>safe</datasource>")
+        bundle.comment = b"PAT_NAME"
+    assert _contains_credential(archive.getvalue(), session)
+
+
+def test_download_payload_checks_compressed_textual_sidecars_for_credentials() -> None:
+    """Persisted textual sidecars are decompressed and inspected as well as Tableau XML."""
+    session = TableauSession(
+        "https://example.invalid", "SESSION_TOKEN", "site", pat_name="PAT_NAME", pat_secret="PAT_SECRET"
+    )
+    archive = BytesIO()
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
+        bundle.writestr("source.tds", "<datasource>safe</datasource>")
+        bundle.writestr("proxy-note.txt", "PAT_SECRET")
+    assert _contains_credential(archive.getvalue(), session)
+
+
+@pytest.mark.parametrize("payload", [b"PK not a zip", b"PK\x03\x04"])
+def test_download_payload_refuses_unreadable_archives(payload: bytes) -> None:
+    """A ZIP-looking payload that cannot be inspected must not be persisted."""
+    session = TableauSession(
+        "https://example.invalid", "SESSION_TOKEN", "site", pat_name="PAT_NAME", pat_secret="PAT_SECRET"
+    )
+    with pytest.raises(RuntimeError, match="unreadable datasource archive"):
+        _contains_credential(payload, session)
+
+
+def test_download_payload_refuses_archive_without_supported_text_members() -> None:
+    """A valid archive still fails closed if no persisted Tableau text can be assessed."""
+    session = TableauSession(
+        "https://example.invalid", "SESSION_TOKEN", "site", pat_name="PAT_NAME", pat_secret="PAT_SECRET"
+    )
+    archive = BytesIO()
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("data.hyper", b"opaque")
+    with pytest.raises(RuntimeError, match="no assessable Tableau XML member"):
+        _contains_credential(archive.getvalue(), session)
+
+
+def test_download_stem_requires_a_full_uuid() -> None:
+    """Only the validated response identifier can name a downloaded artifact."""
+    luid = "8f6e1d3c-2b4a-4d8e-9f01-123456789abc"
+    session = TableauSession("https://example.invalid", luid, "site", pat_name="PAT_NAME", pat_secret="PAT_SECRET")
+    assert _download_stem(luid, session) is None
+    assert _download_stem("PAT_SECRET", session) is None
+    assert _download_stem("8f6e1d3c-2b4a-4d8e-9f01-123456789abd", session) == "8f6e1d3c-2b4a-4d8e-9f01-123456789abd"
 
 
 def test_survey_promotes_a_metadata_api_orphan_into_phase_1(tmp_path: Path) -> None:

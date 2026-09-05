@@ -644,6 +644,65 @@ def _run_main(monkeypatch, tmp_path, server):
     return assess_estate.main()
 
 
+def test_reflected_site_id_is_scrubbed_in_the_initial_listing_log(monkeypatch, no_sleep, caplog):
+    """The outbound path stays raw, but its pre-request progress log must not disclose it."""
+
+    class ReflectedSite(FakeTableau):
+        SIGNIN = {"credentials": {"token": "session-token", "site": {"id": ENV["TABLEAU_PAT_SECRET"]}}}
+
+    with caplog.at_level("INFO"):
+        site = _site(ReflectedSite(), monkeypatch, max_attempts=1)
+        assess_estate._listing(site, assess_estate.INVENTORY[0])  # pylint: disable=protected-access
+    assert ENV["TABLEAU_PAT_SECRET"] not in caplog.text
+
+
+def test_write_store_scrubs_every_sqlite_input(monkeypatch, no_sleep, tmp_path):
+    """Raw identities may support assembly, but the SQLite sink receives only scrubbed copies."""
+    site = _site(FakeTableau(), monkeypatch, max_attempts=1)
+    raw = assess_estate.collect(site, None)
+    secret = ENV["TABLEAU_PAT_SECRET"]
+    raw["projects"][0]["name"] = secret
+    raw["groups"][0]["name"] = secret
+    raw["datasources"][0]["name"] = secret
+    raw["structure"]["publishedDatasources"] = [{"name": secret, "upstreamTables": [{"fullName": secret}]}]
+    raw["permissions"] = [
+        {
+            "object_type": secret,
+            "object_luid": secret,
+            "object_name": secret,
+            "grantee_type": secret,
+            "grantee_luid": secret,
+            "capability": secret,
+            "mode": secret,
+        }
+    ]
+    raw["collection_errors"] = [
+        {
+            "listing": secret,
+            "severity": assess_estate.SECONDARY,
+            "status": 500,
+            "path": secret,
+            "page": 1,
+            "attempts": 1,
+            "elapsed_sec": 0,
+            "transport": False,
+            "error": secret,
+        }
+    ]
+    assembled = assess_estate.assemble(raw, 0.99)
+    store = assess_estate.write_store(tmp_path, raw, assembled, site.scrub_text)
+    assert secret.encode() not in store.read_bytes()
+    assert all(secret not in path.read_text(encoding="utf-8") for path in (tmp_path / "raw").glob("*.json"))
+
+
+def test_checkpoint_scrubs_reflected_response_before_writing_raw_json(monkeypatch, no_sleep, tmp_path):
+    """Pass-one checkpoint artifacts use the same redaction boundary as final raw output."""
+    site = _site(FakeTableau(), monkeypatch, max_attempts=1)
+    secret = ENV["TABLEAU_PAT_SECRET"]
+    assess_estate._checkpoint(tmp_path, {"workbooks": [{"name": secret}]}, site.scrub_text)  # pylint: disable=protected-access
+    assert secret not in (tmp_path / "raw" / "workbooks.json").read_text(encoding="utf-8")
+
+
 def test_a_timeout_on_a_secondary_listing_yields_a_degraded_but_COMPLETE_assessment(
     monkeypatch, no_sleep, tmp_path, caplog
 ):

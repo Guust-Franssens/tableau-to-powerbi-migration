@@ -100,7 +100,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import resolve_datasource_target as target_resolution  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_render_capability as render_capability  # noqa: E402  # pylint: disable=wrong-import-position
-from tableau_env import env_source, pat_secret, redact, require, resolve_env  # noqa: E402  # pylint: disable=wrong-import-position
+from tableau_env import env_source, pat_secret, redact, require, resolve_env, scrub_tree  # noqa: E402  # pylint: disable=wrong-import-position
 
 LOG = logging.getLogger("assess")
 
@@ -360,7 +360,7 @@ class Site:  # pylint: disable=too-many-instance-attributes  # one client: crede
         both reach ``assessment.json``, ``report.md`` and now ``estate.db``, and a proxy or WAF that
         echoes the request writes the owner's PAT (or the live session token) into all three.
         """
-        return redact(text, self._pat[1], self.token or "")
+        return redact(text, self._pat[0], self._pat[1], self.token or "")
 
     def _scrub(self, payload: bytes) -> str:
         """Decode a response body with every credential known at this point removed.
@@ -443,7 +443,14 @@ class Site:  # pylint: disable=too-many-instance-attributes  # one client: crede
                     _record(path, status, detail, attempt, started), counts_for_circuit=kind == "transient"
                 )
             self.retries += 1
-            LOG.warning("  %s -> %s; retry %d/%d in %.1fs", path, detail[:90], attempt, self.policy.max_attempts, delay)
+            LOG.warning(
+                "  %s -> %s; retry %d/%d in %.1fs",
+                self.scrub_text(path),
+                detail[:90],
+                attempt,
+                self.policy.max_attempts,
+                delay,
+            )
             time.sleep(delay)
 
     def get(self, path: str) -> dict[str, Any] | None:
@@ -733,7 +740,7 @@ def _listing(site: Site, spec: Listing) -> tuple[list[dict], dict | None]:
     a working one for 180 s, then produced a traceback.
     """
     path = f"/sites/{site.site_id}{spec.path}"
-    LOG.info("  %-14s reading %s", spec.label, path)
+    LOG.info("  %-14s reading %s", spec.label, site.scrub_text(path))
     started = time.monotonic()
     rows, error = site.paged(path, spec.collection, spec.item)
     if error:
@@ -1011,20 +1018,21 @@ def _degraded_contract(errors: list[dict], workbooks_total: int) -> dict[str, An
     }
 
 
-def _write_raw(out: Path, payload: dict[str, Any]) -> None:
+def _write_raw(out: Path, payload: dict[str, Any], redactor=None) -> None:
     """Write raw API responses as evidence. Called twice on purpose - see ``_checkpoint``."""
     (out / "raw").mkdir(parents=True, exist_ok=True)
-    for key, value in payload.items():
+    scrubbed, _paths = scrub_tree(payload, redactor or (lambda text: text))
+    for key, value in scrubbed.items():
         (out / "raw" / f"{key}.json").write_text(json.dumps(value, indent=2), encoding="utf-8")
 
 
-def _checkpoint(out: Path, inventory: dict[str, list]) -> None:
+def _checkpoint(out: Path, inventory: dict[str, list], redactor=None) -> None:
     """Persist the pass-1 inventory the moment it exists, before anything flakier runs.
 
     Nothing used to be written until ``main`` completed, so a failure in a secondary pass discarded
     a finished inventory of 273 workbooks and 1042 views - three times in one afternoon (#193).
     """
-    _write_raw(out, inventory)
+    _write_raw(out, inventory, redactor)
     LOG.info("  checkpoint: pass-1 inventory persisted to %s", out / "raw")
 
 
@@ -1077,17 +1085,19 @@ def _write_run_marker(conn: sqlite3.Connection, assembled: dict[str, Any]) -> No
     )
 
 
-def write_store(out: Path, raw: dict[str, Any], assembled: dict[str, Any]) -> Path:
+def write_store(out: Path, raw: dict[str, Any], assembled: dict[str, Any], redactor=None) -> Path:
     """Raw JSON as evidence, SQLite as the query layer.
 
     Raw responses are kept because an assessment is evidence for a COMMERCIAL decision - "retire
     these 40" must be defensible months later, and an API response is not reproducible once the
     estate moves.
     """
+    scrubbed_raw, _paths = scrub_tree(raw, redactor or (lambda text: text))
+    scrubbed_assembled, _paths = scrub_tree(assembled, redactor or (lambda text: text))
     _write_raw(
         out,
         {
-            key: raw[key]
+            key: scrubbed_raw[key]
             for key in (
                 "workbooks",
                 "views",
@@ -1102,6 +1112,7 @@ def write_store(out: Path, raw: dict[str, Any], assembled: dict[str, Any]) -> Pa
                 "structure",
             )
         },
+        redactor,
     )
 
     db_path = out / "estate.db"
@@ -1113,7 +1124,7 @@ def write_store(out: Path, raw: dict[str, Any], assembled: dict[str, Any]) -> Pa
         ":sheets,:dashboards,:calcs,:lods,:table_calcs,:has_user_reference,:complexity,"
         ":complexity_understated,:views_lifetime,:view_count,:subscriptions,:alerts,:custom_views,"
         ":rank,:cumulative_share,:tier,:tier_reason)",
-        [{**r, "has_user_reference": int(bool(r.get("has_user_reference")))} for r in assembled["workbooks"]],
+        [{**r, "has_user_reference": int(bool(r.get("has_user_reference")))} for r in scrubbed_assembled["workbooks"]],
     )
     conn.executemany(
         "INSERT OR REPLACE INTO view VALUES (?,?,?,?,?,?)",
@@ -1126,7 +1137,7 @@ def write_store(out: Path, raw: dict[str, Any], assembled: dict[str, Any]) -> Pa
                 int((v.get("usage") or {}).get("totalViewCount") or 0),
                 v.get("updatedAt"),
             )
-            for v in raw["views"]
+            for v in scrubbed_raw["views"]
         ],
     )
     conn.executemany(
@@ -1141,10 +1152,10 @@ def write_store(out: Path, raw: dict[str, Any], assembled: dict[str, Any]) -> Pa
                 None,
                 None,
             )
-            for d in raw["datasources"]
+            for d in scrubbed_raw["datasources"]
         ],
     )
-    for ds in raw["structure"].get("publishedDatasources") or []:
+    for ds in scrubbed_raw["structure"].get("publishedDatasources") or []:
         conn.execute(
             "UPDATE datasource SET is_certified=?, has_extracts=?, extract_last_refresh=? WHERE name=?",
             (
@@ -1160,28 +1171,34 @@ def write_store(out: Path, raw: dict[str, Any], assembled: dict[str, Any]) -> Pa
         )
     conn.executemany(
         "INSERT INTO dependency VALUES (:workbook_name,:workbook_luid,:datasource_name,:datasource_luid,:source)",
-        assembled["dependencies"],
+        scrubbed_assembled["dependencies"],
     )
     conn.executemany(
         "INSERT OR REPLACE INTO project VALUES (?,?,?,?)",
-        [(p["id"], p.get("name"), p.get("parentProjectId"), p.get("contentPermissions")) for p in raw["projects"]],
+        [
+            (p["id"], p.get("name"), p.get("parentProjectId"), p.get("contentPermissions"))
+            for p in scrubbed_raw["projects"]
+        ],
     )
     conn.executemany(
         "INSERT OR REPLACE INTO grp VALUES (?,?,?,?)",
         # `_members` is NULL, not 0, for a group whose membership could not be read: 0 reads as a
         # finding ("this group is empty"), and that is the opposite of what we know.
-        [(g["id"], g.get("name"), (g.get("domain") or {}).get("name"), g.get("_members")) for g in raw["groups"]],
+        [
+            (g["id"], g.get("name"), (g.get("domain") or {}).get("name"), g.get("_members"))
+            for g in scrubbed_raw["groups"]
+        ],
     )
     conn.executemany(
         "INSERT INTO permission VALUES (:object_type,:object_luid,:object_name,:grantee_type,"
         ":grantee_luid,:capability,:mode)",
-        raw["permissions"],
+        scrubbed_raw["permissions"],
     )
     conn.executemany(
         "INSERT OR REPLACE INTO flow VALUES (?,?,?)",
-        [(f["id"], f.get("name"), (f.get("project") or {}).get("name")) for f in raw["flows"]],
+        [(f["id"], f.get("name"), (f.get("project") or {}).get("name")) for f in scrubbed_raw["flows"]],
     )
-    _write_run_marker(conn, assembled)
+    _write_run_marker(conn, scrubbed_assembled)
     conn.commit()
     conn.close()
     return db_path
@@ -1781,6 +1798,16 @@ def _log_server_ceiling(ceiling: dict[str, Any] | None) -> None:
         )
 
 
+def _write_final_artifacts(out: Path, raw: dict, assembled: dict, coverage_target: float, redactor) -> Path:
+    """Persist scrubbed assessment outputs and return the report path."""
+    scrubbed_raw, _paths = scrub_tree(raw, redactor)
+    scrubbed_assembled, _paths = scrub_tree(assembled, redactor)
+    report = out / "report.md"
+    report.write_text(render_report(scrubbed_assembled, scrubbed_raw, coverage_target), encoding="utf-8")
+    (out / "assessment.json").write_text(json.dumps(scrubbed_assembled, indent=2) + "\n", encoding="utf-8")
+    return report
+
+
 def main() -> int:
     """Assess the estate. Exit 1 when nothing could be assessed, 3 when a PRIMARY listing failed."""
     args = _build_parser().parse_args()
@@ -1808,14 +1835,11 @@ def main() -> int:
     started = time.perf_counter()
     args.out.mkdir(parents=True, exist_ok=True)
     _clear_final_artifacts(args.out)
-    raw = collect(site, survey, checkpoint=lambda inventory: _checkpoint(args.out, inventory))
+    raw = collect(site, survey, checkpoint=lambda inventory: _checkpoint(args.out, inventory, site.scrub_text))
     assembled = assemble(raw, args.coverage_target)
+    db = write_store(args.out, raw, assembled, site.scrub_text)
     site.sign_out()
-
-    db = write_store(args.out, raw, assembled)
-    report = args.out / "report.md"
-    report.write_text(render_report(assembled, raw, args.coverage_target), encoding="utf-8")
-    (args.out / "assessment.json").write_text(json.dumps(assembled, indent=2) + "\n", encoding="utf-8")
+    report = _write_final_artifacts(args.out, raw, assembled, args.coverage_target, site.scrub_text)
 
     counts: dict[str, int] = {}
     for row in assembled["workbooks"]:

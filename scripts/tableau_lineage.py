@@ -56,23 +56,28 @@ metadata_api/en-us/docs/meta_api_start.html); datasource download GET
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import logging
+import re
 import sys
 import urllib.error
 import urllib.request
+import zipfile
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from tableau_env import require, resolve_env  # noqa: E402  # pylint: disable=wrong-import-position
+from tableau_env import redact, redacted_note, require, resolve_env, scrub_tree  # noqa: E402  # pylint: disable=wrong-import-position
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger("tableau_lineage")
 
 DEFAULT_API_VERSION = "3.19"
+_LUID = re.compile(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}", re.IGNORECASE)
+_TEXTUAL_ARCHIVE_MEMBERS = (".twb", ".tds", ".xml", ".txt", ".json", ".csv", ".ini", ".log", ".yaml", ".yml")
 
 # How an edge (data source -> workbook) was learned. Printed next to every edge so a plan is
 # self-describing: an operator never has to guess which system made which claim.
@@ -222,7 +227,7 @@ def _summary(data: dict[str, Any]) -> dict[str, Any]:
     return summary if isinstance(summary, dict) else {}
 
 
-def _count(*values: Any) -> int:
+def _count(values: Sequence[Any]) -> int:
     """The largest of several counts of the SAME failure, ignoring anything that is not a count.
 
     `estate_survey.py` records one failure in more than one place (`connection_read_errors`, the
@@ -231,7 +236,7 @@ def _count(*values: Any) -> int:
     exactly what `build_survey()` produces when it is called directly, without `survey_site()`'s
     error bookkeeping.
     """
-    counts = [len(v) if isinstance(v, list) else v for v in values]
+    counts = [len(value) if isinstance(value, list) else value for value in values]
     return max((c for c in counts if isinstance(c, int) and not isinstance(c, bool)), default=0)
 
 
@@ -276,16 +281,18 @@ def _visibility_gaps(data: dict[str, Any]) -> list[str]:
     summary = _summary(data)
     workbooks = data.get("workbooks") or []
 
-    listing = _count(data.get("listing_errors"), summary.get("listing_errors"))
+    listing = _count((data.get("listing_errors"), summary.get("listing_errors")))
     if listing:
         gaps.append(
             f"{listing} site listing(s) failed - workbooks or data sources are MISSING from this survey entirely"
         )
     unread = _count(
-        data.get("connection_read_errors"),
-        summary.get("connection_read_errors"),
-        summary.get("dependencies_unknown"),
-        sum(1 for wb in workbooks if isinstance(wb, dict) and wb.get("dependencies_unknown")),
+        (
+            data.get("connection_read_errors"),
+            summary.get("connection_read_errors"),
+            summary.get("dependencies_unknown"),
+            sum(1 for wb in workbooks if isinstance(wb, dict) and wb.get("dependencies_unknown")),
+        )
     )
     if unread:
         gaps.append(f"{unread} workbook connection(s) could not be read")
@@ -305,9 +312,11 @@ def _resolution_gaps(data: dict[str, Any], unresolved_deps: int) -> list[str]:
     does not print the same 38 dependencies under two different sentences.
     """
     unresolved = _count(
-        data.get("unresolved_dependencies"),
-        _summary(data).get("unresolved_dependencies"),
-        unresolved_deps,
+        (
+            data.get("unresolved_dependencies"),
+            _summary(data).get("unresolved_dependencies"),
+            unresolved_deps,
+        )
     )
     if not unresolved:
         return []
@@ -423,6 +432,8 @@ class TableauSession(NamedTuple):
     token: str
     site_id: str
     api_version: str = DEFAULT_API_VERSION
+    pat_name: str = ""
+    pat_secret: str = ""
 
     @property
     def base(self) -> str:
@@ -436,8 +447,14 @@ def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str]) -> di
     req = urllib.request.Request(url, data=body, method="POST")
     for key, value in {"Content-Type": "application/json", "Accept": "application/json", **headers}.items():
         req.add_header(key, value)
+    result = json.loads(_response_text(req))
+    return result
+
+
+def _response_text(req: urllib.request.Request) -> str:
+    """Read a credentialed Tableau response without persisting it."""
     with urllib.request.urlopen(req, timeout=120) as resp:  # noqa: S310 - URL comes from env config
-        return json.loads(resp.read().decode("utf-8"))
+        return resp.read().decode("utf-8")
 
 
 def sign_in(server: str, site: str, pat_name: str, pat_secret: str, api_version: str) -> TableauSession:
@@ -458,27 +475,95 @@ def sign_in(server: str, site: str, pat_name: str, pat_secret: str, api_version:
     site_id = (creds.get("site") or {}).get("id")
     if not token or not site_id:
         raise RuntimeError("sign-in succeeded but returned no token/site id")
-    return TableauSession(server=server, token=token, site_id=site_id, api_version=api_version)
+    return TableauSession(
+        server=server,
+        token=token,
+        site_id=site_id,
+        api_version=api_version,
+        pat_name=pat_name,
+        pat_secret=pat_secret,
+    )
 
 
 def fetch_lineage(session: TableauSession) -> list[dict[str, Any]]:
     """Run the Metadata API lineage query; return the publishedDatasources list."""
     url = f"{session.base}/api/metadata/graphql"
-    result = _post_json(url, {"query": LINEAGE_QUERY}, headers={"X-Tableau-Auth": session.token})
+    result = _post_json(
+        url,
+        {"query": LINEAGE_QUERY},
+        headers={"X-Tableau-Auth": session.token},
+    )
     if result.get("errors"):
-        raise RuntimeError(f"Metadata API returned errors: {json.dumps(result['errors'])[:400]}")
+        raise RuntimeError(
+            "Metadata API returned errors: "
+            + redacted_note(
+                json.dumps(result["errors"]),
+                lambda text: redact(text, session.pat_name, session.pat_secret, session.token),
+                limit=400,
+            )
+        )
     return result.get("data", {}).get("publishedDatasources", [])
 
 
 def download_datasource(session: TableauSession, luid: str, dest: Path) -> Path:
     """Download one published data source's content (.tdsx) so its model layer can be parsed."""
+    luid = _download_stem(luid, session)
+    if luid is None:
+        raise RuntimeError("refusing to download a datasource without a valid LUID")
     url = f"{session.base}/api/{session.api_version}/sites/{session.site_id}/datasources/{luid}/content"
     req = urllib.request.Request(url, method="GET")
     req.add_header("X-Tableau-Auth", session.token)
     dest.parent.mkdir(parents=True, exist_ok=True)
     with urllib.request.urlopen(req, timeout=300) as resp:  # noqa: S310 - URL comes from env config
-        dest.write_bytes(resp.read())
+        payload = resp.read()
+    if _contains_credential(payload, session):
+        raise RuntimeError("refusing to persist a datasource response that reflects a credential")
+    dest.write_bytes(payload)
     return dest
+
+
+def _contains_credential(payload: bytes, session: TableauSession) -> bool:
+    """Inspect raw XML and persisted .tdsx metadata before persistence."""
+    secrets = (session.pat_name, session.pat_secret, session.token)
+
+    def reflected(value: bytes) -> bool:
+        text = value.decode("utf-8", "replace")
+        return redact(text, *secrets) != text
+
+    if reflected(payload):
+        return True
+    if not payload.startswith(b"PK"):
+        return False
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            if reflected(archive.comment):
+                return True
+            for member in archive.infolist():
+                if (
+                    redact(member.filename, *secrets) != member.filename
+                    or reflected(member.comment)
+                    or reflected(member.extra)
+                ):
+                    return True
+            members = [
+                member for member in archive.infolist() if member.filename.lower().endswith(_TEXTUAL_ARCHIVE_MEMBERS)
+            ]
+            if not members:
+                raise RuntimeError("refusing to persist an archive with no assessable Tableau XML member")
+            return any(reflected(archive.read(member)) for member in members)
+    except zipfile.BadZipFile as exc:
+        raise RuntimeError("refusing to persist an unreadable datasource archive") from exc
+
+
+def _download_stem(luid: object, session: TableauSession) -> str | None:
+    """Return the only response-derived value allowed to name a download."""
+    if (
+        not isinstance(luid, str)
+        or not _LUID.fullmatch(luid)
+        or luid in {session.pat_name, session.pat_secret, session.token}
+    ):
+        return None
+    return luid
 
 
 def _origin(key: str, metadata_keys: set[str], survey_keys: set[str]) -> str:
@@ -906,7 +991,7 @@ def _resolve_survey(path: Path | None) -> tuple[Survey | None, bool]:
         return None, False
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-locals
     """CLI entry point."""
     args = _build_parser().parse_args(argv)
 
@@ -925,29 +1010,59 @@ def main(argv: list[str] | None = None) -> int:
         log.info("signed in to %s (site '%s')", server, site or "<default>")
         datasources = fetch_lineage(session)
     except (urllib.error.URLError, urllib.error.HTTPError, RuntimeError) as exc:
-        log.error("Tableau API call failed: %s", exc)
+        log.error(
+            "Tableau API call failed: %s",
+            redacted_note(str(exc), lambda text: redact(text, pat_secret), limit=400),
+        )
         return 1
 
     log.info("found %d published data source(s)", len(datasources))
     if args.save_json:
-        args.save_json.write_text(json.dumps({"site": site, "datasources": datasources}, indent=2), encoding="utf-8")
+        args.save_json.write_text(
+            json.dumps(
+                scrub_tree(
+                    {"site": site, "datasources": datasources},
+                    lambda text: redact(text, pat_name, pat_secret, session.token),
+                )[0],
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
         log.info("raw lineage saved to %s", args.save_json)
 
     plan = build_plan(datasources, site, survey)
+    display_plan, _paths = scrub_tree(plan, lambda text: redact(text, pat_name, pat_secret, session.token))
     if args.plan or not args.download:
-        print_plan(plan, survey)
+        print_plan(display_plan, survey)
 
     if args.download:
         log.info("\nDownloading %d data source(s) to %s ...", len(plan), args.download)
         for entry in plan:
-            if not entry["luid"]:
+            luid = _download_stem(entry["luid"], session)
+            if luid is None:
+                log.warning(
+                    "  !!  %s has no valid LUID; refusing download",
+                    redacted_note(
+                        str(entry["name"]),
+                        lambda text: redact(text, pat_name, pat_secret, session.token),
+                        limit=400,
+                    ),
+                )
                 continue
-            dest = args.download / f"{entry['name']}.tdsx"
+            dest = args.download / f"{luid}.tdsx"
             try:
-                download_datasource(session, entry["luid"], dest)
+                download_datasource(session, luid, dest)
                 log.info("  OK  %s", dest)
-            except (urllib.error.URLError, urllib.error.HTTPError) as exc:
-                log.warning("  !!  %s failed: %s", entry["name"], exc)
+            except (urllib.error.URLError, urllib.error.HTTPError, RuntimeError) as exc:
+                log.warning(
+                    "  !!  %s failed: %s",
+                    redacted_note(
+                        str(entry["name"]),
+                        lambda text: redact(text, pat_name, pat_secret, session.token),
+                        limit=400,
+                    ),
+                    redacted_note(str(exc), lambda text: redact(text, pat_name, pat_secret, session.token), limit=400),
+                )
         log.info("\nParse each with: python scripts/parse_tableau.py <file>.tdsx -o <spec>.json")
     return 0
 
