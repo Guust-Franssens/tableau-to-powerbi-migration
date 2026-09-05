@@ -72,8 +72,8 @@ Three locations, one direction (from `AGENTS.md`, and it is enforced):
 
 | stage | path | rule |
 |---|---|---|
-| engine truth | `<bundle>/reports/` (reliable); `<bundle>/semantic_models/` (only if emitted) | **never edit an existing baseline** |
-| working copy | `<bundle>/pbip/` | agents edit here; this is what `deploy_estate.py` reads |
+| pristine engine baseline / unbound pass | `<bundle>/reports/` (reliable); `<bundle>/semantic_models/` (only if emitted) | **never edit an existing baseline**; it is not the shipped visual |
+| working copy | `<bundle>/pbip/` | model-bound working and shipped pass; agents edit here before package promotion |
 | deliverable | `migrations/{workbooks,datasources}/<slug>/fabric/` | copied at sign-off |
 
 Automated inventory command by phase:
@@ -653,15 +653,17 @@ What a bundle contains ✅ verified against the reference bundle by listing it, 
 
 #### Engine model-baseline availability
 
-`reports/` is a reliable engine-truth baseline. `semantic_models/` is conditional: a 12-workbook
-estate audited on 2026-08-24 had report baselines for all 12, but only 4 model pairs (33%); the
-remaining 8 working models had no engine-truth counterpart. An unpaired model does **not** mean
-“no changes were needed” — it means model churn is unmeasurable for that unit.
+`reports/` is the pristine engine baseline / model-unbound report pass. `semantic_models/` is
+conditional: a 12-workbook estate audited on 2026-08-24 had report baselines for all 12, but only 4
+model pairs (33%); the remaining 8 working models had no pristine baseline counterpart. An unpaired
+model does **not** mean “no changes were needed” — it means model churn is unmeasurable for that
+unit.
 
-Before diffing a model, verify its engine-truth counterpart exists. Record an absent counterpart as
-**BASELINE UNAVAILABLE**, distinctly from a clean/no-change diff; a tool using exit codes must give
-that state its own non-success/skip result, following `check_stub_measures.py`'s rule that “no stubs”
-and “no model” never print or exit the same way. Only an existing pair can produce “no changes.”
+Before diffing a model, verify its pristine baseline counterpart exists. Record an absent counterpart
+as **BASELINE UNAVAILABLE**, distinctly from a clean/no-change diff; a tool using exit codes must
+give that state its own non-success/skip result, following `check_stub_measures.py`'s rule that “no
+stubs” and “no model” never print or exit the same way. Only an existing pair can produce “no
+changes.”
 
 For an engine-gap distribution, publish separate report and model denominators, state the paired-model
 coverage, and do not generalize model churn from the paired subset to the whole estate. The first

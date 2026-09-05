@@ -1168,6 +1168,7 @@ def test_the_blind_ceiling_is_not_below_the_childs_own_bounded_retry_budget() ->
     ), "the budget does not even cover one full read timeout per attempt"
 
 
+@pytest.mark.engine_dependency(expected_skip_reason="canonical engine not installed, so its constants cannot be read")
 def test_the_ceiling_constants_match_the_INSTALLED_engine() -> None:
     """The arithmetic is only sound while the engine's own numbers are what we think they are.
 
@@ -1180,8 +1181,8 @@ def test_the_ceiling_constants_match_the_INSTALLED_engine() -> None:
 
     try:
         fetch_tds = harvest.engine_scripts_dir() / "fetch_tds.py"
-    except Exception as exc:  # pylint: disable=broad-exception-caught
-        pytest.skip(f"canonical engine not installed, so its constants cannot be read: {exc}")
+    except Exception:  # pylint: disable=broad-exception-caught
+        pytest.skip("canonical engine not installed, so its constants cannot be read")
     if not fetch_tds.is_file():
         pytest.skip(f"{fetch_tds} is missing")
     tree = ast.parse(fetch_tds.read_text(encoding="utf-8"))
