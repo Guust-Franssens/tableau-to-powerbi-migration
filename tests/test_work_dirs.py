@@ -1006,8 +1006,110 @@ def test_verify_cli_needs_no_unit_argument_but_allocation_still_does(tmp_path: P
 
 
 # --------------------------------------------------------------------------------------
-# The prevention half - the prohibition must live in the artifact an agent actually reads
+# --runs-parent - a same-plumbing alias for --repo-root (issue #479, second reopen): an explicit,
+# first-class short EXTERNAL root override for when the repo-local `_runs/` path itself projects
+# over Power BI Desktop's path ceiling.
 # --------------------------------------------------------------------------------------
+
+
+def _run_allocate_cli(unit: str, *root_args: str, json_out: bool = True) -> subprocess.CompletedProcess:
+    args = [sys.executable, str(REPO_ROOT / "scripts" / "work_dirs.py"), unit, *root_args]
+    if json_out:
+        args.append("--json")
+    return subprocess.run(args, capture_output=True, text=True, check=False)
+
+
+def test_runs_parent_allocates_the_identical_canonical_tree_as_repo_root(tmp_path: Path) -> None:
+    """`--runs-parent` is plumbing-identical to `--repo-root`: same subdirs, same manifest shape."""
+    external = tmp_path / "short"
+
+    result = _run_allocate_cli("acme", "--runs-parent", str(external))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["root"] == str(external / "_runs" / "001-acme")
+    for name in CANONICAL_SUBDIRS:
+        if name in LAZY_SUBDIRS:
+            continue
+        assert Path(payload[name]).is_dir()
+    manifest = json.loads((external / "_runs" / "001-acme" / "run.json").read_text(encoding="utf-8"))
+    assert manifest["run"] == 1
+    assert manifest[RUN_LOCATION_KEY] == "001-acme"
+
+
+def test_runs_parent_and_repo_root_are_mutually_exclusive(tmp_path: Path) -> None:
+    """Supplying both must fail before any allocation happens, not silently pick one."""
+    result = _run_allocate_cli("acme", "--repo-root", str(tmp_path), "--runs-parent", str(tmp_path))
+
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert not runs_root(tmp_path).exists()
+
+
+def test_runs_parent_verify_inspects_the_named_external_root_only(tmp_path: Path) -> None:
+    """`--verify --runs-parent` must report on the external root, never silently fall back to the
+    repo's own `_runs/`."""
+    external = tmp_path / "short"
+    allocate_run("acme", repo_root=external)
+
+    result = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "work_dirs.py"), "--verify", "--runs-parent", str(external)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "INTACT" in result.stdout
+    assert str(runs_root(external)) in result.stdout
+
+
+def test_runs_parent_need_not_be_a_git_checkout(tmp_path: Path) -> None:
+    """The override's parent is just a directory - it need not contain a `.git` at all."""
+    external = tmp_path / "not-a-repo"
+    external.mkdir()
+
+    result = _run_allocate_cli("acme", "--runs-parent", str(external))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not (external / ".git").exists()
+
+
+def test_runs_parent_racing_allocators_still_get_unique_numbers(tmp_path: Path) -> None:
+    """Two allocators under the same external parent must never collide on a run number - the same
+    invariant `allocate_run` already guarantees for a repo-local root."""
+    external = tmp_path / "short"
+    barrier = threading.Barrier(2)
+    results: list[int] = []
+    lock = threading.Lock()
+
+    def worker(name: str) -> None:
+        barrier.wait()
+        run = allocate_run(name, repo_root=external)
+        with lock:
+            results.append(run.run_number)
+
+    threads = [threading.Thread(target=worker, args=(name,)) for name in ("acme", "beta")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert sorted(results) == [1, 2]
+
+
+def test_runs_parent_invalid_target_fails_before_partial_allocation(tmp_path: Path) -> None:
+    """An unsafe/invalid parent (a plain FILE, not a directory) must fail cleanly and leave no
+    half-allocated run behind."""
+    blocked = tmp_path / "blocked"
+    blocked.write_text("not a directory", encoding="utf-8")
+
+    result = _run_allocate_cli("acme", "--runs-parent", str(blocked))
+
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert not (blocked / "_runs").exists() or not any((blocked / "_runs").iterdir())
+
+
+
 
 
 def test_the_rename_prohibition_and_its_reason_are_stated_in_work_dirs_itself(tmp_path: Path) -> None:
