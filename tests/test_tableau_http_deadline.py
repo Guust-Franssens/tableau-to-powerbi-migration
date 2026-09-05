@@ -33,6 +33,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from email.message import Message
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -62,6 +63,16 @@ DEADLINE_SEC = 0.3
 # The slow-HEADER fixture's own gap, 3x inside the socket timeout rather than 1.25x. Its ~72 bytes
 # take ~2.2s in total, comfortably past DEADLINE_SEC in the unbounded direction.
 HEADER_GAP_SEC = 0.03
+
+
+def test_response_framing_requires_an_unambiguous_usable_content_length():
+    headers = Message()
+    headers.add_header("Content-Length", "5")
+    headers.add_header("Content-Length", "10")
+
+    assert th.response_framing(headers) == "close_delimited"
+    assert th.response_framing({"Content-Length": "abc"}) == "close_delimited"
+    assert th.response_framing({"Content-Length": "5"}) == "content_length"
 
 
 class _Trickle(BaseHTTPRequestHandler):

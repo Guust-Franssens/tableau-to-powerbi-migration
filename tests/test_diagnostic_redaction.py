@@ -1052,9 +1052,10 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
             "derived from it is recorded. Were a caller ever to keep it, `scrub_tree` covers the "
             "manifest whole immediately before serialisation"
         ),
-        "response_framing(headers)": (
-            "FIXED-VOCABULARY: response_framing maps response headers onto one of this repo's three "
-            "literal framing classes and never quotes a header value"
+        "header_value(headers, RESPONSE_FRAMING_HEADER) or response_framing(headers)": (
+            "FIXED-VOCABULARY: either the synthetic framing verdict the shared HTTP primitive already "
+            "reduced to one of this repo's three literals before flattening duplicate headers, or the "
+            "same closed-vocabulary helper applied to a scripted test session's headers"
         ),
     },
     ("scripts/tableau_render_capability.py", "format_matches"): {

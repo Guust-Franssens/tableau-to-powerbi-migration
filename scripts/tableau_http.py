@@ -64,6 +64,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tableau_env import redacted_note  # noqa: E402  # pylint: disable=wrong-import-position
@@ -72,6 +73,7 @@ from tableau_env import redacted_note  # noqa: E402  # pylint: disable=wrong-imp
 # unusable redirect). Distinct from every real status so a caller's retry policy can treat a reset
 # connection and a gateway 503 alike without conflating either with a 2xx.
 NETWORK_ERROR_STATUS = 0
+RESPONSE_FRAMING_HEADER = "X-T2P-Response-Framing"
 
 # An output cap on a diagnostic this module authors. It bounds the OUTPUT of redaction, never its
 # input -- `redacted_note` has already seen the whole message by the time this applies, so cutting it
@@ -117,7 +119,16 @@ def header_value(headers: dict[str, str], name: str) -> str | None:
     return None
 
 
-def response_framing(headers: dict[str, str]) -> str:
+def _header_values(headers: Any, name: str) -> list[str]:
+    """All values for one header, preserving duplicates when the source exposes them."""
+    get_all = getattr(headers, "get_all", None)
+    if callable(get_all):
+        return [value for value in get_all(name, []) if value is not None]
+    value = header_value(headers, name)
+    return [] if value is None else [value]
+
+
+def response_framing(headers: Any) -> str:
     """How the peer delimited this response body, as a closed manifest-safe vocabulary.
 
     Tableau Cloud was measured returning ``Transfer-Encoding: chunked`` for both ``/data`` and
@@ -126,14 +137,21 @@ def response_framing(headers: dict[str, str]) -> str:
     ``Content-Length``. When neither a valid length nor chunked framing is present, EOF is itself the
     delimiter and a truncated CSV prefix is indistinguishable from a complete body.
     """
-    transfer_encoding = header_value(headers, "Transfer-Encoding") or ""
+    transfer_encoding = ",".join(_header_values(headers, "Transfer-Encoding"))
     codings = [coding.strip().casefold() for coding in transfer_encoding.split(",")]
     if "chunked" in codings:
         return "chunked"
-    content_length = header_value(headers, "Content-Length")
-    if content_length is not None and content_length.strip().isdigit():
+    lengths = [value.strip() for value in _header_values(headers, "Content-Length")]
+    if lengths and all(value.isdigit() for value in lengths) and len(set(lengths)) == 1:
         return "content_length"
     return "close_delimited"
+
+
+def _headers_with_framing(headers: Any) -> dict[str, str]:
+    """Flatten headers for callers while retaining the framing verdict before duplicates disappear."""
+    flattened = dict(headers or {})
+    flattened[RESPONSE_FRAMING_HEADER] = response_framing(headers or {})
+    return flattened
 
 
 def _read_bounded(stream, deadline: float | None, timeout: float) -> bytes:
@@ -636,7 +654,7 @@ def _request(
     """
     try:
         with _open(req, timeout, deadline) as resp:
-            return resp.status, _read_bounded(resp, deadline, timeout), dict(resp.headers)
+            return resp.status, _read_bounded(resp, deadline, timeout), _headers_with_framing(resp.headers)
     except urllib.error.HTTPError as exc:
         try:
             body = _read_bounded(exc, deadline, timeout)

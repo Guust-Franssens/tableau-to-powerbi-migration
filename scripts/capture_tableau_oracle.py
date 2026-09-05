@@ -219,6 +219,7 @@ from tableau_capture_policy import (  # noqa: E402  # pylint: disable=wrong-impo
 # method is now a thin adapter that builds the Request and delegates to the one hardened round trip.
 from tableau_http import (  # noqa: E402  # pylint: disable=wrong-import-position
     NETWORK_ERROR_STATUS,
+    RESPONSE_FRAMING_HEADER,
     _request,
     header_value,
     response_framing,
@@ -554,7 +555,7 @@ class TableauSession:
                 # Response data, so both callers POP it before merging the rest into a leg record.
                 # It rides in `stats` so every caller keeps unpacking three values.
                 stats["content_type"] = header_value(headers, "Content-Type")
-                stats["response_framing"] = response_framing(headers)
+                stats["response_framing"] = header_value(headers, RESPONSE_FRAMING_HEADER) or response_framing(headers)
                 return payload, elapsed, stats
             raw = payload.decode("utf-8", "replace")
             # ONE call, with the redactor inside. `classify_export_error` classifies on the raw text
