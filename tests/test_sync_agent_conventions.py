@@ -404,11 +404,17 @@ ROOT_CONTRACTS: dict[str, tuple[Path, tuple[str, ...]]] = {
         (
             "**A Tableau Server/Cloud site** (URL + PAT)",
             "python scripts/run_engine_survey.py --server <host>",
+            "python scripts/assess_estate.py --out _assessment --survey _assessment/estate_survey.json",
+            "python scripts/tableau_lineage.py --plan",
+            "python scripts/harvest_estate_assets.py --out <dir>",
+            "python scripts/run_estate.py --input <dir>/assets --output <bundle>",
             "**A folder of `.twb`/`.twbx`**",
             "python scripts/run_estate.py --input <folder> --output <bundle>",
             "**One `.twb`/`.twbx`**",
             "python scripts/parse_tableau.py <file> -o <spec>",
+            "dispatch `@tableau-migrator`",
             "**A `.tds`/`.tdsx`** (data source, no workbook)",
+            "`parse_tableau.py` accepts it directly",
         ),
     ),
     "migration-brief-path": (
