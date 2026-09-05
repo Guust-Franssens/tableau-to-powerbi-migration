@@ -819,11 +819,13 @@ example there were **15**, sitting unremarked beside a 170-item `remediation_wor
 single highest-value thing the reader surfaces, and it is why `--severity` **never hides them** - a
 blank visual outranks any severity band the worklist assigns.
 
-⚠️ **"nothing else ranks them" is now FALSE at our engine — #189 shipped in 2.355.0 and we run
-2.356.0.** `Yarbrdab000/tableau-fabric-skills#189` sets `pbip_ref_drops[].severity` **structurally at
-the drop site** (`emptied: true` → `severity: "blocking"`), plus a `blocking` worklist rule in the
-`emptied_visual` category. A **partial** drop deliberately stays `high`, not `blocking`. **Prefer the
-engine's own `severity` now**; the reader still ranks them and remains correct on older bundles.
+⚠️ **"nothing else ranks them" became FALSE in engine 2.355.0, and was verified here on canonical
+2.356.0 on 2026-09-03.** `Yarbrdab000/tableau-fabric-skills#189` sets
+`pbip_ref_drops[].severity` **structurally at the drop site** (`emptied: true` →
+`severity: "blocking"`), plus a `blocking` worklist rule in the `emptied_visual` category. A
+**partial** drop deliberately stays `high`, not `blocking`. For engine >= 2.355.0, prefer the
+engine's own `severity`; the reader still ranks them and remains correct on older bundles. This
+entry was not separately re-measured during the targeted 2.368.0 roll-forward.
 ⚠️ Two caveats worth keeping: upstream's own corpus emits **zero** `pbip_ref_drops` entries, so this
 shipped on fixture coverage against *our* estate measurements and the maintainer explicitly asked how
 many of our 23 now carry `blocking` — **that number is still unmeasured here**; and `emptied` is set
