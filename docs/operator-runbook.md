@@ -424,6 +424,34 @@ lines; that is a workaround, not the supported path.
 Expect on success: `[SURVEY] N workbook(s); M depend on a published datasource; K datasource(s) must
 be fetched first.` then one `[DEPENDS]` line per dependent workbook, then `[OK] survey written to …`.
 
+#### Survey schema and key names (`estate_survey.json`)
+
+The survey JSON output is consumed downstream by assessment, harvest, and the per-unit status roll-up tool (`scripts/build_run_unit_status.py`). Its key properties include:
+
+| Key | Type | Description |
+|---|---|---|
+| `fetch_order` | `list[dict]` | Topological download and migration sequence (published datasources first, then dependent workbooks). Each item carries `type` (`"datasource"` or `"workbook"`), `name`, `id` / `luid`, `project_name` / `project`, and optional `datasource_name`. |
+| `required_datasources` | `list[dict]` | Published datasources required by surveyed workbooks (`name`, `id`, `project_name`). |
+| `workbooks` | `list[dict]` | All workbooks discovered during the site survey (`name`, `id`, `project_name`, `connections`). |
+| `unresolved_dependencies` | `list[dict]` | Dependencies named by workbooks that could not be resolved to published datasources on the site. |
+
+#### Tracking per-unit run status (`build_run_unit_status.py`)
+
+To inspect the progress and latest outcome of every unit across a migration run:
+
+```powershell
+python scripts/build_run_unit_status.py _runs/<NNN>-<slug>/
+```
+
+This cross-references the survey scope (`assessment/estate_survey.json`) against observable run and repo artifacts:
+- Verified promoted deliverables in `migrations/{workbooks,datasources}/<slug>/` (requires `promotion-record.json` passing checks; directory presence alone is fail-closed `cannot_assess`).
+- Handover packages in `_runs/<NNN>-<slug>/packages/`.
+- Converted bundle units in `_runs/<NNN>-<slug>/bundle/pbip/`.
+- Harvested source assets in `_runs/<NNN>-<slug>/assets/`.
+- Unmapped dependencies or not-yet-started units.
+
+Emits `_runs/<NNN>-<slug>/unit-status.md` and `.json` with complete 1:1 parity and one row per unit.
+
 ### Step 2 — assess
 
 Emits a **decision, not an inventory**: a coverage curve, a per-workbook complexity score, a
