@@ -56,11 +56,13 @@ metadata_api/en-us/docs/meta_api_start.html); datasource download GET
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import logging
 import sys
 import urllib.error
 import urllib.request
+import zipfile
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -444,8 +446,7 @@ def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str], redac
         req.add_header(key, value)
     with urllib.request.urlopen(req, timeout=120) as resp:  # noqa: S310 - URL comes from env config
         result = json.loads(resp.read().decode("utf-8"))
-    scrubbed, _paths = scrub_tree(result, redactor or (lambda text: text))
-    return scrubbed
+    return result
 
 
 def sign_in(server: str, site: str, pat_name: str, pat_secret: str, api_version: str) -> TableauSession:
@@ -483,14 +484,13 @@ def fetch_lineage(session: TableauSession) -> list[dict[str, Any]]:
         url,
         {"query": LINEAGE_QUERY},
         headers={"X-Tableau-Auth": session.token},
-        redactor=lambda text: redact(text, session.pat_name, session.pat_secret, session.token),
     )
     if result.get("errors"):
         raise RuntimeError(
             "Metadata API returned errors: "
             + redacted_note(
                 json.dumps(result["errors"]),
-                lambda text: redact(text, session.pat_secret, session.token),
+                lambda text: redact(text, session.pat_name, session.pat_secret, session.token),
                 limit=400,
             )
         )
@@ -505,11 +505,32 @@ def download_datasource(session: TableauSession, luid: str, dest: Path) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
     with urllib.request.urlopen(req, timeout=300) as resp:  # noqa: S310 - URL comes from env config
         payload = resp.read()
-    response_text = payload.decode("utf-8", "replace")
-    if redact(response_text, session.pat_secret, session.token) != response_text:
+    if _contains_credential(payload, session):
         raise RuntimeError("refusing to persist a datasource response that reflects a credential")
     dest.write_bytes(payload)
     return dest
+
+
+def _contains_credential(payload: bytes, session: TableauSession) -> bool:
+    """Inspect raw XML or every textual member of a .tds/.tdsx before persistence."""
+    secrets = (session.pat_name, session.pat_secret, session.token)
+
+    def reflected(value: bytes) -> bool:
+        text = value.decode("utf-8", "replace")
+        return redact(text, *secrets) != text
+
+    if not payload.startswith(b"PK"):
+        return reflected(payload)
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            members = [
+                member for member in archive.infolist() if member.filename.lower().endswith((".twb", ".tds", ".xml"))
+            ]
+            if not members:
+                raise RuntimeError("refusing to persist an archive with no assessable Tableau XML member")
+            return any(reflected(archive.read(member)) for member in members)
+    except zipfile.BadZipFile as exc:
+        raise RuntimeError("refusing to persist an unreadable datasource archive") from exc
 
 
 def _origin(key: str, metadata_keys: set[str], survey_keys: set[str]) -> str:
@@ -976,10 +997,7 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
         )
         log.info("raw lineage saved to %s", args.save_json)
 
-    scrubbed_datasources, _paths = scrub_tree(
-        datasources, lambda text: redact(text, pat_name, pat_secret, session.token)
-    )
-    plan = build_plan(scrubbed_datasources, site, survey)
+    plan = build_plan(datasources, site, survey)
     if args.plan or not args.download:
         print_plan(plan, survey)
 
@@ -988,12 +1006,16 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
         for entry in plan:
             if not entry["luid"]:
                 continue
-            dest = args.download / f"{entry['name']}.tdsx"
+            dest = args.download / f"{entry['luid']}.tdsx"
             try:
                 download_datasource(session, entry["luid"], dest)
                 log.info("  OK  %s", dest)
-            except (urllib.error.URLError, urllib.error.HTTPError) as exc:
-                log.warning("  !!  %s failed: %s", entry["name"], exc)
+            except (urllib.error.URLError, urllib.error.HTTPError, RuntimeError) as exc:
+                log.warning(
+                    "  !!  %s failed: %s",
+                    entry["name"],
+                    redacted_note(str(exc), lambda text: redact(text, pat_name, pat_secret, session.token), limit=400),
+                )
         log.info("\nParse each with: python scripts/parse_tableau.py <file>.tdsx -o <spec>.json")
     return 0
 

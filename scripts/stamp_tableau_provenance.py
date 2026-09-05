@@ -161,9 +161,7 @@ class TableauLookup:
         status, payload = self._call("GET", f"/sites/{self.site_id}/workbooks?pageSize=1000", accept="application/json")
         if status != 200:
             raise RuntimeError(f"listing workbooks failed: HTTP {status}")
-        workbooks = json.loads(payload).get("workbooks", {}).get("workbook", [])
-        scrubbed, _paths = scrub_tree(workbooks, self.redact_text)
-        return scrubbed
+        return json.loads(payload).get("workbooks", {}).get("workbook", [])
 
     def content_sha256(self, workbook_id: str) -> str | None:
         """sha256 of the workbook as the server would hand it to us, or ``None`` if it cannot be read."""
@@ -319,8 +317,6 @@ def build(target: Path, env: dict[str, str]) -> dict[str, Any]:
                     None,
                     (f"{type(exc).__name__}: {redacted_note(str(exc), lookup.redact_text, limit=150)}"),
                 )
-            if origin is not None:
-                origin, _paths = scrub_tree(origin, lookup.redact_text)
             record["origin"] = origin
             if origin is None:
                 record["origin_note"] = "no workbook of this LUID or name on the site - local-only input"

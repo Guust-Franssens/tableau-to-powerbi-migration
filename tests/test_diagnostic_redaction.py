@@ -633,11 +633,6 @@ TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
 # making its own request -- taint propagation is intra-module, so a cross-module call's result
 # is invisible without this, and the gate went inert on a module that still looked gated.
 TAINTING_CALLS = {"_request", "fetch_payload", "export", "raw_get", "get_json", "read", "read1", "decode"}
-# ``json.loads`` is a parser, not a response source: it taints only the persisted capture manifest
-# that enters the guarded surface through ``read_manifest``. All HTTP responses are tainted at their
-# transport read, so treating every local JSON parse as hostile makes unrelated offline planning code
-# look credential-derived and obscures the actual response boundary.
-JSON_TAINT_SOURCES = {("scripts/tableau_oracle_manifest.py", "read_manifest")}
 # The ONE thing that clears taint. Not "any helper" -- see test_the_chokepoint_is_the_only_...
 UNTAINTING = {"redacted_note", "scrub_tree", "artifact_stem"}
 LOG_AND_RAISE = {"info", "warning", "error", "debug", "exception", "ExportFailed", "RuntimeError", "ValueError"}
@@ -1523,12 +1518,7 @@ def taint_module(source: str, module: str) -> dict[str, set[str]]:
             for targets, value in _assignments(func):
                 if _called(value) in UNTAINTING:
                     continue
-                if (
-                    _roots(value) & local
-                    or _called(value) in TAINTING_CALLS
-                    or _called(value) in returns_taint
-                    or (_called(value) == "loads" and (module, name) in JSON_TAINT_SOURCES)
-                ):
+                if _roots(value) & local or _called(value) in TAINTING_CALLS or _called(value) in returns_taint:
                     _bind(targets, local)
             for node in ast.walk(func):
                 if (

@@ -427,8 +427,7 @@ class Site:  # pylint: disable=too-many-instance-attributes  # one client: crede
                     detail = f"HTTP 200 but the JSON body is {typename}, expected object"
                     return None, self._fail(_record(path, status, detail, attempt, started))
                 self.consecutive_transient_failures = 0
-                scrubbed, _paths = scrub_tree(parsed, self.scrub_text)
-                return scrubbed, None
+                return parsed, None
             if kind == "session_lost" and reauths < MAX_REAUTH:
                 reauths += 1
                 self.reauths += 1
@@ -444,7 +443,14 @@ class Site:  # pylint: disable=too-many-instance-attributes  # one client: crede
                     _record(path, status, detail, attempt, started), counts_for_circuit=kind == "transient"
                 )
             self.retries += 1
-            LOG.warning("  %s -> %s; retry %d/%d in %.1fs", path, detail[:90], attempt, self.policy.max_attempts, delay)
+            LOG.warning(
+                "  %s -> %s; retry %d/%d in %.1fs",
+                self.scrub_text(path),
+                detail[:90],
+                attempt,
+                self.policy.max_attempts,
+                delay,
+            )
             time.sleep(delay)
 
     def get(self, path: str) -> dict[str, Any] | None:
@@ -1086,10 +1092,12 @@ def write_store(out: Path, raw: dict[str, Any], assembled: dict[str, Any], redac
     these 40" must be defensible months later, and an API response is not reproducible once the
     estate moves.
     """
+    scrubbed_raw, _paths = scrub_tree(raw, redactor or (lambda text: text))
+    scrubbed_assembled, _paths = scrub_tree(assembled, redactor or (lambda text: text))
     _write_raw(
         out,
         {
-            key: raw[key]
+            key: scrubbed_raw[key]
             for key in (
                 "workbooks",
                 "views",
@@ -1116,7 +1124,7 @@ def write_store(out: Path, raw: dict[str, Any], assembled: dict[str, Any], redac
         ":sheets,:dashboards,:calcs,:lods,:table_calcs,:has_user_reference,:complexity,"
         ":complexity_understated,:views_lifetime,:view_count,:subscriptions,:alerts,:custom_views,"
         ":rank,:cumulative_share,:tier,:tier_reason)",
-        [{**r, "has_user_reference": int(bool(r.get("has_user_reference")))} for r in assembled["workbooks"]],
+        [{**r, "has_user_reference": int(bool(r.get("has_user_reference")))} for r in scrubbed_assembled["workbooks"]],
     )
     conn.executemany(
         "INSERT OR REPLACE INTO view VALUES (?,?,?,?,?,?)",
@@ -1129,7 +1137,7 @@ def write_store(out: Path, raw: dict[str, Any], assembled: dict[str, Any], redac
                 int((v.get("usage") or {}).get("totalViewCount") or 0),
                 v.get("updatedAt"),
             )
-            for v in raw["views"]
+            for v in scrubbed_raw["views"]
         ],
     )
     conn.executemany(
@@ -1144,7 +1152,7 @@ def write_store(out: Path, raw: dict[str, Any], assembled: dict[str, Any], redac
                 None,
                 None,
             )
-            for d in raw["datasources"]
+            for d in scrubbed_raw["datasources"]
         ],
     )
     for ds in raw["structure"].get("publishedDatasources") or []:
@@ -1812,13 +1820,14 @@ def main() -> int:
     args.out.mkdir(parents=True, exist_ok=True)
     _clear_final_artifacts(args.out)
     raw = collect(site, survey, checkpoint=lambda inventory: _checkpoint(args.out, inventory, site.scrub_text))
-    scrubbed_raw, _paths = scrub_tree(raw, site.scrub_text)
-    assembled = assemble(scrubbed_raw, args.coverage_target)
-    db = write_store(args.out, scrubbed_raw, assembled, site.scrub_text)
+    assembled = assemble(raw, args.coverage_target)
+    db = write_store(args.out, raw, assembled, site.scrub_text)
     site.sign_out()
+    scrubbed_raw, _paths = scrub_tree(raw, site.scrub_text)
+    scrubbed_assembled, _paths = scrub_tree(assembled, site.scrub_text)
     report = args.out / "report.md"
-    report.write_text(render_report(assembled, scrubbed_raw, args.coverage_target), encoding="utf-8")
-    (args.out / "assessment.json").write_text(json.dumps(assembled, indent=2) + "\n", encoding="utf-8")
+    report.write_text(render_report(scrubbed_assembled, scrubbed_raw, args.coverage_target), encoding="utf-8")
+    (args.out / "assessment.json").write_text(json.dumps(scrubbed_assembled, indent=2) + "\n", encoding="utf-8")
 
     counts: dict[str, int] = {}
     for row in assembled["workbooks"]:
