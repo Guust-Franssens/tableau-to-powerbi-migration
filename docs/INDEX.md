@@ -63,6 +63,7 @@ Eligible files: tracked Markdown knowledge/navigation files, `.github/pbi.kb/**/
 | Handle conduct | [`CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md) | Conduct/community questions. |
 | Handle security reports | [`SECURITY.md`](../SECURITY.md) | Security disclosure routing. |
 | Find migration guidance | [`docs/agent-architecture.md`](../docs/agent-architecture.md) | Root sessions, subagents, skill visibility. |
+| Operate delegated agents | [`docs/agent-operations.md`](../docs/agent-operations.md) | Monitoring a subagent's claims, host V8-heap and Desktop RAM concurrency budgets, and post-crash file forensics — the measured evidence behind `AGENTS.md`'s delegation rules. |
 | Find migration guidance | [`docs/agent-capability-wiring.md`](../docs/agent-capability-wiring.md) | Registry of shipped capabilities that must be visible to agents. |
 | Find migration guidance | [`docs/ai-instructions-authoring-guide.md`](../docs/ai-instructions-authoring-guide.md) | AI-instruction authoring redirect. |
 | Find migration guidance | [`docs/capabilities-and-limitations.md`](../docs/capabilities-and-limitations.md) | Automation capability boundaries. |

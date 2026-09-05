@@ -17,6 +17,9 @@ The through-line: a fix that stops rejecting files by also stopping rejecting `o
 outcome, so the negative case is asserted beside every positive one.
 """
 
+# Test names and explicit empty-list comparisons carry the boundary language this module pins.
+# pylint: disable=invalid-name,missing-function-docstring,use-implicit-booleaness-not-comparison
+
 from __future__ import annotations
 
 import logging
@@ -356,3 +359,226 @@ def test_no_near_cap_warning_when_nothing_is_in_the_band(tmp_path: Path, caplog)
     with caplog.at_level(logging.WARNING, logger=sac.log.name):
         sac.report_sizes([agent])
     assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
+# ---------------------------------------------------------------------------
+# Root-document contracts (AGENTS.md).
+#
+# The size gate above is the only executable thing that has ever touched AGENTS.md, and it measures
+# LENGTH - so every routing contract the root document carries could be deleted to make room and no
+# test would notice. That is the fail-open direction: a shorter AGENTS.md passes the gate harder.
+#
+# These are deliberately NOT a generalized documentation framework. They are a fixed anchor set of
+# the contracts a dispatcher executes: the session-start/migration-start timing split, the four input
+# routes, the five intake decisions, the brief path, Gate B, the post-round-2 scope freeze, the moved
+# incident evidence, and the size targets themselves. Anchors are semantic (a command, a decision
+# name, a link target), never a line number, and whitespace is normalized first so re-wrapping a
+# paragraph is not a failure. Prose around an anchor may be rewritten freely.
+# ---------------------------------------------------------------------------
+
+AGENTS_MD = REPO_ROOT / "AGENTS.md"
+AGENT_OPS_MD = REPO_ROOT / "docs" / "agent-operations.md"
+ORACLE_SCRIPT = REPO_ROOT / "scripts" / "capture_tableau_oracle.py"
+
+# Project TARGETS, tighter than `sac.PROMPT_CHAR_LIMIT`, measured with the repository's own gate
+# (`sac.prompt_size` - the whole file, CRLF included) so this cannot disagree with the tool that
+# fails the build. There is deliberately no lower bound: `dry-run-operator` is far below the persona
+# target and that is fine.
+AGENTS_SIZE_TARGET = 45_000
+PERSONA_SIZE_TARGET = 22_000
+
+# contract id -> (document, required anchors). Table-driven so the mutation proof below can delete
+# each anchor individually and name the contract that noticed.
+ROOT_CONTRACTS: dict[str, tuple[Path, tuple[str, ...]]] = {
+    "session-start-timing": (
+        AGENTS_MD,
+        (
+            "powershell -ExecutionPolicy Bypass -File scripts/preflight.ps1 -Update -CheckUpstream",
+            "| Session start (nothing in flight) | `preflight.ps1 -Update -CheckUpstream` |",
+            "| Migration start (orchestrator step 0) | `preflight.ps1` (plain) |",
+            "| Mid-migration | **don't upgrade the installed tooling** |",
+        ),
+    ),
+    "dispatcher-input-routes": (
+        AGENTS_MD,
+        (
+            "**A Tableau Server/Cloud site** (URL + PAT)",
+            "python scripts/run_engine_survey.py --server <host>",
+            "python scripts/assess_estate.py --out _assessment --survey _assessment/estate_survey.json",
+            "python scripts/tableau_lineage.py --plan",
+            "python scripts/harvest_estate_assets.py --out <dir>",
+            "python scripts/run_estate.py --input <dir>/assets --output <bundle>",
+            "**A folder of `.twb`/`.twbx`**",
+            "python scripts/run_estate.py --input <folder> --output <bundle>",
+            "**One `.twb`/`.twbx`**",
+            "python scripts/parse_tableau.py <file> -o <spec>",
+            "dispatch `@tableau-migrator`",
+            "**A `.tds`/`.tdsx`** (data source, no workbook)",
+            "`parse_tableau.py` accepts it directly",
+        ),
+    ),
+    "migration-brief-path": (
+        AGENTS_MD,
+        ("`migrations/workbooks/<name>/migration-brief.md`",),
+    ),
+    "five-intake-decisions": (
+        AGENTS_MD,
+        (
+            "**Confirm the plan from step 1**",
+            "**Autonomy** — see below. Default `standard`.",
+            "**Fidelity bar**",
+            "**If we hit a wall — stop, or degrade?**",
+            "**Who drives the data refreshes?** — see below. Default `scripted`.",
+        ),
+    ),
+    "credential-stop-outranks-autonomy": (
+        AGENTS_MD,
+        (
+            "| `autopilot` | decide, log it | decide, flag in the summary | **ask — always** |",
+            "No level clears the credential stop",
+        ),
+    ),
+    "gate-b-one-block": (
+        AGENTS_MD,
+        (
+            "### Gate B — after parse + probe, before building",
+            "**ONE block, not four serial stops**",
+            "1. Published datasources",
+            "2. Live sources that failed the probe",
+            "3. Extract-only sources",
+            "4. The high-severity `limitations_encountered` digest",
+        ),
+    ),
+    "post-round-2-scope-freeze": (
+        AGENTS_MD,
+        (
+            "**After R2 freeze scope**",
+            "a **new class or new proof mechanism** forces simplify/delete/split/descope",
+            "**Proof escalation.** Direct tests are the default.",
+        ),
+    ),
+    "agent-operations-evidence-link": (
+        AGENTS_MD,
+        (
+            "Incident evidence behind every rule below: [`docs/agent-operations.md`](docs/agent-operations.md).",
+            "Dumps, numbers and what remains unexplained: [`docs/agent-operations.md`](docs/agent-operations.md).",
+        ),
+    ),
+    "agent-operations-backlink": (
+        AGENT_OPS_MD,
+        (
+            "[`AGENTS.md`](../AGENTS.md)",
+            "`AGENTS.md` is the contract and this file is the reason",
+        ),
+    ),
+    "oracle-capture-exit-contract": (
+        AGENTS_MD,
+        (
+            'Exit 4 is "no views selected"',
+            "**exit 3** is a total non-credential failure",
+            "`3` total non-credential failure",
+            "`4` no views selected",
+        ),
+    ),
+}
+
+ANCHOR_CASES = [
+    pytest.param(contract, anchor, id=f"{contract}-{index}")
+    for contract, (_, anchors) in ROOT_CONTRACTS.items()
+    for index, anchor in enumerate(anchors)
+]
+
+
+def _normalized(path: Path) -> str:
+    """Collapse every run of whitespace, so an anchor survives a re-wrapped paragraph."""
+    return " ".join(path.read_text(encoding="utf-8").split())
+
+
+def _missing_contracts(texts: dict[Path, str]) -> list[str]:
+    """Contract ids whose anchors are not all present, each naming the anchor that went missing."""
+    return [
+        f"{contract}: {anchor!r} missing from {path.name}"
+        for contract, (path, anchors) in ROOT_CONTRACTS.items()
+        for anchor in anchors
+        if anchor not in texts[path]
+    ]
+
+
+def _repo_texts() -> dict[Path, str]:
+    return {path: _normalized(path) for path in {doc for doc, _ in ROOT_CONTRACTS.values()}}
+
+
+def test_the_shipped_root_documents_carry_every_contract() -> None:
+    """The positive case: AGENTS.md and its evidence doc satisfy the anchor set as committed."""
+    assert _missing_contracts(_repo_texts()) == []
+
+
+@pytest.mark.parametrize(("contract", "anchor"), ANCHOR_CASES)
+def test_deleting_any_required_anchor_fails_its_named_contract(contract: str, anchor: str) -> None:
+    """Mutation proof: each anchor is individually load-bearing, and names which contract it serves.
+
+    Without this, an anchor set is only as strong as its weakest member - a duplicated or already
+    unreachable anchor would sit in the table forever, credited as coverage. Removing exactly one
+    occurrence must produce a failure that names THIS contract, and every other contract must stay
+    green so the report points at the deletion rather than at the document generally.
+    """
+    doc, _ = ROOT_CONTRACTS[contract]
+    texts = _repo_texts()
+    assert anchor in texts[doc], "fixture invariant: the anchor must be present before it is deleted"
+    baseline = _missing_contracts(texts)
+    texts[doc] = texts[doc].replace(anchor, "", 1)
+
+    added = [failure for failure in _missing_contracts(texts) if failure not in baseline]
+
+    assert added == [f"{contract}: {anchor!r} missing from {doc.name}"]
+
+
+def test_the_retired_wrong_tool_exit_claim_is_gone_from_the_capture_row() -> None:
+    """The oracle row once carried `capture_tableau_reference.py`'s exit semantics after the command
+    in it had already become the oracle. Exit 3 there means a total non-credential FAILURE, not a
+    "wrong tool for this source" signal, so the old sentence told a reader to keep going after a
+    capture that produced nothing.
+    """
+    text = _normalized(AGENTS_MD)
+    assert "exits 3** on an empty target" not in text
+    assert '"wrong tool for this source"' not in text
+
+
+def test_agents_md_exit_semantics_match_the_oracle_script() -> None:
+    """Independent oracle: the meanings come from the script's own documented contract, not from us.
+
+    Both codes are asserted in the direction the finding corrected - 4 is a selection miss, 3 is a
+    total failure - so a future edit that swaps them fails here as well as in the anchor set.
+    """
+    script = " ".join(ORACLE_SCRIPT.read_text(encoding="utf-8").split())
+    assert "``3`` total non-credential failure" in script
+    assert "``4`` no views selected" in script
+
+    text = _normalized(AGENTS_MD)
+    assert "`3` total non-credential failure" in text
+    assert "`4` no views selected" in text
+
+
+def test_agents_md_stays_within_the_project_size_target() -> None:
+    """Measured with `sac.prompt_size`, the same whole-file count the persona cap uses."""
+    size = sac.prompt_size(AGENTS_MD)
+    assert size <= AGENTS_SIZE_TARGET, f"AGENTS.md is {size} chars, over the {AGENTS_SIZE_TARGET} target"
+
+
+def test_every_persona_stays_within_the_project_size_target() -> None:
+    """A target below `PROMPT_CHAR_LIMIT`, so the hard cap is never the first thing to notice.
+
+    No floor is asserted: `dry-run-operator` is naturally far below this, and demanding a minimum
+    would reward padding.
+    """
+    oversize = {
+        path.name: sac.prompt_size(path)
+        for path in sorted((REPO_ROOT / ".github" / "agents").glob("*.agent.md"))
+        if sac.prompt_size(path) > PERSONA_SIZE_TARGET
+    }
+    assert oversize == {}, f"personas over the {PERSONA_SIZE_TARGET} target: {oversize}"
+
+
+def test_the_project_targets_bind_before_the_hard_cap() -> None:
+    """A target above the enforced cap would be decorative - the cap would fail first, every time."""
+    assert PERSONA_SIZE_TARGET < sac.PROMPT_CHAR_LIMIT

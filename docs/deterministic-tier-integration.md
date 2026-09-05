@@ -201,8 +201,8 @@ file, which is tractable.
 **The two levers that actually work are orthogonal to his tier:**
 1. **A 5th skill bundle `.github/skills/deterministic-tier/`** holding the whole Tier-0 contract
    (`--approved-dax` mechanics, `approved_dax.json` shape, I1-I6, the `parameters.py` sequence, the
-   `report.json` field map, `guidance_sha256`). This is the `AGENTS.md:175` precedent and is the only
-   thing that makes the +6,000 affordable.
+   `report.json` field map, `guidance_sha256`). This follows the durable-learning destination rule
+   in `AGENTS.md`'s shared conventions and is the only thing that makes the +6,000 affordable.
 2. **Split the 5,649-char shared-conventions block** — it is **22,596 chars across four personas,
    24.6 % of the total agent budget**, and *none* of it is affected by Tier 0. Hard stops (credential
    stop, layer ownership) stay verbatim inline; rationale (~3,500-4,000) moves behind a mandatory
@@ -472,7 +472,7 @@ omissions are vacuous and which are genuine:
 ## 7. Instruction shaving — downgraded to a hypothesis with a non-gameable test
 
 v1's criterion ("persona char count decreases while coverage increases") is gameable twice: prose can
-be moved into a skill file (this repo has already done exactly that — `AGENTS.md:175`), and
+be moved into a skill file (the durable-learning rule in `AGENTS.md` explicitly routes craft there), and
 `coverage_pct` counts *landed* objects, not correct ones — `check_candidate_dax`'s own docstring says
 passing means *"well-formed DAX … never 'numerically faithful'."*
 
