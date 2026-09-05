@@ -1050,9 +1050,7 @@ def test_a_close_delimited_csv_capture_is_retained_but_not_numeric_evidence(tmp_
     assert code == 0
     assert manifest["captured_complete"] == 0
     assert manifest["data_unassessable"] == 1
-    assert manifest["data_unassessable_views"][0]["reason"] == (
-        payload_facts.CSV_TRANSPORT_COMPLETENESS_UNESTABLISHED
-    )
+    assert manifest["data_unassessable_views"][0]["reason"] == (payload_facts.CSV_TRANSPORT_COMPLETENESS_UNESTABLISHED)
     assert _naive_numeric_consumer(tmp_path) == []
 
 
