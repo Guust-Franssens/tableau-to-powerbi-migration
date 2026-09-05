@@ -187,16 +187,18 @@ def _mask_quoted_literals(text: str) -> str:
     return "".join(masked)
 
 
-def scan_text(text: str | None) -> list[tuple[str, str]]:
+def scan_text(text: str | None, *, formula_or_internal_expression: bool = False) -> list[tuple[str, str]]:
     """Return [(rule_id, matched_excerpt)] for one string ([] when nothing matches)."""
     if not text or len(text) < 12:
         return []
     normalized, offsets = _normalise_for_matching(text)
+    destructive_view = _mask_quoted_literals(normalized) if formula_or_internal_expression else normalized
     hits = []
     for rule_id, pattern, _ in _RULES:
-        match = pattern.search(normalized)
+        matching_view = destructive_view if rule_id == "destructive-command" else normalized
+        match = pattern.search(matching_view)
         if rule_id == "destructive-command" and match is None:
-            match = _BARE_DESTRUCTIVE_COMMAND_RE.search(_mask_quoted_literals(normalized))
+            match = _BARE_DESTRUCTIVE_COMMAND_RE.search(destructive_view)
         if match:
             hits.append((rule_id, _excerpt(text, offsets, match)))
     return hits
@@ -244,7 +246,8 @@ def scan_spec(spec: dict) -> list[dict]:
     seen: set[tuple[str, str]] = set()
     source_spec = {key: value for key, value in spec.items() if key != "limitations_encountered"}
     for path, role, text, zone_id in _walk_strings(source_spec):
-        for rule_id, excerpt in scan_text(text):
+        is_formula_or_internal_expression = path.endswith((".tableau_formula", ".internal_name"))
+        for rule_id, excerpt in scan_text(text, formula_or_internal_expression=is_formula_or_internal_expression):
             key = (path, rule_id)
             if key in seen:
                 continue
