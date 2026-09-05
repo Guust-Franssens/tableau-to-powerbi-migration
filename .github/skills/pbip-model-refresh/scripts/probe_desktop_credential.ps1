@@ -187,7 +187,10 @@ function Get-DialogTextSet {
   param([Parameter(Mandatory = $true)][object]$Window)
 
   $title = (([string]$Window.Title) -replace '\s+', ' ').Trim()
-  $all = Get-NormalizedText -Texts $Window.Texts
+  $rawTexts = @()
+  if ($title) { $rawTexts += $title }
+  if ($Window.Texts) { $rawTexts += $Window.Texts }
+  $all = Get-NormalizedText -Texts $rawTexts
   $interactive = Get-NormalizedText -Texts $Window.InteractiveTexts
   $content = @($all | Where-Object { $_ -ne $title })
   $prose = @($all | Where-Object { $interactive -notcontains $_ })
@@ -277,9 +280,14 @@ function Get-DialogClassification {
     if ($t -match $blockingSig) { return [pscustomobject]@{ Kind = 'needs-human'; Evidence = $t } }
   }
 
-  # Scan ALL of the content. A first-match-wins loop let one benign element erase everything after it.
+  # Scan ALL of the content, and account for Title (caption).
   $benignHit = $null
   $unaccounted = $null
+  if ($sets.Title) {
+    if (-not ($sets.Title -match $benignSig) -and -not ($sets.Title -match $chromeSig)) {
+      $unaccounted = $sets.Title
+    }
+  }
   foreach ($t in $sets.Content) {
     if ($t -match $benignSig) {
       if ($null -eq $benignHit) { $benignHit = $t }
@@ -308,7 +316,7 @@ function Get-DialogClassification {
   if ($sets.All.Count -eq 0) {
     return [pscustomobject]@{ Kind = 'unreadable'; Evidence = '' }
   }
-  return [pscustomobject]@{ Kind = 'unrecognized'; Evidence = $sets.All[0] }
+  return [pscustomobject]@{ Kind = 'unrecognized'; Evidence = if ($unaccounted) { $unaccounted } else { $sets.All[0] } }
 }
 
 function ConvertTo-HarvestResult {

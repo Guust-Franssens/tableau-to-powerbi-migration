@@ -379,7 +379,8 @@ def dialog_text_set(window: DesktopWindow) -> tuple[str, tuple[str, ...], tuple[
     it can only make a window harder to dismiss, never easier.
     """
     title = re.sub(r"\s+", " ", window.title or "").strip()
-    all_texts = normalize_texts(window.texts)
+    raw_texts = ([title] if title else []) + list(window.texts or ())
+    all_texts = normalize_texts(raw_texts)
     content = tuple(text for text in all_texts if text != title)
     return title, all_texts, content
 
@@ -441,6 +442,11 @@ def classify_dialog(window: DesktopWindow) -> DialogFinding:
     chrome = benign_chrome_signature()
     benign_hit: str | None = None
     unaccounted: str | None = None
+
+    if title:
+        if not (benign.search(title) or chrome.search(title)):
+            unaccounted = title
+
     for text in content:
         if benign.search(text):
             if benign_hit is None:
@@ -458,7 +464,8 @@ def classify_dialog(window: DesktopWindow) -> DialogFinding:
         return _finding(DIALOG_KIND_BENIGN_TITLE_ONLY, window, title)
     if not all_texts:
         return _finding(DIALOG_KIND_UNREADABLE, window, "")
-    return _finding(DIALOG_KIND_UNRECOGNIZED, window, all_texts[0])
+    evidence = unaccounted if unaccounted is not None else all_texts[0]
+    return _finding(DIALOG_KIND_UNRECOGNIZED, window, evidence)
 
 
 def _finding(kind: str, window: DesktopWindow, evidence: str) -> DialogFinding:

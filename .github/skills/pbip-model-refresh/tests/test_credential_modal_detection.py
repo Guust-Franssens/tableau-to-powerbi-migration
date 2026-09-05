@@ -1537,6 +1537,115 @@ def test_only_enumerated_chrome_is_excused_beside_progress_text() -> None:
     assert classify_dialog(table_name).verdict == "DIALOG_UNRECOGNIZED"
 
 
+def test_caption_accounting_python() -> None:
+    """Issue #406 caption accounting in Python detector.
+
+    A caption/Title cannot disappear from safety accounting. An unknown prompt caption (such as
+    'Password:' or 'Please enter your password') must veto benign suppression even when it is removed
+    from content because it matches Title.
+    """
+    # 1. title-only prompt
+    w_title_only = owned_dialog(("Password:",), title="Password:")
+    res_t0 = classify_dialog(w_title_only)
+    assert res_t0.kind == "unrecognized"
+    assert res_t0.verdict == "DIALOG_UNRECOGNIZED"
+    assert res_t0.evidence == "Password:"
+    in_flight_1 = _credential_modal.dialog_verdict([main_window(), w_title_only], operation_in_flight=True)
+    assert in_flight_1 is not None and in_flight_1.verdict == "DIALOG_UNRECOGNIZED"
+
+    # 2. duplicated title+content prompt
+    w_dup = owned_dialog(("Password:", "Evaluating", "Cancel"), title="Password:")
+    res_dup = classify_dialog(w_dup)
+    assert res_dup.kind == "mixed-content"
+    assert res_dup.verdict == "DIALOG_UNRECOGNIZED"
+    assert res_dup.evidence == "Password:"
+    in_flight_2 = _credential_modal.dialog_verdict([main_window(), w_dup], operation_in_flight=True)
+    assert in_flight_2 is not None and in_flight_2.verdict == "DIALOG_UNRECOGNIZED"
+
+    # 3. known benign title with progress
+    w_benign = owned_dialog(("Refresh", "Evaluating", "Cancel"), title="Refresh")
+    res_benign = classify_dialog(w_benign)
+    assert res_benign.kind == "benign"
+    assert res_benign.verdict == "REFRESH_IN_PROGRESS"
+    in_flight_3 = _credential_modal.dialog_verdict([main_window(), w_benign], operation_in_flight=True)
+    assert in_flight_3 is None  # Suppressed in flight
+
+    # 4. unknown title plus benign content
+    w_unk_title = owned_dialog(("Evaluating", "Cancel"), title="Please enter your password")
+    res_unk = classify_dialog(w_unk_title)
+    assert res_unk.kind == "mixed-content"
+    assert res_unk.verdict == "DIALOG_UNRECOGNIZED"
+    assert res_unk.evidence == "Please enter your password"
+    in_flight_4 = _credential_modal.dialog_verdict([main_window(), w_unk_title], operation_in_flight=True)
+    assert in_flight_4 is not None and in_flight_4.verdict == "DIALOG_UNRECOGNIZED"
+
+    # 5. whitespace/case variants
+    w_case = owned_dialog(("password:", "Evaluating", "Cancel"), title="  PASSWORD:  ")
+    res_case = classify_dialog(w_case)
+    assert res_case.kind == "mixed-content"
+    assert res_case.verdict == "DIALOG_UNRECOGNIZED"
+    assert res_case.evidence == "PASSWORD:"
+    in_flight_5 = _credential_modal.dialog_verdict([main_window(), w_case], operation_in_flight=True)
+    assert in_flight_5 is not None and in_flight_5.verdict == "DIALOG_UNRECOGNIZED"
+
+    # 6. credential-signature titles
+    w_cred_title = owned_dialog(("Evaluating", "Cancel"), title="Please specify how to connect")
+    res_cred = classify_dialog(w_cred_title)
+    assert res_cred.kind == "credential"
+    assert res_cred.verdict == "CREDENTIAL_MISSING"
+    in_flight_6 = _credential_modal.dialog_verdict([main_window(), w_cred_title], operation_in_flight=True)
+    assert in_flight_6 is not None and in_flight_6.verdict == "CREDENTIAL_MISSING"
+
+
+def test_python_mutation_drop_caption_accounting(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mutation test (Python): drop caption accounting in classify_dialog. Must fail named assertions."""
+
+    def mutated_classify(window: DesktopWindow) -> DialogFinding:
+        title, all_texts, content = _credential_modal.dialog_text_set(window)
+        signature_hit = _credential_modal._match_dialog_signatures(window, all_texts)
+        if signature_hit is not None:
+            return signature_hit
+        benign = _credential_modal.benign_dialog_signature()
+        chrome = _credential_modal.benign_chrome_signature()
+        benign_hit = None
+        unaccounted = None
+        # MUTATION: dropped caption accounting (if title: ...)
+        for text in content:
+            if benign.search(text):
+                if benign_hit is None:
+                    benign_hit = text
+                continue
+            if chrome.search(text):
+                continue
+            if unaccounted is None:
+                unaccounted = text
+        if benign_hit is not None:
+            if unaccounted is not None:
+                return _credential_modal._finding(_credential_modal.DIALOG_KIND_MIXED_CONTENT, window, unaccounted)
+            return _credential_modal._finding(_credential_modal.DIALOG_KIND_BENIGN, window, benign_hit)
+        if title and benign.search(title):
+            return _credential_modal._finding(_credential_modal.DIALOG_KIND_BENIGN_TITLE_ONLY, window, title)
+        if not all_texts:
+            return _credential_modal._finding(_credential_modal.DIALOG_KIND_UNREADABLE, window, "")
+        evidence = unaccounted if unaccounted is not None else all_texts[0]
+        return _credential_modal._finding(_credential_modal.DIALOG_KIND_UNRECOGNIZED, window, evidence)
+
+    monkeypatch.setattr(_credential_modal, "classify_dialog", mutated_classify)
+
+    cases = [
+        owned_dialog(("Password:", "Evaluating", "Cancel"), title="Password:"),
+        owned_dialog(("Evaluating", "Cancel"), title="Please enter your password"),
+    ]
+
+    failed_count = 0
+    for w in cases:
+        finding = _credential_modal.classify_dialog(w)
+        if finding.kind != "mixed-content":
+            failed_count += 1
+
+    assert failed_count == 2, f"Mutation score: expected 2 failed, got {failed_count} failed"
+
+
 @pytest.mark.parametrize(
     ("width", "height", "texts", "kind"),
     [
@@ -3644,6 +3753,86 @@ def test_powershell_only_enumerated_chrome_is_excused_beside_progress_text(tmp_p
         assert res_t0["verdict"] == "REFRESH_IN_PROGRESS"
 
 
+def test_caption_accounting_powershell(tmp_path: Path) -> None:
+    """Issue #406 caption accounting in PowerShell detector.
+
+    Covering t=0 and RefreshInFlight for:
+    1. title-only prompt
+    2. duplicated title+content prompt
+    3. known benign title with progress
+    4. unknown title plus benign content
+    5. whitespace/case variants
+    6. credential-signature titles
+    """
+    # 1. title-only prompt
+    w_title_only = _window(Title="Password:", Texts=["Password:"], OwnerEnabled=False)
+    res_1_t0 = classify(tmp_path, [w_title_only])
+    assert res_1_t0["kind"] == "unrecognized"
+    assert res_1_t0["verdict"] == "DIALOG_UNRECOGNIZED"
+    assert res_1_t0["exit_code"] == 3
+    assert res_1_t0["evidence"] == "Password:"
+    res_1_flight = classify(tmp_path, [w_title_only], refresh_in_flight=True)
+    assert res_1_flight["kind"] == "unrecognized"
+    assert res_1_flight["verdict"] == "DIALOG_UNRECOGNIZED"
+    assert res_1_flight["exit_code"] == 3
+
+    # 2. duplicated title+content prompt
+    w_dup = _window(Title="Password:", Texts=["Password:", "Evaluating", "Cancel"], OwnerEnabled=False)
+    res_2_t0 = classify(tmp_path, [w_dup])
+    assert res_2_t0["kind"] == "mixed-content"
+    assert res_2_t0["verdict"] == "DIALOG_UNRECOGNIZED"
+    assert res_2_t0["exit_code"] == 3
+    assert res_2_t0["evidence"] == "Password:"
+    res_2_flight = classify(tmp_path, [w_dup], refresh_in_flight=True)
+    assert res_2_flight["kind"] == "mixed-content"
+    assert res_2_flight["verdict"] == "DIALOG_UNRECOGNIZED"
+    assert res_2_flight["exit_code"] == 3
+
+    # 3. known benign title with progress
+    w_benign = _window(Title="Refresh", Texts=["Refresh", "Evaluating", "Cancel"], OwnerEnabled=False)
+    res_3_t0 = classify(tmp_path, [w_benign])
+    assert res_3_t0["kind"] == "benign"
+    assert res_3_t0["verdict"] == "REFRESH_IN_PROGRESS"
+    assert res_3_t0["exit_code"] == 3
+    res_3_flight = classify(tmp_path, [w_benign], refresh_in_flight=True)
+    assert res_3_flight["verdict"] is None
+
+    # 4. unknown title plus benign content
+    w_unk = _window(Title="Please enter your password", Texts=["Evaluating", "Cancel"], OwnerEnabled=False)
+    res_4_t0 = classify(tmp_path, [w_unk])
+    assert res_4_t0["kind"] == "mixed-content"
+    assert res_4_t0["verdict"] == "DIALOG_UNRECOGNIZED"
+    assert res_4_t0["exit_code"] == 3
+    assert res_4_t0["evidence"] == "Please enter your password"
+    res_4_flight = classify(tmp_path, [w_unk], refresh_in_flight=True)
+    assert res_4_flight["kind"] == "mixed-content"
+    assert res_4_flight["verdict"] == "DIALOG_UNRECOGNIZED"
+    assert res_4_flight["exit_code"] == 3
+
+    # 5. whitespace/case variants
+    w_case = _window(Title="  PASSWORD:  ", Texts=["password:", "Evaluating", "Cancel"], OwnerEnabled=False)
+    res_5_t0 = classify(tmp_path, [w_case])
+    assert res_5_t0["kind"] == "mixed-content"
+    assert res_5_t0["verdict"] == "DIALOG_UNRECOGNIZED"
+    assert res_5_t0["exit_code"] == 3
+    assert res_5_t0["evidence"] == "PASSWORD:"
+    res_5_flight = classify(tmp_path, [w_case], refresh_in_flight=True)
+    assert res_5_flight["kind"] == "mixed-content"
+    assert res_5_flight["verdict"] == "DIALOG_UNRECOGNIZED"
+    assert res_5_flight["exit_code"] == 3
+
+    # 6. credential-signature titles
+    w_cred = _window(Title="Please specify how to connect", Texts=["Evaluating", "Cancel"], OwnerEnabled=False)
+    res_6_t0 = classify(tmp_path, [w_cred])
+    assert res_6_t0["kind"] == "credential"
+    assert res_6_t0["verdict"] == "CREDENTIAL_MISSING"
+    assert res_6_t0["exit_code"] == 1
+    res_6_flight = classify(tmp_path, [w_cred], refresh_in_flight=True)
+    assert res_6_flight["kind"] == "credential"
+    assert res_6_flight["verdict"] == "CREDENTIAL_MISSING"
+    assert res_6_flight["exit_code"] == 1
+
+
 def _setup_probe_copy(tmp_path: Path) -> Path:
     """Copy probe_desktop_credential.ps1 and its sibling regex files into tmp_path."""
     probe_dir = tmp_path / "probe_copy"
@@ -3729,6 +3918,34 @@ def test_powershell_mutation_remove_allowlist(tmp_path: Path) -> None:
             failed_count += 1
 
     assert failed_count == 3, f"Mutation score: expected 3 failed, got {failed_count} failed"
+
+
+def test_powershell_mutation_drop_caption_accounting(tmp_path: Path) -> None:
+    """Mutation test 4: drop caption accounting. Must fail named assertions."""
+    mutated_script = _setup_probe_copy(tmp_path)
+    content = mutated_script.read_text(encoding="utf-8")
+    old_code = """  if ($sets.Title) {
+    if (-not ($sets.Title -match $benignSig) -and -not ($sets.Title -match $chromeSig)) {
+      $unaccounted = $sets.Title
+    }
+  }"""
+    new_code = "  # dropped caption accounting"
+    assert old_code in content, "mutation target anchor missing in probe script"
+    mutated_script.write_text(content.replace(old_code, new_code), encoding="utf-8")
+    assert "# dropped caption accounting" in mutated_script.read_text(encoding="utf-8"), "mutation 4 failed to land on disk"
+
+    cases = [
+        _window(Title="Password:", Texts=["Password:", "Evaluating", "Cancel"], OwnerEnabled=False),
+        _window(Title="Please enter your password", Texts=["Evaluating", "Cancel"], OwnerEnabled=False),
+    ]
+
+    failed_count = 0
+    for w in cases:
+        res = classify(tmp_path, [w], refresh_in_flight=True, probe_ps1=mutated_script)
+        if res["verdict"] != "DIALOG_UNRECOGNIZED":
+            failed_count += 1
+
+    assert failed_count == 2, f"Mutation score: expected 2 failed, got {failed_count} failed"
 
 
 def test_the_benign_signature_matches_whole_elements_not_substrings() -> None:
