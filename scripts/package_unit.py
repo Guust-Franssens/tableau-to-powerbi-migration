@@ -983,9 +983,22 @@ def _declares_non_relative(declared: str) -> bool:
     mutation is anchored. The pattern to keep noticing: **each time a wider layer lands above this
     one, the proof that this one still runs has to be re-isolated, or the branch quietly becomes
     unfalsifiable.**
+
+    ⚠️ **Issue #516: a single-rooted Windows path (`\\Users\\<account>\\x`, one leading backslash, no
+    drive letter) is host-rooted with no `..` involved, and neither `is_absolute()` nor `.drive` sees
+    it.** `PureWindowsPath` calls this shape rooted-but-relative-to-the-current-drive - `.root` is
+    `'\\'` while `.drive` is `''` - because Windows itself resolves it against whatever drive is
+    current, not a fixed one. That is still a host location, never something a customer package may
+    contain, so `.root` is checked directly rather than folded into `is_absolute()`, which stays
+    `False` for exactly this shape by design.
     """
     candidate = PureWindowsPath(declared)
-    return candidate.is_absolute() or bool(candidate.drive) or declared.startswith(("\\\\", "/"))
+    return (
+        candidate.is_absolute()
+        or bool(candidate.drive)
+        or bool(candidate.root)
+        or declared.startswith(("\\\\", "/"))
+    )
 
 
 def _declares_unsafe_path(declared: str) -> bool:

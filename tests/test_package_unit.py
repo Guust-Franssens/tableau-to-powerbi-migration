@@ -1932,6 +1932,88 @@ def test_a_DRIVE_RELATIVE_path_is_refused_by_the_PARSE_half_alone(tmp_path: Path
     assert declared not in json.dumps(shipped)
 
 
+def test_a_SINGLE_ROOTED_backslash_path_is_refused_by_the_PARSE_half_alone(tmp_path: Path) -> None:
+    """Issue #516: a Windows path rooted by ONE leading backslash, with no drive letter, is
+    host-rooted - and neither `is_absolute()` nor `.drive` sees it.
+
+    `PureWindowsPath(r"\\Finance\\report.log")` reports `.root == "\\"` and `.drive == ""`: Windows
+    resolves this shape against whichever drive is current, so it is rooted without being pinned to
+    one. That is still a host location a customer package must never contain - it names a directory
+    on the operator's current drive exactly as `C:\\Finance\\report.log` would.
+
+    The discriminator mirrors :func:`test_a_DRIVE_RELATIVE_path_is_refused_by_the_PARSE_half_alone`:
+    `Finance` is not in `host_paths._POSIX_ROOTS`'s vocabulary, so `discloses_host_location` is silent
+    on it and only `_declares_non_relative` can refuse it. Measured::
+
+        \\Finance\\report.log -> _declares_non_relative=True  discloses_host_location=False
+
+    which is exactly the shape an anchor needs: one branch answers, the other cannot.
+    """
+    declared = "\\Finance\\report.log"
+    assert pkg._declares_non_relative(declared) is True  # pylint: disable=protected-access
+    assert hp.discloses_host_location(declared) is False, (
+        "the containment half must be silent, or this isolates nothing"
+    )
+
+    bundle, oracle = _bundle(tmp_path)
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    manifest["views"][0]["image"] = {"status": "ok", "path": declared, "sha256": "x", "bytes": 3}
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+
+    shipped = json.loads((_out(tmp_path) / UNIT / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    leg = shipped["views"][0]["image"]
+    assert leg["status"] == pkg.OMITTED_STATUS
+    assert leg["path"] == pkg.REFUSED_PATH, "the declared location must not be echoed back"
+    assert "non-relative" in leg["packaging_reason"], "only the PARSE half can diagnose this one"
+    assert declared not in json.dumps(shipped)
+
+
+def test_a_SINGLE_ROOTED_WINDOWS_path_never_leaks_the_ACCOUNT_NAME(tmp_path: Path) -> None:
+    """The customer-facing control for issue #516: a real single-rooted path names a real account.
+
+    `\\Users\\<account>\\...` is host-rooted with no drive letter - the exact shape the issue
+    reported as unrefused. Unlike the discriminator above, this one names an account under `Users`,
+    so `discloses_host_location` ALSO fires (defence in depth); what matters here is the observable
+    contract - the account name must never reach the shipped manifest under ANY diagnosis.
+    """
+    declared = "\\Users\\neutral-account\\private\\secret.log"
+    bundle, oracle = _bundle(tmp_path)
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    manifest["views"][0]["image"] = {"status": "ok", "path": declared, "sha256": "x", "bytes": 3}
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+
+    shipped_text = (_out(tmp_path) / UNIT / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8")
+    assert "neutral-account" not in shipped_text, "a real account name must never reach the package"
+    leg = json.loads(shipped_text)["views"][0]["image"]
+    assert leg["status"] == pkg.OMITTED_STATUS
+    assert leg["path"] == pkg.REFUSED_PATH
+
+
+def test_a_POSIX_ROOTED_path_is_STILL_refused_after_the_root_check_was_added(tmp_path: Path) -> None:
+    """Regression control: the new `bool(candidate.root)` disjunct must not change the POSIX verdict.
+
+    `/Users/<account>/...` was already refused before issue #516 (via the explicit
+    `declared.startswith("/")` test); it must remain refused now that `.root` is checked too, and the
+    account name must still never ship.
+    """
+    declared = "/Users/neutral-account/private/secret.log"
+    assert pkg._declares_non_relative(declared) is True  # pylint: disable=protected-access
+
+    bundle, oracle = _bundle(tmp_path)
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    manifest["views"][0]["image"] = {"status": "ok", "path": declared, "sha256": "x", "bytes": 3}
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+
+    shipped_text = (_out(tmp_path) / UNIT / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8")
+    assert "neutral-account" not in shipped_text
+    leg = json.loads(shipped_text)["views"][0]["image"]
+    assert leg["status"] == pkg.OMITTED_STATUS
+    assert leg["path"] == pkg.REFUSED_PATH
+
+
 def test_a_symlink_out_of_the_capture_root_is_refused(tmp_path: Path) -> None:
     """Containment is checked on the RESOLVED path, so a link inside the capture cannot escape it."""
     bundle, oracle = _bundle(tmp_path)

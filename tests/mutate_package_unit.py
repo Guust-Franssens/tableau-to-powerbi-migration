@@ -138,9 +138,31 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
         # DRIVE-RELATIVE path (`<drive>:secret.png` - a drive with no root separator), which no
         # grammar of absolute locations can see because nothing about it is rooted. Each wider layer
         # costs one re-isolation; skipping it leaves the branch unfalsifiable and green.
-        '    return candidate.is_absolute() or bool(candidate.drive) or declared.startswith(("\\\\\\\\", "/"))',
+        "    candidate = PureWindowsPath(declared)\n"
+        "    return (\n"
+        "        candidate.is_absolute()\n"
+        "        or bool(candidate.drive)\n"
+        "        or bool(candidate.root)\n"
+        '        or declared.startswith(("\\\\\\\\", "/"))\n'
+        "    )",
         "    return False  # noqa",
         ["test_a_DRIVE_RELATIVE_path_is_refused_by_the_PARSE_half_alone"],
+    ),
+    (
+        # Issue #516: a SINGLE-ROOTED Windows backslash path (`\\Users\\<account>\\x`, one leading
+        # backslash, no drive letter) is host-rooted with no `..` involved, and neither
+        # `is_absolute()` nor `.drive` sees it - `PureWindowsPath` reports `.root == "\\"` with
+        # `.drive == ""` for exactly this shape. `bool(candidate.root)` is the ONLY thing that
+        # answers it, so removing that one disjunct - leaving `is_absolute()`, `.drive` and the
+        # explicit UNC/POSIX prefix test intact - restores the gap the issue named. The discriminator
+        # is a rooted name outside `host_paths._POSIX_ROOTS`'s vocabulary
+        # (`\\Finance\\report.log`), so `discloses_host_location` stays silent and only this branch
+        # can refuse it.
+        "capture path: stop refusing a single-rooted Windows path with no drive letter",
+        PACKAGER,
+        "        or bool(candidate.root)\n",
+        "",
+        ["test_a_SINGLE_ROOTED_backslash_path_is_refused_by_the_PARSE_half_alone"],
     ),
     (
         # ⚠️ REPLACES "capture path: echo the declared path back into the packaged manifest" (#480
