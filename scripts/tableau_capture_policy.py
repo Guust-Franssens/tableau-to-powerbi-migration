@@ -35,11 +35,14 @@ import random
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tableau_http import NETWORK_ERROR_STATUS  # noqa: E402  # pylint: disable=wrong-import-position
 
 LOG = logging.getLogger("tableau-oracle")
+
+DEFAULT_MAX_AGE_MINUTES = 1
 
 REST_TIMEOUT_SEC = 180
 SESSION_LOST_CODE = "401002"
@@ -200,3 +203,20 @@ def build_retry_policy(
             timeout_sec,
         )
     return RetryPolicy(max_attempts=max_attempts, budget_sec=budget_sec)
+
+
+def validate_max_age(value: Any) -> int:
+    """Validate that a max-age value is an integer >= 1 (in minutes).
+
+    Tableau REST API parameter ``maxAge`` specifies the maximum cache age in minutes.
+    Tableau's supported minimum is 1 minute.
+    Non-integer values, boolean values (since ``bool`` is a subclass of ``int`` in Python),
+    and values < 1 are rejected.
+    """
+    if isinstance(value, bool):
+        raise TypeError(f"max_age must be an integer >= 1, got bool: {value!r}")
+    if not isinstance(value, int):
+        raise TypeError(f"max_age must be an integer >= 1, got {type(value).__name__}: {value!r}")
+    if value < 1:
+        raise ValueError(f"max_age must be an integer >= 1, got {value}")
+    return value

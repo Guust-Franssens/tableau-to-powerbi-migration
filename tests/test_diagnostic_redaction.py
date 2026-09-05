@@ -207,7 +207,7 @@ class _Session(oracle.TableauSession):
         self.token, self.site_id = "tok", "sid"
 
     def _request(self, method, path, *, body=None, accept=None, authed=True, api=None, deadline=None):  # noqa: ARG002
-        if path.endswith("/data"):
+        if path.split("?")[0].endswith("/data"):
             status, payload, headers = self.data_reply or (200, b"a\n1\n", {})
             headers = dict(headers)
             if status == 200 and "Content-Length" not in headers and "Transfer-Encoding" not in headers:
@@ -971,7 +971,7 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "view.get('updatedAt')": _INTO_THE_MANIFEST,
         "(view.get('project') or {}).get('name')": _INTO_THE_MANIFEST,
         "workbook.get('id')": _INTO_THE_MANIFEST,
-        "_capture_data(session, view_luid, out_dir, stem)": (
+        "_capture_data(session, view_luid, out_dir, stem, max_age=max_age)": (
             "SCRUBBED-AT-SINK: the returned leg record, whose own fields are certified in "
             "_capture_data; `stem` comes only from `artifact_stem` and `out_dir` is the CLI's "
             "capture root, so neither argument is response-derived"
@@ -986,18 +986,18 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
             "because it is selected by `salvage`, which is derived from the data leg's status; no "
             "branch of it interpolates anything that came off the wire"
         ),
-        "{'status': NOT_ATTEMPTED, 'attempted': False, 'reason': refusal}": (
-            "FIXED-VOCABULARY: a module constant, a bool, and `refusal` -- certified immediately "
-            "above as one of two self-authored sentences"
+        "{'status': NOT_ATTEMPTED, 'attempted': False, 'reason': refusal, 'max_age_minutes': max_age}": (
+            "FIXED-VOCABULARY: a module constant, a bool, `refusal` (certified immediately "
+            "above as one of two self-authored sentences), and an integer maxAge value"
         ),
         "{'status': data_status, 'attempted': False, 'reason': 'the data leg was blocked at the source, and every "
-        "render route comes from the same VizQL render, so no render could have succeeded'}": (
-            "FIXED-VOCABULARY: a status literal, a bool, and a sentence this module authors -- nothing "
-            "in it came off the wire, so the credential-inheriting skip carries no response text"
+        "render route comes from the same VizQL render, so no render could have succeeded', 'max_age_minutes': max_age}": (
+            "FIXED-VOCABULARY: a status literal, a bool, a sentence this module authors, and an integer maxAge value -- "
+            "nothing in it came off the wire, so the credential-inheriting skip carries no response text"
         ),
         "_capture_render(session, record['view_luid'], targets.out_dir / 'images' / "
         "f'{targets.stem}.{_RENDER_EXTENSIONS[kind]}', kind, _RenderOptions(targets.api_overrides.get(kind), "
-        "SALVAGE_RETRY if salvage else None, deadline if salvage else None))": (
+        "SALVAGE_RETRY if salvage else None, deadline if salvage else None, max_age=max_age))": (
             "SCRUBBED-AT-SINK: the returned leg record, whose own fields are certified in _capture_render; "
             "the PATH argument is built from `targets.stem`, which comes only from `artifact_stem`"
         ),
@@ -1089,6 +1089,8 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "hashlib.sha256(payload).hexdigest()": "DERIVED-IRREVERSIBLY: a one-way digest, not the payload",
         "len(payload)": "NOT-A-STRING: an integer byte count",
         "round(elapsed, 2)": "NOT-A-STRING: a float duration in seconds",
+        "max_age": "NOT-A-STRING: an integer minute value validated via validate_max_age",
+        "query_str": "OUTBOUND: the REST query string constructed with validated options and integer maxAge",
         "dimensions": "NOT-A-STRING: the two integers png_dimensions read from the IHDR chunk",
         "svg_facts(payload)": "NOT-A-STRING: element counts and millimetre geometry, no payload text",
         "pdf_facts(payload)": "NOT-A-STRING: page geometry and font/image counts, no payload text",

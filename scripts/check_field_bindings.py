@@ -101,6 +101,28 @@ _CALC_GROUP_RE = re.compile(r"^\s*calculationGroup\b", re.MULTILINE)
 # nests one of these, so the walk below is generic rather than path-driven.
 _SCALAR_KINDS = ("Column", "Measure")
 
+NUMERIC_DATA_TYPES = frozenset(
+    {
+        "int64",
+        "int32",
+        "int16",
+        "int8",
+        "integer",
+        "int",
+        "double",
+        "decimal",
+        "currency",
+        "single",
+        "float",
+        "real",
+        "numeric",
+    }
+)
+STRING_DATA_TYPES = frozenset({"string", "text"})
+KNOWN_NON_STRING_NON_NUMERIC_DATA_TYPES = frozenset({"boolean", "bool", "datetime", "date", "time", "binary"})
+NON_NUMERIC_DATA_TYPES = frozenset(STRING_DATA_TYPES | KNOWN_NON_STRING_NON_NUMERIC_DATA_TYPES)
+KNOWN_NON_STRING_DATA_TYPES = frozenset(NUMERIC_DATA_TYPES | KNOWN_NON_STRING_NON_NUMERIC_DATA_TYPES)
+
 
 @dataclass
 class TableFields:
@@ -109,6 +131,8 @@ class TableFields:
     columns: set[str] = field(default_factory=set)
     measures: set[str] = field(default_factory=set)
     hierarchies: dict[str, set[str]] = field(default_factory=dict)
+    column_types: dict[str, str | None] = field(default_factory=dict)
+    measure_types: dict[str, str | None] = field(default_factory=dict)
 
 
 @dataclass
@@ -144,6 +168,36 @@ class ModelFields:
             if actual.casefold() == lowered:
                 return actual, fields_
         return None
+
+    def field_type(self, entity: str, prop: str) -> tuple[str | None, str | None]:
+        """Return (kind, dataType) for entity[prop], or (None, None) if not resolved.
+
+        kind is 'Column' or 'Measure' (or None).
+        dataType is e.g. 'string', 'double', or None if untyped in TMDL.
+        """
+        found = self.table(entity)
+        if found is None:
+            found_ci = self.table_ci(entity)
+            if found_ci is None:
+                return None, None
+            _, fields_ = found_ci
+        else:
+            fields_ = found
+
+        if prop in fields_.measures:
+            return "Measure", fields_.measure_types.get(prop)
+        if prop in fields_.columns:
+            return "Column", fields_.column_types.get(prop)
+
+        lowered = prop.casefold()
+        for m in fields_.measures:
+            if m.casefold() == lowered:
+                return "Measure", fields_.measure_types.get(m)
+        for c in fields_.columns:
+            if c.casefold() == lowered:
+                return "Column", fields_.column_types.get(c)
+
+        return None, None
 
     def components(self, *, include_inactive: bool = False) -> dict[str, str]:
         """Casefolded table name -> the id of the relationship component it belongs to.
@@ -333,6 +387,57 @@ def _parse_relationship_block(name: str, body: list[str], model: ModelFields) ->
     )
 
 
+@dataclass
+class _TableParseState:
+    last_hierarchy: str | None = None
+    current_kind: str | None = None
+    current_member: str | None = None
+
+
+def _record_data_type(types_map: dict[str, str | None], member: str, val: str) -> None:
+    """Record dataType for a member; conflicting duplicates mark the type as unassessable (None)."""
+    if member not in types_map:
+        types_map[member] = val
+        return
+    existing = types_map[member]
+    if existing is not None and existing.casefold() != val.casefold():
+        types_map[member] = None
+
+
+def _process_table_line(
+    line: str,
+    member_indent: int,
+    fields_: TableFields,
+    state: _TableParseState,
+) -> None:
+    """Process a single line inside a table TMDL block."""
+    match = _MEMBER_RE.match(line)
+    if match and len(match.group("indent").expandtabs(4)) == member_indent:
+        state.current_kind = match.group("kind")
+        state.current_member = _unquote(match.group("name"))
+        if state.current_kind == "column":
+            fields_.columns.add(state.current_member)
+        elif state.current_kind == "measure":
+            fields_.measures.add(state.current_member)
+        elif state.current_kind == "hierarchy":
+            fields_.hierarchies.setdefault(state.current_member, set())
+            state.last_hierarchy = state.current_member
+        return
+    if match and len(match.group("indent").expandtabs(4)) != member_indent:
+        if match.group("kind") == "level" and state.last_hierarchy is not None:
+            fields_.hierarchies[state.last_hierarchy].add(_unquote(match.group("name")))
+        return
+    prop_match = _PROPERTY_RE.match(line)
+    if prop_match and state.current_member is not None:
+        key = prop_match.group("key")
+        val = prop_match.group("value").strip()
+        if key.casefold() == "datatype":
+            if state.current_kind == "column":
+                _record_data_type(fields_.column_types, state.current_member, val)
+            elif state.current_kind == "measure":
+                _record_data_type(fields_.measure_types, state.current_member, val)
+
+
 def _parse_table_block(name: str, body: list[str], model: ModelFields) -> None:
     """Record the members declared at the block's own top level."""
     fields_ = model.tables.setdefault(name, TableFields())
@@ -341,21 +446,9 @@ def _parse_table_block(name: str, body: list[str], model: ModelFields) -> None:
     if not matches:
         return
     member_indent = min(len(m.group("indent").expandtabs(4)) for m in matches)
-    last_hierarchy: str | None = None
-    for match in matches:
-        if len(match.group("indent").expandtabs(4)) != member_indent:
-            if match.group("kind") == "level" and last_hierarchy is not None:
-                fields_.hierarchies[last_hierarchy].add(_unquote(match.group("name")))
-            continue
-        kind = match.group("kind")
-        member = _unquote(match.group("name"))
-        if kind == "column":
-            fields_.columns.add(member)
-        elif kind == "measure":
-            fields_.measures.add(member)
-        elif kind == "hierarchy":
-            last_hierarchy = member
-            fields_.hierarchies.setdefault(member, set())
+    state = _TableParseState()
+    for line in body:
+        _process_table_line(line, member_indent, fields_, state)
 
 
 def iter_references(report_dir: Path) -> list[FieldRef]:
@@ -685,16 +778,21 @@ def check_pair(report_dir: Path, model_dir: Path) -> dict[str, Any]:
             "visuals": 0,
             "incoherent_visuals": 0,
             "coherence": [],
+            "role_type_violations": 0,
+            "role_type_cannot_assess": 0,
+            "role_type_findings": [],
+            "cannot_assess_findings": [],
         }
     queries = iter_visual_queries(report_dir)
     # Computed in the SAME pass as the per-field grades, and reported alongside them. The field
     # report's core complaint is the ORDERING - the table-agreement failure stayed masked until the
     # genuinely-missing fields were fixed, so "clean bill of health" arrived one round too early.
     coherence = [c for c in (check_visual_coherence(model, q) for q in queries) if c]
+    role_findings, cannot_assess = check_visual_roles(model, report_dir)
     return {
         "report": str(report_dir),
         "model": str(model_dir),
-        "status": _pair_status(unresolved, coherence),
+        "status": _pair_status(unresolved, coherence, role_findings),
         "references": len(findings),
         "near_misses": sum(1 for f in findings if f["status"] == "near_miss"),
         "missing": sum(1 for f in findings if f["status"] == "missing"),
@@ -702,14 +800,290 @@ def check_pair(report_dir: Path, model_dir: Path) -> dict[str, Any]:
         "visuals": len(queries),
         "incoherent_visuals": len(coherence),
         "coherence": _dedupe_coherence(coherence),
+        "role_type_violations": len(role_findings),
+        "role_type_cannot_assess": len(cannot_assess),
+        "role_type_findings": _dedupe_role_findings(role_findings),
+        "cannot_assess_findings": _dedupe_role_findings(cannot_assess),
     }
 
 
-def _pair_status(unresolved: list[dict[str, Any]], coherence: list[dict[str, Any]]) -> str:
-    """`UNRESOLVED` outranks `INCOHERENT`: a name that does not exist has to be fixed first."""
+def is_numeric_visual_role(visual_type: str, role: str) -> bool:
+    """Whether this role on this visual type requires numeric data."""
+    if role in ("Y", "Y2", "MinValue", "MaxValue", "TargetValue"):
+        return True
+    if visual_type == "scatterChart" and role in ("X", "Size"):
+        return True
+    if visual_type == "azureMap" and role == "Size":
+        return True
+    if visual_type == "treemap" and role == "Values":
+        return True
+    return False
+
+
+@dataclass
+class _VisualContext:
+    path: Path
+    visual_name: str
+    visual_type: str
+    scope: dict[str, str]
+
+
+@dataclass
+class _RoleFindings:
+    violations: list[dict[str, Any]]
+    cannot_assess: list[dict[str, Any]]
+
+
+def _evaluate_role_field(
+    model: ModelFields,
+    ctx: _VisualContext,
+    role: str,
+    ref: FieldRef,
+    findings: _RoleFindings,
+) -> None:
+    """Evaluate a single field reference on a numeric visual role."""
+    kind, data_type = model.field_type(ref.entity, ref.prop)
+    if kind is None:
+        return
+    if data_type is not None:
+        normalized = data_type.casefold()
+        if normalized in NUMERIC_DATA_TYPES:
+            return
+        if normalized in NON_NUMERIC_DATA_TYPES:
+            findings.violations.append(
+                {
+                    "status": "non_numeric_role",
+                    "visual": ctx.visual_name,
+                    "visual_type": ctx.visual_type,
+                    "role": role,
+                    "kind": kind,
+                    "entity": ref.entity,
+                    "property": ref.prop,
+                    "data_type": data_type,
+                    "file": str(ctx.path),
+                    "detail": (
+                        f"non-numeric {kind.lower()} '{ref.entity}[{ref.prop}]' "
+                        f"(dataType: {data_type}) bound to numeric visual role '{role}' "
+                        f"on {ctx.visual_type} visual '{ctx.visual_name}'"
+                    ),
+                }
+            )
+            return
+
+    # Missing (None), explicit Unknown, Variant, or unsupported type -> cannot_assess
+    type_desc = f"(dataType: {data_type}) " if data_type is not None else "has no static dataType in TMDL; "
+    findings.cannot_assess.append(
+        {
+            "status": "cannot_assess",
+            "visual": ctx.visual_name,
+            "visual_type": ctx.visual_type,
+            "role": role,
+            "kind": kind,
+            "entity": ref.entity,
+            "property": ref.prop,
+            "file": str(ctx.path),
+            "detail": (
+                f"{kind.lower()} '{ref.entity}[{ref.prop}]' {type_desc}"
+                f"on numeric role '{role}'; cannot assess return type offline"
+            ),
+        }
+    )
+
+
+def _check_role_projections(
+    model: ModelFields,
+    ctx: _VisualContext,
+    query: dict[str, Any],
+    findings: _RoleFindings,
+) -> None:
+    """Check queryState role projections for non-numeric fields on numeric roles."""
+    query_state = query.get("queryState")
+    if not isinstance(query_state, dict):
+        return
+    for role, role_val in query_state.items():
+        if not isinstance(role_val, dict) or not is_numeric_visual_role(ctx.visual_type, role):
+            continue
+        projections = role_val.get("projections")
+        if not isinstance(projections, list):
+            continue
+        for proj in projections:
+            if not isinstance(proj, dict) or proj.get("field") is None:
+                continue
+            refs: list[FieldRef] = []
+            _walk(proj["field"], ctx.scope, ctx.path, refs)
+            for ref in refs:
+                _evaluate_role_field(model, ctx, role, ref, findings)
+
+
+def _extract_scalar_fill_prop(item: dict[str, Any], scope: dict[str, str]) -> tuple[str, str] | None:
+    """Extract (entity, prop) from a scalar Measure/Column in fill.solid.color.expr."""
+    if not isinstance(item, dict):
+        return None
+    fill = item.get("properties", {}).get("fill") if isinstance(item.get("properties"), dict) else None
+    if not isinstance(fill, dict):
+        return None
+    color_expr = fill.get("solid", {}).get("color", {}).get("expr") if isinstance(fill.get("solid"), dict) else None
+    if not isinstance(color_expr, dict):
+        return None
+    for scalar_kind in ("Measure", "Column"):
+        if scalar_kind in color_expr:
+            inner = color_expr[scalar_kind]
+            if isinstance(inner, dict) and isinstance(inner.get("Property"), str):
+                entity = _entity_of(inner.get("Expression"), scope)
+                if entity:
+                    return (entity, inner["Property"])
+    return None
+
+
+def _check_direct_color_fill_item(
+    model: ModelFields,
+    ctx: _VisualContext,
+    item: dict[str, Any],
+    findings: _RoleFindings,
+) -> None:
+    """Check a single dataPoint formatting object item for direct color measure bindings."""
+    target = _extract_scalar_fill_prop(item, ctx.scope)
+    if target is None:
+        return
+    entity, prop = target
+    kind, data_type = model.field_type(entity, prop)
+    if kind is None:
+        return
+    if data_type is not None:
+        normalized = data_type.casefold()
+        if normalized in STRING_DATA_TYPES:
+            findings.violations.append(
+                {
+                    "status": "direct_color_measure",
+                    "visual": ctx.visual_name,
+                    "visual_type": ctx.visual_type,
+                    "role": "objects.dataPoint.fill",
+                    "kind": kind,
+                    "entity": entity,
+                    "property": prop,
+                    "data_type": data_type,
+                    "file": str(ctx.path),
+                    "detail": (
+                        f"direct {kind.lower()} '{entity}[{prop}]' (dataType: {data_type}) bound as "
+                        f"fill.solid.color.expr on {ctx.visual_type} visual '{ctx.visual_name}'; literal color "
+                        f"string measures cannot be bound directly into solid.color.expr (use "
+                        f"Conditional.Cases rule or Field Value binding)"
+                    ),
+                }
+            )
+            return
+        if normalized in KNOWN_NON_STRING_DATA_TYPES:
+            return
+
+    # Missing (None), explicit Unknown, Variant, or unsupported type -> cannot_assess
+    type_desc = f"(dataType: {data_type}) " if data_type is not None else "has no static dataType in TMDL; "
+    findings.cannot_assess.append(
+        {
+            "status": "cannot_assess",
+            "visual": ctx.visual_name,
+            "visual_type": ctx.visual_type,
+            "role": "objects.dataPoint.fill",
+            "kind": kind,
+            "entity": entity,
+            "property": prop,
+            "file": str(ctx.path),
+            "detail": (
+                f"direct {kind.lower()} '{entity}[{prop}]' {type_desc}"
+                f"bound as fill.solid.color.expr; cannot assess return type offline"
+            ),
+        }
+    )
+
+
+def _check_direct_color_fills(
+    model: ModelFields,
+    ctx: _VisualContext,
+    visual: dict[str, Any],
+    findings: _RoleFindings,
+) -> None:
+    """Check dataPoint formatting objects for direct color measure bindings."""
+    objects = visual.get("objects")
+    if not isinstance(objects, dict):
+        return
+    data_points = objects.get("dataPoint")
+    if not isinstance(data_points, list):
+        return
+    for item in data_points:
+        _check_direct_color_fill_item(model, ctx, item, findings)
+
+
+def check_visual_roles(model: ModelFields, report_dir: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Check for role-type mismatches (e.g. non-numeric measures on numeric Y axis or direct color fills).
+
+    Returns (violations, cannot_assess).
+    """
+    findings = _RoleFindings(violations=[], cannot_assess=[])
+    definition = report_dir / "definition"
+    root = definition if definition.is_dir() else report_dir
+
+    for path in sorted(root.rglob("visual.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        visual = payload.get("visual")
+        if not isinstance(visual, dict):
+            continue
+
+        visual_name = payload.get("name") if isinstance(payload.get("name"), str) else path.parent.name
+        visual_type = visual.get("visualType") if isinstance(visual.get("visualType"), str) else "unknown"
+        query = visual.get("query")
+        scope = _source_scope(query, {}) if isinstance(query, dict) else {}
+        ctx = _VisualContext(path=path, visual_name=visual_name, visual_type=visual_type, scope=scope)
+        if isinstance(query, dict):
+            _check_role_projections(model, ctx, query, findings)
+        _check_direct_color_fills(model, ctx, visual, findings)
+
+    return findings.violations, findings.cannot_assess
+
+
+def _dedupe_role_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One entry per distinct role type defect, carrying occurrences and visuals."""
+    merged: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+    for finding in findings:
+        key = (
+            finding["status"],
+            finding["visual_type"],
+            finding["role"],
+            finding["entity"],
+            finding["property"],
+        )
+        entry = merged.get(key)
+        if entry is None:
+            entry = {k: v for k, v in finding.items() if k not in ("file", "visual")}
+            entry["visuals"] = []
+            entry["files"] = []
+            entry["occurrences"] = 0
+            merged[key] = entry
+        entry["occurrences"] += 1
+        vis_entry = f"{finding['visual']} ({finding['visual_type']})"
+        if vis_entry not in entry["visuals"]:
+            entry["visuals"].append(vis_entry)
+        if finding["file"] not in entry["files"]:
+            entry["files"].append(finding["file"])
+    return list(merged.values())
+
+
+def _pair_status(
+    unresolved: list[dict[str, Any]],
+    coherence: list[dict[str, Any]],
+    role_findings: list[dict[str, Any]] | None = None,
+) -> str:
+    """`UNRESOLVED` outranks `INCOHERENT` which outranks `NON_NUMERIC_ROLE`."""
     if unresolved:
         return "UNRESOLVED"
-    return "INCOHERENT" if coherence else "OK"
+    if coherence:
+        return "INCOHERENT"
+    if role_findings:
+        return "NON_NUMERIC_ROLE"
+    return "OK"
 
 
 def _dedupe_coherence(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -777,26 +1151,34 @@ def _merge(pairs: list[dict[str, Any]], skipped: list[dict[str, Any]]) -> dict[s
     ]
     unresolved = [p for p in graded if p["status"] == "UNRESOLVED"]
     incoherent = [p for p in graded if p["status"] == "INCOHERENT"]
+    non_numeric_role = [p for p in graded if p["status"] == "NON_NUMERIC_ROLE"]
     if not graded:
         status = "SKIPPED"
     elif unresolved:
         status = "UNRESOLVED"
+    elif incoherent:
+        status = "INCOHERENT"
+    elif non_numeric_role:
+        status = "NON_NUMERIC_ROLE"
     else:
-        status = "INCOHERENT" if incoherent else "OK"
+        status = "OK"
     return {
         "status": status,
         "reports_scanned": len(graded),
         "reports_unresolved": len(unresolved),
         "reports_incoherent": len(incoherent),
+        "reports_non_numeric_role": len(non_numeric_role),
         "near_misses": sum(p["near_misses"] for p in graded),
         "missing": sum(p["missing"] for p in graded),
         "incoherent_visuals": sum(p.get("incoherent_visuals", 0) for p in graded),
+        "role_type_violations": sum(p.get("role_type_violations", 0) for p in graded),
+        "role_type_cannot_assess": sum(p.get("role_type_cannot_assess", 0) for p in graded),
         "reports": graded,
         "skipped": skipped,
     }
 
 
-FAILING_STATUSES = frozenset({"UNRESOLVED", "INCOHERENT"})
+FAILING_STATUSES = frozenset({"UNRESOLVED", "INCOHERENT", "NON_NUMERIC_ROLE"})
 
 
 def render(report: dict[str, Any], *, verbose: bool = False) -> str:
@@ -813,7 +1195,9 @@ def render(report: dict[str, Any], *, verbose: bool = False) -> str:
             f"FIELD BINDING CHECK: OK - every PBIR field reference in {scanned} report(s) resolves in its model.{tail}"
         )
     lines = [_headline(report, scanned, tail)]
-    inline_small_evidence = report["reports_unresolved"] + report["reports_incoherent"] <= 3
+    inline_small_evidence = (
+        report["reports_unresolved"] + report["reports_incoherent"] + report.get("reports_non_numeric_role", 0) <= 3
+    )
     for one in report["reports"]:
         if one["status"] not in FAILING_STATUSES:
             continue
@@ -831,23 +1215,35 @@ def render(report: dict[str, Any], *, verbose: bool = False) -> str:
             "  UNRELATED TABLES = visual fields resolve but Power BI cannot join their tables; rebind the odd table "
             "out, or add/activate the relationship."
         )
+    if report.get("role_type_violations"):
+        lines.append(
+            "  NON-NUMERIC ROLE = visual role requires numeric data or proper color rule, but is bound to non-numeric "
+            "measure/column; rebind or change calculation."
+        )
     if not verbose:
         lines.append("  Run with --verbose to list every field, visual, and skipped report behind these counts.")
     return "\n".join(lines)
 
 
 def _headline(report: dict[str, Any], scanned: int, tail: str) -> str:
-    """The one line a CI log shows, naming which of the two defects dominates."""
+    """The one line a CI log shows, naming which of the defects dominates."""
     if report["status"] == "UNRESOLVED":
         return (
             f"FIELD BINDING CHECK: UNRESOLVED - {report['reports_unresolved']} of {scanned} report(s) "
             f"reference fields their model does not have "
             f"({report['near_misses']} case-only near-miss(es), {report['missing']} missing){tail}"
         )
+    if report["status"] == "INCOHERENT":
+        return (
+            f"FIELD BINDING CHECK: INCOHERENT - every field resolves, but {report['incoherent_visuals']} visual(s) "
+            f"in {report.get('reports_incoherent', 0)} of {scanned} report(s) bind fields their model cannot "
+            f"join{tail}"
+        )
     return (
-        f"FIELD BINDING CHECK: INCOHERENT - every field resolves, but {report['incoherent_visuals']} visual(s) "
-        f"in {report.get('reports_incoherent', 0)} of {scanned} report(s) bind fields their model cannot "
-        f"join{tail}"
+        f"FIELD BINDING CHECK: NON_NUMERIC_ROLE - every field resolves, but "
+        f"{report.get('role_type_violations', 0)} visual role(s) "
+        f"in {report.get('reports_non_numeric_role', 0)} of {scanned} report(s) bind non-numeric "
+        f"fields to numeric roles or direct color fills{tail}"
     )
 
 
@@ -876,11 +1272,41 @@ def _render_report_summary(one: dict[str, Any], *, verbose: bool, inline_small_e
         lines.append(f"    - MISSING: {one['missing']} reference(s)")
     if one.get("incoherent_visuals"):
         lines.append(f"    - UNRELATED TABLES: {one['incoherent_visuals']} visual(s)")
+    if one.get("role_type_violations"):
+        lines.append(f"    - NON-NUMERIC ROLE / DIRECT COLOR: {one['role_type_violations']} violation(s)")
+    if one.get("role_type_cannot_assess"):
+        lines.append(f"    - CANNOT ASSESS (untyped measure): {one['role_type_cannot_assess']} binding(s)")
     if inline_fields:
         lines += _render_findings(one["findings"], "near_miss")
         lines += _render_findings(one["findings"], "missing")
     if verbose or one.get("incoherent_visuals"):
         lines += _render_coherence(one.get("coherence") or [])
+    if verbose or one.get("role_type_violations"):
+        lines += _render_role_findings_summary(one.get("role_type_findings") or [])
+    if verbose and one.get("cannot_assess_findings"):
+        lines += _render_cannot_assess_summary(one.get("cannot_assess_findings") or [])
+    return lines
+
+
+def _render_role_findings_summary(findings: list[dict[str, Any]]) -> list[str]:
+    """Render role type violations with visual and detail."""
+    lines = []
+    for finding in findings:
+        visuals = ", ".join(finding.get("visuals", [])[:4])
+        lines.append(f"    - ROLE TYPE VIOLATION: {finding.get('detail', '')}  [x{finding.get('occurrences', 1)}]")
+        if visuals:
+            lines.append(f"        visuals: {visuals}")
+    return lines
+
+
+def _render_cannot_assess_summary(findings: list[dict[str, Any]]) -> list[str]:
+    """Render cannot-assess role type entries."""
+    lines = []
+    for finding in findings:
+        visuals = ", ".join(finding.get("visuals", [])[:4])
+        lines.append(f"    - CANNOT ASSESS: {finding.get('detail', '')}  [x{finding.get('occurrences', 1)}]")
+        if visuals:
+            lines.append(f"        visuals: {visuals}")
     return lines
 
 

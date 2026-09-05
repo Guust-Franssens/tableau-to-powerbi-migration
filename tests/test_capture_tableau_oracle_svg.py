@@ -82,8 +82,9 @@ class _Session(oracle.TableauSession):
 
     def _request(self, method, path, *, body=None, accept=None, authed=True, api=None, deadline=None):  # noqa: ARG002
         self.paths.append(path)
+        bare_path = path.split("?")[0]
         for suffix, (status, payload) in self.responses.items():
-            if path.endswith(suffix):
+            if bare_path.endswith(suffix) or suffix in path:
                 return status, payload, {}
         raise AssertionError(f"unscripted path {path}")
 
@@ -589,7 +590,11 @@ def _probe(monkeypatch, responses, view_count):
     return session, oracle.capability.probe_render_capability(session, env, views)
 
 
-SVG_ROUTE, PDF_ROUTE, PNG_ROUTE = "image?format=svg", "pdf?type=Unspecified", "image?resolution=high"
+SVG_ROUTE, PDF_ROUTE, PNG_ROUTE = (
+    "image?format=svg&maxAge=1",
+    "pdf?type=Unspecified&maxAge=1",
+    "image?resolution=high&maxAge=1",
+)
 
 
 def test_a_later_view_that_proves_a_better_tier_beats_an_earlier_provisional_one(monkeypatch):

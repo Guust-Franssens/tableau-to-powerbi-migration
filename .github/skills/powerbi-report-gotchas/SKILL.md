@@ -44,6 +44,13 @@ raises an error dialog on open) or an offline `ajv` harness against the real 2.9
 
 These pass `validate` but render wrong. Only a live Desktop screenshot catches them.
 
+- **A text-returning measure or column bound to a numeric visual role (Y, Y2, MinValue, MaxValue,
+  TargetValue, scatter X/Size, azureMap Size, treemap Values) silently renders the visual empty.**
+  Power BI cannot plot non-numeric values on a continuous or numeric axis. `powerbi-report-author
+  validate` returns 0 errors because it validates only the structural presence and syntax of the
+  field reference, not data types. Statically checked by `scripts/check_field_bindings.py` when
+  TMDL declares `dataType: String`; untyped measures report `CANNOT ASSESS` offline rather than
+  guessing.
 - **Conditional/Cases `Else` is IGNORED by Desktop for table `fontColor`** — the top/else band renders
   **black**. Fix: append an explicit always-true final `Case` (e.g. `driver < 1e12` → the else colour)
   instead of relying on `Else`.
@@ -270,6 +277,16 @@ idioms see `.github/pbi.kb/visuals/table-cond-format.md`.
 - **String-valued "colour helper" measures** (a source field returning a glyph/indicator string)
   **cannot drive PBIR data-colour rules** → static colours; a recurring colour-encoding fidelity loss.
   Record it rather than faking it.
+- **`dataPoint.fill` pointing directly to a measure that returns literal hex-colour strings renders
+  as flat default theme colour with 0 validation errors.** ⚠️ **Distinct mechanism from the
+  string-valued colour helper above:** that entry is about a helper measure attempting to drive
+  discrete rule comparisons; this defect is a direct measure expression
+  (`fill.solid.color.expr.Measure`) bound directly into `solid.color.expr` expecting Power BI to
+  interpret the string as a colour hex code. Desktop silently ignores direct string measure bindings
+  in `solid.color.expr` and renders default theme colors without raising any validation error. Fix:
+  use discrete rules (`Conditional.Cases` with comparisons) or proper Field Value conditional
+  formatting. Statically checked by `scripts/check_field_bindings.py` (when `dataType: String` is declared
+  in TMDL).
 
 ## 3. PBIR mechanics
 

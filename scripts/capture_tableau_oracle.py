@@ -177,6 +177,7 @@ from tableau_oracle_manifest import (  # noqa: E402  # pylint: disable=wrong-imp
 # for why the three time-related words here mean three different things.
 from tableau_capture_policy import (  # noqa: E402  # pylint: disable=wrong-import-position
     CREDENTIAL_REFLECTED,
+    DEFAULT_MAX_AGE_MINUTES,
     DEFAULT_MAX_ATTEMPTS,
     DEFAULT_RETRY_BUDGET_SEC,
     MAX_REAUTH_PER_VIEW,
@@ -188,6 +189,7 @@ from tableau_capture_policy import (  # noqa: E402  # pylint: disable=wrong-impo
     RetryPolicy,
     backoff_delay,
     build_retry_policy,
+    validate_max_age,
 )
 
 # Re-exported, not used here: callers and tests read these off THIS module
@@ -199,9 +201,11 @@ from tableau_capture_policy import (  # noqa: E402  # pylint: disable=wrong-impo
 __all__ = [
     "BACKOFF_BASE_SEC",
     "BACKOFF_CAP_SEC",
+    "DEFAULT_MAX_AGE_MINUTES",
     "RETRY_ADMISSION_FLOOR_SEC",
     "default_retry_budget",
     "retry_admission_floor",
+    "validate_max_age",
 ]
 
 from tableau_capture_policy import (  # noqa: E402  # pylint: disable=wrong-import-position
@@ -655,12 +659,13 @@ def artifact_stem(view_luid: str) -> str:
     return view_luid.lower()
 
 
-def capture_view(
+def capture_view(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     session: TableauSession,
     view: dict[str, Any],
     out_dir: Path,
     wants: frozenset[str] = frozenset(),
     api_overrides: dict[str, str] | None = None,
+    max_age: int = DEFAULT_MAX_AGE_MINUTES,
 ) -> dict[str, Any]:
     """Capture one view's data plus every requested render, keyed by view LUID.
 
@@ -672,6 +677,7 @@ def capture_view(
     probe can recover a tier by re-probing at its documented floor, and a capture that ignores that
     version fetches at the configured one and fails on a tier the manifest already promised.
     """
+    max_age = validate_max_age(max_age)
     view_luid = view["id"]
     workbook = view.get("workbook", {}) or {}
     record: dict[str, Any] = {
@@ -688,13 +694,19 @@ def capture_view(
         # consumer must treat it as "cannot establish", never as either type.
         "view_type": view.get(tableau_view_types.VIEW_TYPE_KEY, tableau_view_types.UNKNOWN),
         "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "max_age_minutes": max_age,
     }
     try:
         stem = artifact_stem(view_luid)
     except ValueError as exc:
         # A view whose identifier is not a LUID is not one we will invent a filename for. Every other
         # candidate string on this record came out of a Tableau response.
-        record["data"] = {"status": "failed", "error": str(exc), "detail": "unusable view identifier"}
+        record["data"] = {
+            "status": "failed",
+            "error": str(exc),
+            "detail": "unusable view identifier",
+            "max_age_minutes": max_age,
+        }
         return record
     if session.reflected_credential(stem.encode("utf-8")):
         # Closes the ONE residual the LUID allowlist leaves: a credential that is itself UUID-shaped
@@ -707,11 +719,17 @@ def capture_view(
             "status": CREDENTIAL_REFLECTED,
             "error": "the view identifier IS one of our own credentials",
             "detail": "refusing to build an artifact path from it; investigate what is reflecting request data",
+            "max_age_minutes": max_age,
         }
         return record
 
-    record["data"] = _capture_data(session, view_luid, out_dir, stem)
-    _capture_renders(session, record, wants, _RenderTargets(out_dir, stem, api_overrides or {}))
+    record["data"] = _capture_data(session, view_luid, out_dir, stem, max_age=max_age)
+    _capture_renders(
+        session,
+        record,
+        wants,
+        _RenderTargets(out_dir, stem, api_overrides or {}, max_age=max_age),
+    )
     return record
 
 
@@ -726,6 +744,7 @@ class _RenderTargets:
     out_dir: Path
     stem: str
     api_overrides: dict[str, str]
+    max_age: int = DEFAULT_MAX_AGE_MINUTES
 
 
 def _capture_renders(
@@ -809,6 +828,7 @@ def _capture_renders(
     data_status = record["data"]["status"]
     if not wants:
         return
+    max_age = validate_max_age(targets.max_age)
     if data_status in _SHARED_ROOT_CAUSE:
         for kind in _RENDER_ROUTES:
             if kind in wants:
@@ -819,6 +839,7 @@ def _capture_renders(
                         "the data leg was blocked at the source, and every render route comes from "
                         "the same VizQL render, so no render could have succeeded"
                     ),
+                    "max_age_minutes": max_age,
                 }
         return
     salvage = data_status != "ok"
@@ -831,7 +852,12 @@ def _capture_renders(
         leg = _LEG_OF[kind]
         refusal = blocked_by or (_salvage_exhausted(deadline, timeout) if salvage else "")
         if refusal:
-            record[leg] = {"status": NOT_ATTEMPTED, "attempted": False, "reason": refusal}
+            record[leg] = {
+                "status": NOT_ATTEMPTED,
+                "attempted": False,
+                "reason": refusal,
+                "max_age_minutes": max_age,
+            }
             continue
         record[leg] = _capture_render(
             session,
@@ -842,6 +868,7 @@ def _capture_renders(
                 targets.api_overrides.get(kind),
                 SALVAGE_RETRY if salvage else None,
                 deadline if salvage else None,
+                max_age=max_age,
             ),
         )
         if salvage and record[leg]["status"] in _VIEW_HEALTH_FAILURES:
@@ -876,7 +903,13 @@ def _salvage_exhausted(deadline: float, timeout: float) -> str:
     )
 
 
-def _capture_data(session: TableauSession, view_luid: str, out_dir: Path, stem: str) -> dict[str, Any]:
+def _capture_data(  # pylint: disable=too-many-locals
+    session: TableauSession,
+    view_luid: str,
+    out_dir: Path,
+    stem: str,
+    max_age: int = DEFAULT_MAX_AGE_MINUTES,
+) -> dict[str, Any]:
     """The numeric oracle for one view: Tableau's own aggregated, display-formatted values.
 
     ⚠️ **An HTTP 200 is not evidence until the body is certified as CSV** (:func:`certify_csv`): a
@@ -886,10 +919,11 @@ def _capture_data(session: TableauSession, view_luid: str, out_dir: Path, stem: 
     consumer can read it as evidence. Why it is structural, not another flag:
     :func:`tableau_oracle_manifest.withhold_uncertified_evidence`.
     """
+    max_age = validate_max_age(max_age)
     try:
-        payload, elapsed, stats = session.export(f"/sites/{session.site_id}/views/{view_luid}/data")
+        payload, elapsed, stats = session.export(f"/sites/{session.site_id}/views/{view_luid}/data?maxAge={max_age}")
     except ExportFailed as exc:
-        return {"status": exc.kind, "error": str(exc), "detail": exc.detail}
+        return {"status": exc.kind, "error": str(exc), "detail": exc.detail, "max_age_minutes": max_age}
     framing = stats.get("response_framing")
     content_encoding = stats.get("content_encoding")
     content_type = stats.pop("content_type", None)
@@ -906,6 +940,7 @@ def _capture_data(session: TableauSession, view_luid: str, out_dir: Path, stem: 
             "detail": CSV_REFUSAL_DETAIL[certification],
             "bytes": len(payload),
             "elapsed_sec": round(elapsed, 2),
+            "max_age_minutes": max_age,
             **stats,
         }
     path, naming = data_leg_fields(out_dir, stem, certification)
@@ -918,6 +953,7 @@ def _capture_data(session: TableauSession, view_luid: str, out_dir: Path, stem: 
         "bytes": len(payload),
         "sha256": hashlib.sha256(payload).hexdigest(),
         "elapsed_sec": round(elapsed, 2),
+        "max_age_minutes": max_age,
         **stats,
     }
     if certification == CSV_CERTIFIED:
@@ -955,7 +991,7 @@ _VIEW_HEALTH_FAILURES = frozenset({"transient", "failed", "session_lost", "sourc
 
 @dataclass(frozen=True)
 class _RenderOptions:
-    """HOW one render leg is fetched: at which api-version, with how much recovery, until when.
+    """HOW one render leg is fetched: at which api-version, with how much recovery, until when, and with what maxAge.
 
     Bundled rather than passed loose because they only ever travel together, and because ``kind``
     -- the WHAT -- must stay a first-class parameter: the redaction gate taints a whole constructed
@@ -969,6 +1005,7 @@ class _RenderOptions:
     api: str | None = None
     retry: RetryPolicy | None = None
     hard_deadline: float | None = None
+    max_age: int = DEFAULT_MAX_AGE_MINUTES
 
 
 def _capture_render(  # pylint: disable=too-many-locals
@@ -989,15 +1026,23 @@ def _capture_render(  # pylint: disable=too-many-locals
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     endpoint, query = _RENDER_ROUTES[kind]
+    max_age = validate_max_age(options.max_age)
+    sep = "&" if "?" in query else "?"
+    query_str = f"{query}{sep}maxAge={max_age}"
     try:
         payload, elapsed, stats = session.export(
-            f"/sites/{session.site_id}/views/{view_luid}/{endpoint}{query}",
+            f"/sites/{session.site_id}/views/{view_luid}/{endpoint}{query_str}",
             api=options.api,
             retry=options.retry,
             hard_deadline=options.hard_deadline,
         )
     except ExportFailed as exc:
-        record = {"status": exc.kind, "error": str(exc), "detail": exc.detail}
+        record = {
+            "status": exc.kind,
+            "error": str(exc),
+            "detail": exc.detail,
+            "max_age_minutes": max_age,
+        }
         if kind == "svg" and SVG_VERSION_MARKER in exc.detail:
             # A version gate is a CONFIGURATION fault, not a broken view: retrying cannot fix it and
             # neither can a Tableau-side credential, so say which knob to turn rather than filing it
@@ -1040,6 +1085,7 @@ def _capture_render(  # pylint: disable=too-many-locals
             "detail": why,
             "bytes": len(payload),
             "elapsed_sec": round(elapsed, 2),
+            "max_age_minutes": max_age,
             **stats,
         }
     # ⚠️ And a payload that STARTS like the requested format is not a payload that IS one. A leading
@@ -1062,6 +1108,7 @@ def _capture_render(  # pylint: disable=too-many-locals
             "detail": why_incomplete,
             "bytes": len(payload),
             "elapsed_sec": round(elapsed, 2),
+            "max_age_minutes": max_age,
             **stats,
         }
     path.write_bytes(payload)
@@ -1072,6 +1119,7 @@ def _capture_render(  # pylint: disable=too-many-locals
         "bytes": len(payload),
         "sha256": hashlib.sha256(payload).hexdigest(),
         "elapsed_sec": round(elapsed, 2),
+        "max_age_minutes": max_age,
         **stats,
     }
     if kind == "svg":
@@ -1085,6 +1133,17 @@ def _capture_render(  # pylint: disable=too-many-locals
         if dimensions:
             record["dimensions_px"] = dimensions
     return record
+
+
+def _arg_max_age(val: str) -> int:
+    try:
+        parsed = int(val)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"--max-age must be an integer >= 1, got {val!r}") from exc
+    try:
+        return validate_max_age(parsed)
+    except (ValueError, TypeError) as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1127,6 +1186,17 @@ def build_parser() -> argparse.ArgumentParser:
         "manifest. Combines with the explicit flags above, which are always honoured as well",
     )
     parser.add_argument("--limit", type=int, default=0, help="stop after N views (0 = all)")
+    parser.add_argument(
+        "--max-age",
+        type=_arg_max_age,
+        default=DEFAULT_MAX_AGE_MINUTES,
+        metavar="MIN",
+        help=(
+            f"maximum cache age in minutes for Tableau server-side query cache (default {DEFAULT_MAX_AGE_MINUTES}, "
+            f"minimum 1). Passed as maxAge=<MIN> on /data, /image, and /pdf requests to ensure the captured baseline "
+            f"reflects fresh server computations rather than a stale cache."
+        ),
+    )
     parser.add_argument(
         "--rest-timeout",
         type=float,
@@ -1200,7 +1270,7 @@ def _advertised_ceiling(session, env: dict[str, str], capability_report: dict[st
     return capability.server_info(env["TABLEAU_SERVER_URL"], redactor=session.redact_text)
 
 
-def main() -> int:
+def main() -> int:  # pylint: disable=too-many-locals
     """Capture the oracle for every selected view.
 
     Exit codes: ``0`` all selected views captured, ``1`` partial non-credential failure,
@@ -1232,11 +1302,12 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     LOG.info("capturing %d view(s) -> %s", len(views), out_dir)
 
+    max_age = validate_max_age(args.max_age)
     capability_report = None
     wants = {kind for kind, on in (("png", args.images), ("svg", args.svg), ("pdf", args.pdf)) if on}
     api_overrides: dict[str, str] = {}
     if args.reference_best and views:
-        capability_report = capability.probe_render_capability(session, env, views)
+        capability_report = capability.probe_render_capability(session, env, views, max_age=max_age)
         capability.apply_selected_tier(capability_report, wants, api_overrides, env)
 
     records, started = [], time.perf_counter()
@@ -1246,14 +1317,22 @@ def main() -> int:
     # variable somebody has to remember to check (#402).
     tableau_view_types.resolve_and_stamp(session, views, LOG)
     for index, view in enumerate(views, 1):
-        record = capture_view(session, view, out_dir, frozenset(wants), api_overrides)
+        record = capture_view(session, view, out_dir, frozenset(wants), api_overrides, max_age=max_age)
         record["workbook_name"] = workbook_names.get(record["workbook_luid"])
         records.append(record)
         log_progress(index, len(views), record, session.redact_text)
 
     exit_code = write_manifest(
         records,
-        CaptureRun(session, env, out_dir, started, frozenset(wants), bool(args.reference_best)),
+        CaptureRun(
+            session,
+            env,
+            out_dir,
+            started,
+            frozenset(wants),
+            bool(args.reference_best),
+            max_age_minutes=max_age,
+        ),
         capability_report,
         _advertised_ceiling(session, env, capability_report, wants),
     )

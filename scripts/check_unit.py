@@ -208,7 +208,7 @@ GATES = (
         (),
         frozenset({"OK"}),
         frozenset({0}),
-        frozenset({"UNRESOLVED", "INCOHERENT"}),
+        frozenset({"UNRESOLVED", "INCOHERENT", "NON_NUMERIC_ROLE"}),
         frozenset({1}),
         frozenset({"SKIPPED", "ERROR"}),
         frozenset({0, 2, 3}),

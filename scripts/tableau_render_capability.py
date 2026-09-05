@@ -52,6 +52,10 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 # `redacted_note` is the chokepoint every attacker-influenced diagnostic in this module goes through,
 # so it is a hard module-level dependency rather than one of the lazy imports below.
+from tableau_capture_policy import (  # noqa: E402  # pylint: disable=wrong-import-position
+    DEFAULT_MAX_AGE_MINUTES,
+    validate_max_age,
+)
 from tableau_env import env_redactor, redact, redacted_note  # noqa: E402  # pylint: disable=wrong-import-position
 
 # ⚠️ Imported as a plain NAME on purpose, twice over. `tableau_http._request(...)` is
@@ -867,7 +871,12 @@ def _add_pin_warnings(report, verdicts, tiers, versions: ApiVersions) -> None:
 MAX_CAPABILITY_PROBE_VIEWS = 3
 
 
-def probe_render_capability(session, env: dict[str, str], views: list[dict[str, Any]]) -> dict[str, Any]:
+def probe_render_capability(
+    session,
+    env: dict[str, str],
+    views: list[dict[str, Any]],
+    max_age: int = DEFAULT_MAX_AGE_MINUTES,
+) -> dict[str, Any]:
     """Ask the SITE what it can render, by probing, and reconcile that with both version strings.
 
     ``session`` is duck-typed on purpose -- anything exposing ``site_id``, ``raw_get(path, api=...)``
@@ -879,6 +888,7 @@ def probe_render_capability(session, env: dict[str, str], views: list[dict[str, 
     -- so try successive views until one gives a determinate answer, capped at
     ``MAX_CAPABILITY_PROBE_VIEWS`` because each attempt costs metered export calls.
     """
+    valid_max_age = validate_max_age(max_age)
     info = server_info(env["TABLEAU_SERVER_URL"], redactor=env_redactor(env, getattr(session, "token", "") or ""))
     configured = env.get("TABLEAU_REST_API_VERSION", "3.21")
     advertised = info.get("rest_api_version")
@@ -894,7 +904,9 @@ def probe_render_capability(session, env: dict[str, str], views: list[dict[str, 
         def fetch(endpoint: str, query: str, api: str | None = None) -> tuple[int, bytes, str | None]:
             # Deliberately the RAW request, not `export()`: a version gate is a permanent answer and
             # must not be run through a retry/re-auth ladder built for transient faults.
-            return session.raw_get(f"/sites/{session.site_id}/views/{view_luid}/{endpoint}{query}", api=api)
+            delim = "&" if "?" in query else "?"
+            full_query = f"{query}{delim}maxAge={valid_max_age}"
+            return session.raw_get(f"/sites/{session.site_id}/views/{view_luid}/{endpoint}{full_query}", api=api)
 
         return fetch
 
@@ -919,6 +931,7 @@ def probe_render_capability(session, env: dict[str, str], views: list[dict[str, 
         if report.get("selected_tier") and report.get("capability_complete"):
             break
     best["server"] = info
+    best["max_age_minutes"] = valid_max_age
     # COUNTED, never derived from the cap. `min(len(views), MAX_CAPABILITY_PROBE_VIEWS)` reported how
     # many views were ELIGIBLE, so a first view that answered completely and broke out of the loop was
     # written up as "3" -- one probe presented as three independent corroborations. The LUIDs make the
@@ -1054,7 +1067,14 @@ def _canonical_phrase(code: int) -> str:
 # precisely because hand-picking a subset of the live credentials is the round-9 defect. Waived
 # deliberately, in the same spirit as `capture_tableau_oracle.TableauSession._request`.
 def _cli_fetch(  # pylint: disable=too-many-arguments
-    base: str, api: str, site_id: str, view_luid: str, token: str, *, redactor=None
+    base: str,
+    api: str,
+    site_id: str,
+    view_luid: str,
+    token: str,
+    *,
+    max_age: int = DEFAULT_MAX_AGE_MINUTES,
+    redactor=None,
 ):
     """Fetcher for the standalone report path. Returns ``(status, body, content_type)``.
 
@@ -1064,10 +1084,13 @@ def _cli_fetch(  # pylint: disable=too-many-arguments
     ``_build_report`` passes the full one.
     """
     scrub = redactor or (lambda text: redact(text, token))
+    valid_max_age = validate_max_age(max_age)
 
     def fetch(endpoint: str, query: str, api_override: str | None = None) -> tuple[int, bytes, str | None]:
         version = api_override or api
-        url = f"{base.rstrip('/')}/api/{version}/sites/{site_id}/views/{view_luid}/{endpoint}{query}"
+        delim = "&" if "?" in query else "?"
+        full_query = f"{query}{delim}maxAge={valid_max_age}"
+        url = f"{base.rstrip('/')}/api/{version}/sites/{site_id}/views/{view_luid}/{endpoint}{full_query}"
         req = urllib.request.Request(url)
         req.add_header("X-Tableau-Auth", token)
         # The session token rides in a header a reflecting proxy can echo into a status line or a
@@ -1104,14 +1127,27 @@ def _build_report(env, args, info) -> dict[str, Any]:
     # redactor goes down into the fetcher, so the HTTP layer's own diagnostics are covered by the
     # identical secret list rather than by whichever subset that call site happened to hold.
     redactor = env_redactor(env, token)
+    max_age = validate_max_age(getattr(args, "max_age", DEFAULT_MAX_AGE_MINUTES))
     report = detect(
-        _cli_fetch(base, configured, site_id, args.view, token, redactor=redactor),
+        _cli_fetch(base, configured, site_id, args.view, token, max_age=max_age, redactor=redactor),
         args.view,
         ApiVersions(configured=configured, advertised=info.get("rest_api_version")),
         redactor=redactor,
     )
     report["server"] = info
+    report["max_age_minutes"] = max_age
     return report
+
+
+def _arg_max_age(val: str) -> int:
+    try:
+        parsed = int(val)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"--max-age must be an integer >= 1, got {val!r}") from exc
+    try:
+        return validate_max_age(parsed)
+    except (ValueError, TypeError) as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1119,6 +1155,16 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--view", required=True, help="view LUID to probe (use one that renders)")
     parser.add_argument("--env", type=Path, default=Path(".env"), help="git-ignored KEY=VALUE credentials file")
+    parser.add_argument(
+        "--max-age",
+        type=_arg_max_age,
+        default=DEFAULT_MAX_AGE_MINUTES,
+        metavar="MIN",
+        help=(
+            f"maximum cache age in minutes for Tableau server-side query cache "
+            f"(default {DEFAULT_MAX_AGE_MINUTES}, minimum 1)"
+        ),
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")

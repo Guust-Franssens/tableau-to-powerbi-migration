@@ -2476,3 +2476,189 @@ def test_the_manifest_censuses_view_types_so_a_consumer_reads_it_once(tmp_path):
     _write(tmp_path, [dict(_record("ok"), view_type="dashboard"), dict(_record("ok"), view_type="unknown")])
     manifest = json.loads((tmp_path / "oracle-manifest.json").read_text(encoding="utf-8"))
     assert manifest["view_types"] == {"dashboard": 1, "worksheet": 0, "unknown": 1}
+
+
+# --- #473: maxAge query parameter, validation, and manifest persistence -------------------------
+#
+# Tableau REST query cache can silently serve /data, /image, and /pdf from cache.
+# The tests below pin:
+# 1. validate_max_age accepts integers >= 1 and rejects 0, negatives, bools, strings, and floats.
+# 2. CLI parser accepts --max-age <int >= 1> and rejects 0, negative, or non-integer arguments.
+# 3. HTTP request paths for /data, /image (png, svg), and /pdf include maxAge=<minutes>.
+# 4. Custom max-age propagates across all request paths, capability probe URLs, and manifest output.
+# 5. Manifest records max_age_minutes at the top level, per view, per leg, and in render capability.
+# 6. Server rejection remains a capture failure / cannot assess, never silently retrying without maxAge.
+
+
+@pytest.mark.parametrize("valid_age", [1, 15, 360])
+def test_validate_max_age_accepts_positive_integers(valid_age):
+    assert oracle.validate_max_age(valid_age) == valid_age
+
+
+@pytest.mark.parametrize(
+    "invalid_input, exc_type",
+    [
+        (0, ValueError),
+        (-1, ValueError),
+        (-100, ValueError),
+        (True, TypeError),
+        (False, TypeError),
+        (1.5, TypeError),
+        ("15", TypeError),
+        (None, TypeError),
+        ([1], TypeError),
+    ],
+)
+def test_validate_max_age_refuses_invalid_types_and_values_less_than_one(invalid_input, exc_type):
+    with pytest.raises(exc_type):
+        oracle.validate_max_age(invalid_input)
+
+
+@pytest.mark.parametrize(
+    "cli_args, expected_max_age",
+    [
+        (["--out", "o"], 1),
+        (["--out", "o", "--max-age", "1"], 1),
+        (["--out", "o", "--max-age", "15"], 15),
+        (["--out", "o", "--max-age=120"], 120),
+    ],
+)
+def test_cli_parser_accepts_valid_max_age(cli_args, expected_max_age):
+    parser = oracle.build_parser()
+    args = parser.parse_args(cli_args)
+    assert args.max_age == expected_max_age
+
+
+@pytest.mark.parametrize(
+    "invalid_cli_arg",
+    ["0", "-1", "-5", "abc", "1.5", "None"],
+)
+def test_cli_parser_refuses_invalid_max_age(invalid_cli_arg):
+    parser = oracle.build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--out", "o", "--max-age", invalid_cli_arg])
+
+
+def test_oracle_requests_send_max_age_on_data_and_all_render_endpoints(tmp_path):
+    """Positive test: /data, /image (PNG/SVG) and /pdf requests all include maxAge=<minutes> in URL."""
+    png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 20
+    svg_bytes = b'<?xml version="1.0"?><svg width="264.848mm" height="211.931mm"><text>x</text></svg>'
+    pdf_bytes = b"%PDF-1.4\n/MediaBox [0 0 822 672]\n"
+    csv_bytes = b"Region,Sales\r\nWest,10\r\n"
+
+    session = FakeSession(
+        [
+            (200, csv_bytes, {"Content-Type": "text/csv"}),
+            (200, png_bytes, {"Content-Type": "image/png"}),
+            (200, svg_bytes, {"Content-Type": "image/svg+xml"}),
+            (200, pdf_bytes, {"Content-Type": "application/pdf"}),
+        ]
+    )
+    view = {"id": DASH_LUID, "name": "Revenue", "workbook": {"id": "wb-1"}}
+    record = oracle.capture_view(
+        session,
+        view,
+        tmp_path,
+        frozenset({"png", "svg", "pdf"}),
+        None,
+        max_age=1,
+    )
+
+    # Check that each request URL carried the maxAge query parameter
+    assert len(session.calls) == 4
+    assert session.calls[0] == f"/sites/{session.site_id}/views/{DASH_LUID}/data?maxAge=1"
+    assert session.calls[1] == f"/sites/{session.site_id}/views/{DASH_LUID}/image?resolution=high&maxAge=1"
+    assert session.calls[2] == f"/sites/{session.site_id}/views/{DASH_LUID}/image?format=svg&maxAge=1"
+    assert session.calls[3] == f"/sites/{session.site_id}/views/{DASH_LUID}/pdf?type=Unspecified&maxAge=1"
+
+    # Check that record and per-leg records disclose max_age_minutes
+    assert record["max_age_minutes"] == 1
+    assert record["data"]["max_age_minutes"] == 1
+    assert record["image"]["max_age_minutes"] == 1
+    assert record["svg"]["max_age_minutes"] == 1
+    assert record["pdf"]["max_age_minutes"] == 1
+
+
+def test_oracle_custom_max_age_propagates_to_requests_and_manifest(tmp_path):
+    """Custom max_age (e.g. 45 min) is passed to requests and persisted to manifest."""
+    csv_bytes = b"Region,Sales\r\nEast,20\r\n"
+    png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 20
+    session = FakeSession(
+        [
+            (200, csv_bytes, {"Content-Type": "text/csv"}),
+            (200, png_bytes, {"Content-Type": "image/png"}),
+        ]
+    )
+    view = {"id": DASH_LUID, "name": "Profits", "workbook": {"id": "wb-1"}}
+    record = oracle.capture_view(
+        session,
+        view,
+        tmp_path,
+        frozenset({"png"}),
+        None,
+        max_age=45,
+    )
+    record["workbook_name"] = "Finance"
+
+    assert session.calls[0] == f"/sites/{session.site_id}/views/{DASH_LUID}/data?maxAge=45"
+    assert session.calls[1] == f"/sites/{session.site_id}/views/{DASH_LUID}/image?resolution=high&maxAge=45"
+
+    env = {"TABLEAU_SERVER_URL": "https://x", "TABLEAU_SITE": "s", "TABLEAU_REST_API_VERSION": "3.29"}
+    oracle.write_manifest([record], oracle.CaptureRun(session, env, tmp_path, 0.0, max_age_minutes=45))
+
+    manifest = json.loads((tmp_path / "oracle-manifest.json").read_text(encoding="utf-8"))
+    assert manifest["max_age_minutes"] == 45
+    assert manifest["views"][0]["max_age_minutes"] == 45
+    assert manifest["views"][0]["data"]["max_age_minutes"] == 45
+    assert manifest["views"][0]["image"]["max_age_minutes"] == 45
+
+
+def test_max_age_is_persisted_in_leg_records_across_failure_and_skip_outcomes(tmp_path):
+    """Max-age is disclosed on legs even when data fails or renders are skipped."""
+    session = FakeSession([(401, FEDERATED_CREDENTIAL, {})])
+    view = {"id": DASH_LUID, "name": "Orders", "workbook": {"id": "wb-1"}}
+    record = oracle.capture_view(
+        session,
+        view,
+        tmp_path,
+        frozenset({"png", "svg"}),
+        None,
+        max_age=10,
+    )
+
+    assert record["max_age_minutes"] == 10
+    assert record["data"]["max_age_minutes"] == 10
+    assert record["data"]["status"] == "source_credential"
+    # Render legs were skipped due to shared root cause (source_credential)
+    assert record["image"]["max_age_minutes"] == 10
+    assert record["image"]["attempted"] is False
+    assert record["image"]["status"] == "source_credential"
+    assert record["svg"]["max_age_minutes"] == 10
+    assert record["svg"]["attempted"] is False
+    assert record["svg"]["status"] == "source_credential"
+
+
+def test_server_rejection_of_max_age_remains_a_failure_and_never_retries_without_parameter(tmp_path):
+    """Invariant: if the server rejects a request with maxAge, it fails loudly and never strips the param."""
+    server_rejection = (
+        "<error code='400000'><summary>Bad Request</summary><detail>Invalid parameter: maxAge</detail></error>"
+    )
+    session = FakeSession(
+        [
+            (400, server_rejection, {}),
+        ]
+    )
+    view = {"id": DASH_LUID, "name": "Sales", "workbook": {"id": "wb-1"}}
+    record = oracle.capture_view(
+        session,
+        view,
+        tmp_path,
+        frozenset(),
+        None,
+        max_age=1,
+    )
+
+    assert record["data"]["status"] == "failed"
+    # Ensure there was exactly 1 call and it had maxAge=1 (no second call without maxAge)
+    assert len(session.calls) == 1
+    assert "maxAge=1" in session.calls[0]
