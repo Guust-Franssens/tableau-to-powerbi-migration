@@ -42,15 +42,15 @@ def is_self_contained(target: Path) -> bool:
 
 
 def is_package_target(target: Path) -> bool:
-    """Whether ``target`` is a package target (flat, nested, or structurally packaged).
+    """Whether ``target`` is a package target (flat, nested, or explicitly marked).
 
-    A package-shaped target (flat ``.../packages/<Unit>``, nested ``.../packages/<batch>/<Unit>``,
-    or structurally containing ``fabric/``) must evaluate only its own local evidence and must not
-    inherit ancestor evidence even if incomplete (missing ``package-manifest.json`` or local evidence).
+    A package-shaped target (flat ``.../packages/<Unit>`` or nested
+    ``.../packages/<batch>/<Unit>``) must evaluate only its own local evidence and must not inherit
+    ancestor evidence even if incomplete (missing ``package-manifest.json`` or local evidence).
+    ``fabric/`` alone is not a package signal: ordinary migration units and bundle roots carry it
+    too and still need to discover run-level evidence.
     """
     if is_self_contained(target):
-        return True
-    if (target / "fabric").is_dir():
         return True
     try:
         resolved = target.resolve()
