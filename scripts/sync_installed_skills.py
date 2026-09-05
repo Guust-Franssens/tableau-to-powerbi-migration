@@ -34,19 +34,143 @@ from __future__ import annotations
 
 import argparse
 import filecmp
+import io
+import os
 import shutil
 import subprocess
 import sys
+import tarfile
+import tempfile
+from dataclasses import dataclass
 from pathlib import Path
-
-from build_plugin import PLUGIN_NAME
-from skill_plugin_source import DEFAULT_INSTALL_HINT, PLUGIN_ROOT_ENV, discover_skill_plugin
 
 REPO = Path(__file__).resolve().parent.parent
 REFERENCE_BUILD = REPO / "_build" / "skill-plugin-reference"
+DEFAULT_SOURCE_REF = "origin/master"
+PLUGIN_ROOT_ENV = "POWERBI_SKILLS_PLUGIN_ROOT"
+DEFAULT_INSTALL_HINT = (
+    "Install it once between sessions: copilot plugin marketplace add Guust-Franssens/powerbi-playbook "
+    "&& copilot plugin install powerbi-playbook@powerbi-playbook-collection"
+)
 
 
-def build_reference_copy(workdir: Path) -> Path:
+class SourceRefError(RuntimeError):
+    """The requested publication source is not a verified merged/default-branch ref."""
+
+
+@dataclass(frozen=True)
+class ReferenceCopy:
+    """Generated reference skill tree and the source it came from."""
+
+    skills_dir: Path
+    label: str
+
+
+@dataclass(frozen=True)
+class SkillPluginDiscovery:
+    """Discovery verdict for the installed skill plugin."""
+
+    status: str
+    plugin_root: Path | None
+    skills_dir: Path | None
+    candidates: tuple[Path, ...]
+    identity: str
+    install_hint: str
+    detail: str
+
+    @property
+    def ok(self) -> bool:
+        """Whether discovery identified exactly one usable plugin root."""
+        return self.status == "found"
+
+
+def _git(args: list[str], *, repo: Path | None = None) -> str:
+    """Run git in ``repo`` and return stdout, raising ``SourceRefError`` on failure."""
+    repo_root = REPO if repo is None else repo
+    result = subprocess.run(
+        ["git", "-C", str(repo_root), *args],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise SourceRefError(detail or f"git {' '.join(args)} failed with exit {result.returncode}")
+    return result.stdout.strip()
+
+
+def resolve_source_commit(source_ref: str) -> tuple[str, str]:
+    """Resolve the locally available remote-tracking ref used as the publication source."""
+    commit = _git(["rev-parse", "--verify", f"{source_ref}^{{commit}}"])
+    full_ref = _git(["rev-parse", "--symbolic-full-name", source_ref])
+    if not full_ref.startswith("refs/remotes/"):
+        raise SourceRefError(f"{source_ref!r} resolves to {full_ref!r}, not a remote-tracking default/merged ref")
+    _git(["cat-file", "-e", f"{commit}:.github/skills"])
+    _git(["cat-file", "-e", f"{commit}:scripts/build_plugin.py"])
+    default_commit = _git(["rev-parse", "--verify", f"{DEFAULT_SOURCE_REF}^{{commit}}"])
+    if commit != default_commit:
+        merged = subprocess.run(
+            ["git", "-C", str(REPO), "merge-base", "--is-ancestor", commit, default_commit],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if merged.returncode != 0:
+            raise SourceRefError(f"{source_ref!r} is not proven merged into {DEFAULT_SOURCE_REF!r}")
+    return commit, full_ref
+
+
+def _extract_ref(commit: str, destination: Path) -> None:
+    """Extract committed repository bytes for ``commit`` into ``destination``."""
+    destination.mkdir(parents=True)
+    _validate_source_tree(commit)
+    archive = subprocess.run(
+        ["git", "-C", str(REPO), "archive", "--format=tar", commit],
+        check=True,
+        capture_output=True,
+    )
+    with tarfile.open(fileobj=io.BytesIO(archive.stdout), mode="r:") as tar:
+        for member in tar:
+            rel = Path(member.name)
+            if rel.is_absolute() or ".." in rel.parts:
+                raise SourceRefError(f"git archive produced unsafe path {member.name!r}")
+            target = destination / rel
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+            elif member.isfile():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                extracted = tar.extractfile(member)
+                if extracted is None:
+                    raise SourceRefError(f"git archive could not extract {member.name!r}")
+                with extracted, target.open("wb") as output:
+                    shutil.copyfileobj(extracted, output)
+            elif member.issym() or member.islnk():
+                raise SourceRefError(f"git archive contains unsupported link entry {member.name!r}")
+            else:
+                raise SourceRefError(f"git archive contains unsupported entry {member.name!r}")
+
+
+def _validate_source_tree(commit: str) -> None:
+    """Reject selected-ref tree entries the filesystem copy cannot faithfully reproduce."""
+    result = subprocess.run(
+        ["git", "-C", str(REPO), "ls-tree", "-rz", "-r", commit],
+        check=False,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        raise SourceRefError(detail or f"git ls-tree failed for {commit}")
+    for record in result.stdout.split(b"\0"):
+        if not record:
+            continue
+        metadata, raw_path = record.split(b"\t", 1)
+        mode = metadata.split(b" ", 1)[0].decode("ascii", errors="replace")
+        if mode not in {"100644", "100755"}:
+            path = raw_path.decode("utf-8", errors="replace")
+            raise SourceRefError(f"git tree contains unsupported mode {mode} at {path!r}")
+
+
+def _build_reference_from(workdir: Path, repo_root: Path) -> Path:
     """Generate the canonical bundles with build_plugin.py, so this script defines no layout itself.
 
     Reusing the generator is the point: if it ever changes what ships (a new bundle, a renamed
@@ -54,15 +178,31 @@ def build_reference_copy(workdir: Path) -> Path:
     definition of "what the plugin contains".
     """
     subprocess.run(
-        [sys.executable, str(REPO / "scripts" / "build_plugin.py"), "--out", str(workdir)],
+        [sys.executable, str(repo_root / "scripts" / "build_plugin.py"), "--out", str(workdir)],
         check=True,
         capture_output=True,
         text=True,
     )
-    built = workdir / "plugins" / PLUGIN_NAME / "skills"
-    if not built.is_dir():
-        raise SystemExit(f"build_plugin.py did not produce {built}")
-    return built
+    built = sorted(path for path in workdir.glob("plugins/*/skills") if path.is_dir())
+    if len(built) != 1:
+        raise SystemExit(f"build_plugin.py produced {len(built)} plugin skills directories under {workdir}")
+    return built[0]
+
+
+def build_reference_copy(
+    workdir: Path, *, source_ref: str = DEFAULT_SOURCE_REF, from_worktree: bool = False
+) -> ReferenceCopy:
+    """Build reference bundles from a verified source ref, or from the worktree by explicit opt-in."""
+    if from_worktree:
+        head = _git(["rev-parse", "--verify", "HEAD"])
+        skills_dir = _build_reference_from(workdir / "reference", REPO)
+        return ReferenceCopy(skills_dir, f"WORKTREE {REPO} at HEAD {head}")
+
+    commit, full_ref = resolve_source_commit(source_ref)
+    source = workdir / "source"
+    _extract_ref(commit, source)
+    skills_dir = _build_reference_from(workdir / "reference", source)
+    return ReferenceCopy(skills_dir, f"{full_ref} at {commit}")
 
 
 def diff_tree(src: Path, dst: Path) -> tuple[list[Path], list[Path]]:
@@ -86,35 +226,162 @@ def diff_tree(src: Path, dst: Path) -> tuple[list[Path], list[Path]]:
     return changed, extra
 
 
-def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-branches
+def _identity_from_root(plugin_root: Path) -> str:
+    plugin = plugin_root.name
+    marketplace = plugin_root.parent.name
+    if marketplace == "installed-plugins":
+        return plugin
+    return f"{plugin}@{marketplace}"
+
+
+def _normalise_plugin_root(path: Path) -> Path:
+    resolved = path.expanduser().resolve()
+    if resolved.name == "skills":
+        return resolved.parent
+    return resolved
+
+
+def _carries_reference_skill(skills_dir: Path, skill_names: tuple[str, ...]) -> bool:
+    return any((skills_dir / skill / "SKILL.md").is_file() for skill in skill_names)
+
+
+# pylint: disable-next=too-many-return-statements
+def discover_skill_plugin(
+    skill_names: tuple[str, ...],
+    *,
+    plugin_root_override: Path | None = None,
+) -> SkillPluginDiscovery:
+    """Find the installed plugin carrying the ref-built shipped skill bundles."""
+    if plugin_root_override:
+        plugin_root = _normalise_plugin_root(plugin_root_override)
+        skills_dir = plugin_root / "skills"
+        if not skills_dir.is_dir():
+            return SkillPluginDiscovery(
+                status="missing",
+                plugin_root=plugin_root,
+                skills_dir=skills_dir,
+                candidates=(),
+                identity=_identity_from_root(plugin_root),
+                install_hint=f"{PLUGIN_ROOT_ENV} points at {plugin_root}, but {skills_dir} does not exist.",
+                detail=f"override has no skills directory: {skills_dir}",
+            )
+        return SkillPluginDiscovery(
+            status="found",
+            plugin_root=plugin_root,
+            skills_dir=skills_dir,
+            candidates=(plugin_root,),
+            identity=_identity_from_root(plugin_root),
+            install_hint=DEFAULT_INSTALL_HINT,
+            detail=f"override: {plugin_root}",
+        )
+
+    root = (Path.home() / ".copilot" / "installed-plugins").expanduser().resolve()
+    candidates = [
+        skills_dir.parent
+        for skills_dir in sorted(root.glob("*/*/skills"))
+        if skills_dir.is_dir() and _carries_reference_skill(skills_dir, skill_names)
+    ]
+    if len(candidates) == 1:
+        plugin_root = candidates[0]
+        return SkillPluginDiscovery(
+            status="found",
+            plugin_root=plugin_root,
+            skills_dir=plugin_root / "skills",
+            candidates=tuple(candidates),
+            identity=_identity_from_root(plugin_root),
+            install_hint=DEFAULT_INSTALL_HINT,
+            detail=f"found {plugin_root}",
+        )
+    if len(candidates) > 1:
+        return SkillPluginDiscovery(
+            status="multiple",
+            plugin_root=None,
+            skills_dir=None,
+            candidates=tuple(candidates),
+            identity="unknown",
+            install_hint="Remove or disable duplicate installed skill plugins so only one copy can shadow the repo.",
+            detail="MULTIPLE skill plugin installs: " + "; ".join(str(path) for path in candidates),
+        )
+    return SkillPluginDiscovery(
+        status="missing",
+        plugin_root=None,
+        skills_dir=None,
+        candidates=(),
+        identity="unknown",
+        install_hint=DEFAULT_INSTALL_HINT,
+        detail=f"no installed plugin under {root} carries any ref-built shipped skill bundle",
+    )
+
+
+def make_reference_workdir(base: Path | None = None) -> Path:
+    """Allocate a private reference directory for one sync invocation."""
+    root = REFERENCE_BUILD if base is None else base
+    root.parent.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix=f"{root.name}-", dir=root.parent))
+
+
+def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-branches,too-many-locals,too-many-return-statements,too-many-statements
     """Sync the installed bundles from the repo, or report drift under --check."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--check", action="store_true", help="report drift and exit 1; change nothing")
     parser.add_argument("--verbose", action="store_true", help="list every file")
+    parser.add_argument(
+        "--source-ref",
+        default=None,
+        help=f"remote-tracking merged/default-branch ref to publish from (default: {DEFAULT_SOURCE_REF})",
+    )
+    parser.add_argument(
+        "--from-worktree",
+        action="store_true",
+        help="DANGEROUS: publish/check this caller's possibly unmerged working tree instead of --source-ref",
+    )
     parser.add_argument(
         "--plugin-root",
         type=Path,
         help=f"explicit installed plugin root; also supported via {PLUGIN_ROOT_ENV}",
     )
     args = parser.parse_args(argv)
+    source_ref = args.source_ref or DEFAULT_SOURCE_REF
+    if args.from_worktree and args.source_ref is not None:
+        print("SYNC: ERROR - --from-worktree and --source-ref are mutually exclusive")
+        return 5
 
-    discovery = discover_skill_plugin(plugin_root_override=args.plugin_root)
-    if discovery.status == "multiple":
-        print("SYNC: ERROR - multiple installed plugins carry these skill bundles")
-        for candidate in discovery.candidates:
-            print(f"      {candidate}")
-        print("      Remove the duplicate; otherwise one copy can silently shadow another.")
-        return 4
-    if not discovery.ok or not discovery.skills_dir:
-        print(f"SYNC: ERROR - plugin not installed ({discovery.detail})")
-        print(f"      {discovery.install_hint or DEFAULT_INSTALL_HINT}")
-        return 2
-
-    installed = discovery.skills_dir
-    if REFERENCE_BUILD.exists():
-        shutil.rmtree(REFERENCE_BUILD)
+    reference_build = make_reference_workdir()
     try:
-        src = build_reference_copy(REFERENCE_BUILD)
+        if args.from_worktree:
+            print("SYNC: WORKTREE SOURCE - explicit --from-worktree is serving unmerged local bytes")
+        try:
+            reference = build_reference_copy(
+                reference_build,
+                source_ref=source_ref,
+                from_worktree=args.from_worktree,
+            )
+        except SourceRefError as exc:
+            print(f"SYNC: ERROR - cannot verify publication source {source_ref!r}")
+            print(f"      {exc}")
+            print(
+                "      Refusing to fall back to the caller's working tree; use --from-worktree explicitly to test it."
+            )
+            return 5
+        src = reference.skills_dir
+        print(f"SYNC: SOURCE - {reference.label}")
+        skill_names = tuple(path.name for path in sorted(src.iterdir()) if path.is_dir())
+        plugin_root_override = args.plugin_root or (
+            Path(os.environ[PLUGIN_ROOT_ENV]) if os.environ.get(PLUGIN_ROOT_ENV) else None
+        )
+        discovery = discover_skill_plugin(skill_names, plugin_root_override=plugin_root_override)
+        if discovery.status == "multiple":
+            print("SYNC: ERROR - multiple installed plugins carry these skill bundles")
+            for candidate in discovery.candidates:
+                print(f"      {candidate}")
+            print("      Remove the duplicate; otherwise one copy can silently shadow another.")
+            return 4
+        if not discovery.ok or not discovery.skills_dir:
+            print(f"SYNC: ERROR - plugin not installed ({discovery.detail})")
+            print(f"      {discovery.install_hint or DEFAULT_INSTALL_HINT}")
+            return 2
+
+        installed = discovery.skills_dir
         changed, extra = diff_tree(src, installed)
 
         if not changed and not extra:
@@ -151,8 +418,8 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-bran
         print("      copy in memory. New sessions (and subagents they spawn) get this one.")
         return 0
     finally:
-        if REFERENCE_BUILD.exists():
-            shutil.rmtree(REFERENCE_BUILD)
+        if reference_build.exists():
+            shutil.rmtree(reference_build)
 
 
 if __name__ == "__main__":
