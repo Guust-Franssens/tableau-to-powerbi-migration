@@ -42,12 +42,14 @@ import tarfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from build_plugin import PLUGIN_NAME
-from skill_plugin_source import DEFAULT_INSTALL_HINT, PLUGIN_ROOT_ENV, discover_skill_plugin
-
 REPO = Path(__file__).resolve().parent.parent
 REFERENCE_BUILD = REPO / "_build" / "skill-plugin-reference"
 DEFAULT_SOURCE_REF = "origin/master"
+PLUGIN_ROOT_ENV = "POWERBI_SKILLS_PLUGIN_ROOT"
+DEFAULT_INSTALL_HINT = (
+    "Install it once between sessions: copilot plugin marketplace add Guust-Franssens/powerbi-playbook "
+    "&& copilot plugin install powerbi-playbook@powerbi-playbook-collection"
+)
 
 
 class SourceRefError(RuntimeError):
@@ -60,6 +62,24 @@ class ReferenceCopy:
 
     skills_dir: Path
     label: str
+
+
+@dataclass(frozen=True)
+class SkillPluginDiscovery:
+    """Discovery verdict for the installed skill plugin."""
+
+    status: str
+    plugin_root: Path | None
+    skills_dir: Path | None
+    candidates: tuple[Path, ...]
+    identity: str
+    install_hint: str
+    detail: str
+
+    @property
+    def ok(self) -> bool:
+        """Whether discovery identified exactly one usable plugin root."""
+        return self.status == "found"
 
 
 def _git(args: list[str], *, repo: Path | None = None) -> str:
@@ -138,10 +158,10 @@ def _build_reference_from(workdir: Path, repo_root: Path) -> Path:
         capture_output=True,
         text=True,
     )
-    built = workdir / "plugins" / PLUGIN_NAME / "skills"
-    if not built.is_dir():
-        raise SystemExit(f"build_plugin.py did not produce {built}")
-    return built
+    built = sorted(path for path in workdir.glob("plugins/*/skills") if path.is_dir())
+    if len(built) != 1:
+        raise SystemExit(f"build_plugin.py produced {len(built)} plugin skills directories under {workdir}")
+    return built[0]
 
 
 def build_reference_copy(
@@ -183,6 +203,92 @@ def diff_tree(src: Path, dst: Path) -> tuple[list[Path], list[Path]]:
     return changed, extra
 
 
+def _identity_from_root(plugin_root: Path) -> str:
+    plugin = plugin_root.name
+    marketplace = plugin_root.parent.name
+    if marketplace == "installed-plugins":
+        return plugin
+    return f"{plugin}@{marketplace}"
+
+
+def _normalise_plugin_root(path: Path) -> Path:
+    resolved = path.expanduser().resolve()
+    if resolved.name == "skills":
+        return resolved.parent
+    return resolved
+
+
+def _carries_reference_skill(skills_dir: Path, skill_names: tuple[str, ...]) -> bool:
+    return any((skills_dir / skill / "SKILL.md").is_file() for skill in skill_names)
+
+
+def discover_skill_plugin(
+    skill_names: tuple[str, ...],
+    *,
+    plugin_root_override: Path | None = None,
+) -> SkillPluginDiscovery:
+    """Find the installed plugin carrying the ref-built shipped skill bundles."""
+    if plugin_root_override:
+        plugin_root = _normalise_plugin_root(plugin_root_override)
+        skills_dir = plugin_root / "skills"
+        if not skills_dir.is_dir():
+            return SkillPluginDiscovery(
+                status="missing",
+                plugin_root=plugin_root,
+                skills_dir=skills_dir,
+                candidates=(),
+                identity=_identity_from_root(plugin_root),
+                install_hint=f"{PLUGIN_ROOT_ENV} points at {plugin_root}, but {skills_dir} does not exist.",
+                detail=f"override has no skills directory: {skills_dir}",
+            )
+        return SkillPluginDiscovery(
+            status="found",
+            plugin_root=plugin_root,
+            skills_dir=skills_dir,
+            candidates=(plugin_root,),
+            identity=_identity_from_root(plugin_root),
+            install_hint=DEFAULT_INSTALL_HINT,
+            detail=f"override: {plugin_root}",
+        )
+
+    root = (Path.home() / ".copilot" / "installed-plugins").expanduser().resolve()
+    candidates = [
+        skills_dir.parent
+        for skills_dir in sorted(root.glob("*/*/skills"))
+        if skills_dir.is_dir() and _carries_reference_skill(skills_dir, skill_names)
+    ]
+    if len(candidates) == 1:
+        plugin_root = candidates[0]
+        return SkillPluginDiscovery(
+            status="found",
+            plugin_root=plugin_root,
+            skills_dir=plugin_root / "skills",
+            candidates=tuple(candidates),
+            identity=_identity_from_root(plugin_root),
+            install_hint=DEFAULT_INSTALL_HINT,
+            detail=f"found {plugin_root}",
+        )
+    if len(candidates) > 1:
+        return SkillPluginDiscovery(
+            status="multiple",
+            plugin_root=None,
+            skills_dir=None,
+            candidates=tuple(candidates),
+            identity="unknown",
+            install_hint="Remove or disable duplicate installed skill plugins so only one copy can shadow the repo.",
+            detail="MULTIPLE skill plugin installs: " + "; ".join(str(path) for path in candidates),
+        )
+    return SkillPluginDiscovery(
+        status="missing",
+        plugin_root=None,
+        skills_dir=None,
+        candidates=(),
+        identity="unknown",
+        install_hint=DEFAULT_INSTALL_HINT,
+        detail=f"no installed plugin under {root} carries any ref-built shipped skill bundle",
+    )
+
+
 def _is_relative_to(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)
@@ -204,7 +310,7 @@ def destination_is_safe(root: Path, rel: Path, *, writing: bool) -> bool:
             return False
     if not _is_relative_to(target.parent.resolve(), root_resolved):
         return False
-    if writing and target.is_symlink():
+    if target.is_symlink():
         return False
     if writing and target.exists() and not _is_relative_to(target.resolve(), root_resolved):
         return False
@@ -246,19 +352,6 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-bran
         print("SYNC: ERROR - --from-worktree and --source-ref are mutually exclusive")
         return 5
 
-    discovery = discover_skill_plugin(plugin_root_override=args.plugin_root)
-    if discovery.status == "multiple":
-        print("SYNC: ERROR - multiple installed plugins carry these skill bundles")
-        for candidate in discovery.candidates:
-            print(f"      {candidate}")
-        print("      Remove the duplicate; otherwise one copy can silently shadow another.")
-        return 4
-    if not discovery.ok or not discovery.skills_dir:
-        print(f"SYNC: ERROR - plugin not installed ({discovery.detail})")
-        print(f"      {discovery.install_hint or DEFAULT_INSTALL_HINT}")
-        return 2
-
-    installed = discovery.skills_dir
     if REFERENCE_BUILD.exists():
         shutil.rmtree(REFERENCE_BUILD)
     try:
@@ -280,6 +373,20 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-bran
             return 5
         src = reference.skills_dir
         print(f"SYNC: SOURCE - {reference.label}")
+        skill_names = tuple(path.name for path in sorted(src.iterdir()) if path.is_dir())
+        discovery = discover_skill_plugin(skill_names, plugin_root_override=args.plugin_root)
+        if discovery.status == "multiple":
+            print("SYNC: ERROR - multiple installed plugins carry these skill bundles")
+            for candidate in discovery.candidates:
+                print(f"      {candidate}")
+            print("      Remove the duplicate; otherwise one copy can silently shadow another.")
+            return 4
+        if not discovery.ok or not discovery.skills_dir:
+            print(f"SYNC: ERROR - plugin not installed ({discovery.detail})")
+            print(f"      {discovery.install_hint or DEFAULT_INSTALL_HINT}")
+            return 2
+
+        installed = discovery.skills_dir
         unsafe = unsafe_destination_paths(src, installed)
         if unsafe:
             print(f"SYNC: ERROR - unsafe destination path: {unsafe[0].as_posix()}")

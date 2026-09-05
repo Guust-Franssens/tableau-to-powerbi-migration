@@ -78,6 +78,25 @@ def test_default_check_uses_origin_master_not_dirty_feature_worktree(
     assert "IN_SYNC" in output
 
 
+def test_default_check_uses_origin_master_build_metadata_not_worktree_edit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _fixture_repo(tmp_path, monkeypatch)
+    plugin_root = _build_installed_from(repo, tmp_path)
+
+    build_script = repo / "scripts" / "build_plugin.py"
+    build_script.write_text(
+        build_script.read_text(encoding="utf-8").replace('PLUGIN_NAME = "powerbi-playbook"', 'PLUGIN_NAME = "evil"'),
+        encoding="utf-8",
+    )
+
+    assert sync.main(["--check", "--plugin-root", str(plugin_root)]) == 0
+
+    output = capsys.readouterr().out
+    assert "refs/remotes/origin/master" in output
+    assert "IN_SYNC" in output
+
+
 def test_missing_origin_ref_refuses_without_worktree_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -197,6 +216,26 @@ def test_write_refuses_matching_symlinked_skill_directory_before_stale_removal(
     assert "unsafe destination path" in output
     assert first_dir.is_symlink()
     assert redirect_dir.is_dir()
+
+
+def test_write_refuses_stale_symlink_leaf_instead_of_unlinking_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _fixture_repo(tmp_path, monkeypatch)
+    plugin_root = _build_installed_from(repo, tmp_path)
+    target_dir = plugin_root / "skills" / "redirect-target"
+    target_dir.mkdir()
+    stale_link = plugin_root / "skills" / "stale-skill"
+    try:
+        stale_link.symlink_to(target_dir, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable in this environment: {exc}")
+
+    assert sync.main(["--plugin-root", str(plugin_root)]) == 6
+
+    output = capsys.readouterr().out
+    assert "unsafe stale path" in output
+    assert stale_link.is_symlink()
 
 
 def test_from_worktree_is_explicit_and_reports_unmerged_drift(
