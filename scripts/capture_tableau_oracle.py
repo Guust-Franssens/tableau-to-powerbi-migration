@@ -561,9 +561,7 @@ class TableauSession:
                 # Response data, so both callers POP it before merging the rest into a leg record.
                 # It rides in `stats` so every caller keeps unpacking three values.
                 stats["content_type"] = header_value(headers, "Content-Type")
-                stats["response_framing"] = header_value(headers, RESPONSE_FRAMING_HEADER) or response_framing(
-                    headers
-                )
+                stats["response_framing"] = header_value(headers, RESPONSE_FRAMING_HEADER) or response_framing(headers)
                 content_encoding = header_value(headers, RESPONSE_CONTENT_ENCODING_HEADER)
                 stats["content_encoding"] = content_encoding or response_content_encoding(headers)
                 return payload, elapsed, stats

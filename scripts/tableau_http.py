@@ -156,9 +156,7 @@ def response_framing(headers: Any, *, decoded_chunked: bool = False) -> str:
         return FRAMING_CONFLICTING_CONTENT_LENGTH
     if lengths:
         return (
-            FRAMING_CONTENT_LENGTH
-            if lengths[0].isascii() and lengths[0].isdigit()
-            else FRAMING_INVALID_CONTENT_LENGTH
+            FRAMING_CONTENT_LENGTH if lengths[0].isascii() and lengths[0].isdigit() else FRAMING_INVALID_CONTENT_LENGTH
         )
     return FRAMING_CLOSE_DELIMITED
 

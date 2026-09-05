@@ -1201,9 +1201,7 @@ def test_loopback_exact_content_length_csv_counts_as_numeric_evidence(tmp_path):
         ),
     ],
 )
-def test_loopback_unsupported_or_unknowable_csv_framing_is_retained_not_evidence(
-    tmp_path, headers, wire_body, reason
-):
+def test_loopback_unsupported_or_unknowable_csv_framing_is_retained_not_evidence(tmp_path, headers, wire_body, reason):
     code, manifest = _loopback_capture(tmp_path, headers, wire_body)
 
     data = manifest["views"][0]["data"]
