@@ -3872,7 +3872,9 @@ def test_caption_accounting_powershell(tmp_path: Path) -> None:
 
     # 8. mixed-case unknown/password caption with duplicate title in content
     w_mixed_pwd = _window(
-        Title="  Please Enter Your Password  ", Texts=["PLEASE ENTER YOUR PASSWORD", "Evaluating", "Cancel"], OwnerEnabled=False
+        Title="  Please Enter Your Password  ",
+        Texts=["PLEASE ENTER YOUR PASSWORD", "Evaluating", "Cancel"],
+        OwnerEnabled=False,
     )
     res_p_mixed_t0 = classify(tmp_path, [w_mixed_pwd])
     assert res_p_mixed_t0["kind"] == "mixed-content"
