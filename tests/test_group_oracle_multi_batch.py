@@ -51,6 +51,12 @@ def _view(
 
     `updated_at=None` is still reachable on purpose, because a server that omits `updatedAt` really
     does produce it, and the fail-closed handling of that case is pinned rather than assumed.
+
+    ⚠️ `certification` is the same claim again, for #480: the writer now stamps it, and a data leg
+    WITHOUT one is a pre-#480 capture whose `path` `load_manifest` withholds. Omitting it here would
+    make every scenario in this file a legacy-manifest scenario -- which is the shape
+    `test_group_oracle_by_workbook.py` exercises deliberately, not the cross-batch merge this file is
+    about.
     """
     view: dict = {
         "view_luid": luid,
@@ -60,7 +66,13 @@ def _view(
         "captured_at": captured_at,
         "updated_at": updated_at,
         "data": (
-            {"status": "ok", "path": f"data/{luid}.csv", "row_count": 1, "bytes": len(CSV)}
+            {
+                "status": "ok",
+                "certification": "certified",
+                "path": f"data/{luid}.csv",
+                "row_count": 1,
+                "bytes": len(CSV),
+            }
             if data == "ok"
             else {"status": data, "error": "HTTP 0", "detail": "read operation timed out"}
         ),
@@ -1999,7 +2011,6 @@ UNTYPED_ON_PURPOSE = {
     "schema": "matched for equality against CAPTURE_SCHEMA",
     "views": "must be a list of objects; checked before anything is read out of it",
     "view_luid": "identity, typed by _is_view_identity and refused as UnidentifiedCaptureView",
-    "data": "a render leg; legs are swept from RENDER_LEGS, so naming them here would be a second list",
     # Read from THIS script's own output, never from an input capture manifest.
     "merge_order_ties": "written by merge_batches, read back for the report",
     "merge_stale_candidates": "written by merge_batches, read back for the report",
@@ -2009,7 +2020,13 @@ UNTYPED_ON_PURPOSE = {
     # Read, but no JSON type it could carry changes the answer.
     "reference_required": "read for truthiness only -- every JSON type is meaningfully truthy or not",
     "rest_api_version": "copied verbatim into the per-workbook manifest, never interpreted",
-    "row_count": "compared with == 0, which is total over every JSON type",
+    # ⚠️ `data` and `row_count` used to be exempted here, each with the reason its own literal read
+    # could not be decided by a type (`data` swept from RENDER_LEGS; `row_count` compared with `== 0`,
+    # total over every JSON type). Since #480 neither is read by a literal `.get` in this module at
+    # all -- `subset_manifest` asks `tableau_oracle_manifest.empty_classification`, the ONE predicate
+    # the capture-wide manifest also counts with -- so an exemption for them would describe code that
+    # moved. Nothing is un-enforced by their removal: they were exemptions, never `_LEG_TYPES` entries,
+    # and if a literal read returns the `unaccounted` half below demands they be declared again.
 }
 
 

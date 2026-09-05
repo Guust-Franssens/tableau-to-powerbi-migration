@@ -36,6 +36,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PACKAGER = REPO_ROOT / "scripts" / "package_unit.py"
 MECHANISM = REPO_ROOT / "scripts" / "manifest_scope.py"
+DETECTOR = REPO_ROOT / "scripts" / "host_paths.py"
 CEILINGS = REPO_ROOT / "scripts" / "check_path_ceiling.py"
 SUITES = (REPO_ROOT / "tests" / "test_package_unit.py", REPO_ROOT / "tests" / "test_package_unit_gates.py")
 
@@ -105,7 +106,8 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
     (
         "handover: stop redacting absolute host paths by value",
         MECHANISM,
-        '    if isinstance(payload, str) and HOST_PATH_RE.match(payload):\n        return REDACTED, [prefix or "."]',
+        "    if isinstance(payload, str) and discloses_host_location(payload):"
+        '\n        return REDACTED, [prefix or "."]',
         '    if False:  # noqa\n        return REDACTED, [prefix or "."]',
         ["test_an_absolute_path_anywhere_in_the_handover_slice_is_redacted"],
     ),
@@ -120,16 +122,130 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
     (
         "capture path: accept an absolute path from the manifest",
         PACKAGER,
-        '    if candidate.is_absolute() or candidate.drive or declared.startswith(("\\\\\\\\", "/")):',
-        "    if False:  # noqa",
-        ["test_an_absolute_path_is_refused_and_never_reaches_the_manifest"],
+        # #480 round 4 moved this predicate into `_declares_non_relative` so `retained_path` meets
+        # the same check as `path`; the snippet follows it rather than being retired.
+        #
+        # ⚠️ Round 7 RE-ANCHORED it. `_declares_unsafe_path` now also asks a CONTAINMENT question,
+        # and `tmp_path` on Windows sits under the runner's own profile - so the old anchor's
+        # absolute path is refused by the new layer with the identical "non-relative" diagnosis and
+        # the mutation SURVIVED against it. What only the parse half answers is a NON-PROFILE
+        # location (`<drive>:\builds\...`), which is what the new anchor drives. Strictly stronger:
+        # it isolates this branch instead of sharing an input with the guard beside it.
+        #
+        # ⚠️ Round 9 RE-ANCHORED it AGAIN, for the same reason one layer up, and the pattern is the
+        # point: `discloses_host_location` refuses every ROOTED location, build drives included, so
+        # a build drive no longer isolates anything either. What is left to this branch alone is a
+        # DRIVE-RELATIVE path (`<drive>:secret.png` - a drive with no root separator), which no
+        # grammar of absolute locations can see because nothing about it is rooted. Each wider layer
+        # costs one re-isolation; skipping it leaves the branch unfalsifiable and green.
+        '    return candidate.is_absolute() or bool(candidate.drive) or declared.startswith(("\\\\\\\\", "/"))',
+        "    return False  # noqa",
+        ["test_a_DRIVE_RELATIVE_path_is_refused_by_the_PARSE_half_alone"],
     ),
     (
-        "capture path: echo the declared path back into the packaged manifest",
+        # ⚠️ REPLACES "capture path: echo the declared path back into the packaged manifest" (#480
+        # round 4). That mutation is now genuinely unobservable: `_contain_declared_paths` runs on
+        # every returned leg, so re-assigning `rewritten["path"] = leg["path"]` is scrubbed straight
+        # back to `REFUSED_PATH` and no test can see it. Keeping it would have reported a SURVIVOR
+        # that is really defence in depth. The sole mitigation is now the scrub itself, so that is
+        # what this mutation removes -- and it is a strictly stronger claim, because the scrub also
+        # covers the field name (`retained_path`) that walked around the old guard entirely.
+        #
+        # ⚠️ Round 5 RE-ANCHORED it. The document sweep in `_scope_oracle_manifest` now contains the
+        # same values a second time, so the two former anchors -- which read the packaged MANIFEST --
+        # survive this mutation on the strength of that sweep alone. What only the leg guard produces
+        # is the DIAGNOSIS: neutered, `_copy_leg` returns no reason, so no `ORACLE_OMISSION` line is
+        # written and the operator cannot tell a hostile manifest from a silent one.
+        "capture path: ship any declared string, however non-relative",
         PACKAGER,
-        '        rewritten["path"] = REFUSED_PATH',
-        '        rewritten["path"] = leg["path"]',
-        ["test_an_absolute_path_is_refused_and_never_reaches_the_manifest"],
+        "    contained, refused = _contain_unsafe_strings(leg)",
+        "    contained, refused = leg, []  # noqa",
+        ["test_a_refused_nested_string_is_DIAGNOSED_not_silently_scrubbed"],
+    ),
+    # ---- round-5 finding: containment must be recursive, and cover the whole document -----------
+    (
+        # Round 3 guarded a NAME, round 4 guarded a top-level VALUE, and a string one level down --
+        # inside an allowlisted `SCALAR_LIST` -- walked around both. Removing the container descent
+        # restores exactly that: `views` itself is a list, so nothing under it is visited at all.
+        "containment: stop descending into lists and tuples, so a nested string ships verbatim",
+        PACKAGER,
+        "    if isinstance(value, (list, tuple)):",
+        "    if False:  # noqa",
+        [
+            "test_a_string_INSIDE_a_retained_container_cannot_ship_a_host_path",
+            "test_a_VIEW_LEVEL_string_cannot_ship_a_host_path_either",
+            "test_the_containment_walk_reaches_EVERY_depth_and_container",
+        ],
+    ),
+    (
+        # The other half of the round-5 boundary: the four copied legs are not the document. With the
+        # sweep gone, `views[].flags[]` and `views[].view_name` meet no check on any path.
+        #
+        # ⚠️ Round 7 RE-ANCHORED the SNIPPET, not the claim: the sweep moved to after `stamp_scope`
+        # so that nothing is appended to the document behind it, and it now sweeps `stamped`.
+        "oracle manifest: guard only the copied legs, not the packaged document",
+        PACKAGER,
+        "    stamped, refused = _contain_unsafe_strings(stamped)",
+        "    refused = []  # noqa",
+        ["test_a_VIEW_LEVEL_string_cannot_ship_a_host_path_either"],
+    ),
+    (
+        # The name is untrusted too, and it leaves the manifest for `handover.md` and
+        # `package-manifest.json`, which the document sweep never sees.
+        #
+        # ⚠️ Round 6 RE-ANCHORED the snippet, not the claim: containment moved from the naming pair
+        # to the whole view, at the source, so `naming, _ = _contain_unsafe_strings([...])` no longer
+        # exists to mutate. Reading the RAW view back is the strictly larger version of the same
+        # edit, and it still has to kill the round-5 name anchor.
+        "packaging: read the RAW view, uncontained, as rounds 3-5 did",
+        PACKAGER,
+        "        view = _contain_unsafe_strings(raw_view)[0]",
+        "        view = raw_view  # noqa",
+        [
+            "test_a_refused_object_NAME_does_not_leak_into_the_other_two_artifacts",
+            "test_the_ORACLE_RESULT_itself_is_contained_not_only_the_scoped_manifest",
+        ],
+    ),
+    # ---- round-6 finding: contain the oracle RESULT at its source, not at a fifth consumer -------
+    (
+        # The precise round-5 behaviour, restored: the NAME contained and nothing else. It proves the
+        # new anchors need whole-view containment rather than one more field, which is exactly what
+        # rounds 3, 4 and 5 each supplied and each was followed by. The round-5 anchors SURVIVE this
+        # by design - `oracle-manifest.json` is still swept - and that is the finding in one line.
+        "packaging: contain only the object NAME, as round 5 did, leaving the LUID and type raw",
+        PACKAGER,
+        "        view = _contain_unsafe_strings(raw_view)[0]",
+        '        view = {**raw_view, "view_name": _contain_unsafe_strings(raw_view.get("view_name"))[0]}  # noqa',
+        [
+            "test_the_ORACLE_RESULT_itself_is_contained_not_only_the_scoped_manifest",
+            "test_a_refused_view_LUID_does_not_reach_an_OMISSION_row",
+        ],
+    ),
+    (
+        # Moving containment to the source is only safe because the walk is IDEMPOTENT: a later
+        # reader must still be able to see that a value was refused. Neutered, the sentinel reads as
+        # an ordinary string, `_copy_leg` stops diagnosing and `scope.refused_fields` empties - the
+        # operator loses both the WHY and the WHERE while the value stays contained, which is the
+        # silent-scrub failure round 5 named.
+        "containment: treat an already-refused string as ordinary, retiring the diagnosis",
+        PACKAGER,
+        '        if value == REFUSED_PATH:\n            return value, [prefix or "."]',
+        "        if False:  # noqa\n            pass",
+        [
+            "test_a_refused_nested_string_is_DIAGNOSED_not_silently_scrubbed",
+            "test_a_VIEW_LEVEL_string_cannot_ship_a_host_path_either",
+        ],
+    ),
+    (
+        # The consumer enumeration's second document: `source-provenance.json` feeds
+        # `shippable_provenance`, `render_handover` and `workbook_identity`'s conflict sentence, and
+        # nothing downstream sweeps any of them. The sentence is why an artifact-walking assertion is
+        # not enough on its own - the leak stops being a string VALUE the moment it is quoted.
+        "packaging: read source-provenance.json raw, so the identity quotes it verbatim",
+        PACKAGER,
+        "    entries = _contain_unsafe_strings(entries)[0]",
+        "    entries = list(entries)  # noqa",
+        ["test_the_WORKBOOK_IDENTITY_document_is_contained_at_its_own_intake_too"],
     ),
     (
         "project: report one dropped path per ROW instead of one per field",
@@ -137,6 +253,122 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
         "        return kept_rows, sorted(set(dropped))",
         "        return kept_rows, dropped",
         ["test_one_unknown_field_across_many_rows_is_reported_once"],
+    ),
+    # ---- round-7 finding B1: the predicate asked "IS this a path", which a prefix defeats ---------
+    (
+        # The exact round-7 predicate, restored: a parse of the whole string, so `HTTP 503: ` in
+        # front of a host path -- which is how `classify_export_error` writes `retry_reasons[]` --
+        # makes it answer False. The positive-control anchor rides along deliberately: it must NOT
+        # fail here, and if a future edit makes the predicate broader instead of narrower it is the
+        # test that says so.
+        "containment: ask 'IS this a path' again, so a host path wrapped in prose ships",
+        PACKAGER,
+        "    return (\n"
+        "        _declares_non_relative(declared) or discloses_host_location(declared) "
+        'or ".." in PureWindowsPath(declared).parts\n'
+        "    )",
+        '    return _declares_non_relative(declared) or ".." in PureWindowsPath(declared).parts  # noqa',
+        ["test_a_host_path_WRAPPED_IN_PROSE_is_refused_not_only_a_bare_one"],
+    ),
+    (
+        # The same sub-class on the handover slice's own guard. Round 7's `HOST_PATH_RE` was anchored
+        # and is now deleted, so this restores the escape by narrowing the CONSUMER instead: one
+        # detector, three consumers, and narrowing any one of them reopens it one artifact over.
+        "handover: redact only what a PROFILE regex sees, so a build root in prose ships whole",
+        MECHANISM,
+        "    if isinstance(payload, str) and discloses_host_location(payload):",
+        "    if isinstance(payload, str) and discloses_host_path(payload):  # noqa",
+        ["test_a_host_path_WRAPPED_IN_PROSE_is_redacted_in_the_HANDOVER_slice_too"],
+    ),
+    # ---- round-9 leak 1: the predicate matched a SPELLING, not the property ----------------------
+    (
+        # The round-8 detector, restored at the DETECTOR rather than at a consumer: the shipping
+        # question narrows back to "is there a user profile in this text". Everything else in the
+        # pipeline is untouched, so what fails is exactly the class round 9 measured escaping -- a
+        # build drive, a UNC share, a POSIX root, and a real profile path re-spelled as an
+        # administrative share or as percent-encoding.
+        "detector: narrow the shipping question back to PROFILE paths only, as round 8 did",
+        DETECTOR,
+        "    if HOST_PROFILE_PATH_RE.search(text):\n        return True\n    return any(",
+        "    return HOST_PROFILE_PATH_RE.search(text) is not None\n    return any(  # noqa",
+        [
+            "test_a_NON_PROFILE_absolute_WRAPPED_IN_PROSE_is_refused_in_EVERY_SPELLING",
+            "test_a_host_path_WRAPPED_IN_PROSE_is_redacted_in_the_HANDOVER_slice_too",
+        ],
+    ),
+    (
+        # The normalisation half on its own. The grammar stays wide; only the alphabet-folding is
+        # removed, and that is enough on its own -- the grammar is written against ONE separator, so
+        # with nothing folding the alphabet first every Windows spelling walks out along with the
+        # percent-encoded one. That is the round-8 failure mode in one line: a wide grammar over an
+        # unnormalised string is still a spelling test.
+        "detector: ask the grammar without folding the alphabet first",
+        DETECTOR,
+        "for found in _HOST_LOCATION_RE.finditer(_normalised(text))",
+        "for found in _HOST_LOCATION_RE.finditer(text)  # noqa",
+        ["test_a_NON_PROFILE_absolute_WRAPPED_IN_PROSE_is_refused_in_EVERY_SPELLING"],
+    ),
+    # ---- round-9 leak 2: the handover slice's KEYS were never contained --------------------------
+    (
+        # Round 8's handover walk, restored: VALUES cleaned, KEYS carried raw. The slice ships WHOLE
+        # and is the agent's work queue, so a key is exactly as untrusted as a value -- which the
+        # packager's own manifest walk had already concluded one artifact and one round earlier.
+        "handover: clean VALUES but carry raw dictionary KEYS, as round 8 did",
+        MECHANISM,
+        "            safe_key, key_redacted = _redacted_key(key, out)",
+        "            safe_key, key_redacted = key, False  # noqa",
+        [
+            "test_an_untrusted_handover_KEY_is_redacted_like_a_value",
+            "test_the_handover_KEY_walk_reports_the_REDACTED_key_and_stays_idempotent",
+        ],
+    ),
+    (
+        # Redaction without collision disambiguation: two unsafe keys both land on one sentinel and
+        # `dict` keeps the last, so the agent's work queue silently loses a field. Containment that
+        # destroys data is not containment, which is why `tableau_env.scrub_tree` disambiguates and
+        # why both of its heirs copy the property rather than the code.
+        "handover: redact colliding keys onto ONE sentinel, losing every field but the last",
+        MECHANISM,
+        "    unique, suffix = REDACTED, 2\n    while unique in taken:\n"
+        '        unique, suffix = f"{REDACTED}#{suffix}", suffix + 1\n    return unique, True',
+        "    return REDACTED, True  # noqa",
+        ["test_the_handover_KEY_walk_reports_the_REDACTED_key_and_stays_idempotent"],
+    ),
+    # ---- round-7 finding B2: keys are untrusted too, and nothing may be appended after the sweep --
+    (
+        # The values-only walk, restored. The key then survives into `project()`, which names the
+        # field it just refused using that key and ships it in `scope.dropped_fields`.
+        "containment: clean VALUES but preserve raw dictionary KEYS, as round 7 did",
+        PACKAGER,
+        "            safe_key, key_refused = _contain_unsafe_key(key, kept)",
+        "            safe_key, key_refused = key, False  # noqa",
+        [
+            "test_an_untrusted_dictionary_KEY_is_contained_like_a_value",
+            "test_the_containment_walk_contains_KEYS_and_reports_the_CONTAINED_key",
+        ],
+    ),
+    (
+        # The diagnostic half: even with keys contained at the view intake, a TOP-LEVEL manifest key
+        # reaches `project()` raw. Building the dropped path from it puts the disclosure back into
+        # the record of the catch -- `tableau_env.scrub_tree`'s third property, restated.
+        "project: name a dropped field with its RAW, untrusted key",
+        MECHANISM,
+        "    return REDACTED if discloses_host_path(text) else text",
+        "    return text  # noqa",
+        ["test_NOTHING_is_appended_to_the_oracle_manifest_after_its_last_containment_pass"],
+    ),
+    (
+        # The STRUCTURAL claim, isolated. Not "delete the sweep" -- that would be caught by half the
+        # suite and would prove nothing about ordering. This restores the round-7 ORDER exactly: the
+        # document is swept, and then `scope` is appended to it. Everything else stays contained, so
+        # only the ordering anchor can fail.
+        "oracle manifest: sweep the document and THEN append `scope`, as round 7 did",
+        PACKAGER,
+        "    stamped, refused = _contain_unsafe_strings(stamped)",
+        '    _late = stamped.pop("scope")\n'
+        "    stamped, refused = _contain_unsafe_strings(stamped)\n"
+        '    stamped["scope"] = _late  # noqa',
+        ["test_NOTHING_is_appended_to_the_oracle_manifest_after_its_last_containment_pass"],
     ),
     # ---- over-trim: the opposite failure -------------------------------------------------------
     (

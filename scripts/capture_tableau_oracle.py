@@ -111,6 +111,16 @@ requested render was obtained (``render_unestablished``), because an unassessabl
 a clean one is the failure mode this whole capture exists to prevent.
 """
 
+# This module went over the 1200-line cap at the merge of #475 (the SVG version gate) and #480 (CSV
+# certification), not in either change alone: master sat at 1195 lines, five short of the cap, so the
+# first branch to integrate pays for both. The cap is a proxy for "this module does too much" and
+# that reading is fair here -- it carries a near-duplicate of the Tableau REST client
+# `assess_estate.py` also carries, and extracting that shared transport is the real fix. It is a
+# refactor of two files that four branches are editing concurrently, so it must not ride along with a
+# customer-defect fix. Trimming the explanatory comments to squeeze back under would trade documented
+# knowledge for a number, which is the wrong trade in this codebase. Suppressed deliberately.
+# pylint: disable=too-many-lines
+
 from __future__ import annotations
 
 import argparse
@@ -129,6 +139,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import tableau_render_capability as capability  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_view_types  # noqa: E402  # pylint: disable=wrong-import-position
 from tableau_payload_facts import (  # noqa: E402  # pylint: disable=wrong-import-position
+    CSV_CERTIFIED,
+    CSV_REFUSAL_DETAIL,
+    CSV_REFUSALS,
+    certify_csv,
     payload_is_complete,
     pdf_facts,
     png_dimensions,
@@ -152,6 +166,7 @@ from tableau_oracle_manifest import (  # noqa: E402  # pylint: disable=wrong-imp
     SVG_UNSUPPORTED_STATUS,
     SVG_VERSION_MARKER,
     CaptureRun,
+    data_leg_fields,
     log_progress,
     write_manifest,
 )
@@ -494,9 +509,11 @@ class TableauSession:
         what made the stated "at most one timeout" salvage bound false.
 
         Returns ``(body, elapsed_sec, stats)`` where ``stats`` records how much recovery was needed --
-        ``reauths``, ``retries`` and the reasons. Recovery is deliberately **recorded, not silent**:
-        a capture that quietly healed itself looks identical to one that never had a problem, which is
-        exactly how a partially-truncated result comes to be trusted.
+        ``reauths``, ``retries`` and the reasons -- plus the response's declared ``content_type``.
+        Recovery is deliberately **recorded, not silent**: a capture that quietly healed itself looks
+        identical to one that never had a problem, which is exactly how a partially-truncated result
+        comes to be trusted. ``content_type`` rides here because a CSV carries no signature, so the
+        declaration is the only thing that can certify a ``/data`` body as data.
 
         Raises :class:`ExportFailed` for anything not worth retrying, so a genuinely broken view is
         never recorded as an empty success.
@@ -527,7 +544,11 @@ class TableauSession:
                         f"between this process and Tableau is reflecting request data -- investigate "
                         f"the proxy/WAF in front of the site, and rotate the credential.",
                     )
-                return payload, elapsed, {"reauths": reauths, "retries": len(retries), "retry_reasons": retries}
+                stats = {"reauths": reauths, "retries": len(retries), "retry_reasons": retries}
+                # Response data, so both callers POP it before merging the rest into a leg record.
+                # It rides in `stats` so every caller keeps unpacking three values.
+                stats["content_type"] = header_value(headers, "Content-Type")
+                return payload, elapsed, stats
             raw = payload.decode("utf-8", "replace")
             # ONE call, with the redactor inside. `classify_export_error` classifies on the raw text
             # -- redaction is handed the human-chosen PAT NAME, and a short one mangles `401002` into
@@ -673,7 +694,7 @@ def capture_view(
         }
         return record
 
-    record["data"] = _capture_data(session, view_luid, out_dir / "data" / f"{stem}.csv", out_dir)
+    record["data"] = _capture_data(session, view_luid, out_dir, stem)
     _capture_renders(session, record, wants, _RenderTargets(out_dir, stem, api_overrides or {}))
     return record
 
@@ -839,23 +860,45 @@ def _salvage_exhausted(deadline: float, timeout: float) -> str:
     )
 
 
-def _capture_data(session: TableauSession, view_luid: str, path: Path, out_dir: Path) -> dict[str, Any]:
-    """The numeric oracle for one view: Tableau's own aggregated, display-formatted values."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _capture_data(session: TableauSession, view_luid: str, out_dir: Path, stem: str) -> dict[str, Any]:
+    """The numeric oracle for one view: Tableau's own aggregated, display-formatted values.
+
+    ⚠️ **An HTTP 200 is not evidence until the body is certified as CSV** (:func:`certify_csv`): a
+    refusal is ``format_mismatch``, with nothing written and no shape recorded. An uncertified but
+    successful body keeps ``ok`` and its bytes, written to ``unassessable/<stem>.bin`` under
+    :data:`RETAINED_PATH_KEY` -- never ``data/<stem>.csv``, never under ``path``, so no numeric
+    consumer can read it as evidence. Why it is structural, not another flag:
+    :func:`tableau_oracle_manifest.withhold_uncertified_evidence`.
+    """
     try:
         payload, elapsed, stats = session.export(f"/sites/{session.site_id}/views/{view_luid}/data")
     except ExportFailed as exc:
         return {"status": exc.kind, "error": str(exc), "detail": exc.detail}
+    certification = certify_csv(payload, stats.pop("content_type", None))
+    if certification in CSV_REFUSALS:
+        return {
+            "status": "format_mismatch",
+            "certification": certification,
+            "detail": CSV_REFUSAL_DETAIL[certification],
+            "bytes": len(payload),
+            "elapsed_sec": round(elapsed, 2),
+            **stats,
+        }
+    path, naming = data_leg_fields(out_dir, stem, certification)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(payload)
-    return {
+    record = {
         "status": "ok",
-        "path": str(path.relative_to(out_dir)).replace("\\", "/"),
+        "certification": certification,
+        **naming,
         "bytes": len(payload),
         "sha256": hashlib.sha256(payload).hexdigest(),
         "elapsed_sec": round(elapsed, 2),
         **stats,
-        **summarise_csv(payload),
     }
+    if certification == CSV_CERTIFIED:
+        record.update(summarise_csv(payload))
+    return record
 
 
 # Route per tier. `pdf` uses `type=Unspecified`, which sizes the page to the viz instead of a paper
@@ -948,6 +991,9 @@ def _capture_render(  # pylint: disable=too-many-locals
             record["cause"] = advice.cause
             record["remedy"] = advice.remedy
         return record
+    # Dropped, not merged, and deliberately not consulted: for a RENDER the payload settles the
+    # question by itself (`%PDF-`, the PNG signature, an `<svg>` root). The data leg is the opposite.
+    stats.pop("content_type", None)
     # HTTP 200 is not proof the requested format came back. An older server that does not recognise
     # `format=svg` can ignore the unknown parameter and return its default PNG -- and writing those
     # bytes to a `.svg` labelled `vector: true` manufactures exactly the false evidence this capture

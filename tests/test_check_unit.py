@@ -231,7 +231,14 @@ def _write_oracle_manifest(  # pylint: disable=too-many-arguments,too-many-posit
             _csv(unit / "_oracle" / data_path)
         record: dict[str, object] = {
             "view_name": name,
-            "data": {"status": "ok", "path": data_path, "row_count": 1} if data else {"status": "failed"},
+            # ⚠️ `certification` is not decoration. Since #480 round 3 a `row_count` alone no longer
+            # licenses an evidence `path` -- every pre-certification manifest carries one, so
+            # trusting it is a gate that never fires on real data -- and this fixture stands for a
+            # CURRENT, certified capture. `test_a_legacy_uncertified_record_is_not_numeric_evidence`
+            # holds the other end.
+            "data": {"status": "ok", "certification": "certified", "path": data_path, "row_count": 1}
+            if data
+            else {"status": "failed"},
             "image": {"status": "ok", "path": image_path} if images else {"status": "failed"},
         }
         if view_type is not None:
@@ -563,7 +570,13 @@ def test_typed_oracle_records_cover_same_named_dashboard_and_worksheet(tmp_path:
             "view_type": "worksheet",
             "workbook_luid": UNIT_LUID,
             "image": {"status": "ok", "path": image},
-            "data": {"status": "ok", "path": data, "row_count": 1},
+            # ⚠️ `certification` for the same reason `_write_oracle_manifest` writes it: since #480
+            # round 3 a `row_count` alone no longer licenses an evidence `path`, and `read_manifest`
+            # demotes an uncertified leg to `retained_path` -- so a hand-built record without one is
+            # a LEGACY capture, and would make this test assert the certification rule rather than
+            # the typed-resolution rule it exists for. The uncertified end is held, deliberately, by
+            # `test_a_legacy_uncertified_record_is_not_numeric_evidence`.
+            "data": {"status": "ok", "certification": "certified", "path": data, "row_count": 1},
         }
     )
     manifest_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -3965,6 +3978,34 @@ def test_a_worksheet_typed_record_cannot_certify_a_same_named_dashboard(tmp_path
     assert oracle["status"] == cu.STATUS_NOT_CHECKED
     assert oracle["visual_present"] == 0
     assert oracle["numeric_present"] == 0
+
+
+def test_a_legacy_uncertified_record_is_not_numeric_evidence(tmp_path: Path) -> None:
+    """#480 round 3, at `check_unit`'s numeric gate.
+
+    ⚠️ The record here is EXACTLY what `origin/master`'s capture wrote for every HTTP 200 -- a
+    `row_count` from `summarise_csv(payload)` and no `certification` -- so this is the shape a live
+    customer's `_oracle/` holds, not a synthetic edge case. `check_unit` still gates on
+    `status == "ok" and data["path"]` and knows nothing about certification; what changes is that
+    `read_manifest` hands it a record with no `path`.
+
+    The VISUAL half must be unaffected, which is what separates "the numeric claim is withheld" from
+    "the whole capture stopped counting".
+    """
+    _write_full_spec(tmp_path, dashboards=[("Sales", [])], worksheets=[])
+    _write_report(tmp_path, ["Sales"])
+    _write_oracle_manifest(tmp_path, ["Sales"], view_type="dashboard")
+    path = tmp_path / "_oracle" / "oracle-manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    for view in manifest["views"]:
+        view["data"].pop("certification", None)
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    oracle = cu.check_oracle_coverage(tmp_path, None, None)
+
+    assert oracle["numeric_present"] == 0, "a row count nothing certified must not count as numeric evidence"
+    assert oracle["visual_present"] == 1, "the render evidence is a separate claim and is untouched"
+    assert oracle["status"] == cu.STATUS_NOT_CHECKED
 
 
 def test_a_dashboard_typed_record_certifies_the_dashboard(tmp_path: Path) -> None:

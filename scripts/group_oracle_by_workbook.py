@@ -145,6 +145,8 @@ from pathlib import Path
 from pathlib import PureWindowsPath
 from typing import Any
 
+import tableau_oracle_manifest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 # The ONE census, shared with the capture rather than re-derived here: the two manifests must agree
 # on what "no establishable render" means, and a second copy of that rule is how they drift apart.
@@ -739,14 +741,20 @@ def _validate_manifest(path: Path, payload: Any) -> dict[str, Any]:
 def load_manifest(oracle_dir: Path) -> dict[str, Any]:
     """Read the capture manifest, or raise a message that names the file we wanted.
 
-    ⚠️ Reading is not accepting. ``json.loads`` alone answers "is this a JSON file", which is a
-    strictly weaker question than "is this a capture manifest", and the gap between them was reported
-    as a clean merge -- :func:`_validate_manifest` closes it before any ``_Batch`` is constructed.
+    Read through :func:`tableau_oracle_manifest.read_manifest`, not ``json.loads``: an OLDER capture
+    names uncertified bytes under the data leg's ``path``, and ``copy_view_files`` keys on exactly
+    that -- so reading raw would place a body nothing established as CSV at ``<workbook>/data/*.csv``
+    in the grouped folder, which is the shape #480 exists to remove.
+
+    ⚠️ Reading is not accepting. Restoring the evidence-path rule answers "which of these bytes may
+    be read as evidence", which is a strictly weaker question than "is this a capture manifest", and
+    the gap between them was reported as a clean merge -- :func:`_validate_manifest` closes it before
+    any ``_Batch`` is constructed. Both run, in that order: withhold first, then refuse.
     """
     path = oracle_dir / MANIFEST_NAME
     if not path.is_file():
         raise FileNotFoundError(f"no {MANIFEST_NAME} in {oracle_dir} - run capture_tableau_oracle.py first")
-    return _validate_manifest(path, json.loads(path.read_text(encoding="utf-8")))
+    return _validate_manifest(path, tableau_oracle_manifest.read_manifest(path))
 
 
 def load_batches(oracle_dirs: list[Path]) -> list[_Batch]:
@@ -1260,7 +1268,18 @@ def subset_manifest(manifest: dict[str, Any], workbook: str, views: list[dict[st
         "workbook_luid": next((v.get("workbook_luid") for v in views if v.get("workbook_luid")), None),
         "view_count": len(views),
         "data_ok": len(ok),
-        "data_empty": len([v for v in ok if (v.get("data") or {}).get("row_count") == 0]),
+        # ⚠️ IMPORTED, not re-implemented (#471). This was a second copy of "row_count == 0", and a
+        # second copy of a rule is how a per-workbook subset comes to disagree with the capture it
+        # was sliced from. The count is unchanged; what is new is that it is now the SAME predicate
+        # the capture-wide manifest counts with -- and the views are NAMED here too, for the reason
+        # `data_empty_views` exists at all: a count cannot tell a reviewer which page to open.
+        "data_empty": len([v for v in ok if tableau_oracle_manifest.empty_classification(v)]),
+        "data_empty_views": tableau_oracle_manifest.data_empty_views(ok),
+        # The third state, carried at the same grade as the other two. A per-workbook reader is the
+        # one who acts on this, and a subset that reported `data_ok: 4` with nothing beside it said
+        # "four good captures" about views whose rows were never measured.
+        "data_unassessable": len([v for v in ok if tableau_oracle_manifest.unassessable_reason(v)]),
+        "data_unassessable_views": tableau_oracle_manifest.data_unassessable_views(ok),
         "credential_blocked": len(blocked),
         "failed": len(failed),
         "render_unestablished": len(unestablished),

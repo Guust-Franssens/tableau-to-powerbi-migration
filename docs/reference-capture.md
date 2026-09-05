@@ -668,6 +668,55 @@ builder might then bake `Year=2020` in to match. Therefore:
 - **Separate the oracles.** The image is the **visual oracle**; a CSV/crosstab exported *at the same
   state* is the **numeric oracle** (the validator already prefers exported CSV for numbers). Never read
   numbers off pixels.
+- **A ZERO-ROW capture is a state, and the manifest names it (#471).** Tableau answers `/data` with a
+  200 and no rows for a view whose default state has nothing to show — a relative-date filter whose
+  window has not landed yet, or a required filter defaulting to None — so the export *succeeds* and
+  the evidence is empty. Measured in the field: 12 of 91 views on one site, every one recorded
+  `status: "ok"`. `data_empty_views` names them with a classification, each record carries
+  `flags: ["data_empty", …]`, and the run warns per view and at the end; the exit code is deliberately
+  unchanged, because this is a legibility fact and not a transport failure. ⚠️ The classification stops
+  where the evidence does: a CSV that returns a HEADER proves a query ran (`empty_query_no_rows`), but
+  a payload with no header at all is `empty_cannot_classify` — a glossary/reference sheet with no
+  underlying query and a real query returning nothing are indistinguishable from the payload (both are
+  `row_count=0, columns=[]`, differing only in `bytes`, which is **not** used as the discriminator).
+  Separating those two needs field-level metadata the capture does not hold. The re-runnable cause and
+  the one that needs `?vf_` pinning (#194) are likewise not separable from a default-state capture.
+  ⚠️⚠️ **"A header proves a query ran" holds only for a payload already CERTIFIED as CSV, and the
+  qualifier is not pedantry — without it the sentence was false (#480).** The parser had established
+  neither that the body was CSV nor that its first row was a header: measured on a real HTTP 200, a
+  `text/html` error page produced `columns: ["<html>"]` with `row_count: 2`, and an
+  `application/octet-stream` body reading `not CSV at all` was *classified* `empty_query_no_rows` —
+  a specific diagnosis about bytes never shown to be a table. `certify_csv` now decides that first:
+  a declared non-CSV type, a markup/JSON opener, an unterminated quote, a strict-parse error or
+  ragged rows are recorded `status: "format_mismatch"` with **no** row count, **no** header and no
+  file written, so nothing downstream can classify them.
+- **A capture we cannot ASSESS is a third state, it is not the clean one, and it must be impossible
+  to CONSUME (#480).** Rows present, zero rows and *unassessable* are three outcomes, not two. A CSV
+  carries no signature — nothing in the bytes proves a body is CSV the way `%PDF-` proves a PDF — so a
+  200 that arrives with **no `Content-Type` at all**, or declaring **`text/plain`** (true of a CSV and
+  equally true of a plain-text error banner), cannot be certified however well-formed it looks: the
+  transport succeeded, the bytes are kept, and **no `row_count` and no `columns` are recorded**. Such
+  a view carries `flags: ["data_unassessable", …]`, is counted and named in `data_unassessable` /
+  `data_unassessable_views`, warns per view and at the end, and is **not counted in
+  `captured_complete`**. The same applies to an older manifest that predates the row count
+  (`row_count_unrecorded`). `data_ok` deliberately still counts it, because the HTTP call genuinely
+  succeeded; that is why the pair beside it exists, so `data_ok` is never read as evidence.
+  ⚠️⚠️ **Round 1 stopped at the flag and that was still fail-open.** Blind review found a FOURTH
+  consumer — `build_reconcile_items.build()` — reading such a record as Tableau numeric ground truth
+  (`item_count: 1`, `tableau_value: 10.0`) because it gates on `status == "ok" and data["path"]`, as
+  `check_unit`, `package_unit` and `group_oracle_by_workbook` all do. A flag has to be remembered by
+  every consumer that ever reads a capture, including the ones not written yet. So the invalid state
+  is now **unrepresentable**: uncertified bytes are written to `unassessable/<luid>.bin` and named
+  `retained_path`, never under `data/`, never suffixed `.csv`, never under `path`, with an authored
+  `evidence_withheld` sentence beside them. Every existing consumer skips them without a line of
+  change. A manifest already on disk cannot be rewritten retroactively, so
+  `tableau_oracle_manifest.read_manifest()` applies the same rule at load — **read a capture manifest
+  through it, never `json.loads`**.
+  ⚠️ `text/plain` was accepted as a CSV declaration until round 2 measured what that costs: an HTTP
+  200 `text/plain` reading `Service unavailable\r\nRetry later\r\n` was recorded `certified` with
+  `columns: ["Service unavailable"]` and `row_count: 1`, and its single-line variant was *diagnosed*
+  `empty_query_no_rows`. It is now `content_type_unspecific` — retained, uncertified, undiagnosed.
+  `text/csv` and `application/csv` remain explicit declarations and still certify.
 - **Bind numeric truth to the workbook's source file, never the estate.** List the bundle's `data/`
   directory before reusing an estate-wide constant. In the measured estate, most workbooks bound the
   9,994-row source (`SUM(Sales) = 2,297,200.8603`), but `book_7-3-LOWESS-Python` bound

@@ -36,6 +36,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import check_path_ceiling as cpc  # noqa: E402  # pylint: disable=wrong-import-position
+import host_paths as hp  # noqa: E402  # pylint: disable=wrong-import-position
 import manifest_scope as ms  # noqa: E402  # pylint: disable=wrong-import-position
 import package_unit as pkg  # noqa: E402  # pylint: disable=wrong-import-position
 import path_flavour as pf  # noqa: E402  # pylint: disable=wrong-import-position
@@ -444,7 +445,15 @@ def test_a_selected_view_with_no_render_is_not_greppable_as_a_render(tmp_path: P
     bundle, oracle = _bundle(tmp_path, views=views)
     manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
     manifest["views"][0]["image"] = {"status": "failed"}
-    manifest["views"][0]["data"] = {"status": "ok", "path": "data/sales.csv"}
+    # `row_count` present: this fixture is a MEASURED capture, and since #480 a data leg with no
+    # measured rows is unassessable and ships no `path` at all -- which would make this test about
+    # the wrong thing.
+    manifest["views"][0]["data"] = {
+        "status": "ok",
+        "path": "data/sales.csv",
+        "row_count": 1,
+        "certification": "certified",
+    }
     (oracle / "data").mkdir(exist_ok=True)
     (oracle / "data" / "sales.csv").write_text("a,b\n1,2\n", encoding="utf-8")
     (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
@@ -1788,9 +1797,18 @@ def _secret_outside(oracle: Path, name: str) -> Path:
 
 @pytest.mark.parametrize("declared", ["../outside-secret.png", "sub/../../outside-secret.png"])
 def test_a_relative_path_escaping_the_capture_root_is_refused(tmp_path: Path, declared: str) -> None:
-    """`../` traversal copied an arbitrary file byte-identically into the customer package."""
+    """`../` traversal copied an arbitrary file byte-identically into the customer package.
+
+    ⚠️ The end-to-end half is now defended TWICE: round-6 source containment refuses a `..` component
+    before `_resolve_capture_file` ever sees it, so the end-to-end assertions alone can no longer
+    tell whether the containment check still exists. The resolver is therefore driven DIRECTLY as
+    well - it is the sole mitigation for the shape source containment cannot see, a symlink INSIDE
+    the capture pointing out of it, and a check nothing can falsify is a check that will be deleted.
+    """
     bundle, oracle = _bundle(tmp_path)
     _secret_outside(oracle, "outside-secret.png")
+    resolved, reason = pkg._resolve_capture_file(oracle, declared)  # pylint: disable=protected-access
+    assert resolved is None and "escapes the capture root" in str(reason)
     manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
     manifest["views"][0]["image"] = {"status": "ok", "path": declared, "sha256": "x", "bytes": 3}
     (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
@@ -1810,6 +1828,15 @@ def test_an_absolute_path_is_refused_and_never_reaches_the_manifest(tmp_path: Pa
     resolved path anyway. Keeping it is deliberate - it is a named requirement and it gives a PRECISE
     diagnosis - so its observable contract is asserted here, otherwise the branch is unfalsifiable
     and could be lost in a refactor without anything going red.
+
+    ⚠️ **Round 7 added a THIRD layer over this same input, and it is why the mutation that neuters
+    `_declares_non_relative` now SURVIVES against this test.** `tmp_path` on Windows sits under the
+    runner's own profile, so `discloses_host_path` refuses the declared string with the identical
+    *"non-relative"* diagnosis and nothing here can tell the two layers apart. What only the parse
+    half answers is a NON-PROFILE location, and that is asserted separately in
+    :func:`test_a_NON_PROFILE_absolute_location_is_refused_by_the_PARSE_half`, which is where the
+    mutation is now anchored. This test is unchanged and still true; it is simply no longer the
+    discriminator.
     """
     bundle, oracle = _bundle(tmp_path)
     secret = tmp_path / "absolute-secret.png"
@@ -1829,6 +1856,82 @@ def test_an_absolute_path_is_refused_and_never_reaches_the_manifest(tmp_path: Pa
     assert str(secret) not in json.dumps(shipped)
 
 
+def test_a_NON_PROFILE_absolute_location_is_refused_by_the_PARSE_half(tmp_path: Path) -> None:
+    """What ONLY `_declares_non_relative` answered, isolated so the branch stays falsifiable.
+
+    Round 7 gave the packager a second, CONTAINMENT-shaped question (does this text disclose a path
+    under a user PROFILE?), and for the ordinary case both layers now fire on the same string with
+    the same *"non-relative"* diagnosis. That is defence in depth and it is wanted - but it made the
+    parse half unobservable, and an unfalsifiable guard is the thing this repo's mutation campaign
+    exists to refuse.
+
+    A build drive is the discriminator: `<drive>:\\builds\\out\\secret.png` names the operator's
+    machine while disclosing no profile, so `host_paths.discloses_host_path` is silent on it and the
+    parse is the only thing that can refuse it. Neuter it and the leg gets a different diagnosis on
+    both hosts - *"escapes the capture root"* on Windows, *"does not resolve to a file"* on Linux,
+    because `PureWindowsPath`'s drive is what makes the two agree here in the first place.
+
+    ⚠️ **Round 9 MASKED this test the same way round 7 masked its predecessor, and it is kept anyway.**
+    `host_paths.discloses_host_location` now refuses every rooted location, a build drive included,
+    so this string is refused by two layers again and the mutation SURVIVES against it. The claim is
+    still true and still worth pinning - a build drive must not ship - so the test stays and the
+    MUTATION moves, to :func:`test_a_DRIVE_RELATIVE_path_is_refused_by_the_PARSE_half_alone`. Deleting
+    it would trade a true assertion for nothing; leaving the mutation here would report a green
+    campaign for a branch nothing exercises.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    declared = f"D:{_SEP}builds{_SEP}out{_SEP}secret.png"
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    manifest["views"][0]["image"] = {"status": "ok", "path": declared, "sha256": "x", "bytes": 3}
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+
+    shipped = json.loads((_out(tmp_path) / UNIT / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    leg = shipped["views"][0]["image"]
+    assert leg["status"] == pkg.OMITTED_STATUS
+    assert leg["path"] == pkg.REFUSED_PATH, "the declared location must not be echoed back"
+    assert "non-relative" in leg["packaging_reason"]
+    assert declared not in json.dumps(shipped)
+
+
+def test_a_DRIVE_RELATIVE_path_is_refused_by_the_PARSE_half_alone(tmp_path: Path) -> None:
+    """Round 9's re-isolation of the parse branch, and the pattern behind having to do it twice.
+
+    Each time a wider containment layer lands above `_declares_non_relative`, the proof that the
+    parse still runs has to be re-isolated or the branch quietly becomes unfalsifiable. Round 7
+    masked the profile anchor; round 8 re-isolated it on a build drive; round 9's predicate covers
+    every ROOTED location, build drives included, so a build drive isolates nothing any more.
+
+    What is left to only this branch is a **drive-relative** path - `<drive>:secret.png`, a drive with
+    no root separator, which Windows resolves against that drive's current directory. It is a real
+    escape route for `_resolve_capture_file` and the containment predicate is silent on it BY
+    CONSTRUCTION: nothing about it is rooted, so no grammar of absolute locations can see it.
+    Measured on the round-9 tip::
+
+        <drive>:secret.png -> _declares_non_relative=True  discloses_host_location=False
+
+    which is exactly the shape an anchor needs: one branch answers, the other cannot.
+    """
+    declared = "C:secret.png"
+    assert pkg._declares_non_relative(declared) is True  # pylint: disable=protected-access
+    assert hp.discloses_host_location(declared) is False, (
+        "the containment half must be silent, or this isolates nothing"
+    )
+
+    bundle, oracle = _bundle(tmp_path)
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    manifest["views"][0]["image"] = {"status": "ok", "path": declared, "sha256": "x", "bytes": 3}
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+
+    shipped = json.loads((_out(tmp_path) / UNIT / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    leg = shipped["views"][0]["image"]
+    assert leg["status"] == pkg.OMITTED_STATUS
+    assert leg["path"] == pkg.REFUSED_PATH, "the declared location must not be echoed back"
+    assert "non-relative" in leg["packaging_reason"], "only the PARSE half can diagnose this one"
+    assert declared not in json.dumps(shipped)
+
+
 def test_a_symlink_out_of_the_capture_root_is_refused(tmp_path: Path) -> None:
     """Containment is checked on the RESOLVED path, so a link inside the capture cannot escape it."""
     bundle, oracle = _bundle(tmp_path)
@@ -1845,6 +1948,885 @@ def test_a_symlink_out_of_the_capture_root_is_refused(tmp_path: Path) -> None:
     _package(tmp_path, bundle, oracle)
     root = _out(tmp_path) / UNIT
     assert not [p for p in root.rglob("*") if p.is_file() and b"EXFILTRATION-CANARY" in p.read_bytes()]
+
+
+def test_a_LEGACY_data_leg_cannot_ship_a_host_path_under_retained_path(tmp_path: Path) -> None:
+    """#480 round 4, finding 1. The containment guard was keyed to a FIELD NAME, not to the manifest.
+
+    `withhold_uncertified_evidence` demotes an uncertified data leg's `path` to `retained_path`
+    before the packager looks at it -- correctly, because those bytes are not evidence -- and
+    `_copy_leg` then keyed on `path`, found none, and returned the leg verbatim. The review's
+    controlled differential drove ONE absolute path through both shapes:
+
+        certified_data.path=<refused-by-packager>
+        legacy_data.retained_path=<drive>:\\Users\\<account>\\private\\oracle.csv
+
+    A customer package carrying an absolute host path is #461's class -- it names their server,
+    project and operator, and this repo is public.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    # The REAL legacy shape: a row count and no certification, so it is withheld and renamed.
+    manifest["views"][0]["data"] = {
+        "status": "ok",
+        "path": f"{HOST_PATH_ROOT}{_SEP}private{_SEP}oracle.csv",
+        "row_count": 900,
+    }
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+
+    shipped = json.loads((_out(tmp_path) / UNIT / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    data = [v for v in shipped["views"] if v.get("flags")][0]["data"]
+    assert absolute_host_paths(shipped) == [], "no packaged field may carry an absolute host path"
+    assert data["retained_path"] == pkg.REFUSED_PATH, "the demoted field must meet the SAME check as `path`"
+    assert "path" not in data, "demotion still holds: uncertified bytes are never named as evidence"
+
+
+def test_the_containment_guard_is_field_AGNOSTIC_not_a_second_allowlist(tmp_path: Path) -> None:
+    """The class-closing half: a THIRD field name must not reopen what round 4 found.
+
+    `retained_path` was the second name; fixing it by name would leave the next one open. This
+    drives an absolute path through `packaged_from` on a leg the packager does not copy -- a field
+    it normally writes itself, and therefore one nobody would think to guard.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    manifest["views"][0]["image"] = {
+        "status": "failed",
+        "packaged_from": f"{HOST_PATH_ROOT}{_SEP}private{_SEP}leak.png",
+    }
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+
+    shipped = json.loads((_out(tmp_path) / UNIT / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    assert absolute_host_paths(shipped) == []
+    assert shipped["views"][0]["image"]["packaged_from"] == pkg.REFUSED_PATH
+
+
+# --------------------------------------------------------------------------------------------
+# #480 round 5: the guard is a property of the DOCUMENT, at every depth
+# --------------------------------------------------------------------------------------------
+
+
+def _shipped_with(tmp_path: Path, *, view: dict) -> tuple[dict, Path]:
+    """Package one bundle whose first oracle view is overwritten with ``view``."""
+    bundle, oracle = _bundle(tmp_path)
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    manifest["views"][0].update(view)
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    return json.loads((root / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8")), root
+
+
+def test_a_string_INSIDE_a_retained_container_cannot_ship_a_host_path(tmp_path: Path) -> None:
+    """#480 round 5, the blocking finding. Round 4 walked `leg.items()`, so a LIST was never opened.
+
+    Review's controlled experiment, reproduced verbatim against the tip before this fix::
+
+        shipped_image={'status': 'failed', 'retry_reasons': ['<drive>:\\\\Users\\\\...\\\\retry.log']}
+        absolute_leaks=['.views[0].image.retry_reasons[0]']
+
+    `retry_reasons` carries server-response diagnostics and is allowlisted as `SCALAR_LIST`, so it is
+    exactly the text most likely to contain a real customer path -- and this repo is public.
+    `dimensions_px` is asserted beside it because fixing `retry_reasons` BY NAME is the fourth escape
+    this test exists to refuse: it is a different allowlisted list, guarded by the same walk.
+    """
+    leak = f"{HOST_PATH_ROOT}{_SEP}private{_SEP}retry.log"
+    shipped, _ = _shipped_with(
+        tmp_path,
+        view={
+            "image": {"status": "failed", "retry_reasons": [leak]},
+            "svg": {"status": "failed", "dimensions_px": [leak]},
+        },
+    )
+    assert absolute_host_paths(shipped) == [], "no string at any depth may carry an absolute host path"
+    assert shipped["views"][0]["image"]["retry_reasons"] == [pkg.REFUSED_PATH]
+    assert shipped["views"][0]["svg"]["dimensions_px"] == [pkg.REFUSED_PATH]
+    assert leak not in json.dumps(shipped)
+
+
+def test_a_VIEW_LEVEL_string_cannot_ship_a_host_path_either(tmp_path: Path) -> None:
+    """The half the review did not reach: `_copy_leg` guards four legs, and the view is not one.
+
+    Measured on the tip with the leg walk made recursive but still called only from `_copy_leg`::
+
+        E view-level flags[] (allowlisted SCALAR_LIST): LEAK leaks=['.views[0].flags[0]']
+        F view_name (scalar, view level):               LEAK leaks=['.views[0].view_name']
+
+    `flags` was allowlisted for #471 and `view_name` has shipped since round 1, so "guard the legs"
+    was never the boundary -- the boundary is the packaged DOCUMENT. The refusal is also RECORDED,
+    because a scrub nobody can see is indistinguishable from a capture that never said anything.
+    """
+    leak = f"{HOST_PATH_ROOT}{_SEP}private{_SEP}leak.log"
+    shipped, _ = _shipped_with(tmp_path, view={"flags": [leak], "view_name": leak})
+    assert absolute_host_paths(shipped) == []
+    assert shipped["views"][0]["flags"] == [pkg.REFUSED_PATH]
+    assert shipped["views"][0]["view_name"] == pkg.REFUSED_PATH
+    assert sorted(shipped["scope"]["refused_fields"]) == ["views[0].flags[0]", "views[0].view_name"]
+
+
+def test_a_refused_object_NAME_does_not_leak_into_the_other_two_artifacts(tmp_path: Path) -> None:
+    """The name leaves the manifest: measured, it reached `handover.md` AND `package-manifest.json`.
+
+    `object_filename` replaces separators, so an absolute `view_name` became the packaged stem
+    `C_Users_<account>_private_leak.log` -- still the account, just punctuated differently. Containing
+    the naming pair ONCE means the stem, the greppable `object=` field and the `objects[].name` row
+    all derive from the contained value instead of each re-deciding.
+    """
+    leak = f"{HOST_PATH_ROOT}{_SEP}private{_SEP}leak.log"
+    _, root = _shipped_with(tmp_path, view={"view_name": leak})
+    account = HOST_PATH_ROOT.rsplit(_SEP, 1)[-1]
+    leaked = [
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_file() and account in path.read_text(encoding="utf-8", errors="ignore")
+    ]
+    assert leaked == [], f"the account name must not reach any packaged artifact: {leaked}"
+    assert not [path for path in root.rglob("*") if account in path.name]
+
+
+def test_the_ORACLE_RESULT_itself_is_contained_not_only_the_scoped_manifest(tmp_path: Path) -> None:
+    """#480 round 6. The document sweep guards ONE artifact; `oracle.objects` is built beside it.
+
+    Rounds 3, 4 and 5 each contained a value at the consumer that had just leaked, and each was
+    followed by a consumer that had not been enumerated. Round 5 swept the scoped
+    `oracle-manifest.json`, and `package_oracle` went on constructing `objects`/`omissions` from the
+    RAW view - which `package-manifest.json` embeds verbatim and `render_handover` interpolates.
+    Review's controlled input and its measured result on the tip::
+
+        view_luid = <drive>:\\Users\\<account>\\private\\view-id.log
+        view_type = \\\\server\\share\\declared-type.log
+
+        oracle-manifest view_luid:                  <refused-by-packager>   # swept
+        package-manifest oracle.objects[0].view_luid: <drive>:\\Users\\...   # NOT swept
+        handover.md:  UNTYPED_RENDER ... luid=<drive>:\\Users\\...           # NOT swept
+
+    So this asserts the SOURCE, not a fifth sweep: the view is contained once, before any field is
+    read, and all four shipped surfaces are checked together because that is the class - a future
+    consumer must inherit containment rather than need its own guard.
+    """
+    luid_leak = f"{HOST_PATH_ROOT}{_SEP}private{_SEP}view-id.log"
+    type_leak = f"{_SEP}{_SEP}server{_SEP}share{_SEP}declared-type.log"
+    shipped, root = _shipped_with(tmp_path, view={"view_luid": luid_leak, "view_type": type_leak})
+
+    package = json.loads((root / "package-manifest.json").read_text(encoding="utf-8"))
+    obj = package["oracle"]["objects"][0]
+    assert obj["view_luid"] == pkg.REFUSED_PATH, "objects[] must be built from the CONTAINED view"
+    assert obj["declared_view_type"] == pkg.REFUSED_PATH
+    assert obj["view_type"] == pkg.KIND_UNKNOWN, "a refused declared type is still untyped, not invented"
+    assert absolute_host_paths(package) == [], "package-manifest.json is a shipped artifact too"
+    assert shipped["views"][0]["view_luid"] == pkg.REFUSED_PATH
+
+    handover = (root / "handover.md").read_text(encoding="utf-8")
+    assert "UNTYPED_RENDER" in handover
+    account = HOST_PATH_ROOT.rsplit(_SEP, 1)[-1]
+    leaked = [
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_file() and account in path.read_text(encoding="utf-8", errors="ignore")
+    ]
+    assert leaked == [], f"no shipped artifact may carry the account name: {leaked}"
+    assert not [path for path in root.rglob("*") if account in path.name], "nor may a filename stem"
+
+
+def test_a_refused_view_LUID_does_not_reach_an_OMISSION_row(tmp_path: Path) -> None:
+    """`omissions[]` is the second structure built beside the sweep, and it carries the LUID too.
+
+    It reaches `package-manifest.json` and the `ORACLE_OMISSION` line, neither of which the scoped
+    manifest's sweep sees. Driven with a leg the packager refuses, so an omission row actually
+    exists to inspect.
+    """
+    luid_leak = f"{HOST_PATH_ROOT}{_SEP}private{_SEP}view-id.log"
+    _, root = _shipped_with(
+        tmp_path,
+        view={"view_luid": luid_leak, "image": {"status": "ok", "path": f"{HOST_PATH_ROOT}{_SEP}secret.png"}},
+    )
+    package = json.loads((root / "package-manifest.json").read_text(encoding="utf-8"))
+    omissions = package["oracle"]["omissions"]
+    assert omissions and omissions[0]["view_luid"] == pkg.REFUSED_PATH
+    assert absolute_host_paths(package) == []
+    assert "non-relative" in omissions[0]["reason"], "the leg's own diagnosis must survive containment"
+    assert luid_leak not in (root / "handover.md").read_text(encoding="utf-8")
+
+
+def test_an_ORDINARY_capture_is_byte_identical_after_containment(tmp_path: Path) -> None:
+    """Positive control for the source containment: a real LUID and a real type must not be mangled.
+
+    A real `view_luid` is a UUID and a real `view_type` is `dashboard`/`worksheet`/`unknown`.
+    Containing the whole view at the source touches every field, so the cost of getting the
+    predicate wrong is now the whole capture rather than one leg - assert the no-op explicitly.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    shipped = json.loads((root / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    package = json.loads((root / "package-manifest.json").read_text(encoding="utf-8"))
+    by_luid = {view["view_luid"]: view for view in shipped["views"]}
+    assert sorted(by_luid) == [
+        "aaaaaaaa-0000-0000-0000-000000000001",
+        "aaaaaaaa-0000-0000-0000-000000000002",
+    ], "every LUID survives verbatim"
+    assert by_luid["aaaaaaaa-0000-0000-0000-000000000002"]["view_type"] == "dashboard"
+    assert by_luid["aaaaaaaa-0000-0000-0000-000000000001"]["view_name"] == "Sales"
+    assert "refused_fields" not in shipped["scope"], "an ordinary capture refuses nothing"
+    assert [obj["view_luid"] for obj in package["oracle"]["objects"]] == sorted(by_luid)
+    assert {obj["view_type"] for obj in package["oracle"]["objects"]} == {"worksheet", "dashboard"}
+    assert package["oracle"]["omissions"] == []
+    assert "unknown/images" not in _images(tmp_path)
+
+
+def test_the_WORKBOOK_IDENTITY_document_is_contained_at_its_own_intake_too(tmp_path: Path) -> None:
+    """The consumer enumeration's second finding: `source-provenance.json` is untrusted input too.
+
+    `origin.workbook_luid` is server-supplied and three readers take it before anything sweeps it -
+    `shippable_provenance` ships it, `render_handover` interpolates it into `ORACLE_ATTRIBUTION
+    luid=`, and `workbook_identity`'s conflict diagnosis quotes it INTO A SENTENCE. Measured before
+    the intake containment::
+
+        scope.suppressed_reason: ... source-provenance.json records <drive>:\\Users\\<account>\\...
+        handover.md: ORACLE_ATTRIBUTION ... reason=... records <drive>:\\Users\\<account>\\...
+
+    ⚠️ `absolute_host_paths` is structurally blind to that second form - the leak is a substring of
+    an authored sentence, not a string VALUE - so this asserts on the account name in the shipped
+    bytes as well. A walk of the parse is the right tool for a field; it is the wrong tool for prose.
+    """
+    leak = f"{HOST_PATH_ROOT}{_SEP}private{_SEP}leak.log"
+    bundle, oracle = _bundle(tmp_path, provenance_luid=leak)
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    provenance = json.loads((root / "source-provenance.json").read_text(encoding="utf-8"))
+    assert pkg.REFUSED_PATH in provenance["scope"]["suppressed_reason"], "the diagnosis quotes the CONTAINED value"
+    assert absolute_host_paths(provenance) == []
+    account = HOST_PATH_ROOT.rsplit(_SEP, 1)[-1]
+    leaked = [
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_file() and account in path.read_text(encoding="utf-8", errors="ignore")
+    ]
+    assert leaked == [], f"no shipped artifact may carry the account name: {leaked}"
+
+
+def test_a_LEGITIMATE_provenance_entry_reaches_the_identity_unchanged(tmp_path: Path) -> None:
+    """Positive control for the provenance intake: a real LUID, sha and filename must not be mangled."""
+    bundle, oracle = _bundle(tmp_path)
+    result = _package(tmp_path, bundle, oracle)
+    identity = result["workbook_identity"]
+    assert identity["luid"] == WB_LUID and identity["match"] == "sha256" and identity["reason"] is None
+    provenance = json.loads((_out(tmp_path) / UNIT / "source-provenance.json").read_text(encoding="utf-8"))
+    entry = provenance["inputs"][0]
+    assert entry["origin"] == {"workbook_luid": WB_LUID, "match": "sha256"}
+    assert entry["input"]["file"] == f"{WB_LUID}_{UNIT}.twb"
+    assert len(entry["input"]["sha256"]) == 64
+
+
+def test_a_refused_nested_string_is_DIAGNOSED_not_silently_scrubbed(tmp_path: Path) -> None:
+    """The leg guard's own contract, which the document sweep cannot supply: WHY, and WHERE.
+
+    A scrub with no diagnosis leaves the operator with a `<refused-by-packager>` and no way to tell a
+    hostile manifest from a capture that recorded nothing. The reason names the JSON path -- never
+    the value -- so the line is actionable without re-leaking what was refused.
+    """
+    leak = f"{HOST_PATH_ROOT}{_SEP}private{_SEP}retry.log"
+    _shipped_with(tmp_path, view={"image": {"status": "failed", "retry_reasons": [leak]}})
+    omissions = [line for line in _lines(tmp_path) if line.startswith("ORACLE_OMISSION")]
+    assert len(omissions) == 1, omissions
+    assert "'retry_reasons[0]'" in omissions[0], "the refusal must name the JSON path it refused"
+    assert "non-relative" in omissions[0]
+    assert leak not in omissions[0], "a diagnosis must not re-leak the value it refused"
+
+
+def test_the_containment_walk_reaches_EVERY_depth_and_container() -> None:
+    """The class, not the instance: a string is refused wherever it sits, in any nesting.
+
+    Driven directly because the current allowlist has no retained two-level container to drive it
+    through -- which is precisely why this is asserted now rather than after a future
+    `Rows({"notes": SCALAR_LIST})` reopens the hole. Tuples are covered because the walk must not
+    silently convert one to a list either.
+    """
+    leak = f"{HOST_PATH_ROOT}{_SEP}x"
+    payload = {
+        "flat": leak,
+        "in_list": [leak],
+        "list_in_dict_in_list": [{"notes": [leak]}],
+        "dict_in_list": [{"src": leak}],
+        "in_tuple": (leak, "keep/me"),
+        "deep": {"a": [{"b": [[leak]]}]},
+        "count": 7,
+        "safe": "data/view-0.csv",
+    }
+    contained, refused = pkg._contain_unsafe_strings(payload)  # pylint: disable=protected-access
+    assert leak not in json.dumps(contained, default=list)
+    assert contained["count"] == 7 and contained["safe"] == "data/view-0.csv"
+    assert isinstance(contained["in_tuple"], tuple) and contained["in_tuple"][1] == "keep/me"
+    assert sorted(refused) == [
+        "deep.a[0].b[0][0]",
+        "dict_in_list[0].src",
+        "flat",
+        "in_list[0]",
+        "in_tuple[0]",
+        "list_in_dict_in_list[0].notes[0]",
+    ]
+
+
+def test_a_LEGITIMATE_string_inside_a_retained_container_survives_unmodified(tmp_path: Path) -> None:
+    """Positive control. An over-correction that scrubs diagnostics destroys the operator's evidence.
+
+    Three shapes that must all pass through byte-identically: a relative capture path, prose that
+    merely MENTIONS something path-like (`/api/views`, `../logs`) without declaring a location, and
+    a non-string scalar list. A capture whose only sin is being informative must stay informative.
+    """
+    prose = [
+        "HTTP 503 from GET /api/views/x after 2 retries",
+        "renderer wrote nothing (see ../logs on the server)",
+        "images/view-0.png was 0 bytes",
+    ]
+    shipped, root = _shipped_with(
+        tmp_path,
+        view={
+            "image": {"status": "failed", "retry_reasons": list(prose), "dimensions_px": [1300, 1600]},
+            "flags": ["data_empty"],
+        },
+    )
+    leg = shipped["views"][0]["image"]
+    assert leg["retry_reasons"] == prose, "a diagnostic that is not a declared path must not be mangled"
+    assert leg["dimensions_px"] == [1300, 1600]
+    assert shipped["views"][0]["flags"] == ["data_empty"]
+    assert "refused_fields" not in shipped["scope"], "nothing was refused, so nothing may be recorded"
+    assert not [line for line in _lines(tmp_path) if line.startswith("ORACLE_OMISSION") and "retry_reasons" in line]
+    assert root.is_dir()
+
+
+# --------------------------------------------------------------------------------------------
+# #480 round 7: a host path WRAPPED IN PROSE, and an untrusted dictionary KEY
+# --------------------------------------------------------------------------------------------
+
+
+def test_a_host_path_WRAPPED_IN_PROSE_is_refused_not_only_a_bare_one(tmp_path: Path) -> None:
+    """#480 round-7 finding B1. The predicate PARSED the string, so any prefix hid the answer.
+
+    `classify_export_error` prepends the HTTP status to a server diagnostic and persists the result
+    in `retry_reasons[]` (`capture_tableau_oracle.py:278,597`), so the field most likely to carry a
+    real customer path is also the field where it arrives wrapped in a sentence. Review's measured
+    reproduction against the round-7 tip::
+
+        raw:               <profile>\\private\\retry.log could not be opened
+        classified detail: HTTP 503: <profile>\\private\\retry.log could not be opened
+        package predicate: False
+        shipped artifact:  oracle/oracle-manifest.json
+
+    Four spellings of ONE path, which is the point: a shipped artifact's question is CONTAINMENT
+    ("does this text disclose a host path?"), not shape ("is this string a path?"). The account name
+    is asserted against the shipped BYTES too, because a walk of the parse is structurally blind to a
+    disclosure that sits inside authored prose rather than being a string VALUE.
+    """
+    leak = f"{HOST_PATH_ROOT}{_SEP}private{_SEP}retry.log"
+    account = HOST_PATH_ROOT.rsplit(_SEP, 1)[-1]
+    wrapped = [
+        f"HTTP 503: {leak} could not be opened",
+        f'"{leak}"',
+        "file:///" + HOST_PATH_ROOT.replace(_SEP, "/") + "/private/retry.log",
+        f"exported nothing; see {leak}",
+    ]
+    shipped, root = _shipped_with(tmp_path, view={"image": {"status": "failed", "retry_reasons": list(wrapped)}})
+    assert shipped["views"][0]["image"]["retry_reasons"] == [pkg.REFUSED_PATH] * len(wrapped)
+    assert absolute_host_paths(shipped) == []
+    leaked = [
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_file() and account in path.read_text(encoding="utf-8", errors="ignore")
+    ]
+    assert leaked == [], f"no shipped artifact may carry the account name: {leaked}"
+
+
+def test_a_host_path_WRAPPED_IN_PROSE_is_redacted_in_the_HANDOVER_slice_too(tmp_path: Path) -> None:
+    """The same sub-class on the second value-shaped guard, which had the same anchored predicate.
+
+    `redact_host_paths` asked `HOST_PATH_RE.match` - whether the value STARTS as a location - while
+    its own docstring claimed it was "the same shape `set_data_folder.py` gates the repo on". It was
+    not, and that drift is finding B1 in a second place: fixing only the packager would have left the
+    identical escape in the artifact that ships WHOLE.
+
+    ⚠️ **Round 9 DELETED the anchored half rather than keeping it beside the containment one.** Both
+    were spelling tests and the union of two spelling tests still missed `HTTP 503: ` + a non-profile
+    absolute. `host_paths.discloses_host_location` is a strict superset of the anchored predicate, so
+    the `non_profile_root` row below asserts the same verdict for a better reason: it is refused
+    because it is ROOTED, not because it happens to be at the start of the string. Moving it into
+    prose - which no anchored test could ever have caught - is what pins that.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    path = bundle / "handover" / f"{UNIT}.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["workbook"]["wrapped_note"] = f"HTTP 503: {HOST_PATH_ROOT}{_SEP}private{_SEP}x could not be opened"
+    payload["workbook"]["non_profile_root"] = f"D:{_SEP}builds{_SEP}out"
+    payload["workbook"]["non_profile_in_prose"] = f"the build wrote to D:{_SEP}builds{_SEP}out and stopped"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+    shipped = json.loads((_out(tmp_path) / UNIT / "handover" / f"{UNIT}.json").read_text(encoding="utf-8"))
+    assert shipped["workbook"]["wrapped_note"] == ms.REDACTED, "a host path inside prose must still be redacted"
+    assert shipped["workbook"]["non_profile_root"] == ms.REDACTED, "a non-profile location must still be redacted"
+    assert shipped["workbook"]["non_profile_in_prose"] == ms.REDACTED, "and it must not be rescued by a prefix"
+    account = HOST_PATH_ROOT.rsplit(_SEP, 1)[-1]
+    assert account not in json.dumps(shipped)
+
+
+def test_an_untrusted_handover_KEY_is_redacted_like_a_value(tmp_path: Path) -> None:
+    """#480 round-9 leak 2. `redact_host_paths` cleaned VALUES and preserved raw KEYS.
+
+    Round 8 declined this, citing *"engine-authored keys, no reproduction"*. A reproduction now
+    exists, and it is built with the same hypothetical-future-field method this slice's own
+    value-redaction test (`test_an_absolute_path_anywhere_in_the_handover_slice_is_redacted`) already
+    uses - so declining it required the value half and the key half of ONE artifact to be held to two
+    different standards of evidence. Measured on the round-8 tip::
+
+        HANDOVER_TOP_KEY_PRESENT=True
+        HANDOVER_NESTED_KEY_PRESENT=True
+        HANDOVER_RAW_TEXT_PRESENT=True    -> customer-shipped handover/Book.json carries the path
+
+    "Engine-authored" describes a key's ORIGIN; it does not enforce the shipping invariant. The
+    packager's own manifest walk had already concluded exactly this one artifact over, in round 7.
+
+    The collision row is not decoration: two distinct unsafe keys must not both redact onto one
+    sentinel and let `dict` keep the last, which would turn a redaction into silent data loss inside
+    the agent's actual work queue.
+    """
+    leak_a = f"{HOST_PATH_ROOT}{_SEP}private{_SEP}secret"
+    leak_b = f"D:{_SEP}builds{_SEP}out"
+    account = HOST_PATH_ROOT.rsplit(_SEP, 1)[-1]
+    bundle, oracle = _bundle(tmp_path)
+    path = bundle / "handover" / f"{UNIT}.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["workbook"][leak_a] = "safe scalar a"
+    payload["workbook"][leak_b] = "safe scalar b"
+    payload["workbook"]["nested"] = {"deep": [{leak_a: "safe scalar c"}]}
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    result = _package(tmp_path, bundle, oracle)
+
+    shipped = json.loads((_out(tmp_path) / UNIT / "handover" / f"{UNIT}.json").read_text(encoding="utf-8"))
+    rendered = json.dumps(shipped)
+    assert leak_a not in rendered and leak_b not in rendered and account not in rendered
+    assert ms.REDACTED in shipped["workbook"] and f"{ms.REDACTED}#2" in shipped["workbook"]
+    assert sorted([shipped["workbook"][ms.REDACTED], shipped["workbook"][f"{ms.REDACTED}#2"]]) == [
+        "safe scalar a",
+        "safe scalar b",
+    ], "a collision must lose neither field's value"
+    assert shipped["workbook"]["nested"]["deep"][0] == {ms.REDACTED: "safe scalar c"}
+    assert any("redacted" in note for note in result["notes"]), "a redaction must be reported, not silent"
+
+    leaked = [
+        item.relative_to(_out(tmp_path) / UNIT).as_posix()
+        for item in (_out(tmp_path) / UNIT).rglob("*")
+        if item.is_file() and account in item.read_text(encoding="utf-8", errors="ignore")
+    ]
+    assert leaked == [], f"an untrusted handover KEY must not reach any packaged artifact: {leaked}"
+
+
+def test_the_handover_KEY_walk_reports_the_REDACTED_key_and_stays_idempotent() -> None:
+    """Driven directly, because two properties of key redaction have no artifact that shows them.
+
+    Copied from `package_unit._contain_unsafe_key`, which solved this for the oracle manifest one
+    round earlier, and from `tableau_env.scrub_tree` before that: the reported path must be built
+    from the REDACTED key or the record of the catch re-emits what was caught, and a second pass over
+    an already-redacted document must not read the sentinel as a fresh, safe key.
+    """
+    leak_a = f"{HOST_PATH_ROOT}{_SEP}a"
+    leak_b = f"{HOST_PATH_ROOT}{_SEP}b"
+    payload = {leak_a: "kept-a", leak_b: "kept-b", "rows": [{leak_a: "kept-nested"}], "count": 7}
+    cleaned, redacted = ms.redact_host_paths(payload, prefix="handover/Book.json")
+
+    assert sorted(cleaned) == sorted([ms.REDACTED, f"{ms.REDACTED}#2", "rows", "count"])
+    assert sorted(value for value in cleaned.values() if isinstance(value, str)) == ["kept-a", "kept-b"]
+    assert cleaned["rows"][0] == {ms.REDACTED: "kept-nested"} and cleaned["count"] == 7
+    assert sorted(redacted) == [
+        f"handover/Book.json.{ms.REDACTED} (key)",
+        f"handover/Book.json.{ms.REDACTED}#2 (key)",
+        f"handover/Book.json.rows[0].{ms.REDACTED} (key)",
+    ]
+    assert HOST_PATH_ROOT not in json.dumps(cleaned) + json.dumps(redacted)
+
+    again, redacted_again = ms.redact_host_paths(cleaned, prefix="handover/Book.json")
+    assert again == cleaned and sorted(redacted_again) == sorted(redacted), "the walk must be idempotent"
+
+
+def test_ORDINARY_PROSE_that_merely_MENTIONS_a_path_is_NOT_refused(tmp_path: Path) -> None:
+    """Positive control for the broader predicate - and the main risk the fix introduces.
+
+    A CONTAINS test is far likelier to false-positive than an IS test, and over-refusal destroys the
+    operator's evidence exactly as under-refusal leaks it. Every shape here mentions something
+    path-like while disclosing no host location: a REST route, a relative directory, a `..` inside a
+    sentence, `Users` as an English word, an ordinary view name, and the repo's own documented
+    `<placeholder>` spelling - which `set_data_folder.py --check` exempts on purpose, so the packager
+    must exempt it identically or the two definitions have re-diverged.
+
+    ⚠️ **Round 9 REVERSES one entry of this control, deliberately, and it is the whole point of the
+    round.** Round 8 asserted here that `the build wrote to <drive>:\\builds and then stopped` must
+    ship, on the reading that a non-profile location in prose is ordinary text. It is not: this PR's
+    own parse anchor states that a build drive names the OPERATOR'S MACHINE and must be refused, and
+    a location cannot become acceptable merely because a status prefix precedes it. That entry has
+    moved to :func:`test_a_NON_PROFILE_absolute_WRAPPED_IN_PROSE_is_refused_in_EVERY_SPELLING`, which
+    asserts the opposite verdict on the same string.
+
+    The four entries after the blank line are round 9's own negative controls, one per way the wider
+    grammar could over-fire: a URL whose PATH looks POSIX-absolute, a dotted version string, a drive
+    letter in prose with no path after it, and a colon-bearing timestamp.
+    """
+    prose = [
+        "HTTP 503 from GET /api/2.4/sites/abc/views/def after 2 retries",
+        "renderer wrote nothing (see ../logs on the server)",
+        "images/view-0.png was 0 bytes",
+        "Users of this dashboard see a blank page",
+        f"set DataFolder to C:{_SEP}Users{_SEP}<account>{_SEP}data as SECURITY.md documents",
+        "GET https://tableau.example.com/var/lib/x returned 500",
+        "engine 2.339.0, powerbi-report-author 0.1.4, node v20.11.1",
+        "drive D: is full; free 0 bytes",
+        "captured at 2026-09-04T16:30:53+02:00 (12:04:07 elapsed)",
+    ]
+    shipped, _ = _shipped_with(
+        tmp_path,
+        view={"image": {"status": "failed", "retry_reasons": list(prose)}, "view_name": "Sales by Users"},
+    )
+    assert shipped["views"][0]["image"]["retry_reasons"] == prose, "informative prose must stay informative"
+    assert shipped["views"][0]["view_name"] == "Sales by Users"
+    assert "refused_fields" not in shipped["scope"], "nothing was refused, so nothing may be recorded"
+
+
+def test_a_NON_PROFILE_absolute_WRAPPED_IN_PROSE_is_refused_in_EVERY_SPELLING(tmp_path: Path) -> None:
+    """#480 round-9 leak 1. The containment predicate matched a SPELLING, not the property.
+
+    Rounds 3-8 each widened the guard by one shape, and each time a different spelling escaped -
+    because a *profile root* is a way of writing a location, not the property that matters to a
+    customer deliverable. Measured on the round-8 tip, one wrapper (`HTTP 503: `, which is how
+    `classify_export_error` writes `retry_reasons[]`) over locations that are all absolute::
+
+        <drive>:\\builds\\out\\secret.log                        -> DISCLOSES=False  SHIPPED=True
+        \\\\customer-server\\finance-share\\secret.log              -> DISCLOSES=False  SHIPPED=True
+        /var/lib/tableau/secret.log                           -> DISCLOSES=False  SHIPPED=True
+        \\\\server\\C$\\Users\\<a real account>\\private\\secret.log  -> DISCLOSES=False  SHIPPED=True
+        C%3A%5CUsers%5C<a real account>%5Cprivate%5Csecret.log-> DISCLOSES=False  SHIPPED=True
+
+    The last two are the decisive ones and are why the account name is asserted against the shipped
+    BYTES: they are a REAL profile path with a REAL account name, re-spelled as an administrative
+    share and as percent-encoding. A spelling test lets the same secret through in another alphabet,
+    so the predicate now normalises the alphabet away and asks ONE question about every rooted form.
+    """
+    account = "blind-review-account"
+    profile = f"C:{_SEP}Users{_SEP}{account}"
+    wrapped = [
+        f"HTTP 503: D:{_SEP}builds{_SEP}out{_SEP}secret.log could not be opened",
+        f"HTTP 503: {_SEP}{_SEP}customer-server{_SEP}finance-share{_SEP}secret.log could not be opened",
+        "HTTP 503: /var/lib/tableau/secret.log could not be opened",
+        f"HTTP 503: {_SEP}{_SEP}server{_SEP}C${_SEP}Users{_SEP}{account}{_SEP}private{_SEP}secret.log failed",
+        f"HTTP 503: {_SEP}{_SEP}?{_SEP}D:{_SEP}builds{_SEP}out{_SEP}secret.log could not be opened",
+        f"HTTP 503: D:{_SEP}{_SEP}builds{_SEP}{_SEP}out{_SEP}secret.log could not be opened",
+        f"HTTP 503: C%3A%5CUsers%5C{account}%5Cprivate%5Csecret.log could not be opened",
+        "HTTP 503: %2Fvar%2Flib%2Ftableau%2Fsecret.log could not be opened",
+        f"the build wrote to D:{_SEP}builds and then stopped",
+    ]
+    shipped, root = _shipped_with(tmp_path, view={"image": {"status": "failed", "retry_reasons": list(wrapped)}})
+    assert shipped["views"][0]["image"]["retry_reasons"] == [pkg.REFUSED_PATH] * len(wrapped)
+    assert absolute_host_paths(shipped) == []
+    assert profile not in json.dumps(shipped)
+    leaked = [
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_file() and account in path.read_text(encoding="utf-8", errors="ignore")
+    ]
+    assert leaked == [], f"no shipped artifact may carry the account name in ANY spelling: {leaked}"
+
+
+def test_the_SHIPPING_predicate_is_a_STRICT_SUPERSET_of_the_repo_COMMIT_GATE() -> None:
+    """The module's stated invariant, asserted rather than asserted-in-prose.
+
+    `host_paths` exists so "a package can never ship what a commit could not" is structurally true.
+    Round 9 gives it TWO predicates - a narrow, profile-only one for the repo's own tracked files and
+    a wide one for customer artifacts - and that is only safe while the wide one contains the narrow
+    one. It is not two independent regexes: `discloses_host_location` unions the narrow predicate in
+    rather than reimplementing it, so this asserts a property of the composition, and the
+    `<placeholder>` row is the one that would break first if a future edit re-spelled it instead.
+    """
+    for text in (
+        HOST_PATH,
+        f"{HOST_PATH_ROOT}{_SEP}private{_SEP}x.log",
+        f"HTTP 503: {HOST_PATH_ROOT}{_SEP}x could not be opened",
+        f'"{HOST_PATH_ROOT}{_SEP}x"',
+        "file:///" + HOST_PATH_ROOT.replace(_SEP, "/") + "/x",
+        f"C:{_SEP}Users{_SEP}<account>{_SEP}data",
+        "Users of this dashboard see a blank page",
+        "/api/2.4/sites/abc/views/def",
+    ):
+        narrow = hp.discloses_host_path(text)
+        assert hp.discloses_host_location(text) or not narrow, f"the shipping predicate narrowed on: {text!r}"
+
+
+def test_an_untrusted_dictionary_KEY_is_contained_like_a_value(tmp_path: Path) -> None:
+    """#480 round-7 finding B2. The walk cleaned VALUES and preserved KEYS.
+
+    `project()`'s whole job is to refuse an unenumerated field - and it then NAMED the refusal using
+    that field's own key, so an untrusted key shipped verbatim inside the record of having dropped
+    it. Review's injected view field and its measured result on the round-7 tip::
+
+        "<profile>\\private\\secret": "safe scalar"
+          -> "scope": {"dropped_fields": ["views[].<profile>\\private\\secret"]}
+
+    The key is contained at the same intake as the values, so `dropped_fields` can only ever name the
+    CONTAINED key - and the `views[]` prefix survives, so the operator still learns at which level an
+    unnameable field was dropped.
+    """
+    leak = f"{HOST_PATH_ROOT}{_SEP}private{_SEP}secret"
+    account = HOST_PATH_ROOT.rsplit(_SEP, 1)[-1]
+    shipped, root = _shipped_with(tmp_path, view={leak: "safe scalar"})
+    assert absolute_host_paths(shipped) == []
+    assert f"views[].{pkg.REFUSED_PATH}" in shipped["scope"]["dropped_fields"]
+    assert leak not in json.dumps(shipped)
+    leaked = [
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_file() and account in path.read_text(encoding="utf-8", errors="ignore")
+    ]
+    assert leaked == [], f"an untrusted KEY must not reach any packaged artifact: {leaked}"
+
+
+def test_NOTHING_is_appended_to_the_oracle_manifest_after_its_last_containment_pass(tmp_path: Path) -> None:
+    """The structural half of B2, and the one that makes "contained by construction" true.
+
+    A TOP-LEVEL manifest key never passes through the per-view intake, so it reaches `project()` raw
+    and lands in `scope.dropped_fields` - which `stamp_scope` used to append AFTER the document's
+    last containment pass. Two keys are driven, because the two guards are complementary rather than
+    redundant and this pins which one answers:
+
+    * a **profile** path is redacted by `manifest_scope._safe_path_segment` while it is being built
+      into the diagnostic, keeping the `<redacted-absolute-path>` spelling and losing only the key;
+    * a **non-profile** location (`D:\\...`) discloses no user profile, so the segment builder is
+      silent on it and only the final sweep - which now runs on the STAMPED document - refuses it.
+
+    Neuter either one and this fails, which is exactly the claim: a later stage must not be able to
+    append raw text to a shipped structure.
+    """
+    profile_key = f"{HOST_PATH_ROOT}{_SEP}private{_SEP}secret"
+    location_key = f"D:{_SEP}builds{_SEP}out"
+    bundle, oracle = _bundle(tmp_path)
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    manifest[profile_key] = "safe scalar"
+    manifest[location_key] = "safe scalar"
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+
+    shipped = json.loads((_out(tmp_path) / UNIT / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    dropped = shipped["scope"]["dropped_fields"]
+    assert ms.REDACTED in dropped, f"a profile key must be redacted as the diagnostic is built: {dropped}"
+    assert pkg.REFUSED_PATH in dropped, f"the final sweep must refuse a non-profile location key: {dropped}"
+    assert profile_key not in json.dumps(shipped) and location_key not in json.dumps(shipped)
+    assert absolute_host_paths(shipped) == []
+    assert any(entry.startswith("scope.dropped_fields[") for entry in shipped["scope"]["refused_fields"]), (
+        "the refusal must be RECORDED, and by the path it refused"
+    )
+
+
+def test_the_containment_walk_contains_KEYS_and_reports_the_CONTAINED_key(tmp_path: Path) -> None:
+    """Driven directly, because three properties of key containment have no artifact that shows them.
+
+    Copied from `tableau_env.scrub_tree` (:461-478), which already solved this for the credential
+    sink and documents why each matters:
+
+    1. a **collision is disambiguated, never silently dropped** - two distinct unsafe keys both
+       contain to the sentinel, and `dict` would keep the last, turning containment into data loss;
+    2. the **reported path uses the CONTAINED key**, or the guard re-emits what it just caught into
+       `scope.refused_fields`;
+    3. the walk stays **IDEMPOTENT**, including the `#2` collision spelling - a second pass must not
+       read it as a fresh, safe key and stop reporting it, which is what lets containment move to the
+       source without a later reader losing what it could previously see.
+    """
+    leak_a = f"{HOST_PATH_ROOT}{_SEP}a"
+    leak_b = f"{HOST_PATH_ROOT}{_SEP}b"
+    payload = {leak_a: "kept-a", leak_b: "kept-b", "views": [{leak_a: "kept-nested"}], "count": 7}
+    contained, refused = pkg._contain_unsafe_strings(payload)  # pylint: disable=protected-access
+
+    assert sorted(contained) == sorted([pkg.REFUSED_PATH, f"{pkg.REFUSED_PATH}#2", "views", "count"])
+    assert sorted(value for value in contained.values() if isinstance(value, str)) == ["kept-a", "kept-b"], (
+        "a collision must lose neither field's value"
+    )
+    assert contained["views"][0] == {pkg.REFUSED_PATH: "kept-nested"} and contained["count"] == 7
+    assert sorted(refused) == [
+        f"{pkg.REFUSED_PATH} (key)",
+        f"{pkg.REFUSED_PATH}#2 (key)",
+        f"views[0].{pkg.REFUSED_PATH} (key)",
+    ]
+    assert HOST_PATH_ROOT not in json.dumps(contained) + json.dumps(refused)
+
+    again, refused_again = pkg._contain_unsafe_strings(contained)  # pylint: disable=protected-access
+    assert again == contained and sorted(refused_again) == sorted(refused), "the walk must be idempotent"
+    assert tmp_path.is_dir()
+
+
+def test_a_NON_allowlisted_scalar_list_never_ships_at_all(tmp_path: Path) -> None:
+    """The other half of the closure: an unenumerated container is DROPPED before it can be refused.
+
+    Containment and scoping are complementary, and this pins which one answers. A field nobody
+    allowlisted cannot ship even a safe value, so a future leaky container has to be added
+    deliberately -- and when it is, the walk above already covers it.
+    """
+    leak = f"{HOST_PATH_ROOT}{_SEP}private{_SEP}leak.log"
+    shipped, _ = _shipped_with(tmp_path, view={"image": {"status": "failed", "future_paths": [leak]}})
+    assert absolute_host_paths(shipped) == []
+    assert "future_paths" not in shipped["views"][0]["image"]
+    assert "views[].image.future_paths" in shipped["scope"]["dropped_fields"]
+
+
+def test_a_LEGITIMATE_relative_retained_path_still_packages_and_says_where_the_bytes_are(
+    tmp_path: Path,
+) -> None:
+    """Positive control for the two above, plus the second half of finding 1.
+
+    A capture-relative `retained_path` must survive -- refusing everything would pass the security
+    assertion while destroying the operator's only route back to the retained bytes. It must also
+    not read as a file inside the PACKAGE: those bytes are deliberately not copied, so read against
+    the package the reference dangles. The leg says which it is.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    manifest["views"][0]["data"] = {"status": "ok", "path": "data/view-0.csv", "row_count": 900}
+    (oracle / "data").mkdir(parents=True, exist_ok=True)
+    (oracle / "data" / "view-0.csv").write_text("Region\r\nWest\r\n", encoding="utf-8")
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+
+    root = _out(tmp_path) / UNIT
+    shipped = json.loads((root / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    data = [v for v in shipped["views"] if v.get("flags")][0]["data"]
+    assert data["retained_path"] == "data/view-0.csv", "a safe capture-relative pointer must survive"
+    assert "capture" in data["packaging_reason"], "the reference must say it names the capture, not this package"
+    assert not (root / "oracle" / "data" / "view-0.csv").exists(), "the bytes stay out of the package"
+    assert not list((root / "oracle").rglob("*.csv"))
+
+
+def test_the_per_view_empty_flag_survives_packaging(tmp_path: Path) -> None:
+    """#471. A per-view fact must not be dropped silently at the package boundary.
+
+    The estate-wide `data_empty` COUNT is deliberately dropped -- this packager cannot recompute it
+    for one unit -- so if the per-view flag were dropped too, a packaged unit would carry a
+    zero-row capture with nothing anywhere saying so, and the fix would have moved the failure
+    rather than removed it.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    manifest["views"][0]["flags"] = ["data_empty", "empty_cannot_classify"]
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+    shipped = json.loads((_out(tmp_path) / UNIT / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    flagged = [view for view in shipped["views"] if view.get("flags")]
+    assert [view["flags"] for view in flagged] == [["data_empty", "empty_cannot_classify"]]
+
+
+def test_a_packaged_view_from_an_OLDER_capture_is_flagged_by_the_packager_itself(tmp_path: Path) -> None:
+    """The legacy half of #480 finding 1, and the reviewer's actual reproduction input.
+
+    A capture written by a current run flags its own views, so carrying the flag is enough for
+    those. An older `oracle-manifest.json` predates the flag entirely -- and that record is what the
+    review drove through `_scope_oracle_manifest()`, getting `data_ok=1 status=ok row_count absent
+    flags absent`, which is what a clean capture looks like. So the per-view rule is DERIVED here
+    from the shared predicate, not merely carried; the estate-wide counts stay dropped, because
+    those genuinely cannot be reconstructed for one unit.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    # No `flags` key anywhere: exactly a manifest written before the diagnostic existed.
+    manifest["views"][0]["data"] = {"status": "ok", "path": "data/view-0.csv", "columns": ["Region"]}
+    (oracle / "data").mkdir(parents=True, exist_ok=True)
+    (oracle / "data" / "view-0.csv").write_text("Region\r\n", encoding="utf-8")
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+
+    shipped = json.loads((_out(tmp_path) / UNIT / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    flagged = [v for v in shipped["views"] if v.get("flags")]
+    assert [v["flags"] for v in flagged] == [["data_unassessable", "row_count_unrecorded"]]
+    # ...and the STRUCTURAL half (#480 round 2): the packager must not copy uncertified bytes into
+    # `<kind>/data/<stem>.csv`, where every numeric consumer reads them as evidence.
+    assert "path" not in flagged[0]["data"]
+    assert flagged[0]["data"]["retained_path"] == "data/view-0.csv"
+    assert not list((_out(tmp_path) / UNIT / "oracle").rglob("*.csv"))
+
+
+def test_the_packager_does_not_flag_a_view_whose_rows_were_measured(tmp_path: Path) -> None:
+    """Control: deriving the flag must not mean stamping it on everything that ships."""
+    bundle, oracle = _bundle(tmp_path)
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    manifest["views"][0]["data"] = {
+        "status": "ok",
+        # ⚠️ Certified, because this is the control for "a view whose rows were MEASURED" and
+        # since #480 round 3 the measurement is the certification, not the number: a `row_count`
+        # with no certificate is the shape every pre-#480 capture has, and it is unassessable.
+        "certification": "certified",
+        "path": "data/view-0.csv",
+        "row_count": 7,
+        "columns": ["Region"],
+    }
+    (oracle / "data").mkdir(parents=True, exist_ok=True)
+    (oracle / "data" / "view-0.csv").write_text("Region\r\nWest\r\n", encoding="utf-8")
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+
+    shipped = json.loads((_out(tmp_path) / UNIT / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    assert [v for v in shipped["views"] if v.get("flags")] == []
+
+
+def test_a_packaged_view_whose_row_count_was_never_recorded_says_so(tmp_path: Path) -> None:
+    """#480 finding 1, at the package boundary -- the third consumer the reviewer named.
+
+    Their observation was `data_ok=1 status=ok row_count absent flags absent`: a packaged unit
+    shipping a view nothing had measured, with nothing anywhere saying so. The estate-wide counts are
+    deliberately dropped here (this packager cannot recompute them for one unit), so the per-view
+    flag is the ONLY channel the fact has -- and `certification` is now allowlisted beside it so a
+    reader knows WHY, not merely that something is off.
+
+    ⚠️ `data_ok` staying 1 is not the defect and must not be "fixed": the export genuinely succeeded.
+    What was missing is everything else on the row.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    view = manifest["views"][0]
+    # The shape `_capture_data` writes when it cannot certify the body: a successful transport, the
+    # bytes kept, and NO row count -- which is exactly the record the reviewer drove through here.
+    view["data"] = {"status": "ok", "path": "data/view-0.csv", "certification": "content_type_absent"}
+    view["flags"] = ["data_unassessable", "content_type_absent"]
+    (oracle / "data").mkdir(parents=True, exist_ok=True)
+    (oracle / "data" / "view-0.csv").write_text("Region,Sales\r\nWest,10\r\n", encoding="utf-8")
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+
+    shipped = json.loads((_out(tmp_path) / UNIT / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    unassessable = [v for v in shipped["views"] if v.get("flags") == ["data_unassessable", "content_type_absent"]]
+    assert len(unassessable) == 1, "the per-view flag is the only channel this fact has after packaging"
+    assert unassessable[0]["data"]["certification"] == "content_type_absent"
+    assert "row_count" not in unassessable[0]["data"]
+    assert unassessable[0]["data"]["status"] == "ok", "the transport succeeded -- keep that distinction"
+    # #480 round 2. Flagging it was necessary and not sufficient: the packaged unit must also not
+    # OFFER the bytes as numbers. `objects[].data` is what the operator's `ORACLE_*` lines and any
+    # numeric consumer read, and it must be empty here.
+    assert "path" not in unassessable[0]["data"]
+    assert unassessable[0]["data"]["retained_path"] == "data/view-0.csv"
+    assert unassessable[0]["data"]["evidence_withheld"]
+    assert not list((_out(tmp_path) / UNIT / "oracle").rglob("*.csv"))
+
+
+def test_allowlisting_the_flag_did_not_open_the_view_to_unknown_fields(tmp_path: Path) -> None:
+    """Control for the test above: the allowlist must still be an allowlist.
+
+    Naming one new key is a one-key widening; a fix that reached the same green by carrying whatever
+    the capture happened to hold would be the denylist round 2 removed.
+    """
+    bundle, oracle = _bundle(tmp_path)
+    manifest = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    manifest["views"][0]["flags"] = ["data_empty"]
+    manifest["views"][0]["future_field_nobody_enumerated"] = "estate-wide business"
+    (oracle / "oracle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _package(tmp_path, bundle, oracle)
+    shipped = json.loads((_out(tmp_path) / UNIT / "oracle" / "oracle-manifest.json").read_text(encoding="utf-8"))
+    assert any(view.get("flags") for view in shipped["views"]), "the positive half must still hold"
+    assert all("future_field_nobody_enumerated" not in view for view in shipped["views"])
+    assert "estate-wide business" not in json.dumps(shipped), "the VALUE must not ship"
+    # The PATH is reported by design -- `scope.reason` says so -- and reading it back is what proves
+    # the field was refused by the allowlist rather than simply absent from the fixture.
+    assert "views[].future_field_nobody_enumerated" in shipped["scope"]["dropped_fields"]
 
 
 def test_a_legitimate_capture_relative_leg_still_copies(tmp_path: Path) -> None:
