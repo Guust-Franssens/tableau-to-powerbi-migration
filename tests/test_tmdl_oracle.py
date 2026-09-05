@@ -29,6 +29,7 @@ an absorbed property and ordinary expression content produce a byte-identical pa
 
 # pylint: disable=import-error,wrong-import-position,missing-function-docstring,redefined-outer-name
 # pylint: disable=protected-access
+# pylint: disable=missing-class-docstring,use-implicit-booleaness-not-comparison
 
 from __future__ import annotations
 
@@ -522,13 +523,27 @@ def test_a_waiting_process_rechecks_after_the_lock_and_does_not_rebuild(monkeypa
 
 
 def test_release_cannot_free_or_delete_a_successors_lock_after_the_pathname_is_replaced(tmp_path):
-    """Reproduce the exact successor-replacement sequence review found unsafe in the pathname/token
-    design: a lock file gets deleted and a successor recreates and locks the SAME path while we
-    still hold our own (now-unlinked) descriptor open. Our own release must have no effect on the
-    successor's lock at all - it is tied to our descriptor, never to the pathname or its content.
+    """Prove release safety using each platform's actual open-file semantics.
+
+    POSIX permits unlink/recreate while A's descriptor is open, so reproduce the exact successor
+    replacement race. Windows denies that unlink; prove the denial keeps A exclusive, then prove a
+    successor can acquire only after A releases its descriptor.
     """
     lock_path = tmp_path / "race.lock"
     fd_a = tmdl_oracle._acquire_build_lock(lock_path, wait=2, poll=0.02)
+
+    if os.name == "nt":
+        try:
+            with pytest.raises(PermissionError):
+                lock_path.unlink()
+            with pytest.raises(OracleUnavailable, match="timed out"):
+                tmdl_oracle._acquire_build_lock(lock_path, wait=0.3, poll=0.02)
+        finally:
+            tmdl_oracle._release_build_lock(fd_a)
+
+        fd_b = tmdl_oracle._acquire_build_lock(lock_path, wait=2, poll=0.02)
+        tmdl_oracle._release_build_lock(fd_b)
+        return
 
     # An operator (or a successor) replaces the pathname out from under A - e.g. after judging A's
     # lock stale - and a successor B then acquires its own fresh lock at the SAME path.
