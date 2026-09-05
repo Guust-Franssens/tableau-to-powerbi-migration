@@ -108,5 +108,3 @@ def test_evidence_dirs_searches_ancestors_only_for_unpackaged_units(tmp_path: Pa
 
     assert bundle_corpus.is_package_target(target) is False
     assert bundle_corpus.evidence_dirs(target, ("oracle",)) == [run_root / "oracle"]
-
-

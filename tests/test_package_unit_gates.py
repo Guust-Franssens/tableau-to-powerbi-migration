@@ -521,9 +521,7 @@ def test_completed_flat_out_dir_layout_is_accepted_and_gates_pass(tmp_path: Path
     if not run_oracle.exists():
         shutil.copytree(oracle, run_oracle)
     flat_packages = tmp_path / "packages"
-    exit_code = pkg.main(
-        ["--bundle", str(bundle), "--out", str(flat_packages), "--oracle", str(run_oracle), "--quiet"]
-    )
+    exit_code = pkg.main(["--bundle", str(bundle), "--out", str(flat_packages), "--oracle", str(run_oracle), "--quiet"])
     assert exit_code == 0
     unit = flat_packages / UNIT
     assert (unit / "package-manifest.json").is_file()
