@@ -33,6 +33,7 @@ from urllib.parse import unquote
 from lxml import etree
 
 from connection_target import powerbi_target
+from prompt_injection import scan_spec
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger("parse_tableau")
@@ -1630,6 +1631,7 @@ def collect_limitations(spec: dict[str, Any], root: etree._Element | None = None
             limitations.extend(_custom_sql_limitations(t))
     limitations.extend(_worksheet_limitations(spec))
     limitations.extend(_dashboard_limitations(spec))
+    limitations.extend(scan_spec(spec))
     return limitations
 
 
