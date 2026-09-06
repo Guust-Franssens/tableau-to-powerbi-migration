@@ -1626,3 +1626,76 @@ def test_the_invariant_is_stated_in_work_dirs_itself() -> None:
 
     assert "THE ONE INVARIANT" in source
     assert "only ever returned on positive proof" in source
+
+
+# --------------------------------------------------------------------------------------
+# Issue #479 follow-up - the runtime HELP text must render a Windows path, not an escape
+#
+# The short-EXTERNAL-root example lives in the module docstring, which argparse prints verbatim as
+# the CLI description. The docstring is not raw, so `C:\t2p` written with a single backslash was
+# compiled to `C:` + TAB + `2p` and shipped to the operator as a path they cannot type.
+# --------------------------------------------------------------------------------------
+
+
+SHORT_ROOT_EXAMPLE = "C:" + chr(92) + "t2p"  # built from chr(92) so this test cannot repeat the bug
+
+
+def _run_help_cli() -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "work_dirs.py"), "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_help_renders_the_short_root_example_with_a_literal_backslash() -> None:
+    """Production CLI, judged on the bytes an operator actually sees.
+
+    Measured on the merged pre-fix source: `python scripts/work_dirs.py --help` printed
+    `an arbitrary short directory such as ``C:<TAB>fmig``` - a tab where the backslash belonged,
+    and a root name no operator could copy. Both halves are asserted: the literal example is
+    present, AND the line carrying it contains no control character that an escape would have
+    substituted."""
+    result = _run_help_cli()
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert SHORT_ROOT_EXAMPLE in result.stdout, (
+        "the short EXTERNAL root example is missing or mangled - a non-raw docstring escape is how "
+        f"it stops rendering as {SHORT_ROOT_EXAMPLE!r}"
+    )
+
+    example_lines = [line for line in result.stdout.splitlines() if "short directory such as" in line]
+    assert example_lines, "the short-root sentence disappeared from the runtime help"
+    for line in example_lines:
+        assert SHORT_ROOT_EXAMPLE in line
+        substituted = {c for c in line if c in "\t\r\x08\x0c\x0b\x07\x00"}
+        assert not substituted, (
+            f"the short-root help line contains control characters {sorted(hex(ord(c)) for c in substituted)} - "
+            "a Windows path example was escape-interpreted instead of printed literally"
+        )
+
+
+def test_no_runtime_string_in_work_dirs_carries_a_substituted_escape() -> None:
+    """Negative control for the fix, and the answer to "is this the only site?".
+
+    Every string constant in the module is parsed out and checked for the control characters a
+    stray `\\t` / `\\r` / `\\b` / `\\f` / `\\v` / `\\a` / `\\0` in a Windows path example would
+    produce. Newlines are excluded - they are legitimate and deliberate here (`json.dumps(...) +
+    "\\n"`). Measured on the merged pre-fix source this failed on exactly one constant: the module
+    docstring. It is a pin, not a general help-text linter: it says nothing about docs, other
+    scripts, or comments."""
+    source = _work_dirs_source()
+    tree = ast.parse(source)
+
+    offenders = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            bad = sorted({c for c in node.value if c in "\t\r\x08\x0c\x0b\x07\x00"})
+            if bad:
+                offenders.append((node.lineno, [hex(ord(c)) for c in bad]))
+
+    assert not offenders, (
+        f"runtime string constants carry substituted escapes at {offenders} - a Windows path "
+        "example needs a doubled backslash in this non-raw source"
+    )
