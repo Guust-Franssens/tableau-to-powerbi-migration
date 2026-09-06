@@ -25,6 +25,17 @@ import run_estate  # noqa: E402  # pylint: disable=wrong-import-position
 from check_path_ceiling import DIR_CEILING, FILE_CEILING, utf16_len  # noqa: E402
 from check_reference_readiness import engine_page_id  # noqa: E402
 
+# These are imported ONLY to state ground truth for the composed CLI-evidence assertions below
+# (the reservation directory name, the manifest key, the verify state) - every actual allocation in
+# this file still goes exclusively through the public `work_dirs.py` CLI via subprocess, never
+# through this import.
+from work_dirs import (  # noqa: E402
+    RUN_LOCATION_INTACT,
+    RUN_PATH_KEY,
+    _reservations_root,
+    _run_number_dir_name,
+)
+
 
 def _report(workbooks=None, dod_status="pass", gates=None) -> dict:
     """A minimal report.json in the engine's real shape."""
@@ -273,6 +284,62 @@ def _work_dirs_allocate(unit: str, root_flag: str, root: Path) -> dict:
     return json.loads(result.stdout)
 
 
+def _work_dirs_verify(root_flag: str, root: Path) -> dict:
+    """Invoke the PUBLIC `work_dirs.py --verify` CLI (not the library function) and parse its JSON."""
+    script = Path(__file__).resolve().parents[1] / "scripts" / "work_dirs.py"
+    result = subprocess.run(
+        [sys.executable, str(script), "--verify", root_flag, str(root), "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    return json.loads(result.stdout)
+
+
+def _assert_cli_evidence(root_flag: str, external_root: Path, alloc: dict) -> None:
+    """The CLI's own reported paths must correspond to a REAL allocation on disk, not merely a
+    plausible-looking JSON payload. A helper that hardcoded a returned path without ever invoking
+    `allocate_run` would satisfy the earlier "invoke the CLI, parse its JSON" requirement to the
+    letter while proving nothing - this is what closes that gap. See
+    `test_cli_evidence_assertions_reject_a_hardcoded_path_with_no_real_allocation` for the negative
+    control proving these checks actually have teeth.
+    """
+    run_root = Path(alloc["root"])
+    bundle = Path(alloc["bundle"])
+    assert bundle == run_root / "bundle", f"reported bundle {bundle} is not root/bundle under {run_root}"
+    assert run_root.is_dir(), f"reported run root {run_root} does not exist on disk"
+
+    manifest_path = run_root / "run.json"
+    assert manifest_path.is_file(), f"reported run root {run_root} has no run.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest.get(RUN_PATH_KEY) == os.path.abspath(str(run_root)), (
+        f"run.json's {RUN_PATH_KEY}={manifest.get(RUN_PATH_KEY)!r} does not match the CLI-reported root {run_root}"
+    )
+
+    runs_root_dir = external_root / "_runs"
+    reservation_dir = _reservations_root(runs_root_dir) / _run_number_dir_name(alloc["run_number"])
+    assert reservation_dir.is_dir(), f"expected reservation directory {reservation_dir} for run {alloc['run_number']}"
+
+    verify = _work_dirs_verify(root_flag, external_root)
+    matching = [r for r in verify["runs"] if r.get("run") == alloc["run_number"]]
+    assert matching, f"--verify did not report run {alloc['run_number']} among {[r.get('run') for r in verify['runs']]}"
+    state = matching[0]["location_check"]["state"]
+    assert state == RUN_LOCATION_INTACT, f"--verify reported run {alloc['run_number']} as {state!r}, not intact"
+
+
+def test_cli_evidence_assertions_reject_a_hardcoded_path_with_no_real_allocation(tmp_path: Path) -> None:
+    """Mutation-sensitive negative control: an `alloc` dict shaped exactly like the CLI's real JSON
+    output, but never produced by an actual `allocate_run` call (no run.json, no reservation, no
+    directory on disk), must fail `_assert_cli_evidence` - proving a helper that merely returns a
+    plausible path string cannot pass the composed test's evidence checks.
+    """
+    fake_root = tmp_path / "_runs" / "001-fake"
+    fake_alloc = {"root": str(fake_root), "bundle": str(fake_root / "bundle"), "run_number": 1, "unit_key": "fake"}
+    with pytest.raises(AssertionError):
+        _assert_cli_evidence("--repo-root", tmp_path, fake_alloc)
+
+
 def _short_external_root() -> Path:
     """A genuinely short, writable, unique root - the test equivalent of `C:\\t2p` on Windows, or a
     short unique directory directly under `/tmp` on POSIX.
@@ -317,10 +384,18 @@ def test_composed_allocator_and_projection_reproduces_run_409(tmp_path: Path) ->
     # engine's own PBIR tail) already leaves no room - reproducing the 275/259 shape from run 409.
     deep_len = FILE_CEILING - suffix_len - tail_len + 6
     deep_root = tmp_path / ("d" * max(deep_len - utf16_len(str(tmp_path)) - 1, 1))
-    deep_alloc = _work_dirs_allocate(unit, "--repo-root", deep_root)
-    deep_projection = run_estate.project_estate_path_ceiling(Path(deep_alloc["bundle"]), [unit])
-    assert deep_projection["status"] == "over_ceiling"
-    assert any(p["length"] > FILE_CEILING for p in deep_projection["offenders"])
+    try:
+        deep_alloc = _work_dirs_allocate(unit, "--repo-root", deep_root)
+        _assert_cli_evidence("--repo-root", deep_root, deep_alloc)
+        deep_projection = run_estate.project_estate_path_ceiling(Path(deep_alloc["bundle"]), [unit])
+        deep_file_len = next(p["length"] for p in deep_projection["paths"] if p["kind"] == "file")
+        deep_dir_len = next(p["length"] for p in deep_projection["paths"] if p["kind"] == "directory")
+        assert deep_projection["status"] == "over_ceiling"
+        assert deep_file_len > FILE_CEILING, f"deep file length {deep_file_len} does not exceed ceiling {FILE_CEILING}"
+        assert deep_dir_len > DIR_CEILING, f"deep dir length {deep_dir_len} does not exceed ceiling {DIR_CEILING}"
+    finally:
+        shutil.rmtree(deep_root, ignore_errors=True)
+    assert not deep_root.exists(), "the deep test's run/reservation tree must not survive the test"
 
     # The same unit, allocated under a genuinely short EXTERNAL --runs-parent root (directly under
     # the drive root on Windows, directly under /tmp on POSIX): reproducing run 409's 208/259 shape,
@@ -328,6 +403,7 @@ def test_composed_allocator_and_projection_reproduces_run_409(tmp_path: Path) ->
     short_root = _short_external_root()
     try:
         short_alloc = _work_dirs_allocate(unit, "--runs-parent", short_root)
+        _assert_cli_evidence("--runs-parent", short_root, short_alloc)
         short_bundle = Path(short_alloc["bundle"])
         short_projection = run_estate.project_estate_path_ceiling(short_bundle, [unit])
         measured = [(p["kind"], p["length"], p["ceiling"]) for p in short_projection["paths"]]
