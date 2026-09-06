@@ -115,6 +115,40 @@ ENGINE_SKIP_REASONS: tuple[str, ...] = (
     "canonical engine not installed, so its constants cannot be read",
 )
 EXPECTED_ENGINE_SKIP_REASONS_BY_NODEID: dict[str, str] = {
+    "tests/test_datasource_path_envelope.py::test_a_standalone_datasource_emits_a_self_service_page_with_visuals": (
+        "deterministic tier not installed"
+    ),
+    "tests/test_datasource_path_envelope.py::test_a_visual_free_datasource_envelope_would_be_fail_open": (
+        "deterministic tier not installed"
+    ),
+    "tests/test_datasource_path_envelope.py::test_the_engine_itself_resolves_both_declared_swap_controllers": (
+        "deterministic tier not installed"
+    ),
+    "tests/test_datasource_path_envelope.py::test_the_production_identifier_envelope_stays_above_the_engines_"
+    "measured_cap": "deterministic tier not installed",
+    "tests/test_datasource_path_envelope.py::test_the_production_projection_refuses_each_emitted_shape_at_its_own_"
+    "boundary[CustomSQL_Parameter_And_Doubled_Operators-directory]": "deterministic tier not installed",
+    "tests/test_datasource_path_envelope.py::test_the_production_projection_refuses_each_emitted_shape_at_its_own_"
+    "boundary[CustomSQL_Parameter_And_Doubled_Operators-file]": "deterministic tier not installed",
+    "tests/test_datasource_path_envelope.py::test_the_production_projection_refuses_each_emitted_shape_at_its_own_"
+    "boundary[Swap_Datasource_With_Field_Parameters-directory]": "deterministic tier not installed",
+    "tests/test_datasource_path_envelope.py::test_the_production_projection_refuses_each_emitted_shape_at_its_own_"
+    "boundary[Swap_Datasource_With_Field_Parameters-file]": "deterministic tier not installed",
+    "tests/test_datasource_path_envelope.py::test_the_production_projection_refuses_each_emitted_shape_at_its_own_"
+    "boundary[issue-424-d-explicit-bar-mark-directory]": "deterministic tier not installed",
+    "tests/test_datasource_path_envelope.py::test_the_production_projection_refuses_each_emitted_shape_at_its_own_"
+    "boundary[issue-424-d-explicit-bar-mark-file]": "deterministic tier not installed",
+    "tests/test_datasource_path_envelope.py::"
+    "test_the_projector_is_blind_to_unit_kind_and_over_projects_this_datasource": ("deterministic tier not installed"),
+    "tests/test_datasource_path_envelope.py::test_the_three_source_shapes_emit_their_documented_reports["
+    "CustomSQL_Parameter_And_Doubled_Operators-page1-False]": "deterministic tier not installed",
+    "tests/test_datasource_path_envelope.py::test_the_three_source_shapes_emit_their_documented_reports["
+    "Swap_Datasource_With_Field_Parameters-pageSelfService-True]": "deterministic tier not installed",
+    "tests/test_datasource_path_envelope.py::test_the_three_source_shapes_emit_their_documented_reports["
+    "issue-424-d-explicit-bar-mark-None-True]": "deterministic tier not installed",
+    "tests/test_datasource_path_envelope.py::test_two_concurrent_pytest_processes_do_not_collide": (
+        "deterministic tier not installed"
+    ),
     "tests/test_dax_oracle_server.py::test_extract_scalar_reads_our_row_shape": "deterministic tier not installed",
     "tests/test_dax_oracle_server.py::test_our_oracle_conforms_to_the_engines_own_contract": (
         "deterministic tier not installed"

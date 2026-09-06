@@ -7,8 +7,11 @@ defensible for that job. They are simply not safe for a CONSUMER, which is what 
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -230,35 +233,92 @@ def test_realistic_long_estate_is_refused_by_conservative_pbir_envelope() -> Non
     assert projection["status"] == "over_ceiling"
 
 
-@pytest.mark.parametrize("unreadable", [False, True])
-def test_main_refuses_path_preflight_before_engine(tmp_path: Path, monkeypatch, unreadable: bool) -> None:
+def _refuse_before_engine(tmp_path: Path, monkeypatch, output: Path) -> tuple[int, list[Path], str]:
+    """Run `main` to the preflight refusal and return (exit code, engine calls, printed detail)."""
     engine = _versioned_engine(tmp_path / "engine", "2.126.0")
     source = tmp_path / "src"
     source.mkdir()
     (source / "Sales.twb").write_text("<workbook />", encoding="utf-8")
     calls: list[Path] = []
     monkeypatch.setattr(run_estate, "run_engine", lambda *args: calls.append(args[0]) or (0, ""))
-    if unreadable:
-        monkeypatch.setattr(run_estate, "_readable_source", lambda _path: False)
-        output = tmp_path / "short"
-    else:
-        output = _boundary_root("Sales", FILE_CEILING + 1)
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        code = run_estate.main(
+            [
+                "--engine",
+                str(engine),
+                "--allow-noncanonical-engine",
+                "--input",
+                str(source),
+                "--output",
+                str(output),
+            ]
+        )
+    return code, calls, buffer.getvalue()
 
-    code = run_estate.main(
-        [
-            "--engine",
-            str(engine),
-            "--allow-noncanonical-engine",
-            "--input",
-            str(source),
-            "--output",
-            str(output),
-        ]
+
+def test_main_refuses_an_over_ceiling_projection_and_says_which_path_and_by_how_much(tmp_path, monkeypatch) -> None:
+    """The refusal must be ATTRIBUTABLE, not merely non-zero.
+
+    ⚠️ Round-1 review: this test previously shared one body (and one assertion set) with the
+    unreadable-source case below, so `EXIT_PATH_CEILING` plus "engine not called, output absent" was
+    accepted for a `CANNOT ASSESS` result that names no path at all. Those two arms refuse for
+    different reasons and now assert their own reason. The exit code is deliberately checked LAST:
+    it is the weakest signal here and it is shared by both arms.
+    """
+    output = _boundary_root("Sales", FILE_CEILING + 1)
+    code, calls, printed = _refuse_before_engine(tmp_path, monkeypatch, output)
+
+    match = re.search(
+        r"PATH CEILING: projected (?P<kind>directory|file) is (?P<length>\d+) UTF-16 units "
+        r"\(ceiling (?P<ceiling>\d+)\) for unit (?P<unit>'[^']+')",
+        printed,
     )
-
+    assert match, f"the refusal did not name the offending path.\nprinted:\n{printed}"
+    kind, length, ceiling, unit = (
+        match.group("kind"),
+        int(match.group("length")),
+        int(match.group("ceiling")),
+        match.group("unit"),
+    )
+    # The root was constructed to sit exactly ONE unit over both ceilings, so only these two
+    # (kind, length, ceiling) triples are legitimate. Membership rather than a single expectation,
+    # because which of the two equally-over offenders wins is an incidental tie-break.
+    assert (kind, length, ceiling) in {
+        ("directory", DIR_CEILING + 1, DIR_CEILING),
+        ("file", FILE_CEILING + 1, FILE_CEILING),
+    }, f"named {kind} {length} vs ceiling {ceiling}; the boundary root puts both exactly one over"
+    assert unit == "'Sales'", f"the refusal named unit {unit}, not the estate's only unit"
+    assert "CANNOT ASSESS" not in printed, "an over-ceiling projection must not report itself as unassessable"
+    assert "--runs-parent" in printed, "the refusal must name the supported escape command (issue #479)"
+    assert not calls, "the engine must not run after a path-ceiling refusal"
+    assert not output.exists(), "a refused run must not create its output root"
     assert code == run_estate.EXIT_PATH_CEILING
-    assert not calls
-    assert not output.exists()
+
+
+def test_main_refuses_an_unreadable_source_with_its_own_cannot_assess_reason(tmp_path, monkeypatch) -> None:
+    """The other arm: nothing could be measured, so nothing may be reported as measured.
+
+    It shares `EXIT_PATH_CEILING` with the case above, which is exactly why the diagnostic — not the
+    exit code — carries the meaning.
+    """
+    monkeypatch.setattr(run_estate, "_readable_source", lambda _path: False)
+    output = tmp_path / "short"
+    code, calls, printed = _refuse_before_engine(tmp_path, monkeypatch, output)
+
+    assert "CANNOT ASSESS downstream PBIP path length" in printed, (
+        f"an unreadable source must refuse as unassessable.\nprinted:\n{printed}"
+    )
+    assert "no usable unit/workbook name" in printed, (
+        f"the CANNOT ASSESS refusal must say WHY it could not measure.\nprinted:\n{printed}"
+    )
+    assert not re.search(r"PATH CEILING: projected (directory|file) is \d+", printed), (
+        "an unmeasurable estate must not claim a projected length it never computed"
+    )
+    assert "--runs-parent" in printed
+    assert not calls, "the engine must not run after a preflight refusal"
+    assert not output.exists(), "a refused run must not create its output root"
+    assert code == run_estate.EXIT_PATH_CEILING
 
 
 def test_estate_path_preflight_accepts_short_root_and_refuses_long_root(tmp_path: Path) -> None:

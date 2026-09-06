@@ -29,6 +29,7 @@ PINNED_ENGINE_SHA = "962d16cfe6f711622d419a567f992da8d90c8781"
 PINNED_ENGINE_VERSION = "2.356.0"
 ENGINE_TEST_TARGETS = (
     "tests/test_issue_424_chart_type_pin.py",
+    "tests/test_datasource_path_envelope.py",
     "tests/test_dax_oracle_server.py",
     "tests/test_upstream_repro_pins.py",
     "tests/test_harvest_download_watchdog.py::test_the_ceiling_constants_match_the_INSTALLED_engine",
@@ -405,6 +406,12 @@ def test_all_engine_dependent_tests_are_accounted_for() -> None:
     - 4 in tests/test_dax_oracle_server.py
     - 8 in tests/test_issue_424_chart_type_pin.py (5 decorators, one 4x parametrized)
     - 3 in tests/test_upstream_repro_pins.py
+
+    Since then tests/test_datasource_path_envelope.py added 15 more — the datasource
+    self-service-page fail-open control, the three-source-shape matrix (3x), the production
+    projection boundary per shape and per path kind (6x), the production identifier-envelope bound,
+    the engine's own swap-parameter resolution, the kind-blindness pin and the concurrency control —
+    taking the denominator to 30.
 
     The skip-reason classifier also treats the installed-engine-constants watchdog as engine-backed,
     so the engine jobs must run that one too instead of marking it NOT_CHECKED in the main job.
