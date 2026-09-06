@@ -1074,19 +1074,22 @@ def test_runs_parent_need_not_be_a_git_checkout(tmp_path: Path) -> None:
     assert not (external / ".git").exists()
 
 
-def test_runs_parent_racing_allocators_still_get_unique_numbers(tmp_path: Path) -> None:
-    """Two allocators under the same external parent must never collide on a run number - the same
-    invariant `allocate_run` already guarantees for a repo-local root."""
+def test_runs_parent_racing_allocators_still_get_unique_numbers_through_the_cli(tmp_path: Path) -> None:
+    """Two allocators racing THROUGH THE PUBLIC CLI under the same external parent must never
+    collide on a run number - the same invariant `allocate_run` already guarantees for a repo-local
+    root, but proven here via `subprocess.run(work_dirs.py ... --runs-parent ...)`, not the library
+    function directly."""
     external = tmp_path / "short"
     barrier = threading.Barrier(2)
-    results: list[int] = []
+    results: list[dict] = []
     lock = threading.Lock()
 
     def worker(name: str) -> None:
         barrier.wait()
-        run = allocate_run(name, repo_root=external)
+        payload = _run_allocate_cli(name, "--runs-parent", str(external))
+        assert payload.returncode == 0, payload.stdout + payload.stderr
         with lock:
-            results.append(run.run_number)
+            results.append(json.loads(payload.stdout))
 
     threads = [threading.Thread(target=worker, args=(name,)) for name in ("acme", "beta")]
     for thread in threads:
@@ -1094,22 +1097,57 @@ def test_runs_parent_racing_allocators_still_get_unique_numbers(tmp_path: Path) 
     for thread in threads:
         thread.join()
 
-    assert sorted(results) == [1, 2]
+    assert sorted(entry["run_number"] for entry in results) == [1, 2]
 
 
 def test_runs_parent_invalid_target_fails_before_partial_allocation(tmp_path: Path) -> None:
     """An unsafe/invalid parent (a plain FILE, not a directory) must fail cleanly and leave no
-    half-allocated run behind."""
+    half-allocated run, and no reservation, behind."""
     blocked = tmp_path / "blocked"
     blocked.write_text("not a directory", encoding="utf-8")
 
     result = _run_allocate_cli("acme", "--runs-parent", str(blocked))
 
     assert result.returncode != 0, result.stdout + result.stderr
-    assert not (blocked / "_runs").exists() or not any((blocked / "_runs").iterdir())
+    assert not (blocked / "_runs").exists(), "no run tree may be left behind by a failed allocation"
 
 
+def test_runs_parent_reports_a_run_moved_within_the_external_tree(tmp_path: Path) -> None:
+    """`--verify --runs-parent` must catch a MOVED run the same way a repo-local `--verify` does -
+    it is the same `check_run_location` invariant, just pointed at an external root."""
+    external = tmp_path / "short"
+    run = allocate_run("acme", repo_root=external)
+    _rename_run_dir(run.root, "042-acme")
 
+    result = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "work_dirs.py"), "--verify", "--runs-parent", str(external)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "MOVED" in result.stdout
+    assert "001-acme" in result.stdout and "042-acme" in result.stdout
+
+
+def test_runs_parent_reports_a_corrupt_external_manifest_as_unverifiable(tmp_path: Path) -> None:
+    """A malformed `run.json` under an external `--runs-parent` root must be `unverifiable`
+    (exit 3), never silently skipped as `intact` or as nothing at all."""
+    external = tmp_path / "short"
+    run = allocate_run("acme", repo_root=external)
+    run.manifest_path.write_text("{not valid json", encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "work_dirs.py"), "--verify", "--runs-parent", str(external)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "UNVERIFIABLE" in result.stdout
+    assert "1 run(s)" in result.stdout, "a corrupt manifest must be counted, not skipped"
 
 
 def test_the_rename_prohibition_and_its_reason_are_stated_in_work_dirs_itself(tmp_path: Path) -> None:

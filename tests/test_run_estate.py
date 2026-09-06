@@ -10,7 +10,9 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
+import tempfile
 import time
 import zipfile
 from pathlib import Path
@@ -256,6 +258,63 @@ def test_estate_path_preflight_accepts_short_root_and_refuses_long_root(tmp_path
     ok, detail = run_estate.preflight_estate_path_ceiling(source, _boundary_root("A" * 20, FILE_CEILING + 1), engine)
     assert ok is False
     assert "--runs-parent" in detail, "the refusal must name the actual supported escape command (issue #479)"
+
+
+def _work_dirs_allocate(unit: str, root_flag: str, root: Path) -> dict:
+    """Invoke the PUBLIC `work_dirs.py` CLI (not the library function) and parse its JSON."""
+    script = Path(__file__).resolve().parents[1] / "scripts" / "work_dirs.py"
+    result = subprocess.run(
+        [sys.executable, str(script), unit, root_flag, str(root), "--json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    return json.loads(result.stdout)
+
+
+def test_composed_allocator_and_projection_reproduces_run_409(tmp_path: Path) -> None:
+    """dry-run 409's exact wall, composed end to end: the PUBLIC `work_dirs.py` CLI allocates a run
+    for the real run-409 unit name, its JSON `bundle` path is fed straight into
+    `run_estate.project_estate_path_ceiling`, and the deep/default allocation must project
+    OVER Desktop's ceilings while the short `--runs-parent` allocation must project OK - not two
+    separate assertions about the allocator and the projector in isolation.
+    """
+    unit = "Meridian_Calc_Gauntlet__Live_Snowflake_"
+
+    # Learn the constant `_runs/<NNN>-<slug>/bundle` suffix the allocator appends, and the constant
+    # downstream PBIR tail the projector appends, from ONE reference allocation/projection - both
+    # are independent of where the root sits, so a short probe root is enough to measure them.
+    probe_root = tmp_path / "probe"
+    probe_alloc = _work_dirs_allocate(unit, "--repo-root", probe_root)
+    probe_bundle = Path(probe_alloc["bundle"])
+    suffix_len = utf16_len(str(probe_bundle)) - utf16_len(str(probe_root))
+    probe_projection = run_estate.project_estate_path_ceiling(probe_bundle, [unit])
+    probe_file_len = next(p["length"] for p in probe_projection["paths"] if p["kind"] == "file")
+    tail_len = probe_file_len - utf16_len(str(probe_bundle))
+
+    # A deep/default-shaped repo root: padded so the allocated bundle path alone (before the
+    # engine's own PBIR tail) already leaves no room - reproducing the 275/259 shape from run 409.
+    deep_len = FILE_CEILING - suffix_len - tail_len + 6
+    deep_root = tmp_path / ("d" * max(deep_len - utf16_len(str(tmp_path)) - 1, 1))
+    deep_alloc = _work_dirs_allocate(unit, "--repo-root", deep_root)
+    deep_projection = run_estate.project_estate_path_ceiling(Path(deep_alloc["bundle"]), [unit])
+    assert deep_projection["status"] == "over_ceiling"
+    assert any(p["length"] > FILE_CEILING for p in deep_projection["offenders"])
+
+    # The same unit, allocated under a short EXTERNAL --runs-parent root: reproducing run 409's
+    # 208/259 shape, comfortably clear of both ceilings. `tempfile.mkdtemp()` is used deliberately
+    # instead of `tmp_path` here: pytest's own `tmp_path` is nested several directories deep
+    # (`/tmp/pytest-of-<user>/pytest-<N>/<test-name>/`), which is not genuinely "short" and would
+    # undermine the very contrast this test proves.
+    short_root = Path(tempfile.mkdtemp())
+    try:
+        short_alloc = _work_dirs_allocate(unit, "--runs-parent", short_root)
+        short_projection = run_estate.project_estate_path_ceiling(Path(short_alloc["bundle"]), [unit])
+        assert short_projection["status"] == "ok"
+        assert not short_projection["offenders"]
+    finally:
+        shutil.rmtree(short_root, ignore_errors=True)
 
 
 def test_estate_path_preflight_cannot_assess_missing_input(tmp_path: Path) -> None:
