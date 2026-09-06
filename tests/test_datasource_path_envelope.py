@@ -212,7 +212,7 @@ def test_a_standalone_datasource_emits_a_self_service_page_with_visuals() -> Non
         "the belief this fixture exists to refute; if the engine genuinely changed, a visual-free "
         "datasource envelope becomes arguable - re-derive it, do not simply delete this test."
     )
-    longest = max(utf16_len(name) for name in run["visuals"])
+    longest = max((utf16_len(name) for name in run["visuals"]), default=0)
     assert longest == ENGINE_IDENTIFIER_CAP, (
         f"The longest emitted datasource visual identifier is {longest} UTF-16 units, not the "
         f"{ENGINE_IDENTIFIER_CAP} that `twb_to_pbir._sanitize` caps at (observed {run['visuals']} on "
