@@ -41,6 +41,8 @@ usage:   # credentials come from a git-ignored .env (see .env.example) or the en
          #   TABLEAU_SITE=mysitecontenturl        (empty string for Tableau Server's Default site)
          #   TABLEAU_PAT_NAME=<personal access token name>
          #   TABLEAU_PAT_SECRET=<personal access token secret>
+         #   TABLEAU_REST_API_VERSION=<optional; same knob every other client in this repo reads,
+         #                             default 3.21>. --api-version overrides it explicitly.
          python scripts/tableau_lineage.py --plan --survey _assessment/estate_survey.json
          python scripts/tableau_lineage.py --plan --env .env
          python scripts/tableau_lineage.py --plan --download migrations/datasources/_downloads
@@ -75,7 +77,12 @@ from tableau_env import redact, redacted_note, require, resolve_env, scrub_tree 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger("tableau_lineage")
 
-DEFAULT_API_VERSION = "3.19"
+DEFAULT_API_VERSION = "3.21"
+"""Matches every other Tableau client in this repo (``assess_estate.py``, ``stamp_tableau_provenance.py``,
+``tableau_render_capability.py``, ``capture_tableau_oracle.py``) - they all read
+``env.get("TABLEAU_REST_API_VERSION", "3.21")``. This script used to hardcode ``3.19`` and never read
+``.env`` at all, so the same credential context could sign in at a DIFFERENT REST API version here than
+in ``assess_estate.py`` (issue #554). See ``_env_config``."""
 _LUID = re.compile(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}", re.IGNORECASE)
 _TEXTUAL_ARCHIVE_MEMBERS = (".twb", ".tds", ".xml", ".txt", ".json", ".csv", ".ini", ".log", ".yaml", ".yml")
 
@@ -934,12 +941,20 @@ def print_plan(plan: list[dict[str, Any]], survey: Survey | None = None) -> None
     _print_orphans(plan, survey)
 
 
-def _env_config(env_path: Path | None = None) -> tuple[str, str, str, str]:
-    """Read server/site/PAT from a `.env` file layered over the environment.
+def _env_config(env_path: Path | None = None) -> tuple[str, str, str, str, str]:
+    """Read server/site/PAT/API-version from a `.env` file layered over the environment.
 
     Previously read ``os.environ`` directly under the name ``TABLEAU_SERVER``, so a `.env` written
     from our own ``.env.example`` (which documents ``TABLEAU_SERVER_URL``) failed here while working
     everywhere else -- on step 2 of the documented site path.
+
+    ``TABLEAU_REST_API_VERSION`` used to be read nowhere in this script - the sign-in call always
+    used the CLI's hardcoded default, ignoring `.env` entirely. Every other Tableau client here
+    (``assess_estate.py``'s ``Site.__init__``, ``stamp_tableau_provenance.py``,
+    ``tableau_render_capability.py``, ``capture_tableau_oracle.py``) reads it via
+    ``env.get("TABLEAU_REST_API_VERSION", "3.21")``, so the SAME `.env` could sign in at a
+    DIFFERENT REST API version here than in the adjacent assessment run (issue #554). ``main()``
+    only falls back to this value when ``--api-version`` was not passed explicitly.
     """
     env = resolve_env(env_path)
     require(env)
@@ -948,6 +963,7 @@ def _env_config(env_path: Path | None = None) -> tuple[str, str, str, str]:
         env.get("TABLEAU_SITE", ""),
         env["TABLEAU_PAT_NAME"],
         env["TABLEAU_PAT_SECRET"],
+        env.get("TABLEAU_REST_API_VERSION", DEFAULT_API_VERSION),
     )
 
 
@@ -970,7 +986,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--save-json", type=Path, help="Save the raw lineage response for offline re-planning")
     parser.add_argument(
-        "--api-version", default=DEFAULT_API_VERSION, help=f"REST API version (default {DEFAULT_API_VERSION})"
+        "--api-version",
+        default=None,
+        help=(
+            "REST API version. Defaults to TABLEAU_REST_API_VERSION in .env, falling back to "
+            f"{DEFAULT_API_VERSION} when neither is set; passing this flag overrides both."
+        ),
     )
     return parser
 
@@ -1004,9 +1025,10 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
         print_plan(build_plan(payload.get("datasources", []), payload.get("site", ""), survey), survey)
         return 0
 
-    server, site, pat_name, pat_secret = _env_config(args.env)
+    server, site, pat_name, pat_secret, env_api_version = _env_config(args.env)
+    api_version = args.api_version if args.api_version is not None else env_api_version
     try:
-        session = sign_in(server, site, pat_name, pat_secret, args.api_version)
+        session = sign_in(server, site, pat_name, pat_secret, api_version)
         log.info("signed in to %s (site '%s')", server, site or "<default>")
         datasources = fetch_lineage(session)
     except (urllib.error.URLError, urllib.error.HTTPError, RuntimeError) as exc:
