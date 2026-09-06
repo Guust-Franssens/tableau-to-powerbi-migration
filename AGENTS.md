@@ -13,14 +13,14 @@ generates into every `.github/agents/*.agent.md`.
 > `python scripts/sync_agent_conventions.py`** — never edit the copy inside an agent file.
 >
 > `--check` reports three failures in one run, the path first: a documented `<bundle>/…` path that is
-> **not a real bundle directory**, **drift**, and a persona over the **30,000-char cap** (measured on
-> the whole file). It scans the block *and each persona in full*, and **write mode exits non-zero
-> too** — that run has propagated the error, not merely proposed it. `--bundle <dir>` also resolves
-> location-shaped paths (`<bundle>/reports/`) on disk. Rationale and the defects behind each rule:
+> **not a real bundle directory** (`--bundle <dir>` also resolves location-shaped paths on disk),
+> **drift**, and a persona over the **30,000-char cap** (measured on the whole file). It scans the
+> block *and each persona in full*, and **write mode exits non-zero too** — that run has propagated
+> the error, not merely proposed it. Rationale and the defects behind each rule:
 > [`docs/agent-architecture.md`](docs/agent-architecture.md).
 
-> **VS Code users:** VS Code Copilot auto-loads `.github/copilot-instructions.md`, *not* this file.
-> That pointer duplicates only the session-start step below and defers everything else here.
+> **VS Code users:** VS Code Copilot auto-loads `.github/copilot-instructions.md`, *not* this file —
+> a pointer that duplicates only the session-start step below and defers the rest here.
 
 **Navigation:** use [`docs/INDEX.md`](docs/INDEX.md) as the tier-2 map before searching blindly.
 Subagents read it as step 0; `scripts/check_navigation_index.py` checks it bidirectionally.
@@ -120,10 +120,8 @@ evidence behind every rule below: [`docs/agent-operations.md`](docs/agent-operat
   complete.** Do file-level forensics BEFORE re-dispatching: `git status` / `git diff --stat` in the
   target worktree, plus file mtimes against the crash time. Measured 2026-08-19: three agents with
   identical "in progress" status had finished, half-finished and done nothing; blind re-dispatch
-  would have overwritten verified-good work.
-- **Prefer briefs that land work incrementally** (commit and `git push` as you go) over ones that
-  buffer everything until a final write — the first turns a crash into truncation, the second into
-  total loss.
+  would have overwritten verified-good work. **Prefer briefs that land work incrementally** (commit
+  and `git push` as you go): a crash then truncates the work instead of taking all of it.
 
 ### The review contract — state this in the brief BEFORE coding
 
@@ -182,9 +180,8 @@ numbers and what remains unexplained: [`docs/agent-operations.md`](docs/agent-op
   and so did four, so any specific safe number is unproven. Advice to "dispatch the whole wave at
   once" (common in user-level delegation guidance) is silent about host memory; this document does
   not endorse it.
-- **A crash takes every subagent's UNPUSHED work.** Committing is not enough. Brief agents to
-  `git push` incrementally, and read the crash dump first after a restart — it timestamps the crash,
-  which is the reference point the file-mtime forensics depend on.
+- **A crash takes every subagent's UNPUSHED work** — committing is not enough. Read the crash dump
+  first after a restart: it timestamps the crash, the reference point file-mtime forensics need.
 
 ---
 
@@ -319,11 +316,11 @@ bundle or goes on to deploy."*
 
 ### Step 2 — five questions, asked ONCE, in one message
 
-**The problem was never that we ask too little; it is that every question arrived too late.** Before
-this section existed, all four ask-moments were mid-flight (published datasource, credential stop,
-re-parse confirmation, retry cap) — and if the user has stepped away, the run dies there (measured
-2026-08-07). Meanwhile fidelity bar and autonomy were inferred silently, and from the outside an hour
-of confident work on a wrong assumption looks exactly like an hour of correct work.
+**The problem was never that we ask too little; it is that every question arrived too late.** All
+four ask-moments used to be mid-flight (published datasource, credential stop, re-parse
+confirmation, retry cap), so a user who has stepped away kills the run there (measured 2026-08-07),
+while fidelity bar and autonomy were inferred silently — and an hour of confident work on a wrong
+assumption looks exactly like an hour of correct work.
 
 Step 1 answers *scope* by investigation, so only these are genuinely questions:
 
@@ -412,17 +409,16 @@ spend but before stamping the root makes that spend permanently unattributable.
 
 A dedicated Copilot **session** per migration unit is the reliable anchor; record its `session_id` in
 `run.json` and do **not** mix unrelated questions or other units into that session. If unrelated work
-happens anyway, flag the run as polluted — it stays visible but must not be silently averaged into
-customer budget estimates. A dispatched `@tableau-migrator` root `agent_id` may be recorded as an
-extra label under `attribution.roots[]`, but it captures only that agent's own calls, never its
-descendants: no single store maps `parent_tool_call_id` back to the issuing agent
-(`assistant_usage_events` is local-only, `tool_requests` cloud-only), so a subtree walk is not
-reconstructible and the session is the only bucket holding a dispatched agent and all its children
-(#364).
+happens anyway, flag the run as polluted rather than silently averaging it into customer budget
+estimates. A dispatched `@tableau-migrator` root `agent_id` may ride along under
+`attribution.roots[]`, but it captures only that agent's own calls, never its descendants: no store
+maps `parent_tool_call_id` back to the issuing agent (`assistant_usage_events` is local-only,
+`tool_requests` cloud-only), so the session is the only bucket holding a dispatched agent and all its
+children (#364).
 
 A session with no `run.json` is development work for cost reporting and is excluded; retroactive
 attribution is impossible. Report **both** model time and elapsed time — they differ by a large
-factor because tool execution runs outside model calls, so quoting only one misleads.
+factor because tool execution runs outside model calls, so one alone misleads.
 
 ### Gate B — after parse + probe, before building
 
@@ -443,11 +439,10 @@ exists so each question is answered once per migration, not once per session.
 
 ## Canonical work layout (pre-bundle stages, scratch, deliverables)
 
-The stages **before** `run_estate.py` had no shared convention and per-run scratch had no home or
-lifecycle — 31 ad-hoc `_*` roots accumulated with nothing recording what any was for (#291, #234).
-The convention is **`_runs/<NNN>-<slug>/`**, never `_work/` (`.gitignore`'s existing `**/_work/` rule
-means the OPPOSITE thing). The **number is the identity** — never renamed or reused, because bundle
-output embeds absolute self-paths; the slug is decoration, because a display name is never unique.
+The stages **before** `run_estate.py` had no shared convention: 31 ad-hoc `_*` roots accumulated with
+nothing recording what any was for (#291, #234). The convention is **`_runs/<NNN>-<slug>/`**, never
+`_work/` (`.gitignore`'s `**/_work/` rule means the OPPOSITE thing). The **number is the identity** —
+never renamed or reused, because bundle output embeds absolute self-paths.
 
 ```
 _runs/<NNN>-<slug>/
@@ -463,26 +458,33 @@ _runs/<NNN>-<slug>/
                             See `docs/migration-phases.md`
     deliverables/          operator-facing outputs meant for the CUSTOMER, never for git — the
                             `ses-prep/` near-miss (#322): a `connections.json` naming 17 real
-                            customer servers landed unprefixed at the repo root, one `git add -A`
-                            away from being committed
+                            customer servers, one `git add -A` from a commit
     scratch/                disposable, run-owned — the only subdir a future `--prune` may delete
 ```
 
-`/_*` in `.gitignore` covers the whole tree by construction — verified with
-`git check-ignore -v -- _runs/<NNN>-<slug>/deliverables/connections.json`, **without** a trailing
-slash (a trailing slash makes `git check-ignore` report every path as ignored, which proves nothing).
+**Windows + PBIP + customer-shaped ⇒ allocate against a SHORT root** (run 409, #479). Repo-local
+`_runs` stays the default; when `<repo>/_runs/<NNN>-<slug>/bundle/…` projects over Desktop's
+259-character file / 247-character directory UTF-16 ceilings, allocate **before** survey/harvest with
+`python scripts/work_dirs.py <slug> --runs-parent <short-parent> --json` — identical allocator,
+`_runs/<NNN>-<slug>/` shape and `run.json`, more path budget — and treat its printed JSON paths as
+authoritative for every later command. Verify with
+`python scripts/work_dirs.py --verify --runs-parent <short-parent>`. Never hand-invent or move a run,
+never substitute a junction, `subst` or symlink, and never weaken the ceiling.
+
+`/_*` in `.gitignore` covers a **repo-local** run by construction (`git check-ignore -v -- <path>`,
+**without** a trailing slash — with one it reports every path as ignored, proving nothing). A
+short-root run lives outside the repo, where that rule never applies and nothing in this checkout can
+commit it. Neither case licenses deletion: leave the run in place as evidence.
 
 **`scripts/work_dirs.py` is the single source of truth for these paths** — `sanitize_unit_key`,
 `allocate_run` (atomic `mkdir`-exclusive, retry on collision, never a read-then-write race),
-`RunPaths` and `list_runs`. It resolves the repo root from its **own file location**, never from
-`Path.cwd()`: a stray empty `fabric/` was once written at the repo root by a script that resolved a
-relative path against whatever CWD an agent invoked it from.
+`RunPaths` and `list_runs`. It resolves the root from its **own file location**, never `Path.cwd()`:
+a stray empty `fabric/` once landed at the repo root from a path resolved against an agent's CWD.
 
-**Scope landed so far:** the convention plus the helper only. `assess_estate.py`,
-`harvest_estate_assets.py`, `capture_tableau_oracle.py` and `run_estate.py` keep their documented
-`_assessment*/` / `_sweep*/` / `_oracle*/` / `_bundle*/` defaults **unchanged** (#234). `_estate/`,
-`_build/` and `migrations/` are explicitly **exempt** — persistent test infra, a bundle-internal
-replay convention, and committed deliverables.
+**Scope:** the convention plus the helper. `assess_estate.py`, `harvest_estate_assets.py`,
+`capture_tableau_oracle.py` and `run_estate.py` keep their documented `_assessment*/` / `_sweep*/` /
+`_oracle*/` / `_bundle*/` defaults **unchanged** (#234); `_estate/`, `_build/` and `migrations/` are
+**exempt** — test infra, a bundle-internal replay convention, and committed deliverables.
 
 ---
 

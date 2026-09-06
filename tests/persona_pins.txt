@@ -68,10 +68,12 @@ ca363a77d68d539000291c004f136141a406df94cc7bbe840215e804822b5745  The operator's
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 c40cbc771eb704f7fef3f3aaa0072cb85779332c7c3b37697ea0fba0836974f5  ``` _runs/<NNN>-<slug>/ <- allocate with scripts/work_dirs.p
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+c8be9dcbb68b183445a6017ea1ddb5fa3fd1095a8841390377341e313ccce487  ~~ **Stage 1 is a short-root allocation on this Windows repo
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 f14c3cd0f5a9dc4e03df442b9361b5ceceea5be9f9092c0f64f25d766cd18edd  | # | stage | command | notes |
 4da1ec6f47782090102dc16bda978efb5655fbf2ddce0f84ecf1faf79a930f2d  |---|---|---|---|
 593e00854990a02a65abfa92b3f1919b847d9bb2f546ea4c687909615a82ddd0  | 0 | preflight | `powershell -ExecutionPolicy Bypass -File 
-8b094b41b478e6cc879e2312df967f359f66a789355cd326bfb7f32eefb1e2ee  | 1 | allocate | `python -c "import sys;sys.path.insert(0,'s
+13be674f9b72722c5dd033a70a86ace4913e173f26e78ea9f17d5abb81d56b39  | 1 | allocate | `python scripts/work_dirs.py <slug> --runs-
 90ca6627a0a6998e796eba9088bc3b51baaee14b344dce46689d17ef8bc6c2eb  | 2 | survey | `python scripts/run_engine_survey.py --server
 62d233210632c77f531ba603bdfd08d6073838f00c17848408b75476f7a6c792  | 3 | assess | `python scripts/assess_estate.py --out <run>/
 e888a3b8cf53a482e39f30173778a2e76d789b3d08e0cf1f826b7d537d778bb3  | 4 | harvest | `python scripts/harvest_estate_assets.py --o
@@ -116,7 +118,9 @@ d941e5dd2cf4f6e94e15f80203557c272a866ce83393afcbb9bc56a380f5ea1d  ~~ **An engine
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 76a434c22dd020490b1affb239b16663cb0c1504b5e1ff09df1bacec4b929bc2  ## Cleanup
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-0f23ef7b3f9538560859546ce4fbce701bef90c2fc0663fe6ffbb6203de72088  Everything you write lives under `_runs/<NNN>-<slug>/`, whic
+f245649ddc2d4c6454293300ea788d694c7c2e61738eeff3dec618d1629afeab  Everything you write lives under the run root stage 1 alloca
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+8e65650688055041f81accff57a20d67978d8326a7742abc3e01f71f019868b4  Either way, leave the run directory in place as evidence, re
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 f2852236b044ddc0109027f5486ad5d448a5b2ce400c84fe5d5bc21af58b2586  ~~ Power BI Desktop cleanup is **PID-scoped**: `Stop-Process
 
