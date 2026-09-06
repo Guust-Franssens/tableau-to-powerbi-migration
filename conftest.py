@@ -115,6 +115,14 @@ ENGINE_SKIP_REASONS: tuple[str, ...] = (
     "canonical engine not installed, so its constants cannot be read",
 )
 EXPECTED_ENGINE_SKIP_REASONS_BY_NODEID: dict[str, str] = {
+    "tests/test_datasource_path_envelope.py::test_a_standalone_datasource_emits_a_self_service_page_with_visuals": (
+        "deterministic tier not installed"
+    ),
+    "tests/test_datasource_path_envelope.py::test_a_visual_free_datasource_envelope_would_be_fail_open": (
+        "deterministic tier not installed"
+    ),
+    "tests/test_datasource_path_envelope.py::"
+    "test_the_projector_is_blind_to_unit_kind_and_over_projects_this_datasource": ("deterministic tier not installed"),
     "tests/test_dax_oracle_server.py::test_extract_scalar_reads_our_row_shape": "deterministic tier not installed",
     "tests/test_dax_oracle_server.py::test_our_oracle_conforms_to_the_engines_own_contract": (
         "deterministic tier not installed"
