@@ -12,8 +12,8 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
+import uuid
 import zipfile
 from pathlib import Path
 
@@ -273,6 +273,26 @@ def _work_dirs_allocate(unit: str, root_flag: str, root: Path) -> dict:
     return json.loads(result.stdout)
 
 
+def _short_external_root() -> Path:
+    """A genuinely short, writable, unique root - the test equivalent of `C:\\t2p` on Windows, or a
+    short unique directory directly under `/tmp` on POSIX.
+
+    `tempfile.mkdtemp()` alone is NOT a short-root control: on Windows it resolves under `%TEMP%`,
+    which lives deep under the user profile (`C:\\Users\\<name>\\AppData\\Local\\Temp\\...`) and
+    measured to still reproduce `over_ceiling` there - it is not a short root at all, just a
+    different long one. This allocates directly under the drive root on Windows, or directly under
+    `/tmp` on POSIX, so the contrast with the deep/default root above is real.
+    """
+    unique = uuid.uuid4().hex[:8]
+    if os.name == "nt":
+        drive = os.environ.get("SystemDrive", "C:")
+        root = Path(f"{drive}\\t2p-{unique}")
+    else:
+        root = Path(f"/tmp/t2p-{unique}")
+    root.mkdir(parents=True, exist_ok=False)
+    return root
+
+
 def test_composed_allocator_and_projection_reproduces_run_409(tmp_path: Path) -> None:
     """dry-run 409's exact wall, composed end to end: the PUBLIC `work_dirs.py` CLI allocates a run
     for the real run-409 unit name, its JSON `bundle` path is fed straight into
@@ -302,19 +322,24 @@ def test_composed_allocator_and_projection_reproduces_run_409(tmp_path: Path) ->
     assert deep_projection["status"] == "over_ceiling"
     assert any(p["length"] > FILE_CEILING for p in deep_projection["offenders"])
 
-    # The same unit, allocated under a short EXTERNAL --runs-parent root: reproducing run 409's
-    # 208/259 shape, comfortably clear of both ceilings. `tempfile.mkdtemp()` is used deliberately
-    # instead of `tmp_path` here: pytest's own `tmp_path` is nested several directories deep
-    # (`/tmp/pytest-of-<user>/pytest-<N>/<test-name>/`), which is not genuinely "short" and would
-    # undermine the very contrast this test proves.
-    short_root = Path(tempfile.mkdtemp())
+    # The same unit, allocated under a genuinely short EXTERNAL --runs-parent root (directly under
+    # the drive root on Windows, directly under /tmp on POSIX): reproducing run 409's 208/259 shape,
+    # comfortably clear of both ceilings.
+    short_root = _short_external_root()
     try:
         short_alloc = _work_dirs_allocate(unit, "--runs-parent", short_root)
-        short_projection = run_estate.project_estate_path_ceiling(Path(short_alloc["bundle"]), [unit])
-        assert short_projection["status"] == "ok"
-        assert not short_projection["offenders"]
+        short_bundle = Path(short_alloc["bundle"])
+        short_projection = run_estate.project_estate_path_ceiling(short_bundle, [unit])
+        measured = [(p["kind"], p["length"], p["ceiling"]) for p in short_projection["paths"]]
+        assert short_projection["status"] == "ok", f"measured lengths (kind, length, ceiling): {measured}"
+        assert not short_projection["offenders"], f"measured lengths (kind, length, ceiling): {measured}"
+        file_len = next(p["length"] for p in short_projection["paths"] if p["kind"] == "file")
+        dir_len = next(p["length"] for p in short_projection["paths"] if p["kind"] == "directory")
+        assert file_len <= FILE_CEILING, f"file length {file_len} exceeds ceiling {FILE_CEILING}"
+        assert dir_len <= DIR_CEILING, f"dir length {dir_len} exceeds ceiling {DIR_CEILING}"
     finally:
         shutil.rmtree(short_root, ignore_errors=True)
+    assert not short_root.exists(), "the external run/reservation tree must not survive the test"
 
 
 def test_estate_path_preflight_cannot_assess_missing_input(tmp_path: Path) -> None:
