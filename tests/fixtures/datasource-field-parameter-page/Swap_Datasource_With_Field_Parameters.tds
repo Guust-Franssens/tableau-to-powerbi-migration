@@ -247,6 +247,28 @@ WHERE o.Profit >> <[Parameters].[Parameter 0014036665946123]>   -- parameter
     <column caption='Min Profit Threshold' datatype='real' name='[Parameter 0014036665946123]' param-domain-type='any' role='measure' type='quantitative' value='100.'>
       <calculation class='tableau' formula='100.' />
     </column>
+    <column caption='Metric' datatype='string' name='[Parameter 0014036665946124]' param-domain-type='list' role='measure' type='nominal' value='&quot;Sales&quot;'>
+      <calculation class='tableau' formula='&quot;Sales&quot;' />
+      <members>
+        <member value='&quot;Sales&quot;' />
+        <member value='&quot;Profit&quot;' />
+      </members>
+      <aliases>
+        <alias key='&quot;Sales&quot;' value='Sales' />
+        <alias key='&quot;Profit&quot;' value='Profit' />
+      </aliases>
+    </column>
+    <column caption='Grouping' datatype='string' name='[Parameter 0014036665946125]' param-domain-type='list' role='measure' type='nominal' value='&quot;Order&quot;'>
+      <calculation class='tableau' formula='&quot;Order&quot;' />
+      <members>
+        <member value='&quot;Order&quot;' />
+        <member value='&quot;Customer&quot;' />
+      </members>
+      <aliases>
+        <alias key='&quot;Order&quot;' value='Order' />
+        <alias key='&quot;Customer&quot;' value='Customer' />
+      </aliases>
+    </column>
   </datasource-dependencies>
   <object-graph>
     <objects>

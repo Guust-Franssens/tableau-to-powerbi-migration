@@ -40,16 +40,51 @@ tree fitted only because that particular datasource had **no** field-swap calcs,
 ## Provenance
 
 Derived from the committed `tests/fixtures/CustomSQL_Parameter_And_Doubled_Operators.tds` (which
-alone emits a thin `page1` shell), with exactly two calculated columns appended:
+alone emits a thin `page1` shell), with two calculated columns **and the two parameters they
+control** appended:
 
 ```
 Metric Swap    (measure)   CASE [Parameters].[Metric]   WHEN "Sales" THEN [Sales] WHEN "Profit" THEN [Profit] END
 Grouping Swap  (dimension) CASE [Parameters].[Grouping] WHEN "Order" THEN [Order ID] WHEN "Customer" THEN [Customer Name] END
 ```
 
-Both shapes are what `parameters.detect_field_swap` accepts: a `[Parameters].[X]`-driven `CASE`
-whose every branch is a **bare** field reference, with at least two branches. One measure-role and
-one dimension-role swap, so the emitted page carries the field-parameter table **and** one
-`listSlicer` per parameter — the slicer count is what scales with the source, the id length is not.
+⚠️ **The parameters are declared, not merely referenced.** `parameters.detect_field_swap` matches
+only the *formula*, so a fixture can reach the self-service branch while its controller exists
+nowhere — which would make this a test of the engine's regex tolerance rather than of a real Tableau
+shape. Round-1 review caught exactly that. `<datasource-dependencies datasource='Parameters'>` now
+declares both controllers as `param-domain-type='list'` columns whose `<members>` are the swap's own
+branch labels and whose `value` default is one of them:
+
+| parameter | domain | default | members |
+|---|---|---|---|
+| `Metric` | `list` | `Sales` | `Sales`, `Profit` |
+| `Grouping` | `list` | `Order` | `Order`, `Customer` |
+
+Verified with the engine's own parser (canonical 2.368.0):
+
+```
+Min Profit Threshold | any  | default 100.    | members []
+Metric               | list | default "Sales" | members ['Sales', 'Profit']    | aliases {'"Sales"': 'Sales', '"Profit"': 'Profit'}
+Grouping             | list | default "Order" | members ['Order', 'Customer']  | aliases {'"Order"': 'Order', '"Customer"': 'Customer'}
+```
+
+Both shapes are what `detect_field_swap` accepts: a `[Parameters].[X]`-driven `CASE` whose every
+branch is a **bare** field reference, with at least two branches. One measure-role and one
+dimension-role swap, so the emitted page carries the field-parameter table **and** one `listSlicer`
+per parameter — the slicer count is what scales with the source, the identifier length is not.
+
+## The three-shape matrix this fixture completes
+
+`tests/test_datasource_path_envelope.py` runs the canonical engine **once** over three committed
+sources and pins each emitted shape, so no conclusion rests on a single artifact:
+
+| source | unit | emitted page | visuals | deepest report tail |
+|---|---|---|---:|---:|
+| `tests/fixtures/CustomSQL_Parameter_And_Doubled_Operators.tds` | ordinary datasource | `page1` | 0 | 32 |
+| this fixture | swap datasource | `pageSelfService` | 3 @ 24 units | 77 |
+| `fixtures/upstream-repros/issue-424-automatic-mark-discrete-date/issue-424-d-explicit-bar-mark.twb` | workbook | `page-Detail8fea6fd9` | 1 @ 24 units | 81 |
+
+The workbook arm is **borrowed**, not newly authored: long-name path arithmetic is already owned by
+`tests/test_run_estate.py`, and duplicating it here would be redundant proof.
 
 Pinned by `tests/test_datasource_path_envelope.py`.
