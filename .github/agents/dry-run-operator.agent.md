@@ -118,10 +118,18 @@ _runs/<NNN>-<slug>/            <- allocate with scripts/work_dirs.py, never inve
     assessment/  assets/  bundle/  oracle/  deliverables/  scratch/
 ```
 
+⚠️ **Stage 1 is a short-root allocation on this Windows repo, not a repo-local one** (run 409, #479).
+The repo's own checkout is deep enough that `<repo>/_runs/<NNN>-<slug>/bundle/pbip/…` projects over
+Power BI Desktop's 259-character file / 247-character directory UTF-16 ceilings, and the engine stage
+is where that lands — so allocate against the short parent **before** survey and harvest. The
+returned JSON paths are authoritative for every later stage: substitute them for `<run>` below rather
+than composing a path yourself. Never hand-invent or move a run afterwards, never substitute a
+junction, `subst` or symlink, and never weaken the ceiling check.
+
 | # | stage | command | notes |
 |---|---|---|---|
 | 0 | preflight | `powershell -ExecutionPolicy Bypass -File scripts/preflight.ps1` | **plain, no `-Update`** — never swap tooling mid-run. Must exit 0 before you continue |
-| 1 | allocate | `python -c "import sys;sys.path.insert(0,'scripts');import work_dirs;print(work_dirs.allocate_run('<slug>').root)"` | atomic; the number is the identity |
+| 1 | allocate | `python scripts/work_dirs.py <slug> --runs-parent C:\t2p --json` | atomic; the number is the identity. Take `<run>` from the printed `root`; check it later with `python scripts/work_dirs.py --verify --runs-parent C:\t2p` |
 | 2 | survey | `python scripts/run_engine_survey.py --server <url> --site <slug> --pat-name <name> --env-file .env --json <run>/assessment/estate_survey.json` | ⚠️ `--server` is required and `--json` takes a **PATH** |
 | 3 | assess | `python scripts/assess_estate.py --out <run>/assessment --survey <run>/assessment/estate_survey.json` | builds `estate.db`, which stage 4 **requires** |
 | 4 | harvest | `python scripts/harvest_estate_assets.py --out <run> --env .env --db <run>/assessment/estate.db` | ⚠️ `--out` is the RUN root; the script appends `assets/` itself |
@@ -181,10 +189,15 @@ our tier (`scripts/`, personas, skills, docs). The two numbering ranges do **not
 
 ## Cleanup
 
-Everything you write lives under `_runs/<NNN>-<slug>/`, which `/_*` in `.gitignore` already covers —
-verify with `git check-ignore -v -- <path>` (**no trailing slash**; a trailing slash makes it report
-every path as ignored, which proves nothing). Leave the run directory in place as evidence. Remove
-nothing else, commit nothing, and confirm `git status --porcelain` shows no stray files you created.
+Everything you write lives under the run root stage 1 allocated, and where that root sits decides how
+it is protected. A **repo-local** run is covered by `/_*` in `.gitignore` — verify with
+`git check-ignore -v -- <path>` (**no trailing slash**; a trailing slash makes it report every path
+as ignored, which proves nothing). A **short-root** run allocated with `--runs-parent C:\t2p` lives
+outside the repo, so that rule never applies to it and nothing in this checkout can commit it —
+which is protection by location, not licence to treat it casually: it still holds customer data.
+
+Either way, leave the run directory in place as evidence, remove no sibling paths, commit nothing,
+and confirm `git status --porcelain` shows no stray files you created inside the repo.
 
 ⚠️ Power BI Desktop cleanup is **PID-scoped**: `Stop-Process -Id <pid>` for an instance you opened,
 never a sweep by name — a sibling agent may own the other one.

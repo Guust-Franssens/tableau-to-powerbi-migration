@@ -324,6 +324,20 @@ def project_estate_path_ceiling(output_root: Path, unit_names: list[str] | None)
     }
 
 
+#: The actionable escape route for a projected path-ceiling refusal - issue #479's second reopen
+#: measured that the earlier "use a shorter run/output root" text named no command an operator could
+#: actually run, while the only documented allocator (`work_dirs.allocate_run`) *always* composes
+#: `<repo>/_runs/<NNN>-<slug>/...`, i.e. the very path that just failed. `work_dirs.py --runs-parent`
+#: allocates the identical canonical `_runs/<NNN>-<slug>/{...}` tree - same manifest, same `--verify`
+#: contract - rooted under an external short parent instead, so the printed hint names it directly.
+_SHORT_ROOT_HINT = (
+    "Allocate a run under a short EXTERNAL parent instead, e.g. "
+    "`python scripts/work_dirs.py <unit> --runs-parent C:\\short\\path --json` "
+    "(same canonical _runs/<NNN>-<slug>/ tree, just rooted somewhere shorter), then point --output "
+    "at that run's bundle/ and retry."
+)
+
+
 def preflight_estate_path_ceiling(input_dir: Path, output_root: Path, engine: Path | None = None) -> tuple[bool, str]:
     """Refuse an estate whose canonical downstream PBIP skeleton exceeds Desktop's ceilings."""
     try:
@@ -331,22 +345,19 @@ def preflight_estate_path_ceiling(input_dir: Path, output_root: Path, engine: Pa
         names = _engine_unit_names(engine, input_dir) if engine and candidates else None
         projection = project_estate_path_ceiling(output_root, names)
     except (OSError, RuntimeError, UnicodeEncodeError, ValueError) as exc:
-        return False, (
-            f"CANNOT ASSESS downstream PBIP path length ({type(exc).__name__}: {exc}). "
-            "Allocate/use a shorter run/output root, then retry."
-        )
+        return False, (f"CANNOT ASSESS downstream PBIP path length ({type(exc).__name__}: {exc}). {_SHORT_ROOT_HINT}")
     if projection["status"] == "cannot_establish":
         return False, (
             "CANNOT ASSESS downstream PBIP path length: the input estate has no usable unit/workbook "
-            "name. Allocate/use a shorter run/output root, then retry."
+            f"name. {_SHORT_ROOT_HINT}"
         )
     if projection["status"] == "over_ceiling":
         worst = max(projection["offenders"], key=lambda record: record["length"] - record["ceiling"])
         return False, (
             f"PATH CEILING: projected {worst['kind']} is {worst['length']} UTF-16 units "
             f"(ceiling {worst['ceiling']}) for unit {projection['longest_unit']!r}. "
-            "Allocate/use a shorter run/output root; LongPathsEnabled and \\\\?\\ prefixes do not make "
-            "Power BI Desktop accept these paths."
+            "LongPathsEnabled and \\\\?\\ prefixes do not make Power BI Desktop accept these paths. "
+            f"{_SHORT_ROOT_HINT}"
         )
     return True, (
         f"PATH CEILING: projected canonical PBIP visual path fits ({projection['longest_unit']!r}); "

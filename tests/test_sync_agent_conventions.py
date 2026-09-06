@@ -380,6 +380,7 @@ AGENTS_MD = REPO_ROOT / "AGENTS.md"
 AGENT_OPS_MD = REPO_ROOT / "docs" / "agent-operations.md"
 OPERATOR_RUNBOOK_MD = REPO_ROOT / "docs" / "operator-runbook.md"
 README_MD = REPO_ROOT / "README.md"
+DRY_RUN_OPERATOR_MD = REPO_ROOT / ".github" / "agents" / "dry-run-operator.agent.md"
 ORACLE_SCRIPT = REPO_ROOT / "scripts" / "capture_tableau_oracle.py"
 
 # Project TARGETS, tighter than `sac.PROMPT_CHAR_LIMIT`, measured with the repository's own gate
@@ -506,12 +507,59 @@ ROOT_CONTRACTS: dict[str, tuple[Path, tuple[str, ...]]] = {
             "`packages/<batch>/<Unit>/` remains supported for compatibility, not as the default",
         ),
     ),
+    # Run 409 (#479): a repo-local run whose bundle path already overshoots Desktop's UTF-16
+    # ceilings. The contract is executable or it is nothing - a document that says "use a shorter
+    # root" without the supported command is what sent an operator to a junction last time.
+    "windows-short-root-allocation": (
+        AGENTS_MD,
+        (
+            "Repo-local `_runs` stays the default",
+            "`python scripts/work_dirs.py <slug> --runs-parent <short-parent> --json`",
+            "`python scripts/work_dirs.py --verify --runs-parent <short-parent>`",
+            "never substitute a junction, `subst` or symlink",
+        ),
+    ),
+    "short-root-privacy-distinction-root": (
+        AGENTS_MD,
+        (
+            "`/_*` in `.gitignore` covers a **repo-local** run by construction",
+            "A short-root run lives outside the repo, where that rule never applies and nothing in "
+            "this checkout can commit it",
+        ),
+    ),
+    # The persona is the executable half: this repo's checkout IS the deep one, so its stage 1 must
+    # name the real short parent rather than a placeholder, and say that the allocator's own JSON -
+    # not a path the agent composes - drives every later stage.
+    "dry-run-operator-short-root-stage-1": (
+        DRY_RUN_OPERATOR_MD,
+        (
+            r"`python scripts/work_dirs.py <slug> --runs-parent C:\t2p --json`",
+            "The returned JSON paths are authoritative for every later stage",
+            r"`python scripts/work_dirs.py --verify --runs-parent C:\t2p`",
+        ),
+    ),
+    "dry-run-operator-cleanup-privacy": (
+        DRY_RUN_OPERATOR_MD,
+        (
+            "A **repo-local** run is covered by `/_*` in `.gitignore`",
+            r"A **short-root** run allocated with `--runs-parent C:\t2p` lives outside the repo, so "
+            "that rule never applies to it and nothing in this checkout can commit it",
+            "leave the run directory in place as evidence, remove no sibling paths",
+        ),
+    ),
 }
 
 OBSOLETE_PACKAGE_DEFAULTS: tuple[tuple[Path, str], ...] = (
     (OPERATOR_RUNBOOK_MD, "one subdirectory per packaging batch"),
     (README_MD, "├── packages/<batch>/<Unit>/"),
     (README_MD, "**2. Package for the agent** → `_runs/<NNN>-<slug>/packages/<batch>/<Unit>/`"),
+)
+
+#: The stage-1 command run 409 was executed with: an unconditional in-repo `allocate_run()`, which
+#: cannot reach a short external parent at all. Leaving it beside the new command would let an agent
+#: pick the one that reproduces the incident, so its ABSENCE is part of the contract.
+OBSOLETE_RUN_ALLOCATION: tuple[tuple[Path, str], ...] = (
+    (DRY_RUN_OPERATOR_MD, "work_dirs.allocate_run('<slug>').root"),
 )
 
 ANCHOR_CASES = [
@@ -549,6 +597,29 @@ def test_the_obsolete_batch_default_is_absent_from_authoritative_docs() -> None:
     """Compatibility nesting must never reappear as the documented canonical layout."""
     stale = [f"{path.name}: {claim}" for path, claim in OBSOLETE_PACKAGE_DEFAULTS if claim in _normalized(path)]
     assert stale == []
+
+
+def test_the_unconditional_in_repo_allocation_is_absent_from_the_dry_run_persona() -> None:
+    """Run 409's stage 1 must not survive beside its replacement.
+
+    An additive edit that only appends the short-root command leaves both on the page, and the
+    in-repo one is the shorter, more familiar of the two - which is how the incident repeats.
+    """
+    stale = [f"{path.name}: {claim}" for path, claim in OBSOLETE_RUN_ALLOCATION if claim in _normalized(path)]
+    assert stale == []
+
+
+def test_the_documented_short_root_flags_exist_in_the_allocator_cli() -> None:
+    """Independent oracle: the flags come from `work_dirs.py`'s own parser, not from the prose.
+
+    Documentation that names a flag the CLI does not accept is worse than silence - it reads as
+    executable and fails on the operator's machine. Both spellings the docs promise are asserted:
+    the allocating form and the `--verify` form that shares the same parent.
+    """
+    parser_source = " ".join((REPO_ROOT / "scripts" / "work_dirs.py").read_text(encoding="utf-8").split())
+    assert '"--runs-parent"' in parser_source
+    assert '"--verify"' in parser_source
+    assert '"--json"' in parser_source
 
 
 @pytest.mark.parametrize(("contract", "anchor"), ANCHOR_CASES)

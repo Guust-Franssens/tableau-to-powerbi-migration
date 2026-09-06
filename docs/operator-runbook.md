@@ -560,7 +560,7 @@ and 2/5 reproduced by running the command:
 | `7` | `EXIT_INVALID_PBIR` | **live** ✅ reproduced — a shipped report FAILS the first-party `powerbi-report-author validate` (measured: `PBIR_ROLE_REQUIRED_MISSING` from a stubbed calc whose projection was dropped) | read `<bundle>/pbir-validity-check.json`; **bind the stub**, do not delete the visual |
 | `8` | `EXIT_BLANK_PLACEHOLDER` | **live** ✅ reproduced — a handover-backed `BLANK()` placeholder is consumed by a report filter or visual field binding | read `<bundle>/blank-placeholder-check.json`; translate the calc or remove the consuming report dependency knowingly |
 | `9` | `EXIT_BUNDLE_REWRITE` | **pre-engine refusal** (#250) — the `--output` bundle holds work an engine re-run would delete, a **different engine version** built it, **or the barrier cannot assess either question** (missing/empty/truncated baseline, `--slice-only`-backfilled baseline, unreadable engine version) | land into a FRESH `--output`, or acknowledge with `--accept-bundle-rewrite` / `--accept-engine-version-change`; the acknowledgement, the destroyed files **and the coverage gaps** are written to `<bundle>/bundle-rewrite-acknowledgement.json` |
-| `10` | `EXIT_PATH_CEILING` | **pre-engine refusal** (#479) — the projected canonical PBIP path exceeds Power BI Desktop's measured UTF-16 file or directory ceiling, or the estate cannot be assessed safely | allocate/use a shorter run/output root; `LongPathsEnabled` and `\\?\` prefixes do not make Desktop accept these paths |
+| `10` | `EXIT_PATH_CEILING` | **pre-engine refusal** (#479) — the projected canonical PBIP path exceeds Power BI Desktop's measured UTF-16 file or directory ceiling, or the estate cannot be assessed safely | allocate a run under a short EXTERNAL parent instead: `python scripts/work_dirs.py <unit> --runs-parent <short-dir> --json`, then point `--output` at that run's `bundle/` and retry — `LongPathsEnabled` and `\\?\` prefixes do not make Desktop accept these paths |
 
 ❌ **Correction: exits 5 and 6 are NOT "pending branch only"** — the previous edition said so, and
 §5.1 check 10 was written against the same stale assumption. Both shipped 2026-08-13 (#109, #111).
@@ -1336,6 +1336,19 @@ report's `byPath` model binding, `_build/` replay). One run per **pipeline run**
 workbook: a 48-workbook estate sweep is a single run whose per-workbook units live inside its
 `bundle/pbip/`. A real customer reorg renumbered **14** run directories on that misunderstanding
 (issue #470) — allocate a new run instead; numbering is cheap and gaps are expected.
+
+**If the canonical repo-local root itself projects over Desktop's path ceiling** (`run_estate.py`'s
+`EXIT_PATH_CEILING`, table row `10` above), allocate under a short EXTERNAL parent instead of
+inventing a second hand-maintained tree:
+
+```powershell
+python scripts/work_dirs.py <unit-name> --runs-parent C:\short\path --json
+python scripts/work_dirs.py --verify --runs-parent C:\short\path
+```
+
+`--runs-parent` is a same-plumbing alias for `--repo-root` (issue #479): it allocates the identical
+`_runs/<NNN>-<slug>/{...}` tree, `run.json` and `--verify` contract, just rooted somewhere with more
+path budget to spare. It need not be a git checkout, and the two flags are mutually exclusive.
 
 **Check it, don't assume it:**
 
