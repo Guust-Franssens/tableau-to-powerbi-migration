@@ -360,7 +360,7 @@ def _short_external_root() -> Path:
     return root
 
 
-def test_composed_allocator_and_projection_reproduces_run_409(tmp_path: Path) -> None:
+def test_composed_allocator_and_projection_reproduces_run_409(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """dry-run 409's exact wall, composed end to end: the PUBLIC `work_dirs.py` CLI allocates a run
     for the real run-409 unit name, its JSON `bundle` path is fed straight into
     `run_estate.project_estate_path_ceiling`, and the deep/default allocation must project
@@ -379,6 +379,20 @@ def test_composed_allocator_and_projection_reproduces_run_409(tmp_path: Path) ->
     probe_projection = run_estate.project_estate_path_ceiling(probe_bundle, [unit])
     probe_file_len = next(p["length"] for p in probe_projection["paths"] if p["kind"] == "file")
     tail_len = probe_file_len - utf16_len(str(probe_bundle))
+
+    # From here on, wrap the REAL `subprocess.run` so every invocation still executes exactly as
+    # before, but its argv is recorded - proof that the deep and short allocations below go through
+    # the public CLI subprocess and not a direct `allocate_run()` library call the assertions below
+    # can no longer be fooled by. A helper swapped to call the library directly would leave
+    # `recorded_argv` empty and fail the count assertion below.
+    real_subprocess_run = subprocess.run
+    recorded_argv: list[list[str]] = []
+
+    def _spying_run(argv, *args, **kwargs):
+        recorded_argv.append([str(a) for a in argv])
+        return real_subprocess_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", _spying_run)
 
     # A deep/default-shaped repo root: padded so the allocated bundle path alone (before the
     # engine's own PBIR tail) already leaves no room - reproducing the 275/259 shape from run 409.
@@ -416,6 +430,28 @@ def test_composed_allocator_and_projection_reproduces_run_409(tmp_path: Path) ->
     finally:
         shutil.rmtree(short_root, ignore_errors=True)
     assert not short_root.exists(), "the external run/reservation tree must not survive the test"
+
+    # Prove the deep/short allocations really went through the public CLI subprocess - not a direct
+    # `allocate_run()` call a rewritten helper could substitute without anyone noticing. `--verify`
+    # invocations (issued by `_assert_cli_evidence`) are excluded on purpose: only the two ALLOCATING
+    # calls are being counted here.
+    script = str(Path(__file__).resolve().parents[1] / "scripts" / "work_dirs.py")
+    allocation_calls = [argv for argv in recorded_argv if "--verify" not in argv]
+    verify_calls = [argv for argv in recorded_argv if "--verify" in argv]
+    assert len(allocation_calls) == 2, (
+        f"expected exactly two allocation subprocess invocations (deep + short), got {recorded_argv}"
+    )
+    assert verify_calls, "expected --verify subprocess invocations from _assert_cli_evidence"
+    for argv in allocation_calls:
+        assert script in argv, f"allocation subprocess did not invoke the public CLI {script}: {argv}"
+        assert "--json" in argv, f"allocation subprocess did not pass --json: {argv}"
+        assert unit in argv, f"allocation subprocess did not pass the exact unit {unit!r}: {argv}"
+    assert any("--repo-root" in argv and str(deep_root) in argv for argv in allocation_calls), (
+        f"no allocation call used --repo-root {deep_root}: {allocation_calls}"
+    )
+    assert any("--runs-parent" in argv and str(short_root) in argv for argv in allocation_calls), (
+        f"no allocation call used --runs-parent {short_root}: {allocation_calls}"
+    )
 
 
 def test_estate_path_preflight_cannot_assess_missing_input(tmp_path: Path) -> None:
