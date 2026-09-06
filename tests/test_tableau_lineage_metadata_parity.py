@@ -12,13 +12,36 @@ control; classify a 401 as a final verdict (never retried, never a partial-plan 
 and add a discriminating control that tells a GraphQL-level (200-with-``errors``) refusal apart from
 a transport-level 401.
 
-**Finding**: the two clients are transport-equivalent (same URL, method, headers, body shape, and
-identical single-attempt-then-final-answer handling of a 401) - EXCEPT that ``tableau_lineage.py``
-never read ``TABLEAU_REST_API_VERSION`` from `.env` at all, hardcoding a REST API version for
-sign-in that could silently differ from the one ``assess_estate.py`` (and every other Tableau client
-in this repo) reads from the SAME `.env` file. That is fixed here. Whether THAT specific drift
-explains the live 401 is not established by this file alone (acceptance #4, a live trial-site
-re-run, is external to this sandbox) - see ``docs/`` / the PR description for that residual.
+**Finding, narrowed to what this file actually measures** (round 2 correction - an earlier revision
+of this docstring over-claimed "transport-equivalent" without having captured timeouts or exercised
+a nonempty 401 body):
+
+* Sign-in and the metadata call itself ARE shape-identical for method, normalized path, headers and
+  body encoding (tests 1-2 below), and a bare 401/403 (no recognized body) is a final, never-retried
+  verdict for BOTH clients (test 3) - that part of the equivalence claim IS measured.
+* The two clients do NOT use the same timeout value (test 3b records both inputs rather than
+  asserting they match - ``assess_estate.py`` is independently configurable via
+  ``--graphql-timeout``/``--rest-timeout``; ``tableau_lineage.py`` hard-codes 120s). That is an
+  existing, independent difference this brief does not change (out of scope: "no broad retry
+  framework or project-scope changes").
+* The two clients do NOT handle a *recognized session-expiry* 401 (Tableau's own ``401002`` body)
+  the same way: ``assess_estate.py`` re-authenticates once (bounded by ``MAX_REAUTH``) and retries
+  the SAME request; ``tableau_lineage.py`` has no such classification and propagates any 401 -
+  including a ``401002`` one - immediately as a final answer (test 3c). This is a REAL, measured
+  behavioral gap, not a transport bug: reproducing ``assess_estate.py``'s narrow reauth-on-401002
+  policy here would need either importing its ``classify``/``SESSION_LOST`` (a new cross-script
+  dependency the round-2 brief asks to avoid unless "strictly smaller", and one that would also
+  widen the tainted-parameter surface ``test_diagnostic_redaction.py`` enumerates for
+  ``fetch_lineage``) or reimplementing it locally, neither of which is in scope for this bounded fix.
+  **Per the issue's option (b): this gap is documented rather than silently claimed as parity, and
+  #554 should stay open pending the live trial-site re-run (acceptance #4) even after this PR.** If
+  a live 401 turns out to carry a ``401002`` body, that is very likely the actual explanation, and
+  the fix would be adding the SAME bounded reauth this file demonstrates ``tableau_lineage.py``
+  lacks - not a broader retry policy.
+* The one drift this file DOES fix: ``tableau_lineage.py`` never read ``TABLEAU_REST_API_VERSION``
+  from `.env` at all, hardcoding a REST API version for sign-in that could silently differ from the
+  one ``assess_estate.py`` (and every other Tableau client in this repo) reads from the SAME `.env`
+  file - independently worth fixing regardless of whether it explains the live 401.
 """
 
 from __future__ import annotations
@@ -59,6 +82,9 @@ LINEAGE_BODY = json.dumps({"data": {"publishedDatasources": []}}).encode()
 GRAPHQL_ERRORS_BODY = json.dumps(
     {"errors": [{"message": "field 'downstreamWorkbooks' requires Data Management"}]}
 ).encode()
+SESSION_LOST_BODY = json.dumps(
+    {"error": {"code": "401002", "summary": "Signed Out", "detail": "The session is not valid."}}
+).encode()
 
 
 class _Response:
@@ -91,26 +117,43 @@ class RecordingTransport:
     is never confused with an authentication failure.
     """
 
-    def __init__(self, *, metadata_status: int = 200, metadata_body: bytes = STRUCTURE_BODY) -> None:
+    def __init__(
+        self,
+        *,
+        metadata_status: int = 200,
+        metadata_body: bytes = STRUCTURE_BODY,
+        metadata_error_body: bytes = b"",
+    ) -> None:
         self.calls: list[urllib.request.Request] = []
+        self.timeouts: list[float | None] = []
         self.metadata_status = metadata_status
         self.metadata_body = metadata_body
+        self.metadata_error_body = metadata_error_body
 
     def __call__(self, request: urllib.request.Request, timeout: float | None = None) -> _Response:
         self.calls.append(request)
+        self.timeouts.append(timeout)
         url = request.full_url
         if url.endswith("/auth/signin"):
             return _Response(200, SIGNIN_BODY)
         if "/metadata/graphql" in url:
             if self.metadata_status != 200:
                 raise urllib.error.HTTPError(
-                    url, self.metadata_status, "Unauthorized", {}, _Response(self.metadata_status, b"")
+                    url,
+                    self.metadata_status,
+                    "Unauthorized",
+                    {},
+                    _Response(self.metadata_status, self.metadata_error_body),
                 )
             return _Response(200, self.metadata_body)
         raise AssertionError(f"unscripted call in the parity experiment: {url}")
 
     def calls_matching(self, fragment: str) -> list[urllib.request.Request]:
         return [call for call in self.calls if fragment in call.full_url]
+
+    def timeouts_matching(self, fragment: str) -> list[float | None]:
+        """Timeout inputs, in call order - paired positionally with ``calls_matching``."""
+        return [t for call, t in zip(self.calls, self.timeouts) if fragment in call.full_url]
 
 
 def _normalize(request: urllib.request.Request) -> dict:
@@ -234,6 +277,52 @@ def test_a_401_never_falls_back_to_a_partial_or_site_wide_plan(monkeypatch: pyte
     assert not save_json.exists()
 
 
+def test_timeout_inputs_are_recorded_not_assumed_equal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round-2 ask: RECORD the timeout each client actually passes to ``urlopen`` rather than
+    asserting an unmeasured equivalence claim. ``assess_estate.py`` uses its configurable
+    ``--graphql-timeout`` (default 300s); ``tableau_lineage.py`` hard-codes 120s. That is an
+    existing, independent difference - out of scope for this bounded fix ("no broad retry/timeout
+    framework")."""
+    transport = RecordingTransport()
+    site, session = _sign_in_both(transport, monkeypatch)
+
+    site.graphql(assess_estate.STRUCTURE_QUERY)
+    tableau_lineage.fetch_lineage(session)
+
+    metadata_timeouts = transport.timeouts_matching("/metadata/graphql")
+    assert len(metadata_timeouts) == 2
+    site_timeout, lineage_timeout = metadata_timeouts
+    assert site_timeout == assess_estate.DEFAULT_GRAPHQL_TIMEOUT_SEC == 300.0
+    assert lineage_timeout == 120
+    assert site_timeout != lineage_timeout  # recorded as-is, not papered over
+
+
+def test_a_recognized_session_expiry_401_is_not_handled_the_same_way(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round-2 ask #3: a nonempty 401 carrying Tableau's OWN session-expiry code (``401002``) is a
+    RECOGNIZED, bounded reauth-and-retry case for ``assess_estate.py`` and an unrecognized,
+    immediately-final one for ``tableau_lineage.py``. This is a REAL measured gap, documented here
+    rather than papered over - see the module docstring for why reproducing it is out of scope for
+    this bounded fix, and why #554 should stay open pending the live trial-site re-run."""
+    transport = RecordingTransport(metadata_status=401, metadata_error_body=SESSION_LOST_BODY)
+    site, session = _sign_in_both(transport, monkeypatch)
+    signin_calls_before = len(transport.calls_matching("/auth/signin"))
+
+    payload, error = site.graphql(assess_estate.STRUCTURE_QUERY)
+    assert payload == {}
+    assert error is not None and error["status"] == 401
+    assert assess_estate.classify(401, str(SESSION_LOST_BODY)) == "session_lost"
+    # assess_estate recognized 401002 and spent its bounded reauth budget re-signing-in.
+    reauth_signins = len(transport.calls_matching("/auth/signin")) - signin_calls_before
+    assert reauth_signins == assess_estate.MAX_REAUTH
+
+    signin_calls_before_lineage = len(transport.calls_matching("/auth/signin"))
+    with pytest.raises(urllib.error.HTTPError) as excinfo:
+        tableau_lineage.fetch_lineage(session)
+    assert excinfo.value.code == 401
+    # tableau_lineage has no such classification: zero additional sign-in attempts, no retry at all.
+    assert len(transport.calls_matching("/auth/signin")) == signin_calls_before_lineage
+
+
 # --- 4. discriminating control: a GraphQL-level refusal is NOT the same as a transport 401 --------
 
 
@@ -292,3 +381,89 @@ def test_an_explicit_cli_api_version_still_overrides_the_env(monkeypatch: pytest
     signin_calls = transport.calls_matching("/auth/signin")
     assert len(signin_calls) == 1
     assert urlsplit(signin_calls[0].full_url).path == "/api/3.4/auth/signin"
+
+
+# --- 6. version validation: blank is ABSENT, malformed is a CONFIGURATION error (round-2 ask #1) --
+
+
+def test_blank_env_and_cli_api_versions_fall_back_to_the_default(tmp_path: Path) -> None:
+    """Blank means ABSENT, never malformed - stripped whitespace-only input falls back to the
+    documented default for both the env-sourced value and an explicit ``--api-version``."""
+    for blank in ("", "   ", "\t"):
+        env_path = tmp_path / f".env-blank-{len(blank)}"
+        values = {**ENV, "TABLEAU_REST_API_VERSION": blank}
+        env_path.write_text("\n".join(f"{key}={value}" for key, value in values.items()), encoding="utf-8")
+        *_rest, env_api_version = tableau_lineage._env_config(env_path)  # pylint: disable=protected-access
+        assert env_api_version == tableau_lineage.DEFAULT_API_VERSION
+
+        assert (
+            tableau_lineage._resolve_api_version(blank, "--api-version")  # pylint: disable=protected-access
+            == tableau_lineage.DEFAULT_API_VERSION
+        )
+
+
+@pytest.mark.parametrize("bad_version", ["banana", "3.", ".21", "3", "3.21x", "v3.21", "3..21", "3.21/etc"])
+def test_a_malformed_api_version_is_a_configuration_error_before_any_request(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, bad_version: str
+) -> None:
+    """A malformed ``.env`` value AND a malformed explicit ``--api-version`` must both fail as a
+    usage/configuration error BEFORE sign-in - never reach the transport, never get silently
+    coerced into the default (that would hide a typo'd version rather than reject it)."""
+    transport = RecordingTransport()
+    monkeypatch.setattr(tableau_lineage.urllib.request, "urlopen", transport)
+
+    malformed_env = tmp_path / ".env-malformed"
+    malformed_values = {**ENV, "TABLEAU_REST_API_VERSION": bad_version}
+    malformed_env.write_text("\n".join(f"{key}={value}" for key, value in malformed_values.items()), encoding="utf-8")
+    with pytest.raises(SystemExit):
+        tableau_lineage._env_config(malformed_env)  # pylint: disable=protected-access
+    assert transport.calls == []
+
+    valid_env = tmp_path / ".env-valid"
+    valid_env.write_text("\n".join(f"{key}={value}" for key, value in ENV.items()), encoding="utf-8")
+    with pytest.raises(SystemExit):
+        tableau_lineage.main(["--plan", "--env", str(valid_env), "--api-version", bad_version])
+    assert transport.calls == []
+
+
+# --- 7. main()'s ACTUAL selection, not just _env_config in isolation (round-2 ask #2) --------------
+
+
+def test_main_selects_the_env_rest_api_version_with_no_cli_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """CLI-level, not unit-level: fails if ``main()`` itself ever stops honoring the env value even
+    while ``_env_config`` in isolation stays correct."""
+    transport = RecordingTransport()
+    monkeypatch.setattr(tableau_lineage.urllib.request, "urlopen", transport)
+    env_path = tmp_path / ".env"
+    env_path.write_text("\n".join(f"{key}={value}" for key, value in ENV.items()), encoding="utf-8")
+
+    exit_code = tableau_lineage.main(["--plan", "--env", str(env_path)])
+
+    assert exit_code == 0
+    signin_calls = transport.calls_matching("/auth/signin")
+    assert len(signin_calls) == 1
+    assert urlsplit(signin_calls[0].full_url).path == "/api/3.29/auth/signin"
+
+
+def test_main_falls_back_to_the_documented_default_with_no_env_or_cli_version(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Absent env AND no ``--api-version`` -> the literal documented default (``3.21``), reached by
+    ``main()`` itself. A regression that reintroduces a hardcoded ``3.19`` inside ``main()`` - even
+    if ``_env_config``/``_resolve_api_version`` stay correct - must fail THIS test: the literal is
+    written out rather than read back from ``DEFAULT_API_VERSION``, which a hardcoded regression
+    would not touch."""
+    transport = RecordingTransport()
+    monkeypatch.setattr(tableau_lineage.urllib.request, "urlopen", transport)
+    values = {key: value for key, value in ENV.items() if key != "TABLEAU_REST_API_VERSION"}
+    env_path = tmp_path / ".env"
+    env_path.write_text("\n".join(f"{key}={value}" for key, value in values.items()), encoding="utf-8")
+
+    exit_code = tableau_lineage.main(["--plan", "--env", str(env_path)])
+
+    assert exit_code == 0
+    signin_calls = transport.calls_matching("/auth/signin")
+    assert len(signin_calls) == 1
+    assert urlsplit(signin_calls[0].full_url).path == "/api/3.21/auth/signin"

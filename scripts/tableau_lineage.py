@@ -83,6 +83,31 @@ DEFAULT_API_VERSION = "3.21"
 ``env.get("TABLEAU_REST_API_VERSION", "3.21")``. This script used to hardcode ``3.19`` and never read
 ``.env`` at all, so the same credential context could sign in at a DIFFERENT REST API version here than
 in ``assess_estate.py`` (issue #554). See ``_env_config``."""
+_API_VERSION_RE = re.compile(r"\d+\.\d+(?:\.\d+)*")
+"""The same numeric MAJOR.MINOR[.PATCH] grammar ``tableau_render_capability.api_tuple`` validates for
+a SERVER-reported version. Duplicated here rather than imported: this is a CONFIG-input check (reject
+a malformed ``.env``/``--api-version`` before any request), not the detection helper that compares a
+live server's reported release, and five lines locally is smaller than a new cross-script import
+(issue #554 round 2)."""
+
+
+def _resolve_api_version(raw: str | None, source: str) -> str:
+    """Normalize one candidate REST API version; blank/absent falls back to ``DEFAULT_API_VERSION``.
+
+    A non-blank value that doesn't match Tableau's numeric grammar (``banana``, whitespace-only,
+    an empty ``major``/``minor`` segment such as ``3.`` or ``.21``) is a CONFIGURATION error, raised
+    before any Tableau request is attempted - never silently sent to the server or coerced.
+    """
+    stripped = (raw or "").strip()
+    if not stripped:
+        return DEFAULT_API_VERSION
+    if not _API_VERSION_RE.fullmatch(stripped):
+        raise SystemExit(
+            f"invalid {source} REST API version {stripped!r}: expected MAJOR.MINOR, e.g. {DEFAULT_API_VERSION}"
+        )
+    return stripped
+
+
 _LUID = re.compile(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}", re.IGNORECASE)
 _TEXTUAL_ARCHIVE_MEMBERS = (".twb", ".tds", ".xml", ".txt", ".json", ".csv", ".ini", ".log", ".yaml", ".yml")
 
@@ -955,6 +980,10 @@ def _env_config(env_path: Path | None = None) -> tuple[str, str, str, str, str]:
     ``env.get("TABLEAU_REST_API_VERSION", "3.21")``, so the SAME `.env` could sign in at a
     DIFFERENT REST API version here than in the adjacent assessment run (issue #554). ``main()``
     only falls back to this value when ``--api-version`` was not passed explicitly.
+
+    Validated (via ``_resolve_api_version``) before it is ever handed to ``sign_in`` - a malformed
+    ``.env`` value is a configuration error raised HERE, before any request is attempted, never a
+    string quietly forwarded into a sign-in URL.
     """
     env = resolve_env(env_path)
     require(env)
@@ -963,7 +992,7 @@ def _env_config(env_path: Path | None = None) -> tuple[str, str, str, str, str]:
         env.get("TABLEAU_SITE", ""),
         env["TABLEAU_PAT_NAME"],
         env["TABLEAU_PAT_SECRET"],
-        env.get("TABLEAU_REST_API_VERSION", DEFAULT_API_VERSION),
+        _resolve_api_version(env.get("TABLEAU_REST_API_VERSION"), "TABLEAU_REST_API_VERSION"),
     )
 
 
@@ -1026,7 +1055,10 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
         return 0
 
     server, site, pat_name, pat_secret, env_api_version = _env_config(args.env)
-    api_version = args.api_version if args.api_version is not None else env_api_version
+    if args.api_version is not None:
+        api_version = _resolve_api_version(args.api_version, "--api-version")
+    else:
+        api_version = env_api_version
     try:
         session = sign_in(server, site, pat_name, pat_secret, api_version)
         log.info("signed in to %s (site '%s')", server, site or "<default>")
