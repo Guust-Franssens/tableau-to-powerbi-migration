@@ -60,7 +60,7 @@ if str(SCRIPTS) not in sys.path:
 
 import engine_source  # noqa: E402  # pylint: disable=wrong-import-position
 import run_estate  # noqa: E402  # pylint: disable=wrong-import-position
-from check_path_ceiling import FILE_CEILING, utf16_len  # noqa: E402
+from check_path_ceiling import DIR_CEILING, FILE_CEILING, utf16_len  # noqa: E402  # pylint: disable=wrong-import-position
 
 FIXTURE_DIR = REPO / "tests" / "fixtures" / "datasource-field-parameter-page"
 SWAP_UNIT = "Swap_Datasource_With_Field_Parameters"
@@ -95,12 +95,27 @@ THIN_PAGE = "page1"
 ENGINE_IDENTIFIER_CAP = 24
 
 
-#: The envelope tail each source kind would be modelled with, longest first. A tail is the part of
-#: the path below `<unit>.Report/`, in UTF-16 units.
+#: The envelope tail each source kind would be modelled with, in UTF-16 units below `<unit>.Report/`.
+#: ⚠️ Round-2 review: these are **documentation of a capability comparison**, never production
+#: coverage. `run_estate` owns the envelope that actually gates a run; anything asserted against the
+#: constants below is a statement about what a kind-aware envelope COULD look like, which is why the
+#: two tests that gate on production call `project_estate_path_ceiling` directly instead.
 def _tail(page: str, visual: str | None) -> int:
     if visual is None:
         return utf16_len(f"definition/pages/{page}/page.json")
     return utf16_len(f"definition/pages/{page}/visuals/{visual}/visual.json")
+
+
+def _root_for_length(length: int) -> Path:
+    """A synthetic resolved root with an exact UTF-16 length on the current host.
+
+    Same idiom as `tests/test_run_estate.py::_root_for_length`, kept local rather than imported so
+    this module has no cross-test-module dependency.
+    """
+    anchor = Path.cwd().anchor
+    root = Path(anchor + "r" * (length - utf16_len(anchor))).resolve()
+    assert utf16_len(str(root)) == length, f"could not build a {length}-unit root; got {root}"
+    return root
 
 
 ENVELOPE_TAIL = {
@@ -246,7 +261,7 @@ def test_every_swap_controller_is_a_declared_parameter() -> None:
 
 # -- what the ENGINE emits -------------------------------------------------------------------------
 @pytest.fixture(scope="session", name="engine_bundle")
-def _engine_bundle(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
+def _engine_bundle(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:  # pylint: disable=too-many-locals
     """Run the canonical engine ONCE over all three source shapes, into a per-process directory.
 
     `tmp_path_factory` gives a base temp that is unique per pytest process and per xdist worker, so
@@ -298,14 +313,23 @@ def _engine_bundle(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
             if report.is_dir()
             else []
         )
+        dir_tails = (
+            [str(p.relative_to(report)).replace("\\", "/") for p in report.rglob("*") if p.is_dir()]
+            if report.is_dir()
+            else []
+        )
         deepest = max(tails, key=utf16_len, default="")
+        deepest_dir = max(dir_tails, key=utf16_len, default="")
         shapes[unit] = {
             "report": report,
             "pages": page_dirs,
             "visuals": visuals,
             "deepest_tail": deepest,
             "deepest_tail_len": utf16_len(deepest),
+            "deepest_dir_tail": deepest_dir,
+            "deepest_dir_tail_len": utf16_len(deepest_dir),
             "longest_visual_id": max((utf16_len(v) for v in visuals), default=0),
+            "longest_page_id": max((utf16_len(p) for p in page_dirs), default=0),
         }
     return {"version": engine_source.engine_version(engine), "root": out, "shapes": shapes}
 
@@ -340,7 +364,7 @@ def test_a_standalone_datasource_emits_a_self_service_page_with_visuals(engine_b
 
 
 @requires_engine
-def test_the_engine_itself_resolves_both_declared_swap_controllers(engine_bundle) -> None:
+def test_the_engine_itself_resolves_both_declared_swap_controllers() -> None:
     """The engine's OWN parser must see the parameters, not just our XML reading of them.
 
     `test_every_swap_controller_is_a_declared_parameter` reads the `.tds` with this repository's
@@ -442,36 +466,91 @@ def test_the_three_source_shapes_emit_their_documented_reports(
 
 
 @requires_engine
+@pytest.mark.parametrize("kind", ["file", "directory"])
 @pytest.mark.parametrize("unit", sorted(MATRIX_SOURCES))
-def test_each_shape_envelope_covers_its_tail_and_one_unit_less_would_not(engine_bundle, unit: str) -> None:
-    """A per-kind envelope must COVER its own emitted tail, and be tight enough to matter.
+def test_the_production_projection_refuses_each_emitted_shape_at_its_own_boundary(
+    engine_bundle, unit: str, kind: str
+) -> None:
+    """The PRODUCTION projector, at a root derived from what the engine really wrote.
 
-    The boundary is computed, not assumed: at `root = FILE_CEILING - envelope - 1` the emitted path
-    must land at or under Desktop's file ceiling, and an envelope one unit shorter must push that
-    same emitted path one unit over. That is the exact place a one-unit understatement flips a
-    refusal into a pass.
+    ⚠️ Round-2 review: the assertion this replaces compared a **test-owned** `ENVELOPE_TAIL`
+    constant against the emitted tail, and closed with the tautology
+    `(CEILING - (actual - 1) - 1) + 1 + actual == CEILING + 1`, which is true for every `actual`.
+    Understating production's own `_PBIR_VISUAL_ID` by four units left all of it green.
+
+    So the root here is sized so the **actually emitted** path measures exactly `ceiling + 1`, and
+    `run_estate.project_estate_path_ceiling` — the real function — must refuse it, naming the right
+    kind, ceiling and unit, and projecting a length that COVERS the real one.
+
+    ⚠️ Honest limit of this boundary, stated rather than implied: it is only as sensitive as the
+    slack between production's envelope and *this fixture's* instance. The workbook fixture emits a
+    19-unit page id and a 24-unit visual id against a 24 + 28 envelope, i.e. 9 units of slack, so a
+    four-unit understatement still covers here. What bounds the envelope against the engine's own
+    maximum is `test_the_production_identifier_envelope_stays_above_the_engines_measured_cap`.
     """
     shape = engine_bundle["shapes"][unit]
-    actual = shape["deepest_tail_len"]
-    envelope = ENVELOPE_TAIL[unit]
+    tail = shape["deepest_tail"] if kind == "file" else shape["deepest_dir_tail"]
+    ceiling = FILE_CEILING if kind == "file" else DIR_CEILING
+    assert tail, f"{unit}: the engine emitted no {kind} under its .Report folder"
 
-    assert envelope >= actual, (
-        f"{unit}: the modelled envelope tail ({envelope}) does not cover the emitted tail "
-        f"({actual}, {shape['deepest_tail']!r}). An envelope that fails to cover real output is "
-        "fail-open by construction."
+    relative = f"pbip/{unit}/{unit}.Report/{tail}"
+    root = _root_for_length(ceiling + 1 - 1 - utf16_len(relative))
+    at_root = utf16_len(str(root)) + 1 + utf16_len(relative)
+    assert at_root == ceiling + 1, (
+        f"harness error: the emitted {kind} measures {at_root} at the constructed root, not the intended {ceiling + 1}"
     )
 
-    boundary_root = FILE_CEILING - envelope - 1
-    assert boundary_root + 1 + actual <= FILE_CEILING, (
-        f"{unit}: at the envelope-derived root {boundary_root} the emitted path measures "
-        f"{boundary_root + 1 + actual}, over the {FILE_CEILING} ceiling"
+    projection = run_estate.project_estate_path_ceiling(root, [unit])
+    record = next(r for r in projection["paths"] if r["kind"] == kind)
+
+    assert record["length"] >= at_root, (
+        f"{unit}/{kind}: the PRODUCTION envelope projects {record['length']} units where the engine "
+        f"really wrote {at_root} ({relative!r}). An envelope that does not cover real output is "
+        "fail-open by construction - this is the assertion a shortened production identifier breaks."
+    )
+    assert projection["status"] == "over_ceiling", (
+        f"{unit}/{kind}: production reported {projection['status']!r} at a root where its own emitted "
+        f"{kind} measures {at_root}, one unit over the {ceiling} ceiling"
+    )
+    assert record["ceiling"] == ceiling, f"{unit}/{kind}: production judged against ceiling {record['ceiling']}"
+    assert projection["longest_unit"] == unit, f"{unit}/{kind}: production named unit {projection['longest_unit']!r}"
+    assert any(offender["kind"] == kind for offender in projection["offenders"]), (
+        f"{unit}/{kind}: production refused, but not on the {kind} rule: "
+        f"{[(o['kind'], o['length'], o['ceiling']) for o in projection['offenders']]}"
     )
 
-    understated_root = FILE_CEILING - (actual - 1) - 1
-    assert understated_root + 1 + actual == FILE_CEILING + 1, (
-        f"{unit}: an envelope one unit under the emitted tail ({actual - 1}) would derive root "
-        f"{understated_root}, at which the emitted path measures {understated_root + 1 + actual}; "
-        f"expected exactly {FILE_CEILING + 1}, i.e. one unit over the ceiling"
+
+@requires_engine
+def test_the_production_identifier_envelope_stays_above_the_engines_measured_cap(engine_bundle) -> None:
+    """Production's projected identifiers must bound what the engine can actually emit.
+
+    `_sanitize` returns `name[:24]`, and this bundle's three shapes are measured, not assumed. The
+    projector deliberately carries `_PBIR_IDENTIFIER_SAFETY_MARGIN` on top of that
+    ("so the envelope remains conservative for a future engine identifier", `run_estate.py`), so an
+    envelope that has been trimmed back to — or below — the observed cap has spent a margin the
+    module documents as intentional. This is the assertion that a four-unit understatement breaks,
+    where a per-fixture boundary cannot: it compares production against the ENGINE's maximum rather
+    than against one artifact's instance.
+    """
+    measured_visual = max(shape["longest_visual_id"] for shape in engine_bundle["shapes"].values())
+    measured_page = max(shape["longest_page_id"] for shape in engine_bundle["shapes"].values())
+    projected_visual = utf16_len(run_estate._PBIR_VISUAL_ID)  # pylint: disable=protected-access
+    projected_page = utf16_len(run_estate._PBIR_PAGE_ID)  # pylint: disable=protected-access
+    margin = run_estate._PBIR_IDENTIFIER_SAFETY_MARGIN  # pylint: disable=protected-access
+
+    assert measured_visual == ENGINE_IDENTIFIER_CAP, (
+        f"the engine's longest emitted visual identifier across all three shapes is {measured_visual}, "
+        f"not `_sanitize`'s {ENGINE_IDENTIFIER_CAP}-unit cap, on engine {engine_bundle['version']}"
+    )
+    assert projected_visual >= measured_visual + margin, (
+        f"production projects a {projected_visual}-unit visual identifier, which is not the measured "
+        f"engine cap ({measured_visual}) plus the documented safety margin ({margin}). Trimming this "
+        "spends a margin `run_estate` states it keeps on purpose, and no per-fixture boundary test "
+        "will notice, because every committed fixture emits shorter identifiers than the cap allows."
+    )
+    assert projected_page >= measured_page, (
+        f"production projects a {projected_page}-unit page identifier, under the {measured_page} the "
+        f"engine emitted on engine {engine_bundle['version']}"
     )
 
 

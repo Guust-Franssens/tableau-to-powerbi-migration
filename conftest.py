@@ -121,15 +121,23 @@ EXPECTED_ENGINE_SKIP_REASONS_BY_NODEID: dict[str, str] = {
     "tests/test_datasource_path_envelope.py::test_a_visual_free_datasource_envelope_would_be_fail_open": (
         "deterministic tier not installed"
     ),
-    "tests/test_datasource_path_envelope.py::test_each_shape_envelope_covers_its_tail_and_one_unit_less_would_not["
-    "CustomSQL_Parameter_And_Doubled_Operators]": "deterministic tier not installed",
-    "tests/test_datasource_path_envelope.py::test_each_shape_envelope_covers_its_tail_and_one_unit_less_would_not["
-    "Swap_Datasource_With_Field_Parameters]": "deterministic tier not installed",
-    "tests/test_datasource_path_envelope.py::test_each_shape_envelope_covers_its_tail_and_one_unit_less_would_not["
-    "issue-424-d-explicit-bar-mark]": "deterministic tier not installed",
     "tests/test_datasource_path_envelope.py::test_the_engine_itself_resolves_both_declared_swap_controllers": (
         "deterministic tier not installed"
     ),
+    "tests/test_datasource_path_envelope.py::test_the_production_identifier_envelope_stays_above_the_engines_"
+    "measured_cap": "deterministic tier not installed",
+    "tests/test_datasource_path_envelope.py::test_the_production_projection_refuses_each_emitted_shape_at_its_own_"
+    "boundary[CustomSQL_Parameter_And_Doubled_Operators-directory]": "deterministic tier not installed",
+    "tests/test_datasource_path_envelope.py::test_the_production_projection_refuses_each_emitted_shape_at_its_own_"
+    "boundary[CustomSQL_Parameter_And_Doubled_Operators-file]": "deterministic tier not installed",
+    "tests/test_datasource_path_envelope.py::test_the_production_projection_refuses_each_emitted_shape_at_its_own_"
+    "boundary[Swap_Datasource_With_Field_Parameters-directory]": "deterministic tier not installed",
+    "tests/test_datasource_path_envelope.py::test_the_production_projection_refuses_each_emitted_shape_at_its_own_"
+    "boundary[Swap_Datasource_With_Field_Parameters-file]": "deterministic tier not installed",
+    "tests/test_datasource_path_envelope.py::test_the_production_projection_refuses_each_emitted_shape_at_its_own_"
+    "boundary[issue-424-d-explicit-bar-mark-directory]": "deterministic tier not installed",
+    "tests/test_datasource_path_envelope.py::test_the_production_projection_refuses_each_emitted_shape_at_its_own_"
+    "boundary[issue-424-d-explicit-bar-mark-file]": "deterministic tier not installed",
     "tests/test_datasource_path_envelope.py::"
     "test_the_projector_is_blind_to_unit_kind_and_over_projects_this_datasource": ("deterministic tier not installed"),
     "tests/test_datasource_path_envelope.py::test_the_three_source_shapes_emit_their_documented_reports["
