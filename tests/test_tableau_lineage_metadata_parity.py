@@ -467,3 +467,91 @@ def test_main_falls_back_to_the_documented_default_with_no_env_or_cli_version(
     signin_calls = transport.calls_matching("/auth/signin")
     assert len(signin_calls) == 1
     assert urlsplit(signin_calls[0].full_url).path == "/api/3.21/auth/signin"
+
+
+# --- 8. reflected-credential redaction at the TOP-LEVEL error log (round-3 security fix) -----------
+#
+# `main()`'s top-level `except` handler used to redact ONLY `pat_secret` from the logged error text,
+# even though an `HTTPError.reason` (which `str(exc)` includes) can echo the PAT NAME or the
+# authenticated session TOKEN just as easily as the secret - an adversarial echo server reflects
+# whatever the request sent, and all three travel in this request. A reflected name or token is
+# exactly as sensitive as the secret itself; logging it verbatim persists it as durably as the secret
+# leak `redact()`'s own docstring was written to prevent (see `tableau_env.redact`, issue #97/#381).
+
+
+def _reflecting_transport(*, reflect_at: str, reflected_value: str):
+    """A transport whose ``reason`` at one named hop echoes ``reflected_value`` verbatim, exactly
+    how an adversarial echo server would - not something either client would ever construct itself.
+    """
+
+    def _urlopen(request: urllib.request.Request, timeout: float | None = None) -> _Response:
+        url = request.full_url
+        if url.endswith("/auth/signin"):
+            if reflect_at == "signin":
+                raise urllib.error.HTTPError(url, 401, f"Unauthorized: {reflected_value}", {}, _Response(401, b""))
+            return _Response(200, SIGNIN_BODY)
+        if "/metadata/graphql" in url:
+            raise urllib.error.HTTPError(url, 401, f"Unauthorized: {reflected_value}", {}, _Response(401, b""))
+        raise AssertionError(f"unscripted call in the parity experiment: {url}")
+
+    return _urlopen
+
+
+def test_a_reflected_pat_name_during_signin_failure_never_reaches_the_top_level_log(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A sign-in failure has no session/token yet - only ``pat_name``/``pat_secret`` can leak here,
+    and the fix must not crash on the not-yet-assigned ``session`` (no unbound-local exception)."""
+    reflected = ENV["TABLEAU_PAT_NAME"]
+    transport = _reflecting_transport(reflect_at="signin", reflected_value=reflected)
+    monkeypatch.setattr(tableau_lineage.urllib.request, "urlopen", transport)
+    env_path = tmp_path / ".env"
+    env_path.write_text("\n".join(f"{key}={value}" for key, value in ENV.items()), encoding="utf-8")
+
+    with caplog.at_level("ERROR"):
+        exit_code = tableau_lineage.main(["--plan", "--env", str(env_path)])
+
+    assert exit_code == 1
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert reflected not in logged
+    assert "[REDACTED]" in logged
+
+
+def test_a_reflected_pat_secret_after_authentication_is_redacted_from_the_top_level_log(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The Metadata call fails AFTER a successful sign-in (a ``session`` now exists); its reflected
+    PAT secret must still be redacted - the fix must not rely on the failure happening pre-session."""
+    reflected = ENV["TABLEAU_PAT_SECRET"]
+    transport = _reflecting_transport(reflect_at="metadata", reflected_value=reflected)
+    monkeypatch.setattr(tableau_lineage.urllib.request, "urlopen", transport)
+    env_path = tmp_path / ".env"
+    env_path.write_text("\n".join(f"{key}={value}" for key, value in ENV.items()), encoding="utf-8")
+
+    with caplog.at_level("ERROR"):
+        exit_code = tableau_lineage.main(["--plan", "--env", str(env_path)])
+
+    assert exit_code == 1
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert reflected not in logged
+    assert "[REDACTED]" in logged
+
+
+def test_a_reflected_session_token_after_metadata_failure_is_redacted_from_the_top_level_log(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The session TOKEN (only known once sign-in succeeds) must ALSO be redacted from this same
+    log line - the pre-fix code redacted only ``pat_secret`` and never touched the token at all."""
+    reflected = "session-token-abc"  # == SIGNIN_BODY's token, i.e. the real authenticated session
+    transport = _reflecting_transport(reflect_at="metadata", reflected_value=reflected)
+    monkeypatch.setattr(tableau_lineage.urllib.request, "urlopen", transport)
+    env_path = tmp_path / ".env"
+    env_path.write_text("\n".join(f"{key}={value}" for key, value in ENV.items()), encoding="utf-8")
+
+    with caplog.at_level("ERROR"):
+        exit_code = tableau_lineage.main(["--plan", "--env", str(env_path)])
+
+    assert exit_code == 1
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert reflected not in logged
+    assert "[REDACTED]" in logged

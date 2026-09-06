@@ -1059,14 +1059,20 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
         api_version = _resolve_api_version(args.api_version, "--api-version")
     else:
         api_version = env_api_version
+    session = None
     try:
         session = sign_in(server, site, pat_name, pat_secret, api_version)
         log.info("signed in to %s (site '%s')", server, site or "<default>")
         datasources = fetch_lineage(session)
     except (urllib.error.URLError, urllib.error.HTTPError, RuntimeError) as exc:
+        # A sign-in failure has no session yet (no token to redact); a fetch_lineage failure does -
+        # redact all three secrets a Tableau error could reflect, not just the PAT secret. A
+        # reflected PAT NAME or session TOKEN is exactly as sensitive as the PAT secret itself
+        # (#554 round 3: an HTTPError.reason echoing either previously reached this log verbatim).
+        token = session.token if session is not None else ""
         log.error(
             "Tableau API call failed: %s",
-            redacted_note(str(exc), lambda text: redact(text, pat_secret), limit=400),
+            redacted_note(str(exc), lambda text: redact(text, pat_name, pat_secret, token), limit=400),
         )
         return 1
 
