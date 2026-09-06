@@ -19,7 +19,7 @@ already projects over Desktop's UTF-16 ceiling (`run_estate.py`'s pre-engine pat
 and needs one supported short EXTERNAL root - not a second, hand-maintained tree. The two flags are
 mutually exclusive and both feed the same `repo_root=` parameter `runs_root()`/`allocate_run()`
 already take: `runs_root(repo_root) == (repo_root or REPO_ROOT) / "_runs"` never cared whether
-`repo_root` was a git checkout, so an arbitrary short directory such as `C:\tfmig` needs no new
+`repo_root` was a git checkout, so an arbitrary short directory such as `C:\\t2p` needs no new
 allocation logic, no junction, no symlink and no drive mapping - it allocates the identical
 `_runs/<NNN>-<slug>/{assessment,assets,bundle,...}/` tree, with the identical `run.json`,
 `allocated_abs_path` and `--verify` semantics, just rooted somewhere with more path budget to spare.
