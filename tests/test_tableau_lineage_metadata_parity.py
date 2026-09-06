@@ -56,7 +56,9 @@ ENV = {
 SIGNIN_BODY = json.dumps({"credentials": {"token": "session-token-abc", "site": {"id": "site-1"}}}).encode()
 STRUCTURE_BODY = json.dumps({"data": {"workbooks": []}}).encode()
 LINEAGE_BODY = json.dumps({"data": {"publishedDatasources": []}}).encode()
-GRAPHQL_ERRORS_BODY = json.dumps({"errors": [{"message": "field 'downstreamWorkbooks' requires Data Management"}]}).encode()
+GRAPHQL_ERRORS_BODY = json.dumps(
+    {"errors": [{"message": "field 'downstreamWorkbooks' requires Data Management"}]}
+).encode()
 
 
 class _Response:
@@ -101,7 +103,9 @@ class RecordingTransport:
             return _Response(200, SIGNIN_BODY)
         if "/metadata/graphql" in url:
             if self.metadata_status != 200:
-                raise urllib.error.HTTPError(url, self.metadata_status, "Unauthorized", {}, _Response(self.metadata_status, b""))
+                raise urllib.error.HTTPError(
+                    url, self.metadata_status, "Unauthorized", {}, _Response(self.metadata_status, b"")
+                )
             return _Response(200, self.metadata_body)
         raise AssertionError(f"unscripted call in the parity experiment: {url}")
 
