@@ -162,6 +162,18 @@ EXPECTED_ENGINE_SKIP_REASONS_BY_NODEID: dict[str, str] = {
     "tests/test_harvest_download_watchdog.py::test_the_ceiling_constants_match_the_INSTALLED_engine": (
         "canonical engine not installed, so its constants cannot be read"
     ),
+    "tests/test_issue_194_long_pbir_path.py::test_the_engine_warning_is_asserted_only_where_it_was_established": (
+        "deterministic tier not installed"
+    ),
+    "tests/test_issue_194_long_pbir_path.py::test_the_long_case_crosses_the_file_ceiling_at_the_skill_default_root": (
+        "deterministic tier not installed"
+    ),
+    "tests/test_issue_194_long_pbir_path.py::test_the_output_root_length_is_what_decides_this_boundary": (
+        "deterministic tier not installed"
+    ),
+    "tests/test_issue_194_long_pbir_path.py::test_the_short_control_stays_inside_both_ceilings_at_the_same_root": (
+        "deterministic tier not installed"
+    ),
     "tests/test_issue_424_chart_type_pin.py::test_permanent_invariant_survives_any_future_fix["
     "issue-424-b-continuous-date-trunc]": "deterministic tier not installed",
     "tests/test_issue_424_chart_type_pin.py::test_permanent_invariant_survives_any_future_fix["

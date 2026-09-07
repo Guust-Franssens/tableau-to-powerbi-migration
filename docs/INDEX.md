@@ -226,6 +226,7 @@ Base: ``
 fixtures/upstream-repros/issue-166-custom-sql-disambiguation/README.md
 fixtures/upstream-repros/issue-168-case-one-bad-branch/README.md
 fixtures/upstream-repros/issue-171-measure-names-parameter/README.md
+fixtures/upstream-repros/issue-194-long-pbir-path/README.md
 fixtures/upstream-repros/issue-424-automatic-mark-discrete-date/README.md
 ```
 

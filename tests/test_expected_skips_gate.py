@@ -29,6 +29,7 @@ PINNED_ENGINE_SHA = "962d16cfe6f711622d419a567f992da8d90c8781"
 PINNED_ENGINE_VERSION = "2.356.0"
 ENGINE_TEST_TARGETS = (
     "tests/test_issue_424_chart_type_pin.py",
+    "tests/test_issue_194_long_pbir_path.py",
     "tests/test_datasource_path_envelope.py",
     "tests/test_dax_oracle_server.py",
     "tests/test_upstream_repro_pins.py",
@@ -411,7 +412,11 @@ def test_all_engine_dependent_tests_are_accounted_for() -> None:
     self-service-page fail-open control, the three-source-shape matrix (3x), the production
     projection boundary per shape and per path kind (6x), the production identifier-envelope bound,
     the engine's own swap-parameter resolution, the kind-blindness pin and the concurrency control —
-    taking the denominator to 30.
+    taking the denominator to 30. `tests/test_issue_194_long_pbir_path.py` then added 3 more (the
+    downloadable upstream long-path repro's A/B boundary controls and its root-length control),
+    taking it to 33, and a 4th — the engine MAX_PATH warning's Windows-only provenance control,
+    split out of the boundary test after both ubuntu engine jobs failed an unconditional
+    assertion — taking it to 34.
 
     The skip-reason classifier also treats the installed-engine-constants watchdog as engine-backed,
     so the engine jobs must run that one too instead of marking it NOT_CHECKED in the main job.
