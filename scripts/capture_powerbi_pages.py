@@ -299,9 +299,7 @@ def _write_comparison_template(
         "display_name": display_name,
         "mode": "pending",
         "capture_sha256": capture_sha256,
-        "visuals": {
-            vid: {"status": "pending", "finding": None, "disposition": None} for vid in visual_ids
-        },
+        "visuals": {vid: {"status": "pending", "finding": None, "disposition": None} for vid in visual_ids},
     }
     (comp_dir / f"{page_id}.json").write_text(json.dumps(template, indent=2), encoding="utf-8")
 

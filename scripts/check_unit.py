@@ -2867,9 +2867,7 @@ def _check_capture_json(iteration_dir: Path) -> tuple[dict[str, Any] | None, str
     return payload, None
 
 
-def _verify_page_screenshots(
-    iteration_dir: Path, capture_pages: dict[str, Any]
-) -> list[dict[str, str]]:
+def _verify_page_screenshots(iteration_dir: Path, capture_pages: dict[str, Any]) -> list[dict[str, str]]:
     """Verify each screenshot exists and its hash matches capture.json."""
     problems: list[dict[str, str]] = []
     for page_id, info in capture_pages.items():
@@ -2890,9 +2888,7 @@ def _verify_page_screenshots(
     return problems
 
 
-def _check_comparison_files(
-    iteration_dir: Path, capture_pages: dict[str, Any]
-) -> tuple[list[dict[str, str]], bool]:
+def _check_comparison_files(iteration_dir: Path, capture_pages: dict[str, Any]) -> tuple[list[dict[str, str]], bool]:
     """Verify comparison files exist for every captured page and are not pending.
 
     Returns (problems, has_sign_off) where has_sign_off is True only when every page
