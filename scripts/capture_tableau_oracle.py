@@ -1314,8 +1314,10 @@ def main() -> int:  # pylint: disable=too-many-locals
     # Resolved ONCE for the whole run - one Metadata API call for the site, not one per view - and
     # stamped onto each view so `capture_view` needs no extra argument. A failure is not fatal: every
     # record then reads `unknown`, and the reason is warned at the seam rather than carried as a
-    # variable somebody has to remember to check (#402).
-    tableau_view_types.resolve_and_stamp(session, views, LOG)
+    # variable somebody has to remember to check (#402). The returned record says how that answer was
+    # reached - including a session loss this call recovered from - and rides into the manifest so a
+    # capture that healed itself is not indistinguishable from one that never faltered (#560).
+    view_type_resolution = tableau_view_types.resolve_and_stamp(session, views, LOG)
     for index, view in enumerate(views, 1):
         record = capture_view(session, view, out_dir, frozenset(wants), api_overrides, max_age=max_age)
         record["workbook_name"] = workbook_names.get(record["workbook_luid"])
@@ -1335,6 +1337,7 @@ def main() -> int:  # pylint: disable=too-many-locals
         ),
         capability_report,
         _advertised_ceiling(session, env, capability_report, wants),
+        view_type_resolution,
     )
     session.sign_out()
     return exit_code

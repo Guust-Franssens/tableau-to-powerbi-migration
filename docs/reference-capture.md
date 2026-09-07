@@ -222,6 +222,17 @@ seven keys and no type — so *the GraphQL Metadata API is the only route that t
 dashboard*. That is a prerequisite for everything below: you cannot prefer a dashboard route without
 first knowing which views are dashboards.
 
+That single site-wide GraphQL call is therefore also a single point of failure, and #560 measured it
+failing in the most misleading way: it took an HTTP **401** (the session token had died, not the PAT),
+every view in the run was marked `unknown` permanently, and the very next REST export re-authenticated
+on the same session and completed — so the capture finished with complete images and data that could
+certify no page. That one call now earns **at most one** re-authentication and retry, and only on a
+401: a `403`, a GraphQL `errors` block and a transport failure are one-shot as before, because
+signing in again cannot change any of them. Recovery is never silent — `oracle-manifest.json` carries
+`view_type_resolution` (`{"reauths": 0|1, "unavailable_reason": …}`) beside the `view_types` census, so
+a run that healed itself is distinguishable from one that never faltered, and a *persistent* 401 still
+leaves every view `unknown` rather than falling back to name-based dashboard typing.
+
 | route | resolution | vector? | credential | live connection | dashboards | survives disconnected sources |
 |---|---|---|---|---|---|---|
 | `.twb`/`.twbx` embedded thumbnail | **192×192, always** | no | **none** | **none** | yes (composite) | **yes** (it is offline) |

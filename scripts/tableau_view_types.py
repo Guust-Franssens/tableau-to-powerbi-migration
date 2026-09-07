@@ -84,6 +84,25 @@ DASHBOARD = "dashboard"
 WORKSHEET = "worksheet"
 UNKNOWN = "unknown"
 
+#: The HTTP status that means "this request was not authenticated". Tableau answers a session whose
+#: token has died with it, and that is RECOVERABLE without a human: the PAT is still valid, only the
+#: token is gone, and ``sign_in`` mints a new one. Measured (#560): the capture's ONE site-wide
+#: Metadata call took a 401, every view was permanently marked ``unknown``, and the very next REST
+#: export on the SAME session re-authenticated and completed -- so the run held complete images and
+#: data that could certify nothing.
+#:
+#: ⚠️ It is deliberately the ONLY status treated as session loss. ``403`` is a permission refusal and
+#: is a FINAL answer -- re-authenticating with the same PAT cannot change it. A GraphQL ``errors``
+#: block arrives on an HTTP 200 the server CHOSE to send, and a schema/capability gap is not fixed by
+#: a new token either. A transport exception produced no status at all, so it is no evidence that our
+#: session died. Retrying any of those would spend a sign-in to learn the same thing twice.
+SESSION_LOST_STATUS = 401
+
+#: At most ONE re-authentication per run-level resolution. The bound is STRUCTURAL -- there is no
+#: loop in :func:`_fetch_recovering`, so it cannot be raised by editing a counter -- and it is what
+#: keeps a site that answers 401 forever from costing a sign-in per attempt.
+MAX_REAUTH = 1
+
 #: The key this module writes onto each view dict, read later when the record is built. Double
 #: underscore so it cannot collide with a field Tableau's REST response actually carries.
 VIEW_TYPE_KEY = "__view_type"
@@ -109,10 +128,22 @@ def view_types(session: Any) -> tuple[dict[str, str], str | None]:
     their valid siblings, which produced a mapping that typed some views and silently left others
     ``unknown`` -- indistinguishable, downstream, from a run where those views genuinely had no type.
     """
-    payload, refused = fetch_payload(session)
+    mapping, reason, _ = _view_types_recovering(session)
+    return mapping, reason
+
+
+def _view_types_recovering(session: Any) -> tuple[dict[str, str], str | None, int]:
+    """:func:`view_types` plus the recovery COUNT. Returns ``(mapping, reason, reauths)``.
+
+    Private because the count is a fact about ONE call and belongs to the caller that reports it --
+    :func:`resolve_and_stamp`, which puts it in the manifest. ``view_types`` keeps its two-value
+    shape so no other caller has to learn about re-authentication to ask what a view is.
+    """
+    payload, refused, reauths = _fetch_recovering(session)
     if refused:
-        return {}, refused
-    return parse_payload(payload)
+        return {}, refused, reauths
+    mapping, reason = parse_payload(payload)
+    return mapping, reason, reauths
 
 
 def parse_payload(payload: Any) -> tuple[dict[str, str], str | None]:
@@ -140,7 +171,7 @@ def parse_payload(payload: Any) -> tuple[dict[str, str], str | None]:
 
 
 def fetch_payload(session: Any) -> tuple[Any, str | None]:
-    """One round trip, decoded. Returns ``(payload, refusal_reason)``.
+    """One round trip -- plus AT MOST ONE re-authenticated retry -- decoded. ``(payload, reason)``.
 
     ⚠️ **Public because a second caller needs exactly this, and re-implementing it is the defect.**
     ``tableau_luid_census`` holds the decoded payload for its counts, so it cannot simply call
@@ -152,7 +183,47 @@ def fetch_payload(session: Any) -> tuple[Any, str | None]:
     A census whose whole claim is "this is what the shipped parser sees" must travel the shipped
     parser's own path. ``test_the_census_and_the_shipped_parser_agree_on_the_same_bytes`` is what
     keeps them from drifting apart again -- sharing a function is a fact about today's code, parity
-    is the property.
+    is the property. The recovery lives BELOW this seam for the same reason: a caller that gets its
+    payload from here gets the retry too, rather than each caller deciding what a 401 means.
+    """
+    payload, refusal, _ = _fetch_recovering(session)
+    return payload, refusal
+
+
+def _fetch_recovering(session: Any) -> tuple[Any, str | None, int]:
+    """One round trip, then AT MOST ONE re-authenticated retry. ``(payload, reason, reauths)``.
+
+    ⚠️ **The bound is structural, not a budget.** There is no loop: one retry exists because one
+    ``_fetch_once`` call follows the sign-in, so "at most one" cannot be raised by editing a counter,
+    and a site that answers 401 forever costs exactly one extra sign-in for the whole run.
+
+    Only :data:`SESSION_LOST_STATUS` qualifies -- see the constant for why 403, a GraphQL ``errors``
+    block and a transport exception deliberately do not. Everything else keeps the one-shot behaviour
+    it has always had, so the FAILING direction of this change is "no retry", never "typed wrong".
+
+    ⚠️ A ``sign_in`` that fails is reported by its exception TYPE and nothing else. The sign-in POST
+    carries the PAT in its own request body, so a reflecting proxy echoes it straight back into the
+    message ``RuntimeError`` was raised with -- the same hazard, and the same defence, as every other
+    reason string in this module. A session object with no ``sign_in`` at all lands here too (as
+    ``AttributeError``) and stays unknown, which is the fail-CLOSED direction.
+    """
+    payload, refusal, status = _fetch_once(session)
+    if status != SESSION_LOST_STATUS:
+        return payload, refusal, 0
+    try:
+        session.sign_in()
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        return {}, f"metadata api returned HTTP {status}; re-authentication failed: {type(exc).__name__}", 0
+    payload, refusal, _status = _fetch_once(session)
+    return payload, refusal, MAX_REAUTH
+
+
+def _fetch_once(session: Any) -> tuple[Any, str | None, int | None]:
+    """ONE round trip, decoded. Returns ``(payload, refusal_reason, http_status)``.
+
+    The status rides back so :func:`_fetch_recovering` can tell a recoverable session loss from a
+    permission refusal without re-reading its own reason string. ``None`` means no HTTP response
+    arrived at all (a transport exception), which is not evidence of session loss.
 
     ⚠️ **The parse catch is deliberately broad, and that is the safer choice here.** An enumerated
     catch is how this repository has repeatedly been bitten -- ``tableau_http``'s round-9 finding was
@@ -183,19 +254,19 @@ def fetch_payload(session: Any) -> tuple[Any, str | None]:
             "POST", "/graphql", body={"query": VIEW_TYPE_QUERY}, api="metadata"
         )
     except Exception as exc:  # pylint: disable=broad-exception-caught
-        return {}, f"metadata api call failed: {type(exc).__name__}"
+        return {}, f"metadata api call failed: {type(exc).__name__}", None
     if status != 200:
-        return {}, f"metadata api returned HTTP {status}"
+        return {}, f"metadata api returned HTTP {status}", status
     if len(body) > _MAX_BODY_BYTES:
-        return {}, f"metadata api response exceeded the {_MAX_BODY_BYTES} byte ceiling; response refused"
+        return {}, f"metadata api response exceeded the {_MAX_BODY_BYTES} byte ceiling; response refused", status
     try:
         payload = json.loads(body.decode("utf-8"))
     except Exception as exc:  # pylint: disable=broad-exception-caught
-        return {}, f"metadata api response was not usable JSON: {type(exc).__name__}"
+        return {}, f"metadata api response was not usable JSON: {type(exc).__name__}", status
     # ⚠️ The top-level SHAPE check deliberately is NOT here. It belongs to `parse_payload`, which is
     # the shared seam every caller goes through -- keeping a copy here as well would be a guard no
     # mutation could kill, because removing it changes nothing.
-    return payload, None
+    return payload, None, status
 
 
 def _errors_refusal(payload: dict[str, Any]) -> str | None:
@@ -344,22 +415,36 @@ def stamp(views: list[dict[str, Any]], mapping: dict[str, str]) -> None:
         view[VIEW_TYPE_KEY] = mapping.get(luid, UNKNOWN)
 
 
-def resolve_and_stamp(session: Any, views: list[dict[str, Any]], log: Any) -> str | None:
-    """Resolve types once for the run, stamp them, and warn if the run cannot discriminate.
+def resolve_and_stamp(session: Any, views: list[dict[str, Any]], log: Any) -> dict[str, Any]:
+    """Resolve types once for the run, stamp them, and report how that answer was arrived at.
 
     One call so the caller keeps no intermediate state: the failure reason is *reported here* rather
     than returned for the caller to remember to check, which is how a "cannot establish" quietly
-    becomes an unexamined variable. Returns the reason anyway, for a caller that wants to record it.
+    becomes an unexamined variable.
+
+    Returns the run-level RESOLUTION RECORD -- ``{"unavailable_reason": str | None, "reauths": int}``
+    -- which ``capture_tableau_oracle.main`` puts in the manifest as ``view_type_resolution``.
+    ⚠️ That return is the reason this is not a ``None``-returning procedure: recovery must not be
+    silent (#560). A run that took a session loss on this one site-wide call and recovered is a
+    different fact from a run that never had a problem, and the manifest is the only artifact a
+    consumer reads afterwards. ``total_reauths`` cannot carry it -- that counter belongs to the
+    export legs, and a reader could not tell which leg spent it.
     """
-    mapping, unavailable = view_types(session)
+    mapping, unavailable, reauths = _view_types_recovering(session)
     if unavailable:
         log.warning(
             "view type is UNKNOWN for every view in this run (%s). A consumer cannot tell a dashboard "
             "composite from a single worksheet; treat page-level visual evidence as unestablished.",
             unavailable,
         )
+    if reauths:
+        log.warning(
+            "the metadata view-type call lost its session and re-authenticated %d time(s); the "
+            "manifest records this as view_type_resolution.reauths.",
+            reauths,
+        )
     stamp(views, mapping)
-    return unavailable
+    return {"unavailable_reason": unavailable, "reauths": reauths}
 
 
 def census(records: list[dict[str, Any]]) -> dict[str, int]:

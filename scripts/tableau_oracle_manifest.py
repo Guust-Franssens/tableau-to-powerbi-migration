@@ -680,6 +680,7 @@ def write_manifest(  # pylint: disable=too-many-locals
     run: CaptureRun,
     capability_report: dict[str, Any] | None = None,
     server_info: dict[str, Any] | None = None,
+    view_type_resolution: dict[str, Any] | None = None,
 ) -> int:
     """Write the manifest and return the process exit code.
 
@@ -712,6 +713,12 @@ def write_manifest(  # pylint: disable=too-many-locals
     response-derived and forcing certifications that would simply not be true. ``None`` is a real
     state, not a default nobody thought about: the ceiling was not established, and the verdict below
     says exactly that instead of guessing.
+
+    ``view_type_resolution`` is ``tableau_view_types.resolve_and_stamp``'s run-level record --
+    ``{"unavailable_reason": str | None, "reauths": int}`` -- and it is a separate parameter for
+    EXACTLY the reason ``server_info`` is: it is derived from a response, and ``CaptureRun`` is
+    provenance. ``None`` means view typing was not resolved on this run at all, which is distinct
+    from resolved-and-unavailable (#560).
     """
     # Before anything partitions or counts them: the per-view fact rides ON the record, so every
     # downstream slice of this capture -- the manifest, a per-workbook subset, a packaged unit --
@@ -753,6 +760,13 @@ def write_manifest(  # pylint: disable=too-many-locals
         # honest state when the Metadata API cannot be reached or does not expose `luid`; it is not
         # a synonym for worksheet.
         "view_types": tableau_view_types.census(records),
+        # #560: HOW that census was arrived at. A recoverable session loss on the one site-wide
+        # Metadata call used to mark every view `unknown` permanently, and the run then healed itself
+        # on its next export -- so the manifest showed complete images and data beside a census that
+        # could certify none of them, with nothing saying why. `reauths` records the bounded recovery
+        # (0 or 1) and `unavailable_reason` the module-authored reason when types stayed unknown.
+        # `null` means view typing was not resolved on this run at all.
+        "view_type_resolution": view_type_resolution,
         "captured_complete": len(complete),
         "data_ok": len(sets["ok"]),
         "data_empty": len(sets["empty"]),

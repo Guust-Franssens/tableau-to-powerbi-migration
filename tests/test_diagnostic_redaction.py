@@ -594,7 +594,16 @@ TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
     # responses, and `log_progress` one record per view. Both cross a module boundary, so propagation
     # cannot carry the taint and the seeds are irreducible -- without them the manifest sink and every
     # console line in that module would be analysed as clean.
-    ("scripts/tableau_oracle_manifest.py", "write_manifest"): {"records", "capability_report", "server_info"},
+    ("scripts/tableau_oracle_manifest.py", "write_manifest"): {
+        "records",
+        "capability_report",
+        "server_info",
+        # #560: `tableau_view_types.resolve_and_stamp`'s run-level record. Response-DERIVED (its
+        # reason is chosen by reading a response), and a separate parameter rather than a CaptureRun
+        # field for exactly the reason `server_info` is one -- so declaring the seed here is what
+        # keeps it tracked into the manifest instead of arriving as clean provenance.
+        "view_type_resolution",
+    },
     ("scripts/tableau_oracle_manifest.py", "log_progress"): {"record", "index", "total"},
     # `_capture_data` hands the verdict layer the `certify_csv` result -- a closed vocabulary, but it
     # crosses a module boundary, so it is declared rather than assumed. ⚠️ `stem` is deliberately NOT
@@ -828,13 +837,19 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
     # through an ExceptHandler rather than an Assign and so is never a tainted root.
     #
     # The transport hop. `body` and `status` arrive from `_request`, the analyser's taint origin.
-    ("scripts/tableau_view_types.py", "fetch_payload"): {
+    ("scripts/tableau_view_types.py", "_fetch_once"): {
         # ⚠️ `type(payload).__name__` is no longer certified HERE, and its absence is the round-4
         # fix rather than an omission: the top-level shape check MOVED into `parse_payload`, the
         # shared seam every caller passes through. Keeping a copy here as well would have been a
         # guard no mutation could kill - remove it and the seam still refuses - so it would have
         # shipped as coverage that cannot fail.
         "status": "NOT-A-STRING: an HTTP status integer from the hardened transport",
+    },
+    # #560: the bounded re-authentication around that one round trip. The status is reported for the
+    # same reason and with the same guarantee as above; the sign-in failure is reported by TYPE only,
+    # which `_PY_TYPE_NAME` covers wherever the analyser flags it.
+    ("scripts/tableau_view_types.py", "_fetch_recovering"): {
+        "status": "NOT-A-STRING: the HTTP status integer that identified the session loss - 401",
     },
     ("scripts/tableau_view_types.py", "parse_payload"): {
         "type(payload).__name__": _PY_TYPE_NAME,
@@ -883,6 +898,12 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
             "FIXED-VOCABULARY: the reason string built by view_types/_mapping_from, composed only of "
             "this module's own literals plus Python type names and integers. No branch interpolates "
             "server-controlled text - that is the property the credential-reflection probe pins."
+        ),
+        "reauths": (
+            "NOT-A-STRING: the count of bounded re-authentications this one Metadata call needed - "
+            "0 or MAX_REAUTH. It is produced by this module's own control flow, never read from a "
+            "response, and it is what makes a run that healed itself distinguishable from one that "
+            "never faltered (#560)."
         ),
     },
     # ⚠️ Every expression here is a COUNT, a module literal, or a module-authored reason. That is
@@ -1289,6 +1310,12 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         ),
         "manifest['elapsed_sec']": "NOT-A-STRING: a float duration in seconds",
         "tableau_view_types.census(records)": _CENSUS_COUNTS,
+        "view_type_resolution": (
+            "SCRUBBED-AT-SINK: `tableau_view_types.resolve_and_stamp`'s run-level record on its way "
+            "into the manifest -- a count and a reason string this repository authors (no branch of "
+            "that module interpolates server-controlled text) -- and `scrub_tree` walks it whole, "
+            "values and keys, immediately before serialisation"
+        ),
         "len(unestablished)": _A_COUNT,
         "unestablished": _INTO_THE_MANIFEST_AGGREGATE,
         "empty_views": _INTO_THE_MANIFEST_AGGREGATE,

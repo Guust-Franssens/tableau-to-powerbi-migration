@@ -2350,7 +2350,7 @@ def test_a_reflected_session_token_never_reaches_the_view_type_warning():
 
         log = _Recorder()
         views = [{"id": DASH_LUID, "name": "Revenue"}]
-        unavailable = view_types_mod.resolve_and_stamp(session, views, log)
+        unavailable = view_types_mod.resolve_and_stamp(session, views, log)["unavailable_reason"]
     finally:
         server.shutdown()
         server.server_close()
@@ -2442,11 +2442,271 @@ def test_the_run_warns_when_it_cannot_discriminate_at_all():
     """A "cannot establish" that is merely RETURNED becomes an unexamined variable at the call site."""
     log = _Recorder()
     views = [{"id": DASH_LUID, "name": "Revenue"}]
-    unavailable = view_types_mod.resolve_and_stamp(FakeSession([(403, "no", {})]), views, log)
-    assert unavailable
+    resolution = view_types_mod.resolve_and_stamp(FakeSession([(403, "no", {})]), views, log)
+    assert resolution["unavailable_reason"]
     assert len(log.warnings) == 1
     assert "UNKNOWN" in log.warnings[0]
     assert views[0][view_types_mod.VIEW_TYPE_KEY] == "unknown"
+
+
+# --- #560: a RECOVERABLE session loss on the ONE site-wide Metadata call ------------------------
+#
+# Measured against a live site on 2026-09-06: `capture_tableau_oracle` signed in, its single
+# `resolve_and_stamp` call took Metadata HTTP 401, every view was marked `unknown` permanently -- and
+# the very next REST export on the SAME session re-authenticated and completed 2/2 data and PNG legs
+# for exit 0. The run therefore held complete evidence that could certify no dashboard page. The
+# standalone census, on the same transport moments later, succeeded in 1.4s, which is what rules out
+# a persistent permission or schema failure.
+#
+# The direction matters and is asserted in both directions below: a recoverable 401 earns AT MOST ONE
+# re-authentication (fail-open would be typing a view from an answer we do not trust), and everything
+# that is NOT a session loss keeps the one-shot behaviour it always had.
+
+#: What Tableau answers a dead session with. The BODY is incidental here -- recognition is by STATUS,
+#: because the Metadata endpoint is not obliged to spell `401002` the way the REST export path does.
+METADATA_401 = (
+    "<?xml version='1.0'?><tsResponse><error code='401002'><summary>Unauthorized</summary></error></tsResponse>"
+)
+
+
+def _typed_payload() -> str:
+    """One dashboard and one worksheet -- an answer that CAN type the view under test."""
+    return json.dumps({"data": {"workbooks": [_wb(dashboards=[DASH_LUID], sheets=[SHEET_LUID])]}})
+
+
+def _resolve(session, views=None):
+    """`resolve_and_stamp` through its real signature, returning `(resolution, views, log)`."""
+    views = [{"id": DASH_LUID, "name": "Revenue"}] if views is None else views
+    log = _Recorder()
+    return view_types_mod.resolve_and_stamp(session, views, log), views, log
+
+
+def test_a_metadata_session_loss_earns_one_reauthentication_and_a_retry():
+    """The defect, from the failing side: 401 -> sign in -> 200, and the run can type its views."""
+    session = FakeSession([(401, METADATA_401, {}), (200, _typed_payload(), {})])
+    resolution, views, log = _resolve(session)
+    assert session.signin_count == 1
+    assert session.calls == ["/graphql", "/graphql"]
+    assert resolution == {"unavailable_reason": None, "reauths": 1}
+    assert views[0][view_types_mod.VIEW_TYPE_KEY] == "dashboard"
+    # Recovery is RECORDED, never silent: a healed run must not read like one that never faltered.
+    assert any("re-authenticated" in line for line in log.warnings), log.warnings
+    assert not any("UNKNOWN" in line for line in log.warnings), log.warnings
+
+
+def test_a_PERSISTENT_401_stays_unknown_and_is_retried_at_most_once():
+    """⚠️ The BOUND, and the fail-closed direction, in one fixture.
+
+    A third scripted response is queued that a correct implementation can never reach: if the retry
+    ever became a loop, `FakeSession` would serve it, the mapping would come back typed, and both the
+    call count and the untouched response prove otherwise. `unknown` is the right answer here -- there
+    is deliberately no name-based fallback for a site that keeps refusing.
+    """
+    unreachable = (200, _typed_payload(), {})
+    session = FakeSession([(401, METADATA_401, {}), (401, METADATA_401, {}), unreachable])
+    resolution, views, log = _resolve(session)
+    assert session.signin_count == 1, "a second sign-in means the bound is not one"
+    assert session.calls == ["/graphql", "/graphql"]
+    assert session.responses == [unreachable], "a third attempt was made, so the retry is unbounded"
+    assert resolution["reauths"] == view_types_mod.MAX_REAUTH == 1
+    assert "HTTP 401" in resolution["unavailable_reason"]
+    assert views[0][view_types_mod.VIEW_TYPE_KEY] == "unknown"
+    assert any("UNKNOWN" in line for line in log.warnings), log.warnings
+
+
+@pytest.mark.parametrize(
+    "first, guard",
+    [
+        # A permission refusal is a FINAL answer: the same PAT cannot become entitled by signing in
+        # again, so retrying spends a sign-in to learn the same thing twice.
+        ((403, "forbidden", {}), "HTTP 403"),
+        ((500, "boom", {}), "HTTP 500"),
+        # An HTTP 200 the server CHOSE to answer with. A schema/capability gap is not session loss.
+        ((200, json.dumps({"errors": [{"message": "FieldUndefined"}]}), {}), "graphql error"),
+        ((200, "not json at all", {}), "not usable JSON"),
+    ],
+)
+def test_a_failure_that_is_not_a_session_loss_is_never_retried_as_one(first, guard):
+    """The negative control on recognition. Only 401 is session loss -- everything else is one shot."""
+    follow_on = (200, _typed_payload(), {})
+    session = FakeSession([first, follow_on])
+    resolution, views, _log = _resolve(session)
+    assert session.signin_count == 0
+    assert session.calls == ["/graphql"]
+    assert session.responses == [follow_on]
+    assert resolution["reauths"] == 0
+    assert guard in resolution["unavailable_reason"]
+    assert views[0][view_types_mod.VIEW_TYPE_KEY] == "unknown"
+
+
+def test_a_transport_failure_is_not_treated_as_a_session_loss():
+    """No HTTP response arrived at all, so there is no evidence our session is what died."""
+
+    class Boom(FakeSession):
+        def _request(self, *_args, **_kwargs):
+            self.calls.append("/graphql")
+            raise ConnectionResetError("reset")
+
+    session = Boom([])
+    resolution, _views, _log = _resolve(session)
+    assert session.signin_count == 0
+    assert resolution["reauths"] == 0
+    assert "ConnectionResetError" in resolution["unavailable_reason"]
+
+
+def test_a_successful_view_type_call_never_re_authenticates():
+    """The existing path, unchanged: one request, no sign-in, no recovery warning."""
+    session = FakeSession([(200, _typed_payload(), {})])
+    resolution, views, log = _resolve(session)
+    assert session.signin_count == 0
+    assert session.calls == ["/graphql"]
+    assert resolution == {"unavailable_reason": None, "reauths": 0}
+    assert views[0][view_types_mod.VIEW_TYPE_KEY] == "dashboard"
+    assert log.warnings == []
+
+
+def test_a_reflected_credential_in_a_SIGN_IN_FAILURE_never_reaches_the_reason():
+    """⚠️ The re-authentication opens a NEW leak surface, and it is the worst-shaped one.
+
+    The sign-in POST carries the PAT in its own request body, so a reflecting proxy echoes it back
+    into the very message `sign_in` raises. Only the exception TYPE is reported here, for exactly the
+    reason no branch of this module quotes a server: detecting a credential FRAGMENT is not solvable.
+    """
+
+    class ReflectingSignIn(FakeSession):
+        def sign_in(self):
+            self.signin_count += 1
+            raise RuntimeError(f"Tableau sign-in failed: HTTP 500. {TAINT} {REFLECTION_SENTINEL}")
+
+    session = ReflectingSignIn([(401, METADATA_401, {})])
+    resolution, views, log = _resolve(session)
+    assert session.signin_count == 1
+    reason = resolution["unavailable_reason"]
+    assert "RuntimeError" in reason
+    assert TAINT not in reason and REFLECTION_SENTINEL not in reason
+    assert TAINT not in "\n".join(log.warnings)
+    assert REFLECTION_SENTINEL not in "\n".join(log.warnings)
+    # A failed sign-in recovered nothing, so it is not reported as a recovery.
+    assert resolution["reauths"] == 0
+    assert views[0][view_types_mod.VIEW_TYPE_KEY] == "unknown"
+
+
+def test_a_session_that_cannot_reauthenticate_at_all_fails_CLOSED():
+    """`fetch_payload` is duck-typed -- the census passes its own object -- so a missing `sign_in`
+    must leave the run untyped rather than raise out of a module whose contract is that it never
+    does."""
+
+    class NoSignIn:
+        def __init__(self):
+            self.calls = 0
+
+        def _request(self, *_args, **_kwargs):
+            self.calls += 1
+            return 401, b"nope", {}
+
+    session = NoSignIn()
+    payload, refusal = view_types_mod.fetch_payload(session)
+    assert session.calls == 1
+    assert payload == {}
+    assert "AttributeError" in refusal
+
+
+class _MainSession(oracle.TableauSession):
+    """A whole-run script keyed by path, with a SEQUENCE for the one site-wide metadata call.
+
+    ⚠️ Its PAT name is deliberately unlike any manifest FIELD name. The sink redacts dict keys as
+    well as values, so the shared `_creds()` (``pat_name="name"``) turns every ``view_name`` key into
+    ``view_[REDACTED]`` and an assertion about a typed view would be testing the redactor -- the same
+    trap `_named_manifest` documents.
+    """
+
+    def __init__(self, graphql):
+        super().__init__(
+            oracle.SiteCredentials(
+                base="https://example.online.tableau.com",
+                site="site",
+                pat_name="oracle-560-pat-name",
+                pat_secret="oracle-560-pat-secret",
+                version="3.29",
+            )
+        )
+        self.graphql = list(graphql)
+        self.token, self.site_id = "tok", "sid"
+        self.signin_count = 0
+        self.paths: list[str] = []
+
+    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None, deadline=None):  # noqa: ARG002
+        self.paths.append(path)
+        if path == "/graphql":
+            status, payload = self.graphql.pop(0)
+            body_bytes = payload.encode()
+            return status, body_bytes, {"Content-Length": str(len(body_bytes))}
+        if "/data" in path:
+            return 200, b"region,rows\nEMEA,1\n", {"Content-Type": "text/csv", "Content-Length": "20"}
+        if path.endswith("/auth/signout"):
+            return 204, b"", {}
+        raise AssertionError(f"unscripted path {path}")
+
+    def sign_in(self):
+        self.signin_count += 1
+        self.token, self.site_id = "tok-2", "sid"
+
+
+_MAIN_ENV = {
+    "TABLEAU_SERVER_URL": "https://example.online.tableau.com",
+    "TABLEAU_SITE": "site",
+    "TABLEAU_PAT_NAME": "name",
+    "TABLEAU_PAT_SECRET": "a-long-enough-secret",
+    "TABLEAU_REST_API_VERSION": "3.29",
+}
+
+
+def _run_main(tmp_path, monkeypatch, session, view):
+    monkeypatch.setattr(sys, "argv", ["capture_tableau_oracle.py", "--out", str(tmp_path)])
+    monkeypatch.setattr(oracle, "resolve_env", lambda _path: dict(_MAIN_ENV))
+    monkeypatch.setattr(oracle, "require", lambda _env: None)
+    monkeypatch.setattr(oracle, "TableauSession", lambda *_a, **_k: session)
+    monkeypatch.setattr(oracle, "select_views", lambda *_a, **_k: ([view], {"wb": "HR"}))
+    code = oracle.main()
+    return code, json.loads((tmp_path / "oracle-manifest.json").read_text(encoding="utf-8"))
+
+
+def test_the_REAL_capture_run_recovers_its_view_typing_and_says_so_in_the_manifest(tmp_path, monkeypatch):
+    """⚠️ Through `main()`, because that is the path the defect was measured on.
+
+    A unit on `resolve_and_stamp` proves the retry exists; only this proves the CAPTURE gets it --
+    that the recovered mapping reaches the census a consumer reads, and that the recovery is written
+    where anyone looking at the run afterwards will find it. A mutation that drops the resolution from
+    the `write_manifest` call fails here and nowhere else.
+    """
+    view = {"id": DASH_LUID, "name": "Revenue", "workbook": {"id": "wb"}}
+    session = _MainSession([(401, METADATA_401), (200, _typed_payload())])
+    code, manifest = _run_main(tmp_path, monkeypatch, session, view)
+    assert code == 0
+    # One sign-in opens the run; the SECOND is the recovery this issue is about.
+    assert session.signin_count == 2
+    assert session.paths.count("/graphql") == 2
+    assert manifest["view_types"] == {"dashboard": 1, "worksheet": 0, "unknown": 0}
+    assert manifest["view_type_resolution"] == {"unavailable_reason": None, "reauths": 1}
+    assert manifest["views"][0]["view_type"] == "dashboard"
+
+
+def test_the_REAL_capture_run_keeps_a_PERSISTENT_401_unknown_and_records_the_attempt(tmp_path, monkeypatch):
+    """The fail-closed control on the same path: complete evidence, and it still certifies nothing.
+
+    ⚠️ The exit code is deliberately unchanged (the exports succeeded), which is precisely why the
+    manifest has to carry the reason -- it is the only place the run says why nothing can be typed.
+    """
+    view = {"id": DASH_LUID, "name": "Revenue", "workbook": {"id": "wb"}}
+    session = _MainSession([(401, METADATA_401), (401, METADATA_401)])
+    code, manifest = _run_main(tmp_path, monkeypatch, session, view)
+    assert code == 0
+    # The run's own opening sign-in, plus exactly ONE recovery attempt -- never a third.
+    assert session.signin_count == 2
+    assert session.paths.count("/graphql") == 2
+    assert manifest["view_types"] == {"dashboard": 0, "worksheet": 0, "unknown": 1}
+    assert manifest["view_type_resolution"]["reauths"] == 1
+    assert "HTTP 401" in manifest["view_type_resolution"]["unavailable_reason"]
 
 
 def test_stamp_joins_on_the_view_ID_not_on_its_NAME():

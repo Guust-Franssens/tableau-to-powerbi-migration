@@ -181,12 +181,12 @@ exec(compile(_src.replace(_old, _new, 1), vt.__file__, "exec"), vt.__dict__)
 # ⚠️ Indentation is part of every anchor. `_fold_workbook` and `_fold_nodes` each de-indented the
 # lines below them when the module was split, and a stale anchor is scored INVALID rather than
 # SURVIVED precisely so that churn cannot masquerade as a hole in the suite.
-_STATUS_GUARD = '    if status != 200:\n        return {}, f"metadata api returned HTTP {status}"\n'
+_STATUS_GUARD = '    if status != 200:\n        return {}, f"metadata api returned HTTP {status}", status\n'
 _SIZE_GUARD = "    if len(body) > _MAX_BODY_BYTES:"
 _STRICT_DECODE = 'payload = json.loads(body.decode("utf-8"))'
 _BROAD_PARSE_CATCH = (
     "    except Exception as exc:  # pylint: disable=broad-exception-caught\n"
-    '        return {}, f"metadata api response was not usable JSON: {type(exc).__name__}"'
+    '        return {}, f"metadata api response was not usable JSON: {type(exc).__name__}", status'
 )
 _TOPLEVEL_GUARD = "    if not isinstance(payload, dict):"
 _ERRORS_PRESENCE = '    if "errors" not in payload:'
@@ -204,7 +204,7 @@ _REFUSAL_PROPAGATE = "        if refused:\n            return {}, refused"
 _FOLD_PROPAGATE = (
     "        refused = _fold_nodes(key, kind, nodes, mapping)\n        if refused:\n            return refused"
 )
-_EXC_TYPE = 'return {}, f"metadata api call failed: {type(exc).__name__}"'
+_EXC_TYPE = 'return {}, f"metadata api call failed: {type(exc).__name__}", None'
 _BAD_LUID_REASON = 'return f"a `{key}` node carried a non-empty value that is not a luid; response refused"'
 
 MUTATIONS: dict[str, str] = {
@@ -245,7 +245,7 @@ vt._mapping_from = _mapping_from
     "parse-catch-narrowed-to-jsondecodeerror": _source_mutation(
         _BROAD_PARSE_CATCH,
         "    except json.JSONDecodeError as exc:\n"
-        '        return {}, f"metadata api response was not usable JSON: {type(exc).__name__}"',
+        '        return {}, f"metadata api response was not usable JSON: {type(exc).__name__}", status',
     ),
     # ⚠️ `replace` silently rewrote an invalid byte to U+FFFD and carried on, producing a TRUSTED
     # mapping from a body we could not actually read.
@@ -298,7 +298,7 @@ vt._LUID_RE = re.compile(r"^.+$")   # any non-empty string is a "luid"
     "graphql-error-message-reported": _source_mutation(
         _ERRORS_COUNT, '        return "metadata api error: " + str(errors[0].get("message"))[:120]'
     ),
-    "exception-message-reported": _source_mutation(_EXC_TYPE, 'return {}, f"metadata api call failed: {exc}"'),
+    "exception-message-reported": _source_mutation(_EXC_TYPE, 'return {}, f"metadata api call failed: {exc}", None'),
     # ⚠️ Keeps the guard wording verbatim and only APPENDS the server's value, so the `guard`
     # assertion still passes and the credential-sentinel test is the only thing that can catch it.
     "bad-luid-value-reported": _source_mutation(
@@ -571,6 +571,67 @@ INTENDED.update(
     {
         "guard-column-is-load-bearing-seam": "tests/test_capture_tableau_oracle.py::test_parse_payload_accepts_arbitrary_decoded_json",
         "guard-column-is-load-bearing-census": "tests/test_tableau_luid_census.py::test_a_malformed_envelope_cannot_bypass_the_guarantees",
+    }
+)
+
+# ⚠️ #560: the bounded re-authentication on the ONE site-wide Metadata call.
+#
+# Each of the five moves a DIFFERENT arm of the same guard, because the failure modes are opposite
+# and a single "remove the recovery" mutation would credit whichever test happened to redden first.
+# `metadata-401-never-retried` reproduces the measured defect (a recoverable session loss marks every
+# view unknown for the whole run); `metadata-retry-is-unbounded` is the fail-open in the other
+# direction; `any-failure-retried-as-session-loss` widens RECOGNITION rather than the bound, which no
+# 401 fixture can see; `metadata-recovery-not-recorded` leaves behaviour correct and deletes only the
+# evidence, so nothing but the manifest assertion can catch it; and the last is this module's
+# standing rule -- no branch quotes a server -- applied to the one NEW leak surface a sign-in adds.
+_SESSION_LOSS_RECOGNITION = "    if status != SESSION_LOST_STATUS:\n        return payload, refusal, 0"
+_ONE_RETRY = "    payload, refusal, _status = _fetch_once(session)\n    return payload, refusal, MAX_REAUTH"
+_SIGNIN_FAILURE_TYPE = 'f"metadata api returned HTTP {status}; re-authentication failed: {type(exc).__name__}"'
+
+MUTATIONS.update(
+    {
+        "metadata-401-never-retried": _source_mutation(
+            _SESSION_LOSS_RECOGNITION, "    if True:\n        return payload, refusal, 0"
+        ),
+        "metadata-retry-is-unbounded": _source_mutation(
+            _ONE_RETRY,
+            "    for _ in range(5):\n"
+            "        payload, refusal, status = _fetch_once(session)\n"
+            "        if status != SESSION_LOST_STATUS:\n"
+            "            break\n"
+            "        session.sign_in()\n"
+            "    return payload, refusal, MAX_REAUTH",
+        ),
+        "any-failure-retried-as-session-loss": _source_mutation(
+            _SESSION_LOSS_RECOGNITION, "    if status == 200:\n        return payload, refusal, 0"
+        ),
+        "metadata-recovery-not-recorded": _source_mutation(_ONE_RETRY, _ONE_RETRY.replace("MAX_REAUTH", "0")),
+        "signin-failure-message-reported": _source_mutation(
+            _SIGNIN_FAILURE_TYPE, 'f"metadata api returned HTTP {status}; re-authentication failed: {exc}"'
+        ),
+    }
+)
+
+INTENDED.update(
+    {
+        "metadata-401-never-retried": (
+            "tests/test_capture_tableau_oracle.py::"
+            "test_the_REAL_capture_run_recovers_its_view_typing_and_says_so_in_the_manifest"
+        ),
+        "metadata-retry-is-unbounded": (
+            "tests/test_capture_tableau_oracle.py::test_a_PERSISTENT_401_stays_unknown_and_is_retried_at_most_once"
+        ),
+        "any-failure-retried-as-session-loss": (
+            "tests/test_capture_tableau_oracle.py::test_a_failure_that_is_not_a_session_loss_is_never_retried_as_one"
+        ),
+        "metadata-recovery-not-recorded": (
+            "tests/test_capture_tableau_oracle.py::"
+            "test_the_REAL_capture_run_recovers_its_view_typing_and_says_so_in_the_manifest"
+        ),
+        "signin-failure-message-reported": (
+            "tests/test_capture_tableau_oracle.py::"
+            "test_a_reflected_credential_in_a_SIGN_IN_FAILURE_never_reaches_the_reason"
+        ),
     }
 )
 
