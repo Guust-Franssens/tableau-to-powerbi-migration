@@ -42,6 +42,7 @@ so a slow capture cannot collapse the check back to one unchanged polling interv
 from __future__ import annotations
 
 import argparse
+import datetime
 import hashlib
 import json
 import subprocess
@@ -50,6 +51,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 Screenshotter = Callable[[str, str, Path], bool]
 BRIDGE_WAIT_SECONDS = 90
@@ -240,6 +242,192 @@ def capture_report(
     return 1 if failed or unstable else 0
 
 
+# ---------------------------------------------------------------------------
+# Iteration-aware capture: allocates a numbered iteration, writes capture.json
+# with per-page stability evidence, and generates comparison templates.
+# ---------------------------------------------------------------------------
+
+ITERATION_DIR_NAME = "iterations"
+CAPTURE_JSON_VERSION = 1
+COMPARISON_TEMPLATE_VERSION = 1
+
+
+def allocate_iteration(validation_root: Path) -> tuple[int, Path]:
+    """Atomically allocate the next iteration number under *validation_root*/iterations/.
+
+    Uses ``mkdir(exist_ok=False)`` as the atomic primitive (same pattern as
+    ``work_dirs.allocate_run``).  Returns ``(number, iteration_dir)``.
+    """
+    iterations_dir = validation_root / ITERATION_DIR_NAME
+    iterations_dir.mkdir(parents=True, exist_ok=True)
+    candidate = 1
+    for existing in iterations_dir.iterdir():
+        if existing.is_dir() and existing.name.isdigit():
+            candidate = max(candidate, int(existing.name) + 1)
+    while True:
+        iteration_name = f"{candidate:03d}"
+        iteration_dir = iterations_dir / iteration_name
+        try:
+            iteration_dir.mkdir(parents=False, exist_ok=False)
+        except FileExistsError:
+            candidate += 1
+            continue
+        return candidate, iteration_dir
+
+
+def _visuals_for_page(report: Path, page_id: str) -> list[str]:
+    """Return sorted visual IDs for a PBIR page directory."""
+    visuals_dir = report / "definition" / "pages" / page_id / "visuals"
+    if not visuals_dir.is_dir():
+        return []
+    return sorted(d.name for d in visuals_dir.iterdir() if d.is_dir() and (d / "visual.json").is_file())
+
+
+def _write_comparison_template(
+    iteration_dir: Path,
+    page_id: str,
+    display_name: str,
+    capture_sha256: str,
+    visual_ids: list[str],
+) -> None:
+    """Write a pending comparison template for one page."""
+    comp_dir = iteration_dir / "comparison" / "pages"
+    comp_dir.mkdir(parents=True, exist_ok=True)
+    template: dict[str, Any] = {
+        "version": COMPARISON_TEMPLATE_VERSION,
+        "page_id": page_id,
+        "display_name": display_name,
+        "mode": "pending",
+        "capture_sha256": capture_sha256,
+        "visuals": {
+            vid: {"status": "pending", "finding": None, "disposition": None} for vid in visual_ids
+        },
+    }
+    (comp_dir / f"{page_id}.json").write_text(json.dumps(template, indent=2), encoding="utf-8")
+
+
+@dataclass(frozen=True)
+class PageEvidence:
+    """Per-page evidence written into capture.json."""
+
+    page_id: str
+    display_name: str
+    screenshot: str
+    sha256: str
+    converged: bool
+    frames: int
+    seconds: float
+
+
+def write_capture_json(
+    iteration_dir: Path,
+    iteration_number: int,
+    report_path: str,
+    page_evidence: list[PageEvidence],
+    *,
+    timestamp: str | None = None,
+) -> Path:
+    """Write ``capture.json`` into *iteration_dir* and return its path."""
+    if timestamp is None:
+        timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    payload: dict[str, Any] = {
+        "version": CAPTURE_JSON_VERSION,
+        "timestamp": timestamp,
+        "iteration": iteration_number,
+        "report": report_path,
+        "all_converged": all(pe.converged for pe in page_evidence),
+        "pages": {
+            pe.page_id: {
+                "display_name": pe.display_name,
+                "screenshot": pe.screenshot,
+                "sha256": pe.sha256,
+                "converged": pe.converged,
+                "frames": pe.frames,
+                "seconds": pe.seconds,
+            }
+            for pe in page_evidence
+        },
+    }
+    out = iteration_dir / "capture.json"
+    out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return out
+
+
+def capture_iteration(  # pylint: disable=too-many-locals
+    report: Path,
+    package: Path,
+    pid: str,
+    options: CaptureOptions,
+    runtime: CaptureRuntime = DEFAULT_RUNTIME,
+) -> tuple[int, Path, int]:
+    """High-level: allocate an iteration, capture all pages, write artifacts.
+
+    Returns ``(iteration_number, iteration_dir, exit_code)``.
+    """
+    validation_root = package / "validation"
+    iteration_number, iteration_dir = allocate_iteration(validation_root)
+    pages_dir = iteration_dir / "pages"
+    pages_dir.mkdir(parents=True, exist_ok=True)
+
+    report_pages = pages(report)
+    if not report_pages:
+        print(f"FAILED: no pages found under {report / 'definition' / 'pages'}")
+        return iteration_number, iteration_dir, 1
+
+    try:
+        report_pages = _selected_pages(report_pages, options.page_ids)
+    except ValueError as error:
+        print(f"FAILED: requested page id(s) not found: {error}")
+        return iteration_number, iteration_dir, 2
+
+    evidence: list[PageEvidence] = []
+    failed: list[str] = []
+    unstable: list[str] = []
+    started = time.time()
+
+    for page_id, name in report_pages:
+        filename = f"{_safe_filename(name)}.png"
+        dest = pages_dir / filename
+        result = capture_stable(page_id, pid, dest, options, runtime)
+        tag = "OK" if result.captured and result.converged else ("UNSTABLE" if result.captured else "FAIL")
+        print(
+            f"  {tag:<9}{name:<26} settled in {result.seconds:5.1f}s over {result.frames} frames "
+            f"({time.time() - started:6.1f}s total)",
+            flush=True,
+        )
+        if not result.captured:
+            failed.append(name)
+        elif not result.converged:
+            unstable.append(name)
+
+        if result.captured:
+            sha = frame_digest(dest)
+            evidence.append(
+                PageEvidence(
+                    page_id=page_id,
+                    display_name=name,
+                    screenshot=f"pages/{filename}",
+                    sha256=sha,
+                    converged=result.converged,
+                    frames=result.frames,
+                    seconds=result.seconds,
+                )
+            )
+            visual_ids = _visuals_for_page(report, page_id)
+            _write_comparison_template(iteration_dir, page_id, name, sha, visual_ids)
+
+    write_capture_json(iteration_dir, iteration_number, str(report), evidence)
+
+    print(f"\n{len(report_pages) - len(failed)}/{len(report_pages)} captured in {time.time() - started:.1f}s")
+    print(f"Iteration {iteration_number} -> {iteration_dir}")
+    if unstable:
+        print("NEVER CONVERGED (still changing at max-wait, treat as PARTIAL): " + ", ".join(unstable))
+    if failed:
+        print("FAILED: " + ", ".join(failed))
+    exit_code = 1 if failed or unstable else 0
+    return iteration_number, iteration_dir, exit_code
+
+
 def _page_ids(value: str) -> frozenset[str]:
     """Parse a non-empty, comma-separated list of PBIR page folder names."""
     page_ids = [page_id.strip() for page_id in value.split(",")]
@@ -254,6 +442,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("report", type=Path, help="Path to a .Report folder")
     parser.add_argument("outdir", type=Path, help="Folder where page PNGs should be written")
     parser.add_argument("--pid", required=True, help="Power BI Desktop PID to capture from")
+    parser.add_argument("--package", type=Path, help="Package directory for iteration-aware capture")
     parser.add_argument(
         "--pages",
         type=_page_ids,
@@ -279,6 +468,9 @@ def main(argv: list[str] | None = None) -> int:
         max_wait=args.max_wait,
         page_ids=args.pages,
     )
+    if args.package:
+        _, _, exit_code = capture_iteration(args.report, args.package, args.pid, options)
+        return exit_code
     return capture_report(args.report, args.outdir, args.pid, options)
 
 

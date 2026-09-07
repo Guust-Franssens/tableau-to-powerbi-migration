@@ -32,6 +32,9 @@ import run_estate  # noqa: E402  # pylint: disable=wrong-import-position
 
 ORIGINAL_CHECK_OCCLUSION = cu.check_occlusion
 ORIGINAL_GATES = cu.GATES
+ORIGINAL_CHECK_VISUAL_CAPTURE = cu.check_visual_capture
+ORIGINAL_CHECK_VISUAL_COMPARISON = cu.check_visual_comparison
+ORIGINAL_CHECK_SIGN_OFF = cu.check_sign_off
 
 
 def _load_script_module(script_name: str):
@@ -270,7 +273,11 @@ def no_native_gates(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         cu, "check_cache_freshness", lambda _target: {"id": "cache-freshness", "status": cu.STATUS_PASS}
     )
-    monkeypatch.setattr(cu, "claimed_only_checks", lambda: [])
+    monkeypatch.setattr(cu, "check_visual_capture", lambda _target: {"id": "visual-capture", "status": cu.STATUS_PASS})
+    monkeypatch.setattr(
+        cu, "check_visual_comparison", lambda _target: {"id": "visual-comparison", "status": cu.STATUS_PASS}
+    )
+    monkeypatch.setattr(cu, "check_sign_off", lambda _target: {"id": "sign-off", "status": cu.STATUS_PASS})
 
 
 def test_brownfield_empty_folder_says_expected_shape(tmp_path: Path) -> None:
@@ -1983,11 +1990,6 @@ def test_summary_line_counts_findings_and_not_checked_classes(tmp_path: Path, mo
             "native_exit": 1,
         },
     )
-    monkeypatch.setattr(
-        cu,
-        "claimed_only_checks",
-        lambda: [{"id": "finalized", "status": cu.STATUS_NOT_CHECKED, "verification": "CLAIMED_ONLY"}],
-    )
 
     rendered = cu.render(cu.run_all(tmp_path))
 
@@ -1995,7 +1997,7 @@ def test_summary_line_counts_findings_and_not_checked_classes(tmp_path: Path, mo
     # stops inflating missing_input; here nothing is external, so the bucket is 0.
     assert rendered.splitlines()[-1] == (
         "SUMMARY: blockers=1; compromises=0; compromises_not_evaluated=0; findings_by_owner=model=1; "
-        "not_checked_structural=1; not_checked_external=0; not_checked_missing_input=0; ladder=FINDINGS exit=1"
+        "not_checked_structural=0; not_checked_external=0; not_checked_missing_input=0; ladder=FINDINGS exit=1"
     )
 
 
@@ -2392,29 +2394,17 @@ def test_actual_pages_counts_zero_visuals_for_a_page_with_none(tmp_path: Path) -
     assert [page["visuals"] for page in cu.actual_pages(tmp_path)] == [0]
 
 
-def test_clean_input_exits_zero_even_with_claimed_only_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Exit 0 must be reachable when only structurally-unverifiable claimed-only phases remain."""
+def test_clean_input_exits_zero_with_passing_validation_checks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exit 0 must be reachable when all validation checks pass (visual-capture, etc.)."""
     _write_spec(tmp_path, ["Executive"])
     _write_report(tmp_path, ["Executive"])
     _write_reference_manifest(tmp_path, ["Executive"])
-    monkeypatch.setattr(
-        cu,
-        "claimed_only_checks",
-        lambda: [
-            {
-                "id": "finalized",
-                "status": cu.STATUS_NOT_CHECKED,
-                "verification": "CLAIMED_ONLY",
-                "detail": "no machine-readable completion artifact exists",
-            }
-        ],
-    )
 
     report = cu.run_all(tmp_path)
 
     assert report["status"] == cu.STATUS_AUTOMATED_PASS
     assert report["exit_code"] == cu.EXIT_OK
-    assert [check["id"] for check in report["checks"]][-1] == "finalized"
+    assert [check["id"] for check in report["checks"]][-1] == "sign-off"
 
 
 def test_scope_model_runs_only_model_layer_checks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4190,3 +4180,198 @@ def test_the_caveats_reach_the_rendered_cli_output(tmp_path: Path) -> None:
 
     assert "NAME-ONLY EVIDENCE REFUSED" in rendered
     assert "'Bo ok'" in rendered
+
+
+# ---------------------------------------------------------------------------
+# Validation iteration gate tests (#363)
+# ---------------------------------------------------------------------------
+
+
+def _make_iteration(unit: Path, number: int = 1, *, converged: bool = True) -> Path:
+    """Create a minimal valid iteration with capture.json, screenshots, and comparison files."""
+    iteration_dir = unit / "validation" / "iterations" / f"{number:03d}"
+    pages_dir = iteration_dir / "pages"
+    pages_dir.mkdir(parents=True, exist_ok=True)
+    png = pages_dir / "Overview.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 64)
+    sha = hashlib.sha256(png.read_bytes()).hexdigest()
+    capture_json = {
+        "version": 1,
+        "timestamp": "2026-01-01T00:00:00Z",
+        "iteration": number,
+        "report": str(unit / "fabric" / "Book.Report"),
+        "all_converged": converged,
+        "pages": {
+            "p1": {
+                "display_name": "Overview",
+                "screenshot": "pages/Overview.png",
+                "sha256": sha,
+                "converged": converged,
+                "frames": 5,
+                "seconds": 12.3,
+            }
+        },
+    }
+    (iteration_dir / "capture.json").write_text(json.dumps(capture_json), encoding="utf-8")
+    comp_dir = iteration_dir / "comparison" / "pages"
+    comp_dir.mkdir(parents=True, exist_ok=True)
+    comp = {
+        "version": 1,
+        "page_id": "p1",
+        "display_name": "Overview",
+        "mode": "sign-off",
+        "capture_sha256": sha,
+        "visuals": {"v0": {"status": "no_discrepancy", "finding": None, "disposition": None}},
+    }
+    (comp_dir / "p1.json").write_text(json.dumps(comp), encoding="utf-8")
+    return iteration_dir
+
+
+def test_visual_capture_passes_with_valid_iteration(tmp_path: Path) -> None:
+    """A valid capture iteration with converged screenshots passes the capture gate."""
+    _make_iteration(tmp_path)
+    result = ORIGINAL_CHECK_VISUAL_CAPTURE(tmp_path)
+    assert result["id"] == "visual-capture"
+    assert result["status"] == cu.STATUS_PASS
+
+
+def test_visual_capture_not_checked_without_iterations(tmp_path: Path) -> None:
+    """No validation/iterations/ directory means NOT_CHECKED."""
+    result = ORIGINAL_CHECK_VISUAL_CAPTURE(tmp_path)
+    assert result["status"] == cu.STATUS_NOT_CHECKED
+
+
+def test_visual_capture_findings_on_missing_screenshot(tmp_path: Path) -> None:
+    """A capture.json that references a missing screenshot is a finding."""
+    iteration_dir = _make_iteration(tmp_path)
+    (iteration_dir / "pages" / "Overview.png").unlink()
+    result = ORIGINAL_CHECK_VISUAL_CAPTURE(tmp_path)
+    assert result["status"] == cu.STATUS_FINDINGS
+    assert any(p["problem"] == "screenshot missing" for p in result["problems"])
+
+
+def test_visual_capture_findings_on_zero_byte_screenshot(tmp_path: Path) -> None:
+    """A zero-byte screenshot is a finding, not a pass."""
+    iteration_dir = _make_iteration(tmp_path)
+    (iteration_dir / "pages" / "Overview.png").write_bytes(b"")
+    result = ORIGINAL_CHECK_VISUAL_CAPTURE(tmp_path)
+    assert result["status"] == cu.STATUS_FINDINGS
+    assert any(p["problem"] == "screenshot zero-byte" for p in result["problems"])
+
+
+def test_visual_capture_findings_on_hash_mismatch(tmp_path: Path) -> None:
+    """A screenshot whose hash doesn't match capture.json is a finding."""
+    iteration_dir = _make_iteration(tmp_path)
+    (iteration_dir / "pages" / "Overview.png").write_bytes(b"TAMPERED")
+    result = ORIGINAL_CHECK_VISUAL_CAPTURE(tmp_path)
+    assert result["status"] == cu.STATUS_FINDINGS
+    assert any(p["problem"] == "screenshot hash mismatch" for p in result["problems"])
+
+
+def test_visual_capture_findings_on_unconverged_page(tmp_path: Path) -> None:
+    """An unconverged page is a finding even if the screenshot exists."""
+    _make_iteration(tmp_path, converged=False)
+    result = ORIGINAL_CHECK_VISUAL_CAPTURE(tmp_path)
+    assert result["status"] == cu.STATUS_FINDINGS
+    assert any(p["problem"] == "page did not converge" for p in result["problems"])
+
+
+def test_visual_comparison_passes_with_complete_comparison(tmp_path: Path) -> None:
+    """A complete comparison file for every page passes the comparison gate."""
+    _make_iteration(tmp_path)
+    result = ORIGINAL_CHECK_VISUAL_COMPARISON(tmp_path)
+    assert result["id"] == "visual-comparison"
+    assert result["status"] == cu.STATUS_PASS
+
+
+def test_visual_comparison_findings_on_missing_comparison(tmp_path: Path) -> None:
+    """A page without a comparison file is a finding."""
+    iteration_dir = _make_iteration(tmp_path)
+    (iteration_dir / "comparison" / "pages" / "p1.json").unlink()
+    result = ORIGINAL_CHECK_VISUAL_COMPARISON(tmp_path)
+    assert result["status"] == cu.STATUS_FINDINGS
+    assert any(p["problem"] == "comparison file missing" for p in result["problems"])
+
+
+def test_visual_comparison_findings_on_pending_template(tmp_path: Path) -> None:
+    """A comparison still in pending mode is a finding."""
+    iteration_dir = _make_iteration(tmp_path)
+    comp_path = iteration_dir / "comparison" / "pages" / "p1.json"
+    comp = json.loads(comp_path.read_text(encoding="utf-8"))
+    comp["mode"] = "pending"
+    comp_path.write_text(json.dumps(comp), encoding="utf-8")
+    result = ORIGINAL_CHECK_VISUAL_COMPARISON(tmp_path)
+    assert result["status"] == cu.STATUS_FINDINGS
+    assert any(p["problem"] == "comparison still pending" for p in result["problems"])
+
+
+def test_visual_comparison_findings_on_stale_capture_sha(tmp_path: Path) -> None:
+    """A comparison whose capture_sha256 doesn't match the capture is stale."""
+    iteration_dir = _make_iteration(tmp_path)
+    comp_path = iteration_dir / "comparison" / "pages" / "p1.json"
+    comp = json.loads(comp_path.read_text(encoding="utf-8"))
+    comp["capture_sha256"] = "stale_hash"
+    comp_path.write_text(json.dumps(comp), encoding="utf-8")
+    result = ORIGINAL_CHECK_VISUAL_COMPARISON(tmp_path)
+    assert result["status"] == cu.STATUS_FINDINGS
+    assert any("stale" in p["problem"] for p in result["problems"])
+
+
+def test_visual_comparison_findings_on_pending_visual(tmp_path: Path) -> None:
+    """A visual still in pending status blocks the comparison gate."""
+    iteration_dir = _make_iteration(tmp_path)
+    comp_path = iteration_dir / "comparison" / "pages" / "p1.json"
+    comp = json.loads(comp_path.read_text(encoding="utf-8"))
+    comp["visuals"]["v0"]["status"] = "pending"
+    comp_path.write_text(json.dumps(comp), encoding="utf-8")
+    result = ORIGINAL_CHECK_VISUAL_COMPARISON(tmp_path)
+    assert result["status"] == cu.STATUS_FINDINGS
+
+
+def test_sign_off_passes_with_complete_iteration(tmp_path: Path) -> None:
+    """A complete iteration with all pages captured and compared passes sign-off."""
+    _make_iteration(tmp_path)
+    result = ORIGINAL_CHECK_SIGN_OFF(tmp_path)
+    assert result["id"] == "sign-off"
+    assert result["status"] == cu.STATUS_PASS
+
+
+def test_sign_off_not_checked_without_iterations(tmp_path: Path) -> None:
+    """No iterations directory means NOT_CHECKED for sign-off."""
+    result = ORIGINAL_CHECK_SIGN_OFF(tmp_path)
+    assert result["status"] == cu.STATUS_NOT_CHECKED
+
+
+def test_sign_off_findings_on_screenshot_problems(tmp_path: Path) -> None:
+    """Screenshot problems block sign-off."""
+    iteration_dir = _make_iteration(tmp_path)
+    (iteration_dir / "pages" / "Overview.png").unlink()
+    result = ORIGINAL_CHECK_SIGN_OFF(tmp_path)
+    assert result["status"] == cu.STATUS_FINDINGS
+
+
+def test_sign_off_findings_on_incomplete_comparison(tmp_path: Path) -> None:
+    """Incomplete comparison blocks sign-off."""
+    iteration_dir = _make_iteration(tmp_path)
+    (iteration_dir / "comparison" / "pages" / "p1.json").unlink()
+    result = ORIGINAL_CHECK_SIGN_OFF(tmp_path)
+    assert result["status"] == cu.STATUS_FINDINGS
+
+
+def test_latest_iteration_picks_highest_number(tmp_path: Path) -> None:
+    """Multiple iterations always resolve to the highest number."""
+    _make_iteration(tmp_path, number=1)
+    _make_iteration(tmp_path, number=3)
+    _make_iteration(tmp_path, number=2)
+    result = ORIGINAL_CHECK_SIGN_OFF(tmp_path)
+    assert result["iteration"] == 3
+
+
+def test_non_numeric_iteration_dirs_are_ignored(tmp_path: Path) -> None:
+    """Only numeric directory names count as iterations."""
+    iterations_dir = tmp_path / "validation" / "iterations"
+    iterations_dir.mkdir(parents=True)
+    (iterations_dir / "scratch").mkdir()
+    (iterations_dir / "notes.txt").write_text("not a dir", encoding="utf-8")
+    result = ORIGINAL_CHECK_VISUAL_CAPTURE(tmp_path)
+    assert result["status"] == cu.STATUS_NOT_CHECKED

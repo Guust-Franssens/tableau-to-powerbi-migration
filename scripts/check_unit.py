@@ -146,7 +146,7 @@ MODEL_CHECK_IDS = frozenset(
 REPORT_CHECK_IDS = frozenset({"pbir-valid", "pbir-layout", "page-parity", "oracle-coverage", "occlusion"})
 INTEGRATION_CHECK_IDS = frozenset({"blank-placeholders", "field-bindings", "connection-fidelity"})
 ALL_ONLY_CHECK_IDS = frozenset(
-    {"engine-receipt", "desktop-orphans", "path-ceiling", "visual-layer-done", "visual-comparison-done", "finalized"}
+    {"engine-receipt", "desktop-orphans", "path-ceiling", "visual-capture", "visual-comparison", "sign-off"}
 )
 
 OWNER_HINTS = {
@@ -2837,28 +2837,229 @@ def check_cache_freshness(target: Path) -> dict[str, Any]:
     }
 
 
-def claimed_only_checks() -> list[dict[str, Any]]:
-    """Phases #271 says are not machine-verifiable today."""
-    return [
-        {
-            "id": "visual-layer-done",
+def _latest_iteration(target: Path) -> tuple[int | None, Path | None]:
+    """Return (number, path) of the highest-numbered iteration, or (None, None)."""
+    iterations_dir = target / "validation" / "iterations"
+    if not iterations_dir.is_dir():
+        return None, None
+    best_num: int | None = None
+    best_path: Path | None = None
+    for child in iterations_dir.iterdir():
+        if child.is_dir() and child.name.isdigit():
+            num = int(child.name)
+            if best_num is None or num > best_num:
+                best_num = num
+                best_path = child
+    return best_num, best_path
+
+
+def _check_capture_json(iteration_dir: Path) -> tuple[dict[str, Any] | None, str | None]:
+    """Load and minimally validate capture.json. Returns (payload, error_detail)."""
+    capture_path = iteration_dir / "capture.json"
+    if not capture_path.is_file():
+        return None, "capture.json missing"
+    try:
+        payload = json.loads(capture_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        return None, f"capture.json unreadable: {exc}"
+    if not isinstance(payload, dict) or "pages" not in payload:
+        return None, "capture.json has no pages key"
+    return payload, None
+
+
+def _verify_page_screenshots(
+    iteration_dir: Path, capture_pages: dict[str, Any]
+) -> list[dict[str, str]]:
+    """Verify each screenshot exists and its hash matches capture.json."""
+    problems: list[dict[str, str]] = []
+    for page_id, info in capture_pages.items():
+        screenshot_rel = info.get("screenshot", "")
+        screenshot_path = iteration_dir / screenshot_rel
+        if not screenshot_path.is_file():
+            problems.append({"page_id": page_id, "problem": "screenshot missing"})
+            continue
+        if screenshot_path.stat().st_size == 0:
+            problems.append({"page_id": page_id, "problem": "screenshot zero-byte"})
+            continue
+        actual_sha = hashlib.sha256(screenshot_path.read_bytes()).hexdigest()
+        expected_sha = info.get("sha256", "")
+        if actual_sha != expected_sha:
+            problems.append({"page_id": page_id, "problem": "screenshot hash mismatch"})
+        if not info.get("converged", False):
+            problems.append({"page_id": page_id, "problem": "page did not converge"})
+    return problems
+
+
+def _check_comparison_files(
+    iteration_dir: Path, capture_pages: dict[str, Any]
+) -> tuple[list[dict[str, str]], bool]:
+    """Verify comparison files exist for every captured page and are not pending.
+
+    Returns (problems, has_sign_off) where has_sign_off is True only when every page
+    has a non-pending comparison with every visual resolved.
+    """
+    problems: list[dict[str, str]] = []
+    has_sign_off = True
+    comp_dir = iteration_dir / "comparison" / "pages"
+    for page_id in capture_pages:
+        comp_file = comp_dir / f"{page_id}.json"
+        if not comp_file.is_file():
+            problems.append({"page_id": page_id, "problem": "comparison file missing"})
+            has_sign_off = False
+            continue
+        try:
+            comp = json.loads(comp_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            problems.append({"page_id": page_id, "problem": "comparison file unreadable"})
+            has_sign_off = False
+            continue
+        mode = comp.get("mode", "pending")
+        if mode == "pending":
+            problems.append({"page_id": page_id, "problem": "comparison still pending"})
+            has_sign_off = False
+            continue
+        # Check capture hash matches
+        if comp.get("capture_sha256") != capture_pages[page_id].get("sha256"):
+            problems.append({"page_id": page_id, "problem": "comparison capture_sha256 mismatch (stale)"})
+            has_sign_off = False
+            continue
+        visuals = comp.get("visuals", {})
+        for vid, vinfo in visuals.items():
+            if vinfo.get("status") == "pending":
+                problems.append({"page_id": page_id, "problem": f"visual {vid} still pending"})
+                has_sign_off = False
+    return problems, has_sign_off
+
+
+def check_visual_capture(target: Path) -> dict[str, Any]:
+    """Verify a stable capture iteration exists with valid screenshots."""
+    iteration_num, iteration_dir = _latest_iteration(target)
+    if iteration_dir is None:
+        return {
+            "id": "visual-capture",
             "status": STATUS_NOT_CHECKED,
-            "verification": "CLAIMED_ONLY",
-            "detail": "no machine-readable completion artifact exists",
-        },
-        {
-            "id": "visual-comparison-done",
+            "detail": "no validation/iterations/ directory found",
+        }
+    capture, error = _check_capture_json(iteration_dir)
+    if error:
+        return {
+            "id": "visual-capture",
             "status": STATUS_NOT_CHECKED,
-            "verification": "CLAIMED_ONLY",
-            "detail": "validator judgement is not a gate artifact today",
-        },
-        {
-            "id": "finalized",
+            "detail": f"iteration {iteration_num}: {error}",
+        }
+    capture_pages = capture.get("pages", {})
+    if not capture_pages:
+        return {
+            "id": "visual-capture",
             "status": STATUS_NOT_CHECKED,
-            "verification": "CLAIMED_ONLY",
-            "detail": "sign-off is not represented by a verifiable artifact today",
-        },
-    ]
+            "detail": f"iteration {iteration_num}: capture.json has no pages",
+        }
+    problems = _verify_page_screenshots(iteration_dir, capture_pages)
+    if problems:
+        return {
+            "id": "visual-capture",
+            "status": STATUS_FINDINGS,
+            "detail": f"iteration {iteration_num}: {len(problems)} screenshot problem(s)",
+            "iteration": iteration_num,
+            "problems": problems,
+        }
+    return {
+        "id": "visual-capture",
+        "status": STATUS_PASS,
+        "detail": f"iteration {iteration_num}: {len(capture_pages)} page(s) captured and verified",
+        "iteration": iteration_num,
+        "pages_captured": len(capture_pages),
+        "all_converged": capture.get("all_converged", False),
+    }
+
+
+def check_visual_comparison(target: Path) -> dict[str, Any]:
+    """Verify comparison artifacts exist and are complete for every captured page."""
+    iteration_num, iteration_dir = _latest_iteration(target)
+    if iteration_dir is None:
+        return {
+            "id": "visual-comparison",
+            "status": STATUS_NOT_CHECKED,
+            "detail": "no validation/iterations/ directory found",
+        }
+    capture, error = _check_capture_json(iteration_dir)
+    if error:
+        return {
+            "id": "visual-comparison",
+            "status": STATUS_NOT_CHECKED,
+            "detail": f"iteration {iteration_num}: {error}",
+        }
+    capture_pages = capture.get("pages", {})
+    problems, _ = _check_comparison_files(iteration_dir, capture_pages)
+    if problems:
+        return {
+            "id": "visual-comparison",
+            "status": STATUS_FINDINGS,
+            "detail": f"iteration {iteration_num}: {len(problems)} comparison problem(s)",
+            "iteration": iteration_num,
+            "problems": problems,
+        }
+    return {
+        "id": "visual-comparison",
+        "status": STATUS_PASS,
+        "detail": f"iteration {iteration_num}: all pages have complete comparison",
+        "iteration": iteration_num,
+    }
+
+
+def check_sign_off(target: Path) -> dict[str, Any]:  # pylint: disable=too-many-return-statements
+    """Verify the latest iteration constitutes a complete sign-off."""
+    iteration_num, iteration_dir = _latest_iteration(target)
+    if iteration_dir is None:
+        return {
+            "id": "sign-off",
+            "status": STATUS_NOT_CHECKED,
+            "detail": "no validation/iterations/ directory found",
+        }
+    capture, error = _check_capture_json(iteration_dir)
+    if error:
+        return {
+            "id": "sign-off",
+            "status": STATUS_NOT_CHECKED,
+            "detail": f"iteration {iteration_num}: {error}",
+        }
+    capture_pages = capture.get("pages", {})
+    if not capture_pages:
+        return {
+            "id": "sign-off",
+            "status": STATUS_NOT_CHECKED,
+            "detail": f"iteration {iteration_num}: no pages captured",
+        }
+    screenshot_problems = _verify_page_screenshots(iteration_dir, capture_pages)
+    if screenshot_problems:
+        return {
+            "id": "sign-off",
+            "status": STATUS_FINDINGS,
+            "detail": f"iteration {iteration_num}: screenshot problems block sign-off",
+            "iteration": iteration_num,
+            "problems": screenshot_problems,
+        }
+    comparison_problems, has_sign_off = _check_comparison_files(iteration_dir, capture_pages)
+    if comparison_problems:
+        return {
+            "id": "sign-off",
+            "status": STATUS_FINDINGS,
+            "detail": f"iteration {iteration_num}: comparison incomplete",
+            "iteration": iteration_num,
+            "problems": comparison_problems,
+        }
+    if not has_sign_off:
+        return {
+            "id": "sign-off",
+            "status": STATUS_NOT_CHECKED,
+            "detail": f"iteration {iteration_num}: sign-off criteria not met",
+        }
+    return {
+        "id": "sign-off",
+        "status": STATUS_PASS,
+        "detail": f"iteration {iteration_num}: complete sign-off with {len(capture_pages)} page(s)",
+        "iteration": iteration_num,
+    }
 
 
 def check_desktop_orphans(target: Path) -> dict[str, Any]:
@@ -3042,7 +3243,9 @@ def run_all(
     if _in_scope("desktop-orphans", scope):
         checks.append(check_desktop_orphans(target))
     if scope == SCOPE_ALL:
-        checks.extend(claimed_only_checks())
+        checks.append(check_visual_capture(target))
+        checks.append(check_visual_comparison(target))
+        checks.append(check_sign_off(target))
     return _finalize(target, checks, exemptions, scope=scope)
 
 

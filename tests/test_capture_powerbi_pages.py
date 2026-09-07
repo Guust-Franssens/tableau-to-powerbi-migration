@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import sys
@@ -428,3 +429,100 @@ def test_capture_report_exits_nonzero_when_report_has_no_pages() -> None:
         assert code == 1
     finally:
         shutil.rmtree(root.parent, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# Iteration allocation and capture.json tests
+# ---------------------------------------------------------------------------
+
+
+def test_allocate_iteration_creates_numbered_directory(tmp_path: Path) -> None:
+    """First allocation creates 001."""
+    number, iteration_dir = capture.allocate_iteration(tmp_path)
+    assert number == 1
+    assert iteration_dir == tmp_path / "iterations" / "001"
+    assert iteration_dir.is_dir()
+
+
+def test_allocate_iteration_increments_monotonically(tmp_path: Path) -> None:
+    """Each allocation gets the next number."""
+    n1, d1 = capture.allocate_iteration(tmp_path)
+    n2, d2 = capture.allocate_iteration(tmp_path)
+    n3, d3 = capture.allocate_iteration(tmp_path)
+    assert (n1, n2, n3) == (1, 2, 3)
+    assert d1.name == "001"
+    assert d2.name == "002"
+    assert d3.name == "003"
+
+
+def test_allocate_iteration_never_reuses_existing_number(tmp_path: Path) -> None:
+    """A pre-existing directory is skipped, never reused."""
+    iterations_dir = tmp_path / "iterations"
+    iterations_dir.mkdir(parents=True)
+    (iterations_dir / "001").mkdir()
+    (iterations_dir / "002").mkdir()
+    number, iteration_dir = capture.allocate_iteration(tmp_path)
+    assert number == 3
+    assert iteration_dir.name == "003"
+
+
+def test_write_capture_json_records_page_evidence(tmp_path: Path) -> None:
+    """capture.json faithfully records per-page stability evidence."""
+    evidence = [
+        capture.PageEvidence("p1", "Overview", "pages/Overview.png", "abc123", True, 5, 12.3),
+        capture.PageEvidence("p2", "Map", "pages/Map.png", "def456", False, 3, 75.0),
+    ]
+    path = capture.write_capture_json(tmp_path, 1, "/report/Book.Report", evidence, timestamp="2026-01-01T00:00:00Z")
+    assert path == tmp_path / "capture.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["version"] == 1
+    assert payload["iteration"] == 1
+    assert payload["report"] == "/report/Book.Report"
+    assert payload["all_converged"] is False
+    assert payload["pages"]["p1"]["converged"] is True
+    assert payload["pages"]["p2"]["converged"] is False
+    assert payload["pages"]["p1"]["sha256"] == "abc123"
+
+
+def test_capture_iteration_writes_capture_json_and_templates(tmp_path: Path) -> None:
+    """capture_iteration produces capture.json, PNGs, and comparison templates."""
+    package = tmp_path / "unit"
+    report = package / "fabric" / "Book.Report"
+    page = report / "definition" / "pages" / "p1"
+    page.mkdir(parents=True)
+    (page / "page.json").write_text('{"displayName": "Overview"}', encoding="utf-8")
+    visuals = page / "visuals" / "v0"
+    visuals.mkdir(parents=True)
+    (visuals / "visual.json").write_text('{"name": "v0"}', encoding="utf-8")
+
+    clock = ManualClock()
+
+    def fake_screenshot(_page_id: str, _pid: str, frame: Path) -> bool:
+        frame.write_bytes(b"settled-image")
+        return True
+
+    number, iteration_dir, exit_code = capture.capture_iteration(
+        report,
+        package,
+        "1234",
+        capture.CaptureOptions(poll=1.0, stable_seconds=0.0, max_wait=2.0),
+        capture.CaptureRuntime(screenshotter=fake_screenshot, sleep=clock.sleep, clock=clock),
+    )
+
+    assert exit_code == 0
+    assert number == 1
+    assert (iteration_dir / "capture.json").is_file()
+    assert (iteration_dir / "pages" / "Overview.png").is_file()
+    comp = iteration_dir / "comparison" / "pages" / "p1.json"
+    assert comp.is_file()
+    comp_data = json.loads(comp.read_text(encoding="utf-8"))
+    assert comp_data["mode"] == "pending"
+    assert "v0" in comp_data["visuals"]
+    assert comp_data["visuals"]["v0"]["status"] == "pending"
+
+
+def test_comparison_template_records_capture_sha256(tmp_path: Path) -> None:
+    """The comparison template pins the capture hash for staleness detection."""
+    capture._write_comparison_template(tmp_path, "p1", "Overview", "abc123", ["v0"])
+    comp = json.loads((tmp_path / "comparison" / "pages" / "p1.json").read_text(encoding="utf-8"))
+    assert comp["capture_sha256"] == "abc123"
