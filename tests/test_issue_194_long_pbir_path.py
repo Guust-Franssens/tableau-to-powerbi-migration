@@ -1,18 +1,21 @@
 """The issue-194 downloadable repro: reproducible, public-safe, and boundary-crossing.
 
-This is an **end-to-end upstream repro**, not another identifier-cap matrix. It asserts exactly three
-things, and deliberately nothing that `tests/test_run_estate.py` already owns:
+This is an **end-to-end upstream repro**, not another identifier-cap matrix. It deliberately does not
+restate what `tests/test_datasource_path_envelope.py` already owns.
 
-1. the two committed `.twbx` archives are byte-reproducible from `build_repro.py` and carry nothing
-   private (offline, runs in CI);
-2. the two archives differ **only** in the identity names — same CSV bytes, same workbook structure
-   once the names are mapped (offline, runs in CI);
-3. canonical engine output at a `C:\\tfmig`-equivalent short root crosses Power BI Desktop's file
-   ceiling for the long case and does not for the short control, with the offender being a
-   **required** child of the semantic model rather than the `.pbip` pointer (engine-dependent).
+⚠️ **Engine-version provenance, stated rather than implied.** The Desktop A/B and the numbers in
+`fixtures/upstream-repros/issue-194-long-pbir-path/README.md` were measured locally on canonical
+engine **2.368.0**. The repository's required engine-integration job pins **2.356.0**
+(`.github/workflows/checks.yml`), so the engine-dependent assertions below are written to hold on
+either: they assert the *boundary* unconditionally and the *specific uncapped table-file offender*
+only at or above the version it was measured on, recording the observed version either way. This
+fixture PR does **not** roll the repository's pinned engine.
 
-The measured refusal, quoted from Desktop's own modal so it is not inferred from a window title, is
-in `fixtures/upstream-repros/issue-194-long-pbir-path/README.md`.
+⚠️ Two safety rules this module exists to keep, both learned the hard way:
+
+* engine output goes to a **process-unique** directory obtained from `tmp_path_factory`, and the
+  public script allocates a fresh id with an atomic `mkdir` - nothing is ever deleted or reused;
+* an unmeasurable run must be reported as INVALID, never as a clean verdict.
 """
 
 from __future__ import annotations
@@ -37,36 +40,69 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 import engine_source  # noqa: E402  # pylint: disable=wrong-import-position
-from check_path_ceiling import DIR_CEILING, FILE_CEILING, utf16_len  # noqa: E402  # pylint: disable=wrong-import-position
+import host_paths  # noqa: E402  # pylint: disable=wrong-import-position
 
 FIXTURE = REPO / "fixtures" / "upstream-repros" / "issue-194-long-pbir-path"
 BUILDER = FIXTURE / "build_repro.py"
+MEASURE = FIXTURE / "measure_repro.py"
 
 
-def _builder_cases() -> dict[str, dict[str, str]]:
-    """The builder's own CASES table, imported rather than duplicated."""
-    spec = importlib.util.spec_from_file_location("issue194_build_repro", BUILDER)
+def _load(path: Path, name: str):
+    """Import a fixture-local script as a module, so tests drive the SAME implementation."""
+    spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.CASES
+    return module
 
+
+measure_repro = _load(MEASURE, "issue194_measure_repro")
+_BUILDER = _load(BUILDER, "issue194_build_repro")
+CASES = _BUILDER.CASES
 
 #: Archive names are DERIVED from the builder, never hard-coded: a mutation that renames a case must
 #: reach the artifact the test reads, or the mutation silently tests nothing.
-LONG_ARCHIVE = f"{_builder_cases()['long']['stem']}.twbx"
-SHORT_ARCHIVE = f"{_builder_cases()['short']['stem']}.twbx"
+LONG_ARCHIVE = f"{CASES['long']['stem']}.twbx"
+SHORT_ARCHIVE = f"{CASES['short']['stem']}.twbx"
 
 SIMULATE_ENGINE_ABSENT = "T2P_SIMULATE_ENGINE_ABSENT_FOR_TESTS"
 ENGINE_SKIP_REASON = "deterministic tier not installed"
 
-#: The skill's ordinary run root is `C:\tfmig\runs\NNNN\out` - 22 UTF-16 units. The engine's output
-#: paths are root-independent, so the test reproduces that LENGTH under pytest's own temp directory
-#: rather than writing to a shared machine path.
-SKILL_ROOT_LEN = utf16_len(r"C:\tfmig\runs\9194\out")
+#: The skill's ordinary run root is 22 UTF-16 units (`C:\tfmig\runs\NNNN\out`). The engine's emitted
+#: relative tails are root-independent, so the census is exercised at that LENGTH without creating
+#: the path - which is also what lets this run on a host that has no `C:\`.
+SKILL_ROOT_LEN = 22
 
-#: Text that must never appear in a public repro. Hostnames and site slugs are what a harvested
-#: Tableau workbook leaks; `repository-location` is the element that carries them.
-FORBIDDEN = ("repository-location", "onmicrosoft.com", "tableau.com", "10ax.online", "password=")
+#: The version the offender-identity claim was measured on. Below it, the claim is recorded but not
+#: asserted (see the module docstring).
+OFFENDER_MEASURED_ON = (2, 368, 0)
+
+#: Exactly what a public archive may contain: one root-level `.twb`, one CSV under `Data/`.
+CSV_MEMBER_RE = re.compile(r"^Data/[A-Za-z0-9._-]+/[A-Za-z0-9 ._-]+\.csv$")
+TWB_MEMBER_RE = re.compile(r"^[A-Za-z0-9 ._-]+\.twb$")
+
+#: Element and attribute names that carry a location, an identity or a secret in Tableau XML.
+FORBIDDEN_ELEMENTS = {"repository-location", "repository", "user", "credential", "credentials"}
+FORBIDDEN_ATTRS = {
+    "server",
+    "host",
+    "hostname",
+    "dbname",
+    "username",
+    "user",
+    "password",
+    "token",
+    "auth",
+    "authentication",
+    "site",
+    "sitename",
+    "xml:base",
+    "port",
+}
+#: Attributes above that Tableau writes as an EMPTY placeholder in a legitimate packaged flat-file
+#: workbook. Empty is allowed; any value is not.
+EMPTY_ONLY_ATTRS = {"server"}
+
+URLISH_RE = re.compile(r"(?i)(?:[a-z][a-z0-9+.-]*://|\\\\[^\\]|^[A-Za-z]:[\\/])")
 
 
 def _contract() -> Path | None:
@@ -89,6 +125,10 @@ def _members(archive: Path) -> dict[str, bytes]:
         return {info.filename: zf.read(info) for info in zf.infolist()}
 
 
+def _version_tuple(text: str | None) -> tuple[int, ...]:
+    return tuple(int(part) for part in re.findall(r"\d+", text or "0")[:3]) or (0,)
+
+
 # -- offline: the archives are reproducible and public-safe ----------------------------------------
 def test_the_committed_archives_rebuild_byte_for_byte() -> None:
     """A maintainer must be able to regenerate exactly what they downloaded."""
@@ -107,16 +147,40 @@ def test_the_committed_archives_rebuild_byte_for_byte() -> None:
     assert "DIFFER" not in done.stdout and "MISSING" not in done.stdout, done.stdout
 
 
-def test_the_archives_carry_no_private_identifiers() -> None:
-    """Public-safe means checked, not assumed: no server, site, account or credential text."""
-    for archive in (LONG_ARCHIVE, SHORT_ARCHIVE):
-        for name, payload in _members(FIXTURE / archive).items():
-            text = payload.decode("utf-8", "replace")
-            for needle in FORBIDDEN:
-                assert needle not in text and needle not in name, (
-                    f"{archive}:{name} contains {needle!r}. This fixture is linked from a public "
-                    "upstream issue; it must carry nothing but synthetic data and generic names."
+@pytest.mark.parametrize("archive_name", [LONG_ARCHIVE, SHORT_ARCHIVE])
+def test_each_archive_matches_the_allowed_public_shape(archive_name: str) -> None:
+    """ALLOWLIST, not blacklist: exactly the members and XML this fixture is permitted to ship.
+
+    ⚠️ Round-1 review: an earlier version searched for five substrings, so anything not on that list
+    shipped. This enumerates what is ALLOWED - two members, and an XML tree with no location,
+    identity or secret bearing element or attribute - and rejects everything else.
+    """
+    members = _members(FIXTURE / archive_name)
+    twbs = [name for name in members if TWB_MEMBER_RE.fullmatch(name)]
+    csvs = [name for name in members if CSV_MEMBER_RE.fullmatch(name)]
+    assert len(twbs) == 1, f"{archive_name}: expected exactly one root-level .twb, found {twbs}"
+    assert len(csvs) == 1, f"{archive_name}: expected exactly one Data/<dir>/<file>.csv, found {csvs}"
+    extra = sorted(set(members) - set(twbs) - set(csvs))
+    assert not extra, f"{archive_name}: unexpected archive member(s) {extra}; only a .twb and its CSV may ship"
+
+    for name, payload in members.items():
+        text = payload.decode("utf-8", "replace")
+        assert not host_paths.discloses_host_path(text), f"{archive_name}:{name} discloses a host profile path"
+        assert not host_paths.discloses_host_location(text), f"{archive_name}:{name} discloses a host location"
+
+    root = ET.fromstring(members[twbs[0]].decode("utf-8"))
+    for element in root.iter():
+        tag = element.tag.rsplit("}", 1)[-1].lower()
+        assert tag not in FORBIDDEN_ELEMENTS, f"{archive_name}: <{tag}> may not ship in a public repro"
+        for raw_attr, value in element.attrib.items():
+            attr = raw_attr.rsplit("}", 1)[-1].lower()
+            if attr in FORBIDDEN_ATTRS:
+                assert attr in EMPTY_ONLY_ATTRS and value == "", (
+                    f"{archive_name}: <{tag} {raw_attr}={value!r}> - this attribute may not carry a value"
                 )
+            assert not URLISH_RE.search(value), (
+                f"{archive_name}: <{tag} {raw_attr}={value!r}> looks like a URL, UNC or drive-absolute path"
+            )
 
 
 def test_the_two_cases_differ_only_in_their_identity_names() -> None:
@@ -130,21 +194,16 @@ def test_the_two_cases_differ_only_in_their_identity_names() -> None:
         "the two cases no longer ship identical data; the A/B would then have two variables"
     )
 
-    cases = _builder_cases()
-    long_xml = long_members[next(n for n in long_members if n.endswith(".twb"))].decode("utf-8")
-    short_xml = short_members[next(n for n in short_members if n.endswith(".twb"))].decode("utf-8")
     tokens = {"datasource": "@@D@@", "dashboard": "@@B@@", "worksheet": "@@W@@", "csv": "@@C@@"}
-    # Longest value first: the short case's datasource name ("Regional Sales") is a PREFIX of its
-    # dashboard name ("Regional Sales Review"), so a naive order rewrites half a title.
-    for side, xml_name in (("long", "long_xml"), ("short", "short_xml")):
-        text = long_xml if side == "long" else short_xml
-        for key in sorted(tokens, key=lambda k, s=side: -len(cases[s][k])):
-            text = text.replace(cases[side][key], tokens[key])
-        if xml_name == "long_xml":
-            long_xml = text
-        else:
-            short_xml = text
-    assert ET.canonicalize(long_xml) == ET.canonicalize(short_xml), (
+    mapped = {}
+    for side, members in (("long", long_members), ("short", short_members)):
+        text = members[next(n for n in members if n.endswith(".twb"))].decode("utf-8")
+        # Longest value first: the short case's datasource name ("Regional Sales") is a PREFIX of its
+        # dashboard name ("Regional Sales Review"), so a naive order rewrites half a title.
+        for key in sorted(tokens, key=lambda k, s=side: -len(CASES[s][k])):
+            text = text.replace(CASES[side][key], tokens[key])
+        mapped[side] = ET.canonicalize(text)
+    assert mapped["long"] == mapped["short"], (
         "with the identity names mapped back to placeholders the two workbooks must be identical; "
         "anything else means the A/B changes more than the names"
     )
@@ -152,15 +211,112 @@ def test_the_two_cases_differ_only_in_their_identity_names() -> None:
 
 def test_the_long_case_carries_a_plausible_name_not_padding() -> None:
     """A repro a maintainer will act on cannot be `AAAA...`."""
-    for key, value in _builder_cases()["long"].items():
+    for key, value in CASES["long"].items():
         words = re.findall(r"[A-Za-z][a-z]+", value)
         assert len(words) >= 4, f"long {key} {value!r} does not read like a real title"
         assert not re.search(r"(.)\1{4,}", value), f"long {key} {value!r} looks like padding"
 
 
+# -- the public script's own safety and honesty ----------------------------------------------------
+def test_allocation_never_deletes_or_reuses_an_existing_run(tmp_path: Path) -> None:
+    """The rule the incident bought: allocate, never clear.
+
+    A sentinel is planted in a pre-existing candidate directory; allocation must step over it and
+    leave it byte-identical. Two allocations must never return the same root.
+    """
+    parent = tmp_path / "runs"
+    occupied = parent / "0001"
+    occupied.mkdir(parents=True)
+    sentinel = occupied / "precious.json"
+    sentinel.write_text('{"approved": ["BP text", "BMI text", "HR text"]}', encoding="utf-8")
+    before = hashlib.sha256(sentinel.read_bytes()).hexdigest()
+
+    first = measure_repro.allocate_run(parent)
+    second = measure_repro.allocate_run(parent)
+
+    assert occupied.is_dir() and sentinel.is_file(), "allocation removed a pre-existing run directory"
+    assert hashlib.sha256(sentinel.read_bytes()).hexdigest() == before, "allocation modified a pre-existing run"
+    assert first != second, f"two allocations shared one root: {first}"
+    assert first.name != "0001" and second.name != "0001", "allocation reused the occupied id"
+    assert {first.name, second.name} == {"0002", "0003"}, f"unexpected ids {first.name}, {second.name}"
+
+
+def test_concurrent_allocations_do_not_collide(tmp_path: Path) -> None:
+    """The claim is atomicity, so it is exercised from separate PROCESSES, not one loop."""
+    parent = tmp_path / "runs"
+    parent.mkdir()
+    snippet = (
+        "import importlib.util, sys\n"
+        f"spec = importlib.util.spec_from_file_location('m', r'{MEASURE}')\n"
+        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+        "from pathlib import Path\n"
+        "print(m.allocate_run(Path(sys.argv[1])).name)\n"
+    )
+    children = [
+        subprocess.Popen(  # noqa: S603  # pylint: disable=consider-using-with
+            [sys.executable, "-c", snippet, str(parent)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(4)
+    ]
+    names = []
+    for child in children:
+        out, err = child.communicate(timeout=300)
+        assert child.returncode == 0, err
+        names.append(out.strip())
+    assert len(set(names)) == len(names), f"concurrent allocations collided: {names}"
+
+
+def test_a_missing_engine_cannot_print_a_clean_verdict(tmp_path: Path) -> None:
+    """The negative control for 'invalid measurements look successful'."""
+    done = subprocess.run(
+        [
+            sys.executable,
+            str(MEASURE),
+            "--engine",
+            str(tmp_path / "no-such-engine"),
+            "--runs-parent",
+            str(tmp_path / "runs"),
+        ],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        check=False,
+    )
+    assert done.returncode != 0, f"a missing engine exited 0:\n{done.stdout}"
+    assert done.returncode == measure_repro.EXIT_INVALID, f"expected EXIT_INVALID, got {done.returncode}"
+    assert "INVALID" in done.stdout, done.stdout
+    assert "documented A/B held" not in done.stdout, "a run that measured nothing claimed the A/B result"
+
+
+def test_an_empty_output_tree_is_invalid_not_within_ceilings(tmp_path: Path) -> None:
+    """`census` of nothing must not read as a pass."""
+    empty = tmp_path / "out"
+    empty.mkdir()
+    measured = measure_repro.census(empty, root_len=SKILL_ROOT_LEN)
+    assert measured["entries"] == 0
+    assert not measured["offenders"]
+    reasons = measure_repro.invalid_reasons("long", measured, engine_exit=0)
+    assert reasons, "an empty output tree produced no INVALID reason"
+    assert any("no entries" in reason for reason in reasons), reasons
+
+
+def test_a_nonzero_engine_exit_is_invalid_however_clean_the_tree_looks(tmp_path: Path) -> None:
+    """Exit code first: a tree can look perfect and still be the product of a failed run."""
+    out = tmp_path / "out"
+    (out / "pbip").mkdir(parents=True)
+    (out / "pbip" / "x.pbip").write_text("{}", encoding="utf-8")
+    measured = measure_repro.census(out, root_len=SKILL_ROOT_LEN)
+    assert measure_repro.invalid_reasons("long", measured, engine_exit=0) == []
+    reasons = measure_repro.invalid_reasons("long", measured, engine_exit=1)
+    assert any("engine exited 1" in reason for reason in reasons), reasons
+
+
 # -- engine-dependent: the boundary is crossed by real emitted output ------------------------------
 @pytest.fixture(scope="session", name="engine_runs")
-def _engine_runs(tmp_path_factory: pytest.TempPathFactory) -> dict[str, dict[str, Any]]:
+def _engine_runs(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
     """Run the canonical engine on BOTH archives, each into its own per-process temp root."""
     engine = _contract()
     if engine is None:  # pragma: no cover - requires_engine handles collection-time absence
@@ -172,55 +328,55 @@ def _engine_runs(tmp_path_factory: pytest.TempPathFactory) -> dict[str, dict[str
         source.mkdir(parents=True)
         shutil.copy2(FIXTURE / archive, source / archive)
         out = base / case / "out"
-        done = subprocess.run(
-            [
-                sys.executable,
-                str(engine_source.engine_scripts_dir(engine) / "migrate_estate.py"),
-                "-i",
-                str(source),
-                "-o",
-                str(out),
-            ],
-            capture_output=True,
-            text=True,
-            errors="replace",
-            timeout=1800,
-            check=False,
+        code, _command, output = measure_repro.run_engine(engine, source, out)
+        assert code == 0, f"harness failure running the engine on {archive}:\n{output[-4000:]}"
+        # THE production census, at the skill's own root LENGTH - one implementation, not two.
+        measured = measure_repro.census(out, root_len=SKILL_ROOT_LEN)
+        assert measure_repro.invalid_reasons(case, measured, code) == [], measure_repro.invalid_reasons(
+            case, measured, code
         )
-        assert done.returncode == 0, f"harness failure running the engine on {archive}:\n{done.stdout}\n{done.stderr}"
-        files = [p for p in out.rglob("*") if p.is_file()]
-        dirs = [p for p in out.rglob("*") if p.is_dir()]
-        deepest = max(files, key=lambda p, root=out: utf16_len(str(p.relative_to(root))))
-        runs[case] = {
-            "out": out,
-            "files": len(files),
-            "dirs": len(dirs),
-            "deepest_tail": str(deepest.relative_to(out)).replace("\\", "/"),
-            "deepest_tail_len": utf16_len(str(deepest.relative_to(out))),
-            "deepest_dir_tail_len": max(utf16_len(str(p.relative_to(out))) for p in dirs),
-            "pbip_tail_len": max(utf16_len(str(p.relative_to(out))) for p in out.rglob("*.pbip")),
-        }
+        measured["engine_output"] = output
+        runs[case] = measured
     return {"version": engine_source.engine_version(engine), "cases": runs}
 
 
 @requires_engine
 def test_the_long_case_crosses_the_file_ceiling_at_the_skill_default_root(engine_runs) -> None:
-    """The repro's claim, measured on emitted paths at the skill's own 22-unit root length."""
+    """The repro's claim, on emitted paths, judged by the production census implementation."""
     long_case = engine_runs["cases"]["long"]
-    at_root = SKILL_ROOT_LEN + 1 + long_case["deepest_tail_len"]
-    assert at_root > FILE_CEILING, (
-        f"the long case measures {at_root} at a {SKILL_ROOT_LEN}-unit root "
-        f"({long_case['deepest_tail']!r}, tail {long_case['deepest_tail_len']}) on engine "
-        f"{engine_runs['version']} - it no longer reproduces issue #194. If an upstream cap now "
-        "covers the table filename, that is the fix; retire this fixture rather than padding it."
+    version = engine_runs["version"]
+
+    assert long_case["entries"] == 51 and long_case["files"] == 27 and long_case["directories"] == 24, (
+        f"emitted structure changed: {long_case['entries']} entries "
+        f"({long_case['files']} files, {long_case['directories']} dirs) on engine {version}"
     )
-    assert ".SemanticModel/definition/tables/" in long_case["deepest_tail"], (
-        f"the offender moved to {long_case['deepest_tail']!r}. This repro is specifically about the "
-        "UNCAPPED semantic-model table filename; a different offender is a different report."
+    assert not long_case["unknown"], f"unreadable path(s): {long_case['unknown']}"
+    assert len(long_case["pbip_tails"]) == 1, f"expected one .pbip, found {long_case['pbip_tails']}"
+    assert long_case["pbip_len"] <= measure_repro.FILE_CEILING, (
+        f"the .pbip pointer is itself {long_case['pbip_len']} units. The point of this repro is that a "
+        "LEGAL entry file still cannot be opened because of a nested required child."
     )
-    assert SKILL_ROOT_LEN + 1 + long_case["pbip_tail_len"] <= FILE_CEILING, (
-        "the .pbip pointer itself must stay short - the point of the repro is that a legal entry "
-        "file still cannot be opened because of a nested required child"
+
+    files = [o for o in long_case["offenders"] if o["kind"] == "file"]
+    dirs = [o for o in long_case["offenders"] if o["kind"] == "directory"]
+    assert not dirs, f"unexpected overlong directory offender(s): {[o['tail'] for o in dirs]}"
+    assert len(files) == 1, (
+        f"expected exactly ONE overlong file at a {SKILL_ROOT_LEN}-unit root, found {len(files)}: "
+        f"{[(o['tail'], o['length']) for o in files]} on engine {version}"
+    )
+
+    offender = files[0]
+    if _version_tuple(version) >= OFFENDER_MEASURED_ON:
+        assert measure_repro.OFFENDER_FRAGMENT in offender["tail"] and offender["tail"].endswith(
+            measure_repro.OFFENDER_SUFFIX
+        ), (
+            f"the offender moved to {offender['tail']!r} on engine {version}. This repro is "
+            "specifically about the UNCAPPED semantic-model table filename; a different offender is a "
+            "different report. If an upstream cap now covers it, retire the fixture rather than pad it."
+        )
+    assert "MAX_PATH" in long_case["engine_output"], (
+        "the engine no longer emits its MAX_PATH warning for this case; the README's provenance note "
+        "about a non-binding warning would then be stale"
     )
 
 
@@ -228,12 +384,14 @@ def test_the_long_case_crosses_the_file_ceiling_at_the_skill_default_root(engine
 def test_the_short_control_stays_inside_both_ceilings_at_the_same_root(engine_runs) -> None:
     """The A/B control: same shape, same data, short names, comfortably legal."""
     short_case = engine_runs["cases"]["short"]
-    file_at_root = SKILL_ROOT_LEN + 1 + short_case["deepest_tail_len"]
-    dir_at_root = SKILL_ROOT_LEN + 1 + short_case["deepest_dir_tail_len"]
-    assert file_at_root <= FILE_CEILING, f"short control file {file_at_root} over {FILE_CEILING}"
-    assert dir_at_root <= DIR_CEILING, f"short control directory {dir_at_root} over {DIR_CEILING}"
     long_case = engine_runs["cases"]["long"]
-    assert (short_case["files"], short_case["dirs"]) == (long_case["files"], long_case["dirs"]), (
-        f"the two cases emitted different structures ({short_case['files']}/{short_case['dirs']} vs "
-        f"{long_case['files']}/{long_case['dirs']}); the A/B would then differ in more than names"
+    assert not short_case["offenders"], (
+        f"the short control has offender(s) {[(o['kind'], o['tail']) for o in short_case['offenders']]}; "
+        "an A/B with two failing arms has no control"
+    )
+    assert short_case["pbip_len"] <= measure_repro.FILE_CEILING
+    assert not short_case["unknown"]
+    assert (short_case["files"], short_case["directories"]) == (long_case["files"], long_case["directories"]), (
+        f"the two cases emitted different structures ({short_case['files']}/{short_case['directories']} vs "
+        f"{long_case['files']}/{long_case['directories']}); the A/B would then differ in more than names"
     )

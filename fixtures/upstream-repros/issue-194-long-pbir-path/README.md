@@ -4,13 +4,26 @@
 `migrate_estate._fs_safe`), but it does **not** cap
 `<model>.SemanticModel/definition/tables/<table>.tmdl`, whose name comes from the source table /
 flat-file name. A workbook with an ordinary-looking long export filename therefore still emits a
-**required** child past Power BI Desktop's MAX_PATH boundary — **at the skill's own short
-`C:\tfmig\runs\NNNN\out` run root**, with `LongPathsEnabled = 1`. The `.pbip` pointer is short and
-legal; the project still cannot open.
+**required** child past Power BI Desktop's MAX_PATH boundary — **at the skill's own short 22-unit
+run root**, with `LongPathsEnabled = 1`. The `.pbip` pointer is short and legal; the project still
+cannot open.
 
-Measured on canonical engine **2.368.0**, Power BI Desktop **2.157.828.0**, Windows with
-`HKLM\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled = 1` and `git core.longpaths`
-unset. Nothing in this fixture contains customer, company, host, credential or private-path data.
+Nothing in this fixture contains customer, company, host, credential or private-path data, and a
+test enforces that as an **allowlist** (exactly one root `.twb` + one `Data/<dir>/<file>.csv`, and an
+XML tree carrying no location, identity or secret element or attribute).
+
+## Engine-version provenance — read before quoting a number
+
+| what | version | status |
+|---|---|---|
+| the measurements and the Desktop A/B below | canonical **2.368.0** | ✅ measured locally |
+| the repository's **required** engine-integration job | pinned **2.356.0** | ⚠️ **whether this fixture reproduces there is UNVERIFIED** |
+| scheduled / manual drift runs | current upstream `main` | not exercised here |
+
+This fixture PR deliberately does **not** roll the repository's pinned engine. The engine-dependent
+test is written to survive either: it asserts the **boundary** unconditionally, and asserts the
+**specific uncapped table-file offender** only at or above `2.368.0`, recording the observed version
+in both directions. `measure_repro.py` writes the observed `engine_version` into its JSON.
 
 ## The pair
 
@@ -29,46 +42,75 @@ The name set is the only variable.
 ## Reproduce
 
 ```
-python fixtures/upstream-repros/issue-194-long-pbir-path/build_repro.py --check    # archives are reproducible
-python <engine>/skills/tableau-migration/scripts/migrate_estate.py ^
-    -i C:\tfmig\runs\9194\in -o C:\tfmig\runs\9194\out
-```
-
-or run both cases and census every emitted path in one step:
-
-```
+python fixtures/upstream-repros/issue-194-long-pbir-path/build_repro.py --check     # archives are reproducible
 python fixtures/upstream-repros/issue-194-long-pbir-path/measure_repro.py ^
-    --engine <engine-plugin-root> --runs-parent C:\tfmig\runs
+    --engine <engine-plugin-root> --runs-parent C:\tfmig\i194 --json census.json
 ```
 
-Engine exit is **0** in both cases: nothing warns, and every file is written correctly (the writer
-is long-path aware).
+⚠️ **`measure_repro.py` never deletes anything.** It allocates a fresh four-digit run directory under
+`--runs-parent` with an atomic exclusive `mkdir`, steps over any id already on disk, and prints what
+it allocated. The default parent is `C:\tfmig\i194` — this fixture's own — deliberately **not** the
+shared `C:\tfmig\runs`.
+
+Exit codes are the verdict: **0** measured and the documented A/B held · **2** INVALID/UNMEASURED ·
+**3** measured cleanly but the A/B did not hold · **64** usage. A non-zero exit never prints a clean
+verdict; a missing engine, an unreadable path, an empty tree, or a missing/ambiguous `.pbip` are all
+INVALID rather than "within ceilings".
+
+Or run the engine by hand:
+
+```
+python <engine>\skills\tableau-migration\scripts\migrate_estate.py -i <run>\in -o <run>\out
+```
 
 ## Expected measurement
 
+Engine **exit 0** in both cases.
+
+⚠️ **The engine is not silent — but its warning is non-binding and its advice does not help.** For
+the long case it prints:
+
+```
+[WARN] manual attention required: workbook .pbip output path is 273 chars, at/over the Windows
+MAX_PATH (260) limit -- the build proceeds via long-path (\\?\) writes, but to OPEN this .pbip
+locally in Power BI Desktop re-run with a shorter output root (e.g. -o C:\tfmig) or enable Windows
+long paths
+```
+
+Three things about it are worth an upstream maintainer's attention:
+
+1. it does **not** change the exit code — the run reports success;
+2. it says *"workbook **.pbip** output path is 273 chars"*, but the `.pbip` here is **162**. The 273
+   belongs to the deepest emitted child, not to the pointer the sentence names;
+3. its remedy — *"or enable Windows long paths"* — does not work. These measurements were taken with
+   `LongPathsEnabled = 1` and Desktop refused anyway. The other remedy, *"a shorter output root
+   (e.g. `-o C:\tfmig`)"*, is already what was used: the root here is 22 units.
+
 | | long | short |
 |---|---:|---:|
-| output root | `C:\tfmig\runs\9194\out` (22) | `C:\tfmig\runs\9195\out` (22) |
+| output root | 22 units | 22 units |
 | entries emitted | 51 (27 files, 24 dirs) | 51 (27 files, 24 dirs) |
 | unreadable / undecodable | 0 | 0 |
 | **longest FILE** | **273** (ceiling 259) ❌ | **165** ✅ |
 | longest DIRECTORY | 239 (ceiling 247) ✅ | 153 ✅ |
 | `.pbip` pointer | 162 ✅ | 76 ✅ |
+| offenders | **1 file, 0 directories** | 0 |
+| engine MAX_PATH warning | yes | no |
 
 The single offender is a **required** child of the semantic model:
 
 ```
-C:\tfmig\runs\9194\out\pbip\
-  Regional Sales Performance and Inventory Turnover Revie-b52b9462\        <- 64, capped
-  Regional Sales Performance and Inventory Turnover Conso-980f2851.SemanticModel\   <- 64, capped
+<root>\pbip\
+  Regional Sales Performance and Inventory Turnover Revie-b52b9462\                    64  (capped)
+  Regional Sales Performance and Inventory Turnover Conso-980f2851.SemanticModel\      64+14 (capped)
   definition\tables\
-  Regional Sales Performance and Inventory Turnover FY2026 Q3 Detail Extract.csv.tmdl   <- 83, NOT capped
+  Regional Sales Performance and Inventory Turnover FY2026 Q3 Detail Extract.csv.tmdl  83  (NOT capped)
 ```
 
 Its relative tail is **250** units, so this project fits only under a root of **8 characters or
 fewer** — i.e. effectively nowhere. Under the repository's canonical
 `<repo>\_runs\<NNN>-<slug>\bundle` shape (71) the same archive measures **file 322 / dir 288**.
-**The upstream repro target is the `C:\tfmig\runs\NNNN\out` shape**, because it is the tool's own
+**The upstream repro target is the 22-unit `C:\tfmig\...` shape**, because it is the tool's own
 default and it already fails.
 
 ## Power BI Desktop, A/B
@@ -77,12 +119,11 @@ Long case — double-click the `.pbip`. Desktop shows a modal **"Issues were fou
 path, the window title stays `Untitled - Power BI Desktop`, and the Desktop Bridge reports
 `bridgeStatus: error` / *"Host is not ready to accept operations"*:
 
-> Cannot read `C:\tfmig\runs\9194\out\pbip\Regional Sales Performance and Inventory Turnover
-> Revie-b52b9462\Regional Sales Performance and Inventory Turnover
-> Conso-980f2851.SemanticModel\definition\tables\Regional Sales Performance and Inventory Turnover
-> FY2026 Q3 Detail Extract.csv.tmdl'. The specified path, file name, or both are too long. The fully
-> qualified file name must be less than 260 characters, and the directory name must be less than 248
-> characters.
+> Cannot read `…\pbip\Regional Sales Performance and Inventory Turnover Revie-b52b9462\Regional Sales
+> Performance and Inventory Turnover Conso-980f2851.SemanticModel\definition\tables\Regional Sales
+> Performance and Inventory Turnover FY2026 Q3 Detail Extract.csv.tmdl'. The specified path, file
+> name, or both are too long. The fully qualified file name must be less than 260 characters, and the
+> directory name must be less than 248 characters.
 
 Short control — same double-click, same machine: Desktop opens, the bridge reports
 `bridgeStatus: connected`, page `Regional Sales Review` enumerates, and after a refresh the model
@@ -104,5 +145,5 @@ cap, so it spends 83 units in a single component and overruns on its own.
 | `src/workbook-template.twb` | the one source of both workbooks; four identity placeholders |
 | `src/regional_sales.csv` | 4 rows, 4 columns, synthetic |
 | `build_repro.py` | deterministic packager; `--check` verifies the committed archives |
-| `measure_repro.py` | runs the canonical engine on both cases and censuses every emitted path |
+| `measure_repro.py` | allocates a fresh run, invokes the canonical engine, censuses every emitted path, and refuses to report an unmeasurable run as clean |
 | `*.twbx` | the two downloadable archives |
