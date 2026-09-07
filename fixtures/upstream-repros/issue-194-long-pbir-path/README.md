@@ -67,8 +67,8 @@ python <engine>\skills\tableau-migration\scripts\migrate_estate.py -i <run>\in -
 
 Engine **exit 0** in both cases.
 
-⚠️ **The engine is not silent — but its warning is non-binding and its advice does not help.** For
-the long case it prints:
+⚠️ **The engine is not silent — and its two remedies are not equivalent.** For the long case it
+prints:
 
 ```
 [WARN] manual attention required: workbook .pbip output path is 273 chars, at/over the Windows
@@ -77,14 +77,29 @@ locally in Power BI Desktop re-run with a shorter output root (e.g. -o C:\tfmig)
 long paths
 ```
 
-Three things about it are worth an upstream maintainer's attention:
+Four things about it are worth an upstream maintainer's attention:
 
 1. it does **not** change the exit code — the run reports success;
 2. it says *"workbook **.pbip** output path is 273 chars"*, but the `.pbip` here is **162**. The 273
    belongs to the deepest emitted child, not to the pointer the sentence names;
-3. its remedy — *"or enable Windows long paths"* — does not work. These measurements were taken with
-   `LongPathsEnabled = 1` and Desktop refused anyway. The other remedy, *"a shorter output root
-   (e.g. `-o C:\tfmig`)"*, is already what was used: the root here is 22 units.
+3. *"or enable Windows long paths"* — **does not work.** Every measurement here was taken with
+   `LongPathsEnabled = 1` and Desktop refused anyway (Desktop enforces its own limit in managed
+   code);
+4. *"a shorter output root (e.g. `-o C:\tfmig`)"* — ⚠️ **this one is arithmetically true, and an
+   earlier revision of this README wrongly said it was not.** The relative tail is fixed at **250**
+   units, so the verdict is a pure function of the root length:
+
+   | output root | length | deepest file | verdict |
+   |---|---:|---:|---|
+   | `C:\tfmig\runs\NNNN\out` — the ordinary skill run output root | **22** | **273** | ❌ over 259 |
+   | `C:\tfmig` — the container root itself | **8** | **259** | ✅ exactly legal |
+
+   So `-o C:\tfmig` does avoid *this fixture's* boundary. It is an **extreme placement workaround,
+   not long-path support**: it abandons the canonical `runs/<id>/{in,out}` layout, writes engine
+   output directly into the container root beside every other run, leaves **zero** headroom (one
+   more character anywhere and it fails again), and may simply be unavailable on a managed VDI where
+   the writable location is fixed and deeper. The defect is that a required child is 250 units long,
+   not that operators picked the wrong folder.
 
 | | long | short |
 |---|---:|---:|
@@ -108,10 +123,10 @@ The single offender is a **required** child of the semantic model:
 ```
 
 Its relative tail is **250** units, so this project fits only under a root of **8 characters or
-fewer** — i.e. effectively nowhere. Under the repository's canonical
-`<repo>\_runs\<NNN>-<slug>\bundle` shape (71) the same archive measures **file 322 / dir 288**.
-**The upstream repro target is the 22-unit `C:\tfmig\...` shape**, because it is the tool's own
-default and it already fails.
+fewer** — `C:\tfmig` exactly, and nothing deeper (see the root-length table above). Under the
+repository's canonical `<repo>\_runs\<NNN>-<slug>\bundle` shape (71) the same archive measures
+**file 322 / dir 288**. **The upstream repro target is the 22-unit `C:\tfmig\runs\NNNN\out` shape**,
+because it is the tool's own default and it already fails.
 
 ## Power BI Desktop, A/B
 

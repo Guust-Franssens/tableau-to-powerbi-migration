@@ -20,8 +20,10 @@ fixture PR does **not** roll the repository's pinned engine.
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import importlib.util
+import io
 import os
 import re
 import shutil
@@ -79,6 +81,71 @@ OFFENDER_MEASURED_ON = (2, 368, 0)
 #: Exactly what a public archive may contain: one root-level `.twb`, one CSV under `Data/`.
 CSV_MEMBER_RE = re.compile(r"^Data/[A-Za-z0-9._-]+/[A-Za-z0-9 ._-]+\.csv$")
 TWB_MEMBER_RE = re.compile(r"^[A-Za-z0-9 ._-]+\.twb$")
+
+#: ⚠️ Round-2 review: the structural allowlist below accepted arbitrary customer identity in
+#: ordinary captions and arbitrary bytes in the CSV. These constants are the INDEPENDENT control -
+#: written out here, never read from `build_repro.CASES`, so a builder edit is caught rather than
+#: followed. `test_the_builder_still_carries_the_intended_generic_identity` pins the two against
+#: each other.
+EXPECTED_IDENTITY = {
+    "long": {
+        "stem": "Regional Sales Performance and Inventory Turnover Review FY2026 Q3 Final",
+        "datasource": "Regional Sales Performance and Inventory Turnover Consolidated Source",
+        "dashboard": "Regional Sales Performance and Inventory Turnover Review Dashboard",
+        "worksheet": "Regional Net Revenue by Sales Region and Fiscal Period Detail",
+        "csv": "Regional Sales Performance and Inventory Turnover FY2026 Q3 Detail Extract.csv",
+    },
+    "short": {
+        "stem": "Regional Sales FY26Q3",
+        "datasource": "Regional Sales",
+        "dashboard": "Regional Sales Review",
+        "worksheet": "Net Revenue by Region",
+        "csv": "regional_sales.csv",
+    },
+}
+
+#: The fixed, non-identity vocabulary a legitimate build emits: column captions and internal names,
+#: the federated/textscan connection ids, the archive's data folder and two layout edge names.
+STRUCTURAL_LITERALS = frozenset(
+    {
+        "Region",
+        "Fiscal Period",
+        "Units Shipped",
+        "Net Revenue",
+        "region",
+        "fiscal_period",
+        "units_shipped",
+        "net_revenue",
+        "[region]",
+        "[fiscal_period]",
+        "[units_shipped]",
+        "[net_revenue]",
+        "[none:region:nk]",
+        "[sum:net_revenue:qk]",
+        "federated.regionalsales",
+        "textscan.regionalsales",
+        "Data/regional-sales",
+        "left",
+        "top",
+    }
+)
+
+#: Attributes that can carry a human-authored caption or an identity.
+IDENTITY_ATTRS = ("caption", "name", "table", "column", "filename", "directory")
+
+#: The synthetic payload, pinned independently of `src/regional_sales.csv`.
+EXPECTED_CSV_SHA256 = "da5fc2aeea765c03d0180b368adf2143a19ffac1c6251ef68f671d527269fde5"
+EXPECTED_CSV_HEADER = ("region", "fiscal_period", "units_shipped", "net_revenue")
+EXPECTED_CSV_ROWS = (
+    ("North", "2026-Q1", "120", "48250.00"),
+    ("South", "2026-Q1", "95", "37110.00"),
+    ("East", "2026-Q1", "143", "55980.00"),
+    ("West", "2026-Q1", "88", "31420.00"),
+)
+
+#: Payload shapes that must never appear in ANY archive member, caption or data cell.
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+SECRET_RE = re.compile(r"(?i)\b(pass(?:word|wd)|secret|token|api[_-]?key|bearer|credential|apikey)\b|\*{4,}|-----BEGIN")
 
 #: Element and attribute names that carry a location, an identity or a secret in Tableau XML.
 FORBIDDEN_ELEMENTS = {"repository-location", "repository", "user", "credential", "credentials"}
@@ -145,6 +212,76 @@ def test_the_committed_archives_rebuild_byte_for_byte() -> None:
         f"commit the result, or the download and the recipe disagree.\n{done.stdout}\n{done.stderr}"
     )
     assert "DIFFER" not in done.stdout and "MISSING" not in done.stdout, done.stdout
+
+
+def test_the_builder_still_carries_the_intended_generic_identity() -> None:
+    """The independent identity pin: what the builder emits must be what this file expects.
+
+    ⚠️ Round-2 review: every other identity check derived its expectation from `build_repro.CASES`,
+    so editing the builder moved the goalposts with the code. `EXPECTED_IDENTITY` is written out
+    here instead, and a mismatch is a failure rather than a new baseline.
+    """
+    assert CASES == EXPECTED_IDENTITY, (
+        "the builder's identity values no longer match the generic set this fixture is allowed to "
+        "publish. If the change is deliberate, update EXPECTED_IDENTITY *and* re-check that the new "
+        f"names carry no customer identity.\n  builder : {CASES}\n  expected: {EXPECTED_IDENTITY}"
+    )
+
+
+@pytest.mark.parametrize("archive_name", [LONG_ARCHIVE, SHORT_ARCHIVE])
+def test_each_archive_ships_exactly_the_synthetic_dataset(archive_name: str) -> None:
+    """The data control: exact digest, exact schema, exact four rows.
+
+    A structural allowlist says nothing about payload bytes; a real customer extract would sail
+    through it. This pins the CSV three ways - an independent digest, the header, and every cell.
+    """
+    members = _members(FIXTURE / archive_name)
+    csv_name = next(name for name in members if name.endswith(".csv"))
+    payload = members[csv_name]
+    assert hashlib.sha256(payload).hexdigest() == EXPECTED_CSV_SHA256, (
+        f"{archive_name}: the shipped CSV is not the pinned synthetic dataset "
+        f"(sha256 {hashlib.sha256(payload).hexdigest()})"
+    )
+    rows = list(csv.reader(io.StringIO(payload.decode("utf-8"))))
+    assert tuple(rows[0]) == EXPECTED_CSV_HEADER, f"{archive_name}: CSV header {rows[0]}"
+    body = tuple(tuple(row) for row in rows[1:] if row)
+    assert body == EXPECTED_CSV_ROWS, f"{archive_name}: CSV rows changed:\n  {body}"
+
+
+@pytest.mark.parametrize("archive_name", [LONG_ARCHIVE, SHORT_ARCHIVE])
+def test_no_archive_member_carries_email_or_secret_shaped_text(archive_name: str) -> None:
+    """Payload content, not just structure: no address and no credential shape, anywhere."""
+    for name, payload in _members(FIXTURE / archive_name).items():
+        text = payload.decode("utf-8", "replace")
+        for label, pattern in (("email-shaped", EMAIL_RE), ("credential/secret-shaped", SECRET_RE)):
+            found = pattern.search(text) or pattern.search(name)
+            assert not found, f"{archive_name}:{name} contains {label} text {found.group(0)!r}"
+
+
+@pytest.mark.parametrize("archive_name", [LONG_ARCHIVE, SHORT_ARCHIVE])
+def test_every_caption_and_name_comes_from_the_intended_identity_set(archive_name: str) -> None:
+    """A caption is where customer identity actually leaks - so enumerate what may appear.
+
+    Allowed: the fixed structural vocabulary, this case's five intended identity values, and the
+    bracketed form of its CSV name. Anything else - `Contoso Confidential`, a person, a project
+    codename - fails here rather than shipping.
+    """
+    side = "long" if archive_name.startswith(EXPECTED_IDENTITY["long"]["stem"]) else "short"
+    identity = EXPECTED_IDENTITY[side]
+    allowed = set(STRUCTURAL_LITERALS) | set(identity.values()) | {f"[{identity['csv']}]"}
+
+    members = _members(FIXTURE / archive_name)
+    root = ET.fromstring(members[next(n for n in members if n.endswith(".twb"))].decode("utf-8"))
+    seen: set[str] = set()
+    for element in root.iter():
+        for raw_attr, value in element.attrib.items():
+            if raw_attr.rsplit("}", 1)[-1].lower() in IDENTITY_ATTRS:
+                seen.add(value)
+    unexpected = sorted(seen - allowed)
+    assert not unexpected, (
+        f"{archive_name}: caption/name value(s) outside the intended generic identity set: "
+        f"{unexpected}. A public repro may only carry the fixed vocabulary and its own five names."
+    )
 
 
 @pytest.mark.parametrize("archive_name", [LONG_ARCHIVE, SHORT_ARCHIVE])
@@ -336,6 +473,7 @@ def _engine_runs(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
             case, measured, code
         )
         measured["engine_output"] = output
+        measured["out_dir"] = out
         runs[case] = measured
     return {"version": engine_source.engine_version(engine), "cases": runs}
 
@@ -378,6 +516,34 @@ def test_the_long_case_crosses_the_file_ceiling_at_the_skill_default_root(engine
         "the engine no longer emits its MAX_PATH warning for this case; the README's provenance note "
         "about a non-binding warning would then be stale"
     )
+
+
+@requires_engine
+def test_the_output_root_length_is_what_decides_this_boundary(engine_runs) -> None:
+    """R2: the engine's shorter-root advice DOES avoid this boundary - state it precisely.
+
+    The relative tail is fixed at 250 units, so the verdict is a pure function of the output root
+    length: the ordinary 22-unit `C:\\tfmig\\runs\\NNNN\\out` measures 273 and fails, while an
+    8-unit root (`-o C:\\tfmig` itself) measures exactly 259 and is legal. That is an extreme
+    placement workaround, not long-path support - `LongPathsEnabled = 1` was set throughout and
+    Desktop still refused the 22-unit case.
+    """
+    out = engine_runs["cases"]["long"]["out_dir"]
+    at22 = measure_repro.census(out, root_len=22)
+    at8 = measure_repro.census(out, root_len=8)
+
+    assert at22["longest_file_len"] == 273, f"expected 273 at a 22-unit root, got {at22['longest_file_len']}"
+    assert len([o for o in at22["offenders"] if o["kind"] == "file"]) == 1, at22["offenders"]
+
+    assert at8["longest_file_len"] == measure_repro.FILE_CEILING, (
+        f"expected exactly {measure_repro.FILE_CEILING} at an 8-unit root, got {at8['longest_file_len']}"
+    )
+    assert not at8["offenders"], (
+        f"an 8-unit output root must be legal for this fixture, but it reports "
+        f"{[(o['kind'], o['length']) for o in at8['offenders']]}"
+    )
+    tail = at22["longest_file_len"] - 22 - 1
+    assert tail == 250, f"the relative tail moved to {tail}; the 22-vs-8 arithmetic above is derived from it"
 
 
 @requires_engine

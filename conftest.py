@@ -165,6 +165,9 @@ EXPECTED_ENGINE_SKIP_REASONS_BY_NODEID: dict[str, str] = {
     "tests/test_issue_194_long_pbir_path.py::test_the_long_case_crosses_the_file_ceiling_at_the_skill_default_root": (
         "deterministic tier not installed"
     ),
+    "tests/test_issue_194_long_pbir_path.py::test_the_output_root_length_is_what_decides_this_boundary": (
+        "deterministic tier not installed"
+    ),
     "tests/test_issue_194_long_pbir_path.py::test_the_short_control_stays_inside_both_ceilings_at_the_same_root": (
         "deterministic tier not installed"
     ),
