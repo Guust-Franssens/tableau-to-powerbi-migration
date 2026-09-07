@@ -414,7 +414,9 @@ def test_all_engine_dependent_tests_are_accounted_for() -> None:
     the engine's own swap-parameter resolution, the kind-blindness pin and the concurrency control —
     taking the denominator to 30. `tests/test_issue_194_long_pbir_path.py` then added 3 more (the
     downloadable upstream long-path repro's A/B boundary controls and its root-length control),
-    taking it to 33.
+    taking it to 33, and a 4th — the engine MAX_PATH warning's Windows-only provenance control,
+    split out of the boundary test after both ubuntu engine jobs failed an unconditional
+    assertion — taking it to 34.
 
     The skip-reason classifier also treats the installed-engine-constants watchdog as engine-backed,
     so the engine jobs must run that one too instead of marking it NOT_CHECKED in the main job.

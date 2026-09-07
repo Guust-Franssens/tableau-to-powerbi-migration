@@ -5,6 +5,10 @@ usage:   python fixtures/upstream-repros/issue-194-long-pbir-path/build_repro.py
 
 `--check` rebuilds into memory and compares SHA-256 against the committed archives instead of
 writing, so CI can prove the archives are reproducible without touching the working tree.
+"Reproducible" here means ACROSS operating systems and checkouts, not merely across runs on one
+machine - the two mechanisms that guarantee it are `payload_bytes` (line-ending normalisation, the
+proven cause of a past Linux-only mismatch) and `ZIP_COMPRESSION` (stored members, so no compressor
+implementation can leak into the bytes).
 """
 
 from __future__ import annotations
@@ -31,6 +35,22 @@ CSV_DIR = "Data/regional-sales"
 
 #: A fixed timestamp so the ZIP is byte-reproducible on any machine and in any year.
 ZIP_DATE = (1980, 1, 1, 0, 0, 0)
+
+#: ⚠️ **STORED, not DEFLATED.** A DEFLATE byte stream is a property of the *zlib implementation and
+#: version* linked into the interpreter, not of the ZIP format, so a deflated archive is only
+#: reproducible against an identically-linked interpreter. These fixtures are ~7 KB - compression
+#: buys nothing and costs a reproducibility guarantee. ⚠️ This is a *hardening* measure whose
+#: contribution was never isolated: the CI failure it was proposed for had a different, proven cause
+#: (see `payload_bytes`). Both changes are kept because both remove a real class of host dependence.
+ZIP_COMPRESSION = zipfile.ZIP_STORED
+
+#: Fixed POSIX mode (0600) in the high half of ``external_attr``. Written explicitly because
+#: ``ZipInfo`` otherwise derives it from the host filesystem.
+ZIP_EXTERNAL_ATTR = 0o600 << 16
+
+#: ``0`` = MS-DOS/FAT. ``ZipInfo`` otherwise picks 0 on Windows and 3 (Unix) elsewhere, which alone
+#: would make the central directory differ between a Windows and a Linux rebuild.
+ZIP_CREATE_SYSTEM = 0
 
 #: The ONLY dimension that differs between the two cases: the identity names. Long side is a
 #: plausible enterprise report title and export filename, never repeated characters.
@@ -59,9 +79,27 @@ PLACEHOLDERS = {
 }
 
 
+def payload_bytes(path: Path) -> bytes:
+    """Read a source file as UTF-8 text and re-encode it with LF endings.
+
+    ⚠️ **This, not the compression method, is why a rebuild used to differ on Linux.** The archives
+    are built from files in the git working tree, and this repository is checked out with
+    ``core.autocrlf=true`` on Windows: ``src/regional_sales.csv`` is **156 bytes with CRLF** in a
+    Windows working tree and **151 bytes with LF** in the stored blob that a Linux runner checks out.
+    The old builder read it with ``read_bytes()``, so the archive literally contained a different
+    member on each platform and no ZIP setting could have fixed that. (The ``.twb`` template was
+    always immune, because ``read_text()`` applies universal newlines - this makes both sources use
+    the same rule, explicitly, instead of one by accident.)
+
+    Normalising in the BUILDER rather than via ``.gitattributes`` keeps the guarantee a property of
+    the recipe: it holds for a maintainer who downloads the tree however their git is configured.
+    """
+    return path.read_text(encoding="utf-8").encode("utf-8")
+
+
 def workbook_xml(case: dict[str, str]) -> bytes:
     """The template with only the identity placeholders substituted - nothing else differs."""
-    text = TEMPLATE.read_text(encoding="utf-8")
+    text = payload_bytes(TEMPLATE).decode("utf-8")
     for token in PLACEHOLDERS:
         assert token in text, f"template lost its {token} placeholder"
     for token, key in PLACEHOLDERS.items():
@@ -74,17 +112,18 @@ def build(case_name: str) -> tuple[str, bytes]:
     case = CASES[case_name]
     name = f"{case['stem']}.twbx"
     buffer = io.BytesIO()
-    # Sorted, fixed-date, fixed-compression entries: same bytes on every machine and every run.
+    # Sorted, fixed-date, STORED entries with pinned host metadata: the same bytes on every machine,
+    # every run and every operating system (see ZIP_COMPRESSION).
     entries = [
         (f"{case['stem']}.twb", workbook_xml(case)),
-        (f"{CSV_DIR}/{case['csv']}", CSV.read_bytes()),
+        (f"{CSV_DIR}/{case['csv']}", payload_bytes(CSV)),
     ]
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+    with zipfile.ZipFile(buffer, "w", ZIP_COMPRESSION) as archive:
         for arcname, payload in sorted(entries):
             info = zipfile.ZipInfo(arcname, date_time=ZIP_DATE)
-            info.compress_type = zipfile.ZIP_DEFLATED
-            info.external_attr = 0o600 << 16
-            info.create_system = 0
+            info.compress_type = ZIP_COMPRESSION
+            info.external_attr = ZIP_EXTERNAL_ATTR
+            info.create_system = ZIP_CREATE_SYSTEM
             archive.writestr(info, payload)
     return name, buffer.getvalue()
 

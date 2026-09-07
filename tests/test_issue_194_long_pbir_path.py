@@ -3,13 +3,20 @@
 This is an **end-to-end upstream repro**, not another identifier-cap matrix. It deliberately does not
 restate what `tests/test_datasource_path_envelope.py` already owns.
 
-⚠️ **Engine-version provenance, stated rather than implied.** The Desktop A/B and the numbers in
-`fixtures/upstream-repros/issue-194-long-pbir-path/README.md` were measured locally on canonical
-engine **2.368.0**. The repository's required engine-integration job pins **2.356.0**
-(`.github/workflows/checks.yml`), so the engine-dependent assertions below are written to hold on
-either: they assert the *boundary* unconditionally and the *specific uncapped table-file offender*
-only at or above the version it was measured on, recording the observed version either way. This
-fixture PR does **not** roll the repository's pinned engine.
+⚠️ **Engine-version and HOST provenance, stated rather than implied.** The Desktop A/B and the
+numbers in `fixtures/upstream-repros/issue-194-long-pbir-path/README.md` were measured locally on
+Windows with canonical engine **2.368.0**. The repository's required engine-integration job pins
+**2.356.0** (`.github/workflows/checks.yml`) and runs on **ubuntu-latest**, so the engine-dependent
+assertions below are written to hold on either:
+
+* the **boundary and offender** claims are properties of the emitted relative paths, which are
+  host-independent, so they are asserted unconditionally (the offender *identity* is version-scoped
+  to the version it was measured on, recording the observed version either way);
+* the engine's **MAX_PATH warning** is not an engine invariant at all - canonical 2.368.0 guards it
+  with `if os.name == "nt" and len(projected) >= MAX_PATH:`, so it cannot appear on a Linux runner.
+  It is asserted only on Windows at or above the measured version, and merely recorded elsewhere.
+
+This fixture PR does **not** roll the repository's pinned engine.
 
 ⚠️ Two safety rules this module exists to keep, both learned the hard way:
 
@@ -78,6 +85,17 @@ SKILL_ROOT_LEN = 22
 #: asserted (see the module docstring).
 OFFENDER_MEASURED_ON = (2, 368, 0)
 
+#: ⚠️ CI finding: the engine's MAX_PATH warning is a **Windows-only** code path, not a cross-platform
+#: engine invariant. Read-only in canonical 2.368.0,
+#: `skills/tableau-migration/scripts/migrate_estate.py` guards it with
+#: `if os.name == "nt" and len(projected) >= MAX_PATH:` - so on a Linux runner the engine emits
+#: nothing however long the projected path is, and both the pinned-2.356 and latest-2.368 ubuntu jobs
+#: failed an unconditional assertion for that reason alone. The warning is asserted only where it was
+#: established (Windows, at or above the version it was measured on) and merely RECORDED elsewhere;
+#: the boundary and offender claims stay unconditional because they are properties of the emitted
+#: paths, which are host-independent.
+WARNING_ESTABLISHED_ON_NT_ONLY = True
+
 #: Exactly what a public archive may contain: one root-level `.twb`, one CSV under `Data/`.
 CSV_MEMBER_RE = re.compile(r"^Data/[A-Za-z0-9._-]+/[A-Za-z0-9 ._-]+\.csv$")
 TWB_MEMBER_RE = re.compile(r"^[A-Za-z0-9 ._-]+\.twb$")
@@ -133,8 +151,11 @@ STRUCTURAL_LITERALS = frozenset(
 #: Attributes that can carry a human-authored caption or an identity.
 IDENTITY_ATTRS = ("caption", "name", "table", "column", "filename", "directory")
 
-#: The synthetic payload, pinned independently of `src/regional_sales.csv`.
-EXPECTED_CSV_SHA256 = "da5fc2aeea765c03d0180b368adf2143a19ffac1c6251ef68f671d527269fde5"
+#: The synthetic payload, pinned independently of `src/regional_sales.csv`. ⚠️ This is the digest of
+#: the **LF-normalised** bytes the builder writes into the archive (`build_repro.payload_bytes`), not
+#: of whatever the working tree holds - a Windows checkout with `core.autocrlf=true` has the same
+#: file at 156 CRLF bytes. Pinning the normalised form is the point: it is the same on every host.
+EXPECTED_CSV_SHA256 = "91285f691f812e2ec0b0255cde697e90cd85f1b8e6e8a47603c153988d6ac396"
 EXPECTED_CSV_HEADER = ("region", "fiscal_period", "units_shipped", "net_revenue")
 EXPECTED_CSV_ROWS = (
     ("North", "2026-Q1", "120", "48250.00"),
@@ -170,6 +191,17 @@ FORBIDDEN_ATTRS = {
 EMPTY_ONLY_ATTRS = {"server"}
 
 URLISH_RE = re.compile(r"(?i)(?:[a-z][a-z0-9+.-]*://|\\\\[^\\]|^[A-Za-z]:[\\/])")
+
+#: ⚠️ CI finding, and the attribution matters. A rebuild differed on ubuntu-latest for a **proven**
+#: reason - a CRLF working tree vs an LF blob for `src/regional_sales.csv`, covered by
+#: `test_the_build_is_immune_to_the_checkouts_line_endings`. Deflate variance was the *proposed*
+#: cause and was never isolated; the archives are STORED anyway, because a DEFLATE stream does depend
+#: on the linked zlib build and removing that class costs nothing at 7 KB. The constants below pin
+#: every remaining header field `zipfile` would otherwise derive from the host.
+EXPECTED_MEMBER_COMPRESS_TYPE = zipfile.ZIP_STORED
+EXPECTED_MEMBER_DATE = (1980, 1, 1, 0, 0, 0)
+EXPECTED_MEMBER_CREATE_SYSTEM = 0
+EXPECTED_MEMBER_EXTERNAL_ATTR = 0o600 << 16
 
 
 def _contract() -> Path | None:
@@ -212,6 +244,100 @@ def test_the_committed_archives_rebuild_byte_for_byte() -> None:
         f"commit the result, or the download and the recipe disagree.\n{done.stdout}\n{done.stderr}"
     )
     assert "DIFFER" not in done.stdout and "MISSING" not in done.stdout, done.stdout
+
+
+@pytest.mark.parametrize("archive_name", [LONG_ARCHIVE, SHORT_ARCHIVE])
+def test_the_archive_encoding_is_pinned_and_host_independent(archive_name: str) -> None:
+    """Reproducibility must hold ACROSS operating systems, not merely across runs on one machine.
+
+    This is the *hardening* half of the cross-platform guarantee: no compressor implementation and no
+    host filesystem may leak a byte into the archive. The half that was actually broken is
+    `test_the_build_is_immune_to_the_checkouts_line_endings`.
+
+    * the COMMITTED archive is STORED with every host-derived header field pinned;
+    * rebuilding with `sys.platform` reporting Linux produces the IDENTICAL bytes - which exercises
+      the one platform branch `zipfile.ZipInfo.__init__` actually has (`create_system` 0 vs 3).
+    """
+    with zipfile.ZipFile(FIXTURE / archive_name) as zf:
+        infos = zf.infolist()
+        assert infos, f"{archive_name} has no members"
+        for info in infos:
+            where = f"{archive_name}:{info.filename}"
+            assert info.compress_type == EXPECTED_MEMBER_COMPRESS_TYPE, (
+                f"{where} is compress_type {info.compress_type}, not STORED. A compressed member "
+                "makes the archive digest depend on the machine's zlib build - see CI on ubuntu."
+            )
+            assert info.compress_size == info.file_size, (
+                f"{where} stores {info.compress_size} bytes for a {info.file_size}-byte payload; "
+                "a STORED member must be its payload verbatim"
+            )
+            assert info.date_time == EXPECTED_MEMBER_DATE, f"{where} timestamp {info.date_time}"
+            assert info.create_system == EXPECTED_MEMBER_CREATE_SYSTEM, (
+                f"{where} create_system {info.create_system}; zipfile derives this from the host OS "
+                "(0 on Windows, 3 elsewhere) unless it is pinned"
+            )
+            assert info.external_attr == EXPECTED_MEMBER_EXTERNAL_ATTR, f"{where} attr {info.external_attr:#o}"
+
+            if info.filename.endswith(".csv"):
+                assert b"\r\n" not in zf.read(info), (
+                    f"{where} carries CRLF, so the committed archive was built from a Windows "
+                    "checkout without normalisation - a Linux rebuild will not match it"
+                )
+
+    case = "long" if archive_name == LONG_ARCHIVE else "short"
+    _, native = _BUILDER.build(case)
+    original = sys.platform
+    try:
+        sys.platform = "linux"
+        _, as_linux = _BUILDER.build(case)
+    finally:
+        sys.platform = original
+    assert hashlib.sha256(as_linux).hexdigest() == hashlib.sha256(native).hexdigest(), (
+        f"{archive_name} rebuilds to different bytes when the interpreter reports a different "
+        "platform, so `--check` cannot hold across operating systems"
+    )
+
+
+@pytest.mark.parametrize("archive_name", [LONG_ARCHIVE, SHORT_ARCHIVE])
+def test_the_build_is_immune_to_the_checkouts_line_endings(archive_name: str, tmp_path: Path) -> None:
+    """The PROVEN cause of the Linux-only mismatch: a CRLF working tree and an LF blob.
+
+    ⚠️ Evidence, not hypothesis. `src/regional_sales.csv` is **156 bytes with CRLF** in a Windows
+    working tree (`core.autocrlf=true`) and **151 bytes with LF** in the git blob a Linux runner
+    checks out - `git cat-file blob` against the index says so directly. The old builder read it with
+    `read_bytes()`, so the archive contained a *different member* on each platform, and no ZIP
+    setting could have fixed that. The `.twb` template was accidentally immune because `read_text()`
+    applies universal newlines; `build_repro.payload_bytes` now applies the same rule to both.
+
+    This control feeds the builder BOTH checkouts of the same logical source and requires one digest.
+    It is deliberately separate from the encoding pin above: they fail for different reasons, and
+    conflating them is how the wrong cause got blamed in the first place.
+    """
+    case = "long" if archive_name == LONG_ARCHIVE else "short"
+    digests = set()
+    for label, newline in (("lf", b"\n"), ("crlf", b"\r\n")):
+        checkout = tmp_path / label
+        checkout.mkdir()
+        for source in (_BUILDER.TEMPLATE, _BUILDER.CSV):
+            body = source.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", newline)
+            (checkout / source.name).write_bytes(body)
+        original = (_BUILDER.TEMPLATE, _BUILDER.CSV)
+        try:
+            _BUILDER.TEMPLATE = checkout / original[0].name
+            _BUILDER.CSV = checkout / original[1].name
+            _, payload = _BUILDER.build(case)
+        finally:
+            _BUILDER.TEMPLATE, _BUILDER.CSV = original
+        digests.add(hashlib.sha256(payload).hexdigest())
+
+    assert len(digests) == 1, (
+        f"{archive_name} builds to different bytes from a CRLF checkout than from an LF checkout "
+        f"({sorted(digests)}). `build_repro.py --check` would then pass on the machine that built "
+        "the archives and fail on every other one - which is exactly what CI reported."
+    )
+    assert hashlib.sha256((FIXTURE / archive_name).read_bytes()).hexdigest() == digests.pop(), (
+        f"{archive_name} on disk is not what a line-ending-normalised build produces; regenerate it"
+    )
 
 
 def test_the_builder_still_carries_the_intended_generic_identity() -> None:
@@ -473,6 +599,7 @@ def _engine_runs(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
             case, measured, code
         )
         measured["engine_output"] = output
+        measured["max_path_warning"] = "MAX_PATH" in output
         measured["out_dir"] = out
         runs[case] = measured
     return {"version": engine_source.engine_version(engine), "cases": runs}
@@ -512,9 +639,47 @@ def test_the_long_case_crosses_the_file_ceiling_at_the_skill_default_root(engine
             "specifically about the UNCAPPED semantic-model table filename; a different offender is a "
             "different report. If an upstream cap now covers it, retire the fixture rather than pad it."
         )
-    assert "MAX_PATH" in long_case["engine_output"], (
-        "the engine no longer emits its MAX_PATH warning for this case; the README's provenance note "
-        "about a non-binding warning would then be stale"
+
+
+@requires_engine
+def test_the_engine_warning_is_asserted_only_where_it_was_established(engine_runs) -> None:
+    """The engine's MAX_PATH warning is a WINDOWS observation, not a cross-platform invariant.
+
+    ⚠️ CI finding. An earlier revision asserted `"MAX_PATH" in engine_output` unconditionally inside
+    the boundary test above, and both ubuntu engine jobs (pinned 2.356.0 and latest 2.368.0) failed
+    on it. The cause is not a version regression: canonical 2.368.0 guards the warning with
+    `if os.name == "nt" and len(projected) >= MAX_PATH:`, so a Linux runner emits nothing however
+    long the projected path is - and the failure was attributed to the wrong thing.
+
+    So the claim is asserted only where it is established - on Windows, at or above the version it
+    was measured on - and merely RECORDED everywhere else. Recording is deliberate and is not a
+    weaker assertion: off Windows this test claims neither presence nor absence, because the
+    observation has no evidence there in either direction.
+    """
+    long_case = engine_runs["cases"]["long"]
+    version = engine_runs["version"]
+    observed = long_case.get("max_path_warning")
+
+    assert isinstance(observed, bool), (
+        "the harness stopped recording whether the engine's MAX_PATH warning appeared. Recording is "
+        "the outcome off Windows, so losing the field silently turns this test into a no-op."
+    )
+    print(f"engine {version} on os.name={os.name!r}: MAX_PATH warning emitted = {observed}")
+
+    established = os.name == "nt" and _version_tuple(version) >= OFFENDER_MEASURED_ON
+    if not established:
+        # Deliberately NOT a skip: the repository's engine-dependent contract treats a skipped
+        # engine test under T2P_REQUIRE_ENGINE_TESTS=1 as a CI failure, and a reason-keyed skip
+        # would also have to be baselined. Recording the field IS the outcome here - this run
+        # claims neither presence nor absence, because it has no evidence either way.
+        assert WARNING_ESTABLISHED_ON_NT_ONLY, "the Windows-only provenance note was removed"
+        return
+
+    assert observed, (
+        f"engine {version} on Windows no longer emits its MAX_PATH warning for this case. The "
+        "README states that the engine exits 0 AND emits a non-binding warning; that provenance "
+        "note would now be stale. This is about the warning only - the boundary and offender "
+        "assertions above are unaffected and remain unconditional."
     )
 
 

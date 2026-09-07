@@ -16,14 +16,23 @@ XML tree carrying no location, identity or secret element or attribute).
 
 | what | version | status |
 |---|---|---|
-| the measurements and the Desktop A/B below | canonical **2.368.0** | ✅ measured locally |
-| the repository's **required** engine-integration job | pinned **2.356.0** | ⚠️ **whether this fixture reproduces there is UNVERIFIED** |
-| scheduled / manual drift runs | current upstream `main` | not exercised here |
+| the measurements and the Desktop A/B below | canonical **2.368.0**, on **Windows** | ✅ measured locally |
+| the repository's **required** engine-integration job | pinned **2.356.0**, on **ubuntu-latest** | ⚠️ **whether this fixture reproduces there is UNVERIFIED** |
+| scheduled / manual drift runs | current upstream `main`, on **ubuntu-latest** | not exercised here |
 
 This fixture PR deliberately does **not** roll the repository's pinned engine. The engine-dependent
 test is written to survive either: it asserts the **boundary** unconditionally, and asserts the
 **specific uncapped table-file offender** only at or above `2.368.0`, recording the observed version
 in both directions. `measure_repro.py` writes the observed `engine_version` into its JSON.
+
+⚠️ **HOST provenance matters too, and one claim is host-scoped.** The emitted relative paths — and
+therefore every length, offender and ceiling verdict below — are host-independent, so those claims
+are asserted on any runner. The engine's **MAX_PATH warning is not**: canonical 2.368.0 guards it
+with `if os.name == "nt" and len(projected) >= MAX_PATH:`
+(`skills/tableau-migration/scripts/migrate_estate.py`), so a **Linux** run emits nothing however long
+the projected path is. The warning quoted below is a **measured Windows 2.368.0 observation**; the
+test asserts it only there and merely records it elsewhere, claiming neither presence nor absence off
+Windows.
 
 ## The pair
 
@@ -38,6 +47,16 @@ in both directions. `measure_repro.py` writes the observed `engine_version` into
 Both archives are generated from **one** template, `src/workbook-template.twb`, by substituting only
 the four identity placeholders `@@DATASOURCE@@`, `@@DASHBOARD@@`, `@@WORKSHEET@@`, `@@CSVFILE@@`.
 The name set is the only variable.
+
+⚠️ **The archives are built line-ending-normalised and ZIP-`STORED`, and the first of those is the
+one that was actually broken.** `build_repro.py --check` must hold on *any* machine. It did not:
+`src/regional_sales.csv` is **156 bytes with CRLF** in a Windows working tree (`core.autocrlf=true`)
+and **151 bytes with LF** in the git blob a Linux runner checks out, and the builder read it with
+`read_bytes()` — so the archive contained a literally different member on each platform. The builder
+now reads every source through one normalising helper (`payload_bytes`), which is what the `.twb`
+template already got for free from `read_text()`. Storing rather than deflating removes a *second*
+class of host dependence (a DEFLATE stream depends on the linked zlib build); its contribution was
+never isolated, and it is kept as hardening rather than as the fix.
 
 ## Reproduce
 
@@ -67,8 +86,8 @@ python <engine>\skills\tableau-migration\scripts\migrate_estate.py -i <run>\in -
 
 Engine **exit 0** in both cases.
 
-⚠️ **The engine is not silent — and its two remedies are not equivalent.** For the long case it
-prints:
+⚠️ **The engine is not silent on Windows — and its two remedies are not equivalent.** Measured on
+**Windows** with canonical **2.368.0**, the long case prints:
 
 ```
 [WARN] manual attention required: workbook .pbip output path is 273 chars, at/over the Windows
@@ -77,15 +96,18 @@ locally in Power BI Desktop re-run with a shorter output root (e.g. -o C:\tfmig)
 long paths
 ```
 
-Four things about it are worth an upstream maintainer's attention:
+Five things about it are worth an upstream maintainer's attention:
 
-1. it does **not** change the exit code — the run reports success;
-2. it says *"workbook **.pbip** output path is 273 chars"*, but the `.pbip` here is **162**. The 273
+1. it is **Windows-only** — the emitter is guarded by `os.name == "nt"`, so the same run on Linux
+   emits nothing at all while producing the identical over-long path. The path defect is
+   cross-platform; the warning is not;
+2. it does **not** change the exit code — the run reports success;
+3. it says *"workbook **.pbip** output path is 273 chars"*, but the `.pbip` here is **162**. The 273
    belongs to the deepest emitted child, not to the pointer the sentence names;
-3. *"or enable Windows long paths"* — **does not work.** Every measurement here was taken with
+4. *"or enable Windows long paths"* — **does not work.** Every measurement here was taken with
    `LongPathsEnabled = 1` and Desktop refused anyway (Desktop enforces its own limit in managed
    code);
-4. *"a shorter output root (e.g. `-o C:\tfmig`)"* — ⚠️ **this one is arithmetically true, and an
+5. *"a shorter output root (e.g. `-o C:\tfmig`)"* — ⚠️ **this one is arithmetically true, and an
    earlier revision of this README wrongly said it was not.** The relative tail is fixed at **250**
    units, so the verdict is a pure function of the root length:
 
@@ -110,7 +132,7 @@ Four things about it are worth an upstream maintainer's attention:
 | longest DIRECTORY | 239 (ceiling 247) ✅ | 153 ✅ |
 | `.pbip` pointer | 162 ✅ | 76 ✅ |
 | offenders | **1 file, 0 directories** | 0 |
-| engine MAX_PATH warning | yes | no |
+| engine MAX_PATH warning (**Windows only**) | yes | no |
 
 The single offender is a **required** child of the semantic model:
 
