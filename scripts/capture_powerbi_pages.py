@@ -317,13 +317,27 @@ class PageEvidence:
     seconds: float
 
 
-def write_capture_json(
+def _compute_report_digest(report: Path) -> str:
+    """Hash all page/visual JSON files for staleness detection."""
+    sha = hashlib.sha256()
+    pages_root = report / "definition" / "pages"
+    if pages_root.is_dir():
+        for path in sorted(pages_root.rglob("*.json")):
+            try:
+                sha.update(path.read_bytes())
+            except OSError:
+                sha.update(path.name.encode())
+    return sha.hexdigest()
+
+
+def write_capture_json(  # pylint: disable=too-many-arguments
     iteration_dir: Path,
     iteration_number: int,
     report_path: str,
     page_evidence: list[PageEvidence],
     *,
     timestamp: str | None = None,
+    report_digest: str | None = None,
 ) -> Path:
     """Write ``capture.json`` into *iteration_dir* and return its path."""
     if timestamp is None:
@@ -346,6 +360,8 @@ def write_capture_json(
             for pe in page_evidence
         },
     }
+    if report_digest is not None:
+        payload["report_digest"] = report_digest
     out = iteration_dir / "capture.json"
     out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return out
@@ -414,7 +430,13 @@ def capture_iteration(  # pylint: disable=too-many-locals
             visual_ids = _visuals_for_page(report, page_id)
             _write_comparison_template(iteration_dir, page_id, name, sha, visual_ids)
 
-    write_capture_json(iteration_dir, iteration_number, str(report), evidence)
+    write_capture_json(
+        iteration_dir,
+        iteration_number,
+        str(report),
+        evidence,
+        report_digest=_compute_report_digest(report),
+    )
 
     print(f"\n{len(report_pages) - len(failed)}/{len(report_pages)} captured in {time.time() - started:.1f}s")
     print(f"Iteration {iteration_number} -> {iteration_dir}")

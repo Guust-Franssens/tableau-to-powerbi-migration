@@ -2837,24 +2837,47 @@ def check_cache_freshness(target: Path) -> dict[str, Any]:
     }
 
 
-def _latest_iteration(target: Path) -> tuple[int | None, Path | None]:
-    """Return (number, path) of the highest-numbered iteration, or (None, None)."""
+# ---------------------------------------------------------------------------
+# Validation iteration gates (#363)
+#
+# Three gates replace the former CLAIMED_ONLY rows. The denominator is the
+# CURRENT PBIR page/visual inventory, re-derived each time — never taken from
+# capture.json alone.  A capture that does not cover the current inventory, or
+# whose report has been edited since the capture, blocks sign-off.
+# ---------------------------------------------------------------------------
+
+# Closed set of accepted visual statuses for sign-off.  ``finding`` and
+# ``pending`` are explicitly NOT closed — they block.  ``unverified`` never
+# becomes ``match``.
+_CLOSED_VISUAL_STATUSES = frozenset({"no_discrepancy", "accepted_limitation"})
+
+# Comparison fields the validator may edit; everything else is immutable.
+_COMPARISON_REQUIRED_KEYS = frozenset({"version", "page_id", "display_name", "mode", "capture_sha256", "visuals"})
+
+
+def _all_iterations(target: Path) -> list[tuple[int, Path]]:
+    """Return all (number, path) pairs, sorted ascending."""
     iterations_dir = target / "validation" / "iterations"
     if not iterations_dir.is_dir():
-        return None, None
-    best_num: int | None = None
-    best_path: Path | None = None
+        return []
+    result: list[tuple[int, Path]] = []
     for child in iterations_dir.iterdir():
         if child.is_dir() and child.name.isdigit():
-            num = int(child.name)
-            if best_num is None or num > best_num:
-                best_num = num
-                best_path = child
-    return best_num, best_path
+            result.append((int(child.name), child))
+    result.sort(key=lambda pair: pair[0])
+    return result
+
+
+def _latest_iteration(target: Path) -> tuple[int | None, Path | None]:
+    """Return (number, path) of the highest-numbered iteration, or (None, None)."""
+    iterations = _all_iterations(target)
+    if not iterations:
+        return None, None
+    return iterations[-1]
 
 
 def _check_capture_json(iteration_dir: Path) -> tuple[dict[str, Any] | None, str | None]:
-    """Load and minimally validate capture.json. Returns (payload, error_detail)."""
+    """Load and validate capture.json. Returns (payload, error_detail)."""
     capture_path = iteration_dir / "capture.json"
     if not capture_path.is_file():
         return None, "capture.json missing"
@@ -2864,16 +2887,73 @@ def _check_capture_json(iteration_dir: Path) -> tuple[dict[str, Any] | None, str
         return None, f"capture.json unreadable: {exc}"
     if not isinstance(payload, dict) or "pages" not in payload:
         return None, "capture.json has no pages key"
+    if not isinstance(payload.get("pages"), dict):
+        return None, "capture.json pages is not a dict"
     return payload, None
+
+
+def _pbir_page_visual_inventory(target: Path) -> dict[str, list[str]]:
+    """Re-derive the current PBIR page→visual-ids inventory from the package.
+
+    The denominator is the SHIPPED report, not what was captured.
+    """
+    inventory: dict[str, list[str]] = {}
+    for page in actual_pages(target):
+        page_id = page["id"]
+        report_path = page.get("report")
+        if not report_path:
+            continue
+        report = Path(report_path)
+        visuals_dir = report / "definition" / "pages" / page_id / "visuals"
+        visual_ids: list[str] = []
+        if visuals_dir.is_dir():
+            for vdir in sorted(visuals_dir.iterdir()):
+                if vdir.is_dir() and (vdir / "visual.json").is_file():
+                    visual_ids.append(vdir.name)
+        inventory[page_id] = visual_ids
+    return inventory
+
+
+def _report_digest(target: Path) -> str:
+    """Stable digest of the report's page structure for staleness detection.
+
+    Hashes every ``page.json`` and ``visual.json`` to detect edits after capture.
+    """
+    sha = hashlib.sha256()
+    for report in shipping_reports(target):
+        pages_root = report / "definition" / "pages"
+        if not pages_root.is_dir():
+            continue
+        for path in sorted(pages_root.rglob("*.json")):
+            try:
+                sha.update(path.read_bytes())
+            except OSError:
+                sha.update(path.name.encode())
+    return sha.hexdigest()
+
+
+def _safe_relative_path(base: Path, rel: str) -> Path | None:
+    """Resolve ``rel`` under ``base``, rejecting path traversal."""
+    if not rel or ".." in rel.replace("\\", "/").split("/"):
+        return None
+    candidate = (base / rel).resolve()
+    try:
+        candidate.relative_to(base.resolve())
+    except ValueError:
+        return None
+    return candidate
 
 
 def _verify_page_screenshots(iteration_dir: Path, capture_pages: dict[str, Any]) -> list[dict[str, str]]:
     """Verify each screenshot exists and its hash matches capture.json."""
     problems: list[dict[str, str]] = []
     for page_id, info in capture_pages.items():
+        if not isinstance(info, dict):
+            problems.append({"page_id": page_id, "problem": "page entry is not a dict"})
+            continue
         screenshot_rel = info.get("screenshot", "")
-        screenshot_path = iteration_dir / screenshot_rel
-        if not screenshot_path.is_file():
+        screenshot_path = _safe_relative_path(iteration_dir, screenshot_rel)
+        if screenshot_path is None or not screenshot_path.is_file():
             problems.append({"page_id": page_id, "problem": "screenshot missing"})
             continue
         if screenshot_path.stat().st_size == 0:
@@ -2888,16 +2968,29 @@ def _verify_page_screenshots(iteration_dir: Path, capture_pages: dict[str, Any])
     return problems
 
 
-def _check_comparison_files(iteration_dir: Path, capture_pages: dict[str, Any]) -> tuple[list[dict[str, str]], bool]:
-    """Verify comparison files exist for every captured page and are not pending.
+def _check_comparison_files(  # pylint: disable=too-many-branches,too-many-locals,too-many-statements
+    iteration_dir: Path,
+    capture_pages: dict[str, Any],
+    current_inventory: dict[str, list[str]],
+) -> tuple[list[dict[str, str]], bool]:
+    """Verify comparison files are present, well-formed, and complete for sign-off.
 
-    Returns (problems, has_sign_off) where has_sign_off is True only when every page
-    has a non-pending comparison with every visual resolved.
+    Comparison must use ``mode == "sign-off"``; every visual must have a closed status.
+    The set of comparison files must exactly match the current PBIR page set.
     """
     problems: list[dict[str, str]] = []
     has_sign_off = True
     comp_dir = iteration_dir / "comparison" / "pages"
-    for page_id in capture_pages:
+
+    # Reject extra comparison files (foreign pages)
+    if comp_dir.is_dir():
+        on_disk = {f.stem for f in comp_dir.iterdir() if f.suffix == ".json"}
+        extra = on_disk - set(current_inventory)
+        for extra_id in sorted(extra):
+            problems.append({"page_id": extra_id, "problem": "extra comparison file (foreign page)"})
+            has_sign_off = False
+
+    for page_id, expected_visuals in current_inventory.items():
         comp_file = comp_dir / f"{page_id}.json"
         if not comp_file.is_file():
             problems.append({"page_id": page_id, "problem": "comparison file missing"})
@@ -2909,26 +3002,132 @@ def _check_comparison_files(iteration_dir: Path, capture_pages: dict[str, Any]) 
             problems.append({"page_id": page_id, "problem": "comparison file unreadable"})
             has_sign_off = False
             continue
-        mode = comp.get("mode", "pending")
-        if mode == "pending":
-            problems.append({"page_id": page_id, "problem": "comparison still pending"})
+        if not isinstance(comp, dict):
+            problems.append({"page_id": page_id, "problem": "comparison file is not a JSON object"})
             has_sign_off = False
             continue
-        # Check capture hash matches
-        if comp.get("capture_sha256") != capture_pages[page_id].get("sha256"):
-            problems.append({"page_id": page_id, "problem": "comparison capture_sha256 mismatch (stale)"})
+
+        # Schema: reject unknown top-level keys
+        unknown_keys = set(comp) - _COMPARISON_REQUIRED_KEYS
+        if unknown_keys:
+            problems.append({"page_id": page_id, "problem": f"unknown keys: {sorted(unknown_keys)}"})
+            has_sign_off = False
+
+        # Strict mode check
+        if comp.get("mode") != "sign-off":
+            problems.append({"page_id": page_id, "problem": f"mode is '{comp.get('mode')}', expected 'sign-off'"})
             has_sign_off = False
             continue
-        visuals = comp.get("visuals", {})
-        for vid, vinfo in visuals.items():
-            if vinfo.get("status") == "pending":
-                problems.append({"page_id": page_id, "problem": f"visual {vid} still pending"})
+
+        # Capture hash pinning
+        if page_id in capture_pages:
+            if comp.get("capture_sha256") != capture_pages[page_id].get("sha256"):
+                problems.append({"page_id": page_id, "problem": "capture_sha256 mismatch (stale)"})
                 has_sign_off = False
+                continue
+
+        # Visual set must match current inventory exactly
+        visuals = comp.get("visuals")
+        if not isinstance(visuals, dict):
+            problems.append({"page_id": page_id, "problem": "visuals is not a dict"})
+            has_sign_off = False
+            continue
+        comp_visual_ids = set(visuals)
+        expected_visual_ids = set(expected_visuals)
+        missing_visuals = expected_visual_ids - comp_visual_ids
+        extra_visuals = comp_visual_ids - expected_visual_ids
+        if missing_visuals:
+            problems.append({"page_id": page_id, "problem": f"missing visuals: {sorted(missing_visuals)}"})
+            has_sign_off = False
+        if extra_visuals:
+            problems.append({"page_id": page_id, "problem": f"extra visuals: {sorted(extra_visuals)}"})
+            has_sign_off = False
+
+        # Every visual must be closed
+        for vid, vinfo in visuals.items():
+            if not isinstance(vinfo, dict):
+                problems.append({"page_id": page_id, "problem": f"visual {vid}: not a dict"})
+                has_sign_off = False
+                continue
+            status = vinfo.get("status")
+            if status not in _CLOSED_VISUAL_STATUSES:
+                problems.append({"page_id": page_id, "problem": f"visual {vid}: status '{status}' is not closed"})
+                has_sign_off = False
+            # accepted_limitation requires disposition and evidence
+            if status == "accepted_limitation":
+                if not vinfo.get("disposition"):
+                    problems.append(
+                        {"page_id": page_id, "problem": f"visual {vid}: accepted_limitation without disposition"}
+                    )
+                    has_sign_off = False
+
     return problems, has_sign_off
 
 
+def _prior_finding_ids(target: Path, current_iteration_num: int) -> set[str]:
+    """Collect stable finding IDs from all prior completed iterations."""
+    finding_ids: set[str] = set()
+    for num, iteration_dir in _all_iterations(target):
+        if num >= current_iteration_num:
+            break
+        comp_dir = iteration_dir / "comparison" / "pages"
+        if not comp_dir.is_dir():
+            continue
+        for comp_file in comp_dir.iterdir():
+            if comp_file.suffix != ".json":
+                continue
+            try:
+                comp = json.loads(comp_file.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            if not isinstance(comp, dict):
+                continue
+            visuals = comp.get("visuals", {})
+            if not isinstance(visuals, dict):
+                continue
+            for vid, vinfo in visuals.items():
+                if isinstance(vinfo, dict) and vinfo.get("finding"):
+                    finding_ids.add(f"{comp_file.stem}/{vid}")
+    return finding_ids
+
+
+def _check_finding_persistence(
+    iteration_dir: Path,
+    prior_findings: set[str],
+) -> list[dict[str, str]]:
+    """Every prior finding must appear as resolved/still_open/accepted_limitation."""
+    if not prior_findings:
+        return []
+    problems: list[dict[str, str]] = []
+    current_findings: set[str] = set()
+    comp_dir = iteration_dir / "comparison" / "pages"
+    if comp_dir.is_dir():
+        for comp_file in comp_dir.iterdir():
+            if comp_file.suffix != ".json":
+                continue
+            try:
+                comp = json.loads(comp_file.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            if not isinstance(comp, dict):
+                continue
+            visuals = comp.get("visuals", {})
+            if not isinstance(visuals, dict):
+                continue
+            for vid, vinfo in visuals.items():
+                if isinstance(vinfo, dict):
+                    key = f"{comp_file.stem}/{vid}"
+                    status = vinfo.get("status", "")
+                    if status in ("no_discrepancy", "accepted_limitation") or vinfo.get("finding"):
+                        current_findings.add(key)
+    disappeared = prior_findings - current_findings
+    for fid in sorted(disappeared):
+        problems.append({"finding_id": fid, "problem": "prior finding disappeared"})
+    return problems
+
+
 def check_visual_capture(target: Path) -> dict[str, Any]:
-    """Verify a stable capture iteration exists with valid screenshots."""
+    """Verify a stable capture iteration exists with valid screenshots covering the PBIR inventory."""
     iteration_num, iteration_dir = _latest_iteration(target)
     if iteration_dir is None:
         return {
@@ -2950,12 +3149,32 @@ def check_visual_capture(target: Path) -> dict[str, Any]:
             "status": STATUS_NOT_CHECKED,
             "detail": f"iteration {iteration_num}: capture.json has no pages",
         }
-    problems = _verify_page_screenshots(iteration_dir, capture_pages)
+
+    # Re-derive current PBIR inventory and require exact page set coverage
+    current_inventory = _pbir_page_visual_inventory(target)
+    problems: list[dict[str, str]] = []
+    if current_inventory:
+        captured_ids = set(capture_pages)
+        expected_ids = set(current_inventory)
+        missing = expected_ids - captured_ids
+        extra = captured_ids - expected_ids
+        for pid in sorted(missing):
+            problems.append({"page_id": pid, "problem": "page not captured"})
+        for pid in sorted(extra):
+            problems.append({"page_id": pid, "problem": "captured page not in current PBIR"})
+
+    # Report staleness: reject if report was edited after capture
+    if capture.get("report_digest"):
+        current_digest = _report_digest(target)
+        if current_digest != capture["report_digest"]:
+            problems.append({"page_id": "*", "problem": "report edited after capture (digest mismatch)"})
+
+    problems.extend(_verify_page_screenshots(iteration_dir, capture_pages))
     if problems:
         return {
             "id": "visual-capture",
             "status": STATUS_FINDINGS,
-            "detail": f"iteration {iteration_num}: {len(problems)} screenshot problem(s)",
+            "detail": f"iteration {iteration_num}: {len(problems)} problem(s)",
             "iteration": iteration_num,
             "problems": problems,
         }
@@ -2970,7 +3189,7 @@ def check_visual_capture(target: Path) -> dict[str, Any]:
 
 
 def check_visual_comparison(target: Path) -> dict[str, Any]:
-    """Verify comparison artifacts exist and are complete for every captured page."""
+    """Verify comparison artifacts exist, are complete, and cover the current PBIR inventory."""
     iteration_num, iteration_dir = _latest_iteration(target)
     if iteration_dir is None:
         return {
@@ -2986,7 +3205,10 @@ def check_visual_comparison(target: Path) -> dict[str, Any]:
             "detail": f"iteration {iteration_num}: {error}",
         }
     capture_pages = capture.get("pages", {})
-    problems, _ = _check_comparison_files(iteration_dir, capture_pages)
+    current_inventory = _pbir_page_visual_inventory(target)
+    if not current_inventory:
+        current_inventory = {pid: [] for pid in capture_pages}
+    problems, _ = _check_comparison_files(iteration_dir, capture_pages, current_inventory)
     if problems:
         return {
             "id": "visual-comparison",
@@ -3003,8 +3225,12 @@ def check_visual_comparison(target: Path) -> dict[str, Any]:
     }
 
 
-def check_sign_off(target: Path) -> dict[str, Any]:  # pylint: disable=too-many-return-statements
-    """Verify the latest iteration constitutes a complete sign-off."""
+def check_sign_off(target: Path) -> dict[str, Any]:  # pylint: disable=too-many-return-statements,too-many-branches
+    """Verify the latest iteration constitutes a complete sign-off.
+
+    Re-derives the PBIR page/visual inventory, validates screenshots, comparisons, and
+    finding persistence from prior iterations. Only ``mode == "sign-off"`` qualifies.
+    """
     iteration_num, iteration_dir = _latest_iteration(target)
     if iteration_dir is None:
         return {
@@ -3026,23 +3252,45 @@ def check_sign_off(target: Path) -> dict[str, Any]:  # pylint: disable=too-many-
             "status": STATUS_NOT_CHECKED,
             "detail": f"iteration {iteration_num}: no pages captured",
         }
-    screenshot_problems = _verify_page_screenshots(iteration_dir, capture_pages)
-    if screenshot_problems:
+
+    all_problems: list[dict[str, str]] = []
+
+    # Re-derive current PBIR inventory
+    current_inventory = _pbir_page_visual_inventory(target)
+    if current_inventory:
+        captured_ids = set(capture_pages)
+        expected_ids = set(current_inventory)
+        for pid in sorted(expected_ids - captured_ids):
+            all_problems.append({"page_id": pid, "problem": "page not captured"})
+        for pid in sorted(captured_ids - expected_ids):
+            all_problems.append({"page_id": pid, "problem": "captured page not in current PBIR"})
+
+    # Report staleness
+    if capture.get("report_digest"):
+        if _report_digest(target) != capture["report_digest"]:
+            all_problems.append({"page_id": "*", "problem": "report edited after capture"})
+
+    # Screenshot verification
+    all_problems.extend(_verify_page_screenshots(iteration_dir, capture_pages))
+
+    # Comparison verification against current inventory
+    if not current_inventory:
+        current_inventory = {pid: [] for pid in capture_pages}
+    comparison_problems, has_sign_off = _check_comparison_files(iteration_dir, capture_pages, current_inventory)
+    all_problems.extend(comparison_problems)
+
+    # Prior finding persistence
+    if iteration_num is not None:
+        prior_findings = _prior_finding_ids(target, iteration_num)
+        all_problems.extend(_check_finding_persistence(iteration_dir, prior_findings))
+
+    if all_problems:
         return {
             "id": "sign-off",
             "status": STATUS_FINDINGS,
-            "detail": f"iteration {iteration_num}: screenshot problems block sign-off",
+            "detail": f"iteration {iteration_num}: {len(all_problems)} problem(s) block sign-off",
             "iteration": iteration_num,
-            "problems": screenshot_problems,
-        }
-    comparison_problems, has_sign_off = _check_comparison_files(iteration_dir, capture_pages)
-    if comparison_problems:
-        return {
-            "id": "sign-off",
-            "status": STATUS_FINDINGS,
-            "detail": f"iteration {iteration_num}: comparison incomplete",
-            "iteration": iteration_num,
-            "problems": comparison_problems,
+            "problems": all_problems,
         }
     if not has_sign_off:
         return {
