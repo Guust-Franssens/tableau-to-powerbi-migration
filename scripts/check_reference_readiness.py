@@ -67,7 +67,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
-from bundle_corpus import evidence_dirs, shipping_reports
+from bundle_corpus import evidence_dirs, is_package_target, shipping_reports
 import object_identity as oid
 from object_identity import AMBIGUOUS
 from reference_evidence import (
@@ -150,6 +150,154 @@ DELIBERATE_DROP_MARKERS = (
     "unsupported visual type",
     "no usable field bindings",
 )
+
+PACKAGE_MANIFEST_NAME = "package-manifest.json"
+
+
+# ---------------------------------------------------------------------------
+# Package manifest integrity verification (#558 + #562)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class VerifiedPackageManifest:
+    """A package manifest whose contents have been rehashed and whose roles are present."""
+
+    manifest: dict[str, Any]
+    contents: dict[str, str]  # {relative-path: verified-sha256}
+
+
+def _parse_json_no_duplicate_keys(text: str) -> dict[str, Any] | tuple[None, str]:
+    """Parse JSON, refusing duplicate keys in any object.
+
+    Python's ``json.loads`` silently keeps the LAST duplicate, so ``{"a":1,"a":2}`` parses as
+    ``{"a":2}`` and the first value is silently lost. A ``contents.files`` map with a duplicate
+    key would drop one file from integrity checks.
+    """
+
+    def pairs_hook(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate key {key!r}")
+            result[key] = value
+        return result
+
+    try:
+        payload = json.loads(text, object_pairs_hook=pairs_hook)
+    except (json.JSONDecodeError, ValueError) as exc:
+        return None, str(exc)
+    if not isinstance(payload, dict):
+        return None, "package manifest is not a JSON object"
+    return payload
+
+
+def _asset_path_problems(asset_rel: str, root: Path) -> list[str]:
+    """Why ``asset_rel`` may not be used as a package-relative asset path, or empty when it is safe."""
+    problems: list[str] = []
+    if not asset_rel or not asset_rel.strip():
+        problems.append("artifacts.asset is empty")
+        return problems
+    # Must be normalized posix form, no backslashes
+    if "\\" in asset_rel:
+        problems.append(f"artifacts.asset contains backslash: {asset_rel!r}")
+    parts = asset_rel.replace("\\", "/").split("/")
+    if ".." in parts:
+        problems.append(f"artifacts.asset contains traversal: {asset_rel!r}")
+    # Must resolve under the package root
+    try:
+        resolved = (root / asset_rel).resolve()
+        root_resolved = root.resolve()
+        if not str(resolved).startswith(str(root_resolved) + "/") and resolved != root_resolved:
+            problems.append(f"artifacts.asset resolves outside the package root: {asset_rel!r}")
+    except (OSError, ValueError):
+        problems.append(f"artifacts.asset cannot be resolved: {asset_rel!r}")
+    return problems
+
+
+def verify_package_manifest(  # noqa: C901  # pylint: disable=too-many-locals,too-many-branches
+    root: Path,
+) -> VerifiedPackageManifest | list[str]:
+    """Parse and verify the package manifest, or return a list of problems.
+
+    1. Parse with duplicate-key detection.
+    2. Extract ``contents.files`` and rehash every declared file.
+    3. Refuse missing, unreadable, or hash-mismatched entries.
+    4. Verify the asset declaration is safe and present in the contents map.
+    5. Check ``workbook_identity`` consistency with ``source-provenance.json``.
+    """
+    manifest_path = root / PACKAGE_MANIFEST_NAME
+    try:
+        text = manifest_path.read_text(encoding="utf-8-sig")
+    except OSError:
+        return [f"{PACKAGE_MANIFEST_NAME} is missing or unreadable"]
+    parsed = _parse_json_no_duplicate_keys(text)
+    if isinstance(parsed, tuple):
+        return [f"{PACKAGE_MANIFEST_NAME}: {parsed[1]}"]
+    manifest = parsed
+
+    # contents.files is required for integrity
+    contents_obj = manifest.get("contents")
+    if not isinstance(contents_obj, dict):
+        return [f"{PACKAGE_MANIFEST_NAME} has no 'contents' object"]
+    files_map = contents_obj.get("files")
+    if not isinstance(files_map, dict):
+        return [f"{PACKAGE_MANIFEST_NAME} has no 'contents.files' map"]
+
+    problems: list[str] = []
+    verified: dict[str, str] = {}
+    for rel_path, expected_hash in files_map.items():
+        if not isinstance(expected_hash, str) or not expected_hash.strip():
+            problems.append(f"contents.files[{rel_path!r}]: missing or empty hash")
+            continue
+        file_path = root / rel_path
+        if not file_path.is_file():
+            problems.append(f"contents.files[{rel_path!r}]: file is missing")
+            continue
+        actual_hash = sha256_of(file_path)
+        if actual_hash is None:
+            problems.append(f"contents.files[{rel_path!r}]: file is unreadable")
+            continue
+        if actual_hash != expected_hash:
+            problems.append(f"contents.files[{rel_path!r}]: hash mismatch")
+            continue
+        verified[rel_path] = actual_hash
+
+    # The asset declaration must be present and in the verified contents
+    artifacts = manifest.get("artifacts")
+    if isinstance(artifacts, dict):
+        asset_rel = artifacts.get("asset")
+        if isinstance(asset_rel, str) and asset_rel.strip():
+            path_problems = _asset_path_problems(asset_rel, root)
+            problems.extend(path_problems)
+            if not path_problems and asset_rel not in verified:
+                if asset_rel in files_map:
+                    problems.append(
+                        f"artifacts.asset {asset_rel!r} is declared in contents.files "
+                        "but failed integrity"
+                    )
+                else:
+                    problems.append(
+                        f"artifacts.asset {asset_rel!r} is not in the verified contents map"
+                    )
+
+    if problems:
+        return problems
+    return VerifiedPackageManifest(manifest=manifest, contents=verified)
+
+
+def _resolve_package_source(
+    root: Path, verified: VerifiedPackageManifest
+) -> Path | None:
+    """Resolve source from a verified package manifest. Returns the asset path or None."""
+    artifacts = verified.manifest.get("artifacts")
+    if not isinstance(artifacts, dict):
+        return None
+    asset_rel = artifacts.get("asset")
+    if not isinstance(asset_rel, str) or not asset_rel.strip():
+        return None
+    candidate = root / asset_rel
+    return candidate if candidate.is_file() else None
 
 
 @dataclass(frozen=True)
@@ -562,26 +710,32 @@ def _handover(root: Path, unit: str) -> dict[str, Any] | None:
     return json_object(root / "handover" / f"{unit}.json")
 
 
-def resolve_source(root: Path, unit: str, handover: dict[str, Any] | None, explicit: Path | None) -> Path | None:
+def resolve_source(
+    root: Path,
+    unit: str,
+    handover: dict[str, Any] | None,
+    explicit: Path | None,
+    *,
+    verified_manifest: VerifiedPackageManifest | None = None,
+) -> Path | None:
     """Locate the Tableau workbook this unit was built from.
 
-    Order: an explicit `--source`; the package manifest's ``artifacts.asset`` (a package-relative path
-    such as ``assets/<luid>_<Name>.twbx``); the handover's `workbook.source_id` (a run-root-relative
-    path such as `_runs\\406-...\\assets\\Book.twb`, so it is tried against the bundle, its parent and
-    its grandparent); then `input_manifest.json`'s staged asset whose stem matches the unit name.
-    Returns None rather than guessing, which becomes CANNOT_ESTABLISH.
+    Order: an explicit `--source`; a verified package manifest's ``artifacts.asset``; the handover's
+    `workbook.source_id` (a run-root-relative path tried against the bundle, its parent and its
+    grandparent); then `input_manifest.json`'s staged asset whose stem matches the unit name. Returns
+    None rather than guessing, which becomes CANNOT_ESTABLISH.
+
+    For package targets (detected by :func:`bundle_corpus.is_package_target`), source resolution uses
+    ONLY the verified manifest — the legacy handover/input-manifest fallbacks are deliberately
+    suppressed, because a package that falls back to ancestor data has silently escaped its own
+    integrity boundary.
     """
     if explicit is not None:
         return explicit if explicit.is_file() else None
-    # A self-contained package carries its source asset and names it in package-manifest.json.
-    pkg_manifest = json_object(root / "package-manifest.json")
-    if isinstance(pkg_manifest, dict):
-        artifacts = pkg_manifest.get("artifacts")
-        asset_rel = artifacts.get("asset") if isinstance(artifacts, dict) else None
-        if isinstance(asset_rel, str) and asset_rel.strip():
-            candidate = root / asset_rel
-            if candidate.is_file():
-                return candidate
+    # A verified package manifest is authoritative for source resolution.
+    if verified_manifest is not None:
+        return _resolve_package_source(root, verified_manifest)
+    # Legacy fallbacks — only for non-package bundle layouts.
     workbook = (handover or {}).get("workbook")
     source_id = workbook.get("source_id") if isinstance(workbook, dict) else None
     if isinstance(source_id, str) and source_id.strip():
@@ -754,13 +908,15 @@ def _emitted_pages(unit: str, report_dir: Path, source: Path) -> dict[str, str] 
     return emitted
 
 
-def assess_unit(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-return-statements
+def assess_unit(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-return-statements,too-many-locals
     root: Path,
     report_dir: Path,
     engine_report: dict[str, Any] | None,
     evidence: list[Evidence],
     explicit_source: Path | None,
     require_validation_grade: bool,
+    *,
+    verified_manifest: VerifiedPackageManifest | None = None,
 ) -> UnitResult:
     """Readiness for one shipping report."""
     unit = report_dir.name[: -len(".Report")]
@@ -769,7 +925,7 @@ def assess_unit(  # pylint: disable=too-many-arguments,too-many-positional-argum
         return exempt
 
     handover = _handover(root, unit)
-    source = resolve_source(root, unit, handover, explicit_source)
+    source = resolve_source(root, unit, handover, explicit_source, verified_manifest=verified_manifest)
     if source is None:
         return _cannot(
             unit,
@@ -903,6 +1059,21 @@ def scan(
 ) -> dict[str, Any]:
     """Assess every shipping report under ``root``."""
     root = root.resolve()
+
+    # For package targets, verify the manifest BEFORE any source/evidence discovery.
+    verified_manifest: VerifiedPackageManifest | None = None
+    if is_package_target(root) and explicit_source is None:
+        result = verify_package_manifest(root)
+        if isinstance(result, list):
+            detail = "; ".join(result[:4])
+            return _merge(
+                root,
+                [_cannot(root.name, f"package manifest verification failed: {detail}")],
+                [],
+                [],
+            )
+        verified_manifest = result
+
     evidence, rejected = _collect_evidence(root, reference_dir, oracle_dir)
     engine_report = _engine_report(root)
     reports = shipping_reports(root)
@@ -911,7 +1082,15 @@ def scan(
         detail = "no shipping report and no engine report.json found - nothing was measured"
         return _merge(root, [_cannot(root.name, detail)], evidence, rejected)
     units = [
-        assess_unit(root, report, engine_report, evidence, explicit_source, require_validation_grade)
+        assess_unit(
+            root,
+            report,
+            engine_report,
+            evidence,
+            explicit_source,
+            require_validation_grade,
+            verified_manifest=verified_manifest,
+        )
         for report in reports
     ]
     units.extend(_units_without_reports(engine_report, reports))

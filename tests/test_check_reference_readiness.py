@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import struct
 import sys
 import zlib
@@ -32,6 +33,15 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import check_reference_readiness as crr  # noqa: E402  # pylint: disable=wrong-import-position
+
+
+def _contents_map(root: Path) -> dict[str, str]:
+    """``{relative-posix-path: sha256}`` for every file under ``root`` except package-manifest.json."""
+    result = {}
+    for path in sorted(root.rglob("*")):
+        if path.is_file() and path.relative_to(root).as_posix() != "package-manifest.json":
+            result[path.relative_to(root).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return result
 
 # Page ids observed in the real engine bundle
 # `_runs/406-meridian-smoke-2-339-0-20260901/bundle/pbip/Meridian Revenue by Region/...`,
@@ -1256,17 +1266,15 @@ def test_a_packaged_unit_reads_only_its_own_manifest_end_to_end(tmp_path: Path) 
     """
     package = tmp_path / "run" / "unit"
     package.mkdir(parents=True)
-    (tmp_path / "assets").mkdir()
-    sha = build_unit(package, "WB", worksheets=["Revenue Trend"])
     view = {"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_luid": UNIT_LUID}
+    # Write oracle to BOTH the package and the ancestor run directory.
     write_oracle(package, [view])
     write_oracle(tmp_path / "run", [view])
-    assert crr.scan(package)["units"][0]["pages"][0]["readiness"] == "unverifiable"
-
-    (package / "package-manifest.json").write_text("{}", encoding="utf-8")
+    sha = _build_package(package, "WB", worksheets=["Revenue Trend"])
 
     report = crr.scan(package)
     assert report["units"][0]["pages"][0]["readiness"] == "ready"
+    # Only the package-local oracle was used, not the ancestor's.
     assert report["evidence_records"] == 1
     assert sha
 
@@ -1314,8 +1322,10 @@ def _build_package(
         encoding="utf-8",
     )
     asset_rel = f"assets/{real_name}" if manifest_asset is ... else manifest_asset
+    # Compute contents map BEFORE writing the manifest (it excludes the manifest itself).
+    contents = _contents_map(package)
     (package / "package-manifest.json").write_text(
-        json.dumps({"artifacts": {"asset": asset_rel}}),
+        json.dumps({"artifacts": {"asset": asset_rel}, "contents": {"files": contents}}),
         encoding="utf-8",
     )
     return digest
@@ -1325,9 +1335,10 @@ def test_a_package_resolves_its_source_from_manifest_without_flags(tmp_path: Pat
     """The core acceptance (#558): a canonical package resolves its source with no ``--source``."""
     package = tmp_path / "packages" / "WB"
     package.mkdir(parents=True)
-    sha = _build_package(package, "WB", worksheets=["Revenue Trend"])
+    # Write oracle BEFORE _build_package so it's included in the contents map.
     view = {"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_luid": UNIT_LUID}
     write_oracle(package, [view])
+    sha = _build_package(package, "WB", worksheets=["Revenue Trend"])
 
     report = crr.scan(package)
     unit = report["units"][0]
@@ -1341,10 +1352,15 @@ def test_a_package_with_missing_asset_is_cannot_establish(tmp_path: Path) -> Non
     """A manifest naming a non-existent asset must not resolve."""
     package = tmp_path / "packages" / "WB"
     package.mkdir(parents=True)
-    _build_package(package, "WB", worksheets=["Revenue Trend"], manifest_asset="assets/gone.twb")
-    # Remove the real asset so nothing resolves
-    for f in (package / "assets").iterdir():
-        f.unlink()
+    _build_package(package, "WB", worksheets=["Revenue Trend"])
+    # Overwrite the manifest to point to a non-existent asset, keeping contents valid for other files
+    # but the asset entry will now be missing from the filesystem.
+    manifest_path = package / "package-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifacts"]["asset"] = "assets/gone.twb"
+    # Also add the fake asset to contents so it fails the hash check (file missing).
+    manifest["contents"]["files"]["assets/gone.twb"] = "0" * 64
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     report = crr.scan(package)
     assert report["units"][0]["status"] == "CANNOT_ESTABLISH"
@@ -1354,10 +1370,10 @@ def test_a_package_with_conflicting_identity_is_cannot_establish(tmp_path: Path)
     """A source whose provenance records a different LUID than the oracle evidence is not clean."""
     package = tmp_path / "packages" / "WB"
     package.mkdir(parents=True)
-    _build_package(package, "WB", worksheets=["Revenue Trend"], luid=UNIT_LUID)
-    # Oracle says it's a different workbook
+    # Oracle says it's a different workbook — write before building so it's in the contents map.
     view = {"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_luid": OTHER_LUID}
     write_oracle(package, [view])
+    _build_package(package, "WB", worksheets=["Revenue Trend"], luid=UNIT_LUID)
 
     report = crr.scan(package)
     unit = report["units"][0]
@@ -1370,8 +1386,11 @@ def test_a_datasource_only_package_is_not_applicable(tmp_path: Path) -> None:
     package = tmp_path / "packages" / "DS"
     package.mkdir(parents=True)
     write_engine_report(package, workbooks=[], datasources=["DS"])
-    write_report(package, "DS", [])
-    (package / "package-manifest.json").write_text(json.dumps({"artifacts": {}}), encoding="utf-8")
+    # Compute contents before writing the manifest.
+    contents = _contents_map(package)
+    (package / "package-manifest.json").write_text(
+        json.dumps({"artifacts": {}, "contents": {"files": contents}}), encoding="utf-8"
+    )
 
     report = crr.scan(package)
     # No shipping report means the empty-bundle path; engine says datasource-only
@@ -1379,6 +1398,163 @@ def test_a_datasource_only_package_is_not_applicable(tmp_path: Path) -> None:
 
 
 def test_a_unit_three_levels_below_the_run_still_inherits_the_flat_capture(tmp_path: Path) -> None:
+    """MEDIUM 1 from round-1 review of PR #454, at the canonical depth.
+
+    `capture_tableau_oracle.py` writes `_runs/<NNN>-<slug>/oracle/` while an un-packaged unit sits at
+    `_runs/<NNN>-<slug>/bundle/pbip/<Unit>/` - THREE ancestors below it. Stopping at one (the exit
+    gate) or two (this one) makes a real capture invisible for the ordinary engine-bundle shape, so
+    the depth is part of the shared rule rather than each gate's guess.
+    """
+    unit = tmp_path / "run" / "bundle" / "pbip" / "Unit"
+    unit.mkdir(parents=True)
+    (tmp_path / "run" / "oracle").mkdir()
+
+    assert crr._default_dirs(unit, "oracle") == [tmp_path / "run" / "oracle"]
+
+
+# --------------------------------------------------------------------------------------------
+# Package manifest integrity verification (#558 + #562) - negative controls
+# Each test below targets a SPECIFIC failure mode and must fail for its own reason.
+# --------------------------------------------------------------------------------------------
+
+
+def test_a_non_object_contents_map_is_cannot_establish(tmp_path: Path) -> None:
+    """contents.files must be a dict; a list or string silently passes no integrity check."""
+    package = tmp_path / "packages" / "WB"
+    package.mkdir(parents=True)
+    write_oracle(package, [{"view_name": "Revenue", "view_type": "worksheet", "workbook_luid": UNIT_LUID}])
+    _build_package(package, "WB", worksheets=["Revenue"])
+    # Overwrite with non-dict contents.files
+    manifest = json.loads((package / "package-manifest.json").read_text(encoding="utf-8"))
+    manifest["contents"]["files"] = ["not", "a", "dict"]
+    (package / "package-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    report = crr.scan(package)
+    assert report["status"] == "CANNOT_ESTABLISH"
+    assert "contents.files" in report["units"][0]["detail"]
+
+
+def test_duplicate_keys_in_manifest_json_is_cannot_establish(tmp_path: Path) -> None:
+    """Python's json.loads silently keeps the last duplicate; this gate refuses the ambiguity."""
+    package = tmp_path / "packages" / "WB"
+    package.mkdir(parents=True)
+    write_oracle(package, [{"view_name": "Revenue", "view_type": "worksheet", "workbook_luid": UNIT_LUID}])
+    _build_package(package, "WB", worksheets=["Revenue"])
+    # Write raw JSON with a duplicate key (can't do with json.dumps)
+    (package / "package-manifest.json").write_text(
+        '{"artifacts": {}, "artifacts": {}, "contents": {"files": {}}}', encoding="utf-8"
+    )
+
+    report = crr.scan(package)
+    assert report["status"] == "CANNOT_ESTABLISH"
+    assert "duplicate" in report["units"][0]["detail"].lower()
+
+
+def test_one_changed_byte_against_recorded_digest_is_cannot_establish(tmp_path: Path) -> None:
+    """A single byte change in a declared file must fail the integrity check."""
+    package = tmp_path / "packages" / "WB"
+    package.mkdir(parents=True)
+    write_oracle(package, [{"view_name": "Revenue", "view_type": "worksheet", "workbook_luid": UNIT_LUID}])
+    _build_package(package, "WB", worksheets=["Revenue"])
+    # Flip one byte in the source-provenance.json
+    prov = package / "source-provenance.json"
+    content = prov.read_bytes()
+    prov.write_bytes(content + b" ")
+
+    report = crr.scan(package)
+    assert report["status"] == "CANNOT_ESTABLISH"
+    assert "hash mismatch" in report["units"][0]["detail"]
+
+
+def test_deleted_file_from_contents_map_is_cannot_establish(tmp_path: Path) -> None:
+    """A file declared in contents.files but physically absent must fail."""
+    package = tmp_path / "packages" / "WB"
+    package.mkdir(parents=True)
+    write_oracle(package, [{"view_name": "Revenue", "view_type": "worksheet", "workbook_luid": UNIT_LUID}])
+    _build_package(package, "WB", worksheets=["Revenue"])
+    # Delete the engine report (it's in the contents map)
+    (package / "report.json").unlink()
+
+    report = crr.scan(package)
+    assert report["status"] == "CANNOT_ESTABLISH"
+    assert "missing" in report["units"][0]["detail"]
+
+
+def test_missing_package_manifest_cannot_rescue_via_legacy_handover(tmp_path: Path) -> None:
+    """A package-shaped target with no manifest must NOT fall back to legacy handover resolution."""
+    package = tmp_path / "packages" / "WB"
+    package.mkdir(parents=True)
+    write_oracle(package, [{"view_name": "Revenue", "view_type": "worksheet", "workbook_luid": UNIT_LUID}])
+    _build_package(package, "WB", worksheets=["Revenue"])
+    # Delete the manifest — the package is under packages/ so is_package_target is True
+    (package / "package-manifest.json").unlink()
+
+    report = crr.scan(package)
+    assert report["status"] == "CANNOT_ESTABLISH"
+    assert "missing" in report["units"][0]["detail"].lower()
+
+
+def test_asset_traversal_outside_package_is_cannot_establish(tmp_path: Path) -> None:
+    """An asset path with ``..`` that escapes the package root must be refused."""
+    package = tmp_path / "packages" / "WB"
+    package.mkdir(parents=True)
+    # Write a workbook OUTSIDE the package
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    write_workbook(outside / "escaped.twb", worksheets=["Revenue"])
+    write_engine_report(package, workbooks=["WB"])
+    write_handover(package, "WB", source_id="/nonexistent")
+    page_ids = [obj.page_id for obj in crr.source_objects(outside / "escaped.twb") or []]
+    write_report(package, "WB", page_ids)
+    (package / "source-provenance.json").write_text(json.dumps({"inputs": []}), encoding="utf-8")
+    contents = _contents_map(package)
+    (package / "package-manifest.json").write_text(
+        json.dumps({
+            "artifacts": {"asset": "../../outside/escaped.twb"},
+            "contents": {"files": contents},
+        }),
+        encoding="utf-8",
+    )
+
+    report = crr.scan(package)
+    assert report["status"] == "CANNOT_ESTABLISH"
+    assert "traversal" in report["units"][0]["detail"]
+
+
+def test_extra_foreign_oracle_evidence_beside_valid_record_is_finding(tmp_path: Path) -> None:
+    """A package with both a valid and a foreign oracle record: the foreign record must be refused."""
+    package = tmp_path / "packages" / "WB"
+    package.mkdir(parents=True)
+    # Write oracle with one valid record and one from a foreign workbook
+    write_oracle(package, [
+        {"view_name": "Revenue", "view_type": "worksheet", "workbook_luid": UNIT_LUID},
+        {"view_name": "Foreign View", "view_type": "worksheet", "workbook_luid": OTHER_LUID},
+    ])
+    _build_package(package, "WB", worksheets=["Revenue"])
+
+    report = crr.scan(package)
+    # The valid record should resolve, but the foreign one is counted as refused
+    assert report["evidence_attributed"]["foreign"] >= 1
+
+
+def test_ancestor_evidence_cannot_rescue_an_incomplete_package(tmp_path: Path) -> None:
+    """An incomplete package under packages/ must not inherit ancestor evidence."""
+    package = tmp_path / "run" / "packages" / "WB"
+    package.mkdir(parents=True)
+    # Write oracle at the RUN level (ancestor), NOT inside the package
+    view = {"view_name": "Revenue", "view_type": "worksheet", "workbook_luid": UNIT_LUID}
+    write_oracle(tmp_path / "run", [view])
+    # Build a package with oracle evidence inside — then delete the package-local oracle
+    write_oracle(package, [view])
+    _build_package(package, "WB", worksheets=["Revenue"])
+    # Remove the package-local oracle entirely and rewrite the manifest without it
+    shutil.rmtree(package / "_oracle")
+    # The manifest now declares oracle files that are missing → integrity failure
+    report = crr.scan(package)
+    assert report["status"] == "CANNOT_ESTABLISH"
+
+
+
     """MEDIUM 1 from round-1 review of PR #454, at the canonical depth.
 
     `capture_tableau_oracle.py` writes `_runs/<NNN>-<slug>/oracle/` while an un-packaged unit sits at
