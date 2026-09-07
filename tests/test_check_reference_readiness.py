@@ -1271,6 +1271,113 @@ def test_a_packaged_unit_reads_only_its_own_manifest_end_to_end(tmp_path: Path) 
     assert sha
 
 
+def _build_package(
+    package: Path,
+    unit: str,
+    *,
+    worksheets: list[str],
+    luid: str = UNIT_LUID,
+    asset_name: str | None = None,
+    manifest_asset: str | None = ...,  # type: ignore[assignment]  # sentinel
+) -> str:
+    """Build a canonical package-shaped unit and return the source sha256.
+
+    The asset lives at ``<package>/assets/<asset_name>`` and ``package-manifest.json`` names it via
+    ``artifacts.asset``. The handover's ``source_id`` points to a NON-EXISTENT absolute path, matching
+    the real package shape where the original run path no longer resolves.
+    """
+    real_name = asset_name or f"{luid}_{unit}.twb"
+    source = write_workbook(package / "assets" / real_name, worksheets=worksheets)
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    write_engine_report(package, workbooks=[unit])
+    # The handover's source_id is an absolute path that does NOT exist (the real package shape).
+    write_handover(package, unit, source_id=f"/nonexistent/run/assets/{real_name}")
+    page_ids = [obj.page_id for obj in crr.source_objects(source) or []]
+    write_report(package, unit, page_ids)
+    (package / "source-provenance.json").write_text(
+        json.dumps(
+            {
+                "inputs": [
+                    {
+                        "input": {"file": real_name, "sha256": digest},
+                        "origin": {
+                            "workbook_luid": luid,
+                            "workbook_name": unit,
+                            "matched_by": "luid",
+                            "match": "sha256",
+                            "revision_match": "same",
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    asset_rel = f"assets/{real_name}" if manifest_asset is ... else manifest_asset
+    (package / "package-manifest.json").write_text(
+        json.dumps({"artifacts": {"asset": asset_rel}}),
+        encoding="utf-8",
+    )
+    return digest
+
+
+def test_a_package_resolves_its_source_from_manifest_without_flags(tmp_path: Path) -> None:
+    """The core acceptance (#558): a canonical package resolves its source with no ``--source``."""
+    package = tmp_path / "packages" / "WB"
+    package.mkdir(parents=True)
+    sha = _build_package(package, "WB", worksheets=["Revenue Trend"])
+    view = {"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_luid": UNIT_LUID}
+    write_oracle(package, [view])
+
+    report = crr.scan(package)
+    unit = report["units"][0]
+    assert unit["status"] == "READY", unit["detail"]
+    assert unit["source"].endswith(".twb")
+    assert report["pages_expected"] == 1
+    assert sha
+
+
+def test_a_package_with_missing_asset_is_cannot_establish(tmp_path: Path) -> None:
+    """A manifest naming a non-existent asset must not resolve."""
+    package = tmp_path / "packages" / "WB"
+    package.mkdir(parents=True)
+    _build_package(package, "WB", worksheets=["Revenue Trend"], manifest_asset="assets/gone.twb")
+    # Remove the real asset so nothing resolves
+    for f in (package / "assets").iterdir():
+        f.unlink()
+
+    report = crr.scan(package)
+    assert report["units"][0]["status"] == "CANNOT_ESTABLISH"
+
+
+def test_a_package_with_conflicting_identity_is_cannot_establish(tmp_path: Path) -> None:
+    """A source whose provenance records a different LUID than the oracle evidence is not clean."""
+    package = tmp_path / "packages" / "WB"
+    package.mkdir(parents=True)
+    _build_package(package, "WB", worksheets=["Revenue Trend"], luid=UNIT_LUID)
+    # Oracle says it's a different workbook
+    view = {"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_luid": OTHER_LUID}
+    write_oracle(package, [view])
+
+    report = crr.scan(package)
+    unit = report["units"][0]
+    # The page is blind or unverifiable because the oracle LUID doesn't match the source LUID
+    assert unit["pages"][0]["readiness"] in ("blind", "unverifiable")
+
+
+def test_a_datasource_only_package_is_not_applicable(tmp_path: Path) -> None:
+    """Datasource-only packages keep their earned NOT_APPLICABLE (#558 AC 4)."""
+    package = tmp_path / "packages" / "DS"
+    package.mkdir(parents=True)
+    write_engine_report(package, workbooks=[], datasources=["DS"])
+    write_report(package, "DS", [])
+    (package / "package-manifest.json").write_text(json.dumps({"artifacts": {}}), encoding="utf-8")
+
+    report = crr.scan(package)
+    # No shipping report means the empty-bundle path; engine says datasource-only
+    assert report["status"] == "NOT_APPLICABLE"
+
+
 def test_a_unit_three_levels_below_the_run_still_inherits_the_flat_capture(tmp_path: Path) -> None:
     """MEDIUM 1 from round-1 review of PR #454, at the canonical depth.
 

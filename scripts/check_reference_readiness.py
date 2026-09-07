@@ -565,13 +565,23 @@ def _handover(root: Path, unit: str) -> dict[str, Any] | None:
 def resolve_source(root: Path, unit: str, handover: dict[str, Any] | None, explicit: Path | None) -> Path | None:
     """Locate the Tableau workbook this unit was built from.
 
-    Order: an explicit `--source`; the handover's `workbook.source_id` (a run-root-relative path such
-    as `_runs\\406-...\\assets\\Book.twb`, so it is tried against the bundle, its parent and its
-    grandparent); then `input_manifest.json`'s staged asset whose stem matches the unit name. Returns
-    None rather than guessing, which becomes CANNOT_ESTABLISH.
+    Order: an explicit `--source`; the package manifest's ``artifacts.asset`` (a package-relative path
+    such as ``assets/<luid>_<Name>.twbx``); the handover's `workbook.source_id` (a run-root-relative
+    path such as `_runs\\406-...\\assets\\Book.twb`, so it is tried against the bundle, its parent and
+    its grandparent); then `input_manifest.json`'s staged asset whose stem matches the unit name.
+    Returns None rather than guessing, which becomes CANNOT_ESTABLISH.
     """
     if explicit is not None:
         return explicit if explicit.is_file() else None
+    # A self-contained package carries its source asset and names it in package-manifest.json.
+    pkg_manifest = json_object(root / "package-manifest.json")
+    if isinstance(pkg_manifest, dict):
+        artifacts = pkg_manifest.get("artifacts")
+        asset_rel = artifacts.get("asset") if isinstance(artifacts, dict) else None
+        if isinstance(asset_rel, str) and asset_rel.strip():
+            candidate = root / asset_rel
+            if candidate.is_file():
+                return candidate
     workbook = (handover or {}).get("workbook")
     source_id = workbook.get("source_id") if isinstance(workbook, dict) else None
     if isinstance(source_id, str) and source_id.strip():
