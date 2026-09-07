@@ -92,6 +92,7 @@ from _verdict_lines import (  # noqa: F401  # pylint: disable=unused-import
     _has_desktop_gone_verdict,
     _has_desktop_unready_verdict,
     _has_dialog_verdict,
+    _has_timeout_verdict,
     _is_earned_success,
     classify_child_verdict,
 )

@@ -71,6 +71,13 @@ DIALOG_VERDICT_RE = re.compile(
     r"^\s*(?:REFRESH|PREFLIGHT|PROBE):\s+"
     r"(?P<token>REFRESH_IN_PROGRESS|DIALOG_NEEDS_HUMAN|DIALOG_UNRECOGNIZED|DIALOG_UNREADABLE)\b"
 )
+# Timeout family: the child's own deadline elapsed and it could not distinguish a slow source from a
+# credential modal (``refresh_pbip_model`` main(), ``TimeoutError`` handler). Its diagnostic prose
+# legitimately names "sign-in" because it offers BOTH hypotheses, so it MUST be matched structurally
+# before any free-text credential-marker scan — otherwise the unanchored scan reads the prose and
+# relabels an ambiguous timeout as a confident ``NO_CREDENTIAL`` without any observed auth prompt.
+# Mapped to ERROR (nothing was learned), never NO_CREDENTIAL (issue #146).
+TIMEOUT_VERDICT_RE = re.compile(r"^\s*(?:REFRESH|PREFLIGHT|PROBE):\s+TIMEOUT\b")
 
 
 def _has_credential_stop_verdict(text: str) -> bool:
@@ -129,6 +136,18 @@ def _has_dialog_verdict(text: str) -> bool:
     return _dialog_verdict_token(text) is not None
 
 
+def _has_timeout_verdict(text: str) -> bool:
+    """True when a line is a machine-readable ``TIMEOUT`` verdict (issue #146).
+
+    The child's timeout handler legitimately names "sign-in" and "credential" in its diagnostic prose
+    (it offers BOTH hypotheses for why the refresh didn't return), so it MUST be recognised here —
+    structurally, on the verdict LINE — before the unanchored ``CREDENTIAL_MARKERS`` scan in
+    ``probe_live_source``. Without this the prose falls through to that scan and an ambiguous timeout
+    is relabelled ``NO_CREDENTIAL`` without any observed auth prompt.
+    """
+    return any(TIMEOUT_VERDICT_RE.match(line) for line in text.splitlines())
+
+
 # Every authoritative non-success verdict the child can emit. A run that carries ANY of them did not
 # earn a clear, whatever else its transcript says. Kept as one list so a new verdict family is wired
 # into the success gate by adding it here, not by lengthening a boolean chain someone has to read.
@@ -137,6 +156,7 @@ NON_SUCCESS_VERDICT_CHECKS = (
     _has_desktop_gone_verdict,
     _has_desktop_unready_verdict,
     _has_dialog_verdict,
+    _has_timeout_verdict,
 )
 
 
@@ -207,6 +227,15 @@ def classify_child_verdict(text: str, raw: str) -> tuple[str, str] | None:
             "connector authentication form whose text was not readable - do not assume sign-in is "
             "NOT needed. Look at the Desktop screen, settle whatever it is showing, and re-run the "
             "probe. Raw: " + raw,
+        )
+    if _has_timeout_verdict(text):
+        return (
+            "ERROR",
+            "the refresh timed out at the child's own deadline. The child could not distinguish a "
+            "slow source from a blocked credential modal - its diagnostic prose names both hypotheses "
+            "but has confirmed neither. Do not classify this as NO_CREDENTIAL without positive "
+            "evidence of a sign-in prompt. Run the arbiter (probe_desktop_credential.ps1) to settle "
+            "it. Raw: " + raw,
         )
     return None
 

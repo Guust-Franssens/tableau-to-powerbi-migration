@@ -454,9 +454,11 @@ def test_unreadable_dialog_verdict_does_not_assert_not_a_sign_in_prompt() -> Non
         text = buffer.getvalue()
         _, detail = probe_live_source._classify_failure(text, network_fault_observed=False)
         assert "NOT a sign-in prompt" in detail, (
-            "DIALOG_NEEDS_HUMAN positively identified a non-credential prompt; "
-            "'NOT a sign-in prompt' should be stated"
+            "DIALOG_NEEDS_HUMAN positively identified a non-credential prompt; 'NOT a sign-in prompt' should be stated"
         )
+
+
+def test_the_parent_knows_every_dialog_token_the_detector_can_emit() -> None:
     """Anti-drift: a token added to the detector must not stay unknown to the parent classifier.
 
     Without this the two halves of finding 2's fix can separate silently - a new verdict would fall
@@ -501,6 +503,92 @@ def test_a_dialog_verdict_cannot_clear_the_live_source_gate(monkeypatch: pytest.
     rc, verdict = probe_live_source._refresh_and_classify(123, "Orders", 1, network_fault_observed=False)
 
     assert (rc, verdict) != (0, "DATA_OK"), "a dialog verdict must veto a stale-looking success line"
+    assert verdict == "ERROR"
+
+
+def test_timeout_verdict_is_recognised_structurally_not_as_no_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #146: the child's TIMEOUT verdict prose names 'sign-in' and must not become NO_CREDENTIAL.
+
+    End-to-end: drives the real child timeout emitter, captures its exact transcript/exit code,
+    and feeds them into the real parent ``_refresh_and_classify``. Without the structural
+    ``TIMEOUT`` recognition, the diagnostic prose ("a human must sign in once") trips the
+    unanchored ``CREDENTIAL_MARKERS`` scan and the parent reports ``NO_CREDENTIAL`` without any
+    observed auth prompt.
+
+    The mutation control: removing the structural ``TIMEOUT`` match must make this test fail on
+    the ``NO_CREDENTIAL`` assertion, not on an unrelated check.
+    """
+    probe_live_source = _import_probe_live_source()
+    refresh_pbip_model, _, _ = _import_skill_modules()
+
+    # Reproduce the child's REAL timeout emitter output. The child hits this path when a
+    # TimeoutError is raised during refresh and the exception text contains "timeout".
+    # We use the exact format from refresh_pbip_model.py main() lines 1717-1734, with the
+    # CREDENTIAL_PROBE path resolved from the real module.
+    credential_probe = refresh_pbip_model.CREDENTIAL_PROBE
+    timeout_text = "TimeoutError: XMLA CommandTimeout was 300s and did not fire"
+    child_stdout_lines = [
+        f"REFRESH: TIMEOUT - no result within configured refresh deadline ({timeout_text})",
+        "  CAUSE UNKNOWN - this script cannot distinguish these two, and they need",
+        "  opposite responses:",
+        "    (a) SLOW: a very large model. Refresh only what you need with --tables;",
+        "        do NOT simply wait longer.",
+        "    (b) BLOCKED: Desktop is showing a data-source sign-in modal no automation",
+        "        can fill. Retrying cannot dismiss it; a human must sign in once.",
+        "  SETTLE IT - run the arbiter that ships beside this script, do not guess:",
+        f'    powershell -File "{credential_probe}" -DesktopPid 111',
+    ]
+    child_stdout = "\n".join(child_stdout_lines) + "\n"
+    child_exit = 3  # the real emitter returns 3
+
+    monkeypatch.setattr(
+        probe_live_source.subprocess,
+        "run",
+        lambda *_a, **_k: subprocess.CompletedProcess(
+            args=["refresh"],
+            returncode=child_exit,
+            stdout=child_stdout,
+            stderr="",
+        ),
+    )
+
+    rc, verdict = probe_live_source._refresh_and_classify(123, "Orders", 1, network_fault_observed=False)
+
+    # The timeout verdict MUST be recognised structurally and mapped to ERROR.
+    assert probe_live_source._has_timeout_verdict(child_stdout), (
+        "the structural TIMEOUT recogniser did not match the child's real output"
+    )
+    assert verdict == "ERROR", (
+        f"expected ERROR for an ambiguous timeout; got {verdict}. "
+        "If NO_CREDENTIAL: the unanchored credential-marker scan read the diagnostic prose."
+    )
+    assert verdict != "NO_CREDENTIAL", (
+        "TIMEOUT must never classify as NO_CREDENTIAL: the child could not distinguish "
+        "a slow source from a credential modal"
+    )
+
+
+def test_timeout_verdict_cannot_clear_the_live_source_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defence in depth: a TIMEOUT verdict blocks success even beside a stale DATA_OK."""
+    probe_live_source = _import_probe_live_source()
+    monkeypatch.setattr(
+        probe_live_source.subprocess,
+        "run",
+        lambda *_a, **_k: subprocess.CompletedProcess(
+            args=["refresh"],
+            returncode=0,
+            stdout="REFRESH: TIMEOUT - deadline\nREFRESH: TABLES_OK 'Orders'\n",
+            stderr="",
+        ),
+    )
+
+    rc, verdict = probe_live_source._refresh_and_classify(123, "Orders", 1, network_fault_observed=False)
+
+    assert (rc, verdict) != (0, "DATA_OK"), "a TIMEOUT verdict must veto a stale-looking success line"
     assert verdict == "ERROR"
 
 
