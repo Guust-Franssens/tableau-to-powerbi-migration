@@ -186,13 +186,27 @@ def classify_child_verdict(text: str, raw: str) -> tuple[str, str] | None:
         )
     token = _dialog_verdict_token(text)
     if token is not None:
+        # DIALOG_NEEDS_HUMAN positively matched a known non-credential blocking prompt (e.g.
+        # the native-database-query approval), so we CAN say it is not a sign-in wall. The
+        # unreadable/unrecognized tokens cannot: the window could not be classified, so asserting
+        # "NOT a sign-in prompt" would contradict the absence of evidence (issue #146). For
+        # REFRESH_IN_PROGRESS, a benign progress dialog was observed without operation_in_flight.
+        if token == "DIALOG_NEEDS_HUMAN":
+            return (
+                "ERROR",
+                f"Power BI Desktop has a dialog up that the probe identified as a known blocking "
+                f"prompt ({token}), so the refresh never established anything about the data source. "
+                "The child classified the window and reports that it is NOT a sign-in prompt - do not "
+                "send anyone to re-authenticate on the strength of this. Look at the Desktop screen, "
+                "approve whatever it is showing, and re-run the probe. Raw: " + raw,
+            )
         return (
             "ERROR",
-            f"Power BI Desktop has a dialog up that the probe could not account for ({token}), so the "
-            "refresh never established anything about the data source. The child classified the "
-            "window and reports that it is NOT a sign-in prompt - do not send anyone to "
-            "re-authenticate on the strength of this. Look at the Desktop screen, settle whatever it "
-            "is showing, and re-run the probe. Raw: " + raw,
+            f"Power BI Desktop has a dialog up that the probe could not classify ({token}), so the "
+            "refresh never established anything about the data source. The dialog COULD be a "
+            "connector authentication form whose text was not readable - do not assume sign-in is "
+            "NOT needed. Look at the Desktop screen, settle whatever it is showing, and re-run the "
+            "probe. Raw: " + raw,
         )
     return None
 

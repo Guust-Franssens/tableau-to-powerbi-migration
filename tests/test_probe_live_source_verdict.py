@@ -96,6 +96,10 @@ def test_probe_argv_fed_through_real_emitter_is_accepted_by_the_parent(monkeypat
 
     # The exact desync #152 named: the probe always narrows with --tables and never asks for --canaries.
     assert "--tables" in argv and "--canaries" not in argv
+    # Issue #146: the probe must disable progress tracing so the child uses the legacy XMLA timeout
+    # path (300s + 30s = 330s), not the 3600s progress absolute backstop that exceeds the parent's
+    # 390s subprocess kill budget. Without --no-progress the child never reaches its own deadline.
+    assert "--no-progress" in argv
 
     # 2. Parse the child flags (everything after `python refresh_pbip_model.py`) with the REAL parser.
     child_flags = argv[2:]
@@ -409,7 +413,50 @@ def test_a_dialog_verdict_is_recognised_structurally_and_is_not_a_credential_sto
         )
 
 
-def test_the_parent_knows_every_dialog_token_the_detector_can_emit() -> None:
+def test_unreadable_dialog_verdict_does_not_assert_not_a_sign_in_prompt() -> None:
+    """Issue #146: prose must not claim 'NOT a sign-in prompt' for dialogs it could not classify.
+
+    DIALOG_NEEDS_HUMAN matched a KNOWN non-credential blocking prompt, so saying 'NOT a sign-in
+    prompt' is honest. DIALOG_UNREADABLE and DIALOG_UNRECOGNIZED could not be classified at all,
+    so the same assertion is stronger than the evidence supports. Measured 2026-09-06: a connector
+    authentication form had no readable Win32 text, classified DIALOG_UNRECOGNIZED, and the parent
+    asserted 'NOT a sign-in prompt' when sign-in WAS required.
+    """
+    probe_live_source = _import_probe_live_source()
+    refresh_pbip_model, _, credential_modal = _import_skill_modules()
+
+    # Tokens that COULD be an unclassified connector-auth dialog.
+    uncertain_tokens = {
+        "DIALOG_UNREADABLE": (),
+        "DIALOG_UNRECOGNIZED": ("Save changes?", "Discard"),
+        "REFRESH_IN_PROGRESS": ("Refresh", "Evaluating..."),
+    }
+    for label, texts in uncertain_tokens.items():
+        window = credential_modal.DesktopWindow("Refresh" if "Refresh" in texts else "", "Cls", 702, 355, texts)
+        finding = credential_modal.classify_dialog(window)
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            refresh_pbip_model._emit_dialog_finding(111, finding)
+        text = buffer.getvalue()
+        _, detail = probe_live_source._classify_failure(text, network_fault_observed=False)
+        assert "NOT a sign-in prompt" not in detail, (
+            f"{label}: the parent asserts 'NOT a sign-in prompt' for a dialog it could not "
+            "classify - this is stronger than the evidence (issue #146)"
+        )
+
+    # DIALOG_NEEDS_HUMAN IS a positive identification - 'NOT a sign-in' IS honest here.
+    for evidence_text in ("Authentication required",):
+        window = credential_modal.DesktopWindow("", "Cls", 702, 355, (evidence_text,))
+        finding = credential_modal.classify_dialog(window)
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            refresh_pbip_model._emit_dialog_finding(111, finding)
+        text = buffer.getvalue()
+        _, detail = probe_live_source._classify_failure(text, network_fault_observed=False)
+        assert "NOT a sign-in prompt" in detail, (
+            "DIALOG_NEEDS_HUMAN positively identified a non-credential prompt; "
+            "'NOT a sign-in prompt' should be stated"
+        )
     """Anti-drift: a token added to the detector must not stay unknown to the parent classifier.
 
     Without this the two halves of finding 2's fix can separate silently - a new verdict would fall

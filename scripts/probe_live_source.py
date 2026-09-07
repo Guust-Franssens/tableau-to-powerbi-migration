@@ -770,6 +770,16 @@ def _refresh_and_classify(pid: int, table: str, timeout_sec: int, network_fault_
                 "--tables",
                 table,
                 "--no-save",
+                # A probe does not need AMO progress tracing; disable it so the child uses the
+                # legacy XMLA timeout path (REFRESH_TIMEOUT_SECONDS + grace = 330s) instead of
+                # the progress absolute backstop (3600s).  Without this flag the child's internal
+                # deadline exceeds the parent's subprocess kill budget (PROBE_TIMEOUT_SECONDS =
+                # 390s), so the parent kills the child before it ever reaches its own deadline —
+                # the code path that re-checks for a credential dialog and emits a proper verdict.
+                # Measured 2026-09-06: the child ran with progress_enabled=True (the default for
+                # --pid + full refresh), used total_timeout=3600s, and the parent killed it at
+                # 390s with a generic "ERROR refresh did not return" — no dialog verdict at all.
+                "--no-progress",
             ],
             capture_output=True,
             text=True,
