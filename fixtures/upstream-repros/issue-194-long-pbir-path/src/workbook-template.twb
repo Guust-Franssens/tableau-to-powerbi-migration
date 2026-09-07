@@ -1,0 +1,135 @@
+<?xml version='1.0' encoding='utf-8' ?>
+
+<workbook source-build='2024.1' source-platform='win' version='18.1' xmlns:user='http://www.tableausoftware.com/xml/user'>
+  <datasources>
+    <datasource caption='@@DATASOURCE@@' inline='true' name='federated.regionalsales' version='18.1'>
+      <connection class='federated'>
+        <named-connections>
+          <named-connection caption='@@CSVFILE@@' name='textscan.regionalsales'>
+            <connection class='textscan' directory='Data/regional-sales' filename='@@CSVFILE@@' server='' />
+          </named-connection>
+        </named-connections>
+        <relation connection='textscan.regionalsales' name='@@CSVFILE@@' table='[@@CSVFILE@@]' type='table'>
+          <columns character-set='UTF-8' header='yes' locale='en_US' separator=','>
+            <column datatype='string' name='region' ordinal='0' />
+            <column datatype='string' name='fiscal_period' ordinal='1' />
+            <column datatype='integer' name='units_shipped' ordinal='2' />
+            <column datatype='real' name='net_revenue' ordinal='3' />
+          </columns>
+        </relation>
+        <metadata-records>
+          <metadata-record class='column'>
+            <remote-name>region</remote-name>
+            <remote-type>129</remote-type>
+            <local-name>[region]</local-name>
+            <parent-name>[@@CSVFILE@@]</parent-name>
+            <remote-alias>region</remote-alias>
+            <ordinal>0</ordinal>
+            <local-type>string</local-type>
+            <aggregation>Count</aggregation>
+            <contains-null>true</contains-null>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>fiscal_period</remote-name>
+            <remote-type>129</remote-type>
+            <local-name>[fiscal_period]</local-name>
+            <parent-name>[@@CSVFILE@@]</parent-name>
+            <remote-alias>fiscal_period</remote-alias>
+            <ordinal>1</ordinal>
+            <local-type>string</local-type>
+            <aggregation>Count</aggregation>
+            <contains-null>true</contains-null>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>units_shipped</remote-name>
+            <remote-type>20</remote-type>
+            <local-name>[units_shipped]</local-name>
+            <parent-name>[@@CSVFILE@@]</parent-name>
+            <remote-alias>units_shipped</remote-alias>
+            <ordinal>2</ordinal>
+            <local-type>integer</local-type>
+            <aggregation>Sum</aggregation>
+            <contains-null>true</contains-null>
+          </metadata-record>
+          <metadata-record class='column'>
+            <remote-name>net_revenue</remote-name>
+            <remote-type>5</remote-type>
+            <local-name>[net_revenue]</local-name>
+            <parent-name>[@@CSVFILE@@]</parent-name>
+            <remote-alias>net_revenue</remote-alias>
+            <ordinal>3</ordinal>
+            <local-type>real</local-type>
+            <aggregation>Sum</aggregation>
+            <contains-null>true</contains-null>
+          </metadata-record>
+        </metadata-records>
+      </connection>
+      <column caption='Region' datatype='string' name='[region]' role='dimension' type='nominal' />
+      <column caption='Fiscal Period' datatype='string' name='[fiscal_period]' role='dimension' type='nominal' />
+      <column caption='Units Shipped' datatype='integer' name='[units_shipped]' role='measure' type='quantitative' />
+      <column caption='Net Revenue' datatype='real' name='[net_revenue]' role='measure' type='quantitative' />
+    </datasource>
+  </datasources>
+  <worksheets>
+    <worksheet name='@@WORKSHEET@@'>
+      <table>
+        <view>
+          <datasources>
+            <datasource caption='@@DATASOURCE@@' name='federated.regionalsales' />
+          </datasources>
+          <datasource-dependencies datasource='federated.regionalsales'>
+            <column caption='Region' datatype='string' name='[region]' role='dimension' type='nominal' />
+            <column caption='Net Revenue' datatype='real' name='[net_revenue]' role='measure' type='quantitative' />
+            <column-instance column='[net_revenue]' derivation='Sum' name='[sum:net_revenue:qk]' pivot='key' type='quantitative' />
+            <column-instance column='[region]' derivation='None' name='[none:region:nk]' pivot='key' type='nominal' />
+          </datasource-dependencies>
+          <aggregation value='true' />
+        </view>
+        <panes>
+          <pane>
+            <mark class='Bar' />
+          </pane>
+        </panes>
+        <rows>[federated.regionalsales].[sum:net_revenue:qk]</rows>
+        <cols>[federated.regionalsales].[none:region:nk]</cols>
+      </table>
+    </worksheet>
+  </worksheets>
+  <dashboards>
+    <dashboard name='@@DASHBOARD@@'>
+      <style />
+      <size maxheight='800' maxwidth='1000' minheight='800' minwidth='1000' />
+      <zones>
+        <zone h='98000' id='3' type-v2='layout-basic' w='98000' x='1000' y='1000'>
+          <zone h='98000' id='2' name='@@WORKSHEET@@' w='98000' x='1000' y='1000' />
+        </zone>
+      </zones>
+    </dashboard>
+  </dashboards>
+  <windows source-height='30'>
+    <window class='worksheet' maximized='true' name='@@WORKSHEET@@'>
+      <cards>
+        <edge name='left'>
+          <strip size='160'>
+            <card type='pages' />
+            <card type='filters' />
+            <card type='marks' />
+          </strip>
+        </edge>
+        <edge name='top'>
+          <strip size='2147483647'>
+            <card type='columns' />
+          </strip>
+          <strip size='2147483647'>
+            <card type='rows' />
+          </strip>
+        </edge>
+      </cards>
+    </window>
+    <window class='dashboard' name='@@DASHBOARD@@'>
+      <viewpoints>
+        <viewpoint name='@@WORKSHEET@@' />
+      </viewpoints>
+    </window>
+  </windows>
+</workbook>
