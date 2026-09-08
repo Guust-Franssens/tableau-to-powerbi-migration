@@ -152,7 +152,7 @@ stay byte-identical.
 >
 > | verdict | exit | what was actually observed |
 > |---|---|---|
-> | `CREDENTIAL_MISSING` | 1 | text matched `credential_modal_signature.regex`. The hard stop. |
+> | `CREDENTIAL_MISSING` | 1 | text matched `credential_modal_signature.regex`, **or** the dialog has no readable text but hosts a WebView2 (`Chrome_WidgetWin_1`) or MSHTML (`Internet Explorer_Server`) child — positive hosting-technology evidence of a connector-authentication form (issue #146). The hard stop. |
 > | `CREDENTIAL_PRESENT` | 0 | a refresh was invoked and ran to the deadline with nothing unclassifiable up. Still not the gate of record for a serverless source — confirm with the one-row data probe. |
 > | `REFRESH_IN_PROGRESS` | 3 | a dialog whose **whole content** positively reads as refresh progress was already up **at t=0**: another refresh owns this instance. Wait for it or cancel the stale one; do not stack a second refresh. |
 > | `DIALOG_NEEDS_HUMAN` | 3 | a **known** human-blocking prompt that is not a credential prompt — the **native-database-query approval modal** above all. Not exit 1, because the remedy is an approval, not a sign-in. Never suppressed, and it outranks any progress text in the same window. |
