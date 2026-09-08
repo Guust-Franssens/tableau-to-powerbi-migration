@@ -24,7 +24,6 @@ import _credential_modal
 import probe_desktop_query
 import refresh_pbip_model
 from _credential_modal import (
-    CONNECTOR_AUTH_HOST_CLASSES,
     CredentialDetection,
     CredentialModal,
     CredentialUnknownError,

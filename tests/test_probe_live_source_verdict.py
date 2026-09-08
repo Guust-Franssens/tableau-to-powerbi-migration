@@ -915,9 +915,7 @@ def test_connector_auth_host_classifies_as_no_credential_through_parent(
     refresh_pbip_model, _, credential_modal = _import_skill_modules()
 
     # The measured shape: no text, WebView2 child present
-    window = credential_modal.DesktopWindow(
-        "", "Cls", 702, 355, (), child_classes=("Chrome_WidgetWin_1",)
-    )
+    window = credential_modal.DesktopWindow("", "Cls", 702, 355, (), child_classes=("Chrome_WidgetWin_1",))
     finding = credential_modal.classify_dialog(window)
     assert finding.kind == "credential", f"expected credential, got {finding.kind}"
     assert finding.verdict == "CREDENTIAL_MISSING"

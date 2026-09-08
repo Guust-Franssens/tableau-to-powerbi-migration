@@ -372,10 +372,12 @@ def blocking_prompt_signature() -> re.Pattern[str]:
 # enough to be a prompt". A dialog candidate that has NO readable Win32 text AND hosts one of these
 # classes is classified ``credential`` (issue #146 live shape: the connector window's UIA harvest
 # exposes only an empty pane, but a WebView2 child is present).
-CONNECTOR_AUTH_HOST_CLASSES = frozenset({
-    "Chrome_WidgetWin_1",
-    "Internet Explorer_Server",
-})
+CONNECTOR_AUTH_HOST_CLASSES = frozenset(
+    {
+        "Chrome_WidgetWin_1",
+        "Internet Explorer_Server",
+    }
+)
 
 
 def _has_connector_auth_host(window: DesktopWindow) -> bool:
@@ -388,9 +390,7 @@ def _has_connector_auth_host(window: DesktopWindow) -> bool:
     in a dialog that otherwise exposes no content is a deterministic signal: Power BI Desktop uses
     WebView2 specifically for connector authentication forms, not for native progress/approval dialogs.
     """
-    return bool(window.child_classes) and bool(
-        CONNECTOR_AUTH_HOST_CLASSES.intersection(window.child_classes)
-    )
+    return bool(window.child_classes) and bool(CONNECTOR_AUTH_HOST_CLASSES.intersection(window.child_classes))
 
 
 def normalize_texts(texts: Iterable[str]) -> tuple[str, ...]:
@@ -520,9 +520,7 @@ def _classify_unreadable_window(window: DesktopWindow) -> DialogFinding:
     instead of the actionable ``CREDENTIAL_MISSING`` / ``NO_CREDENTIAL`` human stop.
     """
     if _has_connector_auth_host(window):
-        host_classes = ",".join(
-            c for c in window.child_classes if c in CONNECTOR_AUTH_HOST_CLASSES
-        )
+        host_classes = ",".join(c for c in window.child_classes if c in CONNECTOR_AUTH_HOST_CLASSES)
         return _finding(DIALOG_KIND_CREDENTIAL, window, f"connector-auth-host:{host_classes}")
     return _finding(DIALOG_KIND_UNREADABLE, window, "")
 
@@ -1168,10 +1166,7 @@ def raise_terminal_detection(pid: int, state: CredentialDetection, source_hint: 
     """
     if state.modal is not None:
         raise CredentialMissingError(pid, state.modal, source_hint)
-    if (
-        state.dialog is not None
-        and state.dialog.kind == DIALOG_KIND_CREDENTIAL
-    ):
+    if state.dialog is not None and state.dialog.kind == DIALOG_KIND_CREDENTIAL:
         raise CredentialMissingError(
             pid,
             CredentialModal(matched_text=state.dialog.evidence, window=state.dialog.window),
