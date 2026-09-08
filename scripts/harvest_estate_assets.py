@@ -5,6 +5,7 @@ purpose: download every workbook and published datasource on a Tableau site, the
 usage:   python scripts/harvest_estate_assets.py --out <dir> [--env .env] [--limit N]
                                                  [--skip-download] [--workbooks-only]
                                                  [--project NAME] [--project-id LUID]
+                                                 [--project-url URL]
                                                  [--allow-unignored-out]
 
 Exit codes
@@ -75,6 +76,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
@@ -1457,6 +1459,115 @@ def dependency_datasources(con: sqlite3.Connection, workbook_luids: list[str]) -
     )
 
 
+PROJECT_LUID = re.compile(r"^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$")
+PROJECT_NUMERIC = re.compile(r"^[0-9]+$")
+
+
+class ProjectUrlError(ValueError):
+    """A pasted project URL that cannot become an exact `--project-id`. Always a usage error.
+
+    Never an empty selection and never a best guess: an empty result set reads as "that project has
+    no content" rather than "we could not resolve your input", which is the dangerous outcome
+    issue #191 exists to prevent.
+    """
+
+
+def _url_label(url: str, position: int) -> str:
+    """How a rejected URL is NAMED in a diagnostic: its position, and the host only.
+
+    Deliberately never the raw URL. `urlsplit().hostname` drops any `user:password@` userinfo, and
+    neither the query nor the fragment is read here -- a pasted Tableau URL routinely carries a
+    session token in one of them, and this script's diagnostics are pasted into public issues.
+    """
+    try:
+        host = urlsplit(url).hostname
+    except ValueError:  # an unparseable authority (e.g. a malformed IPv6 literal)
+        host = None
+    return f"--project-url #{position}" + (f" (host {host})" if host else "")
+
+
+def _project_route_candidates(url: str, label: str) -> list[str]:
+    """Every `/projects/<id>` segment in the URL's path and in its fragment route.
+
+    Tableau's web UI puts the route in the FRAGMENT (`https://<site>/#/site/<slug>/projects/35`),
+    while REST-shaped links put it in the path. Path and fragment are scanned separately so a path
+    ending in `projects` can never pair with the first fragment segment and invent an id.
+    """
+    parts = urlsplit(url)
+    if parts.scheme and parts.scheme.lower() not in ("http", "https"):
+        raise ProjectUrlError(f"{label}: only http(s) Tableau URLs are supported")
+    routes = [parts.path]
+    if parts.fragment:
+        routes.append(parts.fragment.split("?", 1)[0])
+    candidates: list[str] = []
+    for route in routes:
+        segments = [unquote(segment) for segment in route.split("/") if segment]
+        candidates.extend(
+            current for previous, current in zip(segments, segments[1:]) if previous.lower() == "projects"
+        )
+    return candidates
+
+
+def project_id_from_url(url: str, position: int = 1) -> str:
+    """The project LUID a pasted Tableau URL carries, or a usage error saying exactly why not.
+
+    The numeric branch is the whole point of issue #191: `https://<site>/#/projects/35` is the most
+    natural way a customer names "the one project I want", and that `35` is a legacy web-UI
+    identifier with NO public mapping -- verified against a live site 2026-08-17, REST
+    `GET /sites/{id}/projects` exposes only GUIDs and the Metadata API answers `FieldUndefined` for
+    it. So it is refused here, before any sign-in or download, rather than resolved by guesswork.
+    """
+    label = _url_label(url, position)
+    candidates = list(dict.fromkeys(_project_route_candidates(url, label)))
+    if not candidates:
+        raise ProjectUrlError(
+            f"{label}: no `/projects/<id>` segment found; pass the project name (--project NAME) "
+            "or its LUID (--project-id LUID)"
+        )
+    if len(candidates) > 1:
+        raise ProjectUrlError(
+            f"{label}: {len(candidates)} different `/projects/<id>` segments, so which project is "
+            "meant is ambiguous; pass --project-id LUID"
+        )
+    candidate = candidates[0]
+    if PROJECT_LUID.match(candidate):
+        return candidate
+    if PROJECT_NUMERIC.match(candidate):
+        raise ProjectUrlError(
+            f"{label}: Tableau's numeric project id ({candidate}) is a legacy web-UI identifier "
+            "with no public REST or Metadata API mapping, so it cannot be resolved to a project. "
+            'Open the URL in a browser and pass the project name (--project "<name>") or its LUID '
+            "(--project-id LUID)."
+        )
+    raise ProjectUrlError(
+        f"{label}: the `/projects/<id>` segment is neither a LUID nor a numeric id; pass the "
+        "project name (--project NAME) or its LUID (--project-id LUID)"
+    )
+
+
+def project_ids_from_urls(urls: Sequence[str], project_ids: Sequence[str]) -> list[str]:
+    """Fold every `--project-url` into the existing exact `--project-id` list, or refuse the lot.
+
+    No new resolver and no new endpoint: a URL that carries a LUID is normalised into the path
+    `--project-id` already takes, byte for byte. Every URL is judged BEFORE any is applied, so an
+    invocation mixing one usable URL with one numeric URL selects nothing at all -- a partial scope
+    would silently migrate less than the operator asked for.
+    """
+    resolved = list(project_ids)
+    errors: list[str] = []
+    for position, url in enumerate(urls, 1):
+        try:
+            luid = project_id_from_url(url, position)
+        except ProjectUrlError as exc:
+            errors.append(str(exc))
+            continue
+        if luid not in resolved:  # the same project named twice is one project, not two
+            resolved.append(luid)
+    if errors:
+        raise ProjectUrlError("\n".join(errors))
+    return resolved
+
+
 def scoped_todo(
     con: sqlite3.Connection, project_names: list[str], project_ids: list[str], workbooks_only: bool
 ) -> tuple[list[tuple[str, str, str]], list[tuple[str, str]], int, int, int]:
@@ -1490,7 +1601,7 @@ def scoped_todo(
         )
     )
     if not selected:
-        raise ValueError("no projects matched --project/--project-id")
+        raise ValueError("no projects matched --project/--project-id (--project-url resolves into --project-id)")
     selected_ids = [row[0] for row in selected]
     placeholders = ",".join("?" for _ in selected_ids)
     workbooks = list(
@@ -1689,6 +1800,16 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-statements,too-ma
         default=[],
         help="project LUID to harvest (repeatable); same selection as --project, matched exactly",
     )
+    ap.add_argument(
+        "--project-url",
+        action="append",
+        default=[],
+        metavar="URL",
+        help="a project URL pasted out of the browser (repeatable). A URL carrying a LUID is "
+        "normalised into --project-id; Tableau's NUMERIC web-UI project id "
+        "(https://<site>/#/projects/35) has no public API mapping and is refused with the id "
+        "echoed, before any sign-in or download",
+    )
     ap.add_argument("--limit", type=int, help="stop after N assets (for a quick pass)")
     ap.add_argument(
         "--download-timeout",
@@ -1718,6 +1839,14 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-statements,too-ma
         help="write to --out even when git does not ignore it (escape hatch; logs a warning instead)",
     )
     args = ap.parse_args()
+
+    # BEFORE the output guard, the engine, the `.env` and above all the sign-in: a URL we cannot
+    # turn into an exact LUID is a usage error, and refusing it here is what keeps it from becoming
+    # an empty selection that reads like "that project has no content" (issue #191).
+    try:
+        args.project_id = project_ids_from_urls(args.project_url, args.project_id)
+    except ProjectUrlError as exc:
+        ap.error(str(exc))
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     if 0 < args.download_stall_timeout < ENGINE_READ_TIMEOUT_SECONDS:

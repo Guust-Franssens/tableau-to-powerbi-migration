@@ -258,3 +258,207 @@ def test_the_sweep_does_not_re_download_an_assets_dir_from_before_the_luid_prefi
 
     assert offline_sweep == [legacy]
     assert rows[0]["file"] == str(legacy)
+
+
+# --- a project URL pasted out of the browser (issue #191) ---------------------------------------
+#
+# The numeric id in Tableau's own web-UI route is a legacy internal identifier with NO public API
+# surface: verified against a live site 2026-08-17, REST `GET /sites/{id}/projects` returns only
+# GUID `id`s and the Metadata API answers `FieldUndefined` for it. So the ONE thing these guard is
+# that an unresolvable paste is a loud usage error rather than a scope that quietly selects nothing
+# -- an empty selection reads as "that project has no content", not "we could not resolve you".
+
+PROJECT_GUID = "a85bde90-9380-4a01-8b1e-2f9c3d4e5f60"
+OTHER_GUID = "b0000000-0000-4000-8000-000000000000"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        f"https://tableau.example.com/#/projects/{PROJECT_GUID}",
+        f"https://tableau.example.com/#/site/finance/projects/{PROJECT_GUID}",
+        f"https://tableau.example.com/#/site/finance/projects/{PROJECT_GUID}/",
+        f"https://tableau.example.com/#/projects/{PROJECT_GUID}?:origin=card_share_link",
+        f"https://tableau.example.com/api/3.19/sites/{OTHER_GUID}/projects/{PROJECT_GUID}",
+        f"http://tableau.example.com/#/projects/{PROJECT_GUID}",
+        f"tableau.example.com/#/projects/{PROJECT_GUID}",
+        f"https://tableau.example.com/%23/site/finance/projects/{PROJECT_GUID}",
+    ],
+)
+def test_a_guid_url_normalises_into_the_exact_project_id_path(url: str) -> None:
+    """Including the REST shape, whose SITE guid sits in the same URL and must not be mistaken for it."""
+    assert harvest.project_ids_from_urls([url], []) == [PROJECT_GUID]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://tableau.example.com/#/projects/35",
+        "https://tableau.example.com/#/projects/35/",
+        "https://tableau.example.com/#/site/finance/projects/35?:origin=card_share_link",
+        "https://tableau.example.com/#/projects/3%35",  # percent-encoded, same legacy id
+    ],
+)
+def test_a_numeric_url_is_refused_with_the_id_echoed(url: str) -> None:
+    with pytest.raises(harvest.ProjectUrlError) as raised:
+        harvest.project_ids_from_urls([url], [])
+    message = str(raised.value)
+    assert "35" in message
+    assert "no public REST or Metadata API mapping" in message
+    assert "--project" in message  # says what to pass instead, not just that it failed
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://tableau.example.com/#/site/finance/views/Monthly/Sheet1",
+        "https://tableau.example.com/",
+        "",
+        "not a url at all",
+    ],
+)
+def test_a_url_with_no_project_segment_is_a_usage_error(url: str) -> None:
+    with pytest.raises(harvest.ProjectUrlError, match="no `/projects/<id>` segment"):
+        harvest.project_ids_from_urls([url], [])
+
+
+def test_a_non_http_url_is_refused_as_unsupported() -> None:
+    with pytest.raises(harvest.ProjectUrlError, match="only http"):
+        harvest.project_ids_from_urls([f"file:///c:/projects/{PROJECT_GUID}"], [])
+
+
+def test_a_project_segment_that_is_neither_luid_nor_numeric_is_a_usage_error() -> None:
+    """A project NAME in the route is not silently accepted: `--project` matches exactly, this does not."""
+    with pytest.raises(harvest.ProjectUrlError, match="neither a LUID nor a numeric id"):
+        harvest.project_ids_from_urls(["https://tableau.example.com/#/projects/Certified%20Sources"], [])
+
+
+def test_two_project_segments_in_one_url_are_ambiguous_rather_than_a_best_guess() -> None:
+    url = f"https://tableau.example.com/#/projects/{PROJECT_GUID}/projects/{OTHER_GUID}"
+    with pytest.raises(harvest.ProjectUrlError, match="ambiguous"):
+        harvest.project_ids_from_urls([url], [])
+
+
+def test_the_same_project_named_twice_is_one_project() -> None:
+    url = f"https://tableau.example.com/#/projects/{PROJECT_GUID}"
+    assert harvest.project_ids_from_urls([url, url], []) == [PROJECT_GUID]
+    assert harvest.project_ids_from_urls([url], [PROJECT_GUID]) == [PROJECT_GUID]
+
+
+def test_two_different_guid_urls_scope_to_both_projects_like_repeated_project_id() -> None:
+    """`--project-url` is repeatable and ADDITIVE, exactly as `--project-id` already is."""
+    urls = [f"https://tableau.example.com/#/projects/{PROJECT_GUID}", f"https://x.example.com/#/projects/{OTHER_GUID}"]
+    assert harvest.project_ids_from_urls(urls, []) == [PROJECT_GUID, OTHER_GUID]
+
+
+def test_a_url_composes_with_the_existing_project_id_flag() -> None:
+    resolved = harvest.project_ids_from_urls([f"https://tableau.example.com/#/projects/{PROJECT_GUID}"], [OTHER_GUID])
+    assert resolved == [OTHER_GUID, PROJECT_GUID]
+
+
+def test_one_valid_url_beside_one_numeric_url_refuses_the_whole_invocation() -> None:
+    """No partial scope: a run that silently drops half the requested scope is the worse failure."""
+    urls = [f"https://tableau.example.com/#/projects/{PROJECT_GUID}", "https://tableau.example.com/#/projects/35"]
+    with pytest.raises(harvest.ProjectUrlError) as raised:
+        harvest.project_ids_from_urls(urls, [])
+    assert "35" in str(raised.value)
+
+
+def test_the_diagnostic_never_echoes_userinfo_query_or_fragment_secrets() -> None:
+    url = "https://admin:hunter2@tableau.example.com/#/site/finance/projects/35?:token=SEKRIT-TOKEN"
+    with pytest.raises(harvest.ProjectUrlError) as raised:
+        harvest.project_ids_from_urls([url], [])
+    message = str(raised.value)
+    assert "tableau.example.com" in message and "35" in message
+    for secret in ("hunter2", "admin", "SEKRIT-TOKEN", ":token"):
+        assert secret not in message
+
+
+# --- the same refusal, end to end through main() -------------------------------------------------
+
+
+def guid_estate_db(path: Path) -> Path:
+    """The same one-workbook estate, with the project keyed by a LUID a URL could carry."""
+    con = sqlite3.connect(path)
+    con.executescript(
+        f"""
+        CREATE TABLE project (luid TEXT PRIMARY KEY, name TEXT);
+        CREATE TABLE workbook (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        CREATE TABLE datasource (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
+        CREATE TABLE dependency (workbook_luid TEXT, datasource_luid TEXT, datasource_name TEXT);
+        INSERT INTO project VALUES ('{PROJECT_GUID}', 'Finance');
+        INSERT INTO workbook VALUES ('wb-finance', 'Monthly Report', '{PROJECT_GUID}');
+        """
+    )
+    con.commit()
+    con.close()
+    return path
+
+
+@pytest.fixture(name="refuse_all_work")
+def refuse_all_work_fixture(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every step main() takes AFTER argument handling, wired to fail loudly if it is reached."""
+
+    def refuse(name: str):
+        def boom(*args: object, **kwargs: object):
+            raise AssertionError(f"{name} ran before the project URL was refused: {args} {kwargs}")
+
+        return boom
+
+    monkeypatch.setattr(harvest, "refuse_unignored_output", refuse("the --out guard"))
+    monkeypatch.setattr(harvest, "engine_scripts_dir", refuse("engine resolution"))
+    monkeypatch.setattr(harvest, "resolve_env", refuse("the .env / credential read"))
+    monkeypatch.setattr(harvest, "require", refuse("the credential check"))
+    monkeypatch.setattr(harvest, "download", refuse("a download"))
+
+
+@pytest.mark.parametrize(
+    "urls",
+    [
+        ["https://tableau.example.com/#/projects/35"],
+        [f"https://tableau.example.com/#/projects/{PROJECT_GUID}", "https://tableau.example.com/#/projects/35"],
+    ],
+)
+def test_the_cli_refuses_a_numeric_project_url_before_any_session_or_download(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+    urls: list[str],
+    refuse_all_work: None,  # pylint: disable=unused-argument
+) -> None:
+    """The mutation control: drop the refusal from `main()` and this stops raising SystemExit at all.
+
+    Both cases matter -- the numeric URL alone, and a numeric URL BESIDE a usable one, which must
+    still select nothing rather than quietly harvest half the requested scope.
+    """
+    argv = ["harvest_estate_assets.py", "--out", str(tmp_path / "_sweep"), "--db", str(tmp_path / "estate.db")]
+    for url in urls:
+        argv += ["--project-url", url]
+    monkeypatch.setattr(sys, "argv", argv)
+
+    with pytest.raises(SystemExit) as raised:
+        harvest.main()
+
+    assert raised.value.code == 2  # argparse's usage-error convention, unchanged
+    stderr = capsys.readouterr().err
+    assert "35" in stderr and "no public REST or Metadata API mapping" in stderr
+    assert not (tmp_path / "_sweep").exists()  # nothing was created, so nothing was partially scoped
+
+
+def test_the_cli_treats_a_guid_url_exactly_as_the_project_id_it_carries(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, offline_sweep: list[Path]
+) -> None:
+    """Byte for byte the same selection, so the URL really is normalised into the existing path."""
+    db = guid_estate_db(tmp_path / "estate.db")
+
+    def sweep(out: Path, *extra: str) -> list[dict]:
+        (out / "assets").mkdir(parents=True)
+        (out / "assets" / "wb-finance_Monthly_Report.twbx").write_bytes(b"PK\x03\x04")
+        rows = run_sweep(monkeypatch, out, db, "--skip-download", *extra)
+        return [{key: row[key] for key in ("name", "kind", "luid")} for row in rows]
+
+    by_id = sweep(tmp_path / "_by_id", "--project-id", PROJECT_GUID)
+    by_url = sweep(tmp_path / "_by_url", "--project-url", f"https://tableau.example.com/#/projects/{PROJECT_GUID}")
+
+    assert by_url == by_id == [{"name": "Monthly Report", "kind": "workbook", "luid": "wb-finance"}]
+    assert len(offline_sweep) == 2
