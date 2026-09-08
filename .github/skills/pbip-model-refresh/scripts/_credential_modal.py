@@ -93,9 +93,15 @@ class DesktopWindow:
       dialog disables the owner too. It only means the exoneration does not apply.
     * ``owner_enabled is None``  - no owner, so the test did not apply. Not the same as passing it.
 
-    Nine fields, waived rather than split: this is one Win32 window record and every field is read
+    Ten fields, waived rather than split: this is one Win32 window record and every field is read
     straight from the API. Grouping the modality pair behind a nested object would put an indirection
     between a reader and the two values three review rounds turned on.
+
+    ``child_classes`` carries the Win32 class names of immediate child HWNDs. It is the only evidence
+    available when the window's own text and its children's ``GetWindowText`` both return empty (the
+    measured live shape for Power BI's connector-authentication form, issue #146). A child class
+    matching the WebView2 host (``Chrome_WidgetWin_1``) is positive hosting-technology evidence that
+    the dialog contains a web-hosted authentication form - not a size/geometry proxy.
     """
 
     # pylint: disable=too-many-instance-attributes
@@ -108,6 +114,7 @@ class DesktopWindow:
     hwnd: int = 0
     owner_hwnd: int = 0
     owner_enabled: bool | None = None
+    child_classes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -357,6 +364,35 @@ def blocking_prompt_signature() -> re.Pattern[str]:
     return _compile_signature(BLOCKING_SIGNATURE_PATH)
 
 
+# Child-class evidence for the connector authentication form (issue #146). Power BI Desktop hosts its
+# data-source credential dialogs in a WebView2 control whose Win32 child class is
+# ``Chrome_WidgetWin_1``. The ``Internet Explorer_Server`` class is the legacy MSHTML host used by
+# older connector forms. These are HOSTING-TECHNOLOGY identifiers, not size/class proxies (#400
+# review): the claim is "this dialog contains a web authentication surface", not "this dialog is big
+# enough to be a prompt". A dialog candidate that has NO readable Win32 text AND hosts one of these
+# classes is classified ``credential`` (issue #146 live shape: the connector window's UIA harvest
+# exposes only an empty pane, but a WebView2 child is present).
+CONNECTOR_AUTH_HOST_CLASSES = frozenset({
+    "Chrome_WidgetWin_1",
+    "Internet Explorer_Server",
+})
+
+
+def _has_connector_auth_host(window: DesktopWindow) -> bool:
+    """Does ``window`` host a WebView2 or MSHTML child, consistent with a connector auth form?
+
+    This is positive hosting-technology evidence for the connector authentication dialog that Power BI
+    Desktop shows when a data source requires credentials. The dialog's own text and its children's
+    ``GetWindowText`` both return empty (the measured live shape, issue #146), so text-based signatures
+    cannot match. But the WebView2 host child (``Chrome_WidgetWin_1``) is present, and its presence
+    in a dialog that otherwise exposes no content is a deterministic signal: Power BI Desktop uses
+    WebView2 specifically for connector authentication forms, not for native progress/approval dialogs.
+    """
+    return bool(window.child_classes) and bool(
+        CONNECTOR_AUTH_HOST_CLASSES.intersection(window.child_classes)
+    )
+
+
 def normalize_texts(texts: Iterable[str]) -> tuple[str, ...]:
     """Whitespace-normalised, de-duplicated, order-preserving text (mirrors ``Get-NormalizedText``)."""
     clean: list[str] = []
@@ -469,9 +505,26 @@ def classify_dialog(window: DesktopWindow) -> DialogFinding:
     if title and benign.search(title):
         return _finding(DIALOG_KIND_BENIGN_TITLE_ONLY, window, title)
     if not all_texts:
-        return _finding(DIALOG_KIND_UNREADABLE, window, "")
+        return _classify_unreadable_window(window)
     evidence = unaccounted if unaccounted is not None else all_texts[0]
     return _finding(DIALOG_KIND_UNRECOGNIZED, window, evidence)
+
+
+def _classify_unreadable_window(window: DesktopWindow) -> DialogFinding:
+    """Classify a dialog with NO readable Win32 text (issue #146).
+
+    When the window hosts a WebView2 or MSHTML child, it is positive hosting-technology evidence of a
+    connector-authentication form — Power BI Desktop uses these containers specifically for data-source
+    credential dialogs, not for native progress or approval windows. Without this, the dialog classifies
+    ``DIALOG_UNREADABLE`` → ``ERROR``, and a 390-second bounded wait ends with a generic tooling error
+    instead of the actionable ``CREDENTIAL_MISSING`` / ``NO_CREDENTIAL`` human stop.
+    """
+    if _has_connector_auth_host(window):
+        host_classes = ",".join(
+            c for c in window.child_classes if c in CONNECTOR_AUTH_HOST_CLASSES
+        )
+        return _finding(DIALOG_KIND_CREDENTIAL, window, f"connector-auth-host:{host_classes}")
+    return _finding(DIALOG_KIND_UNREADABLE, window, "")
 
 
 def _finding(kind: str, window: DesktopWindow, evidence: str) -> DialogFinding:
@@ -745,6 +798,32 @@ def _child_texts(user32, hwnd: int) -> tuple[str, ...]:
     return tuple(texts)
 
 
+def _child_class_names(user32, hwnd: int) -> tuple[str, ...]:
+    """Win32 class names of immediate child HWNDs (issue #146).
+
+    Collected alongside ``_child_texts`` so the caller can identify hosting technology (WebView2,
+    MSHTML) even when ``GetWindowText`` returns empty for every child - the measured live shape for
+    Power BI's connector-authentication form.
+    """
+    classes: list[str] = []
+    errors: list[BaseException] = []
+
+    def callback(child_hwnd, _lparam):
+        try:
+            cls = _class_name(user32, _hwnd_value(child_hwnd))
+            if cls:
+                classes.append(cls)
+        except BaseException as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+            errors.append(exc)
+        return True
+
+    enum_child_proc = _winenumproc_type()(callback)
+    user32.EnumChildWindows(hwnd, enum_child_proc, 0)
+    if errors:
+        raise Win32EnumerationError(f"child class enumeration callback failed: {errors[0]}") from errors[0]
+    return tuple(classes)
+
+
 def _enumerate_pid_windows_with_count(pid: int) -> tuple[list[DesktopWindow], int]:
     """Enumerate visible top-level/owned windows for ``pid`` using Win32 ``EnumWindows``.
 
@@ -772,7 +851,9 @@ def _enumerate_pid_windows_with_count(pid: int) -> tuple[list[DesktopWindow], in
             rect = wintypes.RECT()
             user32.GetWindowRect(hwnd_int, ctypes.byref(rect))
             title = _window_text(user32, hwnd_int)
-            texts = tuple(text for text in (title, *_child_texts(user32, hwnd_int)) if text)
+            child_texts = _child_texts(user32, hwnd_int)
+            texts = tuple(text for text in (title, *child_texts) if text)
+            child_classes = _child_class_names(user32, hwnd_int)
             # The modality facts. `GW_OWNER` is the window a modal disables, and its enabled state is
             # the only direct evidence of whether this window is blocking anyone (#400 review round 3).
             # Deliberately three-valued: no owner means the test did not apply, which is NOT "passed".
@@ -789,6 +870,7 @@ def _enumerate_pid_windows_with_count(pid: int) -> tuple[list[DesktopWindow], in
                     hwnd=hwnd_int,
                     owner_hwnd=owner_hwnd,
                     owner_enabled=owner_enabled,
+                    child_classes=child_classes,
                 )
             )
         except BaseException as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
@@ -1068,12 +1150,17 @@ def print_dialog_observed_notice(pid: int, finding: DialogFinding) -> None:
 
 
 def raise_terminal_detection(pid: int, state: CredentialDetection, source_hint: str | None = None) -> None:
-    """Raise for the two observations that end a bounded wait IMMEDIATELY.
+    """Raise for the observations that end a bounded wait IMMEDIATELY.
 
-    Only a matched credential signature and a confirmed-dead process qualify. A :class:`DialogFinding`
-    deliberately does NOT (issue #376): it is latched by the caller and surfaced at the deadline via
+    A matched credential signature (text-based), a connector-auth-host dialog (child-class-based,
+    issue #146), and a confirmed-dead process qualify. Other :class:`DialogFinding` kinds deliberately
+    do NOT (issue #376): they are latched by the caller and surfaced at the deadline via
     :func:`raise_latched_verdict`, so a dialog we could not read cannot cut short a refresh that was
     going to succeed.
+
+    The credential-kind dialog finding from the connector-auth-host path (issue #146) is an exception:
+    the WebView2 child class IS positive hosting-technology evidence of a connector authentication form,
+    so it earns the same immediate stop as a text-based credential match.
 
     Public because ``refresh_pbip_model`` has a SECOND wait loop - the progress-monitor branch - which
     must behave identically. It used to call the t=0 helper instead, so a proven-benign progress dialog
@@ -1081,6 +1168,15 @@ def raise_terminal_detection(pid: int, state: CredentialDetection, source_hint: 
     """
     if state.modal is not None:
         raise CredentialMissingError(pid, state.modal, source_hint)
+    if (
+        state.dialog is not None
+        and state.dialog.kind == DIALOG_KIND_CREDENTIAL
+    ):
+        raise CredentialMissingError(
+            pid,
+            CredentialModal(matched_text=state.dialog.evidence, window=state.dialog.window),
+            source_hint,
+        )
     if state.process_gone is not None:
         raise DesktopGoneError(pid, state.process_gone)
 

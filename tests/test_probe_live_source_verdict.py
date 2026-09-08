@@ -897,3 +897,89 @@ def test_probe_timeout_default_threads_all_the_way_to_run_probe(
         f"{probe_live_source.PROBE_TIMEOUT_SECONDS}; the argparse default has drifted off the constant, so the "
         "child would be SIGKILLed before its own deadline can fire (issue #156 inversion)."
     )
+
+
+def test_connector_auth_host_classifies_as_no_credential_through_parent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #146: a WebView2-hosting unreadable dialog must become NO_CREDENTIAL in the parent.
+
+    The measured live shape: the connector-authentication window's UIA harvest exposes only an empty
+    pane, but a ``Chrome_WidgetWin_1`` child is present. ``classify_dialog`` returns
+    ``CREDENTIAL_MISSING``, the child emits it on a verdict line, and the parent must classify it as
+    ``NO_CREDENTIAL`` — the actionable human stop.
+
+    This is the sanctioned ``probe_live_source`` path, not just a helper-only test.
+    """
+    probe_live_source = _import_probe_live_source()
+    refresh_pbip_model, _, credential_modal = _import_skill_modules()
+
+    # The measured shape: no text, WebView2 child present
+    window = credential_modal.DesktopWindow(
+        "", "Cls", 702, 355, (), child_classes=("Chrome_WidgetWin_1",)
+    )
+    finding = credential_modal.classify_dialog(window)
+    assert finding.kind == "credential", f"expected credential, got {finding.kind}"
+    assert finding.verdict == "CREDENTIAL_MISSING"
+
+    # Emit through the real emitter
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        refresh_pbip_model._emit_dialog_finding(111, finding)
+    stdout = buffer.getvalue()
+
+    # The emitted line must carry CREDENTIAL_MISSING, because the kind is credential
+    assert "CREDENTIAL_MISSING" in stdout, f"emitter did not produce CREDENTIAL_MISSING: {stdout!r}"
+
+    # Feed through the real parent classifier
+    monkeypatch.setattr(
+        probe_live_source.subprocess,
+        "run",
+        lambda *_args, _out=stdout, **_kwargs: subprocess.CompletedProcess(
+            args=["refresh"], returncode=1, stdout=_out, stderr=""
+        ),
+    )
+    rc, verdict = probe_live_source._refresh_and_classify(  # noqa: SLF001
+        123, "Orders", 1, network_fault_observed=False
+    )
+    assert verdict == "NO_CREDENTIAL", (
+        f"the connector-auth-host finding must classify as NO_CREDENTIAL in the parent, got {verdict}"
+    )
+
+
+def test_connector_auth_host_mutation_no_webview2_does_not_become_no_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mutation: removing the WebView2 child class must NOT produce NO_CREDENTIAL.
+
+    Without the positive hosting-technology signal, the dialog is unreadable and the parent must
+    classify it as ERROR, not NO_CREDENTIAL. This is the mutation that proves the credential-specific
+    assertion fails for the intended reason (issue #146 brief).
+    """
+    probe_live_source = _import_probe_live_source()
+    refresh_pbip_model, _, credential_modal = _import_skill_modules()
+
+    # Same shape but without WebView2 child — should be unreadable
+    window = credential_modal.DesktopWindow("", "Cls", 702, 355, (), child_classes=())
+    finding = credential_modal.classify_dialog(window)
+    assert finding.kind == "unreadable", f"expected unreadable without WebView2, got {finding.kind}"
+
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        refresh_pbip_model._emit_dialog_finding(111, finding)
+    stdout = buffer.getvalue()
+    assert "CREDENTIAL_MISSING" not in stdout
+
+    monkeypatch.setattr(
+        probe_live_source.subprocess,
+        "run",
+        lambda *_args, _out=stdout, **_kwargs: subprocess.CompletedProcess(
+            args=["refresh"], returncode=3, stdout=_out, stderr=""
+        ),
+    )
+    rc, verdict = probe_live_source._refresh_and_classify(  # noqa: SLF001
+        123, "Orders", 1, network_fault_observed=False
+    )
+    assert verdict != "NO_CREDENTIAL", (
+        f"without WebView2 evidence, the verdict must NOT be NO_CREDENTIAL, got {verdict}"
+    )

@@ -24,6 +24,7 @@ import _credential_modal
 import probe_desktop_query
 import refresh_pbip_model
 from _credential_modal import (
+    CONNECTOR_AUTH_HOST_CLASSES,
     CredentialDetection,
     CredentialModal,
     CredentialUnknownError,
@@ -34,6 +35,7 @@ from _credential_modal import (
     DialogFoundError,
     DesktopWindow,
     _enumerate_pid_windows_with_count,
+    _has_connector_auth_host,
     classify_dialog,
     inspect_credential_modal,
     join_with_credential_poll,
@@ -174,6 +176,7 @@ def owned_dialog(
     height: int = 355,
     owner_enabled: bool | None = False,
     hwnd: int = DIALOG_HWND,
+    child_classes: tuple[str, ...] = (),
 ) -> DesktopWindow:
     """A dialog OWNED by :func:`main_window`.
 
@@ -190,6 +193,7 @@ def owned_dialog(
         hwnd=hwnd,
         owner_hwnd=MAIN_HWND,
         owner_enabled=owner_enabled,
+        child_classes=child_classes,
     )
 
 
@@ -4152,3 +4156,127 @@ def test_a_native_query_prompt_beside_progress_text_is_live_reported(tmp_path: P
     assert done.returncode == 3, f"a native-query approval must never clear or be a credential stop:\n{done.stdout}"
     assert "CREDENTIAL_PRESENT" not in done.stdout
     assert "REFRESH_IN_PROGRESS" not in done.stdout, "one progress element must not suppress the whole window"
+
+
+# ---------------------------------------------------------------------------
+# Issue #146: connector-auth host detection via child window class names
+# ---------------------------------------------------------------------------
+
+
+def connector_auth_dialog_window() -> DesktopWindow:
+    """The measured live shape (issue #146): owned, no readable Win32 text, WebView2 child present."""
+    return owned_dialog(child_classes=("Chrome_WidgetWin_1",))
+
+
+def test_connector_auth_host_detected_by_webview2_child_class() -> None:
+    """Issue #146: a dialog with no readable text but a WebView2 child is a connector auth form.
+
+    This is the measured live shape: the connector-authentication window's UIA harvest and
+    ``GetWindowText`` both return empty, but ``EnumChildWindows`` reveals a ``Chrome_WidgetWin_1``
+    child — the WebView2 host class. That is positive hosting-technology evidence.
+    """
+    window = connector_auth_dialog_window()
+    finding = classify_dialog(window)
+    assert finding.kind == "credential", f"expected credential, got {finding.kind}"
+    assert finding.verdict == "CREDENTIAL_MISSING"
+    assert "connector-auth-host" in finding.evidence
+    assert "Chrome_WidgetWin_1" in finding.evidence
+
+
+def test_connector_auth_host_mutation_removing_webview2_falls_to_unreadable() -> None:
+    """Mutation: removing the WebView2 child class evidence must NOT produce CREDENTIAL_MISSING.
+
+    Without the positive hosting-technology signal, the dialog is unreadable — and unreadable must
+    never assert a credential wall (the invariant from issue #146's brief).
+    """
+    window_without_host = owned_dialog(child_classes=())
+    finding = classify_dialog(window_without_host)
+    assert finding.kind == "unreadable", f"without WebView2 child, expected unreadable, got {finding.kind}"
+    assert finding.verdict == "DIALOG_UNREADABLE"
+
+
+def test_connector_auth_host_with_irrelevant_child_class_stays_unreadable() -> None:
+    """A child class that is NOT in CONNECTOR_AUTH_HOST_CLASSES must not trigger credential."""
+    window = owned_dialog(child_classes=("SomeOtherClass",))
+    finding = classify_dialog(window)
+    assert finding.kind == "unreadable", f"non-auth child class should stay unreadable, got {finding.kind}"
+    assert finding.verdict == "DIALOG_UNREADABLE"
+
+
+def test_mshtml_legacy_host_also_classifies_as_credential() -> None:
+    """The legacy MSHTML host (Internet Explorer_Server) is also a connector auth host."""
+    window = owned_dialog(child_classes=("Internet Explorer_Server",))
+    finding = classify_dialog(window)
+    assert finding.kind == "credential"
+    assert finding.verdict == "CREDENTIAL_MISSING"
+
+
+def test_connector_auth_host_text_takes_precedence_over_child_class() -> None:
+    """If the window HAS readable text matching a credential signature, text wins (not child class).
+
+    The child-class path is a fallback for when text is empty. When text IS present and matches,
+    the text-based credential finding must take precedence with the text as evidence.
+    """
+    window = owned_dialog(
+        ("Please specify how to connect",),
+        child_classes=("Chrome_WidgetWin_1",),
+    )
+    finding = classify_dialog(window)
+    assert finding.kind == "credential"
+    assert finding.verdict == "CREDENTIAL_MISSING"
+    # Evidence should be the text, not the child class — text match is earlier and stronger
+    assert "connector-auth-host" not in finding.evidence
+
+
+def test_connector_auth_host_beside_progress_surfaces_as_credential_stop() -> None:
+    """Issue #146 live shape: refresh progress AND a WebView2-hosting unreadable dialog.
+
+    ``dialog_verdict`` must surface the credential finding, not suppress it in favour of the
+    progress dialog. This is the exact shape the original issue describes.
+    """
+    from _credential_modal import dialog_verdict
+
+    windows = [
+        connector_auth_dialog_window(),
+        progress_dialog_window(),
+        main_window(title="Report"),
+    ]
+    finding = dialog_verdict(windows, operation_in_flight=True)
+    assert finding is not None, "expected a finding, got None"
+    assert finding.kind == "credential"
+    assert finding.verdict == "CREDENTIAL_MISSING"
+
+
+def test_connector_auth_host_through_inspect_credential_modal() -> None:
+    """The parent integration path: ``inspect_credential_modal`` returns a modal for the WebView2 host.
+
+    The CREDENTIAL_MISSING verdict emitted by ``classify_dialog`` must reach ``inspect_credential_modal``
+    as a ``dialog`` finding with ``kind == 'credential'``, which ``raise_terminal_detection`` then
+    routes to ``CredentialMissingError``.
+    """
+    windows = [connector_auth_dialog_window(), main_window(title="Report")]
+    state = inspect_credential_modal(111, lambda _pid: windows)
+    # The connector-auth-host path produces a CredentialModal via match_credential_modal OR
+    # a dialog finding with kind=credential via dialog_verdict. Since the window has no text
+    # matching the signature, it goes through classify_dialog -> dialog_verdict -> dialog finding.
+    assert state.dialog is not None or state.modal is not None, (
+        "inspect_credential_modal must see the connector auth host"
+    )
+    if state.dialog is not None:
+        assert state.dialog.kind == "credential"
+        assert state.dialog.verdict == "CREDENTIAL_MISSING"
+
+
+def test_has_connector_auth_host_requires_matching_class() -> None:
+    """Unit test for _has_connector_auth_host: only CONNECTOR_AUTH_HOST_CLASSES classes match."""
+    webview2 = DesktopWindow("", "Cls", 100, 100, child_classes=("Chrome_WidgetWin_1",))
+    mshtml = DesktopWindow("", "Cls", 100, 100, child_classes=("Internet Explorer_Server",))
+    other = DesktopWindow("", "Cls", 100, 100, child_classes=("Button",))
+    empty = DesktopWindow("", "Cls", 100, 100, child_classes=())
+    none_set = DesktopWindow("", "Cls", 100, 100)
+
+    assert _has_connector_auth_host(webview2) is True
+    assert _has_connector_auth_host(mshtml) is True
+    assert _has_connector_auth_host(other) is False
+    assert _has_connector_auth_host(empty) is False
+    assert _has_connector_auth_host(none_set) is False
