@@ -154,6 +154,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # keeps this script the offline, network-free step its module docstring promises.
 from tableau_oracle_manifest import render_unestablished  # noqa: E402  # pylint: disable=wrong-import-position
 
+# The ONE shipping rule for `view_type_resolution`, shared with the packager rather than re-derived
+# here (#560 review round 1). `manifest_scope` already owns "what a manifest may carry, by name AND
+# by value"; a second copy of that rule in this script is how a grouped manifest and a packaged one
+# would come to disagree about the same record. Pure functions, no network, no credential.
+from manifest_scope import (  # noqa: E402  # pylint: disable=wrong-import-position
+    merged_view_type_resolution,
+    scope_view_type_resolution,
+    scope_view_type_resolution_batches,
+)
+
 LOG = logging.getLogger("group-oracle")
 
 MANIFEST_NAME = "oracle-manifest.json"
@@ -1126,7 +1136,21 @@ def merge_batches(batches: list[_Batch]) -> tuple[dict[str, Any], dict[str, Path
     newest = max(batches, key=lambda b: (b.captured_at, b.order))
     merged = {key: value for key, value in newest.manifest.items() if key != "views"}
     merged["views"] = views
-    merged["batches"] = [b.label for b in sorted(batches, key=lambda b: (b.captured_at, b.order), reverse=True)]
+    ordered = sorted(batches, key=lambda b: (b.captured_at, b.order), reverse=True)
+    merged["batches"] = [b.label for b in ordered]
+    # ⚠️ NOT taken from the newest batch, unlike every other non-view field above (#560 review round
+    # 1). `view_type_resolution` records whether the ONE site-wide Metadata call lost its session and
+    # recovered; a clean re-run therefore OVERWROTE an earlier batch's recovery, and the merged
+    # manifest said `reauths: 0` about a merge that contained one. The aggregate cannot erase either
+    # direction, and the per-batch rows keep the detail the aggregate summarises.
+    resolution, by_batch = merged_view_type_resolution(
+        [(b.label, b.manifest.get("view_type_resolution")) for b in ordered]
+    )
+    merged.pop("view_type_resolution", None)
+    if resolution is not None:
+        merged["view_type_resolution"] = resolution
+    if len(batches) > 1:
+        merged["view_type_resolution_by_batch"] = by_batch
     merged["merge_order_basis"] = basis
     merged["merge_order_ties"] = ties
     merged["merge_stale_candidates"] = stale
@@ -1309,7 +1333,30 @@ def subset_manifest(manifest: dict[str, Any], workbook: str, views: list[dict[st
     ):
         if field in manifest:
             subset[field] = manifest[field]
+    # ⚠️ Carried through the SHIPPING RULE, not verbatim (#560 review round 1). This is the GRADE of
+    # the `view_types` census -- whether the one site-wide Metadata call took a 401 and recovered, or
+    # never established typing at all -- and dropping it, which is what this function did, left a
+    # per-workbook manifest asserting a census with nothing saying how it was arrived at.
+    subset.update(_carried_view_type_resolution(manifest))
     return subset
+
+
+def _carried_view_type_resolution(manifest: dict[str, Any]) -> dict[str, Any]:
+    """The resolution fields a per-workbook manifest carries over, sanitised. ``{}`` when there are none.
+
+    Sanitised rather than copied because ``unavailable_reason`` is free text BY TYPE: a value outside
+    the vocabulary ``tableau_view_types`` authors is replaced, so the FACT that typing was unavailable
+    survives and a reflected credential cannot, and a malformed record becomes "not established"
+    rather than a clean zero.
+    """
+    carried: dict[str, Any] = {}
+    if "view_type_resolution" in manifest:
+        carried["view_type_resolution"], _refused = scope_view_type_resolution(manifest["view_type_resolution"])
+    if "view_type_resolution_by_batch" in manifest:
+        carried["view_type_resolution_by_batch"], _rows_refused = scope_view_type_resolution_batches(
+            manifest["view_type_resolution_by_batch"]
+        )
+    return carried
 
 
 def build_parser() -> argparse.ArgumentParser:

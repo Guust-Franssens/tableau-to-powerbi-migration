@@ -233,6 +233,31 @@ signing in again cannot change any of them. Recovery is never silent — `oracle
 a run that healed itself is distinguishable from one that never faltered, and a *persistent* 401 still
 leaves every view `unknown` rather than falling back to name-based dashboard typing.
 
+**That record travels with the census through every consumer, or it evidences nothing.** Both
+re-writers of the capture manifest used to drop it, so the artifact a reviewer or a customer actually
+opens asserted a `view_types` census with no grade beside it:
+
+| consumer | what it now carries |
+|---|---|
+| `group_oracle_by_workbook.py` → `<slug>/reference/oracle-manifest.json` | the record, **and** — when several capture batches were merged — a conservative aggregate plus `view_type_resolution_by_batch` |
+| `package_unit.py` → `<unit>/oracle/oracle-manifest.json` | the same two fields, through `manifest_scope`'s allowlist |
+
+Three rules make that safe, and each closes a way the evidence could have decayed in transit:
+
+* **the merge cannot last-wins it.** `merge_batches` takes its non-view fields from the newest batch,
+  so a clean re-run would overwrite an older batch's recovery. `reauths` is therefore the SUM over
+  batches whose counts are readable, and `unavailable_reason` is non-null whenever ANY batch could not
+  establish typing — the per-batch rows keep the detail the aggregate summarises. A single batch is
+  carried verbatim, never summarised.
+* **`unavailable_reason` ships only if this repository authored it.** `tableau_view_types` interpolates
+  Python type names, HTTP statuses and integer counts into every reason it writes and never
+  server-controlled text; `manifest_scope.ships_reason` enforces that one layer down, where no
+  credential is available to redact with. Anything outside the vocabulary is replaced, so the FACT
+  that typing was unavailable survives and a reflected token cannot.
+* **an unreadable record is refused, never rounded to zero.** `reauths: null` plus an authored refusal
+  is what a malformed value becomes — "we cannot tell what happened" and "no recovery happened" are
+  different answers, and only one of them may look clean.
+
 | route | resolution | vector? | credential | live connection | dashboards | survives disconnected sources |
 |---|---|---|---|---|---|---|
 | `.twb`/`.twbx` embedded thumbnail | **192×192, always** | no | **none** | **none** | yes (composite) | **yes** (it is offline) |

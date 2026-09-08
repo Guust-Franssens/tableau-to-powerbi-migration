@@ -49,6 +49,7 @@ Two mechanisms, deliberately different in kind
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -74,6 +75,25 @@ class Rows:  # pylint: disable=too-few-public-methods
 
     def __init__(self, spec: dict[str, Any]) -> None:
         self.spec = spec
+
+
+class Sanitized:  # pylint: disable=too-few-public-methods
+    """Spec marker: a value normalised by a TYPED rule rather than by field names alone.
+
+    ``project()`` is name-shaped, and a name-shaped rule cannot decide whether a *string* is safe to
+    ship. One field needs both: ``view_type_resolution.unavailable_reason`` is free-form text by
+    type, and the allowlist would carry whatever it happened to say. The sanitiser answers the value
+    question; the allowlist inside it still answers the name question, so unknown nested keys are
+    dropped exactly as they are everywhere else.
+
+    The callable returns ``(shippable value, dropped/refused JSON paths)`` -- the same pair
+    ``project()`` returns -- so the two compose without a special case at the call site.
+    """
+
+    __slots__ = ("sanitize",)
+
+    def __init__(self, sanitize: Any) -> None:
+        self.sanitize = sanitize
 
 
 #: Spec leaf: carry this value verbatim - and it MUST be a scalar (str/int/float/bool/None).
@@ -137,6 +157,8 @@ def project(payload: Any, spec: Any, *, prefix: str = "") -> tuple[Any, list[str
             kept_rows.append(value)
             dropped.extend(lost)
         return kept_rows, sorted(set(dropped))
+    if isinstance(spec, Sanitized):
+        return spec.sanitize(payload, prefix=prefix or ".")
     if isinstance(spec, dict):
         if not isinstance(payload, dict):
             return {}, [prefix or "."]
@@ -383,6 +405,225 @@ ORACLE_VIEW_ALLOW: dict[str, Any] = {
     **{leg: ORACLE_LEG_SPEC for leg in ("image", "svg", "pdf", "data")},
 }
 
+# --------------------------------------------------------------------------------------------
+# view_type_resolution: the ONE record whose value, not merely whose field name, decides shipping
+# --------------------------------------------------------------------------------------------
+
+#: The record `tableau_view_types.resolve_and_stamp` writes and `capture_tableau_oracle` stamps into
+#: `oracle-manifest.json` as `view_type_resolution` -- `{"reauths": int, "unavailable_reason": str |
+#: None}` (#560). It says whether the ONE site-wide Metadata call that types every view lost its
+#: session and recovered, and whether typing stayed unavailable. Both grouping
+#: (`group_oracle_by_workbook.subset_manifest`) and packaging (`package_unit._scope_oracle_manifest`)
+#: used to drop it, so a per-workbook or packaged manifest showed a `view_types` census with nothing
+#: saying it had been arrived at through a 401 -> reauth -> 200, or not arrived at at all.
+VIEW_TYPE_RESOLUTION_FIELDS = ("reauths", "unavailable_reason")
+
+#: Emitted INSTEAD of a record we cannot read. Deliberately not an omission and deliberately not a
+#: zero: "no recovery happened" and "we cannot tell what happened" are different answers, and a
+#: malformed record silently becoming `{"reauths": 0}` is the fail-open this whole field exists to
+#: close. It echoes nothing of the offending value -- the report of a refusal must not re-emit what
+#: was refused (`tableau_env.scrub_tree`'s rule, applied here).
+RESOLUTION_REFUSED = "the capture's view_type_resolution was not a readable record; resolution evidence refused"
+#: Emitted instead of a reason string this repository did not author -- see :func:`ships_reason`.
+REASON_REFUSED = "the capture's view_type_resolution carried a reason this repository did not author; text refused"
+
+_TYPE = r"[A-Za-z_][A-Za-z0-9_]*"  # a Python type name: `__name__`, never server-controlled text
+_NODE = r"(dashboards|sheets)"  # the two GraphQL fields `tableau_view_types` names, and no others
+
+#: **A closed vocabulary, checked by VALUE, because a name-shaped allowlist cannot make this call.**
+#:
+#: `unavailable_reason` is free-form by type, and this layer holds no credential, so it cannot redact
+#: one out of a sentence the way the capture's own sink (`tableau_env.scrub_tree`) can. What it CAN
+#: do is refuse anything outside the vocabulary its producer guarantees:
+#: `tableau_view_types` authors every one of these strings and interpolates only Python type names,
+#: HTTP statuses, integer counts and its own two literal field names -- never server-controlled text
+#: (`tests/test_diagnostic_redaction.py` certifies that claim; this ENFORCES it one layer down).
+#:
+#: Consequence, and it is the intended one: a reflected credential arriving in that field never
+#: reaches a grouped or packaged manifest -- it is replaced by :data:`REASON_REFUSED`, so the FACT
+#: that typing was unavailable survives while the text does not. Drift is fail-closed and loud:
+#: `tests/test_view_type_resolution_scope.py` drives the producer's own failure branches through
+#: :func:`ships_reason`, so a nineteenth reason fails a test rather than shipping unchecked.
+_AUTHORED_REASONS: tuple[str, ...] = (
+    rf"metadata api response was {_TYPE}, not an object",
+    r"metadata api returned HTTP \d+",
+    rf"metadata api returned HTTP \d+; re-authentication failed: {_TYPE}",
+    rf"metadata api call failed: {_TYPE}",
+    r"metadata api response exceeded the \d+ byte ceiling; response refused",
+    rf"metadata api response was not usable JSON: {_TYPE}",
+    r"metadata api returned \d+ graphql error\(s\); response refused",
+    rf"metadata api `errors` was {_TYPE}, not a list; response refused",
+    rf"metadata api `data` was {_TYPE}, not an object",
+    rf"metadata api `workbooks` was {_TYPE}, not a list",
+    r"metadata api returned no dashboards or sheets carrying a luid",
+    rf"a workbook node was {_TYPE}, not an object; response refused",
+    rf"a workbook had no `{_NODE}` field, which the schema declares non-null; response refused",
+    rf"`{_NODE}` was {_TYPE}, not a list; response refused",
+    rf"a `{_NODE}` node was {_TYPE}, not an object; response refused",
+    rf"a `{_NODE}` node carried a {_TYPE} where the schema declares String!; response refused",
+    rf"a `{_NODE}` node carried a non-empty value that is not a luid; response refused",
+    r"the same luid was reported as both a dashboard and a worksheet; response refused",
+    # This module's own aggregate over merged batches, and its two refusals. They are in the
+    # vocabulary so the rule is IDEMPOTENT: a grouped manifest re-read by the packager must survive
+    # its own sanitiser unchanged, or evidence would decay one hop at a time.
+    (
+        r"across \d+ capture batches: \d+ could not establish view types, "
+        r"\d+ carried no readable resolution record; see view_type_resolution_by_batch"
+    ),
+    re.escape(RESOLUTION_REFUSED),
+    re.escape(REASON_REFUSED),
+)
+_AUTHORED_REASON_RE = re.compile(r"(?:%s)\Z" % "|".join(_AUTHORED_REASONS))  # pylint: disable=consider-using-f-string
+
+#: What one merged batch contributed. `record` is a closed vocabulary, so "this batch recovered",
+#: "this batch never resolved typing" and "this batch's record was unreadable" stay three answers.
+RESOLUTION_RESOLVED = "resolved"
+RESOLUTION_ABSENT = "absent"
+RESOLUTION_UNREADABLE = "unreadable"
+#: The four fields one per-batch row may carry. Anything else is dropped and named, like every other
+#: level here -- a row is a diagnostic, not a place to smuggle a field past the allowlist.
+RESOLUTION_ROW_FIELDS = ("batch", "record", *VIEW_TYPE_RESOLUTION_FIELDS)
+
+
+def ships_reason(text: Any) -> bool:
+    """True when ``text`` is a reason this repository authored, and may therefore ship verbatim."""
+    return isinstance(text, str) and bool(_AUTHORED_REASON_RE.match(text))
+
+
+def _shippable_reauths(value: Any) -> tuple[int | None, bool]:
+    """`(count, was it refused)`. A bool is NOT a count, and a negative one is not either.
+
+    ``None`` is returned for anything unreadable, never ``0``: the caller ships "not established",
+    which no consumer can mistake for "no re-authentication happened".
+    """
+    if value is None:
+        return None, False
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None, True
+    return value, False
+
+
+def scope_view_type_resolution(value: Any, *, prefix: str = "view_type_resolution") -> tuple[Any, list[str]]:
+    """One `view_type_resolution` record, made shippable. `(record or None, refused paths)`.
+
+    ``None`` in and ``None`` out means exactly what the capture means by it: view typing was not
+    resolved on this run at all. Everything else is normalised onto the two typed fields, with any
+    unknown key dropped (and named) like every other allowlist level in this module.
+    """
+    if value is None:
+        return None, []
+    if not isinstance(value, dict):
+        return {"reauths": None, "unavailable_reason": RESOLUTION_REFUSED}, [prefix]
+    refused: list[str] = [
+        f"{prefix}.{_safe_path_segment(key)}" for key in value if key not in VIEW_TYPE_RESOLUTION_FIELDS
+    ]
+    reauths, bad_count = _shippable_reauths(value.get("reauths"))
+    if bad_count:
+        refused.append(f"{prefix}.reauths")
+    reason = value.get("unavailable_reason")
+    if reason is not None and not ships_reason(reason):
+        reason = REASON_REFUSED
+        refused.append(f"{prefix}.unavailable_reason")
+    return {"reauths": reauths, "unavailable_reason": reason}, sorted(set(refused))
+
+
+def merged_view_type_resolution(
+    contributions: list[tuple[str, Any]],
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    """Fold several batches' records into `(a conservative aggregate, one row per batch)`.
+
+    ⚠️ **Last-wins is the defect this exists to prevent.** ``merge_batches`` takes its non-view fields
+    from the NEWEST batch, so a clean re-run silently overwrote an earlier batch's recovered 401 --
+    the grouped manifest then said `reauths: 0` about a merge that contained a recovery. The
+    aggregate is therefore built so that it **cannot erase either**:
+
+    * ``reauths`` is the SUM of the batches whose counts are readable, so any recovery anywhere keeps
+      the aggregate non-zero;
+    * ``unavailable_reason`` is non-null whenever ANY batch could not establish typing or carried an
+      unreadable record, and it names how many of each -- the per-batch detail is in the rows, which
+      the caller writes beside it as ``view_type_resolution_by_batch``.
+
+    A single contribution is returned VERBATIM (normalised, never summarised), so the ordinary
+    one-capture case survives grouping exactly as the capture wrote it.
+
+    Returns ``(None, rows)`` only when no batch carried a record at all -- an aggregate is not
+    invented for a merge that has nothing to say.
+    """
+    rows: list[dict[str, Any]] = []
+    for label, value in contributions:
+        record, _refused = scope_view_type_resolution(value)
+        if record is None:
+            state = RESOLUTION_ABSENT
+        elif record["unavailable_reason"] == RESOLUTION_REFUSED:
+            state = RESOLUTION_UNREADABLE
+        else:
+            state = RESOLUTION_RESOLVED
+        rows.append(
+            {
+                "batch": REDACTED if discloses_host_location(str(label)) else str(label),
+                "record": state,
+                "reauths": None if record is None else record["reauths"],
+                "unavailable_reason": None if record is None else record["unavailable_reason"],
+            }
+        )
+    present = [row for row in rows if row["record"] != RESOLUTION_ABSENT]
+    if not present:
+        return None, rows
+    if len(contributions) == 1:
+        single, _refused = scope_view_type_resolution(contributions[0][1])
+        return single, rows
+    unavailable = [row for row in present if row["record"] == RESOLUTION_RESOLVED and row["unavailable_reason"]]
+    unreadable = [row for row in rows if row["record"] == RESOLUTION_UNREADABLE]
+    reason = None
+    if unavailable or unreadable:
+        reason = (
+            f"across {len(rows)} capture batches: {len(unavailable)} could not establish view types, "
+            f"{len(unreadable)} carried no readable resolution record; see view_type_resolution_by_batch"
+        )
+    return {
+        "reauths": sum(row["reauths"] for row in present if isinstance(row["reauths"], int)),
+        "unavailable_reason": reason,
+    }, rows
+
+
+def scope_view_type_resolution_batches(
+    value: Any, *, prefix: str = "view_type_resolution_by_batch"
+) -> tuple[Any, list[str]]:
+    """The per-batch rows, made shippable. Same rules as one record, plus the batch LABEL.
+
+    A label is a directory name an operator chose, so it is swept for an absolute host location by
+    the same predicate everything else in this module is judged by; the row is kept either way,
+    because which batch is which is the whole point of the list.
+    """
+    if not isinstance(value, list):
+        return [], [prefix]
+    rows: list[dict[str, Any]] = []
+    refused: list[str] = []
+    for index, entry in enumerate(value):
+        if not isinstance(entry, dict):
+            refused.append(f"{prefix}[{index}]")
+            continue
+        refused.extend(f"{prefix}[].{_safe_path_segment(key)}" for key in entry if key not in RESOLUTION_ROW_FIELDS)
+        record, lost = scope_view_type_resolution(
+            {key: entry[key] for key in VIEW_TYPE_RESOLUTION_FIELDS if key in entry}, prefix=f"{prefix}[]"
+        )
+        refused.extend(lost)
+        label = str(entry.get("batch", ""))
+        state = entry.get("record")
+        if state not in (RESOLUTION_RESOLVED, RESOLUTION_ABSENT, RESOLUTION_UNREADABLE):
+            if state is not None:
+                refused.append(f"{prefix}[].record")
+            state = None
+        rows.append(
+            {
+                "batch": REDACTED if discloses_host_location(label) else label,
+                "record": state,
+                **(record or {"reauths": None, "unavailable_reason": None}),
+            }
+        )
+    return rows, sorted(set(refused))
+
+
 #: `oracle-manifest.json`. Everything counting the ESTATE RUN is dropped and RECOMPUTED from the
 #: packaged views (see `_scope_oracle_manifest`); everything identifying another unit is dropped
 #: outright. `render_capability.probe_view_luid`/`probe_view_name`/`probe_view_luids` name the view
@@ -392,6 +633,17 @@ ORACLE_VIEW_ALLOW: dict[str, Any] = {
 ORACLE_MANIFEST_ALLOW: dict[str, Any] = {
     **_fields("schema", "captured_at", "server", "site", "rest_api_version"),
     "requested_renders": SCALAR_LIST,
+    # #560 review round 1. The GRADE of the `view_types` census travels WITH it, or a packaged
+    # manifest asserts a census arrived at through a session loss as though nothing had happened --
+    # and a persistently unavailable typing as though it had been established. `Sanitized`, not
+    # `_fields(...)`: `unavailable_reason` is a string, so a name-shaped allowlist would carry
+    # whatever it said, and this layer holds no credential to redact one out of it.
+    "view_type_resolution": Sanitized(scope_view_type_resolution),
+    # Present only on a manifest that MERGED several capture batches (`group_oracle_by_workbook`).
+    # It ships for the reason the aggregate is conservative: two batches with different recoveries
+    # must not be readable as one, and the counts in the aggregate are only actionable beside the
+    # rows they were counted from.
+    "view_type_resolution_by_batch": Sanitized(scope_view_type_resolution_batches),
     "render_capability": {
         **_fields(
             "configured_api_version",

@@ -2020,6 +2020,15 @@ UNTYPED_ON_PURPOSE = {
     # Read, but no JSON type it could carry changes the answer.
     "reference_required": "read for truthiness only -- every JSON type is meaningfully truthy or not",
     "rest_api_version": "copied verbatim into the per-workbook manifest, never interpreted",
+    # ⚠️ #560 round 1. It is NOT typed here on purpose, and the alternative was considered: typing it
+    # would make a malformed DIAGNOSTIC field refuse an otherwise-good capture (exit 2), which is a
+    # heavier answer than the evidence warrants. `manifest_scope.scope_view_type_resolution` accepts
+    # every JSON type without raising and normalises anything unreadable onto an explicit refusal
+    # record (`reauths: null`, an authored reason) -- so no type it could carry reaches a merge
+    # decision, a count, or a verdict. Pinned by `tests/test_view_type_resolution_scope.py`'s
+    # malformed-value parametrisation, which drives list/str/int/bool/wrong-typed-field through both
+    # the grouped and the packaged manifest.
+    "view_type_resolution": "normalised by manifest_scope, which refuses every unreadable shape",
     # ⚠️ `data` and `row_count` used to be exempted here, each with the reason its own literal read
     # could not be decided by a type (`data` swept from RENDER_LEGS; `row_count` compared with `== 0`,
     # total over every JSON type). Since #480 neither is read by a literal `.get` in this module at
