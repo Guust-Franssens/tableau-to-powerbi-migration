@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Collection
 
 # Each entry: (rule id, compiled pattern, what it indicates). Patterns are case-insensitive and
 # anchored on phrasing that only makes sense when addressed to an AI assistant.
@@ -134,21 +135,31 @@ _CONFUSABLES = str.maketrans(
 )
 
 
-def _normalise_for_matching(text: str) -> tuple[str, list[int]]:
-    """Return normalized text and its per-character original source offsets."""
+def _normalise_for_matching(text: str) -> tuple[str, list[int], set[int]]:
+    """Return normalized text, its per-character original source offsets, and the normalized indices
+    that carry a line break.
+
+    Whitespace is collapsed to single spaces, so the line structure a `//` comment depends on would
+    otherwise be lost: `line_breaks` records which of those spaces stands for a newline.
+    """
     normalized: list[str] = []
     offsets: list[int] = []
+    line_breaks: set[int] = set()
     for offset, character in enumerate(text):
         transformed = unicodedata.normalize("NFKC", character).translate(_CONFUSABLES)
         for normalized_character in transformed:
             if normalized_character.isspace():
                 if normalized and normalized[-1] == " ":
+                    if normalized_character in "\r\n":
+                        line_breaks.add(len(normalized) - 1)
                     continue
+                if normalized_character in "\r\n":
+                    line_breaks.add(len(normalized))
                 normalized.append(" ")
             else:
                 normalized.append(normalized_character)
             offsets.append(offset)
-    return "".join(normalized), offsets
+    return "".join(normalized), offsets, line_breaks
 
 
 def _excerpt(text: str, offsets: list[int], match: re.Match[str]) -> str:
@@ -158,8 +169,29 @@ def _excerpt(text: str, offsets: list[int], match: re.Match[str]) -> str:
     return " ".join(text[start:end].split())[:120]
 
 
-def _mask_quoted_literals(text: str) -> str:
-    """Replace formula literals and identifiers, retaining unquoted comment text."""
+def _comment_end(text: str, start: int, line_breaks: Collection[int]) -> int:
+    """Return the index just past the comment that starts at `start`.
+
+    A `//` comment ends at its line break, which whitespace collapsing has turned into a plain space,
+    so `line_breaks` is the only record of where the line ended. A `/* ... */` comment ends after its
+    closing marker; an unterminated one runs to the end of the text - no close is invented.
+    """
+    if text[start : start + 2] == "//":
+        ends = [index for index in line_breaks if index >= start + 2]
+        return min(ends) if ends else len(text)
+    closing = text.find("*/", start + 2)
+    return len(text) if closing == -1 else closing + 2
+
+
+def _mask_quoted_literals(text: str, line_breaks: Collection[int] = frozenset()) -> str:
+    """Replace formula literals and identifiers, retaining unquoted comment text.
+
+    Comment text stays visible so an instruction hidden in a `//` or `/* ... */` comment is still
+    matched. Comment state is tracked rather than terminal (#544): where the comment ends, masking of
+    quoted literals and bracketed identifiers resumes, so command-shaped *data* after a comment is
+    not escalated. A comment marker inside a literal or a bracketed identifier is data, not a state
+    change, because those spans are consumed first.
+    """
     masked = list(text)
     quote: str | None = None
     index = 0
@@ -167,7 +199,8 @@ def _mask_quoted_literals(text: str) -> str:
         character = text[index]
         if quote is None:
             if text[index : index + 2] in {"//", "/*"}:
-                return "".join(masked[:index]) + text[index:]
+                index = _comment_end(text, index, line_breaks)
+                continue
             if character == "[":
                 closing = text.find("]", index + 1)
                 if closing != -1:
@@ -193,8 +226,8 @@ def scan_text(text: str | None, *, formula_or_internal_expression: bool = False)
     """Return [(rule_id, matched_excerpt)] for one string ([] when nothing matches)."""
     if not text or len(text) < 12:
         return []
-    normalized, offsets = _normalise_for_matching(text)
-    destructive_view = _mask_quoted_literals(normalized) if formula_or_internal_expression else normalized
+    normalized, offsets, line_breaks = _normalise_for_matching(text)
+    destructive_view = _mask_quoted_literals(normalized, line_breaks) if formula_or_internal_expression else normalized
     hits = []
     for rule_id, pattern, _ in _RULES:
         matching_view = destructive_view if rule_id == "destructive-command" else normalized
