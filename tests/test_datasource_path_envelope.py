@@ -164,6 +164,18 @@ def requires_engine(test):
     return pytest.mark.skipif(_contract() is None, reason=ENGINE_SKIP_REASON)(test)
 
 
+def _source_names(unit: str) -> dict[str, list[str]]:
+    """The production semantic-model name bound for one matrix source (issue #564).
+
+    The projector now carries a model term as well as a report term, and it refuses rather than
+    guessing when the emitted table filenames were never bounded. Deriving the bound from the SAME
+    source file the engine is handed keeps every assertion below a statement about real output.
+    """
+    bound = run_estate._bound_source_names([MATRIX_SOURCES[unit]])  # pylint: disable=protected-access
+    assert bound is not None, f"production could not bound the emitted names for {unit!r}"
+    return bound
+
+
 # -- the fixture INPUT (no engine; this half runs in CI) -------------------------------------------
 def _fixture_root() -> ET.Element:
     return ET.parse(MATRIX_SOURCES[SWAP_UNIT]).getroot()
@@ -320,6 +332,13 @@ def _engine_bundle(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]: 
         )
         deepest = max(tails, key=utf16_len, default="")
         deepest_dir = max(dir_tails, key=utf16_len, default="")
+        unit_dir = out / "pbip" / unit
+        model_dirs = (
+            sorted(p for p in unit_dir.iterdir() if p.is_dir() and p.name.endswith(".SemanticModel"))
+            if unit_dir.is_dir()
+            else []
+        )
+        model_files = [p for model in model_dirs for p in model.rglob("*") if p.is_file()]
         shapes[unit] = {
             "report": report,
             "pages": page_dirs,
@@ -330,6 +349,9 @@ def _engine_bundle(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]: 
             "deepest_dir_tail_len": utf16_len(deepest_dir),
             "longest_visual_id": max((utf16_len(v) for v in visuals), default=0),
             "longest_page_id": max((utf16_len(p) for p in page_dirs), default=0),
+            "model_dirs": [p.name for p in model_dirs],
+            "longest_model_file_len": max((utf16_len(str(p)) for p in model_files), default=0),
+            "longest_model_file": str(max(model_files, key=lambda p: utf16_len(str(p)))) if model_files else "",
         }
     return {"version": engine_source.engine_version(engine), "root": out, "shapes": shapes}
 
@@ -500,7 +522,7 @@ def test_the_production_projection_refuses_each_emitted_shape_at_its_own_boundar
         f"harness error: the emitted {kind} measures {at_root} at the constructed root, not the intended {ceiling + 1}"
     )
 
-    projection = run_estate.project_estate_path_ceiling(root, [unit])
+    projection = run_estate.project_estate_path_ceiling(root, [unit], _source_names(unit))
     record = next(r for r in projection["paths"] if r["kind"] == kind)
 
     assert record["length"] >= at_root, (
@@ -582,6 +604,52 @@ def test_a_visual_free_datasource_envelope_would_be_fail_open(engine_bundle) -> 
 
 
 @requires_engine
+@pytest.mark.parametrize("unit", sorted(MATRIX_SOURCES))
+def test_the_model_family_covers_each_shapes_emitted_semantic_model(engine_bundle, unit: str) -> None:
+    """Issue #564's model term, measured against what each of the three shapes really emitted.
+
+    The pre-conversion projection now carries
+    `pbip/<unit>/<model>.SemanticModel/definition/tables/<table>` + the TMDL suffix. An envelope
+    that does not COVER the emitted model tree is fail-open by construction - the same standard the
+    report term is already held to above.
+
+    It also states the second half of "these three shapes retain their current behaviour": for all
+    of them the REPORT term is still the binding constraint, so #564 changed the model term from
+    absent to covered without making the projector newly pessimistic about ordinary sources.
+    """
+    shape = engine_bundle["shapes"][unit]
+    root = engine_bundle["root"]
+    version = engine_bundle["version"]
+
+    assert shape["model_dirs"], f"{unit} emitted no .SemanticModel folder on engine {version}"
+    assert shape["longest_model_file_len"], f"{unit} emitted an empty .SemanticModel folder on engine {version}"
+
+    projection = run_estate.project_estate_path_ceiling(root, [unit], _source_names(unit))
+    model_file = next(
+        record
+        for record in projection["paths"]
+        if record["kind"] == "file" and record["family"] == run_estate._FAMILY_MODEL  # pylint: disable=protected-access
+    )
+    report_file = next(
+        record
+        for record in projection["paths"]
+        if record["kind"] == "file" and record["family"] == run_estate._FAMILY_PBIR  # pylint: disable=protected-access
+    )
+
+    assert model_file["length"] >= shape["longest_model_file_len"], (
+        f"{unit}: the projected semantic-model path is {model_file['length']} units where the engine "
+        f"really wrote {shape['longest_model_file_len']} ({shape['longest_model_file']!r}) on engine "
+        f"{version}. An envelope that does not cover real output is fail-open by construction."
+    )
+    assert report_file["length"] >= model_file["length"], (
+        f"{unit}: the semantic-model term ({model_file['length']}) has overtaken the report term "
+        f"({report_file['length']}) on engine {version}. That is not automatically wrong - it is the "
+        "state issue #564 exists for - but it means this shape's verdict is no longer decided by the "
+        "term it used to be, so re-derive the expectation rather than deleting the assertion."
+    )
+
+
+@requires_engine
 def test_the_projector_is_blind_to_unit_kind_and_over_projects_this_datasource(engine_bundle) -> None:
     """The classification defect, stated against the production function and real emitted paths.
 
@@ -594,7 +662,7 @@ def test_the_projector_is_blind_to_unit_kind_and_over_projects_this_datasource(e
     """
     shape = engine_bundle["shapes"][SWAP_UNIT]
     root = engine_bundle["root"]
-    projection = run_estate.project_estate_path_ceiling(root, [SWAP_UNIT])
+    projection = run_estate.project_estate_path_ceiling(root, [SWAP_UNIT], _source_names(SWAP_UNIT))
     projected_file = next(r for r in projection["paths"] if r["kind"] == "file")["length"]
     actual_file = max(utf16_len(str(p)) for p in shape["report"].rglob("*") if p.is_file())
 

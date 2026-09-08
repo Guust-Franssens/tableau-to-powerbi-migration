@@ -81,9 +81,21 @@ def _root_for_length(length: int) -> Path:
     return Path(anchor + "r" * (length - utf16_len(anchor))).resolve()
 
 
+def _pbir_only_source_names() -> dict[str, list[str]]:
+    """A `_bound_source_names`-shaped result whose semantic-model term is as short as it can be.
+
+    Issue #564 made the model term a first-class half of the envelope, so a test that is ABOUT the
+    PBIR term has to say so rather than leave the model half unstated - an unstated model term is
+    `cannot_establish`, by design, because a table filename nobody bounded is exactly what shipped a
+    project Desktop refuses. One-unit names keep the model records far below both ceilings, so these
+    tests still measure what they were written to measure.
+    """
+    return {"tables": ["t"], "models": ["m"]}
+
+
 def _boundary_root(unit: str, ceiling: int) -> Path:
     probe_root = Path("/r").resolve()
-    probe = run_estate.project_estate_path_ceiling(probe_root, [unit])
+    probe = run_estate.project_estate_path_ceiling(probe_root, [unit], _pbir_only_source_names())
     file_length = next(path["length"] for path in probe["paths"] if path["kind"] == "file")
     target_length = utf16_len(str(probe_root)) + ceiling - file_length
     return _root_for_length(target_length)
@@ -110,7 +122,7 @@ def test_a_failed_definition_of_done_is_not_a_pass() -> None:
 def test_projected_path_uses_utf16_and_accepts_the_measured_file_boundary() -> None:
     unit = "A" * 20
     root = _boundary_root(unit, FILE_CEILING)
-    projection = run_estate.project_estate_path_ceiling(root, [unit])
+    projection = run_estate.project_estate_path_ceiling(root, [unit], _pbir_only_source_names())
     file_path = next(path for path in projection["paths"] if path["kind"] == "file")
     assert file_path["length"] == FILE_CEILING
     assert projection["status"] == "ok"
@@ -119,7 +131,7 @@ def test_projected_path_uses_utf16_and_accepts_the_measured_file_boundary() -> N
 def test_projected_path_refuses_the_next_file_and_directory_boundaries() -> None:
     unit = "A" * 20
     root = _boundary_root(unit, FILE_CEILING + 1)
-    projection = run_estate.project_estate_path_ceiling(root, [unit])
+    projection = run_estate.project_estate_path_ceiling(root, [unit], _pbir_only_source_names())
     assert projection["status"] == "over_ceiling"
     assert any(path["length"] == FILE_CEILING + 1 for path in projection["offenders"])
     assert any(path["length"] == DIR_CEILING + 1 for path in projection["offenders"])
@@ -127,14 +139,14 @@ def test_projected_path_refuses_the_next_file_and_directory_boundaries() -> None
 
 def test_projected_path_counts_supplementary_characters_as_two_units() -> None:
     unit = "😀" * 20
-    projection = run_estate.project_estate_path_ceiling(Path("/r"), [unit])
+    projection = run_estate.project_estate_path_ceiling(Path("/r"), [unit], _pbir_only_source_names())
     file_path = next(path for path in projection["paths"] if path["kind"] == "file")
     assert file_path["length"] == utf16_len(file_path["path"])
     assert file_path["length"] > len(file_path["path"])
 
 
 def test_projected_names_include_engine_collision_suffixes() -> None:
-    projection = run_estate.project_estate_path_ceiling(Path("/short"), ["Sales", "sales"])
+    projection = run_estate.project_estate_path_ceiling(Path("/short"), ["Sales", "sales"], _pbir_only_source_names())
 
     assert projection["status"] == "cannot_establish"
 
@@ -222,7 +234,7 @@ def test_pbir_envelope_is_pinned_to_committed_artifacts() -> None:
 def test_realistic_long_estate_is_refused_by_conservative_pbir_envelope() -> None:
     root = _root_for_length(90)
     unit = "u" * 37
-    projection = run_estate.project_estate_path_ceiling(root, [unit])
+    projection = run_estate.project_estate_path_ceiling(root, [unit], _pbir_only_source_names())
     file_path = next(path for path in projection["paths"] if path["kind"] == "file")
     directory = next(path for path in projection["paths"] if path["kind"] == "directory")
     report_root = Path("pbip") / unit / f"{unit}.Report"
@@ -231,6 +243,174 @@ def test_realistic_long_estate_is_refused_by_conservative_pbir_envelope() -> Non
     assert file_path["length"] == utf16_len(str(root)) + 1 + utf16_len(str(report_root / visual_tail))
     assert directory["length"] == utf16_len(str(root)) + 1 + utf16_len(str(report_root / visual_tail.parent))
     assert projection["status"] == "over_ceiling"
+    assert projection["binding_family"] == run_estate._FAMILY_PBIR, (
+        "with a one-unit table name the REPORT family must still be the binding constraint; if the "
+        "model term now binds here, the model envelope has become the pessimistic one"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The SEMANTIC-MODEL half of the envelope (issue #564)
+#
+# The projector modelled only the PBIR visual path. Issue #564 called that "latent, because the
+# conservative PBIR envelope is usually longer" - and on the committed
+# `fixtures/upstream-repros/issue-194-long-pbir-path` long case at the skill's own 22-unit root that
+# framing is WRONG in the unsafe direction: the PBIR term projects 255 (inside the 259 ceiling) while
+# the engine really writes a 273-unit model table part. It was fail-OPEN, today, on committed
+# evidence. `tests/test_issue_194_long_pbir_path.py` carries that engine-backed measurement; these
+# are the arithmetic controls, which need no engine.
+# ---------------------------------------------------------------------------
+def _model_binding_case() -> tuple[Path, str, dict[str, list[str]]]:
+    """A root/unit/source-name triple where PBIR fits and the model table part does not.
+
+    Derived, never hard-coded: the root is sized so the PBIR file lands exactly ON the ceiling, then
+    the table name is grown until the model file passes it. That is the real shape of the defect -
+    a projection that reports `ok` while a REQUIRED child is over.
+    """
+    unit = "u" * 40
+    root = _boundary_root(unit, FILE_CEILING)
+    pbir_only = run_estate.project_estate_path_ceiling(root, [unit], _pbir_only_source_names())
+    assert pbir_only["status"] == "ok", "harness error: the PBIR term must fit at this root"
+    # `<root>\pbip\<unit>\<model>.SemanticModel\definition\tables\<table>.<suffix>`
+    fixed = (
+        utf16_len(str(root))
+        + 1
+        + utf16_len("pbip")
+        + 1
+        + utf16_len(unit)
+        + 1
+        + utf16_len(unit)  # the model base bound falls back to the unit name
+        + utf16_len(run_estate._MODEL_FOLDER_SUFFIX)
+        + 1
+        + utf16_len(run_estate._MODEL_TABLE_DIR.replace("/", os.sep))
+        + 1
+        + utf16_len(run_estate._MODEL_TABLE_SUFFIX)
+    )
+    table = "t" * (FILE_CEILING + 1 - fixed)
+    return root, unit, {"tables": [table], "models": []}
+
+
+def test_the_semantic_model_table_path_binds_where_the_report_path_fits() -> None:
+    """CONTROL - TMDL binds. The whole of #564: a clean PBIR verdict over an unopenable project."""
+    root, unit, source_names = _model_binding_case()
+
+    projection = run_estate.project_estate_path_ceiling(root, [unit], source_names)
+
+    pbir = [record for record in projection["paths"] if record["family"] == run_estate._FAMILY_PBIR]
+    model = [record for record in projection["paths"] if record["family"] == run_estate._FAMILY_MODEL]
+    assert all(record["length"] <= record["ceiling"] for record in pbir), (
+        f"harness error: the report family must FIT here, measured {[r['length'] for r in pbir]}"
+    )
+    model_file = next(record for record in model if record["kind"] == "file")
+    assert model_file["length"] == FILE_CEILING + 1, (
+        f"harness error: the model file was meant to land one over the ceiling, measured {model_file['length']}"
+    )
+    assert projection["status"] == "over_ceiling", (
+        "the projection reported clean while the semantic model's own required table part is over "
+        "Desktop's file ceiling - that is exactly the fail-open outcome #564 describes"
+    )
+    assert projection["binding_family"] == run_estate._FAMILY_MODEL
+    assert [offender["family"] for offender in projection["offenders"]] == [run_estate._FAMILY_MODEL]
+
+
+def test_one_unit_of_table_understatement_flips_a_refusal_into_a_pass() -> None:
+    """CONTROL - the understatement direction, judged by the verdict rather than by a length.
+
+    Dropping ONE unit from the projected table name is the smallest possible fail-open mutation, and
+    it must change `over_ceiling` into `ok`. A test that only compared lengths would still pass with
+    the model term deleted entirely; this one cannot.
+    """
+    root, unit, source_names = _model_binding_case()
+    understated = {"tables": [source_names["tables"][0][:-1]], "models": source_names["models"]}
+
+    exact = run_estate.project_estate_path_ceiling(root, [unit], source_names)
+    short = run_estate.project_estate_path_ceiling(root, [unit], understated)
+
+    assert exact["status"] == "over_ceiling"
+    assert short["status"] == "ok", (
+        "a one-unit-shorter table name must fall back inside the ceiling; if it does not, this case "
+        "is no longer pinned to the boundary and the mutation below proves nothing"
+    )
+    exact_file = next(
+        record for record in exact["paths"] if record["kind"] == "file" and record["family"] == run_estate._FAMILY_MODEL
+    )
+    short_file = next(
+        record for record in short["paths"] if record["kind"] == "file" and record["family"] == run_estate._FAMILY_MODEL
+    )
+    assert exact_file["length"] - short_file["length"] == 1
+
+
+def test_an_unbounded_table_name_is_never_a_clean_verdict() -> None:
+    """CONTROL - acceptance #3. No table bound means no verdict, never `ok`."""
+    for source_names in (None, {"tables": [], "models": ["m"]}, {"models": ["m"]}):
+        projection = run_estate.project_estate_path_ceiling(Path("/short"), ["Sales"], source_names)
+        assert projection["status"] == "cannot_establish", (
+            f"source names {source_names!r} produced {projection['status']!r}; an unbounded emitted "
+            "table filename must never be reported as a clean path verdict"
+        )
+        assert "table filename" in projection["reason"], projection["reason"]
+
+
+def test_an_unparseable_source_document_cannot_assess(tmp_path: Path) -> None:
+    """A source that DECODES but does not parse cannot bound its own table names.
+
+    `_readable_source` only proves the bytes are UTF-8, so this arm would otherwise reach the
+    projector with no table names at all and be reported as clean.
+    """
+    source = tmp_path / "Torn.twb"
+    source.write_text("<workbook>", encoding="utf-8")
+    engine = _versioned_engine(tmp_path / "engine", "test")
+
+    assert run_estate._readable_source(source) is True, "the byte-level gate must still accept this"
+    assert run_estate._bound_source_names([source]) is None
+
+    ok, detail = run_estate.preflight_estate_path_ceiling(source, Path("/short"), engine)
+    assert ok is False
+    assert "CANNOT ASSESS" in detail and "table filename" in detail
+
+
+def test_bound_source_names_reads_relations_calcs_and_datasources(tmp_path: Path) -> None:
+    """What the bound is DERIVED from, stated against the three engine consumers of a name."""
+    source = tmp_path / "Shapes.twb"
+    source.write_text(
+        "<workbook><datasources>"
+        "<datasource caption='Sales Consolidated' name='federated.sales'>"
+        "<connection class='federated'>"
+        "<relation name='Orders Fact Detail Extract.csv' table='[Orders]' type='table' />"
+        "</connection>"
+        "<column caption='Metric Swap' name='[Calculation_1]' role='measure'>"
+        "<calculation formula='CASE [Parameters].[M] WHEN &quot;a&quot; THEN [x] END' /></column>"
+        "<column caption='Not A Calc' name='[plain]' role='dimension' />"
+        "</datasource></datasources></workbook>",
+        encoding="utf-8",
+    )
+
+    bound = run_estate._bound_source_names([source])
+
+    assert bound is not None
+    assert "Orders Fact Detail Extract.csv" in bound["tables"], "the relation display name is the emitted file name"
+    assert "Orders" in bound["tables"], "the physical table is the display-name fallback"
+    assert "Metric Swap" in bound["tables"], "a field-swap calc becomes its own field-parameter table"
+    assert "Not A Calc" not in bound["tables"], "a plain column never becomes a table"
+    assert set(run_estate._ENGINE_INJECTED_TABLES) <= set(bound["tables"]), (
+        "the engine-injected tables are the floor, so a relation-free source still bounds"
+    )
+    assert "Sales Consolidated" in bound["models"] and "federated.sales" in bound["models"]
+
+
+def test_the_model_folder_bound_replays_the_engine_cap() -> None:
+    """`_fs_safe_utf16_len` is a LENGTH replay of `migrate_estate._fs_safe`, so pin the shape.
+
+    The engine keeps `_MAX_FS_BASE` code points verbatim, and above that truncates to
+    `_MAX_FS_BASE - 9` and appends `-<8 hex>`. `tests/test_issue_194_long_pbir_path.py` pins the
+    replay against the engine's own function; this is the arithmetic it must reproduce.
+    """
+    cap = run_estate._ENGINE_MAX_FS_BASE
+    assert run_estate._fs_safe_utf16_len("a" * cap) == cap
+    assert run_estate._fs_safe_utf16_len("a" * (cap + 1)) == cap
+    assert run_estate._fs_safe_utf16_len("a" * 500) == cap
+    assert run_estate._fs_safe_utf16_len("Sales") == 5
+    assert run_estate._fs_safe_utf16_len("😀" * 10) == 20, "an astral name is counted in UTF-16 units"
 
 
 def _refuse_before_engine(tmp_path: Path, monkeypatch, output: Path) -> tuple[int, list[Path], str]:
@@ -436,7 +616,7 @@ def test_composed_allocator_and_projection_reproduces_run_409(tmp_path: Path, mo
     probe_alloc = _work_dirs_allocate(unit, "--repo-root", probe_root)
     probe_bundle = Path(probe_alloc["bundle"])
     suffix_len = utf16_len(str(probe_bundle)) - utf16_len(str(probe_root))
-    probe_projection = run_estate.project_estate_path_ceiling(probe_bundle, [unit])
+    probe_projection = run_estate.project_estate_path_ceiling(probe_bundle, [unit], _pbir_only_source_names())
     probe_file_len = next(p["length"] for p in probe_projection["paths"] if p["kind"] == "file")
     tail_len = probe_file_len - utf16_len(str(probe_bundle))
 
@@ -461,7 +641,9 @@ def test_composed_allocator_and_projection_reproduces_run_409(tmp_path: Path, mo
     try:
         deep_alloc = _work_dirs_allocate(unit, "--repo-root", deep_root)
         _assert_cli_evidence("--repo-root", deep_root, deep_alloc)
-        deep_projection = run_estate.project_estate_path_ceiling(Path(deep_alloc["bundle"]), [unit])
+        deep_projection = run_estate.project_estate_path_ceiling(
+            Path(deep_alloc["bundle"]), [unit], _pbir_only_source_names()
+        )
         deep_file_len = next(p["length"] for p in deep_projection["paths"] if p["kind"] == "file")
         deep_dir_len = next(p["length"] for p in deep_projection["paths"] if p["kind"] == "directory")
         assert deep_projection["status"] == "over_ceiling"
@@ -479,7 +661,7 @@ def test_composed_allocator_and_projection_reproduces_run_409(tmp_path: Path, mo
         short_alloc = _work_dirs_allocate(unit, "--runs-parent", short_root)
         _assert_cli_evidence("--runs-parent", short_root, short_alloc)
         short_bundle = Path(short_alloc["bundle"])
-        short_projection = run_estate.project_estate_path_ceiling(short_bundle, [unit])
+        short_projection = run_estate.project_estate_path_ceiling(short_bundle, [unit], _pbir_only_source_names())
         measured = [(p["kind"], p["length"], p["ceiling"]) for p in short_projection["paths"]]
         assert short_projection["status"] == "ok", f"measured lengths (kind, length, ceiling): {measured}"
         assert not short_projection["offenders"], f"measured lengths (kind, length, ceiling): {measured}"

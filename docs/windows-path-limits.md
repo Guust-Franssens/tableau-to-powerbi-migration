@@ -361,7 +361,56 @@ Pass `--ceiling 282` to test that budget.
 
 ---
 
-## 7. What the check deliberately does NOT do
+## 6b. The PRE-conversion projection — two path families, not one
+
+Everything above is the **shipping-time** gate (`scripts/check_path_ceiling.py`), which walks a tree
+that already exists. `run_estate.project_estate_path_ceiling` answers the earlier question — *may
+this estate be converted into this output root at all?* — before a single byte is written, so it has
+to **project** the deepest path instead of measuring it.
+
+It projects **both** families the engine emits, and refuses if **either** breaches its own ceiling:
+
+| family | projected path | how each variable component is bounded |
+|---|---|---|
+| `pbir` | `<root>\pbip\<unit>\<unit>.Report\definition\pages\<page>\visuals\<visual>\visual.json` | fixed identifier envelope (24-unit page, 26 + 2-unit visual), pinned to 869 committed artifacts |
+| `semantic_model` | `<root>\pbip\<unit>\<model>.SemanticModel\definition\tables\<table>` + the TMDL suffix | `<model>` replays `migrate_estate._fs_safe`'s `_MAX_FS_BASE = 64` cap; `<table>` is **read from the source** — relation `name`/`table`, field-swap calc captions, plus the engine-injected floor |
+
+`<unit>` is not projected at all: it is asked of the selected engine (`_safe_folder`), so it is the
+real allocation rather than a guess.
+
+⚠️ **The model family was missing, and that was fail-OPEN today — not latent (#564).** Measured on
+canonical **2.368.0** with `fixtures/upstream-repros/issue-194-long-pbir-path`'s long case at the
+skill's own 22-unit `C:\tfmig\runs\NNNN\out` root:
+
+| term | projected | verdict |
+|---|---:|---|
+| report visual path | **255** | inside the 259 file ceiling — a clean pass |
+| semantic-model table part | **273** | over; the exact path Desktop names in its refusal dialog |
+
+The issue that opened this recorded the gap as latent *"because the conservative PBIR envelope is
+usually longer"*. On this committed evidence it is not: the model term overruns on its own, in a
+single **83-unit** filename the engine's folder cap never touches. The short control is the A/B —
+same structure, short names, both families clean.
+
+**Where it cannot bound, it refuses.** A source that cannot be opened or parsed, an engine that
+returns no unit name, or a table name that could not be derived all return `cannot_establish`, never
+`ok`. That is the same rule as `unknown`/`no_paths` above, applied one phase earlier.
+
+**Residual headroom, stated rather than implied:**
+
+* the model bound is estate-wide — the longest table name and the longest model base are applied to
+  **every** unit, so a mixed estate is over-projected. Fail-closed, and it costs nothing in practice
+  because any single offender refuses the whole run anyway;
+* a **published (`sqlproxy`) datasource** whose relations live on the server is bounded only by what
+  the local document declares. ⚠️ Unverified: if the engine can emit a table whose name appears in
+  neither the workbook nor its `.tds`, that name is not covered;
+* engine-injected tables beyond `_Measures` / `Date` (RLS role files, culture files) are shorter than
+  the table term at every shape measured, but they are not separately projected;
+* the projector is still blind to unit KIND (`tests/test_datasource_path_envelope.py`), so a
+  datasource is given the workbook worst case. That over-refusal is tracked separately.
+
+---
+
 
 * **It never asks the OS whether a path can be opened.** The verdict is computed arithmetically from
   path strings, so neither the registry, nor git's config, nor the host OS can soften it. Linux CI

@@ -133,6 +133,7 @@ import subprocess
 import sys
 import time
 import uuid
+import xml.etree.ElementTree as ET
 import zipfile
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -190,26 +191,152 @@ _PBIR_VISUAL_ID = "v" * (_PBIR_MAX_VISUAL_ID_UTF16 + _PBIR_IDENTIFIER_SAFETY_MAR
 _PBIR_VISUAL_FILE = "visual" + ".json"
 _PBIR_VISUAL_TAIL = f"definition/pages/{_PBIR_PAGE_ID}/visuals/{_PBIR_VISUAL_ID}/{_PBIR_VISUAL_FILE}"
 
+# -- the SEMANTIC-MODEL half of the envelope (issue #564) ------------------------------------------
+# The PBIR term above was the whole envelope, and that was fail-OPEN rather than merely latent.
+# Measured on canonical engine 2.368.0 with the committed
+# `fixtures/upstream-repros/issue-194-long-pbir-path` long case at the skill's own 22-unit
+# `C:\tfmig\runs\NNNN\out` root: the PBIR envelope projects 255 (inside the 259 file ceiling) while
+# the engine really emits
+# `pbip/<unit>/<model>.SemanticModel/definition/tables/<table>` + the TMDL suffix at 273 - a
+# REQUIRED child that Power BI Desktop refuses by name. So the projector has to carry a model term.
+#
+# What makes it projectable before the engine writes anything:
+#   * the model FOLDER base is hard-capped - `migrate_estate._fs_safe` truncates to
+#     `_MAX_FS_BASE = 64` code points and appends `-<8 hex>`, and the workbook/datasource call sites
+#     use `_fs_safe` (no de-duplication suffix), so replaying that rule on the source's own
+#     datasource captions reproduces the emitted length exactly;
+#   * the TABLE FILE name is NOT capped - `assemble_model` writes
+#     `definition/tables/{display}` + the TMDL suffix straight from the relation display name
+#     (`connection_to_m._table_display` = `<relation name>` or the parsed `item`), which is exactly
+#     the 83-unit component that overruns in the fixture. It is readable from the source document,
+#     so it is derived rather than guessed.
+_ENGINE_MAX_FS_BASE = 64
+_ENGINE_FS_HASH_LEN = 8
+_MODEL_FOLDER_SUFFIX = ".SemanticModel"
+_MODEL_TABLE_DIR = "definition/tables"
+_MODEL_TABLE_SUFFIX = "." + "tmdl"
+#: Tables the engine injects that no source relation names. `_Measures` is unconditional whenever
+#: measures exist and `Date` is the synthesized date table; both are short, and they exist here so a
+#: source with no readable relation at all still has a real, non-empty floor to bound.
+_ENGINE_INJECTED_TABLES = ("_Measures", "Date")
+#: Path families, so a verdict can name WHICH one binds rather than only a length.
+_FAMILY_PBIR = "pbir"
+_FAMILY_MODEL = "semantic_model"
+_FAMILY_LABEL = {
+    _FAMILY_PBIR: "report visual path",
+    _FAMILY_MODEL: "semantic-model table path",
+}
+
 
 _ENGINE_SOURCE_SUFFIXES = {".twb": ".twb", ".twbx": ".twb", ".tds": ".tds", ".tdsx": ".tds"}
 
 
-def _readable_source(path: Path) -> bool:
-    """Prove a source and its required Tableau document can be opened before conversion."""
+def _source_document_bytes(path: Path) -> bytes | None:
+    """The raw bytes of a source's required Tableau document, or None when it cannot be opened.
+
+    One reader for both consumers: `_readable_source` (the candidate gate) and
+    `_bound_source_names` (the path-envelope derivation). They previously would have needed the same
+    ``.twb``-inside-``.twbx`` walk twice, and two copies of that walk are two chances for the gate
+    and the projection to disagree about what the estate even contains.
+    """
     try:
         if path.suffix.lower() in {".twb", ".tds"}:
-            path.read_bytes().decode("utf-8-sig")
-            return True
+            return path.read_bytes()
         required = _ENGINE_SOURCE_SUFFIXES[path.suffix.lower()]
         with zipfile.ZipFile(path) as archive:
             for info in archive.infolist():
                 if not info.is_dir() and Path(info.filename).suffix.lower() == required:
                     with archive.open(info) as document:
-                        document.read().decode("utf-8-sig")
-                    return True
-            return False
-    except (OSError, KeyError, UnicodeDecodeError, zipfile.BadZipFile):
+                        return document.read()
+            return None
+    except (OSError, KeyError, zipfile.BadZipFile):
+        return None
+
+
+def _readable_source(path: Path) -> bool:
+    """Prove a source and its required Tableau document can be opened before conversion."""
+    raw = _source_document_bytes(path)
+    if raw is None:
         return False
+    try:
+        raw.decode("utf-8-sig")
+        return True
+    except UnicodeDecodeError:
+        return False
+
+
+def _strip_brackets(name: str) -> str:
+    """A Tableau `[a].[b]` identifier with its brackets removed.
+
+    Deliberately keeps the whole qualified string rather than only the leaf: over-stating a table
+    name is fail-CLOSED, and the engine's own `_parse_table_name` leaf can never be longer than what
+    this returns.
+    """
+    return name.replace("[", "").replace("]", "").strip()
+
+
+def _fs_safe_utf16_len(name: str) -> int:
+    """The UTF-16 length of the folder base `migrate_estate._fs_safe` would emit for `name`.
+
+    A length-only replay of the engine rule, so nothing here depends on reproducing its content hash:
+    at or below `_MAX_FS_BASE` code points the name survives verbatim, above it the engine keeps
+    `_MAX_FS_BASE - 9` code points and appends `-<8 hex>`. Counting the KEPT prefix in UTF-16 rather
+    than assuming one unit per code point is what keeps an astral-character name from being
+    understated.
+    """
+    safe = name.strip().rstrip(".")
+    if not safe:
+        return 0
+    if len(safe) <= _ENGINE_MAX_FS_BASE:
+        return utf16_len(safe)
+    keep = _ENGINE_MAX_FS_BASE - _ENGINE_FS_HASH_LEN - 1
+    return utf16_len(safe[:keep].strip().rstrip(".")) + 1 + _ENGINE_FS_HASH_LEN
+
+
+def _bound_source_names(paths: list[Path]) -> dict[str, list[str]] | None:
+    """Bound the model-folder and table-file names the engine will emit, from the SOURCES.
+
+    Returns ``{"tables": [...], "models": [...]}``, or **None** when any source could not be read or
+    parsed - an unbounded table filename must never be reported as a clean path verdict (#564).
+
+    The three contributors to a table filename, all readable before conversion:
+
+    * ``<relation name=...>`` and ``<relation table='[...]'>`` - `connection_to_m._table_display`
+      emits ``name or item`` and `assemble_model` writes it into the filename uncapped;
+    * a calculated field's caption - a field-swap calc becomes its own field-parameter table whose
+      part filename is `parameters._safe_filename(<display name>)`, also uncapped;
+    * `_ENGINE_INJECTED_TABLES` - the floor, so a source declaring no relation at all still yields a
+      real bound instead of an empty maximum.
+    """
+    tables = set(_ENGINE_INJECTED_TABLES)
+    models: set[str] = set()
+    for path in paths:
+        raw = _source_document_bytes(path)
+        if raw is None:
+            return None
+        try:
+            root = ET.fromstring(raw.lstrip(b"\xef\xbb\xbf"))
+        except ET.ParseError:
+            return None
+        for datasource in root.iter("datasource"):
+            for attribute in ("caption", "name"):
+                value = datasource.get(attribute)
+                if value:
+                    models.add(value)
+        for relation in root.iter("relation"):
+            name = relation.get("name")
+            if name:
+                tables.add(name)
+            table = relation.get("table")
+            if table and _strip_brackets(table):
+                tables.add(_strip_brackets(table))
+        for column in root.iter("column"):
+            if column.find("calculation") is None:
+                continue
+            label = column.get("caption") or _strip_brackets(column.get("name") or "")
+            if label:
+                tables.add(label)
+    return {"tables": sorted(tables), "models": sorted(models)}
 
 
 def _input_candidates(input_dir: Path) -> list[Path] | None:
@@ -269,17 +396,53 @@ def _engine_unit_names(engine: Path, input_dir: Path) -> list[str] | None:
     return names
 
 
-def project_estate_path_ceiling(output_root: Path, unit_names: list[str] | None) -> dict:
-    """Project the canonical PBIP visual path before the engine writes any output.
+def _path_record(kind: str, family: str, path: Path) -> dict:
+    """One measured projected path, judged against the ceiling its KIND is subject to."""
+    return {
+        "kind": kind,
+        "family": family,
+        "path": str(path),
+        "length": utf16_len(str(path)),
+        "ceiling": FILE_CEILING if kind == "file" else DIR_CEILING,
+    }
+
+
+def _unit_path_records(output_root: Path, unit: str, model_base: str, longest_table: str) -> list[dict]:
+    """Both projected path families for ONE unit.
+
+    The PBIR records stay FIRST: existing consumers select a record by `kind` alone, and the report
+    term is the one they were written against.
+    """
+    unit_root = output_root / "pbip" / unit
+    report_root = unit_root / f"{unit}.Report"
+    table_directory = unit_root / f"{model_base}{_MODEL_FOLDER_SUFFIX}" / _MODEL_TABLE_DIR
+    return [
+        _path_record("directory", _FAMILY_PBIR, report_root / _PBIR_VISUAL_TAIL.rsplit("/", 1)[0]),
+        _path_record("file", _FAMILY_PBIR, report_root / _PBIR_VISUAL_TAIL),
+        _path_record("directory", _FAMILY_MODEL, table_directory),
+        _path_record("file", _FAMILY_MODEL, table_directory / f"{longest_table}{_MODEL_TABLE_SUFFIX}"),
+    ]
+
+
+def project_estate_path_ceiling(
+    output_root: Path, unit_names: list[str] | None, source_names: dict[str, list[str]] | None = None
+) -> dict:
+    """Project BOTH canonical PBIP path families before the engine writes any output.
 
     The fixed page/visual identifiers define the minimum canonical PBIR safety envelope; the estate's
     longest source name and actual output root are the variable inputs available at this stage.
+
+    `source_names` is a `_bound_source_names` result and carries the SEMANTIC-MODEL half (#564):
+    the emitted `<model>.SemanticModel/definition/tables/<table>` TMDL term, whose table component
+    the engine does not cap. It defaults to `None` - "not established" - and that returns
+    `cannot_establish`, never a clean verdict, because a table filename nobody bounded is exactly the
+    path that shipped a project Power BI Desktop refuses by name.
     """
     output_root = output_root.resolve()
     if not unit_names:
         return {
             "status": "cannot_establish",
-            "reason": "no unit/workbook name was available before conversion",
+            "reason": "the input estate has no usable unit/workbook name",
             "output_root": str(output_root),
         }
     records = []
@@ -292,33 +455,37 @@ def project_estate_path_ceiling(output_root: Path, unit_names: list[str] | None)
             "reason": "the selected engine returned an invalid unit name",
             "output_root": str(output_root),
         }
+    tables = list((source_names or {}).get("tables") or [])
+    if not tables:
+        return {
+            "status": "cannot_establish",
+            "reason": (
+                "the emitted semantic-model table filenames could not be bounded from the source "
+                "documents, so the deepest projected path is unknown"
+            ),
+            "output_root": str(output_root),
+        }
+    longest_table = max(tables, key=utf16_len)
+    # The model folder is the one component the engine DOES cap, so replay that cap over every
+    # candidate the model name can come from: `migrate_estate` derives it with `_fs_safe` from the
+    # primary datasource caption/name, falling back to the unit label itself.
+    model_base_units = max(
+        _fs_safe_utf16_len(name) for name in list((source_names or {}).get("models") or []) + projected_names
+    )
+    model_base = "m" * model_base_units
     for unit in projected_names:
-        report = f"{unit}.Report"
-        report_root = output_root / "pbip" / unit / report
-        directory = report_root / _PBIR_VISUAL_TAIL.rsplit("/", 1)[0]
-        file_path = report_root / _PBIR_VISUAL_TAIL
-        records.extend(
-            (
-                {
-                    "kind": "directory",
-                    "path": str(directory),
-                    "length": utf16_len(str(directory)),
-                    "ceiling": DIR_CEILING,
-                },
-                {
-                    "kind": "file",
-                    "path": str(file_path),
-                    "length": utf16_len(str(file_path)),
-                    "ceiling": FILE_CEILING,
-                },
-            )
-        )
+        records.extend(_unit_path_records(output_root, unit, model_base, longest_table))
     offenders = [record for record in records if record["length"] > record["ceiling"]]
+    binding = max(records, key=lambda record: record["length"] - record["ceiling"])
     return {
         "status": "over_ceiling" if offenders else "ok",
         "output_root": str(output_root),
         "longest_unit": max(projected_names, key=utf16_len),
         "projected_units": projected_names,
+        "longest_table": longest_table,
+        "model_base_length": model_base_units,
+        "binding_family": binding["family"],
+        "binding": binding,
         "paths": records,
         "offenders": offenders,
     }
@@ -343,25 +510,30 @@ def preflight_estate_path_ceiling(input_dir: Path, output_root: Path, engine: Pa
     try:
         candidates = _input_candidates(input_dir)
         names = _engine_unit_names(engine, input_dir) if engine and candidates else None
-        projection = project_estate_path_ceiling(output_root, names)
+        source_names = _bound_source_names(candidates) if candidates else None
+        projection = project_estate_path_ceiling(output_root, names, source_names)
     except (OSError, RuntimeError, UnicodeEncodeError, ValueError) as exc:
         return False, (f"CANNOT ASSESS downstream PBIP path length ({type(exc).__name__}: {exc}). {_SHORT_ROOT_HINT}")
     if projection["status"] == "cannot_establish":
-        return False, (
-            "CANNOT ASSESS downstream PBIP path length: the input estate has no usable unit/workbook "
-            f"name. {_SHORT_ROOT_HINT}"
-        )
+        return False, (f"CANNOT ASSESS downstream PBIP path length: {projection['reason']}. {_SHORT_ROOT_HINT}")
+    ceilings = f"ceilings are {FILE_CEILING} for files and {DIR_CEILING} for directories"
     if projection["status"] == "over_ceiling":
         worst = max(projection["offenders"], key=lambda record: record["length"] - record["ceiling"])
         return False, (
             f"PATH CEILING: projected {worst['kind']} is {worst['length']} UTF-16 units "
             f"(ceiling {worst['ceiling']}) for unit {projection['longest_unit']!r}. "
+            f"The binding path family is {worst['family']} ({_FAMILY_LABEL[worst['family']]}); "
+            f"{ceilings}. Longest projected table filename "
+            f"{projection['longest_table'] + _MODEL_TABLE_SUFFIX!r}. "
             "LongPathsEnabled and \\\\?\\ prefixes do not make Power BI Desktop accept these paths. "
             f"{_SHORT_ROOT_HINT}"
         )
+    binding = projection["binding"]
     return True, (
-        f"PATH CEILING: projected canonical PBIP visual path fits ({projection['longest_unit']!r}); "
-        "this is the pre-conversion safety envelope."
+        f"PATH CEILING: projected canonical PBIP paths fit ({projection['longest_unit']!r}); "
+        f"the binding family is {binding['family']} ({_FAMILY_LABEL[binding['family']]}) at "
+        f"{binding['length']} UTF-16 units against its {binding['ceiling']} {binding['kind']} ceiling; "
+        f"{ceilings}. This is the pre-conversion safety envelope."
     )
 
 

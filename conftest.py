@@ -124,6 +124,12 @@ EXPECTED_ENGINE_SKIP_REASONS_BY_NODEID: dict[str, str] = {
     "tests/test_datasource_path_envelope.py::test_the_engine_itself_resolves_both_declared_swap_controllers": (
         "deterministic tier not installed"
     ),
+    "tests/test_datasource_path_envelope.py::test_the_model_family_covers_each_shapes_emitted_semantic_model["
+    "CustomSQL_Parameter_And_Doubled_Operators]": "deterministic tier not installed",
+    "tests/test_datasource_path_envelope.py::test_the_model_family_covers_each_shapes_emitted_semantic_model["
+    "Swap_Datasource_With_Field_Parameters]": "deterministic tier not installed",
+    "tests/test_datasource_path_envelope.py::test_the_model_family_covers_each_shapes_emitted_semantic_model["
+    "issue-424-d-explicit-bar-mark]": "deterministic tier not installed",
     "tests/test_datasource_path_envelope.py::test_the_production_identifier_envelope_stays_above_the_engines_"
     "measured_cap": "deterministic tier not installed",
     "tests/test_datasource_path_envelope.py::test_the_production_projection_refuses_each_emitted_shape_at_its_own_"
@@ -171,6 +177,15 @@ EXPECTED_ENGINE_SKIP_REASONS_BY_NODEID: dict[str, str] = {
     "tests/test_issue_194_long_pbir_path.py::test_the_output_root_length_is_what_decides_this_boundary": (
         "deterministic tier not installed"
     ),
+    "tests/test_issue_194_long_pbir_path.py::"
+    "test_the_preconversion_projection_reproduces_the_emitted_overlong_model_path": (
+        "deterministic tier not installed"
+    ),
+    "tests/test_issue_194_long_pbir_path.py::test_the_projected_model_folder_base_matches_the_engines_own_cap": (
+        "deterministic tier not installed"
+    ),
+    "tests/test_issue_194_long_pbir_path.py::"
+    "test_the_short_control_projects_clean_and_still_covers_its_emitted_model": ("deterministic tier not installed"),
     "tests/test_issue_194_long_pbir_path.py::test_the_short_control_stays_inside_both_ceilings_at_the_same_root": (
         "deterministic tier not installed"
     ),

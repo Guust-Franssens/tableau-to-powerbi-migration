@@ -31,6 +31,7 @@ import csv
 import hashlib
 import importlib.util
 import io
+import json
 import os
 import re
 import shutil
@@ -50,6 +51,8 @@ if str(SCRIPTS) not in sys.path:
 
 import engine_source  # noqa: E402  # pylint: disable=wrong-import-position
 import host_paths  # noqa: E402  # pylint: disable=wrong-import-position
+import run_estate  # noqa: E402  # pylint: disable=wrong-import-position
+from check_path_ceiling import DIR_CEILING, FILE_CEILING, utf16_len  # noqa: E402  # pylint: disable=wrong-import-position
 
 FIXTURE = REPO / "fixtures" / "upstream-repros" / "issue-194-long-pbir-path"
 BUILDER = FIXTURE / "build_repro.py"
@@ -601,6 +604,7 @@ def _engine_runs(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
         measured["engine_output"] = output
         measured["max_path_warning"] = "MAX_PATH" in output
         measured["out_dir"] = out
+        measured["source_dir"] = source
         runs[case] = measured
     return {"version": engine_source.engine_version(engine), "cases": runs}
 
@@ -726,3 +730,182 @@ def test_the_short_control_stays_inside_both_ceilings_at_the_same_root(engine_ru
         f"the two cases emitted different structures ({short_case['files']}/{short_case['directories']} vs "
         f"{long_case['files']}/{long_case['directories']}); the A/B would then differ in more than names"
     )
+
+
+# -- the PRE-CONVERSION projection this repro is the evidence for (issue #564) ---------------------
+#: The engine's own folder-base cap, replayed length-only by `run_estate._fs_safe_utf16_len`. Pinned
+#: against `migrate_estate._fs_safe` itself below rather than restated from its source.
+_FS_SAFE_PROBES = (
+    "Sales",
+    "a" * 63,
+    "a" * 64,
+    "a" * 65,
+    "a" * 200,
+    CASES["long"]["datasource"],
+    CASES["short"]["datasource"],
+    CASES["long"]["stem"],
+)
+
+
+def _synthetic_root(length: int) -> Path:
+    """A resolved root of an exact UTF-16 length, never created on disk.
+
+    Same idiom as the other path-envelope modules: the emitted relative tails are root-independent,
+    so the projection can be exercised at the skill's own 22-unit root LENGTH on a host that has no
+    Windows drive root at all.
+    """
+    anchor = Path.cwd().anchor
+    root = Path(anchor + "r" * (length - utf16_len(anchor))).resolve()
+    assert utf16_len(str(root)) == length, f"could not build a {length}-unit root; got {root}"
+    return root
+
+
+def _projection_for(case: dict) -> dict:
+    """Run the PRODUCTION pre-conversion projector over this case's own source, at a 22-unit root."""
+    engine = _contract()
+    names = run_estate._engine_unit_names(engine, case["source_dir"])  # pylint: disable=protected-access
+    assert names, "the engine could not allocate a unit name for this case"
+    candidates = run_estate._input_candidates(case["source_dir"])  # pylint: disable=protected-access
+    bound = run_estate._bound_source_names(candidates)  # pylint: disable=protected-access
+    assert bound is not None, "production could not bound the emitted table filenames"
+    return run_estate.project_estate_path_ceiling(_synthetic_root(SKILL_ROOT_LEN), names, bound)
+
+
+def _emitted_model_file_len(out: Path, root_len: int) -> int:
+    """The longest emitted `.SemanticModel` file, measured at a given root length."""
+    lengths = [
+        root_len + 1 + utf16_len(str(path.relative_to(out)).replace("\\", "/"))
+        for path in out.rglob("*")
+        if path.is_file() and any(part.endswith(".SemanticModel") for part in path.relative_to(out).parts)
+    ]
+    assert lengths, "the engine emitted no .SemanticModel file for this case"
+    return max(lengths)
+
+
+def _family_record(projection: dict, family: str, kind: str) -> dict:
+    return next(r for r in projection["paths"] if r["family"] == family and r["kind"] == kind)
+
+
+@requires_engine
+def test_the_preconversion_projection_reproduces_the_emitted_overlong_model_path(engine_runs) -> None:
+    """⚠️ CONTRADICTS #564's own severity framing, on this repository's committed evidence.
+
+    #564 records the gap as "fail-closed/latent on today's engine because the conservative PBIR
+    envelope is usually longer". At the skill's own 22-unit root this fixture's long case measures
+    the opposite: the report term projects 255 - INSIDE the 259 file ceiling - while the engine
+    really writes a 273-unit required semantic-model table part. The pre-conversion projection was
+    therefore fail-OPEN here today, not merely latent.
+
+    The projected model length is asserted to EQUAL the emitted one, not merely to cover it: every
+    component is derived (engine unit name, replayed `_fs_safe` model base, the source's own
+    relation display name), so an off-by-anything is a real disagreement with the engine.
+    """
+    long_case = engine_runs["cases"]["long"]
+    version = engine_runs["version"]
+    projection = _projection_for(long_case)
+
+    model_file = _family_record(projection, run_estate._FAMILY_MODEL, "file")
+    report_file = _family_record(projection, run_estate._FAMILY_PBIR, "file")
+
+    assert model_file["length"] == long_case["longest_file_len"], (
+        f"the projected semantic-model path is {model_file['length']} units where the engine really "
+        f"wrote {long_case['longest_file_len']} ({long_case['longest_file_tail']!r}) on engine "
+        f"{version}. This projection is derived from the source, so a mismatch is a real "
+        "disagreement with the engine rather than a tolerance to widen."
+    )
+    assert model_file["length"] == 273, (
+        f"the measured boundary moved to {model_file['length']}; the README's 273/259 arithmetic and "
+        "the upstream report are derived from it"
+    )
+    assert report_file["length"] <= FILE_CEILING, (
+        f"the REPORT term measures {report_file['length']} here, over the {FILE_CEILING} ceiling. It "
+        "was 255 on engine 2.368.0, which is what made the model-only overrun fail-OPEN. If the "
+        "report term now refuses on its own, this case no longer demonstrates #564 - find a case "
+        "that does rather than deleting the assertion."
+    )
+    assert projection["status"] == "over_ceiling"
+    assert projection["binding_family"] == run_estate._FAMILY_MODEL
+    if _version_tuple(version) >= OFFENDER_MEASURED_ON:
+        # Same provenance rule the offender-identity assertion above follows: the LENGTH is a
+        # property of the emitted relative paths and is asserted unconditionally, while WHICH
+        # component carries it was established on 2.368.0 and is scoped to it.
+        assert projection["longest_table"] + run_estate._MODEL_TABLE_SUFFIX in long_case["longest_file_tail"], (
+            f"production projected table part {projection['longest_table']!r}, which is not the "
+            f"component the engine actually emitted ({long_case['longest_file_tail']!r})"
+        )
+
+
+@requires_engine
+def test_the_short_control_projects_clean_and_still_covers_its_emitted_model(engine_runs) -> None:
+    """The A/B control for the projection: the short case must project CLEAN, and still cover.
+
+    An envelope that refused both arms would prove nothing, and one that fits without covering the
+    emitted model tree would be fail-open at a different root.
+    """
+    short_case = engine_runs["cases"]["short"]
+    projection = _projection_for(short_case)
+    emitted = _emitted_model_file_len(short_case["out_dir"], SKILL_ROOT_LEN)
+
+    model_file = _family_record(projection, run_estate._FAMILY_MODEL, "file")
+    model_dir = _family_record(projection, run_estate._FAMILY_MODEL, "directory")
+
+    assert projection["status"] == "ok", (
+        f"the short control was refused: {[(o['family'], o['kind'], o['length']) for o in projection['offenders']]}"
+    )
+    assert model_file["length"] >= emitted, (
+        f"the projected model path ({model_file['length']}) does not cover the emitted one ({emitted})"
+    )
+    assert model_file["length"] <= FILE_CEILING and model_dir["length"] <= DIR_CEILING
+    assert projection["binding_family"] == run_estate._FAMILY_PBIR, (
+        "with short names the report term is expected to bind, which is the state #564 describes as "
+        "the usual one - the long case above is the counter-example"
+    )
+
+
+@requires_engine
+def test_the_projected_model_folder_base_matches_the_engines_own_cap() -> None:
+    """The model-base term is a LENGTH replay of `migrate_estate._fs_safe` - pin it to that function.
+
+    Replaying an engine rule in our own code is the load-bearing assumption of the model term, and
+    the only honest control for it is the engine's own implementation over the same names, including
+    this fixture's real datasource captions.
+    """
+    engine = _contract()
+    snippet = (
+        "import json, sys\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "from migrate_estate import _MAX_FS_BASE, _fs_safe\n"
+        "names = json.loads(sys.argv[2])\n"
+        "print(json.dumps({'cap': _MAX_FS_BASE, 'bases': [_fs_safe(n) for n in names]}))\n"
+    )
+    done = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            snippet,
+            str(engine_source.engine_scripts_dir(engine)),
+            json.dumps(list(_FS_SAFE_PROBES)),
+        ],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=300,
+        check=False,
+    )
+    assert done.returncode == 0, (
+        f"could not run the engine's own `_fs_safe` on engine {engine_source.engine_version(engine)}. "
+        "If `_MAX_FS_BASE`/`_fs_safe` moved, the model-folder term of the pre-conversion projection "
+        f"is derived from them and must be re-derived rather than the pin relaxed:\n{done.stderr}"
+    )
+    seen = json.loads(done.stdout)
+
+    assert seen["cap"] == run_estate._ENGINE_MAX_FS_BASE, (
+        f"the engine's `_MAX_FS_BASE` is {seen['cap']}, not the {run_estate._ENGINE_MAX_FS_BASE} the "
+        "projection replays. The model-folder term is derived from that number."
+    )
+    for name, base in zip(_FS_SAFE_PROBES, seen["bases"], strict=True):
+        assert run_estate._fs_safe_utf16_len(name) == utf16_len(base), (
+            f"{name[:40]!r}...: the projection bounds the model folder at "
+            f"{run_estate._fs_safe_utf16_len(name)} units, the engine emitted {base!r} "
+            f"({utf16_len(base)} units)"
+        )
