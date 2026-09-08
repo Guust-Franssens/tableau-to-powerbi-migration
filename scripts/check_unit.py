@@ -3362,26 +3362,23 @@ def render(report: dict[str, Any]) -> str:
 def _safe_print(text: str, stream=None) -> None:
     """Print *text*, degrading only characters the stream cannot encode.
 
-    Preserves full Unicode when stdout supports it; falls back to
-    ``backslashreplace`` encoding on a CP1252/ASCII console so the CLI
-    never raises :class:`UnicodeEncodeError` (#559).
+    Preserves full Unicode when the stream's encoding can represent every
+    character; otherwise deterministically backslash-replaces unencodable
+    characters for that encoding (ASCII fallback).  The encodable
+    representation is constructed **before** the first write so a partial
+    write can never duplicate a prefix (#559).
     """
     if stream is None:
         stream = sys.stdout
+    encoding = getattr(stream, "encoding", None) or "ascii"
     try:
-        print(text, file=stream)
-    except UnicodeEncodeError:
-        encoding = getattr(stream, "encoding", None)
-        if isinstance(encoding, str):
-            try:
-                print(
-                    text.encode(encoding, "backslashreplace").decode(encoding, "replace"),
-                    file=stream,
-                )
-                return
-            except LookupError:  # pragma: no cover - encoding Python does not know
-                pass
-        print(text.encode("ascii", "backslashreplace").decode("ascii"), file=stream)
+        text.encode(encoding)
+    except (UnicodeEncodeError, LookupError):
+        try:
+            text = text.encode(encoding, "backslashreplace").decode(encoding, "replace")
+        except LookupError:  # pragma: no cover - encoding Python does not know
+            text = text.encode("ascii", "backslashreplace").decode("ascii")
+    print(text, file=stream)
 
 
 def main(argv: list[str] | None = None) -> int:

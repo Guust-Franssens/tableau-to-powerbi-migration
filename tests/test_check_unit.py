@@ -4216,7 +4216,6 @@ class TestSafePrintCP1252:
         stream.flush()
         stream.seek(0)
         output = stream.read()
-        # The original glyph is replaced, but the ASCII payload survives.
         assert "NAME-ONLY EVIDENCE REFUSED" in output
 
     def test_utf8_stream_preserves_glyph(self):
@@ -4235,16 +4234,12 @@ class TestSafePrintCP1252:
         """main() returns report['exit_code'] even when stdout cannot encode the output."""
         import io
 
-        # Minimal valid unit dir — a spec with one dashboard, so the gate returns FINDINGS.
         _write_spec(tmp_path, ["D1"])
         buf = io.BytesIO()
         fake_stdout = io.TextIOWrapper(buf, encoding="ascii", errors="strict")
         monkeypatch.setattr(sys, "stdout", fake_stdout)
         rc = cu.main([str(tmp_path)])
-        # The gate ladder returns a status with a well-defined exit code; whatever it is,
-        # it must NOT be replaced by a traceback exit.
         assert isinstance(rc, int)
-        # The exit code is one of the defined ladder values.
         assert rc in {cu.EXIT_OK, cu.EXIT_FINDINGS, cu.EXIT_NOT_CHECKED, cu.EXIT_PRECONDITION_FAILED}
 
     def test_io_error_is_not_swallowed(self):
@@ -4259,3 +4254,40 @@ class TestSafePrintCP1252:
 
         with pytest.raises(OSError, match="disk full"):
             cu._safe_print("hello", stream=BrokenStream())
+
+    def test_no_duplicated_prefix_on_cp1252(self):
+        """Encode-before-write means the report is emitted exactly once."""
+        stream = self._cp1252_stream()
+        text = "PREFIX ⚠️ SUFFIX"
+        cu._safe_print(text, stream=stream)
+        stream.flush()
+        stream.seek(0)
+        output = stream.read()
+        assert output.count("PREFIX") == 1
+        assert "SUFFIX" in output
+
+    def test_os_error_on_first_write_propagates_immediately(self):
+        """An OSError must propagate on the first write; no second write attempted.
+
+        A mutation broadening the catch to Exception would retry and hit the
+        second (accepting) write, so write_count > 1 kills the mutation.
+        """
+        import io
+
+        class FirstWriteFails(io.StringIO):
+            encoding = "utf-8"
+
+            def __init__(self):
+                super().__init__()
+                self.write_count = 0
+
+            def write(self, s):
+                self.write_count += 1
+                if self.write_count == 1:
+                    raise OSError("transient")
+                return super().write(s)
+
+        stream = FirstWriteFails()
+        with pytest.raises(OSError, match="transient"):
+            cu._safe_print("hello", stream=stream)
+        assert stream.write_count == 1
