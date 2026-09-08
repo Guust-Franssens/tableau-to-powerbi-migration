@@ -3359,6 +3359,31 @@ def render(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _safe_print(text: str, stream=None) -> None:
+    """Print *text*, degrading only characters the stream cannot encode.
+
+    Preserves full Unicode when stdout supports it; falls back to
+    ``backslashreplace`` encoding on a CP1252/ASCII console so the CLI
+    never raises :class:`UnicodeEncodeError` (#559).
+    """
+    if stream is None:
+        stream = sys.stdout
+    try:
+        print(text, file=stream)
+    except UnicodeEncodeError:
+        encoding = getattr(stream, "encoding", None)
+        if isinstance(encoding, str):
+            try:
+                print(
+                    text.encode(encoding, "backslashreplace").decode(encoding, "replace"),
+                    file=stream,
+                )
+                return
+            except LookupError:  # pragma: no cover - encoding Python does not know
+                pass
+        print(text.encode("ascii", "backslashreplace").decode("ascii"), file=stream)
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -3382,7 +3407,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         _write_json(args.json, report)
     if not args.quiet:
-        print(render(report))
+        _safe_print(render(report))
     return int(report["exit_code"])
 
 

@@ -4190,3 +4190,72 @@ def test_the_caveats_reach_the_rendered_cli_output(tmp_path: Path) -> None:
 
     assert "NAME-ONLY EVIDENCE REFUSED" in rendered
     assert "'Bo ok'" in rendered
+
+
+# ---------------------------------------------------------------------------
+# #559 — safe printing on a CP1252/ASCII console
+# ---------------------------------------------------------------------------
+
+
+class TestSafePrintCP1252:
+    """_safe_print must not raise UnicodeEncodeError on a restricted stream."""
+
+    @staticmethod
+    def _cp1252_stream():
+        """Return an in-memory text stream that behaves like a CP1252 console."""
+        import io
+
+        buf = io.BytesIO()
+        return io.TextIOWrapper(buf, encoding="cp1252", errors="strict")
+
+    def test_cp1252_stream_no_traceback(self):
+        """The warning glyph must not crash; text must arrive."""
+        stream = self._cp1252_stream()
+        text = "⚠️ NAME-ONLY EVIDENCE REFUSED: 1 record(s)"
+        cu._safe_print(text, stream=stream)
+        stream.flush()
+        stream.seek(0)
+        output = stream.read()
+        # The original glyph is replaced, but the ASCII payload survives.
+        assert "NAME-ONLY EVIDENCE REFUSED" in output
+
+    def test_utf8_stream_preserves_glyph(self):
+        """On a capable stream the original text is untouched."""
+        import io
+
+        buf = io.BytesIO()
+        stream = io.TextIOWrapper(buf, encoding="utf-8")
+        text = "⚠️ hello"
+        cu._safe_print(text, stream=stream)
+        stream.flush()
+        stream.seek(0)
+        assert stream.read().strip() == text
+
+    def test_main_exit_code_survives_encoding_failure(self, tmp_path: Path, monkeypatch):
+        """main() returns report['exit_code'] even when stdout cannot encode the output."""
+        import io
+
+        # Minimal valid unit dir — a spec with one dashboard, so the gate returns FINDINGS.
+        _write_spec(tmp_path, ["D1"])
+        buf = io.BytesIO()
+        fake_stdout = io.TextIOWrapper(buf, encoding="ascii", errors="strict")
+        monkeypatch.setattr(sys, "stdout", fake_stdout)
+        rc = cu.main([str(tmp_path)])
+        # The gate ladder returns a status with a well-defined exit code; whatever it is,
+        # it must NOT be replaced by a traceback exit.
+        assert isinstance(rc, int)
+        # The exit code is one of the defined ladder values.
+        assert rc in {cu.EXIT_OK, cu.EXIT_FINDINGS, cu.EXIT_NOT_CHECKED, cu.EXIT_PRECONDITION_FAILED}
+
+    def test_io_error_is_not_swallowed(self):
+        """A real I/O failure must propagate — only UnicodeEncodeError is caught."""
+        import io
+
+        class BrokenStream(io.StringIO):
+            encoding = "utf-8"
+
+            def write(self, s):
+                raise OSError("disk full")
+
+        with pytest.raises(OSError, match="disk full"):
+            cu._safe_print("hello", stream=BrokenStream())
