@@ -58,9 +58,13 @@
 
     exit 1  CREDENTIAL_MISSING   a window's text matched the credential signature. THIS IS THE HARD
                                  STOP - a human must sign in once; no automation can fill it.
-    exit 0  CREDENTIAL_PRESENT   a refresh was invoked and ran to the deadline with no credential
-                                 modal and nothing unclassifiable up. Still not the gate of record for
-                                 a serverless source - confirm with the one-row data probe.
+    exit 0  CREDENTIAL_PRESENT   a refresh was invoked and no credential modal was seen before this
+                                 probe's deadline. That is an absence of evidence, not proof of a
+                                 cached credential: it does not establish that the refresh ran to the
+                                 deadline, that Desktop stayed alive and responsive, or that every
+                                 window was accounted for - a process that dies mid-poll enumerates
+                                 zero windows and lands here. Never the gate of record - confirm with
+                                 the one-row data probe.
     exit 3  UNKNOWN              no verdict was established - no window for the pid, a minimized
                                  owner, or no Refresh control was ever invoked (with nothing invoked,
                                  "no modal appeared" proves nothing - reporting PRESENT would be a
@@ -70,10 +74,13 @@
                                  it, not just its first element - was already up at t=0. Desktop is
                                  busy, so the credential state cannot be probed; wait for it, or
                                  cancel the stale refresh.
-    exit 3  DIALOG_NEEDS_HUMAN   a KNOWN human-blocking prompt that is not a credential prompt - the
-                                 native database query approval modal above all. Not exit 1, because
-                                 the remedy is an approval, not a sign-in. Never suppressed, and it
-                                 outranks any progress text in the same window.
+    exit 3  DIALOG_NEEDS_HUMAN   a KNOWN blocking prompt matched: the native database query approval
+                                 modal, an approval request, or an "authentication required" notice.
+                                 Not exit 1, because the credential signature did not match - but the
+                                 remedy is NOT established either, since that signature spans both an
+                                 approval and an authentication notice. Read the prompt on screen.
+                                 Never suppressed, and it outranks any progress text in the same
+                                 window.
     exit 3  DIALOG_UNRECOGNIZED  a dialog is up whose text matched NO signature, or which shows
                                  progress text ALONGSIDE prose that is not progress status. We read
                                  it and could not account for it. The signatures are a known-shapes
@@ -248,9 +255,11 @@ function Get-DialogClassification {
 
   Kinds, in the order they are tested:
     credential        the credential signature matched a text element or the prose join -> hard stop.
-    needs-human       a KNOWN human-blocking prompt that is not a credential prompt - the native
-                      database query approval modal. Exit 3, not 1: a human must act, but the remedy
-                      is an approval, not a sign-in.
+    needs-human       a KNOWN blocking prompt whose text did not match the credential signature - the
+                      native database query approval modal, an approval request, or an "authentication
+                      required" notice. Exit 3, not 1: a human must act, and this probe does not
+                      establish which action, because the signature spans both an approval and an
+                      authentication notice.
     mixed-content     progress text AND unaccounted prose in the same window. Round 3's defect: the
                       FIRST content element matching the benign regex used to classify the whole
                       window, so `Evaluating` beside
@@ -425,14 +434,21 @@ function Get-VerdictGuidance {
 
     * `CREDENTIAL_MISSING` matched the credential signature - POSITIVE evidence of a sign-in prompt,
       so it may name sign-in as the remedy.
-    * `DIALOG_NEEDS_HUMAN` matched a KNOWN non-credential blocking-prompt signature - also positive
-      evidence, so it may say a human must act and that this signature's remedy is an approval.
+    * `DIALOG_NEEDS_HUMAN` matched a KNOWN blocking-prompt signature, so it may say a human must act.
+      It may NOT say which action: that signature covers the native-query approval AND
+      `Authentication (?:is )?required`, so "an approval, not a sign-in" is false for part of its own
+      match set. It names the signature and sends the human to the prompt.
     * `DIALOG_UNREADABLE` and `DIALOG_UNRECOGNIZED` matched NOTHING. Matching nothing is not evidence
       of absence: the signatures are a known-shapes list, and a harvest is never provably complete
       (`LegacyIAccessiblePattern` is unreachable from managed UIA at all). So neither may say "this is
       not a credential wall", "no sign-in is implied", or that the credential sits behind it. They say
       what was and was not established, and send a human to the screen.
     * `REFRESH_IN_PROGRESS` positively read progress content: wait or cancel, do not stack.
+    * `CREDENTIAL_PRESENT` observed only that a refresh was invoked and no credential prompt appeared
+      before the deadline. It may NOT claim the refresh ran to the deadline, that Desktop stayed alive
+      and responsive, or that no window was left unaccounted for - a process that dies mid-poll
+      enumerates zero windows and reaches exactly this line (the token and exit code are unchanged;
+      only the prose is bounded).
     * `UNKNOWN` established no verdict at all.
   #>
   param(
@@ -454,8 +470,8 @@ function Get-VerdictGuidance {
       $lines += "  a human must sign in ONCE at the Desktop screen; no automation can fill this dialog"
     }
     'DIALOG_NEEDS_HUMAN' {
-      $lines += "  its text matched a KNOWN human-blocking prompt signature that is not the credential signature (the native database query approval above all)"
-      $lines += "  a human must act at the Desktop screen; the remedy this signature names is an approval, not a sign-in"
+      $lines += "  its text matched a KNOWN blocking-prompt signature - the native database query approval, an approval request, or an 'authentication required' notice"
+      $lines += "  a human must act at the Desktop screen on the prompt shown there; this probe does not establish WHICH action that prompt needs, so read it before assuming"
     }
     'DIALOG_UNREADABLE' {
       $lines += "  its content could not be established, so NOTHING was determined about the credential state - a credential prompt is neither confirmed nor ruled out"
@@ -470,8 +486,8 @@ function Get-VerdictGuidance {
       $lines += "  wait for it, or cancel the stale one; do not stack a second refresh on it"
     }
     'CREDENTIAL_PRESENT' {
-      $lines += "  a refresh was invoked and ran to the deadline with no credential prompt and no window left unaccounted for"
-      $lines += "  a serverless source can still prompt after this deadline - confirm with the one-row data probe"
+      $lines += "  a refresh was invoked and this probe saw no credential prompt before its own deadline"
+      $lines += "  that is an absence of evidence, not proof of a cached credential: nothing here establishes that Desktop stayed alive and responsive, or that every window was accounted for - confirm with the one-row data probe"
     }
     default {
       $lines += "  no verdict was established: the credential state was not determined, in either direction"
@@ -835,7 +851,7 @@ while ((Get-Date) -lt $deadline) {
 if ($latched) {
   Write-Output ("a dialog was up during the refresh: {0}" -f (Format-DialogEvidence -Window $latched.Window))
   Write-VerdictGuidance -Verdict $latched.Verdict -Kind $latched.Kind
-  Write-Output "  a dialog was open throughout, so 'no modal appeared' was never established"
+  Write-Output "  this dialog was OBSERVED during the refresh, so 'no modal appeared' was never established"
   Write-Output ("VERDICT: {0}" -f $latched.Verdict)
   exit $latched.ExitCode
 }
