@@ -55,6 +55,10 @@ class FakeLookup:
     def content_revision_key(self, workbook_id):  # noqa: ARG002
         return self._remote_key
 
+    def content_unavailable(self, workbook_id):  # noqa: ARG002
+        """This fake always answers with the content it was told to; nothing is ever unread."""
+        return None
+
     def sign_out(self):
         self.signed_out = True
 
@@ -445,6 +449,7 @@ class RecordingSite(prov.TableauLookup):
         inventory_status=200,
         inventory_error=None,
         content_errors=(),
+        content_status=None,
         signout_error=None,
     ):
         super().__init__(env)
@@ -454,6 +459,7 @@ class RecordingSite(prov.TableauLookup):
         self._inventory_status = inventory_status
         self._inventory_error = inventory_error
         self._content_errors = set(content_errors)
+        self._content_status = dict(content_status or {})
         self._signout_error = signout_error
 
     def _call(self, method, path, body=None, accept=None):  # noqa: ARG002
@@ -469,6 +475,10 @@ class RecordingSite(prov.TableauLookup):
             luid = path.split("/workbooks/")[1].split("/")[0]
             if luid in self._content_errors:
                 raise urllib.error.URLError("content transport is dead")
+            if luid in self._content_status:
+                # A real refusal answers with a BODY, and an authenticated site can reflect a
+                # credential into it - so the fixture puts one there.
+                return self._content_status[luid], b"<error>not for you</error>"
             served = self.served.setdefault(luid, [])
             payload = f"<workbook luid='{luid}' download='{len(served)}'/>".encode()
             served.append(payload)
@@ -723,3 +733,176 @@ def test_reflected_credentials_never_reach_the_output_over_the_cached_path(tmp_p
 
     assert secret not in text
     assert "[REDACTED]" in text, "the detector had something to detect"
+
+
+# ------------------------------------- correction round on PR #582 (blind review of the cache slice)
+#
+# Three findings, each with its own transport-level reproduction:
+#   1. the withheld-live fallback persisted LOCAL strings verbatim - a filename IS a credential sink;
+#   2. a non-200 content answer cached as "no bytes" and was reported as "the bytes DIFFER";
+#   3. a malformed non-string inventory name was keyed by `repr` and could match a local stem.
+
+
+def _twbx_with_members(path: Path, member_names: list[str]) -> Path:
+    """A `.twbx` whose MEMBER names are chosen by the caller - members are a string sink too."""
+    with zipfile.ZipFile(path, "w") as archive:
+        for name in member_names:
+            archive.writestr(name, b"<workbook/>")
+    return path
+
+
+def test_a_scrub_failure_still_redacts_the_local_strings_it_keeps(tmp_path, monkeypatch):
+    """Finding 1a. The local half is not automatically clean - it is merely UNSCRUBBED.
+
+    A workbook whose FILENAME is the PAT secret is not exotic: harvest names files from site data,
+    and the file above already builds a fixture named after a credential. Withholding the live half
+    while persisting `input.file` verbatim writes the secret into an artifact that is committed
+    beside findings and pasted into issues.
+
+    Here the first scrub (over the whole tree, live half included) fails and the retry over the
+    reduced local-only tree succeeds - so the filename is REDACTED rather than dropped.
+    """
+    secret = "SYNTHETIC_FILENAME_SECRET_42"
+    env = dict(LIVE_ENV, TABLEAU_PAT_SECRET=secret)
+    _twbx(tmp_path, secret)
+    site = _install(monkeypatch, RecordingSite(env, workbooks=[{"id": "luid-1", "name": secret}]))
+    real_scrub, attempts = prov.scrub_tree, []
+
+    def fails_once_on_the_live_tree(value, redactor):
+        attempts.append(value)
+        if len(attempts) == 1:
+            raise RuntimeError("the live half could not be scrubbed")
+        return real_scrub(value, redactor)
+
+    monkeypatch.setattr(prov, "scrub_tree", fails_once_on_the_live_tree)
+    result = prov.build(tmp_path, env)
+
+    record = result["inputs"][0]
+    assert secret not in json.dumps(result)
+    assert "[REDACTED]" in record["input"]["file"], "redacted, not dropped - the retry worked"
+    assert record["input"]["sha256"] and record["origin"] is None
+    assert site.count("signout") == 1
+
+
+def test_an_unusable_redactor_keeps_only_derived_evidence(tmp_path, monkeypatch):
+    """Finding 1b. When redaction itself cannot be trusted, every COPIED string goes.
+
+    PAT secret == the filename, PAT name == a member name, session token == another member name.
+    All three are strings copied out of the environment, and none may survive; a digest, a byte count
+    and a CRC are values this module computed and cannot carry a credential.
+    """
+    secret, pat_name, token = "SECRET_AS_FILENAME_42", "PAT_NAME_AS_MEMBER_42", "session-token"
+    env = dict(LIVE_ENV, TABLEAU_PAT_NAME=pat_name, TABLEAU_PAT_SECRET=secret)
+    _twbx_with_members(tmp_path / f"{secret}.twbx", [f"{pat_name}.twb", f"Data/{token}.csv"])
+
+    class UnusableRedactor(RecordingSite):
+        def redact_text(self, text):
+            raise RuntimeError("the redactor is broken")
+
+    site = _install(monkeypatch, UnusableRedactor(env, workbooks=[]))
+    result = prov.build(tmp_path, env)
+
+    text = json.dumps(result)
+    for credential in (secret, pat_name, token):
+        assert credential not in text, f"a copied string survived an untrusted redaction: {credential}"
+    record = result["inputs"][0]["input"]
+    assert "file" not in record, "the filename is a copied string"
+    assert record["sha256"] and record["size_bytes"], "derived evidence is kept"
+    assert record["members"] and all(set(member) == {"size_bytes", "crc32"} for member in record["members"])
+    assert site.count("signout") == 1
+
+
+def test_an_unreadable_site_copy_is_unavailable_not_a_byte_difference(tmp_path, monkeypatch):
+    """Finding 2. A 404 read as `match: "name_only"` plus "the bytes DIFFER from the site copy".
+
+    That is a drift verdict about bytes nobody ever saw, on an item the site simply refused to hand
+    over - and `reference_evidence`/`package_unit` carry `name_only` forward as a build difference.
+    """
+    luid = _fixture_luid(3)
+    _twbx(tmp_path, f"{luid}_Refused_A")
+    _twbx(tmp_path, f"{luid}_Refused_B")
+    site = _install(
+        monkeypatch,
+        RecordingSite(LIVE_ENV, workbooks=[{"id": luid, "name": "Refused"}], content_status={luid: 404}),
+    )
+
+    records = prov.build(tmp_path, LIVE_ENV)["inputs"]
+
+    assert site.count("content") == 1, "one refusal is one call, for both inputs"
+    for record in records:
+        origin = record["origin"]
+        assert origin["match"] == "unavailable"
+        assert origin["content_unavailable"] == "HTTP 404"
+        assert origin["remote_sha256"] is None and origin["remote_revision_key"] is None
+        assert origin["revision_match"] is None, "nothing was compared, so nothing differs"
+        assert "DIFFER" not in record["origin_note"]
+        assert record["lookup_error"] == "content unavailable: HTTP 404"
+        assert origin["workbook_luid"] == luid, "the inventory evidence we DID get is still recorded"
+
+
+def test_a_refusal_reason_carries_no_response_text(tmp_path, monkeypatch):
+    """The reason is the status NUMBER. An authenticated site can reflect a credential into a body,
+    and the fixture's refusal body is exactly the kind of text that must never become the reason."""
+    luid = _fixture_luid(6)
+    _twbx(tmp_path, f"{luid}_Refused")
+    _install(
+        monkeypatch,
+        RecordingSite(LIVE_ENV, workbooks=[{"id": luid, "name": "Refused"}], content_status={luid: 403}),
+    )
+
+    origin = prov.build(tmp_path, LIVE_ENV)["inputs"][0]["origin"]
+
+    assert origin["content_unavailable"] == "HTTP 403"
+    assert "not for you" not in json.dumps(origin), "no response body reaches the record"
+
+
+def test_a_refused_download_does_not_condemn_a_healthy_sibling(tmp_path, monkeypatch):
+    """Positive control beside finding 2: a real byte difference is still reported as one."""
+    refused, healthy = _fixture_luid(4), _fixture_luid(5)
+    _twbx(tmp_path, f"{refused}_Refused")
+    _twbx(tmp_path, f"{healthy}_Healthy")
+    inventory = [{"id": refused, "name": "Refused"}, {"id": healthy, "name": "Healthy"}]
+    site = _install(
+        monkeypatch,
+        RecordingSite(LIVE_ENV, workbooks=inventory, content_status={refused: 404}),
+    )
+
+    records = {record["origin"]["workbook_luid"]: record for record in prov.build(tmp_path, LIVE_ENV)["inputs"]}
+
+    assert site.count("content") == 2, "one refusal, one real download"
+    assert records[refused]["origin"]["match"] == "unavailable"
+    assert records[healthy]["origin"]["match"] == "name_only", "the site copy WAS read and it differs"
+    assert records[healthy]["origin"]["content_unavailable"] is None
+    assert "DIFFER" in records[healthy]["origin_note"]
+    assert "lookup_error" not in records[healthy]
+
+
+def test_a_malformed_inventory_name_cannot_match_a_local_file(tmp_path, monkeypatch):
+    """Finding 3. A response whose `name` is `["Superstore"]` was keyed by `repr` and matched a local
+    file called literally `['Superstore']` - identity invented out of a malformed field."""
+    _twbx(tmp_path, "['Superstore']")
+    site = _install(monkeypatch, RecordingSite(LIVE_ENV, workbooks=[{"id": "luid-1", "name": ["Superstore"]}]))
+
+    record = prov.build(tmp_path, LIVE_ENV)["inputs"][0]
+
+    assert record["origin"] is None, "a list is not a name"
+    assert site.count("content") == 0, "no identity, so nothing to download"
+    assert "local-only" in record["origin_note"]
+
+
+@pytest.mark.parametrize("malformed", [{"value": "Superstore"}, ["Superstore"], 42, None])
+def test_a_malformed_name_never_matches_its_own_repr(malformed):
+    """The same rule stated directly, over the shapes a malformed REST answer can actually take."""
+    lookup = FakeLookup([{"id": "a", "name": malformed}])
+    assert prov.find_origin(lookup, repr(malformed), {"sha256": "x"}) is None
+
+
+def test_a_luid_match_survives_a_malformed_name_and_counts_it_as_no_name():
+    """Identity still comes from the LUID, and `same_name_count` answers safely rather than crashing."""
+    lookup = FakeLookup([{"id": HARVEST_LUID, "name": ["Sales"]}])
+
+    origin = prov.find_origin(lookup, f"{HARVEST_LUID}_Sales", {"sha256": "x"})
+
+    assert origin["matched_by"] == "luid"
+    assert origin["same_name_count"] == 0, "a non-string is not a display name, so it is not ambiguous"
+    assert origin["workbook_name"] == ["Sales"], "the raw field is still recorded as the site gave it"

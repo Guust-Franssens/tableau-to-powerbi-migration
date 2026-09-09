@@ -127,6 +127,7 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
         self._inventory_failure: Exception | None = None
         self._content_cache: dict[str, bytes | None] = {}
         self._content_failure: dict[str, Exception] = {}
+        self._content_unavailable: dict[str, str] = {}
 
     def _call(self, method: str, path: str, body: dict | None = None, accept: str | None = None):
         request = urllib.request.Request(
@@ -211,7 +212,10 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
         return json.loads(payload).get("workbooks", {}).get("workbook", [])
 
     def content_sha256(self, workbook_id: str) -> str | None:
-        """sha256 of the workbook as the server would hand it to us, or ``None`` if it cannot be read."""
+        """sha256 of the workbook as the server would hand it to us, or ``None`` if it cannot be read.
+
+        ``None`` means **unread**, never "different" - :meth:`content_unavailable` carries the reason.
+        """
         payload = self._content(workbook_id)
         return hashlib.sha256(payload).hexdigest() if payload is not None else None
 
@@ -232,6 +236,15 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
         payload = self._content(workbook_id)
         return revision_key(payload) if payload is not None else None
 
+    def content_unavailable(self, workbook_id: str) -> str | None:
+        """Why this workbook's bytes could not be read, or ``None`` when they were read.
+
+        The reason is the HTTP **status number only** - never response text, which an authenticated
+        site can reflect a credential into. Cached with the miss, so the answer costs no extra call
+        and every input resolving to that LUID gets the same honest reason.
+        """
+        return self._content_unavailable.get(workbook_id)
+
     def _content(self, workbook_id: str) -> bytes | None:
         """The site's bytes for one workbook, downloaded at most once - miss and failure cached.
 
@@ -239,6 +252,11 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
         inputs resolving to one site item) pays for one download. A transport failure latches that
         LUID only: a *different* workbook may well be readable, and pretending otherwise would turn
         one dead item into a site-wide "local only" verdict.
+
+        ⚠️ A non-200 answer caches as ``None`` **plus a reason**. Without the reason a 404 was
+        indistinguishable from a download whose bytes disagreed, and the caller duly recorded
+        ``match: "name_only"`` with "the bytes DIFFER from the site copy" - a drift claim about bytes
+        nobody ever saw.
         """
         if workbook_id in self._content_failure:
             raise self._content_failure[workbook_id]
@@ -250,6 +268,8 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 self._content_failure[workbook_id] = exc
                 raise
+            if status != 200:
+                self._content_unavailable[workbook_id] = f"HTTP {int(status)}"
             self._content_cache[workbook_id] = payload if status == 200 else None
         return self._content_cache[workbook_id]
 
@@ -279,15 +299,6 @@ def _sanitized(text: str) -> str:
     return "".join(char if char.isalnum() or char in "-_" else "_" for char in text)[:60]
 
 
-def _name_key(value: Any) -> Any:
-    """A hashable stand-in for an inventory ``name`` so a malformed response cannot crash the index.
-
-    A real REST answer gives a string; anything else could never have compared equal to a filename
-    stem under the previous scan either, and ``repr`` keeps that true while staying hashable.
-    """
-    return value if isinstance(value, (str, bytes, int, float, bool, type(None))) else repr(value)
-
-
 class _WorkbookIndex:
     """The site inventory keyed by the three EXACT rules :func:`find_origin` matches on.
 
@@ -295,22 +306,34 @@ class _WorkbookIndex:
     they meant when each rule was a separate scan of the whole list. Building the index is local CPU
     over an inventory that is now fetched once per run; the cost this module cares about is round
     trips, and there is exactly one.
+
+    ⚠️ **Only a real string is a name.** An earlier revision of this index kept a malformed ``name``
+    hashable by keying it on ``repr``, which invented identity out of nothing: a response whose
+    ``name`` was ``["Superstore"]`` became the key ``"['Superstore']"`` and matched a local file
+    called exactly that. A non-string name does not participate in name matching at all - it cannot
+    equal a filename stem, which is the answer the pre-index scan gave.
     """
 
     def __init__(self, workbooks: list[dict[str, Any]]) -> None:
         self.workbooks = workbooks
         self.by_luid: dict[str, list[dict[str, Any]]] = {}
-        self.by_name: dict[Any, list[dict[str, Any]]] = {}
+        self.by_name: dict[str, list[dict[str, Any]]] = {}
         self.by_sanitized_name: dict[str, list[dict[str, Any]]] = {}
         for workbook in workbooks:
             name = workbook.get("name")
             self.by_luid.setdefault(str(workbook.get("id") or "").lower(), []).append(workbook)
-            self.by_name.setdefault(_name_key(name), []).append(workbook)
-            self.by_sanitized_name.setdefault(_sanitized(str(name or "")), []).append(workbook)
+            if isinstance(name, str):
+                self.by_name.setdefault(name, []).append(workbook)
+                self.by_sanitized_name.setdefault(_sanitized(name), []).append(workbook)
 
     def same_name_count(self, name: Any) -> int:
-        """How many workbooks on the site carry this exact name - ambiguity is worth recording."""
-        return len(self.by_name.get(_name_key(name), []))
+        """How many workbooks on the site carry this exact name - ambiguity is worth recording.
+
+        A malformed (non-string) name is not a name, so it counts **0** rather than being coerced
+        into one. It is still a safe answer for a workbook resolved by LUID: the question asked is
+        "is this display name ambiguous", and a value that is not a display name has no answer.
+        """
+        return len(self.by_name.get(name, [])) if isinstance(name, str) else 0
 
     def match(self, luid: str | None, name_part: str) -> tuple[str | None, list[dict[str, Any]]]:
         """Resolve a filename stem to site workbooks, and say WHICH rule found them.
@@ -324,7 +347,7 @@ class _WorkbookIndex:
             candidates = self.by_luid.get(luid.lower(), [])
             if candidates:
                 return "luid", candidates
-        candidates = self.by_name.get(_name_key(name_part), [])
+        candidates = self.by_name.get(name_part, [])
         if candidates:
             return "name", candidates
         if luid is not None:
@@ -355,6 +378,11 @@ def find_origin(lookup: TableauLookup, stem: str, local: dict[str, Any]) -> dict
     not comparable* - a missing key on either side, or two different algorithms. It is never
     ``"differs"`` in that case: a false drift alarm on every pre-existing capture would be worse than
     the gap it closes.
+
+    ⚠️ ``match`` has a third value, ``"unavailable"``, for the case where the site copy was never
+    read - a 404, a 403, any non-200. It used to fall through to ``"name_only"``, which claimed the
+    bytes DIFFER from a copy nobody had seen: a drift verdict manufactured out of a failed download.
+    ``content_unavailable`` carries the sanitized reason, and both digests stay ``None``.
     """
     luid, name_part = split_harvest_stem(stem)
     index = _WorkbookIndex(lookup.workbooks())
@@ -365,8 +393,15 @@ def find_origin(lookup: TableauLookup, stem: str, local: dict[str, Any]) -> dict
     workbook = candidates[0]
     remote_sha = lookup.content_sha256(workbook["id"])
     remote_key = lookup.content_revision_key(workbook["id"])
+    unavailable = lookup.content_unavailable(workbook["id"])
     local_key = RevisionKey.from_json(local.get("revision_key"))
     agreement = local_key.agrees_with(remote_key) if local_key is not None else None
+    if remote_sha == local["sha256"]:
+        verdict = "sha256"
+    elif remote_sha is None:
+        verdict = "unavailable"
+    else:
+        verdict = "name_only"
     return {
         "server": lookup.base,
         "site": lookup.site,
@@ -379,7 +414,8 @@ def find_origin(lookup: TableauLookup, stem: str, local: dict[str, Any]) -> dict
         "tableau_product_version": lookup.product_version,
         "rest_api_version": lookup.version,
         "matched_by": matched_by,
-        "match": "sha256" if remote_sha == local["sha256"] else "name_only",
+        "match": verdict,
+        "content_unavailable": unavailable,
         "revision_match": None if agreement is None else ("same" if agreement else "differs"),
         "remote_revision_key": remote_key.as_json() if remote_key is not None else None,
         "remote_sha256": remote_sha,
@@ -430,6 +466,13 @@ def build(target: Path, env: dict[str, str]) -> dict[str, Any]:
                     f"matched by {origin['matched_by']}, but the bytes DIFFER from the site copy - "
                     "figures measured here will not reproduce against it"
                 )
+            elif origin["match"] == "unavailable":
+                reason = origin.get("content_unavailable") or "the site refused the download"
+                record["origin_note"] = (
+                    f"matched by {origin['matched_by']}, but the site copy could NOT be read "
+                    f"({reason}) - no byte or revision comparison was made"
+                )
+                record["lookup_error"] = f"content unavailable: {reason}"
         records.append(record)
     result = {
         "schema": "tableau-source-provenance/1",
@@ -459,7 +502,7 @@ def _finish_live(result: dict[str, Any], lookup: TableauLookup) -> dict[str, Any
         result, _paths = scrub_tree(result, lookup.redact_text)
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
         LOG.warning("provenance redaction failed (%s) - live origin fields withheld", type(exc).__name__)
-        result = _without_live_fields(result)
+        result = _without_live_fields(result, lookup.redact_text)
     finally:
         try:
             lookup.sign_out()
@@ -468,19 +511,60 @@ def _finish_live(result: dict[str, Any], lookup: TableauLookup) -> dict[str, Any
     return result
 
 
-def _without_live_fields(result: dict[str, Any]) -> dict[str, Any]:
-    """The same stamp with every response-derived field dropped, keeping the local fingerprints."""
-    return {
+WITHHELD_NOTE = "live origin withheld - provenance redaction failed for this run"
+DERIVED_INPUT_FIELDS = ("size_bytes", "sha256", "revision_key")
+DERIVED_MEMBER_FIELDS = ("size_bytes", "crc32")
+
+
+def _without_live_fields(result: dict[str, Any], redactor) -> dict[str, Any]:
+    """The stamp with the response-derived half dropped and the local half made safe to persist.
+
+    ⚠️ Keeping the local record verbatim is NOT safe, and an earlier revision did exactly that. A
+    fingerprint is full of strings that came from the environment rather than from us -
+    ``input.file`` and every ``members[].name`` - and a workbook whose FILENAME is the PAT secret
+    (or a member named after the PAT name, or the session token) then writes that credential into an
+    artifact that is committed beside findings and pasted into issues. The local half being local
+    does not make it clean; it makes it *unscrubbed*.
+
+    So it is redacted independently, by the audited :func:`tableau_env.scrub_tree` over the reduced
+    tree - the first attempt may well have failed on the live half. If **that** fails too, redaction
+    itself cannot be trusted, and only fields this module DERIVED survive: sizes, the sha256, the
+    revision key, member sizes and CRCs. Every copied string goes, filename included. Losing the
+    filename hurts a consumer; persisting a credential is not recoverable.
+    """
+    reduced = {
         **result,
         "inputs": [
-            {
-                "input": record["input"],
-                "origin": None,
-                "origin_note": "live origin withheld - provenance redaction failed for this run",
-            }
-            for record in result["inputs"]
+            {"input": record["input"], "origin": None, "origin_note": WITHHELD_NOTE} for record in result["inputs"]
         ],
     }
+    try:
+        scrubbed, _paths = scrub_tree(reduced, redactor)
+        return scrubbed
+    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        LOG.warning("provenance redaction is unusable (%s) - keeping DERIVED evidence only", type(exc).__name__)
+        return {
+            **result,
+            "inputs": [
+                {"input": _derived_only(record["input"]), "origin": None, "origin_note": WITHHELD_NOTE}
+                for record in result["inputs"]
+            ],
+        }
+
+
+def _derived_only(record: dict[str, Any]) -> dict[str, Any]:
+    """A fingerprint reduced to what this module COMPUTED - no string copied from the environment.
+
+    A digest, a byte count and a CRC cannot carry a credential: none of them is a copy of anything
+    the operator configured. ``file`` and ``members[].name`` are copies, and are what goes.
+    """
+    reduced = {key: value for key, value in record.items() if key in DERIVED_INPUT_FIELDS}
+    if isinstance(record.get("members"), list):
+        reduced["members"] = [
+            {key: value for key, value in member.items() if key in DERIVED_MEMBER_FIELDS}
+            for member in record["members"]
+        ]
+    return reduced
 
 
 def main() -> int:
