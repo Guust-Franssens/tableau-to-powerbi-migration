@@ -894,12 +894,19 @@ def _collect_evidence(
 def _package_integrity_refusal(root: Path) -> UnitResult | None:
     """`CANNOT_ESTABLISH` when ``root`` is a package whose own filesystem cannot be trusted, else None.
 
-    ⚠️ **This runs BEFORE any source or evidence discovery, and that ordering is the point.** A
-    package-shaped target is the one target that inherits NO ancestor evidence
-    (`bundle_corpus.is_package_target`), so the package's own tree is the whole evidence boundary -
-    and until #562 the only thing checked about it was that `package-manifest.json` EXISTED. An
-    independent audit measured 14 controlled packages - malformed, duplicate-keyed, byte-changed,
-    file-deleted, path-escaping, foreign-file - every one returning `READY 4/4` here.
+    WARNING: **This runs BEFORE any source or evidence discovery, and before the target is resolved.**
+    Both orderings are the invariant, not housekeeping:
+
+    * A package-shaped target is the one target that inherits NO ancestor evidence
+      (`bundle_corpus.is_package_target`), so the package's own tree is the whole evidence boundary -
+      and until #562 the only thing checked about it was that `package-manifest.json` EXISTED. An
+      independent audit measured 14 controlled packages - malformed, duplicate-keyed, byte-changed,
+      file-deleted, path-escaping, foreign-file - every one returning `READY 4/4` here.
+    * ``root`` is the path the CALLER SUPPLIED. `Path.resolve()` turns a symlinked or junctioned
+      target into its destination, so resolving first would verify - and then read source and
+      evidence from - a directory the operator never named, with the reparse hop erased from the
+      verdict. The supplied path is classified by `lstat` instead, and a root that is itself a
+      reparse point is refused.
 
     Only the filesystem/manifest invariant is asserted: the declared namespace and bytes ARE the
     package. Roles, identity and oracle semantics are separate invariants and are not claimed. A
@@ -927,10 +934,13 @@ def scan(
     require_validation_grade: bool = False,
 ) -> dict[str, Any]:
     """Assess every shipping report under ``root``."""
-    root = root.resolve()
+    # DELIBERATELY not resolved yet - see `_package_integrity_refusal`. Canonicalisation happens only
+    # once the package precondition has passed, so a reparse-point root can never be replaced by its
+    # destination and then be read for source or evidence.
     damaged = _package_integrity_refusal(root)
     if damaged is not None:
         return _merge(root, [damaged], [], [])
+    root = root.resolve()
     evidence, rejected = _collect_evidence(root, reference_dir, oracle_dir)
     engine_report = _engine_report(root)
     reports = shipping_reports(root)

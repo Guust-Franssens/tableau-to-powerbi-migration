@@ -7,6 +7,7 @@ LUIDs or oracle semantics - those are a later slice and are NOT covered by these
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -62,6 +63,28 @@ def build_package(
 
 def codes(result: pfs.PackageFilesystem) -> list[str]:
     return [finding.code for finding in result.findings]
+
+
+class _ReparseStatus:  # pylint: disable=too-few-public-methods
+    """A real `stat_result` with the Windows reparse-point attribute forced on.
+
+    The symlink controls cannot run on an unprivileged Windows account (`WinError 1314`), so the
+    classifier is also driven directly: a junction and a file symlink reach it through this same
+    attribute bit, and `S_ISLNK` is 0 for a junction.
+    """
+
+    def __init__(self, status: os.stat_result) -> None:
+        self.st_mode = status.st_mode
+        self.st_file_attributes = getattr(status, "st_file_attributes", 0) | 0x400
+
+
+def _explode(reason: str):  # type: ignore[no-untyped-def]
+    """A stand-in that fails the test if it is ever called."""
+
+    def refuse(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError(reason)
+
+    return refuse
 
 
 # --------------------------------------------------------------------------------------- positives
@@ -142,7 +165,51 @@ def test_duplicate_top_level_key_is_rejected(tmp_path: Path) -> None:
     result = pfs.verify_package_filesystem(root)
 
     assert codes(result) == ["manifest-duplicate-key"]
-    assert "kind" in result.findings[0].detail
+    assert "#2" in result.findings[0].detail
+    assert "kind" not in result.findings[0].detail
+
+
+def test_a_duplicated_key_is_never_echoed_into_a_shareable_finding(tmp_path: Path) -> None:
+    """`contents.files` is keyed BY PATH, so the duplicated key can itself be a customer path."""
+    secret = "D:/Payroll/Customer Secret.twbx"
+    digest = _digest(b"a\n")
+    root = build_package(
+        tmp_path,
+        files={"README.md": b"a\n"},
+        manifest_text=(
+            '{"contents": {"files": {"README.md": "%s", "%s": "%s", "%s": "%s"}}}'
+            % (digest, secret, digest, secret, digest)
+        ),
+    )
+
+    result = pfs.verify_package_filesystem(root)
+
+    assert codes(result) == ["manifest-duplicate-key"]
+    rendered = result.summary(limit=10) + " | " + " | ".join(f.describe() for f in result.findings)
+    assert secret not in rendered
+    assert "Payroll" not in rendered
+    assert "Customer Secret" not in rendered
+    assert "D:" not in rendered
+
+
+@pytest.mark.parametrize(
+    "manifest_text",
+    [
+        '{"contents": {"files": {}}, "score": NaN}',
+        '{"contents": {"files": {}}, "score": Infinity}',
+        '{"contents": {"files": {}}, "score": -Infinity}',
+        '{"contents": {"files": {}}, "nested": {"deep": [1, {"x": NaN}]}}',
+    ],
+)
+def test_non_standard_json_constants_are_refused_anywhere_in_the_tree(tmp_path: Path, manifest_text: str) -> None:
+    """Python's decoder accepts NaN/Infinity by default; a strict reader does not, so two readers
+    would disagree about what the package declared - the duplicate-key ambiguity in another suit."""
+    root = build_package(tmp_path, files={"README.md": b"a\n"}, manifest_text=manifest_text)
+
+    result = pfs.verify_package_filesystem(root)
+
+    assert codes(result) == ["manifest-not-json"]
+    assert result.clean is False
 
 
 def test_duplicate_key_is_rejected_at_every_depth(tmp_path: Path) -> None:
@@ -371,6 +438,131 @@ def test_file_symlink_is_refused(tmp_path: Path) -> None:
     assert "reparse-point" in codes(pfs.verify_package_filesystem(root))
 
 
+# ------------------------------------------------------------- root and manifest are classified first
+
+
+@pytest.mark.skipif(not WINDOWS, reason="directory junctions are a Windows reparse point")
+def test_a_junctioned_package_root_is_refused_and_its_destination_is_never_read(tmp_path: Path) -> None:
+    """A root that is a reparse point must not silently BECOME its destination."""
+    real = build_package(tmp_path / "real", files={"README.md": b"a\n"})
+    assert pfs.verify_package_filesystem(real).clean is True
+
+    link = tmp_path / "packages" / "Linked"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    if not _make_junction(link, real):
+        pytest.skip("could not create junction: mklink /J failed on this host")
+
+    result = pfs.verify_package_filesystem(link)
+
+    assert codes(result) == ["reparse-point"]
+    assert result.findings[0].path == "."
+    assert result.declared_files == 0
+
+
+def test_an_injected_reparse_root_is_refused_before_the_manifest_is_ever_opened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The portable half of the control above - a file symlink cannot be created on this host."""
+    root = build_package(tmp_path, files={"README.md": b"a\n"})
+    real_lstat = os.lstat
+
+    def reparse_root(path, **kwargs):  # type: ignore[no-untyped-def]
+        status = real_lstat(path, **kwargs)
+        if Path(path) == root:
+            return _ReparseStatus(status)
+        return status
+
+    monkeypatch.setattr(pfs.os, "lstat", reparse_root)
+    monkeypatch.setattr(Path, "read_text", _explode("read_text ran on a reparse-point root"))
+
+    result = pfs.verify_package_filesystem(root)
+
+    assert codes(result) == ["reparse-point"]
+
+
+def test_a_reparse_point_manifest_is_refused_before_any_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`read_text()` on a linked manifest reads bytes from OUTSIDE the package. lstat comes first."""
+    root = build_package(tmp_path, files={"README.md": b"a\n"})
+    manifest = root / pfs.PACKAGE_MARKER
+    real_lstat = os.lstat
+
+    def reparse_manifest(path, **kwargs):  # type: ignore[no-untyped-def]
+        status = real_lstat(path, **kwargs)
+        if Path(path) == manifest:
+            return _ReparseStatus(status)
+        return status
+
+    monkeypatch.setattr(pfs.os, "lstat", reparse_manifest)
+    monkeypatch.setattr(Path, "read_text", _explode("read_text ran on a reparse-point manifest"))
+
+    result = pfs.verify_package_filesystem(root)
+
+    assert codes(result) == ["reparse-point"]
+    assert result.findings[0].path == pfs.PACKAGE_MARKER
+
+
+def test_a_directory_where_the_manifest_should_be_is_refused_without_reading(tmp_path: Path) -> None:
+    root = tmp_path / "packages" / "Minimal"
+    (root / pfs.PACKAGE_MARKER).mkdir(parents=True)
+
+    result = pfs.verify_package_filesystem(root)
+
+    assert codes(result) == ["non-regular-file"]
+    assert result.findings[0].path == pfs.PACKAGE_MARKER
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="this platform has no os.mkfifo")
+def test_a_fifo_manifest_is_refused_without_blocking(tmp_path: Path) -> None:
+    """Opening a FIFO for read BLOCKS until a writer appears - the verifier must never get there."""
+    root = tmp_path / "packages" / "Minimal"
+    root.mkdir(parents=True)
+    os.mkfifo(root / pfs.PACKAGE_MARKER)  # pylint: disable=no-member
+
+    result = pfs.verify_package_filesystem(root)
+
+    assert codes(result) == ["non-regular-file"]
+
+
+# ---------------------------------------------------------------- cross-host Windows alias namespace
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["COM\u00b9", "com\u00b2.png", "oracle/LPT\u00b3.dat", "lpt\u00b9.txt", "COM\u00b3.tar.gz"],
+)
+def test_windows_superscript_device_names_are_refused(key: str) -> None:
+    """Windows best-fit-maps COM<sup>1..3</sup> onto COM1-COM3, so an ordinary file on a
+    case-sensitive host is a DEVICE on the host that reads the package."""
+    assert pfs.declared_path_problem(key) is not None
+
+
+@pytest.mark.parametrize("key", ["PACKAGE-MANIFEST.JSON", "Package-Manifest.json", "package-manifest.json "])
+def test_an_alias_of_the_excluded_manifest_may_not_be_declared_as_another_file(tmp_path: Path, key: str) -> None:
+    """The manifest exclusion is exact-match; Windows is not. On a case-sensitive host these are
+    ordinary second files that verify clean, and on the reading host they ARE the manifest."""
+    root = build_package(
+        tmp_path,
+        files={"README.md": b"a\n"},
+        manifest={"contents": {"files": {"README.md": _digest(b"a\n"), key: _digest(b"a\n")}}},
+    )
+
+    result = pfs.verify_package_filesystem(root)
+
+    assert result.clean is False
+    assert set(codes(result)) & {"declared-path-alias", "declared-path-unsafe", "declared-manifest-self"}
+
+
+def test_the_exact_manifest_key_still_reports_declaring_itself(tmp_path: Path) -> None:
+    """Seeding the alias map must not reclassify the exact self-declaration control."""
+    root = build_package(
+        tmp_path,
+        files={"README.md": b"a\n"},
+        manifest={"contents": {"files": {"README.md": _digest(b"a\n"), pfs.PACKAGE_MARKER: "0" * 64}}},
+    )
+
+    assert codes(pfs.verify_package_filesystem(root)) == ["declared-manifest-self"]
+
+
 def test_reparse_predicate_recognises_the_windows_attribute_without_a_symlink() -> None:
     """The symlink control is unavailable on an unprivileged Windows host, so pin the predicate.
 
@@ -392,10 +584,17 @@ def test_reparse_predicate_recognises_the_windows_attribute_without_a_symlink() 
 
 
 def test_walk_never_uses_rglob_is_dir_is_file_or_resolve() -> None:
-    """Those four all FOLLOW links, which is the defect this walk exists to avoid."""
-    source = Path(pfs.__file__).read_text(encoding="utf-8")
-    for banned in (".rglob(", ".is_dir(", ".is_file(", ".resolve("):
-        assert banned not in source, banned
+    """Those four all FOLLOW links, which is the defect this walk exists to avoid.
+
+    Read from the parsed AST rather than the source text, so the module may DISCUSS `resolve()` in
+    its prose (it has to - the pre-resolve defect is the reason the root check exists) without the
+    guard reading the explanation as the offence.
+    """
+    tree = ast.parse(Path(pfs.__file__).read_text(encoding="utf-8"))
+    called = {
+        node.func.attr for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+    assert called.isdisjoint({"rglob", "glob", "is_dir", "is_file", "resolve", "samefile"}), sorted(called)
 
 
 # ------------------------------------------------------------------------------------ read failures
@@ -491,6 +690,62 @@ def test_non_package_legacy_root_is_not_subjected_to_the_package_precondition(tm
     legacy.mkdir(parents=True)
 
     assert crr._package_integrity_refusal(legacy) is None  # pylint: disable=protected-access
+
+
+@pytest.mark.skipif(not WINDOWS, reason="directory junctions are a Windows reparse point")
+def test_scan_refuses_a_junctioned_target_and_never_reads_the_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The supplied path is verified, not its destination.
+
+    `Path.resolve()` substitutes the destination silently, so resolving before the precondition would
+    verify - and then take source and evidence from - a directory the operator never named, with the
+    reparse hop erased from the verdict. The destination here is a package that WOULD be assessed.
+    """
+    real = build_package(
+        tmp_path / "real",
+        files={"report.json": b'{"workbooks": [{"name": "Minimal"}], "datasources": []}\n'},
+    )
+    link = tmp_path / "packages" / "Linked"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    if not _make_junction(link, real):
+        pytest.skip("could not create junction: mklink /J failed on this host")
+
+    monkeypatch.setattr(crr, "_collect_evidence", _explode("evidence discovery ran on a reparse-point target"))
+    monkeypatch.setattr(crr, "resolve_source", _explode("source resolution ran on a reparse-point target"))
+
+    report = crr.scan(link)
+
+    assert report["status"] == crr.STATUS_CANNOT_ESTABLISH
+    assert "reparse-point" in report["units"][0]["detail"]
+    assert report["evidence_records"] == 0
+
+
+def test_scan_does_not_resolve_the_target_before_the_package_precondition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The portable half: an injected reparse root must reach the refusal, not the assessment."""
+    root = build_package(
+        tmp_path,
+        files={"report.json": b'{"workbooks": [{"name": "Minimal"}], "datasources": []}\n'},
+    )
+    real_lstat = os.lstat
+
+    def reparse_root(path, **kwargs):  # type: ignore[no-untyped-def]
+        status = real_lstat(path, **kwargs)
+        if Path(path) == root:
+            return _ReparseStatus(status)
+        return status
+
+    monkeypatch.setattr(pfs.os, "lstat", reparse_root)
+    monkeypatch.setattr(crr, "_collect_evidence", _explode("evidence discovery ran on a reparse-point target"))
+    monkeypatch.setattr(crr, "resolve_source", _explode("source resolution ran on a reparse-point target"))
+    monkeypatch.setattr(Path, "resolve", _explode("the target was resolved before the package precondition"))
+
+    report = crr.scan(root)
+
+    assert report["status"] == crr.STATUS_CANNOT_ESTABLISH
+    assert "reparse-point" in report["units"][0]["detail"]
 
 
 def test_clean_package_continues_unchanged_and_is_not_rescued(tmp_path: Path) -> None:

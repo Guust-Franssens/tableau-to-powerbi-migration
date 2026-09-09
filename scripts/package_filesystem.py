@@ -89,8 +89,16 @@ _DRIVE_RE = re.compile(r"^[A-Za-z]:")
 
 #: Windows reserved device names. Reserved WITH an extension too (`CON.txt` is `CON`), so the check
 #: is on the component's stem.
+#:
+#: WARNING: **The SUPERSCRIPT digits are reserved too** - `COM<sup>1..3</sup>` / `LPT<sup>1..3</sup>`
+#: (U+00B9 / U+00B2 / U+00B3). Windows applies a best-fit mapping that folds them onto `COM1`-`COM3`,
+#: so a package built on a case-sensitive host can carry a name that is an ordinary file there and a
+#: DEVICE on the host that reads it. `"com\u00b9".upper()` is `"COM\u00b9"`, so the stem check catches
+#: them only if they are listed here explicitly.
 _RESERVED_DEVICES = frozenset(
-    {"CON", "PRN", "AUX", "NUL"} | {f"COM{digit}" for digit in "123456789"} | {f"LPT{digit}" for digit in "123456789"}
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{digit}" for digit in "123456789\u00b9\u00b2\u00b3"}
+    | {f"LPT{digit}" for digit in "123456789\u00b9\u00b2\u00b3"}
 )
 
 #: `FILE_ATTRIBUTE_REPARSE_POINT`. Named here because `stat` only exposes it on Windows, and this
@@ -148,39 +156,119 @@ class PackageFilesystem:
 
 
 class _DuplicateKey(ValueError):
-    """A JSON object repeated a key, at any depth."""
+    """A JSON object repeated a key, at any depth.
+
+    WARNING: it deliberately carries **no key text**. A duplicated key can itself be an absolute
+    customer path (`contents.files` is keyed by path), and this exception's message reaches a
+    shareable finding, so it names the POSITION and nothing else.
+    """
+
+
+class _NonStandardConstant(ValueError):
+    """The document used `NaN`, `Infinity` or `-Infinity`, which JSON does not define."""
 
 
 def _reject_duplicate_keys(pairs: Sequence[tuple[str, object]]) -> dict[str, object]:
     """`object_pairs_hook` that refuses a repeated key ANYWHERE in the document.
 
-    ⚠️ Plain `json.loads` silently keeps the LAST value, so `{"kind": "workbook", "kind": "x"}` parses
-    happily and two readers can legitimately disagree about what the package declared. The controlled
-    duplicate-key package returned production `READY 4/4`.
+    WARNING: Plain `json.loads` silently keeps the LAST value, so `{"kind": "workbook", "kind": "x"}`
+    parses happily and two readers can legitimately disagree about what the package declared. The
+    controlled duplicate-key package returned production `READY 4/4`.
     """
     seen: dict[str, object] = {}
-    for key, value in pairs:
+    for ordinal, (key, value) in enumerate(pairs, start=1):
         if key in seen:
-            raise _DuplicateKey(f"duplicate key {key!r}")
+            raise _DuplicateKey(f"repeats a key already given earlier in the same object (entry #{ordinal})")
         seen[key] = value
     return seen
+
+
+def _reject_constant(_name: str) -> object:
+    """`parse_constant` hook: `NaN`/`Infinity`/`-Infinity` are not JSON and are refused everywhere.
+
+    Python's decoder accepts them by default, so a manifest carrying one parses on this reader and is
+    rejected by a strict one - the same "two readers disagree about what was declared" ambiguity the
+    duplicate-key hook exists for. The name is not echoed: the refusal is generic.
+    """
+    raise _NonStandardConstant("uses a non-standard JSON constant")
+
+
+def _is_reparse_point(status: os.stat_result) -> bool:
+    """Whether an `lstat` result describes a symlink, a junction or any other reparse point.
+
+    ONE predicate, used by the root check, the manifest check and the walker alike - a second copy is
+    how the three drift apart. `S_ISLNK` is 0 for a Windows junction, which is why the file-attribute
+    bit is tested as well.
+    """
+    if stat.S_ISLNK(status.st_mode):
+        return True
+    return bool(getattr(status, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def _stat_failure(relative: str, error: OSError, *, expect_directory: bool) -> PackageFinding:
+    """The finding for a path whose own `lstat` failed."""
+    if isinstance(error, FileNotFoundError):
+        if expect_directory:
+            return PackageFinding("directory-unreadable", relative, "does not exist")
+        return PackageFinding("manifest-missing", relative, "the package carries no manifest")
+    code = "directory-unreadable" if expect_directory else "manifest-unreadable"
+    return PackageFinding(code, relative, f"could not be stat'd: {type(error).__name__}")
+
+
+def _classify_entry(path: Path, relative: str, *, expect_directory: bool) -> PackageFinding | None:
+    """Classify ONE path from its own `lstat`, following nothing, or None when it is as expected.
+
+    WARNING: **this runs before anything opens or reads the path, and that ordering is the point.**
+    `read_text()` on a symlinked, junctioned or FIFO `package-manifest.json` follows or BLOCKS - it
+    reads bytes from outside the package, or never returns at all - so the manifest is classified by
+    `os.lstat` first, with the SAME reparse predicate the walker uses rather than a second copy of it.
+
+    Residual, stated rather than mechanised: a path replaced between the `lstat` and the subsequent
+    open is not detected. That is an adversarial race, and this module's guarantee is accidental
+    damage and confused composition (see the module docstring), not adversarial rewrite.
+    """
+    try:
+        status = os.lstat(path)
+    except OSError as error:
+        return _stat_failure(relative, error, expect_directory=expect_directory)
+    if _is_reparse_point(status):
+        return PackageFinding("reparse-point", relative, "is a symlink, junction or other reparse point")
+    if expect_directory:
+        if stat.S_ISDIR(status.st_mode):
+            return None
+        return PackageFinding("non-regular-file", relative, "is not a directory")
+    if not stat.S_ISREG(status.st_mode):
+        return PackageFinding("non-regular-file", relative, "is not a regular file")
+    return None
+
+
+def _parse_manifest_text(raw: str) -> tuple[object, PackageFinding | None]:
+    """Strictly decode the manifest text, or the finding explaining why it cannot be decoded."""
+    try:
+        return json.loads(raw, object_pairs_hook=_reject_duplicate_keys, parse_constant=_reject_constant), None
+    except _DuplicateKey as duplicate:
+        return None, PackageFinding("manifest-duplicate-key", PACKAGE_MARKER, str(duplicate))
+    except _NonStandardConstant:
+        return None, PackageFinding(
+            "manifest-not-json", PACKAGE_MARKER, "is not valid JSON: it uses a non-standard constant"
+        )
+    except (json.JSONDecodeError, ValueError, RecursionError) as error:
+        return None, PackageFinding("manifest-not-json", PACKAGE_MARKER, f"is not valid JSON: {type(error).__name__}")
 
 
 def _load_manifest(root: Path) -> tuple[Mapping[str, object] | None, PackageFinding | None]:
     """The parsed manifest object, or the finding explaining why there is none."""
     manifest_path = root / PACKAGE_MARKER
+    refusal = _classify_entry(manifest_path, PACKAGE_MARKER, expect_directory=False)
+    if refusal is not None:
+        return None, refusal
     try:
         raw = manifest_path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return None, PackageFinding("manifest-missing", PACKAGE_MARKER, "the package carries no manifest")
     except (OSError, UnicodeDecodeError) as error:
         return None, PackageFinding("manifest-unreadable", PACKAGE_MARKER, f"could not be read: {type(error).__name__}")
-    try:
-        parsed = json.loads(raw, object_pairs_hook=_reject_duplicate_keys)
-    except _DuplicateKey as duplicate:
-        return None, PackageFinding("manifest-duplicate-key", PACKAGE_MARKER, str(duplicate))
-    except (json.JSONDecodeError, ValueError, RecursionError) as error:
-        return None, PackageFinding("manifest-not-json", PACKAGE_MARKER, f"is not valid JSON: {type(error).__name__}")
+    parsed, refusal = _parse_manifest_text(raw)
+    if refusal is not None:
+        return None, refusal
     if not isinstance(parsed, dict):
         return None, PackageFinding(
             "manifest-not-object", PACKAGE_MARKER, f"top level is {type(parsed).__name__}, not an object"
@@ -264,7 +352,11 @@ def _check_declared(files: Mapping[str, object]) -> tuple[dict[str, str], list[P
     """`{safe declared path: declared digest}` plus a finding for every entry that cannot be used."""
     findings: list[PackageFinding] = []
     safe: dict[str, str] = {}
-    aliases: dict[str, str] = {}
+    # SEEDED with the excluded root manifest, because the exclusion is exact-match while Windows is
+    # not. On a case-sensitive host `PACKAGE-MANIFEST.JSON` is a second, ordinary file that verifies
+    # clean; on the Windows host that later reads the package it IS the manifest, so the package
+    # silently describes a file that cannot exist beside itself.
+    aliases: dict[str, str] = {alias_key(PACKAGE_MARKER): PACKAGE_MARKER}
     for ordinal, (key, digest) in enumerate(files.items(), start=1):
         problem = declared_path_problem(key)
         if problem is not None:
@@ -297,13 +389,6 @@ def _check_declared(files: Mapping[str, object]) -> tuple[dict[str, str], list[P
     return safe, findings
 
 
-def _is_reparse_point(status: os.stat_result) -> bool:
-    """Whether an `lstat` result describes a symlink, a junction or any other reparse point."""
-    if stat.S_ISLNK(status.st_mode):
-        return True
-    return bool(getattr(status, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT)
-
-
 def _walk(root: Path) -> tuple[dict[str, Path], list[PackageFinding], list[str]]:
     """Every REGULAR file under ``root``, top-down, refusing every reparse point BEFORE recursing.
 
@@ -315,15 +400,9 @@ def _walk(root: Path) -> tuple[dict[str, Path], list[PackageFinding], list[str]]
     files: dict[str, Path] = {}
     findings: list[PackageFinding] = []
     empty: list[str] = []
-    try:
-        if _is_reparse_point(root.lstat()):
-            return files, [PackageFinding("reparse-point", ".", "the package root is itself a reparse point")], empty
-    except OSError as error:
-        return (
-            files,
-            [PackageFinding("directory-unreadable", ".", f"could not be stat'd: {type(error).__name__}")],
-            empty,
-        )
+    root_problem = _classify_entry(root, ".", expect_directory=True)
+    if root_problem is not None:
+        return files, [root_problem], empty
     pending: list[tuple[str, Path]] = [("", root)]
     while pending:
         prefix, directory = pending.pop()
@@ -442,7 +521,15 @@ def verify_package_filesystem(root: Path) -> PackageFilesystem:
     This is a precondition, not a verdict about the migration: it says nothing about workbook or
     datasource roles, identity or oracle evidence. Callers run it BEFORE discovering source or
     evidence, so a damaged package can never be read as its own evidence boundary.
+
+    WARNING: **``root`` must be the path the caller was HANDED, not a resolved one.** The whole point
+    of the root classification below is that a package root which is itself a symlink or junction is
+    refused rather than silently becoming its destination - and `Path.resolve()` performs exactly
+    that substitution before this function can see it.
     """
+    root_problem = _classify_entry(root, ".", expect_directory=True)
+    if root_problem is not None:
+        return _refused(root, root_problem)
     manifest, refusal = _load_manifest(root)
     if refusal is not None or manifest is None:
         return _refused(root, refusal or PackageFinding("manifest-missing", PACKAGE_MARKER, "no manifest"))

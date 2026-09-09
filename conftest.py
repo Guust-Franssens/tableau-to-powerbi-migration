@@ -97,6 +97,7 @@ EXPECTED_EXACT_SKIP_REASONS: frozenset[str] = frozenset(
         "reproduces the WINDOWS half: Path resolves / against the current drive",
         "case-sensitive filesystem: 'FOO' and 'foo' are not the same deliverable",
         "directory junctions are a Windows reparse point",
+        "this platform has no os.mkfifo",
         "canonical engine not installed, so its constants cannot be read",
     }
 )
