@@ -2008,10 +2008,15 @@ def test_a_walk_failure_cannot_report_a_clean_tree(tmp_path: Path, monkeypatch) 
         code = run_estate.main(_slice_only_argv(out))
 
     assert code == run_estate.EXIT_PATH_CEILING
-    assert "CANNOT ASSESS the emitted tree" in buffer.getvalue()
-    assert "device is not ready" in buffer.getvalue()
+    printed = buffer.getvalue()
+    assert "CANNOT ASSESS the emitted tree" in printed
+    assert run_estate.SCAN_UNASSESSABLE_CODE in printed and "class=OSError" in printed, printed
+    assert "device is not ready" not in printed, "a raw exception message was printed"
     report = _path_report(out)
-    assert report["status"] == "unknown_paths" and "OSError" in report["scan_error"]
+    assert report["status"] == "unknown_paths"
+    assert report["scan_error_code"] == run_estate.SCAN_UNASSESSABLE_CODE
+    assert report["scan_error_facts"]["class"] == "OSError" and report["scan_error_facts"]["errno"] == 5
+    assert "scan_error" not in report, "the free-form message is persisted again"
     assert not (out / "handover").exists(), "handover slices were written after a refusal"
 
 
@@ -2031,8 +2036,13 @@ def test_a_path_the_walker_could_not_measure_refuses(tmp_path: Path, monkeypatch
         code = run_estate.main(_slice_only_argv(out))
 
     assert code == run_estate.EXIT_PATH_CEILING
-    assert "access is denied" in buffer.getvalue(), buffer.getvalue()
-    assert _path_report(out)["status"] == "unknown_paths"
+    printed = buffer.getvalue()
+    assert run_estate.UNKNOWN_PATH_CODE.format(index=1) in printed, printed
+    assert "access is denied" not in printed, "the walker's free-form reason was printed"
+    report = _path_report(out)
+    assert report["status"] == "unknown_paths"
+    assert report["unknown_paths"][0]["code"] == run_estate.UNKNOWN_PATH_CODE.format(index=1)
+    assert "reason" not in report["unknown_paths"][0], "the free-form reason is persisted again"
 
 
 def test_an_output_tree_with_nothing_measurable_is_not_clean(tmp_path: Path) -> None:
@@ -2332,11 +2342,11 @@ def test_the_printed_refusal_carries_no_host_location(tmp_path: Path, monkeypatc
     assert not discloses_host_location(residue), residue
 
 
-def test_an_error_message_embedding_the_bundle_path_is_rewritten_not_echoed(tmp_path: Path, monkeypatch) -> None:
-    """An OS error routinely quotes the path it failed on - that path is the customer's.
+def test_an_error_message_embedding_the_bundle_path_is_never_persisted(tmp_path: Path, monkeypatch) -> None:
+    """An OS error routinely quotes the path it failed on - so its message is not published at all.
 
-    The bundle's own root is PROVEN, so it is rewritten to `<bundle>` rather than withheld: the
-    class, the errno and the failure text all survive, which is what makes the line worth keeping.
+    What survives is what can be read STRUCTURALLY off the exception: its class and its errno. There
+    is no rewriting step to get wrong, which is the whole point of the simplification.
     """
     out = _secret_rooted_bundle(tmp_path)
 
@@ -2351,10 +2361,11 @@ def test_an_error_message_embedding_the_bundle_path_is_rewritten_not_echoed(tmp_
     raw = (out / run_estate.PATH_CEILING_REPORT).read_text(encoding="utf-8")
     assert SECRET_FOLDER not in raw and SECRET_ACCOUNT not in raw, raw
     assert SECRET_FOLDER not in detail and SECRET_ACCOUNT not in detail, detail
+    assert "device is not ready" not in raw and "device is not ready" not in detail
     payload = json.loads(raw)
-    assert payload["diagnostics_withheld"] == 0, "a provable bundle root must be rewritten, not withheld"
-    assert run_estate.SAFE_BUNDLE_ROOT in payload["scan_error"], payload["scan_error"]
-    assert "device is not ready" in payload["scan_error"] and "OSError" in payload["scan_error"]
+    assert "scan_error" not in payload
+    assert payload["scan_error_code"] == run_estate.SCAN_UNASSESSABLE_CODE
+    assert payload["scan_error_facts"] == {"class": "OSError", "errno": 5}
     assert [value for value in _strings(payload) if discloses_host_location(value)] == []
 
 
@@ -2378,7 +2389,8 @@ def test_a_path_outside_the_bundle_is_an_ordinal_not_an_echo(tmp_path: Path, mon
     assert SECRET_FOLDER not in raw and SECRET_FOLDER not in detail, raw
     assert payload["paths_not_placed"] == 1
     assert payload["unknown_paths"][0]["path"] == run_estate.UNASSESSABLE_PATH.format(index=1)
-    assert "access is denied" in raw, "the reason itself was lost with the path"
+    assert payload["unknown_paths"][0]["code"] == run_estate.UNKNOWN_PATH_CODE.format(index=1)
+    assert "access is denied" not in raw, "the walker's free-form reason is persisted again"
 
 
 # ---------------------------------------------------------------------------
@@ -2400,7 +2412,10 @@ def _relative_bundle(monkeypatch, tmp_path: Path) -> Path:
 
 
 def test_a_relative_root_does_not_survive_in_the_persisted_scan_error(tmp_path: Path, monkeypatch) -> None:
-    """The reviewer's reproduction, on the report: a walk failure quoting a relative customer root."""
+    """The reviewer's reproduction, on the report: a walk failure quoting a relative customer root.
+
+    No rewriting: the message is not published at all. Its class and errno are.
+    """
     out = _relative_bundle(monkeypatch, tmp_path)
 
     def _boom(*_args, **_kwargs):
@@ -2415,8 +2430,9 @@ def test_a_relative_root_does_not_survive_in_the_persisted_scan_error(tmp_path: 
     payload = json.loads(raw)
     assert SECRET_FOLDER not in raw, raw
     assert SECRET_FOLDER not in detail, detail
-    assert run_estate.SAFE_BUNDLE_ROOT in payload["scan_error"]
-    assert "OSError" in payload["scan_error"] and "device is not ready" in payload["scan_error"]
+    assert "scan_error" not in payload, "a free-form message is persisted again"
+    assert payload["scan_error_code"] == run_estate.SCAN_UNASSESSABLE_CODE
+    assert payload["scan_error_facts"] == {"class": "OSError", "errno": 5}
 
 
 def test_a_relative_root_does_not_survive_in_an_unknown_path_reason(tmp_path: Path, monkeypatch) -> None:
@@ -2438,11 +2454,12 @@ def test_a_relative_root_does_not_survive_in_an_unknown_path_reason(tmp_path: Pa
     assert proceed is False
     raw = (out / run_estate.PATH_CEILING_REPORT).read_text(encoding="utf-8")
     payload = json.loads(raw)
-    reason = payload["unknown_paths"][0]["reason"]
+    row = payload["unknown_paths"][0]
     assert SECRET_FOLDER not in raw and SECRET_FOLDER not in detail, raw
-    assert f"{run_estate.SAFE_BUNDLE_ROOT}/pbip" in reason.replace("\\", "/"), reason
-    assert payload["unknown_paths"][0]["path"].startswith(run_estate.SAFE_BUNDLE_ROOT), payload["unknown_paths"]
-    assert "PermissionError" in reason
+    assert "reason" not in row, "the walker's free-form reason is persisted again"
+    assert row["code"] == run_estate.UNKNOWN_PATH_CODE.format(index=1)
+    # The structured half still names WHERE, because it was placed by true containment.
+    assert row["path"] == f"{run_estate.SAFE_BUNDLE_ROOT}/pbip", row
 
 
 def test_a_relative_root_does_not_survive_a_publication_failure_diagnostic(tmp_path: Path, monkeypatch, caplog) -> None:
@@ -2460,14 +2477,15 @@ def test_a_relative_root_does_not_survive_a_publication_failure_diagnostic(tmp_p
     assert written is None
     logged = "\n".join(record.getMessage() for record in caplog.records)
     assert SECRET_FOLDER not in logged, logged
-    assert run_estate.SAFE_BUNDLE_ROOT in logged, logged
-    assert "PermissionError" in logged and "Errno 13" in logged, (
-        f"the actionable class and error code were dropped with the path: {logged}"
+    assert "Permission denied" not in logged, "the exception's own message was logged"
+    assert f"operation={run_estate.PUBLISH_REPORT_OPERATION}" in logged, logged
+    assert "class=PermissionError" in logged and "errno=13" in logged, (
+        f"the actionable class and error code were dropped with the message: {logged}"
     )
 
 
-def test_a_foreign_relative_path_is_withheld_with_its_class_and_code(tmp_path: Path, monkeypatch) -> None:
-    """A path that is NOT the bundle cannot be proven safe, so the message goes - the facts stay."""
+def test_a_foreign_path_in_a_message_is_never_published_only_its_class_and_code(tmp_path: Path, monkeypatch) -> None:
+    """A path that is not the bundle's cannot be reasoned about - so no message is published at all."""
     out = _relative_bundle(monkeypatch, tmp_path)
 
     def _boom(*_args, **_kwargs):
@@ -2482,17 +2500,17 @@ def test_a_foreign_relative_path_is_withheld_with_its_class_and_code(tmp_path: P
     payload = json.loads(raw)
     assert "OtherCustomer" not in raw and "payroll" not in raw, raw
     assert "OtherCustomer" not in detail and "payroll" not in detail, detail
-    # Both unstructured fields carry the same offending text - `scan_error` and the walker's own
-    # reason - so both are withheld, each under its own ordinal.
-    assert payload["diagnostics_withheld"] == 2
-    assert payload["scan_error"].startswith("PermissionError"), payload["scan_error"]
-    assert "Errno 13" in payload["scan_error"], payload["scan_error"]
-    assert run_estate.WITHHELD_DIAGNOSTIC.format(index=1) in payload["scan_error"]
-    assert run_estate.WITHHELD_DIAGNOSTIC.format(index=2) in payload["unknown_paths"][0]["reason"]
+    assert "scan_error" not in payload
+    assert payload["scan_error_code"] == run_estate.SCAN_UNASSESSABLE_CODE
+    assert payload["scan_error_facts"] == {"class": "PermissionError", "errno": 13}
 
 
-def test_a_safe_message_keeps_its_text_class_and_code(tmp_path: Path, monkeypatch) -> None:
-    """The false-positive control: a message with no path at all must not be degraded."""
+def test_a_path_free_message_is_not_published_either(tmp_path: Path, monkeypatch) -> None:
+    """The control that used to justify keeping prose: even a harmless message is not published.
+
+    Its useful content survives structurally - `PermissionError`, `errno=13`, a stable code - which
+    is the whole trade this simplification makes: no parser, no rewriting, nothing to get wrong.
+    """
     out = _relative_bundle(monkeypatch, tmp_path)
 
     def _boom(*_args, **_kwargs):
@@ -2503,13 +2521,52 @@ def test_a_safe_message_keeps_its_text_class_and_code(tmp_path: Path, monkeypatc
     _proceed, detail = run_estate.check_emitted_path_ceiling(out, [])
 
     payload = json.loads((out / run_estate.PATH_CEILING_REPORT).read_text(encoding="utf-8"))
-    assert payload["diagnostics_withheld"] == 0, payload["scan_error"]
-    assert payload["scan_error"] == "OSError: [Errno 5] device is not ready", payload["scan_error"]
-    assert "device is not ready" in detail
+    assert "device is not ready" not in json.dumps(payload) and "device is not ready" not in detail
+    assert payload["scan_error_code"] == run_estate.SCAN_UNASSESSABLE_CODE
+    assert payload["scan_error_facts"] == {"class": "OSError", "errno": 5}
+    assert run_estate.SCAN_UNASSESSABLE_CODE in detail and "class=OSError" in detail
 
 
-def test_the_scan_verdict_and_structured_evidence_survive_sanitisation(tmp_path: Path, monkeypatch) -> None:
-    """Sanitising diagnostics must not weaken the verdict or the measured evidence beside it."""
+# -- the prefix collision that ended the substitution approach -------------------------------------
+#
+# A root of `…\bundle` shares a PREFIX with its siblings `…\bundle-foreign` and `…\bundle2`. Any
+# substring replacement rewrites those into `<bundle>-foreign` and `<bundle>2`, which reads as if
+# they were inside the bundle - inventing containment that does not exist, out of a customer path.
+# True path-component containment (`Path.is_relative_to`) refuses both, and there is no other path
+# handling left for a collision to reach.
+@pytest.mark.parametrize("sibling", ["bundle-foreign", "bundle2"])
+def test_a_prefix_sharing_sibling_is_never_read_as_inside_the_bundle(tmp_path: Path, monkeypatch, sibling: str) -> None:
+    import check_path_ceiling  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+
+    out = _relative_bundle(monkeypatch, tmp_path)
+    foreign = out.parent / sibling / "payroll.twbx"
+    monkeypatch.setattr(
+        check_path_ceiling,
+        "collect",
+        lambda _root: ([], [{"path": str(foreign), "reason": f"PermissionError: cannot open {foreign}"}]),
+    )
+
+    proceed, detail = run_estate.check_emitted_path_ceiling(out, [])
+
+    assert proceed is False
+    raw = (out / run_estate.PATH_CEILING_REPORT).read_text(encoding="utf-8")
+    payload = json.loads(raw)
+    for text in (raw, detail):
+        assert sibling not in text, f"the sibling directory name leaked: {text}"
+        assert SECRET_FOLDER not in text, text
+        assert "payroll" not in text, text
+        assert f"{run_estate.SAFE_BUNDLE_ROOT}-" not in text and f"{run_estate.SAFE_BUNDLE_ROOT}2" not in text, (
+            "a prefix collision was rewritten as if it were inside the bundle"
+        )
+    assert payload["paths_not_placed"] == 1
+    assert payload["unknown_paths"][0]["path"] == run_estate.UNASSESSABLE_PATH.format(index=1)
+    assert payload["unknown_paths"][0]["code"] == run_estate.UNKNOWN_PATH_CODE.format(index=1)
+
+
+def test_the_scan_verdict_and_structured_evidence_survive_the_code_only_diagnostics(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Dropping free-form diagnostics must not weaken the verdict or the measured evidence beside it."""
     out = _relative_bundle(monkeypatch, tmp_path)
     monkeypatch.setattr(run_estate, "PATH_CEILING_LIMITS", _ceilings(1, 4096))
 
@@ -2519,7 +2576,7 @@ def test_the_scan_verdict_and_structured_evidence_survive_sanitisation(tmp_path:
     assert proceed is False
     assert payload["status"] == "over_ceiling"
     assert payload["counted"]["over_ceiling"] >= 1
-    assert payload["diagnostics_withheld"] == 0 and payload["paths_not_placed"] == 0
+    assert payload["paths_not_placed"] == 0
     offender = payload["worst_offenders"][0]
     assert offender["length"] > offender["ceiling"] and offender["kind"] in {"file", "directory"}
     assert offender["path"].startswith(f"{run_estate.SAFE_BUNDLE_ROOT}/")
