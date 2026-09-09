@@ -12,8 +12,10 @@ The rule these tests exist to enforce: **a same-named workbook is not the same w
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
+import urllib.error
 import zipfile
 from pathlib import Path
 
@@ -398,3 +400,326 @@ def test_an_uncomparable_remote_key_is_recorded_as_neither(tmp_path):
 
     assert origin["revision_match"] is None
     assert origin["remote_revision_key"] is None
+
+
+# ------------------------------------------------- remote call budget (issue #576, round 4)
+#
+# Measured 2026-09-09 on the pre-cache code against a recording loopback site: 66 harvested inputs
+# cost **200** remote calls - `2 + N + 2M`, one site-wide inventory listing per input plus TWO full
+# downloads of every matched workbook, with byte-identical repeats for 66 of 66 LUIDs. At an ordinary
+# large-`.twbx` latency of ~9 s that is the >20 min stall reported in #576, with no stall required.
+#
+# Every count below is taken at the TRANSPORT (`_call`), never at a mocked method: the 31 tests above
+# mock `workbooks`/`content_sha256`/`content_revision_key` by name and could not see the defect,
+# which is exactly how the multiplier shipped.
+
+LIVE_ENV = {
+    "TABLEAU_SERVER_URL": "https://x.online.tableau.com",
+    "TABLEAU_SITE": "site",
+    "TABLEAU_PAT_NAME": "fixture-pat-name",
+    "TABLEAU_PAT_SECRET": "fixture-pat-secret-long-enough",
+}
+
+
+def _fixture_luid(index: int) -> str:
+    return f"{index:08x}-0000-4000-8000-{index:012x}"
+
+
+class RecordingSite(prov.TableauLookup):
+    """The production client with exactly ONE substitution: its transport.
+
+    ``_call`` is the only network boundary in the module, so recording there counts what a customer's
+    Tableau site would actually be asked, and cannot be satisfied by production code that merely
+    stops calling a mocked method name.
+
+    Content is answered with DIFFERENT bytes on every call for the same LUID, so a second download
+    is detectable in the recorded digests and not only in the call count - which is also the real
+    behaviour: a `.twbx` is repacked per download.
+    """
+
+    def __init__(  # pylint: disable=too-many-arguments
+        self,
+        env,
+        *,
+        workbooks=(),
+        inventory_status=200,
+        inventory_error=None,
+        content_errors=(),
+        signout_error=None,
+    ):
+        super().__init__(env)
+        self.calls: list[tuple[str, str]] = []
+        self.served: dict[str, list[bytes]] = {}
+        self._site_workbooks = list(workbooks)
+        self._inventory_status = inventory_status
+        self._inventory_error = inventory_error
+        self._content_errors = set(content_errors)
+        self._signout_error = signout_error
+
+    def _call(self, method, path, body=None, accept=None):  # noqa: ARG002
+        self.calls.append((method, path))
+        if path == "/auth/signin":
+            token = {"credentials": {"token": "session-token", "site": {"id": "site-id"}}}
+            return 200, json.dumps(token).encode()
+        if path == "/auth/signout":
+            if self._signout_error is not None:
+                raise self._signout_error
+            return 204, b""
+        if "/content" in path:
+            luid = path.split("/workbooks/")[1].split("/")[0]
+            if luid in self._content_errors:
+                raise urllib.error.URLError("content transport is dead")
+            served = self.served.setdefault(luid, [])
+            payload = f"<workbook luid='{luid}' download='{len(served)}'/>".encode()
+            served.append(payload)
+            return 200, payload
+        if self._inventory_error is not None:
+            raise self._inventory_error
+        if self._inventory_status != 200:
+            return self._inventory_status, b"{}"
+        return 200, json.dumps({"workbooks": {"workbook": self._site_workbooks}}).encode()
+
+    def count(self, kind: str) -> int:
+        """How many times the site was asked for ``signin`` / ``signout`` / ``inventory`` / ``content``."""
+        if kind in ("signin", "signout"):
+            return sum(1 for _method, path in self.calls if path == f"/auth/{kind}")
+        if kind == "content":
+            return sum(1 for _method, path in self.calls if "/content" in path)
+        return sum(1 for _method, path in self.calls if "/workbooks?" in path)
+
+
+def _install(monkeypatch, site: RecordingSite) -> RecordingSite:
+    monkeypatch.setattr(prov, "TableauLookup", lambda _env: site)
+    return site
+
+
+def _harvested(tmp_path: Path, count: int) -> list[dict]:
+    """``count`` harvest-shaped inputs (``<luid>_<sanitized-name>.twbx``) and the matching inventory."""
+    inventory = []
+    for index in range(count):
+        luid = _fixture_luid(index)
+        _twbx(tmp_path, f"{luid}_Fixture_Workbook_{index:03d}", payload=f"<workbook n='{index}'/>".encode())
+        inventory.append({"id": luid, "name": f"Fixture Workbook {index:03d}", "project": {"name": "Fixture Project"}})
+    return inventory
+
+
+def test_a_many_input_run_costs_one_inventory_and_one_download_per_matched_luid(tmp_path, monkeypatch):
+    """THE #576 test. 66 matched inputs cost 200 calls before this; the formula is now 2 + 1 + M.
+
+    Mutation it must fail on: restoring the per-input ``lookup.workbooks()`` (inventory becomes 66),
+    or re-fetching inside ``content_revision_key`` (content becomes 132).
+    """
+    inventory = _harvested(tmp_path, 66)
+    site = _install(monkeypatch, RecordingSite(LIVE_ENV, workbooks=inventory))
+
+    result = prov.build(tmp_path, LIVE_ENV)
+
+    assert site.count("inventory") == 1, "the site inventory does not change between inputs"
+    assert site.count("content") == 66, "one download per distinct matched LUID, not two"
+    assert len(site.calls) == 2 + 1 + 66, "sign-in + one inventory + one content each + sign-out"
+    assert result["input_count"] == 66
+    assert sum(1 for record in result["inputs"] if record.get("origin")) == 66
+    assert site.count("signout") == 1, "the session is still released"
+
+
+def test_unmatched_inputs_still_fetch_exactly_one_inventory_and_no_content(tmp_path, monkeypatch):
+    """Negative control: a cache keyed per input, or per-input listing, both break this."""
+    _harvested(tmp_path, 8)
+    site = _install(monkeypatch, RecordingSite(LIVE_ENV, workbooks=[]))
+
+    result = prov.build(tmp_path, LIVE_ENV)
+
+    assert (site.count("inventory"), site.count("content")) == (1, 0)
+    assert len(site.calls) == 3
+    assert all(record["origin"] is None for record in result["inputs"])
+    assert all(record["input"]["sha256"] for record in result["inputs"])
+
+
+def test_one_downloaded_payload_feeds_both_the_raw_sha_and_the_revision_key(tmp_path, monkeypatch):
+    """The two digests must describe the SAME bytes, not two downloads that merely look alike.
+
+    The fixture answers different bytes on every content call, so a second download would show up in
+    the recorded digests as well as in the call count.
+    """
+    inventory = _harvested(tmp_path, 1)
+    site = _install(monkeypatch, RecordingSite(LIVE_ENV, workbooks=inventory))
+
+    origin = prov.build(tmp_path, LIVE_ENV)["inputs"][0]["origin"]
+
+    luid = inventory[0]["id"]
+    assert site.count("content") == 1
+    served = site.served[luid][0]
+    assert origin["remote_sha256"] == hashlib.sha256(served).hexdigest()
+    assert origin["remote_revision_key"] == oid.revision_key(served).as_json()
+
+
+def test_duplicate_inputs_of_one_luid_reuse_the_cached_content(tmp_path, monkeypatch):
+    """Two local copies of one harvested workbook are one site item, so they are one download."""
+    luid = _fixture_luid(7)
+    _twbx(tmp_path, f"{luid}_Copy_A")
+    _twbx(tmp_path, f"{luid}_Copy_B")
+    site = _install(monkeypatch, RecordingSite(LIVE_ENV, workbooks=[{"id": luid, "name": "Copy A"}]))
+
+    result = prov.build(tmp_path, LIVE_ENV)
+
+    assert site.count("content") == 1
+    assert [record["origin"]["workbook_luid"] for record in result["inputs"]] == [luid, luid]
+
+
+@pytest.mark.parametrize(
+    "kwargs,expected",
+    [
+        ({"inventory_status": 500}, "RuntimeError: listing workbooks failed: HTTP 500"),
+        ({"inventory_error": urllib.error.URLError("inventory transport is dead")}, "URLError:"),
+    ],
+)
+def test_a_dead_inventory_is_asked_once_and_every_input_keeps_its_fingerprint(tmp_path, monkeypatch, kwargs, expected):
+    """Measured: 66 inputs produced 66 identical failing listings. One answer is enough.
+
+    Each input still records its own redacted reason - latching the CALL must not latch the record.
+    """
+    _harvested(tmp_path, 12)
+    site = _install(monkeypatch, RecordingSite(LIVE_ENV, **kwargs))
+
+    result = prov.build(tmp_path, LIVE_ENV)
+
+    assert site.count("inventory") == 1
+    assert site.count("content") == 0
+    errors = {record["lookup_error"] for record in result["inputs"]}
+    assert len(errors) == 1 and errors.pop().startswith(expected)
+    assert len(result["inputs"]) == 12
+    assert all(record["input"]["sha256"] and record["origin"] is None for record in result["inputs"])
+
+
+def test_a_dead_content_call_latches_that_luid_only(tmp_path, monkeypatch):
+    """A workbook that cannot be downloaded must not condemn a different workbook.
+
+    Two inputs share the dead LUID (one attempt between them) and a third resolves to a healthy one,
+    which is still fetched and still matched.
+    """
+    dead, alive = _fixture_luid(1), _fixture_luid(2)
+    _twbx(tmp_path, f"{dead}_Dead_A")
+    _twbx(tmp_path, f"{dead}_Dead_B")
+    _twbx(tmp_path, f"{alive}_Alive")
+    inventory = [{"id": dead, "name": "Dead"}, {"id": alive, "name": "Alive"}]
+    site = _install(monkeypatch, RecordingSite(LIVE_ENV, workbooks=inventory, content_errors=[dead]))
+
+    records = prov.build(tmp_path, LIVE_ENV)["inputs"]
+
+    assert site.count("content") == 2, "one attempt for the dead LUID, one download for the healthy one"
+    dead_records = [r for r in records if r["input"]["file"].startswith(dead)]
+    assert len(dead_records) == 2
+    assert {r["lookup_error"] for r in dead_records} == {dead_records[0]["lookup_error"]}
+    assert dead_records[0]["lookup_error"].startswith("URLError:")
+    alive_record = next(r for r in records if r["input"]["file"].startswith(alive))
+    assert alive_record["origin"]["workbook_luid"] == alive
+
+
+def test_a_signout_failure_cannot_discard_the_completed_result(tmp_path, monkeypatch):
+    """Measured on the pre-fix code: a closed sign-out connection lost 3 of 3 fingerprints.
+
+    Every input was already fingerprinted and matched in memory when the session release failed.
+    """
+    inventory = _harvested(tmp_path, 3)
+    site = _install(
+        monkeypatch,
+        RecordingSite(LIVE_ENV, workbooks=inventory, signout_error=ConnectionError("closed without a response")),
+    )
+
+    result = prov.build(tmp_path, LIVE_ENV)
+
+    assert result["input_count"] == 3
+    assert all(record["input"]["sha256"] for record in result["inputs"])
+    assert sum(1 for record in result["inputs"] if record.get("origin")) == 3
+    assert site.count("signout") == 1, "it was attempted - it simply may not cost the artifact"
+
+
+def test_sign_out_swallows_a_transport_failure_and_still_drops_the_token():
+    """The client's own half of the guarantee: releasing a session may never raise at its caller.
+
+    A Tableau session expires by itself, so a failed release costs nothing - while a raise costs the
+    whole stamp, which is exactly what was measured before this slice.
+    """
+    site = RecordingSite(LIVE_ENV, signout_error=ConnectionError("closed without a response"))
+    site.token = "session-token"
+
+    site.sign_out()
+
+    assert site.token is None
+    assert site.count("signout") == 1
+
+
+def test_the_completed_result_survives_a_signout_that_raises_outright(tmp_path, monkeypatch):
+    """The second, independent guard: ``sign_out`` swallows transport errors, and ``build`` refuses to
+    lose a finished stamp to *any* failure of the release step - including one the client itself
+    cannot anticipate. Each guard is proven separately, because either alone leaves a way to lose the
+    artifact measured in #576.
+    """
+    inventory = _harvested(tmp_path, 2)
+
+    class HostileSignOut(RecordingSite):
+        def sign_out(self):
+            raise RuntimeError("release is unavailable")
+
+    _install(monkeypatch, HostileSignOut(LIVE_ENV, workbooks=inventory))
+
+    result = prov.build(tmp_path, LIVE_ENV)
+
+    assert result["input_count"] == 2
+    assert sum(1 for record in result["inputs"] if record.get("origin")) == 2
+
+
+def test_the_cli_still_writes_the_artifact_when_signout_fails(tmp_path, monkeypatch):
+    """The same failure used to exit 1 with no file at all; the CLI is the operator-visible half."""
+    inventory = _harvested(tmp_path, 3)
+    _install(
+        monkeypatch,
+        RecordingSite(LIVE_ENV, workbooks=inventory, signout_error=ConnectionError("closed without a response")),
+    )
+    out = tmp_path / "source-provenance.json"
+    monkeypatch.setattr(prov, "resolve_env", lambda _path: dict(LIVE_ENV))
+    monkeypatch.setattr(sys, "argv", ["stamp_tableau_provenance.py", "--input", str(tmp_path), "--out", str(out)])
+
+    assert prov.main() == 0
+    assert json.loads(out.read_text(encoding="utf-8"))["input_count"] == 3
+
+
+def test_a_scrub_failure_withholds_live_fields_but_keeps_the_fingerprints(tmp_path, monkeypatch):
+    """Redaction failing is the one case that may NOT keep the live half - fail closed on the secret.
+
+    The site reflects the PAT name into ``project.name``, so an unscrubbed record would carry it.
+    """
+    secret = "SYNTHETIC_SCRUB_FAILURE_PAT_42"
+    env = dict(LIVE_ENV, TABLEAU_PAT_NAME=secret)
+    inventory = _harvested(tmp_path, 2)
+    for workbook in inventory:
+        workbook["project"] = {"name": f"Project {secret}"}
+    site = _install(monkeypatch, RecordingSite(env, workbooks=inventory))
+
+    def explode(_value, _redactor):
+        raise RuntimeError("redaction is unavailable")
+
+    monkeypatch.setattr(prov, "scrub_tree", explode)
+    result = prov.build(tmp_path, env)
+
+    assert secret not in json.dumps(result)
+    assert result["input_count"] == 2
+    assert all(record["input"]["sha256"] for record in result["inputs"])
+    assert all(record["origin"] is None for record in result["inputs"])
+    assert "redaction failed" in result["inputs"][0]["origin_note"]
+    assert site.count("signout") == 1, "the session is released even when the scrub blew up"
+
+
+def test_reflected_credentials_never_reach_the_output_over_the_cached_path(tmp_path, monkeypatch):
+    """The redaction control has to hold on the NEW call path, not only the old one."""
+    secret = "SYNTHETIC_CACHED_PATH_PAT_42"
+    env = dict(LIVE_ENV, TABLEAU_PAT_NAME=secret)
+    inventory = _harvested(tmp_path, 5)
+    for workbook in inventory:
+        workbook["project"] = {"name": f"Project {secret}"}
+    _install(monkeypatch, RecordingSite(env, workbooks=inventory))
+
+    text = json.dumps(prov.build(tmp_path, env))
+
+    assert secret not in text
+    assert "[REDACTED]" in text, "the detector had something to detect"

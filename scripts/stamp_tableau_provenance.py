@@ -97,10 +97,25 @@ def fingerprint(path: Path) -> dict[str, Any]:
     return record
 
 
-class TableauLookup:
-    """Minimal read-only REST client, used only to identify a workbook we already hold."""
+class TableauLookup:  # pylint: disable=too-many-instance-attributes
+    """Minimal read-only REST client, used only to identify a workbook we already hold.
+
+    Every remote answer is fetched **at most once per instance**, because one instance is one
+    provenance run. Measured 2026-09-09 against a recording loopback site on the pre-cache code, 66
+    harvested inputs cost **200** remote calls -- ``2 + N + 2M``: one site-wide inventory listing per
+    input, and *two* full downloads of every matched workbook, because
+    :meth:`content_sha256` and :meth:`content_revision_key` each fetched independently. The bytes were
+    identical on every repeat for 66 of 66 LUIDs, so every repeat was pure cost, and at an ordinary
+    large-``.twbx`` latency of ~9 s that is the >20 min field stall reported in #576.
+
+    Failures are cached too, and separately per operation: a dead inventory is asked **once** rather
+    than once per input (measured: 66 identical failing listings), while a workbook whose content
+    cannot be read latches only *that* LUID, so a different workbook is still tried honestly.
+    """
 
     def __init__(self, env: dict[str, str]) -> None:
+        # Seven fields describe the site and the session; the four after them are this run's answer
+        # cache, kept as plain fields rather than a container so each one reads at its use site.
         self.base = env["TABLEAU_SERVER_URL"].rstrip("/")
         self.version = env.get("TABLEAU_REST_API_VERSION", "3.21")
         self.site = env["TABLEAU_SITE"]
@@ -108,6 +123,10 @@ class TableauLookup:
         self._pat = (env["TABLEAU_PAT_NAME"], pat_secret(env))
         self.token: str | None = None
         self.site_id: str | None = None
+        self._inventory: list[dict[str, Any]] | None = None
+        self._inventory_failure: Exception | None = None
+        self._content_cache: dict[str, bytes | None] = {}
+        self._content_failure: dict[str, Exception] = {}
 
     def _call(self, method: str, path: str, body: dict | None = None, accept: str | None = None):
         request = urllib.request.Request(
@@ -147,17 +166,45 @@ class TableauLookup:
         self.token, self.site_id = creds["token"], creds["site"]["id"]
 
     def sign_out(self) -> None:
-        """Best-effort release of the session."""
+        """Best-effort release of the session - a transport failure here must cost nothing.
+
+        ⚠️ Measured 2026-09-09: a sign-out whose connection was closed without a response raised out
+        of :func:`build` *after every input had been fingerprinted and matched*, and the CLI exited 1
+        with **no file at all** (3 of 3 fingerprints lost); under ``run_estate`` the same failure was
+        swallowed into a one-line warning and no phase evidence. The session expires on its own, so
+        the only correct behaviour is to drop the token and continue.
+        """
         if self.token:
-            self._call("POST", "/auth/signout")
-            self.token = None
+            try:
+                self._call("POST", "/auth/signout")
+            except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+                LOG.debug("Tableau sign-out failed (%s) - session left to expire", type(exc).__name__)
+            finally:
+                self.token = None
 
     def redact_text(self, text: str) -> str:
         """Redact credentials that an authenticated response might reflect."""
         return redact(text, self._pat[0], self._pat[1], self.token or "")
 
     def workbooks(self) -> list[dict[str, Any]]:
-        """Every workbook on the site (first page is enough to identify one by name)."""
+        """Every workbook on the site, listed **once per run** - the failure included.
+
+        The listing does not vary between inputs, so asking again for the second and every later
+        input bought nothing and cost one round trip each (66 of 66 measured). Latching the failure
+        matters just as much: a dead site answered 66 identical errors, ~9 s apiece on a real host.
+        The cached exception is re-raised so each input still records its own redacted reason.
+        """
+        if self._inventory_failure is not None:
+            raise self._inventory_failure
+        if self._inventory is None:
+            try:
+                self._inventory = self._fetch_workbooks()
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                self._inventory_failure = exc
+                raise
+        return self._inventory
+
+    def _fetch_workbooks(self) -> list[dict[str, Any]]:
         status, payload = self._call("GET", f"/sites/{self.site_id}/workbooks?pageSize=1000", accept="application/json")
         if status != 200:
             raise RuntimeError(f"listing workbooks failed: HTTP {status}")
@@ -178,15 +225,33 @@ class TableauLookup:
         byte length, and the population is itself unstable - ``World Indicators`` differed in one
         sample and agreed minutes later - so a raw comparison does not merely fail for a fixed
         subset: any "confirmed" verdict it produces is luck.
+
+        Both digests read the SAME cached payload, which is not merely cheaper: two downloads of one
+        archive can differ byte for byte, so digesting two of them describes two different blobs.
         """
         payload = self._content(workbook_id)
         return revision_key(payload) if payload is not None else None
 
     def _content(self, workbook_id: str) -> bytes | None:
-        status, payload = self._call(
-            "GET", f"/sites/{self.site_id}/workbooks/{workbook_id}/content?includeExtract=True"
-        )
-        return payload if status == 200 else None
+        """The site's bytes for one workbook, downloaded at most once - miss and failure cached.
+
+        The cache is keyed by LUID, so a folder holding two copies of one harvested workbook (or two
+        inputs resolving to one site item) pays for one download. A transport failure latches that
+        LUID only: a *different* workbook may well be readable, and pretending otherwise would turn
+        one dead item into a site-wide "local only" verdict.
+        """
+        if workbook_id in self._content_failure:
+            raise self._content_failure[workbook_id]
+        if workbook_id not in self._content_cache:
+            try:
+                status, payload = self._call(
+                    "GET", f"/sites/{self.site_id}/workbooks/{workbook_id}/content?includeExtract=True"
+                )
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                self._content_failure[workbook_id] = exc
+                raise
+            self._content_cache[workbook_id] = payload if status == 200 else None
+        return self._content_cache[workbook_id]
 
 
 HARVEST_STEM_RE = re.compile(
@@ -214,6 +279,61 @@ def _sanitized(text: str) -> str:
     return "".join(char if char.isalnum() or char in "-_" else "_" for char in text)[:60]
 
 
+def _name_key(value: Any) -> Any:
+    """A hashable stand-in for an inventory ``name`` so a malformed response cannot crash the index.
+
+    A real REST answer gives a string; anything else could never have compared equal to a filename
+    stem under the previous scan either, and ``repr`` keeps that true while staying hashable.
+    """
+    return value if isinstance(value, (str, bytes, int, float, bool, type(None))) else repr(value)
+
+
+class _WorkbookIndex:
+    """The site inventory keyed by the three EXACT rules :func:`find_origin` matches on.
+
+    Buckets keep inventory order, so ``candidates[0]`` and ``same_name_count`` mean precisely what
+    they meant when each rule was a separate scan of the whole list. Building the index is local CPU
+    over an inventory that is now fetched once per run; the cost this module cares about is round
+    trips, and there is exactly one.
+    """
+
+    def __init__(self, workbooks: list[dict[str, Any]]) -> None:
+        self.workbooks = workbooks
+        self.by_luid: dict[str, list[dict[str, Any]]] = {}
+        self.by_name: dict[Any, list[dict[str, Any]]] = {}
+        self.by_sanitized_name: dict[str, list[dict[str, Any]]] = {}
+        for workbook in workbooks:
+            name = workbook.get("name")
+            self.by_luid.setdefault(str(workbook.get("id") or "").lower(), []).append(workbook)
+            self.by_name.setdefault(_name_key(name), []).append(workbook)
+            self.by_sanitized_name.setdefault(_sanitized(str(name or "")), []).append(workbook)
+
+    def same_name_count(self, name: Any) -> int:
+        """How many workbooks on the site carry this exact name - ambiguity is worth recording."""
+        return len(self.by_name.get(_name_key(name), []))
+
+    def match(self, luid: str | None, name_part: str) -> tuple[str | None, list[dict[str, Any]]]:
+        """Resolve a filename stem to site workbooks, and say WHICH rule found them.
+
+        Identity first: the exact LUID, then the exact name, and only for a stem that carries
+        harvest's LUID prefix - because only then do we know ``safe_component()`` was applied - the
+        sanitized name. The fallback is never offered to a hand-placed file, which is the
+        name-is-not-identity error this module exists to prevent.
+        """
+        if luid is not None:
+            candidates = self.by_luid.get(luid.lower(), [])
+            if candidates:
+                return "luid", candidates
+        candidates = self.by_name.get(_name_key(name_part), [])
+        if candidates:
+            return "name", candidates
+        if luid is not None:
+            candidates = self.by_sanitized_name.get(name_part, [])
+            if candidates:
+                return "sanitized_name", candidates
+        return None, []
+
+
 def find_origin(lookup: TableauLookup, stem: str, local: dict[str, Any]) -> dict[str, Any] | None:
     """Identify a local workbook on the site by LUID or name, then CONFIRM by content hash.
 
@@ -237,23 +357,8 @@ def find_origin(lookup: TableauLookup, stem: str, local: dict[str, Any]) -> dict
     the gap it closes.
     """
     luid, name_part = split_harvest_stem(stem)
-    workbooks = lookup.workbooks()
-
-    matched_by, candidates = None, []
-    if luid is not None:
-        candidates = [wb for wb in workbooks if str(wb.get("id") or "").lower() == luid.lower()]
-        if candidates:
-            matched_by = "luid"
-    if not candidates:
-        candidates = [wb for wb in workbooks if wb.get("name") == name_part]
-        if candidates:
-            matched_by = "name"
-    if not candidates and luid is not None:
-        # Only undo a transformation we KNOW was applied: the stem carries harvest's LUID prefix, so
-        # its remainder went through safe_component(). Never loosen matching for a hand-placed file.
-        candidates = [wb for wb in workbooks if _sanitized(str(wb.get("name") or "")) == name_part]
-        if candidates:
-            matched_by = "sanitized_name"
+    index = _WorkbookIndex(lookup.workbooks())
+    matched_by, candidates = index.match(luid, name_part)
     if not candidates:
         return None
 
@@ -278,7 +383,7 @@ def find_origin(lookup: TableauLookup, stem: str, local: dict[str, Any]) -> dict
         "revision_match": None if agreement is None else ("same" if agreement else "differs"),
         "remote_revision_key": remote_key.as_json() if remote_key is not None else None,
         "remote_sha256": remote_sha,
-        "same_name_count": sum(1 for wb in workbooks if wb.get("name") == workbook.get("name")),
+        "same_name_count": index.same_name_count(workbook.get("name")),
     }
 
 
@@ -332,11 +437,50 @@ def build(target: Path, env: dict[str, str]) -> dict[str, Any]:
         "input_count": len(records),
         "inputs": records,
     }
-    if lookup is not None:
-        scrubbed_result, _paths = scrub_tree(result, lookup.redact_text)
-        lookup.sign_out()
-        return scrubbed_result
+    if lookup is None:
+        return result
+    return _finish_live(result, lookup)
+
+
+def _finish_live(result: dict[str, Any], lookup: TableauLookup) -> dict[str, Any]:
+    """Scrub the live-derived record and release the session, without either being able to lose it.
+
+    ⚠️ Both steps used to sit unguarded after all the work was done, and that cost the whole file:
+    measured 2026-09-09, a sign-out whose connection closed without a response discarded 3 of 3
+    fingerprints and exited the CLI 1 with no artifact, and under ``run_estate`` the same failure was
+    swallowed to a warning with no artifact either. Fingerprints are computed from local bytes and
+    owe nothing to the site, so nothing the site does may delete them.
+
+    Redaction failing is the one case where fingerprints are NOT simply kept alongside the rest: an
+    unscrubbed live record can carry a reflected credential, so the response-derived half is withheld
+    and the local half survives. Fail-closed on the secret, fail-open on the evidence.
+    """
+    try:
+        result, _paths = scrub_tree(result, lookup.redact_text)
+    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        LOG.warning("provenance redaction failed (%s) - live origin fields withheld", type(exc).__name__)
+        result = _without_live_fields(result)
+    finally:
+        try:
+            lookup.sign_out()
+        except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+            LOG.warning("Tableau sign-out failed (%s) - session left to expire", type(exc).__name__)
     return result
+
+
+def _without_live_fields(result: dict[str, Any]) -> dict[str, Any]:
+    """The same stamp with every response-derived field dropped, keeping the local fingerprints."""
+    return {
+        **result,
+        "inputs": [
+            {
+                "input": record["input"],
+                "origin": None,
+                "origin_note": "live origin withheld - provenance redaction failed for this run",
+            }
+            for record in result["inputs"]
+        ],
+    }
 
 
 def main() -> int:
