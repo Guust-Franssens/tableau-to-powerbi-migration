@@ -5,6 +5,7 @@ purpose: download every workbook and published datasource on a Tableau site, the
 usage:   python scripts/harvest_estate_assets.py --out <dir> [--env .env] [--limit N]
                                                  [--skip-download] [--workbooks-only]
                                                  [--project NAME] [--project-id LUID]
+                                                 [--project-url URL]
                                                  [--allow-unignored-out]
 
 Exit codes
@@ -69,12 +70,14 @@ import sys
 import threading
 import time
 import traceback
+import uuid
 from collections import deque
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import SplitResult, unquote, urlsplit
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
@@ -1457,6 +1460,175 @@ def dependency_datasources(con: sqlite3.Connection, workbook_luids: list[str]) -
     )
 
 
+PROJECT_LUID = re.compile(r"[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}")
+PROJECT_NUMERIC = re.compile(r"[0-9]+")
+
+
+class ProjectUrlError(ValueError):
+    """A pasted project URL that cannot become an exact `--project-id`. Always a usage error.
+
+    Never an empty selection and never a best guess: an empty result set reads as "that project has
+    no content" rather than "we could not resolve your input", which is the dangerous outcome
+    issue #191 exists to prevent. ⚠️ EVERY exit from this module's URL handling is this class --
+    a raw `ValueError` escaping to the CLI becomes an uncaught traceback and exit 1, which in this
+    script MEANS "nothing could be assessed", i.e. a harvest verdict standing in for a typo.
+    """
+
+
+def _parsed_url(url: str, position: int) -> tuple[str, SplitResult]:
+    """Parse the URL ONCE, inside the guard, and derive the diagnostic label from that same parse.
+
+    Two things are load-bearing here.
+
+    * **Guarded.** `urlsplit` raises on a malformed authority (`https://[::1/...` -> `ValueError:
+      Invalid IPv6 URL`). Parsing outside a guard let that reach the CLI as a traceback and exit 1
+      -- and exit 1 is not "you typed something odd", it is this script's "NOTHING COULD BE
+      ASSESSED" verdict.
+    * **Sanitized.** The urllib message is NEVER echoed: at least one of its forms quotes the netloc
+      back ("netloc '...' contains invalid characters under NFKC normalization"), and the netloc is
+      exactly where `user:password@` sits. Only the exception CLASS name is repeated, and the
+      chained context is suppressed so no traceback can carry the raw string either.
+
+    The label is the position plus `hostname` alone -- never the raw URL. `hostname` drops any
+    userinfo, and neither the query nor the fragment is read for it: a pasted Tableau URL routinely
+    carries a session token in one of them, and these diagnostics get pasted into public issues.
+    """
+    plain = f"--project-url #{position}"
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+    except ValueError as exc:
+        raise ProjectUrlError(
+            f"{plain}: not a parseable URL ({type(exc).__name__}; the URL is not echoed because it "
+            "may carry a session token). Paste the project page URL, or pass the project name "
+            "(--project NAME) or its LUID (--project-id LUID)."
+        ) from None
+    return plain + (f" (host {host})" if host else ""), parts
+
+
+def _route_candidates(parts: SplitResult, label: str) -> list[str]:
+    """Every `/projects/<id>` segment in the URL's path and in its fragment route.
+
+    Tableau's web UI puts the route in the FRAGMENT (`https://<site>/#/site/<slug>/projects/35`),
+    while REST-shaped links put it in the path. Path and fragment are scanned separately so a path
+    ending in `projects` can never pair with the first fragment segment and invent an id. Splitting
+    happens BEFORE percent-decoding, so a `%2F` cannot smuggle in an extra segment.
+    """
+    if parts.scheme and parts.scheme.lower() not in ("http", "https"):
+        raise ProjectUrlError(f"{label}: only http(s) Tableau URLs are supported")
+    routes = [parts.path]
+    if parts.fragment:
+        routes.append(parts.fragment.split("?", 1)[0])
+    candidates: list[str] = []
+    for route in routes:
+        segments = [unquote(segment) for segment in route.split("/") if segment]
+        candidates.extend(
+            current for previous, current in zip(segments, segments[1:]) if previous.lower() == "projects"
+        )
+    return candidates
+
+
+def _refuse_control_characters(candidate: str, label: str) -> None:
+    """A percent-decoded segment that is not printable is a usage error, never a project id.
+
+    `...%0A` decodes to `<luid>\\n`, and a trailing newline is invisible in every log line it
+    appears in while matching NO row in `estate.db` -- the silent empty selection this whole flag
+    exists to prevent. Only the offending CODEPOINTS are named (never the segment), and this covers
+    the zero-width and bidi formatting characters too, which are the same hazard without the
+    newline's visibility.
+    """
+    offenders = sorted({f"U+{ord(char):04X}" for char in candidate if not char.isprintable()})
+    if offenders:
+        raise ProjectUrlError(
+            f"{label}: the `/projects/<id>` segment contains non-printable character(s) "
+            f"({', '.join(offenders)}) once percent-decoded, so it is not a project id"
+        )
+
+
+def _canonical_luid(candidate: str) -> str | None:
+    """The canonical lowercase unbraced LUID this segment IS, or None if it is not one.
+
+    ⚠️ The regex stays the gate and `uuid.UUID` is only the normaliser, deliberately in that order:
+    `uuid.UUID` on its own accepts 32 undashed hex characters and a `urn:uuid:` prefix, which are
+    not Tableau LUID shapes. What it is here for is CASE: Tableau's REST API and `estate.db` both
+    hold LUIDs lowercase, so an uppercase GUID pasted out of a URL used to be forwarded verbatim to
+    an exact-match `--project-id` lookup and select NOTHING -- a real empty selection, from a URL
+    that named a real project.
+    """
+    inner = candidate[1:-1] if candidate.startswith("{") and candidate.endswith("}") else candidate
+    if not PROJECT_LUID.fullmatch(inner):
+        return None
+    return str(uuid.UUID(inner))
+
+
+def project_id_from_url(url: str, position: int = 1) -> str:
+    """The project LUID a pasted Tableau URL carries, or a usage error saying exactly why not.
+
+    The numeric branch is the whole point of issue #191: `https://<site>/#/projects/35` is the most
+    natural way a customer names "the one project I want", and that `35` is a legacy web-UI
+    identifier with NO public mapping -- verified against a live site 2026-08-17, REST
+    `GET /sites/{id}/projects` exposes only GUIDs and the Metadata API answers `FieldUndefined` for
+    it. So it is refused here, before any sign-in or download, rather than resolved by guesswork.
+
+    Every match is a `fullmatch` over a canonicalised segment. A prefix match plus `$` accepted
+    `<luid>\\n` (Python's `$` matches before a trailing newline), which is an id no row can equal.
+    """
+    label, parts = _parsed_url(url, position)
+    decoded = _route_candidates(parts, label)
+    for candidate in decoded:
+        _refuse_control_characters(candidate, label)
+    # Canonicalise BEFORE de-duplicating, so the same project written two ways in one URL is one
+    # project rather than an "ambiguous" refusal.
+    candidates = list(dict.fromkeys(_canonical_luid(candidate) or candidate for candidate in decoded))
+    if not candidates:
+        raise ProjectUrlError(
+            f"{label}: no `/projects/<id>` segment found; pass the project name (--project NAME) "
+            "or its LUID (--project-id LUID)"
+        )
+    if len(candidates) > 1:
+        raise ProjectUrlError(
+            f"{label}: {len(candidates)} different `/projects/<id>` segments, so which project is "
+            "meant is ambiguous; pass --project-id LUID"
+        )
+    candidate = candidates[0]
+    if PROJECT_LUID.fullmatch(candidate):
+        return candidate
+    if PROJECT_NUMERIC.fullmatch(candidate):
+        raise ProjectUrlError(
+            f"{label}: Tableau's numeric project id ({candidate}) is a legacy web-UI identifier "
+            "with no public REST or Metadata API mapping, so it cannot be resolved to a project. "
+            'Open the URL in a browser and pass the project name (--project "<name>") or its LUID '
+            "(--project-id LUID)."
+        )
+    raise ProjectUrlError(
+        f"{label}: the `/projects/<id>` segment is neither a LUID nor a numeric id; pass the "
+        "project name (--project NAME) or its LUID (--project-id LUID)"
+    )
+
+
+def project_ids_from_urls(urls: Sequence[str], project_ids: Sequence[str]) -> list[str]:
+    """Fold every `--project-url` into the existing exact `--project-id` list, or refuse the lot.
+
+    No new resolver and no new endpoint: a URL that carries a LUID is normalised into the path
+    `--project-id` already takes, in the canonical lowercase form Tableau itself stores. Every URL
+    is judged BEFORE any is applied, so an invocation mixing one usable URL with one unresolvable
+    URL selects nothing at all -- a partial scope would silently migrate less than was asked for.
+    """
+    resolved = list(project_ids)
+    errors: list[str] = []
+    for position, url in enumerate(urls, 1):
+        try:
+            luid = project_id_from_url(url, position)
+        except ProjectUrlError as exc:
+            errors.append(str(exc))
+            continue
+        if luid not in resolved:  # the same project named twice is one project, not two
+            resolved.append(luid)
+    if errors:
+        raise ProjectUrlError("\n".join(errors))
+    return resolved
+
+
 def scoped_todo(
     con: sqlite3.Connection, project_names: list[str], project_ids: list[str], workbooks_only: bool
 ) -> tuple[list[tuple[str, str, str]], list[tuple[str, str]], int, int, int]:
@@ -1490,7 +1662,7 @@ def scoped_todo(
         )
     )
     if not selected:
-        raise ValueError("no projects matched --project/--project-id")
+        raise ValueError("no projects matched --project/--project-id (--project-url resolves into --project-id)")
     selected_ids = [row[0] for row in selected]
     placeholders = ",".join("?" for _ in selected_ids)
     workbooks = list(
@@ -1689,6 +1861,16 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-statements,too-ma
         default=[],
         help="project LUID to harvest (repeatable); same selection as --project, matched exactly",
     )
+    ap.add_argument(
+        "--project-url",
+        action="append",
+        default=[],
+        metavar="URL",
+        help="a project URL pasted out of the browser (repeatable). A URL carrying a LUID is "
+        "normalised into --project-id; Tableau's NUMERIC web-UI project id "
+        "(https://<site>/#/projects/35) has no public API mapping and is refused with the id "
+        "echoed, before any sign-in or download",
+    )
     ap.add_argument("--limit", type=int, help="stop after N assets (for a quick pass)")
     ap.add_argument(
         "--download-timeout",
@@ -1718,6 +1900,14 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-statements,too-ma
         help="write to --out even when git does not ignore it (escape hatch; logs a warning instead)",
     )
     args = ap.parse_args()
+
+    # BEFORE the output guard, the engine, the `.env` and above all the sign-in: a URL we cannot
+    # turn into an exact LUID is a usage error, and refusing it here is what keeps it from becoming
+    # an empty selection that reads like "that project has no content" (issue #191).
+    try:
+        args.project_id = project_ids_from_urls(args.project_url, args.project_id)
+    except ProjectUrlError as exc:
+        ap.error(str(exc))
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     if 0 < args.download_stall_timeout < ENGINE_READ_TIMEOUT_SECONDS:

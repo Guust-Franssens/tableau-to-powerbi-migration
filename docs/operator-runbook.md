@@ -367,6 +367,25 @@ convention — see §7 for which ones actually are.
 > `.twbx` files in a public repo. Prove your exact path with `git check-ignore -v` before you
 > download anything.
 
+> **Scoping step 4 to one project, and the project URL a customer will actually paste.** Step 4 takes
+> `--project NAME` and `--project-id LUID` (repeatable, matched exactly, never fuzzy), plus
+> `--project-url URL` for a link copied out of the browser. ⚠️ **Tableau's own web-UI route carries a
+> NUMERIC project id — `https://<site>/#/projects/35` — and that number cannot be resolved to a
+> project by anything public**: verified against a live site 2026-08-17, REST
+> `GET /sites/{id}/projects` exposes only GUID `id`s and the Metadata API answers `FieldUndefined`.
+> A customer confirmed the same in the field: the only workaround was a human opening the link and
+> reading the name off the page (#191). So `--project-url` accepts a URL carrying a **LUID** and
+> normalises it into `--project-id` — **canonicalised to lowercase, unbraced**, because Tableau and
+> `estate.db` both store LUIDs that way and an uppercase or `{braced}` paste otherwise matches no
+> row at all — and **refuses a numeric one before any sign-in or download**, echoing the number and
+> naming the two inputs that do work. The same refusal covers a malformed or ambiguous URL and a
+> segment carrying a percent-decoded control or zero-width character (`…/projects/<luid>%0A` is a
+> project id nothing can equal), and any mixture containing one unresolvable URL refuses the whole
+> invocation — there is no partial scope, because a run that silently selects nothing looks exactly
+> like a project with no content. ⚠️ Every one of those refusals is **exit 2** (a usage error) and
+> never a traceback: exit **1** from this script means *the estate could not be assessed*, which is
+> the wrong thing for a mistyped URL to say.
+
 > **What `phase-timings.json` does and does not measure.** `total_elapsed_sec` is the plain **sum of
 > the recorded phases** ✅ verified (`write_phase_record`: `sum(p["elapsed_sec"] for p in phases)`),
 > which is *"where did the time go inside the run"* — **not** how long your command took. Work that
