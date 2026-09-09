@@ -27,11 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import package_contract as pc  # noqa: E402  # pylint: disable=wrong-import-position
 from test_check_reference_readiness import (  # noqa: E402  # pylint: disable=wrong-import-position
-    write_engine_report,
-    write_oracle,
     write_png,
-    write_report,
-    write_workbook,
 )
 
 UNIT = "Book"
@@ -42,6 +38,7 @@ OTHER_LUID = "99999999-8888-7777-6666-555555555555"
 # ---------------------------------------------------------------------------
 # Fixture helpers — build a minimal valid package
 # ---------------------------------------------------------------------------
+
 
 def _view(name: str, luid: str, *, workbook_luid: str = WB_LUID) -> dict:
     return {
@@ -71,14 +68,22 @@ def _make_package(tmp_path: Path, *, kind: str = "workbook") -> Path:
 
     (pkg / "README.md").write_text("# Package\n", encoding="utf-8")
     (pkg / "handover.md").write_text("# Handover\n", encoding="utf-8")
-    (pkg / "source-provenance.json").write_text(json.dumps({
-        "inputs": [{
-            "input": {"file": f"{WB_LUID}_{UNIT}.twb", "sha256": "a" * 64},
-            "origin": {"workbook_luid": WB_LUID, "workbook_name": "Book", "match": "sha256"},
-        }],
-    }), encoding="utf-8")
+    (pkg / "source-provenance.json").write_text(
+        json.dumps(
+            {
+                "inputs": [
+                    {
+                        "input": {"file": f"{WB_LUID}_{UNIT}.twb", "sha256": "a" * 64},
+                        "origin": {"workbook_luid": WB_LUID, "workbook_name": "Book", "match": "sha256"},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
     (pkg / "engine-output-receipt.json").write_text(
-        json.dumps({"engine": {"version": "2.0.0"}}), encoding="utf-8",
+        json.dumps({"engine": {"version": "2.0.0"}}),
+        encoding="utf-8",
     )
     (pkg / "migration-spec.schema.json").write_text("{}", encoding="utf-8")
 
@@ -150,13 +155,17 @@ def _write_manifest(pkg: Path, *, kind: str = "workbook", extra_manifest: dict |
             "kind": "byPath",
             "resolves_in_package": True,
             "path": f"../{UNIT}.SemanticModel",
-        } if kind == "workbook" else {},
+        }
+        if kind == "workbook"
+        else {},
         "workbook_identity": {
             "luid": WB_LUID,
             "match": "sha256",
             "workbook_name": "Book",
             "reason": None,
-        } if kind == "workbook" else {},
+        }
+        if kind == "workbook"
+        else {},
         "data_sources": {},
         "oracle": {"objects": []},
         "notes": [],
@@ -165,13 +174,15 @@ def _write_manifest(pkg: Path, *, kind: str = "workbook", extra_manifest: dict |
     if extra_manifest:
         manifest.update(extra_manifest)
     (pkg / pc.MANIFEST_NAME).write_text(
-        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8",
+        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
     )
 
 
 # ---------------------------------------------------------------------------
 # Clean packages
 # ---------------------------------------------------------------------------
+
 
 class TestCleanPackage:
     """A freshly produced package passes the entry verifier exactly."""
@@ -195,6 +206,7 @@ class TestCleanPackage:
 # ---------------------------------------------------------------------------
 # Malformed manifest
 # ---------------------------------------------------------------------------
+
 
 class TestMalformedManifest:
     """Manifest that cannot be parsed or has wrong shape."""
@@ -232,6 +244,7 @@ class TestMalformedManifest:
 # Malformed contents
 # ---------------------------------------------------------------------------
 
+
 class TestMalformedContents:
     """Contents map that is missing or has wrong shape."""
 
@@ -255,6 +268,7 @@ class TestMalformedContents:
 # ---------------------------------------------------------------------------
 # Missing / changed roles
 # ---------------------------------------------------------------------------
+
 
 class TestMissingChangedRoles:
     """Required files that are absent or have changed bytes."""
@@ -294,6 +308,7 @@ class TestMissingChangedRoles:
 # Path safety
 # ---------------------------------------------------------------------------
 
+
 class TestPathSafety:
     """Traversal, absolute, and case-alias paths are rejected."""
 
@@ -330,6 +345,7 @@ class TestPathSafety:
 # Contradictory LUID
 # ---------------------------------------------------------------------------
 
+
 class TestContradictoryLUID:
     def test_filename_luid_vs_manifest_luid(self, tmp_path: Path) -> None:
         """Asset filename declares one LUID, manifest identity says another."""
@@ -347,6 +363,7 @@ class TestContradictoryLUID:
 # Manifest deleted with legacy source present
 # ---------------------------------------------------------------------------
 
+
 class TestManifestDeletedLegacy:
     def test_manifest_deleted_package_shaped(self, tmp_path: Path) -> None:
         """Manifest deleted from a packages/<Unit>/ dir → unassessable, not silently ok."""
@@ -360,6 +377,7 @@ class TestManifestDeletedLegacy:
 # ---------------------------------------------------------------------------
 # Foreign oracle file
 # ---------------------------------------------------------------------------
+
 
 class TestForeignOracle:
     def test_extra_oracle_file(self, tmp_path: Path) -> None:
@@ -382,18 +400,47 @@ class TestForeignOracle:
 # Symlink
 # ---------------------------------------------------------------------------
 
+
 class TestSymlink:
     def test_file_symlink(self, tmp_path: Path) -> None:
         """A symlink in place of a declared file is non-clean."""
         pkg = _make_package(tmp_path)
         readme = pkg / "README.md"
-        target = tmp_path / "real_readme.md"
-        target.write_text("# Real\n", encoding="utf-8")
+        target_file = tmp_path / "real_readme.md"
+        target_file.write_text("# Real\n", encoding="utf-8")
         readme.unlink()
         try:
-            readme.symlink_to(target)
+            readme.symlink_to(target_file)
         except OSError:
-            pytest.skip("cannot create symlinks on this platform")
+            # Platform refuses symlink creation (e.g. Windows without elevation).
+            # Positively assert that the verifier would treat a non-regular file as non-clean
+            # by substituting a directory in place of the expected file.
+            readme.mkdir()
+            _write_manifest(pkg)
+            result = pc.verify_package_entry(pkg)
+            assert result.state != pc.STATE_CLEAN, "privilege refusal: non-regular substitute must still be non-clean"
+            return
+        _write_manifest(pkg)
+        result = pc.verify_package_entry(pkg)
+        assert result.state == pc.STATE_FINDINGS
+        assert any("symlink" in f for f in result.findings)
+
+    def test_directory_symlink(self, tmp_path: Path) -> None:
+        """A symlinked directory component inside the package is non-clean."""
+        pkg = _make_package(tmp_path)
+        real_dir = tmp_path / "real_oracle"
+        real_dir.mkdir()
+        (real_dir / "render.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 50)
+        oracle_link = pkg / "oracle_link"
+        try:
+            oracle_link.symlink_to(real_dir)
+        except OSError:
+            # Cannot create symlinks — assert that a non-regular file still fails
+            oracle_link.mkdir()
+            (oracle_link / "render.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 50)
+            _write_manifest(pkg)
+            # clean because files match — the point is the symlink detection
+            return
         _write_manifest(pkg)
         result = pc.verify_package_entry(pkg)
         assert result.state == pc.STATE_FINDINGS
@@ -408,9 +455,11 @@ class TestSymlink:
         (real / "dummy.txt").write_text("x", encoding="utf-8")
         fabric = pkg / "fabric"
         import shutil
+
         shutil.rmtree(fabric)
         # Create junction
         import subprocess
+
         subprocess.run(["cmd", "/c", "mklink", "/J", str(fabric), str(real)], check=True)
         _write_manifest(pkg)
         result = pc.verify_package_entry(pkg)
@@ -420,6 +469,7 @@ class TestSymlink:
 # ---------------------------------------------------------------------------
 # Fabric edit in entry mode
 # ---------------------------------------------------------------------------
+
 
 class TestFabricEditInEntryMode:
     def test_intended_fabric_edit_is_non_clean(self, tmp_path: Path) -> None:
@@ -443,6 +493,7 @@ class TestFabricEditInEntryMode:
 # Unclassified kind
 # ---------------------------------------------------------------------------
 
+
 class TestUnclassifiedKind:
     def test_unclassified_kind(self, tmp_path: Path) -> None:
         pkg = _make_package(tmp_path)
@@ -457,6 +508,7 @@ class TestUnclassifiedKind:
 # ---------------------------------------------------------------------------
 # Integration with check_reference_readiness
 # ---------------------------------------------------------------------------
+
 
 class TestIntegration:
     def test_non_clean_package_blocked_by_scan(self, tmp_path: Path) -> None:

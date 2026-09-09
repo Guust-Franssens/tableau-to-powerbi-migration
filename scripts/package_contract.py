@@ -46,14 +46,16 @@ STATE_UNASSESSABLE = "unassessable"
 
 #: Always-required scaffold files (excluding package-manifest.json itself, which is checked
 #: separately as the manifest role).
-_ALWAYS_REQUIRED: frozenset[str] = frozenset({
-    "README.md",
-    "handover.md",
-    "report.json",
-    "source-provenance.json",
-    "engine-output-receipt.json",
-    "migration-spec.schema.json",
-})
+_ALWAYS_REQUIRED: frozenset[str] = frozenset(
+    {
+        "README.md",
+        "handover.md",
+        "report.json",
+        "source-provenance.json",
+        "engine-output-receipt.json",
+        "migration-spec.schema.json",
+    }
+)
 
 #: Additional roles required for workbook packages.
 _WORKBOOK_REQUIRED_PREFIXES: tuple[str, ...] = (
@@ -63,11 +65,16 @@ _WORKBOOK_REQUIRED_PREFIXES: tuple[str, ...] = (
 )
 
 #: Windows device names (case-insensitive, with or without extension).
-_WIN_DEVICE_NAMES = frozenset({
-    "CON", "PRN", "AUX", "NUL",
-    *(f"COM{i}" for i in range(1, 10)),
-    *(f"LPT{i}" for i in range(1, 10)),
-})
+_WIN_DEVICE_NAMES = frozenset(
+    {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        *(f"COM{i}" for i in range(1, 10)),
+        *(f"LPT{i}" for i in range(1, 10)),
+    }
+)
 
 #: Regex for a valid lowercase hex SHA-256 digest.
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -76,6 +83,7 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 # ---------------------------------------------------------------------------
 # Result type
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class PackageEntryResult:
@@ -100,6 +108,7 @@ class PackageEntryResult:
 # ---------------------------------------------------------------------------
 # Path safety
 # ---------------------------------------------------------------------------
+
 
 def _path_problem(posix_key: str) -> str | None:  # pylint: disable=too-many-return-statements
     """Why ``posix_key`` may not appear as a ``contents.files`` key, or None when safe.
@@ -146,8 +155,7 @@ def _case_alias_collisions(keys: list[str]) -> list[str]:
         folded = key.casefold()
         if folded in seen and seen[folded] != key:
             findings.append(
-                f"case-alias collision: {key!r} and {seen[folded]!r} "
-                "collide on case-insensitive filesystems"
+                f"case-alias collision: {key!r} and {seen[folded]!r} collide on case-insensitive filesystems"
             )
         else:
             seen[folded] = key
@@ -157,6 +165,7 @@ def _case_alias_collisions(keys: list[str]) -> list[str]:
 # ---------------------------------------------------------------------------
 # Duplicate-key-safe JSON parse
 # ---------------------------------------------------------------------------
+
 
 def _parse_json_no_dupes(text: str) -> tuple[Any, str | None]:
     """Parse JSON rejecting duplicate keys at any nesting level.
@@ -186,26 +195,52 @@ def _parse_json_no_dupes(text: str) -> tuple[Any, str | None]:
 # Filesystem safety checks
 # ---------------------------------------------------------------------------
 
-def _check_symlink(path: Path) -> str | None:
-    """Return a finding if ``path`` is a symlink, junction, or reparse point."""
+
+def _check_symlink_or_reparse(path: Path) -> str | None:
+    """Return a finding if ``path`` is a symlink, junction, or reparse point.
+
+    Works for both files and directories.  On Linux, detects symlinks via lstat.  On Windows,
+    also detects junctions/reparse points via ``st_file_attributes``.
+    """
     try:
         st = path.lstat()
     except OSError as exc:
         return f"cannot lstat {path.name}: {exc}"
     if stat.S_ISLNK(st.st_mode):
         return f"symlink: {path.name}"
-    # On Windows, junctions are directories with reparse points — detected via lstat differing from
-    # stat on the resolved path.  On non-Windows we cannot check reparse points, so we report only
-    # symlinks (the behaviour is explicitly unverified for Windows reparse points outside symlinks).
+    # On Windows, junctions are directories with reparse points — detected via st_file_attributes.
+    # On non-Windows we cannot check reparse points, so we report only symlinks (the behaviour is
+    # explicitly unverified for Windows reparse points outside symlinks).
     if os.name == "nt":  # pragma: no cover — platform-specific
         try:
             _reparse_flag = 0x400
-            attrs = os.lstat(path).st_file_attributes  # type: ignore[attr-defined]
+            attrs = st.st_file_attributes  # type: ignore[attr-defined]
             if attrs & _reparse_flag:
                 return f"reparse point (junction or symlink): {path.name}"
         except (AttributeError, OSError):
             pass
     return None
+
+
+def _check_directory_components(target: Path, findings: list[str]) -> bool:
+    """Check every subdirectory inside ``target`` for symlinks/junctions/reparse points.
+
+    Returns True if any finding was added (caller should stop before hashing outside the package).
+    """
+    found = False
+    checked: set[Path] = set()
+    for path in sorted(target.rglob("*")):
+        if not path.is_dir():
+            continue
+        if path in checked:
+            continue
+        checked.add(path)
+        finding = _check_symlink_or_reparse(path)
+        if finding:
+            rel = path.relative_to(target).as_posix()
+            findings.append(f"directory {rel}: {finding}")
+            found = True
+    return found
 
 
 def _check_regular_file(path: Path) -> str | None:
@@ -223,6 +258,7 @@ def _check_regular_file(path: Path) -> str | None:
 # Core verifier
 # ---------------------------------------------------------------------------
 
+
 def _load_manifest(target: Path) -> PackageEntryResult | tuple[dict, str, dict]:  # pylint: disable=too-many-return-statements
     """Parse and validate the manifest, returning early result on failure or (manifest, kind, files_map)."""
     manifest_path = target / MANIFEST_NAME
@@ -235,7 +271,7 @@ def _load_manifest(target: Path) -> PackageEntryResult | tuple[dict, str, dict]:
         )
         return PackageEntryResult(state=STATE_UNASSESSABLE, findings=[detail])
 
-    symlink_finding = _check_symlink(manifest_path)
+    symlink_finding = _check_symlink_or_reparse(manifest_path)
     if symlink_finding:
         return PackageEntryResult(state=STATE_UNASSESSABLE, findings=[f"manifest: {symlink_finding}"])
 
@@ -265,21 +301,27 @@ def _load_manifest(target: Path) -> PackageEntryResult | tuple[dict, str, dict]:
     contents = manifest.get("contents")
     if not isinstance(contents, dict):
         return PackageEntryResult(
-            state=STATE_UNASSESSABLE, kind=kind,
-            findings=["manifest has no 'contents' object"], manifest=manifest,
+            state=STATE_UNASSESSABLE,
+            kind=kind,
+            findings=["manifest has no 'contents' object"],
+            manifest=manifest,
         )
     files_map = contents.get("files")
     if not isinstance(files_map, dict):
         return PackageEntryResult(
-            state=STATE_UNASSESSABLE, kind=kind,
-            findings=["manifest 'contents.files' is not an object"], manifest=manifest,
+            state=STATE_UNASSESSABLE,
+            kind=kind,
+            findings=["manifest 'contents.files' is not an object"],
+            manifest=manifest,
         )
 
     return manifest, kind, files_map
 
 
 def _verify_paths_and_hashes(  # pylint: disable=too-many-locals,too-many-branches
-    target: Path, files_map: dict[str, str], findings: list[str],
+    target: Path,
+    files_map: dict[str, str],
+    findings: list[str],
 ) -> tuple[set[str], set[str]]:
     """Validate path safety, SHA-256 format, file set equality, symlinks, and rehash."""
     # Path safety
@@ -293,6 +335,10 @@ def _verify_paths_and_hashes(  # pylint: disable=too-many-locals,too-many-branch
     for key, digest in files_map.items():
         if not isinstance(digest, str) or not _SHA256_RE.match(digest):
             findings.append(f"invalid sha256 for {key!r}: {digest!r}")
+
+    # Directory-component check — symlinks/junctions/reparse on directories must be caught
+    # BEFORE traversal or hashing, so nothing reads outside the package boundary.
+    has_reparse_dir = _check_directory_components(target, findings)
 
     # File set equality
     actual_files: set[str] = set()
@@ -308,11 +354,16 @@ def _verify_paths_and_hashes(  # pylint: disable=too-many-locals,too-many-branch
     for f in sorted(actual_files - declared_files):
         findings.append(f"undeclared file present: {f}")
 
+    # If any directory is a reparse point, skip file-level hashing — the content is outside
+    # the package boundary and cannot be trusted.
+    if has_reparse_dir:
+        return declared_files, actual_files
+
     # Symlink / reparse and rehash (only for files that exist)
     present = declared_files & actual_files
     for key in sorted(present):
         file_path = target / PurePosixPath(key)
-        sym = _check_symlink(file_path)
+        sym = _check_symlink_or_reparse(file_path)
         if sym:
             findings.append(f"declared file {key}: {sym}")
             continue
@@ -380,8 +431,12 @@ def verify_package_entry(target: Path) -> PackageEntryResult:
 # Role checks
 # ---------------------------------------------------------------------------
 
+
 def _check_workbook_roles(
-    _target: Path, manifest: dict[str, Any], declared: set[str], findings: list[str],
+    _target: Path,
+    manifest: dict[str, Any],
+    declared: set[str],
+    findings: list[str],
 ) -> None:
     """Verify workbook-specific required roles."""
     artifacts = manifest.get("artifacts") or {}
@@ -403,8 +458,9 @@ def _check_workbook_roles(
 
     # Report
     report = artifacts.get("report")
-    if not report or not any(k.startswith("fabric/") and k.endswith(".Report/") or
-                             k.startswith("fabric/") for k in declared):
+    if not report or not any(
+        k.startswith("fabric/") and k.endswith(".Report/") or k.startswith("fabric/") for k in declared
+    ):
         # Check for fabric/ presence
         if not any(k.startswith("fabric/") for k in declared):
             findings.append("workbook missing required fabric working copy")
@@ -416,7 +472,10 @@ def _check_workbook_roles(
 
 
 def _check_datasource_roles(
-    _target: Path, manifest: dict[str, Any], declared: set[str], findings: list[str],
+    _target: Path,
+    manifest: dict[str, Any],
+    declared: set[str],
+    findings: list[str],
 ) -> None:
     """Verify datasource-specific required roles — asset/spec/handover/oracle are optional."""
     # Model must be present
@@ -429,7 +488,9 @@ def _check_datasource_roles(
 
 
 def _check_workbook_identity(
-    target: Path, manifest: dict[str, Any], findings: list[str],
+    target: Path,
+    manifest: dict[str, Any],
+    findings: list[str],
 ) -> Path | None:
     """Cross-check identity fields and return verified source path if consistent."""
     identity = manifest.get("workbook_identity") or {}
@@ -459,9 +520,7 @@ def _check_workbook_identity(
     # Filename LUID cross-check
     from_filename = _filename_luid(asset_path.name)
     if from_filename and from_filename.casefold() != luid.casefold():
-        findings.append(
-            f"contradictory LUID: filename says {from_filename}, manifest identity says {luid}"
-        )
+        findings.append(f"contradictory LUID: filename says {from_filename}, manifest identity says {luid}")
         return None
 
     return asset_path
@@ -480,8 +539,12 @@ def _filename_luid(name: str) -> str | None:
 # Oracle file cross-reference
 # ---------------------------------------------------------------------------
 
+
 def _check_oracle_files(
-    _target: Path, manifest: dict[str, Any], declared: set[str], findings: list[str],
+    _target: Path,
+    manifest: dict[str, Any],
+    declared: set[str],
+    findings: list[str],
 ) -> None:
     """If oracle objects declare files, verify they are local, declared and cross-referenced."""
     oracle = manifest.get("oracle")
@@ -514,6 +577,7 @@ def _check_oracle_files(
 # ---------------------------------------------------------------------------
 # Package-shape detection
 # ---------------------------------------------------------------------------
+
 
 def _is_package_shaped(target: Path) -> bool:
     """Whether ``target`` looks like a package directory (under ``packages/``)."""
