@@ -67,7 +67,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
-from bundle_corpus import evidence_dirs, shipping_reports
+from bundle_corpus import evidence_dirs, is_package_target, shipping_reports
+from package_contract import STATE_CLEAN, verify_package_entry
 import object_identity as oid
 from object_identity import AMBIGUOUS
 from reference_evidence import (
@@ -893,6 +894,19 @@ def scan(
 ) -> dict[str, Any]:
     """Assess every shipping report under ``root``."""
     root = root.resolve()
+
+    # -- Package-entry integrity gate (issue #562) --
+    # For package targets, verify the manifest contract before any evidence/source discovery.
+    # A non-clean package is blocked: its evidence cannot be trusted.
+    if is_package_target(root):
+        entry = verify_package_entry(root)
+        if entry.state != STATE_CLEAN:
+            detail = (
+                f"package-entry integrity: {entry.state} "
+                f"({len(entry.findings)} finding(s): {'; '.join(entry.findings[:3])})"
+            )
+            return _merge(root, [_cannot(root.name, detail)], [], [])
+
     evidence, rejected = _collect_evidence(root, reference_dir, oracle_dir)
     engine_report = _engine_report(root)
     reports = shipping_reports(root)
