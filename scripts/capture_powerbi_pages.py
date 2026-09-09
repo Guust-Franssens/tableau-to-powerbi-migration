@@ -332,15 +332,20 @@ def _capture_pages(
     page_captures: list[capture_receipt.PageCapture] = []
     for page_info in selected_pages:
         dest = pages_dir / f"{page_info.page_id}.png"
-        result = capture_stable(page_info.page_id, pid, dest, options, CaptureRuntime(
-            screenshotter=runtime.screenshotter,
-            sleep=runtime.sleep,
-            clock=runtime.clock,
-        ))
+        result = capture_stable(
+            page_info.page_id,
+            pid,
+            dest,
+            options,
+            CaptureRuntime(
+                screenshotter=runtime.screenshotter,
+                sleep=runtime.sleep,
+                clock=runtime.clock,
+            ),
+        )
         tag = "OK" if result.captured and result.converged else ("UNSTABLE" if result.captured else "FAIL")
         print(
-            f"  {tag:<9}{page_info.display_name:<26} settled in {result.seconds:5.1f}s "
-            f"over {result.frames} frames",
+            f"  {tag:<9}{page_info.display_name:<26} settled in {result.seconds:5.1f}s over {result.frames} frames",
             flush=True,
         )
         if not result.captured or not result.converged:
@@ -351,17 +356,19 @@ def _capture_pages(
             print(f"FAILED: zero-byte screenshot for page {page_info.display_name!r}")
             return None
         screenshot_bytes = dest.read_bytes()
-        page_captures.append(capture_receipt.PageCapture(
-            page_id=page_info.page_id,
-            display_name=page_info.display_name,
-            visual_ids=[v.name for v in page_info.visuals],
-            screenshot_relative_path=f"pages/{page_info.page_id}.png",
-            screenshot_sha256=hashlib.sha256(screenshot_bytes).hexdigest(),
-            screenshot_bytes=len(screenshot_bytes),
-            converged=result.converged,
-            frames=result.frames,
-            elapsed_seconds=round(result.seconds, 3),
-        ))
+        page_captures.append(
+            capture_receipt.PageCapture(
+                page_id=page_info.page_id,
+                display_name=page_info.display_name,
+                visual_ids=[v.name for v in page_info.visuals],
+                screenshot_relative_path=f"pages/{page_info.page_id}.png",
+                screenshot_sha256=hashlib.sha256(screenshot_bytes).hexdigest(),
+                screenshot_bytes=len(screenshot_bytes),
+                converged=result.converged,
+                frames=result.frames,
+                elapsed_seconds=round(result.seconds, 3),
+            )
+        )
     return page_captures
 
 
@@ -378,21 +385,25 @@ def _write_receipt(  # pylint: disable=too-many-arguments,too-many-positional-ar
 ) -> list[str]:
     """Build, validate and write the capture receipt.  Returns validation errors (empty = ok)."""
     receipt = capture_receipt.CaptureReceipt(
-        iteration_id=iteration_id, mode=mode, scope=scope,
-        package_root=str(identity.package_root), pbip_path=str(identity.pbip_path),
-        pbip_sha256=identity.pbip_sha256, report_folder=str(identity.report_folder),
+        iteration_id=iteration_id,
+        mode=mode,
+        scope=scope,
+        package_root=str(identity.package_root),
+        pbip_path=str(identity.pbip_path),
+        pbip_sha256=identity.pbip_sha256,
+        report_folder=str(identity.report_folder),
         definition_pbir_sha256=identity.definition_pbir_sha256,
         current_file_path=current_file_path,
         timestamp=runtime.now_utc().isoformat(),
-        stable_seconds=options.stable_seconds, poll_seconds=options.poll,
-        max_wait_seconds=options.max_wait, pages=page_captures,
+        stable_seconds=options.stable_seconds,
+        poll_seconds=options.poll,
+        max_wait_seconds=options.max_wait,
+        pages=page_captures,
     )
     receipt_dict = capture_receipt.receipt_to_dict(receipt)
     errors = capture_receipt.validate_receipt(receipt_dict)
     if not errors:
-        (iteration_dir / "capture.json").write_text(
-            json.dumps(receipt_dict, indent=2) + "\n", encoding="utf-8"
-        )
+        (iteration_dir / "capture.json").write_text(json.dumps(receipt_dict, indent=2) + "\n", encoding="utf-8")
     return errors
 
 
@@ -448,8 +459,15 @@ def capture_package(  # pylint: disable=too-many-locals,too-many-return-statemen
 
     # Build and write receipt
     errors = _write_receipt(
-        iteration_dir, identity, iteration_id, mode, scope,
-        current_file_path, options, page_captures, runtime,
+        iteration_dir,
+        identity,
+        iteration_id,
+        mode,
+        scope,
+        current_file_path,
+        options,
+        page_captures,
+        runtime,
     )
     if errors:
         shutil.rmtree(iteration_dir, ignore_errors=True)

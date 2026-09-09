@@ -75,9 +75,7 @@ def _make_package(root: Path, *, name: str = "Book", pages: list[tuple[str, str,
     for page_id, display_name, visual_ids in pages:
         page_dir = report / "definition" / "pages" / page_id
         page_dir.mkdir(parents=True, exist_ok=True)
-        (page_dir / "page.json").write_text(
-            json.dumps({"displayName": display_name}), encoding="utf-8"
-        )
+        (page_dir / "page.json").write_text(json.dumps({"displayName": display_name}), encoding="utf-8")
         for vid in visual_ids:
             vis_dir = page_dir / "visuals" / vid
             vis_dir.mkdir(parents=True, exist_ok=True)
@@ -86,9 +84,7 @@ def _make_package(root: Path, *, name: str = "Book", pages: list[tuple[str, str,
 
 
 def _fake_status(pbip_path: Path, pid: int = 1234) -> str:
-    return json.dumps(
-        {"instances": [{"pid": pid, "currentFilePath": str(pbip_path.resolve())}]}
-    )
+    return json.dumps({"instances": [{"pid": pid, "currentFilePath": str(pbip_path.resolve())}]})
 
 
 def _make_runtime(
@@ -175,10 +171,13 @@ class TestReadPbirInventory:
     def test_reads_pages_and_visuals(self) -> None:
         root = _workspace("inventory-ok")
         try:
-            _make_package(root, pages=[
-                ("Page1", "Sales", ["va", "vb"]),
-                ("Page2", "Details", ["vc"]),
-            ])
+            _make_package(
+                root,
+                pages=[
+                    ("Page1", "Sales", ["va", "vb"]),
+                    ("Page2", "Details", ["vc"]),
+                ],
+            )
             identity = capture_receipt.resolve_package(root)
             inv = capture_receipt.read_pbir_inventory(identity.report_folder)
             assert len(inv) == 2
@@ -300,13 +299,17 @@ class TestCapturePackage:
     def test_clean_all_pages_capture_writes_receipt(self) -> None:
         root = _workspace("pkg-clean")
         try:
-            _make_package(root, pages=[
-                ("Page1", "Sales", ["va"]),
-                ("Page2", "Map", ["vb", "vc"]),
-            ])
+            _make_package(
+                root,
+                pages=[
+                    ("Page1", "Sales", ["va"]),
+                    ("Page2", "Map", ["vb", "vc"]),
+                ],
+            )
             runtime = _make_runtime(root)
             code = capture.capture_package(
-                root, "1234",
+                root,
+                "1234",
                 capture.CaptureOptions(poll=0.0, stable_seconds=0.0, max_wait=10.0),
                 runtime,
             )
@@ -334,15 +337,21 @@ class TestCapturePackage:
     def test_subset_capture_is_triage_not_signoff(self) -> None:
         root = _workspace("pkg-subset")
         try:
-            _make_package(root, pages=[
-                ("Page1", "Sales", ["va"]),
-                ("Page2", "Map", ["vb"]),
-            ])
+            _make_package(
+                root,
+                pages=[
+                    ("Page1", "Sales", ["va"]),
+                    ("Page2", "Map", ["vb"]),
+                ],
+            )
             runtime = _make_runtime(root)
             code = capture.capture_package(
-                root, "1234",
+                root,
+                "1234",
                 capture.CaptureOptions(
-                    poll=0.0, stable_seconds=0.0, max_wait=10.0,
+                    poll=0.0,
+                    stable_seconds=0.0,
+                    max_wait=10.0,
                     page_ids=frozenset({"Page1"}),
                 ),
                 runtime,
@@ -371,7 +380,8 @@ class TestCapturePackageFailures:
             _make_package(root, pages=[("Page1", "Sales", ["va"])])
             runtime = _make_runtime(root, fail_pages=frozenset({"Page1"}))
             code = capture.capture_package(
-                root, "1234",
+                root,
+                "1234",
                 capture.CaptureOptions(poll=0.0, stable_seconds=0.0, max_wait=10.0),
                 runtime,
             )
@@ -386,7 +396,8 @@ class TestCapturePackageFailures:
             _make_package(root, pages=[("Page1", "Sales", ["va"])])
             runtime = _make_runtime(root, zero_byte_pages=frozenset({"Page1"}))
             code = capture.capture_package(
-                root, "1234",
+                root,
+                "1234",
                 capture.CaptureOptions(poll=0.0, stable_seconds=0.0, max_wait=10.0),
                 runtime,
             )
@@ -413,7 +424,8 @@ class TestCapturePackageFailures:
                 now_utc=lambda: FIXED_TIME,
             )
             code = capture.capture_package(
-                root, "1234",
+                root,
+                "1234",
                 capture.CaptureOptions(poll=0.0, stable_seconds=0.0, max_wait=10.0),
                 runtime,
             )
@@ -438,7 +450,8 @@ class TestCapturePackageFailures:
                 now_utc=lambda: FIXED_TIME,
             )
             code = capture.capture_package(
-                root, "1234",
+                root,
+                "1234",
                 capture.CaptureOptions(poll=0.0, stable_seconds=0.0, max_wait=10.0),
                 runtime,
             )
@@ -467,13 +480,22 @@ class TestReceiptValidation:
 
     def test_rejects_path_traversal_in_screenshot(self) -> None:
         receipt = capture_receipt.CaptureReceipt(
-            iteration_id="001", mode="sign-off", scope="all-pages",
-            pages=[capture_receipt.PageCapture(
-                page_id="P1", display_name="X", visual_ids=[],
-                screenshot_relative_path="../../../etc/passwd",
-                screenshot_sha256="abc", screenshot_bytes=100,
-                converged=True, frames=3, elapsed_seconds=1.0,
-            )],
+            iteration_id="001",
+            mode="sign-off",
+            scope="all-pages",
+            pages=[
+                capture_receipt.PageCapture(
+                    page_id="P1",
+                    display_name="X",
+                    visual_ids=[],
+                    screenshot_relative_path="../../../etc/passwd",
+                    screenshot_sha256="abc",
+                    screenshot_bytes=100,
+                    converged=True,
+                    frames=3,
+                    elapsed_seconds=1.0,
+                )
+            ],
         )
         d = capture_receipt.receipt_to_dict(receipt)
         errors = capture_receipt.validate_receipt(d)
@@ -481,14 +503,23 @@ class TestReceiptValidation:
 
     def test_valid_receipt_has_no_errors(self) -> None:
         receipt = capture_receipt.CaptureReceipt(
-            iteration_id="001", mode="sign-off", scope="all-pages",
+            iteration_id="001",
+            mode="sign-off",
+            scope="all-pages",
             timestamp="2026-09-09T12:00:00+00:00",
-            pages=[capture_receipt.PageCapture(
-                page_id="P1", display_name="Sales", visual_ids=["v1"],
-                screenshot_relative_path="pages/P1.png",
-                screenshot_sha256="abc123", screenshot_bytes=100,
-                converged=True, frames=3, elapsed_seconds=1.5,
-            )],
+            pages=[
+                capture_receipt.PageCapture(
+                    page_id="P1",
+                    display_name="Sales",
+                    visual_ids=["v1"],
+                    screenshot_relative_path="pages/P1.png",
+                    screenshot_sha256="abc123",
+                    screenshot_bytes=100,
+                    converged=True,
+                    frames=3,
+                    elapsed_seconds=1.5,
+                )
+            ],
         )
         d = capture_receipt.receipt_to_dict(receipt)
         errors = capture_receipt.validate_receipt(d)

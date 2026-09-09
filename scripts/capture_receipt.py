@@ -203,10 +203,7 @@ def validate_bridge_open(
             if str(inst.current_file_path).casefold() == target_path:
                 match = inst
             else:
-                raise ValueError(
-                    f"PID {pid} has currentFilePath {inst.current_file_path!r}, "
-                    f"expected {canonical_pbip}"
-                )
+                raise ValueError(f"PID {pid} has currentFilePath {inst.current_file_path!r}, expected {canonical_pbip}")
     if match is None:
         raise ValueError(f"PID {pid} not found in bridge status")
 
@@ -237,9 +234,7 @@ def allocate_iteration(package_root: Path) -> tuple[Path, str]:
             )
     # Find next number
     existing = sorted(
-        int(m.group(1))
-        for d in iterations_root.iterdir()
-        if d.is_dir() and (m := _ITERATION_RE.match(d.name))
+        int(m.group(1)) for d in iterations_root.iterdir() if d.is_dir() and (m := _ITERATION_RE.match(d.name))
     )
     next_num = (existing[-1] + 1) if existing else 1
     iteration_id = f"{next_num:03d}"
@@ -359,7 +354,10 @@ _REQUIRED_DWELL_KEYS = {"stable_seconds", "poll_seconds", "max_wait_seconds"}
 
 
 def _validate_sub_object(
-    data: dict[str, Any], required: set[str], prefix: str, errors: list[str],
+    data: dict[str, Any],
+    required: set[str],
+    prefix: str,
+    errors: list[str],
 ) -> None:
     extra = set(data.keys()) - required
     if extra:
