@@ -2626,10 +2626,17 @@ param(
   [string]$WindowsJson,
   [string]$PayloadJson,
   [int]$PayloadExit = 0,
+  [string]$GuidanceVerdict,
+  [string]$GuidanceKind = '',
   [switch]$RefreshInFlight
 )
 $ErrorActionPreference = 'Stop'
 . $Probe -LoadDetectorsOnly
+if ($GuidanceVerdict) {
+  $lines = @(Get-VerdictGuidance -Verdict $GuidanceVerdict -Kind $GuidanceKind)
+  Write-Output ('<<<PROBE-JSON>>>' + (ConvertTo-Json ([ordered]@{ lines = $lines }) -Compress -Depth 4))
+  return
+}
 if ($PayloadJson) {
   $payload = $null
   try { $payload = ConvertFrom-Json (Get-Content -LiteralPath $PayloadJson -Raw) } catch { $payload = $null }
@@ -2865,9 +2872,10 @@ def test_an_unreadable_dialog_is_a_third_verdict_not_one_of_the_other_two(tmp_pa
 def test_a_readable_but_unrecognized_dialog_is_distinct_from_an_unreadable_one(tmp_path: Path) -> None:
     """The two ambiguous states are NOT the same state, and the verdict has to distinguish them.
 
-    "We read this window and it is not a credential prompt" is strictly more knowledge than "we could
-    not read this window at all". Collapsing them loses the only fact that tells an operator whether
-    looking at the screen will help.
+    "We read this window and nothing we know accounts for it" is strictly more knowledge than "we
+    could not read this window at all". Collapsing them loses the only fact that tells an operator
+    whether looking at the screen will help. Neither state establishes anything about the credential
+    itself - see the verdict-message contract at the end of this module.
     """
     unrecognized = classify(tmp_path, [_window(Title="Whoops", Texts=["Whoops", "Something went wrong"])])
     unreadable = classify(tmp_path, [_window(Texts=[])])
@@ -4152,3 +4160,906 @@ def test_a_native_query_prompt_beside_progress_text_is_live_reported(tmp_path: P
     assert done.returncode == 3, f"a native-query approval must never clear or be a credential stop:\n{done.stdout}"
     assert "CREDENTIAL_PRESENT" not in done.stdout
     assert "REFRESH_IN_PROGRESS" not in done.stdout, "one progress element must not suppress the whole window"
+
+
+# ==================================================================================================
+# probe_desktop_credential.ps1 - what each VERDICT token TELLS A HUMAN (issue #146, M1)
+# ==================================================================================================
+#
+# The classification is not under test here and does not change: the same windows produce the same
+# tokens and the same exit codes as before. What is under test is the PROSE the probe prints beside a
+# token, because master's prose over-claimed on exactly the tokens that establish the least.
+#
+# Master (da1ec87c) printed, for a dialog that matched NO signature:
+#
+#     "its text matches no credential-prompt signature, so this is not a credential wall"
+#     "it matched no credential-prompt signature, so this is NOT a credential wall and no sign-in is
+#      implied"
+#
+# Both are inferences dressed as findings. The signature files are a known-shapes list, not an
+# exhaustive one, and a UIA harvest is never provably complete (`LegacyIAccessiblePattern` is not
+# reachable from the managed API at all - the script says so itself). "Nothing matched" is therefore
+# the ABSENCE of a finding about the credential state, not a finding that no credential is needed. The
+# same sentence was also printed for `DIALOG_UNREADABLE`, where the content was never read at all, and
+# for `DIALOG_NEEDS_HUMAN`, where a human IS needed.
+#
+# The tests below drive the SHIPPED message table directly through the `-LoadDetectorsOnly` seam, and
+# then check that the production script is the thing that uses it.
+
+# Tokens whose evidence is "nothing matched" or "nothing was read". They may report what was observed
+# and send a human to the screen; they may not conclude anything about the credential state.
+AMBIGUOUS_VERDICTS = ("DIALOG_UNREADABLE", "DIALOG_UNRECOGNIZED", "UNKNOWN")
+
+# Claims none of the above can support. Compared case-insensitively against the whole message.
+UNSUPPORTED_CLAIMS = (
+    "not a credential wall",
+    "no sign-in is implied",
+    "no sign-in implied",
+    "not a credential prompt",
+    "no credential is needed",
+    "the credential is cached",
+    "credential sits behind",
+)
+
+# Master's wording, verbatim, for the mutation test below.
+OLD_DEFINITIVE_ASSERTION = "so this is not a credential wall and no sign-in is implied"
+
+VERDICT_MESSAGE_CONTRACT = {
+    # Positive signature match -> may name sign-in as the remedy.
+    "CREDENTIAL_MISSING": {
+        "required": (
+            "matched the connector credential-prompt signature",
+            "positive evidence",
+            "sign in once at the desktop screen",
+        ),
+        "forbidden": ("could not be established", "matched no signature"),
+    },
+    # Positive match on a KNOWN blocking prompt -> a human must act. WHICH action is NOT established:
+    # blocking_prompt_signature.regex is `native database quer(y|ies)|requires your approval|
+    # Authentication (is )?required`, so an authentication notice matches it too and "an approval, not
+    # a sign-in" is false for part of its own match set (review of PR #583).
+    "DIALOG_NEEDS_HUMAN": {
+        "required": (
+            "known blocking-prompt signature",
+            "a human must act at the desktop screen",
+            "does not establish which action",
+        ),
+        "forbidden": (
+            "an approval, not a sign-in",
+            "the remedy is an approval",
+            "must sign in",
+            "no verdict was established",
+        ),
+    },
+    # Content never established.
+    "DIALOG_UNREADABLE": {
+        "required": (
+            "content could not be established",
+            "nothing was determined about the credential state",
+            "neither confirmed nor ruled out",
+            "a human must look at the desktop screen",
+        ),
+        "forbidden": UNSUPPORTED_CLAIMS + ("must sign in",),
+    },
+    # Content read, nothing matched.
+    "DIALOG_UNRECOGNIZED": {
+        "required": (
+            "was read but matched no signature",
+            "not exhaustive",
+            "unaccounted for",
+            "nothing was determined about the credential state",
+            "a human must look at the desktop screen",
+        ),
+        "forbidden": UNSUPPORTED_CLAIMS + ("must sign in",),
+    },
+    # Positively read progress content -> wait or cancel, never stack.
+    "REFRESH_IN_PROGRESS": {
+        "required": (
+            "a refresh is already running on this pid",
+            "wait for it, or cancel the stale one",
+            "do not stack a second refresh",
+        ),
+        "forbidden": ("must sign in", "no verdict was established"),
+    },
+    # No verdict at all.
+    "UNKNOWN": {
+        "required": (
+            "no verdict was established",
+            "not determined, in either direction",
+        ),
+        "forbidden": UNSUPPORTED_CLAIMS + ("must sign in",),
+    },
+    # A refresh was invoked and no prompt appeared before the deadline. That is ALL that was observed:
+    # the poll loop enumerates zero windows for a process that has died, latches nothing, and reaches
+    # exactly this line - so the prose may not claim the refresh ran to the deadline, that Desktop
+    # stayed alive, or that no window was left unaccounted for (review of PR #583). Token and exit
+    # code are unchanged; only the claim is bounded.
+    "CREDENTIAL_PRESENT": {
+        "required": (
+            "a refresh was invoked",
+            "saw no credential prompt before its own deadline",
+            "absence of evidence, not proof of a cached credential",
+            "one-row data probe",
+        ),
+        "forbidden": (
+            "ran to the deadline",
+            "no window left unaccounted for",
+            "nothing unclassifiable",
+            "must sign in",
+        ),
+    },
+}
+
+
+def verdict_guidance(
+    tmp_path: Path,
+    verdict: str,
+    *,
+    kind: str = "",
+    probe_ps1: Path | None = None,
+) -> list[str]:
+    """Run the SHIPPED message table for one verdict token and return the lines it would print."""
+    exe = _powershell()
+    harness = tmp_path / "classify.ps1"
+    harness.write_text(_HARNESS, encoding="utf-8")
+    target_probe = probe_ps1 if probe_ps1 is not None else PROBE_PS1
+    argv = [exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness), "-Probe", str(target_probe)]
+    argv += ["-GuidanceVerdict", verdict, "-GuidanceKind", kind]
+    done = subprocess.run(argv, capture_output=True, text=True, timeout=120, check=False)
+    assert done.returncode == 0, f"harness failed ({done.returncode}):\n{done.stdout}\n{done.stderr}"
+    marker = "<<<PROBE-JSON>>>"
+    assert marker in done.stdout, f"harness produced no result payload:\n{done.stdout}\n{done.stderr}"
+    payload = json.loads(done.stdout.split(marker, 1)[1].strip().splitlines()[0])
+    lines = payload["lines"]
+    return [lines] if isinstance(lines, str) else list(lines)
+
+
+# The token-level lines each verdict prints, PINNED here as an INDEPENDENT oracle.
+#
+# Load-bearing: the production-path assertions below must not ask the script under test what it should
+# have said - that is how a message-swap mutation passes its own check. These strings are compared
+# byte-for-byte against the shipped table by `test_the_pinned_message_oracle_matches_the_shipped_table`,
+# so the pin cannot rot silently, and every other production assertion uses the pin.
+EXPECTED_TOKEN_LINES = {
+    "CREDENTIAL_MISSING": (
+        "  its text matched the connector credential-prompt signature - positive evidence of a sign-in prompt",
+        "  a human must sign in ONCE at the Desktop screen; no automation can fill this dialog",
+    ),
+    "DIALOG_NEEDS_HUMAN": (
+        "  its text matched a KNOWN blocking-prompt signature - the native database query approval, an approval request, or an 'authentication required' notice",
+        "  a human must act at the Desktop screen on the prompt shown there; this probe does not establish WHICH action that prompt needs, so read it before assuming",
+    ),
+    "DIALOG_UNREADABLE": (
+        "  its content could not be established, so NOTHING was determined about the credential state - a credential prompt is neither confirmed nor ruled out",
+        "  a human must look at the Desktop screen and say what this window is",
+    ),
+    "DIALOG_UNRECOGNIZED": (
+        "  its content was READ but matched no signature this probe knows, and the signature list is not exhaustive - so this window is unaccounted for and NOTHING was determined about the credential state",
+        "  a human must look at the Desktop screen and say what this window is",
+    ),
+    "REFRESH_IN_PROGRESS": (
+        "  its content positively reads as refresh progress: a refresh is already running on this pid, so the credential state could not be probed",
+        "  wait for it, or cancel the stale one; do not stack a second refresh on it",
+    ),
+    "CREDENTIAL_PRESENT": (
+        "  a refresh was invoked and this probe saw no credential prompt before its own deadline",
+        "  that is an absence of evidence, not proof of a cached credential: nothing here establishes that Desktop stayed alive and responsive, or that every window was accounted for - confirm with the one-row data probe",
+    ),
+    "UNKNOWN": (
+        "  no verdict was established: the credential state was not determined, in either direction",
+        "  nothing here establishes the credential state; re-probe a responsive Desktop, or look at the Desktop screen",
+    ),
+}
+
+# Walks the SHIPPED script's AST and pairs each `VERDICT:` emission with the guidance call in the same
+# statement block. Text search cannot do this: it cannot tell which block a line belongs to, and it
+# cannot compare the ARGUMENT a guidance call was handed with the token its neighbour emits.
+_EMISSION_AST_HARNESS = r"""
+param([Parameter(Mandatory = $true)][string]$Probe)
+$ErrorActionPreference = 'Stop'
+$errors = $null
+$tokens = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($Probe, [ref]$tokens, [ref]$errors)
+if ($errors.Count) { throw ("probe does not parse: " + $errors[0].Message) }
+
+function Get-OwningBlock {
+  param($Node)
+  while ($null -ne $Node) {
+    if ($Node -is [System.Management.Automation.Language.StatementBlockAst] -or
+        $Node -is [System.Management.Automation.Language.NamedBlockAst]) { return $Node }
+    $Node = $Node.Parent
+  }
+  return $null
+}
+
+$commands = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)
+$verdicts = @()
+$guides = @()
+foreach ($c in $commands) {
+  $name = ''
+  try { $name = [string]$c.GetCommandName() } catch { $name = '' }
+  if ($name -eq 'Write-Output' -and $c.Extent.Text -match 'VERDICT:') { $verdicts += $c }
+  elseif ($name -eq 'Write-VerdictGuidance') { $guides += $c }
+}
+
+$sites = @()
+foreach ($v in $verdicts) {
+  $vBlock = Get-OwningBlock -Node $v
+  $best = $null
+  foreach ($g in $guides) {
+    if (-not [object]::ReferenceEquals((Get-OwningBlock -Node $g), $vBlock)) { continue }
+    if ($null -eq $best) { $best = $g; continue }
+    $bestGap = [Math]::Abs($best.Extent.StartOffset - $v.Extent.StartOffset)
+    $thisGap = [Math]::Abs($g.Extent.StartOffset - $v.Extent.StartOffset)
+    if ($thisGap -lt $bestGap) { $best = $g }
+  }
+  $sites += [ordered]@{
+    line            = $v.Extent.StartLineNumber
+    verdict_text    = $v.Extent.Text
+    verdict_offset  = $v.Extent.StartOffset
+    guidance_text   = $(if ($null -eq $best) { $null } else { $best.Extent.Text })
+    guidance_offset = $(if ($null -eq $best) { -1 } else { $best.Extent.StartOffset })
+  }
+}
+Write-Output ('<<<PROBE-JSON>>>' + (ConvertTo-Json @($sites) -Compress -Depth 6))
+"""
+
+
+def _named_token(text: str, keyword: str) -> str:
+    """The token a command names: a quoted literal, or the expression it interpolates."""
+    literal = re.search(rf"{keyword}\s*'([A-Z_]+)'", text) or re.search(rf'{keyword}\s*"([A-Z_]+)"', text)
+    if literal:
+        return literal.group(1)
+    expression = re.search(rf"{keyword}\s*(\$[A-Za-z_][\w.]*)", text)
+    if expression:
+        return expression.group(1)
+    return f"<unparsed: {text}>"
+
+
+def _token_of_verdict(text: str) -> str:
+    """The token a `VERDICT:` emission prints - literal, or the expression it formats in."""
+    literal = re.search(r"VERDICT:\s*([A-Z_]+)", text)
+    if literal:
+        return literal.group(1)
+    formatted = re.search(r"-f\s*(\$[A-Za-z_][\w.]*)", text)
+    if formatted:
+        return formatted.group(1)
+    return f"<unparsed: {text}>"
+
+
+def emission_sites(probe_ps1: Path, tmp_path: Path) -> list[dict]:
+    """Every `VERDICT:` emission in ``probe_ps1``, paired with the guidance call in its own block."""
+    exe = _powershell()
+    harness = tmp_path / "emission_ast.ps1"
+    harness.write_text(_EMISSION_AST_HARNESS, encoding="utf-8")
+    argv = [exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness), "-Probe", str(probe_ps1)]
+    done = subprocess.run(argv, capture_output=True, text=True, timeout=120, check=False)
+    assert done.returncode == 0, f"AST harness failed ({done.returncode}):\n{done.stdout}\n{done.stderr}"
+    marker = "<<<PROBE-JSON>>>"
+    assert marker in done.stdout, f"AST harness produced no payload:\n{done.stdout}\n{done.stderr}"
+    raw = json.loads(done.stdout.split(marker, 1)[1].strip().splitlines()[0])
+    sites = []
+    for site in raw if isinstance(raw, list) else [raw]:
+        guidance_text = site["guidance_text"]
+        sites.append(
+            {
+                "line": site["line"],
+                "token": _token_of_verdict(site["verdict_text"]),
+                "guidance": None if guidance_text is None else _named_token(guidance_text, "-Verdict"),
+                "verdict_offset": site["verdict_offset"],
+                "guidance_offset": site["guidance_offset"],
+            }
+        )
+    return sites
+
+
+# Success-shaped claims the probe is not entitled to make anywhere - help block or runtime output.
+#
+# `CREDENTIAL_PRESENT` is an observation about one bounded window: a refresh was invoked and nothing
+# recognizable came up before the deadline. It is not a finding that a credential exists, that the
+# refresh proceeded or completed, that Desktop survived, that no dialog went unseen, or that an
+# unattended loop is safe - the poll loop enumerates zero windows for a process that has died and
+# reaches the same line. These are checked against the COMPLETE stdout of a real run, not against the
+# guidance table alone: the table was corrected first and the summary line beside it kept saying
+# "(refresh proceeded)".
+#
+# Each entry is the ASSERTIVE spelling of a retired claim, never a fragment that also appears inside
+# the disclaimers that replaced it - "the refresh proceeded or completed" is the honest sentence, so
+# banning the bare "refresh proceeded" would forbid the correction along with the defect.
+RETIRED_SUCCESS_CLAIMS = (
+    "(refresh proceeded)",
+    "refresh succeeded",
+    "refresh completed successfully",
+    "cached machine-wide",
+    "can run unattended",
+    "safe to run unattended",
+    "already has a cached credential",
+)
+
+
+def assert_no_retired_success_claim(stdout: str) -> None:
+    """No run, on any path, may print a success-shaped claim the probe cannot support."""
+    haystack = stdout.lower()
+    for claim in RETIRED_SUCCESS_CLAIMS:
+        assert claim not in haystack, f"the run printed the retired claim {claim!r}:\n{stdout}"
+
+
+def assert_production_pairs_guidance_with_its_token(stdout: str) -> str:
+    """The production-path invariant: what the run PRINTED explains the token it actually emitted.
+
+    Independent of the script under test - the expected lines come from the pinned oracle above, so a
+    swapped message or a mis-argued guidance call cannot mark its own homework. Degradation-proof by
+    construction: it reads whichever token the run ended on, which is what lets it hold for the live
+    fixtures, where contention can legitimately turn one exit-3 verdict into another.
+    """
+    lines = [line.rstrip() for line in stdout.splitlines()]
+    verdict_lines = [i for i, line in enumerate(lines) if line.startswith("VERDICT: ")]
+    assert len(verdict_lines) == 1, f"expected exactly one machine-readable verdict line:\n{stdout}"
+    index = verdict_lines[0]
+    token = lines[index][len("VERDICT: ") :].strip()
+    assert token in EXPECTED_TOKEN_LINES, f"unknown verdict token {token!r}:\n{stdout}"
+
+    expected = list(EXPECTED_TOKEN_LINES[token])
+    before = lines[:index]
+    positions = []
+    for line in expected:
+        assert line in before, f"{token} was emitted without its explanation {line!r}:\n{stdout}"
+        positions.append(before.index(line))
+    assert positions == sorted(positions), f"{token}'s explanation was printed out of order:\n{stdout}"
+
+    for other, other_lines in EXPECTED_TOKEN_LINES.items():
+        if other == token:
+            continue
+        for line in other_lines:
+            if line in expected:  # some sentences are shared between two ambiguous tokens
+                continue
+            assert line not in lines, f"{token} was explained with {other}'s message:\n{stdout}"
+    return token
+
+
+def assert_message_matches_its_evidence(verdict: str, lines: list[str]) -> None:
+    """The whole invariant, in one place, so the mutation test can assert it FAILS."""
+    assert lines, f"{verdict} printed no explanation at all"
+    blob = " ".join(lines).lower()
+    contract = VERDICT_MESSAGE_CONTRACT[verdict]
+    for phrase in contract["required"]:
+        assert phrase in blob, f"{verdict} must say {phrase!r}; it said: {lines!r}"
+    for phrase in contract["forbidden"]:
+        assert phrase not in blob, f"{verdict} claimed {phrase!r}, which its evidence cannot support: {lines!r}"
+
+
+@pytest.mark.parametrize("verdict", sorted(VERDICT_MESSAGE_CONTRACT))
+def test_every_verdict_token_says_only_what_its_evidence_supports(tmp_path: Path, verdict: str) -> None:
+    """Token-by-token, directly against the shipped table: no token over-claims or under-informs.
+
+    `CREDENTIAL_MISSING` and `DIALOG_NEEDS_HUMAN` matched a signature, so they may name a remedy - a
+    sign-in for the first, an approval for the second. The three ambiguous tokens matched nothing, so
+    they may only report what was and was not established and send a human to the screen.
+    """
+    assert_message_matches_its_evidence(verdict, verdict_guidance(tmp_path, verdict))
+
+
+@pytest.mark.parametrize("verdict", AMBIGUOUS_VERDICTS)
+def test_an_ambiguous_token_never_rules_a_credential_prompt_in_or_out(tmp_path: Path, verdict: str) -> None:
+    """The #146 regression itself, stated as its own assertion rather than only inside the contract.
+
+    Two directions, and both are failures: claiming the credential is fine (master's defect, which is
+    fail-open prose over a fail-closed exit code), and claiming a credential wall we never saw.
+    """
+    blob = " ".join(verdict_guidance(tmp_path, verdict)).lower()
+
+    for claim in UNSUPPORTED_CLAIMS:
+        assert claim not in blob, f"{verdict} ruled the credential state OUT with {claim!r}"
+    assert "must sign in" not in blob, f"{verdict} ruled a credential wall IN"
+    assert "look at the desktop screen" in blob, f"{verdict} must route this to a human"
+
+
+@pytest.mark.parametrize(
+    ("kind", "verdict", "observation"),
+    [
+        ("unreadable", "DIALOG_UNREADABLE", "exposes no readable text"),
+        ("benign-title-only", "DIALOG_UNREADABLE", "a caption is not content"),
+        ("benign-unverified", "DIALOG_UNREADABLE", "benign-looking is not benign"),
+        ("mixed-content", "DIALOG_UNRECOGNIZED", "does not explain the rest of this window"),
+    ],
+)
+def test_the_finer_observation_survives_beside_the_honest_token_message(
+    tmp_path: Path, kind: str, verdict: str, observation: str
+) -> None:
+    """Honesty must not cost detail: WHY the window is ambiguous is the most useful line printed.
+
+    Several kinds fold into one token, and the token-level sentence cannot tell them apart. The kind
+    line says what was observed; the token line says what that leaves undetermined.
+    """
+    lines = verdict_guidance(tmp_path, verdict, kind=kind)
+
+    assert any(observation in line for line in lines), f"{kind} lost its observation line: {lines!r}"
+    assert_message_matches_its_evidence(verdict, lines)
+
+
+def test_the_production_script_pairs_every_guidance_call_with_the_token_it_emits(tmp_path: Path) -> None:
+    """Every emission site, by AST: the guidance ARGUMENT is the token that site emits, and it is FIRST.
+
+    Replaces an earlier proximity check ("some Write-VerdictGuidance within four lines above"), which
+    was blind to the two failures that matter: a site handing the shared table the WRONG token, and a
+    site printing the token before its explanation. This walks the shipped script's statement blocks
+    and pairs each `VERDICT:` emission with the guidance call in the same block, comparing the token
+    each one names - literal to literal (`'UNKNOWN'` vs `"VERDICT: UNKNOWN"`) and expression to
+    expression (`$blocker.Verdict` vs `("VERDICT: {0}" -f $blocker.Verdict)`).
+
+    Every token in the contract must be reachable from some site, `CREDENTIAL_PRESENT` included; the
+    two variable sites cover the dialog band, which is exactly why they are compared by expression.
+    """
+    pairs = emission_sites(PROBE_PS1, tmp_path)
+
+    assert len(pairs) >= 8, f"expected every verdict band to have an emission site; found {len(pairs)}"
+    for site in pairs:
+        assert site["guidance"] is not None, f"site at line {site['line']} emits {site['token']!r} with no guidance"
+        assert site["guidance_offset"] < site["verdict_offset"], (
+            f"site at line {site['line']} prints its token before the explanation"
+        )
+        assert site["guidance"] == site["token"], (
+            f"site at line {site['line']} explains {site['guidance']!r} but emits {site['token']!r}"
+        )
+    literal_tokens = {site["token"] for site in pairs if not site["token"].startswith("$")}
+    expression_sites = [site for site in pairs if site["token"].startswith("$")]
+    assert {"UNKNOWN", "CREDENTIAL_MISSING", "CREDENTIAL_PRESENT"} <= literal_tokens, (
+        f"a literal-token band lost its emission site: {literal_tokens!r}"
+    )
+    assert len(expression_sites) == 2, (
+        f"the dialog band must be emitted from the blocker and latched sites: {expression_sites!r}"
+    )
+
+
+def test_no_public_help_text_still_carries_a_retracted_claim() -> None:
+    """The help block is the probe's public documentation - it may not out-claim the runtime either.
+
+    Four retractions now: the ambiguous-verdict assertions (#146 M1), the universal
+    "approval, not a sign-in" remedy for `DIALOG_NEEDS_HUMAN`, `CREDENTIAL_PRESENT`'s claim that the
+    refresh ran to the deadline with nothing unclassifiable up, and - the last one a fresh review
+    found still standing - the SYNOPSIS/DESCRIPTION pair that said the probe detects a credential
+    "cached machine-wide" and licenses a loop that "can run unattended".
+
+    Scanned over the WHOLE help block, not the guidance table: the table was corrected first and the
+    help kept contradicting it, which is precisely how a reader ends up with the retired claim.
+    """
+    text = PROBE_PS1.read_text(encoding="utf-8")
+    help_block = text.split("#>", 1)[0].lower()
+
+    assert "dialog_unrecognized" in help_block, "the help block must still document the token"
+    assert "credential_present" in help_block, "the help block must still document the clear token"
+    for claim in (
+        "not a credential wall",
+        "no sign-in is implied",
+        "the remedy is an approval, not a sign-in",
+        "ran to the deadline with no credential",
+        "nothing unclassifiable up",
+        *RETIRED_SUCCESS_CLAIMS,
+    ):
+        assert claim not in help_block, f"the documented behaviour still asserts {claim!r}"
+
+
+def run_probe_against_windowless_pid(*, probe_ps1: Path | None = None, timeout_sec: str = "5"):
+    """Run the SHIPPED script for real against a live pid that owns no window, and return the process.
+
+    The cheapest genuine production path there is: no Desktop, no GUI, no seam. It reaches the first
+    emission site in the script, so it exercises the real `Write-VerdictGuidance` -> `VERDICT:` pairing
+    rather than the classifiers' dot-source entry point.
+    """
+    exe = _powershell()
+    target = probe_ps1 if probe_ps1 is not None else PROBE_PS1
+    holder = subprocess.Popen(  # a real, live pid that owns no visible window at all
+        [exe, "-NoProfile", "-Command", "Start-Sleep -Seconds 60"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    try:
+        return subprocess.run(
+            [
+                exe,
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(target),
+                "-DesktopPid",
+                str(holder.pid),
+                "-TimeoutSec",
+                timeout_sec,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+    finally:
+        holder.kill()
+        holder.wait(timeout=30)
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="probe_desktop_credential.ps1 is a Windows-only UI Automation arbiter"
+)
+def test_the_real_script_prints_the_honest_message_beside_its_token() -> None:
+    """Production invocation control: the shipped script, run for real, on a pid with no windows.
+
+    `-LoadDetectorsOnly` returns before any of the runtime emission code, so the seam tests above stop
+    short of it. This one runs the script the way `refresh_pbip_model.py` runs it and reads what
+    actually reached stdout: the machine-readable token, the exit code, and the prose beside them -
+    checked against the PINNED oracle, not against the script's own idea of what it should have said.
+    """
+    done = run_probe_against_windowless_pid()
+
+    assert done.returncode == 3, f"a pid with no windows must stay UNKNOWN/exit 3:\n{done.stdout}\n{done.stderr}"
+    assert assert_production_pairs_guidance_with_its_token(done.stdout) == "UNKNOWN"
+    assert_no_retired_success_claim(done.stdout)
+    stdout = done.stdout.lower()
+    for claim in UNSUPPORTED_CLAIMS:
+        assert claim not in stdout, f"the runtime still claims {claim!r}:\n{done.stdout}"
+
+
+def test_powershell_mutation_restore_the_definitive_credential_assertion(tmp_path: Path) -> None:
+    """Mutation 5: put master's wording back on both ambiguous tokens. The contract must FAIL.
+
+    A messaging test that cannot fail is worse than none, because it is credited as coverage. This
+    reinstates the exact sentence #146 was filed about and asserts each ambiguous token's contract
+    raises - and that the classification is untouched by the mutation, which is what makes it a
+    MESSAGING mutation rather than a behavioural one.
+    """
+    mutated_script = _setup_probe_copy(tmp_path)
+    content = mutated_script.read_text(encoding="utf-8")
+    targets = {
+        "DIALOG_UNREADABLE": (
+            "so NOTHING was determined about the credential state - "
+            "a credential prompt is neither confirmed nor ruled out"
+        ),
+        "DIALOG_UNRECOGNIZED": (
+            "and the signature list is not exhaustive - so this window is unaccounted for "
+            "and NOTHING was determined about the credential state"
+        ),
+    }
+    for verdict, anchor in targets.items():
+        assert anchor in content, f"mutation target anchor missing for {verdict}"
+        content = content.replace(anchor, OLD_DEFINITIVE_ASSERTION)
+    content = content.replace("  a human must look at the Desktop screen and say what this window is", "")
+    mutated_script.write_text(content, encoding="utf-8")
+    landed = mutated_script.read_text(encoding="utf-8")
+    assert landed.count(OLD_DEFINITIVE_ASSERTION) == 2, "mutation 5 failed to land on disk"
+
+    failed_count = 0
+    for verdict in targets:
+        lines = verdict_guidance(tmp_path, verdict, probe_ps1=mutated_script)
+        assert lines, f"{verdict} produced no lines at all, so the mutation broke the harness"
+        try:
+            assert_message_matches_its_evidence(verdict, lines)
+        except AssertionError:
+            failed_count += 1
+
+    assert failed_count == 2, f"Mutation score: expected 2 failed, got {failed_count} failed"
+
+    # The mutation is messaging-only: the same window still produces the same token and exit code, so
+    # the contract above cannot be passing merely because classification changed underneath it.
+    unreadable = classify(tmp_path, [_window(Texts=[], OwnerEnabled=False)], probe_ps1=mutated_script)
+    assert unreadable["verdict"] == "DIALOG_UNREADABLE"
+    assert unreadable["exit_code"] == 3
+
+
+@pytest.mark.parametrize("verdict", sorted(EXPECTED_TOKEN_LINES))
+def test_the_pinned_message_oracle_matches_the_shipped_table(tmp_path: Path, verdict: str) -> None:
+    """The pin is only an independent oracle while it is also an ACCURATE one.
+
+    Every production assertion compares stdout against `EXPECTED_TOKEN_LINES` rather than against the
+    script's own table, so that a swapped message cannot mark its own homework. The cost of that is
+    that the pin can rot; this is the test that stops it, byte-for-byte, against the shipped table.
+    """
+    assert verdict_guidance(tmp_path, verdict) == list(EXPECTED_TOKEN_LINES[verdict])
+
+
+# A dialog whose content is read but matches nothing: unaccounted prose, no progress status, no
+# chrome-only excuse. Latched during our own refresh -> DIALOG_UNRECOGNIZED.
+_MODAL_UNRECOGNISED_PROSE = r"""
+$script:timer.Add_Tick({
+    $script:timer.Stop()
+    $modal = New-Object System.Windows.Window
+    $modal.Title = 'Notice'
+    $modal.Width = 520
+    $modal.Height = 320
+    $panel = New-Object System.Windows.Controls.StackPanel
+    $block = New-Object System.Windows.Controls.TextBlock
+    $block.Text = 'The workbook contains an element this build does not understand'
+    $null = $panel.Children.Add($block)
+    $modal.Content = $panel
+    $helper = New-Object System.Windows.Interop.WindowInteropHelper($modal)
+    $helper.Owner = $script:form.Handle
+    $null = $modal.ShowDialog()
+  })
+"""
+
+# A dialog that exposes no text at all - no caption, no content. Latched -> DIALOG_UNREADABLE.
+_MODAL_NO_TEXT_AT_ALL = r"""
+$script:timer.Add_Tick({
+    $script:timer.Stop()
+    $modal = New-Object System.Windows.Window
+    $modal.Title = ''
+    $modal.Width = 420
+    $modal.Height = 260
+    $modal.Content = (New-Object System.Windows.Controls.Grid)
+    $helper = New-Object System.Windows.Interop.WindowInteropHelper($modal)
+    $helper.Owner = $script:form.Handle
+    $null = $modal.ShowDialog()
+  })
+"""
+
+# Nothing at all happens after the Refresh click: the probe polls to its deadline and clears.
+_MODAL_NONE = ""
+
+# A refresh progress dialog that is ALREADY UP before the probe starts. It needs its own fixture app,
+# not a modal body: the shared preamble writes its ready-file when the FORM is shown, which would race
+# the modal, and the shared runner skips when no Refresh was invoked - which is precisely what the
+# t=0 branch does, because it stops before invoking anything.
+_STARTUP_PROGRESS_APP = r"""
+param([Parameter(Mandatory = $true)][string]$ReadyFile)
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName PresentationFramework
+Add-Type -AssemblyName PresentationCore
+Add-Type -AssemblyName WindowsBase
+Add-Type -AssemblyName WindowsFormsIntegration
+[System.Windows.Forms.Application]::EnableVisualStyles()
+$script:form = New-Object System.Windows.Forms.Form
+$script:form.Text = 'Fake Desktop'
+$script:form.Width = 640
+$script:form.Height = 480
+$button = New-Object System.Windows.Controls.Button
+$button.Content = 'Refresh'
+$hostControl = New-Object System.Windows.Forms.Integration.ElementHost
+$hostControl.Width = 140
+$hostControl.Height = 48
+$hostControl.Child = $button
+$script:form.Controls.Add($hostControl)
+$script:ready = $ReadyFile
+$script:form.Add_Shown({
+    $timer = New-Object System.Windows.Forms.Timer
+    $timer.Interval = 300
+    $timer.Add_Tick({
+        $timer.Stop()
+        $modal = New-Object System.Windows.Window
+        $modal.Title = 'Refresh'
+        $modal.Width = 520
+        $modal.Height = 320
+        $panel = New-Object System.Windows.Controls.StackPanel
+        $status = New-Object System.Windows.Controls.TextBlock
+        $status.Text = 'Evaluating'
+        $null = $panel.Children.Add($status)
+        $cancel = New-Object System.Windows.Controls.Button
+        $cancel.Content = 'Cancel'
+        $null = $panel.Children.Add($cancel)
+        $modal.Content = $panel
+        $helper = New-Object System.Windows.Interop.WindowInteropHelper($modal)
+        $helper.Owner = $script:form.Handle
+        # Ready only once the modal is actually rendered: the probe must find it at t=0.
+        $modal.Add_ContentRendered({ Set-Content -LiteralPath $script:ready -Value 'ready' -Encoding ascii })
+        $null = $modal.ShowDialog()
+      })
+    $timer.Start()
+  })
+[System.Windows.Forms.Application]::Run($script:form)
+"""
+
+
+def _assert_live_pairing(done, *, expected_token: str, expected_exit: int, label: str) -> None:
+    """Shared body for the live emission-path tests: the printed prose explains the printed token.
+
+    Deliberately NOT a parametrized test. The repo's partition gates key a test by
+    `<file>::<function>` from the AST (`tests/test_gui_marker_gate.py`,
+    `tests/test_parallel_test_loop.py`), while pytest collects a parametrized case as
+    `<file>::<function>[id]`. One parametrized `gui` test therefore reads as an unmarked
+    window-spawner AND as a stale `gui` marker at the same time, and inflates every exact
+    deselection census - measured in run 34400693275, six gate failures from one decorator. Each
+    live case is its own function, and each calls `_run_probe_against_wpf_modal` in its OWN body so
+    both the `gui` scan (transitive) and the `serial` scan (function-scoped) can see it.
+
+    ⚠️ Contention can legitimately turn one exit-3 verdict into another (a slow harvest degrades to
+    `DIALOG_UNREADABLE`). The pairing assertion holds regardless - it reads whichever token the run
+    ended on - so the exact-token assertion is made only where the run is stable, and the exit-3
+    cases assert the BAND, which every degraded path preserves by design. Measured on a quiet
+    machine (2026-09-09): all five cases reached their intended token exactly, so the band form is
+    tolerance for contention, not cover for a case that never worked.
+    """
+    token = assert_production_pairs_guidance_with_its_token(done.stdout)
+    assert_no_retired_success_claim(done.stdout)
+    if expected_exit == 3:
+        assert done.returncode == 3, f"{label}: the exit-3 band must hold:\n{done.stdout}"
+        assert token in {"DIALOG_NEEDS_HUMAN", "DIALOG_UNRECOGNIZED", "DIALOG_UNREADABLE"}, (
+            f"{label}: expected an exit-3 dialog verdict, got {token}:\n{done.stdout}"
+        )
+    else:
+        assert done.returncode == expected_exit, f"{label}: wrong exit code:\n{done.stdout}"
+        assert token == expected_token, f"{label}: expected {expected_token}, got {token}:\n{done.stdout}"
+
+
+@pytest.mark.gui
+@pytest.mark.serial
+def test_the_live_probe_explains_the_clear_path(tmp_path: Path) -> None:
+    """`CREDENTIAL_PRESENT`, live: a refresh is invoked, nothing comes up, and the probe exits 0.
+
+    The exit-0 path is the one a caller reads as "go ahead", so its COMPLETE output - summary line
+    included, not just the guidance table - has to stay observation-only. A fresh review found the
+    table already corrected while the line beside it still said "(refresh proceeded)".
+    """
+    done = _run_probe_against_wpf_modal(tmp_path, _MODAL_NONE)
+
+    _assert_live_pairing(
+        done,
+        expected_token="CREDENTIAL_PRESENT",
+        expected_exit=0,
+        label="no dialog at all -> the clear path",
+    )
+    assert_no_retired_success_claim(done.stdout)
+    assert "no credential modal and no other recognized dialog detected within" in done.stdout, (
+        f"the exit-0 summary line must state what was DETECTED, not that a refresh succeeded:\n{done.stdout}"
+    )
+
+
+@pytest.mark.gui
+@pytest.mark.serial
+def test_the_live_probe_explains_a_credential_modal_caught_in_the_poll_loop(tmp_path: Path) -> None:
+    """`CREDENTIAL_MISSING`, live: the hard stop, from the poll-loop emission site."""
+    _assert_live_pairing(
+        _run_probe_against_wpf_modal(tmp_path, _MODAL_TEXTPATTERN_ONLY),
+        expected_token="CREDENTIAL_MISSING",
+        expected_exit=1,
+        label="a credential modal caught in the poll loop",
+    )
+
+
+@pytest.mark.gui
+@pytest.mark.serial
+def test_the_live_probe_explains_a_known_blocking_prompt(tmp_path: Path) -> None:
+    """`DIALOG_NEEDS_HUMAN`, live: a native-query approval beside progress text, latched."""
+    _assert_live_pairing(
+        _run_probe_against_wpf_modal(tmp_path, _MODAL_PROGRESS_PLUS_NATIVE_QUERY),
+        expected_token="DIALOG_NEEDS_HUMAN",
+        expected_exit=3,
+        label="a known blocking prompt, latched",
+    )
+
+
+@pytest.mark.gui
+@pytest.mark.serial
+def test_the_live_probe_explains_a_dialog_it_read_but_could_not_place(tmp_path: Path) -> None:
+    """`DIALOG_UNRECOGNIZED`, live: readable prose that matched no signature, latched."""
+    _assert_live_pairing(
+        _run_probe_against_wpf_modal(tmp_path, _MODAL_UNRECOGNISED_PROSE),
+        expected_token="DIALOG_UNRECOGNIZED",
+        expected_exit=3,
+        label="read, matched nothing, latched",
+    )
+
+
+@pytest.mark.gui
+@pytest.mark.serial
+def test_the_live_probe_explains_a_dialog_it_could_not_read(tmp_path: Path) -> None:
+    """`DIALOG_UNREADABLE`, live: a modal exposing no text at all, latched."""
+    _assert_live_pairing(
+        _run_probe_against_wpf_modal(tmp_path, _MODAL_NO_TEXT_AT_ALL),
+        expected_token="DIALOG_UNREADABLE",
+        expected_exit=3,
+        label="no readable text at all, latched",
+    )
+
+
+@pytest.mark.gui
+@pytest.mark.serial
+def test_the_live_probe_explains_a_refresh_already_in_progress(tmp_path: Path) -> None:
+    """The last production emission site: a dialog already up at t=0, before anything is invoked.
+
+    This is the branch the 2026-08-28 field report walked into, and the only one where
+    `REFRESH_IN_PROGRESS` can be emitted at all - the poll loop ignores our own progress dialog by
+    design.
+
+    The fixture app is launched HERE rather than through a helper, which is one of the two spellings
+    `tests/test_parallel_test_loop.py::_launches_the_live_desktop` recognises (the `-ReadyFile`
+    argument the app uses to announce its window). Its scan is function-scoped, so a private helper
+    hid a genuinely live test from the `serial` census - it is a live fixture either way, and the
+    marker is earned; this makes the classification legible to the gate that enforces it.
+    """
+    exe = _powershell()
+    app_script = tmp_path / "startup_dialog_app.ps1"
+    app_script.write_text(_STARTUP_PROGRESS_APP, encoding="utf-8")
+    ready = tmp_path / "startup_ready.txt"
+    app = subprocess.Popen(  # pylint: disable=consider-using-with
+        [exe, "-Sta", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(app_script), "-ReadyFile", str(ready)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        for _ in range(60):
+            if ready.exists():
+                break
+            time.sleep(0.5)
+        if not ready.exists():
+            pytest.skip("the startup-dialog fixture never rendered its modal (no interactive desktop?)")
+        done = subprocess.run(
+            [
+                exe,
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(PROBE_PS1),
+                "-DesktopPid",
+                str(app.pid),
+                "-TimeoutSec",
+                "8",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+    finally:
+        app.kill()
+        app.wait(timeout=30)
+
+    assert "refresh invoked" not in done.stdout, f"the t=0 branch must stop before invoking:\n{done.stdout}"
+    assert done.returncode == 3, f"a dialog up at t=0 must stop the probe at exit 3:\n{done.stdout}"
+    token = assert_production_pairs_guidance_with_its_token(done.stdout)
+    assert_no_retired_success_claim(done.stdout)
+    assert token in {"REFRESH_IN_PROGRESS", "DIALOG_UNREADABLE", "DIALOG_UNRECOGNIZED"}, (
+        f"expected the t=0 dialog band, got {token}:\n{done.stdout}"
+    )
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="probe_desktop_credential.ps1 is a Windows-only UI Automation arbiter"
+)
+@pytest.mark.parametrize(
+    ("mutation", "why"),
+    [
+        ("message-swap", "UNKNOWN's message body replaced with CREDENTIAL_PRESENT's"),
+        ("token-swap", "the UNKNOWN site asks the table for CREDENTIAL_PRESENT"),
+        ("order-swap", "the token is printed before its explanation"),
+    ],
+)
+def test_production_emission_mutations_break_the_pairing(tmp_path: Path, mutation: str, why: str) -> None:
+    """Mutation 6-8: the three ways a guidance call can lie about the token beside it. All must FAIL.
+
+    Each mutation is MESSAGING-ONLY by construction - the token and the exit code are asserted to be
+    unchanged in the same run - so a pass here would mean the pairing assertion is vacuous rather than
+    that the arbiter still behaves.
+    """
+    mutated_script = _setup_probe_copy(tmp_path)
+    content = mutated_script.read_text(encoding="utf-8")
+
+    if mutation == "message-swap":
+        original = "\n".join(f'      $lines += "{line}"' for line in EXPECTED_TOKEN_LINES["UNKNOWN"])
+        replacement = "\n".join(f'      $lines += "{line}"' for line in EXPECTED_TOKEN_LINES["CREDENTIAL_PRESENT"])
+        assert original in content, "mutation anchor missing for the message swap"
+        content = content.replace(original, replacement)
+    elif mutation == "token-swap":
+        original = """  Write-Output "no window for pid $DesktopPid found"
+  Write-VerdictGuidance -Verdict 'UNKNOWN'"""
+        replacement = """  Write-Output "no window for pid $DesktopPid found"
+  Write-VerdictGuidance -Verdict 'CREDENTIAL_PRESENT'"""
+        assert original in content, "mutation anchor missing for the token swap"
+        content = content.replace(original, replacement)
+    else:
+        original = """  Write-VerdictGuidance -Verdict 'UNKNOWN'
+  Write-Output "VERDICT: UNKNOWN"
+  exit 3
+}"""
+        replacement = """  Write-Output "VERDICT: UNKNOWN"
+  Write-VerdictGuidance -Verdict 'UNKNOWN'
+  exit 3
+}"""
+        assert original in content, "mutation anchor missing for the ordering swap"
+        content = content.replace(original, replacement, 1)
+
+    mutated_script.write_text(content, encoding="utf-8")
+    done = run_probe_against_windowless_pid(probe_ps1=mutated_script)
+
+    assert done.returncode == 3, f"{why}: the mutation must be messaging-only:\n{done.stdout}\n{done.stderr}"
+    assert "VERDICT: UNKNOWN" in done.stdout, f"{why}: the token must be unchanged:\n{done.stdout}"
+    with pytest.raises(AssertionError):
+        assert_production_pairs_guidance_with_its_token(done.stdout)
