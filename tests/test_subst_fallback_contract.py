@@ -82,10 +82,12 @@ REQUIRED: dict[str, tuple[Path, tuple[str, ...]]] = {
     "canonical-recipe": (
         WINDOWS_PATH_LIMITS_MD,
         (
-            "subst | Select-String '^R:\\\\'",
-            "subst R: C:\\tfmig\\i194\\0001\\out",
-            "Stop-Process -Id <literal pid> -Force\n# 5. ALWAYS remove the mapping",
-            "subst R: /d",
+            "$root = (Resolve-Path -LiteralPath 'C:\\runs\\0001-regional sales\\bundle').Path",
+            "if ((Test-Path -LiteralPath 'R:\\') -or ((subst) -match '^R:\\\\:')) {",
+            'subst R: "$root"\nif ($LASTEXITCODE -ne 0) { throw "subst failed (exit $LASTEXITCODE)" }',
+            "if (-not (Test-Path -LiteralPath 'R:\\')) { throw 'R: did not appear - open nothing' }",
+            "Stop-Process -Id <literal pid> -Force\n# 6. ALWAYS remove the mapping, and CHECK the removal",
+            "subst R: /d\nif ($LASTEXITCODE -ne 0 -or (Test-Path -LiteralPath 'R:\\')) { throw 'R: is still mapped' }",
         ),
     ),
     # One short branch plus a link - the runbook is not a second copy of the rationale.
@@ -226,6 +228,39 @@ def test_the_guard_test_named_by_the_evidence_page_exists() -> None:
     guard = (REPO_ROOT / "tests" / "test_harvest_output_guard.py").read_text(encoding="utf-8")
     assert "def test_the_canonical_probe_is_what_lets_a_substituted_drive_through" in guard
     assert "test_the_canonical_probe_is_what_lets_a_substituted_drive_through" in _normalized(WINDOWS_PATH_LIMITS_MD)
+
+
+def test_the_physical_path_stays_the_authoritative_artifact_identity() -> None:
+    """Invariant 1 of #566, guarded on its own so a deletion NAMES the identity rule.
+
+    Deliberately different sentences from the phrase table above. A statement whose only guard is a
+    shared table fails as "some contract lost a phrase", which does not tell a reviewer that the
+    canonical-identity rule is what went missing - and identity is the half an alias erodes most
+    easily, because the bridge reports the alias spelling straight back at you.
+    """
+    text = _normalized(WINDOWS_PATH_LIMITS_MD)
+    assert "The canonical physical path — and every hash taken over it — remains authoritative" in text, (
+        "the canonical-identity rule is gone from the evidence page"
+    )
+    assert "It shortens the *spelling* Desktop sees. It does not shorten, move or repair the artifact." in text, (
+        "the alias is no longer described as a spelling rather than a repair"
+    )
+
+
+def test_an_alias_open_never_makes_an_over_ceiling_tree_clean() -> None:
+    """Invariant 2 of #566, guarded on its own so a deletion NAMES the shippability rule.
+
+    This is the fail-open direction: the permission is what an operator remembers, and the sentence
+    that stops a green Desktop window from becoming a green receipt is the one worth its own
+    assertion rather than a share of a table.
+    """
+    text = _normalized(WINDOWS_PATH_LIMITS_MD)
+    assert "a physically over-ceiling tree stays non-clean" in text, (
+        "the page no longer says an over-ceiling tree stays non-clean when an alias opens it"
+    )
+    assert "❌ **It does not make anything shippable.**" in text, (
+        "the page no longer refuses shippability on the strength of an alias open"
+    )
 
 
 def test_the_ceiling_gate_still_scans_the_resolved_target() -> None:

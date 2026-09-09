@@ -372,24 +372,37 @@ or rebuilding it is blocked, and you need Desktop only to open, refresh or captu
 
 ### The safe sequence
 
+⚠️ Two things this sequence is deliberately explicit about, both measured 2026-09-09 on this host:
+a literal spaced path typed unquoted is **two** arguments to `subst` (`subst R: C:\runs\0001 regional
+sales\bundle` → *"Incorrect number of parameters"*, exit **1**, nothing mapped), and `Test-Path`
+**prints** `False` rather than stopping anything — so both the resolve and every check below have to
+be executable, not eyeballed.
+
 ```powershell
-# 1. prove the letter is unused - no output from either line means free.
-#    Never take a letter another user, tool or mapping already owns.
-subst | Select-String '^R:\\'
-Test-Path R:\
+# 1. resolve the physical root ONCE, literally - a unit name may contain spaces
+$root = (Resolve-Path -LiteralPath 'C:\runs\0001-regional sales\bundle').Path
 
-# 2. map the EXACT existing physical output root (resolved, never composed)
-subst R: C:\tfmig\i194\0001\out
+# 2. REFUSE if the letter is taken - never take one another user, tool or mapping owns
+if ((Test-Path -LiteralPath 'R:\') -or ((subst) -match '^R:\\:')) {
+    throw 'R: is already assigned - choose another free letter'
+}
 
-# 3. open ONLY the mapped project, and keep the PID
-$p = Start-Process -FilePath $env:PBI_DESKTOP_PATH -ArgumentList "`"R:\pbip\<Unit>\<Unit>.pbip`"" -PassThru
+# 3. map the resolved root as ONE quoted argument, and CHECK that it worked
+subst R: "$root"
+if ($LASTEXITCODE -ne 0) { throw "subst failed (exit $LASTEXITCODE)" }
+if (-not (Test-Path -LiteralPath 'R:\')) { throw 'R: did not appear - open nothing' }
+
+# 4. only now open the mapped project, and keep the PID
+$pbip = 'R:\pbip\<Unit>\<Unit>.pbip'
+$p = Start-Process -FilePath $env:PBI_DESKTOP_PATH -ArgumentList "`"$pbip`"" -PassThru
 $p.Id
 
-# 4. all Desktop work is PID-scoped (bridge status / refresh / capture), then close that exact PID
+# 5. all Desktop work is PID-scoped (bridge status / refresh / capture), then close that exact PID
 Stop-Process -Id <literal pid> -Force
 
-# 5. ALWAYS remove the mapping
+# 6. ALWAYS remove the mapping, and CHECK the removal
 subst R: /d
+if ($LASTEXITCODE -ne 0 -or (Test-Path -LiteralPath 'R:\')) { throw 'R: is still mapped' }
 ```
 
 ### Never
