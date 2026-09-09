@@ -160,7 +160,7 @@ from tableau_oracle_manifest import render_unestablished  # noqa: E402  # pylint
 # would come to disagree about the same record. Pure functions, no network, no credential.
 from manifest_scope import (  # noqa: E402  # pylint: disable=wrong-import-position
     merged_view_type_resolution,
-    scope_view_type_resolution,
+    scope_grouped_resolution,
     scope_view_type_resolution_batches,
 )
 
@@ -1348,10 +1348,15 @@ def _carried_view_type_resolution(manifest: dict[str, Any]) -> dict[str, Any]:
     the vocabulary ``tableau_view_types`` authors is replaced, so the FACT that typing was unavailable
     survives and a reflected credential cannot, and a malformed record becomes "not established"
     rather than a clean zero.
+
+    ⚠️ The aggregate goes through ``scope_grouped_resolution``, which reads it BESIDE the per-batch
+    rows (correction round, finding 2): a merged manifest is the one input whose count may exceed
+    what a single capture can produce, and it is believable only as the sum of rows this module
+    validated. The rows themselves stay on the individual rule, one batch at a time.
     """
     carried: dict[str, Any] = {}
     if "view_type_resolution" in manifest:
-        carried["view_type_resolution"], _refused = scope_view_type_resolution(manifest["view_type_resolution"])
+        carried["view_type_resolution"], _refused = scope_grouped_resolution(manifest)
     if "view_type_resolution_by_batch" in manifest:
         carried["view_type_resolution_by_batch"], _rows_refused = scope_view_type_resolution_batches(
             manifest["view_type_resolution_by_batch"]

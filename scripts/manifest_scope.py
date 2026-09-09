@@ -88,12 +88,18 @@ class Sanitized:  # pylint: disable=too-few-public-methods
 
     The callable returns ``(shippable value, dropped/refused JSON paths)`` -- the same pair
     ``project()`` returns -- so the two compose without a special case at the call site.
+
+    ``siblings=True`` hands the sanitiser the ENCLOSING mapping instead of its own value, for the one
+    field whose shipping rule genuinely depends on a sibling: a multi-batch ``view_type_resolution``
+    aggregate is only believable beside the per-batch rows it claims to summarise (#560 correction
+    round). It is refused outside a mapping spec, because there is no sibling to read there.
     """
 
-    __slots__ = ("sanitize",)
+    __slots__ = ("sanitize", "siblings")
 
-    def __init__(self, sanitize: Any) -> None:
+    def __init__(self, sanitize: Any, *, siblings: bool = False) -> None:
         self.sanitize = sanitize
+        self.siblings = siblings
 
 
 #: Spec leaf: carry this value verbatim - and it MUST be a scalar (str/int/float/bool/None).
@@ -158,6 +164,11 @@ def project(payload: Any, spec: Any, *, prefix: str = "") -> tuple[Any, list[str
             dropped.extend(lost)
         return kept_rows, sorted(set(dropped))
     if isinstance(spec, Sanitized):
+        if spec.siblings:
+            raise TypeError(
+                f"a sibling-reading sanitiser must sit inside a mapping spec, not at {prefix or '.'} - "
+                "there is nothing beside it to read"
+            )
         return spec.sanitize(payload, prefix=prefix or ".")
     if isinstance(spec, dict):
         if not isinstance(payload, dict):
@@ -169,7 +180,13 @@ def project(payload: Any, spec: Any, *, prefix: str = "") -> tuple[Any, list[str
             if key not in spec:
                 dropped.append(path)
                 continue
-            projected, lost = project(value, spec[key], prefix=path)
+            sub = spec[key]
+            if isinstance(sub, Sanitized) and sub.siblings:
+                projected, lost = sub.sanitize(payload, prefix=path)
+                kept[key] = projected
+                dropped.extend(lost)
+                continue
+            projected, lost = project(value, sub, prefix=path)
             kept[key] = projected
             dropped.extend(lost)
         return kept, sorted(set(dropped))
@@ -426,6 +443,30 @@ VIEW_TYPE_RESOLUTION_FIELDS = ("reauths", "unavailable_reason")
 RESOLUTION_REFUSED = "the capture's view_type_resolution was not a readable record; resolution evidence refused"
 #: Emitted instead of a reason string this repository did not author -- see :func:`ships_reason`.
 REASON_REFUSED = "the capture's view_type_resolution carried a reason this repository did not author; text refused"
+#: Emitted when the record is otherwise readable but its COUNT is not -- see :func:`_shippable_reauths`.
+#:
+#: ⚠️ **Correction round, finding 1.** A present record whose `reauths` was unreadable (measured with
+#: the string `"1"`) normalised to `reauths: null` and was then classified `resolved`, so the merge
+#: counted it among the batches with nothing to report and emitted a clean
+#: `{"reauths": 0, "unavailable_reason": null}` aggregate. A malformed count is EVIDENCE, not an
+#: absence: it forces this reason onto the record and `unreadable` onto its per-batch row, which is
+#: what makes the aggregate reason non-null.
+COUNT_REFUSED = "the capture's view_type_resolution carried an unreadable re-authentication count; count refused"
+#: Emitted when an aggregate count disagreed with the per-batch rows it claims to summarise. The rows
+#: are the only validated evidence there is, so they win and the aggregate is rebuilt from them.
+COUNT_RECOMPUTED = (
+    "the capture's view_type_resolution disagreed with view_type_resolution_by_batch; "
+    "count recomputed from the per-batch rows"
+)
+
+#: ⚠️ **Correction round, finding 2: the ceiling is STRUCTURAL, not a sanity limit.**
+#: `tableau_view_types` makes ONE site-wide Metadata call and allows AT MOST ONE re-authenticated
+#: retry (`tableau_view_types.MAX_REAUTH == 1`), so a single capture -- and therefore a single merged
+#: BATCH -- can only ever report 0 or 1. A `2` in an individual record is not a larger count; it is a
+#: record this producer did not write, and accepting it let a caller inflate recovery evidence at
+#: will. Only a MERGE can legitimately total more, and only as the sum of rows validated by this
+#: bound (:func:`scope_grouped_resolution`).
+MAX_BATCH_REAUTHS = 1
 
 _TYPE = r"[A-Za-z_][A-Za-z0-9_]*"  # a Python type name: `__name__`, never server-controlled text
 _NODE = r"(dashboards|sheets)"  # the two GraphQL fields `tableau_view_types` names, and no others
@@ -472,6 +513,8 @@ _AUTHORED_REASONS: tuple[str, ...] = (
     ),
     re.escape(RESOLUTION_REFUSED),
     re.escape(REASON_REFUSED),
+    re.escape(COUNT_REFUSED),
+    re.escape(COUNT_RECOMPUTED),
 )
 _AUTHORED_REASON_RE = re.compile(r"(?:%s)\Z" % "|".join(_AUTHORED_REASONS))  # pylint: disable=consider-using-f-string
 
@@ -490,17 +533,74 @@ def ships_reason(text: Any) -> bool:
     return isinstance(text, str) and bool(_AUTHORED_REASON_RE.match(text))
 
 
-def _shippable_reauths(value: Any) -> tuple[int | None, bool]:
-    """`(count, was it refused)`. A bool is NOT a count, and a negative one is not either.
+def _shippable_reauths(value: Any, *, ceiling: int = MAX_BATCH_REAUTHS) -> tuple[int | None, bool]:
+    """`(count, was it refused)`. A bool is NOT a count, a negative one is not either -- nor is `2`.
 
     ``None`` is returned for anything unreadable, never ``0``: the caller ships "not established",
     which no consumer can mistake for "no re-authentication happened".
+
+    ``ceiling`` is :data:`MAX_BATCH_REAUTHS` for every INDIVIDUAL record, because that is what one
+    capture can structurally produce. It is raised ONLY by :func:`scope_grouped_resolution`, and only
+    to a total this module itself computed from per-batch rows it validated at the same bound -- so a
+    caller can never talk the ceiling up by asserting a bigger number.
     """
     if value is None:
         return None, False
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value > ceiling:
         return None, True
     return value, False
+
+
+def _row_total(rows: list[dict[str, Any]]) -> int:
+    """The only trustworthy multi-batch total: the SUM of per-batch counts this module validated.
+
+    ⚠️ It does NOT re-validate, deliberately. Every row reaching here was built moments earlier by
+    :func:`_scope_resolution` at :data:`MAX_BATCH_REAUTHS` -- in :func:`merged_view_type_resolution`
+    from the batches themselves, in :func:`scope_grouped_resolution` through
+    :func:`scope_view_type_resolution_batches` -- so each addend is already a structurally possible
+    0 or 1, and a row whose count was unreadable is already ``None`` and contributes nothing rather
+    than a guess. A second copy of the bound here would be untestable (no input can reach it
+    unvalidated) and would quietly become the place the rule is read from, which is how two copies
+    of one rule start to disagree. The bound that matters is the one on the way IN, and
+    `test_a_forged_per_batch_row_count_is_never_a_summand` drives a forged row through it.
+    """
+    return sum(count for row in rows if (count := row.get("reauths")) is not None)
+
+
+def _scope_resolution(
+    value: Any, *, prefix: str, ceiling: int = MAX_BATCH_REAUTHS
+) -> tuple[dict[str, Any] | None, list[str], str]:
+    """`(record or None, refused paths, state)` -- the shipping rule, with its VERDICT attached.
+
+    The state is returned rather than re-derived from the record, because the two are not the same
+    question: a malformed count leaves a record that still reads plausibly (`reauths: null`) and only
+    the sanitiser knows it was refused. Deriving the verdict from the shipped shape is exactly how a
+    batch with an unreadable count was classified `resolved` and folded into a clean aggregate.
+    """
+    if value is None:
+        return None, [], RESOLUTION_ABSENT
+    if not isinstance(value, dict):
+        return {"reauths": None, "unavailable_reason": RESOLUTION_REFUSED}, [prefix], RESOLUTION_UNREADABLE
+    refused: list[str] = [
+        f"{prefix}.{_safe_path_segment(key)}" for key in value if key not in VIEW_TYPE_RESOLUTION_FIELDS
+    ]
+    reauths, bad_count = _shippable_reauths(value.get("reauths"), ceiling=ceiling)
+    if bad_count:
+        refused.append(f"{prefix}.reauths")
+    reason = value.get("unavailable_reason")
+    if reason is not None and not ships_reason(reason):
+        reason = REASON_REFUSED
+        refused.append(f"{prefix}.unavailable_reason")
+    if bad_count and reason is None:
+        # The refusal must be IN the record. A shipped `{"reauths": null, "unavailable_reason": null}`
+        # is indistinguishable from a run that simply never re-authenticated, and nothing downstream
+        # can recover the difference once it has been written.
+        reason = COUNT_REFUSED
+    return (
+        {"reauths": reauths, "unavailable_reason": reason},
+        sorted(set(refused)),
+        (RESOLUTION_UNREADABLE if bad_count else RESOLUTION_RESOLVED),
+    )
 
 
 def scope_view_type_resolution(value: Any, *, prefix: str = "view_type_resolution") -> tuple[Any, list[str]]:
@@ -509,22 +609,47 @@ def scope_view_type_resolution(value: Any, *, prefix: str = "view_type_resolutio
     ``None`` in and ``None`` out means exactly what the capture means by it: view typing was not
     resolved on this run at all. Everything else is normalised onto the two typed fields, with any
     unknown key dropped (and named) like every other allowlist level in this module.
+
+    This is the INDIVIDUAL rule -- one capture, one batch, one row -- so the count is bounded by
+    :data:`MAX_BATCH_REAUTHS`. An aggregate over merged batches goes through
+    :func:`scope_grouped_resolution`, which is the only caller allowed to exceed it.
     """
-    if value is None:
-        return None, []
-    if not isinstance(value, dict):
-        return {"reauths": None, "unavailable_reason": RESOLUTION_REFUSED}, [prefix]
-    refused: list[str] = [
-        f"{prefix}.{_safe_path_segment(key)}" for key in value if key not in VIEW_TYPE_RESOLUTION_FIELDS
-    ]
-    reauths, bad_count = _shippable_reauths(value.get("reauths"))
-    if bad_count:
-        refused.append(f"{prefix}.reauths")
-    reason = value.get("unavailable_reason")
-    if reason is not None and not ships_reason(reason):
-        reason = REASON_REFUSED
-        refused.append(f"{prefix}.unavailable_reason")
-    return {"reauths": reauths, "unavailable_reason": reason}, sorted(set(refused))
+    record, refused, _state = _scope_resolution(value, prefix=prefix)
+    return record, refused
+
+
+def scope_grouped_resolution(manifest: Any, *, prefix: str = "view_type_resolution") -> tuple[Any, list[str]]:
+    """The aggregate of a manifest that MAY have merged batches, judged against its own rows.
+
+    ⚠️ **Correction round, finding 2.** ``reauths`` above :data:`MAX_BATCH_REAUTHS` is unreachable for
+    a single capture, so a manifest asserting one is either a merge -- in which case the per-batch
+    rows it ships must add up to it -- or it is inflating recovery evidence. The rows are the only
+    validated evidence in the document, so:
+
+    * **no readable rows** -> the individual bound applies, and a `2` is refused outright;
+    * **rows present** -> the shipped count is the rows' SUM, recomputed rather than believed. A
+      disagreement in either direction (an inflated total, or an erased one) is flagged with
+      :data:`COUNT_RECOMPUTED` and named in the refused paths.
+
+    The aggregate this module writes in :func:`merged_view_type_resolution` is the rows' sum by
+    construction, so a grouped manifest re-read here survives unchanged -- the rule stays idempotent
+    across the grouping -> packaging hop.
+    """
+    value = manifest.get("view_type_resolution") if isinstance(manifest, dict) else None
+    rows, _row_refusals = scope_view_type_resolution_batches(
+        manifest.get("view_type_resolution_by_batch") if isinstance(manifest, dict) else None
+    )
+    total = _row_total(rows) if rows else None
+    record, refused, _state = _scope_resolution(
+        value, prefix=prefix, ceiling=MAX_BATCH_REAUTHS if total is None else max(total, MAX_BATCH_REAUTHS)
+    )
+    if record is None or total is None or record["reauths"] == total:
+        return record, refused
+    reason = record["unavailable_reason"]
+    return {
+        "reauths": total,
+        "unavailable_reason": COUNT_RECOMPUTED if reason in (None, COUNT_REFUSED) else reason,
+    }, sorted({*refused, f"{prefix}.reauths"})
 
 
 def merged_view_type_resolution(
@@ -551,13 +676,7 @@ def merged_view_type_resolution(
     """
     rows: list[dict[str, Any]] = []
     for label, value in contributions:
-        record, _refused = scope_view_type_resolution(value)
-        if record is None:
-            state = RESOLUTION_ABSENT
-        elif record["unavailable_reason"] == RESOLUTION_REFUSED:
-            state = RESOLUTION_UNREADABLE
-        else:
-            state = RESOLUTION_RESOLVED
+        record, _refused, state = _scope_resolution(value, prefix="view_type_resolution")
         rows.append(
             {
                 "batch": REDACTED if discloses_host_location(str(label)) else str(label),
@@ -581,7 +700,7 @@ def merged_view_type_resolution(
             f"{len(unreadable)} carried no readable resolution record; see view_type_resolution_by_batch"
         )
     return {
-        "reauths": sum(row["reauths"] for row in present if isinstance(row["reauths"], int)),
+        "reauths": _row_total(rows),
         "unavailable_reason": reason,
     }, rows
 
@@ -638,7 +757,12 @@ ORACLE_MANIFEST_ALLOW: dict[str, Any] = {
     # and a persistently unavailable typing as though it had been established. `Sanitized`, not
     # `_fields(...)`: `unavailable_reason` is a string, so a name-shaped allowlist would carry
     # whatever it said, and this layer holds no credential to redact one out of it.
-    "view_type_resolution": Sanitized(scope_view_type_resolution),
+    #
+    # ⚠️ `siblings=True` (correction round, finding 2): the count is judged against
+    # `view_type_resolution_by_batch`, because a total above `MAX_BATCH_REAUTHS` is unreachable for a
+    # single capture and is believable only as the sum of validated per-batch rows. Reading the
+    # aggregate alone let a forged `reauths: 2` ship as recovery evidence no batch ever reported.
+    "view_type_resolution": Sanitized(scope_grouped_resolution, siblings=True),
     # Present only on a manifest that MERGED several capture batches (`group_oracle_by_workbook`).
     # It ships for the reason the aggregate is conservative: two batches with different recoveries
     # must not be readable as one, and the counts in the aggregate are only actionable beside the
