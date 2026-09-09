@@ -51,6 +51,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from target_identity import TargetIdentityRefusal, resolve_target
+
 Screenshotter = Callable[[str, str, Path], bool]
 BRIDGE_WAIT_SECONDS = 90
 SCREENSHOT_TIMEOUT_SECONDS = BRIDGE_WAIT_SECONDS + 30
@@ -267,12 +269,30 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Minimum byte-identical dwell before treating a page as converged",
     )
     parser.add_argument("--max-wait", type=float, default=75.0, help="Max seconds to wait for one page")
+    parser.add_argument(
+        "--fabric-dir",
+        type=Path,
+        default=None,
+        help="Package fabric/ directory for canonical target-identity validation before capture",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point."""
     args = parse_args(sys.argv[1:] if argv is None else argv)
+
+    # When --fabric-dir is supplied, resolve canonical target identity before capture.
+    if args.fabric_dir is not None:
+        identity = resolve_target(args.fabric_dir, pid=int(args.pid))
+        if isinstance(identity, TargetIdentityRefusal):
+            print(f"TARGET IDENTITY REFUSED: {identity.reason}", file=sys.stderr)
+            return 3
+        print(
+            f"Target identity: {identity.pbip_path} rev={identity.revision_digest[:12]} "
+            f"({len(identity.pages)} pages, {sum(len(p.visual_ids) for p in identity.pages)} visuals)"
+        )
+
     options = CaptureOptions(
         poll=args.poll,
         stable_seconds=args.stable_seconds,

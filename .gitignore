@@ -274,4 +274,6 @@ tests/fixtures/live/
 # `git add -A` away from committing a machine path to a PUBLIC repo, which is the near-miss
 # issue #322 records. They also trip the ruff gate, which scans tests/.
 tests/_mutation_plugin.py
-tests/_mutation_outcomes.json
+tests/_mutation_outcomes.json.test-work/
+
+.test-work/
