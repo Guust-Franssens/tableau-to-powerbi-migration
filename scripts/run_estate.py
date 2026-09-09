@@ -145,6 +145,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import time
@@ -178,6 +179,7 @@ from check_path_ceiling import (
 )
 from check_path_ceiling import scan as scan_path_ceiling
 from engine_source import EngineNotFoundError, NonCanonicalEngineError, engine_provenance, resolve_engine
+from host_paths import discloses_host_location
 from manifest_scope import redact_host_paths
 from migration_bundle import ENGINE_RECEIPT, sha256_file, write_engine_receipt
 
@@ -225,6 +227,20 @@ SAFE_BUNDLE_ROOT = "<bundle>"
 #: echoed and never re-spelled as if it were relative: "I could not place this" is a different and
 #: honest answer, and echoing it is exactly the disclosure this transform exists to prevent.
 UNASSESSABLE_PATH = "<path-not-provably-inside-the-bundle-{index}>"
+
+#: The same answer for FREE-FORM text. A relative `--output` (`AcmeCorp-Confidential-FY26Q3\bundle`)
+#: names a customer as plainly as an absolute one and is invisible to every absolute-path predicate
+#: in this repo, so a message that cannot be proven free of a path keeps only its class and error
+#: code and is otherwise withheld under an ordinal.
+WITHHELD_DIAGNOSTIC = "<diagnostic-{index}-withheld: not provably free of a host path>"
+
+#: A whitespace-delimited token that still looks like a path, and a bare drive prefix.
+_SEPARATOR_TOKEN_RE = re.compile(r"\S*[\\/]\S*")
+_DRIVE_PREFIX_RE = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]:")
+
+#: What may be kept from a withheld message: the leading exception class, and any error code.
+_DIAGNOSTIC_CLASS_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.]*)\s*:")
+_DIAGNOSTIC_CODE_RE = re.compile(r"\b(errno|winerror)\b[\s:]*(-?\d+)", re.IGNORECASE)
 
 #: Where `scan()` records a single measured path, and where it records a list of them.
 _PATH_RECORD_KEYS = ("longest", "root_budget_binding")
@@ -776,16 +792,95 @@ def _ascii_path(value: str) -> str:
     return value.encode("ascii", "backslashreplace").decode("ascii")
 
 
-def _safe_diagnostic(exc: BaseException) -> str:
-    """`Type: message` for a log line, with any host location in the message redacted WHOLE.
+def _root_spellings(out_dir: Path) -> list[str]:
+    """Every spelling of THIS run's bundle root that could appear inside a diagnostic string.
 
-    An OS error message routinely embeds the path it failed on, which is the customer's absolute
-    path. `manifest_scope.redact_host_paths` is the repo's shipping redactor (built on
-    `host_paths.discloses_host_location`), so this asks the one question the rest of the repo asks
-    instead of inventing a second, weaker one.
+    An `--output` reaches an error message however the operator typed it, so the relative form, the
+    separator-normalised form and the canonical absolute form are all substituted - longest first,
+    so the absolute form is replaced before the relative substring inside it. Resolution is
+    best-effort: a root that cannot be resolved simply contributes fewer spellings, never an
+    exception, and anything left unproven is withheld by :func:`sanitize_diagnostic` anyway.
     """
-    cleaned, _hits = redact_host_paths(f"{type(exc).__name__}: {exc}")
-    return _ascii_path(str(cleaned))
+    raw = str(out_dir)
+    candidates = [raw, os.path.normpath(raw)]
+    try:
+        candidates.append(str(Path(raw).resolve()))
+    except (OSError, RuntimeError, ValueError):
+        pass
+    for candidate in list(candidates):
+        candidates.append(candidate.replace("\\", "/"))
+        candidates.append(candidate.replace("/", "\\"))
+    spellings = {candidate for candidate in candidates if candidate not in {"", ".", "/", "\\"}}
+    return sorted(spellings, key=len, reverse=True)
+
+
+def _is_shareable_diagnostic(text: str) -> bool:
+    """Whether free-form text can be PROVEN to carry no path except the bundle's own.
+
+    Two questions, and the second is the one the reviewer's reproduction needed: the repo's generic
+    predicate answers "is there an absolute host location in here", which a RELATIVE customer
+    directory passes untouched. So every whitespace-delimited token that still looks like a path -
+    it carries a separator, or a drive prefix - must already be rooted at the `<bundle>` marker.
+    Deliberately fail-closed: prose containing `and/or` is withheld rather than reasoned about.
+    """
+    if discloses_host_location(text):
+        return False
+    if any(SAFE_BUNDLE_ROOT not in token for token in _SEPARATOR_TOKEN_RE.findall(text)):
+        return False
+    return not _DRIVE_PREFIX_RE.search(text.replace(SAFE_BUNDLE_ROOT, ""))
+
+
+def _withheld_diagnostic(text: str, ordinal: int) -> str:
+    """What survives a message that could not be proven safe: class, error code, an ordinal.
+
+    Never the message. The class name and an `Errno`/`WinError` number are runtime facts about the
+    failure, carry no location, and are what makes the withheld line still actionable - "PermissionError
+    13" says what to check. Everything else is dropped rather than partially redacted, because a
+    partial redaction of free-form text is exactly the guess this correction exists to remove.
+    """
+    stripped = text.strip()
+    match = _DIAGNOSTIC_CLASS_RE.match(stripped)
+    parts = [match.group(1) if match else "diagnostic"]
+    parts += [f"{kind.title()} {number}" for kind, number in _DIAGNOSTIC_CODE_RE.findall(stripped)]
+    return f"{' '.join(parts)} {WITHHELD_DIAGNOSTIC.format(index=ordinal)}"
+
+
+def sanitize_diagnostic(text: object, spellings: list[str], ordinal: int) -> tuple[str, bool]:
+    """`(text safe to persist or print, was it withheld)` for one unstructured diagnostic string.
+
+    Order is the contract: the bundle root's own spellings are replaced with `<bundle>` FIRST - that
+    is the one root this process can prove, in whatever form the operator supplied it - and only the
+    remainder is judged. Generic host redaction still runs afterwards over the whole document
+    (`shareable_path_report`), so this narrows what reaches it rather than replacing it.
+    """
+    value = text if isinstance(text, str) else str(text)
+    for spelling in spellings:
+        value = re.sub(re.escape(spelling), SAFE_BUNDLE_ROOT, value, flags=re.IGNORECASE)
+    if _is_shareable_diagnostic(value):
+        return value, False
+    return _withheld_diagnostic(value, ordinal), True
+
+
+def _sanitized(text: object, spellings: list[str], withheld: list[str]) -> str:
+    """:func:`sanitize_diagnostic` with the run's withheld-ordinal counter threaded through it."""
+    value, was_withheld = sanitize_diagnostic(text, spellings, len(withheld) + 1)
+    if was_withheld:
+        withheld.append(value)
+    return value
+
+
+def _safe_diagnostic(exc: BaseException, out_dir: Path) -> str:
+    """A log line for one failure: the bundle root spelled `<bundle>`, anything unproven withheld.
+
+    ⚠️ Generic host-path detection only recognises ABSOLUTE locations, and a `--output` may be
+    RELATIVE - `AcmeCorp-Confidential-FY26Q3\\bundle` discloses a customer just as plainly and
+    survives every absolute-path predicate in this repo. So the bundle's own spellings are replaced
+    FIRST (that is the one root this call can prove), and only then is what remains judged; a
+    message that cannot be proven free of some other path keeps its class and error code and
+    nothing else.
+    """
+    text, _withheld = sanitize_diagnostic(f"{type(exc).__name__}: {exc}", _root_spellings(out_dir), 1)
+    return _ascii_path(text)
 
 
 def _bundle_relative(value: object, root: Path, unplaced: list[str]) -> str:
@@ -823,9 +918,13 @@ def shareable_path_report(report: dict, out_dir: Path) -> dict:
     because absolute length is exactly what Power BI Desktop counts.
     """
     root = Path(os.path.normpath(str(out_dir)))
+    spellings = _root_spellings(out_dir)
     unplaced: list[str] = []
+    withheld: list[str] = []
     shareable = dict(report)
     shareable["root"] = SAFE_BUNDLE_ROOT
+    if "scan_error" in shareable:
+        shareable["scan_error"] = _sanitized(shareable["scan_error"], spellings, withheld)
     for key in _PATH_RECORD_KEYS:
         record = shareable.get(key)
         if isinstance(record, dict):
@@ -837,7 +936,14 @@ def shareable_path_report(report: dict, out_dir: Path) -> dict:
                 dict(row, path=_bundle_relative(row.get("path"), root, unplaced)) if isinstance(row, dict) else row
                 for row in rows
             ]
+    shareable["unknown_paths"] = [
+        dict(row, reason=_sanitized(row["reason"], spellings, withheld))
+        if isinstance(row, dict) and "reason" in row
+        else row
+        for row in shareable.get("unknown_paths") or []
+    ]
     shareable["paths_not_placed"] = len(unplaced)
+    shareable["diagnostics_withheld"] = len(withheld)
     cleaned, redacted = redact_host_paths(shareable, prefix=PATH_CEILING_REPORT)
     cleaned["redacted_fields"] = sorted(redacted)
     return cleaned
@@ -893,7 +999,7 @@ def write_path_ceiling_report(out_dir: Path, report: dict) -> Path | None:
         os.replace(staging_path, final_path)
         swapped = True
     except (OSError, TypeError, ValueError) as exc:
-        log.warning("PATH CEILING: report not published (%s: %s)", type(exc).__name__, _safe_diagnostic(exc))
+        log.warning("PATH CEILING: report not published (%s)", _safe_diagnostic(exc, out_dir))
         return None
     finally:
         if not swapped:
@@ -1659,7 +1765,7 @@ def produce_and_gate_output(
         try:
             write_phase_record(args.output, phases)
         except (OSError, TypeError, ValueError) as exc:
-            log.warning("PATH CEILING: phase timings not persisted (%s)", _safe_diagnostic(exc))
+            log.warning("PATH CEILING: phase timings not persisted (%s)", _safe_diagnostic(exc, args.output))
         return report, EXIT_PATH_CEILING
     return report, EXIT_OK
 
