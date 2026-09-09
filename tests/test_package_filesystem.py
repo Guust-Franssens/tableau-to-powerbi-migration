@@ -194,7 +194,7 @@ def test_contents_files_must_be_a_mapping(tmp_path: Path, files: object) -> None
         "\\\\host\\share\\x.txt",
         "/etc/passwd",
         "//host/share/x.txt",
-        "C:/Users/someone/secret.txt",
+        "C:/Payroll/secret.txt",
         "C:secret.txt",
         "c:/x.txt",
         "a\x00b.txt",
@@ -228,7 +228,7 @@ def test_non_string_declared_path_is_refused() -> None:
 
 def test_unsafe_declared_key_is_named_by_ordinal_and_never_echoed(tmp_path: Path) -> None:
     """An unsafe key can BE an absolute customer path; these findings are printed into verdicts."""
-    secret = "C:/Users/someone/Customer Secret.twbx"
+    secret = "D:/Payroll/Customer Secret.twbx"
     root = build_package(
         tmp_path,
         files={"README.md": b"a\n"},

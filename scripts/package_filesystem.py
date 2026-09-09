@@ -235,7 +235,7 @@ def declared_path_problem(value: object) -> str | None:
     Judged LEXICALLY and on BOTH flavours regardless of the host: a packaging host is not necessarily
     the host that reads the package, and `..\\x` is a traversal on Windows while `PurePosixPath`
     reads it as one innocent filename. Nothing here touches the filesystem - these strings are
-    untrusted, and `Path("/Users/x")` on Windows resolves against the current drive.
+    untrusted, and `Path("/etc/hosts")` on Windows resolves against the current drive.
     """
     if not isinstance(value, str):
         return f"is {type(value).__name__}, not a string"
