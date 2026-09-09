@@ -139,9 +139,7 @@ def _resolve_pbip(fabric_dir: Path) -> tuple[Path, dict[str, Any]] | TargetIdent
     if not pbip_files:
         return TargetIdentityRefusal("no .pbip file found in " + str(fabric_dir))
     if len(pbip_files) > 1:
-        return TargetIdentityRefusal(
-            f"multiple .pbip files: {', '.join(p.name for p in pbip_files)}"
-        )
+        return TargetIdentityRefusal(f"multiple .pbip files: {', '.join(p.name for p in pbip_files)}")
     pbip_path = pbip_files[0]
     doc = _read_strict_json(pbip_path)
     if isinstance(doc, Exception):
@@ -149,25 +147,19 @@ def _resolve_pbip(fabric_dir: Path) -> tuple[Path, dict[str, Any]] | TargetIdent
     return pbip_path, doc
 
 
-def _resolve_report_dir(
-    pbip_doc: dict[str, Any], fabric_dir: Path
-) -> tuple[str, Path] | TargetIdentityRefusal:
+def _resolve_report_dir(pbip_doc: dict[str, Any], fabric_dir: Path) -> tuple[str, Path] | TargetIdentityRefusal:
     """Resolve the report artifact path from the .pbip doc."""
     artifacts = pbip_doc.get("artifacts")
     if not isinstance(artifacts, list) or not artifacts:
         return TargetIdentityRefusal(".pbip has no artifacts list")
     report_entries = [a for a in artifacts if isinstance(a, dict) and "report" in a]
     if len(report_entries) != 1:
-        return TargetIdentityRefusal(
-            f"expected exactly 1 report artifact, found {len(report_entries)}"
-        )
+        return TargetIdentityRefusal(f"expected exactly 1 report artifact, found {len(report_entries)}")
     report_rel = report_entries[0]["report"].get("path", "")
     if not isinstance(report_rel, str) or not report_rel:
         return TargetIdentityRefusal("report artifact has no path")
     if not _is_contained(report_rel):
-        return TargetIdentityRefusal(
-            f"report path is absolute, traversing, or foreign: {report_rel!r}"
-        )
+        return TargetIdentityRefusal(f"report path is absolute, traversing, or foreign: {report_rel!r}")
     if not report_rel.endswith(".Report"):
         return TargetIdentityRefusal(f"report path does not end with .Report: {report_rel!r}")
     report_dir = fabric_dir / report_rel
@@ -176,15 +168,11 @@ def _resolve_report_dir(
     return report_rel, report_dir
 
 
-def _resolve_model_binding(
-    report_dir: Path, fabric_dir: Path
-) -> str | TargetIdentityRefusal:
+def _resolve_model_binding(report_dir: Path, fabric_dir: Path) -> str | TargetIdentityRefusal:
     """Parse definition.pbir and resolve the semantic-model binding."""
     pbir_path = report_dir / "definition.pbir"
     if not pbir_path.is_file():
-        return TargetIdentityRefusal(
-            f"definition.pbir not found in {report_dir.name}"
-        )
+        return TargetIdentityRefusal(f"definition.pbir not found in {report_dir.name}")
     doc = _read_strict_json(pbir_path)
     if isinstance(doc, Exception):
         return TargetIdentityRefusal(f"malformed definition.pbir JSON: {doc}")
@@ -195,9 +183,7 @@ def _resolve_model_binding(
     by_conn = dataset_ref.get("byConnection")
     count = sum(1 for x in (by_path, by_conn) if x is not None)
     if count == 0:
-        return TargetIdentityRefusal(
-            "definition.pbir has no model binding (byPath or byConnection)"
-        )
+        return TargetIdentityRefusal("definition.pbir has no model binding (byPath or byConnection)")
     if count > 1:
         return TargetIdentityRefusal("definition.pbir has multiple model bindings")
     if by_path is not None:
@@ -205,9 +191,7 @@ def _resolve_model_binding(
     return _format_by_connection(by_conn)
 
 
-def _validate_by_path(
-    by_path: Any, report_dir: Path, fabric_dir: Path
-) -> str | TargetIdentityRefusal:
+def _validate_by_path(by_path: Any, report_dir: Path, fabric_dir: Path) -> str | TargetIdentityRefusal:
     path_str = by_path.get("path", "") if isinstance(by_path, dict) else ""
     if not isinstance(path_str, str) or not path_str:
         return TargetIdentityRefusal("byPath binding has no path")
@@ -229,9 +213,7 @@ def _format_by_connection(by_conn: Any) -> str:
     return f"byConnection:{name}" if name else "byConnection"
 
 
-def _enumerate_page(
-    entry: Path, report_rel: str
-) -> PageIdentity | TargetIdentityRefusal:
+def _enumerate_page(entry: Path, report_rel: str) -> PageIdentity | TargetIdentityRefusal:
     """Enumerate one page directory and its visuals."""
     page_id = entry.name
     page_json = entry / "page.json"
@@ -250,20 +232,14 @@ def _enumerate_page(
                 continue
             vid = v_entry.name
             if vid in seen:
-                return TargetIdentityRefusal(
-                    f"duplicate visual directory in page {page_id}: {vid}"
-                )
+                return TargetIdentityRefusal(f"duplicate visual directory in page {page_id}: {vid}")
             seen.add(vid)
             vj = v_entry / "visual.json"
             if not vj.is_file():
-                return TargetIdentityRefusal(
-                    f"visual.json missing in {page_id}/visuals/{vid}"
-                )
+                return TargetIdentityRefusal(f"visual.json missing in {page_id}/visuals/{vid}")
             vdoc = _read_strict_json(vj)
             if isinstance(vdoc, Exception):
-                return TargetIdentityRefusal(
-                    f"malformed visual.json in {page_id}/visuals/{vid}: {vdoc}"
-                )
+                return TargetIdentityRefusal(f"malformed visual.json in {page_id}/visuals/{vid}: {vdoc}")
             visual_ids.append(vid)
     page_rel = str(PurePosixPath(report_rel) / "definition" / "pages" / page_id)
     return PageIdentity(page_rel, page_id, display_name, tuple(visual_ids))
@@ -302,9 +278,7 @@ def _enumerate_pages(
     return tuple(results), defn
 
 
-def _compute_revision_digest(
-    report_rel: str, definition_dir: Path, fabric_dir: Path
-) -> tuple[str, tuple[str, ...]]:
+def _compute_revision_digest(report_rel: str, definition_dir: Path, fabric_dir: Path) -> tuple[str, tuple[str, ...]]:
     """Compute a deterministic revision digest over all PBIR definition files."""
     def_files: list[str] = []
 
@@ -331,15 +305,11 @@ def _compute_revision_digest(
     return digest.hexdigest(), tuple(pkg_files)
 
 
-def _validate_bridge_status(
-    pid: int, canonical_pbip: str, bridge_runner: BridgeRunner
-) -> str | TargetIdentityRefusal:
+def _validate_bridge_status(pid: int, canonical_pbip: str, bridge_runner: BridgeRunner) -> str | TargetIdentityRefusal:
     """Validate bridge status for *pid* and return the bridge file path."""
     rc, output = bridge_runner(pid)
     if rc != 0:
-        return TargetIdentityRefusal(
-            f"bridge status --pid {pid} failed (rc={rc}): {output.strip()[:200]}"
-        )
+        return TargetIdentityRefusal(f"bridge status --pid {pid} failed (rc={rc}): {output.strip()[:200]}")
     try:
         start = output.index("{")
         end = output.rindex("}") + 1
@@ -350,23 +320,15 @@ def _validate_bridge_status(
     if not isinstance(instances, list):
         return TargetIdentityRefusal("bridge status has no instances array")
     matches = [
-        inst
-        for inst in instances
-        if isinstance(inst, dict) and int(inst.get("pid") or inst.get("Pid") or -1) == pid
+        inst for inst in instances if isinstance(inst, dict) and int(inst.get("pid") or inst.get("Pid") or -1) == pid
     ]
     if not matches:
         return TargetIdentityRefusal(f"bridge status has no instance for pid {pid}")
     if len(matches) > 1:
-        return TargetIdentityRefusal(
-            f"bridge status has {len(matches)} entries for pid {pid}"
-        )
-    bridge_file = str(
-        matches[0].get("currentFilePath") or matches[0].get("CurrentFilePath") or ""
-    )
+        return TargetIdentityRefusal(f"bridge status has {len(matches)} entries for pid {pid}")
+    bridge_file = str(matches[0].get("currentFilePath") or matches[0].get("CurrentFilePath") or "")
     if not bridge_file:
-        return TargetIdentityRefusal(
-            f"bridge status for pid {pid} has no currentFilePath"
-        )
+        return TargetIdentityRefusal(f"bridge status for pid {pid} has no currentFilePath")
     if sys.platform == "win32":
         ok = os.path.normcase(bridge_file) == os.path.normcase(canonical_pbip)
     else:
@@ -412,9 +374,7 @@ def resolve_target(
         return pages_result
     page_ids, definition_dir = pages_result
 
-    digest, def_files = _compute_revision_digest(
-        report_rel, definition_dir, fabric_dir
-    )
+    digest, def_files = _compute_revision_digest(report_rel, definition_dir, fabric_dir)
 
     bridge = _validate_bridge_status(pid, str(pbip_path), bridge_runner)
     if isinstance(bridge, TargetIdentityRefusal):
