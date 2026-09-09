@@ -528,6 +528,47 @@ stay byte-identical.
 > Until #376 the Python path reported this as `BLOCKED_BY_DIALOG` at exit 1, i.e. as a sign-in wall,
 > which is the wrong remedy: this needs an **approval**, not an account.
 
+> ### Known limitation: connector-auth dialogs that expose no readable content (Refs #146)
+>
+> **Status:** accepted and fail-closed as of September 2026. PR #572 proved that generic
+> WebView/MSHTML/window-class, geometry and ownership signals false-convict non-auth browser content,
+> so no detector logic uses them as credential evidence.
+>
+> **The shape:** a live-source PBIP opens successfully and loads its model, but a second connector-owned
+> authentication window appears alongside the Refresh progress dialog. The existing UIA harvest of that
+> window exposes only an empty pane — no text surfaces, no automation identifiers, nothing the
+> classifier can match against `credential_modal_signature.regex`. The detector therefore reports
+> `DIALOG_UNREADABLE` or `DIALOG_UNRECOGNIZED` (exit 3), which is honest but insufficient: a credential
+> action *is* required, yet the verdict does not say so.
+>
+> **What each verdict means for the operator:**
+>
+> | verdict | what it tells you | what to do |
+> |---|---|---|
+> | `CREDENTIAL_MISSING` (exit 1) | positive auth-specific evidence was found — a text signature in the dialog matched `credential_modal_signature.regex` | hard stop; a human must sign in. The only verdict that asserts a credential wall. |
+> | `DIALOG_UNREADABLE` (exit 3) | a dialog is up whose content could **not** be read or shown to be harmless | **a human must inspect Desktop.** It may be a credential prompt, but this tool cannot confirm that. Do NOT assert "no sign-in is needed." |
+> | `DIALOG_UNRECOGNIZED` (exit 3) | a dialog is up whose text matched no known signature | same as `DIALOG_UNREADABLE`: a human must inspect Desktop. The dialog's content was read but not recognised. |
+> | `REFRESH_IN_PROGRESS` (exit 3) | the dialog's content positively reads as refresh progress | not a credential wall; wait for the refresh or cancel the stale one. |
+> | `DIALOG_NEEDS_HUMAN` (exit 3) | a known human-blocking prompt that is not a credential prompt (e.g. native-query approval) | not a credential wall; approve the prompt. |
+>
+> **The contract:**
+> - `CREDENTIAL_MISSING` / `NO_CREDENTIAL` requires **positive authentication-specific evidence**. No
+>   amount of window-class, geometry, ownership or hosting-technology inference may produce it.
+> - `DIALOG_UNREADABLE` / `DIALOG_UNRECOGNIZED` is non-clean and requires a human to inspect Desktop,
+>   but it does **not** assert that sign-in is needed — and must never be re-labelled as
+>   `NO_CREDENTIAL` by a parent script or agent.
+> - Autopilot / auto-approve **never** clears or bypasses a dialog verdict. The credential sits behind
+>   a modal sign-in dialog no automation can fill; autonomy governs choices, not physics.
+> - If no auth-specific signal is available from the APIs the shipped skill can reach, the limitation
+>   is accepted and visible (exit 3, gate stays armed). **Fail-closed is the release behaviour.**
+>
+> **Why this is safe, not broken.** The gate stays armed on any exit-3 verdict: no artifact is built,
+> no cache is written, and the parent (`probe_live_source.py`) maps the exit-3 family to `ERROR` —
+> "the probe itself could not run." A human is always told to look. The cost is a bounded wait
+> (≤330 s) that ends with an honest "I cannot tell" rather than a fast "sign in now." The alternative
+> — guessing `NO_CREDENTIAL` from a hosting signal — was measured in PR #572 to false-convict
+> non-auth browser content, which terminates the run on a credential wall that does not exist.
+
 Read-only preflight (proves credentials + source reachability without changing anything):
 
 ```
