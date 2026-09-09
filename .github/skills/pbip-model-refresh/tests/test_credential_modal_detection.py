@@ -4808,8 +4808,111 @@ $script:form.Add_Shown({
 """
 
 
-def _run_probe_against_startup_dialog(tmp_path: Path):
-    """Run the probe against a fixture whose dialog is already up, i.e. the t=0 emission site."""
+def _assert_live_pairing(done, *, expected_token: str, expected_exit: int, label: str) -> None:
+    """Shared body for the live emission-path tests: the printed prose explains the printed token.
+
+    Deliberately NOT a parametrized test. The repo's partition gates key a test by
+    `<file>::<function>` from the AST (`tests/test_gui_marker_gate.py`,
+    `tests/test_parallel_test_loop.py`), while pytest collects a parametrized case as
+    `<file>::<function>[id]`. One parametrized `gui` test therefore reads as an unmarked
+    window-spawner AND as a stale `gui` marker at the same time, and inflates every exact
+    deselection census - measured in run 34400693275, six gate failures from one decorator. Each
+    live case is its own function, and each calls `_run_probe_against_wpf_modal` in its OWN body so
+    both the `gui` scan (transitive) and the `serial` scan (function-scoped) can see it.
+
+    ⚠️ Contention can legitimately turn one exit-3 verdict into another (a slow harvest degrades to
+    `DIALOG_UNREADABLE`). The pairing assertion holds regardless - it reads whichever token the run
+    ended on - so the exact-token assertion is made only where the run is stable, and the exit-3
+    cases assert the BAND, which every degraded path preserves by design. Measured on a quiet
+    machine (2026-09-09): all five cases reached their intended token exactly, so the band form is
+    tolerance for contention, not cover for a case that never worked.
+    """
+    token = assert_production_pairs_guidance_with_its_token(done.stdout)
+    if expected_exit == 3:
+        assert done.returncode == 3, f"{label}: the exit-3 band must hold:\n{done.stdout}"
+        assert token in {"DIALOG_NEEDS_HUMAN", "DIALOG_UNRECOGNIZED", "DIALOG_UNREADABLE"}, (
+            f"{label}: expected an exit-3 dialog verdict, got {token}:\n{done.stdout}"
+        )
+    else:
+        assert done.returncode == expected_exit, f"{label}: wrong exit code:\n{done.stdout}"
+        assert token == expected_token, f"{label}: expected {expected_token}, got {token}:\n{done.stdout}"
+
+
+@pytest.mark.gui
+@pytest.mark.serial
+def test_the_live_probe_explains_the_clear_path(tmp_path: Path) -> None:
+    """`CREDENTIAL_PRESENT`, live: a refresh is invoked, nothing comes up, the probe clears."""
+    _assert_live_pairing(
+        _run_probe_against_wpf_modal(tmp_path, _MODAL_NONE),
+        expected_token="CREDENTIAL_PRESENT",
+        expected_exit=0,
+        label="no dialog at all -> the clear path",
+    )
+
+
+@pytest.mark.gui
+@pytest.mark.serial
+def test_the_live_probe_explains_a_credential_modal_caught_in_the_poll_loop(tmp_path: Path) -> None:
+    """`CREDENTIAL_MISSING`, live: the hard stop, from the poll-loop emission site."""
+    _assert_live_pairing(
+        _run_probe_against_wpf_modal(tmp_path, _MODAL_TEXTPATTERN_ONLY),
+        expected_token="CREDENTIAL_MISSING",
+        expected_exit=1,
+        label="a credential modal caught in the poll loop",
+    )
+
+
+@pytest.mark.gui
+@pytest.mark.serial
+def test_the_live_probe_explains_a_known_blocking_prompt(tmp_path: Path) -> None:
+    """`DIALOG_NEEDS_HUMAN`, live: a native-query approval beside progress text, latched."""
+    _assert_live_pairing(
+        _run_probe_against_wpf_modal(tmp_path, _MODAL_PROGRESS_PLUS_NATIVE_QUERY),
+        expected_token="DIALOG_NEEDS_HUMAN",
+        expected_exit=3,
+        label="a known blocking prompt, latched",
+    )
+
+
+@pytest.mark.gui
+@pytest.mark.serial
+def test_the_live_probe_explains_a_dialog_it_read_but_could_not_place(tmp_path: Path) -> None:
+    """`DIALOG_UNRECOGNIZED`, live: readable prose that matched no signature, latched."""
+    _assert_live_pairing(
+        _run_probe_against_wpf_modal(tmp_path, _MODAL_UNRECOGNISED_PROSE),
+        expected_token="DIALOG_UNRECOGNIZED",
+        expected_exit=3,
+        label="read, matched nothing, latched",
+    )
+
+
+@pytest.mark.gui
+@pytest.mark.serial
+def test_the_live_probe_explains_a_dialog_it_could_not_read(tmp_path: Path) -> None:
+    """`DIALOG_UNREADABLE`, live: a modal exposing no text at all, latched."""
+    _assert_live_pairing(
+        _run_probe_against_wpf_modal(tmp_path, _MODAL_NO_TEXT_AT_ALL),
+        expected_token="DIALOG_UNREADABLE",
+        expected_exit=3,
+        label="no readable text at all, latched",
+    )
+
+
+@pytest.mark.gui
+@pytest.mark.serial
+def test_the_live_probe_explains_a_refresh_already_in_progress(tmp_path: Path) -> None:
+    """The last production emission site: a dialog already up at t=0, before anything is invoked.
+
+    This is the branch the 2026-08-28 field report walked into, and the only one where
+    `REFRESH_IN_PROGRESS` can be emitted at all - the poll loop ignores our own progress dialog by
+    design.
+
+    The fixture app is launched HERE rather than through a helper, which is one of the two spellings
+    `tests/test_parallel_test_loop.py::_launches_the_live_desktop` recognises (the `-ReadyFile`
+    argument the app uses to announce its window). Its scan is function-scoped, so a private helper
+    hid a genuinely live test from the `serial` census - it is a live fixture either way, and the
+    marker is earned; this makes the classification legible to the gate that enforces it.
+    """
     exe = _powershell()
     app_script = tmp_path / "startup_dialog_app.ps1"
     app_script.write_text(_STARTUP_PROGRESS_APP, encoding="utf-8")
@@ -4826,64 +4929,27 @@ def _run_probe_against_startup_dialog(tmp_path: Path):
             time.sleep(0.5)
         if not ready.exists():
             pytest.skip("the startup-dialog fixture never rendered its modal (no interactive desktop?)")
-        argv = [exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(PROBE_PS1)]
-        argv += ["-DesktopPid", str(app.pid), "-TimeoutSec", "8"]
-        return subprocess.run(argv, capture_output=True, text=True, timeout=300, check=False)
+        done = subprocess.run(
+            [
+                exe,
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(PROBE_PS1),
+                "-DesktopPid",
+                str(app.pid),
+                "-TimeoutSec",
+                "8",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
     finally:
         app.kill()
         app.wait(timeout=30)
-
-
-@pytest.mark.gui
-@pytest.mark.serial
-@pytest.mark.parametrize(
-    ("modal", "expected_token", "expected_exit", "label"),
-    [
-        (_MODAL_NONE, "CREDENTIAL_PRESENT", 0, "no dialog at all -> the clear path"),
-        (_MODAL_TEXTPATTERN_ONLY, "CREDENTIAL_MISSING", 1, "a credential modal caught in the poll loop"),
-        (_MODAL_PROGRESS_PLUS_NATIVE_QUERY, "DIALOG_NEEDS_HUMAN", 3, "a known blocking prompt, latched"),
-        (_MODAL_UNRECOGNISED_PROSE, "DIALOG_UNRECOGNIZED", 3, "read, matched nothing, latched"),
-        (_MODAL_NO_TEXT_AT_ALL, "DIALOG_UNREADABLE", 3, "no readable text at all, latched"),
-    ],
-)
-def test_the_live_probe_explains_the_token_it_actually_emits(
-    tmp_path: Path, modal: str, expected_token: str, expected_exit: int, label: str
-) -> None:
-    """Production emission path, per token: the printed explanation belongs to the printed token.
-
-    The four live branches that a synthesised window cannot reach - the poll-loop credential stop, the
-    latched-dialog site, and the clear path - each run for real here, and each is checked against the
-    PINNED oracle.
-
-    ⚠️ Contention can legitimately turn one exit-3 verdict into another (a slow harvest degrades to
-    `DIALOG_UNREADABLE`). The pairing assertion is written to hold regardless: it reads whichever token
-    the run ended on. The exact-token assertion is therefore made only where the run is stable, and the
-    exit-code assertion is made on the BAND, which the degraded paths preserve by design. Measured on a
-    quiet machine (2026-09-09): all five cases reached their intended token exactly, so the band form
-    is tolerance for contention, not cover for a case that never worked.
-    """
-    done = _run_probe_against_wpf_modal(tmp_path, modal)
-
-    token = assert_production_pairs_guidance_with_its_token(done.stdout)
-    if expected_exit == 3:
-        assert done.returncode == 3, f"{label}: the exit-3 band must hold:\n{done.stdout}"
-        assert token in {"DIALOG_NEEDS_HUMAN", "DIALOG_UNRECOGNIZED", "DIALOG_UNREADABLE"}, (
-            f"{label}: expected an exit-3 dialog verdict, got {token}:\n{done.stdout}"
-        )
-    else:
-        assert done.returncode == expected_exit, f"{label}: wrong exit code:\n{done.stdout}"
-        assert token == expected_token, f"{label}: expected {expected_token}, got {token}:\n{done.stdout}"
-
-
-@pytest.mark.gui
-@pytest.mark.serial
-def test_the_live_probe_explains_a_refresh_already_in_progress(tmp_path: Path) -> None:
-    """The last production emission site: a dialog already up at t=0, before anything is invoked.
-
-    This is the branch the 2026-08-28 field report walked into, and the only one where `REFRESH_IN_PROGRESS`
-    can be emitted at all - the poll loop ignores our own progress dialog by design.
-    """
-    done = _run_probe_against_startup_dialog(tmp_path)
 
     assert "refresh invoked" not in done.stdout, f"the t=0 branch must stop before invoking:\n{done.stdout}"
     assert done.returncode == 3, f"a dialog up at t=0 must stop the probe at exit 3:\n{done.stdout}"
