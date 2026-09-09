@@ -462,3 +462,155 @@ def test_the_cli_treats_a_guid_url_exactly_as_the_project_id_it_carries(
 
     assert by_url == by_id == [{"name": "Monthly Report", "kind": "workbook", "luid": "wb-finance"}]
     assert len(offline_sweep) == 2
+
+
+# --- review round 1: three URL classes that reached a WRONG outcome, not merely an ugly one ------
+#
+# All three were reproduced against the first commit before being fixed, and all three share one
+# shape: the failure was invisible. A raw `ValueError` became exit 1, which in this script MEANS
+# "nothing could be assessed"; an uppercase GUID and a `%0A`-suffixed GUID both became a perfectly
+# well-formed `--project-id` matching no row at all.
+
+MALFORMED_AUTHORITY = [
+    "https://[::1/#/projects/35",  # unterminated IPv6 literal -> urlsplit ValueError
+    "https://admin:hunter2@[::1/#/projects/35?:tok=SEKRIT-TOKEN",
+    # `netloc '...' contains invalid characters under NFKC normalization` -- the ONE urllib message
+    # that quotes the netloc back, and the netloc is exactly where `user:password@` sits.
+    "https://admin:hunter2@exa\u2100mple.com/#/projects/35?:tok=SEKRIT-TOKEN",
+]
+
+
+@pytest.mark.parametrize("url", MALFORMED_AUTHORITY)
+def test_a_malformed_authority_is_a_sanitized_usage_error_not_a_raw_valueerror(url: str) -> None:
+    """`urlsplit` raises on a malformed authority; unguarded that reached the CLI as a traceback."""
+    with pytest.raises(harvest.ProjectUrlError) as raised:
+        harvest.project_ids_from_urls([url], [])
+    message = str(raised.value)
+    assert "not a parseable URL" in message
+    for leak in ("hunter2", "admin", "SEKRIT-TOKEN", "exa", "[::1"):
+        assert leak not in message
+    assert raised.value.__cause__ is None and raised.value.__context__ is None  # no chained raw text
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        (f"https://x.example.com/#/projects/{PROJECT_GUID.upper()}", PROJECT_GUID),
+        (f"https://x.example.com/#/projects/{{{PROJECT_GUID}}}", PROJECT_GUID),
+        (f"https://x.example.com/#/projects/%7B{PROJECT_GUID.upper()}%7D", PROJECT_GUID),
+        # The same project written two ways in ONE url is one project, not an ambiguity.
+        (f"https://x.example.com/#/projects/{PROJECT_GUID}/projects/{PROJECT_GUID.upper()}", PROJECT_GUID),
+    ],
+)
+def test_an_accepted_guid_is_canonicalised_to_lowercase_unbraced_form(url: str, expected: str) -> None:
+    """Tableau stores LUIDs lowercase, so a verbatim uppercase GUID matched NO row -- silently."""
+    assert harvest.project_ids_from_urls([url], []) == [expected]
+
+
+@pytest.mark.parametrize(
+    ("url", "codepoint"),
+    [
+        (f"https://x.example.com/#/projects/{PROJECT_GUID}%0A", "U+000A"),  # `$` matches before it
+        (f"https://x.example.com/#/projects/{PROJECT_GUID}%00", "U+0000"),
+        (f"https://x.example.com/#/projects/{PROJECT_GUID}%E2%80%8B", "U+200B"),  # zero-width space
+        ("https://x.example.com/#/projects/35%0A", "U+000A"),
+    ],
+)
+def test_a_decoded_control_character_is_refused_rather_than_silently_carried(url: str, codepoint: str) -> None:
+    with pytest.raises(harvest.ProjectUrlError) as raised:
+        harvest.project_ids_from_urls([url], [])
+    assert "non-printable" in str(raised.value) and codepoint in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        f"https://x.example.com/#/projects/urn:uuid:{PROJECT_GUID}",  # uuid.UUID would take these,
+        "https://x.example.com/#/projects/a85bde9093804a018b1e2f9c3d4e5f60",  # the regex gate does not
+        f"https://x.example.com/#/projects/%20{PROJECT_GUID}%20",
+        # A printable suffix: the reason BOTH matches are `fullmatch`. A prefix match returns the
+        # whole segment, so `<luid>x` would have been forwarded verbatim as a project id.
+        f"https://x.example.com/#/projects/{PROJECT_GUID}x",
+        f"https://x.example.com/#/projects/{PROJECT_GUID}%20extra",
+        "https://x.example.com/#/projects/35x",
+        "https://x.example.com/#/projects/35;jsessionid=SEKRIT-TOKEN",
+    ],
+)
+def test_canonicalisation_did_not_widen_what_counts_as_a_luid(url: str) -> None:
+    """`uuid.UUID` is the normaliser, not the gate: it accepts undashed and `urn:` forms, we do not."""
+    with pytest.raises(harvest.ProjectUrlError) as raised:
+        harvest.project_ids_from_urls([url], [])
+    assert "SEKRIT-TOKEN" not in str(raised.value)  # the generic refusal never echoes the segment
+
+
+# --- the same three classes, end to end through main() -------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("urls", "expected"),
+    [
+        ([MALFORMED_AUTHORITY[1]], "not a parseable URL"),
+        ([f"https://x.example.com/#/projects/{PROJECT_GUID}%0A"], "non-printable"),
+        # valid + invalid: still refuses everything, so no partial scope survives the correction.
+        (
+            [f"https://x.example.com/#/projects/{PROJECT_GUID}", MALFORMED_AUTHORITY[0]],
+            "not a parseable URL",
+        ),
+        (
+            [f"https://x.example.com/#/projects/{PROJECT_GUID}", f"https://x.example.com/#/projects/{PROJECT_GUID}%0A"],
+            "non-printable",
+        ),
+        # A LUID with a printable suffix: refused, never truncated to the LUID and never forwarded
+        # whole. Exit 1 here would be the script claiming the estate could not be assessed.
+        ([f"https://x.example.com/#/projects/{PROJECT_GUID}x"], "neither a LUID nor a numeric id"),
+    ],
+)
+def test_the_cli_refuses_a_malformed_or_control_bearing_url_as_a_usage_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+    urls: list[str],
+    expected: str,
+    refuse_all_work: None,  # pylint: disable=unused-argument
+) -> None:
+    """Exit 2 and a sanitized message -- NOT exit 1, which is this script's "nothing assessed"."""
+    argv = ["harvest_estate_assets.py", "--out", str(tmp_path / "_sweep"), "--db", str(tmp_path / "estate.db")]
+    for url in urls:
+        argv += ["--project-url", url]
+    monkeypatch.setattr(sys, "argv", argv)
+
+    with pytest.raises(SystemExit) as raised:
+        harvest.main()
+
+    assert raised.value.code == 2
+    stderr = capsys.readouterr().err
+    assert expected in stderr
+    assert "Traceback" not in stderr
+    for leak in ("hunter2", "SEKRIT-TOKEN"):
+        assert leak not in stderr
+    assert not (tmp_path / "_sweep").exists()
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        f"https://tableau.example.com/#/projects/{PROJECT_GUID.upper()}",
+        f"https://tableau.example.com/#/projects/%7B{PROJECT_GUID.upper()}%7D",
+    ],
+)
+def test_the_cli_selects_the_real_project_from_an_uppercase_or_braced_url(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, url: str, offline_sweep: list[Path]
+) -> None:
+    """The production control for canonicalisation: `estate.db` holds the LUID lowercase.
+
+    Without the `uuid.UUID` pass this selects nothing, `scoped_todo` raises `no projects matched`,
+    and the run exits 1 -- an invented "that project is empty" for a URL naming a real project.
+    """
+    out = tmp_path / "_sweep"
+    (out / "assets").mkdir(parents=True)
+    (out / "assets" / "wb-finance_Monthly_Report.twbx").write_bytes(b"PK\x03\x04")
+
+    rows = run_sweep(monkeypatch, out, guid_estate_db(tmp_path / "estate.db"), "--skip-download", "--project-url", url)
+
+    assert [(row["kind"], row["luid"]) for row in rows] == [("workbook", "wb-finance")]
+    assert len(offline_sweep) == 1
