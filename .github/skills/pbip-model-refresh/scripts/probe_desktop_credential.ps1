@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
-  Detect whether Power BI Desktop already has a cached credential for the live data source(s) in the
-  currently open model, WITHOUT the agent being able to type the credential itself.
+  Detect whether a credential prompt is blocking the live data source(s) in the currently open Power
+  BI Desktop model, WITHOUT the agent being able to type the credential itself.
 
 .DESCRIPTION
   Live database sources (Databricks, SQL Server, Snowflake, ...) need a credential that is NOT in the
@@ -16,8 +16,11 @@
   .github/skills/pbip-model-refresh/scripts/probe_desktop_query.py (scripts/probe_desktop_query.py is a
   forwarding shim kept for existing callers).
     * If a credential modal is already open, or appears within -TimeoutSec of a refresh -> MISSING.
-    * If a refresh proceeds with no modal -> PRESENT (a credential is cached machine-wide; the loop
-      can run unattended) -- but re-confirm with the one-row data probe for serverless sources.
+    * If NO credential modal and no other recognized dialog is DETECTED within -TimeoutSec of the
+      refresh being invoked -> PRESENT. That token records an OBSERVATION about this probe's window
+      and nothing more: it does not establish that a credential exists or is cached, that the refresh
+      proceeded or completed, that Desktop stayed alive, that no dialog went unseen, or that an
+      unsupervised loop is safe. Confirm with the one-row data probe before relying on it.
 
   It triggers Refresh via UI Automation (the Bridge exposes no refresh verb) and watches every
   top-level window of the target process for the connector credential dialog's signature text.
@@ -58,13 +61,14 @@
 
     exit 1  CREDENTIAL_MISSING   a window's text matched the credential signature. THIS IS THE HARD
                                  STOP - a human must sign in once; no automation can fill it.
-    exit 0  CREDENTIAL_PRESENT   a refresh was invoked and no credential modal was seen before this
-                                 probe's deadline. That is an absence of evidence, not proof of a
-                                 cached credential: it does not establish that the refresh ran to the
-                                 deadline, that Desktop stayed alive and responsive, or that every
-                                 window was accounted for - a process that dies mid-poll enumerates
-                                 zero windows and lands here. Never the gate of record - confirm with
-                                 the one-row data probe.
+    exit 0  CREDENTIAL_PRESENT   a refresh was invoked and NO credential modal and no other recognized
+                                 dialog were detected before this probe's deadline. That is an absence
+                                 of evidence, not proof of a cached credential: it does not establish
+                                 that a credential exists, that the refresh proceeded or completed,
+                                 that Desktop stayed alive and responsive, that no dialog went unseen,
+                                 or that an unsupervised loop is safe - a process that dies mid-poll
+                                 enumerates zero windows and lands here. Never the gate of record -
+                                 confirm with the one-row data probe.
     exit 3  UNKNOWN              no verdict was established - no window for the pid, a minimized
                                  owner, or no Refresh control was ever invoked (with nothing invoked,
                                  "no modal appeared" proves nothing - reporting PRESENT would be a
@@ -855,7 +859,7 @@ if ($latched) {
   Write-Output ("VERDICT: {0}" -f $latched.Verdict)
   exit $latched.ExitCode
 }
-Write-Output "no credential modal within ${TimeoutSec}s (refresh proceeded)"
+Write-Output "no credential modal and no other recognized dialog detected within ${TimeoutSec}s of invoking the refresh"
 Write-VerdictGuidance -Verdict 'CREDENTIAL_PRESENT'
 Write-Output "VERDICT: CREDENTIAL_PRESENT"
 exit 0

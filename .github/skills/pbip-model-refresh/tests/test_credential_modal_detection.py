@@ -4453,6 +4453,37 @@ def emission_sites(probe_ps1: Path, tmp_path: Path) -> list[dict]:
     return sites
 
 
+# Success-shaped claims the probe is not entitled to make anywhere - help block or runtime output.
+#
+# `CREDENTIAL_PRESENT` is an observation about one bounded window: a refresh was invoked and nothing
+# recognizable came up before the deadline. It is not a finding that a credential exists, that the
+# refresh proceeded or completed, that Desktop survived, that no dialog went unseen, or that an
+# unattended loop is safe - the poll loop enumerates zero windows for a process that has died and
+# reaches the same line. These are checked against the COMPLETE stdout of a real run, not against the
+# guidance table alone: the table was corrected first and the summary line beside it kept saying
+# "(refresh proceeded)".
+#
+# Each entry is the ASSERTIVE spelling of a retired claim, never a fragment that also appears inside
+# the disclaimers that replaced it - "the refresh proceeded or completed" is the honest sentence, so
+# banning the bare "refresh proceeded" would forbid the correction along with the defect.
+RETIRED_SUCCESS_CLAIMS = (
+    "(refresh proceeded)",
+    "refresh succeeded",
+    "refresh completed successfully",
+    "cached machine-wide",
+    "can run unattended",
+    "safe to run unattended",
+    "already has a cached credential",
+)
+
+
+def assert_no_retired_success_claim(stdout: str) -> None:
+    """No run, on any path, may print a success-shaped claim the probe cannot support."""
+    haystack = stdout.lower()
+    for claim in RETIRED_SUCCESS_CLAIMS:
+        assert claim not in haystack, f"the run printed the retired claim {claim!r}:\n{stdout}"
+
+
 def assert_production_pairs_guidance_with_its_token(stdout: str) -> str:
     """The production-path invariant: what the run PRINTED explains the token it actually emitted.
 
@@ -4583,20 +4614,27 @@ def test_the_production_script_pairs_every_guidance_call_with_the_token_it_emits
 def test_no_public_help_text_still_carries_a_retracted_claim() -> None:
     """The help block is the probe's public documentation - it may not out-claim the runtime either.
 
-    Three retractions, not one: the ambiguous-verdict assertions (#146 M1), the universal
-    "approval, not a sign-in" remedy for `DIALOG_NEEDS_HUMAN`, and `CREDENTIAL_PRESENT`'s claim that
-    the refresh ran to the deadline with nothing unclassifiable up.
+    Four retractions now: the ambiguous-verdict assertions (#146 M1), the universal
+    "approval, not a sign-in" remedy for `DIALOG_NEEDS_HUMAN`, `CREDENTIAL_PRESENT`'s claim that the
+    refresh ran to the deadline with nothing unclassifiable up, and - the last one a fresh review
+    found still standing - the SYNOPSIS/DESCRIPTION pair that said the probe detects a credential
+    "cached machine-wide" and licenses a loop that "can run unattended".
+
+    Scanned over the WHOLE help block, not the guidance table: the table was corrected first and the
+    help kept contradicting it, which is precisely how a reader ends up with the retired claim.
     """
     text = PROBE_PS1.read_text(encoding="utf-8")
     help_block = text.split("#>", 1)[0].lower()
 
     assert "dialog_unrecognized" in help_block, "the help block must still document the token"
+    assert "credential_present" in help_block, "the help block must still document the clear token"
     for claim in (
         "not a credential wall",
         "no sign-in is implied",
         "the remedy is an approval, not a sign-in",
         "ran to the deadline with no credential",
         "nothing unclassifiable up",
+        *RETIRED_SUCCESS_CLAIMS,
     ):
         assert claim not in help_block, f"the documented behaviour still asserts {claim!r}"
 
@@ -4655,6 +4693,7 @@ def test_the_real_script_prints_the_honest_message_beside_its_token() -> None:
 
     assert done.returncode == 3, f"a pid with no windows must stay UNKNOWN/exit 3:\n{done.stdout}\n{done.stderr}"
     assert assert_production_pairs_guidance_with_its_token(done.stdout) == "UNKNOWN"
+    assert_no_retired_success_claim(done.stdout)
     stdout = done.stdout.lower()
     for claim in UNSUPPORTED_CLAIMS:
         assert claim not in stdout, f"the runtime still claims {claim!r}:\n{done.stdout}"
@@ -4828,6 +4867,7 @@ def _assert_live_pairing(done, *, expected_token: str, expected_exit: int, label
     tolerance for contention, not cover for a case that never worked.
     """
     token = assert_production_pairs_guidance_with_its_token(done.stdout)
+    assert_no_retired_success_claim(done.stdout)
     if expected_exit == 3:
         assert done.returncode == 3, f"{label}: the exit-3 band must hold:\n{done.stdout}"
         assert token in {"DIALOG_NEEDS_HUMAN", "DIALOG_UNRECOGNIZED", "DIALOG_UNREADABLE"}, (
@@ -4841,12 +4881,23 @@ def _assert_live_pairing(done, *, expected_token: str, expected_exit: int, label
 @pytest.mark.gui
 @pytest.mark.serial
 def test_the_live_probe_explains_the_clear_path(tmp_path: Path) -> None:
-    """`CREDENTIAL_PRESENT`, live: a refresh is invoked, nothing comes up, the probe clears."""
+    """`CREDENTIAL_PRESENT`, live: a refresh is invoked, nothing comes up, and the probe exits 0.
+
+    The exit-0 path is the one a caller reads as "go ahead", so its COMPLETE output - summary line
+    included, not just the guidance table - has to stay observation-only. A fresh review found the
+    table already corrected while the line beside it still said "(refresh proceeded)".
+    """
+    done = _run_probe_against_wpf_modal(tmp_path, _MODAL_NONE)
+
     _assert_live_pairing(
-        _run_probe_against_wpf_modal(tmp_path, _MODAL_NONE),
+        done,
         expected_token="CREDENTIAL_PRESENT",
         expected_exit=0,
         label="no dialog at all -> the clear path",
+    )
+    assert_no_retired_success_claim(done.stdout)
+    assert "no credential modal and no other recognized dialog detected within" in done.stdout, (
+        f"the exit-0 summary line must state what was DETECTED, not that a refresh succeeded:\n{done.stdout}"
     )
 
 
@@ -4954,6 +5005,7 @@ def test_the_live_probe_explains_a_refresh_already_in_progress(tmp_path: Path) -
     assert "refresh invoked" not in done.stdout, f"the t=0 branch must stop before invoking:\n{done.stdout}"
     assert done.returncode == 3, f"a dialog up at t=0 must stop the probe at exit 3:\n{done.stdout}"
     token = assert_production_pairs_guidance_with_its_token(done.stdout)
+    assert_no_retired_success_claim(done.stdout)
     assert token in {"REFRESH_IN_PROGRESS", "DIALOG_UNREADABLE", "DIALOG_UNRECOGNIZED"}, (
         f"expected the t=0 dialog band, got {token}:\n{done.stdout}"
     )
