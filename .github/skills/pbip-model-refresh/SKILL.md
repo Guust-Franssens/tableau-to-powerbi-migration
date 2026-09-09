@@ -32,7 +32,8 @@ so `dotnet add` cannot silently no-op on a net10 default:
   the script prints at runtime resolves to a file that is actually here. **Only `CREDENTIAL_MISSING`
   (exit 1) is a hard stop**; everything it cannot positively identify as a credential prompt lands in
   the exit-3 "could not probe" band (`REFRESH_IN_PROGRESS` / `DIALOG_UNRECOGNIZED` /
-  `DIALOG_UNREADABLE` / `UNKNOWN`) rather than escalating to a human — see the verdict table below.
+  `DIALOG_UNREADABLE` / `UNKNOWN`). These outcomes require a human to physically inspect Desktop —
+  they make no automatic credential/sign-in assertion. See the verdict table below.
 - [**`tests/`**](tests) - the regression suite for both, runnable from this folder
   (`pytest tests`). It is what makes the portability claim below checkable rather than aspirational.
 
