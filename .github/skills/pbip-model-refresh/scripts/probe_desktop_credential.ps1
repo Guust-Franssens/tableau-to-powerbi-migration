@@ -61,9 +61,11 @@
     exit 0  CREDENTIAL_PRESENT   a refresh was invoked and ran to the deadline with no credential
                                  modal and nothing unclassifiable up. Still not the gate of record for
                                  a serverless source - confirm with the one-row data probe.
-    exit 3  UNKNOWN              no window for the pid, a minimized owner, or no Refresh control was
-                                 ever invoked (with nothing invoked, "no modal appeared" proves
-                                 nothing - reporting PRESENT would be a fail-open arbiter).
+    exit 3  UNKNOWN              no verdict was established - no window for the pid, a minimized
+                                 owner, or no Refresh control was ever invoked (with nothing invoked,
+                                 "no modal appeared" proves nothing - reporting PRESENT would be a
+                                 fail-open arbiter). The credential state was not determined in either
+                                 direction.
     exit 3  REFRESH_IN_PROGRESS  a dialog whose CONTENT positively reads as refresh progress - all of
                                  it, not just its first element - was already up at t=0. Desktop is
                                  busy, so the credential state cannot be probed; wait for it, or
@@ -73,15 +75,18 @@
                                  the remedy is an approval, not a sign-in. Never suppressed, and it
                                  outranks any progress text in the same window.
     exit 3  DIALOG_UNRECOGNIZED  a dialog is up whose text matched NO signature, or which shows
-                                 progress text ALONGSIDE prose that is not progress status. We read it
-                                 and it is not a credential prompt - so it is not a credential wall -
-                                 but we cannot account for all of it. A human should look at the
-                                 screen.
+                                 progress text ALONGSIDE prose that is not progress status. We read
+                                 it and could not account for it. The signatures are a known-shapes
+                                 list, not an exhaustive one, so a matched-nothing read settles
+                                 NOTHING about the credential state in either direction: a human must
+                                 look at the screen and say what the window is.
     exit 3  DIALOG_UNREADABLE    a dialog is up that could not be shown to be harmless: no text at
                                  all, or only a reassuring CAPTION, or benign-looking content read
-                                 from an INCOMPLETE harvest. "We could not establish it" is a weaker
-                                 state of knowledge than "we read it and it did not match", and the
-                                 two must not collapse into one verdict.
+                                 from an INCOMPLETE harvest. Its content was never established, so no
+                                 conclusion about the credential state is available; a human must look
+                                 at the screen. "We could not establish it" is a weaker state of
+                                 knowledge than "we read it and it did not match", and the two must
+                                 not collapse into one verdict.
 
   ⚠️ `BLOCKED_BY_DIALOG` is deliberately NOT emitted here any more (issue #367). It used to be, on a
   size-only test - ANY visible non-main window >=100x100 - which a Power BI Refresh progress dialog
@@ -264,8 +269,10 @@ function Get-DialogClassification {
     benign-title-only the CAPTION matched the benign signature and no content did. A caption is not
                       content.
     unreadable        no readable text at all.
-    unrecognized      readable text that matched no signature: we looked, and it is not a credential
-                      prompt. Distinct from `unreadable` on purpose - absent is not empty.
+    unrecognized      readable text that matched no signature: we looked, and nothing we know accounts
+                      for it. The signature list is not exhaustive, so this is not a finding ABOUT the
+                      credential state - it is the absence of one. Distinct from `unreadable` on
+                      purpose - absent is not empty.
 
   Everything except `credential` and `benign` lands in the exit-3 band, so the failure mode of every
   uncertainty here is a LOUD stop-and-look, never a silent clear.
@@ -405,6 +412,79 @@ function Get-DialogVerdict {
   if ($null -ne $unrecognized) { return $unrecognized }
   if ($null -ne $benign -and -not $RefreshInFlight) { return $benign }
   return $null
+}
+
+function Get-VerdictGuidance {
+  <# The operator-facing prose for ONE machine-readable verdict token (issue #146).
+
+  MESSAGING ONLY. This function decides nothing: it is called AFTER a verdict has been chosen, and it
+  never changes the token or the exit code. It exists so every emission site says the same thing about
+  the same token, and so what it says can be tested directly instead of only through a live Desktop.
+
+  The rule it enforces: a line may only claim what the verdict's own evidence supports.
+
+    * `CREDENTIAL_MISSING` matched the credential signature - POSITIVE evidence of a sign-in prompt,
+      so it may name sign-in as the remedy.
+    * `DIALOG_NEEDS_HUMAN` matched a KNOWN non-credential blocking-prompt signature - also positive
+      evidence, so it may say a human must act and that this signature's remedy is an approval.
+    * `DIALOG_UNREADABLE` and `DIALOG_UNRECOGNIZED` matched NOTHING. Matching nothing is not evidence
+      of absence: the signatures are a known-shapes list, and a harvest is never provably complete
+      (`LegacyIAccessiblePattern` is unreachable from managed UIA at all). So neither may say "this is
+      not a credential wall", "no sign-in is implied", or that the credential sits behind it. They say
+      what was and was not established, and send a human to the screen.
+    * `REFRESH_IN_PROGRESS` positively read progress content: wait or cancel, do not stack.
+    * `UNKNOWN` established no verdict at all.
+  #>
+  param(
+    [Parameter(Mandatory = $true)][string]$Verdict,
+    [string]$Kind = ''
+  )
+
+  $lines = @()
+  switch ($Kind) {
+    'mixed-content' { $lines += "  it shows refresh progress AND prose that is not progress status - a progress dialog does not explain the rest of this window" }
+    'benign-unverified' { $lines += "  its content LOOKS like refresh progress, but the read was truncated or incomplete - benign-looking is not benign" }
+    'benign-title-only' { $lines += "  its CAPTION looks like a progress dialog, but no content confirmed it - a caption is not content" }
+    'unreadable' { $lines += "  this window exposes no readable text at all" }
+    default { }
+  }
+  switch ($Verdict) {
+    'CREDENTIAL_MISSING' {
+      $lines += "  its text matched the connector credential-prompt signature - positive evidence of a sign-in prompt"
+      $lines += "  a human must sign in ONCE at the Desktop screen; no automation can fill this dialog"
+    }
+    'DIALOG_NEEDS_HUMAN' {
+      $lines += "  its text matched a KNOWN human-blocking prompt signature that is not the credential signature (the native database query approval above all)"
+      $lines += "  a human must act at the Desktop screen; the remedy this signature names is an approval, not a sign-in"
+    }
+    'DIALOG_UNREADABLE' {
+      $lines += "  its content could not be established, so NOTHING was determined about the credential state - a credential prompt is neither confirmed nor ruled out"
+      $lines += "  a human must look at the Desktop screen and say what this window is"
+    }
+    'DIALOG_UNRECOGNIZED' {
+      $lines += "  its content was READ but matched no signature this probe knows, and the signature list is not exhaustive - so this window is unaccounted for and NOTHING was determined about the credential state"
+      $lines += "  a human must look at the Desktop screen and say what this window is"
+    }
+    'REFRESH_IN_PROGRESS' {
+      $lines += "  its content positively reads as refresh progress: a refresh is already running on this pid, so the credential state could not be probed"
+      $lines += "  wait for it, or cancel the stale one; do not stack a second refresh on it"
+    }
+    'CREDENTIAL_PRESENT' {
+      $lines += "  a refresh was invoked and ran to the deadline with no credential prompt and no window left unaccounted for"
+      $lines += "  a serverless source can still prompt after this deadline - confirm with the one-row data probe"
+    }
+    default {
+      $lines += "  no verdict was established: the credential state was not determined, in either direction"
+      $lines += "  nothing here establishes the credential state; re-probe a responsive Desktop, or look at the Desktop screen"
+    }
+  }
+  return $lines
+}
+
+function Write-VerdictGuidance {
+  <# Emit `Get-VerdictGuidance`'s lines. The single runtime path from a token to what we tell a human. #>
+  param([Parameter(Mandatory = $true)][string]$Verdict, [string]$Kind = '')
+  foreach ($line in (Get-VerdictGuidance -Verdict $Verdict -Kind $Kind)) { Write-Output $line }
 }
 
 if ($LoadDetectorsOnly) { return }
@@ -668,40 +748,41 @@ function Get-PidWindows {
 }
 
 $windows = Get-PidWindows
-if (-not $windows -or $windows.Count -eq 0) { Write-Output "no window for pid $DesktopPid found"; Write-Output "VERDICT: UNKNOWN"; exit 3 }
+if (-not $windows -or $windows.Count -eq 0) {
+  Write-Output "no window for pid $DesktopPid found"
+  Write-VerdictGuidance -Verdict 'UNKNOWN'
+  Write-Output "VERDICT: UNKNOWN"
+  exit 3
+}
 
 # 1. If a credential modal is ALREADY open, the credential is missing - report immediately.
 $hit = Test-CredentialModal -Windows $windows
 if ($hit) {
   Write-Output ("credential modal already open: '{0}'" -f $hit.Substring(0, [Math]::Min(80, $hit.Length)))
+  Write-VerdictGuidance -Verdict 'CREDENTIAL_MISSING'
   Write-Output "VERDICT: CREDENTIAL_MISSING"
   exit 1
 }
 
-# 1b. A dialog is up that is not a credential prompt. It is NOT a credential wall - say what it is and
-# exit 3 (cannot probe), never exit 1 (human needed). Invoking a Refresh on top of an unclassified
-# dialog is how the 2026-08-28 field report ended up with a stale duplicate refresh to cancel.
+# 1b. A dialog is up that did not match the credential signature. Say what was OBSERVED and what that
+# leaves undetermined, then exit 3 (cannot probe), never exit 1 (human needed). Matching nothing is
+# not evidence that the credential is cached, so no line here may claim it. Invoking a Refresh on top
+# of an unclassified dialog is how the 2026-08-28 field report ended up with a stale duplicate refresh
+# to cancel.
 $blocker = Get-DialogVerdict -Windows $windows
 if ($blocker) {
   Write-Output ("dialog already open: {0}" -f (Format-DialogEvidence -Window $blocker.Window))
   if ($blocker.Evidence) {
     Write-Output ("  matched text: '{0}'" -f $blocker.Evidence.Substring(0, [Math]::Min(80, $blocker.Evidence.Length)))
   }
-  switch ($blocker.Kind) {
-    'benign' { Write-Output "  a refresh is already running on this pid - wait for it, or cancel the stale one; do not stack a second refresh on it" }
-    'needs-human' { Write-Output "  this is a known human-blocking prompt (e.g. native database query approval), NOT a credential prompt - approve it at the Desktop screen; no sign-in is implied" }
-    'mixed-content' { Write-Output "  it shows refresh progress AND prose that is not progress status - a progress dialog does not explain the rest of this window; look at the Desktop screen" }
-    'benign-unverified' { Write-Output "  its content LOOKS like refresh progress, but the read was truncated or incomplete - benign-looking is not benign; look at the Desktop screen" }
-    'benign-title-only' { Write-Output "  its CAPTION looks like a progress dialog, but no content confirmed it - a caption is not content; look at the Desktop screen" }
-    'unreadable' { Write-Output "  this window exposes no readable text, so it could not be classified at all - look at the Desktop screen" }
-    default { Write-Output "  its text matches no credential-prompt signature, so this is not a credential wall - look at the Desktop screen" }
-  }
+  Write-VerdictGuidance -Verdict $blocker.Verdict -Kind $blocker.Kind
   Write-Output ("VERDICT: {0}" -f $blocker.Verdict)
   exit $blocker.ExitCode
 }
 foreach ($w in $windows) {
   if ($w.Minimized -and $w.ClassName.StartsWith('WindowsForms10.Window.8')) {
     Write-Output "Power BI Desktop owner window is minimized; owned modal dialogs are hidden from enumeration"
+    Write-VerdictGuidance -Verdict 'UNKNOWN'
     Write-Output "VERDICT: UNKNOWN"
     exit 3
   }
@@ -725,6 +806,7 @@ Write-Output "refresh invoked: $invoked"
 # evidence a credential is cached. Report UNKNOWN rather than a fail-open CREDENTIAL_PRESENT.
 if (-not $invoked) {
   Write-Output "no invokable Refresh control found for pid $DesktopPid - cannot probe the credential state"
+  Write-VerdictGuidance -Verdict 'UNKNOWN'
   Write-Output "VERDICT: UNKNOWN"
   exit 3
 }
@@ -732,10 +814,10 @@ if (-not $invoked) {
 $deadline = (Get-Date).AddSeconds($TimeoutSec)
 # From here on a PROVEN-benign progress dialog is our own refresh, so it is ignored (-RefreshInFlight).
 # Nothing else is: an unreadable, unverified, caption-only or unrecognized dialog is LATCHED rather
-# than acted on. It is not a credential prompt, so it must not abort a healthy refresh - but it also
-# means "no modal appeared" is no longer established, so it must not be erased by a quiet deadline
-# either. Latching is the same shape the Python detector uses for its indeterminate states, and it is
-# what keeps both failure directions closed.
+# than acted on. It did not MATCH the credential signature, so it must not abort a healthy refresh -
+# but matching nothing is not evidence of absence, so "no modal appeared" is no longer established
+# either and the dialog must not be erased by a quiet deadline. Latching is the same shape the Python
+# detector uses for its indeterminate states, and it is what keeps both failure directions closed.
 $latched = $null
 while ((Get-Date) -lt $deadline) {
   Start-Sleep -Milliseconds 2000
@@ -743,6 +825,7 @@ while ((Get-Date) -lt $deadline) {
   $hit = Test-CredentialModal -Windows $windows
   if ($hit) {
     Write-Output ("credential modal detected: '{0}'" -f $hit.Substring(0, [Math]::Min(80, $hit.Length)))
+    Write-VerdictGuidance -Verdict 'CREDENTIAL_MISSING'
     Write-Output "VERDICT: CREDENTIAL_MISSING"
     exit 1
   }
@@ -751,11 +834,12 @@ while ((Get-Date) -lt $deadline) {
 }
 if ($latched) {
   Write-Output ("a dialog was up during the refresh: {0}" -f (Format-DialogEvidence -Window $latched.Window))
-  Write-Output "  it matched no credential-prompt signature, so this is NOT a credential wall and no sign-in is implied"
-  Write-Output "  but a window we could not account for was open, so 'no modal appeared' is not established"
+  Write-VerdictGuidance -Verdict $latched.Verdict -Kind $latched.Kind
+  Write-Output "  a dialog was open throughout, so 'no modal appeared' was never established"
   Write-Output ("VERDICT: {0}" -f $latched.Verdict)
   exit $latched.ExitCode
 }
 Write-Output "no credential modal within ${TimeoutSec}s (refresh proceeded)"
+Write-VerdictGuidance -Verdict 'CREDENTIAL_PRESENT'
 Write-Output "VERDICT: CREDENTIAL_PRESENT"
 exit 0

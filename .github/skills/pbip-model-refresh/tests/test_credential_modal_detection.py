@@ -2626,10 +2626,17 @@ param(
   [string]$WindowsJson,
   [string]$PayloadJson,
   [int]$PayloadExit = 0,
+  [string]$GuidanceVerdict,
+  [string]$GuidanceKind = '',
   [switch]$RefreshInFlight
 )
 $ErrorActionPreference = 'Stop'
 . $Probe -LoadDetectorsOnly
+if ($GuidanceVerdict) {
+  $lines = @(Get-VerdictGuidance -Verdict $GuidanceVerdict -Kind $GuidanceKind)
+  Write-Output ('<<<PROBE-JSON>>>' + (ConvertTo-Json ([ordered]@{ lines = $lines }) -Compress -Depth 4))
+  return
+}
 if ($PayloadJson) {
   $payload = $null
   try { $payload = ConvertFrom-Json (Get-Content -LiteralPath $PayloadJson -Raw) } catch { $payload = $null }
@@ -2865,9 +2872,10 @@ def test_an_unreadable_dialog_is_a_third_verdict_not_one_of_the_other_two(tmp_pa
 def test_a_readable_but_unrecognized_dialog_is_distinct_from_an_unreadable_one(tmp_path: Path) -> None:
     """The two ambiguous states are NOT the same state, and the verdict has to distinguish them.
 
-    "We read this window and it is not a credential prompt" is strictly more knowledge than "we could
-    not read this window at all". Collapsing them loses the only fact that tells an operator whether
-    looking at the screen will help.
+    "We read this window and nothing we know accounts for it" is strictly more knowledge than "we
+    could not read this window at all". Collapsing them loses the only fact that tells an operator
+    whether looking at the screen will help. Neither state establishes anything about the credential
+    itself - see the verdict-message contract at the end of this module.
     """
     unrecognized = classify(tmp_path, [_window(Title="Whoops", Texts=["Whoops", "Something went wrong"])])
     unreadable = classify(tmp_path, [_window(Texts=[])])
@@ -4152,3 +4160,314 @@ def test_a_native_query_prompt_beside_progress_text_is_live_reported(tmp_path: P
     assert done.returncode == 3, f"a native-query approval must never clear or be a credential stop:\n{done.stdout}"
     assert "CREDENTIAL_PRESENT" not in done.stdout
     assert "REFRESH_IN_PROGRESS" not in done.stdout, "one progress element must not suppress the whole window"
+
+
+# ==================================================================================================
+# probe_desktop_credential.ps1 - what each VERDICT token TELLS A HUMAN (issue #146, M1)
+# ==================================================================================================
+#
+# The classification is not under test here and does not change: the same windows produce the same
+# tokens and the same exit codes as before. What is under test is the PROSE the probe prints beside a
+# token, because master's prose over-claimed on exactly the tokens that establish the least.
+#
+# Master (da1ec87c) printed, for a dialog that matched NO signature:
+#
+#     "its text matches no credential-prompt signature, so this is not a credential wall"
+#     "it matched no credential-prompt signature, so this is NOT a credential wall and no sign-in is
+#      implied"
+#
+# Both are inferences dressed as findings. The signature files are a known-shapes list, not an
+# exhaustive one, and a UIA harvest is never provably complete (`LegacyIAccessiblePattern` is not
+# reachable from the managed API at all - the script says so itself). "Nothing matched" is therefore
+# the ABSENCE of a finding about the credential state, not a finding that no credential is needed. The
+# same sentence was also printed for `DIALOG_UNREADABLE`, where the content was never read at all, and
+# for `DIALOG_NEEDS_HUMAN`, where a human IS needed.
+#
+# The tests below drive the SHIPPED message table directly through the `-LoadDetectorsOnly` seam, and
+# then check that the production script is the thing that uses it.
+
+# Tokens whose evidence is "nothing matched" or "nothing was read". They may report what was observed
+# and send a human to the screen; they may not conclude anything about the credential state.
+AMBIGUOUS_VERDICTS = ("DIALOG_UNREADABLE", "DIALOG_UNRECOGNIZED", "UNKNOWN")
+
+# Claims none of the above can support. Compared case-insensitively against the whole message.
+UNSUPPORTED_CLAIMS = (
+    "not a credential wall",
+    "no sign-in is implied",
+    "no sign-in implied",
+    "not a credential prompt",
+    "no credential is needed",
+    "the credential is cached",
+    "credential sits behind",
+)
+
+# Master's wording, verbatim, for the mutation test below.
+OLD_DEFINITIVE_ASSERTION = "so this is not a credential wall and no sign-in is implied"
+
+VERDICT_MESSAGE_CONTRACT = {
+    # Positive signature match -> may name sign-in as the remedy.
+    "CREDENTIAL_MISSING": {
+        "required": (
+            "matched the connector credential-prompt signature",
+            "positive evidence",
+            "sign in once at the desktop screen",
+        ),
+        "forbidden": ("could not be established", "matched no signature"),
+    },
+    # Positive match on a KNOWN non-credential blocking prompt -> a human must act, but not sign in.
+    "DIALOG_NEEDS_HUMAN": {
+        "required": (
+            "known human-blocking prompt signature",
+            "a human must act at the desktop screen",
+            "an approval, not a sign-in",
+        ),
+        "forbidden": ("must sign in", "no verdict was established"),
+    },
+    # Content never established.
+    "DIALOG_UNREADABLE": {
+        "required": (
+            "content could not be established",
+            "nothing was determined about the credential state",
+            "neither confirmed nor ruled out",
+            "a human must look at the desktop screen",
+        ),
+        "forbidden": UNSUPPORTED_CLAIMS + ("must sign in",),
+    },
+    # Content read, nothing matched.
+    "DIALOG_UNRECOGNIZED": {
+        "required": (
+            "was read but matched no signature",
+            "not exhaustive",
+            "unaccounted for",
+            "nothing was determined about the credential state",
+            "a human must look at the desktop screen",
+        ),
+        "forbidden": UNSUPPORTED_CLAIMS + ("must sign in",),
+    },
+    # Positively read progress content -> wait or cancel, never stack.
+    "REFRESH_IN_PROGRESS": {
+        "required": (
+            "a refresh is already running on this pid",
+            "wait for it, or cancel the stale one",
+            "do not stack a second refresh",
+        ),
+        "forbidden": ("must sign in", "no verdict was established"),
+    },
+    # No verdict at all.
+    "UNKNOWN": {
+        "required": (
+            "no verdict was established",
+            "not determined, in either direction",
+        ),
+        "forbidden": UNSUPPORTED_CLAIMS + ("must sign in",),
+    },
+}
+
+
+def verdict_guidance(
+    tmp_path: Path,
+    verdict: str,
+    *,
+    kind: str = "",
+    probe_ps1: Path | None = None,
+) -> list[str]:
+    """Run the SHIPPED message table for one verdict token and return the lines it would print."""
+    exe = _powershell()
+    harness = tmp_path / "classify.ps1"
+    harness.write_text(_HARNESS, encoding="utf-8")
+    target_probe = probe_ps1 if probe_ps1 is not None else PROBE_PS1
+    argv = [exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness), "-Probe", str(target_probe)]
+    argv += ["-GuidanceVerdict", verdict, "-GuidanceKind", kind]
+    done = subprocess.run(argv, capture_output=True, text=True, timeout=120, check=False)
+    assert done.returncode == 0, f"harness failed ({done.returncode}):\n{done.stdout}\n{done.stderr}"
+    marker = "<<<PROBE-JSON>>>"
+    assert marker in done.stdout, f"harness produced no result payload:\n{done.stdout}\n{done.stderr}"
+    payload = json.loads(done.stdout.split(marker, 1)[1].strip().splitlines()[0])
+    lines = payload["lines"]
+    return [lines] if isinstance(lines, str) else list(lines)
+
+
+def assert_message_matches_its_evidence(verdict: str, lines: list[str]) -> None:
+    """The whole invariant, in one place, so the mutation test can assert it FAILS."""
+    assert lines, f"{verdict} printed no explanation at all"
+    blob = " ".join(lines).lower()
+    contract = VERDICT_MESSAGE_CONTRACT[verdict]
+    for phrase in contract["required"]:
+        assert phrase in blob, f"{verdict} must say {phrase!r}; it said: {lines!r}"
+    for phrase in contract["forbidden"]:
+        assert phrase not in blob, f"{verdict} claimed {phrase!r}, which its evidence cannot support: {lines!r}"
+
+
+@pytest.mark.parametrize("verdict", sorted(VERDICT_MESSAGE_CONTRACT))
+def test_every_verdict_token_says_only_what_its_evidence_supports(tmp_path: Path, verdict: str) -> None:
+    """Token-by-token, directly against the shipped table: no token over-claims or under-informs.
+
+    `CREDENTIAL_MISSING` and `DIALOG_NEEDS_HUMAN` matched a signature, so they may name a remedy - a
+    sign-in for the first, an approval for the second. The three ambiguous tokens matched nothing, so
+    they may only report what was and was not established and send a human to the screen.
+    """
+    assert_message_matches_its_evidence(verdict, verdict_guidance(tmp_path, verdict))
+
+
+@pytest.mark.parametrize("verdict", AMBIGUOUS_VERDICTS)
+def test_an_ambiguous_token_never_rules_a_credential_prompt_in_or_out(tmp_path: Path, verdict: str) -> None:
+    """The #146 regression itself, stated as its own assertion rather than only inside the contract.
+
+    Two directions, and both are failures: claiming the credential is fine (master's defect, which is
+    fail-open prose over a fail-closed exit code), and claiming a credential wall we never saw.
+    """
+    blob = " ".join(verdict_guidance(tmp_path, verdict)).lower()
+
+    for claim in UNSUPPORTED_CLAIMS:
+        assert claim not in blob, f"{verdict} ruled the credential state OUT with {claim!r}"
+    assert "must sign in" not in blob, f"{verdict} ruled a credential wall IN"
+    assert "look at the desktop screen" in blob, f"{verdict} must route this to a human"
+
+
+@pytest.mark.parametrize(
+    ("kind", "verdict", "observation"),
+    [
+        ("unreadable", "DIALOG_UNREADABLE", "exposes no readable text"),
+        ("benign-title-only", "DIALOG_UNREADABLE", "a caption is not content"),
+        ("benign-unverified", "DIALOG_UNREADABLE", "benign-looking is not benign"),
+        ("mixed-content", "DIALOG_UNRECOGNIZED", "does not explain the rest of this window"),
+    ],
+)
+def test_the_finer_observation_survives_beside_the_honest_token_message(
+    tmp_path: Path, kind: str, verdict: str, observation: str
+) -> None:
+    """Honesty must not cost detail: WHY the window is ambiguous is the most useful line printed.
+
+    Several kinds fold into one token, and the token-level sentence cannot tell them apart. The kind
+    line says what was observed; the token line says what that leaves undetermined.
+    """
+    lines = verdict_guidance(tmp_path, verdict, kind=kind)
+
+    assert any(observation in line for line in lines), f"{kind} lost its observation line: {lines!r}"
+    assert_message_matches_its_evidence(verdict, lines)
+
+
+def test_the_production_script_routes_every_verdict_through_the_tested_table() -> None:
+    """Control: the table above is the one PRODUCTION uses, at every emission site.
+
+    Without this, the tests prove a function nothing calls. Every `VERDICT:` line in the shipped
+    script must be preceded by a `Write-VerdictGuidance` call, and no site may hand-roll prose about a
+    token - which is exactly how master ended up with two different, both over-claiming, sentences for
+    the same verdict.
+    """
+    lines = PROBE_PS1.read_text(encoding="utf-8").splitlines()
+    emissions = [i for i, line in enumerate(lines) if "Write-Output" in line and "VERDICT:" in line]
+
+    assert len(emissions) >= 8, f"expected every verdict band to be emitted; found {len(emissions)} sites"
+    for i in emissions:
+        preceding = lines[max(0, i - 4) : i]
+        assert any("Write-VerdictGuidance" in line for line in preceding), (
+            f"the verdict emitted at line {i + 1} prints no guidance from the shared table: {lines[i]!r}"
+        )
+    callers = [line for line in lines if "Get-VerdictGuidance -Verdict" in line]
+    assert len(callers) == 1, f"Get-VerdictGuidance must have exactly one runtime caller; found {callers!r}"
+    assert "Write-VerdictGuidance" in "\n".join(lines), "the single caller must be the shared emitter"
+
+
+def test_no_public_help_text_still_carries_the_retracted_assertion() -> None:
+    """The help block is the probe's public documentation - it may not out-claim the runtime either."""
+    text = PROBE_PS1.read_text(encoding="utf-8")
+    help_block = text.split("#>", 1)[0].lower()
+
+    assert "dialog_unrecognized" in help_block, "the help block must still document the token"
+    for claim in ("not a credential wall", "no sign-in is implied"):
+        assert claim not in help_block, f"the documented behaviour still asserts {claim!r}"
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="probe_desktop_credential.ps1 is a Windows-only UI Automation arbiter"
+)
+def test_the_real_script_prints_the_honest_message_beside_its_token(tmp_path: Path) -> None:
+    """Production invocation control: the shipped script, run for real, on a pid with no windows.
+
+    `-LoadDetectorsOnly` returns before any of the runtime emission code, so every test above stops at
+    the seam. This one runs the script the way `refresh_pbip_model.py` runs it and reads what actually
+    reached stdout: the machine-readable token, the exit code, and the prose beside them.
+    """
+    exe = _powershell()
+    holder = subprocess.Popen(  # a real, live pid that owns no visible window at all
+        [exe, "-NoProfile", "-Command", "Start-Sleep -Seconds 60"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    try:
+        done = subprocess.run(
+            [
+                exe,
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(PROBE_PS1),
+                "-DesktopPid",
+                str(holder.pid),
+                "-TimeoutSec",
+                "5",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+    finally:
+        holder.kill()
+        holder.wait(timeout=30)
+
+    assert done.returncode == 3, f"a pid with no windows must stay UNKNOWN/exit 3:\n{done.stdout}\n{done.stderr}"
+    assert "VERDICT: UNKNOWN" in done.stdout, f"the machine-readable token must be unchanged:\n{done.stdout}"
+    stdout = done.stdout.lower()
+    assert "no verdict was established" in stdout, f"the runtime printed no honest explanation:\n{done.stdout}"
+    for claim in UNSUPPORTED_CLAIMS:
+        assert claim not in stdout, f"the runtime still claims {claim!r}:\n{done.stdout}"
+
+
+def test_powershell_mutation_restore_the_definitive_credential_assertion(tmp_path: Path) -> None:
+    """Mutation 5: put master's wording back on both ambiguous tokens. The contract must FAIL.
+
+    A messaging test that cannot fail is worse than none, because it is credited as coverage. This
+    reinstates the exact sentence #146 was filed about and asserts each ambiguous token's contract
+    raises - and that the classification is untouched by the mutation, which is what makes it a
+    MESSAGING mutation rather than a behavioural one.
+    """
+    mutated_script = _setup_probe_copy(tmp_path)
+    content = mutated_script.read_text(encoding="utf-8")
+    targets = {
+        "DIALOG_UNREADABLE": (
+            "so NOTHING was determined about the credential state - "
+            "a credential prompt is neither confirmed nor ruled out"
+        ),
+        "DIALOG_UNRECOGNIZED": (
+            "and the signature list is not exhaustive - so this window is unaccounted for "
+            "and NOTHING was determined about the credential state"
+        ),
+    }
+    for verdict, anchor in targets.items():
+        assert anchor in content, f"mutation target anchor missing for {verdict}"
+        content = content.replace(anchor, OLD_DEFINITIVE_ASSERTION)
+    content = content.replace("  a human must look at the Desktop screen and say what this window is", "")
+    mutated_script.write_text(content, encoding="utf-8")
+    landed = mutated_script.read_text(encoding="utf-8")
+    assert landed.count(OLD_DEFINITIVE_ASSERTION) == 2, "mutation 5 failed to land on disk"
+
+    failed_count = 0
+    for verdict in targets:
+        lines = verdict_guidance(tmp_path, verdict, probe_ps1=mutated_script)
+        assert lines, f"{verdict} produced no lines at all, so the mutation broke the harness"
+        try:
+            assert_message_matches_its_evidence(verdict, lines)
+        except AssertionError:
+            failed_count += 1
+
+    assert failed_count == 2, f"Mutation score: expected 2 failed, got {failed_count} failed"
+
+    # The mutation is messaging-only: the same window still produces the same token and exit code, so
+    # the contract above cannot be passing merely because classification changed underneath it.
+    unreadable = classify(tmp_path, [_window(Texts=[], OwnerEnabled=False)], probe_ps1=mutated_script)
+    assert unreadable["verdict"] == "DIALOG_UNREADABLE"
+    assert unreadable["exit_code"] == 3
