@@ -375,6 +375,14 @@ ceiling or cannot be assessed. The tight root budget stays **advisory** there, e
 output is **preserved as evidence** — never deleted, shortened or rewritten; permanent filename
 shortening is an upstream engine fix, and a refused bundle is what its report cites.
 
+That report is **published atomically** (serialize whole → per-process staging sibling → `os.replace`),
+so a full disk or an unserializable document cannot leave a truncated `path-ceiling.json` or destroy a
+previous trustworthy one; the refusal **outranks its own evidence**, so failing to persist the phase
+timings still exits 10; and both the report and the console line are **bundle-relative** —
+`<bundle>/pbip/…` — so a path-length report can be pasted into an upstream issue without carrying the
+run root, the account name or a customer folder with it. A path that cannot be *proven* inside the
+bundle is reported as an unassessable ordinal rather than echoed.
+
 ---
 
 ## 7. What the check deliberately does NOT do

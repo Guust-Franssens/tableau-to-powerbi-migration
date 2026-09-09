@@ -82,7 +82,10 @@ things a conversation cannot be trusted to remember every time:
    consumer uses - immediately after the output is recorded and BEFORE provenance, handover slices,
    packaging, agents or Desktop. Over the ceiling, unmeasurable or unwalkable all return
    `EXIT_PATH_CEILING`; the output is preserved as evidence and never deleted or rewritten
-   (permanent filename shortening is an upstream engine fix).
+   (permanent filename shortening is an upstream engine fix). The verdict is published ATOMICALLY
+   (staging sibling + `os.replace`, so a failed write cannot destroy a previous report) and
+   SHAREABLE: what lands in `path-ceiling.json` and on the console is bundle-relative, carrying the
+   offending tail but never the run root, account or customer folder.
 
 Deliberately NOT here
 ---------------------
@@ -141,6 +144,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import subprocess
 import sys
 import time
@@ -174,6 +178,7 @@ from check_path_ceiling import (
 )
 from check_path_ceiling import scan as scan_path_ceiling
 from engine_source import EngineNotFoundError, NonCanonicalEngineError, engine_provenance, resolve_engine
+from manifest_scope import redact_host_paths
 from migration_bundle import ENGINE_RECEIPT, sha256_file, write_engine_receipt
 
 log = logging.getLogger("run_estate")
@@ -208,6 +213,22 @@ PATH_CEILING_REPORT = "path-ceiling.json"
 #: wherever the run happens. `min_root_budget` stays None, so the tight-root-budget number remains
 #: ADVISORY here - it is reported, never a refusal.
 PATH_CEILING_LIMITS = WINDOWS_LIMITS
+
+#: How a measured path is spelled once it leaves this process. The measurement itself keeps the
+#: absolute path (that is what Desktop counts), but a `path-ceiling.json` is shared upstream, pasted
+#: into an issue and read by an agent, so what is PERSISTED and PRINTED is bundle-relative: the
+#: refusal stays actionable (the offending tail is the whole point) while the run root - drive,
+#: account name, customer folder - never leaves the machine that measured it.
+SAFE_BUNDLE_ROOT = "<bundle>"
+
+#: A path the transform could not PROVE lies inside the bundle. It is reported as an ordinal, never
+#: echoed and never re-spelled as if it were relative: "I could not place this" is a different and
+#: honest answer, and echoing it is exactly the disclosure this transform exists to prevent.
+UNASSESSABLE_PATH = "<path-not-provably-inside-the-bundle-{index}>"
+
+#: Where `scan()` records a single measured path, and where it records a list of them.
+_PATH_RECORD_KEYS = ("longest", "root_budget_binding")
+_PATH_LIST_KEYS = ("worst_offenders", "near_ceiling_paths", "unknown_paths")
 VOLATILE_GENERATED_DIRS = {".pbi"}
 SCRATCH_DIRS = frozenset({"scratch", "_work", "_build", "_probe", "tmp", "temp", "_shots"})
 SCRATCH_INTENTS = frozenset(part.lstrip("._") for part in SCRATCH_DIRS)
@@ -755,6 +776,73 @@ def _ascii_path(value: str) -> str:
     return value.encode("ascii", "backslashreplace").decode("ascii")
 
 
+def _safe_diagnostic(exc: BaseException) -> str:
+    """`Type: message` for a log line, with any host location in the message redacted WHOLE.
+
+    An OS error message routinely embeds the path it failed on, which is the customer's absolute
+    path. `manifest_scope.redact_host_paths` is the repo's shipping redactor (built on
+    `host_paths.discloses_host_location`), so this asks the one question the rest of the repo asks
+    instead of inventing a second, weaker one.
+    """
+    cleaned, _hits = redact_host_paths(f"{type(exc).__name__}: {exc}")
+    return _ascii_path(str(cleaned))
+
+
+def _bundle_relative(value: object, root: Path, unplaced: list[str]) -> str:
+    """One measured path as `<bundle>/<tail>`, or an ordinal when containment cannot be PROVEN.
+
+    Purely lexical, and deliberately so: `Path.resolve()` on a UNC literal naming a host that does
+    not exist blocks on SMB name resolution (measured in `manifest_scope._inside_any`), and a path
+    that cannot be placed is unassessable regardless of what the filesystem would say.
+    """
+    text = value if isinstance(value, str) else str(value)
+    try:
+        candidate = Path(os.path.normpath(text))
+        if candidate.is_relative_to(root):
+            tail = candidate.relative_to(root).as_posix()
+            return SAFE_BUNDLE_ROOT if tail in {"", "."} else f"{SAFE_BUNDLE_ROOT}/{tail}"
+    except (OSError, ValueError):
+        pass
+    unplaced.append(text)
+    return UNASSESSABLE_PATH.format(index=len(unplaced))
+
+
+def shareable_path_report(report: dict, out_dir: Path) -> dict:
+    """The measurement as it may leave this machine: same numbers, no host location.
+
+    Two layers, and each closes what the other cannot:
+
+    * every field `scan()` fills with a measured path is rewritten bundle-relative, so the refusal
+      still names the offending tail (which IS the actionable part, and what an upstream report
+      needs) while the run root never appears;
+    * the whole document then goes through `manifest_scope.redact_host_paths`, the repo's
+      value-shaped shipping redactor, so a string this function does not know about - an OS error
+      message, an unknown-path reason, a future field - cannot carry a location past it either.
+
+    The measurement itself is untouched: `check_path_ceiling.scan` still measures absolute paths,
+    because absolute length is exactly what Power BI Desktop counts.
+    """
+    root = Path(os.path.normpath(str(out_dir)))
+    unplaced: list[str] = []
+    shareable = dict(report)
+    shareable["root"] = SAFE_BUNDLE_ROOT
+    for key in _PATH_RECORD_KEYS:
+        record = shareable.get(key)
+        if isinstance(record, dict):
+            shareable[key] = dict(record, path=_bundle_relative(record.get("path"), root, unplaced))
+    for key in _PATH_LIST_KEYS:
+        rows = shareable.get(key)
+        if isinstance(rows, list):
+            shareable[key] = [
+                dict(row, path=_bundle_relative(row.get("path"), root, unplaced)) if isinstance(row, dict) else row
+                for row in rows
+            ]
+    shareable["paths_not_placed"] = len(unplaced)
+    cleaned, redacted = redact_host_paths(shareable, prefix=PATH_CEILING_REPORT)
+    cleaned["redacted_fields"] = sorted(redacted)
+    return cleaned
+
+
 def scan_emitted_path_ceiling(out_dir: Path, limits: Limits | None = None) -> dict:
     """Measure the tree the engine ACTUALLY emitted. A failed measurement is never a clean one."""
     try:
@@ -762,6 +850,8 @@ def scan_emitted_path_ceiling(out_dir: Path, limits: Limits | None = None) -> di
     except (OSError, RuntimeError, UnicodeError, ValueError) as exc:
         # `collect` already routes per-entry failures into `unknown_paths`; this is the walk itself
         # failing outright. Reported in the SAME shape so the written report is readable either way.
+        # Raw here on purpose: `shareable_path_report` is the one place paths are made shareable, so
+        # pre-escaping the root would only stop it recognising the bundle it belongs to.
         reason = f"{type(exc).__name__}: {exc}"
         return {
             "version": 1,
@@ -770,25 +860,59 @@ def scan_emitted_path_ceiling(out_dir: Path, limits: Limits | None = None) -> di
             "scan_error": reason,
             "counted": {"measured": 0, "files": 0, "directories": 0, "over_ceiling": 0, "unknown": 1},
             "worst_offenders": [],
-            "unknown_paths": [{"path": _ascii_path(str(out_dir)), "reason": reason}],
+            "unknown_paths": [{"path": str(out_dir), "reason": reason}],
         }
 
 
 def write_path_ceiling_report(out_dir: Path, report: dict) -> Path | None:
-    """Persist the measurement beside the bundle it judges. Returns None if it could not be written."""
-    path = out_dir / PATH_CEILING_REPORT
+    """Publish the measurement beside the bundle it judges, ATOMICALLY. None if it was not written.
+
+    The order is the guarantee: the whole document is serialized to a string FIRST, then written to
+    a per-process staging sibling, flushed and fsynced, and only then `os.replace`d over the final
+    name. So a serialization error, a full disk or a torn write cannot leave a truncated
+    `path-ceiling.json` behind, and an existing report from a previous run stays byte-identical
+    rather than being destroyed by the very run that could not describe itself. On any failure only
+    THIS call's exact staging file is removed, best effort - never the report, never a sibling.
+
+    ⚠️ The pattern is deliberately the repo's existing one (`_abf._staged_image_write`,
+    `generated_edit_declarations._append_record`): unique-per-process staging name, `os.replace`,
+    staging removed when the swap did not happen. Neither is imported: `_append_record` is private
+    to another module, generates its own filename and injects its own `version`/`recorded_at` keys,
+    so its semantics do not fit publishing one named report - and `_abf` belongs to a skill bundle.
+    """
+    final_path = out_dir / PATH_CEILING_REPORT
+    staging_path = final_path.with_name(f"{final_path.name}.{os.getpid()}-{uuid.uuid4().hex}.tmp")
+    swapped = False
     try:
-        path.write_text(json.dumps(report, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+        # Serialize BEFORE touching the filesystem: a TypeError here must never have opened a file.
+        payload = json.dumps(report, indent=2, ensure_ascii=True) + "\n"
+        with open(staging_path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(staging_path, final_path)
+        swapped = True
     except (OSError, TypeError, ValueError) as exc:
-        log.warning("PATH CEILING: report not written (%s: %s)", type(exc).__name__, exc)
+        log.warning("PATH CEILING: report not published (%s: %s)", type(exc).__name__, _safe_diagnostic(exc))
         return None
-    return path
+    finally:
+        if not swapped:
+            try:
+                staging_path.unlink()
+            except OSError:  # pragma: no cover - best effort by contract; the report is untouched
+                log.warning("PATH CEILING: staging file left behind: %s", staging_path.name)
+    return final_path
 
 
 def path_ceiling_verdict(report: dict, written: Path | None) -> tuple[bool, str]:
-    """Turn one measurement into (proceed, detail). Everything that is not clean refuses."""
+    """Turn one measurement into (proceed, detail). Everything that is not clean refuses.
+
+    ``report`` is the SHAREABLE view (:func:`shareable_path_report`), so every path this prints is
+    already bundle-relative. The report is named relatively too - the operator supplied ``--output``
+    and does not need it read back, while a console line is pasted into issues and chat.
+    """
     counted = report.get("counted") or {}
-    where = f" Report: {written}." if written else ""
+    where = f" Report: {SAFE_BUNDLE_ROOT}/{PATH_CEILING_REPORT}." if written else ""
     preserved = " The emitted output is PRESERVED as evidence - nothing was deleted or rewritten."
     if written is None:
         return False, (
@@ -838,9 +962,15 @@ def path_ceiling_verdict(report: dict, written: Path | None) -> tuple[bool, str]
 
 
 def check_emitted_path_ceiling(out_dir: Path, phases: list[dict], limits: Limits | None = None) -> tuple[bool, str]:
-    """Gate the ACTUAL engine output against Desktop's ceilings before anything consumes it."""
+    """Gate the ACTUAL engine output against Desktop's ceilings before anything consumes it.
+
+    The measurement is absolute (that is what Desktop counts); everything that LEAVES this call -
+    the published report and the printed verdict - is the bundle-relative, host-location-free view
+    built by :func:`shareable_path_report`.
+    """
     started = time.monotonic()
-    report = scan_emitted_path_ceiling(out_dir, limits)
+    measured = scan_emitted_path_ceiling(out_dir, limits)
+    report = shareable_path_report(measured, out_dir)
     written = write_path_ceiling_report(out_dir, report)
     proceed, detail = path_ceiling_verdict(report, written)
     phases.append(
@@ -1519,7 +1649,17 @@ def produce_and_gate_output(
     if not path_ok:
         # The timings are written even on a refusal, and they carry no later phase: the record IS
         # the evidence that nothing downstream started. The output tree itself is left untouched.
-        write_phase_record(args.output, phases)
+        #
+        # ⚠️ But the refusal OUTRANKS its own evidence. A bundle Power BI Desktop cannot open must
+        # still refuse when the timings cannot be persisted (a full disk, a read-only mount, an
+        # unserializable phase); returning EXIT_OK there - or letting the exception escape into the
+        # caller's traceback - would turn a path refusal into a run that continues or into a crash
+        # whose exit code says something else entirely. Only the write/serialization classes this
+        # repo already catches around a JSON write are absorbed; anything else still propagates.
+        try:
+            write_phase_record(args.output, phases)
+        except (OSError, TypeError, ValueError) as exc:
+            log.warning("PATH CEILING: phase timings not persisted (%s)", _safe_diagnostic(exc))
         return report, EXIT_PATH_CEILING
     return report, EXIT_OK
 

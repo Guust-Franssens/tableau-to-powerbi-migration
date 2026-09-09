@@ -7,6 +7,7 @@ defensible for that job. They are simply not safe for a CONSUMER, which is what 
 
 from __future__ import annotations
 
+import builtins
 import contextlib
 import io
 import json
@@ -27,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import run_estate  # noqa: E402  # pylint: disable=wrong-import-position
 from check_path_ceiling import DIR_CEILING, FILE_CEILING, utf16_len  # noqa: E402
 from check_reference_readiness import engine_page_id  # noqa: E402
+from host_paths import discloses_host_location  # noqa: E402
 
 # These are imported ONLY to state ground truth for the composed CLI-evidence assertions below
 # (the reservation directory name, the manifest key, the verify state) - every actual allocation in
@@ -1934,7 +1936,15 @@ def test_an_over_ceiling_emitted_tree_refuses_before_any_consumer_sees_it(tmp_pa
     )
     assert match, f"the refusal did not name the binding path.\nprinted:\n{printed}"
     assert int(match.group("length")) > int(match.group("ceiling"))
-    assert Path(match.group("path")).exists(), "the refusal named a path that is not on disk"
+    named = match.group("path").rstrip(".")
+    assert named.startswith(f"{run_estate.SAFE_BUNDLE_ROOT}/"), (
+        f"the refusal named {named!r}, which is not the bundle-relative spelling"
+    )
+    tail = named[len(run_estate.SAFE_BUNDLE_ROOT) + 1 :]
+    assert (out / Path(tail)).is_file(), (
+        f"the refusal named {tail!r}, which is not a real path inside the bundle it judged"
+    )
+    assert str(out) not in printed and str(tmp_path) not in printed, "the refusal printed the absolute run root"
     assert stamped == [], "provenance ran on a tree Power BI Desktop cannot open"
     report = _path_report(out)
     assert report["status"] == "over_ceiling" and report["counted"]["over_ceiling"] >= 1
@@ -2155,3 +2165,211 @@ def test_a_tight_root_budget_is_reported_and_never_refuses() -> None:
     assert proceed is True, detail
     assert "ADVISORY: root budget 12" in detail, detail
     assert "not a refusal" in detail, detail
+
+
+# ---------------------------------------------------------------------------
+# The refusal's own evidence contract (blind-review findings on PR #587)
+#
+# Three properties of the REFUSAL, none of which is about path length:
+#   1. publishing the report is atomic - a failure cannot destroy a previous trustworthy one;
+#   2. exit 10 outranks its own evidence - failing to persist timings must not change the verdict;
+#   3. what is persisted and printed is SHAREABLE - bundle-relative, with no host location in it.
+# ---------------------------------------------------------------------------
+
+TRUSTWORTHY_REPORT = b'{"status": "ok", "written_by": "a previous run"}\n'
+
+#: A run root that is BOTH profile-shaped and carries a customer-identifying folder, so a leak of
+#: either half is detectable rather than inferred.
+SECRET_ACCOUNT = "j.doe"
+SECRET_FOLDER = "AcmeCorp-Confidential-FY26Q3"
+
+
+def _secret_rooted_bundle(tmp_path: Path) -> Path:
+    """A bundle whose ABSOLUTE path discloses an account name and a customer folder."""
+    out = tmp_path / "Users" / SECRET_ACCOUNT / SECRET_FOLDER / "bundle"
+    return _minimal_bundle(out)
+
+
+def _strings(payload) -> list[str]:
+    """Every string anywhere in a JSON document, keys included."""
+    if isinstance(payload, dict):
+        return [k for k in payload if isinstance(k, str)] + [s for v in payload.values() for s in _strings(v)]
+    if isinstance(payload, list):
+        return [s for v in payload for s in _strings(v)]
+    return [payload] if isinstance(payload, str) else []
+
+
+def _half_writing_open(monkeypatch, suffix: str = ".tmp") -> None:
+    """Make writes to `*<suffix>` fail after emitting half their bytes - a real partial write."""
+    real_open = builtins.open
+
+    class _HalfWriter:
+        def __init__(self, handle):
+            self._handle = handle
+
+        def write(self, text):
+            self._handle.write(text[: len(text) // 2])
+            raise OSError(28, "No space left on device")
+
+        def __getattr__(self, name):
+            return getattr(self._handle, name)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            self._handle.close()
+            return False
+
+    def _open(file, *args, **kwargs):
+        handle = real_open(file, *args, **kwargs)
+        return _HalfWriter(handle) if str(file).endswith(suffix) else handle
+
+    monkeypatch.setattr(builtins, "open", _open)
+
+
+def test_a_partial_write_leaves_the_previous_report_byte_identical(tmp_path: Path, monkeypatch) -> None:
+    """A full disk mid-write must not turn a trustworthy report into a truncated one."""
+    out = _minimal_bundle(tmp_path / "bundle")
+    previous = out / run_estate.PATH_CEILING_REPORT
+    previous.write_bytes(TRUSTWORTHY_REPORT)
+    _half_writing_open(monkeypatch)
+
+    written = run_estate.write_path_ceiling_report(out, {"status": "over_ceiling", "counted": {}})
+
+    assert written is None, "a partial write reported success"
+    assert previous.read_bytes() == TRUSTWORTHY_REPORT, "the previous report was destroyed by a failed write"
+    assert not list(out.glob("*.tmp")), "the staging file was left behind"
+
+
+def test_a_failed_swap_leaves_the_previous_report_byte_identical(tmp_path: Path, monkeypatch) -> None:
+    """The other half of atomicity: the write completed, the replace did not."""
+    out = _minimal_bundle(tmp_path / "bundle")
+    previous = out / run_estate.PATH_CEILING_REPORT
+    previous.write_bytes(TRUSTWORTHY_REPORT)
+
+    def _boom(*_args, **_kwargs):
+        raise OSError(13, "Permission denied")
+
+    monkeypatch.setattr(run_estate.os, "replace", _boom)
+
+    written = run_estate.write_path_ceiling_report(out, {"status": "over_ceiling", "counted": {}})
+
+    assert written is None
+    assert previous.read_bytes() == TRUSTWORTHY_REPORT
+    assert not list(out.glob("*.tmp")), "only this call's staging file may be removed, and it must be"
+
+
+def test_an_unserializable_report_never_opens_the_final_file(tmp_path: Path) -> None:
+    """Serialize FIRST: a document that cannot be rendered must not have truncated anything."""
+    out = _minimal_bundle(tmp_path / "bundle")
+    previous = out / run_estate.PATH_CEILING_REPORT
+    previous.write_bytes(TRUSTWORTHY_REPORT)
+
+    written = run_estate.write_path_ceiling_report(out, {"status": "ok", "when": object()})
+
+    assert written is None
+    assert previous.read_bytes() == TRUSTWORTHY_REPORT
+    assert not list(out.glob("*.tmp"))
+
+
+def test_a_path_refusal_survives_a_phase_record_failure(tmp_path: Path, monkeypatch) -> None:
+    """Exit 10 outranks its own evidence: unwritable timings are secondary to an unopenable bundle."""
+
+    def _boom(*_args, **_kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(run_estate, "write_phase_record", _boom)
+
+    code, printed, stamped, out = _emitted_run(tmp_path, monkeypatch, _ceilings(utf16_len(str(tmp_path)), 4096))
+
+    assert code == run_estate.EXIT_PATH_CEILING, printed
+    assert stamped == [], "provenance ran after a refusal whose timings could not be persisted"
+    assert not (out / "handover").exists(), "a later phase ran after the refusal"
+    assert not (out / "phase-timings.json").exists(), "the fixture did not actually block the write"
+
+
+def test_the_published_report_carries_no_host_location(tmp_path: Path, monkeypatch) -> None:
+    """The report is shared upstream, so the run root - account, customer folder - must not be in it."""
+    out = _secret_rooted_bundle(tmp_path)
+    monkeypatch.setattr(run_estate, "PATH_CEILING_LIMITS", _ceilings(utf16_len(str(tmp_path)), 4096))
+
+    proceed, detail = run_estate.check_emitted_path_ceiling(out, [])
+
+    assert proceed is False, detail
+    raw = (out / run_estate.PATH_CEILING_REPORT).read_text(encoding="utf-8")
+    payload = json.loads(raw)
+    assert SECRET_FOLDER not in raw and SECRET_ACCOUNT not in raw, "the report disclosed the run root"
+    assert str(out) not in raw
+    leaked = [value for value in _strings(payload) if discloses_host_location(value)]
+    assert leaked == [], f"the report carries host location(s): {leaked}"
+    assert payload["root"] == run_estate.SAFE_BUNDLE_ROOT
+    assert payload["worst_offenders"], payload
+    assert all(record["path"].startswith(f"{run_estate.SAFE_BUNDLE_ROOT}/") for record in payload["worst_offenders"])
+    assert any("pbip/Alpha" in record["path"] for record in payload["worst_offenders"]), (
+        "the relative tail was lost; the refusal has to stay actionable"
+    )
+
+
+def test_the_printed_refusal_carries_no_host_location(tmp_path: Path, monkeypatch) -> None:
+    """A console line is what gets pasted into an issue - it may not carry the customer's root.
+
+    ⚠️ The one drive-shaped string in the output is `_SHORT_ROOT_HINT`'s documented example command,
+    a CONSTANT of this repository shared with the pre-conversion refusal - not data from this run.
+    That is asserted directly rather than waved away, and everything else is judged strictly.
+    """
+    out = _secret_rooted_bundle(tmp_path)
+    monkeypatch.setattr(run_estate, "PATH_CEILING_LIMITS", _ceilings(utf16_len(str(tmp_path)), 4096))
+
+    _proceed, detail = run_estate.check_emitted_path_ceiling(out, [])
+
+    assert SECRET_FOLDER not in detail and SECRET_ACCOUNT not in detail, detail
+    assert str(out) not in detail and str(tmp_path) not in detail, detail
+    assert f"{run_estate.SAFE_BUNDLE_ROOT}/{run_estate.PATH_CEILING_REPORT}" in detail, (
+        "the report must be named relatively, not by its absolute path"
+    )
+    residue = detail.replace(run_estate._SHORT_ROOT_HINT, "")
+    assert not discloses_host_location(residue), residue
+
+
+def test_an_error_message_embedding_the_bundle_path_is_redacted_whole(tmp_path: Path, monkeypatch) -> None:
+    """An OS error routinely quotes the path it failed on - that path is the customer's."""
+    out = _secret_rooted_bundle(tmp_path)
+
+    def _boom(*_args, **_kwargs):
+        raise OSError(5, f"device is not ready: {out}")
+
+    monkeypatch.setattr(run_estate, "scan_path_ceiling", _boom)
+
+    proceed, detail = run_estate.check_emitted_path_ceiling(out, [])
+
+    assert proceed is False
+    raw = (out / run_estate.PATH_CEILING_REPORT).read_text(encoding="utf-8")
+    assert SECRET_FOLDER not in raw and SECRET_ACCOUNT not in raw, raw
+    assert SECRET_FOLDER not in detail and SECRET_ACCOUNT not in detail, detail
+    payload = json.loads(raw)
+    assert payload["redacted_fields"], "the closing redactor recorded no catch for a leaking error"
+    assert [value for value in _strings(payload) if discloses_host_location(value)] == []
+
+
+def test_a_path_outside_the_bundle_is_an_ordinal_not_an_echo(tmp_path: Path, monkeypatch) -> None:
+    """Containment that cannot be PROVEN is reported as unassessable, never echoed or faked relative."""
+    import check_path_ceiling  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+
+    out = _minimal_bundle(tmp_path / "bundle")
+    foreign = tmp_path / "Users" / SECRET_ACCOUNT / SECRET_FOLDER / "elsewhere.json"
+    monkeypatch.setattr(
+        check_path_ceiling,
+        "collect",
+        lambda _root: ([], [{"path": str(foreign), "reason": "PermissionError: access is denied"}]),
+    )
+
+    proceed, detail = run_estate.check_emitted_path_ceiling(out, [])
+
+    assert proceed is False
+    raw = (out / run_estate.PATH_CEILING_REPORT).read_text(encoding="utf-8")
+    payload = json.loads(raw)
+    assert SECRET_FOLDER not in raw and SECRET_FOLDER not in detail, raw
+    assert payload["paths_not_placed"] == 1
+    assert payload["unknown_paths"][0]["path"] == run_estate.UNASSESSABLE_PATH.format(index=1)
+    assert "access is denied" in raw, "the reason itself was lost with the path"
