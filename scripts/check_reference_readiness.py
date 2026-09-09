@@ -67,7 +67,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
-from bundle_corpus import evidence_dirs, is_package_target, shipping_reports
+from bundle_corpus import evidence_dirs, shipping_reports
 from package_contract import STATE_CLEAN, verify_package_entry
 import object_identity as oid
 from object_identity import AMBIGUOUS
@@ -884,6 +884,19 @@ def _collect_evidence(
     return ref_ok + orc_ok, ref_bad + orc_bad
 
 
+def _is_package_shaped_target(target: Path) -> bool:
+    """Whether ``target`` sits under a ``packages/`` parent (flat or nested)."""
+    try:
+        parent = target.parent
+        if parent.name == "packages":
+            return True
+        if parent.parent.name == "packages":
+            return True
+    except (OSError, RuntimeError, ValueError):
+        pass
+    return False
+
+
 def scan(
     root: Path,
     *,
@@ -896,9 +909,10 @@ def scan(
     root = root.resolve()
 
     # -- Package-entry integrity gate (issue #562) --
-    # For package targets, verify the manifest contract before any evidence/source discovery.
-    # A non-clean package is blocked: its evidence cannot be trusted.
-    if is_package_target(root):
+    # For package-shaped targets (under packages/), verify the manifest contract before any
+    # evidence/source discovery.  Targets that merely carry a package-manifest.json stub to
+    # stop ancestor walks (is_self_contained) but are not under packages/ skip this gate.
+    if _is_package_shaped_target(root):
         entry = verify_package_entry(root)
         if entry.state != STATE_CLEAN:
             detail = (
