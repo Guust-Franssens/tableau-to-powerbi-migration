@@ -96,6 +96,7 @@ EXPECTED_EXACT_SKIP_REASONS: frozenset[str] = frozenset(
         "filesystem will not store a combining-character filename unchanged",
         "reproduces the WINDOWS half: Path resolves / against the current drive",
         "case-sensitive filesystem: 'FOO' and 'foo' are not the same deliverable",
+        "directory junctions are a Windows reparse point",
         "canonical engine not installed, so its constants cannot be read",
     }
 )
