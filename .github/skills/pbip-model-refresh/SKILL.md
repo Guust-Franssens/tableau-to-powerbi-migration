@@ -552,13 +552,19 @@ stay byte-identical.
 > | `DIALOG_NEEDS_HUMAN` (exit 3) | a known human-blocking prompt that is not a credential prompt (e.g. native-query approval) | not a credential wall; approve the prompt. |
 >
 > **The contract:**
-> - `CREDENTIAL_MISSING` / `NO_CREDENTIAL` requires **positive authentication-specific evidence**. No
->   amount of window-class, geometry, ownership or hosting-technology inference may produce it.
-> - `DIALOG_UNREADABLE` / `DIALOG_UNRECOGNIZED` is non-clean and requires a human to inspect Desktop,
->   but it does **not** assert that sign-in is needed — and must never be re-labelled as
->   `NO_CREDENTIAL` by a parent script or agent.
-> - Autopilot / auto-approve **never** clears or bypasses a dialog verdict. The credential sits behind
->   a modal sign-in dialog no automation can fill; autonomy governs choices, not physics.
+> - Modal-level `CREDENTIAL_MISSING` requires **positive auth-specific signature evidence** (a text
+>   match against `credential_modal_signature.regex`). No amount of window-class, geometry, ownership
+>   or hosting-technology inference may produce it. Parent-level `NO_CREDENTIAL` can also arise from
+>   the existing broader credential-stop/marker evidence path; this limitation does not change or
+>   endorse that code path.
+> - `DIALOG_UNREADABLE` / `DIALOG_UNRECOGNIZED` is non-clean: a human must **physically inspect
+>   Desktop** to determine what the dialog is. This is not an automatic credential/sign-in stop — the
+>   tool cannot confirm whether sign-in is needed — but it is also not clearance. It must never be
+>   re-labelled as `NO_CREDENTIAL` by a parent script or agent.
+> - Autopilot / auto-approve **never** clears or bypasses a dialog verdict. An unresolved dialog
+>   requires physical human inspection regardless of autonomy level; that is a physical dependency,
+>   not a choice. Credential remediation (actually signing in) is a separate, further step that only
+>   applies once the human confirms the dialog is in fact a credential prompt.
 > - If no auth-specific signal is available from the APIs the shipped skill can reach, the limitation
 >   is accepted and visible (exit 3, gate stays armed). **Fail-closed is the release behaviour.**
 >

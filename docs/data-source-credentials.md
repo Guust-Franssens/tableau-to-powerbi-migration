@@ -268,18 +268,23 @@ This is a deliberate choice. PR #572 proved that generic WebView/MSHTML/window-c
 signals false-convict non-auth browser content as `NO_CREDENTIAL`, terminating runs on a credential
 wall that does not exist. The contract:
 
-- **`CREDENTIAL_MISSING` / `NO_CREDENTIAL`** requires positive authentication-specific evidence (a
-  text signature matching `credential_modal_signature.regex`). Hosting technology, class, geometry
-  and ownership are not credential evidence.
-- **`DIALOG_UNREADABLE` / `DIALOG_UNRECOGNIZED`** is non-clean: a human must inspect Desktop. It
-  does **not** assert that sign-in is needed, and must never be re-labelled as `NO_CREDENTIAL`.
-- **Autopilot never clears or bypasses a dialog verdict.** The credential sits behind a modal sign-in
-  dialog no automation can fill; autonomy governs choices, not physics.
+- **`CREDENTIAL_MISSING`** at the modal level requires positive authentication-specific signature
+  evidence (a text match against `credential_modal_signature.regex`). Hosting technology, class,
+  geometry and ownership are not credential evidence. Parent-level **`NO_CREDENTIAL`** can also arise
+  from the existing broader credential-stop/marker evidence path; this limitation does not change or
+  endorse that code path.
+- **`DIALOG_UNREADABLE` / `DIALOG_UNRECOGNIZED`** is non-clean: a human must physically inspect
+  Desktop to determine what the dialog is. This is not an automatic credential/sign-in stop — the
+  tool cannot confirm whether sign-in is needed — but it is also not clearance. It must never be
+  re-labelled as `NO_CREDENTIAL`.
+- **Autopilot never clears or bypasses a dialog verdict.** An unresolved dialog requires physical
+  human inspection regardless of autonomy level. Credential remediation (actually signing in) is a
+  separate, further step once the human confirms the dialog is a credential prompt.
 - When no auth-specific signal is available, the limitation is accepted and visible; **fail-closed is
   the release behaviour** (exit 3, gate stays armed, no artifact built).
 
 **The cost** is a bounded wait (≤330 s) ending with an honest "I cannot tell" rather than a fast
 actionable verdict. **The benefit** is that healthy runs are never terminated by a false credential
-wall. The one-row data probe (`probe_desktop_query.py`) remains the gate of record — a `DATA_OK`
-from it proves credentials + reachability + valid M in one shot, regardless of what the dialog
-arbiter reported.
+wall. The one-row data probe (`probe_desktop_query.py`) remains the gate of record, but `DATA_OK` is
+authoritative only after any dialog is settled and a clean probe actually executes — an active,
+unresolved dialog is never overridden.
