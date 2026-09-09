@@ -15,6 +15,13 @@ Three questions, in order: **completeness** (a page for every source object the 
 should exist), **evidence** (a usable render provably OF that object, in THIS workbook, at THIS
 revision), and **grade**.
 
+WARNING: **A package target is proven to BE its declared contents first (#562).** A package inherits no
+ancestor evidence, so its own tree is the whole evidence boundary - and a package whose manifest is
+unreadable, or whose declared file namespace/bytes no longer match the package, is
+`CANNOT_ESTABLISH` before any source or evidence is discovered
+(`scripts/package_filesystem.py`). That precondition claims nothing about roles or identity, so a
+clean package continues into the assessment below completely unchanged.
+
 Fail closed - the ONE design rule
 ----------------------------------
 `blind`, `unverifiable` and `insufficient-grade` are all distinct from `ready`, and **none of
@@ -67,9 +74,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
-from bundle_corpus import evidence_dirs, shipping_reports
+from bundle_corpus import evidence_dirs, is_package_target, shipping_reports
 import object_identity as oid
 from object_identity import AMBIGUOUS
+from package_filesystem import verify_package_filesystem
 from reference_evidence import (
     MANUAL_KIND_HINT,
     CAP_VALIDATION,
@@ -883,6 +891,33 @@ def _collect_evidence(
     return ref_ok + orc_ok, ref_bad + orc_bad
 
 
+def _package_integrity_refusal(root: Path) -> UnitResult | None:
+    """`CANNOT_ESTABLISH` when ``root`` is a package whose own filesystem cannot be trusted, else None.
+
+    ⚠️ **This runs BEFORE any source or evidence discovery, and that ordering is the point.** A
+    package-shaped target is the one target that inherits NO ancestor evidence
+    (`bundle_corpus.is_package_target`), so the package's own tree is the whole evidence boundary -
+    and until #562 the only thing checked about it was that `package-manifest.json` EXISTED. An
+    independent audit measured 14 controlled packages - malformed, duplicate-keyed, byte-changed,
+    file-deleted, path-escaping, foreign-file - every one returning `READY 4/4` here.
+
+    Only the filesystem/manifest invariant is asserted: the declared namespace and bytes ARE the
+    package. Roles, identity and oracle semantics are separate invariants and are not claimed. A
+    CLEAN package therefore continues into the normal assessment completely unchanged - it is not
+    rescued, and a legitimately unresolvable source still ends `CANNOT_ESTABLISH`.
+    """
+    if not is_package_target(root):
+        return None
+    verdict = verify_package_filesystem(root)
+    if verdict.clean:
+        return None
+    return _cannot(
+        root.name,
+        "this package's declared contents could not be proven to be the package on disk, so it cannot "
+        f"be read as its own evidence boundary ({verdict.state}): {verdict.summary()}",
+    )
+
+
 def scan(
     root: Path,
     *,
@@ -893,6 +928,9 @@ def scan(
 ) -> dict[str, Any]:
     """Assess every shipping report under ``root``."""
     root = root.resolve()
+    damaged = _package_integrity_refusal(root)
+    if damaged is not None:
+        return _merge(root, [damaged], [], [])
     evidence, rejected = _collect_evidence(root, reference_dir, oracle_dir)
     engine_report = _engine_report(root)
     reports = shipping_reports(root)

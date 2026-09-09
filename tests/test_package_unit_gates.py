@@ -542,7 +542,7 @@ def test_incomplete_flat_package_without_manifest_fails_closed_when_ancestor_evi
     tmp_path: Path,
 ) -> None:
     """An incomplete flat package without manifest and without local evidence refuses ancestor evidence."""
-    bundle, oracle, objects = _bundle(tmp_path, covered=None)
+    bundle, oracle, _objects = _bundle(tmp_path, covered=None)
     run_oracle = tmp_path / "oracle"
     if not run_oracle.exists():
         shutil.copytree(oracle, run_oracle)
@@ -554,12 +554,14 @@ def test_incomplete_flat_package_without_manifest_fails_closed_when_ancestor_evi
     (unit / "package-manifest.json").unlink()
     shutil.rmtree(unit / "oracle")
 
-    # Entry gate refuses ancestor evidence: reports blind pages rather than READY
+    # Entry gate refuses ancestor evidence. Since #562 the refusal arrives BEFORE the page
+    # expectation is derived - a package-shaped target that declares nothing is not an evidence
+    # boundary at all - so this is 0 pages and 0 admitted records rather than N blind pages.
     code, payload = _readiness(unit, tmp_path)
-    assert code in {1, 3}
-    assert payload["status"] in {"FINDINGS", "CANNOT_ESTABLISH"}
+    assert (code, payload["status"]) == (3, "CANNOT_ESTABLISH")
     assert payload["pages_ready"] == 0
-    assert payload["pages_blind"] == len(objects)
+    assert payload["evidence_records"] == 0
+    assert "package-manifest.json" in payload["units"][0]["detail"]
 
     # Exit gate refuses ancestor evidence: oracle-coverage is NOT_CHECKED with 0 evidence
     coverage = check_unit.check_oracle_coverage(unit, None, None)
@@ -576,7 +578,7 @@ def test_incomplete_nested_package_without_manifest_fails_closed_when_ancestor_e
     tmp_path: Path,
 ) -> None:
     """An incomplete nested package without manifest and without local evidence refuses ancestor evidence."""
-    bundle, oracle, objects = _bundle(tmp_path, covered=None)
+    bundle, oracle, _objects = _bundle(tmp_path, covered=None)
     run_oracle = tmp_path / "oracle"
     if not run_oracle.exists():
         shutil.copytree(oracle, run_oracle)
@@ -588,11 +590,12 @@ def test_incomplete_nested_package_without_manifest_fails_closed_when_ancestor_e
     (unit / "package-manifest.json").unlink()
     shutil.rmtree(unit / "oracle")
 
+    # As above: the nested shape is a package target too, so it is refused before expectation.
     code, payload = _readiness(unit, tmp_path)
-    assert code in {1, 3}
-    assert payload["status"] in {"FINDINGS", "CANNOT_ESTABLISH"}
+    assert (code, payload["status"]) == (3, "CANNOT_ESTABLISH")
     assert payload["pages_ready"] == 0
-    assert payload["pages_blind"] == len(objects)
+    assert payload["evidence_records"] == 0
+    assert "package-manifest.json" in payload["units"][0]["detail"]
 
     coverage = check_unit.check_oracle_coverage(unit, None, None)
     assert coverage["status"] == check_unit.STATUS_NOT_CHECKED

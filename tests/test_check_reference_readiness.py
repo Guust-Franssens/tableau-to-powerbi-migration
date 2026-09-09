@@ -1248,6 +1248,21 @@ def test_a_package_with_no_evidence_of_its_own_still_inherits_nothing(tmp_path: 
     assert crr._default_dirs(target, "oracle") == []
 
 
+def _write_valid_package_manifest(package: Path) -> None:
+    """Marker AND a manifest that matches the tree, because the marker alone is not a boundary (#562).
+
+    Since the package filesystem precondition landed, `{}` is a package that declares nothing and is
+    therefore refused before evidence discovery. This test is about the ANCESTOR-isolation rule, so
+    it needs a package whose own declared contents genuinely check out.
+    """
+    files = {
+        path.relative_to(package).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(package.rglob("*"))
+        if path.is_file() and path.name != "package-manifest.json"
+    }
+    (package / "package-manifest.json").write_text(json.dumps({"contents": {"files": files}}), encoding="utf-8")
+
+
 def test_a_packaged_unit_reads_only_its_own_manifest_end_to_end(tmp_path: Path) -> None:
     """The same defect at gate level: the doubled record must not reach the readiness verdict.
 
@@ -1263,7 +1278,7 @@ def test_a_packaged_unit_reads_only_its_own_manifest_end_to_end(tmp_path: Path) 
     write_oracle(tmp_path / "run", [view])
     assert crr.scan(package)["units"][0]["pages"][0]["readiness"] == "unverifiable"
 
-    (package / "package-manifest.json").write_text("{}", encoding="utf-8")
+    _write_valid_package_manifest(package)
 
     report = crr.scan(package)
     assert report["units"][0]["pages"][0]["readiness"] == "ready"
