@@ -183,6 +183,25 @@ def _comment_end(text: str, start: int, line_breaks: Collection[int]) -> int:
     return len(text) if closing == -1 else closing + 2
 
 
+def _bracket_end(text: str, start: int) -> int:
+    """Return the index of the `]` that closes the identifier opened at `start` (-1 when unclosed).
+
+    Tableau escapes a literal `]` inside a bracketed identifier by doubling it, so `]]` is part of
+    the name and only an unpaired `]` closes it. Stopping at the first `]` ended the identifier early
+    and handed the rest of the name back to the scanner as if it were formula syntax, where a `/*` in
+    the name then opened a comment that does not exist.
+    """
+    index = start + 1
+    while True:
+        closing = text.find("]", index)
+        if closing == -1:
+            return -1
+        if text[closing + 1 : closing + 2] == "]":
+            index = closing + 2
+            continue
+        return closing
+
+
 def _mask_quoted_literals(text: str, line_breaks: Collection[int] = frozenset()) -> str:
     """Replace formula literals and identifiers, retaining unquoted comment text.
 
@@ -191,6 +210,11 @@ def _mask_quoted_literals(text: str, line_breaks: Collection[int] = frozenset())
     quoted literals and bracketed identifiers resumes, so command-shaped *data* after a comment is
     not escalated. A comment marker inside a literal or a bracketed identifier is data, not a state
     change, because those spans are consumed first.
+
+    The comment DELIMITERS themselves are blanked in the matching copy while their bodies stay
+    visible: `/* DROP */ /* TABLE x */` and `// DROP` + `// TABLE x` are one instruction split across
+    comments, and leaving `*/ /*` or `//` between the words is enough to evade the detector. Only the
+    two-character markers become whitespace - offsets are preserved and no other source token moves.
     """
     masked = list(text)
     quote: str | None = None
@@ -198,11 +222,16 @@ def _mask_quoted_literals(text: str, line_breaks: Collection[int] = frozenset())
     while index < len(text):
         character = text[index]
         if quote is None:
-            if text[index : index + 2] in {"//", "/*"}:
-                index = _comment_end(text, index, line_breaks)
+            marker = text[index : index + 2]
+            if marker in {"//", "/*"}:
+                end = _comment_end(text, index, line_breaks)
+                masked[index : index + 2] = "  "
+                if marker == "/*" and text[end - 2 : end] == "*/":
+                    masked[end - 2 : end] = "  "
+                index = end
                 continue
             if character == "[":
-                closing = text.find("]", index + 1)
+                closing = _bracket_end(text, index)
                 if closing != -1:
                     masked[index : closing + 1] = " " * (closing - index + 1)
                     index = closing
