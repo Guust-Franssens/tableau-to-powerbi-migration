@@ -50,6 +50,8 @@ if str(SCRIPTS) not in sys.path:
 
 import engine_source  # noqa: E402  # pylint: disable=wrong-import-position
 import host_paths  # noqa: E402  # pylint: disable=wrong-import-position
+import run_estate  # noqa: E402  # pylint: disable=wrong-import-position
+from check_path_ceiling import utf16_len  # noqa: E402  # pylint: disable=wrong-import-position
 
 FIXTURE = REPO / "fixtures" / "upstream-repros" / "issue-194-long-pbir-path"
 BUILDER = FIXTURE / "build_repro.py"
@@ -725,4 +727,413 @@ def test_the_short_control_stays_inside_both_ceilings_at_the_same_root(engine_ru
     assert (short_case["files"], short_case["directories"]) == (long_case["files"], long_case["directories"]), (
         f"the two cases emitted different structures ({short_case['files']}/{short_case['directories']} vs "
         f"{long_case['files']}/{long_case['directories']}); the A/B would then differ in more than names"
+    )
+
+
+# -- issue #564: the semantic-model table path family ----------------------------------------------
+#
+# The projector's model term is a GENERIC source-component envelope, not a class inventory, because
+# three successive class-by-class projectors were each defeated by a filename class the engine had
+# and this repository lacked: `combine_descriptors`' duplicate-relation `Relation (<datasource>)`, a
+# long range/what-if parameter caption, and the per-island `Date (<datasource>)` calendar. Every
+# control below therefore judges `projected >= actual` on what the engine REALLY wrote - an
+# expected-filename assertion is blind to exactly the class that defeats it.
+TEMPLATE_TWB = (FIXTURE / "src" / "workbook-template.twb").read_text(encoding="utf-8")
+TEMPLATE_CSV = (FIXTURE / "src" / "regional_sales.csv").read_text(encoding="utf-8")
+
+#: The kill control's identity names, deliberately the SAME length: the emitted collision name is
+#: then `<relation> (<caption>)`, i.e. two full-length source-owned components plus fixed
+#: punctuation, which is the only shape that can distinguish a two-component bound from a
+#: one-component one AND exceed twice its longest component. ⚠️ The relation is a RENAMED logical
+#: table over a short flat file, not the file name itself: a packaged flat file also contributes its
+#: bracketed `[<file>#csv]` form, six units longer than the name, so a file-named relation can never
+#: exceed twice the pool maximum and the fixed-overhead mutation would be unkillable. Renaming a
+#: logical table is ordinary Tableau authoring. Plausible enterprise names, never repeated
+#: characters (see `test_the_long_case_carries_a_plausible_name_not_padding`).
+KILL_RELATION = "Regional Sales and Inventory Turnover FY2026 Q3 Detail Snapshot"
+KILL_CAPTION_A = "Alpha Regional Sales and Inventory Turnover Consolidated Source"
+KILL_CAPTION_B = "Delta Regional Sales and Inventory Turnover Consolidated Source"
+KILL_CSV = "regional_sales.csv"
+
+ISLAND_CAPTION_A = "Alpha Consolidated Regional Sales and Inventory Turnover Source"
+ISLAND_CAPTION_B = "Beta Consolidated Regional Sales and Inventory Turnover Source"
+PARAMETER_CAPTION = "Rolling Inventory Turnover Threshold for FY2026 Q3 Review"
+ASTRAL_CAPTION = "Ventas 🌍🌎🌏 Consolidado Regional 📊 FY2026"
+ASTRAL_CSV = "ventas_🌍_consolidado.csv"
+
+DATE_METADATA_RECORD = """<metadata-record class='column'>
+            <remote-name>order_date</remote-name>
+            <remote-type>7</remote-type>
+            <local-name>[order_date]</local-name>
+            <parent-name>[{csv}]</parent-name>
+            <remote-alias>order_date</remote-alias>
+            <ordinal>4</ordinal>
+            <local-type>date</local-type>
+            <aggregation>Year</aggregation>
+            <contains-null>true</contains-null>
+          </metadata-record>"""
+
+
+def _island(
+    caption: str,
+    ds_id: str,
+    csv_name: str,
+    worksheet: str,
+    dashboard: str,
+    *,
+    dates: bool = False,
+    relation_name: str | None = None,
+) -> str:
+    """One datasource island built from the committed repro template.
+
+    `relation_name` renames the LOGICAL table over the same flat file - ordinary Tableau authoring,
+    and the only way to give a relation an identity that is not derived from the file name.
+    """
+    text = TEMPLATE_TWB
+    for token, value in (
+        ("@@DATASOURCE@@", caption),
+        ("@@CSVFILE@@", csv_name),
+        ("@@WORKSHEET@@", worksheet),
+        ("@@DASHBOARD@@", dashboard),
+    ):
+        assert token in text, f"the committed template lost its {token} placeholder"
+        text = text.replace(token, value)
+    text = text.replace("federated.regionalsales", ds_id)
+    text = text.replace("textscan.regionalsales", "textscan." + ds_id.split(".", 1)[-1])
+    if relation_name is not None:
+        marker = f"name='{csv_name}' table="
+        assert text.count(marker) == 1, f"the template's relation name is no longer {marker!r}"
+        text = text.replace(marker, f"name='{relation_name}' table=")
+    if not dates:
+        return text
+    text = text.replace(
+        "<column datatype='real' name='net_revenue' ordinal='3' />",
+        "<column datatype='real' name='net_revenue' ordinal='3' />\n"
+        "            <column datatype='date' name='order_date' ordinal='4' />",
+    )
+    text = text.replace(
+        "</metadata-records>", DATE_METADATA_RECORD.format(csv=csv_name) + "\n        </metadata-records>"
+    )
+    return text.replace(
+        "<column caption='Net Revenue' datatype='real' name='[net_revenue]' role='measure' type='quantitative' />",
+        "<column caption='Net Revenue' datatype='real' name='[net_revenue]' role='measure' type='quantitative' />\n"
+        "      <column caption='Order Date' datatype='date' name='[order_date]' role='dimension' type='ordinal' />",
+        1,
+    )
+
+
+def _combine(first: str, second: str) -> ET.Element:
+    """Two islands in ONE workbook - what makes `combine_descriptors` and the per-island calendar run."""
+    root = ET.fromstring(first)
+    other = ET.fromstring(second)
+    for container, tag in (("datasources", "datasource"), ("worksheets", "worksheet"), ("dashboards", "dashboard")):
+        root.find(container).append(other.find(f"{container}/{tag}"))
+    for window in other.findall("windows/window"):
+        root.find("windows").append(window)
+    return root
+
+
+def _with_value_parameter(root: ET.Element, caption: str) -> ET.Element:
+    """A range parameter plus the calc that references it, so `emit_value_parameters` fires."""
+    root.find("datasources").insert(
+        0,
+        ET.fromstring(
+            "<datasource hasconnection='false' inline='true' name='Parameters' version='18.1'>"
+            f"<column caption='{caption}' datatype='real' name='[Parameter 1]' "
+            "param-domain-type='range' role='measure' type='quantitative' value='5.0'>"
+            "<calculation class='tableau' formula='5.0' />"
+            "<range granularity='1.0' max='100.0' min='0.0' />"
+            "</column></datasource>"
+        ),
+    )
+    root.findall("datasources/datasource")[1].append(
+        ET.fromstring(
+            "<column caption='Flagged Revenue' datatype='boolean' name='[Calculation_flag]' "
+            "role='dimension' type='ordinal'>"
+            "<calculation class='tableau' formula='[net_revenue] &gt; [Parameters].[Parameter 1]' />"
+            "</column>"
+        )
+    )
+    return root
+
+
+def _write_control(base: Path, root: ET.Element, csv_names: tuple[str, ...], stem: str) -> Path:
+    """Materialise one control as a loose `.twb` plus the flat files its relations name."""
+    source = base / "in"
+    (source / "Data" / "regional-sales").mkdir(parents=True, exist_ok=True)
+    ET.ElementTree(root).write(source / f"{stem}.twb", encoding="utf-8", xml_declaration=True)
+    for csv_name in csv_names:
+        (source / "Data" / "regional-sales" / csv_name).write_text(TEMPLATE_CSV, encoding="utf-8")
+    return source
+
+
+def _model_controls() -> dict[str, tuple[ET.Element, tuple[str, ...], str]]:
+    """The four source-visible naming shapes this module drives through the real engine."""
+    duplicate = _combine(
+        _island(ISLAND_CAPTION_A, "federated.alpha", "regional_sales.csv", "Sheet A", "Dash A", dates=True),
+        _island(ISLAND_CAPTION_B, "federated.beta", "regional_sales.csv", "Sheet B", "Dash B", dates=True),
+    )
+    parameter = _with_value_parameter(
+        _combine(
+            _island(ISLAND_CAPTION_A, "federated.alpha", "regional_sales.csv", "Sheet A", "Dash A"),
+            _island(ISLAND_CAPTION_B, "federated.beta", "regional_sales_b.csv", "Sheet B", "Dash B"),
+        ),
+        PARAMETER_CAPTION,
+    )
+    astral = ET.fromstring(_island(ASTRAL_CAPTION, "federated.astral", ASTRAL_CSV, "Hoja", "Panel"))
+    kill = _combine(
+        _island(KILL_CAPTION_A, "federated.alpha", KILL_CSV, "Sheet A", "Dash A", relation_name=KILL_RELATION),
+        _island(KILL_CAPTION_B, "federated.beta", KILL_CSV, "Sheet B", "Dash B", relation_name=KILL_RELATION),
+    )
+    return {
+        "duplicate_relation_and_island_date": (duplicate, ("regional_sales.csv",), "Islands"),
+        "value_parameter": (parameter, ("regional_sales.csv", "regional_sales_b.csv"), "WhatIf"),
+        "astral_identity": (astral, (ASTRAL_CSV,), "Astral"),
+        "two_long_components": (kill, (KILL_CSV,), "Collision"),
+    }
+
+
+@pytest.fixture(scope="session", name="model_runs")
+def _model_runs(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
+    """Run the canonical engine on every model-family control, once, into per-process directories."""
+    engine = _contract()
+    if engine is None:  # pragma: no cover - requires_engine handles collection-time absence
+        pytest.skip(ENGINE_SKIP_REASON)
+    base = tmp_path_factory.mktemp("issue-564")
+    runs: dict[str, dict[str, Any]] = {}
+    for name, (root, csv_names, stem) in _model_controls().items():
+        source = _write_control(base / name, root, csv_names, stem)
+        out = base / name / "out"
+        code, _command, output = measure_repro.run_engine(engine, source, out)
+        assert code == 0, f"harness failure running the engine on control {name}:\n{output[-4000:]}"
+        tables = sorted(path.name for path in out.rglob("*") if path.is_file() and path.parent.name == "tables")
+        model_files = [
+            str(path.relative_to(out)).replace("\\", "/")
+            for path in out.rglob("*")
+            if path.is_file() and any(part.endswith(".SemanticModel") for part in path.relative_to(out).parts)
+        ]
+        assert tables and model_files, f"control {name} emitted no semantic model at all"
+        runs[name] = {
+            "source": source,
+            "out": out,
+            "tables": tables,
+            "longest_model_tail": max(model_files, key=utf16_len),
+            "units": run_estate._engine_unit_names(engine, source),  # pylint: disable=protected-access
+            "evidence": run_estate.model_envelope_evidence(
+                run_estate._input_candidates(source),  # pylint: disable=protected-access
+                engine,
+            ),
+        }
+    return {"version": engine_source.engine_version(engine), "engine": engine, "controls": runs}
+
+
+def _projected_model_file(run: dict[str, Any], root: Path, evidence: dict | None = None) -> int:
+    """The longest projected semantic-model FILE for one control, at an exact root."""
+    projection = run_estate.project_estate_path_ceiling(root, run["units"], evidence or run["evidence"])
+    assert projection["status"] != "cannot_establish", projection.get("reason")
+    return max(
+        record["length"]
+        for record in projection["paths"]
+        if record["family"] == run_estate._FAMILY_MODEL  # pylint: disable=protected-access
+        and record["kind"] == "file"
+    )
+
+
+def _actual_model_file(run: dict[str, Any], root: Path) -> int:
+    """The longest semantic-model FILE the engine really wrote, rebased onto the same root."""
+    return utf16_len(str(root / run["longest_model_tail"]))
+
+
+def _actual_table_filename(run: dict[str, Any]) -> int:
+    """The longest table FILENAME the engine really wrote for one control."""
+    return max(utf16_len(name) for name in run["tables"])
+
+
+def _projected_table_filename(evidence: dict) -> int:
+    """The longest table filename production would allow for the same evidence."""
+    return evidence["table_stem"] + utf16_len(run_estate._MODEL_TABLE_SUFFIX)  # pylint: disable=protected-access
+
+
+@requires_engine
+def test_the_model_projection_covers_the_committed_long_and_short_pair(engine_runs) -> None:
+    """The A/B pair, judged on the SEMANTIC-MODEL family rather than the report family.
+
+    The long arm's offender is itself a model table part (`measure_repro.OFFENDER_SUFFIX`), so this
+    is the control where the two families' verdicts must agree in direction: the projection covers
+    the emitted model path in both arms, and refuses the long one at the skill's ordinary root.
+    """
+    engine = _contract()
+    root = Path(Path.cwd().anchor + "r" * (SKILL_ROOT_LEN - utf16_len(Path.cwd().anchor))).resolve()
+    for case, archive in (("long", LONG_ARCHIVE), ("short", SHORT_ARCHIVE)):
+        out = engine_runs["cases"][case]["out_dir"]
+        source = out.parent / "in"
+        units = run_estate._engine_unit_names(engine, source)  # pylint: disable=protected-access
+        evidence = run_estate.model_envelope_evidence(
+            run_estate._input_candidates(source),  # pylint: disable=protected-access
+            engine,
+        )
+        assert evidence["status"] == "ok", f"{archive}: {evidence.get('reason')}"
+        projection = run_estate.project_estate_path_ceiling(root, units, evidence)
+        projected = max(
+            record["length"]
+            for record in projection["paths"]
+            if record["family"] == run_estate._FAMILY_MODEL  # pylint: disable=protected-access
+            and record["kind"] == "file"
+        )
+        model_tails = [
+            str(path.relative_to(out)).replace("\\", "/")
+            for path in out.rglob("*")
+            if path.is_file() and any(part.endswith(".SemanticModel") for part in path.relative_to(out).parts)
+        ]
+        actual = max(utf16_len(str(root / tail)) for tail in model_tails)
+        assert projected >= actual, (
+            f"{case}: projected {projected} < emitted {actual} on engine {engine_runs['version']}"
+        )
+        if case == "long":
+            assert projection["status"] == "over_ceiling", (
+                "the long arm emits a model table part measured at 273 units at this root; the "
+                "projection must refuse it"
+            )
+            assert projection["family"] == run_estate._FAMILY_MODEL  # pylint: disable=protected-access
+
+
+@requires_engine
+def test_each_control_reproduces_the_naming_class_it_exists_for(model_runs) -> None:
+    """Guard the controls themselves: a control that stopped emitting its class proves nothing.
+
+    ⚠️ These are the three classes that defeated class-by-class projection, plus the astral case.
+    They are asserted on the engine's OWN emitted filenames, so an upstream naming change is loud
+    here rather than silently making every projection assertion below vacuous.
+    """
+    version = model_runs["version"]
+    duplicate = model_runs["controls"]["duplicate_relation_and_island_date"]["tables"]
+    assert any(name.startswith(f"regional_sales.csv ({ISLAND_CAPTION_B}") for name in duplicate), (
+        f"the duplicate-relation disambiguation class disappeared on engine {version}: {duplicate}"
+    )
+    assert sum(name.startswith("Date (") for name in duplicate) == 2, (
+        f"the per-island calendar class disappeared on engine {version}: {duplicate}"
+    )
+
+    parameter = model_runs["controls"]["value_parameter"]["tables"]
+    assert any(name.startswith(PARAMETER_CAPTION) for name in parameter), (
+        f"the what-if parameter table class disappeared on engine {version}: {parameter}"
+    )
+
+    astral = model_runs["controls"]["astral_identity"]["tables"]
+    assert any("🌍" in name for name in astral), (
+        f"the astral identity never reached a table filename on engine {version}: {astral}"
+    )
+
+    kill = model_runs["controls"]["two_long_components"]["tables"]
+    combined = next((name for name in kill if name.startswith(f"{KILL_RELATION} ({KILL_CAPTION_B}")), None)
+    assert combined, f"the two-long-component control lost its collision on engine {version}: {kill}"
+    stem = combined[: -utf16_len(run_estate._MODEL_TABLE_SUFFIX)]  # pylint: disable=protected-access
+    assert utf16_len(stem) > 2 * utf16_len(KILL_CAPTION_A), (
+        f"the emitted name {stem!r} ({utf16_len(stem)} units) no longer exceeds twice the longest "
+        f"source component ({utf16_len(KILL_CAPTION_A)}); the fixed-overhead mutation below would "
+        "then be unkillable and this control has stopped doing its job"
+    )
+
+
+@requires_engine
+def test_the_model_projection_covers_every_emitted_table_part(model_runs) -> None:
+    """The invariant: projected >= actual, on the bytes the canonical engine really wrote."""
+    root = Path(Path.cwd().anchor + "r" * (SKILL_ROOT_LEN - utf16_len(Path.cwd().anchor))).resolve()
+    for name, run in model_runs["controls"].items():
+        assert run["evidence"]["status"] == "ok", (
+            f"{name}: production could not establish its own evidence on engine {model_runs['version']}: "
+            f"{run['evidence'].get('reason')}"
+        )
+        projected = _projected_model_file(run, root)
+        actual = _actual_model_file(run, root)
+        print(f"{name}: projected {projected} >= actual {actual} ({run['longest_model_tail']})")
+        assert projected >= actual, (
+            f"{name}: production projects {projected} units where the engine wrote {actual} "
+            f"({run['longest_model_tail']!r}) on engine {model_runs['version']}. Understating the "
+            "semantic-model family is the fail-open defect of issue #564."
+        )
+
+
+@requires_engine
+def test_dropping_the_second_source_component_understates_real_engine_output(model_runs, monkeypatch) -> None:
+    """MUTATION 1 - the two-component term. Remove it and this control must fail.
+
+    `combine_descriptors` composes `f"{name} ({caption})"`, so an emitted filename can carry TWO
+    full-length source-owned components. A one-component envelope is the class-blind mistake this
+    replaces, and it understates measured output rather than merely being tighter.
+
+    The comparison is on the FILENAME term, which is the term being mutated: the whole-path
+    comparison (`test_the_model_projection_covers_every_emitted_table_part`) also carries the
+    projected model-folder base, whose deliberate over-projection would absorb the mutation and make
+    this test vacuous.
+    """
+    run = model_runs["controls"]["two_long_components"]
+    actual = _actual_table_filename(run)
+    assert _projected_table_filename(run["evidence"]) >= actual, "the unmutated bound must cover the control"
+
+    monkeypatch.setattr(
+        run_estate,
+        "_MODEL_NAME_SHAPES",
+        tuple((1, literal) for _count, literal in run_estate._MODEL_NAME_SHAPES),  # pylint: disable=protected-access
+    )
+    mutated = run_estate._model_table_stem_bound(  # pylint: disable=protected-access
+        run["evidence"]["component"]
+    ) + utf16_len(run_estate._MODEL_TABLE_SUFFIX)  # pylint: disable=protected-access
+    assert mutated < actual, (
+        f"a ONE-component envelope ({mutated}) still covers the {actual}-unit two-component filename "
+        f"the engine emitted ({max(run['tables'], key=utf16_len)!r}), so this control cannot detect "
+        "the defect it exists for. Lengthen the control's identity names rather than deleting the "
+        "assertion."
+    )
+
+
+@requires_engine
+def test_dropping_the_fixed_overhead_understates_real_engine_output(model_runs, monkeypatch) -> None:
+    """MUTATION 2 - the fixed punctuation and uniquification allowance. Remove them and it must fail.
+
+    ⚠️ Honest limit: the two sub-terms are killed TOGETHER, not independently. The emitted collision
+    name exceeds twice its longest component by the three units of `" ("` + `")"`, which the 16-unit
+    uniquifier allowance would absorb on its own - so no committed control kills the allowance
+    alone. It is deliberate slack for the `" 2"` / `"_2"` climbs, not a measured boundary, and this
+    is stated rather than implied.
+    """
+    run = model_runs["controls"]["two_long_components"]
+    actual = _actual_table_filename(run)
+
+    monkeypatch.setattr(
+        run_estate,
+        "_MODEL_NAME_SHAPES",
+        tuple((count, 0) for count, _literal in run_estate._MODEL_NAME_SHAPES),  # pylint: disable=protected-access
+    )
+    monkeypatch.setattr(run_estate, "_MODEL_UNIQUIFIER_UTF16", 0)
+    mutated = run_estate._model_table_stem_bound(  # pylint: disable=protected-access
+        run["evidence"]["component"]
+    ) + utf16_len(run_estate._MODEL_TABLE_SUFFIX)  # pylint: disable=protected-access
+    assert mutated < actual, (
+        f"with NO fixed overhead the bound ({mutated}) still covers the {actual}-unit emitted "
+        "filename, so the overhead term is unproven by this control"
+    )
+
+
+@requires_engine
+def test_the_version_gate_is_what_refuses_an_unaudited_engine(model_runs, monkeypatch) -> None:
+    """MUTATION 3 - the version gate. Widen it and the refusal disappears.
+
+    The gate is the reason the bound is a claim about a SPECIFIC engine tree. Reported against the
+    canonical tree with a simulated version, so the census half is genuinely satisfied and only the
+    version decides - a stub tree would fail the census too and prove nothing about the gate.
+    """
+    engine = model_runs["engine"]
+    monkeypatch.setattr(run_estate, "engine_version", lambda _root=None: "9.9.9-unaudited")
+
+    refused = run_estate._model_write_site_census(engine)  # pylint: disable=protected-access
+    assert refused["status"] == "cannot_establish"
+    assert "9.9.9-unaudited" in refused["reason"]
+
+    monkeypatch.setattr(run_estate, "_MODEL_AUDITED_ENGINE_VERSIONS", frozenset({"9.9.9-unaudited"}))
+    widened = run_estate._model_write_site_census(engine)  # pylint: disable=protected-access
+    assert widened["status"] == "ok", (
+        f"with the gate widened the census still refuses ({widened.get('reason')}), so the assertion "
+        "above was passing for the census's reasons rather than the version gate's - the mutation "
+        "would not be independent"
     )

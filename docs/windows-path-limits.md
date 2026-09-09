@@ -370,6 +370,23 @@ Pass `--ceiling 282` to test that budget.
 * **A path it cannot measure is `unknown`, never passing.**
 * **An empty target is `no_paths`, not `ok`.**
 
+**The PRE-CONVERSION projection (`run_estate.project_estate_path_ceiling`) covers two families, and
+the second one is a bound rather than a path** (#564). Alongside the canonical PBIR visual path it
+projects `pbip/<unit>/<model>.SemanticModel/definition/tables/<table>` — the family that carries
+canonical engine 2.368.0's single measured over-ceiling artifact (273 units at the ordinary 22-unit
+run root, #565). Nothing caps that table filename, and its name is composed from source-owned
+identity, so the term is a deliberately conservative **envelope**: the longest identity component in
+the input documents, times the largest number of components any censused write site combines (2, from
+`combine_descriptors`' `Relation (<datasource>)` disambiguation), plus fixed punctuation and a
+uniquification allowance. It is **not** a per-class reimplementation of the engine's naming — three
+successive class-by-class projectors were each defeated by a class the engine had and this repository
+lacked. Two consequences, both intentional: the bound is **version-gated** (an engine outside the
+audited set, or a write-site census that no longer matches, yields `cannot_establish` and therefore a
+refusal, never a clean verdict), and it **over-refuses** — a workbook whose own captions are long can
+be refused at every output root even though the engine would have fitted. The refusal names the
+binding family and the component driving it, so the actionable move is visible: shorten the run root,
+or shorten that identity in the source.
+
 ---
 
 ## 8. What is still unverified

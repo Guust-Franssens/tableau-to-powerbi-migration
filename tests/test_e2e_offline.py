@@ -86,17 +86,35 @@ def _pipeline(tmp_path_factory):
         client.sign_out()
 
     engine = estate.install_fake_engine(work / "engine")
-    code = run_estate.main(
-        [
-            "--input",
-            str(work / "assets"),
-            "--output",
-            str(work / "bundle"),
-            "--engine",
-            str(engine),
-            "--allow-noncanonical-engine",
-        ]
-    )
+    with pytest.MonkeyPatch.context() as patch:
+        # The pre-conversion SEMANTIC-MODEL path envelope (issue #564) is version-gated against the
+        # canonical engine's own table write-site census, which this deliberate mock engine cannot
+        # satisfy - so without this the coordinator would refuse (`CANNOT ASSESS`) before the deploy
+        # chain under test here ever starts. Stubbed with a one-unit source component, which cannot
+        # bind; the envelope itself is proven against real engine output in
+        # `tests/test_issue_194_long_pbir_path.py` and `tests/test_run_estate.py`.
+        patch.setattr(
+            run_estate,
+            "model_envelope_evidence",
+            lambda _paths, _engine: {
+                "status": "ok",
+                "engine_version": "mock-engine",
+                "component": 1,
+                "component_value": "x",
+                "table_stem": run_estate._model_table_stem_bound(1),  # pylint: disable=protected-access
+            },
+        )
+        code = run_estate.main(
+            [
+                "--input",
+                str(work / "assets"),
+                "--output",
+                str(work / "bundle"),
+                "--engine",
+                str(engine),
+                "--allow-noncanonical-engine",
+            ]
+        )
     assert code == 0, "the coordinator must accept the bundle before anything is deployed"
 
     return {

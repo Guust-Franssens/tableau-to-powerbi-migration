@@ -81,10 +81,56 @@ def _root_for_length(length: int) -> Path:
     return Path(anchor + "r" * (length - utf16_len(anchor))).resolve()
 
 
+#: Model-family evidence whose source component is deliberately ONE unit, so the semantic-model term
+#: can never bind and every PBIR assertion below stays a statement about PBIR. The model family has
+#: its own tests (`_model_component_bound`, the boundary flip, and the engine-backed
+#: projection >= actual controls in `tests/test_issue_194_long_pbir_path.py`).
+PBIR_ONLY_EVIDENCE = {
+    "status": "ok",
+    "engine_version": "test-only",
+    "component": 1,
+    "component_value": "x",
+    "table_stem": run_estate._model_table_stem_bound(1),
+}
+
+#: The PRODUCTION evidence function, captured before the autouse stub below can replace it, so a
+#: test about the gate itself can still reach it.
+REAL_MODEL_EVIDENCE = run_estate.model_envelope_evidence
+
+
+def _evidence(component: int, *, version: str = "test-only") -> dict:
+    """Model-family evidence for an exact source-component length."""
+    return {
+        "status": "ok",
+        "engine_version": version,
+        "component": component,
+        "component_value": "c" * component,
+        "table_stem": run_estate._model_table_stem_bound(component),
+    }
+
+
+@pytest.fixture(autouse=True)
+def _default_model_evidence(monkeypatch: pytest.MonkeyPatch):
+    """Make the DEFAULT preflight in this module measure the PBIR family only.
+
+    Every `main()` test here builds a stub engine tree, which by construction cannot satisfy the
+    version-gated write-site census the semantic-model bound requires - so without this the whole
+    module would refuse with `CANNOT ASSESS` and stop testing what it is about. That gate is not
+    left unproven: `test_main_refuses_when_the_model_family_cannot_be_bounded` restores the real
+    function and drives `main` through it, and the bound itself is proven against real engine output
+    in `tests/test_issue_194_long_pbir_path.py`.
+    """
+    monkeypatch.setattr(run_estate, "model_envelope_evidence", lambda _paths, _engine: dict(PBIR_ONLY_EVIDENCE))
+
+
 def _boundary_root(unit: str, ceiling: int) -> Path:
     probe_root = Path("/r").resolve()
-    probe = run_estate.project_estate_path_ceiling(probe_root, [unit])
-    file_length = next(path["length"] for path in probe["paths"] if path["kind"] == "file")
+    probe = run_estate.project_estate_path_ceiling(probe_root, [unit], PBIR_ONLY_EVIDENCE)
+    file_length = next(
+        path["length"]
+        for path in probe["paths"]
+        if path["kind"] == "file" and path["family"] == run_estate._FAMILY_PBIR
+    )
     target_length = utf16_len(str(probe_root)) + ceiling - file_length
     return _root_for_length(target_length)
 
@@ -110,8 +156,10 @@ def test_a_failed_definition_of_done_is_not_a_pass() -> None:
 def test_projected_path_uses_utf16_and_accepts_the_measured_file_boundary() -> None:
     unit = "A" * 20
     root = _boundary_root(unit, FILE_CEILING)
-    projection = run_estate.project_estate_path_ceiling(root, [unit])
-    file_path = next(path for path in projection["paths"] if path["kind"] == "file")
+    projection = run_estate.project_estate_path_ceiling(root, [unit], PBIR_ONLY_EVIDENCE)
+    file_path = next(
+        path for path in projection["paths"] if path["kind"] == "file" and path["family"] == run_estate._FAMILY_PBIR
+    )
     assert file_path["length"] == FILE_CEILING
     assert projection["status"] == "ok"
 
@@ -119,7 +167,7 @@ def test_projected_path_uses_utf16_and_accepts_the_measured_file_boundary() -> N
 def test_projected_path_refuses_the_next_file_and_directory_boundaries() -> None:
     unit = "A" * 20
     root = _boundary_root(unit, FILE_CEILING + 1)
-    projection = run_estate.project_estate_path_ceiling(root, [unit])
+    projection = run_estate.project_estate_path_ceiling(root, [unit], PBIR_ONLY_EVIDENCE)
     assert projection["status"] == "over_ceiling"
     assert any(path["length"] == FILE_CEILING + 1 for path in projection["offenders"])
     assert any(path["length"] == DIR_CEILING + 1 for path in projection["offenders"])
@@ -127,16 +175,259 @@ def test_projected_path_refuses_the_next_file_and_directory_boundaries() -> None
 
 def test_projected_path_counts_supplementary_characters_as_two_units() -> None:
     unit = "😀" * 20
-    projection = run_estate.project_estate_path_ceiling(Path("/r"), [unit])
+    projection = run_estate.project_estate_path_ceiling(Path("/r"), [unit], PBIR_ONLY_EVIDENCE)
     file_path = next(path for path in projection["paths"] if path["kind"] == "file")
     assert file_path["length"] == utf16_len(file_path["path"])
     assert file_path["length"] > len(file_path["path"])
 
 
 def test_projected_names_include_engine_collision_suffixes() -> None:
-    projection = run_estate.project_estate_path_ceiling(Path("/short"), ["Sales", "sales"])
+    projection = run_estate.project_estate_path_ceiling(Path("/short"), ["Sales", "sales"], PBIR_ONLY_EVIDENCE)
 
     assert projection["status"] == "cannot_establish"
+
+
+# ---------------------------------------------------------------------------
+# The semantic-model table path family (issue #564)
+# ---------------------------------------------------------------------------
+#
+# The projector used to model ONLY the PBIR visual path, so a `<model>.SemanticModel/definition/
+# tables/<name>.tmdl` longer than that path could pass the pre-conversion gate. Issue #565 measured
+# a required 273-unit `.tmdl` at the skill's ordinary 22-unit run root. Every test below is about
+# the direction that matters: the projection may over-refuse, but it must never understate and must
+# never report `ok` for a family it could not bound.
+
+
+def _twb(*captions: str) -> str:
+    """A minimal Tableau document carrying exactly the identity captions given."""
+    columns = "".join(f"<column caption='{caption}' name='[c{index}]' />" for index, caption in enumerate(captions))
+    return f"<workbook><datasources><datasource name='ds'>{columns}</datasource></datasources></workbook>"
+
+
+def test_the_model_family_is_projected_and_can_be_the_binding_path() -> None:
+    """A short PBIR unit with a long source identity: the model term is what binds."""
+    unit = "u" * 10
+    projection = run_estate.project_estate_path_ceiling(_root_for_length(40), [unit], _evidence(60))
+
+    model_file = next(
+        record
+        for record in projection["paths"]
+        if record["family"] == run_estate._FAMILY_MODEL and record["kind"] == "file"
+    )
+    pbir_file = next(
+        record
+        for record in projection["paths"]
+        if record["family"] == run_estate._FAMILY_PBIR and record["kind"] == "file"
+    )
+    assert model_file["length"] > pbir_file["length"], (
+        f"the model term ({model_file['length']}) did not exceed the PBIR term ({pbir_file['length']}) "
+        "for a 10-unit unit name with a 60-unit source component - this is the shape #564 reports"
+    )
+    assert projection["family"] == run_estate._FAMILY_MODEL
+    assert "semantic-model table filename bound" in projection["reason"]
+    assert projection["binding"] is model_file
+
+
+def test_the_projection_is_never_clean_without_model_evidence() -> None:
+    """The fail-open shape #564 names: a clean PBIR verdict standing in for the whole projection."""
+    for evidence in (None, {}, {"status": "cannot_establish", "reason": "engine version 9.9.9 is unaudited"}):
+        projection = run_estate.project_estate_path_ceiling(Path("/short"), ["Sales"], evidence)
+        assert projection["status"] == "cannot_establish", evidence
+        assert projection["family"] == run_estate._FAMILY_MODEL, evidence
+        assert "semantic-model table path family" in projection["reason"], evidence
+    assert "9.9.9" in projection["reason"], "the underlying reason must survive into the verdict"
+
+
+def test_the_model_bound_combines_two_source_components_plus_fixed_overhead() -> None:
+    """The bound is the censused shape maximum, not one component and not their sum."""
+    assert run_estate._MODEL_MAX_COMPONENTS == 2
+    for component in (0, 1, 20, 63, 400):
+        expected = (
+            max(count * component + literal for count, literal in run_estate._MODEL_NAME_SHAPES)
+            + run_estate._MODEL_UNIQUIFIER_UTF16
+        )
+        assert run_estate._model_table_stem_bound(component) == expected
+    assert run_estate._model_table_stem_bound(63) > 2 * 63, "the fixed overhead term vanished"
+
+
+def test_the_model_folder_bound_respects_the_engines_own_base_cap() -> None:
+    """`migrate_estate._fs_safe` truncates a folder base; the table filename it never touches."""
+    unit = "u" * 10
+    projection = run_estate.project_estate_path_ceiling(Path("/r"), [unit], _evidence(400))
+    folder = Path(
+        next(
+            record["path"]
+            for record in projection["paths"]
+            if record["family"] == run_estate._FAMILY_MODEL and record["kind"] == "directory"
+        )
+    )
+    base = next(part for part in folder.parts if part.endswith(run_estate._MODEL_FOLDER_SUFFIX))
+    assert utf16_len(base) == run_estate._MODEL_FOLDER_BASE_CAP_UTF16 + utf16_len(run_estate._MODEL_FOLDER_SUFFIX)
+
+
+def test_a_one_unit_longer_root_flips_the_model_family_from_ok_to_refused() -> None:
+    """The boundary flip, on the model family: exactly at the ceiling passes, one unit over refuses."""
+    unit = "u" * 10
+    evidence = _evidence(45)
+    probe = run_estate.project_estate_path_ceiling(Path("/r").resolve(), [unit], evidence)
+    probe_file = next(
+        record for record in probe["paths"] if record["family"] == run_estate._FAMILY_MODEL and record["kind"] == "file"
+    )
+    at_ceiling = _root_for_length(utf16_len(str(Path("/r").resolve())) + FILE_CEILING - probe_file["length"])
+
+    fits = run_estate.project_estate_path_ceiling(at_ceiling, [unit], evidence)
+    model_file = next(
+        record for record in fits["paths"] if record["family"] == run_estate._FAMILY_MODEL and record["kind"] == "file"
+    )
+    assert model_file["length"] == FILE_CEILING
+    assert fits["status"] == "ok", [(r["family"], r["kind"], r["length"]) for r in fits["offenders"]]
+
+    over = run_estate.project_estate_path_ceiling(_root_for_length(utf16_len(str(at_ceiling)) + 1), [unit], evidence)
+    assert over["status"] == "over_ceiling"
+    assert [record["family"] for record in over["offenders"]] == [run_estate._FAMILY_MODEL]
+    assert over["offenders"][0]["length"] == FILE_CEILING + 1
+
+
+def test_supplementary_identity_components_count_as_two_units_each(tmp_path: Path) -> None:
+    """An astral caption is two UTF-16 units per code point - the length Windows actually counts."""
+    source = tmp_path / "Astral.twb"
+    source.write_text(_twb("Ventas 🌍🌎🌏 Consolidado"), encoding="utf-8")
+    bound = run_estate._model_component_bound([source])
+
+    assert bound["status"] == "ok"
+    assert bound["component"] == utf16_len("Ventas 🌍🌎🌏 Consolidado")
+    assert bound["component"] > len("Ventas 🌍🌎🌏 Consolidado")
+
+
+def test_the_component_bound_takes_the_longest_identity_across_the_estate(tmp_path: Path) -> None:
+    """Pooled across every input, because a table filename is composed per unit but gated per run."""
+    short = tmp_path / "Short.twb"
+    short.write_text(_twb("Sales"), encoding="utf-8")
+    long = tmp_path / "Long.twb"
+    long.write_text(_twb("Regional Sales and Inventory Turnover Consolidated Source"), encoding="utf-8")
+
+    assert run_estate._model_component_bound([short])["component"] == utf16_len("Sales")
+    pooled = run_estate._model_component_bound([short, long])
+    assert pooled["component"] == utf16_len("Regional Sales and Inventory Turnover Consolidated Source")
+
+
+def test_an_unparseable_or_empty_source_cannot_produce_a_bound(tmp_path: Path) -> None:
+    """No identity, no bound - never a small bound that happens to fit."""
+    broken = tmp_path / "Broken.twb"
+    broken.write_text("<workbook>", encoding="utf-8")
+    assert run_estate._model_component_bound([broken])["status"] == "cannot_establish"
+
+    empty = tmp_path / "Empty.twb"
+    empty.write_text("<workbook />", encoding="utf-8")
+    assert run_estate._model_component_bound([empty])["status"] == "cannot_establish"
+    assert run_estate._model_component_bound([])["status"] == "cannot_establish"
+    assert run_estate._model_component_bound(None)["status"] == "cannot_establish"
+
+
+def test_an_unaudited_engine_version_cannot_establish_the_census(tmp_path: Path) -> None:
+    """The version gate: the bound is a claim about a SPECIFIC engine tree, not about engines."""
+    engine = _versioned_engine(tmp_path / "engine", "9.9.9")
+    census = run_estate._model_write_site_census(engine)
+
+    assert census["status"] == "cannot_establish"
+    assert "9.9.9" in census["reason"] and "audited" in census["reason"]
+    assert run_estate._model_write_site_census(None)["status"] == "cannot_establish"
+
+
+def test_a_moved_write_site_census_cannot_establish_the_bound(tmp_path: Path, monkeypatch) -> None:
+    """An audited VERSION is not enough: the write sites it was read from must still be there."""
+    engine = _versioned_engine(tmp_path / "engine", sorted(run_estate._MODEL_AUDITED_ENGINE_VERSIONS)[0])
+    census = run_estate._model_write_site_census(engine)
+    assert census["status"] == "cannot_establish", "a stub engine tree cannot satisfy the census"
+    assert "census mismatch" in census["reason"] or "could not be read" in census["reason"]
+
+    scripts = engine / "skills" / "tableau-migration" / "scripts"
+    monkeypatch.setattr(run_estate, "_MODEL_WRITE_SITE_CENSUS", {"migrate_estate.py": {"def _safe_folder": 1}})
+    assert run_estate._model_write_site_census(engine)["status"] == "ok", (
+        "harness check: with a census the stub DOES satisfy, the gate must pass - otherwise the "
+        "mismatch assertion above proves nothing about the census itself"
+    )
+    (scripts / "migrate_estate.py").write_text("# the write site moved\n", encoding="utf-8")
+    moved = run_estate._model_write_site_census(engine)
+    assert moved["status"] == "cannot_establish"
+    assert "census mismatch" in moved["reason"]
+
+
+def test_the_preflight_names_the_binding_family_in_both_directions(tmp_path: Path, monkeypatch) -> None:
+    """An operator must be able to attribute the verdict to a family without reading the code."""
+    engine = _versioned_engine(tmp_path / "engine", "test")
+    source = tmp_path / "Sales.twb"
+    source.write_text(_twb("Sales"), encoding="utf-8")
+
+    monkeypatch.setattr(run_estate, "model_envelope_evidence", lambda _paths, _engine: _evidence(60))
+    ok, detail = run_estate.preflight_estate_path_ceiling(source, Path("/short"), engine)
+    assert ok is True, detail
+    assert f"binding family {run_estate._FAMILY_MODEL}" in detail
+
+    ok, detail = run_estate.preflight_estate_path_ceiling(source, _root_for_length(200), engine)
+    assert ok is False
+    assert f"Binding family {run_estate._FAMILY_MODEL}" in detail
+    assert "--runs-parent" in detail
+
+    monkeypatch.setattr(
+        run_estate,
+        "model_envelope_evidence",
+        lambda _paths, _engine: {"status": "cannot_establish", "reason": "engine version 9.9.9 is unaudited"},
+    )
+    ok, detail = run_estate.preflight_estate_path_ceiling(source, Path("/short"), engine)
+    assert ok is False
+    assert "CANNOT ASSESS" in detail and "9.9.9" in detail
+    assert f"Binding family {run_estate._FAMILY_MODEL}" in detail
+
+
+def test_model_envelope_evidence_refuses_before_it_reads_a_single_source(tmp_path: Path) -> None:
+    """Order matters: an unaudited engine is refused whatever the sources say."""
+    engine = _versioned_engine(tmp_path / "engine", "9.9.9")
+    source = tmp_path / "Sales.twb"
+    source.write_text(_twb("Sales"), encoding="utf-8")
+
+    evidence = REAL_MODEL_EVIDENCE([source], engine)
+    assert evidence["status"] == "cannot_establish"
+    assert "9.9.9" in evidence["reason"]
+    assert "component" not in evidence, "an unaudited engine must not yield a bound at all"
+
+
+def test_main_refuses_when_the_model_family_cannot_be_bounded(tmp_path: Path, monkeypatch) -> None:
+    """End to end through `main`, with the REAL evidence function and no autouse stub.
+
+    This is the wiring proof for the whole change: a stub engine cannot satisfy the version-gated
+    census, so the run is refused before the engine is invoked and before an output root is created,
+    with a diagnostic that names the family and the reason.
+    """
+    monkeypatch.setattr(run_estate, "model_envelope_evidence", REAL_MODEL_EVIDENCE)
+    engine = _versioned_engine(tmp_path / "engine", "2.126.0")
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "Sales.twb").write_text(_twb("Sales"), encoding="utf-8")
+    output = tmp_path / "out"
+    calls: list[Path] = []
+    monkeypatch.setattr(run_estate, "run_engine", lambda *args: calls.append(args[0]) or (0, ""))
+
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        code = run_estate.main(
+            [
+                "--engine",
+                str(engine),
+                "--allow-noncanonical-engine",
+                "--input",
+                str(source),
+                "--output",
+                str(output),
+            ]
+        )
+    printed = buffer.getvalue()
+
+    assert code == run_estate.EXIT_PATH_CEILING
+    assert "CANNOT ASSESS" in printed and run_estate._FAMILY_MODEL in printed, printed
+    assert "2.126.0" in printed and "audited" in printed, printed
+    assert not calls, "the engine must not run when the model path family is unbounded"
+    assert not output.exists(), "a refused run must not create its output root"
 
 
 def test_projected_names_are_supplied_by_the_selected_engine(tmp_path: Path) -> None:
@@ -222,9 +513,15 @@ def test_pbir_envelope_is_pinned_to_committed_artifacts() -> None:
 def test_realistic_long_estate_is_refused_by_conservative_pbir_envelope() -> None:
     root = _root_for_length(90)
     unit = "u" * 37
-    projection = run_estate.project_estate_path_ceiling(root, [unit])
-    file_path = next(path for path in projection["paths"] if path["kind"] == "file")
-    directory = next(path for path in projection["paths"] if path["kind"] == "directory")
+    projection = run_estate.project_estate_path_ceiling(root, [unit], PBIR_ONLY_EVIDENCE)
+    file_path = next(
+        path for path in projection["paths"] if path["kind"] == "file" and path["family"] == run_estate._FAMILY_PBIR
+    )
+    directory = next(
+        path
+        for path in projection["paths"]
+        if path["kind"] == "directory" and path["family"] == run_estate._FAMILY_PBIR
+    )
     report_root = Path("pbip") / unit / f"{unit}.Report"
     visual_tail = Path(run_estate._PBIR_VISUAL_TAIL)
     assert utf16_len(str(root)) == 90
@@ -436,7 +733,7 @@ def test_composed_allocator_and_projection_reproduces_run_409(tmp_path: Path, mo
     probe_alloc = _work_dirs_allocate(unit, "--repo-root", probe_root)
     probe_bundle = Path(probe_alloc["bundle"])
     suffix_len = utf16_len(str(probe_bundle)) - utf16_len(str(probe_root))
-    probe_projection = run_estate.project_estate_path_ceiling(probe_bundle, [unit])
+    probe_projection = run_estate.project_estate_path_ceiling(probe_bundle, [unit], PBIR_ONLY_EVIDENCE)
     probe_file_len = next(p["length"] for p in probe_projection["paths"] if p["kind"] == "file")
     tail_len = probe_file_len - utf16_len(str(probe_bundle))
 
@@ -461,7 +758,7 @@ def test_composed_allocator_and_projection_reproduces_run_409(tmp_path: Path, mo
     try:
         deep_alloc = _work_dirs_allocate(unit, "--repo-root", deep_root)
         _assert_cli_evidence("--repo-root", deep_root, deep_alloc)
-        deep_projection = run_estate.project_estate_path_ceiling(Path(deep_alloc["bundle"]), [unit])
+        deep_projection = run_estate.project_estate_path_ceiling(Path(deep_alloc["bundle"]), [unit], PBIR_ONLY_EVIDENCE)
         deep_file_len = next(p["length"] for p in deep_projection["paths"] if p["kind"] == "file")
         deep_dir_len = next(p["length"] for p in deep_projection["paths"] if p["kind"] == "directory")
         assert deep_projection["status"] == "over_ceiling"
@@ -479,7 +776,7 @@ def test_composed_allocator_and_projection_reproduces_run_409(tmp_path: Path, mo
         short_alloc = _work_dirs_allocate(unit, "--runs-parent", short_root)
         _assert_cli_evidence("--runs-parent", short_root, short_alloc)
         short_bundle = Path(short_alloc["bundle"])
-        short_projection = run_estate.project_estate_path_ceiling(short_bundle, [unit])
+        short_projection = run_estate.project_estate_path_ceiling(short_bundle, [unit], PBIR_ONLY_EVIDENCE)
         measured = [(p["kind"], p["length"], p["ceiling"]) for p in short_projection["paths"]]
         assert short_projection["status"] == "ok", f"measured lengths (kind, length, ceiling): {measured}"
         assert not short_projection["offenders"], f"measured lengths (kind, length, ceiling): {measured}"

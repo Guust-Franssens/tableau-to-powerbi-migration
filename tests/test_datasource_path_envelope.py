@@ -124,6 +124,17 @@ ENVELOPE_TAIL = {
     THIN_UNIT: _tail(THIN_PAGE, None),
 }
 
+#: Model-family evidence whose source component is one unit, so the semantic-model term cannot bind
+#: and the PBIR assertions in this module stay statements about PBIR. The model family's own control
+#: (`test_the_model_family_projection_covers_every_emitted_shape`) uses the PRODUCTION evidence.
+PBIR_ONLY_EVIDENCE = {
+    "status": "ok",
+    "engine_version": "test-only",
+    "component": 1,
+    "component_value": "x",
+    "table_stem": run_estate._model_table_stem_bound(1),  # pylint: disable=protected-access
+}
+
 #: The two calcs grafted onto the base fixture, and the exact shape `parameters.detect_field_swap`
 #: accepts: a `[Parameters].[X]`-driven CASE whose every branch is a BARE field reference, >= 2
 #: branches. One measure-role and one dimension-role, so the emitted page carries the table AND a
@@ -320,6 +331,22 @@ def _engine_bundle(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]: 
         )
         deepest = max(tails, key=utf16_len, default="")
         deepest_dir = max(dir_tails, key=utf16_len, default="")
+        # The SEMANTIC-MODEL family (issue #564): the model folder beside the report, and the
+        # longest table part the engine actually wrote into it. Recorded per unit so the
+        # projection >= actual control below compares production against real emitted bytes.
+        unit_root = out / "pbip" / unit
+        model_dirs = (
+            [path for path in unit_root.iterdir() if path.is_dir() and path.name.endswith(".SemanticModel")]
+            if unit_root.is_dir()
+            else []
+        )
+        model_files = [
+            str(path.relative_to(unit_root)).replace("\\", "/")
+            for model in model_dirs
+            for path in model.rglob("*")
+            if path.is_file()
+        ]
+        deepest_model = max(model_files, key=utf16_len, default="")
         shapes[unit] = {
             "report": report,
             "pages": page_dirs,
@@ -330,6 +357,9 @@ def _engine_bundle(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]: 
             "deepest_dir_tail_len": utf16_len(deepest_dir),
             "longest_visual_id": max((utf16_len(v) for v in visuals), default=0),
             "longest_page_id": max((utf16_len(p) for p in page_dirs), default=0),
+            "model_folders": [path.name for path in model_dirs],
+            "deepest_model_tail": deepest_model,
+            "deepest_model_tail_len": utf16_len(deepest_model),
         }
     return {"version": engine_source.engine_version(engine), "root": out, "shapes": shapes}
 
@@ -500,8 +530,12 @@ def test_the_production_projection_refuses_each_emitted_shape_at_its_own_boundar
         f"harness error: the emitted {kind} measures {at_root} at the constructed root, not the intended {ceiling + 1}"
     )
 
-    projection = run_estate.project_estate_path_ceiling(root, [unit])
-    record = next(r for r in projection["paths"] if r["kind"] == kind)
+    projection = run_estate.project_estate_path_ceiling(root, [unit], PBIR_ONLY_EVIDENCE)
+    record = next(
+        r
+        for r in projection["paths"]
+        if r["kind"] == kind and r["family"] == run_estate._FAMILY_PBIR  # pylint: disable=protected-access
+    )
 
     assert record["length"] >= at_root, (
         f"{unit}/{kind}: the PRODUCTION envelope projects {record['length']} units where the engine "
@@ -594,8 +628,12 @@ def test_the_projector_is_blind_to_unit_kind_and_over_projects_this_datasource(e
     """
     shape = engine_bundle["shapes"][SWAP_UNIT]
     root = engine_bundle["root"]
-    projection = run_estate.project_estate_path_ceiling(root, [SWAP_UNIT])
-    projected_file = next(r for r in projection["paths"] if r["kind"] == "file")["length"]
+    projection = run_estate.project_estate_path_ceiling(root, [SWAP_UNIT], PBIR_ONLY_EVIDENCE)
+    projected_file = next(
+        r
+        for r in projection["paths"]
+        if r["kind"] == "file" and r["family"] == run_estate._FAMILY_PBIR  # pylint: disable=protected-access
+    )["length"]
     actual_file = max(utf16_len(str(p)) for p in shape["report"].rglob("*") if p.is_file())
 
     assert projected_file > actual_file, (
@@ -612,6 +650,45 @@ def test_the_projector_is_blind_to_unit_kind_and_over_projects_this_datasource(e
         f"The sound datasource envelope ({sound}) does not cover the emitted path ({actual_file}); an "
         "envelope that fails to cover real output is fail-open by construction."
     )
+
+
+@requires_engine
+def test_the_model_family_projection_covers_every_emitted_shape(engine_bundle) -> None:
+    """Issue #564, against real engine output: an ORDINARY datasource, a FIELD-SWAP datasource and a
+    real workbook, each judged on the semantic-model table part the engine actually wrote.
+
+    The comparison is `projected >= actual` on the emitted bytes, not against an expected filename:
+    an expected-string test cannot see a naming class the engine has and this repository does not,
+    which is exactly how three successive class-by-class projectors were defeated (issue #564).
+    """
+    engine = _contract()
+    evidence = run_estate.model_envelope_evidence(sorted(MATRIX_SOURCES.values()), engine)
+    assert evidence["status"] == "ok", (
+        f"the production evidence could not be established on engine {engine_bundle['version']}: "
+        f"{evidence.get('reason')}. If the engine moved, re-audit the write-site census - do not "
+        "relax the gate."
+    )
+
+    root = engine_bundle["root"]
+    projection = run_estate.project_estate_path_ceiling(root, sorted(MATRIX_SOURCES), evidence)
+    projected = max(
+        record["length"]
+        for record in projection["paths"]
+        if record["family"] == run_estate._FAMILY_MODEL  # pylint: disable=protected-access
+        and record["kind"] == "file"
+    )
+
+    for unit, shape in engine_bundle["shapes"].items():
+        assert shape["model_folders"], (
+            f"{unit} emitted no `.SemanticModel` folder on engine {engine_bundle['version']}; this "
+            "control would then be vacuous"
+        )
+        actual = utf16_len(str(root / "pbip" / unit / shape["deepest_model_tail"]))
+        assert projected >= actual, (
+            f"{unit}: production projects {projected} units for the semantic-model family where the "
+            f"engine really wrote {actual} ({shape['deepest_model_tail']!r}). A projection that does "
+            "not cover real output is fail-open by construction - this is issue #564."
+        )
 
 
 @requires_engine

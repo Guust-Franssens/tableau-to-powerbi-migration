@@ -133,6 +133,7 @@ import subprocess
 import sys
 import time
 import uuid
+import xml.etree.ElementTree as ET
 import zipfile
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -151,7 +152,13 @@ from check_pbir_valid import REPORT_NAME as PBIR_VALID_REPORT
 from check_pbir_valid import render as render_pbir_valid
 from check_pbir_valid import scan as scan_pbir_validity
 from check_path_ceiling import DIR_CEILING, FILE_CEILING, utf16_len
-from engine_source import EngineNotFoundError, NonCanonicalEngineError, engine_provenance, resolve_engine
+from engine_source import (
+    EngineNotFoundError,
+    NonCanonicalEngineError,
+    engine_provenance,
+    engine_version,
+    resolve_engine,
+)
 from migration_bundle import ENGINE_RECEIPT, sha256_file, write_engine_receipt
 
 log = logging.getLogger("run_estate")
@@ -228,6 +235,288 @@ def _input_candidates(input_dir: Path) -> list[Path] | None:
     return candidates
 
 
+# --------------------------------------------------------------------------------------------
+# The SEMANTIC-MODEL table path family (issue #564)
+# --------------------------------------------------------------------------------------------
+# The PBIR envelope above is not the only family the engine emits. A workbook's model lands as
+# `pbip/<unit>/<model>.SemanticModel/definition/tables/<table>` + the TMDL suffix, and NOTHING caps
+# that table filename - the engine's model-folder writer lays each part path down verbatim, while
+# the model FOLDER base is capped at `migrate_estate._MAX_FS_BASE`. Issue #565 measured a required
+# 273-unit table part at the skill's ordinary 22-unit run root while the `.pbip` pointer was legal.
+#
+# ⚠️ This is deliberately NOT a per-class reimplementation of the engine's naming. Three emitted
+# filename classes each defeated that approach in turn (duplicate-relation disambiguation
+# `Relation (<datasource>)`, a long range/what-if parameter caption, and the per-island
+# `Date (<datasource>)` calendar), because the inventory of classes is owned by the engine and a
+# class it has but we lack is silently absent rather than loud. Instead this bounds the emitted
+# filename GENERICALLY: the longest SOURCE-OWNED identity component in the input documents, times
+# the maximum number of such components any censused write site can combine, plus that site's fixed
+# punctuation and uniquification allowance. It over-refuses by construction; it must not understate.
+_FAMILY_PBIR = "pbir"
+_FAMILY_MODEL = "semantic_model"
+
+#: The engine version(s) the write-site census below was read against. The bound is a claim about a
+#: SPECIFIC engine tree, so any other version is `cannot_establish` rather than a silent assumption
+#: that the naming did not move. Re-audit the write sites and extend this set deliberately.
+_MODEL_AUDITED_ENGINE_VERSIONS = frozenset({"2.368.0"})
+
+#: The audited census, as literal occurrence counts in the canonical engine's own scripts. Read on
+#: 2.368.0 by enumerating every expression that CREATES a `definition/tables/<name>` model part
+#: (`assemble_model.py` lines 4877 data tables, 4941 date dimensions, 5326 `_Measures`, 5707
+#: DirectLake, and `_inject_field_param_tables`; the five remaining occurrences are enrichment sites
+#: guarded by `if path in parts`, which cannot mint a new filename) plus the name-composing
+#: expressions those sites consume (`connection_to_m.combine_descriptors`' `f"{name} ({caption})"` /
+#: `f"{name} ({caption} {n})"`, `assemble_model`'s `"Date (%s)"` prefix ladder, and
+#: `parameters.py`'s `_safe_filename` / `" Parameter"` naming). It is a FINGERPRINT, not a parser: a
+#: count that moves means the audited census no longer describes this tree, so the bound is refused.
+_MODEL_WRITE_SITE_CENSUS: dict[str, dict[str, int]] = {
+    "assemble_model.py": {
+        "definition/tables/": 11,
+        "_inject_field_param_tables": 4,
+        "name_pref": 6,
+        "Date (%s)": 1,
+    },
+    "connection_to_m.py": {
+        'f"{name} ({caption})"': 1,
+        'f"{name} ({caption} {n})"': 1,
+        "def _table_display": 1,
+    },
+    "parameters.py": {
+        "_safe_filename(": 3,
+        'prefer_suffix=" Parameter"': 1,
+        "def _uniquify": 3,
+    },
+    "migrate_estate.py": {
+        "_fs_safe(": 4,
+        "_MAX_FS_BASE": 6,
+    },
+}
+
+#: `(source components, fixed literal UTF-16 units)` for every emitted table-name SHAPE the census
+#: found, without deciding which shape a given source will take:
+#:   * 2 components + `" ("`, `")"` and the collision climb's separating space - the widest, from
+#:     `combine_descriptors`' duplicate-relation disambiguation;
+#:   * 1 component + `"Date ("`, `")"` and `" Dimension"` - the widest fixed text, from the
+#:     per-island calendar ladder (`" Parameter"` at 10 units is strictly inside it).
+#: The bound is the MAXIMUM over the shapes, not their sum: combining the widest component count
+#: with an unrelated shape's literal would be arbitrary padding rather than a bound.
+_MODEL_NAME_SHAPES = ((2, 4), (1, 17))
+
+#: The widest component count any censused shape combines - reported in the refusal so the driver of
+#: an over-refusal is attributable rather than a bare number.
+_MODEL_MAX_COMPONENTS = max(count for count, _literal in _MODEL_NAME_SHAPES)
+
+#: Head-room for the uniquification ladders that can ride on top of a shape: the table-name climb
+#: (`" 2"`, `" 3"`, ...) and the part-filename climb (`"_2"`, `"_3"`, ...) can both apply, so this
+#: allows six digits of each.
+_MODEL_UNIQUIFIER_UTF16 = 16
+
+#: ⚠️ The literal is composed rather than written out: `run_estate` is the coordinator, and its own
+#: architectural guard forbids model-content filenames appearing in it (see
+#: `test_the_coordinator_never_emits_model_content`).
+_MODEL_TABLE_SUFFIX = "." + "tmdl"
+_MODEL_FOLDER_SUFFIX = ".SemanticModel"
+_MODEL_TABLES_TAIL = ("definition", "tables")
+
+#: `migrate_estate._fs_safe` truncates a folder base to `_MAX_FS_BASE` (64) CODE POINTS; an astral
+#: code point is two UTF-16 units, so 128 units is the ceiling that cap really imposes.
+_MODEL_FOLDER_BASE_CAP_UTF16 = 128
+
+#: Attributes that can carry a source-owned identity a censused write site may put in a filename.
+#: `caption` is collected from EVERY element - a caption is the human name the disambiguation
+#: suffix, the calendar suffix, the what-if table and the field-parameter table are all built from,
+#: and deciding WHICH of those a given caption will become is exactly the class reasoning this
+#: envelope refuses to do. The remaining attributes are scoped to the elements the engine's parser
+#: reads a table identity from, so an internal, structurally-decorated id that no write site can
+#: reach (`<column-instance name='[none:X:nk]'>`, `<zone name=...>`) does not inflate the bound.
+_MODEL_IDENTITY_ATTRS = frozenset({"caption"})
+
+#: `<element>` -> the additional attributes on it that a censused write site can read as a name:
+#: relation names and raw tables (`_table_display`), datasource captions and their `datasource_name`
+#: fallback (`combine_descriptors`, `_collapse_untyped_relations_to_extract`), an extract's
+#: materialized `tablename`, a parameter's `internal_name` (`<column name=...>`, the caption's own
+#: fallback in `emit_value_parameters`), and the object-graph entries `_object_table_map` resolves.
+_MODEL_IDENTITY_ATTRS_BY_TAG: dict[str, frozenset[str]] = {
+    "datasource": frozenset({"name", "formatted-name"}),
+    "named-connection": frozenset({"name"}),
+    "relation": frozenset({"name", "table"}),
+    "table": frozenset({"name", "table"}),
+    "connection": frozenset({"tablename"}),
+    "extract": frozenset({"name"}),
+    "column": frozenset({"name"}),
+    "object": frozenset({"name", "id"}),
+}
+
+#: `(element, attribute)` pairs whose value is a QUALIFIED Tableau name (`[catalog].[schema].[item]`,
+#: `[__tableau_internal_object_id__].[<guid>]`). The engine's parser keeps ONE segment of these
+#: (`connection_to_m._strip_brackets` and the bracket splitter that produces a relation's `item`; a
+#: parameter's `internal_name` is the bracket-stripped `<column name>`), so the bound is the longest
+#: segment rather than the whole string - otherwise a 30-unit internal object-id prefix inflates
+#: every estate that has one. Deliberately NOT applied to a relation's own `name` or to any
+#: `caption`: those reach `definition/tables/<name>` verbatim, brackets and all. ⚠️ Residual: a
+#: name whose own text contains `].[` would be split here; Tableau escapes `]` as `]]` inside a
+#: bracketed name, so that string cannot be a single segment in a document it wrote.
+_MODEL_QUALIFIED_FIELDS = frozenset(
+    {
+        ("relation", "table"),
+        ("table", "table"),
+        ("connection", "tablename"),
+        ("column", "name"),
+        ("object", "id"),
+    }
+)
+
+#: Location-shaped attributes, scoped to the elements that carry an upstream file. Only the final
+#: path component of a location can become a name (an extracted flat file's relation is named after
+#: the file, never after its directory), so the separator split is a string rule rather than a class
+#: decision - and a packaged flat file's `<relation name=...>` carries the same identity anyway.
+_MODEL_LOCATION_ATTRS = frozenset({"filename", "directory", "path"})
+_MODEL_LOCATION_TAGS = frozenset({"connection", "named-connection", "relation", "datasource"})
+
+#: Elements whose TEXT is an identity the engine reads: an extract's materialized-table parent and
+#: the metadata-record naming around it (`connection_to_m._extract_materialized_tables`).
+_MODEL_IDENTITY_TEXT_TAGS = frozenset({"parent-name", "local-name", "remote-name", "local-alias", "remote-alias"})
+
+
+def _local_tag(name: str) -> str:
+    """An XML tag or attribute name without its namespace, lowercased."""
+    return name.rsplit("}", 1)[-1].lower()
+
+
+def _longest_qualified_segment(value: str) -> str:
+    """The longest segment of a qualified `[catalog].[schema].[item]` Tableau name.
+
+    Brackets are deliberately NOT stripped: the engine's parser strips them, which only ever
+    shortens the identity it keeps, so leaving them in keeps this an upper bound.
+    """
+    return max(value.split("].["), key=utf16_len)
+
+
+def _source_document(path: Path) -> str | None:
+    """The Tableau XML document text of a loose or packaged source, or None when unreadable."""
+    try:
+        if path.suffix.lower() in {".twb", ".tds"}:
+            return path.read_bytes().decode("utf-8-sig")
+        required = _ENGINE_SOURCE_SUFFIXES[path.suffix.lower()]
+        with zipfile.ZipFile(path) as archive:
+            for info in archive.infolist():
+                if not info.is_dir() and Path(info.filename).suffix.lower() == required:
+                    with archive.open(info) as document:
+                        return document.read().decode("utf-8-sig")
+        return None
+    except (OSError, KeyError, UnicodeDecodeError, zipfile.BadZipFile):
+        return None
+
+
+def _identity_components(text: str) -> list[str] | None:
+    """Every source-owned identity string in one Tableau document, or None when it will not parse."""
+    try:
+        root = ET.fromstring(text)
+    except (ET.ParseError, ValueError):
+        return None
+    found: list[str] = []
+    for element in root.iter():
+        tag = _local_tag(element.tag)
+        scoped = _MODEL_IDENTITY_ATTRS_BY_TAG.get(tag, frozenset())
+        for key, value in element.attrib.items():
+            if not value:
+                continue
+            attribute = _local_tag(key)
+            if (tag, attribute) in _MODEL_QUALIFIED_FIELDS:
+                found.append(_longest_qualified_segment(value))
+            elif attribute in _MODEL_IDENTITY_ATTRS or attribute in scoped:
+                found.append(value)
+            elif attribute in _MODEL_LOCATION_ATTRS and tag in _MODEL_LOCATION_TAGS:
+                found.append(value.replace("\\", "/").rsplit("/", 1)[-1])
+        if tag in _MODEL_IDENTITY_TEXT_TAGS and (element.text or "").strip():
+            found.append(_longest_qualified_segment(element.text.strip()))
+    return found
+
+
+def _model_component_bound(paths: list[Path] | None) -> dict:
+    """The longest source-owned identity component the estate can hand a table filename."""
+    if not paths:
+        return {"status": "cannot_establish", "reason": "no readable Tableau source document was available"}
+    longest, longest_value = 0, ""
+    for path in paths:
+        text = _source_document(path)
+        if text is None:
+            return {"status": "cannot_establish", "reason": f"source {path.name!r} could not be read as Tableau XML"}
+        components = _identity_components(text)
+        if components is None:
+            return {"status": "cannot_establish", "reason": f"source {path.name!r} is not parseable Tableau XML"}
+        for value in components:
+            length = utf16_len(value)
+            if length > longest:
+                longest, longest_value = length, value
+    if not longest:
+        return {"status": "cannot_establish", "reason": "the estate declares no source identity component"}
+    return {"status": "ok", "component": longest, "component_value": longest_value}
+
+
+def _model_write_site_census(engine: Path | None) -> dict:
+    """Prove the audited table write-site census still describes the engine that will run."""
+    if engine is None:
+        return {"status": "cannot_establish", "reason": "no engine was selected, so its table write sites are unknown"}
+    try:
+        version = engine_version(engine)
+    except OSError:
+        version = None
+    if version not in _MODEL_AUDITED_ENGINE_VERSIONS:
+        return {
+            "status": "cannot_establish",
+            "reason": (
+                f"engine version {version or 'unknown'} is outside the audited set "
+                f"{sorted(_MODEL_AUDITED_ENGINE_VERSIONS)}; the table write-site census was never "
+                "read against it"
+            ),
+        }
+    scripts_dir = engine / "skills" / "tableau-migration" / "scripts"
+    for filename, probes in _MODEL_WRITE_SITE_CENSUS.items():
+        try:
+            text = (scripts_dir / filename).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return {"status": "cannot_establish", "reason": f"engine script {filename!r} could not be read"}
+        for probe, expected in probes.items():
+            seen = text.count(probe)
+            if seen != expected:
+                return {
+                    "status": "cannot_establish",
+                    "reason": (
+                        f"table write-site census mismatch in {filename}: {probe!r} occurs {seen} "
+                        f"time(s), audited {expected}"
+                    ),
+                }
+    return {"status": "ok", "engine_version": version}
+
+
+def _model_table_stem_bound(component: int) -> int:
+    """The longest emitted table filename STEM (before the suffix) the censused sites can compose."""
+    return max(count * component + literal for count, literal in _MODEL_NAME_SHAPES) + _MODEL_UNIQUIFIER_UTF16
+
+
+def model_envelope_evidence(paths: list[Path] | None, engine: Path | None) -> dict:
+    """Version-gated evidence for the semantic-model table path family.
+
+    Returns either `{"status": "ok", ...}` carrying the bound, or `{"status": "cannot_establish",
+    "reason": ...}`. It never returns a clean bound from an unaudited engine or an unreadable source:
+    the projection's whole job is to be unable to say "fits" when it cannot say it.
+    """
+    census = _model_write_site_census(engine)
+    if census["status"] != "ok":
+        return census
+    bound = _model_component_bound(paths)
+    if bound["status"] != "ok":
+        return bound
+    return {
+        "status": "ok",
+        "engine_version": census["engine_version"],
+        "component": bound["component"],
+        "component_value": bound["component_value"],
+        "table_stem": _model_table_stem_bound(bound["component"]),
+    }
+
+
 def _engine_unit_names(engine: Path, input_dir: Path) -> list[str] | None:
     """Ask the selected engine for its real datasource-then-workbook folder allocation."""
     scripts_dir = engine / "skills" / "tableau-migration" / "scripts"
@@ -269,16 +558,42 @@ def _engine_unit_names(engine: Path, input_dir: Path) -> list[str] | None:
     return names
 
 
-def project_estate_path_ceiling(output_root: Path, unit_names: list[str] | None) -> dict:
-    """Project the canonical PBIP visual path before the engine writes any output.
+def _path_records(family: str, directory: Path, file_path: Path) -> list[dict]:
+    """The (directory, file) pair a projected path contributes, each judged by its own ceiling."""
+    return [
+        {
+            "family": family,
+            "kind": "directory",
+            "path": str(directory),
+            "length": utf16_len(str(directory)),
+            "ceiling": DIR_CEILING,
+        },
+        {
+            "family": family,
+            "kind": "file",
+            "path": str(file_path),
+            "length": utf16_len(str(file_path)),
+            "ceiling": FILE_CEILING,
+        },
+    ]
 
-    The fixed page/visual identifiers define the minimum canonical PBIR safety envelope; the estate's
-    longest source name and actual output root are the variable inputs available at this stage.
+
+def project_estate_path_ceiling(
+    output_root: Path, unit_names: list[str] | None, model_evidence: dict | None = None
+) -> dict:
+    """Project BOTH canonical PBIP path families before the engine writes any output.
+
+    The PBIR term uses the fixed page/visual identifiers as the minimum canonical safety envelope.
+    The semantic-model term is the conservative source-component envelope described above, and it
+    requires `model_evidence` from `model_envelope_evidence`: without it - or with an unaudited
+    engine, or an unreadable source - the whole projection is `cannot_establish`, never `ok`, because
+    a clean PBIR verdict alone would be exactly the fail-open shape issue #564 reports.
     """
     output_root = output_root.resolve()
     if not unit_names:
         return {
             "status": "cannot_establish",
+            "family": _FAMILY_PBIR,
             "reason": "no unit/workbook name was available before conversion",
             "output_root": str(output_root),
         }
@@ -289,31 +604,44 @@ def project_estate_path_ceiling(output_root: Path, unit_names: list[str] | None)
     ) != len(projected_names):
         return {
             "status": "cannot_establish",
+            "family": _FAMILY_PBIR,
             "reason": "the selected engine returned an invalid unit name",
             "output_root": str(output_root),
         }
+    if not model_evidence or model_evidence.get("status") != "ok":
+        return {
+            "status": "cannot_establish",
+            "family": _FAMILY_MODEL,
+            "reason": (
+                "the semantic-model table path family could not be bounded: "
+                + ((model_evidence or {}).get("reason") or "no model-path evidence was supplied")
+            ),
+            "output_root": str(output_root),
+        }
+    component = model_evidence["component"]
+    table_stem = model_evidence["table_stem"]
+    # The model FOLDER is `_fs_safe(<datasource caption> or <workbook name>)`, so it is bounded by
+    # the same component pool as the table name and by the engine's own base cap - never by the unit
+    # name alone, which is why the unit-name-only projection could not see this family at all.
+    model_base_units = min(
+        max([component, *(utf16_len(name) for name in projected_names)]), _MODEL_FOLDER_BASE_CAP_UTF16
+    )
     for unit in projected_names:
-        report = f"{unit}.Report"
-        report_root = output_root / "pbip" / unit / report
-        directory = report_root / _PBIR_VISUAL_TAIL.rsplit("/", 1)[0]
-        file_path = report_root / _PBIR_VISUAL_TAIL
+        unit_root = output_root / "pbip" / unit
+        report_root = unit_root / f"{unit}.Report"
         records.extend(
-            (
-                {
-                    "kind": "directory",
-                    "path": str(directory),
-                    "length": utf16_len(str(directory)),
-                    "ceiling": DIR_CEILING,
-                },
-                {
-                    "kind": "file",
-                    "path": str(file_path),
-                    "length": utf16_len(str(file_path)),
-                    "ceiling": FILE_CEILING,
-                },
+            _path_records(
+                _FAMILY_PBIR,
+                report_root / _PBIR_VISUAL_TAIL.rsplit("/", 1)[0],
+                report_root / _PBIR_VISUAL_TAIL,
             )
         )
+        tables_dir = unit_root / ("m" * model_base_units + _MODEL_FOLDER_SUFFIX)
+        for part in _MODEL_TABLES_TAIL:
+            tables_dir = tables_dir / part
+        records.extend(_path_records(_FAMILY_MODEL, tables_dir, tables_dir / ("t" * table_stem + _MODEL_TABLE_SUFFIX)))
     offenders = [record for record in records if record["length"] > record["ceiling"]]
+    binding = max(records, key=lambda record: record["length"] - record["ceiling"])
     return {
         "status": "over_ceiling" if offenders else "ok",
         "output_root": str(output_root),
@@ -321,7 +649,23 @@ def project_estate_path_ceiling(output_root: Path, unit_names: list[str] | None)
         "projected_units": projected_names,
         "paths": records,
         "offenders": offenders,
+        "family": binding["family"],
+        "binding": binding,
+        "reason": _binding_reason(binding, model_evidence),
+        "model_evidence": model_evidence,
     }
+
+
+def _binding_reason(binding: dict, model_evidence: dict) -> str:
+    """Why the binding path family binds, in the terms that produced its length."""
+    if binding["family"] == _FAMILY_MODEL:
+        return (
+            f"the semantic-model table filename bound ({_MODEL_MAX_COMPONENTS} x the "
+            f"{model_evidence['component']}-unit source component {model_evidence['component_value']!r} "
+            f"plus fixed overhead) is the longest projected path, on audited engine "
+            f"{model_evidence['engine_version']}"
+        )
+    return "the canonical PBIR visual path is the longest projected path"
 
 
 #: The actionable escape route for a projected path-ceiling refusal - issue #479's second reopen
@@ -343,10 +687,15 @@ def preflight_estate_path_ceiling(input_dir: Path, output_root: Path, engine: Pa
     try:
         candidates = _input_candidates(input_dir)
         names = _engine_unit_names(engine, input_dir) if engine and candidates else None
-        projection = project_estate_path_ceiling(output_root, names)
+        projection = project_estate_path_ceiling(output_root, names, model_envelope_evidence(candidates, engine))
     except (OSError, RuntimeError, UnicodeEncodeError, ValueError) as exc:
         return False, (f"CANNOT ASSESS downstream PBIP path length ({type(exc).__name__}: {exc}). {_SHORT_ROOT_HINT}")
     if projection["status"] == "cannot_establish":
+        if projection["family"] == _FAMILY_MODEL:
+            return False, (
+                "CANNOT ASSESS downstream PBIP path length: "
+                f"{projection['reason']}. Binding family {_FAMILY_MODEL}. {_SHORT_ROOT_HINT}"
+            )
         return False, (
             "CANNOT ASSESS downstream PBIP path length: the input estate has no usable unit/workbook "
             f"name. {_SHORT_ROOT_HINT}"
@@ -356,12 +705,14 @@ def preflight_estate_path_ceiling(input_dir: Path, output_root: Path, engine: Pa
         return False, (
             f"PATH CEILING: projected {worst['kind']} is {worst['length']} UTF-16 units "
             f"(ceiling {worst['ceiling']}) for unit {projection['longest_unit']!r}. "
+            f"Binding family {worst['family']}: {projection['reason']}. "
             "LongPathsEnabled and \\\\?\\ prefixes do not make Power BI Desktop accept these paths. "
             f"{_SHORT_ROOT_HINT}"
         )
     return True, (
-        f"PATH CEILING: projected canonical PBIP visual path fits ({projection['longest_unit']!r}); "
-        "this is the pre-conversion safety envelope."
+        f"PATH CEILING: projected canonical PBIP paths fit ({projection['longest_unit']!r}); "
+        f"binding family {projection['family']} - {projection['reason']}. "
+        "This is the pre-conversion safety envelope."
     )
 
 
