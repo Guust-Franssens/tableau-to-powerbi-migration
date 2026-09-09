@@ -660,16 +660,37 @@ def test_the_model_family_projection_covers_every_emitted_shape(engine_bundle) -
     The comparison is `projected >= actual` on the emitted bytes, not against an expected filename:
     an expected-string test cannot see a naming class the engine has and this repository does not,
     which is exactly how three successive class-by-class projectors were defeated (issue #564).
+
+    ⚠️ The bound is VERSION-GATED, and the repository's engine job pins an older build than the one
+    the write-site census was audited on. On an unaudited engine the correct production outcome is a
+    REFUSAL, so that arm asserts the refusal - never a skip, and never a clean verdict.
     """
     engine = _contract()
+    version = engine_bundle["version"]
     evidence = run_estate.model_envelope_evidence(sorted(MATRIX_SOURCES.values()), engine)
+    root = engine_bundle["root"]
+
+    for unit, shape in engine_bundle["shapes"].items():
+        assert shape["model_folders"], (
+            f"{unit} emitted no `.SemanticModel` folder on engine {version}; this control would then be vacuous"
+        )
+
+    if version not in run_estate._MODEL_AUDITED_ENGINE_VERSIONS:  # pylint: disable=protected-access
+        assert evidence["status"] == "cannot_establish", (
+            f"engine {version} is outside the audited set, so the evidence must refuse rather than "
+            f"report {evidence.get('status')!r}"
+        )
+        assert str(version) in evidence["reason"], evidence["reason"]
+        refused = run_estate.project_estate_path_ceiling(root, sorted(MATRIX_SOURCES), evidence)
+        assert refused["status"] == "cannot_establish"
+        assert refused["family"] == run_estate._FAMILY_MODEL  # pylint: disable=protected-access
+        return
+
     assert evidence["status"] == "ok", (
-        f"the production evidence could not be established on engine {engine_bundle['version']}: "
+        f"the production evidence could not be established on engine {version}: "
         f"{evidence.get('reason')}. If the engine moved, re-audit the write-site census - do not "
         "relax the gate."
     )
-
-    root = engine_bundle["root"]
     projection = run_estate.project_estate_path_ceiling(root, sorted(MATRIX_SOURCES), evidence)
     projected = max(
         record["length"]
@@ -677,12 +698,7 @@ def test_the_model_family_projection_covers_every_emitted_shape(engine_bundle) -
         if record["family"] == run_estate._FAMILY_MODEL  # pylint: disable=protected-access
         and record["kind"] == "file"
     )
-
     for unit, shape in engine_bundle["shapes"].items():
-        assert shape["model_folders"], (
-            f"{unit} emitted no `.SemanticModel` folder on engine {engine_bundle['version']}; this "
-            "control would then be vacuous"
-        )
         actual = utf16_len(str(root / "pbip" / unit / shape["deepest_model_tail"]))
         assert projected >= actual, (
             f"{unit}: production projects {projected} units for the semantic-model family where the "
