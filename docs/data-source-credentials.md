@@ -89,7 +89,10 @@ sign-in modal appeared only *after* the probe's 90s window. The one-row data pro
 UIA re-dump confirmed the modal was open. So: **treat `probe_desktop_query.py` (`DATA_OK` vs
 `NO_DATA`/`ERROR`) as the gate of record**, and use `probe_desktop_credential.ps1` only to *explain* a
 `NO_DATA` (i.e. "is a credential modal the reason?"). A `CREDENTIAL_PRESENT` from the modal probe must
-NOT be trusted on its own for a serverless source — always confirm with `DATA_OK`.
+NOT be trusted on its own for a serverless source — always confirm with `DATA_OK`. ⚠️ That authority
+runs one way only: `DATA_OK` is authoritative once a clean probe has actually executed with no dialog
+outstanding, and it never overrides an active or unsettled dialog. Settle the dialog first, then
+re-probe.
 
 `scripts/probe_desktop_credential.ps1 -DesktopPid <pid>` triggers a refresh via UI Automation and
 watches for the connector modal:
@@ -97,19 +100,24 @@ watches for the connector modal:
   sign in once. **This is the only verdict that is a hard stop.**
 - No modal within the timeout -> `VERDICT: CREDENTIAL_PRESENT` (exit 0), **but** re-confirm with the
   data probe before trusting it (see the serverless false-positive above).
-- A dialog is up that is *not* a credential prompt -> one of `REFRESH_IN_PROGRESS` (another refresh
-  already owns this instance — wait for it or cancel the stale one), `DIALOG_NEEDS_HUMAN` (a **known**
-  human-blocking prompt that is not a credential prompt — the native-database-query approval modal;
-  approve it, no sign-in implied), `DIALOG_UNRECOGNIZED` (no signature matched, or progress text
-  alongside prose that is not progress status) or `DIALOG_UNREADABLE` (its **content** could not be
-  shown to be harmless), each **exit 3**. All four mean *"could not probe"*, never *"a human must sign
-  in"*.
+- A dialog is up that could not be identified as a credential prompt -> one of `REFRESH_IN_PROGRESS`
+  (another refresh already owns this instance — wait for it or cancel the stale one; do not stack a
+  second refresh), `DIALOG_NEEDS_HUMAN` (a **known** human-blocking prompt that is not a credential
+  prompt — the native-database-query approval modal; approve it, no sign-in implied),
+  `DIALOG_UNRECOGNIZED` (content was read but matched no known signature — which is **not** proof it
+  is non-credential) or `DIALOG_UNREADABLE` (its **content** could not be established at all), each
+  **exit 3**. All four mean *"could not probe"*. Only `DIALOG_NEEDS_HUMAN` positively identifies what
+  is up; for the other two the credential question is left **undetermined**, so they assert neither
+  *"a human must sign in"* nor its opposite — a human must inspect Desktop and settle the dialog. No
+  automation clears one, and autopilot is no exception: "decide, don't ask" governs choices, not a
+  window only a person can read.
 
-⚠️ **Do not read a non-`CREDENTIAL_MISSING` verdict as a credential wall.** Until issue #367 the probe
-returned `BLOCKED_BY_DIALOG` at **exit 1** for *any* visible non-main window >= 100x100 — a Power BI
-Refresh progress dialog trips that trivially, and a field report on 2026-08-28 caught it doing so under
-three concurrent refreshes against a cold Snowflake warehouse. The probe now classifies a dialog by its
-text and reports what it actually saw; the size test only decides which windows are worth reading.
+⚠️ **Do not read a non-`CREDENTIAL_MISSING` verdict as a credential wall — and do not read one as
+proof there is no credential wall either.** Until issue #367 the probe returned `BLOCKED_BY_DIALOG` at
+**exit 1** for *any* visible non-main window >= 100x100 — a Power BI Refresh progress dialog trips
+that trivially, and a field report on 2026-08-28 caught it doing so under three concurrent refreshes
+against a cold Snowflake warehouse. The probe now classifies a dialog by its text and reports what it
+actually saw; the size test only decides which windows are worth reading.
 
 ✅ **The Python fast check (`probe_desktop_query.py` / `refresh_pbip_model.py`) was fixed the same way
 in issue #376, and `BLOCKED_BY_DIALOG` is retired from it.** It carried the identical size-only rule on
@@ -139,8 +147,13 @@ exit 3. Two consequences worth knowing:
   same suppression — measured, filed as #406 rather than fixed in passing.
 - `probe_live_source` recognises the dialog tokens **structurally** and maps them to **`ERROR`** —
   "the probe itself could not run". The gate stays armed; nothing asserts a sign-in wall that was never
-  observed. Without that structural step the transcript fell through to an unanchored keyword scan, and
-  `DIALOG_NEEDS_HUMAN` quoting `Authentication required` came back out as `NO_CREDENTIAL`.
+  observed, and nothing rules one out either. Without that structural step the transcript fell through
+  to an unanchored keyword scan, and `DIALOG_NEEDS_HUMAN` quoting `Authentication required` came back
+  out as `NO_CREDENTIAL`. ⚠️ Note the parent verdict `NO_CREDENTIAL` is **broader** than the
+  modal-level `CREDENTIAL_MISSING`, which needs a positive authentication-specific signature match:
+  the parent is also reached from an anchored credential-stop verdict line and from free-text
+  connector credential markers (a revoked PAT returns a 403 with no modal at all), so it is not a
+  text-signature-only verdict.
 
 Two gotchas learned building it: (a) use a **generous timeout (>=60s)** because a serverless warehouse
 (Databricks) can **cold-start** before the modal appears, so a short wait yields a false PRESENT; and

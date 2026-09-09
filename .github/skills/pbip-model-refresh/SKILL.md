@@ -30,9 +30,11 @@ so `dotnet add` cannot silently no-op on a net10 default:
   refresh TIMEOUT names: a UI-Automation check for a data-source sign-in modal, so "slow" and
   "blocked" are told apart by evidence, not guessed. Ships **inside** the bundle, so the instruction
   the script prints at runtime resolves to a file that is actually here. **Only `CREDENTIAL_MISSING`
-  (exit 1) is a hard stop**; everything it cannot positively identify as a credential prompt lands in
-  the exit-3 "could not probe" band (`REFRESH_IN_PROGRESS` / `DIALOG_UNRECOGNIZED` /
-  `DIALOG_UNREADABLE` / `UNKNOWN`) rather than escalating to a human — see the verdict table below.
+  (exit 1) is a hard stop**, and it requires positive authentication-specific signature evidence;
+  everything it cannot positively identify as a credential prompt lands in the exit-3 "could not
+  probe" band (`REFRESH_IN_PROGRESS` / `DIALOG_UNRECOGNIZED` / `DIALOG_UNREADABLE` / `UNKNOWN`), which
+  asserts nothing about sign-in in either direction — a human must inspect Desktop and settle whatever
+  is up before the run proceeds. See the verdict table below.
 - [**`tests/`**](tests) - the regression suite for both, runnable from this folder
   (`pytest tests`). It is what makes the portability claim below checkable rather than aspirational.
 
@@ -152,13 +154,22 @@ stay byte-identical.
 >
 > | verdict | exit | what was actually observed |
 > |---|---|---|
-> | `CREDENTIAL_MISSING` | 1 | text matched `credential_modal_signature.regex`. The hard stop. |
+> | `CREDENTIAL_MISSING` | 1 | positive authentication-specific evidence: text matched `credential_modal_signature.regex`. The hard stop. |
 > | `CREDENTIAL_PRESENT` | 0 | a refresh was invoked and ran to the deadline with nothing unclassifiable up. Still not the gate of record for a serverless source — confirm with the one-row data probe. |
 > | `REFRESH_IN_PROGRESS` | 3 | a dialog whose **whole content** positively reads as refresh progress was already up **at t=0**: another refresh owns this instance. Wait for it or cancel the stale one; do not stack a second refresh. |
 > | `DIALOG_NEEDS_HUMAN` | 3 | a **known** human-blocking prompt that is not a credential prompt — the **native-database-query approval modal** above all. Not exit 1, because the remedy is an approval, not a sign-in. Never suppressed, and it outranks any progress text in the same window. |
-> | `DIALOG_UNRECOGNIZED` | 3 | a dialog is up whose text matched **no** signature, **or** which shows progress text *alongside* prose that is not progress status. We read it, and it is **not** a credential prompt — but we cannot account for all of it. |
-> | `DIALOG_UNREADABLE` | 3 | a dialog is up that could not be **shown to be harmless**: no text at all, or only a reassuring **caption**, or benign-looking content read from an **incomplete** harvest (truncated, timed out, or a pattern that threw). Deliberately distinct from `DIALOG_UNRECOGNIZED`: *absent is not empty*, and "we could not establish it" is a weaker state of knowledge than "we read it and it did not match". |
+> | `DIALOG_UNRECOGNIZED` | 3 | a dialog is up whose text matched **no** signature, **or** which shows progress text *alongside* prose that is not progress status. We read the content, and it matched nothing we know — including the credential signature, which is **not** proof it is non-credential. The credential question is left undetermined; a human must inspect Desktop. |
+> | `DIALOG_UNREADABLE` | 3 | a dialog is up whose **content could not be established**: no text at all, or only a reassuring **caption**, or benign-looking content read from an **incomplete** harvest (truncated, timed out, or a pattern that threw). Deliberately distinct from `DIALOG_UNRECOGNIZED`: *absent is not empty*, and "we could not establish it" is a weaker state of knowledge than "we read it and it did not match". Nothing here asserts a sign-in wall, and nothing rules one out; a human must inspect Desktop. |
 > | `UNKNOWN` | 3 | no window for the pid, a minimized owner, or no Refresh control was ever invoked. |
+>
+> **Accepted limitation (issue #146, open).** Some connector authentication dialogs expose no readable
+> text, so `DIALOG_UNREADABLE` / `DIALOG_UNRECOGNIZED` can be the *best available* answer about a
+> window that really is a sign-in form. The band is therefore fail-closed and undetermined, not
+> cleared: only a human at the Desktop screen can settle it, `REFRESH_IN_PROGRESS` means wait rather
+> than stack a second refresh, and a `DATA_OK` never overrides an active or unsettled dialog — it is
+> authoritative only once the dialog is settled and a clean probe actually executes. Autopilot changes
+> none of this: it governs choices, not a window no automation can read or dismiss, so it never
+> bypasses or clears a dialog verdict.
 >
 > **Which way it errs, and why.** A false *positive* here terminates at exit 1 and escalates to a
 > human, so nothing downstream ever runs. A false *negative* lands on `CREDENTIAL_PRESENT`, which the
@@ -177,10 +188,11 @@ stay byte-identical.
 > - **`scripts/benign_dialog_signature.regex`** is the progress vocabulary ("Evaluating", "N rows
 >   loaded", "Waiting for other queries"). ⚠️ It is **inferred** from Power BI's refresh UI, not
 >   captured from a live dialog, and it is deliberately not load-bearing: a miss only downgrades
->   `REFRESH_IN_PROGRESS` to `DIALOG_UNRECOGNIZED` — both exit 3, neither a credential wall. Keep its
->   alternatives narrow and anchored; a broad pattern here is the one way this file could hide a real
->   modal, and `test_the_benign_signature_can_never_shadow_a_credential_prompt` gates exactly that. If
->   you ever have a real progress dialog on screen, capture its exact text and tighten this file.
+>   `REFRESH_IN_PROGRESS` to `DIALOG_UNRECOGNIZED` — both exit 3, neither reported as a credential
+>   wall. Keep its alternatives narrow and anchored; a broad pattern here is the one way this file
+>   could hide a real modal, and `test_the_benign_signature_can_never_shadow_a_credential_prompt`
+>   gates exactly that. If you ever have a real progress dialog on screen, capture its exact text and
+>   tighten this file.
 
 > ⚠️ **Win32 child-HWND text does NOT see inside a WPF dialog — and the burden of proof runs ONE WAY.**
 > WPF renders its entire visual tree into **one** HWND, so `EnumChildWindows` harvests nothing and only
