@@ -1854,3 +1854,304 @@ def test_a_dry_run_reports_the_refusal_and_never_writes_an_acknowledgement(tmp_p
     )
     assert calls == []
     assert not (out / run_estate.BUNDLE_REWRITE_RECORD).exists(), "a dry run must not write into the bundle"
+
+
+# ---------------------------------------------------------------------------
+# issue #564: the EMITTED tree, not the pre-conversion projection
+#
+# The projection above is fail-open by construction - it composes the canonical PBIR visual tail onto
+# names knowable BEFORE conversion, and the path that actually breaches on the committed issue-194
+# repro is an uncapped SEMANTIC-MODEL table filename it never models. These tests are about the
+# measurement of what the engine ACTUALLY wrote, and about WHERE it sits in the run: after the output
+# is recorded, before anything downstream consumes it.
+#
+# Long paths are never CREATED here, for the reason `tests/test_check_path_ceiling.py` states in its
+# own docstring: a stock Windows runner cannot create a 260-unit path at all, so the fixture rather
+# than the assertion would fail. A tight ceiling over a short tree walks the identical comparison
+# code. The shipped 259/247 pair is pinned separately, filesystem-free, below.
+# ---------------------------------------------------------------------------
+
+
+def _ceilings(file_ceiling: int, dir_ceiling: int) -> run_estate.Limits:
+    """Tight limits for a short tree - same code path, no unwritable fixture."""
+    return run_estate.Limits(file_ceiling=file_ceiling, dir_ceiling=dir_ceiling, warn_at=max(file_ceiling, 1) - 1)
+
+
+def _emitted_run(
+    tmp_path: Path,
+    monkeypatch,
+    limits: run_estate.Limits | None = None,
+) -> tuple[int, str, list[Path], Path]:
+    """A full run through `main` with the stand-in engine. Returns (code, stdout, provenance calls, bundle).
+
+    `stamp_inputs` is the SENTINEL: it is the first thing that runs after the gate, so a mutation that
+    deletes the gate or moves it later lets the sentinel fire on an over-ceiling tree.
+    """
+    _without_pbir_validator(monkeypatch)
+    engine = _versioned_engine(tmp_path / "engine", "2.339.0")
+    out = tmp_path / "bundle"
+    src = tmp_path / "src"
+    src.mkdir(exist_ok=True)
+    (src / "unit.twb").write_text("<workbook />", encoding="utf-8")
+    monkeypatch.setattr(run_estate, "run_engine", _bundle_engine())
+    stamped: list[Path] = []
+    monkeypatch.setattr(run_estate, "stamp_inputs", lambda _input, out_dir: stamped.append(out_dir))
+    if limits is not None:
+        monkeypatch.setattr(run_estate, "PATH_CEILING_LIMITS", limits)
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        code = run_estate.main(_landing_argv(engine, src, out))
+    return code, buffer.getvalue(), stamped, out
+
+
+def _path_report(out: Path) -> dict:
+    return json.loads((out / run_estate.PATH_CEILING_REPORT).read_text(encoding="utf-8"))
+
+
+def _phase_names(out: Path) -> list[str]:
+    return [phase["phase"] for phase in json.loads((out / "phase-timings.json").read_text(encoding="utf-8"))["phases"]]
+
+
+def _minimal_bundle(out: Path) -> Path:
+    """A bundle with report.json and one conditional folder only - no semantic_models/, no data/."""
+    _write(out / "report.json", json.dumps(_report(workbooks=[_workbook("Alpha", "AlphaModel")])))
+    _write(out / "pbip" / "Alpha" / "Alpha.pbip", "{}")
+    return out
+
+
+def test_an_over_ceiling_emitted_tree_refuses_before_any_consumer_sees_it(tmp_path: Path, monkeypatch) -> None:
+    """THE issue-564 shape: the projection passed, the emitted tree is unopenable, everything was green.
+
+    The exit code is asserted last: it is the weakest signal. What matters is that the refusal names
+    the binding path and that the first downstream consumer never ran.
+    """
+    code, printed, stamped, out = _emitted_run(tmp_path, monkeypatch, _ceilings(utf16_len(str(tmp_path)), 4096))
+
+    assert "PATH CEILING:" in printed and "EMITTED path(s) exceed" in printed, printed
+    match = re.search(
+        r"binding (?P<kind>file|directory) is (?P<length>\d+) UTF-16 units \(ceiling (?P<ceiling>\d+)\): (?P<path>\S+)",
+        printed,
+    )
+    assert match, f"the refusal did not name the binding path.\nprinted:\n{printed}"
+    assert int(match.group("length")) > int(match.group("ceiling"))
+    assert Path(match.group("path")).exists(), "the refusal named a path that is not on disk"
+    assert stamped == [], "provenance ran on a tree Power BI Desktop cannot open"
+    report = _path_report(out)
+    assert report["status"] == "over_ceiling" and report["counted"]["over_ceiling"] >= 1
+    assert code == run_estate.EXIT_PATH_CEILING
+
+
+def test_a_clean_emitted_tree_continues_unchanged(tmp_path: Path, monkeypatch) -> None:
+    """The false-positive control: the SAME run at the real ceilings must reach every later phase."""
+    code, printed, stamped, out = _emitted_run(tmp_path, monkeypatch)
+
+    assert code == run_estate.EXIT_OK, printed
+    assert stamped == [out], "a clean tree must not stop the run"
+    assert _path_report(out)["status"] == "ok"
+    assert "none over Desktop" in printed, printed
+    assert {"provenance", "adjudicate", "slice_handovers"} <= set(_phase_names(out))
+
+
+def test_one_overlong_directory_refuses_even_when_every_file_is_legal(tmp_path: Path, monkeypatch) -> None:
+    """Measured in `check_path_ceiling`: an overlong DIRECTORY makes `git add` drop its contents at exit 0."""
+    code, printed, stamped, out = _emitted_run(tmp_path, monkeypatch, _ceilings(4096, utf16_len(str(tmp_path))))
+
+    assert "binding directory is" in printed, printed
+    assert stamped == [], "provenance ran on a tree whose directories git itself would silently drop"
+    report = _path_report(out)
+    assert {record["kind"] for record in report["worst_offenders"]} == {"directory"}
+    assert report["counted"]["over_ceiling"] == report["counted"]["directories"], (
+        "a file was counted as an offender in a directory-only fixture"
+    )
+    assert code == run_estate.EXIT_PATH_CEILING
+
+
+def test_the_emitted_measurement_counts_utf16_units_not_code_points(tmp_path: Path) -> None:
+    """A non-BMP character is 1 code point and 2 UTF-16 units - Desktop counts the second number."""
+    out = tmp_path / "bundle"
+    target = out / "pbip" / "x" / "visual\U0001f600.json"
+    _write(target)
+    units = utf16_len(str(target))
+    assert units == len(str(target)) + 1, "the fixture no longer carries a supplementary character"
+
+    refused, detail = run_estate.check_emitted_path_ceiling(out, [], _ceilings(units - 1, 4096))
+    assert refused is False, detail
+    assert "EMITTED path(s) exceed" in detail
+    passed, clean = run_estate.check_emitted_path_ceiling(out, [], _ceilings(units, 4096))
+    assert passed is True, clean
+
+
+def test_a_walk_failure_cannot_report_a_clean_tree(tmp_path: Path, monkeypatch) -> None:
+    """The walker raising outright is an indeterminate state, never a pass."""
+    out = _minimal_bundle(tmp_path / "bundle")
+
+    def _boom(*_args, **_kwargs):
+        raise OSError(5, "device is not ready")
+
+    monkeypatch.setattr(run_estate, "scan_path_ceiling", _boom)
+    monkeypatch.setattr(
+        run_estate, "stamp_inputs", lambda *_a, **_k: pytest.fail("provenance ran after a walk failure")
+    )
+
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        code = run_estate.main(_slice_only_argv(out))
+
+    assert code == run_estate.EXIT_PATH_CEILING
+    assert "CANNOT ASSESS the emitted tree" in buffer.getvalue()
+    assert "device is not ready" in buffer.getvalue()
+    report = _path_report(out)
+    assert report["status"] == "unknown_paths" and "OSError" in report["scan_error"]
+    assert not (out / "handover").exists(), "handover slices were written after a refusal"
+
+
+def test_a_path_the_walker_could_not_measure_refuses(tmp_path: Path, monkeypatch) -> None:
+    """The walker's OWN unknown classification binds - this gate never re-decides it."""
+    import check_path_ceiling  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+
+    out = _minimal_bundle(tmp_path / "bundle")
+    monkeypatch.setattr(
+        check_path_ceiling,
+        "collect",
+        lambda _root: ([], [{"path": str(out / "pbip"), "reason": "PermissionError: access is denied"}]),
+    )
+
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        code = run_estate.main(_slice_only_argv(out))
+
+    assert code == run_estate.EXIT_PATH_CEILING
+    assert "access is denied" in buffer.getvalue(), buffer.getvalue()
+    assert _path_report(out)["status"] == "unknown_paths"
+
+
+def test_an_output_tree_with_nothing_measurable_is_not_clean(tmp_path: Path) -> None:
+    """`census` of nothing must not read as a pass (the same rule the issue-194 harness enforces)."""
+    empty = tmp_path / "out"
+    empty.mkdir()
+
+    proceed, detail = run_estate.check_emitted_path_ceiling(empty, [])
+
+    assert proceed is False
+    assert "nothing was measured" in detail, detail
+    assert _path_report(empty)["status"] == "no_paths"
+
+
+def test_a_bundle_without_the_conditional_engine_folders_is_clean(tmp_path: Path) -> None:
+    """`semantic_models/` and `data/` are conditional output - their absence is not a finding."""
+    out = _minimal_bundle(tmp_path / "bundle")
+
+    assert run_estate.main(_slice_only_argv(out)) == run_estate.EXIT_OK
+    assert _path_report(out)["status"] == "ok"
+    assert (out / "handover" / "Alpha.json").is_file()
+
+
+def test_slice_only_output_is_gated_too(tmp_path: Path, monkeypatch) -> None:
+    """`--slice-only` never runs the engine, but it hands an EXISTING tree downstream all the same."""
+    out = _minimal_bundle(tmp_path / "bundle")
+    monkeypatch.setattr(run_estate, "PATH_CEILING_LIMITS", _ceilings(utf16_len(str(tmp_path)), 4096))
+
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        code = run_estate.main(_slice_only_argv(out))
+
+    assert code == run_estate.EXIT_PATH_CEILING
+    assert not (out / "handover").exists()
+    assert _phase_names(out) == ["slice_only_baseline_backfill", "path_ceiling"], (
+        "a slice-only refusal ran a phase it should not have"
+    )
+
+
+def test_the_phase_record_after_a_refusal_carries_no_later_phase(tmp_path: Path, monkeypatch) -> None:
+    """The timings ARE the evidence that nothing downstream started."""
+    _code, _printed, _stamped, out = _emitted_run(tmp_path, monkeypatch, _ceilings(utf16_len(str(tmp_path)), 4096))
+
+    names = _phase_names(out)
+    assert names[-1] == "path_ceiling", names
+    assert {"engine_run", "engine_receipt"} <= set(names), names
+    assert not {"provenance", "adjudicate", "slice_handovers"} & set(names), names
+
+
+def test_a_refusal_preserves_the_engine_output_and_what_built_it(tmp_path: Path, monkeypatch) -> None:
+    """Permanent shortening is an upstream fix - here the tree is EVIDENCE, so nothing is removed."""
+    code, _printed, _stamped, out = _emitted_run(tmp_path, monkeypatch, _ceilings(utf16_len(str(tmp_path)), 4096))
+
+    assert code == run_estate.EXIT_PATH_CEILING
+    assert (out / ORDERS_TMDL).read_text(encoding="utf-8") == "table Orders"
+    assert (out / REPORT_JSON).is_file() and (out / "pbip" / "WB" / "WB.pbip").is_file()
+    assert (out / run_estate.ENGINE_RECEIPT).is_file(), "the refused bundle can no longer say what built it"
+    manifest = json.loads((out / "input_manifest.json").read_text(encoding="utf-8"))
+    assert manifest[run_estate.GENERATED_ARTIFACTS_KEY]["files"], "the baseline was lost with the refusal"
+
+
+def test_an_engine_failure_keeps_its_precedence_and_writes_no_path_report(tmp_path: Path, monkeypatch) -> None:
+    """A failed engine has no output to judge - the path gate must not claim one."""
+    _without_pbir_validator(monkeypatch)
+    engine = _versioned_engine(tmp_path / "engine", "2.339.0")
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "unit.twb").write_text("<workbook />", encoding="utf-8")
+    out = tmp_path / "bundle"
+    monkeypatch.setattr(run_estate, "run_engine", lambda *_args: (1, "engine exploded"))
+    monkeypatch.setattr(run_estate, "PATH_CEILING_LIMITS", _ceilings(1, 1))
+
+    assert run_estate.main(_landing_argv(engine, src, out)) == run_estate.EXIT_ENGINE_FAILED
+    assert not (out / run_estate.PATH_CEILING_REPORT).exists()
+
+
+def test_no_path_report_is_written_when_there_is_no_output_to_measure(tmp_path: Path, monkeypatch) -> None:
+    """A bundle with no report.json fails loudly upstream of this gate, and leaves no verdict behind."""
+    out = tmp_path / "bundle"
+    out.mkdir()
+    monkeypatch.setattr(run_estate, "PATH_CEILING_LIMITS", _ceilings(1, 1))
+
+    with pytest.raises(FileNotFoundError):
+        run_estate.main(_slice_only_argv(out))
+
+    assert not (out / run_estate.PATH_CEILING_REPORT).exists()
+
+
+def test_a_verdict_that_cannot_be_recorded_is_not_a_pass(tmp_path: Path, monkeypatch) -> None:
+    """An unattributable verdict is an unassessable one: refuse rather than continue on hearsay."""
+    out = _minimal_bundle(tmp_path / "bundle")
+    monkeypatch.setattr(run_estate, "write_path_ceiling_report", lambda *_args: None)
+
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        code = run_estate.main(_slice_only_argv(out))
+
+    assert code == run_estate.EXIT_PATH_CEILING
+    assert "could not be written" in buffer.getvalue()
+
+
+def test_the_gate_uses_the_measured_desktop_ceilings_and_keeps_the_root_budget_advisory() -> None:
+    """Filesystem-free pin: loosening the defaults, or promoting the advisory, has to fail here."""
+    assert run_estate.PATH_CEILING_LIMITS.file_ceiling == FILE_CEILING == 259
+    assert run_estate.PATH_CEILING_LIMITS.dir_ceiling == DIR_CEILING == 247
+    assert run_estate.PATH_CEILING_LIMITS.min_root_budget is None, (
+        "the tight portable root budget is ADVISORY here; gating on it is a different decision"
+    )
+
+
+def test_a_tight_root_budget_is_reported_and_never_refuses() -> None:
+    """The portable-budget advisory stays advisory - it is about WHERE a bundle lands, not this tree.
+
+    Driven through the verdict directly rather than through a fixture, because a tight root budget on
+    a CLEAN tree requires an absolute root under ~40 units, which no `tmp_path` on any runner has.
+    """
+    report = {
+        "status": "ok",
+        "root": "bundle",
+        "counted": {"measured": 4, "files": 2, "directories": 2, "over_ceiling": 0, "unknown": 0},
+        "file_ceiling": FILE_CEILING,
+        "dir_ceiling": DIR_CEILING,
+        "root_budget": 12,
+        "root_budget_is_tight": True,
+        "shipping_root_budget_advisory": 40,
+    }
+
+    proceed, detail = run_estate.path_ceiling_verdict(report, Path("bundle") / run_estate.PATH_CEILING_REPORT)
+
+    assert proceed is True, detail
+    assert "ADVISORY: root budget 12" in detail, detail
+    assert "not a refusal" in detail, detail

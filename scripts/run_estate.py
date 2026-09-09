@@ -72,6 +72,18 @@ things a conversation cannot be trusted to remember every time:
    prior full run already wrote), and `check_migration_progress.py` now tells the two cases apart -
    see its `NO_BASELINE_BY_DESIGN` state.
 
+8. **The pre-engine path projection is fail-open, so the EMITTED tree is measured too (issue #564).**
+   `preflight_estate_path_ceiling` projects the canonical PBIR visual tail onto names knowable before
+   conversion; the path that actually breaches on the committed issue-194 repro is an uncapped
+   SEMANTIC-MODEL table filename, which no pre-conversion projection here models. A bundle could
+   therefore pass the projection and still be one Power BI Desktop refuses to open, with every
+   signal green. `check_emitted_path_ceiling` measures what the engine really wrote - through
+   `check_path_ceiling.scan`, the same walker and the same measured 259/247 ceilings every other
+   consumer uses - immediately after the output is recorded and BEFORE provenance, handover slices,
+   packaging, agents or Desktop. Over the ceiling, unmeasurable or unwalkable all return
+   `EXIT_PATH_CEILING`; the output is preserved as evidence and never deleted or rewritten
+   (permanent filename shortening is an upstream engine fix).
+
 Deliberately NOT here
 ---------------------
 No migration logic. This never writes TMDL, never writes PBIR, never opens Power BI Desktop. It runs
@@ -150,7 +162,17 @@ from check_blank_placeholders import scan as scan_blank_placeholders
 from check_pbir_valid import REPORT_NAME as PBIR_VALID_REPORT
 from check_pbir_valid import render as render_pbir_valid
 from check_pbir_valid import scan as scan_pbir_validity
-from check_path_ceiling import DIR_CEILING, FILE_CEILING, utf16_len
+from check_path_ceiling import (
+    DIR_CEILING,
+    FILE_CEILING,
+    STATUS_NO_PATHS,
+    STATUS_OVER_CEILING,
+    STATUS_UNKNOWN_PATHS,
+    WINDOWS_LIMITS,
+    Limits,
+    utf16_len,
+)
+from check_path_ceiling import scan as scan_path_ceiling
 from engine_source import EngineNotFoundError, NonCanonicalEngineError, engine_provenance, resolve_engine
 from migration_bundle import ENGINE_RECEIPT, sha256_file, write_engine_receipt
 
@@ -174,6 +196,18 @@ EXIT_BUNDLE_REWRITE = 9
 EXIT_PATH_CEILING = 10
 GENERATED_ARTIFACTS_KEY = "generated_artifacts"
 SLICE_ONLY_COVERAGE = "slice_only_backfill"
+
+#: Where the post-engine path measurement lands inside the bundle, so a refusal is ATTRIBUTABLE to
+#: named paths rather than to a console line nobody kept. `path-ceiling.json` is the name this repo
+#: already uses for `check_path_ceiling.py --json` output (`check_unit.py` reads exactly that file),
+#: so the bundle carries one convention rather than a second private one.
+PATH_CEILING_REPORT = "path-ceiling.json"
+
+#: The MEASURED Desktop pair (259 file / 247 directory, UTF-16 code units), applied unconditionally:
+#: the question is "will the machine this bundle is shipped to open it", which is a Windows question
+#: wherever the run happens. `min_root_budget` stays None, so the tight-root-budget number remains
+#: ADVISORY here - it is reported, never a refusal.
+PATH_CEILING_LIMITS = WINDOWS_LIMITS
 VOLATILE_GENERATED_DIRS = {".pbi"}
 SCRATCH_DIRS = frozenset({"scratch", "_work", "_build", "_probe", "tmp", "temp", "_shots"})
 SCRATCH_INTENTS = frozenset(part.lstrip("._") for part in SCRATCH_DIRS)
@@ -681,6 +715,143 @@ def record_engine_output(out_dir: Path, report: dict | None, phases: list[dict],
     )
     log.info("ENGINE_OUTPUT_TREE: hashes -> %s", write_engine_output_tree(out_dir))
     write_receipt_phase(out_dir, phases, engine)
+
+
+# ---------------------------------------------------------------------------
+# The post-engine path-ceiling gate (issue #564)
+#
+# The pre-engine projection above (`preflight_estate_path_ceiling`) is a PROJECTION: it composes the
+# canonical PBIR visual tail onto unit names it can know BEFORE conversion. That is genuinely all it
+# can see, and it is fail-open by construction - measured on the committed issue-194 repro, the path
+# that actually breaches is a SEMANTIC-MODEL table file
+# (`<unit>.SemanticModel/definition/tables/<uncapped table name>`), which no pre-conversion
+# projection in this repo models. So an estate could pass the projection, emit a tree Power BI
+# Desktop cannot open, and hand it to packaging, agents and Desktop with every signal green.
+#
+# This gate answers the different question - "what did the engine ACTUALLY write?" - by measuring the
+# emitted tree with the SAME authority every other consumer uses (`check_path_ceiling.scan`, walker
+# and ceilings included; nothing here re-implements either). Python can write these paths, so the
+# tree exists; what must never happen is downstream work STARTING from it.
+#
+# Three rules, all deliberate:
+#   * it runs AFTER the engine's output is recorded (receipt + baselines) and BEFORE provenance,
+#     handover slices, packaging, agents and Desktop - so the refusal is early for consumers and
+#     late enough that the bundle still explains what built it;
+#   * where it cannot assess, it BLOCKS - an unreadable directory, an unmeasurable name, a walker
+#     failure or a tree with nothing in it is an indeterminate state, never a pass. That is the same
+#     rule the destructive-re-run barrier follows, for the same reason;
+#   * it NEVER deletes, shortens or rewrites the output. Permanent filename shortening belongs
+#     upstream in the engine; here the emitted tree is preserved as evidence for that report.
+# ---------------------------------------------------------------------------
+
+
+def _ascii_path(value: str) -> str:
+    """A console-safe rendering of a path that may carry astral or undecodable characters.
+
+    Output-only. The measurement itself is UTF-16 and belongs to `check_path_ceiling`; this exists
+    because a CP1252 console raises `UnicodeEncodeError` on the very paths a refusal has to name,
+    and a gate that crashes while printing its verdict has no verdict.
+    """
+    return value.encode("ascii", "backslashreplace").decode("ascii")
+
+
+def scan_emitted_path_ceiling(out_dir: Path, limits: Limits | None = None) -> dict:
+    """Measure the tree the engine ACTUALLY emitted. A failed measurement is never a clean one."""
+    try:
+        return scan_path_ceiling(out_dir, limits or PATH_CEILING_LIMITS)
+    except (OSError, RuntimeError, UnicodeError, ValueError) as exc:
+        # `collect` already routes per-entry failures into `unknown_paths`; this is the walk itself
+        # failing outright. Reported in the SAME shape so the written report is readable either way.
+        reason = f"{type(exc).__name__}: {exc}"
+        return {
+            "version": 1,
+            "root": str(out_dir),
+            "status": STATUS_UNKNOWN_PATHS,
+            "scan_error": reason,
+            "counted": {"measured": 0, "files": 0, "directories": 0, "over_ceiling": 0, "unknown": 1},
+            "worst_offenders": [],
+            "unknown_paths": [{"path": _ascii_path(str(out_dir)), "reason": reason}],
+        }
+
+
+def write_path_ceiling_report(out_dir: Path, report: dict) -> Path | None:
+    """Persist the measurement beside the bundle it judges. Returns None if it could not be written."""
+    path = out_dir / PATH_CEILING_REPORT
+    try:
+        path.write_text(json.dumps(report, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    except (OSError, TypeError, ValueError) as exc:
+        log.warning("PATH CEILING: report not written (%s: %s)", type(exc).__name__, exc)
+        return None
+    return path
+
+
+def path_ceiling_verdict(report: dict, written: Path | None) -> tuple[bool, str]:
+    """Turn one measurement into (proceed, detail). Everything that is not clean refuses."""
+    counted = report.get("counted") or {}
+    where = f" Report: {written}." if written else ""
+    preserved = " The emitted output is PRESERVED as evidence - nothing was deleted or rewritten."
+    if written is None:
+        return False, (
+            "CANNOT ASSESS the emitted tree: its path-ceiling report could not be written into "
+            f"{report.get('root')}, so the verdict would not be attributable." + preserved
+        )
+    if report.get("status") == STATUS_OVER_CEILING:
+        offenders = report.get("worst_offenders") or []
+        binding = max(offenders, key=lambda record: record["length"] - record["ceiling"], default=None)
+        detail = (
+            f"binding {binding['kind']} is {binding['length']} UTF-16 units (ceiling "
+            f"{binding['ceiling']}): {_ascii_path(binding['path'])}"
+            if binding
+            else "no offender could be named"
+        )
+        return False, (
+            f"PATH CEILING: {counted.get('over_ceiling')} EMITTED path(s) exceed what Power BI "
+            f"Desktop will open - {detail}. LongPathsEnabled and \\\\?\\ prefixes do not make "
+            f"Desktop accept these paths, so nothing downstream may start from this tree.{where}"
+            f"{preserved} {_SHORT_ROOT_HINT}"
+        )
+    if report.get("status") == STATUS_UNKNOWN_PATHS:
+        unknown = (report.get("unknown_paths") or [{}])[0]
+        reason = report.get("scan_error") or unknown.get("reason") or "no reason was recorded"
+        return False, (
+            f"CANNOT ASSESS the emitted tree: {counted.get('unknown')} path(s) could not be "
+            f"measured - {reason} ({_ascii_path(str(unknown.get('path')))}). Unmeasurable is not "
+            f"clean, so nothing downstream may start from this tree.{where}{preserved}"
+        )
+    if report.get("status") == STATUS_NO_PATHS:
+        return False, (
+            f"CANNOT ASSESS the emitted tree: nothing was measured under {report.get('root')}. An "
+            f"output folder with no measurable path cannot be judged clean.{where}{preserved}"
+        )
+    advisory = ""
+    if report.get("root_budget_is_tight"):
+        advisory = (
+            f" ADVISORY: root budget {report.get('root_budget')} < "
+            f"{report.get('shipping_root_budget_advisory')} - this bundle tolerates only a short "
+            "installation root wherever it is shipped; not a refusal."
+        )
+    return True, (
+        f"PATH CEILING: {counted.get('measured')} emitted path(s) measured, none over Desktop's "
+        f"ceilings (file <= {report.get('file_ceiling')}, directory <= {report.get('dir_ceiling')})."
+        f"{where}{advisory}"
+    )
+
+
+def check_emitted_path_ceiling(out_dir: Path, phases: list[dict], limits: Limits | None = None) -> tuple[bool, str]:
+    """Gate the ACTUAL engine output against Desktop's ceilings before anything consumes it."""
+    started = time.monotonic()
+    report = scan_emitted_path_ceiling(out_dir, limits)
+    written = write_path_ceiling_report(out_dir, report)
+    proceed, detail = path_ceiling_verdict(report, written)
+    phases.append(
+        {
+            "phase": "path_ceiling",
+            "elapsed_sec": round(time.monotonic() - started, 1),
+            "status": report.get("status"),
+            "over_ceiling": (report.get("counted") or {}).get("over_ceiling"),
+        }
+    )
+    return proceed, detail
 
 
 # ---------------------------------------------------------------------------
@@ -1314,6 +1485,45 @@ def run_engine_phase(args: argparse.Namespace, engine: Path | None, phases: list
     return EXIT_OK
 
 
+def produce_and_gate_output(
+    args: argparse.Namespace, engine: Path | None, phases: list[dict]
+) -> tuple[dict | None, int]:
+    """Run the engine, baseline what it wrote, and refuse a tree nothing downstream may consume.
+
+    These three steps are ONE procedure, and the order is load-bearing in both directions:
+
+    * the baselines and receipt are recorded FIRST, so a bundle refused below still says what built
+      it - the receipt is exactly the evidence an upstream path-length report needs;
+    * the emitted tree is measured LAST, and before this function returns, so provenance, handover
+      slices, packaging, agent work and Desktop all sit behind it. The pre-engine projection cannot
+      see the paths the engine really writes (issue #564), so this is the only place where a bundle
+      Power BI Desktop refuses to open can still be stopped.
+
+    Returns ``(report, exit code)``; the report is None only when there was no output to read.
+    """
+    if not args.slice_only:
+        code = run_engine_phase(args, engine, phases)
+        if code != EXIT_OK:
+            # A failed engine has no output to judge, so nothing is measured and no path report is
+            # written - the engine's own verdict keeps precedence.
+            return None, code
+
+    report = read_report(args.output)
+    if not args.slice_only:
+        record_engine_output(args.output, report, phases, engine)
+    else:
+        backfill_slice_only_baseline(args.output, report, phases)
+
+    path_ok, path_detail = check_emitted_path_ceiling(args.output, phases)
+    print(path_detail)
+    if not path_ok:
+        # The timings are written even on a refusal, and they carry no later phase: the record IS
+        # the evidence that nothing downstream started. The output tree itself is left untouched.
+        write_phase_record(args.output, phases)
+        return report, EXIT_PATH_CEILING
+    return report, EXIT_OK
+
+
 class GateResults(NamedTuple):
     """Every independent verdict one estate run produces, in precedence order.
 
@@ -1415,17 +1625,10 @@ def main(argv: list[str] | None = None) -> int:
 
     record_bundle_rewrite_acknowledgement(rewrite)
 
-    # --- phase 1: the engine ------------------------------------------------------------------
-    if not args.slice_only:
-        code = run_engine_phase(args, engine, phases)
-        if code != EXIT_OK:
-            return code
-
-    report = read_report(args.output)
-    if not args.slice_only:
-        record_engine_output(args.output, report, phases, engine)
-    else:
-        backfill_slice_only_baseline(args.output, report, phases)
+    # --- phase 1 + 1a: the engine, its recorded output, and the ceilings that output must meet --
+    report, code = produce_and_gate_output(args, engine, phases)
+    if code != EXIT_OK:
+        return code
 
     # --- phase 1b: stamp where the inputs came from -------------------------------------------
     # The engine records the LOCAL half in input_manifest.json (name, size, sha256, staged path)
