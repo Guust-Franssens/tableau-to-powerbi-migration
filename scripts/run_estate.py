@@ -650,11 +650,16 @@ def stamp_inputs(input_dir: Path, out_dir: Path, timeout_sec: float | None = Non
     import stamp_tableau_provenance as prov  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
 
     effective_timeout = prov.DEFAULT_TIMEOUT_SEC if timeout_sec is None else timeout_sec
+    deadline_at = None if effective_timeout is None else time.monotonic() + max(0.0, float(effective_timeout))
     result = prov.build(input_dir, prov.resolve_env(Path(".env")), timeout_sec=effective_timeout)
     if not result["input_count"]:
         return None
     path = out_dir / "source-provenance.json"
-    path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    alarm = prov._arm_deadline_alarm(deadline_at, time.monotonic)  # pylint: disable=protected-access
+    try:
+        path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    finally:
+        prov._disarm_deadline_alarm(alarm)  # pylint: disable=protected-access
     matched = sum(1 for r in result["inputs"] if (r.get("origin") or {}).get("match") == "sha256")
     state = (result.get("phase") or {}).get("status") or "unknown"
     return f"{result['input_count']} input(s) stamped, {matched} confirmed against the site ({state}) -> {path}"
@@ -926,7 +931,7 @@ def write_path_ceiling_report(out_dir: Path, report: dict) -> Path | None:
             os.fsync(handle.fileno())
         os.replace(staging_path, final_path)
         swapped = True
-    except (OSError, TypeError, ValueError) as exc:
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
         log.warning("PATH CEILING: report not published (%s)", _operation_failure(PUBLISH_REPORT_OPERATION, exc))
         return None
     finally:

@@ -50,6 +50,7 @@ import hashlib
 import json
 import logging
 import re
+import signal
 import sys
 import threading
 import time
@@ -587,6 +588,32 @@ def _deadline_expired(deadline_at: float | None, clock: Callable[[], float]) -> 
     return deadline_at is not None and clock() >= deadline_at
 
 
+def _raise_deadline(_signum, _frame) -> None:
+    raise DeadlineExceeded()
+
+
+def _arm_deadline_alarm(deadline_at: float | None, clock: Callable[[], float]):
+    if (
+        deadline_at is None
+        or clock is not time.monotonic
+        or threading.current_thread() is not threading.main_thread()
+        or not hasattr(signal, "setitimer")
+    ):
+        return None
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    remaining = max(0.001, deadline_at - clock())
+    signal.signal(signal.SIGALRM, _raise_deadline)
+    signal.setitimer(signal.ITIMER_REAL, remaining)
+    return previous_handler
+
+
+def _disarm_deadline_alarm(previous_handler) -> None:
+    if previous_handler is None:
+        return
+    signal.setitimer(signal.ITIMER_REAL, 0)
+    signal.signal(signal.SIGALRM, previous_handler)
+
+
 # pylint: disable-next=too-many-locals,too-many-branches,too-many-statements
 def build(
     target: Path,
@@ -601,110 +628,116 @@ def build(
     phase = _phase_record(timeout_sec)
     progress = _build_progress_sink(phase, started=started, deadline_at=deadline_at, clock=clock)
     progress({"event": "phase-start", "input_completed": 0, "input_total": 0})
+    alarm = _arm_deadline_alarm(deadline_at, clock)
     try:
-        inputs = collect_inputs(target)
-    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-        _phase_error(phase, "collect-inputs-failed", exc)
-        phase["status"] = "failed"
-        return {
-            "schema": "tableau-source-provenance/1",
-            "stamped_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "input_count": 0,
-            "phase": phase,
-            "inputs": [],
-        }
-    progress({"event": "inputs-discovered", "input_completed": 0, "input_total": len(inputs)})
-    lookup: TableauLookup | None = None
-    has_workbook_inputs = any(path.suffix.lower() in WORKBOOK_SUFFIXES for path in inputs)
-    has_live_credentials = bool(env.get("TABLEAU_SERVER_URL") and env.get("TABLEAU_PAT_NAME"))
-    if has_live_credentials and has_workbook_inputs:
         try:
-            lookup = TableauLookup(env)
-            if hasattr(lookup, "set_run_context"):
-                lookup.set_run_context(deadline_at=deadline_at, clock=clock, progress=progress)
-            lookup.sign_in()
+            inputs = collect_inputs(target)
         except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-            _phase_error(phase, _exception_code(exc), exc, operation="sign-in")
-            LOG.warning(
-                "no Tableau lookup (%s) - fingerprints only",
-                type(exc).__name__,
-            )
-            lookup = None
-
-    records = []
-    for index, path in enumerate(inputs, start=1):
-        record: dict[str, Any]
-        try:
-            record = {"input": fingerprint(path)}
-        except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-            _phase_error(phase, "fingerprint-unavailable", exc)
-            record = {
-                "input": {},
-                "origin": None,
-                "fingerprint_error": {"code": "fingerprint-unavailable", "class": type(exc).__name__},
+            _phase_error(phase, "collect-inputs-failed", exc)
+            phase["status"] = "failed"
+            return {
+                "schema": "tableau-source-provenance/1",
+                "stamped_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "input_count": 0,
+                "phase": phase,
+                "inputs": [],
             }
+        progress({"event": "inputs-discovered", "input_completed": 0, "input_total": len(inputs)})
+        lookup: TableauLookup | None = None
+        has_workbook_inputs = any(path.suffix.lower() in WORKBOOK_SUFFIXES for path in inputs)
+        has_live_credentials = bool(env.get("TABLEAU_SERVER_URL") and env.get("TABLEAU_PAT_NAME"))
+        if has_live_credentials and has_workbook_inputs:
+            try:
+                lookup = TableauLookup(env)
+                if hasattr(lookup, "set_run_context"):
+                    lookup.set_run_context(deadline_at=deadline_at, clock=clock, progress=progress)
+                lookup.sign_in()
+            except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+                _phase_error(phase, _exception_code(exc), exc, operation="sign-in")
+                LOG.warning(
+                    "no Tableau lookup (%s) - fingerprints only",
+                    type(exc).__name__,
+                )
+                lookup = None
+
+        records = []
+        for index, path in enumerate(inputs, start=1):
+            record: dict[str, Any]
+            try:
+                record = {"input": fingerprint(path)}
+            except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+                _phase_error(phase, "fingerprint-unavailable", exc)
+                record = {
+                    "input": {},
+                    "origin": None,
+                    "fingerprint_error": {"code": "fingerprint-unavailable", "class": type(exc).__name__},
+                }
+                records.append(record)
+                progress({"event": "input-complete", "input_completed": index, "input_total": len(inputs)})
+                continue
+            if path.suffix.lower() not in WORKBOOK_SUFFIXES:
+                record["origin"] = None
+                if has_live_credentials:
+                    record["lookup_error_code"] = DATASOURCE_ORIGIN_UNAVAILABLE
+                    record["origin_note"] = (
+                        "Tableau datasource live origin lookup is not implemented - local-only input"
+                    )
+                    _phase_error(phase, DATASOURCE_ORIGIN_UNAVAILABLE, operation="datasource-origin")
+            elif lookup is not None:
+                if _deadline_expired(deadline_at, clock):
+                    origin = None
+                    record["lookup_error_code"] = DEADLINE_EXPIRED
+                    record["lookup_error"] = "DeadlineExceeded: provenance phase deadline expired"
+                    _phase_error(phase, DEADLINE_EXPIRED, DeadlineExceeded())
+                else:
+                    try:
+                        origin = find_origin(lookup, path.stem, record["input"])
+                    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+                        code = _exception_code(exc)
+                        _phase_error(phase, code, exc)
+                        origin, record["lookup_error_code"], record["lookup_error"] = (
+                            None,
+                            code,
+                            (f"{type(exc).__name__}: {redacted_note(str(exc), lookup.redact_text, limit=150)}"),
+                        )
+                record["origin"] = origin
+                if origin is None:
+                    if record.get("lookup_error_code") == DEADLINE_EXPIRED:
+                        record["origin_note"] = "remote origin unavailable - provenance phase deadline expired"
+                    elif record.get("lookup_error_code"):
+                        record["origin_note"] = "remote origin unavailable - Tableau lookup failed"
+                    else:
+                        record["origin_note"] = "no workbook of this LUID or name on the site - local-only input"
+                elif origin["match"] == "name_only":
+                    record["origin_note"] = (
+                        f"matched by {origin['matched_by']}, but the bytes DIFFER from the site copy - "
+                        "figures measured here will not reproduce against it"
+                    )
+                elif origin["match"] == "unavailable":
+                    reason = origin.get("content_unavailable") or "the site refused the download"
+                    code = origin.get("content_error_code") or "content-unavailable"
+                    record["lookup_error_code"] = code
+                    _phase_error(phase, code, operation="content")
+                    record["origin_note"] = (
+                        f"matched by {origin['matched_by']}, but the site copy could NOT be read "
+                        f"({reason}) - no byte or revision comparison was made"
+                    )
+                    record["lookup_error"] = f"content unavailable: {reason}"
             records.append(record)
             progress({"event": "input-complete", "input_completed": index, "input_total": len(inputs)})
-            continue
-        if path.suffix.lower() not in WORKBOOK_SUFFIXES:
-            record["origin"] = None
-            if has_live_credentials:
-                record["lookup_error_code"] = DATASOURCE_ORIGIN_UNAVAILABLE
-                record["origin_note"] = "Tableau datasource live origin lookup is not implemented - local-only input"
-                _phase_error(phase, DATASOURCE_ORIGIN_UNAVAILABLE, operation="datasource-origin")
-        elif lookup is not None:
-            if _deadline_expired(deadline_at, clock):
-                origin = None
-                record["lookup_error_code"] = DEADLINE_EXPIRED
-                record["lookup_error"] = "DeadlineExceeded: provenance phase deadline expired"
-                _phase_error(phase, DEADLINE_EXPIRED, DeadlineExceeded())
-            else:
-                try:
-                    origin = find_origin(lookup, path.stem, record["input"])
-                except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-                    code = _exception_code(exc)
-                    _phase_error(phase, code, exc)
-                    origin, record["lookup_error_code"], record["lookup_error"] = (
-                        None,
-                        code,
-                        (f"{type(exc).__name__}: {redacted_note(str(exc), lookup.redact_text, limit=150)}"),
-                    )
-            record["origin"] = origin
-            if origin is None:
-                if record.get("lookup_error_code") == DEADLINE_EXPIRED:
-                    record["origin_note"] = "remote origin unavailable - provenance phase deadline expired"
-                elif record.get("lookup_error_code"):
-                    record["origin_note"] = "remote origin unavailable - Tableau lookup failed"
-                else:
-                    record["origin_note"] = "no workbook of this LUID or name on the site - local-only input"
-            elif origin["match"] == "name_only":
-                record["origin_note"] = (
-                    f"matched by {origin['matched_by']}, but the bytes DIFFER from the site copy - "
-                    "figures measured here will not reproduce against it"
-                )
-            elif origin["match"] == "unavailable":
-                reason = origin.get("content_unavailable") or "the site refused the download"
-                code = origin.get("content_error_code") or "content-unavailable"
-                record["lookup_error_code"] = code
-                _phase_error(phase, code, operation="content")
-                record["origin_note"] = (
-                    f"matched by {origin['matched_by']}, but the site copy could NOT be read "
-                    f"({reason}) - no byte or revision comparison was made"
-                )
-                record["lookup_error"] = f"content unavailable: {reason}"
-        records.append(record)
-        progress({"event": "input-complete", "input_completed": index, "input_total": len(inputs)})
-    result = {
-        "schema": "tableau-source-provenance/1",
-        "stamped_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "input_count": len(records),
-        "phase": phase,
-        "inputs": records,
-    }
-    if lookup is None:
-        phase["status"] = "partial" if phase["errors"] else "local_only"
-        return result
-    return _finish_live(result, lookup)
+        result = {
+            "schema": "tableau-source-provenance/1",
+            "stamped_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "input_count": len(records),
+            "phase": phase,
+            "inputs": records,
+        }
+        if lookup is None:
+            phase["status"] = "partial" if phase["errors"] else "local_only"
+            return result
+        return _finish_live(result, lookup)
+    finally:
+        _disarm_deadline_alarm(alarm)
 
 
 def _finish_live(result: dict[str, Any], lookup: TableauLookup) -> dict[str, Any]:
