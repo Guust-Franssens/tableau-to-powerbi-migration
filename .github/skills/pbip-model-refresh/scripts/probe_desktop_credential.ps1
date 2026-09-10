@@ -9,7 +9,10 @@
   the user authenticates once in a modal dialog. The Desktop Bridge cannot fill that modal, so before
   the agent's build/render/validate loop can work against live data, a human must sign in once.
 
-  This probe tells the two states apart so the migrator only prompts when needed. NOTE: for a
+  This probe classifies what it can OBSERVE inside ONE bounded window, so the migrator has evidence
+  rather than a guess. The two directions are not symmetric: only positive, authentication-specific
+  evidence establishes a missing credential, while CREDENTIAL_PRESENT establishes no opposite state -
+  it records that nothing recognizable came up before the deadline, and nothing more. NOTE: for a
   *serverless* source that cold-starts, the modal can appear only AFTER this probe's timeout, yielding a
   false CREDENTIAL_PRESENT; treat the one-row data probe (DATA_OK vs NO_DATA) as the gate of record and
   use this modal probe only to explain a NO_DATA. That probe ships inside the pbip-model-refresh skill:
@@ -104,8 +107,10 @@
   satisfies trivially; a field report on 2026-08-28 caught it reporting exactly that under three
   concurrent refreshes. This script has no way to establish that a dialog is *blocking*, so every
   `BLOCKED_BY_DIALOG` it emitted was an inference dressed as a finding, in the one verdict class the
-  toolkit treats as a hard stop. The Python fast check (`_credential_modal.blocking_dialog_candidates`)
-  still emits that token on its own path; this arbiter now names what it actually observed instead.
+  toolkit treats as a hard stop. The Python fast check (`_credential_modal`) retired the token on the
+  same grounds (issue #376) and now speaks this arbiter's vocabulary - `CREDENTIAL_MISSING`,
+  `DIALOG_NEEDS_HUMAN`, `DIALOG_UNREADABLE`, `DIALOG_UNRECOGNIZED`, `REFRESH_IN_PROGRESS` - so neither
+  path emits it any more; each names what it actually observed instead.
 
   ⚠️ THE BURDEN OF PROOF RUNS ONE WAY: a dialog is suppressed only when we POSITIVELY READ benign
   CONTENT. It is never suppressed because we read *something* and the caption looked reassuring. The
@@ -164,8 +169,10 @@ $benignSig = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'benign_dialog_s
 # length is not evidence and short unknown text (e.g. "Password:") is never excused as benign.
 $chromeSig = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'benign_chrome_signature.regex') -Raw).Trim()
 
-# Prompts that are KNOWN to need a human but are NOT credential prompts - the native-database-query
-# approval modal above all. Migrated custom-SQL sources emit exactly the shape that triggers it, and
+# Prompts that are KNOWN to block a human. The set is not "everything except a sign-in prompt": its
+# alternatives span the native-database-query approval modal AND an `Authentication (is )?required`
+# notice, so a match establishes that a human must act at the screen, never WHICH action they must
+# take. Migrated custom-SQL sources emit exactly the shape that triggers the approval modal, and
 # SKILL.md's standing instruction is to check for it before concluding anything about credentials; a
 # probe that suppressed it would make this bundle contradict its own documentation. Matched BEFORE
 # benign, so one progress element in the same window cannot erase it (review round 3).
@@ -785,8 +792,10 @@ if ($hit) {
 }
 
 # 1b. A dialog is up that did not match the credential signature. Say what was OBSERVED and what that
-# leaves undetermined, then exit 3 (cannot probe), never exit 1 (human needed). Matching nothing is
-# not evidence that the credential is cached, so no line here may claim it. Invoking a Refresh on top
+# leaves undetermined, then exit 3 (cannot probe), never exit 1 (the credential-specific hard stop).
+# Exit 3 is NOT a "no human needed" band: a known blocking prompt, and a window nobody could account
+# for, both land here and both send a human to the screen. Matching nothing is not evidence that the
+# credential is cached, so no line here may claim it. Invoking a Refresh on top
 # of an unclassified dialog is how the 2026-08-28 field report ended up with a stale duplicate refresh
 # to cancel.
 $blocker = Get-DialogVerdict -Windows $windows

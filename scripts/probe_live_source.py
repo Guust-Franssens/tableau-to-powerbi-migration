@@ -445,8 +445,11 @@ def _classify_failure(text: str, network_fault_observed: bool) -> tuple[str, str
     if _has_credential_stop_verdict(text):
         return "NO_CREDENTIAL", text
     # Free-text connector error strings (NOT verdict tokens) stay an unanchored substring scan on
-    # purpose: a revoked Databricks PAT returns a 403/socket-reset with NO modal and NO verdict line,
-    # so CREDENTIAL_MARKERS is the only signal that catches it. Do not "structuralise" this path.
+    # purpose: a revoked PAT can come back as a bare socket reset (10054 / "forcibly closed") with NO
+    # modal and NO verdict line, so CREDENTIAL_MARKERS is the only signal that catches it. Do not
+    # "structuralise" this path. It is deliberately LAST: a 403/forbidden/permission refusal is
+    # ACCESS_DENIED at the branch above and never reaches here - the server authenticated us and then
+    # refused, which a sign-in cannot repair, so it must not be relabelled a credential problem.
     if any(marker in low for marker in CREDENTIAL_MARKERS):
         return "NO_CREDENTIAL", text
     return (

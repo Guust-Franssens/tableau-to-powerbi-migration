@@ -54,16 +54,18 @@ DESKTOP_GONE_VERDICT_RE = re.compile(r"^\s*(?:REFRESH|PREFLIGHT|PROBE):\s+DESKTO
 DESKTOP_UNREADY_VERDICT_RE = re.compile(r"^\s*(?:REFRESH|PREFLIGHT|PROBE):\s+DESKTOP_UNREADY\b")
 # Dialog family (issue #376), from `refresh_pbip_model._emit_dialog_finding` /
 # `probe_desktop_query._emit_dialog_finding`. The child looked at a visible Desktop dialog and is
-# saying, authoritatively, "this is NOT a sign-in wall and I could not probe".
+# saying, authoritatively, "a dialog is up, here is the token for what I could establish about it,
+# and I could not probe". Only `CREDENTIAL_MISSING` is credential-specific; these four are not, which
+# is a statement about the EVIDENCE and never a finding that no sign-in is needed.
 #
 # It MUST be matched structurally and BEFORE the free-text scans (#400 review, finding 2). Without
 # this, the parent fell through to `CREDENTIAL_MARKERS`, which scans the whole transcript - so
 # `DIALOG_NEEDS_HUMAN` carrying the evidence excerpt `Authentication required` was relabelled
-# `NO_CREDENTIAL` on the word "authentication", overriding the child's explicit statement to the
-# contrary and firing the "a human must sign in; terminate the run" directive. Measured in review.
+# `NO_CREDENTIAL` on the word "authentication", replacing the child's own token with a free-text guess
+# and firing the "a human must sign in; terminate the run" directive. Measured in review.
 #
 # Adding the tokens to CREDENTIAL_STOP_VERDICT_RE instead would have been the other wrong answer: it
-# would assert the very credential wall the child says it did not see. These map to ERROR - "the probe
+# would assert a credential wall none of these tokens establishes. These map to ERROR - "the probe
 # itself could not run" - which keeps the gate armed and claims nothing about the source.
 # `tests/test_probe_live_source_verdict.py` gates this list against the detector's own verdict table,
 # so a token added there cannot stay unknown here.
@@ -119,10 +121,11 @@ def _dialog_verdict_token(text: str) -> str | None:
 
     Matched on the verdict LINE, never a substring, for the same reason as every other family here -
     but this one is load-bearing in the opposite direction: it exists so the parent STOPS free-text
-    scanning once the child has authoritatively said "a dialog is up, and it is not a sign-in wall".
-    The child's own evidence excerpt can legitimately contain a credential keyword (the blocking
-    signature includes `Authentication required`), and the unanchored scan then contradicted the
-    verdict it was quoting.
+    scanning once the child has authoritatively said "a dialog is up, and here is the token for what I
+    could establish about it". Structural recognition PRESERVES the child's token; it is not itself a
+    finding that no sign-in is needed. The child's own evidence excerpt can legitimately contain a
+    credential keyword (the blocking signature includes `Authentication required`), and the unanchored
+    scan then reclassified the very verdict it was quoting.
     """
     for line in text.splitlines():
         match = DIALOG_VERDICT_RE.match(line)
@@ -180,14 +183,19 @@ def classify_child_verdict(text: str, raw: str) -> tuple[str, str] | None:
     """Map an AUTHORITATIVE child verdict line to ``(verdict, detail)``, or ``None``.
 
     These are checked before any free-text scan, because the child looked at the machine and is
-    telling us what it saw; a substring scan of the transcript can only contradict it. All three map
-    to ``ERROR`` - "the probe itself could not run" - which keeps the gate armed and claims nothing
-    about the data source.
+    telling us what it saw; a substring scan of the transcript can only contradict it. Every branch
+    maps to ``ERROR`` - "the probe itself could not run" - which keeps the gate armed and claims
+    nothing about the data source. The branches differ only in what they tell a human to DO, which is
+    why the count of them is set by the tokens rather than by taste (issue #146).
 
     Extracted from ``probe_live_source._classify_failure`` when the #376 dialog family pushed that
     module past pylint's ``max-module-lines``. The seam is real rather than convenient: everything
     here is decided by a verdict LINE, and everything left there is decided by free text.
     """
+    # One return per verdict token whose guidance differs: collapsing any of them into a shared
+    # branch is precisely the defect this function was corrected for. Same waiver, same reason, as
+    # `probe_live_source._classify_failure`.
+    # pylint: disable=too-many-return-statements
     if _has_desktop_gone_verdict(text):
         return (
             "ERROR",
@@ -206,19 +214,31 @@ def classify_child_verdict(text: str, raw: str) -> tuple[str, str] | None:
         )
     token = _dialog_verdict_token(text)
     if token is not None:
-        # DIALOG_NEEDS_HUMAN positively matched a known non-credential blocking prompt (e.g.
-        # the native-database-query approval), so we CAN say it is not a sign-in wall. The
-        # unreadable/unrecognized tokens cannot: the window could not be classified, so asserting
-        # "NOT a sign-in prompt" would contradict the absence of evidence (issue #146). For
-        # REFRESH_IN_PROGRESS, a benign progress dialog was observed without operation_in_flight.
+        # Each token gets the guidance ITS OWN evidence supports (issue #146). DIALOG_NEEDS_HUMAN
+        # positively matched a known human-blocking prompt, whose signature spans the native-query
+        # approval AND `Authentication required` - so it establishes that a human must act, never
+        # WHICH action, and never that a sign-in is not the action. REFRESH_IN_PROGRESS positively
+        # read a refresh already running on this pid: wait or cancel, never stack, and never route it
+        # to the generic could-be-authentication text. The unreadable/unrecognized pair matched
+        # nothing, so they rule a sign-in prompt neither in nor out.
         if token == "DIALOG_NEEDS_HUMAN":
             return (
                 "ERROR",
-                f"Power BI Desktop has a dialog up that the probe identified as a known blocking "
+                f"Power BI Desktop has a dialog up that the probe identified as a known human-blocking "
                 f"prompt ({token}), so the refresh never established anything about the data source. "
-                "The child classified the window and reports that it is NOT a sign-in prompt - do not "
-                "send anyone to re-authenticate on the strength of this. Look at the Desktop screen, "
-                "approve whatever it is showing, and re-run the probe. Raw: " + raw,
+                "That signature spans a native-query approval AND an 'Authentication required' notice, "
+                "so it establishes that a human must act - NOT which action, and NOT that "
+                "re-authenticating is unnecessary. Look at the Desktop screen, do what the prompt "
+                "visible there asks, and re-run the probe. Raw: " + raw,
+            )
+        if token == "REFRESH_IN_PROGRESS":
+            return (
+                "ERROR",
+                f"Power BI Desktop already has a refresh running on this pid ({token}), so this probe "
+                "could not run and nothing was established about the data source. Wait for the running "
+                "refresh to finish, or cancel the stale one - never stack a second refresh on it. It "
+                "settles nothing about the credential state in either direction; re-run the probe once "
+                "the pid is idle. Raw: " + raw,
             )
         return (
             "ERROR",
