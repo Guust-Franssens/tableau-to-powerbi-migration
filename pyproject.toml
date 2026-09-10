@@ -160,7 +160,14 @@ max-line-length = 120
 # growth from closing fail-open holes, not comment bloat. Bumped again for the 2nd bounded review
 # round (mixed-scope-poisoning + multi-source-earned-state fixes, plus the `_valid_scoped_audit_entry`
 # split needed to keep `_audit_entries` under the return-statement limit): 1260 -> ~1350 -> ~1380.
-max-module-lines = 1400
+#
+# Issue #562: the Phase-1 `data_access` authority (typed `DataAccessAssessment`, the pure
+# `assess_data_access` fold over the per-key audit ledger, and the strict `parse_data_access`
+# deserializer) lands HERE on purpose - it is the same semantic authority as the gate, and the
+# audit's stop rule forbids a second module that would re-derive credential-gate meaning from the
+# same audit lines. Splitting it out to satisfy a line ceiling would trade a lint number for the
+# duplicate-authority defect the whole slice exists to avoid. ~1380 -> 2300.
+max-module-lines = 2300
 
 [tool.pylint."messages control"]
 # TODO comments are a deliberate scope-tracking practice in this repo, not a defect.

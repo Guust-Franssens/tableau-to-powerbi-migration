@@ -145,11 +145,11 @@ def test_empty_custom_sql_after_a_real_table_cannot_clear_the_source(tmp_path, m
     original_probe = probe_live_source._probe_one_table
     attempted = []
 
-    def _probe_table(migration, conn, target, opts):
+    def _probe_table(migration, leg_name, conn, target, opts):
         attempted.append(target[0]["name"])
         if target[0]["name"] == "REAL_TABLE":
             return 0, "DATA_OK"
-        return original_probe(migration, conn, target, opts)
+        return original_probe(migration, leg_name, conn, target, opts)
 
     monkeypatch.setattr(probe_live_source, "_host_resolves", lambda _server: True)
     monkeypatch.setattr(probe_live_source, "_probe_one_table", _probe_table)
@@ -196,6 +196,7 @@ def test_real_table_probe_still_opens_refreshes_and_returns_data_ok(tmp_path, mo
 
     rc, verdict = probe_live_source._probe_one_table(  # pylint: disable=protected-access
         tmp_path,
+        "source-key:0000000000000000",
         SNOWFLAKE,
         ({"name": "FLIGHTS", "custom_sql": None}, "Col"),
         (7, False),
@@ -229,6 +230,7 @@ def test_custom_sql_probe_without_enumerated_columns_clears_when_refresh_returns
 
     rc, verdict = probe_live_source._probe_one_table(  # pylint: disable=protected-access
         tmp_path,
+        "source-key:0000000000000000",
         SNOWFLAKE,
         (
             {
@@ -314,7 +316,7 @@ def test_mixed_source_proves_credentials_and_custom_sql(tmp_path, caplog, monkey
     )
     attempted = []
 
-    def _probe_table(_migration: Path, _conn: dict, target: tuple[dict, str], _opts: tuple[int, bool]):
+    def _probe_table(_migration: Path, _leg_name: str, _conn: dict, target: tuple[dict, str], _opts: tuple[int, bool]):
         table_spec, _column = target
         attempted.append(table_spec["name"])
         return 0, "DATA_OK"

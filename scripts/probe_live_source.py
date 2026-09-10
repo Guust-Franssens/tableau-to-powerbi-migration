@@ -822,8 +822,8 @@ def _refresh_and_classify(pid: int, table: str, timeout_sec: int, network_fault_
     return 1, verdict
 
 
-def _record_attempt(migration: Path, verdict: str, what: str) -> None:
-    """Append the probe's verdict to the audit log, whatever it was.
+def _record_attempt(migration: Path, verdict: str, what: str, sources: list[str]) -> None:
+    """Append the probe's verdict to the audit log, whatever it was, KEYED to the leg it measured.
 
     Without this the audit only ever recorded SUCCESS (`probe-cleared`), so "never measured" and
     "measured, and the source refused us" were indistinguishable after the fact - a real gap in the
@@ -837,6 +837,13 @@ def _record_attempt(migration: Path, verdict: str, what: str) -> None:
     probed". Inferring behaviour from an artifact a well-behaved actor is told to remove punishes
     exactly the behaviour we want.
 
+    ⚠️ `sources` is REQUIRED, and it is the `_leg_key` identity - never a display name, a server, or
+    an index. `probe-cleared` has carried source keys since #346 while the ATTEMPT records did not,
+    so on a two-key bundle nothing recorded which endpoint returned DATA_OK: the trail could show a
+    success and a clear without either being attributable to a key. Any reader strict enough to
+    require "this key was measured, then this key was cleared" therefore had to fail closed on
+    every multi-source unit. A default value here would silently reopen that, so there is none.
+
     ⚠️ CALL THIS THE INSTANT THE VERDICT IS KNOWN, never from an outer frame. It first lived in
     `run_probe`, one level up - which put it AFTER `_probe_one_table`'s `finally: _close(pid)`, a
     Desktop shutdown that takes tens of seconds. Measured 2026-08-03: `claude-opus-4.8` ran the
@@ -848,7 +855,7 @@ def _record_attempt(migration: Path, verdict: str, what: str) -> None:
     sys.path.insert(0, str(Path(__file__).parent))
     from credential_gate import _audit  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
 
-    _audit(migration, f"probe-{verdict.lower()}", what)
+    _audit(migration, f"probe-{verdict.lower()}", what, sources=list(sources))
 
 
 def _host_resolves(server: str) -> bool:
@@ -1105,12 +1112,12 @@ def _probe_leg(
             "will fix an address that does not exist.",
             server,
         )
-        _record_attempt(migration, "UNREACHABLE", f"{server} -> UNREACHABLE (DNS)")
+        _record_attempt(migration, "UNREACHABLE", f"{server} -> UNREACHABLE (DNS)", [leg_name])
         return 1, "UNREACHABLE"
 
     log.info("probing leg: %s", leg_name)
     for i, table in enumerate(tables):
-        rc, verdict = _probe_one_table(migration, conn, (table, column), opts)
+        rc, verdict = _probe_one_table(migration, leg_name, conn, (table, column), opts)
         if rc == 0:
             if any(_is_custom_sql(candidate) for candidate in tables[i + 1 :]):
                 continue
@@ -1121,8 +1128,15 @@ def _probe_leg(
     return 1, "BAD_TABLE"
 
 
-def _probe_one_table(migration: Path, conn: dict, target: tuple[dict, str], opts: tuple[int, bool]) -> tuple[int, str]:
+def _probe_one_table(  # pylint: disable=too-many-locals
+    migration: Path, leg_name: str, conn: dict, target: tuple[dict, str], opts: tuple[int, bool]
+) -> tuple[int, str]:
     """Run the probe against one specific table. Returns (exit code, verdict).
+
+    `leg_name` is the `_leg_key` identity of the leg being measured and exists only so the audit
+    record can be keyed: every verdict written from here names the source it came from, or a reader
+    cannot tell which of several live endpoints answered. It is also the one local that pushed this
+    function over pylint's `max-locals` ceiling, which the disable above records rather than hides.
 
     `opts` is read positionally rather than unpacked into names: this function sits at pylint's
     `max-locals` ceiling, and each element is used exactly once.
@@ -1152,11 +1166,11 @@ def _probe_one_table(migration: Path, conn: dict, target: tuple[dict, str], opts
             # Recorded HERE, not by the caller. Everything below this line - the `finally` that
             # shuts Desktop down - is slow, and a measurement that is not written down did not
             # happen as far as any later reader is concerned.
-            _record_attempt(migration, verdict, f"{table} -> {verdict} (no catalog)")
+            _record_attempt(migration, verdict, f"{table} -> {verdict} (no catalog)", [leg_name])
             return 1, verdict
         log.info("model loaded - refreshing")
         rc, verdict = _refresh_and_classify(pid, table, opts[0], _network_fault_observed(conn))
-        _record_attempt(migration, verdict, f"{table} -> {verdict}")
+        _record_attempt(migration, verdict, f"{table} -> {verdict}", [leg_name])
         return rc, verdict
     finally:
         if pid and desktop_event and opts[1]:

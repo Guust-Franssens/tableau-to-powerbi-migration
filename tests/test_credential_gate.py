@@ -7,8 +7,9 @@ file must authorize NOTHING, because agents demonstrably create it themselves.
 
 from __future__ import annotations
 
-import json
 import hashlib
+import importlib.util
+import json
 import os
 import platform
 import re
@@ -22,6 +23,11 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 GATE = REPO / "scripts" / "credential_gate.py"
 HOOK = REPO / "scripts" / "hooks" / "credential_gate.py"
+
+sys.path.insert(0, str(REPO / "scripts"))
+
+import credential_gate as cg  # noqa: E402  # pylint: disable=wrong-import-position
+import preflight_source_credentials as pf  # noqa: E402  # pylint: disable=wrong-import-position
 
 
 def _sha256(path: Path) -> str:
@@ -53,7 +59,7 @@ def _write_engine_receipt(migration: Path, artifacts: list[Path]) -> None:
     _append_audit(migration, "engine-receipt", f"sha256={_sha256(receipt)}")
 
 
-def _append_audit(migration: Path, action: str, detail: str) -> None:
+def _append_audit(migration: Path, action: str, detail: str, sources: list[str] | None = None) -> None:
     audit = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "action": action,
@@ -64,6 +70,10 @@ def _append_audit(migration: Path, action: str, detail: str) -> None:
         # An unscoped synthetic fixture would now be silently dropped and never actually exercised.
         "scope": str(migration.resolve()),
     }
+    if sources is not None:
+        # `sources` is what makes an entry ATTRIBUTABLE to one live endpoint. Optional here only so
+        # the fixtures can build the unkeyed shape deliberately, which is a control, not a default.
+        audit["sources"] = list(sources)
     with (migration / ".credential-gate-audit.log").open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(audit) + "\n")
 
@@ -2444,3 +2454,939 @@ def test_a_forged_override_is_confirmable_from_json_not_the_exit_code(tmp_path: 
     assert real.returncode == 3
     states = {u["state"] for u in json.loads(real.stdout)["units"]}
     assert "FORGED-OVERRIDE" in states
+
+
+# ---------------------------------------------------------------------------------------------
+# Phase-1 package-local data-access authority (#562)
+#
+# `assess_data_access` is the first thing in this module that must be PURE: every other entry point
+# here is allowed to write - `apply_block` writes a marker, `clear_block` writes an audit line, and
+# `verify` appends `violation` lines as it judges. A projection built by calling `verify` would
+# therefore change the evidence it is derived from, so the first test below is the one that makes
+# the rest meaningful, and it carries its own positive control proving the check can fail.
+# ---------------------------------------------------------------------------------------------
+
+LIVE_A = {"class": "sqlserver", "server": "a.example", "database": "db", "powerbi_target": "live_source"}
+LIVE_B = {
+    "class": "snowflake",
+    "server": "b.example",
+    "database": "db",
+    "warehouse": "wh",
+    "powerbi_target": "live_source",
+}
+FLAT = {"class": "excel-direct", "powerbi_target": "flat_file"}
+REVIEW = {"class": "unknown", "server": "u.example", "powerbi_target": "unknown"}
+# Same unclassifiable leg, minus any hashable endpoint identity. `_classify_legs` converts a leg it
+# cannot key into `needs-credential` with an `unstable-source[...]` placeholder - fail-closed, and
+# deliberately NOT the same answer as `REVIEW` above: a key that cannot be derived can never be
+# matched against audit evidence, so it is an authority failure rather than a data finding.
+REVIEW_UNSTABLE = {"class": "unknown", "powerbi_target": "unknown"}
+
+KEY_A = pf._leg_key({}, 0, LIVE_A)
+KEY_B = pf._leg_key({}, 0, LIVE_B)
+
+COMPLETE_LOCAL = {
+    "self_contained": True,
+    "omissions": [],
+    "neutralized": [],
+    "retained_network": [],
+    "binding": {"state": "unbound"},
+}
+
+
+def _da_spec(*connections: dict) -> dict:
+    """A package-local `migration-spec.json` payload declaring exactly these connection legs."""
+    return {
+        "data_sources": [
+            {"name": f"ds{index}", "connection": dict(conn), "tables": [], "fields": []}
+            for index, conn in enumerate(connections)
+        ]
+    }
+
+
+def _da_root(tmp_path: Path, name: str, *connections: dict) -> Path:
+    """A gate root that is a legitimate scope target and declares these live/flat legs itself."""
+    root = tmp_path / name
+    (root / "fabric").mkdir(parents=True, exist_ok=True)
+    (root / "migration-spec.json").write_text(json.dumps(_da_spec(*connections)), encoding="utf-8")
+    return root
+
+
+def _trail(root: Path, *entries: tuple) -> None:
+    """Append `(action, sources_or_None)` audit records in order. Detail text is irrelevant here."""
+    for action, sources in entries:
+        _append_audit(root, action, f"{action} fixture", sources)
+
+
+def _assess(root: Path, spec: dict, local: dict | None = None, **kwargs) -> object:
+    return cg.assess_data_access(
+        root,
+        package_spec=spec,
+        package_data_sources=COMPLETE_LOCAL if local is None else local,
+        fallback_authorization=kwargs.pop("policy", "stop"),
+        requested_scope=kwargs.pop("scope", "model_and_report"),
+        provider=kwargs.pop("provider", None),
+    )
+
+
+def _tree_snapshot(root: Path) -> list[tuple[str, int, bytes]]:
+    """Every file beneath `root` with its size and bytes - enough to catch any write at all."""
+    return sorted(
+        (str(path.relative_to(root)), path.stat().st_size, path.read_bytes())
+        for path in root.rglob("*")
+        if path.is_file()
+    )
+
+
+def test_the_assessor_never_writes_a_byte_while_verify_demonstrably_does(tmp_path: Path) -> None:
+    """The purity invariant, with the positive control that stops it being vacuous.
+
+    A test that only asserts "nothing changed" passes just as happily against a function that was
+    never called. So the same tree is put through `verify()` afterwards: `verify` MUST append a
+    `violation` line for an unearned clear, and if it does not, the snapshot comparison above
+    proves nothing about the assessor either.
+    """
+    root = _da_root(tmp_path, "pure", LIVE_A)
+    _trail(root, ("block", [KEY_A]), ("probe-no_credential", [KEY_A]), ("manual-clear", None))
+    (root / "fabric" / "Model.tmdl").write_text("table T\n", encoding="utf-8")
+    before = _tree_snapshot(root)
+
+    for scope in ("model_and_report", "model_only"):
+        for policy in ("stop", "model_only_unvalidated"):
+            _assess(root, _da_spec(LIVE_A), scope=scope, policy=policy)
+    _assess(root, _da_spec(FLAT))
+    _assess(root, _da_spec(REVIEW))
+
+    assert _tree_snapshot(root) == before, "assess_data_access must not write, rename or truncate anything"
+
+    assert cg.verify(root) == 1, "control: this tree IS an unearned clear, so verify must fail it"
+    assert _tree_snapshot(root) != before, (
+        "control failed: verify() did not append its violation line, so the snapshot comparison "
+        "above cannot distinguish a pure assessor from an uncalled one"
+    )
+
+
+def test_an_all_flat_package_with_complete_bytes_is_local_import_ready(tmp_path: Path) -> None:
+    """No live leg, complete packaged bytes, and deliberately NO audit log at all.
+
+    An extract-only unit is legitimately never gated (`_gate_was_ever_applied`), so demanding audit
+    evidence here would block every flat-file package. `binding.state=unbound` is Phase-2 work and
+    must not read as a dependency failure.
+    """
+    root = _da_root(tmp_path, "flat", FLAT, FLAT)
+    assert not (root / cg.AUDIT).exists(), "fixture must have no audit trail, or it proves nothing"
+
+    result = _assess(root, _da_spec(FLAT, FLAT))
+
+    assert (result.state, result.codes) == ("local_import_ready", ("all-flat-file", "package-self-contained"))
+    assert result.source_keys == ()
+    assert (result.validation, result.max_phase2_claim) == ("validated", "data_validated")
+    assert result.effective_scope == "model_and_report"
+
+
+def test_one_live_key_earned_by_a_keyed_probe_then_clear_is_live_data_ok(tmp_path: Path) -> None:
+    """The only shape that earns `live_data_ok`: keyed measurement, then keyed clear, same epoch."""
+    root = _da_root(tmp_path, "one-live", LIVE_A)
+    _trail(root, ("block", [KEY_A]), ("probe-data_ok", [KEY_A]), ("probe-cleared", [KEY_A]))
+
+    result = _assess(root, _da_spec(LIVE_A))
+
+    assert (result.state, result.codes) == ("live_data_ok", ("probe-cleared", "probe-data-ok"))
+    assert result.source_keys == (KEY_A,)
+    assert (result.validation, result.max_phase2_claim) == ("validated", "data_validated")
+
+
+def test_two_live_keys_earned_in_separate_epochs_are_both_retained(tmp_path: Path) -> None:
+    """Re-arming B must not erase A: independent endpoints are independent reachability facts."""
+    root = _da_root(tmp_path, "two-live", LIVE_A, LIVE_B)
+    _trail(
+        root,
+        ("block", [KEY_A]),
+        ("probe-data_ok", [KEY_A]),
+        ("probe-cleared", [KEY_A]),
+        ("block", [KEY_B]),
+        ("probe-data_ok", [KEY_B]),
+        ("probe-cleared", [KEY_B]),
+    )
+
+    result = _assess(root, _da_spec(LIVE_A, LIVE_B))
+
+    assert result.state == "live_data_ok"
+    assert result.source_keys == tuple(sorted((KEY_A, KEY_B)))
+
+
+def test_the_latest_arm_invalidates_only_its_own_keys_proof(tmp_path: Path) -> None:
+    """Per-key epochs, proved in both directions from ONE trail.
+
+    The same audit log must say `blocked/marker-only` for the re-armed key and `live_data_ok` for
+    the untouched one. A global "cleared" bit cannot produce both answers, so this is the test that
+    distinguishes a per-key ledger from one.
+    """
+    root = _da_root(tmp_path, "rearm", LIVE_A, LIVE_B)
+    _trail(
+        root,
+        ("block", [KEY_A, KEY_B]),
+        ("probe-data_ok", [KEY_A]),
+        ("probe-cleared", [KEY_A]),
+        ("probe-data_ok", [KEY_B]),
+        ("probe-cleared", [KEY_B]),
+        ("block", [KEY_B]),
+    )
+
+    both = _assess(root, _da_spec(LIVE_A, LIVE_B))
+    only_a = _assess(root, _da_spec(LIVE_A))
+
+    assert (both.state, both.codes) == ("blocked", ("marker-only",))
+    assert (only_a.state, only_a.source_keys) == ("live_data_ok", (KEY_A,))
+
+
+def test_a_mixed_flat_and_live_package_needs_every_live_key_and_complete_bytes(tmp_path: Path) -> None:
+    """A live leg does not excuse the flat half, and the flat half does not excuse the live one."""
+    root = _da_root(tmp_path, "mixed", FLAT, LIVE_A, LIVE_B)
+    _trail(
+        root,
+        ("block", [KEY_A, KEY_B]),
+        ("probe-data_ok", [KEY_A]),
+        ("probe-data_ok", [KEY_B]),
+        ("probe-cleared", [KEY_A, KEY_B]),
+    )
+    spec = _da_spec(FLAT, LIVE_A, LIVE_B)
+
+    earned = _assess(root, spec)
+    leaky = _assess(root, spec, {**COMPLETE_LOCAL, "retained_network": ["\\\\share\\rows.csv"]})
+
+    assert (earned.state, earned.source_keys) == ("live_data_ok", tuple(sorted((KEY_A, KEY_B))))
+    assert (leaky.state, leaky.codes) == ("blocked", ("local-import-incomplete",))
+
+
+def test_an_unkeyed_probe_success_cannot_earn_a_clear(tmp_path: Path) -> None:
+    """The producer gap #562 closes, pinned from the READER side.
+
+    Before `_record_attempt` stamped source keys, a two-key bundle could hold a `probe-data_ok` and
+    a `probe-cleared` with nothing tying either to an endpoint. The positive control is the same
+    trail with the key present, so this cannot pass by refusing everything.
+    """
+    root = _da_root(tmp_path, "unkeyed", LIVE_A)
+    _trail(root, ("block", [KEY_A]), ("probe-data_ok", None), ("probe-cleared", [KEY_A]))
+    unkeyed = _assess(root, _da_spec(LIVE_A))
+
+    keyed_root = _da_root(tmp_path, "keyed", LIVE_A)
+    _trail(keyed_root, ("block", [KEY_A]), ("probe-data_ok", [KEY_A]), ("probe-cleared", [KEY_A]))
+    keyed = _assess(keyed_root, _da_spec(LIVE_A))
+
+    assert (unkeyed.state, unkeyed.codes) == ("blocked", ("stale-clear",))
+    assert keyed.state == "live_data_ok"
+
+
+def test_a_real_bare_earned_clear_through_the_gate_cli_stays_blocked(tmp_path: Path) -> None:
+    """End to end through the PRODUCTION arm/clear path, not synthetic audit lines.
+
+    `clear_block(..., earned=True)` writes a `probe-cleared` naming the last block's sources even
+    though nothing was ever measured. That entry is real, well-formed, keyed and trusted - and it
+    still must not produce `live_data_ok`.
+    """
+    root = _da_root(tmp_path, "cli-clear", LIVE_A)
+    cg.apply_block(root, [KEY_A])
+    assert (root / cg.MARKER).exists(), "fixture must start armed"
+    assert cg.clear_block(root, "operator said it is fine", earned=True) == 0
+    assert "probe-cleared" in _direct_actions(root), "fixture must produce the real earned-clear record"
+
+    result = _assess(root, _da_spec(LIVE_A))
+
+    assert (result.state, result.codes) == ("blocked", ("stale-clear",))
+
+
+def test_a_later_non_success_probe_invalidates_an_already_earned_key(tmp_path: Path) -> None:
+    """Proof is not permanent: the LATEST measurement decides, including when it goes backwards."""
+    root = _da_root(tmp_path, "regressed", LIVE_A)
+    _trail(
+        root,
+        ("block", [KEY_A]),
+        ("probe-data_ok", [KEY_A]),
+        ("probe-cleared", [KEY_A]),
+        ("probe-no_credential", [KEY_A]),
+    )
+
+    result = _assess(root, _da_spec(LIVE_A))
+
+    assert (result.state, result.codes) == ("blocked", ("probe-no-credential",))
+
+
+@pytest.mark.parametrize(
+    ("entries", "expected_code"),
+    [
+        pytest.param((("block", [KEY_A]),), "marker-only", id="marker-only"),
+        pytest.param((("block", [KEY_A]), ("manual-clear", None)), "manual-clear", id="manual-clear"),
+        pytest.param(
+            (("block", [KEY_A]), ("probe-credential_present", [KEY_A])),
+            "credential-present-only",
+            id="credential-present",
+        ),
+        pytest.param((("block", [KEY_A]), ("probe-skipped", [KEY_A])), "live-probe-skipped", id="skipped"),
+        pytest.param(
+            (("block", [KEY_A]), ("probe-operator_required", [KEY_A])),
+            "probe-operator-required",
+            id="operator-required",
+        ),
+        pytest.param((("block", [KEY_A]), ("probe-no_credential", [KEY_A])), "probe-no-credential", id="no-credential"),
+        pytest.param((("block", [KEY_A]), ("probe-access_denied", [KEY_A])), "probe-access-denied", id="access-denied"),
+        pytest.param((("block", [KEY_A]), ("probe-unreachable", [KEY_A])), "probe-unreachable", id="unreachable"),
+        pytest.param((("block", [KEY_A]), ("probe-bad_table", [KEY_A])), "probe-bad-table", id="bad-table"),
+        pytest.param((("block", [KEY_A]), ("probe-error", [KEY_A])), "probe-error", id="error"),
+    ],
+)
+def test_each_unearned_shape_names_its_own_blocking_code(tmp_path: Path, entries: tuple, expected_code: str) -> None:
+    """Every refusal must be distinguishable. A single fail-closed code would pass all of these."""
+    root = _da_root(tmp_path, f"blocked-{expected_code}", LIVE_A)
+    _trail(root, *entries)
+
+    result = _assess(root, _da_spec(LIVE_A))
+
+    assert (result.state, result.codes) == ("blocked", (expected_code,))
+
+
+@pytest.mark.parametrize(
+    ("poison", "expected_code"),
+    [
+        pytest.param("missing", "audit-missing", id="missing"),
+        pytest.param("empty", "audit-malformed", id="empty"),
+        pytest.param("malformed", "audit-malformed", id="malformed-line"),
+        pytest.param("foreign", "audit-foreign-scope", id="foreign-scope"),
+        pytest.param("unscoped", "audit-foreign-scope", id="unscoped"),
+    ],
+)
+def test_an_untrusted_audit_cannot_establish_live_access(tmp_path: Path, poison: str, expected_code: str) -> None:
+    """An untrusted trail is `cannot_establish`, never `blocked` - and never a silent pass.
+
+    Each poison is mixed into an OTHERWISE COMPLETE, genuinely earned history, so the refusal comes
+    from the poison rather than from missing evidence.
+    """
+    root = _da_root(tmp_path, f"poison-{poison}", LIVE_A)
+    if poison != "missing":
+        _trail(root, ("block", [KEY_A]), ("probe-data_ok", [KEY_A]), ("probe-cleared", [KEY_A]))
+    audit = root / cg.AUDIT
+    if poison == "empty":
+        audit.write_text("", encoding="utf-8")
+    elif poison == "malformed":
+        audit.write_text(audit.read_text(encoding="utf-8") + "{ this is not json\n", encoding="utf-8")
+    elif poison == "foreign":
+        foreign = json.dumps({"ts": "x", "action": "block", "detail": "d", "scope": str(tmp_path / "elsewhere")})
+        audit.write_text(audit.read_text(encoding="utf-8") + foreign + "\n", encoding="utf-8")
+    elif poison == "unscoped":
+        audit.write_text(audit.read_text(encoding="utf-8") + json.dumps({"action": "block"}) + "\n", encoding="utf-8")
+
+    result = _assess(root, _da_spec(LIVE_A))
+
+    assert (result.state, result.codes) == ("cannot_establish", (expected_code,))
+    assert result.source_keys == (), "an untrusted authority must not still publish its keys"
+
+
+def test_an_untrusted_audit_does_not_block_a_package_with_no_live_leg(tmp_path: Path) -> None:
+    """Negative control for the poison suite: the audit is only load-bearing when something needs it."""
+    root = _da_root(tmp_path, "poison-irrelevant", FLAT)
+    (root / cg.AUDIT).write_text("{ not json at all\n", encoding="utf-8")
+
+    assert _assess(root, _da_spec(FLAT)).state == "local_import_ready"
+
+
+def test_a_force_scoped_arm_is_never_portable_one_unit_authority(tmp_path: Path) -> None:
+    """`--force-scope` gates a whole subtree, so its evidence cannot certify one package."""
+    root = _da_root(tmp_path, "forced", LIVE_A)
+    _trail(
+        root,
+        ("block-forced-scope", None),
+        ("block", [KEY_A]),
+        ("probe-data_ok", [KEY_A]),
+        ("probe-cleared", [KEY_A]),
+    )
+
+    result = _assess(root, _da_spec(LIVE_A))
+
+    assert (result.state, result.codes) == ("cannot_establish", ("forced-scope",))
+
+
+def _authorized_root(tmp_path: Path, name: str, *, override: bool = True, authorize_first: bool = False) -> Path:
+    root = _da_root(tmp_path, name, LIVE_A)
+    if authorize_first:
+        _trail(root, ("authorize", None), ("block", [KEY_A]))
+    else:
+        _trail(root, ("block", [KEY_A]), ("authorize", None), ("probe-cleared", [KEY_A]))
+    if override:
+        (root / cg.OVERRIDE).write_text("authorized by a human\n", encoding="utf-8")
+    return root
+
+
+def test_an_authentic_authorization_at_model_only_scope_is_the_limited_accepted_state(tmp_path: Path) -> None:
+    """Authorized is ACCEPTED but never validated, and its ceiling drops to structural-only."""
+    root = _authorized_root(tmp_path, "authorized")
+
+    result = _assess(root, _da_spec(LIVE_A), policy="model_only_unvalidated", scope="model_only")
+
+    assert (result.state, result.codes) == ("authorized_model_only", ("brief-model-only", "human-authorize"))
+    assert (result.validation, result.max_phase2_claim) == ("unvalidated", "structural_only")
+    assert (result.effective_scope, result.source_keys) == ("model_only", (KEY_A,))
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "root_kwargs", "why"),
+    [
+        pytest.param({"policy": "stop", "scope": "model_only"}, {}, "brief says stop", id="brief-says-stop"),
+        pytest.param(
+            {"policy": "model_only_unvalidated", "scope": "model_and_report"},
+            {},
+            "requested scope is not model-only",
+            id="scope-not-model-only",
+        ),
+        pytest.param(
+            {"policy": "model_only_unvalidated", "scope": "model_only"},
+            {"override": False},
+            "no override file, so nothing authentic to honour",
+            id="no-override-file",
+        ),
+        pytest.param(
+            {"policy": "model_only_unvalidated", "scope": "model_only"},
+            {"authorize_first": True},
+            "the authorization predates the current arm",
+            id="authorize-before-arm",
+        ),
+    ],
+)
+def test_a_partial_authorization_is_a_named_mismatch_not_a_quiet_pass(
+    tmp_path: Path, kwargs: dict, root_kwargs: dict, why: str
+) -> None:
+    """All three legs must agree. Any partial combination blocks and SAYS it was a mismatch."""
+    root = _authorized_root(tmp_path, f"mismatch-{len(why)}-{kwargs['scope']}-{kwargs['policy']}", **root_kwargs)
+
+    result = _assess(root, _da_spec(LIVE_A), **kwargs)
+
+    assert result.state == "blocked", why
+    assert "authorization-mismatch" in result.codes, why
+
+
+def test_a_brief_that_asks_for_the_fallback_without_any_authorization_is_a_mismatch(tmp_path: Path) -> None:
+    """The other direction: policy wants the fallback, but no human ever signed anything."""
+    root = _da_root(tmp_path, "wants-fallback", LIVE_A)
+    _trail(root, ("block", [KEY_A]))
+
+    result = _assess(root, _da_spec(LIVE_A), policy="model_only_unvalidated", scope="model_only")
+
+    assert result.state == "blocked"
+    assert set(result.codes) == {"marker-only", "authorization-mismatch"}
+
+
+def test_a_forged_override_with_no_authorize_entry_authorizes_nothing(tmp_path: Path) -> None:
+    """The file alone has never authorized anything, and this authority does not change that."""
+    root = _da_root(tmp_path, "forged-override", LIVE_A)
+    _trail(root, ("block", [KEY_A]))
+    (root / cg.OVERRIDE).write_text("I wrote this myself\n", encoding="utf-8")
+
+    result = _assess(root, _da_spec(LIVE_A), policy="model_only_unvalidated", scope="model_only")
+
+    assert result.state == "blocked"
+    assert "authorization-mismatch" in result.codes
+
+
+@pytest.mark.parametrize(
+    ("root_legs", "package_legs", "expected"),
+    [
+        pytest.param((LIVE_A,), (LIVE_A, LIVE_B), "source-key-set-changed", id="key-added"),
+        pytest.param((LIVE_A,), (LIVE_B,), "source-key-set-changed", id="key-swapped"),
+        pytest.param((LIVE_A, LIVE_A), (LIVE_A, LIVE_A), "source-key-invalid", id="key-duplicated"),
+    ],
+)
+def test_a_package_key_the_gate_root_never_covered_cannot_be_established(
+    tmp_path: Path, root_legs: tuple, package_legs: tuple, expected: str
+) -> None:
+    """Root evidence is bound to package evidence by KEY, in both directions."""
+    root = _da_root(tmp_path, f"keys-{expected}-{len(package_legs)}", *root_legs)
+    _trail(root, ("block", [KEY_A]), ("probe-data_ok", [KEY_A]), ("probe-cleared", [KEY_A]))
+
+    result = _assess(root, _da_spec(*package_legs))
+
+    assert (result.state, result.codes) == ("cannot_establish", (expected,))
+
+
+def test_a_package_carrying_fewer_keys_than_the_gate_root_still_earns_its_own(tmp_path: Path) -> None:
+    """Negative control for the key-set rules: an estate root legitimately gates more than one unit."""
+    root = _da_root(tmp_path, "root-superset", LIVE_A, LIVE_B)
+    _trail(
+        root,
+        ("block", [KEY_A, KEY_B]),
+        ("probe-data_ok", [KEY_A]),
+        ("probe-data_ok", [KEY_B]),
+        ("probe-cleared", [KEY_A, KEY_B]),
+    )
+
+    result = _assess(root, _da_spec(LIVE_A))
+
+    assert (result.state, result.source_keys) == ("live_data_ok", (KEY_A,)), "only this package's own key ships"
+
+
+def test_an_unknown_or_review_leg_blocks_and_is_never_dropped_from_the_denominator(tmp_path: Path) -> None:
+    """A leg nobody can classify is not a flat file, and an earned sibling does not cover it."""
+    root = _da_root(tmp_path, "review", LIVE_A, REVIEW)
+    _trail(root, ("block", [KEY_A]), ("probe-data_ok", [KEY_A]), ("probe-cleared", [KEY_A]))
+
+    with_review = _assess(root, _da_spec(LIVE_A, REVIEW))
+    without_review = _assess(root, _da_spec(LIVE_A))
+
+    assert (with_review.state, with_review.codes) == ("blocked", ("unknown-target",))
+    assert without_review.state == "live_data_ok", "control: the review leg is what blocked, nothing else"
+
+
+def test_an_unclassifiable_leg_with_no_stable_identity_is_an_authority_failure(tmp_path: Path) -> None:
+    """Contradicts the tidy "review blocks" reading, and the canonical classifier is right.
+
+    `_classify_legs` promotes a leg it cannot KEY to `needs-credential` with an
+    `unstable-source[...]` placeholder rather than leaving it as `review`. That placeholder can
+    never be matched against audit evidence, so the honest answer is `cannot_establish`, not a
+    `blocked` finding about data. Pinned here because it is a real behaviour of the shared
+    classifier, not of this assessor, and a future "simplification" would silently downgrade it.
+    """
+    root = _da_root(tmp_path, "unstable-review", LIVE_A)
+
+    result = _assess(root, _da_spec(REVIEW_UNSTABLE))
+
+    assert (result.state, result.codes) == ("cannot_establish", ("source-key-invalid",))
+
+
+@pytest.mark.parametrize(
+    "local",
+    [
+        pytest.param({**COMPLETE_LOCAL, "self_contained": False}, id="not-self-contained"),
+        pytest.param({**COMPLETE_LOCAL, "omissions": [{"reason": "unshippable"}]}, id="omission"),
+        pytest.param({**COMPLETE_LOCAL, "neutralized": ["Sales.xlsx"]}, id="neutralized"),
+        pytest.param({**COMPLETE_LOCAL, "retained_network": ["rows.csv"]}, id="retained-network"),
+        pytest.param({"self_contained": True}, id="fields-absent"),
+    ],
+)
+def test_incomplete_packaged_bytes_block_a_flat_package(tmp_path: Path, local: dict) -> None:
+    """Local access is a claim about BYTES THAT SHIPPED; a missing field is incomplete, not silent."""
+    root = _da_root(tmp_path, f"incomplete-{len(local)}-{local.get('self_contained')}", FLAT)
+
+    result = _assess(root, _da_spec(FLAT), local)
+
+    assert (result.state, result.codes) == ("blocked", ("local-import-incomplete",))
+
+
+def test_an_unreadable_localization_record_is_cannot_establish_not_blocked(tmp_path: Path) -> None:
+    """A record that is not even a mapping is an authority failure, not a data finding."""
+    root = _da_root(tmp_path, "bad-local-record", FLAT)
+
+    result = _assess(root, _da_spec(FLAT), ["not", "a", "mapping"])
+
+    assert (result.state, result.codes) == ("cannot_establish", ("spec-unreadable",))
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        pytest.param("not a mapping", id="spec-not-a-mapping"),
+        pytest.param({"data_sources": "nope"}, id="data-sources-not-a-list"),
+        pytest.param({"data_sources": ["nope"]}, id="source-not-a-mapping"),
+    ],
+)
+def test_an_unreadable_package_spec_is_cannot_establish(tmp_path: Path, spec: object) -> None:
+    root = _da_root(tmp_path, "bad-spec", FLAT)
+
+    result = _assess(root, spec)
+
+    assert (result.state, result.codes) == ("cannot_establish", ("spec-unreadable",))
+
+
+def test_a_live_leg_with_no_hashable_identity_is_source_key_invalid(tmp_path: Path) -> None:
+    """`_classify_legs` returns an `unstable-source[...]` placeholder; it is not a source key."""
+    root = _da_root(tmp_path, "unstable", LIVE_A)
+    unstable = {"class": "snowflake", "server": "s.example", "powerbi_target": "live_source"}
+
+    result = _assess(root, _da_spec(unstable))
+
+    assert (result.state, result.codes) == ("cannot_establish", ("source-key-invalid",))
+
+
+def _direct_actions(root: Path) -> list[str]:
+    return [json.loads(line)["action"] for line in (root / cg.AUDIT).read_text(encoding="utf-8").splitlines()]
+
+
+PROVIDER_LIVE = cg.DataAccessAssessment(
+    state="live_data_ok",
+    source_keys=(KEY_A,),
+    provider_unit=None,
+    provider_state=None,
+    validation="validated",
+    effective_scope="model_and_report",
+    max_phase2_claim="data_validated",
+    codes=("probe-cleared", "probe-data-ok"),
+)
+PROVIDER_LOCAL = cg.DataAccessAssessment(
+    state="local_import_ready",
+    source_keys=(),
+    provider_unit=None,
+    provider_state=None,
+    validation="validated",
+    effective_scope="model_and_report",
+    max_phase2_claim="data_validated",
+    codes=("all-flat-file", "package-self-contained"),
+)
+PROVIDER_AUTHORIZED = cg.DataAccessAssessment(
+    state="authorized_model_only",
+    source_keys=(KEY_A,),
+    provider_unit=None,
+    provider_state=None,
+    validation="unvalidated",
+    effective_scope="model_only",
+    max_phase2_claim="structural_only",
+    codes=("brief-model-only", "human-authorize"),
+)
+PROVIDER_BLOCKED = cg.DataAccessAssessment(
+    state="blocked",
+    source_keys=(),
+    provider_unit=None,
+    provider_state=None,
+    validation="not_established",
+    effective_scope=None,
+    max_phase2_claim="none",
+    codes=("marker-only",),
+)
+PROVIDER_RECURSIVE = cg.DataAccessAssessment(
+    state="provider_inherited",
+    source_keys=(KEY_A,),
+    provider_unit="Upstream",
+    provider_state="live_data_ok",
+    validation="validated",
+    effective_scope="model_and_report",
+    max_phase2_claim="data_validated",
+    codes=("provider-exact",),
+)
+
+
+@pytest.mark.parametrize(
+    ("provider_assessment", "expected_keys"),
+    [
+        pytest.param(PROVIDER_LIVE, (KEY_A,), id="live-provider"),
+        pytest.param(PROVIDER_LOCAL, (), id="local-provider"),
+    ],
+)
+def test_exactly_one_direct_provider_is_inherited_field_for_field(
+    tmp_path: Path, provider_assessment: object, expected_keys: tuple
+) -> None:
+    """The consumer copies the provider's semantic fields verbatim and names it exactly."""
+    root = _da_root(tmp_path, f"consumer-{len(expected_keys)}", FLAT)
+
+    result = _assess(
+        root, _da_spec(FLAT), scope="report_only_shared_model", provider=("Superstore", provider_assessment)
+    )
+
+    assert (result.state, result.codes) == ("provider_inherited", ("provider-exact",))
+    assert (result.provider_unit, result.provider_state) == ("Superstore", provider_assessment.state)
+    assert result.source_keys == expected_keys
+    assert result.validation == provider_assessment.validation
+    assert result.max_phase2_claim == provider_assessment.max_phase2_claim
+    assert result.effective_scope == "report_only_shared_model"
+
+
+def test_a_model_only_provider_cannot_authorize_a_report_only_consumer(tmp_path: Path) -> None:
+    """Intersecting `model_only` with `report_only_shared_model` is empty - but only for the REPORT.
+
+    The same provider still inherits fine at model-only scope, which is the control that proves the
+    refusal is about the topology intersection rather than about the provider being unusable.
+    """
+    root = _da_root(tmp_path, "model-only-provider", FLAT)
+    provider = ("SharedModel", PROVIDER_AUTHORIZED)
+
+    report_consumer = _assess(root, _da_spec(FLAT), scope="report_only_shared_model", provider=provider)
+    model_consumer = _assess(root, _da_spec(FLAT), scope="model_only", provider=provider)
+
+    assert (report_consumer.state, report_consumer.codes) == ("blocked", ("provider-model-only",))
+    assert (model_consumer.state, model_consumer.provider_state) == ("provider_inherited", "authorized_model_only")
+    assert (model_consumer.validation, model_consumer.max_phase2_claim) == ("unvalidated", "structural_only")
+
+
+@pytest.mark.parametrize(
+    ("provider", "expected"),
+    [
+        pytest.param(None, "provider-missing", id="absent"),
+        pytest.param(("Upstream", PROVIDER_RECURSIVE), "provider-ambiguous", id="recursive"),
+        pytest.param(("Upstream", PROVIDER_BLOCKED), "provider-missing", id="not-an-authority"),
+        pytest.param(("", PROVIDER_LIVE), "provider-foreign", id="empty-unit"),
+        pytest.param(("Upstream", {"state": "live_data_ok"}), "provider-foreign", id="foreign-shape"),
+        pytest.param(("Upstream", PROVIDER_LIVE, "extra"), "provider-foreign", id="wrong-arity"),
+    ],
+)
+def test_an_unusable_provider_is_named_rather_than_searched_for(
+    tmp_path: Path, provider: object, expected: str
+) -> None:
+    """No registry lookup, no name match, no ancestor walk - each failure gets its own code."""
+    root = _da_root(tmp_path, f"provider-{expected}-{type(provider).__name__}-{len(str(provider))}", FLAT)
+
+    result = cg.assess_data_access(
+        root,
+        package_spec=_da_spec(FLAT),
+        package_data_sources=COMPLETE_LOCAL,
+        fallback_authorization="stop",
+        requested_scope="report_only_shared_model",
+        provider=provider,
+    )
+
+    assert (result.state, result.codes) == ("cannot_establish", (expected,))
+
+
+@pytest.mark.parametrize("policy", ["stop", "model_only_unvalidated"])
+@pytest.mark.parametrize("scope", ["model_and_report", "model_only", "report_only_shared_model"])
+def test_the_typed_inputs_are_a_closed_vocabulary(tmp_path: Path, policy: str, scope: str) -> None:
+    """Accepted members must work; anything else is a CALLER bug and raises rather than degrading."""
+    root = _da_root(tmp_path, f"vocab-{policy}-{scope}", FLAT)
+    _assess(root, _da_spec(FLAT), policy=policy, scope=scope, provider=("U", PROVIDER_LOCAL))
+
+    with pytest.raises(ValueError):
+        _assess(root, _da_spec(FLAT), policy="whatever")
+    with pytest.raises(ValueError):
+        _assess(root, _da_spec(FLAT), scope="everything")
+
+
+def _projection(**overrides) -> dict:
+    payload = {
+        "schema": "phase1-data-access/v1",
+        "state": "live_data_ok",
+        "source_keys": [KEY_A],
+        "provider_unit": None,
+        "provider_state": None,
+        "validation": "validated",
+        "effective_scope": "model_and_report",
+        "max_phase2_claim": "data_validated",
+        "codes": ["probe-cleared", "probe-data-ok"],
+    }
+    payload.update(overrides)
+    return payload
+
+
+ROUND_TRIP_CASES = (PROVIDER_LIVE, PROVIDER_LOCAL, PROVIDER_AUTHORIZED, PROVIDER_BLOCKED, PROVIDER_RECURSIVE)
+
+
+@pytest.mark.parametrize("assessment", ROUND_TRIP_CASES, ids=[a.state for a in ROUND_TRIP_CASES])
+def test_every_producible_assessment_survives_its_own_strict_parser(tmp_path: Path, assessment: object) -> None:
+    """Producer and parser must agree by construction, and the bytes must be stable."""
+    text = assessment.dumps()
+
+    assert cg.parse_data_access(text) == assessment
+    assert assessment.dumps() == text, "serialization must be deterministic, or S1 hashes churn"
+
+    path = tmp_path / "data-access.json"
+    path.write_text(text, encoding="utf-8")
+    assert cg.read_data_access(path) == assessment
+
+
+def test_a_cannot_establish_projection_round_trips_too(tmp_path: Path) -> None:
+    """The refusal states ship as artifacts as well; they must survive the same parser."""
+    root = _da_root(tmp_path, "refusal-round-trip", LIVE_A)
+    refusal = _assess(root, _da_spec(LIVE_A))
+
+    assert refusal.state == "cannot_establish"
+    assert cg.parse_data_access(refusal.dumps()) == refusal
+
+
+@pytest.mark.parametrize(
+    ("text", "reason"),
+    [
+        pytest.param("{ nope", "malformed-json", id="malformed-json"),
+        pytest.param("[]", "not-an-object", id="not-an-object"),
+        pytest.param('{"schema": 1, "schema": 2}', "duplicate-key", id="duplicate-key-shallow"),
+        pytest.param(
+            json.dumps(_projection())[:-1] + ', "codes": ["probe-cleared"]}', "duplicate-key", id="duplicate-key-real"
+        ),
+    ],
+)
+def test_the_projection_parser_refuses_malformed_text_by_name(text: str, reason: str) -> None:
+    """Textual refusals, each identified. `.code` is always the shipped `projection-invalid`."""
+    with pytest.raises(cg.DataAccessProjectionError) as excinfo:
+        cg.parse_data_access(text)
+
+    assert excinfo.value.reason == reason
+    assert excinfo.value.code == "projection-invalid"
+
+
+def test_a_nonfinite_number_is_refused_as_such(tmp_path: Path) -> None:
+    """`NaN`/`Infinity` are not JSON; Python's decoder accepts them unless told not to."""
+    payload = json.dumps(_projection())[:-1] + ', "extra": Infinity}'
+
+    with pytest.raises(cg.DataAccessProjectionError) as excinfo:
+        cg.parse_data_access(payload)
+
+    assert excinfo.value.reason == "nonfinite"
+
+
+@pytest.mark.parametrize(
+    ("payload", "reason"),
+    [
+        pytest.param({**_projection(), "surprise": 1}, "unknown-field", id="unknown-field"),
+        pytest.param({k: v for k, v in _projection().items() if k != "codes"}, "missing-field", id="missing-field"),
+        pytest.param(_projection(schema="phase1-data-access/v2"), "unknown-value", id="wrong-schema"),
+        pytest.param(_projection(state=7), "bad-type", id="state-not-a-string"),
+        pytest.param(_projection(state="excellent"), "unknown-value", id="unknown-state"),
+        pytest.param(_projection(validation=None), "bad-type", id="validation-not-nullable"),
+        pytest.param(_projection(effective_scope="everything"), "unknown-value", id="unknown-scope"),
+        pytest.param(_projection(max_phase2_claim="lots"), "unknown-value", id="unknown-ceiling"),
+        pytest.param(_projection(provider_unit=""), "bad-type", id="empty-provider-unit"),
+        pytest.param(_projection(provider_state="blocked"), "unknown-value", id="provider-state-not-direct"),
+        pytest.param(_projection(source_keys="nope"), "bad-type", id="source-keys-not-a-list"),
+        pytest.param(_projection(source_keys=[1]), "bad-type", id="source-key-not-a-string"),
+        pytest.param(_projection(source_keys=[KEY_B, KEY_A]), "source-keys-unsorted", id="unsorted-keys"),
+        pytest.param(_projection(source_keys=[KEY_A, KEY_A]), "source-keys-unsorted", id="duplicate-keys"),
+        pytest.param(_projection(source_keys=["source-key:zzzz"]), "source-key-invalid", id="bad-key-syntax"),
+        pytest.param(_projection(source_keys=["a.example"]), "source-key-invalid", id="display-name-as-key"),
+        pytest.param(_projection(codes=["probe-data-ok", "probe-cleared"]), "codes-unsorted", id="unsorted-codes"),
+        pytest.param(_projection(codes=["probe-cleared", "totally-fine"]), "unknown-value", id="unknown-code"),
+    ],
+)
+def test_the_projection_parser_refuses_bad_fields_by_name(payload: dict, reason: str) -> None:
+    """Field-level strictness. Each case must name ITS refusal, not a single catch-all."""
+    with pytest.raises(cg.DataAccessProjectionError) as excinfo:
+        cg.parse_data_access(json.dumps(payload))
+
+    assert excinfo.value.reason == reason
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param(_projection(source_keys=[]), id="live-without-keys"),
+        pytest.param(_projection(codes=["probe-cleared"]), id="live-missing-a-code"),
+        pytest.param(_projection(validation="unvalidated"), id="live-not-validated"),
+        pytest.param(_projection(effective_scope="report_only_shared_model"), id="direct-with-consumer-scope"),
+        pytest.param(
+            _projection(
+                state="local_import_ready",
+                codes=["all-flat-file", "package-self-contained"],
+            ),
+            id="local-carrying-live-keys",
+        ),
+        pytest.param(
+            _projection(
+                state="authorized_model_only",
+                source_keys=[KEY_A],
+                codes=["brief-model-only", "human-authorize"],
+                validation="unvalidated",
+                effective_scope="model_and_report",
+                max_phase2_claim="structural_only",
+            ),
+            id="authorized-outside-model-only",
+        ),
+        pytest.param(
+            _projection(
+                state="blocked",
+                source_keys=[],
+                codes=["all-flat-file"],
+                validation="not_established",
+                effective_scope=None,
+                max_phase2_claim="none",
+            ),
+            id="blocked-with-an-accepted-code",
+        ),
+        pytest.param(
+            _projection(
+                state="cannot_establish",
+                source_keys=[KEY_A],
+                codes=["audit-missing"],
+                validation="not_established",
+                effective_scope=None,
+                max_phase2_claim="none",
+            ),
+            id="cannot-establish-still-publishing-keys",
+        ),
+        pytest.param(
+            _projection(
+                state="provider_inherited",
+                codes=["provider-exact"],
+                provider_unit="Upstream",
+                provider_state=None,
+            ),
+            id="inherited-without-a-provider-state",
+        ),
+        pytest.param(
+            _projection(
+                state="provider_inherited",
+                source_keys=[],
+                codes=["provider-exact"],
+                provider_unit="Upstream",
+                provider_state="live_data_ok",
+            ),
+            id="inherited-live-provider-with-no-keys",
+        ),
+        pytest.param(
+            _projection(
+                state="provider_inherited",
+                codes=["provider-exact"],
+                provider_unit=None,
+                provider_state="live_data_ok",
+            ),
+            id="inherited-without-a-provider-unit",
+        ),
+        pytest.param(_projection(provider_unit="Upstream"), id="direct-state-naming-a-provider"),
+    ],
+)
+def test_the_projection_parser_refuses_impossible_state_combinations(payload: dict) -> None:
+    """Types alone cannot catch a semantically impossible projection; these are the tampered shapes."""
+    with pytest.raises(cg.DataAccessProjectionError) as excinfo:
+        cg.parse_data_access(json.dumps(payload))
+
+    assert excinfo.value.reason == "illegal-combination"
+
+
+def test_reading_an_absent_projection_is_a_refusal_not_an_empty_state(tmp_path: Path) -> None:
+    """`read_data_access` must never degrade a missing artifact into a permissive default."""
+    with pytest.raises(cg.DataAccessProjectionError) as excinfo:
+        cg.read_data_access(tmp_path / "nope" / "data-access.json")
+
+    assert excinfo.value.reason == "unreadable"
+    assert excinfo.value.code == "projection-invalid"
+
+
+def test_the_module_still_loads_the_way_the_hook_loads_it(tmp_path: Path) -> None:
+    """A latent trap this slice tripped, pinned so the next addition cannot re-arm it.
+
+    `scripts/hooks/credential_gate.py` loads this module with
+    `importlib.util.module_from_spec` + `exec_module` and deliberately does NOT register it in
+    `sys.modules`. Combined with `from __future__ import annotations`, a `@dataclass` in this
+    module then makes `dataclasses._is_type` dereference `sys.modules.get(cls.__module__)` - which
+    is `None` - and raise. The hook catches everything and fails closed, so the visible symptom is
+    that EVERY hook decision becomes a deny: measured here, and caught only by
+    `test_credential_gate_shield.py`, never by importing this module normally.
+
+    ⚠️ Residual, deliberately not fixed in this slice: the hook's own loader is still fragile, and
+    fixing it means editing `scripts/hooks/credential_gate.py`, which is outside this change's
+    closed surface. This test makes the trap loud instead of silent.
+    """
+    spec = importlib.util.spec_from_file_location("_credential_gate_core_for_hook", GATE)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    assert "_credential_gate_core_for_hook" not in sys.modules, "the hook does not register it, so neither may this"
+
+    spec.loader.exec_module(module)
+
+    assert module.assess_data_access is not None
+    assert (
+        module.DataAccessAssessment(
+            state="blocked",
+            source_keys=(),
+            provider_unit=None,
+            provider_state=None,
+            validation="not_established",
+            effective_scope=None,
+            max_phase2_claim="none",
+            codes=("marker-only",),
+        ).state
+        == "blocked"
+    )
+    assert not (tmp_path / "unused").exists(), "importing the module must not touch the filesystem"
+
+
+def test_no_projection_field_can_carry_a_host_path_or_display_name(tmp_path: Path) -> None:
+    """Privacy is structural: the exported surface has no field shaped to hold customer text."""
+    root = _da_root(tmp_path, "privacy", LIVE_A, FLAT)
+    _trail(root, ("block", [KEY_A]), ("probe-unreachable", [KEY_A]))
+
+    payload = json.dumps(_assess(root, _da_spec(LIVE_A, FLAT)).to_json())
+
+    for secret in ("a.example", "sqlserver", "excel-direct", str(root), "ds0", "ds1"):
+        assert secret not in payload, f"{secret!r} reached the projection"
+    assert set(json.loads(payload)) == set(cg.DATA_ACCESS_FIELDS)
