@@ -214,6 +214,7 @@ def test_fingerprints_still_land_with_no_credentials(tmp_path):
     _twbx(tmp_path)
     result = prov.build(tmp_path, {})
     assert result["input_count"] == 1
+    assert result["phase"] == {"status": "local_only", "errors": []}
     assert result["inputs"][0]["input"]["sha256"]
     assert result["inputs"][0].get("origin") is None
 
@@ -228,6 +229,10 @@ def test_a_lookup_failure_degrades_to_fingerprints_rather_than_failing(tmp_path,
     monkeypatch.setattr(prov, "TableauLookup", boom)
     result = prov.build(tmp_path, {"TABLEAU_SERVER_URL": "https://x", "TABLEAU_PAT_NAME": "n"})
     assert result["inputs"][0]["input"]["sha256"]
+    assert result["phase"]["status"] == "partial"
+    assert result["phase"]["errors"] == [
+        {"code": "live-lookup-refused", "operation": "sign-in", "exception_class": "RuntimeError"}
+    ]
 
 
 def test_every_workbook_in_a_folder_is_stamped(tmp_path):
@@ -238,7 +243,61 @@ def test_every_workbook_in_a_folder_is_stamped(tmp_path):
 
 
 def test_an_empty_folder_is_reported_rather_than_stamped_as_success(tmp_path):
-    assert prov.build(tmp_path, {})["input_count"] == 0
+    result = prov.build(tmp_path, {})
+    assert result["input_count"] == 0
+    assert result["phase"] == {
+        "status": "empty",
+        "errors": [{"code": "empty-input", "operation": "collect-inputs"}],
+    }
+
+
+def test_failed_input_discovery_is_a_safe_structured_result(tmp_path, monkeypatch):
+    secret = str(tmp_path / "customer-secret")
+
+    def fail(_target):
+        raise OSError(13, secret)
+
+    monkeypatch.setattr(prov, "collect_inputs", fail)
+    result = prov.build(tmp_path, {})
+
+    assert result["input_count"] == 0 and result["inputs"] == []
+    assert result["phase"] == {
+        "status": "failed",
+        "errors": [
+            {
+                "code": "collect-inputs-failed",
+                "operation": "collect-inputs",
+                "exception_class": "PermissionError",
+                "errno": 13,
+            }
+        ],
+    }
+    assert secret not in json.dumps(result)
+
+
+def test_one_failed_local_fingerprint_keeps_the_completed_sibling(tmp_path, monkeypatch):
+    _twbx(tmp_path, "Broken")
+    _twbx(tmp_path, "Healthy")
+    real_fingerprint = prov.fingerprint
+
+    def fingerprint(path):
+        if path.stem == "Broken":
+            raise OSError(5, str(path))
+        return real_fingerprint(path)
+
+    monkeypatch.setattr(prov, "fingerprint", fingerprint)
+    result = prov.build(tmp_path, {})
+
+    assert result["phase"]["status"] == "partial"
+    assert result["input_count"] == 2
+    assert result["inputs"][0]["fingerprint_error"] == {
+        "code": "local-fingerprint-failed",
+        "operation": "fingerprint",
+        "exception_class": "OSError",
+        "errno": 5,
+    }
+    assert result["inputs"][1]["input"]["sha256"]
+    assert str(tmp_path) not in json.dumps(result)
 
 
 # --------------------------------------------------------------------------- secrets
@@ -319,7 +378,11 @@ def test_live_lookup_errors_are_scrubbed_before_the_manifest_sink(tmp_path, monk
     }
     result = prov.build(tmp_path, env)
     assert secret not in json.dumps(result)
-    assert "[REDACTED]" in result["inputs"][0]["lookup_error"]
+    assert result["inputs"][0]["lookup_error"] == {
+        "code": "live-lookup-failed",
+        "operation": "lookup-origin",
+        "exception_class": "RuntimeError",
+    }
 
 
 @pytest.mark.parametrize("key", ["TABLEAU_SERVER_URL", "TABLEAU_PAT_NAME"])
@@ -528,6 +591,7 @@ def test_a_many_input_run_costs_one_inventory_and_one_download_per_matched_luid(
     assert site.count("content") == 66, "one download per distinct matched LUID, not two"
     assert len(site.calls) == 2 + 1 + 66, "sign-in + one inventory + one content each + sign-out"
     assert result["input_count"] == 66
+    assert result["phase"]["status"] == "success"
     assert sum(1 for record in result["inputs"] if record.get("origin")) == 66
     assert site.count("signout") == 1, "the session is still released"
 
@@ -595,8 +659,12 @@ def test_a_dead_inventory_is_asked_once_and_every_input_keeps_its_fingerprint(tm
 
     assert site.count("inventory") == 1
     assert site.count("content") == 0
-    errors = {record["lookup_error"] for record in result["inputs"]}
-    assert len(errors) == 1 and errors.pop().startswith(expected)
+    errors = {json.dumps(record["lookup_error"], sort_keys=True) for record in result["inputs"]}
+    assert len(errors) == 1
+    error = json.loads(errors.pop())
+    assert error["code"] == "live-lookup-failed"
+    assert error["operation"] == "lookup-origin"
+    assert error["exception_class"] in expected
     assert len(result["inputs"]) == 12
     assert all(record["input"]["sha256"] and record["origin"] is None for record in result["inputs"])
 
@@ -619,8 +687,12 @@ def test_a_dead_content_call_latches_that_luid_only(tmp_path, monkeypatch):
     assert site.count("content") == 2, "one attempt for the dead LUID, one download for the healthy one"
     dead_records = [r for r in records if r["input"]["file"].startswith(dead)]
     assert len(dead_records) == 2
-    assert {r["lookup_error"] for r in dead_records} == {dead_records[0]["lookup_error"]}
-    assert dead_records[0]["lookup_error"].startswith("URLError:")
+    assert all(record["lookup_error"] == dead_records[0]["lookup_error"] for record in dead_records)
+    assert dead_records[0]["lookup_error"] == {
+        "code": "live-lookup-failed",
+        "operation": "lookup-origin",
+        "exception_class": "URLError",
+    }
     alive_record = next(r for r in records if r["input"]["file"].startswith(alive))
     assert alive_record["origin"]["workbook_luid"] == alive
 
@@ -641,6 +713,12 @@ def test_a_signout_failure_cannot_discard_the_completed_result(tmp_path, monkeyp
     assert result["input_count"] == 3
     assert all(record["input"]["sha256"] for record in result["inputs"])
     assert sum(1 for record in result["inputs"] if record.get("origin")) == 3
+    assert result["phase"]["status"] == "partial"
+    assert result["phase"]["errors"][-1] == {
+        "code": "sign-out-failed",
+        "operation": "sign-out",
+        "exception_class": "ConnectionError",
+    }
     assert site.count("signout") == 1, "it was attempted - it simply may not cost the artifact"
 
 
@@ -677,6 +755,11 @@ def test_the_completed_result_survives_a_signout_that_raises_outright(tmp_path, 
 
     assert result["input_count"] == 2
     assert sum(1 for record in result["inputs"] if record.get("origin")) == 2
+    assert result["phase"]["errors"][-1] == {
+        "code": "sign-out-failed",
+        "operation": "sign-out",
+        "exception_class": "RuntimeError",
+    }
 
 
 def test_the_cli_still_writes_the_artifact_when_signout_fails(tmp_path, monkeypatch):
@@ -716,6 +799,12 @@ def test_a_scrub_failure_withholds_live_fields_but_keeps_the_fingerprints(tmp_pa
     assert result["input_count"] == 2
     assert all(record["input"]["sha256"] for record in result["inputs"])
     assert all(record["origin"] is None for record in result["inputs"])
+    assert result["phase"]["status"] == "partial"
+    assert result["phase"]["errors"][0] == {
+        "code": "scrub-failed",
+        "operation": "scrub",
+        "exception_class": "RuntimeError",
+    }
     assert "redaction failed" in result["inputs"][0]["origin_note"]
     assert site.count("signout") == 1, "the session is released even when the scrub blew up"
 
@@ -836,7 +925,11 @@ def test_an_unreadable_site_copy_is_unavailable_not_a_byte_difference(tmp_path, 
         assert origin["remote_sha256"] is None and origin["remote_revision_key"] is None
         assert origin["revision_match"] is None, "nothing was compared, so nothing differs"
         assert "DIFFER" not in record["origin_note"]
-        assert record["lookup_error"] == "content unavailable: HTTP 404"
+        assert record["lookup_error"] == {
+            "code": "content-unavailable",
+            "operation": "download-workbook",
+            "http_status": 404,
+        }
         assert origin["workbook_luid"] == luid, "the inventory evidence we DID get is still recorded"
 
 

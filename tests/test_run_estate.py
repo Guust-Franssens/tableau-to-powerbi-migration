@@ -1897,7 +1897,14 @@ def _emitted_run(
     (src / "unit.twb").write_text("<workbook />", encoding="utf-8")
     monkeypatch.setattr(run_estate, "run_engine", _bundle_engine())
     stamped: list[Path] = []
-    monkeypatch.setattr(run_estate, "stamp_inputs", lambda _input, out_dir: stamped.append(out_dir))
+    monkeypatch.setattr(
+        run_estate,
+        "stamp_inputs",
+        lambda _input, out_dir: (
+            stamped.append(out_dir)
+            or run_estate.ProvenanceStampResult(True, "local_only", "fixture provenance published")
+        ),
+    )
     if limits is not None:
         monkeypatch.setattr(run_estate, "PATH_CEILING_LIMITS", limits)
     buffer = io.StringIO()
@@ -2236,6 +2243,174 @@ def _half_writing_open(monkeypatch, suffix: str = ".tmp") -> None:
         return _HalfWriter(handle) if str(file).endswith(suffix) else handle
 
     monkeypatch.setattr(builtins, "open", _open)
+
+
+# ---------------------------------------------------------------------------
+# issue #576: source provenance is an atomic, binding artifact
+# ---------------------------------------------------------------------------
+
+
+def _structured_provenance(status: str, code: str | None = None) -> dict:
+    errors = [{"code": code, "operation": "collect-inputs"}] if code else []
+    return {
+        "schema": "tableau-source-provenance/1",
+        "stamped_at": "2026-09-10T00:00:00Z",
+        "input_count": 0,
+        "inputs": [],
+        "phase": {"status": status, "errors": errors},
+    }
+
+
+def test_an_empty_structured_provenance_result_is_published_and_refuses(tmp_path: Path, monkeypatch) -> None:
+    import stamp_tableau_provenance as prov  # noqa: PLC0415
+
+    out = tmp_path / "bundle"
+    out.mkdir()
+    monkeypatch.setattr(prov, "resolve_env", lambda _path: {})
+    monkeypatch.setattr(prov, "build", lambda *_args: _structured_provenance("empty", "empty-input"))
+
+    stamped = run_estate.stamp_inputs(tmp_path, out)
+
+    artifact = json.loads((out / run_estate.SOURCE_PROVENANCE_REPORT).read_text(encoding="utf-8"))
+    assert artifact["phase"]["status"] == "empty"
+    assert artifact["phase"]["errors"][0]["code"] == "empty-input"
+    assert stamped == run_estate.ProvenanceStampResult(
+        False,
+        "empty",
+        f"0 input(s) stamped, 0 confirmed against the site (empty) -> {out / run_estate.SOURCE_PROVENANCE_REPORT}",
+    )
+
+
+def test_a_build_exception_becomes_a_safe_published_failure(tmp_path: Path, monkeypatch) -> None:
+    import stamp_tableau_provenance as prov  # noqa: PLC0415
+
+    out = tmp_path / "bundle"
+    out.mkdir()
+    secret = str(tmp_path / "customer-secret")
+    monkeypatch.setattr(prov, "resolve_env", lambda _path: {})
+
+    def fail(*_args):
+        raise OSError(5, secret)
+
+    monkeypatch.setattr(prov, "build", fail)
+    stamped = run_estate.stamp_inputs(tmp_path, out)
+    raw = (out / run_estate.SOURCE_PROVENANCE_REPORT).read_text(encoding="utf-8")
+    artifact = json.loads(raw)
+
+    assert stamped.ok is False and stamped.status == "failed"
+    assert artifact["phase"] == {
+        "status": "failed",
+        "errors": [
+            {
+                "code": "build-failed",
+                "operation": "build",
+                "exception_class": "OSError",
+                "errno": 5,
+            }
+        ],
+    }
+    assert secret not in raw
+
+
+def test_a_publication_failure_is_a_non_success_stamp(tmp_path: Path, monkeypatch) -> None:
+    import stamp_tableau_provenance as prov  # noqa: PLC0415
+
+    out = tmp_path / "bundle"
+    out.mkdir()
+    monkeypatch.setattr(prov, "resolve_env", lambda _path: {})
+    monkeypatch.setattr(prov, "build", lambda *_args: _structured_provenance("local_only"))
+    monkeypatch.setattr(run_estate, "write_source_provenance", lambda *_args: None)
+
+    stamped = run_estate.stamp_inputs(tmp_path, out)
+
+    assert stamped.ok is False
+    assert stamped.status == "publication_failed"
+
+
+@pytest.mark.parametrize("bad_value", [object(), float("nan"), float("inf")])
+def test_unserializable_or_nonfinite_provenance_never_corrupts_the_prior_artifact(
+    tmp_path: Path, bad_value: object
+) -> None:
+    out = tmp_path / "bundle"
+    out.mkdir()
+    previous = out / run_estate.SOURCE_PROVENANCE_REPORT
+    previous.write_bytes(TRUSTWORTHY_REPORT)
+
+    assert run_estate.write_source_provenance(out, {"bad": bad_value}) is None
+    assert previous.read_bytes() == TRUSTWORTHY_REPORT
+    assert not list(out.glob("*.tmp"))
+
+
+def test_a_partial_provenance_write_leaves_the_prior_artifact_byte_identical(tmp_path: Path, monkeypatch) -> None:
+    out = tmp_path / "bundle"
+    out.mkdir()
+    previous = out / run_estate.SOURCE_PROVENANCE_REPORT
+    previous.write_bytes(TRUSTWORTHY_REPORT)
+    _half_writing_open(monkeypatch)
+
+    assert run_estate.write_source_provenance(out, _structured_provenance("success")) is None
+    assert previous.read_bytes() == TRUSTWORTHY_REPORT
+    assert not list(out.glob("*.tmp"))
+
+
+def test_a_failed_provenance_replace_leaves_the_prior_artifact_byte_identical(tmp_path: Path, monkeypatch) -> None:
+    out = tmp_path / "bundle"
+    out.mkdir()
+    previous = out / run_estate.SOURCE_PROVENANCE_REPORT
+    previous.write_bytes(TRUSTWORTHY_REPORT)
+
+    def fail(*_args):
+        raise OSError(13, "Permission denied")
+
+    monkeypatch.setattr(run_estate.os, "replace", fail)
+
+    assert run_estate.write_source_provenance(out, _structured_provenance("success")) is None
+    assert previous.read_bytes() == TRUSTWORTHY_REPORT
+    assert not list(out.glob("*.tmp"))
+
+
+def test_a_provenance_failure_stops_before_adjudication_and_handover(tmp_path: Path, monkeypatch) -> None:
+    import stamp_tableau_provenance as prov  # noqa: PLC0415
+
+    _without_pbir_validator(monkeypatch)
+    engine = _versioned_engine(tmp_path / "engine", "2.339.0")
+    out = tmp_path / "bundle"
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "unit.twb").write_text("<workbook />", encoding="utf-8")
+    monkeypatch.setattr(run_estate, "run_engine", _bundle_engine())
+    monkeypatch.setattr(prov, "resolve_env", lambda _path: {})
+    monkeypatch.setattr(
+        prov,
+        "build",
+        lambda *_args: {
+            "schema": "tableau-source-provenance/1",
+            "stamped_at": "2026-09-10T00:00:00Z",
+            "input_count": 1,
+            "inputs": [{"input": {"file": "unit.twb", "sha256": "digest"}}],
+            "phase": {
+                "status": "partial",
+                "errors": [{"code": "live-lookup-refused", "operation": "sign-in"}],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        run_estate,
+        "check_pbir_validity",
+        lambda *_args: pytest.fail("adjudication ran after provenance failure"),
+    )
+
+    code = run_estate.main(_landing_argv(engine, src, out))
+
+    assert code == run_estate.EXIT_PROVENANCE_FAILED
+    assert (
+        json.loads((out / run_estate.SOURCE_PROVENANCE_REPORT).read_text(encoding="utf-8"))["phase"]["status"]
+        == "partial"
+    )
+    assert not (out / "handover").exists()
+    names = _phase_names(out)
+    assert "provenance" in names
+    assert not {"adjudicate", "slice_handovers"} & set(names)
 
 
 def test_a_partial_write_leaves_the_previous_report_byte_identical(tmp_path: Path, monkeypatch) -> None:
