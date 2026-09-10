@@ -46,6 +46,13 @@ EXIT_MATCH = 0
 EXIT_DIFFERS = 1
 EXIT_UNMEASURABLE = 3
 
+# ⚠️ CONSTANT, and it carries no supplied path or component (issue #562). This tool calls five
+# target-bearing `check_unit` helpers directly; four of them return their own non-clean schema when a
+# staged unit's package boundary cannot be established, and `_oracle_capture_oracles` raises instead,
+# because an empty capture is a measurable fact that must not be manufactured from an unproven
+# boundary. A measurement that could not be made must not report a clean digest.
+REFUSED_BOUNDARY_MESSAGE = "cannot measure: a staged unit's package boundary could not be established"
+
 
 def _key(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", text.casefold())
@@ -262,7 +269,13 @@ def main(argv: list[str] | None = None) -> int:
 
     summary = measure(units, oracle_dir)
     if oracle_dir is not None:
-        summary["oracle_layer"] = oracle_layer_facts(units, oracle_dir)
+        try:
+            summary["oracle_layer"] = oracle_layer_facts(units, oracle_dir)
+        except cu._DirectTargetRefused as refusal:  # pylint: disable=protected-access
+            # Only the classifier's stable code travels; the refusal deliberately retains no path,
+            # no component and no destination, so there is nothing here to redact.
+            print(f"{REFUSED_BOUNDARY_MESSAGE} ({refusal.code})", file=sys.stderr)
+            return EXIT_UNMEASURABLE
     result = {"summary": summary, "sha256": digest(summary), "unstaged": unstaged}
     print(json.dumps(result, indent=2, sort_keys=True))
     if args.json:
