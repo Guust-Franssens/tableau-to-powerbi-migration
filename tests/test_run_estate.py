@@ -2594,6 +2594,26 @@ def test_a_self_contradictory_result_publishes_a_failure_and_refuses(
     assert len(list(out.glob("source-provenance*"))) == 1, list(out.iterdir())
 
 
+def test_the_verdict_does_not_rest_on_normalization_having_rewritten_the_status(tmp_path: Path, monkeypatch) -> None:
+    """Defence in depth: normalisation stubbed to a passthrough, the verdict must STILL refuse.
+
+    Without this the verdict would be `phase.status in SUCCESS_STATUSES` - correct only for as long
+    as something upstream keeps rewriting the status, which is exactly the assumption the reviewed
+    defect made. The artifact here is deliberately left success-shaped so the only thing under test
+    is whether the VERDICT reads the evidence or the claim.
+    """
+    import stamp_tableau_provenance as prov  # noqa: PLC0415
+
+    monkeypatch.setattr(prov, "normalize_result", lambda result: result)
+    out = tmp_path / "bundle"
+
+    stamped = _stamp_of(monkeypatch, tmp_path, out, _contradictory(CONTRADICTORY_RESULTS["success-with-no-inputs"][0]))
+
+    assert stamped.status == "success", "the passthrough stub is what makes this the status-only trap"
+    assert _provenance_artifact(out)["phase"]["status"] == "success"
+    assert stamped.ok is False, "the verdict was taken from phase.status alone"
+
+
 def test_an_honest_local_only_result_is_published_unchanged_and_passes(tmp_path: Path, monkeypatch) -> None:
     """The control the correction must not break: positive count, matching list, no site available."""
     out = tmp_path / "bundle"
