@@ -695,12 +695,15 @@ def test_mutation_restoring_the_retired_approval_prose_breaks_the_named_assertio
 
 
 def test_permission_refusals_stay_access_denied_ahead_of_the_credential_markers() -> None:
-    """A 403 is ACCESS_DENIED and stays ACCESS_DENIED: the server authenticated us, then refused.
+    """A 403 stays ACCESS_DENIED, and branch ORDER is the only thing that decides it.
 
-    Branch order is the whole control - ``ACCESS_DENIED_MARKERS`` is tested before the unanchored
-    ``CREDENTIAL_MARKERS`` scan, and the texts below carry BOTH kinds of word on purpose. Signing in
-    again cannot repair a permission refusal, so classifying one as a credential problem sends an
-    operator to a screen that will not help and invites an unchanged retry.
+    ``ACCESS_DENIED_MARKERS`` is tested before the unanchored ``CREDENTIAL_MARKERS`` scan, and the
+    texts below carry BOTH kinds of word on purpose, so the order is what settles them. That is the
+    whole claim: this pins a classification, not a diagnosis. Nothing here establishes that
+    authentication succeeded, that permissions are the only possible cause, or that re-authenticating
+    could never help - a ``403``/``forbidden``/permission marker is routed to the permission-specific
+    verdict so the operator is shown the marker the source actually returned, rather than a
+    credential verdict the credential scan would have written over it.
     """
     probe_live_source = _import_probe_live_source()
 

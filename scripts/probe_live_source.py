@@ -447,9 +447,12 @@ def _classify_failure(text: str, network_fault_observed: bool) -> tuple[str, str
     # Free-text connector error strings (NOT verdict tokens) stay an unanchored substring scan on
     # purpose: a revoked PAT can come back as a bare socket reset (10054 / "forcibly closed") with NO
     # modal and NO verdict line, so CREDENTIAL_MARKERS is the only signal that catches it. Do not
-    # "structuralise" this path. It is deliberately LAST: a 403/forbidden/permission refusal is
-    # ACCESS_DENIED at the branch above and never reaches here - the server authenticated us and then
-    # refused, which a sign-in cannot repair, so it must not be relabelled a credential problem.
+    # "structuralise" this path. It is deliberately LAST: a text carrying a `403`/`forbidden`/permission
+    # marker is classified ACCESS_DENIED at the branch above and never reaches here, which is what the
+    # ACCESS_DENIED_MARKERS branch is for. That ORDER is the entire claim: nothing here establishes that
+    # authentication succeeded, that permissions are the only possible cause, or that re-authenticating
+    # could never help - it only keeps the permission-specific verdict from being overwritten by the
+    # unanchored credential scan, so the operator is shown the marker the source actually returned.
     if any(marker in low for marker in CREDENTIAL_MARKERS):
         return "NO_CREDENTIAL", text
     return (
