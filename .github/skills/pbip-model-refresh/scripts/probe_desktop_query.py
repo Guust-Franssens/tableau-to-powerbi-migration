@@ -397,8 +397,10 @@ def _emit_dialog_finding(pid: int, finding: DialogFinding) -> None:
     Replaces ``_emit_blocked_by_dialog``, whose ``BLOCKED_BY_DIALOG`` token sat at exit 1 - the
     hard-stop band - and was reached from a SIZE-ONLY test, so a Power BI Refresh progress dialog
     aborted THE GATE OF RECORD with a verdict the parent classifier reads as ``NO_CREDENTIAL``. The
-    token now names what was observed and every one of them is exit 3: "could not probe", never "a
-    person must supply account details". Both lines are marker-free (issue #153).
+    token now names what was observed and every one of them is exit 3: "could not probe", never the
+    credential-specific hard stop. Exit 3 is not a clearance either - ``DIALOG_NEEDS_HUMAN`` and
+    ``REFRESH_IN_PROGRESS`` name a known blocker and a running refresh, while the unreadable and
+    unrecognized tokens settle nothing in either direction. Both lines are marker-free (issue #153).
     """
     print(f"PREFLIGHT: {finding.verdict} pid={pid}; {describe_dialog_finding(finding)}")
     print(f"  {dialog_guidance(finding)}")
@@ -430,7 +432,9 @@ def _credential_verdict(pid: int, state: CredentialDetection) -> int | None:
       1  ``CREDENTIAL_MISSING`` - the credential signature matched. The ONLY hard stop.
       2  ``DESKTOP_GONE`` / ``DESKTOP_UNREADY`` - local Desktop failure; the source was never tested.
       3  a dialog finding, or ``UNKNOWN`` - we could not probe. Loud, recoverable, and no claim about
-         the data source or about anyone needing to supply account details.
+         the data source. It is not a clearance: a known blocking prompt and a running refresh both
+         land here, and an unreadable or unrecognized window settles the credential question in
+         neither direction.
     """
     if state.modal is not None:
         _emit_credential_missing(pid, state.modal)
