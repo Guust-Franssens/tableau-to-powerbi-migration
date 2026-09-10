@@ -2277,7 +2277,7 @@ def test_an_empty_structured_provenance_result_is_published_and_refuses(tmp_path
     assert stamped == run_estate.ProvenanceStampResult(
         False,
         "empty",
-        f"0 input(s) stamped, 0 confirmed against the site (empty) -> {out / run_estate.SOURCE_PROVENANCE_REPORT}",
+        f"0 input(s) stamped, 0 confirmed against the site (empty) -> {run_estate.SAFE_SOURCE_PROVENANCE_REPORT}",
     )
 
 
@@ -2415,6 +2415,229 @@ def test_a_provenance_failure_stops_before_adjudication_and_handover(
     names = _phase_names(out)
     assert "provenance" in names
     assert not {"adjudicate", "slice_handovers"} & set(names)
+
+
+# ---------------------------------------------------------------------------
+# Blind-review correction on PR #594
+#
+# Two findings, both about what the phase says rather than what it does:
+#   1. the console/log line named the artifact by its ABSOLUTE path, so the run root - drive,
+#      account name, customer folder - left the machine on the success line AND the refusal line.
+#      Every other shareable string in this module is bundle-relative; this one was not.
+#   2. a result that CONTRADICTS ITSELF read as a pass. `input_count: 0` with `inputs: []` and a
+#      `success`/`local_only` status describes no input at all, and the verdict was taken from
+#      `phase.status` alone, so a run that stamped nothing continued to adjudication and handover.
+# ---------------------------------------------------------------------------
+
+
+def _provenance_input(name: str = "unit.twb") -> dict:
+    return {"input": {"file": name, "sha256": "d" * 64}}
+
+
+def _honest_local_only(count: int = 1) -> dict:
+    """The result the correction must LEAVE ALONE: local-only, positive count, matching list."""
+    return {
+        "schema": "tableau-source-provenance/1",
+        "stamped_at": "2026-09-10T00:00:00Z",
+        "input_count": count,
+        "inputs": [_provenance_input(f"unit{index}.twb") for index in range(count)],
+        "phase": {"status": "local_only", "errors": []},
+    }
+
+
+def _stamp_of(monkeypatch, tmp_path: Path, out: Path, result: dict) -> run_estate.ProvenanceStampResult:
+    """`stamp_inputs` over one canned structured result, with no site and no .env."""
+    import stamp_tableau_provenance as prov  # noqa: PLC0415
+
+    monkeypatch.setattr(prov, "resolve_env", lambda _path: {})
+    monkeypatch.setattr(prov, "build", lambda *_args: result)
+    out.mkdir(parents=True, exist_ok=True)
+    return run_estate.stamp_inputs(tmp_path, out)
+
+
+def _provenance_artifact(out: Path) -> dict:
+    return json.loads((out / run_estate.SOURCE_PROVENANCE_REPORT).read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize(
+    ("result", "expected_status"),
+    [
+        (_honest_local_only(), "local_only"),
+        (_structured_provenance("empty", "empty-input"), "empty"),
+        (_structured_provenance("failed", "collect-inputs-failed"), "failed"),
+    ],
+)
+def test_the_provenance_line_names_the_artifact_bundle_relatively(
+    tmp_path: Path, monkeypatch, result: dict, expected_status: str
+) -> None:
+    """Success AND failure: the detail names `<bundle>/source-provenance.json`, never a host path."""
+    out = tmp_path / "Users" / SECRET_ACCOUNT / SECRET_FOLDER / "bundle"
+
+    stamped = _stamp_of(monkeypatch, tmp_path, out, result)
+
+    assert stamped.status == expected_status
+    assert f"-> {run_estate.SAFE_SOURCE_PROVENANCE_REPORT}" in stamped.detail, stamped.detail
+    assert str(out) not in stamped.detail, stamped.detail
+    assert SECRET_FOLDER not in stamped.detail and SECRET_ACCOUNT not in stamped.detail, stamped.detail
+    assert _provenance_artifact(out)["phase"]["status"] == expected_status
+
+
+def test_the_success_log_line_carries_no_host_path(tmp_path: Path, monkeypatch, caplog) -> None:
+    """The line emitted on the PASSING path - the one a run emits every time - is shareable too."""
+    import stamp_tableau_provenance as prov  # noqa: PLC0415
+
+    _without_pbir_validator(monkeypatch)
+    engine = _versioned_engine(tmp_path / "engine", "2.339.0")
+    out = tmp_path / "bundle"
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "unit.twb").write_text("<workbook />", encoding="utf-8")
+    monkeypatch.setattr(run_estate, "run_engine", _bundle_engine())
+    monkeypatch.setattr(prov, "resolve_env", lambda _path: {})
+    monkeypatch.setattr(prov, "build", lambda *_args: _honest_local_only())
+
+    with caplog.at_level("INFO", logger="run_estate"), contextlib.redirect_stdout(io.StringIO()):
+        exit_code = run_estate.main(_landing_argv(engine, src, out))
+
+    provenance_lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("PROVENANCE:")]
+    assert exit_code != run_estate.EXIT_PROVENANCE_FAILED
+    assert provenance_lines, [r.getMessage() for r in caplog.records]
+    logged = "\n".join(provenance_lines)
+    assert run_estate.SAFE_SOURCE_PROVENANCE_REPORT in logged, logged
+    assert str(out) not in logged, logged
+    assert str(tmp_path) not in logged, logged
+
+
+def test_the_refusal_console_line_carries_no_host_path(tmp_path: Path, monkeypatch) -> None:
+    """`main`'s printed refusal names the artifact bundle-relatively, not by its location on disk."""
+    import stamp_tableau_provenance as prov  # noqa: PLC0415
+
+    _without_pbir_validator(monkeypatch)
+    engine = _versioned_engine(tmp_path / "engine", "2.339.0")
+    out = tmp_path / "bundle"
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "unit.twb").write_text("<workbook />", encoding="utf-8")
+    monkeypatch.setattr(run_estate, "run_engine", _bundle_engine())
+    monkeypatch.setattr(prov, "resolve_env", lambda _path: {})
+    monkeypatch.setattr(prov, "build", lambda *_args: _structured_provenance("failed", "collect-inputs-failed"))
+
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        exit_code = run_estate.main(_landing_argv(engine, src, out))
+    printed = buffer.getvalue()
+
+    assert exit_code == run_estate.EXIT_PROVENANCE_FAILED
+    assert "PROVENANCE_FAILED" in printed
+    assert run_estate.SAFE_SOURCE_PROVENANCE_REPORT in printed, printed
+    assert str(out) not in printed, printed
+    assert str(tmp_path) not in printed, printed
+
+
+#: Every way a structured result can contradict itself, with the fault code it must be recorded as.
+#: `input_count` is the field a consumer counts on, so a bool, a string, a negative number and a
+#: count that disagrees with the list beside it are all named separately rather than collapsed.
+CONTRADICTORY_RESULTS = {
+    "success-with-no-inputs": ({"input_count": 0, "inputs": [], "status": "success"}, "success-without-inputs"),
+    "local_only-with-no-inputs": ({"input_count": 0, "inputs": [], "status": "local_only"}, "success-without-inputs"),
+    "negative-count": ({"input_count": -1, "inputs": [], "status": "success"}, "input-count-negative"),
+    "bool-count": (
+        {"input_count": True, "inputs": [_provenance_input()], "status": "success"},
+        "input-count-not-an-integer",
+    ),
+    "string-count": (
+        {"input_count": "1", "inputs": [_provenance_input()], "status": "success"},
+        "input-count-not-an-integer",
+    ),
+    "count-exceeds-list": (
+        {"input_count": 2, "inputs": [_provenance_input()], "status": "success"},
+        "input-count-mismatch",
+    ),
+    "list-exceeds-count": (
+        {"input_count": 1, "inputs": [_provenance_input(), _provenance_input("b.twb")], "status": "local_only"},
+        "input-count-mismatch",
+    ),
+    "inputs-not-a-list": ({"input_count": 1, "inputs": {"unit.twb": {}}, "status": "success"}, "inputs-not-a-list"),
+}
+
+
+def _contradictory(shape: dict) -> dict:
+    return {
+        "schema": "tableau-source-provenance/1",
+        "stamped_at": "2026-09-10T00:00:00Z",
+        "input_count": shape["input_count"],
+        "inputs": shape["inputs"],
+        "phase": {"status": shape["status"], "errors": [{"code": "live-lookup-refused", "operation": "sign-in"}]},
+    }
+
+
+@pytest.mark.parametrize(("shape", "fault"), list(CONTRADICTORY_RESULTS.values()), ids=list(CONTRADICTORY_RESULTS))
+def test_a_self_contradictory_result_publishes_a_failure_and_refuses(
+    tmp_path: Path, monkeypatch, shape: dict, fault: str
+) -> None:
+    """One artifact is still published - and it is not success-shaped, and the verdict is False."""
+    out = tmp_path / "bundle"
+
+    stamped = _stamp_of(monkeypatch, tmp_path, out, _contradictory(shape))
+
+    artifact = _provenance_artifact(out)
+    assert stamped.ok is False, stamped
+    assert artifact["phase"]["status"] not in {"success", "local_only"}, artifact
+    assert artifact["phase"]["status"] == stamped.status == "failed", artifact
+    codes = [error["code"] for error in artifact["phase"]["errors"]]
+    assert fault in codes, codes
+    assert "live-lookup-refused" in codes, "the errors the build already recorded were discarded"
+    assert [error["operation"] for error in artifact["phase"]["errors"] if error["code"] == fault] == [
+        "validate-result"
+    ], artifact
+    assert artifact["input_count"] == len(artifact["inputs"]), artifact
+    assert len(list(out.glob("source-provenance*"))) == 1, list(out.iterdir())
+
+
+def test_an_honest_local_only_result_is_published_unchanged_and_passes(tmp_path: Path, monkeypatch) -> None:
+    """The control the correction must not break: positive count, matching list, no site available."""
+    out = tmp_path / "bundle"
+    honest = _honest_local_only(count=2)
+
+    stamped = _stamp_of(monkeypatch, tmp_path, out, honest)
+
+    assert stamped == run_estate.ProvenanceStampResult(
+        True,
+        "local_only",
+        f"2 input(s) stamped, 0 confirmed against the site (local_only) -> {run_estate.SAFE_SOURCE_PROVENANCE_REPORT}",
+    )
+    assert _provenance_artifact(out) == honest
+
+
+def test_a_contradictory_result_never_reaches_adjudication_or_handover(tmp_path: Path, monkeypatch) -> None:
+    """The consequence the verdict exists for, measured through `main` rather than asserted."""
+    import stamp_tableau_provenance as prov  # noqa: PLC0415
+
+    _without_pbir_validator(monkeypatch)
+    engine = _versioned_engine(tmp_path / "engine", "2.339.0")
+    out = tmp_path / "bundle"
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "unit.twb").write_text("<workbook />", encoding="utf-8")
+    monkeypatch.setattr(run_estate, "run_engine", _bundle_engine())
+    monkeypatch.setattr(prov, "resolve_env", lambda _path: {})
+    monkeypatch.setattr(
+        prov,
+        "build",
+        lambda *_args: _contradictory(CONTRADICTORY_RESULTS["success-with-no-inputs"][0]),
+    )
+    monkeypatch.setattr(
+        run_estate,
+        "check_pbir_validity",
+        lambda *_args: pytest.fail("adjudication ran on a result that stamped no input"),
+    )
+
+    exit_code = run_estate.main(_landing_argv(engine, src, out))
+
+    assert exit_code == run_estate.EXIT_PROVENANCE_FAILED
+    assert _provenance_artifact(out)["phase"]["status"] == "failed"
+    assert not (out / "handover").exists()
+    assert not {"adjudicate", "slice_handovers"} & set(_phase_names(out))
 
 
 def test_a_partial_write_leaves_the_previous_report_byte_identical(tmp_path: Path, monkeypatch) -> None:

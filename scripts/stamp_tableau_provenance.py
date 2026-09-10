@@ -66,6 +66,16 @@ LOG = logging.getLogger("provenance")
 
 WORKBOOK_SUFFIXES = (".twb", ".twbx")
 SUCCESS_STATUSES = frozenset({"success", "local_only"})
+SCHEMA = "tableau-source-provenance/1"
+
+#: The operation named by every fault this module records about a result's OWN SHAPE, so a consumer
+#: can tell "the site refused us" from "this result does not describe anything".
+CONSISTENCY_OPERATION = "validate-result"
+
+#: The status a self-contradictory result is normalised to. Deliberately one of the statuses that
+#: already exist rather than a new vocabulary: a consumer that already refuses `failed` refuses this
+#: too, without learning a second state machine.
+UNASSESSABLE_STATUS = "failed"
 
 
 def _error(code: str, operation: str, exc: BaseException | None = None, **facts: int) -> dict[str, Any]:
@@ -84,7 +94,7 @@ def _error(code: str, operation: str, exc: BaseException | None = None, **facts:
 def _result(inputs: list[dict[str, Any]], status: str, errors: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """One complete provenance result in the schema published by every build path."""
     return {
-        "schema": "tableau-source-provenance/1",
+        "schema": SCHEMA,
         "stamped_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "input_count": len(inputs),
         "inputs": inputs,
@@ -95,6 +105,88 @@ def _result(inputs: list[dict[str, Any]], status: str, errors: list[dict[str, An
 def failure_result(code: str, operation: str, exc: BaseException) -> dict[str, Any]:
     """A complete safe result for a failure before :func:`build` could return one."""
     return _result([], "failed", [_error(code, operation, exc)])
+
+
+def consistency_faults(result: Any) -> list[str]:
+    """Stable codes for every way ``result`` CONTRADICTS ITSELF. Empty means self-consistent.
+
+    ⚠️ A status is a CLAIM, not evidence. A result carrying ``input_count: 0``, ``inputs: []`` and a
+    ``success``/``local_only`` status describes no input at all while reading as a pass, so a reader
+    that trusts the status alone lets a run that stamped nothing continue to adjudication and
+    handover. This is the single place that decides self-consistency: :func:`normalize_result` uses
+    it to decide what may be PUBLISHED and :func:`is_success` to decide the VERDICT, so the two can
+    never drift apart.
+
+    An honest zero-input result is `empty`, and an honest local-only result has a positive count
+    matching its list - neither is a fault here.
+    """
+    if not isinstance(result, dict):
+        return ["result-not-a-mapping"]
+
+    faults: list[str] = []
+    records = result.get("inputs")
+    if not isinstance(records, list):
+        faults.append("inputs-not-a-list")
+        records = []
+
+    count = result.get("input_count")
+    counted: int | None = None
+    if isinstance(count, bool) or not isinstance(count, int):
+        faults.append("input-count-not-an-integer")
+    elif count < 0:
+        faults.append("input-count-negative")
+    else:
+        counted = count
+        if count != len(records):
+            faults.append("input-count-mismatch")
+
+    phase = result.get("phase")
+    status = phase.get("status") if isinstance(phase, dict) else None
+    if not isinstance(status, str):
+        faults.append("phase-status-unassessable")
+    elif status in SUCCESS_STATUSES and not (counted and records):
+        faults.append("success-without-inputs")
+    return faults
+
+
+def normalize_result(result: Any) -> dict[str, Any]:
+    """The result that may be PUBLISHED: a self-contradictory one is rewritten as a failure.
+
+    Exactly one artifact is still published - suppressing it would destroy the only evidence of what
+    went wrong - but it carries the existing typed phase-error shape, the faults it was normalised
+    for, and a status that no consumer reads as a pass. Prior errors are kept: the contradiction is
+    added to the record, never substituted for it.
+    """
+    faults = consistency_faults(result)
+    if not faults:
+        return result
+
+    source = result if isinstance(result, dict) else {}
+    records = source.get("inputs")
+    records = records if isinstance(records, list) else []
+    claimed = source.get("input_count")
+    facts = {"claimed_input_count": claimed} if isinstance(claimed, int) and not isinstance(claimed, bool) else {}
+
+    phase = source.get("phase")
+    prior = phase.get("errors") if isinstance(phase, dict) else None
+    errors = list(prior) if isinstance(prior, list) else []
+    errors.extend(_error(code, CONSISTENCY_OPERATION, **facts) for code in faults)
+
+    normalized = dict(source)
+    normalized["schema"] = source.get("schema") if isinstance(source.get("schema"), str) else SCHEMA
+    if not isinstance(normalized.get("stamped_at"), str):
+        normalized["stamped_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    normalized["input_count"] = len(records)
+    normalized["inputs"] = records
+    normalized["phase"] = {"status": UNASSESSABLE_STATUS, "errors": errors}
+    return normalized
+
+
+def is_success(result: Any) -> bool:
+    """Whether ``result`` may be treated as a pass: self-consistent AND claiming a success status."""
+    if consistency_faults(result):
+        return False
+    return result["phase"]["status"] in SUCCESS_STATUSES
 
 
 def fingerprint(path: Path) -> dict[str, Any]:

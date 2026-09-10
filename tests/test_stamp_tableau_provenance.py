@@ -999,3 +999,109 @@ def test_a_luid_match_survives_a_malformed_name_and_counts_it_as_no_name():
     assert origin["matched_by"] == "luid"
     assert origin["same_name_count"] == 0, "a non-string is not a display name, so it is not ambiguous"
     assert origin["workbook_name"] == ["Sales"], "the raw field is still recorded as the site gave it"
+
+
+# ------------------------------------ blind-review correction on PR #594 (self-contradictory results)
+#
+# `phase.status` is a CLAIM. A result carrying `input_count: 0`, `inputs: []` and a `success` or
+# `local_only` status describes NO INPUT AT ALL while reading as a pass, so a consumer that trusts
+# the status alone lets a run that stamped nothing proceed to adjudication and handover. These tests
+# pin the one place that decides self-consistency, and the two answers derived from it: what may be
+# PUBLISHED (`normalize_result`) and what counts as a PASS (`is_success`).
+
+
+def _shaped(count, inputs, status="success", errors=None):
+    return {
+        "schema": prov.SCHEMA,
+        "stamped_at": "2026-09-10T00:00:00Z",
+        "input_count": count,
+        "inputs": inputs,
+        "phase": {"status": status, "errors": errors if errors is not None else []},
+    }
+
+
+@pytest.mark.parametrize(
+    ("result", "fault"),
+    [
+        (_shaped(0, [], "success"), "success-without-inputs"),
+        (_shaped(0, [], "local_only"), "success-without-inputs"),
+        (_shaped(-1, [], "success"), "input-count-negative"),
+        (_shaped(True, [{"input": {}}], "success"), "input-count-not-an-integer"),
+        (_shaped("1", [{"input": {}}], "success"), "input-count-not-an-integer"),
+        (_shaped(None, [{"input": {}}], "local_only"), "input-count-not-an-integer"),
+        (_shaped(2, [{"input": {}}], "success"), "input-count-mismatch"),
+        (_shaped(1, [{"input": {}}, {"input": {}}], "local_only"), "input-count-mismatch"),
+        (_shaped(1, {"unit": {}}, "success"), "inputs-not-a-list"),
+        (_shaped(1, [{"input": {}}], 7), "phase-status-unassessable"),
+        ("not a result at all", "result-not-a-mapping"),
+    ],
+)
+def test_a_self_contradictory_result_is_faulted_and_never_passes(result, fault):
+    assert fault in prov.consistency_faults(result)
+    assert prov.is_success(result) is False
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        _shaped(1, [{"input": {}}], "success"),
+        _shaped(2, [{"input": {}}, {"input": {}}], "local_only"),
+        _shaped(0, [], "empty", [{"code": "empty-input", "operation": "collect-inputs"}]),
+        _shaped(0, [], "failed", [{"code": "build-failed", "operation": "build"}]),
+        _shaped(1, [{"input": {}}], "partial", [{"code": "live-lookup-refused", "operation": "sign-in"}]),
+    ],
+)
+def test_a_self_consistent_result_is_never_faulted_or_rewritten(result):
+    """Including the honest non-passing ones: `empty` and `failed` are consistent, just not passes."""
+    assert prov.consistency_faults(result) == []
+    assert prov.normalize_result(result) is result
+    assert prov.is_success(result) is (result["phase"]["status"] in prov.SUCCESS_STATUSES)
+
+
+def test_normalization_rewrites_the_status_and_keeps_the_errors_already_recorded():
+    prior = {"code": "live-lookup-refused", "operation": "sign-in"}
+    normalized = prov.normalize_result(_shaped(3, [], "success", [prior]))
+
+    assert normalized["phase"]["status"] == prov.UNASSESSABLE_STATUS == "failed"
+    assert normalized["phase"]["status"] not in prov.SUCCESS_STATUSES
+    assert normalized["phase"]["errors"][0] == prior, "the build's own evidence was discarded"
+    fault = normalized["phase"]["errors"][1]
+    assert fault == {
+        "code": "input-count-mismatch",
+        "operation": prov.CONSISTENCY_OPERATION,
+        "claimed_input_count": 3,
+    }
+    assert normalized["input_count"] == len(normalized["inputs"]) == 0, "the contradictory count survived"
+    assert prov.is_success(normalized) is False
+    assert prov.consistency_faults(normalized) == [], "normalization left a result that is STILL contradictory"
+
+
+def test_a_normalized_result_is_a_complete_publishable_document():
+    """A non-mapping result still normalises to the schema every consumer of the artifact reads."""
+    normalized = prov.normalize_result(None)
+
+    assert normalized["schema"] == prov.SCHEMA
+    assert isinstance(normalized["stamped_at"], str)
+    assert normalized["input_count"] == 0 and normalized["inputs"] == []
+    assert normalized["phase"]["errors"] == [{"code": "result-not-a-mapping", "operation": prov.CONSISTENCY_OPERATION}]
+    assert json.loads(json.dumps(normalized)) == normalized, "the normalised result is not strict JSON"
+
+
+def test_a_real_build_over_real_inputs_is_self_consistent(tmp_path):
+    """The end-to-end control: what `build` actually emits must never trip its own consistency check."""
+    _twbx(tmp_path)
+
+    result = prov.build(tmp_path, {})
+
+    assert prov.consistency_faults(result) == [], result
+    assert result["phase"]["status"] == "local_only"
+    assert prov.is_success(result) is True
+    assert prov.normalize_result(result) is result
+
+
+def test_a_build_over_an_empty_directory_is_consistent_but_not_a_pass(tmp_path):
+    result = prov.build(tmp_path, {})
+
+    assert prov.consistency_faults(result) == [], result
+    assert result["phase"]["status"] == "empty"
+    assert prov.is_success(result) is False

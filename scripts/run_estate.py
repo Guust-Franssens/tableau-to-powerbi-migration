@@ -223,6 +223,11 @@ PATH_CEILING_LIMITS = WINDOWS_LIMITS
 #: account name, customer folder - never leaves the machine that measured it.
 SAFE_BUNDLE_ROOT = "<bundle>"
 
+#: How the provenance artifact is NAMED once the name leaves this process. The same reasoning as
+#: `SAFE_BUNDLE_ROOT`: the console line is pasted into an issue and read by an agent, so it names the
+#: artifact bundle-relatively. The absolute path stays inside the process that wrote it.
+SAFE_SOURCE_PROVENANCE_REPORT = f"{SAFE_BUNDLE_ROOT}/{SOURCE_PROVENANCE_REPORT}"
+
 #: A path the transform could not PROVE lies inside the bundle. It is reported as an ordinal, never
 #: echoed and never re-spelled as if it were relative: "I could not place this" is a different and
 #: honest answer, and echoing it is exactly the disclosure this transform exists to prevent.
@@ -680,6 +685,12 @@ def stamp_inputs(input_dir: Path, out_dir: Path) -> ProvenanceStampResult:
     Every structured result is published, including empty and failed results. Remote lookup may
     honestly degrade to local-only evidence, but unassessable evidence or failed publication blocks
     later phases.
+
+    A result is NORMALISED before it is published: a result that contradicts itself (a success or
+    local_only status carrying no inputs, a count that is not a whole number, a count that disagrees
+    with the list beside it) is published as a failure carrying the stable fault codes, so the
+    artifact on disk is never success-shaped on evidence that cannot support it. The verdict is then
+    taken from the same consistency check rather than from ``phase.status`` alone.
     """
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import stamp_tableau_provenance as prov  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
@@ -689,13 +700,16 @@ def stamp_inputs(input_dir: Path, out_dir: Path) -> ProvenanceStampResult:
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
         result = prov.failure_result("build-failed", "build", exc)
 
-    path = write_source_provenance(out_dir, result)
-    if path is None:
-        return ProvenanceStampResult(False, "publication_failed", "source-provenance.json could not be published")
+    result = prov.normalize_result(result)
+    if write_source_provenance(out_dir, result) is None:
+        return ProvenanceStampResult(
+            False,
+            "publication_failed",
+            f"{SAFE_SOURCE_PROVENANCE_REPORT} could not be published",
+        )
 
-    phase = result.get("phase") if isinstance(result, dict) else None
-    status = phase.get("status", "unknown") if isinstance(phase, dict) else "unknown"
-    records = result.get("inputs", []) if isinstance(result, dict) else []
+    status = result["phase"].get("status", "unknown")
+    records = result.get("inputs") or []
     matched = sum(
         1
         for record in records
@@ -703,9 +717,11 @@ def stamp_inputs(input_dir: Path, out_dir: Path) -> ProvenanceStampResult:
         and isinstance(record.get("origin"), dict)
         and record["origin"].get("match") == "sha256"
     )
-    count = result.get("input_count", 0) if isinstance(result, dict) else 0
-    detail = f"{count} input(s) stamped, {matched} confirmed against the site ({status}) -> {path}"
-    return ProvenanceStampResult(status in prov.SUCCESS_STATUSES, status, detail)
+    count = result.get("input_count", 0)
+    detail = (
+        f"{count} input(s) stamped, {matched} confirmed against the site ({status}) -> {SAFE_SOURCE_PROVENANCE_REPORT}"
+    )
+    return ProvenanceStampResult(prov.is_success(result), status, detail)
 
 
 def write_phase_record(out_dir: Path, phases: list[dict]) -> Path:
