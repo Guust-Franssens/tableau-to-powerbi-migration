@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -977,9 +978,30 @@ def test_an_unusable_evidence_object_attributes_nothing():
 # ---------------------------------------------------------------------------------------------
 
 
+class _ScopedOs:  # pylint: disable=too-few-public-methods
+    """`harvest_gap_trees`' view of `os`, with ONE wrapped attribute and everything else real.
+
+    ⚠️ Patching `hgt.os.walk` instead patches the process-wide stdlib `os` module, because `hgt.os`
+    IS that module object. Measured on Windows CPython 3.13.2: the injected `PermissionError` fired a
+    second time during `TemporaryDirectory` cleanup - 3.13's unsafe `shutil._rmtree_unsafe()` walks
+    with `os.walk`, and Windows has no dir-fd APIs so it cannot take the fd-based branch - and
+    `harvest()`'s fail-closed `except OSError` replaced the already-correct `incomplete` report with
+    an empty `unstable` one. Linux CI never saw it: 3.12 recursed with `os.scandir` and Ubuntu takes
+    the fd branch anyway, so the same test passed for reasons unrelated to what it asserts.
+
+    Replacing the module's `os` NAME keeps the injection inside the code under test.
+    """
+
+    def __init__(self, walk):
+        self.walk = walk
+
+    def __getattr__(self, name):
+        return getattr(os, name)
+
+
 def _block_directory(monkeypatch, blocked_name: str, side: str, *, locatable: bool = True) -> None:
     """Make `os.walk` fail on one directory of one side, exactly as a PermissionError would."""
-    real_walk = hgt.os.walk
+    real_walk = os.walk
 
     def walk(top, onerror=None, **kwargs):
         for dirpath, dirnames, filenames in real_walk(top, onerror=onerror, **kwargs):
@@ -991,7 +1013,7 @@ def _block_directory(monkeypatch, blocked_name: str, side: str, *, locatable: bo
                 continue
             yield dirpath, dirnames, filenames
 
-    monkeypatch.setattr(hgt.os, "walk", walk)
+    monkeypatch.setattr(hgt, "os", _ScopedOs(walk))
 
 
 def _bundle_with_blocked_dir(tmp_path: Path) -> Path:
@@ -1012,12 +1034,21 @@ def test_unreadable_directory_does_not_fabricate_additions_beneath_it(tmp_path, 
 
     assert entry["files"]["added"] == 0, "a file under an unreadable directory was counted as added"
     assert entry["files"]["removed"] == 0
+    assert entry["provenance"] == {}
     assert entry["status"] == heg.PAIR_UNASSESSABLE
     assert report["status"] == heg.STATUS_INCOMPLETE
 
 
-def test_a_traversal_failure_that_cannot_be_located_suppresses_the_whole_pair(tmp_path, monkeypatch):
-    """Nothing about the pair can be scoped, so a partial answer would look complete and be wrong."""
+def test_a_traversal_failure_that_cannot_be_located_suppresses_unscoped_tree_delta_records(tmp_path, monkeypatch):
+    """An unlocatable failure cannot be withdrawn from a path set, so NO tree-delta record survives.
+
+    ⚠️ The suppression is narrower than the whole pair, and the earlier name overstated it. Only the
+    records DERIVED from the tree comparison are withheld (`_difference_records` emits nothing when
+    `TreeDelta.scoped` is false), which is why the pair's own `provenance` is empty while its raw
+    file COUNTS are still reported. Generated-artifact drift the module adjudicates independently
+    from the engine's hash inventory is not derived from that delta and stays eligible: here the
+    post-baseline `p2/page.json` is still reconciled as one `unpaired` top-level `tier_edit`.
+    """
     bundle = _bundle_with_blocked_dir(tmp_path)
     _write(bundle / "pbip/WB/WB.Report/definition/pages/p2/page.json", {"name": "p2"})
     _block_directory(monkeypatch, "blocked", "reports", locatable=False)
@@ -1025,9 +1056,10 @@ def test_a_traversal_failure_that_cannot_be_located_suppresses_the_whole_pair(tm
     report = heg.harvest(bundle)
     entry = _pair(report, "report", "WB")
 
-    assert entry["provenance"] == {}
+    assert entry["provenance"] == {}, "an unscopeable traversal failure still emitted tree-delta records"
     assert entry["status"] == heg.PAIR_UNASSESSABLE
     assert report["status"] == heg.STATUS_INCOMPLETE
+    assert [record["path"] for record in report["tier_edits"]] == ["definition/pages/p2/page.json"]
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1408,7 +1440,7 @@ def test_a_blocked_tree_root_withdraws_the_whole_tree_from_every_count(tmp_path,
     this module's documented promise that unreadable content is excluded from every count.
     """
     bundle = _identical_bundle(tmp_path)
-    real_walk = hgt.os.walk
+    real_walk = os.walk
 
     def walk(top, onerror=None, **kwargs):
         if Path(top).name == "WB.Report" and "reports" in Path(top).parts:
@@ -1419,7 +1451,7 @@ def test_a_blocked_tree_root_withdraws_the_whole_tree_from_every_count(tmp_path,
             return
         yield from real_walk(top, onerror=onerror, **kwargs)
 
-    monkeypatch.setattr(hgt.os, "walk", walk)
+    monkeypatch.setattr(hgt, "os", _ScopedOs(walk))
     report = heg.harvest(bundle)
     entry = _pair(report, "report", "WB")
 

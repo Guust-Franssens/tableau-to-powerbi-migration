@@ -99,6 +99,10 @@ EXPECTED_EXACT_SKIP_REASONS: frozenset[str] = frozenset(
         "case-sensitive filesystem: 'FOO' and 'foo' are not the same deliverable",
         "canonical engine not installed, so its constants cannot be read",
         "os.mkfifo is POSIX-only",
+        # A case-INSENSITIVE host cannot hold `package-manifest.json` and `PACKAGE-MANIFEST.JSON` at
+        # once, so the second-spelling control (tests/test_package_filesystem.py) has nothing to
+        # assert there. Windows is that host, so this skip is expected on the primary platform.
+        "this filesystem is case-insensitive: two manifest-name spellings are one file",
     }
 )
 
