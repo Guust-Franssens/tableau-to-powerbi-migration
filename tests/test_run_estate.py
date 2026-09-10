@@ -2003,11 +2003,12 @@ def test_run_estate_publishes_provenance_for_datasource_only_inputs(tmp_path: Pa
     assert artifact["inputs"][0]["input"]["sha256"]
 
 
-def test_a_provenance_publication_failure_is_not_a_successful_skip(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize("exc", [OSError(28, "No space left on device"), RuntimeError("deadline expired")])
+def test_a_provenance_publication_failure_is_not_a_successful_skip(tmp_path: Path, monkeypatch, exc) -> None:
     """Remote lookup can be partial, but failing to publish source-provenance.json is a real failure."""
 
     def _publication_failed(*_args, **_kwargs):
-        raise OSError(28, "No space left on device")
+        raise exc
 
     _without_pbir_validator(monkeypatch)
     engine = _versioned_engine(tmp_path / "engine", "2.339.0")

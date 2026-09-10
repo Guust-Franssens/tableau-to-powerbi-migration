@@ -1708,7 +1708,7 @@ def produce_and_gate_output(
         # repo already catches around a JSON write are absorbed; anything else still propagates.
         try:
             write_phase_record(args.output, phases)
-        except (OSError, TypeError, ValueError) as exc:
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
             log.warning(
                 "PATH CEILING: phase timings not persisted (%s)",
                 _operation_failure(WRITE_PHASE_RECORD_OPERATION, exc),
@@ -1834,7 +1834,7 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
         started = time.monotonic()
         try:
             stamped = stamp_inputs(args.input, args.output, args.provenance_timeout_sec)
-        except (OSError, TypeError, ValueError) as exc:
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
             phases.append(
                 {
                     "phase": "provenance",
