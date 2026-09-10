@@ -554,22 +554,33 @@ def test_incomplete_flat_package_without_manifest_fails_closed_when_ancestor_evi
     (unit / "package-manifest.json").unlink()
     shutil.rmtree(unit / "oracle")
 
-    # Entry gate refuses ancestor evidence: reports blind pages rather than READY
+    # ENTRY GATE ONLY. ⚠️ The refusal SHAPE changed with #562: the damaged boundary is classified
+    # before the root is resolved and before any discovery runs, so the gate forms no opinion at all
+    # instead of reporting the unit's pages as blind. Both are exit 3; the new one additionally
+    # proves discovery never happened. The exit gate is asserted separately below.
     code, payload = _readiness(unit, tmp_path)
-    assert code in {1, 3}
-    assert payload["status"] in {"FINDINGS", "CANNOT_ESTABLISH"}
+    assert (code, payload["status"]) == (3, "CANNOT_ESTABLISH")
     assert payload["pages_ready"] == 0
-    assert payload["pages_blind"] == len(objects)
+    assert payload["pages_expected"] == 0, f"classification must precede the {len(objects)}-page expectation"
+    assert payload["evidence_records"] == 0, "no ancestor evidence may be collected for a damaged package"
+    assert "package_marker_missing" in payload["units"][0]["detail"]
 
-    # Exit gate refuses ancestor evidence: oracle-coverage is NOT_CHECKED with 0 evidence
+    # Exit gate refuses ancestor evidence: oracle-coverage is NOT_CHECKED with 0 evidence.
+    # ⚠️ Pre-existing behaviour on a REAL (un-aliased) path, unchanged and unclaimed by #562.
     coverage = check_unit.check_oracle_coverage(unit, None, None)
     assert coverage["status"] == check_unit.STATUS_NOT_CHECKED
     assert coverage["visual_present"] == 0
     assert coverage["numeric_present"] == 0
 
+    # ⚠️ The exit gate's SHAPE changed the same way, one slice later (#562 follow-up): `run_all`
+    # classifies the original target first, so a damaged boundary stops before `_unit_dir` resolves
+    # anything and there is no `oracle-coverage` row left to inspect. Strictly stronger than the
+    # NOT_CHECKED row this used to assert - the coverage assertions above still hold that end.
     run_report = check_unit.run_all(unit, scope=check_unit.SCOPE_REPORT)
     checks = {c["id"]: c for c in run_report["checks"]}
-    assert checks["oracle-coverage"]["status"] == check_unit.STATUS_NOT_CHECKED
+    assert "oracle-coverage" not in checks
+    assert run_report["exit_code"] == check_unit.EXIT_NOT_CHECKED
+    assert checks[check_unit.PACKAGE_BOUNDARY_CHECK_ID]["code"] == "package_marker_missing"
 
 
 def test_incomplete_nested_package_without_manifest_fails_closed_when_ancestor_evidence_present(
@@ -588,20 +599,26 @@ def test_incomplete_nested_package_without_manifest_fails_closed_when_ancestor_e
     (unit / "package-manifest.json").unlink()
     shutil.rmtree(unit / "oracle")
 
+    # ENTRY GATE ONLY - the exit-gate assertions below are pre-existing and unclaimed by #562.
     code, payload = _readiness(unit, tmp_path)
-    assert code in {1, 3}
-    assert payload["status"] in {"FINDINGS", "CANNOT_ESTABLISH"}
+    assert (code, payload["status"]) == (3, "CANNOT_ESTABLISH")
     assert payload["pages_ready"] == 0
-    assert payload["pages_blind"] == len(objects)
+    assert payload["pages_expected"] == 0, f"classification must precede the {len(objects)}-page expectation"
+    assert payload["evidence_records"] == 0, "no ancestor evidence may be collected for a damaged package"
+    assert "package_marker_missing" in payload["units"][0]["detail"]
 
     coverage = check_unit.check_oracle_coverage(unit, None, None)
     assert coverage["status"] == check_unit.STATUS_NOT_CHECKED
     assert coverage["visual_present"] == 0
     assert coverage["numeric_present"] == 0
 
+    # ⚠️ Same shape change as the flat case above (#562 follow-up): the boundary is classified before
+    # resolution, so the exit gate forms no opinion rather than reporting an unmeasurable coverage row.
     run_report = check_unit.run_all(unit, scope=check_unit.SCOPE_REPORT)
     checks = {c["id"]: c for c in run_report["checks"]}
-    assert checks["oracle-coverage"]["status"] == check_unit.STATUS_NOT_CHECKED
+    assert "oracle-coverage" not in checks
+    assert run_report["exit_code"] == check_unit.EXIT_NOT_CHECKED
+    assert checks[check_unit.PACKAGE_BOUNDARY_CHECK_ID]["code"] == "package_marker_missing"
 
 
 def test_nested_batch_out_dir_compatibility_is_preserved(tmp_path: Path) -> None:

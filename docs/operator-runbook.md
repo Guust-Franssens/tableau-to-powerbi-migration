@@ -1188,6 +1188,27 @@ python -c "import ssl; print(len(ssl.create_default_context().get_ca_certs()), l
 
 ---
 
+### 4.13 Desktop refuses to open a project and names a file that is too long
+
+The tree is **physically** over Desktop's UTF-16 ceilings (file 259 / directory 247). The fix is a
+short physical root: re-allocate with
+`python scripts/work_dirs.py <slug> --runs-parent C:\t2p --json` and re-run the engine into it.
+
+When relocating or rebuilding is blocked and you need Desktop only to open, refresh or capture, a
+**same-user `subst` alias** is a measured fallback (2026-09-08, #566, on the committed issue-194
+repro: a required path of **273** was refused; the same output root mapped to `R:` measured **253**,
+opened, refreshed four real rows and captured the page). It is temporary, machine-local, not portable
+and never the canonical path: `check_path_ceiling.py` still measures the physical tree, and no
+receipt, package or promotion may claim path-safety because an alias opened it.
+
+Safe sequence: prove the letter is unused → `subst R: <exact-existing-root>` → open only the mapped
+`.pbip` → PID-scoped Desktop work → `Stop-Process -Id <literal pid> -Force` → `subst R: /d`. The full
+recipe, the physical-fail/alias-open control and everything it does **not** prove:
+[`docs/windows-path-limits.md`](windows-path-limits.md) (§6 *`subst` — a measured Desktop-open
+fallback, never a repair*).
+
+---
+
 ## 5. Verification checklist
 
 Run in order. Each line says what it proves — and §5.2 says what none of them prove.

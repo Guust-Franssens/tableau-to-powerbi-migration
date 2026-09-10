@@ -68,7 +68,7 @@ ca363a77d68d539000291c004f136141a406df94cc7bbe840215e804822b5745  The operator's
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 c40cbc771eb704f7fef3f3aaa0072cb85779332c7c3b37697ea0fba0836974f5  ``` _runs/<NNN>-<slug>/ <- allocate with scripts/work_dirs.p
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-c8be9dcbb68b183445a6017ea1ddb5fa3fd1095a8841390377341e313ccce487  ~~ **Stage 1 is a short-root allocation on this Windows repo
+b2cd5d9dceece5981d17f17aa3d56733f943f230bc1c9ad33a2ef53064e3acd6  ~~ **Stage 1 is a short-root allocation on this Windows repo
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 f14c3cd0f5a9dc4e03df442b9361b5ceceea5be9f9092c0f64f25d766cd18edd  | # | stage | command | notes |
 4da1ec6f47782090102dc16bda978efb5655fbf2ddce0f84ecf1faf79a930f2d  |---|---|---|---|

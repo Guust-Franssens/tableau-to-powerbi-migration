@@ -17,7 +17,9 @@ path: this detector feeds ``probe_desktop_query.py``, the gate of record.
 CONTENT positively reads as recognised progress status. It is never dismissed because the caption
 looked reassuring, and never because we merely read *something*. Everything we could not account for -
 unreadable, caption-only, unrecognised, or progress text mixed with prose - surfaces as its own
-non-credential finding at **exit 3**, which is loud and recoverable, and never as a credential wall.
+non-clean dialog finding at **exit 3**, which is loud and recoverable, and never enters the
+credential hard-stop band. Staying out of that band is a statement about the EVIDENCE, not about the
+source: an unaccounted-for window rules a sign-in prompt neither in nor out.
 
 Three deliberate divergences from ``probe_desktop_credential.ps1``, each because this detector has
 strictly LESS evidence than the arbiter (Win32 child-HWND text only; no UI Automation):
@@ -177,8 +179,10 @@ class DialogFoundError(RuntimeError):
     a window is up and what it says, never that it blocks anything. It replaces ``DialogBlockedError``,
     whose ``BLOCKED_BY_DIALOG`` verdict sat in the exit-1 hard-stop band and was reached from a
     SIZE-ONLY test - so a Power BI Refresh progress dialog produced the same verdict as a sign-in
-    prompt. Every outcome here is now exit 3: a human should look at the screen, but no sign-in is
-    implied and nothing about the data source has been established.
+    prompt. Every outcome here is now exit 3: a human should look at the screen, and nothing about the
+    data source has been established. Exit 3 settles no credential question in either direction - a
+    known blocking prompt, a running refresh and a window nobody could read all land here, and only
+    the visible prompt says which action (if any) a person must take.
     """
 
     def __init__(self, pid: int, finding: DialogFinding) -> None:
@@ -347,12 +351,14 @@ def benign_chrome_signature() -> re.Pattern[str]:
 
 
 def blocking_prompt_signature() -> re.Pattern[str]:
-    """Compile the shared signature for KNOWN human-blocking prompts that are not sign-in prompts.
+    """Compile the shared signature for KNOWN human-blocking prompts.
 
-    The native-database-query approval modal above all: migrated custom-SQL sources emit exactly the
-    shape that triggers it, and this bundle's own guidance says to check for it before concluding
-    anything about a data source. Matched BEFORE the benign signature, so one progress element in the
-    same window cannot erase it.
+    Not "prompts that are not sign-in prompts": the shared alternatives span the native-database-query
+    approval modal AND an ``Authentication (is )?required`` notice, so a match establishes that a human
+    must act at the Desktop screen, never WHICH action. The native-query modal is the reason the
+    signature exists - migrated custom-SQL sources emit exactly the shape that triggers it, and this
+    bundle's own guidance says to check for it before concluding anything about a data source. Matched
+    BEFORE the benign signature, so one progress element in the same window cannot erase it.
     """
     return _compile_signature(BLOCKING_SIGNATURE_PATH)
 
@@ -417,8 +423,10 @@ def classify_dialog(window: DesktopWindow) -> DialogFinding:
     ``probe_desktop_credential.ps1``):
 
     ``credential``        the credential signature matched a text element -> hard stop.
-    ``needs-human``       a KNOWN human-blocking prompt that is not a sign-in prompt. Tested BEFORE
-                          benign so a progress element in the same window cannot erase it.
+    ``needs-human``       a KNOWN human-blocking prompt: the signature spans the native-query approval
+                          AND an authentication-required notice, so it establishes that a human must
+                          act, not which action. Tested BEFORE benign so a progress element in the
+                          same window cannot erase it.
     ``mixed-content``     progress text AND content nobody could account for, in the same window. A
                           first-match-wins loop would let one benign element erase everything after
                           it, which is how ``Evaluating`` beside *"Permission is required to run this
@@ -428,8 +436,10 @@ def classify_dialog(window: DesktopWindow) -> DialogFinding:
     ``benign-title-only`` the CAPTION matched the benign signature and no content did. A caption is not
                           content, so this joins the unreadable band.
     ``unreadable``        no readable text at all.
-    ``unrecognized``      readable text that matched no signature: we looked, and it is not a sign-in
-                          prompt. Distinct from ``unreadable`` on purpose - absent is not empty.
+    ``unrecognized``      readable text that matched no signature: we looked, and could not account for
+                          what we read. The signatures are a known-shapes list, so that settles the
+                          credential question in NEITHER direction. Distinct from ``unreadable`` on
+                          purpose - absent is not empty.
 
     ⚠️ **There is no length amnesty, and there must never be one again (#376 review, finding 5).**
     This used to accept any unmatched element of fewer than ``MIN_PROMPT_WORDS`` words, which meant
@@ -899,8 +909,10 @@ def describe_dialog_finding(finding: DialogFinding) -> str:
 # this property is gated rather than merely intended.
 DIALOG_KIND_GUIDANCE = {
     DIALOG_KIND_NEEDS_HUMAN: (
-        "this is a KNOWN human-blocking prompt (e.g. the native database query approval), not a "
-        "data-source sign-on prompt - approve it at the Desktop screen; no account details are implied"
+        "this matched a KNOWN human-blocking prompt signature (blocking_prompt_signature.regex), whose "
+        "alternatives span the native database query approval AND a notice that a person must complete "
+        "something at the screen - so a person must act on the prompt Power BI Desktop is showing; this "
+        "detector does not establish WHICH action, so read the prompt before assuming"
     ),
     DIALOG_KIND_MIXED_CONTENT: (
         "it shows refresh progress AND prose that is not progress status - a progress dialog does not "
@@ -914,8 +926,9 @@ DIALOG_KIND_GUIDANCE = {
         "this window exposes no readable text, so it could not be classified at all - look at the Desktop screen"
     ),
     DIALOG_KIND_UNRECOGNIZED: (
-        "its text matched no known prompt signature, so nothing here says a person must supply account "
-        "details - look at the Desktop screen"
+        "its text was read but matched no prompt signature this detector knows, and that list is not "
+        "exhaustive - so this window is unaccounted for and nothing here was settled either way; look "
+        "at the Desktop screen"
     ),
     DIALOG_KIND_BENIGN: (
         "a refresh is already running on this pid - wait for it, or cancel the stale one; do not stack "
@@ -1054,15 +1067,18 @@ def print_indeterminate_state_notice(pid: int, reason: str) -> None:
 def print_dialog_observed_notice(pid: int, finding: DialogFinding) -> None:
     """Loudly note the first time a bounded wait sees a dialog it could not dismiss (issue #376).
 
-    Latched rather than acted on: it is not a sign-on prompt, so it must not abort a refresh that is
-    otherwise healthy and may still finish - but it also means "no modal appeared" is no longer
-    established, so a quiet deadline must not erase it either. Marker-free, and not a ``REFRESH:``
-    verdict line, so the parent classifier cannot mistake it for a verdict (issue #153).
+    Latched rather than acted on: it did not match the hard-stop signature, so it must not abort a
+    refresh that is otherwise healthy and may still finish - but it also means "no modal appeared" is
+    no longer established, so a quiet deadline must not erase it either. Not matching that signature
+    rules nothing IN or OUT about the source; it only says this observation is not the hard stop.
+    Marker-free, and not a ``REFRESH:`` verdict line, so the parent classifier cannot mistake it for a
+    verdict (issue #153).
     """
     print(
         f"PID {pid} has a dialog up that could not be shown to be harmless ({finding.kind}); latching "
-        f"it - {dialog_guidance(finding)}. The wait continues, because this is not a prompt for account "
-        "details and an otherwise healthy refresh must not be aborted by it.",
+        f"it - {dialog_guidance(finding)}. The wait continues, because this window did not match the "
+        "hard-stop signature and an otherwise healthy refresh must not be aborted by it; it surfaces "
+        "again at the deadline.",
         flush=True,
     )
 
@@ -1134,7 +1150,7 @@ def join_with_credential_poll(
     on is ours, so a PROVEN-benign progress dialog is ours too and is ignored. Nothing else is.
 
     A :class:`DialogFinding` - a dialog we could not dismiss - is LATCHED, not raised (issue #376). It
-    is not a prompt for account details, so it must not abort a refresh that may still finish; but it
+    did not match the credential signature, so it must not abort a refresh that may still finish; but it
     also means "no modal appeared" is no longer established, so it surfaces at the deadline as
     :class:`DialogFoundError` rather than as a bare timeout blaming a slow source. Before #376 this
     raised at once, on a SIZE-ONLY test, at the same exit code as a real sign-on wall - so a Power BI

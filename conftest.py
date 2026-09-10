@@ -86,6 +86,7 @@ EXPECTED_EXACT_SKIP_REASONS: frozenset[str] = frozenset(
         "the administrative share is not reachable on this machine",
         "8.3 name generation is disabled on this volume",
         "no free drive letter available for subst",
+        "`subst` is Windows-only",
         "no unused drive letter to point at",
         "lineage check is Windows-only",
         "write-deny enforcement is an icacls ACL; the marker-only path cannot block a write",
@@ -97,6 +98,7 @@ EXPECTED_EXACT_SKIP_REASONS: frozenset[str] = frozenset(
         "reproduces the WINDOWS half: Path resolves / against the current drive",
         "case-sensitive filesystem: 'FOO' and 'foo' are not the same deliverable",
         "canonical engine not installed, so its constants cannot be read",
+        "os.mkfifo is POSIX-only",
     }
 )
 
