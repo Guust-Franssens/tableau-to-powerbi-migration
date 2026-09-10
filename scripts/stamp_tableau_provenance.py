@@ -426,6 +426,7 @@ class _WorkbookIndex:
         return None, []
 
 
+# pylint: disable-next=too-many-locals
 def find_origin(lookup: TableauLookup, stem: str, local: dict[str, Any]) -> dict[str, Any] | None:
     """Identify a local workbook on the site by LUID or name, then CONFIRM by content hash.
 
@@ -460,9 +461,16 @@ def find_origin(lookup: TableauLookup, stem: str, local: dict[str, Any]) -> dict
         return None
 
     workbook = candidates[0]
-    remote_sha = lookup.content_sha256(workbook["id"])
-    remote_key = lookup.content_revision_key(workbook["id"])
-    unavailable = lookup.content_unavailable(workbook["id"])
+    content_error_code = None
+    try:
+        remote_sha = lookup.content_sha256(workbook["id"])
+        remote_key = lookup.content_revision_key(workbook["id"])
+        unavailable = lookup.content_unavailable(workbook["id"])
+    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        remote_sha = None
+        remote_key = None
+        content_error_code = _exception_code(exc, "content-unavailable")
+        unavailable = content_error_code
     local_key = RevisionKey.from_json(local.get("revision_key"))
     agreement = local_key.agrees_with(remote_key) if local_key is not None else None
     if remote_sha == local["sha256"]:
@@ -471,7 +479,7 @@ def find_origin(lookup: TableauLookup, stem: str, local: dict[str, Any]) -> dict
         verdict = "unavailable"
     else:
         verdict = "name_only"
-    return {
+    origin = {
         "server": lookup.base,
         "site": lookup.site,
         "workbook_luid": workbook["id"],
@@ -490,6 +498,9 @@ def find_origin(lookup: TableauLookup, stem: str, local: dict[str, Any]) -> dict
         "remote_sha256": remote_sha,
         "same_name_count": index.same_name_count(workbook.get("name")),
     }
+    if content_error_code is not None:
+        origin["content_error_code"] = content_error_code
+    return origin
 
 
 def collect_inputs(target: Path) -> list[Path]:
@@ -631,6 +642,8 @@ def build(
             if origin is None:
                 if record.get("lookup_error_code") == DEADLINE_EXPIRED:
                     record["origin_note"] = "remote origin unavailable - provenance phase deadline expired"
+                elif record.get("lookup_error_code"):
+                    record["origin_note"] = "remote origin unavailable - Tableau lookup failed"
                 else:
                     record["origin_note"] = "no workbook of this LUID or name on the site - local-only input"
             elif origin["match"] == "name_only":
@@ -640,6 +653,9 @@ def build(
                 )
             elif origin["match"] == "unavailable":
                 reason = origin.get("content_unavailable") or "the site refused the download"
+                code = origin.get("content_error_code") or "content-unavailable"
+                record["lookup_error_code"] = code
+                _phase_error(phase, code, operation="content")
                 record["origin_note"] = (
                     f"matched by {origin['matched_by']}, but the site copy could NOT be read "
                     f"({reason}) - no byte or revision comparison was made"

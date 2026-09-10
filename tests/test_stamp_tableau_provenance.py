@@ -623,7 +623,9 @@ def test_a_dead_content_call_latches_that_luid_only(tmp_path, monkeypatch):
     dead_records = [r for r in records if r["input"]["file"].startswith(dead)]
     assert len(dead_records) == 2
     assert {r["lookup_error"] for r in dead_records} == {dead_records[0]["lookup_error"]}
-    assert dead_records[0]["lookup_error"].startswith("URLError:")
+    assert dead_records[0]["lookup_error_code"] == "content-unavailable"
+    assert dead_records[0]["origin"]["match"] == "unavailable"
+    assert dead_records[0]["origin"]["workbook_luid"] == dead
     alive_record = next(r for r in records if r["input"]["file"].startswith(alive))
     assert alive_record["origin"]["workbook_luid"] == alive
 
@@ -832,9 +834,12 @@ def test_an_unreadable_site_copy_is_unavailable_not_a_byte_difference(tmp_path, 
         RecordingSite(LIVE_ENV, workbooks=[{"id": luid, "name": "Refused"}], content_status={luid: 404}),
     )
 
-    records = prov.build(tmp_path, LIVE_ENV)["inputs"]
+    result = prov.build(tmp_path, LIVE_ENV)
 
     assert site.count("content") == 1, "one refusal is one call, for both inputs"
+    assert result["phase"]["status"] == "partial"
+    assert {"code": "content-unavailable", "operation": "content"} in result["phase"]["errors"]
+    records = result["inputs"]
     for record in records:
         origin = record["origin"]
         assert origin["match"] == "unavailable"
@@ -878,6 +883,7 @@ def test_a_trickling_remote_operation_crossing_the_phase_deadline_keeps_the_arti
         prov.DEADLINE_EXPIRED,
         prov.DEADLINE_EXPIRED,
     ]
+    assert result["inputs"][0]["origin"]["match"] == "unavailable"
     assert all(record["input"]["sha256"] for record in result["inputs"])
     assert result["phase"]["progress"][-1]["input_completed"] == 2
     assert "PROVENANCE progress:" in caplog.text
