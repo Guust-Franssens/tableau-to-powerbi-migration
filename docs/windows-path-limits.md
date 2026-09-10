@@ -463,6 +463,30 @@ because the right value depends on where the customer unpacks.
 (`docs/deterministic-tier-integration.md:414`) — though the estate bundle now has **66 files** past it.
 Pass `--ceiling 282` to test that budget.
 
+### Where `run_estate.py` applies this — the EMITTED tree, not only the projection
+
+The estate coordinator has always refused a run whose *projected* PBIR visual path breaks the ceiling,
+before conversion. That projection is fail-open by construction: it composes the canonical
+`pages/<id>/visuals/<id>` tail onto unit names knowable up front, and the path that actually breaches
+on the committed issue-194 repro is an **uncapped semantic-model table file** it never models —
+measured at **343 UTF-16 units** on canonical engine output, from a bundle whose projection passed.
+So `run_estate.py` also measures **what the engine really wrote**: immediately after the output receipt
+and baselines are recorded, and *before* provenance, handover slices, packaging, agent work or
+Desktop, it runs `check_path_ceiling.scan` (this module's walker and this page's 259/247 pair —
+nothing re-implemented) over the bundle, writes the report to `<bundle>/path-ceiling.json`, and returns
+`EXIT_PATH_CEILING` (10) when any emitted file, directory, or the walk itself says the tree is over the
+ceiling or cannot be assessed. The tight root budget stays **advisory** there, exactly as above. The
+output is **preserved as evidence** — never deleted, shortened or rewritten; permanent filename
+shortening is an upstream engine fix, and a refused bundle is what its report cites.
+
+That report is **published atomically** (serialize whole → per-process staging sibling → `os.replace`),
+so a full disk or an unserializable document cannot leave a truncated `path-ceiling.json` or destroy a
+previous trustworthy one; the refusal **outranks its own evidence**, so failing to persist the phase
+timings still exits 10; and both the report and the console line are **bundle-relative** —
+`<bundle>/pbip/…` — so a path-length report can be pasted into an upstream issue without carrying the
+run root, the account name or a customer folder with it. A path that cannot be *proven* inside the
+bundle is reported as an unassessable ordinal rather than echoed.
+
 ---
 
 ## 8. What the check deliberately does NOT do
