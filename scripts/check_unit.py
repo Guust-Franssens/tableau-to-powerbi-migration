@@ -81,6 +81,12 @@ EXIT_USAGE = 64
 # ``stopped_after`` cannot drift apart, and so a test can name the assertion it kills.
 PACKAGE_BOUNDARY_CHECK_ID = "package-boundary"
 
+# ⚠️ The refusal's ``target`` label is a CONSTANT, not the supplied path's final component. A unit
+# folder is routinely named after the customer (`Contoso-Secret`), and the refusal verdict is the one
+# a caller pastes into an issue. The classifier's stable code and generic detail carry every fact the
+# reader needs; the identity of the thing refused is exactly the part that must not travel.
+REFUSED_TARGET_LABEL = "unclassified-target"
+
 EXEMPTIONS_FILE = "unit-check-exemptions.json"
 VALID_EXEMPTION_CHECKS = frozenset({"stub-measures", "page-parity", "scaffold-partitions"})
 
@@ -405,10 +411,13 @@ def _write_json(path: Path, payload: Any) -> None:
 def _unit_dir(target: Path) -> Path:
     """Return the migration unit directory when ``target`` is its fabric folder or bundle.
 
-    ⚠️ ``resolve()`` **follows** a symlink or NTFS junction, so this must only ever be handed a root
-    that :func:`_cleared_target` has already cleared (issue #562). It is not itself a boundary check
-    and cannot be made into one: by the time it runs, an alias would already have substituted its
-    destination for the path the caller named.
+    ⚠️ ``resolve()`` **follows** a symlink or NTFS junction, so this cannot be a boundary check and
+    must not be read as one: by the time it runs, an alias has already substituted its destination
+    for the path the caller named. :func:`run_all` classifies before reaching it (issue #562).
+
+    ❌ **That ordering is `run_all`'s and the CLI's, not this function's.** A direct call to a public
+    helper - ``check_oracle_coverage``, ``check_page_parity``, ``load_exemptions`` - still arrives
+    here with an unclassified target. See :func:`run_all` for the residual and its follow-up.
     """
     target = target.resolve()
     return target.parent if target.name == "fabric" else target
@@ -1844,9 +1853,10 @@ def _oracle_dirs(target: Path, explicit: Path | None) -> list[Path]:
     of PR #454).
 
     ⚠️ ``evidence_dirs`` classifies again to decide whether to walk upward, and it does so on the
-    **resolved** unit root. That is safe only because ``target`` reached here through
-    :func:`_cleared_target`: the caller-supplied path was classified before any resolution, so this
-    second classification can never be the one that decides an alias's boundary (issue #562).
+    **resolved** unit root. Reached through :func:`run_all` that is harmless - the supplied path was
+    classified before any resolution, so the second classification cannot be the one that decides an
+    alias's boundary. Reached by a **direct** helper call it is the only classification there is, and
+    it is taken on the destination: the residual named in :func:`run_all` (issue #562).
     """
     if explicit:
         return _resolved_unique([explicit])
@@ -3023,18 +3033,14 @@ def _append_model_readiness_checks(
 
 
 def _cleared_target(target: Path, classification: TargetClassification) -> Path:
-    """Resolve the caller-supplied target, but ONLY once its boundary has been classified.
+    """Resolve the target, but ONLY under a classification :func:`run_all` just computed for it.
 
-    ⚠️ **This is the single place `check_unit` turns a supplied path into a resolved one**, and it is
-    gated on the classification taken from the ORIGINAL path (issue #562). Everything downstream -
-    :func:`_unit_dir`, :func:`_reference_dirs`, :func:`_oracle_dirs` and, through it,
-    :func:`bundle_corpus.evidence_dirs` - therefore only ever sees a root that has already been
-    cleared. That is what stops the classification those helpers take *after* resolution from
-    becoming the authority: for a caller-supplied alias it would classify the destination, which is
-    precisely the substitution the classifier exists to refuse.
-
-    Raising rather than returning is deliberate. An unsafe classification reaching here means the
-    refusal above it was removed, and a silent resolve would restore the defect with no verdict.
+    ⚠️ Defense in depth, not the guarantee. The guarantee is the ordering in :func:`run_all`; this
+    exists so that deleting that refusal cannot silently resolve an unsafe root and continue with no
+    verdict. It is deliberately private and takes no caller-supplied verdict: ``classification`` is
+    always the one computed locally, from **this** ``target``, immediately above the call. An
+    injectable verdict would let a caller clear one path with another path's answer, which is the
+    substitution the classifier exists to refuse rather than a new place to allow it.
     """
     if not classification.is_safe:
         raise ValueError(f"target was not cleared for resolution: {classification.code}")
@@ -3048,10 +3054,10 @@ def _refused_boundary_report(classification: TargetClassification, scope: str) -
     destination's evidence through the very alias that was refused, and ``inspect_brownfield`` alone
     would ``rglob`` the whole tree behind it.
 
-    ⚠️ The wording is the classifier's stable code plus its generic detail and NOTHING else - no
-    supplied path, no link destination, no raw exception. ``target`` is the normalized final path
-    component, the unit label every other verdict here already prints, never the supplied path: that
-    path can itself be a secret-bearing absolute path that ends up pasted into an issue.
+    ⚠️ Every string here is a CONSTANT or stable classifier output - the code, its generic detail,
+    the lexical placement enum, and :data:`REFUSED_TARGET_LABEL`. **No part of the supplied path
+    survives, including its final component**: a unit folder is routinely named after the customer,
+    and round-1 review of PR #593 called printing that component a disclosure rather than a label.
 
     The verdict is the gate's existing NOT_CHECKED state (exit 2, *"could not be fully checked"*),
     not a new exit code - the boundary is unproven, so this gate forms no opinion, and forming no
@@ -3063,7 +3069,7 @@ def _refused_boundary_report(classification: TargetClassification, scope: str) -
     )
     return {
         "version": 1,
-        "target": classification.unit_name or "target",
+        "target": REFUSED_TARGET_LABEL,
         "scope": scope,
         "omitted_checks": _omitted_checks(scope),
         "status": STATUS_NOT_CHECKED,
@@ -3083,22 +3089,11 @@ def _refused_boundary_report(classification: TargetClassification, scope: str) -
     }
 
 
-def _entry_classification(target: Path, supplied: TargetClassification | None) -> TargetClassification:
-    """The ONE classification of the original caller-supplied target.
-
-    ``supplied`` is the verdict :func:`main` already took on the *same* original path, so the CLI's
-    own pre-checks never classify a second time (or a second thing). Absent it, the classification is
-    taken here - always before any resolution.
-    """
-    return supplied if supplied is not None else classify_target(target)
-
-
 def run_all(
     target: Path,
     reference_dir: Path | None = None,
     oracle_dir: Path | None = None,
     scope: str = SCOPE_ALL,
-    classification: TargetClassification | None = None,
 ) -> dict[str, Any]:
     """Run checks for one persona-owned scope, returning a normalized envelope.
 
@@ -3106,19 +3101,32 @@ def run_all(
     The exit gate reached its package handling through ``_unit_dir()`` -> ``target.resolve()``, so a
     caller-supplied symlink or junction was classified on its *destination* and could then consume
     that destination's oracle/reference evidence through the alias. The original target is now
-    classified exactly once, here, and a damaged or unsafe boundary stops before ``_unit_dir``, any
+    classified **here, by this function, from its own argument**, before ``_unit_dir``, any
     ``resolve``/``is_dir``/``is_file``/``rglob``, evidence discovery, manifest read or ancestor walk.
 
-    ``classification`` lets :func:`main` hand over the verdict it already took on the same original
-    path, so the CLI's own pre-checks cannot classify a second time (or a second thing).
+    ⚠️ **There is deliberately no ``classification`` parameter.** An earlier revision let ``main``
+    hand its verdict in to save a second ``lstat``; round-1 review of PR #593 rejected it, because a
+    parameter that decides whether a boundary is safe is exactly the parameter a caller must not be
+    able to supply - one path's answer would clear a different path. Re-classifying the same original
+    path is a few microseconds and is bound to the argument by construction.
 
     A **safe** ordinary bundle or package continues into the existing behaviour completely
-    unchanged. Verifying that a package's manifest still describes the bytes on disk is a later
-    slice of #562; this is the boundary ordering only.
+    unchanged.
+
+    ❌ **Blocking residual, stated rather than implied: this ordering covers `run_all` and the CLI
+    only.** The public per-check helpers - ``check_oracle_coverage``, ``check_page_parity``,
+    ``load_exemptions``, ``page_expectation`` - still reach ``_unit_dir`` (and therefore
+    ``resolve()``) with an unclassified target, so an aliased root handed to one of them is still
+    classified on its destination. ``tests/estate_page_gate_digest.py`` is a real caller of exactly
+    that surface. Closing it is a separate follow-up and must land before the Phase-2 umbrella
+    completes; do not read this function's guarantee as covering the direct-helper surface.
+
+    Verifying that a package's manifest still describes the bytes on disk is a later slice of #562;
+    this is the boundary ordering only.
     """
     if scope not in SCOPES:
         raise ValueError(f"unknown scope: {scope}")
-    classification = _entry_classification(target, classification)
+    classification = classify_target(target)
     if not classification.is_safe:
         return _refused_boundary_report(classification, scope)
     target = _cleared_target(target, classification)
@@ -3515,21 +3523,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     # ⚠️ Classification precedes the directory pre-check, which FOLLOWS: `is_dir()` dereferences a
-    # junction, and the usage error below echoes the supplied path. Running it first is how the
-    # entry gate's CLI leaked a target and returned the wrong exit code (PR #590, round-1 review);
-    # the same shape lives here. The verdict is passed into `run_all` so the original path is
-    # classified exactly once.
-    classification = classify_target(args.target)
-    if classification.is_safe and not args.target.is_dir():
+    # junction, and the usage error below echoes the supplied path. Running it first is how the entry
+    # gate's CLI leaked a target and returned the wrong exit code (PR #590, round-1 review); the same
+    # shape lives here. This verdict guards ONLY that pre-check and is deliberately NOT passed on:
+    # `run_all` classifies the same original path itself, because a boundary verdict a caller can
+    # supply is a verdict a caller can supply for a different path (PR #593, round-1 review).
+    if classify_target(args.target).is_safe and not args.target.is_dir():
         print(f"ERROR: not a directory: {args.target}", file=sys.stderr)
         return EXIT_USAGE
-    report = run_all(
-        args.target,
-        reference_dir=args.reference_dir,
-        oracle_dir=args.oracle_dir,
-        scope=args.scope,
-        classification=classification,
-    )
+    report = run_all(args.target, reference_dir=args.reference_dir, oracle_dir=args.oracle_dir, scope=args.scope)
     if args.json:
         _write_json(args.json, report)
     if not args.quiet:

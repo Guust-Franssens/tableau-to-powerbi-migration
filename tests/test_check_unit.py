@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib.util
 import hashlib
+import inspect
 import json
 import os
 import time
@@ -4436,15 +4437,25 @@ def test_an_aliased_root_is_refused_before_unit_dir_and_reads_no_destination_evi
 
 
 @pytest.mark.parametrize(
-    "relative",
-    [("run", "packages", "Unit"), ("run", "packages", "batch", "Unit")],
-    ids=["flat", "nested"],
+    ("relative", "marker", "code", "placement"),
+    [
+        (("run", "packages", "Unit"), None, "CODE_PACKAGE_MARKER_MISSING", "PLACEMENT_FLAT"),
+        (("run", "packages", "batch", "Unit"), None, "CODE_PACKAGE_MARKER_MISSING", "PLACEMENT_NESTED"),
+        (("run", "packages", "Unit"), "dir", "CODE_PACKAGE_MARKER_NOT_REGULAR", "PLACEMENT_FLAT"),
+    ],
+    ids=["flat-missing", "nested-missing", "flat-non-regular"],
 )
-def test_a_package_shaped_root_with_no_marker_is_refused_before_discovery(
-    tmp_path: Path, relative: tuple[str, ...]
+def test_a_package_shaped_root_without_a_regular_marker_is_refused_before_discovery(
+    tmp_path: Path, relative: tuple[str, ...], marker: str | None, code: str, placement: str
 ) -> None:
-    """Kills: falling back to ordinary bundle handling for an unproven boundary, at either placement."""
+    """Kills: falling back to ordinary bundle handling for an unproven boundary.
+
+    Both placements and both damaged-marker shapes ride one parametrization: a DIRECTORY named
+    `package-manifest.json` declares exactly as little as no marker at all.
+    """
     unit = _package(tmp_path.joinpath(*relative), marker=False)
+    if marker == "dir":
+        (unit / bundle_corpus.PACKAGE_MARKER).mkdir()
 
     armed, followed = _run_all_without_following(unit)
     report = cu.run_all(unit)
@@ -4453,23 +4464,9 @@ def test_a_package_shaped_root_with_no_marker_is_refused_before_discovery(
     assert armed is not None
     assert report["exit_code"] == cu.EXIT_NOT_CHECKED
     row = _boundary_row(report)
-    assert row["code"] == bundle_corpus.CODE_PACKAGE_MARKER_MISSING
-    assert row["placement"] == (bundle_corpus.PLACEMENT_FLAT if len(relative) == 3 else bundle_corpus.PLACEMENT_NESTED)
+    assert row["code"] == getattr(bundle_corpus, code)
+    assert row["placement"] == getattr(bundle_corpus, placement)
     assert [check["id"] for check in report["checks"]] == [cu.PACKAGE_BOUNDARY_CHECK_ID]
-
-
-def test_a_non_regular_marker_is_refused_before_discovery(tmp_path: Path) -> None:
-    """A DIRECTORY named `package-manifest.json` declares nothing; it must not read as an ordinary bundle."""
-    unit = _package(tmp_path / "run" / "packages" / "Unit", marker=False)
-    (unit / bundle_corpus.PACKAGE_MARKER).mkdir()
-
-    armed, followed = _run_all_without_following(unit)
-    report = cu.run_all(unit)
-
-    assert followed == "", followed
-    assert armed is not None
-    assert report["exit_code"] == cu.EXIT_NOT_CHECKED
-    assert _boundary_row(report)["code"] == bundle_corpus.CODE_PACKAGE_MARKER_NOT_REGULAR
 
 
 def test_an_unassessable_root_refuses_rather_than_succeeding_exception_shaped(
@@ -4495,19 +4492,24 @@ def test_an_unassessable_root_refuses_rather_than_succeeding_exception_shaped(
     assert "permission denied by the test" not in rendered
 
 
-def test_the_original_target_is_classified_exactly_once_and_never_after_resolution(
+def test_run_all_classifies_its_own_argument_and_accepts_no_injected_verdict(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Kills: classifying the RESOLVED target, and re-classifying after resolution.
+    """Kills: a caller-supplied `classification`, and classifying the RESOLVED target.
 
-    The target is spelled `<...>/Unit/fabric/..`, which `resolve()` collapses to `<...>/Unit`. So a
-    recorded argument equal to the supplied spelling can only have been taken before resolution, and
-    a list of length one can only mean the exit gate never asked a second time.
+    Two halves, both named. **At the API level** there is no parameter through which one path's
+    verdict could clear another - round-1 review of PR #593 rejected the earlier `classification=`
+    kwarg for exactly that reason, so a signature assertion is the only construction that makes the
+    mismatch impossible rather than merely unused. **At the call level** the target is spelled
+    `<...>/Unit/fabric/..`, which `resolve()` collapses to `<...>/Unit`: a recorded argument equal to
+    the supplied spelling can only have been taken before resolution, and a single entry can only
+    mean the exit gate never asked a second time.
 
     ⚠️ Scope stated: this counts `check_unit`'s OWN calls. `bundle_corpus.evidence_dirs` classifies
-    again on the already-cleared root by design; the point of `_cleared_target` is that its answer
-    can no longer be about a directory the caller never named.
+    again on the already-cleared root by design.
     """
+    assert "classification" not in inspect.signature(cu.run_all).parameters
+
     package = _package(tmp_path / "run" / "packages" / "Unit")
     spelling = package / "fabric" / ".."
     seen: list[Path] = []
@@ -4526,6 +4528,28 @@ def test_the_original_target_is_classified_exactly_once_and_never_after_resoluti
     assert not [check for check in report["checks"] if check["id"] == cu.PACKAGE_BOUNDARY_CHECK_ID]
 
 
+def test_the_cli_preclassifies_only_for_its_own_is_dir_check_and_run_all_reclassifies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLI's own verdict guards its following pre-check and is NOT handed on as authority.
+
+    Two classifications of the SAME original path is the intended shape: the second is bound to
+    `run_all`'s own argument by construction, which an injected object never could be.
+    """
+    package = _package(tmp_path / "run" / "packages" / "Unit")
+    seen: list[Path] = []
+    real = cu.classify_target
+
+    def recording(target: Path):
+        seen.append(target)
+        return real(target)
+
+    monkeypatch.setattr(cu, "classify_target", recording)
+
+    assert cu.main([str(package), "--quiet"]) != cu.EXIT_USAGE, "the safe pre-check must not fire here"
+    assert seen == [package, package]
+
+
 def test_resolution_is_gated_on_the_clearance_rather_than_merely_ordered_after_it(tmp_path: Path) -> None:
     """Kills: deleting the refusal and letting an unsafe classification fall through to `resolve()`."""
     package = _package(tmp_path / "run" / "packages" / "Unit")
@@ -4537,6 +4561,27 @@ def test_resolution_is_gated_on_the_clearance_rather_than_merely_ordered_after_i
     assert cu._cleared_target(package, safe) == package.resolve()  # pylint: disable=protected-access
     with pytest.raises(ValueError, match=bundle_corpus.CODE_PACKAGE_MARKER_MISSING):
         cu._cleared_target(damaged, unsafe)  # pylint: disable=protected-access
+
+
+def test_a_direct_helper_call_still_follows_an_alias_which_is_the_open_residual(tmp_path: Path) -> None:
+    """❌ RESIDUAL, reproduced rather than falsely tested green (PR #593 round-1 review, split out).
+
+    `run_all` and the CLI classify first; the public per-check helpers do NOT. `check_oracle_coverage`
+    reaches `_unit_dir` -> `resolve()` directly, so an aliased root handed to it is still classified
+    on its destination and its evidence is consumed through the alias - measured here as a full
+    visual PASS on a package the caller never named. `tests/estate_page_gate_digest.py` calls exactly
+    this surface (`check_page_parity`, `check_oracle_coverage`, `load_exemptions`, `page_expectation`).
+
+    ⚠️ This test asserts the CURRENT, WRONG behaviour on purpose. When the follow-up closes the
+    direct-helper surface it must FAIL and be inverted; a test that quietly passed either way would
+    be the false-green this split exists to prevent.
+    """
+    package = _package(tmp_path / "run" / "packages" / "Unit")
+    alias = tmp_path / "alias"
+    _link_directory(alias, package)
+
+    assert cu.run_all(alias)["exit_code"] == cu.EXIT_NOT_CHECKED, "run_all is covered"
+    assert cu.check_oracle_coverage(alias, None, None)["visual_present"] == 1, "direct helper is NOT covered"
 
 
 def test_a_safe_package_and_an_ordinary_unit_keep_their_existing_verdicts(tmp_path: Path) -> None:
@@ -4560,10 +4605,16 @@ def test_a_safe_package_and_an_ordinary_unit_keep_their_existing_verdicts(tmp_pa
         assert next(c for c in report["checks"] if c["id"] == "oracle-coverage")["visual_present"] == 1
 
 
-def test_the_cli_refuses_an_aliased_target_without_printing_any_supplied_path(tmp_path: Path) -> None:
-    """Exit state and every output channel: no supplied path, no link destination, no traceback."""
-    package = _package(tmp_path / "run" / "packages" / "Unit")
-    alias = tmp_path / "alias"
+def test_the_cli_refuses_an_aliased_target_without_printing_any_supplied_component(tmp_path: Path) -> None:
+    """Exit state and every output channel: no supplied path, **no supplied path COMPONENT**, no traceback.
+
+    Round-1 review of PR #593: printing the target's final component as a "label" is a disclosure,
+    not a label - a unit folder is routinely the customer's name. Both the alias and the package it
+    points at are named distinctively here so a leak of *either* component fails a named assertion,
+    and the constant label is asserted positively so deleting the whole `target` key cannot pass.
+    """
+    package = _package(tmp_path / "run" / "packages" / "Contoso-Secret")
+    alias = tmp_path / "Fabrikam-Confidential"
     _link_directory(alias, package)
     json_path = tmp_path / "verdict.json"
 
@@ -4579,8 +4630,9 @@ def test_the_cli_refuses_an_aliased_target_without_printing_any_supplied_path(tm
 
     assert completed.returncode == cu.EXIT_NOT_CHECKED, completed.stdout + completed.stderr
     assert bundle_corpus.CODE_TARGET_ROOT_REPARSE in everywhere
-    assert str(alias) not in everywhere
-    assert str(package) not in everywhere
-    assert str(tmp_path) not in everywhere
+    assert cu.REFUSED_TARGET_LABEL in everywhere
+    assert json.loads(written)["target"] == cu.REFUSED_TARGET_LABEL
+    for supplied in (str(alias), str(package), str(tmp_path), alias.name, package.name):
+        assert supplied not in everywhere, supplied
     assert "Traceback" not in everywhere
     assert "ERROR: not a directory" not in everywhere

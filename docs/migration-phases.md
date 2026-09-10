@@ -229,16 +229,26 @@ NTFS junction is refused the same way: following it would decide the boundary ab
 never named. This is deliberate and fails **closed** — including for an ordinary, unpackaged bundle
 reached through an alias.
 
-✅ **The EXIT gate now shares that ordering.** `check_unit.py` classifies the **original**
-caller-supplied target exactly once, before `_unit_dir()` (which `resolve()`s, and therefore
-follows), before any `is_dir`/`is_file`/`rglob`, and before oracle/reference discovery, the manifest
-read or the ancestor walk. `run_all` refuses a damaged or unsafe boundary with its existing
-`NOT_CHECKED` verdict (**exit 2** — the gate forms no opinion, which is not a pass), reading nothing
-through the alias and printing only the classifier's stable code and generic detail: never the
-supplied path, the link destination or a raw exception. Its CLI classifies before its own `is_dir`
-pre-check, for the same reason the entry gate's does. Resolution itself is gated on the clearance
-(`_cleared_target`), so the classification `bundle_corpus.evidence_dirs` takes later, on the resolved
-root, can no longer be the one that decides an alias's boundary.
+✅ **The EXIT gate's `run_all` and CLI now share that ordering.** `check_unit.py` classifies the
+**original** caller-supplied target — in `run_all`, from its own argument, with no injectable
+`classification` parameter — before `_unit_dir()` (which `resolve()`s, and therefore follows), before
+any `is_dir`/`is_file`/`rglob`, and before oracle/reference discovery, the manifest read or the
+ancestor walk. A damaged or unsafe boundary gets the gate's existing `NOT_CHECKED` verdict (**exit
+2** — the gate forms no opinion, which is not a pass), reading nothing through the alias and printing
+only the classifier's stable code, its generic detail and a **constant** target label: never the
+supplied path, never its final component (a unit folder is routinely the customer's name), never the
+link destination or a raw exception. The CLI classifies before its own `is_dir` pre-check and
+deliberately does **not** hand that verdict on — `run_all` re-asks about the same path, because a
+boundary verdict a caller can supply is one a caller can supply for a *different* path.
+
+❌ **Blocking residual: the DIRECT per-check helpers are not covered.** `check_oracle_coverage`,
+`check_page_parity`, `load_exemptions` and `page_expectation` still reach `_unit_dir` — and therefore
+`resolve()` — with an unclassified target, so an aliased root handed straight to one of them is still
+classified on its destination and its evidence consumed through the alias.
+`tests/estate_page_gate_digest.py` is a real caller of that surface, and
+`test_a_direct_helper_call_still_follows_an_alias_which_is_the_open_residual` reproduces the gap
+rather than asserting it away. Closing it is a separate follow-up and must land before the Phase-2
+umbrella completes; do not read `run_all`'s guarantee as covering direct helper calls.
 
 ⚠️ Boundary **ordering** only. Neither gate yet verifies that a package's `package-manifest.json`
 still describes the bytes on disk — no JSON parse, no hashes, no declared-contents or role check.
