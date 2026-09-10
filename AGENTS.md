@@ -439,14 +439,14 @@ exists so each question is answered once per migration, not once per session.
 
 ## Canonical work layout (pre-bundle stages, scratch, deliverables)
 
-The stages **before** `run_estate.py` had no shared convention: 31 ad-hoc `_*` roots accumulated with
-nothing recording what any was for (#291, #234). The convention is **`_runs/<NNN>-<slug>/`**, never
-`_work/` (`.gitignore`'s `**/_work/` rule means the OPPOSITE thing). The **number is the identity** —
-never renamed or reused, because bundle output embeds absolute self-paths.
+Before `run_estate.py` there was no shared convention: 31 ad-hoc `_*` roots, none
+saying what it was for (#291, #234). The convention is **`_runs/<NNN>-<slug>/`**, never
+`_work/` (`.gitignore`'s `**/_work/` rule means the OPPOSITE thing). The **number is the identity**,
+never renamed or reused: bundle output embeds absolute self-paths.
 
 ```
 _runs/<NNN>-<slug>/
-    run.json          <- the one authoritative description of this run
+    run.json          <- the authoritative description of this run
     assessment/        assess_estate.py-shaped output
     assets/             harvest_estate_assets.py-shaped downloads
     bundle/              run_estate.py-shaped conversion output
@@ -455,36 +455,38 @@ _runs/<NNN>-<slug>/
                             directory itself and writes `packages/<Unit>/`. Package-shaped targets
                             never inherit run-level evidence, even before their completion marker;
                             nested `packages/<batch>/<Unit>/` remains readable for compatibility.
-                            See `docs/migration-phases.md`
-    deliverables/          operator-facing outputs meant for the CUSTOMER, never for git — the
+    deliverables/          operator-facing outputs for the CUSTOMER, never for git — the
                             `ses-prep/` near-miss (#322): a `connections.json` naming 17 real
                             customer servers, one `git add -A` from a commit
     scratch/                disposable, run-owned — the only subdir a future `--prune` may delete
 ```
 
 **Windows + PBIP + customer-shaped ⇒ allocate against a SHORT root** (run 409, #479). Repo-local
-`_runs` stays the default; when `<repo>/_runs/<NNN>-<slug>/bundle/…` projects over Desktop's
-259-character file / 247-character directory UTF-16 ceilings, allocate **before** survey/harvest with
-`python scripts/work_dirs.py <slug> --runs-parent <short-parent> --json` — identical allocator,
-`_runs/<NNN>-<slug>/` shape and `run.json`, more path budget — and treat its printed JSON paths as
-authoritative for every later command. Verify with
+`_runs` stays the default; when `<repo>/_runs/<NNN>-<slug>/bundle/…` overshoots Desktop's
+259/247-character UTF-16 file/directory ceilings, allocate **before** survey/harvest with
+`python scripts/work_dirs.py <slug> --runs-parent <short-parent> --json` — same allocator, shape and
+`run.json`, more path budget — and treat its printed JSON paths as
+authoritative for later commands. Verify with
 `python scripts/work_dirs.py --verify --runs-parent <short-parent>`. Never hand-invent or move a run,
-never substitute a junction, `subst` or symlink, and never weaken the ceiling.
+never a junction or symlink, and never weaken the ceiling. ⚠️ ONE measured exception (2026-09-08,
+#566): a same-user `subst` alias may open an already-built over-ceiling tree in Desktop when
+re-allocation is blocked — temporary, never the recorded path, waives no gate
+([`docs/windows-path-limits.md`](docs/windows-path-limits.md) §6).
 
 `/_*` in `.gitignore` covers a **repo-local** run by construction (`git check-ignore -v -- <path>`,
-**without** a trailing slash — with one it reports every path as ignored, proving nothing). A
+**without** a trailing slash — with one every path reports as ignored, proving nothing). A
 short-root run lives outside the repo, where that rule never applies and nothing in this checkout can
 commit it. Neither case licenses deletion: leave the run in place as evidence.
 
 **`scripts/work_dirs.py` is the single source of truth for these paths** — `sanitize_unit_key`,
-`allocate_run` (atomic `mkdir`-exclusive, retry on collision, never a read-then-write race),
-`RunPaths` and `list_runs`. It resolves the root from its **own file location**, never `Path.cwd()`:
-a stray empty `fabric/` once landed at the repo root from a path resolved against an agent's CWD.
+`allocate_run` (atomic `mkdir`-exclusive, retry on collision, no read-then-write race),
+`RunPaths`, `list_runs`. It resolves the root from its **own file location**, never `Path.cwd()`:
+a stray empty `fabric/` once landed at the repo root from a CWD-resolved path.
 
-**Scope:** the convention plus the helper. `assess_estate.py`, `harvest_estate_assets.py`,
+**Scope:** convention plus helper. `assess_estate.py`, `harvest_estate_assets.py`,
 `capture_tableau_oracle.py` and `run_estate.py` keep their documented `_assessment*/` / `_sweep*/` /
 `_oracle*/` / `_bundle*/` defaults **unchanged** (#234); `_estate/`, `_build/` and `migrations/` are
-**exempt** — test infra, a bundle-internal replay convention, and committed deliverables.
+**exempt** — test infra, a bundle-internal replay convention, committed deliverables.
 
 ---
 
