@@ -69,6 +69,7 @@ WORKBOOK_SUFFIXES = (".twb", ".twbx")
 DEFAULT_TIMEOUT_SEC = 120.0
 DEADLINE_EXPIRED = "deadline-expired"
 PAGINATION_RESIDUAL = "pagination-beyond-1000-workbooks-not-addressed"
+DATASOURCE_ORIGIN_UNAVAILABLE = "datasource-origin-unavailable"
 
 
 class DeadlineExceeded(RuntimeError):
@@ -595,7 +596,9 @@ def build(
         }
     progress({"event": "inputs-discovered", "input_completed": 0, "input_total": len(inputs)})
     lookup: TableauLookup | None = None
-    if env.get("TABLEAU_SERVER_URL") and env.get("TABLEAU_PAT_NAME"):
+    has_workbook_inputs = any(path.suffix.lower() in WORKBOOK_SUFFIXES for path in inputs)
+    has_live_credentials = bool(env.get("TABLEAU_SERVER_URL") and env.get("TABLEAU_PAT_NAME"))
+    if has_live_credentials and has_workbook_inputs:
         try:
             lookup = TableauLookup(env)
             if hasattr(lookup, "set_run_context"):
@@ -624,7 +627,13 @@ def build(
             records.append(record)
             progress({"event": "input-complete", "input_completed": index, "input_total": len(inputs)})
             continue
-        if lookup is not None:
+        if path.suffix.lower() not in WORKBOOK_SUFFIXES:
+            record["origin"] = None
+            if has_live_credentials:
+                record["lookup_error_code"] = DATASOURCE_ORIGIN_UNAVAILABLE
+                record["origin_note"] = "Tableau datasource live origin lookup is not implemented - local-only input"
+                _phase_error(phase, DATASOURCE_ORIGIN_UNAVAILABLE, operation="datasource-origin")
+        elif lookup is not None:
             if _deadline_expired(deadline_at, clock):
                 origin = None
                 record["lookup_error_code"] = DEADLINE_EXPIRED

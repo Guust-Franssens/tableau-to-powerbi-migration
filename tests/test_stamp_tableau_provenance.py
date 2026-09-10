@@ -248,6 +248,22 @@ def test_a_datasource_only_folder_still_gets_a_local_fingerprint_artifact(tmp_pa
     assert result["inputs"][0]["input"]["sha256"]
 
 
+def test_a_datasource_input_never_borrows_same_named_workbook_origin(tmp_path, monkeypatch):
+    """Datasource REST provenance is not implemented; workbook inventory must not fake it."""
+    (tmp_path / "Published.tds").write_text("<datasource />", encoding="utf-8")
+    site = _install(monkeypatch, RecordingSite(LIVE_ENV, workbooks=[{"id": "wb1", "name": "Published"}]))
+
+    result = prov.build(tmp_path, LIVE_ENV)
+
+    assert site.calls == [], "a datasource-only stamp must not enter the workbook REST lookup"
+    assert result["phase"]["status"] == "partial"
+    assert {"code": prov.DATASOURCE_ORIGIN_UNAVAILABLE, "operation": "datasource-origin"} in result["phase"]["errors"]
+    record = result["inputs"][0]
+    assert record["origin"] is None
+    assert record["lookup_error_code"] == prov.DATASOURCE_ORIGIN_UNAVAILABLE
+    assert "workbook_luid" not in json.dumps(record)
+
+
 def test_an_empty_folder_is_reported_rather_than_stamped_as_success(tmp_path):
     assert prov.build(tmp_path, {})["input_count"] == 0
 
