@@ -1,6 +1,6 @@
 ---
 name: live-source-reachability
-description: Prove a Tableau migration's live database sources are reachable through the Power BI artifact that will ship, and route credential-gate verdicts. Use before building any workbook/datasource that has live sources, when probe_bundle/probe_live_source returns DATA_OK, OPERATOR_REQUIRED, NO_CREDENTIAL, UNREACHABLE, ERROR, or SKIPPED, or when a credential-gate audit/verify decision is needed.
+description: Prove a Tableau migration's live database sources are reachable through the Power BI artifact that will ship, and route credential-gate verdicts. Use before building any workbook/datasource that has live sources, when probe_bundle/probe_live_source returns DATA_OK, OPERATOR_REQUIRED, NO_CREDENTIAL, ACCESS_DENIED, UNREACHABLE, ERROR, or SKIPPED, or when a credential-gate audit/verify decision is needed.
 ---
 
 # Live-source reachability and credential-gate routing
@@ -52,6 +52,7 @@ execution route a migrator should invoke instead of carrying the mechanics inlin
 | `DATA_OK` | Power BI returned a real row; the probe earns the clear itself. | Continue. |
 | `OPERATOR_REQUIRED` | Custom SQL/cost/modal risk needs a human Desktop refresh. | Hard stop; do not accept SQL-client proof. |
 | `NO_CREDENTIAL` | Power BI lacks or rejects a credential. | Hard stop after one attempt; ask for Desktop sign-in or human build-only authorization. |
+| `ACCESS_DENIED` | The classifier matched access-denial-shaped text (`403`/forbidden/permission denied/not authorized) ahead of the credential markers. It does **not** establish that authentication succeeded, that the failure is permission-only, or that a fresh sign-in cannot help — `403 Unauthorized: authentication failed` and `403 Forbidden: access token revoked` both land here. | Hard stop; the gate stays armed. **Unchanged retry is not useful** — read the redacted detail and change what the source named: the credential/token when it speaks of authentication or an expired or revoked token, the permission or object grant when it names a principal or object. Do not route it as a timeout or a transient error. |
 | `UNREACHABLE` | Address/network/spec failure, not a credential wall. | Report the bad address/path; do not send the user to sign in. |
 | `ERROR` | Local tooling/artifact evidence failure. | Stop; fix/reroute the artifact evidence before retrying. |
 | `SKIPPED` | No live source exists. | Record the skip and continue. |

@@ -4532,9 +4532,12 @@ def assert_message_matches_its_evidence(verdict: str, lines: list[str]) -> None:
 def test_every_verdict_token_says_only_what_its_evidence_supports(tmp_path: Path, verdict: str) -> None:
     """Token-by-token, directly against the shipped table: no token over-claims or under-informs.
 
-    `CREDENTIAL_MISSING` and `DIALOG_NEEDS_HUMAN` matched a signature, so they may name a remedy - a
-    sign-in for the first, an approval for the second. The three ambiguous tokens matched nothing, so
-    they may only report what was and was not established and send a human to the screen.
+    `CREDENTIAL_MISSING` matched the credential signature, so it may name sign-in as the remedy.
+    `DIALOG_NEEDS_HUMAN` matched a KNOWN human-blocking prompt, so it may say a human must act - but
+    not WHICH action: its signature spans the native-query approval AND `Authentication (is )?required`,
+    so prescribing an approval is false for part of its own match set. The three ambiguous tokens
+    matched nothing, so they may only report what was and was not established and send a human to the
+    screen.
     """
     assert_message_matches_its_evidence(verdict, verdict_guidance(tmp_path, verdict))
 
@@ -4614,11 +4617,13 @@ def test_the_production_script_pairs_every_guidance_call_with_the_token_it_emits
 def test_no_public_help_text_still_carries_a_retracted_claim() -> None:
     """The help block is the probe's public documentation - it may not out-claim the runtime either.
 
-    Four retractions now: the ambiguous-verdict assertions (#146 M1), the universal
+    Five retractions now: the ambiguous-verdict assertions (#146 M1), the universal
     "approval, not a sign-in" remedy for `DIALOG_NEEDS_HUMAN`, `CREDENTIAL_PRESENT`'s claim that the
-    refresh ran to the deadline with nothing unclassifiable up, and - the last one a fresh review
-    found still standing - the SYNOPSIS/DESCRIPTION pair that said the probe detects a credential
-    "cached machine-wide" and licenses a loop that "can run unattended".
+    refresh ran to the deadline with nothing unclassifiable up, the SYNOPSIS/DESCRIPTION pair that
+    said the probe detects a credential "cached machine-wide" and licenses a loop that "can run
+    unattended", and - the fifth - the opening sentence that said the probe "tells the two states
+    apart", which reads CREDENTIAL_PRESENT as the established mirror image of CREDENTIAL_MISSING when
+    it is only a bounded observation.
 
     Scanned over the WHOLE help block, not the guidance table: the table was corrected first and the
     help kept contradicting it, which is precisely how a reader ends up with the retired claim.
@@ -4634,9 +4639,30 @@ def test_no_public_help_text_still_carries_a_retracted_claim() -> None:
         "the remedy is an approval, not a sign-in",
         "ran to the deadline with no credential",
         "nothing unclassifiable up",
+        "tells the two states apart",
         *RETIRED_SUCCESS_CLAIMS,
     ):
         assert claim not in help_block, f"the documented behaviour still asserts {claim!r}"
+
+
+def test_no_source_comment_still_carries_a_retracted_claim() -> None:
+    """The comments below the help block are read by the next maintainer, and they contradicted it.
+
+    The guidance table was corrected first (PR #583), then the help block; these three sentences sat
+    in the code around them still saying the retired thing, which is how a corrected message gets
+    "fixed" back. Each phrase is the ASSERTIVE spelling of a retracted claim and appears nowhere in
+    the replacement prose, so this scans the WHOLE script - including the quoted retractions in
+    `Get-VerdictGuidance`'s own docstring, which are deliberately worded as negations.
+    """
+    text = PROBE_PS1.read_text(encoding="utf-8").lower()
+
+    for claim, why in (
+        ("tells the two states apart", "CREDENTIAL_PRESENT is a bounded observation, not the mirror of MISSING"),
+        ("known to need a human but are not credential prompts", "the blocking signature spans an auth notice too"),
+        ("never exit 1 (human needed)", "exit 3 can still need a human; exit 1 is the credential-specific stop"),
+        ("still emits that token on its own path", "the Python fast check retired BLOCKED_BY_DIALOG too"),
+    ):
+        assert claim not in text, f"a source comment still asserts {claim!r} - {why}"
 
 
 def run_probe_against_windowless_pid(*, probe_ps1: Path | None = None, timeout_sec: str = "5"):

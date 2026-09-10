@@ -316,7 +316,111 @@ nothing else. Note the contrast with git, which in the directory case tells you 
 
 ---
 
-## 6. Two questions, and why the gate is what it is
+## 6. `subst` — a measured Desktop-open fallback, never a repair
+
+⚠️ **This section corrects an earlier unconditional prohibition.** The shared conventions used to say
+*"never substitute a junction, `subst` or symlink"* for an over-ceiling run. The junction and symlink
+halves stand. The `subst` half was never measured, and it is wrong for the one narrow case below.
+
+**Measured 2026-09-08 (#566)** on the committed
+[`fixtures/upstream-repros/issue-194-long-pbir-path`](../fixtures/upstream-repros/issue-194-long-pbir-path/README.md)
+repro, engine `2.368.0`, output root `C:\tfmig\i194\0001\out` (22 chars):
+
+| pass | deepest required path | Power BI Desktop |
+|---|---:|---|
+| **physical root** | **273** — one `…SemanticModel\definition\tables\*.tmdl` | ❌ refused, naming that file |
+| **same root through `subst R:`** | **253** | ✅ opened — bridge `ready`, dashboard page enumerated, full refresh returned **four real rows** (`DATA_OK`, `--no-save`), stable page capture 1/1 |
+
+**Both rows are the control and both must stay on this page.** The physical failure is what proves the
+tree is genuinely over the ceiling; the alias open is what proves the *mapping* — not some incidental
+difference between two trees — is what Desktop responded to. ⚠️ This is measured **for that fixture on
+this host**, not a general statement that Desktop supports `subst`.
+
+### What the alias is, and what it is not
+
+`subst` maps an **existing** directory onto an unused drive letter, so a path that was
+`C:\tfmig\i194\0001\out\pbip\…` is spelled `R:\pbip\…`. It shortens the *spelling* Desktop sees. It
+does not shorten, move or repair the artifact.
+
+* ✅ **Same-user, same-logon, same-session.** The mapping is visible to every process in that logon
+  context, not merely the terminal that created it — which is why Desktop, launched separately, can
+  open through it.
+* ❌ **Machine-local and not portable.** Another user, an elevated or service context, another machine,
+  and this machine after sign-out or reboot need not have it. A customer or any downstream recipient
+  cannot rely on it, and the artifact stays unopenable without it.
+* ❌ **It does not make anything shippable.** `check_path_ceiling.py` measures the **physical** tree, so
+  a physically over-ceiling tree stays non-clean, and no receipt, manifest, package or promotion may
+  claim `portable` / path-safe because an alias opened it.
+* ⚠️ **`currentFilePath` and `reportDir` come back in the alias spelling** (`R:\…`). That records how
+  the file was *opened*; it is not the run's identity. The canonical physical path — and every hash
+  taken over it — remains authoritative, and the two must not be confused.
+* ✅ **Pointing a gate at the alias does not shorten what it measures.** `check_path_ceiling.py`
+  scans `target.resolve()`, and on Windows `resolve()` returns the *physical* path behind a
+  substituted drive — measured 2026-09-09 on this host: with `subst Q: C:\tfmig` active,
+  `Path("Q:/wt566docs").resolve()` → `C:\tfmig\wt566docs`. `harvest_estate_assets.py`'s output guard
+  rebuilds the canonical spelling for the same reason (pinned by
+  `tests/test_harvest_output_guard.py::test_the_canonical_probe_is_what_lets_a_substituted_drive_through`).
+  ⚠️ Measured for those two consumers only — do not assume every tool you hand an `R:\…` path to
+  resolves it.
+
+### The default has not changed
+
+A short **physical** root is still the fix: allocate with
+`python scripts/work_dirs.py <slug> --runs-parent <short-parent> --json` **before** survey and harvest,
+and re-run the engine into it. The alias is for the case where the tree already exists and relocating
+or rebuilding it is blocked, and you need Desktop only to open, refresh or capture.
+
+### The safe sequence
+
+⚠️ Two things this sequence is deliberately explicit about, both measured 2026-09-09 on this host:
+a literal spaced path typed unquoted is **two** arguments to `subst` (`subst R: C:\runs\0001 regional
+sales\bundle` → *"Incorrect number of parameters"*, exit **1**, nothing mapped), and `Test-Path`
+**prints** `False` rather than stopping anything — so both the resolve and every check below have to
+be executable, not eyeballed.
+
+```powershell
+# 1. resolve the physical root ONCE, literally - a unit name may contain spaces
+$root = (Resolve-Path -LiteralPath 'C:\runs\0001-regional sales\bundle').Path
+
+# 2. REFUSE if the letter is taken - never take one another user, tool or mapping owns
+if ((Test-Path -LiteralPath 'R:\') -or ((subst) -match '^R:\\:')) {
+    throw 'R: is already assigned - choose another free letter'
+}
+
+# 3. map the resolved root as ONE quoted argument, and CHECK that it worked
+subst R: "$root"
+if ($LASTEXITCODE -ne 0) { throw "subst failed (exit $LASTEXITCODE)" }
+if (-not (Test-Path -LiteralPath 'R:\')) { throw 'R: did not appear - open nothing' }
+
+# 4. only now open the mapped project, and keep the PID
+$pbip = 'R:\pbip\<Unit>\<Unit>.pbip'
+$p = Start-Process -FilePath $env:PBI_DESKTOP_PATH -ArgumentList "`"$pbip`"" -PassThru
+$p.Id
+
+# 5. all Desktop work is PID-scoped (bridge status / refresh / capture), then close that exact PID
+Stop-Process -Id <literal pid> -Force
+
+# 6. ALWAYS remove the mapping, and CHECK the removal
+subst R: /d
+if ($LASTEXITCODE -ne 0 -or (Test-Path -LiteralPath 'R:\')) { throw 'R: is still mapped' }
+```
+
+### Never
+
+* Never map over a letter that is in use, and never over another user's or another session's drive.
+* Never delete, move or rename the physical tree to make the alias work.
+* Never record the alias as the run's canonical path, and never rewrite `run.json`, an engine receipt,
+  `definition.pbir`, package provenance or a model path to `R:`.
+* Never point `python scripts/work_dirs.py --verify` at the alias spelling and report that the run moved.
+* Never use the alias to waive a failed `check_path_ceiling.py`, a `check_unit.py` path gate or a
+  promotion destination check — an alias answers "can Desktop open it here, now, as me", which is not
+  the question any of those gates asks.
+* Never leave the mapping behind: a forgotten `R:` collides with the next run's and outlives the work
+  that justified it.
+
+---
+
+## 7. Two questions, and why the gate is what it is
 
 The absolute count ("183 over ceiling") is a fact about *where the bundle sits*. The customer will put
 it somewhere else. So the check answers **both** questions:
@@ -385,7 +489,7 @@ bundle is reported as an unassessable ordinal rather than echoed.
 
 ---
 
-## 7. What the check deliberately does NOT do
+## 8. What the check deliberately does NOT do
 
 * **It never asks the OS whether a path can be opened.** The verdict is computed arithmetically from
   path strings, so neither the registry, nor git's config, nor the host OS can soften it. Linux CI
@@ -396,7 +500,7 @@ bundle is reported as an unassessable ordinal rather than echoed.
 
 ---
 
-## 8. What is still unverified
+## 9. What is still unverified
 
 * **Which guard actually refuses 260/248.** `EnsureNotLong` allows both (§1, measured against the
   assembly), so the observed refusal comes from something else — most plausibly the .NET/Win32
@@ -412,12 +516,16 @@ bundle is reported as an unassessable ordinal rather than echoed.
 * **Whether Desktop fails identically with `LongPathsEnabled = 0`.** It cannot be *better* — every
   measurement here was taken with the opt-in ON and Desktop refused anyway — but it was not measured.
 * **Whether the archive/ship step has a lower budget of its own.** 282 remains one anecdote.
+* **Whether the `subst` fallback (§6) generalises.** It was measured once, on one fixture, on this
+  host, against the MSIX Desktop build — enough to retire an unmeasured prohibition, not enough to
+  promise a customer that an alias will open *their* over-ceiling tree. The physical ceiling is what is
+  measured end-to-end; the alias is a workaround whose reach is unknown.
 * **The warning count in the git repro.** This run counted 74 `Filename too long` warnings; an
   independent reviewer counted 73 on the same shape. Immaterial to the verdict, but not reconciled.
 
 ---
 
-## 9. Proposed follow-up (not done in this pass)
+## 10. Proposed follow-up (not done in this pass)
 
 `scripts/preflight.ps1` has **zero** long-path checks. It should report `LongPathsEnabled`,
 `git config core.longpaths`, **and** the longest generated path — the first two as context explaining

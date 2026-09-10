@@ -51,6 +51,116 @@ AZURE_MAP_COOKBOOK = REPO_ROOT / ".github" / "pbi.kb" / "visuals" / "azureMap.md
 SEMANTIC_GOTCHAS = SKILLS_DIR / "powerbi-semantic-model-gotchas" / "SKILL.md"
 BUNDLED_PATH_CLAIM_RE = re.compile(r"\bbundled(?:\s+in\s+this skill's)?\s+[`']([^`']+)[`']")
 
+# --- credential/dialog guidance contract (issue #146) ---------------------------------------------
+# The arbiter `.github/skills/pbip-model-refresh/scripts/probe_desktop_credential.ps1` is the wording
+# oracle; these are the operator-facing paragraphs that restate it. Only CURRENT-guidance blocks are
+# read: the same files also carry historical defect narratives that legitimately quote the retired
+# claims, and scanning those would forbid the repo from recording its own history.
+PBIP_REFRESH_SKILL = SKILLS_DIR / "pbip-model-refresh" / "SKILL.md"
+LIVE_SOURCE_SKILL = SKILLS_DIR / "live-source-reachability" / "SKILL.md"
+CREDENTIAL_DOC = REPO_ROOT / "docs" / "data-source-credentials.md"
+GATE_DOC = REPO_ROOT / "docs" / "credential-gate.md"
+GATE_TESTING_DOC = REPO_ROOT / "docs" / "credential-gate-testing.md"
+SCRIPTS_README = REPO_ROOT / "scripts" / "README.md"
+# `credential-gate-testing.md` routes by ERROR SIGNATURE, so its ACCESS_DENIED row is keyed on the
+# connector text rather than on the token - hence a row prefix here instead of `_table_row`.
+ACCESS_DENIED_SIGNATURE_ROW = "| error names `403`"
+DESKTOP_VERDICT_TOKENS = (
+    "CREDENTIAL_MISSING",
+    "CREDENTIAL_PRESENT",
+    "REFRESH_IN_PROGRESS",
+    "DIALOG_NEEDS_HUMAN",
+    "DIALOG_UNRECOGNIZED",
+    "DIALOG_UNREADABLE",
+)
+AMNESTY_BLOCK_LEAD = "> ✅ **Length amnesty, current state:"
+PREFLIGHT_STEP_LEAD = "3. **Local:**"
+# The canonical clean-run paragraph: `DATA_OK` is earned, and an active dialog or any authoritative
+# non-success token outranks a stale or late one. Bounded to its own paragraph so the next one cannot
+# stand in for it.
+CLEAN_RUN_LEAD = "⚠️ **`DATA_OK` is earned by a clean run"
+CLEAN_RUN_ENDS = "**Pass `--pid`"
+# Exact claims the arbiter's own evidence does not support. Retired, not merely discouraged.
+RETIRED_CREDENTIAL_CLAIMS = (
+    "$MinPromptWords",
+    "still has the length-amnesty",
+    "already cached",
+    "ran to the deadline",
+    "approval, not a sign-in",
+    "not a sign-in prompt",
+    "no sign-in implied",
+)
+# ACCESS_DENIED over-claims. `_classify_failure` tests BARE markers (`403`, `forbidden`, ...) before
+# any credential marker, so `403 Unauthorized: authentication failed` and
+# `403 Forbidden: access token revoked` both classify as ACCESS_DENIED - measured against the shipped
+# classifier. The verdict therefore cannot assert that authentication succeeded, that the failure is
+# permission-only, or that a fresh credential can never help.
+RETIRED_ACCESS_DENIED_CLAIMS = (
+    "final until permissions change",
+    "authenticated, but",
+    "and **authenticated**",
+    "permission owner",
+    "never a second sign-in",
+    "sign in again",
+    "signing in again is not enough",
+)
+# Both messages are `403`s that a NEW credential would fix, and both land on ACCESS_DENIED. Naming
+# them in the docs is what stops the verdict being read as "authentication already succeeded".
+ACCESS_DENIED_CONTROL_MESSAGES = (
+    "403 Unauthorized: authentication failed",
+    "403 Forbidden: access token revoked",
+)
+
+
+def _verdict_rows(path: Path) -> str:
+    """The Desktop-arbiter verdict-table rows in `path`, blockquoted or not."""
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.lstrip(">").strip()
+        if not stripped.startswith("| `"):
+            continue
+        if stripped.split("`")[1] in DESKTOP_VERDICT_TOKENS:
+            rows.append(stripped)
+    return "\n".join(rows)
+
+
+def _block_from(path: Path, lead: str, *, ends: str | None = None) -> str:
+    """The contiguous block that starts at the line beginning with `lead`.
+
+    It stops before the first line starting with `ends`, and - when `lead` is a blockquote - at the
+    first unquoted line, so a current-guidance paragraph cannot silently absorb the historical
+    narrative that follows it and pass on that text instead.
+    """
+    quoted = lead.startswith(">")
+    block: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not block:
+            if line.startswith(lead):
+                block.append(line)
+            continue
+        if (ends is not None and line.startswith(ends)) or (quoted and not line.startswith(">")):
+            break
+        block.append(line)
+    return "\n".join(block)
+
+
+def _table_row(path: Path, key: str) -> str:
+    """The single markdown table row whose first cell names `key`."""
+    rows = [line for line in path.read_text(encoding="utf-8").splitlines() if line.startswith(f"| `{key}`")]
+    return "\n".join(rows)
+
+
+def _signature_row(path: Path, prefix: str) -> str:
+    """The one markdown row starting with `prefix`, or `''` when it is not unique.
+
+    `credential-gate-testing.md` routes by ERROR SIGNATURE rather than by token, so its ACCESS_DENIED
+    row has no backticked first cell for `_table_row` to key on. Returning `''` for a non-unique match
+    keeps the caller's "this contract now proves nothing" assertion in charge, rather than silently
+    asserting against whichever row happened to be first.
+    """
+    rows = [line for line in path.read_text(encoding="utf-8").splitlines() if line.startswith(prefix)]
+    return rows[0] if len(rows) == 1 else ""
+
 
 def test_the_skills_directory_is_not_empty() -> None:
     """Guards the collection itself: `SKILL_FILES` drives parametrization, and an empty glob would
@@ -346,3 +456,118 @@ def test_azure_map_cookbook_does_not_recommend_dead_end_filter_or_blank_basemap_
     assert "**Top-N filter**" not in text
     assert "only after confirming the source genuinely has no basemap" in text
     assert "same 3 of 10" in text
+
+
+def test_credential_guidance_states_only_what_the_desktop_arbiter_establishes() -> None:
+    """Issue #146: keep the operator-facing credential guidance inside the arbiter's own evidence.
+
+    The oracle is `probe_desktop_credential.ps1`'s emitted guidance, which may claim a sign-in only
+    for `CREDENTIAL_MISSING`, must send a `DIALOG_NEEDS_HUMAN` reader to the prompt on screen rather
+    than prescribing an action, and must leave the credential state undetermined in BOTH directions
+    for the two ambiguous dialog tokens. Docs that outran that evidence are what this pins.
+
+    Deliberately scoped to the current-guidance blocks. The same files also carry the historical
+    defect narratives (the #406 length amnesty, the retired `BLOCKED_BY_DIALOG` band) that quote the
+    retired wording on purpose, and a whole-file scan would forbid the repo from recording its own
+    history.
+    """
+    guidance = {
+        "pbip-model-refresh verdict table": _verdict_rows(PBIP_REFRESH_SKILL),
+        "pbip-model-refresh length-amnesty status": _block_from(PBIP_REFRESH_SKILL, AMNESTY_BLOCK_LEAD),
+        "data-source-credentials verdict table": _verdict_rows(CREDENTIAL_DOC),
+        "data-source-credentials preflight step": _block_from(CREDENTIAL_DOC, PREFLIGHT_STEP_LEAD, ends="4. "),
+        "scripts/README arbiter row": _table_row(SCRIPTS_README, "probe_desktop_credential.ps1"),
+    }
+    for name, block in guidance.items():
+        assert block, f"the {name} block was not found - this contract now proves nothing"
+        for claim in RETIRED_CREDENTIAL_CLAIMS:
+            assert claim not in block, f"{name} still carries the retired claim {claim!r}"
+
+    for name, needle in [
+        ("pbip-model-refresh verdict table", "do not stack"),
+        ("pbip-model-refresh verdict table", "Act on the prompt visible in Desktop"),
+        ("pbip-model-refresh verdict table", "the remedy is **not** established either"),
+        ("pbip-model-refresh verdict table", "A bounded observation"),
+        ("pbip-model-refresh length-amnesty status", "issue #406 is closed"),
+        ("data-source-credentials verdict table", "do not stack"),
+        ("data-source-credentials verdict table", "does **not** establish which action"),
+        ("data-source-credentials verdict table", "A bounded observation only"),
+        ("data-source-credentials preflight step", "bounded observation"),
+        ("scripts/README arbiter row", "not proof of a cached credential"),
+        ("scripts/README arbiter row", "gate of record"),
+    ]:
+        assert needle in guidance[name], f"{name} no longer states {needle!r}"
+
+    # Both ambiguous tokens must say it, not just one: a half-corrected table is the shape that let
+    # `DIALOG_UNREADABLE` inherit `DIALOG_UNRECOGNIZED`'s (stronger) claim in the first place.
+    for name in ("pbip-model-refresh verdict table", "data-source-credentials verdict table"):
+        undetermined = guidance[name].count("undetermined in both directions")
+        assert undetermined >= 2, (
+            f"{name} states 'undetermined in both directions' {undetermined} time(s); "
+            "DIALOG_UNREADABLE and DIALOG_UNRECOGNIZED must each say it"
+        )
+
+    # ACCESS_DENIED says what the CLASSIFIER saw, not what the source decided. Collapsing it into a
+    # timeout or a transient error is one failure; promoting it to "authentication succeeded, so only
+    # a permission change can help" is the other, and the shipped classifier contradicts that one.
+    # All four operator-facing surfaces that route it are listed; a fifth would be an unpinned consumer.
+    access_denied_rows = {
+        SCRIPTS_README.name: _table_row(SCRIPTS_README, "probe_live_source.py"),
+        LIVE_SOURCE_SKILL.name: _table_row(LIVE_SOURCE_SKILL, "ACCESS_DENIED"),
+        GATE_DOC.name: _table_row(GATE_DOC, "ACCESS_DENIED"),
+        GATE_TESTING_DOC.name: _signature_row(GATE_TESTING_DOC, ACCESS_DENIED_SIGNATURE_ROW),
+    }
+    for name, row in access_denied_rows.items():
+        assert row, f"no ACCESS_DENIED row found in {name} - this contract now proves nothing"
+        assert "ACCESS_DENIED" in row, f"{name} no longer names ACCESS_DENIED in its row"
+        assert "permission" in row.lower(), f"{name} no longer ties ACCESS_DENIED to permissions"
+        for claim in RETIRED_ACCESS_DENIED_CLAIMS:
+            assert claim not in row, (
+                f"{name} still carries the retired ACCESS_DENIED claim {claim!r}: the classifier "
+                "matches bare 403/forbidden markers, so the verdict cannot assert that "
+                "authentication succeeded or that a fresh credential is pointless"
+            )
+        assert "does **not** establish that authentication succeeded" in row.lower(), (
+            f"{name} no longer states that ACCESS_DENIED does not establish that authentication succeeded"
+        )
+        for message in ACCESS_DENIED_CONTROL_MESSAGES:
+            assert message in row, (
+                f"{name} no longer cites the control message {message!r}, which the shipped "
+                "classifier returns ACCESS_DENIED for despite being fixable with a new credential"
+            )
+
+    # The retry rule survives the correction, in its honest form: blind repetition is useless, but the
+    # operator is NOT forbidden from re-authenticating - they must read the detail and change the input
+    # the source named.
+    for name in (SCRIPTS_README.name, LIVE_SOURCE_SKILL.name, GATE_DOC.name):
+        row = access_denied_rows[name]
+        assert "unchanged retry is not useful" in row.lower(), (
+            f"{name} no longer states that unchanged retry is not useful for ACCESS_DENIED"
+        )
+        assert "read the redacted detail" in row.lower(), (
+            f"{name} no longer tells the operator to read the redacted detail before acting"
+        )
+    assert "never, unchanged" in access_denied_rows[GATE_TESTING_DOC.name], (
+        f"{GATE_TESTING_DOC.name} no longer states that retrying ACCESS_DENIED unchanged is wrong"
+    )
+
+    # A clean run is what earns DATA_OK: an active dialog, any authoritative non-success token, or a
+    # non-zero exit outranks a stale or late DATA_OK-looking line. `_verdict_lines._is_earned_success`
+    # is the oracle - it requires exit 0, no `NON_SUCCESS_VERDICT_CHECKS` hit (which include
+    # `_has_dialog_verdict`), and only then a scoped success line.
+    clean_run = _block_from(CREDENTIAL_DOC, CLEAN_RUN_LEAD, ends=CLEAN_RUN_ENDS)
+    assert clean_run, (
+        f"the clean-run DATA_OK paragraph was not found in {CREDENTIAL_DOC.name} - this contract now proves nothing"
+    )
+    assert "an active dialog vetoes it" in clean_run, (
+        f"{CREDENTIAL_DOC.name} no longer states that an active dialog vetoes DATA_OK"
+    )
+    assert "outranks a stale or late" in clean_run, (
+        f"{CREDENTIAL_DOC.name} no longer states that an authoritative non-success verdict outranks a "
+        "stale or late DATA_OK line"
+    )
+    for permissive in ("may be accepted", "can still be trusted", "even while an active dialog"):
+        assert permissive not in clean_run.lower(), (
+            f"{CREDENTIAL_DOC.name} now permits a DATA_OK that was never earned ({permissive!r}): an "
+            "active dialog or any authoritative non-success token must veto it"
+        )

@@ -229,13 +229,43 @@ NTFS junction is refused the same way: following it would decide the boundary ab
 never named. This is deliberate and fails **closed** — including for an ordinary, unpackaged bundle
 reached through an alias.
 
-❌ **The EXIT gate is NOT yet covered by that ordering, and this is a known blocking residual.**
-`check_unit.py`'s `_oracle_dirs()` reaches the shared walk through `_unit_dir()`, which calls
-`target.resolve()` **first** — so for a caller-supplied alias the classification happens on the
-already-resolved destination, which is precisely the substitution the classifier exists to refuse.
-The stop is therefore only reliable there for a real, un-aliased path. Closing it means classifying
-the **original** target before resolution, which is a separate follow-up to #562; do not read the
-entry gate's guarantee as covering `check_unit.py`.
+✅ **The EXIT gate's `run_all` and CLI now share that ordering.** `check_unit.py` classifies the
+**original** caller-supplied target — in `run_all`, from its own argument, with no injectable
+`classification` parameter — before `_unit_dir()` (which `resolve()`s, and therefore follows), before
+any `is_dir`/`is_file`/`rglob`, and before oracle/reference discovery, the manifest read or the
+ancestor walk. A damaged or unsafe boundary gets the gate's existing `NOT_CHECKED` verdict (**exit
+2** — the gate forms no opinion, which is not a pass), reading nothing through the alias and printing
+only the classifier's stable code, its generic detail and a **constant** target label: never the
+supplied path, never its final component (a unit folder is routinely the customer's name), never the
+link destination or a raw exception. The CLI classifies before its own `is_dir` pre-check and
+deliberately does **not** hand that verdict on — `run_all` re-asks about the same path, because a
+boundary verdict a caller can supply is one a caller can supply for a *different* path.
+
+✅ **The DIRECT per-check helpers now carry the same ordering.** `load_exemptions`,
+`page_expectation`, `check_page_parity`, `check_oracle_coverage` and `_oracle_capture_oracles` each
+classify **their own argument as their first operation** — before `_unit_dir`, before
+`shipping_reports` (which `page_expectation` reached *ahead of* `_unit_dir`, measured), before any
+`resolve`/`is_file`/`is_dir`/`exists`/`rglob` or read, and before an **explicit** oracle directory is
+loaded (an explicit `--oracle` bypasses `_unit_dir` entirely, so `_unit_dir` could never have been
+the boundary). Each catches independently and returns its **existing** non-clean shape — `path: None`
+exemptions, `assessable: False`, `NOT_CHECKED` parity, not-assessable oracle coverage — while
+`_oracle_capture_oracles` raises a path-free typed refusal that `tests/estate_page_gate_digest.py`,
+the one production caller of this surface, catches at its tool boundary and reports as its existing
+`EXIT_UNMEASURABLE` (**exit 3**) with a constant message. There is no `classification`, clearance or
+context parameter anywhere on that surface: a verdict a caller can hand in is one a caller can hand
+in for a *different* path. Safe targets keep byte-identical results and the committed estate digest
+is unchanged.
+
+⚠️ **Limited closure, stated rather than implied.** This covers exactly the production
+direct-helper surface: **1 consumer, 5 entry functions, 6 call sites**. Other target-bearing helpers
+with no production caller — `inspect_brownfield`, `expected_pages`, `page_drop_explanations`,
+`actual_pages`, `check_occlusion`, and the internal `run_all` components — are **not** hardened
+standalone library APIs. Do not read this as "every function in `check_unit.py` is safe to call with
+an arbitrary path"; making it so is a different consumer class and a separate API-hardening issue.
+
+⚠️ Boundary **ordering** only. Neither gate yet verifies that a package's `package-manifest.json`
+still describes the bytes on disk — no JSON parse, no hashes, no declared-contents or role check.
+That is a later slice of #562.
 
 ### The two gates
 
