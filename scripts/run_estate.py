@@ -199,8 +199,10 @@ EXIT_INVALID_PBIR = 7
 EXIT_BLANK_PLACEHOLDER = 8
 EXIT_BUNDLE_REWRITE = 9
 EXIT_PATH_CEILING = 10
+EXIT_PROVENANCE_FAILED = 11
 GENERATED_ARTIFACTS_KEY = "generated_artifacts"
 SLICE_ONLY_COVERAGE = "slice_only_backfill"
+SOURCE_PROVENANCE_REPORT = "source-provenance.json"
 
 #: Where the post-engine path measurement lands inside the bundle, so a refusal is ATTRIBUTABLE to
 #: named paths rather than to a console line nobody kept. `path-ceiling.json` is the name this repo
@@ -221,6 +223,11 @@ PATH_CEILING_LIMITS = WINDOWS_LIMITS
 #: account name, customer folder - never leaves the machine that measured it.
 SAFE_BUNDLE_ROOT = "<bundle>"
 
+#: How the provenance artifact is NAMED once the name leaves this process. The same reasoning as
+#: `SAFE_BUNDLE_ROOT`: the console line is pasted into an issue and read by an agent, so it names the
+#: artifact bundle-relatively. The absolute path stays inside the process that wrote it.
+SAFE_SOURCE_PROVENANCE_REPORT = f"{SAFE_BUNDLE_ROOT}/{SOURCE_PROVENANCE_REPORT}"
+
 #: A path the transform could not PROVE lies inside the bundle. It is reported as an ordinal, never
 #: echoed and never re-spelled as if it were relative: "I could not place this" is a different and
 #: honest answer, and echoing it is exactly the disclosure this transform exists to prevent.
@@ -238,8 +245,9 @@ UNKNOWN_PATH_CODE = "unknown-path-{index}"
 #: The operations this module may name in a log line. An allowlist, so a label is a constant of this
 #: file rather than anything derived from data.
 PUBLISH_REPORT_OPERATION = "publish-path-ceiling-report"
+PUBLISH_PROVENANCE_OPERATION = "publish-source-provenance"
 WRITE_PHASE_RECORD_OPERATION = "write-phase-record"
-_ALLOWED_OPERATIONS = frozenset({PUBLISH_REPORT_OPERATION, WRITE_PHASE_RECORD_OPERATION})
+_ALLOWED_OPERATIONS = frozenset({PUBLISH_PROVENANCE_OPERATION, PUBLISH_REPORT_OPERATION, WRITE_PHASE_RECORD_OPERATION})
 
 #: Where `scan()` records a single measured path, and where it records a list of them.
 _PATH_RECORD_KEYS = ("longest", "root_budget_binding")
@@ -638,27 +646,82 @@ def slice_handovers(report: dict, out_dir: Path) -> list[Path]:
     return written
 
 
-def stamp_inputs(input_dir: Path, out_dir: Path) -> str | None:
+class ProvenanceStampResult(NamedTuple):
+    """Publication and verdict for one structured provenance result."""
+
+    ok: bool
+    status: str
+    detail: str
+
+
+def write_source_provenance(out_dir: Path, result: dict) -> Path | None:
+    """Atomically publish one strict-JSON provenance result without harming a prior artifact."""
+    final_path = out_dir / SOURCE_PROVENANCE_REPORT
+    staging_path = final_path.with_name(f"{final_path.name}.{os.getpid()}-{uuid.uuid4().hex}.tmp")
+    swapped = False
+    try:
+        payload = json.dumps(result, indent=2, ensure_ascii=True, allow_nan=False) + "\n"
+        with open(staging_path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(staging_path, final_path)
+        swapped = True
+    except (OSError, TypeError, ValueError) as exc:
+        log.warning("PROVENANCE: artifact not published (%s)", _operation_failure(PUBLISH_PROVENANCE_OPERATION, exc))
+        return None
+    finally:
+        if not swapped:
+            try:
+                staging_path.unlink()
+            except OSError:  # pragma: no cover - best effort; never touch the prior final artifact
+                log.warning("PROVENANCE: staging file left behind: %s", staging_path.name)
+    return final_path
+
+
+def stamp_inputs(input_dir: Path, out_dir: Path) -> ProvenanceStampResult:
     """Record where each input workbook came from, into ``<out>/source-provenance.json``.
 
-    Best-effort by design: a migration must never fail because a Tableau site was unreachable, so a
-    lookup failure degrades to fingerprints and anything unexpected degrades to no file at all.
-    Imported lazily so `run_estate` still works in an environment where the stamper is absent.
-    """
-    try:
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        import stamp_tableau_provenance as prov  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+    Every structured result is published, including empty and failed results. Remote lookup may
+    honestly degrade to local-only evidence, but unassessable evidence or failed publication blocks
+    later phases.
 
+    A result is NORMALISED before it is published: a result that contradicts itself (a success or
+    local_only status carrying no inputs, a count that is not a whole number, a count that disagrees
+    with the list beside it) is published as a failure carrying the stable fault codes, so the
+    artifact on disk is never success-shaped on evidence that cannot support it. The verdict is then
+    taken from the same consistency check rather than from ``phase.status`` alone.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import stamp_tableau_provenance as prov  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+
+    try:
         result = prov.build(input_dir, prov.resolve_env(Path(".env")))
-        if not result["input_count"]:
-            return None
-        path = out_dir / "source-provenance.json"
-        path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
-        matched = sum(1 for r in result["inputs"] if (r.get("origin") or {}).get("match") == "sha256")
-        return f"{result['input_count']} input(s) stamped, {matched} confirmed against the site -> {path}"
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-        log.warning("provenance stamp skipped (%s: %s)", type(exc).__name__, str(exc)[:120])
-        return None
+        result = prov.failure_result("build-failed", "build", exc)
+
+    result = prov.normalize_result(result)
+    if write_source_provenance(out_dir, result) is None:
+        return ProvenanceStampResult(
+            False,
+            "publication_failed",
+            f"{SAFE_SOURCE_PROVENANCE_REPORT} could not be published",
+        )
+
+    status = result["phase"].get("status", "unknown")
+    records = result.get("inputs") or []
+    matched = sum(
+        1
+        for record in records
+        if isinstance(record, dict)
+        and isinstance(record.get("origin"), dict)
+        and record["origin"].get("match") == "sha256"
+    )
+    count = result.get("input_count", 0)
+    detail = (
+        f"{count} input(s) stamped, {matched} confirmed against the site ({status}) -> {SAFE_SOURCE_PROVENANCE_REPORT}"
+    )
+    return ProvenanceStampResult(prov.is_success(result), status, detail)
 
 
 def write_phase_record(out_dir: Path, phases: list[dict]) -> Path:
@@ -1776,7 +1839,7 @@ def final_verdict(gates: GateResults, out_dir: Path) -> int:
     return EXIT_OK
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-locals,too-many-return-statements
     """CLI entry point."""
     args = build_parser().parse_args(argv)
 
@@ -1820,9 +1883,24 @@ def main(argv: list[str] | None = None) -> int:
     if args.input:
         started = time.monotonic()
         stamped = stamp_inputs(args.input, args.output)
-        phases.append({"phase": "provenance", "elapsed_sec": round(time.monotonic() - started, 1)})
-        if stamped:
-            log.info("PROVENANCE: %s", stamped)
+        phases.append(
+            {
+                "phase": "provenance",
+                "elapsed_sec": round(time.monotonic() - started, 1),
+                "status": stamped.status,
+            }
+        )
+        log.info("PROVENANCE: %s", stamped.detail)
+        if not stamped.ok:
+            try:
+                write_phase_record(args.output, phases)
+            except (OSError, TypeError, ValueError) as exc:
+                log.warning(
+                    "PROVENANCE: phase timings not persisted (%s)",
+                    _operation_failure(WRITE_PHASE_RECORD_OPERATION, exc),
+                )
+            print(f"\nESTATE: PROVENANCE_FAILED - {stamped.detail}")
+            return EXIT_PROVENANCE_FAILED
 
     # --- phase 2: the check the engine's exit code cannot give us -----------------------------
     started = time.monotonic()

@@ -764,7 +764,14 @@ def _slice_only_run(bundle: Path, source_dir: Path, monkeypatch) -> tuple[int, l
     consumer after the gate, so it is what proves the gate ran BEFORE anything downstream.
     """
     stamped: list[Path] = []
-    monkeypatch.setattr(run_estate, "stamp_inputs", lambda _input, out_dir: stamped.append(out_dir))
+    monkeypatch.setattr(
+        run_estate,
+        "stamp_inputs",
+        lambda _input, out_dir: (
+            stamped.append(out_dir)
+            or run_estate.ProvenanceStampResult(True, "local_only", "fixture provenance published")
+        ),
+    )
     code = run_estate.main(["--slice-only", "--input", str(source_dir), "--output", str(bundle)])
     return code, stamped
 

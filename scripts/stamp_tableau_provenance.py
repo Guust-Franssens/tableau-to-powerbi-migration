@@ -60,11 +60,133 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from object_identity import RevisionKey, revision_key  # noqa: E402  # pylint: disable=wrong-import-position
-from tableau_env import env_redactor, pat_secret, redact, redacted_note, resolve_env, scrub_tree  # noqa: E402  # pylint: disable=wrong-import-position
+from tableau_env import pat_secret, redact, resolve_env, scrub_tree  # noqa: E402  # pylint: disable=wrong-import-position
 
 LOG = logging.getLogger("provenance")
 
 WORKBOOK_SUFFIXES = (".twb", ".twbx")
+SUCCESS_STATUSES = frozenset({"success", "local_only"})
+SCHEMA = "tableau-source-provenance/1"
+
+#: The operation named by every fault this module records about a result's OWN SHAPE, so a consumer
+#: can tell "the site refused us" from "this result does not describe anything".
+CONSISTENCY_OPERATION = "validate-result"
+
+#: The status a self-contradictory result is normalised to. Deliberately one of the statuses that
+#: already exist rather than a new vocabulary: a consumer that already refuses `failed` refuses this
+#: too, without learning a second state machine.
+UNASSESSABLE_STATUS = "failed"
+
+
+def _error(code: str, operation: str, exc: BaseException | None = None, **facts: int) -> dict[str, Any]:
+    """A stable failure record containing no exception or response text."""
+    record: dict[str, Any] = {"code": code, "operation": operation}
+    if exc is not None:
+        record["exception_class"] = type(exc).__name__
+        for attribute in ("errno", "winerror"):
+            value = getattr(exc, attribute, None)
+            if isinstance(value, int):
+                record[attribute] = value
+    record.update({key: value for key, value in facts.items() if isinstance(value, int)})
+    return record
+
+
+def _result(inputs: list[dict[str, Any]], status: str, errors: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """One complete provenance result in the schema published by every build path."""
+    return {
+        "schema": SCHEMA,
+        "stamped_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "input_count": len(inputs),
+        "inputs": inputs,
+        "phase": {"status": status, "errors": errors or []},
+    }
+
+
+def failure_result(code: str, operation: str, exc: BaseException) -> dict[str, Any]:
+    """A complete safe result for a failure before :func:`build` could return one."""
+    return _result([], "failed", [_error(code, operation, exc)])
+
+
+def consistency_faults(result: Any) -> list[str]:
+    """Stable codes for every way ``result`` CONTRADICTS ITSELF. Empty means self-consistent.
+
+    ⚠️ A status is a CLAIM, not evidence. A result carrying ``input_count: 0``, ``inputs: []`` and a
+    ``success``/``local_only`` status describes no input at all while reading as a pass, so a reader
+    that trusts the status alone lets a run that stamped nothing continue to adjudication and
+    handover. This is the single place that decides self-consistency: :func:`normalize_result` uses
+    it to decide what may be PUBLISHED and :func:`is_success` to decide the VERDICT, so the two can
+    never drift apart.
+
+    An honest zero-input result is `empty`, and an honest local-only result has a positive count
+    matching its list - neither is a fault here.
+    """
+    if not isinstance(result, dict):
+        return ["result-not-a-mapping"]
+
+    faults: list[str] = []
+    records = result.get("inputs")
+    if not isinstance(records, list):
+        faults.append("inputs-not-a-list")
+        records = []
+
+    count = result.get("input_count")
+    counted: int | None = None
+    if isinstance(count, bool) or not isinstance(count, int):
+        faults.append("input-count-not-an-integer")
+    elif count < 0:
+        faults.append("input-count-negative")
+    else:
+        counted = count
+        if count != len(records):
+            faults.append("input-count-mismatch")
+
+    phase = result.get("phase")
+    status = phase.get("status") if isinstance(phase, dict) else None
+    if not isinstance(status, str):
+        faults.append("phase-status-unassessable")
+    elif status in SUCCESS_STATUSES and not (counted and records):
+        faults.append("success-without-inputs")
+    return faults
+
+
+def normalize_result(result: Any) -> dict[str, Any]:
+    """The result that may be PUBLISHED: a self-contradictory one is rewritten as a failure.
+
+    Exactly one artifact is still published - suppressing it would destroy the only evidence of what
+    went wrong - but it carries the existing typed phase-error shape, the faults it was normalised
+    for, and a status that no consumer reads as a pass. Prior errors are kept: the contradiction is
+    added to the record, never substituted for it.
+    """
+    faults = consistency_faults(result)
+    if not faults:
+        return result
+
+    source = result if isinstance(result, dict) else {}
+    records = source.get("inputs")
+    records = records if isinstance(records, list) else []
+    claimed = source.get("input_count")
+    facts = {"claimed_input_count": claimed} if isinstance(claimed, int) and not isinstance(claimed, bool) else {}
+
+    phase = source.get("phase")
+    prior = phase.get("errors") if isinstance(phase, dict) else None
+    errors = list(prior) if isinstance(prior, list) else []
+    errors.extend(_error(code, CONSISTENCY_OPERATION, **facts) for code in faults)
+
+    normalized = dict(source)
+    normalized["schema"] = source.get("schema") if isinstance(source.get("schema"), str) else SCHEMA
+    if not isinstance(normalized.get("stamped_at"), str):
+        normalized["stamped_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    normalized["input_count"] = len(records)
+    normalized["inputs"] = records
+    normalized["phase"] = {"status": UNASSESSABLE_STATUS, "errors": errors}
+    return normalized
+
+
+def is_success(result: Any) -> bool:
+    """Whether ``result`` may be treated as a pass: self-consistent AND claiming a success status."""
+    if consistency_faults(result):
+        return False
+    return result["phase"]["status"] in SUCCESS_STATUSES
 
 
 def fingerprint(path: Path) -> dict[str, Any]:
@@ -166,7 +288,7 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
         creds = json.loads(payload)["credentials"]
         self.token, self.site_id = creds["token"], creds["site"]["id"]
 
-    def sign_out(self) -> None:
+    def sign_out(self) -> Exception | None:
         """Best-effort release of the session - a transport failure here must cost nothing.
 
         ⚠️ Measured 2026-09-09: a sign-out whose connection was closed without a response raised out
@@ -175,13 +297,16 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
         swallowed into a one-line warning and no phase evidence. The session expires on its own, so
         the only correct behaviour is to drop the token and continue.
         """
+        failure = None
         if self.token:
             try:
                 self._call("POST", "/auth/signout")
             except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
                 LOG.debug("Tableau sign-out failed (%s) - session left to expire", type(exc).__name__)
+                failure = exc
             finally:
                 self.token = None
+        return failure
 
     def redact_text(self, text: str) -> str:
         """Redact credentials that an authenticated response might reflect."""
@@ -430,34 +555,45 @@ def collect_inputs(target: Path) -> list[Path]:
     return sorted(p for p in target.iterdir() if p.suffix.lower() in WORKBOOK_SUFFIXES)
 
 
-def build(target: Path, env: dict[str, str]) -> dict[str, Any]:
+def build(target: Path, env: dict[str, str]) -> dict[str, Any]:  # pylint: disable=too-many-locals
     """Fingerprint every input, and attach its Tableau origin when credentials allow."""
-    inputs = collect_inputs(target)
+    try:
+        inputs = collect_inputs(target)
+    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        LOG.warning("provenance input discovery failed (%s)", type(exc).__name__)
+        return failure_result("collect-inputs-failed", "collect-inputs", exc)
+    if not inputs:
+        return _result([], "empty", [_error("empty-input", "collect-inputs")])
+
     lookup: TableauLookup | None = None
-    redactor = env_redactor(env)
-    if env.get("TABLEAU_SERVER_URL") and env.get("TABLEAU_PAT_NAME"):
+    errors: list[dict[str, Any]] = []
+    live_requested = bool(env.get("TABLEAU_SERVER_URL") and env.get("TABLEAU_PAT_NAME"))
+    if live_requested:
         try:
             lookup = TableauLookup(env)
             lookup.sign_in()
         except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-            LOG.warning(
-                "no Tableau lookup (%s: %s) - fingerprints only",
-                type(exc).__name__,
-                redacted_note(str(exc), redactor, limit=120),
-            )
+            LOG.warning("no Tableau lookup (%s) - fingerprints only", type(exc).__name__)
+            errors.append(_error("live-lookup-refused", "sign-in", exc))
             lookup = None
 
     records = []
     for path in inputs:
-        record = {"input": fingerprint(path)}
+        try:
+            local = fingerprint(path)
+        except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+            error = _error("local-fingerprint-failed", "fingerprint", exc)
+            errors.append(error)
+            records.append({"input": {"status": "unavailable"}, "fingerprint_error": error})
+            continue
+        record = {"input": local}
         if lookup is not None:
             try:
                 origin = find_origin(lookup, path.stem, record["input"])
             except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-                origin, record["lookup_error"] = (
-                    None,
-                    (f"{type(exc).__name__}: {redacted_note(str(exc), lookup.redact_text, limit=150)}"),
-                )
+                origin = None
+                record["lookup_error"] = _error("live-lookup-failed", "lookup-origin", exc)
+                errors.append(record["lookup_error"])
             record["origin"] = origin
             if origin is None:
                 record["origin_note"] = "no workbook of this LUID or name on the site - local-only input"
@@ -472,14 +608,13 @@ def build(target: Path, env: dict[str, str]) -> dict[str, Any]:
                     f"matched by {origin['matched_by']}, but the site copy could NOT be read "
                     f"({reason}) - no byte or revision comparison was made"
                 )
-                record["lookup_error"] = f"content unavailable: {reason}"
+                status = int(reason.removeprefix("HTTP ")) if reason.startswith("HTTP ") else 0
+                record["lookup_error"] = _error("content-unavailable", "download-workbook", http_status=status)
+                errors.append(record["lookup_error"])
         records.append(record)
-    result = {
-        "schema": "tableau-source-provenance/1",
-        "stamped_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "input_count": len(records),
-        "inputs": records,
-    }
+    usable = sum(record["input"].get("status") != "unavailable" for record in records)
+    status = "failed" if not usable else ("partial" if errors else ("success" if live_requested else "local_only"))
+    result = _result(records, status, errors)
     if lookup is None:
         return result
     return _finish_live(result, lookup)
@@ -502,12 +637,18 @@ def _finish_live(result: dict[str, Any], lookup: TableauLookup) -> dict[str, Any
         result, _paths = scrub_tree(result, lookup.redact_text)
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
         LOG.warning("provenance redaction failed (%s) - live origin fields withheld", type(exc).__name__)
+        result["phase"]["errors"].append(_error("scrub-failed", "scrub", exc))
         result = _without_live_fields(result, lookup.redact_text)
     finally:
         try:
-            lookup.sign_out()
+            signout_failure = lookup.sign_out()
+            if signout_failure is not None:
+                result["phase"]["errors"].append(_error("sign-out-failed", "sign-out", signout_failure))
         except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
             LOG.warning("Tableau sign-out failed (%s) - session left to expire", type(exc).__name__)
+            result["phase"]["errors"].append(_error("sign-out-failed", "sign-out", exc))
+    if result["phase"]["errors"]:
+        result["phase"]["status"] = "partial"
     return result
 
 
@@ -543,6 +684,7 @@ def _without_live_fields(result: dict[str, Any], redactor) -> dict[str, Any]:
         return scrubbed
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
         LOG.warning("provenance redaction is unusable (%s) - keeping DERIVED evidence only", type(exc).__name__)
+        result["phase"]["errors"].append(_error("scrub-failed", "scrub-local-fields", exc))
         return {
             **result,
             "inputs": [
