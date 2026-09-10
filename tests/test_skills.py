@@ -75,6 +75,11 @@ DESKTOP_VERDICT_TOKENS = (
 )
 AMNESTY_BLOCK_LEAD = "> ✅ **Length amnesty, current state:"
 PREFLIGHT_STEP_LEAD = "3. **Local:**"
+# The canonical clean-run paragraph: `DATA_OK` is earned, and an active dialog or any authoritative
+# non-success token outranks a stale or late one. Bounded to its own paragraph so the next one cannot
+# stand in for it.
+CLEAN_RUN_LEAD = "⚠️ **`DATA_OK` is earned by a clean run"
+CLEAN_RUN_ENDS = "**Pass `--pid`"
 # Exact claims the arbiter's own evidence does not support. Retired, not merely discouraged.
 RETIRED_CREDENTIAL_CLAIMS = (
     "$MinPromptWords",
@@ -84,6 +89,26 @@ RETIRED_CREDENTIAL_CLAIMS = (
     "approval, not a sign-in",
     "not a sign-in prompt",
     "no sign-in implied",
+)
+# ACCESS_DENIED over-claims. `_classify_failure` tests BARE markers (`403`, `forbidden`, ...) before
+# any credential marker, so `403 Unauthorized: authentication failed` and
+# `403 Forbidden: access token revoked` both classify as ACCESS_DENIED - measured against the shipped
+# classifier. The verdict therefore cannot assert that authentication succeeded, that the failure is
+# permission-only, or that a fresh credential can never help.
+RETIRED_ACCESS_DENIED_CLAIMS = (
+    "final until permissions change",
+    "authenticated, but",
+    "and **authenticated**",
+    "permission owner",
+    "never a second sign-in",
+    "sign in again",
+    "signing in again is not enough",
+)
+# Both messages are `403`s that a NEW credential would fix, and both land on ACCESS_DENIED. Naming
+# them in the docs is what stops the verdict being read as "authentication already succeeded".
+ACCESS_DENIED_CONTROL_MESSAGES = (
+    "403 Unauthorized: authentication failed",
+    "403 Forbidden: access token revoked",
 )
 
 
@@ -123,6 +148,18 @@ def _table_row(path: Path, key: str) -> str:
     """The single markdown table row whose first cell names `key`."""
     rows = [line for line in path.read_text(encoding="utf-8").splitlines() if line.startswith(f"| `{key}`")]
     return "\n".join(rows)
+
+
+def _signature_row(path: Path, prefix: str) -> str:
+    """The one markdown row starting with `prefix`, or `''` when it is not unique.
+
+    `credential-gate-testing.md` routes by ERROR SIGNATURE rather than by token, so its ACCESS_DENIED
+    row has no backticked first cell for `_table_row` to key on. Returning `''` for a non-unique match
+    keeps the caller's "this contract now proves nothing" assertion in charge, rather than silently
+    asserting against whichever row happened to be first.
+    """
+    rows = [line for line in path.read_text(encoding="utf-8").splitlines() if line.startswith(prefix)]
+    return rows[0] if len(rows) == 1 else ""
 
 
 def test_the_skills_directory_is_not_empty() -> None:
@@ -470,34 +507,67 @@ def test_credential_guidance_states_only_what_the_desktop_arbiter_establishes() 
             "DIALOG_UNREADABLE and DIALOG_UNRECOGNIZED must each say it"
         )
 
-    # ACCESS_DENIED is a distinct FINAL branch - authenticated, then refused by permissions. Collapsing
-    # it into a generic error/timeout or a second sign-in is the failure this half of the routing pins.
+    # ACCESS_DENIED says what the CLASSIFIER saw, not what the source decided. Collapsing it into a
+    # timeout or a transient error is one failure; promoting it to "authentication succeeded, so only
+    # a permission change can help" is the other, and the shipped classifier contradicts that one.
     # All four operator-facing surfaces that route it are listed; a fifth would be an unpinned consumer.
-    for path, key, finality in [
-        (SCRIPTS_README, "probe_live_source.py", "final until permissions change"),
-        (LIVE_SOURCE_SKILL, "ACCESS_DENIED", "do not retry unchanged"),
-        (GATE_DOC, "ACCESS_DENIED", "final until permissions change"),
-    ]:
-        row = _table_row(path, key)
-        assert row, f"no `{key}` row found in {path.name} - this contract now proves nothing"
-        assert "ACCESS_DENIED" in row, f"{path.name} no longer names ACCESS_DENIED in its `{key}` row"
-        assert "permission" in row.lower(), f"{path.name} no longer ties ACCESS_DENIED to permissions"
-        assert finality in row, f"{path.name} no longer states {finality!r} for ACCESS_DENIED"
+    access_denied_rows = {
+        SCRIPTS_README.name: _table_row(SCRIPTS_README, "probe_live_source.py"),
+        LIVE_SOURCE_SKILL.name: _table_row(LIVE_SOURCE_SKILL, "ACCESS_DENIED"),
+        GATE_DOC.name: _table_row(GATE_DOC, "ACCESS_DENIED"),
+        GATE_TESTING_DOC.name: _signature_row(GATE_TESTING_DOC, ACCESS_DENIED_SIGNATURE_ROW),
+    }
+    for name, row in access_denied_rows.items():
+        assert row, f"no ACCESS_DENIED row found in {name} - this contract now proves nothing"
+        assert "ACCESS_DENIED" in row, f"{name} no longer names ACCESS_DENIED in its row"
+        assert "permission" in row.lower(), f"{name} no longer ties ACCESS_DENIED to permissions"
+        for claim in RETIRED_ACCESS_DENIED_CLAIMS:
+            assert claim not in row, (
+                f"{name} still carries the retired ACCESS_DENIED claim {claim!r}: the classifier "
+                "matches bare 403/forbidden markers, so the verdict cannot assert that "
+                "authentication succeeded or that a fresh credential is pointless"
+            )
+        assert "does **not** establish that authentication succeeded" in row.lower(), (
+            f"{name} no longer states that ACCESS_DENIED does not establish that authentication succeeded"
+        )
+        for message in ACCESS_DENIED_CONTROL_MESSAGES:
+            assert message in row, (
+                f"{name} no longer cites the control message {message!r}, which the shipped "
+                "classifier returns ACCESS_DENIED for despite being fixable with a new credential"
+            )
 
-    signature_rows = [
-        line
-        for line in GATE_TESTING_DOC.read_text(encoding="utf-8").splitlines()
-        if line.startswith(ACCESS_DENIED_SIGNATURE_ROW)
-    ]
-    assert len(signature_rows) == 1, (
-        f"expected exactly one {ACCESS_DENIED_SIGNATURE_ROW!r} row in {GATE_TESTING_DOC.name}, "
-        f"found {len(signature_rows)} - this contract now proves nothing"
-    )
-    signature_row = signature_rows[0]
-    assert "ACCESS_DENIED" in signature_row, (
-        f"{GATE_TESTING_DOC.name} no longer maps the 403/forbidden signature to ACCESS_DENIED"
-    )
-    assert "permission" in signature_row.lower(), f"{GATE_TESTING_DOC.name} no longer ties ACCESS_DENIED to permissions"
-    assert "never, unchanged" in signature_row, (
+    # The retry rule survives the correction, in its honest form: blind repetition is useless, but the
+    # operator is NOT forbidden from re-authenticating - they must read the detail and change the input
+    # the source named.
+    for name in (SCRIPTS_README.name, LIVE_SOURCE_SKILL.name, GATE_DOC.name):
+        row = access_denied_rows[name]
+        assert "unchanged retry is not useful" in row.lower(), (
+            f"{name} no longer states that unchanged retry is not useful for ACCESS_DENIED"
+        )
+        assert "read the redacted detail" in row.lower(), (
+            f"{name} no longer tells the operator to read the redacted detail before acting"
+        )
+    assert "never, unchanged" in access_denied_rows[GATE_TESTING_DOC.name], (
         f"{GATE_TESTING_DOC.name} no longer states that retrying ACCESS_DENIED unchanged is wrong"
     )
+
+    # A clean run is what earns DATA_OK: an active dialog, any authoritative non-success token, or a
+    # non-zero exit outranks a stale or late DATA_OK-looking line. `_verdict_lines._is_earned_success`
+    # is the oracle - it requires exit 0, no `NON_SUCCESS_VERDICT_CHECKS` hit (which include
+    # `_has_dialog_verdict`), and only then a scoped success line.
+    clean_run = _block_from(CREDENTIAL_DOC, CLEAN_RUN_LEAD, ends=CLEAN_RUN_ENDS)
+    assert clean_run, (
+        f"the clean-run DATA_OK paragraph was not found in {CREDENTIAL_DOC.name} - this contract now proves nothing"
+    )
+    assert "an active dialog vetoes it" in clean_run, (
+        f"{CREDENTIAL_DOC.name} no longer states that an active dialog vetoes DATA_OK"
+    )
+    assert "outranks a stale or late" in clean_run, (
+        f"{CREDENTIAL_DOC.name} no longer states that an authoritative non-success verdict outranks a "
+        "stale or late DATA_OK line"
+    )
+    for permissive in ("may be accepted", "can still be trusted", "even while an active dialog"):
+        assert permissive not in clean_run.lower(), (
+            f"{CREDENTIAL_DOC.name} now permits a DATA_OK that was never earned ({permissive!r}): an "
+            "active dialog or any authoritative non-success token must veto it"
+        )
