@@ -50,7 +50,8 @@ EXIT_UNMEASURABLE = 3
 # target-bearing `check_unit` helpers directly; four of them return their own non-clean schema when a
 # staged unit's package boundary cannot be established, and `_oracle_capture_oracles` raises instead,
 # because an empty capture is a measurable fact that must not be manufactured from an unproven
-# boundary. A measurement that could not be made must not report a clean digest.
+# boundary. A measurement that could not be made must not report a clean digest - see
+# :func:`_refused_boundary`, which is checked on EVERY run, with or without `--oracle`.
 REFUSED_BOUNDARY_MESSAGE = "cannot measure: a staged unit's package boundary could not be established"
 
 
@@ -235,6 +236,30 @@ def digest(summary: dict[str, object]) -> str:
     return hashlib.sha256(json.dumps(summary, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
+def _refused_boundary(units: list[Path]) -> str | None:
+    """The classifier code of the first staged unit whose package boundary is unproven, else ``None``.
+
+    ⚠️ **Unconditional, and BEFORE any measurement.** An earlier revision only noticed a refusal
+    where it happened to surface - inside the ``--oracle`` layer - so a run without ``--oracle``
+    measured a staged package that declares no boundary, collected its `NOT_CHECKED` rows as if they
+    were data, and published a digest anyway: exit 1 normally, and exit **0** under ``--update``,
+    overwriting the committed expectation with a number nothing established.
+
+    It asks the direct guard about each staged unit, in the exact spelling the measurement will use,
+    rather than inferring from `NOT_CHECKED` counts - a `NOT_CHECKED` row is a legitimate measured
+    verdict for plenty of ordinary units, so counting them would refuse real estates and still miss
+    the case where only some rows are affected.
+    """
+    for unit in units:
+        try:
+            cu._checked_direct_target(Path(unit.as_posix()))  # pylint: disable=protected-access
+        except cu._DirectTargetRefused as refusal:  # pylint: disable=protected-access
+            # Only the classifier's stable code travels; the refusal deliberately retains no path,
+            # no component and no destination, so there is nothing here to redact.
+            return refusal.code
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--bundle", required=True, type=Path, help="engine bundle with pbip/ and handover/")
@@ -267,15 +292,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"cannot measure: {oracle_dir / 'oracle-manifest.json'} is not a file", file=sys.stderr)
         return EXIT_UNMEASURABLE
 
+    refused = _refused_boundary(units)
+    if refused is not None:
+        print(f"{REFUSED_BOUNDARY_MESSAGE} ({refused})", file=sys.stderr)
+        return EXIT_UNMEASURABLE
+
     summary = measure(units, oracle_dir)
     if oracle_dir is not None:
-        try:
-            summary["oracle_layer"] = oracle_layer_facts(units, oracle_dir)
-        except cu._DirectTargetRefused as refusal:  # pylint: disable=protected-access
-            # Only the classifier's stable code travels; the refusal deliberately retains no path,
-            # no component and no destination, so there is nothing here to redact.
-            print(f"{REFUSED_BOUNDARY_MESSAGE} ({refusal.code})", file=sys.stderr)
-            return EXIT_UNMEASURABLE
+        summary["oracle_layer"] = oracle_layer_facts(units, oracle_dir)
     result = {"summary": summary, "sha256": digest(summary), "unstaged": unstaged}
     print(json.dumps(result, indent=2, sort_keys=True))
     if args.json:
