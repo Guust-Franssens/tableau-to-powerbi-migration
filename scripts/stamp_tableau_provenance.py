@@ -663,8 +663,32 @@ def build(
         records = []
         for index, path in enumerate(inputs, start=1):
             record: dict[str, Any]
+            if _deadline_expired(deadline_at, clock):
+                _phase_error(phase, DEADLINE_EXPIRED, DeadlineExceeded())
+                records.append(
+                    {
+                        "input": {},
+                        "origin": None,
+                        "fingerprint_error": {"code": DEADLINE_EXPIRED, "class": "DeadlineExceeded"},
+                        "origin_note": "local fingerprint unavailable - provenance phase deadline expired",
+                    }
+                )
+                progress({"event": "input-complete", "input_completed": index, "input_total": len(inputs)})
+                continue
             try:
                 record = {"input": fingerprint(path)}
+            except DeadlineExceeded as exc:
+                _phase_error(phase, DEADLINE_EXPIRED, exc)
+                records.append(
+                    {
+                        "input": {},
+                        "origin": None,
+                        "fingerprint_error": {"code": DEADLINE_EXPIRED, "class": type(exc).__name__},
+                        "origin_note": "local fingerprint unavailable - provenance phase deadline expired",
+                    }
+                )
+                progress({"event": "input-complete", "input_completed": index, "input_total": len(inputs)})
+                continue
             except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
                 _phase_error(phase, "fingerprint-unavailable", exc)
                 record = {
@@ -753,20 +777,26 @@ def _finish_live(result: dict[str, Any], lookup: TableauLookup) -> dict[str, Any
     unscrubbed live record can carry a reflected credential, so the response-derived half is withheld
     and the local half survives. Fail-closed on the secret, fail-open on the evidence.
     """
-    try:
-        result, _paths = scrub_tree(result, lookup.redact_text)
-    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-        _phase_error(result["phase"], "redaction-failed", exc, operation="scrub")
-        LOG.warning("provenance redaction failed (%s) - live origin fields withheld", type(exc).__name__)
-        result = _without_live_fields(result, lookup.redact_text)
-    finally:
+    if getattr(lookup, "_remaining_sec", lambda: None)() == 0:
+        _phase_error(result["phase"], DEADLINE_EXPIRED, DeadlineExceeded(), operation="scrub")
+        result = _derived_result_only(result)
+    else:
         try:
-            lookup.sign_out()
+            result, _paths = scrub_tree(result, lookup.redact_text)
+        except DeadlineExceeded as exc:
+            _phase_error(result["phase"], DEADLINE_EXPIRED, exc, operation="scrub")
+            result = _derived_result_only(result)
         except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-            _phase_error(result["phase"], _exception_code(exc, "signout-failed"), exc, operation="sign-out")
-            LOG.warning("Tableau sign-out failed (%s) - session left to expire", type(exc).__name__)
-        if getattr(lookup, "signout_failure_code", None):
-            _phase_error(result["phase"], lookup.signout_failure_code or "signout-failed", operation="sign-out")
+            _phase_error(result["phase"], "redaction-failed", exc, operation="scrub")
+            LOG.warning("provenance redaction failed (%s) - live origin fields withheld", type(exc).__name__)
+            result = _without_live_fields(result, lookup.redact_text)
+    try:
+        lookup.sign_out()
+    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        _phase_error(result["phase"], _exception_code(exc, "signout-failed"), exc, operation="sign-out")
+        LOG.warning("Tableau sign-out failed (%s) - session left to expire", type(exc).__name__)
+    if getattr(lookup, "signout_failure_code", None):
+        _phase_error(result["phase"], lookup.signout_failure_code or "signout-failed", operation="sign-out")
     if result["phase"]["errors"] or any(record.get("lookup_error_code") for record in result["inputs"]):
         result["phase"]["status"] = "partial"
     else:
@@ -806,13 +836,21 @@ def _without_live_fields(result: dict[str, Any], redactor) -> dict[str, Any]:
         return scrubbed
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
         LOG.warning("provenance redaction is unusable (%s) - keeping DERIVED evidence only", type(exc).__name__)
-        return {
-            **result,
-            "inputs": [
-                {"input": _derived_only(record["input"]), "origin": None, "origin_note": WITHHELD_NOTE}
-                for record in result["inputs"]
-            ],
-        }
+        return _derived_result_only(result)
+
+
+def _derived_result_only(result: dict[str, Any]) -> dict[str, Any]:
+    def reduced(record: dict[str, Any]) -> dict[str, Any]:
+        kept = {"input": _derived_only(record["input"]), "origin": None, "origin_note": WITHHELD_NOTE}
+        for key in ("fingerprint_error", "lookup_error_code"):
+            if key in record:
+                kept[key] = record[key]
+        return kept
+
+    return {
+        **result,
+        "inputs": [reduced(record) for record in result["inputs"]],
+    }
 
 
 def _derived_only(record: dict[str, Any]) -> dict[str, Any]:
