@@ -241,14 +241,27 @@ link destination or a raw exception. The CLI classifies before its own `is_dir` 
 deliberately does **not** hand that verdict on — `run_all` re-asks about the same path, because a
 boundary verdict a caller can supply is one a caller can supply for a *different* path.
 
-❌ **Blocking residual: the DIRECT per-check helpers are not covered.** `check_oracle_coverage`,
-`check_page_parity`, `load_exemptions` and `page_expectation` still reach `_unit_dir` — and therefore
-`resolve()` — with an unclassified target, so an aliased root handed straight to one of them is still
-classified on its destination and its evidence consumed through the alias.
-`tests/estate_page_gate_digest.py` is a real caller of that surface, and
-`test_a_direct_helper_call_still_follows_an_alias_which_is_the_open_residual` reproduces the gap
-rather than asserting it away. Closing it is a separate follow-up and must land before the Phase-2
-umbrella completes; do not read `run_all`'s guarantee as covering direct helper calls.
+✅ **The DIRECT per-check helpers now carry the same ordering.** `load_exemptions`,
+`page_expectation`, `check_page_parity`, `check_oracle_coverage` and `_oracle_capture_oracles` each
+classify **their own argument as their first operation** — before `_unit_dir`, before
+`shipping_reports` (which `page_expectation` reached *ahead of* `_unit_dir`, measured), before any
+`resolve`/`is_file`/`is_dir`/`exists`/`rglob` or read, and before an **explicit** oracle directory is
+loaded (an explicit `--oracle` bypasses `_unit_dir` entirely, so `_unit_dir` could never have been
+the boundary). Each catches independently and returns its **existing** non-clean shape — `path: None`
+exemptions, `assessable: False`, `NOT_CHECKED` parity, not-assessable oracle coverage — while
+`_oracle_capture_oracles` raises a path-free typed refusal that `tests/estate_page_gate_digest.py`,
+the one production caller of this surface, catches at its tool boundary and reports as its existing
+`EXIT_UNMEASURABLE` (**exit 3**) with a constant message. There is no `classification`, clearance or
+context parameter anywhere on that surface: a verdict a caller can hand in is one a caller can hand
+in for a *different* path. Safe targets keep byte-identical results and the committed estate digest
+is unchanged.
+
+⚠️ **Limited closure, stated rather than implied.** This covers exactly the production
+direct-helper surface: **1 consumer, 5 entry functions, 6 call sites**. Other target-bearing helpers
+with no production caller — `inspect_brownfield`, `expected_pages`, `page_drop_explanations`,
+`actual_pages`, `check_occlusion`, and the internal `run_all` components — are **not** hardened
+standalone library APIs. Do not read this as "every function in `check_unit.py` is safe to call with
+an arbitrary path"; making it so is a different consumer class and a separate API-hardening issue.
 
 ⚠️ Boundary **ordering** only. Neither gate yet verifies that a package's `package-manifest.json`
 still describes the bytes on disk — no JSON parse, no hashes, no declared-contents or role check.
