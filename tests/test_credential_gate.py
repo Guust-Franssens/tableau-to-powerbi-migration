@@ -97,7 +97,7 @@ def _icacls_read(target: Path) -> tuple[int, str]:
 def _current_account_tokens() -> set[str]:
     r"""Every rendering of THIS account icacls might print: bare name, DOMAIN\name, and the SID.
 
-    Bound at run time, never hard-coded. The #543 audit measured `REDMOND\gfranssens` on one host,
+    Bound at run time, never hard-coded. The #543 audit measured a `DOMAIN\user` rendering on one host,
     but a machine-local user, a service account or a differently tokened session each render
     differently, and a literal would be true on exactly one machine. The SID comes from `whoami`
     when it is available and is simply absent when it is not - matching is a membership test over
