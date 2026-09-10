@@ -72,6 +72,21 @@ things a conversation cannot be trusted to remember every time:
    prior full run already wrote), and `check_migration_progress.py` now tells the two cases apart -
    see its `NO_BASELINE_BY_DESIGN` state.
 
+8. **The pre-engine path projection is fail-open, so the EMITTED tree is measured too (issue #564).**
+   `preflight_estate_path_ceiling` projects the canonical PBIR visual tail onto names knowable before
+   conversion; the path that actually breaches on the committed issue-194 repro is an uncapped
+   SEMANTIC-MODEL table filename, which no pre-conversion projection here models. A bundle could
+   therefore pass the projection and still be one Power BI Desktop refuses to open, with every
+   signal green. `check_emitted_path_ceiling` measures what the engine really wrote - through
+   `check_path_ceiling.scan`, the same walker and the same measured 259/247 ceilings every other
+   consumer uses - immediately after the output is recorded and BEFORE provenance, handover slices,
+   packaging, agents or Desktop. Over the ceiling, unmeasurable or unwalkable all return
+   `EXIT_PATH_CEILING`; the output is preserved as evidence and never deleted or rewritten
+   (permanent filename shortening is an upstream engine fix). The verdict is published ATOMICALLY
+   (staging sibling + `os.replace`, so a failed write cannot destroy a previous report) and
+   SHAREABLE: what lands in `path-ceiling.json` and on the console is bundle-relative, carrying the
+   offending tail but never the run root, account or customer folder.
+
 Deliberately NOT here
 ---------------------
 No migration logic. This never writes TMDL, never writes PBIR, never opens Power BI Desktop. It runs
@@ -129,6 +144,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import subprocess
 import sys
 import time
@@ -150,8 +166,19 @@ from check_blank_placeholders import scan as scan_blank_placeholders
 from check_pbir_valid import REPORT_NAME as PBIR_VALID_REPORT
 from check_pbir_valid import render as render_pbir_valid
 from check_pbir_valid import scan as scan_pbir_validity
-from check_path_ceiling import DIR_CEILING, FILE_CEILING, utf16_len
+from check_path_ceiling import (
+    DIR_CEILING,
+    FILE_CEILING,
+    STATUS_NO_PATHS,
+    STATUS_OVER_CEILING,
+    STATUS_UNKNOWN_PATHS,
+    WINDOWS_LIMITS,
+    Limits,
+    utf16_len,
+)
+from check_path_ceiling import scan as scan_path_ceiling
 from engine_source import EngineNotFoundError, NonCanonicalEngineError, engine_provenance, resolve_engine
+from manifest_scope import redact_host_paths
 from migration_bundle import ENGINE_RECEIPT, sha256_file, write_engine_receipt
 
 log = logging.getLogger("run_estate")
@@ -174,6 +201,49 @@ EXIT_BUNDLE_REWRITE = 9
 EXIT_PATH_CEILING = 10
 GENERATED_ARTIFACTS_KEY = "generated_artifacts"
 SLICE_ONLY_COVERAGE = "slice_only_backfill"
+
+#: Where the post-engine path measurement lands inside the bundle, so a refusal is ATTRIBUTABLE to
+#: named paths rather than to a console line nobody kept. `path-ceiling.json` is the name this repo
+#: already uses for `check_path_ceiling.py --json` output (`check_unit.py` reads exactly that file),
+#: so the bundle carries one convention rather than a second private one.
+PATH_CEILING_REPORT = "path-ceiling.json"
+
+#: The MEASURED Desktop pair (259 file / 247 directory, UTF-16 code units), applied unconditionally:
+#: the question is "will the machine this bundle is shipped to open it", which is a Windows question
+#: wherever the run happens. `min_root_budget` stays None, so the tight-root-budget number remains
+#: ADVISORY here - it is reported, never a refusal.
+PATH_CEILING_LIMITS = WINDOWS_LIMITS
+
+#: How a measured path is spelled once it leaves this process. The measurement itself keeps the
+#: absolute path (that is what Desktop counts), but a `path-ceiling.json` is shared upstream, pasted
+#: into an issue and read by an agent, so what is PERSISTED and PRINTED is bundle-relative: the
+#: refusal stays actionable (the offending tail is the whole point) while the run root - drive,
+#: account name, customer folder - never leaves the machine that measured it.
+SAFE_BUNDLE_ROOT = "<bundle>"
+
+#: A path the transform could not PROVE lies inside the bundle. It is reported as an ordinal, never
+#: echoed and never re-spelled as if it were relative: "I could not place this" is a different and
+#: honest answer, and echoing it is exactly the disclosure this transform exists to prevent.
+UNASSESSABLE_PATH = "<path-not-provably-inside-the-bundle-{index}>"
+
+#: The same answer for a DIAGNOSTIC. Free-form text is not published or printed at all: a message
+#: is written by whatever raised it, so proving one carries no path means parsing prose, and the
+#: prefix-collision finding is what that costs (a root `…\bundle` "sanitised" a sibling
+#: `…\bundle-foreign` into `<bundle>-foreign`, inventing containment that does not exist). What is
+#: published instead is a stable code plus an ordinal, and - only for an exception this module
+#: caught itself - its class name and numeric code, read STRUCTURALLY off the object.
+SCAN_UNASSESSABLE_CODE = "scan-unassessable"
+UNKNOWN_PATH_CODE = "unknown-path-{index}"
+
+#: The operations this module may name in a log line. An allowlist, so a label is a constant of this
+#: file rather than anything derived from data.
+PUBLISH_REPORT_OPERATION = "publish-path-ceiling-report"
+WRITE_PHASE_RECORD_OPERATION = "write-phase-record"
+_ALLOWED_OPERATIONS = frozenset({PUBLISH_REPORT_OPERATION, WRITE_PHASE_RECORD_OPERATION})
+
+#: Where `scan()` records a single measured path, and where it records a list of them.
+_PATH_RECORD_KEYS = ("longest", "root_budget_binding")
+_PATH_LIST_KEYS = ("worst_offenders", "near_ceiling_paths", "unknown_paths")
 VOLATILE_GENERATED_DIRS = {".pbi"}
 SCRATCH_DIRS = frozenset({"scratch", "_work", "_build", "_probe", "tmp", "temp", "_shots"})
 SCRATCH_INTENTS = frozenset(part.lstrip("._") for part in SCRATCH_DIRS)
@@ -681,6 +751,274 @@ def record_engine_output(out_dir: Path, report: dict | None, phases: list[dict],
     )
     log.info("ENGINE_OUTPUT_TREE: hashes -> %s", write_engine_output_tree(out_dir))
     write_receipt_phase(out_dir, phases, engine)
+
+
+# ---------------------------------------------------------------------------
+# The post-engine path-ceiling gate (issue #564)
+#
+# The pre-engine projection above (`preflight_estate_path_ceiling`) is a PROJECTION: it composes the
+# canonical PBIR visual tail onto unit names it can know BEFORE conversion. That is genuinely all it
+# can see, and it is fail-open by construction - measured on the committed issue-194 repro, the path
+# that actually breaches is a SEMANTIC-MODEL table file
+# (`<unit>.SemanticModel/definition/tables/<uncapped table name>`), which no pre-conversion
+# projection in this repo models. So an estate could pass the projection, emit a tree Power BI
+# Desktop cannot open, and hand it to packaging, agents and Desktop with every signal green.
+#
+# This gate answers the different question - "what did the engine ACTUALLY write?" - by measuring the
+# emitted tree with the SAME authority every other consumer uses (`check_path_ceiling.scan`, walker
+# and ceilings included; nothing here re-implements either). Python can write these paths, so the
+# tree exists; what must never happen is downstream work STARTING from it.
+#
+# Three rules, all deliberate:
+#   * it runs AFTER the engine's output is recorded (receipt + baselines) and BEFORE provenance,
+#     handover slices, packaging, agents and Desktop - so the refusal is early for consumers and
+#     late enough that the bundle still explains what built it;
+#   * where it cannot assess, it BLOCKS - an unreadable directory, an unmeasurable name, a walker
+#     failure or a tree with nothing in it is an indeterminate state, never a pass. That is the same
+#     rule the destructive-re-run barrier follows, for the same reason;
+#   * it NEVER deletes, shortens or rewrites the output. Permanent filename shortening belongs
+#     upstream in the engine; here the emitted tree is preserved as evidence for that report.
+# ---------------------------------------------------------------------------
+
+
+def _ascii_path(value: str) -> str:
+    """A console-safe rendering of a path that may carry astral or undecodable characters.
+
+    Output-only. The measurement itself is UTF-16 and belongs to `check_path_ceiling`; this exists
+    because a CP1252 console raises `UnicodeEncodeError` on the very paths a refusal has to name,
+    and a gate that crashes while printing its verdict has no verdict.
+    """
+    return value.encode("ascii", "backslashreplace").decode("ascii")
+
+
+def _exception_facts(exc: BaseException) -> dict:
+    """The only things this module reports about an exception: class name and numeric codes.
+
+    Read STRUCTURALLY off the object - never `str(exc)`, never a parse of it. A message belongs to
+    whoever raised it and routinely embeds the path it failed on; proving one carries no path means
+    reasoning about prose, which is precisely what the prefix-collision finding showed cannot be
+    done safely (a root `…\\bundle` rewrote a sibling `…\\bundle-foreign` into `<bundle>-foreign`).
+    A class name and an errno are runtime facts with no location in them, and they are enough to act
+    on: `PermissionError errno=13` says what to check.
+    """
+    facts: dict = {"class": type(exc).__name__}
+    for attribute in ("errno", "winerror"):
+        code = getattr(exc, attribute, None)
+        if isinstance(code, int):
+            facts[attribute] = code
+    return facts
+
+
+def _operation_failure(operation: str, exc: BaseException) -> str:
+    """One log line for a failure this module caught itself: allowlisted label, class, codes."""
+    label = operation if operation in _ALLOWED_OPERATIONS else "unlabelled-operation"
+    facts = _exception_facts(exc)
+    return " ".join([f"operation={label}"] + [f"{key}={value}" for key, value in facts.items()])
+
+
+def _bundle_relative(value: object, root: Path, unplaced: list[str]) -> str:
+    """One measured path as `<bundle>/<tail>`, or an ordinal when containment cannot be PROVEN.
+
+    Purely lexical, and deliberately so: `Path.resolve()` on a UNC literal naming a host that does
+    not exist blocks on SMB name resolution (measured in `manifest_scope._inside_any`), and a path
+    that cannot be placed is unassessable regardless of what the filesystem would say.
+    """
+    text = value if isinstance(value, str) else str(value)
+    try:
+        candidate = Path(os.path.normpath(text))
+        if candidate.is_relative_to(root):
+            tail = candidate.relative_to(root).as_posix()
+            return SAFE_BUNDLE_ROOT if tail in {"", "."} else f"{SAFE_BUNDLE_ROOT}/{tail}"
+    except (OSError, ValueError):
+        pass
+    unplaced.append(text)
+    return UNASSESSABLE_PATH.format(index=len(unplaced))
+
+
+def shareable_path_report(report: dict, out_dir: Path) -> dict:
+    """The measurement as it may leave this machine: same numbers, no host location.
+
+    Two layers, and each closes what the other cannot:
+
+    * every field `scan()` fills with a measured path is rewritten bundle-relative, so the refusal
+      still names the offending tail (which IS the actionable part, and what an upstream report
+      needs) while the run root never appears;
+    * the whole document then goes through `manifest_scope.redact_host_paths`, the repo's
+      value-shaped shipping redactor, so a string this function does not know about - an OS error
+      message, an unknown-path reason, a future field - cannot carry a location past it either.
+
+    The measurement itself is untouched: `check_path_ceiling.scan` still measures absolute paths,
+    because absolute length is exactly what Power BI Desktop counts.
+    """
+    root = Path(os.path.normpath(str(out_dir)))
+    unplaced: list[str] = []
+    shareable = dict(report)
+    shareable["root"] = SAFE_BUNDLE_ROOT
+    for key in _PATH_RECORD_KEYS:
+        record = shareable.get(key)
+        if isinstance(record, dict):
+            shareable[key] = dict(record, path=_bundle_relative(record.get("path"), root, unplaced))
+    for key in _PATH_LIST_KEYS:
+        rows = shareable.get(key)
+        if isinstance(rows, list):
+            shareable[key] = [
+                dict(row, path=_bundle_relative(row.get("path"), root, unplaced)) if isinstance(row, dict) else row
+                for row in rows
+            ]
+    # The walker's own `reason` is free-form text written by whatever raised it, so it is DROPPED
+    # rather than sanitized: what survives is the ordinal that identifies the row.
+    shareable["unknown_paths"] = [
+        {"path": row.get("path"), "code": UNKNOWN_PATH_CODE.format(index=index)}
+        if isinstance(row, dict)
+        else {"code": UNKNOWN_PATH_CODE.format(index=index)}
+        for index, row in enumerate(shareable.get("unknown_paths") or [], start=1)
+    ]
+    shareable["paths_not_placed"] = len(unplaced)
+    cleaned, redacted = redact_host_paths(shareable, prefix=PATH_CEILING_REPORT)
+    cleaned["redacted_fields"] = sorted(redacted)
+    return cleaned
+
+
+def scan_emitted_path_ceiling(out_dir: Path, limits: Limits | None = None) -> dict:
+    """Measure the tree the engine ACTUALLY emitted. A failed measurement is never a clean one."""
+    try:
+        return scan_path_ceiling(out_dir, limits or PATH_CEILING_LIMITS)
+    except (OSError, RuntimeError, UnicodeError, ValueError) as exc:
+        # `collect` already routes per-entry failures into `unknown_paths`; this is the walk itself
+        # failing outright. Reported as a CODE plus the exception's structural facts - never its
+        # message, which is written by whoever raised it and routinely quotes the path it failed on.
+        return {
+            "version": 1,
+            "root": str(out_dir),
+            "status": STATUS_UNKNOWN_PATHS,
+            "scan_error_code": SCAN_UNASSESSABLE_CODE,
+            "scan_error_facts": _exception_facts(exc),
+            "counted": {"measured": 0, "files": 0, "directories": 0, "over_ceiling": 0, "unknown": 1},
+            "worst_offenders": [],
+            "unknown_paths": [{"path": str(out_dir)}],
+        }
+
+
+def write_path_ceiling_report(out_dir: Path, report: dict) -> Path | None:
+    """Publish the measurement beside the bundle it judges, ATOMICALLY. None if it was not written.
+
+    The order is the guarantee: the whole document is serialized to a string FIRST, then written to
+    a per-process staging sibling, flushed and fsynced, and only then `os.replace`d over the final
+    name. So a serialization error, a full disk or a torn write cannot leave a truncated
+    `path-ceiling.json` behind, and an existing report from a previous run stays byte-identical
+    rather than being destroyed by the very run that could not describe itself. On any failure only
+    THIS call's exact staging file is removed, best effort - never the report, never a sibling.
+
+    ⚠️ The pattern is deliberately the repo's existing one (`_abf._staged_image_write`,
+    `generated_edit_declarations._append_record`): unique-per-process staging name, `os.replace`,
+    staging removed when the swap did not happen. Neither is imported: `_append_record` is private
+    to another module, generates its own filename and injects its own `version`/`recorded_at` keys,
+    so its semantics do not fit publishing one named report - and `_abf` belongs to a skill bundle.
+    """
+    final_path = out_dir / PATH_CEILING_REPORT
+    staging_path = final_path.with_name(f"{final_path.name}.{os.getpid()}-{uuid.uuid4().hex}.tmp")
+    swapped = False
+    try:
+        # Serialize BEFORE touching the filesystem: a TypeError here must never have opened a file.
+        payload = json.dumps(report, indent=2, ensure_ascii=True) + "\n"
+        with open(staging_path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(staging_path, final_path)
+        swapped = True
+    except (OSError, TypeError, ValueError) as exc:
+        log.warning("PATH CEILING: report not published (%s)", _operation_failure(PUBLISH_REPORT_OPERATION, exc))
+        return None
+    finally:
+        if not swapped:
+            try:
+                staging_path.unlink()
+            except OSError:  # pragma: no cover - best effort by contract; the report is untouched
+                log.warning("PATH CEILING: staging file left behind: %s", staging_path.name)
+    return final_path
+
+
+def path_ceiling_verdict(report: dict, written: Path | None) -> tuple[bool, str]:
+    """Turn one measurement into (proceed, detail). Everything that is not clean refuses.
+
+    ``report`` is the SHAREABLE view (:func:`shareable_path_report`), so every path this prints is
+    already bundle-relative. The report is named relatively too - the operator supplied ``--output``
+    and does not need it read back, while a console line is pasted into issues and chat.
+    """
+    counted = report.get("counted") or {}
+    where = f" Report: {SAFE_BUNDLE_ROOT}/{PATH_CEILING_REPORT}." if written else ""
+    preserved = " The emitted output is PRESERVED as evidence - nothing was deleted or rewritten."
+    if written is None:
+        return False, (
+            "CANNOT ASSESS the emitted tree: its path-ceiling report could not be written into "
+            f"{report.get('root')}, so the verdict would not be attributable." + preserved
+        )
+    if report.get("status") == STATUS_OVER_CEILING:
+        offenders = report.get("worst_offenders") or []
+        binding = max(offenders, key=lambda record: record["length"] - record["ceiling"], default=None)
+        detail = (
+            f"binding {binding['kind']} is {binding['length']} UTF-16 units (ceiling "
+            f"{binding['ceiling']}): {_ascii_path(binding['path'])}"
+            if binding
+            else "no offender could be named"
+        )
+        return False, (
+            f"PATH CEILING: {counted.get('over_ceiling')} EMITTED path(s) exceed what Power BI "
+            f"Desktop will open - {detail}. LongPathsEnabled and \\\\?\\ prefixes do not make "
+            f"Desktop accept these paths, so nothing downstream may start from this tree.{where}"
+            f"{preserved} {_SHORT_ROOT_HINT}"
+        )
+    if report.get("status") == STATUS_UNKNOWN_PATHS:
+        unknown = (report.get("unknown_paths") or [{}])[0]
+        cause = report.get("scan_error_code") or unknown.get("code") or "no code was recorded"
+        facts = report.get("scan_error_facts") or {}
+        codes = "".join(f" {key}={value}" for key, value in facts.items())
+        return False, (
+            f"CANNOT ASSESS the emitted tree: {counted.get('unknown')} path(s) could not be "
+            f"measured - {cause}{codes} ({_ascii_path(str(unknown.get('path')))}). Unmeasurable is "
+            f"not clean, so nothing downstream may start from this tree.{where}{preserved}"
+        )
+    if report.get("status") == STATUS_NO_PATHS:
+        return False, (
+            f"CANNOT ASSESS the emitted tree: nothing was measured under {report.get('root')}. An "
+            f"output folder with no measurable path cannot be judged clean.{where}{preserved}"
+        )
+    advisory = ""
+    if report.get("root_budget_is_tight"):
+        advisory = (
+            f" ADVISORY: root budget {report.get('root_budget')} < "
+            f"{report.get('shipping_root_budget_advisory')} - this bundle tolerates only a short "
+            "installation root wherever it is shipped; not a refusal."
+        )
+    return True, (
+        f"PATH CEILING: {counted.get('measured')} emitted path(s) measured, none over Desktop's "
+        f"ceilings (file <= {report.get('file_ceiling')}, directory <= {report.get('dir_ceiling')})."
+        f"{where}{advisory}"
+    )
+
+
+def check_emitted_path_ceiling(out_dir: Path, phases: list[dict], limits: Limits | None = None) -> tuple[bool, str]:
+    """Gate the ACTUAL engine output against Desktop's ceilings before anything consumes it.
+
+    The measurement is absolute (that is what Desktop counts); everything that LEAVES this call -
+    the published report and the printed verdict - is the bundle-relative, host-location-free view
+    built by :func:`shareable_path_report`.
+    """
+    started = time.monotonic()
+    measured = scan_emitted_path_ceiling(out_dir, limits)
+    report = shareable_path_report(measured, out_dir)
+    written = write_path_ceiling_report(out_dir, report)
+    proceed, detail = path_ceiling_verdict(report, written)
+    phases.append(
+        {
+            "phase": "path_ceiling",
+            "elapsed_sec": round(time.monotonic() - started, 1),
+            "status": report.get("status"),
+            "over_ceiling": (report.get("counted") or {}).get("over_ceiling"),
+        }
+    )
+    return proceed, detail
 
 
 # ---------------------------------------------------------------------------
@@ -1314,6 +1652,58 @@ def run_engine_phase(args: argparse.Namespace, engine: Path | None, phases: list
     return EXIT_OK
 
 
+def produce_and_gate_output(
+    args: argparse.Namespace, engine: Path | None, phases: list[dict]
+) -> tuple[dict | None, int]:
+    """Run the engine, baseline what it wrote, and refuse a tree nothing downstream may consume.
+
+    These three steps are ONE procedure, and the order is load-bearing in both directions:
+
+    * the baselines and receipt are recorded FIRST, so a bundle refused below still says what built
+      it - the receipt is exactly the evidence an upstream path-length report needs;
+    * the emitted tree is measured LAST, and before this function returns, so provenance, handover
+      slices, packaging, agent work and Desktop all sit behind it. The pre-engine projection cannot
+      see the paths the engine really writes (issue #564), so this is the only place where a bundle
+      Power BI Desktop refuses to open can still be stopped.
+
+    Returns ``(report, exit code)``; the report is None only when there was no output to read.
+    """
+    if not args.slice_only:
+        code = run_engine_phase(args, engine, phases)
+        if code != EXIT_OK:
+            # A failed engine has no output to judge, so nothing is measured and no path report is
+            # written - the engine's own verdict keeps precedence.
+            return None, code
+
+    report = read_report(args.output)
+    if not args.slice_only:
+        record_engine_output(args.output, report, phases, engine)
+    else:
+        backfill_slice_only_baseline(args.output, report, phases)
+
+    path_ok, path_detail = check_emitted_path_ceiling(args.output, phases)
+    print(path_detail)
+    if not path_ok:
+        # The timings are written even on a refusal, and they carry no later phase: the record IS
+        # the evidence that nothing downstream started. The output tree itself is left untouched.
+        #
+        # ⚠️ But the refusal OUTRANKS its own evidence. A bundle Power BI Desktop cannot open must
+        # still refuse when the timings cannot be persisted (a full disk, a read-only mount, an
+        # unserializable phase); returning EXIT_OK there - or letting the exception escape into the
+        # caller's traceback - would turn a path refusal into a run that continues or into a crash
+        # whose exit code says something else entirely. Only the write/serialization classes this
+        # repo already catches around a JSON write are absorbed; anything else still propagates.
+        try:
+            write_phase_record(args.output, phases)
+        except (OSError, TypeError, ValueError) as exc:
+            log.warning(
+                "PATH CEILING: phase timings not persisted (%s)",
+                _operation_failure(WRITE_PHASE_RECORD_OPERATION, exc),
+            )
+        return report, EXIT_PATH_CEILING
+    return report, EXIT_OK
+
+
 class GateResults(NamedTuple):
     """Every independent verdict one estate run produces, in precedence order.
 
@@ -1415,17 +1805,10 @@ def main(argv: list[str] | None = None) -> int:
 
     record_bundle_rewrite_acknowledgement(rewrite)
 
-    # --- phase 1: the engine ------------------------------------------------------------------
-    if not args.slice_only:
-        code = run_engine_phase(args, engine, phases)
-        if code != EXIT_OK:
-            return code
-
-    report = read_report(args.output)
-    if not args.slice_only:
-        record_engine_output(args.output, report, phases, engine)
-    else:
-        backfill_slice_only_baseline(args.output, report, phases)
+    # --- phase 1 + 1a: the engine, its recorded output, and the ceilings that output must meet --
+    report, code = produce_and_gate_output(args, engine, phases)
+    if code != EXIT_OK:
+        return code
 
     # --- phase 1b: stamp where the inputs came from -------------------------------------------
     # The engine records the LOCAL half in input_manifest.json (name, size, sha256, staged path)
