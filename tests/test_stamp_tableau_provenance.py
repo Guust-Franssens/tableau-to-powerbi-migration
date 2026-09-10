@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import multiprocessing
 import sys
 import urllib.error
 import zipfile
@@ -58,6 +59,10 @@ class FakeLookup:
     def content_unavailable(self, workbook_id):  # noqa: ARG002
         """This fake always answers with the content it was told to; nothing is ever unread."""
         return None
+
+    def content_attempts(self):
+        """One download per matched workbook, which is all this fake ever pretends to serve."""
+        return 1
 
     def sign_out(self):
         self.signed_out = True
@@ -1105,3 +1110,265 @@ def test_a_build_over_an_empty_directory_is_consistent_but_not_a_pass(tmp_path):
     assert prov.consistency_faults(result) == [], result
     assert result["phase"]["status"] == "empty"
     assert prov.is_success(result) is False
+
+
+# ------------------------------------------------ the supervised leaf worker (issue #576, round 5)
+#
+# `build` now runs inside a process the `run_estate` parent can terminate, and reports to it over a
+# deliberately tiny closed protocol. What is pinned here is the WORKER half: that the messages carry
+# numbers and derived digests rather than names, that the safe snapshot leaves before the sign-out
+# that can hang, that cancellation stops the next expensive operation, and that #582's call budget
+# survives being instrumented.
+
+
+class RecordingReporter(prov.NullReporter):
+    """The supervisor channel, captured in-process.
+
+    `checkpoint` runs the SAME reduction the real reporter does, so a mutation that checkpoints the
+    raw fingerprint is visible here rather than only across a process boundary.
+    """
+
+    def __init__(self, cancel_after=None):
+        self.messages = []
+        self._cancel_after = cancel_after
+        self.cancelled = False
+
+    def inputs_discovered(self, total):
+        self.messages.append({"kind": prov.MSG_INPUTS_DISCOVERED, "total": total})
+
+    def operation(self, operation, completed, total=None):
+        self.messages.append(
+            {"kind": prov.MSG_OPERATION, "operation": operation, "completed": completed, "total": total}
+        )
+        if self._cancel_after == operation:
+            self.cancelled = True
+
+    def checkpoint(self, index, record):
+        self.messages.append({"kind": prov.MSG_CHECKPOINT, "index": index, "record": prov.checkpoint_record(record)})
+
+    def safe_snapshot(self, result):
+        self.messages.append({"kind": prov.MSG_SAFE_SNAPSHOT, "result": result})
+
+    def terminal(self, result):
+        self.messages.append({"kind": prov.MSG_TERMINAL, "result": result})
+
+    def kinds(self):
+        return [message["kind"] for message in self.messages]
+
+    def of_kind(self, kind):
+        return [message for message in self.messages if message["kind"] == kind]
+
+    def operations(self, name):
+        return [message for message in self.of_kind(prov.MSG_OPERATION) if message["operation"] == name]
+
+
+def _drain(conn):
+    """Every message on the pipe, stopping at EOF - the worker closes its end when it is done."""
+    messages = []
+    try:
+        while conn.poll():
+            messages.append(conn.recv())
+    except (EOFError, OSError):
+        pass
+    return messages
+
+
+def test_a_many_input_run_reports_one_inventory_and_finishes_at_the_full_input_count(tmp_path, monkeypatch):
+    """#582's budget survives instrumentation, and the progress counters describe the same run.
+
+    The mutation this fails on: reporting per-INPUT inventory progress (66 inventory operations for
+    one round trip), or counting cache hits as content attempts.
+    """
+    inventory = _harvested(tmp_path, 66)
+    site = _install(monkeypatch, RecordingSite(LIVE_ENV, workbooks=inventory))
+    reporter = RecordingReporter()
+
+    result = prov.build(tmp_path, LIVE_ENV, reporter)
+
+    assert (site.count("inventory"), site.count("content")) == (1, 66)
+    assert reporter.of_kind(prov.MSG_INPUTS_DISCOVERED) == [{"kind": prov.MSG_INPUTS_DISCOVERED, "total": 66}]
+    assert len(reporter.operations("inventory")) == 2, "one inventory operation, started and finished"
+    assert reporter.operations("fingerprint")[-1]["completed"] == 66
+    assert reporter.operations("fingerprint")[-1]["total"] == 66
+    assert reporter.operations("content")[-1]["completed"] == 66
+    assert len(reporter.of_kind(prov.MSG_CHECKPOINT)) == 66
+    assert result["input_count"] == 66
+
+
+def test_a_dead_inventory_is_reported_as_one_operation_not_one_per_input(tmp_path, monkeypatch):
+    """Measured: 66 inputs produced 66 identical failing listings. The progress must not re-invent them."""
+    _harvested(tmp_path, 12)
+    site = _install(monkeypatch, RecordingSite(LIVE_ENV, inventory_status=500))
+    reporter = RecordingReporter()
+
+    result = prov.build(tmp_path, LIVE_ENV, reporter)
+
+    assert site.count("inventory") == 1
+    assert len(reporter.operations("inventory")) == 2
+    assert reporter.operations("content")[-1]["completed"] == 0, "a dead inventory downloads nothing"
+    assert len(result["inputs"]) == 12
+
+
+def test_duplicate_luid_inputs_are_two_inputs_and_one_download(tmp_path, monkeypatch):
+    """Two physical inputs, two records, two fingerprints - and exactly ONE remote content attempt.
+
+    Duplicate semantics are load bearing: local de-duplication would silently shrink `input_count`,
+    and counting the cache hit would claim remote work that never happened.
+    """
+    luid = _fixture_luid(7)
+    _twbx(tmp_path, f"{luid}_Copy_A")
+    _twbx(tmp_path, f"{luid}_Copy_B")
+    site = _install(monkeypatch, RecordingSite(LIVE_ENV, workbooks=[{"id": luid, "name": "Copy A"}]))
+    reporter = RecordingReporter()
+
+    result = prov.build(tmp_path, LIVE_ENV, reporter)
+
+    assert site.count("content") == 1
+    assert reporter.of_kind(prov.MSG_INPUTS_DISCOVERED)[0]["total"] == 2
+    assert reporter.operations("fingerprint")[-1]["completed"] == 2
+    assert [message["completed"] for message in reporter.operations("content")] == [1, 1]
+    assert result["input_count"] == len(result["inputs"]) == 2
+
+
+def test_byte_identical_inputs_under_different_names_are_still_two_inputs(tmp_path):
+    """A local content hash is not an identity either: two files are two inputs."""
+    _twbx(tmp_path, "Alpha", payload=b"<workbook/>")
+    _twbx(tmp_path, "Beta", payload=b"<workbook/>")
+    reporter = RecordingReporter()
+
+    result = prov.build(tmp_path, {}, reporter)
+
+    assert result["input_count"] == len(result["inputs"]) == 2
+    assert reporter.of_kind(prov.MSG_INPUTS_DISCOVERED)[0]["total"] == 2
+    assert len(reporter.of_kind(prov.MSG_CHECKPOINT)) == 2
+    assert [message["index"] for message in reporter.of_kind(prov.MSG_CHECKPOINT)] == [0, 1]
+
+
+def test_a_checkpoint_carries_only_derived_evidence_while_the_snapshot_may_carry_names(tmp_path, monkeypatch):
+    """The privacy split that makes an early checkpoint safe at all.
+
+    A checkpoint is emitted BEFORE the live half has been scrubbed, so it holds only what this module
+    COMPUTED - sizes, digests, CRCs. The safe snapshot is emitted AFTER scrub, so it may legitimately
+    hold copied strings. Neither may carry raw exception text.
+    """
+    luid = _fixture_luid(3)
+    _twbx_with_members(tmp_path / f"{luid}_Fixture.twbx", ["Superstore Extract.hyper"])
+    site = _install(monkeypatch, RecordingSite(LIVE_ENV, workbooks=[{"id": luid, "name": "Fixture"}]))
+    reporter = RecordingReporter()
+
+    prov.build(tmp_path, LIVE_ENV, reporter)
+
+    checkpoint = reporter.of_kind(prov.MSG_CHECKPOINT)[0]
+    checkpointed = json.dumps(checkpoint)
+    assert set(checkpoint["record"]["input"]) <= {"size_bytes", "sha256", "revision_key", "members"}
+    assert all(set(member) == {"size_bytes", "crc32"} for member in checkpoint["record"]["input"]["members"])
+    assert "Fixture" not in checkpointed and "Superstore Extract.hyper" not in checkpointed
+    snapshot = reporter.of_kind(prov.MSG_SAFE_SNAPSHOT)[0]
+    assert snapshot["result"]["inputs"][0]["input"]["file"].endswith(".twbx"), "the snapshot is the whole result"
+    assert site.count("signout") == 1
+
+
+def test_the_safe_snapshot_leaves_before_the_sign_out_that_can_hang(tmp_path, monkeypatch):
+    """Ordering is the whole point: sign-out is a network call, and it must not gate the evidence."""
+    luid = _fixture_luid(4)
+    _twbx(tmp_path, f"{luid}_Fixture")
+    site = _install(monkeypatch, RecordingSite(LIVE_ENV, workbooks=[{"id": luid, "name": "Fixture"}]))
+    reporter = RecordingReporter()
+
+    prov.build(tmp_path, LIVE_ENV, reporter)
+
+    kinds = reporter.kinds()
+    snapshot_at = kinds.index(prov.MSG_SAFE_SNAPSHOT)
+    sign_out_at = min(
+        index
+        for index, message in enumerate(reporter.messages)
+        if message["kind"] == prov.MSG_OPERATION and message["operation"] == "sign-out"
+    )
+    assert snapshot_at < sign_out_at, "the snapshot was held hostage to the cleanup call"
+    assert site.count("signout") == 1
+
+
+def test_a_sign_out_failure_after_the_snapshot_is_typed_and_keeps_the_result(tmp_path, monkeypatch):
+    """An ordinary (non-hanging) sign-out failure stays a typed error beside a complete result."""
+    luid = _fixture_luid(5)
+    _twbx(tmp_path, f"{luid}_Fixture")
+    site = _install(
+        monkeypatch,
+        RecordingSite(
+            LIVE_ENV,
+            workbooks=[{"id": luid, "name": "Fixture"}],
+            signout_error=urllib.error.URLError("sign-out transport is dead"),
+        ),
+    )
+    reporter = RecordingReporter()
+
+    result = prov.build(tmp_path, LIVE_ENV, reporter)
+
+    snapshot = reporter.of_kind(prov.MSG_SAFE_SNAPSHOT)[0]["result"]
+    assert snapshot["inputs"][0]["input"]["sha256"]
+    assert result["phase"]["status"] == "partial"
+    assert result["phase"]["errors"][-1] == {
+        "code": "sign-out-failed",
+        "operation": "sign-out",
+        "exception_class": "URLError",
+    }
+    assert site.count("signout") == 1
+
+
+def test_cancellation_stops_the_run_before_the_next_expensive_operation(tmp_path, monkeypatch):
+    """The cooperative half: once the supervisor latches, no further remote work is STARTED.
+
+    It is deliberately not credited as the enforcement - a call already in flight is stopped by the
+    parent killing this process - but it is what keeps a cancelled worker from spending a site's
+    quota on results nobody will accept.
+    """
+    _harvested(tmp_path, 3)
+    site = _install(monkeypatch, RecordingSite(LIVE_ENV, workbooks=[]))
+    reporter = RecordingReporter(cancel_after="fingerprint")
+
+    result = prov.build(tmp_path, LIVE_ENV, reporter)
+
+    assert site.calls == [], "a cancelled worker signed in anyway"
+    assert len(reporter.of_kind(prov.MSG_CHECKPOINT)) == 1, "cancellation did not stop the fingerprint pass"
+    assert result["input_count"] == len(result["inputs"]) == 1
+    assert prov.consistency_faults(result) == [], result
+
+
+def test_the_worker_returns_a_typed_terminal_result_when_the_build_itself_raises(tmp_path, monkeypatch):
+    """A failure `build` cannot describe is still a complete, publishable, TEXT-FREE document.
+
+    The message the exception carried is a host path here, which is exactly the kind of string that
+    must not travel to the parent or reach the artifact.
+    """
+    secret = str(tmp_path / "customer-secret")
+
+    def fail(*_args, **_kwargs):
+        raise OSError(5, secret)
+
+    monkeypatch.setattr(prov, "build", fail)
+    recv, send = multiprocessing.Pipe(duplex=False)
+
+    prov.provenance_worker(send, None, {"input": str(tmp_path), "env": str(tmp_path / "absent.env")})
+
+    messages = _drain(recv)
+    assert [message["kind"] for message in messages] == [prov.MSG_TERMINAL]
+    assert messages[0]["result"]["phase"]["errors"] == [
+        {"code": "build-failed", "operation": "build", "exception_class": "OSError", "errno": 5}
+    ]
+    assert secret not in json.dumps(messages)
+
+
+def test_the_worker_reports_progress_it_can_no_longer_send(tmp_path):
+    """The parent closes its end at the deadline; the worker must not die of a broken pipe.
+
+    It is about to be terminated anyway, and raising here would replace a typed timeout artifact with
+    an unhandled exception in a process nobody is reading.
+    """
+    _twbx(tmp_path)
+    recv, send = multiprocessing.Pipe(duplex=False)
+    recv.close()
+    reporter = prov.WorkerReporter(send, None)
+
+    result = prov.build(tmp_path, {}, reporter)
+
+    assert result["input_count"] == 1, "a closed channel stopped the work it was only observing"

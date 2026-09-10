@@ -70,7 +70,7 @@ import run_estate
 import stamp_tableau_provenance as prov
 
 
-def stamp_inputs(input_dir, out_dir):
+def stamp_inputs(input_dir, out_dir, timeout_sec=None):  # noqa: ARG001  # the deadline is not what is mutated here
     try:
         result = prov.build(input_dir, prov.resolve_env(Path(".env")))
     except Exception as exc:  # noqa: BLE001
