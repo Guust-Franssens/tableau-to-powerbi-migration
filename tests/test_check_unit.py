@@ -4505,8 +4505,10 @@ def test_run_all_classifies_its_own_argument_and_accepts_no_injected_verdict(
     the supplied spelling can only have been taken before resolution, and a single entry can only
     mean the exit gate never asked a second time.
 
-    ⚠️ Scope stated: this counts `check_unit`'s OWN calls. `bundle_corpus.evidence_dirs` classifies
-    again on the already-cleared root by design.
+    ⚠️ Scope stated: this counts `check_unit`'s OWN calls. The direct helpers `run_all` then invokes
+    each re-classify the ALREADY-CLEARED root by design (issue #562) - that is asserted positively
+    below rather than allowed silently, because "somebody asked" is only safe when every ask is bound
+    to the asker's own argument. `bundle_corpus.evidence_dirs` classifies again for the same reason.
     """
     assert "classification" not in inspect.signature(cu.run_all).parameters
 
@@ -4523,7 +4525,8 @@ def test_run_all_classifies_its_own_argument_and_accepts_no_injected_verdict(
 
     report = cu.run_all(spelling)
 
-    assert seen == [spelling]
+    assert seen[0] == spelling, "the gate's FIRST question is about the supplied spelling, not the resolved path"
+    assert set(seen[1:]) == {package.resolve()}, "every later ask is a helper re-asking about the cleared root"
     assert report["target"] == str(package.resolve())
     assert not [check for check in report["checks"] if check["id"] == cu.PACKAGE_BOUNDARY_CHECK_ID]
 
@@ -4547,7 +4550,8 @@ def test_the_cli_preclassifies_only_for_its_own_is_dir_check_and_run_all_reclass
     monkeypatch.setattr(cu, "classify_target", recording)
 
     assert cu.main([str(package), "--quiet"]) != cu.EXIT_USAGE, "the safe pre-check must not fire here"
-    assert seen == [package, package]
+    assert seen[:2] == [package, package], "the CLI asks, then run_all asks again about the SAME original path"
+    assert set(seen[2:]) <= {package.resolve()}, "later asks are direct helpers re-asking about the cleared root"
 
 
 def test_resolution_is_gated_on_the_clearance_rather_than_merely_ordered_after_it(tmp_path: Path) -> None:
@@ -4563,25 +4567,230 @@ def test_resolution_is_gated_on_the_clearance_rather_than_merely_ordered_after_i
         cu._cleared_target(damaged, unsafe)  # pylint: disable=protected-access
 
 
-def test_a_direct_helper_call_still_follows_an_alias_which_is_the_open_residual(tmp_path: Path) -> None:
-    """❌ RESIDUAL, reproduced rather than falsely tested green (PR #593 round-1 review, split out).
+_DIRECT_ENTRIES = ("load_exemptions", "page_expectation", "check_page_parity", "check_oracle_coverage")
 
-    `run_all` and the CLI classify first; the public per-check helpers do NOT. `check_oracle_coverage`
-    reaches `_unit_dir` -> `resolve()` directly, so an aliased root handed to it is still classified
-    on its destination and its evidence is consumed through the alias - measured here as a full
-    visual PASS on a package the caller never named. `tests/estate_page_gate_digest.py` calls exactly
-    this surface (`check_page_parity`, `check_oracle_coverage`, `load_exemptions`, `page_expectation`).
+#: Everything a DIRECT helper must not have reached before classifying its own argument. Wider than
+#: `_FORBIDDEN_PATH_PRIMITIVES`: these helpers read files, so the readers are armed too.
+_FORBIDDEN_DIRECT_PRIMITIVES = (
+    "resolve",
+    "is_file",
+    "is_dir",
+    "exists",
+    "rglob",
+    "glob",
+    "iterdir",
+    "read_text",
+    "read_bytes",
+    "open",
+)
 
-    ⚠️ This test asserts the CURRENT, WRONG behaviour on purpose. When the follow-up closes the
-    direct-helper surface it must FAIL and be inverted; a test that quietly passed either way would
-    be the false-green this split exists to prevent.
+
+def _without_following(call, delegates: tuple[str, ...] = ()) -> tuple[object, str]:
+    """Run one direct helper call with every follower, reader and the oracle loader armed.
+
+    ``delegates`` additionally arms the helpers this entry would otherwise LEAN ON for its refusal.
+    Without that, a guard deleted from `check_page_parity` survives every observable assertion,
+    because `page_expectation`'s guard refuses one frame deeper and the shape comes out identical -
+    the "moved boundary" shape. Arming them is what makes each guard independently necessary.
+
+    Same `MonkeyPatch.context` reasoning as `_run_all_without_following`, and the same reason for a
+    non-`AssertionError` signal: `Path.exists` is armed and pytest calls it while formatting.
     """
-    package = _package(tmp_path / "run" / "packages" / "Unit")
-    alias = tmp_path / "alias"
+
+    def boom(*_args: object, **_kwargs: object) -> object:
+        raise _Followed("a direct helper followed, read, discovered or delegated before classifying")
+
+    with pytest.MonkeyPatch.context() as mp:
+        for name in _FORBIDDEN_DIRECT_PRIMITIVES:
+            mp.setattr(Path, name, boom, raising=True)
+        mp.setattr("builtins.open", boom, raising=True)
+        mp.setattr(cu.tableau_oracle_manifest, "read_manifest", boom, raising=True)
+        mp.setattr(cu, "_unit_dir", boom, raising=True)
+        mp.setattr(cu, "shipping_reports", boom, raising=True)
+        for name in delegates:
+            mp.setattr(cu, name, boom, raising=True)
+        try:
+            return call(), ""
+        except _Followed as exc:
+            return None, str(exc)
+
+
+def _unsafe_root(tmp_path: Path, shape: str) -> tuple[Path, Path]:
+    """One unsafe root plus the REAL directory holding the oracle evidence it must not consume.
+
+    `alias` is a reparse point onto an intact package - not lexically package-shaped, so following it
+    is the only way to reach a verdict. `damaged` is lexically package-shaped with no marker. Built
+    lazily per shape: `_link_directory` skips where the account cannot create a link, and the damaged
+    case must not skip for a link it never needed.
+    """
+    if shape == "alias":
+        package = _package(tmp_path / "run" / "packages" / "Unit")
+        alias = tmp_path / "alias"
+        _link_directory(alias, package)
+        return alias, package / "_oracle"
+    damaged = _package(tmp_path / "run" / "packages" / "Other", marker=False)
+    return damaged, damaged / "_oracle"
+
+
+def _refused_exemptions(result: dict) -> None:
+    """`load_exemptions`: the existing non-clean schema, and an UNREAD sidecar is not an empty one."""
+    assert set(result) == {"path", "entries", "invalid"}
+    assert result["path"] is None and result["entries"] == []
+    assert [row["item"] for row in result["invalid"]] == [cu.REFUSED_TARGET_LABEL]
+
+
+def _refused_expectation(result: dict) -> None:
+    """`page_expectation`: the existing unassessable shape, with nothing read into it."""
+    assert result["assessable"] is False and result["reason"]
+    assert result["actual"] == [] and result["rendered"] == []
+    assert result["candidates"] is None and result["omissions"] == [] and result["contested_names"] == []
+
+
+def _refused_parity(result: dict) -> None:
+    """`check_page_parity`: the existing blocking NOT_CHECKED page-parity row."""
+    assert result["id"] == "page-parity" and result["status"] == cu.STATUS_NOT_CHECKED
+    assert result["expected_pages"] is None and result["actual_pages"] == []
+    assert result["applied_exemptions"] == [] and result["unapplied_exemptions"] == []
+
+
+def _refused_oracle(result: dict) -> None:
+    """`check_oracle_coverage`: the existing not-assessable coverage row, certifying nothing."""
+    assert result["id"] == "oracle-coverage" and result["status"] == cu.STATUS_NOT_CHECKED
+    assert result["pages"] == 0 and result["visual_present"] == 0 and result["numeric_present"] == 0
+    assert result["rows"] == []
+
+
+#: Each entry observed on its OWN, so deleting one guard fails exactly one test rather than a
+#: four-in-one assertion that cannot say which helper regressed. The third element names the
+#: delegates that entry must NOT lean on for its refusal.
+_DIRECT_REFUSALS = {
+    "load_exemptions": (lambda root: cu.load_exemptions(root), _refused_exemptions, ()),
+    "page_expectation": (
+        lambda root: cu.page_expectation(root),
+        _refused_expectation,
+        ("actual_pages", "_spec_pages", "page_drop_explanations"),
+    ),
+    "check_page_parity": (
+        lambda root: cu.check_page_parity(root, {"entries": []}),
+        _refused_parity,
+        ("page_expectation",),
+    ),
+    "check_oracle_coverage": (
+        lambda root: cu.check_oracle_coverage(root, None, None),
+        _refused_oracle,
+        ("page_expectation", "_reference_oracles", "_oracle_capture_oracles"),
+    ),
+}
+
+
+@pytest.mark.parametrize("shape", ["alias", "damaged"])
+@pytest.mark.parametrize("helper", sorted(_DIRECT_REFUSALS))
+def test_a_direct_helper_refuses_an_unsafe_root_before_following_or_reading_anything(
+    tmp_path: Path, helper: str, shape: str
+) -> None:
+    """Kills: classifying after `_unit_dir()`/`shipping_reports`/`resolve()` on the DIRECT surface.
+
+    The inverse of the residual PR #593 left open: `check_oracle_coverage(alias, ...)` used to return
+    a full visual PASS on a package the caller never named, and a package-shaped root with no marker
+    measured `assessable=True`, parity `PASS`, `visual_present=1`. Every follower, every reader, the
+    oracle manifest loader AND this entry's own delegates are armed, so reaching *any* of them is the
+    failure - not merely producing a wrong verdict, and not a refusal borrowed one frame deeper.
+    """
+    root, _evidence = _unsafe_root(tmp_path, shape)
+    call, expect_refused, delegates = _DIRECT_REFUSALS[helper]
+
+    result, followed = _without_following(lambda: call(root), delegates)
+
+    assert followed == "", followed
+    expect_refused(result)
+
+
+@pytest.mark.parametrize("shape", ["alias", "damaged"])
+def test_an_explicit_oracle_directory_does_not_bypass_the_capture_guard(tmp_path: Path, shape: str) -> None:
+    """Kills: guarding only `_unit_dir`/`_oracle_dirs`.
+
+    An explicit oracle directory skips both, so a `_unit_dir`-based guard would never fire - measured,
+    a direct call read one record with `_unit_dir` armed to fail and never called. The manifest loader
+    is armed here: the typed refusal must be raised before it, and it must carry no classification
+    object, no target and no destination.
+    """
+    root, evidence = _unsafe_root(tmp_path, shape)
+    assert (evidence / "oracle-manifest.json").is_file(), "the evidence being withheld must exist"
+
+    with pytest.raises(cu._DirectTargetRefused) as raised:  # pylint: disable=protected-access
+        _without_following(  # pylint: disable=protected-access
+            lambda: cu._oracle_capture_oracles(root, evidence), ("_oracle_dirs",)
+        )
+
+    refusal = raised.value
+    assert refusal.code and refusal.placement
+    assert set(vars(refusal)) == {"code", "detail", "placement"}, "no classification, target or destination"
+
+
+def test_a_refusal_leaks_no_supplied_component_through_any_channel(tmp_path: Path) -> None:
+    """Both the alias and the destination are secret-bearing; neither may appear anywhere.
+
+    Dicts, their JSON rendering, and the exception's `str`/`repr` are all checked, because the
+    refusal is the object a caller pastes into an issue.
+    """
+    package = _package(tmp_path / "run" / "packages" / "Contoso-Secret")
+    alias = tmp_path / "Fabrikam-Confidential"
     _link_directory(alias, package)
 
-    assert cu.run_all(alias)["exit_code"] == cu.EXIT_NOT_CHECKED, "run_all is covered"
-    assert cu.check_oracle_coverage(alias, None, None)["visual_present"] == 1, "direct helper is NOT covered"
+    returned = json.dumps(
+        [
+            cu.load_exemptions(alias),
+            cu.page_expectation(alias),
+            cu.check_page_parity(alias, {"entries": []}),
+            cu.check_oracle_coverage(alias, None, None),
+        ],
+        default=str,
+    )
+    with pytest.raises(cu._DirectTargetRefused) as raised:  # pylint: disable=protected-access
+        cu._oracle_capture_oracles(alias, None)  # pylint: disable=protected-access
+    everywhere = returned + str(raised.value) + repr(raised.value)
+
+    assert bundle_corpus.CODE_TARGET_ROOT_REPARSE in everywhere, "the stable classifier code must survive"
+    for supplied in (str(alias), str(package), str(tmp_path), alias.name, package.name):
+        assert supplied not in everywhere, supplied
+
+
+def test_no_direct_helper_accepts_a_caller_supplied_boundary_verdict(tmp_path: Path) -> None:
+    """Kills: adding a `classification`/`_CheckedTarget`/clearance parameter to any of the five.
+
+    A parameter that decides whether a boundary is safe is exactly the parameter a caller must not be
+    able to supply - one path's answer would clear a different path (PR #593 round-1 review). The
+    factory is pinned to one positional `target` for the same reason.
+    """
+    forbidden = {"classification", "clearance", "checked", "context", "target_classification"}
+    entries = [getattr(cu, name) for name in _DIRECT_ENTRIES] + [cu._oracle_capture_oracles]  # pylint: disable=protected-access
+    for entry in entries:
+        assert not forbidden & set(inspect.signature(entry).parameters), entry.__name__
+    assert list(inspect.signature(cu._checked_direct_target).parameters) == ["target"]  # pylint: disable=protected-access
+
+    package = _package(tmp_path / "run" / "packages" / "Unit")
+    assert cu._checked_direct_target(package) == package.resolve()  # pylint: disable=protected-access
+
+
+def test_the_five_direct_helpers_are_unchanged_for_a_safe_package_and_an_ordinary_unit(tmp_path: Path) -> None:
+    """The positive control that makes every refusal above a withholding rather than a vacuum.
+
+    Handed their real paths, both an intact package and an ordinary unit still read their own
+    evidence through all five entries: the exemption sidecar's path, an assessable expectation, a
+    parity PASS, oracle coverage of the one page, and the one capture record.
+    """
+    for root in (_package(tmp_path / "plain" / "unit", marker=False), _package(tmp_path / "run" / "packages" / "Unit")):
+        exemptions = cu.load_exemptions(root)
+        expectation = cu.page_expectation(root)
+        parity = cu.check_page_parity(root, exemptions)
+        oracle = cu.check_oracle_coverage(root, None, None)
+        records, grades = cu._oracle_capture_oracles(root, None)  # pylint: disable=protected-access
+
+        assert exemptions == {"path": str(root.resolve() / cu.EXEMPTIONS_FILE), "entries": [], "invalid": []}
+        assert expectation["assessable"] is True and [page["name"] for page in expectation["candidates"]] == ["Revenue"]
+        assert parity["status"] == cu.STATUS_PASS
+        assert oracle["status"] == cu.STATUS_PASS and oracle["visual_present"] == 1 and oracle["pages"] == 1
+        assert [record.name for record in records] == ["Revenue"] and grades
 
 
 def test_a_safe_package_and_an_ordinary_unit_keep_their_existing_verdicts(tmp_path: Path) -> None:

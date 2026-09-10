@@ -72,7 +72,7 @@ The Bridge cannot dismiss or fill this. **Remediation:** the user opens the `.pb
 auth method (paste a PAT, or Sign in with AAD), clicks Connect. Desktop caches it; subsequent
 agent-driven opens/reloads then refresh without prompting.
 
-**Detecting present vs missing (so the agent only prompts when needed).** The credential is cached
+**What the modal probe can and cannot establish.** The credential is cached
 per-Windows-user (DPAPI), so it persists across Desktop restarts and even across different `.pbip`
 files — **but it is keyed by the full data-source path (host *and* `httpPath`/warehouse), not the host
 alone.** Verified 2026-07 first-hand: re-pointing the same model from one Databricks warehouse to a
@@ -92,20 +92,25 @@ UIA re-dump confirmed the modal was open. So: **treat `probe_desktop_query.py` (
 NOT be trusted on its own for a serverless source — always confirm with `DATA_OK`.
 
 `scripts/probe_desktop_credential.ps1 -DesktopPid <pid>` triggers a refresh via UI Automation and
-watches for the connector modal:
-- Modal appears (or is already open) -> `VERDICT: CREDENTIAL_MISSING` (exit 1) -> prompt the user to
-  sign in once. **This is the only verdict that is a hard stop.**
-- No modal within the timeout -> `VERDICT: CREDENTIAL_PRESENT` (exit 0), **but** re-confirm with the
-  data probe before trusting it (see the serverless false-positive above).
-- A dialog is up that is *not* a credential prompt -> one of `REFRESH_IN_PROGRESS` (another refresh
-  already owns this instance — wait for it or cancel the stale one), `DIALOG_NEEDS_HUMAN` (a **known**
-  human-blocking prompt that is not a credential prompt — the native-database-query approval modal;
-  approve it, no sign-in implied), `DIALOG_UNRECOGNIZED` (no signature matched, or progress text
-  alongside prose that is not progress status) or `DIALOG_UNREADABLE` (its **content** could not be
-  shown to be harmless), each **exit 3**. All four mean *"could not probe"*, never *"a human must sign
-  in"*.
+classifies whatever window is up in **one bounded probe window**. It reports a *positive* credential
+prompt or a non-clean dialog; it never proves the opposite state:
 
-⚠️ **Do not read a non-`CREDENTIAL_MISSING` verdict as a credential wall.** Until issue #367 the probe
+| Verdict | Exit | What it establishes, and what to do |
+|---|---|---|
+| `CREDENTIAL_MISSING` | 1 | Positive, authentication-specific evidence: a window's text matched the connector credential signature (this includes a modal that was **already open** at t=0). The credential-specific hard stop — a human signs in once at the Desktop screen. |
+| `CREDENTIAL_PRESENT` | 0 | A refresh was invoked and **no** credential prompt was detected before this probe's deadline. A bounded observation only: it does **not** establish that a credential is cached, that the refresh ran or completed, that Desktop stayed alive, or that no window went unseen. Re-confirm with the one-row data probe (see the serverless false `CREDENTIAL_PRESENT` above). |
+| `REFRESH_IN_PROGRESS` | 3 | A dialog whose whole content positively reads as refresh progress was already up: another refresh owns this instance. Wait for it, or cancel the stale one — **do not stack** a second refresh. |
+| `DIALOG_NEEDS_HUMAN` | 3 | A **known** human-blocking prompt matched — the native-database-query approval modal, an approval request, or an `Authentication required` notice. A human must act at the Desktop screen; the token does **not** establish which action, because that one signature spans an approval *and* an authentication notice. Read the prompt before assuming. |
+| `DIALOG_UNRECOGNIZED` | 3 | The window's text was read but matched no known signature, and the signature list is not exhaustive. Inspect Desktop: the credential state is **undetermined in both directions**. |
+| `DIALOG_UNREADABLE` | 3 | The window's **content** could not be established at all (no text, only a caption, or an incomplete harvest). Inspect Desktop: the credential state is **undetermined in both directions**. |
+| `UNKNOWN` | 3 | No window for the pid, a minimized owner, or no Refresh control was ever invoked. Nothing was determined. |
+
+Only `CREDENTIAL_MISSING` is a credential verdict. The exit-3 band means *"could not probe"*, which
+is neither *"a human must sign in"* nor *"no sign-in is needed"* — settle the window on screen, then
+re-probe.
+
+⚠️ **Do not read a non-`CREDENTIAL_MISSING` verdict as a credential wall — and do not read it as the
+absence of one either.** Until issue #367 the probe
 returned `BLOCKED_BY_DIALOG` at **exit 1** for *any* visible non-main window >= 100x100 — a Power BI
 Refresh progress dialog trips that trivially, and a field report on 2026-08-28 caught it doing so under
 three concurrent refreshes against a cold Snowflake warehouse. The probe now classifies a dialog by its
@@ -135,8 +140,10 @@ exit 3. Two consequences worth knowing:
   recognised progress status or enumerated chrome (`benign_chrome_signature.regex`). There is **no
   length amnesty**: blind review measured `Refresh` + `Evaluating...` + *"Please enter your password"*
   classifying `benign` and being suppressed outright under the old five-word rule.
-  ⚠️ `probe_desktop_credential.ps1` still carries that rule (`$MinPromptWords = 5`) and reproduces the
-  same suppression — measured, filed as #406 rather than fixed in passing.
+  ✅ `probe_desktop_credential.ps1` carried the same rule and reproduced the same suppression; it was
+  filed as #406, and **#406 is now closed** — the arbiter has no length amnesty either. Short unknown
+  text (`Password:`) vetoes suppression on both paths, and the enumerated chrome allowlist is the only
+  exemption.
 - `probe_live_source` recognises the dialog tokens **structurally** and maps them to **`ERROR`** —
   "the probe itself could not run". The gate stays armed; nothing asserts a sign-in wall that was never
   observed. Without that structural step the transcript fell through to an unanchored keyword scan, and
@@ -144,7 +151,10 @@ exit 3. Two consequences worth knowing:
 
 Two gotchas learned building it: (a) use a **generous timeout (>=60s)** because a serverless warehouse
 (Databricks) can **cold-start** before the modal appears, so a short wait yields a false PRESENT; and
-(b) also treat an **already-open** modal as MISSING (check before triggering refresh).
+(b) check for an **already-open** window before triggering the refresh — but classify it, do not label
+it. An already-open window is `CREDENTIAL_MISSING` **only when it matches the credential signature**;
+any other active dialog keeps its own exit-3 token (`REFRESH_IN_PROGRESS` / `DIALOG_NEEDS_HUMAN` /
+`DIALOG_UNRECOGNIZED` / `DIALOG_UNREADABLE`) and must be settled on screen first.
 
 ⚠️ **A third, found in blind review 2026-08-29: Win32 child-HWND text cannot see inside a WPF dialog,
 and no proxy for "we read the content" survives contact.** WPF renders its whole visual tree into one
@@ -172,6 +182,12 @@ shot, **credentials present + source reachable + M/partition valid** -> `PREFLIG
 or a connect error -> the gate is red. This is the real "can Power BI actually get data?" test, and it
 runs entirely **locally, before any publish**. (It needs the model open in Desktop and refreshed; run it
 after `probe_desktop_credential.ps1` returns `CREDENTIAL_PRESENT`, or after the user signs in.)
+
+⚠️ **`DATA_OK` is earned by a clean run, and an active dialog vetoes it.** The success line is not a
+substring you may harvest from a transcript: an authoritative non-success verdict anywhere in the child's
+output — any `DIALOG_*` token, `REFRESH_IN_PROGRESS`, or a non-zero exit — outranks a stale or late
+`DATA_OK`-looking line, and the gate stays armed. Settle the dialog, then re-probe for a clean
+`DATA_OK`.
 
 **Pass `--pid` whenever more than one Desktop instance is open** (a parallel batch): the probe binds
 strictly to the `msmdsrv` owned by that pid - it retries briefly for startup lag, then fails, rather than
@@ -234,11 +250,15 @@ The parser records `data_sources[].connection.{class,mode,server}` in `migration
 2. **Warn the user up front** that this workbook hits a live source, so a credential is required in Power
    BI before the report can show data. Give them the host/database from the spec.
 3. **Local:** build the model, then ask the user to open the `.pbip` in Desktop and authenticate the
-   source once (the modal above). Use `scripts/probe_desktop_credential.ps1 -DesktopPid <pid>` to check
-   whether a credential is already cached (`CREDENTIAL_PRESENT`) before prompting — the cache is
+   source once (the modal above). Run `scripts/probe_desktop_credential.ps1 -DesktopPid <pid>` to
+   *observe* what Desktop is showing: a positive credential prompt (`CREDENTIAL_MISSING`), a non-clean
+   dialog (exit 3), or no detected prompt (`CREDENTIAL_PRESENT`). `CREDENTIAL_PRESENT` does **not**
+   prove a cached credential — it is a bounded observation. The cache itself is per-Windows-user and
    machine-wide but keyed by host **+ warehouse/`httpPath`**, so a prior sign-in to the *same host and
-   warehouse* counts (a different warehouse on the same host does not). Only prompt on
-   `CREDENTIAL_MISSING`. Then
+   warehouse* counts (a different warehouse on the same host does not). Prompt for a sign-in on
+   `CREDENTIAL_MISSING`; on an exit-3 token, settle the window on screen (wait/cancel a running
+   refresh, act on the prompt a `DIALOG_NEEDS_HUMAN` shows, inspect an unreadable/unrecognized one)
+   and re-probe. Then
    confirm data actually flows with the skill's `scripts/probe_desktop_query.py --pid <pid>` (one-row DAX probe
    against the Desktop local AS -> `PREFLIGHT: DATA_OK`). This one-row query is the definitive local
    gate: it proves creds + reachability + valid M together, without publishing anything.

@@ -29,15 +29,20 @@ parse_tableau.py  ──►  GATE ARMED           writes are denied on <migratio
                        THE MEASUREMENT      sandbox, opens Power BI Desktop, refreshes, and
                               │             requires a real row back
                               ▼
-        ┌──────────────┬──────────────┬──────────────┬──────────────┬──────────────┐
-     DATA_OK      OPERATOR_REQ   NO_CREDENTIAL   UNREACHABLE      ERROR        SKIPPED
-        │              │              │               │              │              │
-   gate lifts     STOP; run      STOP, ask a      STOP, report   STOP, local    no live source;
-   (probe-        the PBIP in    human to sign    the address/   tooling fault  nothing to prove
-    cleared);     Desktop       in. No retry     network fault  — not a claim
-   build for      manually       conjures a       Nobody needs   about the
-   real                          credential       to sign in     source
+        ┌─────────────┬────────────────┬──────────────┬─────────────┬─────────┬───────┐
+        ▼             ▼                ▼              ▼             ▼         ▼       ▼
+     DATA_OK  OPERATOR_REQUIRED  NO_CREDENTIAL  ACCESS_DENIED  UNREACHABLE  ERROR  SKIPPED
 ```
+
+| Verdict | What it means | What happens next |
+|---|---|---|
+| `DATA_OK` | Power BI returned a real row. | The gate lifts (`probe-cleared`); build for real. |
+| `OPERATOR_REQUIRED` | Custom SQL / cost / modal risk needs a human Desktop refresh. | STOP; run the PBIP in Desktop manually. |
+| `NO_CREDENTIAL` | Positive authentication evidence: Power BI has no credential, or the one it has was rejected. | STOP; ask a human to sign in. No retry conjures a credential. |
+| `ACCESS_DENIED` | The classifier matched **access-denial-shaped** text (`403` / forbidden / access denied / permission denied / insufficient privilege / not authorized) in the refresh error, ahead of any credential marker. It does **not** establish that authentication succeeded, that the failure is permission-only, or that signing in again cannot help: the markers are bare, so `403 Unauthorized: authentication failed` and `403 Forbidden: access token revoked` both land here. | STOP; the gate stays armed. **Unchanged retry is not useful** — read the redacted detail and change what the source actually named: the credential or token when it speaks of authentication or an expired/revoked token, the permission or object grant when it names a principal, a grant or an object. Do not relabel it a timeout or a transient error. |
+| `UNREACHABLE` | Address/network/spec fault. | STOP; report the address/path. Nobody needs to sign in. |
+| `ERROR` | Local tooling fault, or an unclassified failure (including a refresh timeout with no authentication evidence). | STOP; it is not a claim about the source. Fix the tooling/evidence and re-probe. |
+| `SKIPPED` | No live source. | Record the skip and continue. |
 
 **The probe must go *through* Power BI.** A shell query (`sqlcmd`, a Python driver) authenticates as
 the *agent*, while Power BI uses Desktop's per-user credential store — so a shell probe can pass
@@ -269,8 +274,10 @@ Three properties are load-bearing:
   would kill a legitimately cold-starting warehouse. Each unit is probed once; a missing credential is
   a final answer, never retried.
 - **It reports ground truth, honestly.** Per unit: `newly-earned`, `still-blocked` (with
-  `NO_CREDENTIAL` — a human must sign in — kept distinct from `UNREACHABLE`, a spec/DNS fix that needs
-  no sign-in), `anomaly`, `errored`, `skipped`. Exit `0` clean / `1` still blocked / `2` usage / `3`
+  `NO_CREDENTIAL` — a human must sign in — kept distinct from `ACCESS_DENIED`, where the source
+  returned access-denial-shaped text and the operator must read the detail before deciding whether
+  the credential or the permission is what has to change, and from `UNREACHABLE`, a spec/DNS fix that
+  needs no sign-in), `anomaly`, `errored`, `skipped`. Exit `0` clean / `1` still blocked / `2` usage / `3`
   forged-override / `5` anomaly.
 
 > ⚠️ **Regression caveat the sweep surfaces (does not hide).** The single-unit probe now clears with
