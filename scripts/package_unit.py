@@ -380,6 +380,11 @@ EXIT_CANNOT_ASSESS = 6
 #: its own digest, because it is written last and would otherwise never match itself.
 MANIFEST_NAME = "package-manifest.json"
 
+#: The one package-relative name the dispatcher's migration brief is copied to (#562 S2). A fixed
+#: role name, never a discovered `*.md`: "the brief is present" must not be satisfiable by any other
+#: Markdown file a package happens to carry.
+BRIEF_NAME = "migration-brief.md"
+
 #: Refuse to copy a single source larger than this, rather than silently turning a handover folder
 #: into a data lake. Measured on estate run 408 the largest referenced extract is 1.33 MB and the
 #: whole estate is 11.2 MB, so nothing observed comes close - the ceiling exists so that an
@@ -715,6 +720,14 @@ def resolve_asset(bundle: Path, unit: str, handover: Any, assets_dir: Path | Non
     bytes were copied into the package as the customer's workbook - measured, with a clean exit 0
     and a manifest digest that said otherwise. A foreign-flavour staged path is skipped, and the
     name-based candidates below still resolve the asset where it actually is.
+
+    ⚠️ **The stem is compared with the engine's transfer-UUID prefix STRIPPED** (#562 S2). The
+    harvester writes `<luid>_<name><ext>` and the engine's `asset_name()` strips exactly that prefix
+    to derive the unit, so `<luid>_Sales.tdsx` is unit `Sales` - and an equality on the raw stem
+    matched neither. A workbook survived this because a handover slice names its file; a DATASOURCE
+    has no handover slice, so every datasource package shipped `artifacts.asset: null`, with no
+    source, no spec and nothing for a semantic build to start from. The route is still byte-checked
+    by :func:`assert_declared_digest`, which is what keeps it a resolution rather than a guess.
     """
     workbook = handover.get("workbook") if isinstance(handover, dict) else None
     source_id = workbook.get("source_id") if isinstance(workbook, dict) else None
@@ -727,7 +740,7 @@ def resolve_asset(bundle: Path, unit: str, handover: Any, assets_dir: Path | Non
     manifest = read_json(bundle / "input_manifest.json")
     staged_assets = manifest.get("assets") or [] if isinstance(manifest, dict) else []
     for asset in staged_assets:
-        if not isinstance(asset, dict) or PurePosixPath(leaf(str(asset.get("name") or ""))).stem != unit:
+        if not isinstance(asset, dict) or not _names_unit(str(asset.get("name") or ""), unit):
             continue
         staged = asset.get("staged_input_path")
         candidates = [Path(str(staged))] if staged and is_host_native(str(staged)) else []
@@ -740,6 +753,18 @@ def resolve_asset(bundle: Path, unit: str, handover: Any, assets_dir: Path | Non
             if candidate.is_file():
                 return candidate, "input_manifest.staged_input_path"
     return None, "unresolved"
+
+
+def _names_unit(declared: str, unit: str) -> bool:
+    """Whether a staged asset's own filename is the one the engine derived ``unit`` from.
+
+    Two spellings, both the engine's own: the raw stem, and the stem with a leading canonical-UUID
+    transfer prefix removed (`harvest_estate_assets.asset_path` writes it; the engine's
+    `strip_transfer_uuid` removes it). Nothing else - a partial, fuzzy or case-insensitive name match
+    would be a display-name join, and this repository does not admit one as an identity anywhere.
+    """
+    stem = PurePosixPath(leaf(declared)).stem
+    return unit in (stem, _LUID_PREFIX.sub("", stem, count=1))
 
 
 def declared_asset_digest(bundle: Path, name: str) -> str | None:
@@ -882,6 +907,81 @@ def workbook_identity(entries: list[dict[str, Any]], asset: Path | None) -> dict
 def _no_identity(reason: str) -> dict[str, Any]:
     """No usable workbook identity, carrying the precondition that failed."""
     return {"luid": None, "match": None, "workbook_name": None, "reason": reason}
+
+
+#: What a synthesized datasource provenance row records as its ``origin.match``: the packager hashed
+#: the bytes it copied, and that hash is the whole of the claim. Deliberately NOT `sha256`, which in
+#: `stamp_tableau_provenance.py`'s vocabulary means "the SERVER's copy hashed the same" - a stronger
+#: statement this packager is in no position to make.
+PACKAGED_BYTES_MATCH = "packaged_bytes"
+
+
+def datasource_identity(entries: list[dict[str, Any]], asset: Path | None) -> dict[str, Any]:
+    """The DATASOURCE LUID this package's bytes belong to, or a refusal naming why (#562 S2).
+
+    ⚠️ **A different namespace from :func:`workbook_identity`, and it must stay different.** A
+    datasource LUID and a workbook LUID are both canonical UUIDs and mean different objects; the
+    harvester prefixes a `.tds`/`.tdsx` with the DATASOURCE LUID (see :func:`filename_luid`), so this
+    is the one place that prefix is an identity rather than a cross-check. Feeding it into a
+    workbook-LUID comparison is a category error that fails OPEN if the namespaces ever collide,
+    which is why `package_role_identity` refuses a row carrying the other kind's field.
+
+    Two sources, in order: an upstream `source-provenance.json` row for these exact bytes, and the
+    filename prefix. They must agree; a disagreement is refused rather than resolved by whichever was
+    read first. A genuinely LOCAL `.tds` has neither, which is an absence, not a failure - the row is
+    still written, keyed by sha256 alone, and the server LUID is `not_applicable` downstream.
+    """
+    stamped = filename_luid(asset)
+    luids = {
+        str(entry["origin"]["datasource_luid"])
+        for entry in entries
+        if isinstance(entry.get("origin"), dict) and entry["origin"].get("datasource_luid")
+    }
+    if len(luids) > 1:
+        return _no_datasource_identity(f"source-provenance.json maps these bytes onto {len(luids)} datasource LUIDs")
+    recorded = next(iter(luids), None)
+    if recorded and stamped and stamped.casefold() != recorded.casefold():
+        return _no_datasource_identity(
+            "the asset filename declares one datasource LUID and source-provenance.json records "
+            "another for these bytes - two identities that disagree are LESS evidence than none"
+        )
+    luid = recorded or stamped
+    origin = next((entry["origin"] for entry in entries if isinstance(entry.get("origin"), dict)), {})
+    return {
+        "luid": luid,
+        "match": origin.get("match") or (PACKAGED_BYTES_MATCH if luid or asset else None),
+        "workbook_name": None,
+        "reason": None,
+    }
+
+
+def _no_datasource_identity(reason: str) -> dict[str, Any]:
+    """A refused datasource identity. Its provenance is SUPPRESSED, exactly as a workbook's is."""
+    return {"luid": None, "match": None, "workbook_name": None, "reason": reason}
+
+
+def datasource_provenance_rows(
+    entries: list[dict[str, Any]], asset: Path | None, identity: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """The one SHA-matching provenance row a datasource package ships.
+
+    ⚠️ **Synthesized only when nothing upstream stamped one, and only from bytes THIS packager
+    copied.** `stamp_tableau_provenance.py` walks workbooks, so a datasource unit reached packaging
+    with an empty `inputs` list and therefore no record at all of which bytes it was built from - the
+    identity every later gate joins on. What is recorded here is exactly what the packager can
+    establish first-hand: the packaged basename, the digest of the packaged file, and the datasource
+    LUID the harvester wrote into that filename. Nothing is inferred from a display name, and an
+    upstream row always wins.
+    """
+    if entries or asset is None or identity.get("reason"):
+        return entries
+    digest = sha256_of(asset)
+    if digest is None:
+        return []
+    origin: dict[str, Any] = {"match": identity.get("match") or PACKAGED_BYTES_MATCH}
+    if identity.get("luid"):
+        origin["datasource_luid"] = identity["luid"]
+    return [{"input": {"file": asset.name, "sha256": digest}, "origin": origin}]
 
 
 # --------------------------------------------------------------------------------------------
@@ -1539,6 +1639,7 @@ def render_handover(result: dict[str, Any], workbook: dict[str, Any] | None, pag
         f"UNIT name={_field(result['unit'])} kind={_field(result['kind'])} engine={_field(result.get('engine'))}",
         f"PACKAGE spec={_field(result['artifacts'].get('migration_spec'))} "
         f"source={_field(result['artifacts'].get('asset'))} "
+        f"brief={_field(result['artifacts'].get('migration_brief'))} "
         f"report={_field(result['artifacts'].get('report'))} model={_field(result['artifacts'].get('model'))}",
     ]
     body = handover_lines(workbook, pages) if workbook else ["PACKAGE_NOTE text=no handover slice for this unit"]
@@ -1605,6 +1706,7 @@ expected set is every dashboard PLUS every worksheet not placed on one.
 | `assets/` | the Tableau source this was built from |
 | `data/` | the rows the model imports, shipped with it (#461), reached through a `{package_root}` folder parameter in `expressions.tmdl` - see the binding command above. Absent when nothing was shipped - either the model imports nothing, or a source it names was unavailable when this was packaged, in which case that literal now reads `{unavailable}` rather than a path on the builder's machine and `package-manifest.json`'s `data_sources` says which, one line per source, repeated in `handover.md` as a `PACKAGE_NOTE`. |
 | `migration-spec.json` | the parsed source; the expected page set both gates grade against |
+| `migration-brief.md` | **what this migration is FOR**, copied from the dispatcher: scope, fidelity bar, autonomy, refresh strategy, and what was pre-authorized if we hit a wall. A copy, so it travels with the package; the dispatcher's own file stays authoritative and its path is deliberately not recorded here. Absent only when the packager was given none - `package-manifest.json`'s notes then say so. |
 | `migration-spec.schema.json` | the CONTRACT `validate_spec.py` enforces. Read it before appending a `limitations_encountered` entry: exactly `item`/`issue`/`severity`/`stage`, `additionalProperties: false`, so one invented field rejects every entry. |
 | `oracle/` | this unit's Tableau reference, split `dashboard/` vs `worksheet/` vs `unknown/` (**singular** - the directory is the object kind, not a plural). **`oracle/*/data/*.csv` is the NUMERIC oracle** - exact labels and figures, no OCR and no judgement. Read it first. |
 | `report.json` | **gate input, and readable.** The engine's classification of THIS unit - workbook vs datasource - which is what earns a datasource-only unit `NOT_APPLICABLE` instead of a finding. Scoped to this unit. |
@@ -2508,6 +2610,32 @@ def _write_spec_schema(dest: Path) -> tuple[str | None, str | None]:
     return SPEC_SCHEMA.name, None
 
 
+def _write_brief(brief: Path | None, dest: Path) -> tuple[str | None, str | None]:
+    """`(relative brief path, note)` - the dispatcher's brief, COPIED into the package (#562 S2).
+
+    ⚠️ **The bytes travel; the external path never does.** The brief the dispatcher writes lives
+    outside the package at `migrations/{workbooks,datasources}/<slug>/migration-brief.md` and is
+    git-ignored, so a stateless agent handed only the package could not read the one document that
+    says what this migration is FOR. The three cheaper answers were each rejected for a reason:
+    recording the external path is not self-contained and discloses a host location; recording only
+    a hash proves availability of nothing; and keeping it beside the run proves the dispatcher saw
+    it, not that the agent received it.
+
+    Copied rather than moved, so the dispatcher's copy stays authoritative, and named by a fixed
+    package-relative role so "the brief is present" cannot be satisfied by any other Markdown file
+    the package happens to carry.
+    """
+    if brief is None:
+        return None, (
+            f"no {BRIEF_NAME}: none was supplied, so this package does not carry the brief an agent "
+            "is expected to start from (pass --brief)"
+        )
+    if not brief.is_file():
+        return None, f"no {BRIEF_NAME}: the supplied brief is not a readable file"
+    shutil.copy2(brief, dest / BRIEF_NAME)
+    return BRIEF_NAME, None
+
+
 def _attach_oracle(oracle_dir: Path | None, identity: dict[str, Any], dest: Path, unit: str = "") -> dict[str, Any]:
     """This unit's slice of the flat capture, or an empty slice carrying the refusal reason."""
     oracle: dict[str, Any] = {"objects": [], "omissions": [], "route": None, "reason": None}
@@ -2549,6 +2677,7 @@ _SCAFFOLD_FILES = (
     "source-provenance.json",
     "engine-output-receipt.json",
     "migration-spec.json",
+    BRIEF_NAME,
     SPEC_SCHEMA.name,
 )
 
@@ -3080,6 +3209,7 @@ def package_unit(  # pylint: disable=too-many-arguments
     *,
     oracle_dir: Path | None,
     assets_dir: Path | None,
+    brief: Path | None = None,
     discard_edits: bool = False,
     limits: Limits | None = None,
 ) -> dict[str, Any]:
@@ -3142,7 +3272,9 @@ def package_unit(  # pylint: disable=too-many-arguments
             "Remove it and re-run that unit."
         )
     try:
-        result = _assemble_unit(bundle, unit, staging, final=final, oracle_dir=oracle_dir, assets_dir=assets_dir)
+        result = _assemble_unit(
+            bundle, unit, staging, final=final, oracle_dir=oracle_dir, assets_dir=assets_dir, brief=brief
+        )
         assert_assembled_fits(unit, staging, final, out_root, limits)
         replace_dir(staging, final, verify=None if discard_edits else partial(_refuse_if_edited, unit))
     except OSError as failure:
@@ -3508,8 +3640,15 @@ def _stage_handover(bundle: Path, unit: str, dest: Path) -> tuple[Any, list[str]
     return cleaned, redactions, None
 
 
-def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-many-positional-arguments
-    bundle: Path, unit: str, dest: Path, *, final: Path, oracle_dir: Path | None, assets_dir: Path | None
+def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-many-positional-arguments,too-many-statements
+    bundle: Path,
+    unit: str,
+    dest: Path,
+    *,
+    final: Path,
+    oracle_dir: Path | None,
+    assets_dir: Path | None,
+    brief: Path | None = None,
 ) -> dict[str, Any]:
     """Build one unit's package into ``dest``, which is always a fresh, empty directory.
 
@@ -3552,20 +3691,38 @@ def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
     # `<drive>:\Users\<account>\private\leak.log`. Containing at intake means every one of them is
     # fed a contained value, exactly as `package_oracle` is.
     entries = _contain_unsafe_strings(entries)[0]
-    identity = workbook_identity(entries, asset)
-    write_json(dest / "source-provenance.json", shippable_provenance(entries, identity, unit))
+    kind = unit_kind(unit, workbooks, datasources)
+    # ⚠️ **Two identity namespaces, chosen by the engine's own classification of this unit** (#562
+    # S2). A workbook's server identity is its workbook LUID and a datasource's is its datasource
+    # LUID; they are both canonical UUIDs and they mean different objects, so the branch is on kind
+    # rather than on whichever field happens to be populated. `oracle_identity` stays the WORKBOOK
+    # one - Tableau view renders are workbook evidence, and handing `select_views` a datasource LUID
+    # would compare across namespaces.
+    if kind == KIND_DATASOURCE:
+        identity = datasource_identity(entries, asset)
+        entries = datasource_provenance_rows(entries, asset, identity)
+        provenance = shippable_provenance(entries, identity, unit, suppress=bool(identity.get("reason")))
+        oracle_identity = _no_identity("a datasource unit has no Tableau views, so nothing is attributed to it")
+    else:
+        identity = workbook_identity(entries, asset)
+        provenance = shippable_provenance(entries, identity, unit)
+        oracle_identity = identity
+    write_json(dest / "source-provenance.json", provenance)
     write_json(dest / "report.json", scope_report(engine_report, unit))
     receipt = scope_receipt(read_json(bundle / "engine-output-receipt.json"), unit)
     if receipt is not None:
         write_json(dest / "engine-output-receipt.json", receipt)
 
-    oracle = _attach_oracle(oracle_dir, identity, dest, unit)
+    oracle = _attach_oracle(oracle_dir, oracle_identity, dest, unit)
     spec, spec_note = _write_spec(asset, dest)
     if spec_note:
         notes.append(spec_note)
     schema, schema_note = _write_spec_schema(dest)
     if schema_note:
         notes.append(schema_note)
+    packaged_brief, brief_note = _write_brief(brief, dest)
+    if brief_note:
+        notes.append(brief_note)
     if redactions:
         notes.append(
             f"redacted {len(redactions)} absolute host path(s) from the handover slice: {', '.join(redactions[:5])}"
@@ -3580,13 +3737,14 @@ def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
         )
     result = {
         "unit": unit,
-        "kind": unit_kind(unit, workbooks, datasources),
+        "kind": kind,
         "engine": ((receipt or {}).get("engine") or {}).get("version"),
         "packaged": report_name is not None or model_name is not None,
         "self_contained": bool(data_sources["self_contained"] and binding["resolves_in_package"]),
         "artifacts": {
             "migration_spec": spec,
             "migration_spec_schema": schema,
+            "migration_brief": packaged_brief,
             "asset": f"assets/{asset.name}" if asset else None,
             "asset_route": asset_route,
             "report": f"fabric/{report_name}" if report_name else None,
@@ -3777,6 +3935,7 @@ def _package_each(  # pylint: disable=too-many-arguments,too-many-positional-arg
     results: list[dict[str, Any]],
     refused: list[PackageEditsRefused],
     failed: list[PackagingError] | None = None,
+    brief: Path | None = None,
 ) -> None:
     """Package each unit, in deterministic order, collecting failures instead of stopping at one.
 
@@ -3811,6 +3970,7 @@ def _package_each(  # pylint: disable=too-many-arguments,too-many-positional-arg
                     out_root,
                     oracle_dir=oracle_dir,
                     assets_dir=assets_dir,
+                    brief=brief,
                     discard_edits=discard_edits,
                 )
             )
@@ -3839,6 +3999,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--unit", action="append", default=[], help="package only this unit (repeatable)")
     parser.add_argument("--oracle", type=Path, help="oracle capture holding oracle-manifest.json")
     parser.add_argument("--assets", type=Path, help="directory holding the harvested .twb/.twbx/.tds assets")
+    parser.add_argument(
+        "--brief",
+        type=Path,
+        help=(
+            "the dispatcher's migration-brief.md, copied into every package it writes. Its BYTES "
+            "travel; its path is never recorded, because a package that names a location on the "
+            "dispatcher's machine is neither self-contained nor safe to share"
+        ),
+    )
     parser.add_argument("--json", type=Path, help="write the machine-readable packaging report here")
     parser.add_argument("--quiet", action="store_true", help="suppress the rendered summary")
     parser.add_argument(
@@ -3969,6 +4138,10 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
         parser.error(f"--bundle {args.bundle} is not a directory")
     oracle_dir = args.oracle.resolve() if args.oracle else discover_dir(bundle, ("oracle", "_oracle"))
     assets_dir = args.assets.resolve() if args.assets else discover_dir(bundle, ("assets",))
+    if args.brief is not None and not args.brief.is_file():
+        # Fail on the command line rather than in a per-unit note: a mistyped --brief would
+        # otherwise write a whole estate of packages that all silently lack the brief.
+        parser.error(f"--brief {args.brief} is not a file")
 
     available = bundle_units(bundle)
     units = args.unit or available
@@ -3989,7 +4162,16 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
     packageable, budgets = _measure_unit_budgets(bundle, requested, out_root, assets_dir, failed)
     _warn_shipping(budgets)
     _package_each(
-        packageable, bundle, out_root, oracle_dir, assets_dir, args.discard_package_edits, results, refused, failed
+        packageable,
+        bundle,
+        out_root,
+        oracle_dir,
+        assets_dir,
+        args.discard_package_edits,
+        results,
+        refused,
+        failed,
+        brief=args.brief.resolve() if args.brief else None,
     )
     gaps = partition_gaps(requested, results, failed, refused)
 

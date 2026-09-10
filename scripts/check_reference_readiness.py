@@ -55,6 +55,13 @@ drop explanation must match in KIND as well as name, the cryptographic page-iden
 collision limit, the evidence scope table, and the grade ceiling.
 """
 
+# pylint: disable=too-many-lines
+# ⚠️ Over the 1,400-line budget by design of the ENTRY gate's composition, not by accretion: this
+# module now folds four typed authorities (boundary, package bytes, package roles/identity, evidence
+# and grade) into one verdict, and each of the first three lives in its own module. Splitting the
+# fold itself would create a second place a verdict is decided, which is the defect the composition
+# exists to remove.
+
 from __future__ import annotations
 
 import argparse
@@ -71,6 +78,11 @@ from bundle_corpus import TargetClassification, classify_target, evidence_dirs, 
 import object_identity as oid
 from object_identity import AMBIGUOUS
 from package_filesystem import PackageFilesystemResult, verify_package
+from package_role_identity import (
+    Phase1RoleIdentityResult,
+    VerifiedPackage,
+    verify_phase1_role_identity,
+)
 from reference_evidence import (
     MANUAL_KIND_HINT,
     CAP_VALIDATION,
@@ -949,13 +961,75 @@ def _damaged_package(
     return report
 
 
-def scan(
+def _role_identity_block(
+    classification: TargetClassification, roles: Phase1RoleIdentityResult, ordinal: int = 0
+) -> dict[str, Any]:
+    """One target's typed role/identity result, addressed exactly as the integrity block is.
+
+    ⚠️ Same schema shape and same reason: a LIST, always present, one entry per target whose roles
+    were actually assessed. A field written only on refusal makes "this is not a package" and "this
+    package's roles all resolved" share one representation, and a merge across several targets then
+    silently keeps the first.
+    """
+    return {"ordinal": ordinal, "unit": roles.unit or classification.unit_name or "target", **roles.as_dict()}
+
+
+def _role_blocked(
+    root: Path,
+    classification: TargetClassification,
+    integrity: PackageFilesystemResult | None,
+    roles: Phase1RoleIdentityResult,
+) -> dict[str, Any]:
+    """The verdict for a package whose required roles or identity claims do not hold (#562 S2).
+
+    ⚠️ **FINDINGS, not CANNOT_ESTABLISH, and the difference is real.** S1 refuses because the package
+    cannot be described at all; here it describes itself perfectly well and what it describes is
+    wrong - a role nobody declared, a LUID that contradicts another, a provider that does not exist.
+    That is a defect an operator fixes, so it is reported as one; either way it is not a pass, and
+    no evidence is collected for it, because attribution to a unit whose identity does not hold is
+    exactly the thing that must not be produced.
+
+    Same privacy rule as every other refusal here: stable codes only, never a host path, never
+    customer text.
+    """
+    unit = roles.unit or classification.unit_name or root.name or "target"
+    codes = ", ".join(roles.codes()) or roles.verdict
+    detail = (
+        f"role/identity BLOCKED: {codes} - this package's required roles or identity claims do not "
+        "hold, so nothing found in it can be attributed to the unit it names and this gate forms NO "
+        "opinion about its pages, which is NOT a pass"
+    )
+    report = _merge(root, [UnitResult(unit=unit, status=STATUS_FINDINGS, detail=detail)], [], [])
+    if integrity is not None:
+        report["package_integrity"] = [_integrity_block(classification, integrity)]
+    report["role_identity"] = [_role_identity_block(classification, roles)]
+    return report
+
+
+@dataclass(frozen=True)
+class _Prechecked:
+    """The boundary/integrity/role answers for ONE target, computed before any target is scanned.
+
+    ⚠️ ``root`` is carried so :func:`scan` can prove the answers are about the path it was handed.
+    The cohort is assembled in :func:`main`, and a positional mix-up there would otherwise apply one
+    package's clearance to another - the exact substitution `VerifiedPackage` exists to prevent one
+    layer down.
+    """
+
+    root: Path
+    classification: TargetClassification
+    integrity: PackageFilesystemResult | None
+    roles: Phase1RoleIdentityResult | None
+
+
+def scan(  # pylint: disable=too-many-arguments
     root: Path,
     *,
     explicit_source: Path | None = None,
     reference_dir: Path | None = None,
     oracle_dir: Path | None = None,
     require_validation_grade: bool = False,
+    prechecked: _Prechecked | None = None,
 ) -> dict[str, Any]:
     """Assess every shipping report under ``root``.
 
@@ -973,16 +1047,31 @@ def scan(
     by finding an asset the manifest never accounted for. The classification is CONSUMED here, not
     recomputed - a damaged boundary was already refused above and is never reinterpreted.
 
-    A safe, clean package continues into the current behaviour completely unchanged, and records its
-    clean verification in ``package_integrity`` so that field answers "was this assessed?" as well as
-    "what was wrong?".
+    ⚠️ **Then its ROLES and IDENTITY, still before any discovery** (S2). Intact bytes are not a
+    unit: a package can hash perfectly while declaring no source role, carrying a LUID that
+    contradicts its own provenance, or naming a published datasource no supplied package provides.
+    Such a package is refused as ``FINDINGS`` before evidence is collected, because a render
+    attributed to a unit whose identity does not hold is worse than no render at all.
+
+    ``prechecked`` carries the cohort answer :func:`main` computed for THIS root - roles are a
+    property of the SET of packages, so a published consumer cannot be judged one target at a time.
+    It is used only when it is bound to this same root; otherwise everything is recomputed here, and
+    a single-target invocation is simply a cohort of one.
+
+    A safe, clean, role-resolved package continues into the current behaviour completely unchanged,
+    and records both verifications in ``package_integrity`` and ``role_identity`` so those fields
+    answer "was this assessed?" as well as "what was wrong?".
     """
-    classification = classify_target(root)
+    checked = prechecked if prechecked is not None and prechecked.root == root else _precheck(root)
+    classification = checked.classification
     if not classification.is_safe:
         return _unsafe_target(root, classification)
-    integrity = verify_package(root, classification) if classification.declares_self_contained else None
+    integrity = checked.integrity
     if integrity is not None and not integrity.is_clean:
         return _damaged_package(root, classification, integrity)
+    roles = checked.roles
+    if roles is not None and not roles.is_start_ready:
+        return _role_blocked(root, classification, integrity, roles)
     report = _scan_safe_target(
         root,
         explicit_source=explicit_source,
@@ -992,7 +1081,55 @@ def scan(
     )
     if integrity is not None:
         report["package_integrity"] = [_integrity_block(classification, integrity)]
+    if roles is not None:
+        report["role_identity"] = [_role_identity_block(classification, roles)]
     return report
+
+
+def _precheck(root: Path, classification: TargetClassification | None = None) -> _Prechecked:
+    """Boundary, then bytes, then roles - for one target, as a cohort of one."""
+    classification = classify_target(root) if classification is None else classification
+    if not classification.is_safe or not classification.declares_self_contained:
+        return _Prechecked(root, classification, None, None)
+    integrity = verify_package(root, classification)
+    if not integrity.is_clean:
+        return _Prechecked(root, classification, integrity, None)
+    cleared = VerifiedPackage(root=root, classification=classification, integrity=integrity)
+    roles = verify_phase1_role_identity([root], verified=[cleared])[0]
+    return _Prechecked(root, classification, integrity, roles)
+
+
+def _precheck_cohort(paths: list[Path]) -> list[_Prechecked]:
+    """Boundary, then bytes, then roles across EVERY supplied target, in that order.
+
+    ⚠️ The role verifier is invoked **once**, over the whole cohort, and only for the packages S1
+    passed. That is what lets a published consumer and its provider be judged in one command:
+    ``check_reference_readiness.py <provider> <consumer>`` is still one operator action, and a
+    consumer supplied alone is refused rather than assumed to have a provider somewhere.
+    """
+    classifications = [classify_target(path) for path in paths]
+    integrities: list[PackageFilesystemResult | None] = [
+        verify_package(path, classification)
+        if classification.is_safe and classification.declares_self_contained
+        else None
+        for path, classification in zip(paths, classifications, strict=True)
+    ]
+    cohort = [
+        VerifiedPackage(root=path, classification=classification, integrity=integrity)
+        for path, classification, integrity in zip(paths, classifications, integrities, strict=True)
+        if integrity is not None and integrity.is_clean
+    ]
+    verdicts = dict(
+        zip(
+            [str(entry.root) for entry in cohort],
+            verify_phase1_role_identity([entry.root for entry in cohort], verified=cohort),
+            strict=True,
+        )
+    )
+    return [
+        _Prechecked(path, classification, integrity, verdicts.get(str(path)))
+        for path, classification, integrity in zip(paths, classifications, integrities, strict=True)
+    ]
 
 
 def _scan_safe_target(
@@ -1058,6 +1195,10 @@ def _merge(
         # verified clean" are distinguishable rather than both being an absent key. `scan` fills it;
         # `_merge_scans` concatenates every target's, which is what a first-report-wins merge lost.
         "package_integrity": [],
+        # One block per target whose ROLES and identity were assessed (#562 S2). Same shape and same
+        # reason as the field above: it says "assessed, and this is what was found", so an absent
+        # entry means "not a package" rather than "a package with nothing wrong".
+        "role_identity": [],
         "units_scanned": len(units),
         "units_ready": sum(1 for unit in units if unit.status == STATUS_READY),
         "units_not_applicable": sum(1 for unit in units if unit.status == STATUS_NOT_APPLICABLE),
@@ -1263,6 +1404,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.source is not None and not args.source.is_file():
             parser.error(f"--source {args.source} is not a file")
 
+    # ⚠️ The whole cohort is pre-checked HERE, in one pass, before any target is scanned: roles and
+    # published-provider closure are properties of the SET, so judging them one target at a time
+    # would make `<provider> <consumer>` mean something different from two separate commands.
+    prechecked = _precheck_cohort(list(args.paths))
     reports = [
         refusals.get(index)
         or scan(
@@ -1271,6 +1416,7 @@ def main(argv: list[str] | None = None) -> int:
             reference_dir=args.reference,
             oracle_dir=args.oracle,
             require_validation_grade=args.require_validation_grade,
+            prechecked=prechecked[index],
         )
         for index, path in enumerate(args.paths)
     ]
@@ -1315,6 +1461,11 @@ def _merge_scans(reports: list[dict[str, Any]]) -> dict[str, Any]:
         {**block, "ordinal": index}
         for index, report in enumerate(reports)
         for block in report.get("package_integrity", [])
+    ]
+    # Same concatenation, same reason (#562 S2): a clean first package must not hide a second one
+    # whose roles do not hold, and two blocked packages must keep BOTH sets of codes.
+    merged["role_identity"] = [
+        {**block, "ordinal": index} for index, report in enumerate(reports) for block in report.get("role_identity", [])
     ]
     for key, value in reports[0].items():
         if isinstance(value, bool) or not isinstance(value, int):

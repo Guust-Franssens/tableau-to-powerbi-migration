@@ -42,7 +42,7 @@ is precisely the failure this gate exists to prevent.
 | exit | status | meaning |
 |---|---|---|
 | 0 | `READY` / `NOT_APPLICABLE` | every expected page has usable, attributable evidence — or the unit is a datasource-only migration with no Tableau views at all |
-| 1 | `FINDINGS` | a page is blind, its evidence is unusable/unattributable/stale, it was dropped with no engine explanation, its grade is below the required bar, or a workbook shipped no report |
+| 1 | `FINDINGS` | a page is blind, its evidence is unusable/unattributable/stale, it was dropped with no engine explanation, its grade is below the required bar, a workbook shipped no report, **or a package's required roles / identity claims do not hold** (#562 S2) |
 | 2 | — | usage error (argparse). A missing path never produces a verdict |
 | 3 | `CANNOT_ESTABLISH` | the expectation or the page mapping could not be derived, so the gate has no opinion — **do not read that as a pass** |
 
@@ -313,6 +313,74 @@ Direct tests are `tests/test_package_filesystem.py`; `tests/mutation_package_fil
 each anchor asserts the **named** guard rather than any fail-closed refusal — several mutations leave
 the package non-clean for a different reason, which is exactly what a "not clean" assertion would
 have missed.
+
+---
+
+## Required roles and cross-artifact identity (issue #562, slice S2)
+
+Intact bytes are not a migration unit. A package can hash perfectly while declaring no source role,
+carrying a Tableau LUID that contradicts its own provenance, shipping a render no record accounts
+for, or naming a published datasource that no supplied package provides. So after S1 and **still
+before any evidence is collected or any page derived**, every package the invocation names is
+verified by `scripts/package_role_identity.py`.
+
+It asks one question: does this package carry exactly the roles its **kind** and **topology** require,
+and do the identity claims those roles make agree? Each role is `resolved`, an **earned**
+`not_applicable`, or one of `missing` / `ambiguous` / `mismatch`. Only the first two pass.
+
+| topology | how it is decided | model role | evidence roles |
+|---|---|---|---|
+| `owned_model` | a workbook whose spec declares no published datasource | exactly 1 `.SemanticModel` | reference and/or oracle, at least one resolved |
+| `standalone_datasource` | a datasource no cohort consumer depends on | exactly 1 `.SemanticModel` | earned `not_applicable` |
+| `published_provider` | a datasource a cohort consumer resolves to | exactly 1 `.SemanticModel` | earned `not_applicable` |
+| `published_consumer` | a workbook whose spec declares a published datasource | **0 owned models** — it reuses the provider's | reference and/or oracle |
+
+Kind comes from the engine's own `report.json`, never from the filesystem: a datasource package may
+legitimately emit a self-service `.Report`, and that does not make it a workbook.
+
+⚠️ **A role is a DECLARATION the bytes confirm, never a discovery.** Deleting `artifacts.asset` while
+the file stays in `assets/` is `missing` — the file is not rediscovered by scanning the directory, by
+reading the handover slice's `source_id`, or by matching a display name. That rediscovery is the
+fail-open this slice closes: measured on the audited master, exactly that package returned `READY
+4/4`, exit 0.
+
+⚠️ **Identity is hierarchical, and a weaker axis never replaces an available stronger one.** The
+source SHA-256 (S1-verified) joins asset → provenance row → spec filename. The Tableau LUID, when one
+exists, must agree across provenance, the harvester's `<luid>_<name>` filename prefix and every
+oracle view. The two LUID namespaces are **typed**: a datasource LUID in a workbook's provenance is a
+category error, not a spelling difference. A published consumer resolves to its provider by
+datasource LUID first and by the exact `<site>/<name>` published key only when a LUID is genuinely
+unavailable on both sides; `bound_datasource`, `published_ds_name`, folder stems and captions are
+diagnostics and admit nothing.
+
+⚠️ **A cohort, because a consumer cannot prove its provider alone.** The verifier takes the whole
+invocation, so `check_reference_readiness.py <provider-package> <consumer-package>` — still one
+operator command — is what closes a shared-datasource pair. A consumer supplied on its own is
+BLOCKED, because "I cannot see a provider" and "there is no provider" are the same answer from one
+package.
+
+**Earned limitations** do not convert a role state; they record why one is `not_applicable`:
+
+- `local_source_no_server_luid` — a genuinely local `.twb`/`.tds`: SHA, filename and spec agree and
+  there is no server LUID to agree with;
+- `brief_policy_not_parsed` — the packaged `migration-brief.md` carries no strict `+++` TOML
+  frontmatter, so only its presence and its bytes are established here. S2 checks brief **identity**
+  (`unit`, and `scope` against the topology) and deliberately nothing else: reading policy out of
+  free-form Markdown would make wording into a gate. The typed policy object is a `START_READY`
+  prerequisite, not something inferred.
+
+**Failing S2 is `FINDINGS`, exit 1 — not `CANNOT_ESTABLISH`.** S1 refuses because the package cannot
+be described at all; here it describes itself perfectly well and what it describes is wrong, which is
+a defect an operator fixes. Either way no evidence is collected and it is not a pass.
+
+The JSON verdict carries `role_identity`: the same list-of-blocks shape as `package_integrity`, one
+per assessed package, each with the target `ordinal`, the safe `unit` label, the per-role states, the
+source identity, the resolved dependencies and the stable blocker codes. It returns **no source
+`Path`** and performs no source search — that is #558 — and it writes nothing into any package.
+
+Direct tests are `tests/test_package_role_identity.py`, which asserts a named **role and state** for
+every control rather than a bare "not clean"; the producer half is in `tests/test_package_unit.py`
+and `tests/test_package_unit_gates.py`.
 
 ---
 

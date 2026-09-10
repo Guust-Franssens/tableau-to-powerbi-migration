@@ -22,11 +22,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import struct
 import subprocess
 import sys
 import zlib
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -35,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import bundle_corpus  # noqa: E402  # pylint: disable=wrong-import-position
 import check_reference_readiness as crr  # noqa: E402  # pylint: disable=wrong-import-position
 import package_filesystem  # noqa: E402  # pylint: disable=wrong-import-position
+import package_role_identity  # noqa: E402  # pylint: disable=wrong-import-position
 
 # Page ids observed in the real engine bundle
 # `_runs/406-meridian-smoke-2-339-0-20260901/bundle/pbip/Meridian Revenue by Region/...`,
@@ -94,9 +97,14 @@ def write_workbook(path: Path, *, worksheets: list[str], dashboards: dict[str, l
     return path
 
 
-def write_report(root: Path, unit: str, page_ids: list[str]) -> Path:
-    """A PBIR report shipping the given page ids under ``<root>/pbip/<unit>/<unit>.Report``."""
-    report = root / "pbip" / unit / f"{unit}.Report"
+def write_report(root: Path, unit: str, page_ids: list[str], *, base: str = "pbip") -> Path:
+    """A PBIR report shipping the given page ids under ``<root>/<base>/<unit>.Report``.
+
+    ``base`` is ``pbip`` for an engine bundle and ``fabric`` for a handover package - the packager
+    copies `pbip/<Unit>/` to `fabric/`, and `bundle_corpus.shipping_reports` scans `pbip/` in
+    preference when it exists, so a fixture carrying both would be a shape nothing produces.
+    """
+    report = root / base / unit / f"{unit}.Report" if base == "pbip" else root / base / f"{unit}.Report"
     pages = report / "definition" / "pages"
     pages.mkdir(parents=True, exist_ok=True)
     (pages / "pages.json").write_text(json.dumps({"pageOrder": page_ids}), encoding="utf-8")
@@ -266,13 +274,18 @@ def bundle_fixture(tmp_path: Path) -> Path:
     return root
 
 
-def write_package_manifest(package: Path, *, files: dict[str, str] | None = None) -> Path:
+def write_package_manifest(package: Path, *, files: dict[str, str] | None = None, **manifest: Any) -> Path:
     """Give a package the truthful `contents.files` map its producer would have written.
 
     The entry gate now verifies that map before it reads any evidence (issue #562 S1), so a package
     fixture whose marker is an empty `{}` is a DAMAGED package rather than a shorthand for "this is a
     package". Every fixture below that must reach the current behaviour therefore declares its own
     bytes. The manifest excludes itself, exactly as `package_unit.py` does.
+
+    ``manifest`` carries the rest of the producer's record - `unit`, `kind`, `artifacts`,
+    `model_binding` - which S2 reads as this package's ROLE declarations. A fixture that omits them
+    is a package that declares no roles, which is a legitimate (and blocked) shape rather than a
+    shorthand for a complete one.
     """
     if files is None:
         files = {
@@ -281,8 +294,100 @@ def write_package_manifest(package: Path, *, files: dict[str, str] | None = None
             if path.is_file() and path.name != bundle_corpus.PACKAGE_MARKER
         }
     marker = package / bundle_corpus.PACKAGE_MARKER
-    marker.write_text(json.dumps({"unit": package.name, "contents": {"files": files}}, indent=2), encoding="utf-8")
+    payload = {"unit": package.name, **manifest, "contents": {"files": files}}
+    marker.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return marker
+
+
+def build_package(  # pylint: disable=too-many-locals
+    package: Path,
+    unit: str,
+    *,
+    worksheets: list[str],
+    dashboards: dict[str, list[str]] | None = None,
+    oracle_views: list[dict] | None = None,
+    luid: str | None = UNIT_LUID,
+) -> str:
+    """A ROLE-COMPLETE package: `build_unit`'s bundle content plus every role #562 S2 requires.
+
+    Returns the source sha256, exactly as :func:`build_unit` does.
+
+    ⚠️ Written as one builder rather than sprinkled through the fixtures on purpose. The entry gate
+    now composes three questions - boundary, bytes, roles - and a fixture that answers only the
+    first two is not "a package"; it is a package that would be refused, which makes it useless as
+    the positive control the tests below need. Each negative control turns exactly ONE of these
+    knobs off, so what it proves stays legible.
+    """
+    package.mkdir(parents=True, exist_ok=True)
+    (package.parent / "assets").mkdir(parents=True, exist_ok=True)
+    sha = build_unit(package, unit, worksheets=worksheets, dashboards=dashboards, luid=luid, base="fabric")
+
+    asset = package.parent / "assets" / f"{unit}.twb"
+    (package / "assets").mkdir(exist_ok=True)
+    shutil.copy2(asset, package / "assets" / asset.name)
+    (package / "migration-spec.json").write_text(
+        json.dumps({"source": {"file_name": asset.name}, "data_sources": []}), encoding="utf-8"
+    )
+    (package / "migration-spec.schema.json").write_text(json.dumps({"$id": "migration-spec"}), encoding="utf-8")
+    (package / "migration-brief.md").write_text(
+        f'+++\nschema = "phase1-start-ready/v1"\nunit = "{unit}"\nscope = "model_and_report"\n+++\n\nMigrate it.\n',
+        encoding="utf-8",
+    )
+    _stamp_scope(package / "report.json", unit)
+    _stamp_scope(package / "source-provenance.json", unit)
+    _stamp_scope(package / "handover" / f"{unit}.json", unit)
+
+    model = package / "fabric" / f"{unit}.SemanticModel" / "definition"
+    model.mkdir(parents=True, exist_ok=True)
+    (model / "model.tmdl").write_text("model Model\n", encoding="utf-8")
+    (package / "fabric" / f"{unit}.Report" / "definition.pbir").write_text(
+        json.dumps({"version": "4.0", "datasetReference": {"byPath": {"path": f"../{unit}.SemanticModel"}}}),
+        encoding="utf-8",
+    )
+    (package / "fabric" / f"{unit}.pbip").write_text(json.dumps({"version": "1.0"}), encoding="utf-8")
+    (package / "engine-output-receipt.json").write_text(
+        json.dumps(
+            {
+                "engine": {"version": "2.339.0"},
+                "artifacts": [
+                    {"path": path.relative_to(package).as_posix()}
+                    for path in sorted((package / "fabric").rglob("*"))
+                    if path.is_file()
+                ],
+                "scope": {"unit": unit},
+            }
+        ),
+        encoding="utf-8",
+    )
+    if oracle_views is not None:
+        write_oracle(package, oracle_views)
+    return sha
+
+
+def seal_package(package: Path, unit: str) -> Path:
+    """Write the manifest LAST, declaring every role and every byte now in ``package``."""
+    return write_package_manifest(
+        package,
+        unit=unit,
+        kind="workbook",
+        artifacts={
+            "migration_spec": "migration-spec.json",
+            "migration_spec_schema": "migration-spec.schema.json",
+            "migration_brief": "migration-brief.md",
+            "asset": f"assets/{unit}.twb",
+            "report": f"fabric/{unit}.Report",
+            "model": f"fabric/{unit}.SemanticModel",
+            "handover": f"handover/{unit}.json",
+        },
+        model_binding={"kind": "byPath", "path": f"../{unit}.SemanticModel", "resolves_in_package": True},
+    )
+
+
+def _stamp_scope(path: Path, unit: str) -> None:
+    """Add the packager's own `scope.unit` stamp - the claim that this artifact is THIS unit's."""
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["scope"] = {"unit": unit}
+    path.write_text(json.dumps(payload), encoding="utf-8")
 
 
 def build_unit(  # pylint: disable=too-many-arguments
@@ -295,6 +400,7 @@ def build_unit(  # pylint: disable=too-many-arguments
     viz_fidelity: list[dict] | None = None,
     pbip_warnings: list[str] | None = None,
     luid: str | None = UNIT_LUID,
+    base: str = "pbip",
 ) -> str:
     """Wire a complete workbook unit and return its source sha256, which evidence must carry."""
     source = write_workbook(bundle.parent / "assets" / f"{unit}.twb", worksheets=worksheets, dashboards=dashboards)
@@ -302,7 +408,7 @@ def build_unit(  # pylint: disable=too-many-arguments
     write_handover(bundle, unit, source_id=str(source), viz_fidelity=viz_fidelity, pbip_warnings=pbip_warnings)
     if page_ids is None:
         page_ids = [obj.page_id for obj in crr.source_objects(source) or []]
-    write_report(bundle, unit, page_ids)
+    write_report(bundle, unit, page_ids, base=base)
     digest = hashlib.sha256(source.read_bytes()).hexdigest()
     if luid is not None:
         (bundle / "source-provenance.json").write_text(
@@ -1277,15 +1383,17 @@ def test_a_packaged_unit_reads_only_its_own_manifest_end_to_end(tmp_path: Path) 
     directory produces; the ancestor copy is the one that must be ignored.
     """
     package = tmp_path / "run" / "unit"
-    package.mkdir(parents=True)
-    (tmp_path / "assets").mkdir()
-    sha = build_unit(package, "WB", worksheets=["Revenue Trend"])
+    sha = build_package(
+        package,
+        "WB",
+        worksheets=["Revenue Trend"],
+        oracle_views=[{"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_luid": UNIT_LUID}],
+    )
     view = {"view_name": "Revenue Trend", "view_type": "worksheet", "workbook_luid": UNIT_LUID}
-    write_oracle(package, [view])
     write_oracle(tmp_path / "run", [view])
     assert crr.scan(package)["units"][0]["pages"][0]["readiness"] == "unverifiable"
 
-    write_package_manifest(package)
+    seal_package(package, "WB")
 
     report = crr.scan(package)
     assert report["units"][0]["pages"][0]["readiness"] == "ready"
@@ -1659,16 +1767,18 @@ def test_a_SAFE_package_continues_into_the_current_behaviour_unchanged(tmp_path:
     """The classifier is a precondition, not a new verdict: an intact package still reports READY.
 
     ⚠️ This is the vacuity control for every block above. Without it, classifying EVERYTHING as
-    unsafe would satisfy them all - and, since #562 S1, refusing every package on integrity grounds
-    would too. The manifest here is TRUTHFUL, so both preconditions are satisfied and the gate must
-    behave exactly as it did before either was added.
+    unsafe would satisfy them all - and, since #562, refusing every package on integrity or
+    role/identity grounds would too. This package is TRUTHFUL and role-complete, so all three
+    preconditions are satisfied and the gate must behave exactly as it did before any were added.
     """
     unit = tmp_path / "run" / "packages" / "Minimal"
-    unit.mkdir(parents=True)
-    (tmp_path / "run" / "packages" / "assets").mkdir()
-    build_unit(unit, "Minimal", worksheets=["Revenue"])
-    write_oracle(unit, [{"view_name": "Revenue", "view_type": "worksheet", "workbook_luid": UNIT_LUID}])
-    write_package_manifest(unit)
+    build_package(
+        unit,
+        "Minimal",
+        worksheets=["Revenue"],
+        oracle_views=[{"view_name": "Revenue", "view_type": "worksheet", "workbook_luid": UNIT_LUID}],
+    )
+    seal_package(unit, "Minimal")
 
     report = crr.scan(unit)
 
@@ -1677,6 +1787,7 @@ def test_a_SAFE_package_continues_into_the_current_behaviour_unchanged(tmp_path:
     # A clean package RECORDS its verification rather than leaving the field absent: "not a package"
     # and "a package that verified clean" must not share one representation.
     assert [block["status"] for block in report["package_integrity"]] == [package_filesystem.STATUS_CLEAN]
+    assert [block["verdict"] for block in report["role_identity"]] == ["START_READY"]
 
 
 # --------------------------------------------------------------------------------------------
@@ -1691,13 +1802,20 @@ def test_a_SAFE_package_continues_into_the_current_behaviour_unchanged(tmp_path:
 
 
 def _packaged_unit(tmp_path: Path) -> Path:
-    """An intact, evidence-carrying package whose manifest describes exactly its own bytes."""
+    """An intact, ROLE-COMPLETE, evidence-carrying package describing exactly its own bytes.
+
+    Role-complete since #562 S2: the entry gate now refuses a package whose roles or identity do not
+    hold, so a fixture that only satisfied S1 would be refused for a reason these tests are not
+    about - and every S1 assertion below would then be vacuous.
+    """
     unit = tmp_path / "run" / "packages" / "Minimal"
-    unit.mkdir(parents=True)
-    (tmp_path / "run" / "packages" / "assets").mkdir()
-    build_unit(unit, "Minimal", worksheets=["Revenue"])
-    write_oracle(unit, [{"view_name": "Revenue", "view_type": "worksheet", "workbook_luid": UNIT_LUID}])
-    write_package_manifest(unit)
+    build_package(
+        unit,
+        "Minimal",
+        worksheets=["Revenue"],
+        oracle_views=[{"view_name": "Revenue", "view_type": "worksheet", "workbook_luid": UNIT_LUID}],
+    )
+    seal_package(unit, "Minimal")
     return unit
 
 
@@ -1817,11 +1935,13 @@ def test_a_DAMAGED_boundary_is_refused_by_the_classifier_and_never_reinterpreted
     assert bundle_corpus.CODE_PACKAGE_MARKER_MISSING in report["units"][0]["detail"]
 
 
-def test_a_package_whose_manifest_omits_ROLES_is_still_admitted_here(tmp_path: Path) -> None:
-    """The scope control at gate level: S1 judges bytes, not the role graph or identity.
+def test_a_package_whose_manifest_omits_ROLES_is_still_CLEAN_to_the_bytes_verifier(tmp_path: Path) -> None:
+    """The slice boundary, made observable: S1 judges BYTES, S2 judges the role graph.
 
-    Without it, this slice would be indistinguishable from a version that also enforces #562's
-    later invariants - and a reviewer could not tell which failures belong to which claim.
+    Both answers are taken on the same package, in one test, because that is what makes them
+    distinguishable: the manifest below describes its bytes perfectly (S1 clean) and declares no
+    roles at all (S2 blocked). A reviewer can therefore tell which invariant a future failure
+    belongs to, which a single merged verdict would hide.
     """
     unit = _packaged_unit(tmp_path)
     files = json.loads((unit / bundle_corpus.PACKAGE_MARKER).read_text(encoding="utf-8"))["contents"]["files"]
@@ -1832,7 +1952,136 @@ def test_a_package_whose_manifest_omits_ROLES_is_still_admitted_here(tmp_path: P
         encoding="utf-8",
     )
 
-    assert crr.scan(unit)["status"] == crr.STATUS_READY
+    classification = bundle_corpus.classify_target(unit)
+    assert package_filesystem.verify_package(unit, classification).status == package_filesystem.STATUS_CLEAN
+
+    report = crr.scan(unit)
+    assert report["status"] == crr.STATUS_FINDINGS
+    assert [block["status"] for block in report["package_integrity"]] == [package_filesystem.STATUS_CLEAN]
+    assert report["role_identity"][0]["verdict"] == "BLOCKED"
+
+
+# --------------------------------------------------------------------------------------------
+# Required roles and cross-artifact identity at ENTRY (issue #562, slice S2)
+#
+# S1 answers "do these bytes match the manifest". These answer the next question, and only that
+# one: are the roles this package's kind and topology require actually present and declared, and do
+# their stable identity claims agree? A package that fails is refused BEFORE any evidence is
+# collected, because a render attributed to a unit whose identity does not hold is worse than none.
+# The role matrix itself is tested directly in `tests/test_package_role_identity.py`; what belongs
+# here is the WIRING: the order, the cohort, and the shape of the verdict this gate renders.
+# --------------------------------------------------------------------------------------------
+
+
+def test_a_role_blocked_package_stops_before_resolve_and_discovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ORDER claim at the S2 hook: nothing downstream may fire for a package whose roles fail.
+
+    Evidence discovery and source resolution are exactly the steps that would otherwise "rescue" a
+    package by attributing renders to a unit it cannot prove it is.
+    """
+    unit = _packaged_unit(tmp_path)
+    manifest = json.loads((unit / bundle_corpus.PACKAGE_MARKER).read_text(encoding="utf-8"))
+    manifest["artifacts"]["asset"] = None
+    (unit / bundle_corpus.PACKAGE_MARKER).write_text(json.dumps(manifest), encoding="utf-8")
+
+    report, continued = _scan_forbidding_discovery(unit, monkeypatch)
+
+    assert continued == "", continued
+    assert report is not None
+    assert report["status"] == crr.STATUS_FINDINGS
+    assert report["pages_expected"] == 0
+    assert report["evidence_records"] == 0
+    assert report["role_identity"][0]["verdict"] == "BLOCKED"
+    assert package_role_identity.CODE_ROLE_UNDECLARED in report["role_identity"][0]["blockers"]
+
+
+def test_the_role_verdict_is_reported_as_FINDINGS_not_CANNOT_ESTABLISH(tmp_path: Path) -> None:
+    """The two refusals are different answers and must keep different exits.
+
+    S1 refuses because the package cannot be described at all (exit 3, "I have no opinion"). S2
+    refuses because it describes itself perfectly well and what it describes is wrong (exit 1, "here
+    is the defect"). Collapsing them would tell an operator to investigate when they should fix.
+    """
+    unit = _packaged_unit(tmp_path)
+    manifest = json.loads((unit / bundle_corpus.PACKAGE_MARKER).read_text(encoding="utf-8"))
+    manifest["artifacts"]["migration_brief"] = None
+    (unit / "migration-brief.md").unlink()
+    manifest["contents"]["files"].pop("migration-brief.md")
+    (unit / bundle_corpus.PACKAGE_MARKER).write_text(json.dumps(manifest), encoding="utf-8")
+
+    assert crr.main([str(unit), "--quiet"]) == crr.EXIT_FINDINGS
+
+
+def test_the_role_verifier_runs_ONCE_over_the_whole_cohort(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A published consumer cannot prove its provider alone, so the SET is what gets verified.
+
+    One invocation, every clean package in it. Verifying per target would make
+    `<provider> <consumer>` mean the same as two separate commands, which is precisely the shape
+    that cannot resolve a shared datasource.
+    """
+    first = _packaged_unit(tmp_path / "a")
+    second = _packaged_unit(tmp_path / "b")
+    cohorts: list[list[str]] = []
+    real = crr.verify_phase1_role_identity
+
+    def counted(roots, **kwargs):
+        cohorts.append([Path(root).name for root in roots])
+        return real(roots, **kwargs)
+
+    monkeypatch.setattr(crr, "verify_phase1_role_identity", counted)
+
+    assert crr.main([str(first), str(second), "--quiet"]) == crr.EXIT_OK
+    assert cohorts == [["Minimal", "Minimal"]], "the cohort must be verified in one call"
+
+
+def test_a_clean_first_package_does_not_hide_a_role_blocked_SECOND_one(tmp_path: Path) -> None:
+    """Same list-of-blocks discipline as `package_integrity`, and for the same measured reason."""
+    clean = _packaged_unit(tmp_path / "first")
+    blocked = _packaged_unit(tmp_path / "second")
+    manifest = json.loads((blocked / bundle_corpus.PACKAGE_MARKER).read_text(encoding="utf-8"))
+    manifest["artifacts"]["asset"] = None
+    (blocked / bundle_corpus.PACKAGE_MARKER).write_text(json.dumps(manifest), encoding="utf-8")
+
+    merged = crr._merge_scans([crr.scan(clean), crr.scan(blocked)])
+
+    blocks = merged["role_identity"]
+    assert merged["status"] == crr.STATUS_FINDINGS
+    assert [block["ordinal"] for block in blocks] == [0, 1]
+    assert [block["verdict"] for block in blocks] == ["START_READY", "BLOCKED"]
+
+
+def test_the_role_refusal_carries_stable_codes_and_no_host_path(tmp_path: Path) -> None:
+    """These verdicts are pasted into issues; the supplied target can be secret-bearing."""
+    unit = _packaged_unit(tmp_path / "customer-secret-server")
+    manifest = json.loads((unit / bundle_corpus.PACKAGE_MARKER).read_text(encoding="utf-8"))
+    manifest["artifacts"]["asset"] = None
+    (unit / bundle_corpus.PACKAGE_MARKER).write_text(json.dumps(manifest), encoding="utf-8")
+
+    printed = crr.render(crr.scan(unit))
+
+    assert package_role_identity.CODE_ROLE_UNDECLARED in printed
+    assert "customer-secret-server" not in printed
+    assert str(tmp_path) not in printed
+
+
+def test_an_ORDINARY_bundle_never_reaches_the_role_verifier(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Compatibility control: roles are a PACKAGE contract, and a bundle declares none."""
+    bundle = tmp_path / "run" / "bundle"
+    bundle.mkdir(parents=True)
+    (tmp_path / "run" / "assets").mkdir()
+    build_unit(bundle, "Minimal", worksheets=["Revenue"])
+    write_oracle(bundle, [{"view_name": "Revenue", "view_type": "worksheet", "workbook_luid": UNIT_LUID}])
+
+    def boom(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("an ordinary bundle was sent to the role verifier")
+
+    monkeypatch.setattr(crr, "verify_phase1_role_identity", boom)
+
+    report = crr.scan(bundle)
+    assert report["status"] == crr.STATUS_READY
+    assert report["role_identity"] == []
 
 
 # --------------------------------------------------------------------------------------------
@@ -1850,10 +2099,13 @@ def test_a_package_whose_manifest_omits_ROLES_is_still_admitted_here(tmp_path: P
 def _damaged_package_at(tmp_path: Path, name: str, *, damage: str) -> Path:
     """A package that fails S1 for a NAMED reason, so two of them can be told apart in one merge."""
     unit = tmp_path / name / "packages" / "Minimal"
-    unit.mkdir(parents=True)
-    (tmp_path / name / "packages" / "assets").mkdir()
-    build_unit(unit, "Minimal", worksheets=["Revenue"])
-    write_package_manifest(unit)
+    build_package(
+        unit,
+        "Minimal",
+        worksheets=["Revenue"],
+        oracle_views=[{"view_name": "Revenue", "view_type": "worksheet", "workbook_luid": UNIT_LUID}],
+    )
+    seal_package(unit, "Minimal")
     if damage == "extra":
         (unit / "stray.txt").write_text("undeclared\n", encoding="utf-8")
     elif damage == "changed":

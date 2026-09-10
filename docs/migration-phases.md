@@ -160,13 +160,16 @@ Per-unit layout (authoritative list: `package_unit.py`'s module docstring):
 ```
 <out>/<Unit>/
     migration-spec.json          parse_tableau.py; check_unit.py's expected page set (#443)
+    migration-brief.md           the dispatcher's brief, COPIED in (--brief). Bytes only: the
+                                 external path is never recorded (#562 S2)
     report.json                  the engine's own classification, SCOPED to this unit
-    source-provenance.json       SCOPED; the only trusted route to a workbook LUID
+    source-provenance.json       SCOPED; the only trusted route to a workbook/datasource LUID
     engine-output-receipt.json   what built this, so version drift stays checkable
     assets/<luid>_<Name>.twb(x)  the source, under the name resolve_source() already looks for
+    assets/<luid>_<Name>.tds(x)  a DATASOURCE unit's source - complete since #562 S2
     fabric/<Name>.Report/        the engine WORKING COPY (a copytree of pbip/), never the baseline
     fabric/<Model>.SemanticModel/
-    handover/<Unit>.json         the engine's per-workbook slice, verbatim
+    handover/<Unit>.json         the engine's per-workbook slice, plus this packager's scope stamp
     handover.md                  flat, one finding per line, emptied visuals FIRST
     oracle/
         oracle-manifest.json     THIS unit's views only, paths rewritten
@@ -176,6 +179,20 @@ Per-unit layout (authoritative list: `package_unit.py`'s module docstring):
     package-manifest.json        what was packaged, and every omission with its reason
     README.md
 ```
+
+⚠️ **A DATASOURCE package is source-complete too, and was not before (#562 S2).** A datasource unit
+has no handover slice, and the harvester writes `<luid>_<name>.tdsx` while the engine strips exactly
+that prefix to derive the unit name — so the asset never resolved, and every datasource package
+shipped `artifacts.asset: null`, no `migration-spec.json` and an empty provenance `inputs` list at
+exit 0. It now carries its `.tds`/`.tdsx`, its parsed spec, and exactly one SHA-matching provenance
+row carrying the **datasource** LUID (a different namespace from a workbook LUID, never mixed). A
+local `.tds` with no LUID prefix keeps its row and earns `not_applicable` for the server LUID.
+
+⚠️ **The brief is COPIED, never referenced.** The dispatcher's `migration-brief.md` lives outside the
+package and is git-ignored, so a stateless agent handed only the package could not read the one
+document saying what the migration is for. Recording its path instead would disclose a host location
+and prove no availability, so `--brief` copies the bytes under a fixed role name. A package written
+without one is blocked by the entry gate.
 
 ⚠️ **The oracle kind directories are SINGULAR on purpose** — `dashboard/`, `worksheet/`, `unknown/`
 are `object_identity`'s `KIND_*` values *verbatim*, never a pluralised copy. `unknown/` is carried
@@ -263,9 +280,14 @@ with no production caller — `inspect_brownfield`, `expected_pages`, `page_drop
 standalone library APIs. Do not read this as "every function in `check_unit.py` is safe to call with
 an arbitrary path"; making it so is a different consumer class and a separate API-hardening issue.
 
-⚠️ Boundary **ordering** only. Neither gate yet verifies that a package's `package-manifest.json`
-still describes the bytes on disk — no JSON parse, no hashes, no declared-contents or role check.
-That is a later slice of #562.
+⚠️ Boundary **ordering** is one of three checks the ENTRY gate now performs before it reads any
+evidence, and only `check_reference_readiness.py` performs the other two: it verifies that a
+package's `package-manifest.json` still describes exactly the bytes on disk (#562 S1, exit 3 when it
+does not) and that the package carries every role its kind and topology require with agreeing
+identities (#562 S2, exit 1 when it does not) — see
+[`docs/reference-readiness.md`](reference-readiness.md). `check_unit.py` still performs the boundary
+check alone; verified source RETURN (#558) and the credential/data-access projection remain later
+slices.
 
 ### The two gates
 
