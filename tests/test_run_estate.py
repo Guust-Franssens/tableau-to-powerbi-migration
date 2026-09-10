@@ -1984,6 +1984,25 @@ def test_run_estate_provenance_uses_the_bounded_default_timeout(tmp_path: Path, 
     assert (out / "source-provenance.json").is_file()
 
 
+def test_run_estate_publishes_provenance_for_datasource_only_inputs(tmp_path: Path, monkeypatch) -> None:
+    """A .tds/.tdsx estate still needs the guaranteed provenance artifact."""
+    import stamp_tableau_provenance as prov  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+
+    src, out = tmp_path / "src", tmp_path / "bundle"
+    src.mkdir()
+    out.mkdir()
+    (src / "Published.tds").write_text("<datasource />", encoding="utf-8")
+    monkeypatch.setattr(prov, "resolve_env", lambda _path: {})
+
+    summary = run_estate.stamp_inputs(src, out)
+    artifact = json.loads((out / "source-provenance.json").read_text(encoding="utf-8"))
+
+    assert summary is not None
+    assert artifact["input_count"] == 1
+    assert artifact["inputs"][0]["input"]["file"] == "Published.tds"
+    assert artifact["inputs"][0]["input"]["sha256"]
+
+
 def test_a_provenance_publication_failure_is_not_a_successful_skip(tmp_path: Path, monkeypatch) -> None:
     """Remote lookup can be partial, but failing to publish source-provenance.json is a real failure."""
 

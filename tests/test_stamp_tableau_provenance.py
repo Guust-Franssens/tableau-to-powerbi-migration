@@ -237,6 +237,17 @@ def test_every_workbook_in_a_folder_is_stamped(tmp_path):
     assert prov.build(tmp_path, {})["input_count"] == 2
 
 
+def test_a_datasource_only_folder_still_gets_a_local_fingerprint_artifact(tmp_path):
+    """run_estate accepts datasource-only inputs, so provenance must not skip its artifact."""
+    (tmp_path / "Published.tds").write_text("<datasource />", encoding="utf-8")
+
+    result = prov.build(tmp_path, {})
+
+    assert result["input_count"] == 1
+    assert result["inputs"][0]["input"]["file"] == "Published.tds"
+    assert result["inputs"][0]["input"]["sha256"]
+
+
 def test_an_empty_folder_is_reported_rather_than_stamped_as_success(tmp_path):
     assert prov.build(tmp_path, {})["input_count"] == 0
 

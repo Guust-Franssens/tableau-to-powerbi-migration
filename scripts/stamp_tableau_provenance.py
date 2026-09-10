@@ -64,6 +64,7 @@ from tableau_env import pat_secret, redact, redacted_note, resolve_env, scrub_tr
 
 LOG = logging.getLogger("provenance")
 
+TABLEAU_INPUT_SUFFIXES = (".twb", ".twbx", ".tds", ".tdsx")
 WORKBOOK_SUFFIXES = (".twb", ".twbx")
 DEFAULT_TIMEOUT_SEC = 120.0
 DEADLINE_EXPIRED = "deadline-expired"
@@ -505,10 +506,10 @@ def find_origin(lookup: TableauLookup, stem: str, local: dict[str, Any]) -> dict
 
 
 def collect_inputs(target: Path) -> list[Path]:
-    """The workbook(s) to stamp: one file, or every workbook in a folder."""
+    """The Tableau input(s) to stamp: one file, or every workbook/datasource in a folder."""
     if target.is_file():
         return [target]
-    return sorted(p for p in target.iterdir() if p.suffix.lower() in WORKBOOK_SUFFIXES)
+    return sorted(p for p in target.iterdir() if p.suffix.lower() in TABLEAU_INPUT_SUFFIXES)
 
 
 def _phase_record(timeout_sec: float | None) -> dict[str, Any]:
