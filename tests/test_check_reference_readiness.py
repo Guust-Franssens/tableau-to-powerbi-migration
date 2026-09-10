@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import bundle_corpus  # noqa: E402  # pylint: disable=wrong-import-position
 import check_reference_readiness as crr  # noqa: E402  # pylint: disable=wrong-import-position
+import package_filesystem  # noqa: E402  # pylint: disable=wrong-import-position
 
 # Page ids observed in the real engine bundle
 # `_runs/406-meridian-smoke-2-339-0-20260901/bundle/pbip/Meridian Revenue by Region/...`,
@@ -263,6 +264,25 @@ def bundle_fixture(tmp_path: Path) -> Path:
     root.mkdir()
     (tmp_path / "assets").mkdir()
     return root
+
+
+def write_package_manifest(package: Path, *, files: dict[str, str] | None = None) -> Path:
+    """Give a package the truthful `contents.files` map its producer would have written.
+
+    The entry gate now verifies that map before it reads any evidence (issue #562 S1), so a package
+    fixture whose marker is an empty `{}` is a DAMAGED package rather than a shorthand for "this is a
+    package". Every fixture below that must reach the current behaviour therefore declares its own
+    bytes. The manifest excludes itself, exactly as `package_unit.py` does.
+    """
+    if files is None:
+        files = {
+            str(path.relative_to(package).as_posix()): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sorted(package.rglob("*"))
+            if path.is_file() and path.name != bundle_corpus.PACKAGE_MARKER
+        }
+    marker = package / bundle_corpus.PACKAGE_MARKER
+    marker.write_text(json.dumps({"unit": package.name, "contents": {"files": files}}, indent=2), encoding="utf-8")
+    return marker
 
 
 def build_unit(  # pylint: disable=too-many-arguments
@@ -1265,7 +1285,7 @@ def test_a_packaged_unit_reads_only_its_own_manifest_end_to_end(tmp_path: Path) 
     write_oracle(tmp_path / "run", [view])
     assert crr.scan(package)["units"][0]["pages"][0]["readiness"] == "unverifiable"
 
-    (package / "package-manifest.json").write_text("{}", encoding="utf-8")
+    write_package_manifest(package)
 
     report = crr.scan(package)
     assert report["units"][0]["pages"][0]["readiness"] == "ready"
@@ -1639,16 +1659,175 @@ def test_a_SAFE_package_continues_into_the_current_behaviour_unchanged(tmp_path:
     """The classifier is a precondition, not a new verdict: an intact package still reports READY.
 
     ⚠️ This is the vacuity control for every block above. Without it, classifying EVERYTHING as
-    unsafe would satisfy them all.
+    unsafe would satisfy them all - and, since #562 S1, refusing every package on integrity grounds
+    would too. The manifest here is TRUTHFUL, so both preconditions are satisfied and the gate must
+    behave exactly as it did before either was added.
     """
     unit = tmp_path / "run" / "packages" / "Minimal"
     unit.mkdir(parents=True)
     (tmp_path / "run" / "packages" / "assets").mkdir()
     build_unit(unit, "Minimal", worksheets=["Revenue"])
     write_oracle(unit, [{"view_name": "Revenue", "view_type": "worksheet", "workbook_luid": UNIT_LUID}])
-    (unit / bundle_corpus.PACKAGE_MARKER).write_text("{}\n", encoding="utf-8")
+    write_package_manifest(unit)
 
     report = crr.scan(unit)
 
     assert report["status"] == crr.STATUS_READY
     assert report["pages_ready"] == report["pages_expected"] == 1
+    assert "package_integrity" not in report
+
+
+# --------------------------------------------------------------------------------------------
+# Package filesystem/manifest integrity at ENTRY (issue #562, slice S1)
+#
+# The classifier above answers "is this a package boundary, and is it intact enough to reason
+# about". These answer the next question, and only that one: does the manifest still describe the
+# bytes in the package? A package that has gained, lost or changed a file is refused BEFORE any
+# evidence is collected and before source resolution can rescue it with an asset the manifest never
+# accounted for.
+# --------------------------------------------------------------------------------------------
+
+
+def _packaged_unit(tmp_path: Path) -> Path:
+    """An intact, evidence-carrying package whose manifest describes exactly its own bytes."""
+    unit = tmp_path / "run" / "packages" / "Minimal"
+    unit.mkdir(parents=True)
+    (tmp_path / "run" / "packages" / "assets").mkdir()
+    build_unit(unit, "Minimal", worksheets=["Revenue"])
+    write_oracle(unit, [{"view_name": "Revenue", "view_type": "worksheet", "workbook_luid": UNIT_LUID}])
+    write_package_manifest(unit)
+    return unit
+
+
+def test_an_extra_file_in_a_package_blocks_before_resolve_and_discovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ORDER claim, at the integrity hook: nothing downstream may fire for a damaged package.
+
+    A file nobody declared means this composition is not the one the producer described, so evidence
+    found inside it cannot be attributed - and source resolution must never get the chance to find
+    the undeclared asset and call the package usable.
+    """
+    unit = _packaged_unit(tmp_path)
+    (unit / "_oracle" / "stray.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    report, continued = _scan_forbidding_discovery(unit, monkeypatch)
+
+    assert continued == "", continued
+    assert report is not None
+    assert report["status"] == crr.STATUS_CANNOT_ESTABLISH
+    assert report["units_cannot_establish"] == 1
+    assert report["pages_expected"] == 0
+    assert package_filesystem.CODE_FILE_UNDECLARED in report["units"][0]["detail"]
+
+
+def test_a_changed_file_in_a_package_is_refused_at_entry(tmp_path: Path) -> None:
+    """Presence is not integrity: the recorded digest is what makes the manifest a description."""
+    unit = _packaged_unit(tmp_path)
+    assert crr.main([str(unit), "--quiet"]) == crr.EXIT_OK
+
+    (unit / "report.json").write_text('{"workbooks": [{"name": "Tampered"}]}', encoding="utf-8")
+
+    assert crr.main([str(unit), "--quiet"]) == crr.EXIT_CANNOT_ESTABLISH
+
+
+def test_a_malformed_manifest_is_refused_at_entry(tmp_path: Path) -> None:
+    """A manifest that cannot be parsed describes nothing, so nothing about this package is known."""
+    unit = _packaged_unit(tmp_path)
+    (unit / bundle_corpus.PACKAGE_MARKER).write_text('{"contents": {"files": {', encoding="utf-8")
+
+    report = crr.scan(unit)
+
+    assert report["status"] == crr.STATUS_CANNOT_ESTABLISH
+    assert package_filesystem.CODE_MANIFEST_NOT_JSON in report["units"][0]["detail"]
+    assert report["package_integrity"]["status"] == package_filesystem.STATUS_FINDINGS
+
+
+def test_the_integrity_refusal_carries_stable_codes_and_no_host_path(tmp_path: Path) -> None:
+    """These verdicts are pasted into issues; the supplied target can be secret-bearing."""
+    unit = _packaged_unit(tmp_path / "customer-secret-server")
+    (unit / "extra.txt").write_text("x\n", encoding="utf-8")
+
+    report = crr.scan(unit)
+    printed = crr.render(report)
+
+    assert package_filesystem.CODE_FILE_UNDECLARED in report["units"][0]["detail"]
+    assert "customer-secret-server" not in printed
+    assert str(tmp_path) not in printed
+
+
+def test_the_package_verifier_runs_exactly_once_for_a_safe_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Once, before evidence - not once per unit, not again inside a later rescue path.
+
+    A second invocation would mean a second place where the answer could differ from the one the
+    gate acted on, which is the shape the classifier slice was written to remove.
+    """
+    unit = _packaged_unit(tmp_path)
+    calls: list[str] = []
+    real = crr.verify_package
+
+    def counted(root, classification):
+        calls.append(classification.code)
+        return real(root, classification)
+
+    monkeypatch.setattr(crr, "verify_package", counted)
+
+    assert crr.scan(unit)["status"] == crr.STATUS_READY
+    assert calls == [bundle_corpus.CODE_PACKAGE_BOUNDARY_OK]
+
+
+def test_an_ORDINARY_bundle_never_reaches_the_package_verifier(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Compatibility control: an un-packaged bundle has no manifest and must keep behaving as before."""
+    bundle = tmp_path / "run" / "bundle"
+    bundle.mkdir(parents=True)
+    (tmp_path / "run" / "assets").mkdir()
+    build_unit(bundle, "Minimal", worksheets=["Revenue"])
+    write_oracle(bundle, [{"view_name": "Revenue", "view_type": "worksheet", "workbook_luid": UNIT_LUID}])
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("an ordinary bundle was sent to the package verifier")
+
+    monkeypatch.setattr(crr, "verify_package", boom)
+
+    assert crr.scan(bundle)["status"] == crr.STATUS_READY
+
+
+def test_a_DAMAGED_boundary_is_refused_by_the_classifier_and_never_reinterpreted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing marker is the classifier's verdict, and the integrity slice must not restate it.
+
+    ⚠️ Two guards that can both answer "refuse" for the same target are one guard too many: whichever
+    reason reaches the operator first becomes the one they act on, and the other quietly rots.
+    """
+    unit = tmp_path / "run" / "packages" / "Minimal"
+    (unit / "fabric").mkdir(parents=True)
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("a damaged boundary was re-judged by the integrity verifier")
+
+    monkeypatch.setattr(crr, "verify_package", boom)
+    report = crr.scan(unit)
+
+    assert report["status"] == crr.STATUS_CANNOT_ESTABLISH
+    assert bundle_corpus.CODE_PACKAGE_MARKER_MISSING in report["units"][0]["detail"]
+
+
+def test_a_package_whose_manifest_omits_ROLES_is_still_admitted_here(tmp_path: Path) -> None:
+    """The scope control at gate level: S1 judges bytes, not the role graph or identity.
+
+    Without it, this slice would be indistinguishable from a version that also enforces #562's
+    later invariants - and a reviewer could not tell which failures belong to which claim.
+    """
+    unit = _packaged_unit(tmp_path)
+    files = json.loads((unit / bundle_corpus.PACKAGE_MARKER).read_text(encoding="utf-8"))["contents"]["files"]
+    (unit / bundle_corpus.PACKAGE_MARKER).write_text(
+        json.dumps(
+            {"unit": "Minimal", "artifacts": {}, "workbook_identity": {"luid": None}, "contents": {"files": files}}
+        ),
+        encoding="utf-8",
+    )
+
+    assert crr.scan(unit)["status"] == crr.STATUS_READY

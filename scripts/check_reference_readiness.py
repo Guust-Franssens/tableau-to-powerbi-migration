@@ -70,6 +70,7 @@ from xml.etree import ElementTree
 from bundle_corpus import TargetClassification, classify_target, evidence_dirs, shipping_reports
 import object_identity as oid
 from object_identity import AMBIGUOUS
+from package_filesystem import PackageFilesystemResult, verify_package
 from reference_evidence import (
     MANUAL_KIND_HINT,
     CAP_VALIDATION,
@@ -899,6 +900,28 @@ def _unsafe_target(root: Path, classification: TargetClassification) -> dict[str
     return _merge(root, [_cannot(unit, detail)], [], [])
 
 
+def _damaged_package(
+    root: Path, classification: TargetClassification, integrity: PackageFilesystemResult
+) -> dict[str, Any]:
+    """The verdict for a declared package whose manifest no longer describes the bytes on disk.
+
+    ⚠️ Same privacy rule as :func:`_unsafe_target`, and one addition: the integrity result's own rows
+    may carry a package-RELATIVE path or a bare ordinal, never a host path, never an unsafe key
+    spelling and never an exception message. Only the stable codes are rendered here; the full typed
+    rows travel in the JSON verdict, where a consumer can read them without a human pasting them.
+    """
+    unit = classification.unit_name or root.name or "target"
+    codes = ", ".join(integrity.codes()) or integrity.status
+    detail = (
+        f"package-integrity {integrity.status}: {codes} - the package manifest does not describe "
+        "the files in this package, so no evidence here can be attributed and this gate forms NO "
+        "opinion, which is NOT a pass"
+    )
+    report = _merge(root, [_cannot(unit, detail)], [], [])
+    report["package_integrity"] = integrity.as_dict()
+    return report
+
+
 def scan(
     root: Path,
     *,
@@ -916,13 +939,22 @@ def scan(
     boundary is missing, reparse, non-regular or unassessable - and any root that is itself a
     link/junction or cannot be ``lstat``-assessed - stops here as ``CANNOT_ESTABLISH``.
 
-    A **safe** package continues into the current behaviour completely unchanged. Proving that its
-    manifest still describes the bytes on disk is the next slice of #562; this is the boundary
-    classifier only.
+    ⚠️ **A SAFE package is then verified against its own manifest, still before any discovery.** A
+    package whose `package-manifest.json` is unparseable, or which has gained, lost or changed a
+    file, is refused as ``CANNOT_ESTABLISH``: evidence found inside it cannot be attributed to a
+    composition nobody can describe, and source resolution would otherwise rescue a damaged package
+    by finding an asset the manifest never accounted for. The classification is CONSUMED here, not
+    recomputed - a damaged boundary was already refused above and is never reinterpreted.
+
+    A safe, clean package continues into the current behaviour completely unchanged.
     """
     classification = classify_target(root)
     if not classification.is_safe:
         return _unsafe_target(root, classification)
+    if classification.declares_self_contained:
+        integrity = verify_package(root, classification)
+        if not integrity.is_clean:
+            return _damaged_package(root, classification, integrity)
     root = root.resolve()
     evidence, rejected = _collect_evidence(root, reference_dir, oracle_dir)
     engine_report = _engine_report(root)
