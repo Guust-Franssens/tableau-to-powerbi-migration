@@ -667,7 +667,7 @@ def build(
                 _phase_error(phase, DEADLINE_EXPIRED, DeadlineExceeded())
                 records.append(
                     {
-                        "input": {},
+                        "input": {"ordinal": index},
                         "origin": None,
                         "fingerprint_error": {"code": DEADLINE_EXPIRED, "class": "DeadlineExceeded"},
                         "origin_note": "local fingerprint unavailable - provenance phase deadline expired",
@@ -681,7 +681,7 @@ def build(
                 _phase_error(phase, DEADLINE_EXPIRED, exc)
                 records.append(
                     {
-                        "input": {},
+                        "input": {"ordinal": index},
                         "origin": None,
                         "fingerprint_error": {"code": DEADLINE_EXPIRED, "class": type(exc).__name__},
                         "origin_note": "local fingerprint unavailable - provenance phase deadline expired",
@@ -692,7 +692,7 @@ def build(
             except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
                 _phase_error(phase, "fingerprint-unavailable", exc)
                 record = {
-                    "input": {},
+                    "input": {"ordinal": index},
                     "origin": None,
                     "fingerprint_error": {"code": "fingerprint-unavailable", "class": type(exc).__name__},
                 }
@@ -805,7 +805,7 @@ def _finish_live(result: dict[str, Any], lookup: TableauLookup) -> dict[str, Any
 
 
 WITHHELD_NOTE = "live origin withheld - provenance redaction failed for this run"
-DERIVED_INPUT_FIELDS = ("size_bytes", "sha256", "revision_key")
+DERIVED_INPUT_FIELDS = ("ordinal", "size_bytes", "sha256", "revision_key")
 DERIVED_MEMBER_FIELDS = ("size_bytes", "crc32")
 
 
