@@ -3347,6 +3347,48 @@ def test_the_direct_worker_process_is_gone_from_the_operating_system_after_a_dea
     assert not _pid_is_running(run.outcome.worker_pid), "the worker outlived the phase that owned it"
 
 
+def test_a_worker_that_survives_terminate_and_kill_cannot_certify_a_success(tmp_path: Path, monkeypatch) -> None:
+    """A complete terminal result, and still not a pass: the phase could not account for its worker.
+
+    ⚠️ The substituted piece is deliberately the ONE thing this host cannot produce honestly - a
+    process that survives `terminate()` and `kill()`. Everything else is the shipping path: a real
+    spawned worker really sends a real terminal result, and only `_stop_worker`'s OS-level verdict is
+    replaced. It is a seam-substituted control, not a reproduction of an unkillable process.
+
+    The direction matters in both halves. Fail-closed on the VERDICT: exit 11, never `local_only`.
+    Fail-open on the EVIDENCE: the accepted records survive, because they were accepted before the
+    latch and throwing away 66 real fingerprints over a failed kill would help nobody.
+    """
+    monkeypatch.setattr(run_estate, "_stop_worker", lambda _process: run_estate._WorkerStop(True, None, True))  # noqa: SLF001
+
+    run = _supervise(monkeypatch, tmp_path, provenance_workers.succeeds)
+
+    assert run.outcome.worker_alive is True
+    assert run.outcome.expired is False, "an unreapable worker is not a timeout"
+    assert run.stamped.ok is False, "a phase that lost track of its worker reported a pass"
+    assert run.artifact["phase"]["status"] == "partial"
+    assert run.artifact["phase"]["errors"][-1] == {
+        "code": run_estate.PROVENANCE_REAP_CODE,
+        "operation": "fingerprint",
+    }
+    assert run.artifact["inputs"][0]["input"]["file"] == "unit.twb", "the accepted evidence was discarded"
+    assert run.artifact["input_count"] == len(run.artifact["inputs"]) == 1
+    assert len(run.published) == 1
+
+
+def test_an_unreapable_worker_without_a_result_is_a_failure_not_a_partial(tmp_path: Path, monkeypatch) -> None:
+    """The negative control for the branch above: nothing accepted means nothing to be partial about."""
+    monkeypatch.setattr(run_estate, "_stop_worker", lambda _process: run_estate._WorkerStop(True, None, True))  # noqa: SLF001
+
+    run = _supervise(monkeypatch, tmp_path, functools.partial(provenance_workers.blocks_in, "content"))
+
+    assert run.stamped.ok is False
+    assert run.artifact["phase"]["status"] == "failed"
+    assert run.artifact["phase"]["errors"][-1]["code"] == run_estate.PROVENANCE_DEADLINE_CODE, (
+        "the deadline fired first, so it is what the artifact must name"
+    )
+
+
 @pytest.mark.parametrize("value", ["0", "-1", "NaN", "Infinity", "-Infinity"])
 def test_an_unusable_provenance_timeout_is_refused_before_any_work(tmp_path: Path, monkeypatch, capsys, value) -> None:
     """A budget that is not a duration cannot bound anything, so nothing starts.

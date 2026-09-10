@@ -888,7 +888,7 @@ class _ProvenanceState:
         else:
             self.terminal = message["result"]
 
-    def document(self, code: str, **facts: int) -> dict:
+    def document(self, code: str, base: dict | None = None, **facts: int) -> dict:
         """The honest partial/failed document for a phase that did not finish.
 
         Everything ACCEPTED is kept and everything else is an EXPLICIT placeholder, so `input_count`
@@ -896,10 +896,15 @@ class _ProvenanceState:
         contradict) and an unfinished input reads as "we did not get to this one" rather than as
         absent or as fine. A placeholder names no file: it is addressed by ordinal, which is also why
         it cannot leak one.
+
+        ``base`` overrides the accepted safe snapshot as the document to build on. It exists for the
+        one case where a COMPLETE result was accepted and the phase still may not claim success -
+        an unreapable worker - so the evidence survives while the verdict does not.
         """
         error = prov.phase_error(code, self.operation, **facts)
-        if self.snapshot is not None:
-            result = dict(self.snapshot)
+        source = base if base is not None else self.snapshot
+        if source is not None:
+            result = dict(source)
             phase = result.get("phase") if isinstance(result.get("phase"), dict) else {}
             result["phase"] = {"status": "partial", "errors": [*(phase.get("errors") or []), error]}
             return result
@@ -984,11 +989,18 @@ def _worker_document(state: _ProvenanceState, code: str | None, stopped: _Worker
 
     The exit code is recorded only for a worker that died on its OWN - our terminate/kill code
     describes this parent's action and would say nothing about the phase.
+
+    An UNREAPABLE worker is the one case where a complete terminal result was accepted and still may
+    not be published as a pass. It is kept as the document - the evidence is real and was accepted
+    before the latch - but the status is forced to `partial` beside a `worker-reap-failed` error,
+    because a process we could not account for cannot certify anything.
     """
     if code is None:
         return state.terminal or {}
     if code == PROVENANCE_CRASH_CODE and isinstance(stopped.exitcode, int):
         return state.document(code, exit_code=stopped.exitcode)
+    if code == PROVENANCE_REAP_CODE:
+        return state.document(code, base=state.terminal)
     return state.document(code)
 
 
