@@ -51,6 +51,74 @@ AZURE_MAP_COOKBOOK = REPO_ROOT / ".github" / "pbi.kb" / "visuals" / "azureMap.md
 SEMANTIC_GOTCHAS = SKILLS_DIR / "powerbi-semantic-model-gotchas" / "SKILL.md"
 BUNDLED_PATH_CLAIM_RE = re.compile(r"\bbundled(?:\s+in\s+this skill's)?\s+[`']([^`']+)[`']")
 
+# --- credential/dialog guidance contract (issue #146) ---------------------------------------------
+# The arbiter `.github/skills/pbip-model-refresh/scripts/probe_desktop_credential.ps1` is the wording
+# oracle; these are the operator-facing paragraphs that restate it. Only CURRENT-guidance blocks are
+# read: the same files also carry historical defect narratives that legitimately quote the retired
+# claims, and scanning those would forbid the repo from recording its own history.
+PBIP_REFRESH_SKILL = SKILLS_DIR / "pbip-model-refresh" / "SKILL.md"
+LIVE_SOURCE_SKILL = SKILLS_DIR / "live-source-reachability" / "SKILL.md"
+CREDENTIAL_DOC = REPO_ROOT / "docs" / "data-source-credentials.md"
+SCRIPTS_README = REPO_ROOT / "scripts" / "README.md"
+DESKTOP_VERDICT_TOKENS = (
+    "CREDENTIAL_MISSING",
+    "CREDENTIAL_PRESENT",
+    "REFRESH_IN_PROGRESS",
+    "DIALOG_NEEDS_HUMAN",
+    "DIALOG_UNRECOGNIZED",
+    "DIALOG_UNREADABLE",
+)
+AMNESTY_BLOCK_LEAD = "> ✅ **Length amnesty, current state:"
+PREFLIGHT_STEP_LEAD = "3. **Local:**"
+# Exact claims the arbiter's own evidence does not support. Retired, not merely discouraged.
+RETIRED_CREDENTIAL_CLAIMS = (
+    "$MinPromptWords",
+    "still has the length-amnesty",
+    "already cached",
+    "ran to the deadline",
+    "approval, not a sign-in",
+    "not a sign-in prompt",
+    "no sign-in implied",
+)
+
+
+def _verdict_rows(path: Path) -> str:
+    """The Desktop-arbiter verdict-table rows in `path`, blockquoted or not."""
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.lstrip(">").strip()
+        if not stripped.startswith("| `"):
+            continue
+        if stripped.split("`")[1] in DESKTOP_VERDICT_TOKENS:
+            rows.append(stripped)
+    return "\n".join(rows)
+
+
+def _block_from(path: Path, lead: str, *, ends: str | None = None) -> str:
+    """The contiguous block that starts at the line beginning with `lead`.
+
+    It stops before the first line starting with `ends`, and - when `lead` is a blockquote - at the
+    first unquoted line, so a current-guidance paragraph cannot silently absorb the historical
+    narrative that follows it and pass on that text instead.
+    """
+    quoted = lead.startswith(">")
+    block: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not block:
+            if line.startswith(lead):
+                block.append(line)
+            continue
+        if (ends is not None and line.startswith(ends)) or (quoted and not line.startswith(">")):
+            break
+        block.append(line)
+    return "\n".join(block)
+
+
+def _table_row(path: Path, key: str) -> str:
+    """The single markdown table row whose first cell names `key`."""
+    rows = [line for line in path.read_text(encoding="utf-8").splitlines() if line.startswith(f"| `{key}`")]
+    return "\n".join(rows)
+
 
 def test_the_skills_directory_is_not_empty() -> None:
     """Guards the collection itself: `SKILL_FILES` drives parametrization, and an empty glob would
@@ -346,3 +414,65 @@ def test_azure_map_cookbook_does_not_recommend_dead_end_filter_or_blank_basemap_
     assert "**Top-N filter**" not in text
     assert "only after confirming the source genuinely has no basemap" in text
     assert "same 3 of 10" in text
+
+
+def test_credential_guidance_states_only_what_the_desktop_arbiter_establishes() -> None:
+    """Issue #146: keep the operator-facing credential guidance inside the arbiter's own evidence.
+
+    The oracle is `probe_desktop_credential.ps1`'s emitted guidance, which may claim a sign-in only
+    for `CREDENTIAL_MISSING`, must send a `DIALOG_NEEDS_HUMAN` reader to the prompt on screen rather
+    than prescribing an action, and must leave the credential state undetermined in BOTH directions
+    for the two ambiguous dialog tokens. Docs that outran that evidence are what this pins.
+
+    Deliberately scoped to the current-guidance blocks. The same files also carry the historical
+    defect narratives (the #406 length amnesty, the retired `BLOCKED_BY_DIALOG` band) that quote the
+    retired wording on purpose, and a whole-file scan would forbid the repo from recording its own
+    history.
+    """
+    guidance = {
+        "pbip-model-refresh verdict table": _verdict_rows(PBIP_REFRESH_SKILL),
+        "pbip-model-refresh length-amnesty status": _block_from(PBIP_REFRESH_SKILL, AMNESTY_BLOCK_LEAD),
+        "data-source-credentials verdict table": _verdict_rows(CREDENTIAL_DOC),
+        "data-source-credentials preflight step": _block_from(CREDENTIAL_DOC, PREFLIGHT_STEP_LEAD, ends="4. "),
+        "scripts/README arbiter row": _table_row(SCRIPTS_README, "probe_desktop_credential.ps1"),
+    }
+    for name, block in guidance.items():
+        assert block, f"the {name} block was not found - this contract now proves nothing"
+        for claim in RETIRED_CREDENTIAL_CLAIMS:
+            assert claim not in block, f"{name} still carries the retired claim {claim!r}"
+
+    for name, needle in [
+        ("pbip-model-refresh verdict table", "do not stack"),
+        ("pbip-model-refresh verdict table", "Act on the prompt visible in Desktop"),
+        ("pbip-model-refresh verdict table", "the remedy is **not** established either"),
+        ("pbip-model-refresh verdict table", "A bounded observation"),
+        ("pbip-model-refresh length-amnesty status", "issue #406 is closed"),
+        ("data-source-credentials verdict table", "do not stack"),
+        ("data-source-credentials verdict table", "does **not** establish which action"),
+        ("data-source-credentials verdict table", "A bounded observation only"),
+        ("data-source-credentials preflight step", "bounded observation"),
+        ("scripts/README arbiter row", "not proof of a cached credential"),
+        ("scripts/README arbiter row", "gate of record"),
+    ]:
+        assert needle in guidance[name], f"{name} no longer states {needle!r}"
+
+    # Both ambiguous tokens must say it, not just one: a half-corrected table is the shape that let
+    # `DIALOG_UNREADABLE` inherit `DIALOG_UNRECOGNIZED`'s (stronger) claim in the first place.
+    for name in ("pbip-model-refresh verdict table", "data-source-credentials verdict table"):
+        undetermined = guidance[name].count("undetermined in both directions")
+        assert undetermined >= 2, (
+            f"{name} states 'undetermined in both directions' {undetermined} time(s); "
+            "DIALOG_UNREADABLE and DIALOG_UNRECOGNIZED must each say it"
+        )
+
+    # ACCESS_DENIED is a distinct FINAL branch - authenticated, then refused by permissions. Collapsing
+    # it into a generic error/timeout or a second sign-in is the failure this half of the routing pins.
+    for path, key, finality in [
+        (SCRIPTS_README, "probe_live_source.py", "final until permissions change"),
+        (LIVE_SOURCE_SKILL, "ACCESS_DENIED", "do not retry unchanged"),
+    ]:
+        row = _table_row(path, key)
+        assert row, f"no `{key}` row found in {path.name} - this contract now proves nothing"
+        assert "ACCESS_DENIED" in row, f"{path.name} no longer names ACCESS_DENIED in its `{key}` row"
+        assert "permission" in row.lower(), f"{path.name} no longer ties ACCESS_DENIED to permissions"
+        assert finality in row, f"{path.name} no longer states {finality!r} for ACCESS_DENIED"

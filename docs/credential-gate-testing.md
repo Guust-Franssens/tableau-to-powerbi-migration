@@ -96,8 +96,10 @@ connector shape ever changes, change the probe with it** — that alignment is t
 | Signature | Verdict | Retry? |
 |---|---|---|
 | rows returned | `DATA_OK` → clear gate, build | — |
-| refresh **hangs** past the timeout | `NO_CREDENTIAL` — a modal waiting on a human | never |
+| refresh **hangs** past the timeout, no network fault observed | `ERROR` — a timeout is a stalled source *or* a modal; not enough evidence for a credential verdict. Run the arbiter (`probe_desktop_credential.ps1`) to settle it | never, unchanged |
+| refresh hangs past the timeout **and** an independent DNS/TCP check saw a fault | `UNREACHABLE` — the network evidence, not the timeout, carries this | never |
 | error names auth / token / sign-in | `NO_CREDENTIAL` — cached but rejected | never |
+| error names `403` / forbidden / permission denied / not authorized | `ACCESS_DENIED` — authenticated, but this identity may not read the object. Checked **before** the credential markers, and final until a permission owner grants access | never, unchanged |
 | model won't load, "no catalog found" | `UNREACHABLE` — bad host/path, a **spec** bug | never |
 | socket 10054 / `msmdsrv` crash | `UNPROVEN` — say so; do not claim the source refused us | once |
 

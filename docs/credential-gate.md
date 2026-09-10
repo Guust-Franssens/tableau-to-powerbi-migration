@@ -29,15 +29,19 @@ parse_tableau.py  ──►  GATE ARMED           writes are denied on <migratio
                        THE MEASUREMENT      sandbox, opens Power BI Desktop, refreshes, and
                               │             requires a real row back
                               ▼
-        ┌──────────────┬──────────────┬──────────────┬──────────────┬──────────────┐
-     DATA_OK      OPERATOR_REQ   NO_CREDENTIAL   UNREACHABLE      ERROR        SKIPPED
-        │              │              │               │              │              │
-   gate lifts     STOP; run      STOP, ask a      STOP, report   STOP, local    no live source;
-   (probe-        the PBIP in    human to sign    the address/   tooling fault  nothing to prove
-    cleared);     Desktop       in. No retry     network fault  — not a claim
-   build for      manually       conjures a       Nobody needs   about the
-   real                          credential       to sign in     source
+        ┌──────────┬──────────────┬───────────────┬─────────────┬─────────┬─────────┐
+     DATA_OK  OPERATOR_REQ  NO_CREDENTIAL  ACCESS_DENIED  UNREACHABLE   ERROR   SKIPPED
 ```
+
+| Verdict | What it means | What happens next |
+|---|---|---|
+| `DATA_OK` | Power BI returned a real row. | The gate lifts (`probe-cleared`); build for real. |
+| `OPERATOR_REQUIRED` | Custom SQL / cost / modal risk needs a human Desktop refresh. | STOP; run the PBIP in Desktop manually. |
+| `NO_CREDENTIAL` | Positive authentication evidence: Power BI has no credential, or the one it has was rejected. | STOP; ask a human to sign in. No retry conjures a credential. |
+| `ACCESS_DENIED` | Power BI reached the source and **authenticated**, but that identity may not READ the object (`403`/forbidden/permission evidence). | STOP; the gate stays armed. A **permission owner** must grant access — final until permissions change. Do **not** retry unchanged, do not send anyone to sign in again, and do not report it as a timeout or a bad hostname. |
+| `UNREACHABLE` | Address/network/spec fault. | STOP; report the address/path. Nobody needs to sign in. |
+| `ERROR` | Local tooling fault, or an unclassified failure (including a refresh timeout with no authentication evidence). | STOP; it is not a claim about the source. Fix the tooling/evidence and re-probe. |
+| `SKIPPED` | No live source. | Record the skip and continue. |
 
 **The probe must go *through* Power BI.** A shell query (`sqlcmd`, a Python driver) authenticates as
 the *agent*, while Power BI uses Desktop's per-user credential store — so a shell probe can pass
@@ -269,7 +273,8 @@ Three properties are load-bearing:
   would kill a legitimately cold-starting warehouse. Each unit is probed once; a missing credential is
   a final answer, never retried.
 - **It reports ground truth, honestly.** Per unit: `newly-earned`, `still-blocked` (with
-  `NO_CREDENTIAL` — a human must sign in — kept distinct from `UNREACHABLE`, a spec/DNS fix that needs
+  `NO_CREDENTIAL` — a human must sign in — kept distinct from `ACCESS_DENIED`, where the identity
+  authenticated but permissions must change, and from `UNREACHABLE`, a spec/DNS fix that needs
   no sign-in), `anomaly`, `errored`, `skipped`. Exit `0` clean / `1` still blocked / `2` usage / `3`
   forged-override / `5` anomaly.
 
