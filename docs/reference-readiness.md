@@ -249,6 +249,73 @@ anything less as a finding, and the bar lands on the **page**, so every count ag
 
 ---
 
+## Package integrity, before any evidence is read (issue #562, slice S1)
+
+A target that declares a package boundary — a regular, non-reparse `package-manifest.json` at its root
+— is verified against **its own manifest** before `_collect_evidence`, before source resolution and
+before any legacy or ancestor rescue path. The invariant is narrow and complete: the manifest is
+strict readable JSON, and `contents.files` describes **exactly** every regular file in the package and
+its SHA-256 bytes. Missing, malformed, duplicate-keyed, non-finite, unsafe or unassessable input is
+non-clean; only exact namespace-and-hash equality is clean. Anything else is `CANNOT_ESTABLISH`,
+**exit 3** — a package whose composition nobody can describe cannot attribute the renders inside it,
+and source resolution must not be able to rescue it by finding an asset the manifest never accounted
+for. The rules live in `scripts/package_filesystem.py`; its module docstring is the detail.
+
+Three boundaries are deliberate:
+
+- **The classifier already refused a damaged boundary** (`bundle_corpus.classify_target`), and this
+  slice does not restate it. Two guards that can both answer "refuse" for the same target are one
+  guard too many: whichever reason reaches the operator first is the one they act on, and the other
+  rots. A missing marker still reports `package_marker_missing`, not an integrity code.
+- **It judges bytes, not meaning.** Roles (`artifacts.*`), workbook identity/LUID, oracle semantics,
+  verified source resolution (#558) and the post-dispatch working lifecycle are separate invariants
+  with separate evidence. A package that omits a role, or whose `workbook_identity` contradicts its
+  provenance, is S1-**clean** and is refused (or not) further along.
+- **The manifest is unsigned and excludes itself**, so this proves internal consistency: it detects
+  accidental damage, a partial copy, a confused composition and an edit made without re-packaging. It
+  does **not** detect an adversary who rewrites a file and its manifest entry together — that needs an
+  anchor outside the package, which this slice does not invent. A second residual is stated rather
+  than papered over: between the `lstat` that proves an entry regular and the `open` that reads it,
+  the entry can be replaced; closing that needs non-portable handle-level verification the threat
+  model above does not require.
+
+⚠️ **At entry, a package is byte-exact — including `fabric/**`.** That tree becomes legitimately
+mutable once an agent has been dispatched (see [`migration-phases.md`](migration-phases.md) phase 2),
+and reading that backwards into the entry gate would let every half-finished unit look pristine.
+
+⚠️ **A key must be canonical on EVERY host, not merely legal on the one reading it.** Alongside the
+traversal, separator and device rules, a declared key may not hold `<`, `>`, `:`, `"`, `|`, `?` or
+`*`. POSIX accepts all seven in a filename, which is the reason rather than an argument against it: a
+key holding one describes a package that cannot be unpacked on Windows at all, `?`/`*` make one
+declaration match many files wherever they are expanded, `:` is a drive qualifier or an NTFS
+alternate data stream, and `<`/`>`/`|`/`"` are how a path ends up interpreted rather than opened.
+Ordinary package punctuation — brackets, parentheses, ampersands, commas, apostrophes, `%`, `#`, `@`
+— stays usable, and a control asserts it does.
+
+### The structured verdict: `package_integrity`
+
+The JSON verdict carries a **list** of per-target blocks, always present, one for every target whose
+package integrity was assessed — clean or not — each with the target's `ordinal`, the same safe
+`unit` label the rest of the report prints, and the typed `findings`/`unassessable` rows (stable
+codes, package-relative paths, and bare ordinals for an unsafe key). It is empty for an ordinary
+target and for an unsafe root, so "not assessed" and "assessed and correct" are distinguishable
+rather than sharing one absent key.
+
+⚠️ The list shape is a **review correction, not a preference**. The first version wrote a single
+block only on refusal, and `_merge_scans` starts from `dict(reports[0])`: scanning a clean target and
+a damaged one in the same invocation inherited the clean field and dropped the damaged target's
+evidence entirely, while the merged status stayed `CANNOT_ESTABLISH`. A verdict that is right with
+its evidence missing is the quietest failure this gate has. Blocks are now concatenated with the
+ordinal rewritten to the target's position, and both the single-target and merged shapes are
+deterministic.
+
+Direct tests are `tests/test_package_filesystem.py`; `tests/mutation_package_filesystem.py` proves
+each anchor asserts the **named** guard rather than any fail-closed refusal — several mutations leave
+the package non-clean for a different reason, which is exactly what a "not clean" assertion would
+have missed.
+
+---
+
 ## Tests and mutation proof
 
 - `scripts/reference_evidence.py` — the evidence layer, split out because it answers a different
