@@ -39,7 +39,13 @@ import check_desktop_orphans as check_desktop_orphans_module
 import object_identity as oid
 import read_handover
 import tableau_oracle_manifest
-from bundle_corpus import evidence_dirs, shipping_models, shipping_reports
+from bundle_corpus import (
+    TargetClassification,
+    classify_target,
+    evidence_dirs,
+    shipping_models,
+    shipping_reports,
+)
 from check_field_bindings import model_for_report
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -70,6 +76,10 @@ EXIT_FINDINGS = 1
 EXIT_NOT_CHECKED = 2
 EXIT_PRECONDITION_FAILED = 4
 EXIT_USAGE = 64
+
+# The single check row a refused package boundary produces (issue #562). Named once so the row id and
+# ``stopped_after`` cannot drift apart, and so a test can name the assertion it kills.
+PACKAGE_BOUNDARY_CHECK_ID = "package-boundary"
 
 EXEMPTIONS_FILE = "unit-check-exemptions.json"
 VALID_EXEMPTION_CHECKS = frozenset({"stub-measures", "page-parity", "scaffold-partitions"})
@@ -171,6 +181,7 @@ OWNER_HINTS = {
     "engine-receipt": "orchestrator",
     "desktop-orphans": "orchestrator",
     "path-ceiling": "orchestrator (install root length + engine-side name duplication; not a layer defect)",
+    PACKAGE_BOUNDARY_CHECK_ID: "orchestrator (the target handed to this gate, not a layer defect)",
 }
 
 
@@ -392,7 +403,13 @@ def _write_json(path: Path, payload: Any) -> None:
 
 
 def _unit_dir(target: Path) -> Path:
-    """Return the migration unit directory when ``target`` is its fabric folder or bundle."""
+    """Return the migration unit directory when ``target`` is its fabric folder or bundle.
+
+    ⚠️ ``resolve()`` **follows** a symlink or NTFS junction, so this must only ever be handed a root
+    that :func:`_cleared_target` has already cleared (issue #562). It is not itself a boundary check
+    and cannot be made into one: by the time it runs, an alias would already have substituted its
+    destination for the path the caller named.
+    """
     target = target.resolve()
     return target.parent if target.name == "fabric" else target
 
@@ -1825,6 +1842,11 @@ def _oracle_dirs(target: Path, explicit: Path | None) -> list[Path]:
     shared with the entry gate. This function used to stop one level short of it, so a non-packaged
     unit at ``<bundle>/pbip/<Unit>/`` could not reach the run's flat capture at all (round-1 review
     of PR #454).
+
+    ⚠️ ``evidence_dirs`` classifies again to decide whether to walk upward, and it does so on the
+    **resolved** unit root. That is safe only because ``target`` reached here through
+    :func:`_cleared_target`: the caller-supplied path was classified before any resolution, so this
+    second classification can never be the one that decides an alias's boundary (issue #562).
     """
     if explicit:
         return _resolved_unique([explicit])
@@ -3000,16 +3022,106 @@ def _append_model_readiness_checks(
             checks.append(check_func(target))
 
 
+def _cleared_target(target: Path, classification: TargetClassification) -> Path:
+    """Resolve the caller-supplied target, but ONLY once its boundary has been classified.
+
+    ⚠️ **This is the single place `check_unit` turns a supplied path into a resolved one**, and it is
+    gated on the classification taken from the ORIGINAL path (issue #562). Everything downstream -
+    :func:`_unit_dir`, :func:`_reference_dirs`, :func:`_oracle_dirs` and, through it,
+    :func:`bundle_corpus.evidence_dirs` - therefore only ever sees a root that has already been
+    cleared. That is what stops the classification those helpers take *after* resolution from
+    becoming the authority: for a caller-supplied alias it would classify the destination, which is
+    precisely the substitution the classifier exists to refuse.
+
+    Raising rather than returning is deliberate. An unsafe classification reaching here means the
+    refusal above it was removed, and a silent resolve would restore the defect with no verdict.
+    """
+    if not classification.is_safe:
+        raise ValueError(f"target was not cleared for resolution: {classification.code}")
+    return target.resolve()
+
+
+def _refused_boundary_report(classification: TargetClassification, scope: str) -> dict[str, Any]:
+    """The non-clean verdict for a target whose package boundary could not be established.
+
+    ⚠️ Built **without touching the filesystem**. Running the usual checks would mean reading the
+    destination's evidence through the very alias that was refused, and ``inspect_brownfield`` alone
+    would ``rglob`` the whole tree behind it.
+
+    ⚠️ The wording is the classifier's stable code plus its generic detail and NOTHING else - no
+    supplied path, no link destination, no raw exception. ``target`` is the normalized final path
+    component, the unit label every other verdict here already prints, never the supplied path: that
+    path can itself be a secret-bearing absolute path that ends up pasted into an issue.
+
+    The verdict is the gate's existing NOT_CHECKED state (exit 2, *"could not be fully checked"*),
+    not a new exit code - the boundary is unproven, so this gate forms no opinion, and forming no
+    opinion is not a pass.
+    """
+    detail = (
+        f"{classification.code}: {classification.detail} - this gate refuses to fall back to "
+        "ordinary bundle handling and forms NO opinion, which is NOT a pass"
+    )
+    return {
+        "version": 1,
+        "target": classification.unit_name or "target",
+        "scope": scope,
+        "omitted_checks": _omitted_checks(scope),
+        "status": STATUS_NOT_CHECKED,
+        "exit_code": EXIT_NOT_CHECKED,
+        "stopped_after": PACKAGE_BOUNDARY_CHECK_ID,
+        "exemptions": {"path": None, "accepted": 0, "invalid": 0},
+        "checks": [
+            {
+                "id": PACKAGE_BOUNDARY_CHECK_ID,
+                "status": STATUS_NOT_CHECKED,
+                "code": classification.code,
+                "placement": classification.placement,
+                "detail": detail,
+            }
+        ],
+        "brownfield": {},
+    }
+
+
+def _entry_classification(target: Path, supplied: TargetClassification | None) -> TargetClassification:
+    """The ONE classification of the original caller-supplied target.
+
+    ``supplied`` is the verdict :func:`main` already took on the *same* original path, so the CLI's
+    own pre-checks never classify a second time (or a second thing). Absent it, the classification is
+    taken here - always before any resolution.
+    """
+    return supplied if supplied is not None else classify_target(target)
+
+
 def run_all(
     target: Path,
     reference_dir: Path | None = None,
     oracle_dir: Path | None = None,
     scope: str = SCOPE_ALL,
+    classification: TargetClassification | None = None,
 ) -> dict[str, Any]:
-    """Run checks for one persona-owned scope, returning a normalized envelope."""
+    """Run checks for one persona-owned scope, returning a normalized envelope.
+
+    ⚠️ **Classification comes first, before ``resolve()`` and before any discovery** (issue #562).
+    The exit gate reached its package handling through ``_unit_dir()`` -> ``target.resolve()``, so a
+    caller-supplied symlink or junction was classified on its *destination* and could then consume
+    that destination's oracle/reference evidence through the alias. The original target is now
+    classified exactly once, here, and a damaged or unsafe boundary stops before ``_unit_dir``, any
+    ``resolve``/``is_dir``/``is_file``/``rglob``, evidence discovery, manifest read or ancestor walk.
+
+    ``classification`` lets :func:`main` hand over the verdict it already took on the same original
+    path, so the CLI's own pre-checks cannot classify a second time (or a second thing).
+
+    A **safe** ordinary bundle or package continues into the existing behaviour completely
+    unchanged. Verifying that a package's manifest still describes the bytes on disk is a later
+    slice of #562; this is the boundary ordering only.
+    """
     if scope not in SCOPES:
         raise ValueError(f"unknown scope: {scope}")
-    target = target.resolve()
+    classification = _entry_classification(target, classification)
+    if not classification.is_safe:
+        return _refused_boundary_report(classification, scope)
+    target = _cleared_target(target, classification)
     exemptions = load_exemptions(target)
     model_loc = _model_location(target)
     checks: list[dict[str, Any]] = []
@@ -3253,6 +3365,11 @@ def _summary_line(report: dict[str, Any]) -> str:
 def _render_brownfield(report: dict[str, Any]) -> list[str]:
     """Actionable read-only guidance for non-canonical or partial migration folders."""
     brownfield = report.get("brownfield") or {}
+    # An empty inventory means nothing was ever inspected - the refused-boundary verdict
+    # (:func:`_refused_boundary_report`) deliberately reads no filesystem. Printing the discovery
+    # block there would claim a look that never happened. `inspect_brownfield` always returns keys.
+    if not brownfield:
+        return []
     _, _, missing_input, _ = _summary_counts(report)
     if brownfield.get("recognized_target_shape") and not brownfield.get("plan") and missing_input == 0:
         return []
@@ -3397,10 +3514,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--quiet", action="store_true", help="suppress human-readable output")
     args = parser.parse_args(argv)
 
-    if not args.target.is_dir():
+    # ⚠️ Classification precedes the directory pre-check, which FOLLOWS: `is_dir()` dereferences a
+    # junction, and the usage error below echoes the supplied path. Running it first is how the
+    # entry gate's CLI leaked a target and returned the wrong exit code (PR #590, round-1 review);
+    # the same shape lives here. The verdict is passed into `run_all` so the original path is
+    # classified exactly once.
+    classification = classify_target(args.target)
+    if classification.is_safe and not args.target.is_dir():
         print(f"ERROR: not a directory: {args.target}", file=sys.stderr)
         return EXIT_USAGE
-    report = run_all(args.target, reference_dir=args.reference_dir, oracle_dir=args.oracle_dir, scope=args.scope)
+    report = run_all(
+        args.target,
+        reference_dir=args.reference_dir,
+        oracle_dir=args.oracle_dir,
+        scope=args.scope,
+        classification=classification,
+    )
     if args.json:
         _write_json(args.json, report)
     if not args.quiet:

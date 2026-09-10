@@ -24,6 +24,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
+import bundle_corpus  # noqa: E402  # pylint: disable=wrong-import-position
 import check_unit as cu  # noqa: E402  # pylint: disable=wrong-import-position
 import check_field_bindings  # noqa: E402  # pylint: disable=wrong-import-position
 import object_identity as oid  # noqa: E402  # pylint: disable=wrong-import-position
@@ -4291,3 +4292,295 @@ class TestSafePrintCP1252:
         with pytest.raises(OSError, match="transient"):
             cu._safe_print("hello", stream=stream)
         assert stream.write_count == 1
+
+
+# ---------------------------------------------------------------------------------------------
+# Package-boundary ordering in the EXIT gate (issue #562, follow-up to PR #590)
+# ---------------------------------------------------------------------------------------------
+#
+# The invariant under test: `check_unit` classifies the ORIGINAL caller-supplied target exactly once,
+# BEFORE `_unit_dir`, any `resolve`/`is_dir`/`is_file`/`rglob`, oracle/reference discovery, manifest
+# read or ancestor walk. PR #590 shipped the classifier and the ENTRY gate; the exit gate still
+# reached its package handling through `_oracle_dirs()` -> `_unit_dir()` -> `target.resolve()`, so a
+# caller-supplied symlink or junction was classified on its DESTINATION and consumed that
+# destination's evidence through the alias.
+
+
+class _Followed(Exception):
+    """Raised at the exact call site where the exit gate dereferenced or discovered too early.
+
+    ⚠️ Deliberately not `AssertionError`, and deliberately caught inside the patched window: `Path.exists`
+    is armed here and **pytest calls it while formatting a traceback**, so letting the failure escape
+    with the patch installed turns a genuine kill into an INTERNALERROR that reads as infrastructure
+    breakage rather than as this test failing.
+    """
+
+
+#: Everything the exit gate must not have reached before classification. `_unit_dir` is named
+#: explicitly because it is the documented location of the defect: it resolves first.
+_FORBIDDEN_PATH_PRIMITIVES = ("resolve", "is_file", "is_dir", "exists", "rglob", "stat", "open")
+_FORBIDDEN_GATE_HELPERS = (
+    "_unit_dir",
+    "inspect_brownfield",
+    "load_exemptions",
+    "check_page_parity",
+    "check_oracle_coverage",
+)
+
+
+def _run_all_without_following(target: Path, scope: str = cu.SCOPE_ALL) -> tuple[dict | None, str]:
+    """Run the exit gate with every follower and discovery helper armed to explode.
+
+    Uses its own `MonkeyPatch.context` rather than the test's `monkeypatch` fixture: undoing that
+    one would also undo the autouse `no_native_gates` patches and silently re-enable the real
+    subprocess gates for the rest of the test.
+    """
+
+    def boom(*_args: object, **_kwargs: object) -> object:
+        raise _Followed("the exit gate followed or discovered before classifying the supplied target")
+
+    with pytest.MonkeyPatch.context() as mp:
+        for name in _FORBIDDEN_PATH_PRIMITIVES:
+            mp.setattr(Path, name, boom, raising=True)
+        mp.setattr("builtins.open", boom, raising=True)
+        for name in _FORBIDDEN_GATE_HELPERS:
+            mp.setattr(cu, name, boom, raising=True)
+        try:
+            return cu.run_all(target, scope=scope), ""
+        except _Followed as exc:
+            return None, str(exc)
+
+
+def _package(root: Path, *, marker: bool = True) -> Path:
+    """A migration unit with local oracle evidence, optionally declaring its package boundary."""
+    _write_spec(root, ["Revenue"])
+    _write_report(root, ["Revenue"])
+    _write_oracle_manifest(root, ["Revenue"], workbook="Book")
+    if marker:
+        (root / bundle_corpus.PACKAGE_MARKER).write_text("{}\n", encoding="utf-8")
+    return root
+
+
+def _link_directory(link: Path, target: Path) -> None:
+    """A junction (Windows) or a directory symlink (POSIX) - a reparse point either way."""
+    link.parent.mkdir(parents=True, exist_ok=True)
+    if sys.platform == "win32":
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)], capture_output=True, check=False
+        )
+        if completed.returncode != 0:
+            pytest.skip(f"could not create junction: {completed.stderr.decode(errors='replace').strip()}")
+        return
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except (OSError, NotImplementedError):  # pragma: no cover - privilege-dependent
+        pytest.skip("this platform/account cannot create symlinks without elevation")
+
+
+def _symlink_directory(link: Path, target: Path) -> None:
+    """A real directory SYMLINK on every platform; skips where it needs elevation (Windows)."""
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("this platform/account cannot create symlinks without elevation")
+
+
+def _boundary_row(report: dict) -> dict:
+    rows = [check for check in report["checks"] if check["id"] == cu.PACKAGE_BOUNDARY_CHECK_ID]
+    assert len(rows) == 1, f"expected exactly one boundary row, got {[c['id'] for c in report['checks']]}"
+    return rows[0]
+
+
+def test_the_destination_evidence_is_readable_when_the_real_path_is_supplied(tmp_path: Path) -> None:
+    """The POSITIVE control that makes every refusal below a refusal rather than a vacuous pass.
+
+    Handed its real path, this package's own oracle capture certifies its one page. So the refusals
+    that follow are withholding evidence that demonstrably exists and would otherwise be consumed.
+    """
+    package = _package(tmp_path / "run" / "packages" / "Unit")
+
+    report = cu.run_all(package)
+
+    oracle = next(check for check in report["checks"] if check["id"] == "oracle-coverage")
+    assert oracle["visual_present"] == 1
+    assert not [check for check in report["checks"] if check["id"] == cu.PACKAGE_BOUNDARY_CHECK_ID]
+
+
+@pytest.mark.parametrize("make_link", [_link_directory, _symlink_directory], ids=["junction", "symlink"])
+def test_an_aliased_root_is_refused_before_unit_dir_and_reads_no_destination_evidence(
+    tmp_path: Path, make_link
+) -> None:
+    """Kills: classifying after `_unit_dir()`/`resolve()` - the exact residual PR #590 left open.
+
+    The alias is not lexically package-shaped, so following it is the ONLY way to reach the package
+    verdict; the previous ordering did exactly that and then read the destination's oracle manifest.
+    Two independent assertions: the armed run proves nothing was followed or discovered at all, and
+    the ordinary run proves the destination's evidence produced no row.
+    """
+    package = _package(tmp_path / "run" / "packages" / "Unit")
+    alias = tmp_path / "alias"
+    make_link(alias, package)
+
+    armed, followed = _run_all_without_following(alias)
+    report = cu.run_all(alias)
+
+    assert followed == "", followed
+    assert armed is not None and armed["exit_code"] == cu.EXIT_NOT_CHECKED
+    assert report["status"] == cu.STATUS_NOT_CHECKED
+    assert report["exit_code"] == cu.EXIT_NOT_CHECKED
+    assert report["stopped_after"] == cu.PACKAGE_BOUNDARY_CHECK_ID
+    assert _boundary_row(report)["code"] == bundle_corpus.CODE_TARGET_ROOT_REPARSE
+    assert [check["id"] for check in report["checks"]] == [cu.PACKAGE_BOUNDARY_CHECK_ID]
+    assert isinstance(report["brownfield"], dict) and not report["brownfield"]
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [("run", "packages", "Unit"), ("run", "packages", "batch", "Unit")],
+    ids=["flat", "nested"],
+)
+def test_a_package_shaped_root_with_no_marker_is_refused_before_discovery(
+    tmp_path: Path, relative: tuple[str, ...]
+) -> None:
+    """Kills: falling back to ordinary bundle handling for an unproven boundary, at either placement."""
+    unit = _package(tmp_path.joinpath(*relative), marker=False)
+
+    armed, followed = _run_all_without_following(unit)
+    report = cu.run_all(unit)
+
+    assert followed == "", followed
+    assert armed is not None
+    assert report["exit_code"] == cu.EXIT_NOT_CHECKED
+    row = _boundary_row(report)
+    assert row["code"] == bundle_corpus.CODE_PACKAGE_MARKER_MISSING
+    assert row["placement"] == (bundle_corpus.PLACEMENT_FLAT if len(relative) == 3 else bundle_corpus.PLACEMENT_NESTED)
+    assert [check["id"] for check in report["checks"]] == [cu.PACKAGE_BOUNDARY_CHECK_ID]
+
+
+def test_a_non_regular_marker_is_refused_before_discovery(tmp_path: Path) -> None:
+    """A DIRECTORY named `package-manifest.json` declares nothing; it must not read as an ordinary bundle."""
+    unit = _package(tmp_path / "run" / "packages" / "Unit", marker=False)
+    (unit / bundle_corpus.PACKAGE_MARKER).mkdir()
+
+    armed, followed = _run_all_without_following(unit)
+    report = cu.run_all(unit)
+
+    assert followed == "", followed
+    assert armed is not None
+    assert report["exit_code"] == cu.EXIT_NOT_CHECKED
+    assert _boundary_row(report)["code"] == bundle_corpus.CODE_PACKAGE_MARKER_NOT_REGULAR
+
+
+def test_an_unassessable_root_refuses_rather_than_succeeding_exception_shaped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A root whose `lstat` is denied is UNKNOWN, and unknown is never clean - and never a traceback."""
+    unit = _package(tmp_path / "run" / "packages" / "Unit")
+    real_lstat = os.lstat
+
+    def denying(path, *args, **kwargs):
+        if Path(path) == unit:
+            raise PermissionError(13, "permission denied by the test")
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(bundle_corpus.os, "lstat", denying)
+
+    report = cu.run_all(unit)
+    rendered = cu.render(report)
+
+    assert report["exit_code"] == cu.EXIT_NOT_CHECKED
+    assert _boundary_row(report)["code"] == bundle_corpus.CODE_TARGET_ROOT_UNASSESSABLE
+    assert "PermissionError" not in rendered
+    assert "permission denied by the test" not in rendered
+
+
+def test_the_original_target_is_classified_exactly_once_and_never_after_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kills: classifying the RESOLVED target, and re-classifying after resolution.
+
+    The target is spelled `<...>/Unit/fabric/..`, which `resolve()` collapses to `<...>/Unit`. So a
+    recorded argument equal to the supplied spelling can only have been taken before resolution, and
+    a list of length one can only mean the exit gate never asked a second time.
+
+    ⚠️ Scope stated: this counts `check_unit`'s OWN calls. `bundle_corpus.evidence_dirs` classifies
+    again on the already-cleared root by design; the point of `_cleared_target` is that its answer
+    can no longer be about a directory the caller never named.
+    """
+    package = _package(tmp_path / "run" / "packages" / "Unit")
+    spelling = package / "fabric" / ".."
+    seen: list[Path] = []
+    real = cu.classify_target
+
+    def recording(target: Path):
+        seen.append(target)
+        return real(target)
+
+    monkeypatch.setattr(cu, "classify_target", recording)
+
+    report = cu.run_all(spelling)
+
+    assert seen == [spelling]
+    assert report["target"] == str(package.resolve())
+    assert not [check for check in report["checks"] if check["id"] == cu.PACKAGE_BOUNDARY_CHECK_ID]
+
+
+def test_resolution_is_gated_on_the_clearance_rather_than_merely_ordered_after_it(tmp_path: Path) -> None:
+    """Kills: deleting the refusal and letting an unsafe classification fall through to `resolve()`."""
+    package = _package(tmp_path / "run" / "packages" / "Unit")
+    damaged = _package(tmp_path / "run" / "packages" / "Other", marker=False)
+
+    safe = bundle_corpus.classify_target(package)
+    unsafe = bundle_corpus.classify_target(damaged)
+
+    assert cu._cleared_target(package, safe) == package.resolve()  # pylint: disable=protected-access
+    with pytest.raises(ValueError, match=bundle_corpus.CODE_PACKAGE_MARKER_MISSING):
+        cu._cleared_target(damaged, unsafe)  # pylint: disable=protected-access
+
+
+def test_a_safe_package_and_an_ordinary_unit_keep_their_existing_verdicts(tmp_path: Path) -> None:
+    """The regression control: nothing about unaliased, undamaged targets changed.
+
+    Two unrelated consumers ride along here on purpose - the `desktop-orphans` row still runs, and a
+    safe package still evaluates only its OWN evidence, which is the pre-existing package behaviour
+    the boundary ordering must not disturb.
+    """
+    ordinary = _package(tmp_path / "plain" / "unit", marker=False)
+    package = _package(tmp_path / "run" / "packages" / "Unit")
+
+    ordinary_report = cu.run_all(ordinary)
+    package_report = cu.run_all(package)
+
+    assert [check["id"] for check in ordinary_report["checks"]] == [check["id"] for check in package_report["checks"]]
+    assert "desktop-orphans" in [check["id"] for check in package_report["checks"]]
+    for report, root in ((ordinary_report, ordinary), (package_report, package)):
+        assert report["target"] == str(root.resolve())
+        assert report["stopped_after"] is None
+        assert next(c for c in report["checks"] if c["id"] == "oracle-coverage")["visual_present"] == 1
+
+
+def test_the_cli_refuses_an_aliased_target_without_printing_any_supplied_path(tmp_path: Path) -> None:
+    """Exit state and every output channel: no supplied path, no link destination, no traceback."""
+    package = _package(tmp_path / "run" / "packages" / "Unit")
+    alias = tmp_path / "alias"
+    _link_directory(alias, package)
+    json_path = tmp_path / "verdict.json"
+
+    completed = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "check_unit.py"), str(alias), "--json", str(json_path)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    written = json_path.read_text(encoding="utf-8")
+    everywhere = completed.stdout + completed.stderr + written
+
+    assert completed.returncode == cu.EXIT_NOT_CHECKED, completed.stdout + completed.stderr
+    assert bundle_corpus.CODE_TARGET_ROOT_REPARSE in everywhere
+    assert str(alias) not in everywhere
+    assert str(package) not in everywhere
+    assert str(tmp_path) not in everywhere
+    assert "Traceback" not in everywhere
+    assert "ERROR: not a directory" not in everywhere

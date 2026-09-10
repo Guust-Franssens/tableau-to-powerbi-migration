@@ -229,13 +229,20 @@ NTFS junction is refused the same way: following it would decide the boundary ab
 never named. This is deliberate and fails **closed** — including for an ordinary, unpackaged bundle
 reached through an alias.
 
-❌ **The EXIT gate is NOT yet covered by that ordering, and this is a known blocking residual.**
-`check_unit.py`'s `_oracle_dirs()` reaches the shared walk through `_unit_dir()`, which calls
-`target.resolve()` **first** — so for a caller-supplied alias the classification happens on the
-already-resolved destination, which is precisely the substitution the classifier exists to refuse.
-The stop is therefore only reliable there for a real, un-aliased path. Closing it means classifying
-the **original** target before resolution, which is a separate follow-up to #562; do not read the
-entry gate's guarantee as covering `check_unit.py`.
+✅ **The EXIT gate now shares that ordering.** `check_unit.py` classifies the **original**
+caller-supplied target exactly once, before `_unit_dir()` (which `resolve()`s, and therefore
+follows), before any `is_dir`/`is_file`/`rglob`, and before oracle/reference discovery, the manifest
+read or the ancestor walk. `run_all` refuses a damaged or unsafe boundary with its existing
+`NOT_CHECKED` verdict (**exit 2** — the gate forms no opinion, which is not a pass), reading nothing
+through the alias and printing only the classifier's stable code and generic detail: never the
+supplied path, the link destination or a raw exception. Its CLI classifies before its own `is_dir`
+pre-check, for the same reason the entry gate's does. Resolution itself is gated on the clearance
+(`_cleared_target`), so the classification `bundle_corpus.evidence_dirs` takes later, on the resolved
+root, can no longer be the one that decides an alias's boundary.
+
+⚠️ Boundary **ordering** only. Neither gate yet verifies that a package's `package-manifest.json`
+still describes the bytes on disk — no JSON parse, no hashes, no declared-contents or role check.
+That is a later slice of #562.
 
 ### The two gates
 
