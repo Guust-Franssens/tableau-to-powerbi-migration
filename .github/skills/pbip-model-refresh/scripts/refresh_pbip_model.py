@@ -265,8 +265,13 @@ def _emit_dialog_finding(pid: int, finding: DialogFinding) -> None:
     ``DIALOG_NEEDS_HUMAN`` / ``DIALOG_UNREADABLE`` / ``DIALOG_UNRECOGNIZED`` / ``REFRESH_IN_PROGRESS``,
     the same vocabulary ``probe_desktop_credential.ps1`` speaks - instead of ``BLOCKED_BY_DIALOG``,
     which this module emitted at exit 1 from a SIZE-ONLY test and which the parent classifier maps to
-    ``NO_CREDENTIAL``. Nothing here can establish that a dialog BLOCKS anything, so nothing here may
-    enter the hard-stop band; all of these are exit 3.
+    ``NO_CREDENTIAL``. Nothing here can establish that a dialog blocks a DATA SOURCE, so nothing here
+    may enter the credential hard-stop band; all of these are exit 3.
+
+    Exit 3 does not make them equivalent: ``DIALOG_NEEDS_HUMAN`` matched a known human-blocking prompt
+    (which action it needs is decided by the visible prompt, not by the token) and ``REFRESH_IN_PROGRESS``
+    positively read a refresh already running on this pid - wait or cancel, never stack. The unreadable
+    and unrecognized tokens are the uncertain pair: they rule a sign-in prompt neither in nor out.
 
     Both lines are deliberately MARKER-FREE (issue #153): a failing child's whole transcript is scanned
     as free text by ``probe_live_source``, so prose naming a sign-on problem would re-create exactly
