@@ -380,7 +380,7 @@ def test_an_unsafe_key_carrying_a_CUSTOMER_PATH_is_not_echoed(tmp_path: Path) ->
     quotes the offending key "to be helpful" is exactly how this would come back.
     """
     package = build_package(tmp_path)
-    write_manifest(package, files={"C:/Users/someone/customer-secret-server/report.json": "0" * 64})
+    write_manifest(package, files={"C:/Users/<name>/customer-secret-server/report.json": "0" * 64})
 
     result = verify(package)
     rendered = json.dumps(result.as_dict())
@@ -1052,7 +1052,7 @@ def test_no_finding_ever_carries_a_host_path_or_an_exception_message(
 
     def deny(path, *args, **kwargs):
         if Path(path).name == "oracle":
-            raise PermissionError(13, "denied by C:\\Users\\someone\\secret")
+            raise PermissionError(13, "denied by C:\\\\Users\\\\<name>\\\\secret")
         return real_scandir(path, *args, **kwargs)
 
     monkeypatch.setattr(pfs.os, "scandir", deny)
