@@ -1,9 +1,32 @@
 #!/usr/bin/env python
 """
-purpose: Capture every Power BI report page, waiting until each page's render has actually stabilised.
+purpose: Capture every Power BI report page, waiting until each page's render has actually stabilised,
+         and (in `iterate` mode) retain that capture as one canonical package-local review iteration.
 usage:   python scripts/capture_powerbi_pages.py <report.Report> <output-dir> [--pid PID]
                                                 [--pages <id>[,<id>...]] [--poll 4]
                                                 [--stable-seconds 20] [--max-wait 75]
+         python scripts/capture_powerbi_pages.py iterate --package <package> --pid PID
+                                                [--mode sign_off|triage] [--pages <id>[,<id>...]]
+                                                [--reviewer NAME] [--session-id ID]
+                                                [--data-evidence <file.json>]
+                                                [--desktop-file-path <path>]
+         python scripts/capture_powerbi_pages.py finalize --package <package> [--iteration NNN]
+
+The two modes, and why both exist
+---------------------------------
+The bare positional form is unchanged: point it at a `.Report` folder and an output directory and it
+writes settled PNGs. It is the right tool when you are looking at something, and it deliberately
+produces no evidence - the result is printed and discarded.
+
+`iterate` is the same capture with a MEMORY. It resolves the caller-supplied package's own canonical
+report/model (no ancestor search), derives the page and visual inventory from the CURRENT PBIR
+definition rather than from whatever was captured, allocates the next `validation/iterations/<NNN>/`
+exclusively, retains the settled PNGs there, and writes one strict `iteration.json` whose generated
+half is re-derivable and whose judgement half starts PENDING. `finalize` re-derives every generated
+identity immediately before sealing it, so any edit to the report, model, cache, a retained
+screenshot or a prior receipt makes the iteration stale instead of quietly authoritative.
+
+⚠️ An iteration is EVIDENCE, not a verdict. Nothing here decides whether a unit is finished.
 
 Why this exists - and why the obvious version is wrong
 ------------------------------------------------------
@@ -44,16 +67,37 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# ruff: noqa: E402  (the sys.path insert above must precede these sibling-module imports)
+import current_artifact_revision as rev  # pylint: disable=wrong-import-position
+import iteration_receipt as receipt  # pylint: disable=wrong-import-position
 
 Screenshotter = Callable[[str, str, Path], bool]
 BRIDGE_WAIT_SECONDS = 90
 SCREENSHOT_TIMEOUT_SECONDS = BRIDGE_WAIT_SECONDS + 30
+
+#: Recorded into every receipt's `review.tool_version`. Bump it when the CAPTURE RULE changes, so a
+#: receipt says which rule produced it rather than merely which day it was written.
+TOOL_VERSION = "1.0.0"
+
+SUBCOMMANDS = ("iterate", "finalize")
+
+EXIT_OK = 0
+EXIT_CAPTURE_FAILED = 1
+EXIT_USAGE = 2
+#: A named invariant refused the work. Distinct from 1 so "the bridge did not settle" and "this
+#: iteration would not have been evidence" are never confused by a caller.
+EXIT_REFUSED = 3
 
 
 @dataclass(frozen=True)
@@ -248,8 +292,270 @@ def _page_ids(value: str) -> frozenset[str]:
     return frozenset(page_ids)
 
 
+# --------------------------------------------------------------------------------------------------
+# iteration mode
+# --------------------------------------------------------------------------------------------------
+
+
+def _selected_inventory(
+    inventory: list[rev.PageInventory], requested: frozenset[str] | None
+) -> list[rev.PageInventory]:
+    """The current pages this run covers, refusing a page id the report does not have."""
+    if requested is None:
+        return inventory
+    missing = sorted(requested - {page.page_id for page in inventory})
+    if missing:
+        raise receipt.ReceiptError("UNKNOWN_PAGE_ID", f"the report has no page(s) {missing}")
+    return [page for page in inventory if page.page_id in requested]
+
+
+def _resolved_mode(requested: str | None, covers_every_page: bool) -> str:
+    """Sign-off scope is EVERY current page; a subset can only ever be triage.
+
+    A partial sweep that calls itself a sign-off is the exact confusion this producer exists to
+    prevent - it certifies the pages nobody looked at by saying nothing about them.
+    """
+    if not covers_every_page:
+        if requested == receipt.MODE_SIGN_OFF:
+            raise receipt.ReceiptError(
+                "SUBSET_CANNOT_SIGN_OFF", "a subset of the report's pages can never be a sign-off"
+            )
+        return receipt.MODE_TRIAGE
+    return requested or receipt.MODE_SIGN_OFF
+
+
+def _desktop_binding(target: receipt.PackageTarget, declared: str | None) -> tuple[bool, bool | None]:
+    """`(checked, matches)` for the open Desktop file - the RESULT only, never the path.
+
+    Producer-time evidence: whether the instance being screenshotted is showing THIS package's PBIP.
+    The path itself is an absolute host path and must not reach a shareable receipt, so only the
+    boolean survives; the PID and session identity that make it meaningful are recorded separately.
+    """
+    if declared is None:
+        return False, None
+    pbip = next(iter(sorted(target.report_dir.parent.glob("*.pbip"))), None)
+    if pbip is None:
+        raise receipt.ReceiptError("DESKTOP_BINDING_MISMATCH", "the package declares no .pbip to bind against")
+    try:
+        matches = Path(declared).resolve() == pbip.resolve()
+    except OSError as error:
+        raise receipt.ReceiptError("DESKTOP_BINDING_MISMATCH", "the open Desktop file could not be resolved") from error
+    if not matches:
+        raise receipt.ReceiptError(
+            "DESKTOP_BINDING_MISMATCH", "the open Desktop instance is showing a different file than this package"
+        )
+    return True, True
+
+
+def _capture_pages(
+    selected: list[rev.PageInventory],
+    pid: str,
+    directory: Path,
+    options: CaptureOptions,
+    runtime: CaptureRuntime,
+) -> list[dict[str, Any]]:
+    """Settle and retain one PNG per selected page, returning its immutable capture facts."""
+    pages_dir = directory / receipt.PAGES_DIRNAME
+    pages_dir.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, Any]] = []
+    for page in selected:
+        name = receipt.page_image_name(page.page_id)
+        dest = pages_dir / name
+        result = capture_stable(page.page_id, pid, dest, options, runtime)
+        if not result.captured or not dest.is_file():
+            raise receipt.ReceiptError("CAPTURE_FAILED", f"page {page.page_id!r} produced no settled screenshot")
+        blob = dest.read_bytes()
+        if not blob:
+            raise receipt.ReceiptError("SCREENSHOT_EMPTY", f"page {page.page_id!r} captured zero bytes")
+        rows.append(
+            {
+                "page_id": page.page_id,
+                "display_name": page.display_name,
+                "expected_visual_ids": list(page.visual_ids),
+                "tableau": None,
+                "tableau_reason": None,
+                "powerbi": {
+                    "path": f"{receipt.PAGES_DIRNAME}/{name}",
+                    "sha256": hashlib.sha256(blob).hexdigest(),
+                    "byte_count": len(blob),
+                    "converged": result.converged,
+                    "frames": result.frames,
+                    "stable_seconds": options.stable_seconds,
+                    "settled_seconds": round(result.seconds, 3),
+                },
+            }
+        )
+    return rows
+
+
+@dataclass(frozen=True)
+class IterationRequest:
+    """Everything `iterate` needs that is not a capture tuning knob."""
+
+    package: Path
+    pid: str
+    mode: str | None = None
+    reviewer: str = "pbi-migration-validator"
+    session_id: str | None = None
+    data_evidence: Path | None = None
+    desktop_file_path: str | None = None
+
+
+def run_iteration(  # pylint: disable=too-many-locals
+    request: IterationRequest,
+    options: CaptureOptions,
+    runtime: CaptureRuntime = DEFAULT_RUNTIME,
+) -> dict[str, Any]:
+    """Allocate, capture and write one PENDING iteration receipt. Returns the receipt payload.
+
+    The allocated directory is removed if anything after allocation refuses, because a numbered
+    directory with no receipt in it would make the whole chain unreadable from then on - a failed
+    capture must not cost the unit its history.
+    """
+    target = receipt.resolve_package(request.package)
+    inventory = receipt.report_inventory(target.report_dir)
+    selected = _selected_inventory(inventory, options.page_ids)
+    if not selected:
+        raise receipt.ReceiptError("NO_PAGES", "no current page was selected for capture")
+    mode = _resolved_mode(request.mode, len(selected) == len(inventory))
+    checked, matches = _desktop_binding(target, request.desktop_file_path)
+
+    artifact = receipt.artifact_facts(target)
+    data = (
+        receipt.ingest_data_evidence(request.data_evidence, artifact["model_revision"], artifact["cache_sha256"])
+        if request.data_evidence is not None
+        else receipt.pending_data_evidence()
+    )
+
+    directory, previous = receipt.allocate_iteration(request.package)
+    try:
+        rows = _capture_pages(selected, request.pid, directory, options, runtime)
+        for page_id, match in receipt.tableau_matches(target, selected).items():
+            row = next(row for row in rows if row["page_id"] == page_id)
+            row["tableau"], row["tableau_reason"] = match.evidence, match.reason
+        payload = {
+            "schema_version": receipt.SCHEMA_VERSION,
+            "iteration": directory.name,
+            "mode": mode,
+            "state": receipt.STATE_PENDING,
+            "outcome": None,
+            "generated": {
+                "generated_at": receipt.now_rfc3339(),
+                "scope": receipt.SCOPE_ALL_PAGES if len(selected) == len(inventory) else receipt.SCOPE_SUBSET,
+                "artifact": artifact,
+                "review": {
+                    "reviewer": request.reviewer,
+                    "session_id": request.session_id,
+                    "tool": receipt.TOOL_NAME,
+                    "tool_version": TOOL_VERSION,
+                    "desktop_binding_checked": checked,
+                    "desktop_binding_matches": matches,
+                },
+                "previous": (
+                    None
+                    if previous is None
+                    else {
+                        "iteration": previous.name,
+                        "receipt_sha256": previous.receipt_sha256,
+                        "report_revision": previous.payload["generated"]["artifact"]["report_revision"],
+                        "model_revision": previous.payload["generated"]["artifact"]["model_revision"],
+                    }
+                ),
+                "limitations": receipt.limitation_facts(target.root),
+                "data_evidence": data,
+                "pages": rows,
+                "changes_from_previous": receipt.changes_from_previous(previous, rows),
+            },
+            "judgement": receipt.pending_judgement(selected),
+        }
+        receipt.write_receipt(directory, payload)
+        return payload
+    except BaseException:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise
+
+
+def _refused(error: receipt.ReceiptError | rev.RevisionError) -> int:
+    print(f"REFUSED: {error.code}: {error.detail}")
+    return EXIT_REFUSED
+
+
+def cmd_iterate(args: argparse.Namespace, runtime: CaptureRuntime = DEFAULT_RUNTIME) -> int:
+    """`iterate` entry point: capture into a new numbered iteration and write its pending receipt."""
+    options = CaptureOptions(
+        poll=args.poll, stable_seconds=args.stable_seconds, max_wait=args.max_wait, page_ids=args.pages
+    )
+    request = IterationRequest(
+        package=args.package,
+        pid=args.pid,
+        mode=args.mode,
+        reviewer=args.reviewer,
+        session_id=args.session_id,
+        data_evidence=args.data_evidence,
+        desktop_file_path=args.desktop_file_path,
+    )
+    try:
+        payload = run_iteration(request, options, runtime)
+    except (receipt.ReceiptError, rev.RevisionError) as error:
+        return _refused(error)
+    generated = payload["generated"]
+    unstable = [row["page_id"] for row in generated["pages"] if not row["powerbi"]["converged"]]
+    blind = [row["page_id"] for row in generated["pages"] if row["tableau"] is None]
+    print(
+        f"ITERATION {payload['iteration']} ({payload['mode']}, {generated['scope']}): "
+        f"{len(generated['pages'])} page(s) captured, {len(blind)} with no Tableau render"
+    )
+    if unstable:
+        print("NEVER CONVERGED (treat as PARTIAL): " + ", ".join(unstable))
+    if generated["data_evidence"]["status"] == receipt.DATA_STATUS_PENDING:
+        print(f"DATA EVIDENCE PENDING: {generated['data_evidence']['pending_reason']}")
+    print("Fill only the judgement fields, then run: capture_powerbi_pages.py finalize --package <package>")
+    return EXIT_OK
+
+
+def cmd_finalize(args: argparse.Namespace) -> int:
+    """`finalize` entry point: re-derive every generated identity, then seal the iteration."""
+    try:
+        payload = receipt.finalize(args.package, args.iteration)
+    except (receipt.ReceiptError, rev.RevisionError) as error:
+        return _refused(error)
+    print(f"FINALIZED {payload['iteration']} ({payload['mode']}): outcome {payload['outcome']}")
+    return EXIT_OK
+
+
+def _iteration_parser() -> argparse.ArgumentParser:
+    """The subcommand parser. Kept separate so the positional capture form stays untouched."""
+    parser = argparse.ArgumentParser(prog="capture_powerbi_pages.py")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    iterate = subparsers.add_parser("iterate", help="capture into a new package-local iteration")
+    iterate.add_argument("--package", type=Path, required=True, help="Path to the phase-2 package")
+    iterate.add_argument("--pid", required=True, help="Power BI Desktop PID to capture from")
+    iterate.add_argument("--mode", choices=receipt.MODES, help="Defaults to sign_off for a full sweep")
+    iterate.add_argument("--pages", type=_page_ids, help="Comma-separated PBIR page IDs; forces triage mode")
+    iterate.add_argument("--reviewer", default="pbi-migration-validator", help="Who is reviewing this iteration")
+    iterate.add_argument("--session-id", help="Agent session id, recorded for cost/identity attribution")
+    iterate.add_argument("--data-evidence", type=Path, help="Tool-produced DATA_OK record to bind into the receipt")
+    iterate.add_argument("--desktop-file-path", help="currentFilePath of the open Desktop instance (never recorded)")
+    iterate.add_argument("--poll", type=float, default=4.0, help="Seconds between frames for one page")
+    iterate.add_argument("--stable-seconds", type=float, default=20.0, help="Minimum byte-identical dwell")
+    iterate.add_argument("--max-wait", type=float, default=75.0, help="Max seconds to wait for one page")
+
+    finalize = subparsers.add_parser("finalize", help="validate and seal a pending iteration")
+    finalize.add_argument("--package", type=Path, required=True, help="Path to the phase-2 package")
+    finalize.add_argument("--iteration", help="Iteration name (NNN); defaults to the latest")
+    return parser
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    """Parse CLI arguments."""
+    """Parse CLI arguments.
+
+    The first token decides the grammar. That keeps the original `<report> <outdir> --pid` positional
+    form byte-for-byte compatible - a `.Report` path is never one of the subcommand words - instead
+    of demoting it behind a `capture` subcommand nobody's existing invocation types.
+    """
+    if argv and argv[0] in SUBCOMMANDS:
+        return _iteration_parser().parse_args(argv)
     parser = argparse.ArgumentParser()
     parser.add_argument("report", type=Path, help="Path to a .Report folder")
     parser.add_argument("outdir", type=Path, help="Folder where page PNGs should be written")
@@ -267,12 +573,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Minimum byte-identical dwell before treating a page as converged",
     )
     parser.add_argument("--max-wait", type=float, default=75.0, help="Max seconds to wait for one page")
+    parser.set_defaults(command=None)
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point."""
     args = parse_args(sys.argv[1:] if argv is None else argv)
+    if getattr(args, "command", None) == "iterate":
+        return cmd_iterate(args)
+    if getattr(args, "command", None) == "finalize":
+        return cmd_finalize(args)
     options = CaptureOptions(
         poll=args.poll,
         stable_seconds=args.stable_seconds,
