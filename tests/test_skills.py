@@ -59,7 +59,12 @@ BUNDLED_PATH_CLAIM_RE = re.compile(r"\bbundled(?:\s+in\s+this skill's)?\s+[`']([
 PBIP_REFRESH_SKILL = SKILLS_DIR / "pbip-model-refresh" / "SKILL.md"
 LIVE_SOURCE_SKILL = SKILLS_DIR / "live-source-reachability" / "SKILL.md"
 CREDENTIAL_DOC = REPO_ROOT / "docs" / "data-source-credentials.md"
+GATE_DOC = REPO_ROOT / "docs" / "credential-gate.md"
+GATE_TESTING_DOC = REPO_ROOT / "docs" / "credential-gate-testing.md"
 SCRIPTS_README = REPO_ROOT / "scripts" / "README.md"
+# `credential-gate-testing.md` routes by ERROR SIGNATURE, so its ACCESS_DENIED row is keyed on the
+# connector text rather than on the token - hence a row prefix here instead of `_table_row`.
+ACCESS_DENIED_SIGNATURE_ROW = "| error names `403`"
 DESKTOP_VERDICT_TOKENS = (
     "CREDENTIAL_MISSING",
     "CREDENTIAL_PRESENT",
@@ -467,12 +472,32 @@ def test_credential_guidance_states_only_what_the_desktop_arbiter_establishes() 
 
     # ACCESS_DENIED is a distinct FINAL branch - authenticated, then refused by permissions. Collapsing
     # it into a generic error/timeout or a second sign-in is the failure this half of the routing pins.
+    # All four operator-facing surfaces that route it are listed; a fifth would be an unpinned consumer.
     for path, key, finality in [
         (SCRIPTS_README, "probe_live_source.py", "final until permissions change"),
         (LIVE_SOURCE_SKILL, "ACCESS_DENIED", "do not retry unchanged"),
+        (GATE_DOC, "ACCESS_DENIED", "final until permissions change"),
     ]:
         row = _table_row(path, key)
         assert row, f"no `{key}` row found in {path.name} - this contract now proves nothing"
         assert "ACCESS_DENIED" in row, f"{path.name} no longer names ACCESS_DENIED in its `{key}` row"
         assert "permission" in row.lower(), f"{path.name} no longer ties ACCESS_DENIED to permissions"
         assert finality in row, f"{path.name} no longer states {finality!r} for ACCESS_DENIED"
+
+    signature_rows = [
+        line
+        for line in GATE_TESTING_DOC.read_text(encoding="utf-8").splitlines()
+        if line.startswith(ACCESS_DENIED_SIGNATURE_ROW)
+    ]
+    assert len(signature_rows) == 1, (
+        f"expected exactly one {ACCESS_DENIED_SIGNATURE_ROW!r} row in {GATE_TESTING_DOC.name}, "
+        f"found {len(signature_rows)} - this contract now proves nothing"
+    )
+    signature_row = signature_rows[0]
+    assert "ACCESS_DENIED" in signature_row, (
+        f"{GATE_TESTING_DOC.name} no longer maps the 403/forbidden signature to ACCESS_DENIED"
+    )
+    assert "permission" in signature_row.lower(), f"{GATE_TESTING_DOC.name} no longer ties ACCESS_DENIED to permissions"
+    assert "never, unchanged" in signature_row, (
+        f"{GATE_TESTING_DOC.name} no longer states that retrying ACCESS_DENIED unchanged is wrong"
+    )

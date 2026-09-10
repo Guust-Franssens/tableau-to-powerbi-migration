@@ -29,8 +29,9 @@ parse_tableau.py  ──►  GATE ARMED           writes are denied on <migratio
                        THE MEASUREMENT      sandbox, opens Power BI Desktop, refreshes, and
                               │             requires a real row back
                               ▼
-        ┌──────────┬──────────────┬───────────────┬─────────────┬─────────┬─────────┐
-     DATA_OK  OPERATOR_REQ  NO_CREDENTIAL  ACCESS_DENIED  UNREACHABLE   ERROR   SKIPPED
+        ┌─────────────┬────────────────┬──────────────┬─────────────┬─────────┬───────┐
+        ▼             ▼                ▼              ▼             ▼         ▼       ▼
+     DATA_OK  OPERATOR_REQUIRED  NO_CREDENTIAL  ACCESS_DENIED  UNREACHABLE  ERROR  SKIPPED
 ```
 
 | Verdict | What it means | What happens next |
