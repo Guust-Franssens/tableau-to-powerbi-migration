@@ -29,15 +29,39 @@ import bundle_corpus  # noqa: E402  # pylint: disable=wrong-import-position
 _FOLLOWING_PRIMITIVES = ("resolve", "is_file", "is_dir", "exists", "rglob", "stat", "open")
 
 
+class _Followed(Exception):
+    """Raised at the exact call site where classification dereferenced the supplied path.
+
+    ⚠️ Deliberately NOT `AssertionError`, and deliberately caught inside the patched window (see
+    :func:`_classify_without_following`). `Path.exists` is patched here, and **pytest itself calls it
+    while formatting a failure traceback** - so letting the failure escape with the patch still
+    installed turns a genuine kill into an `INTERNALERROR`, which reports as infrastructure breakage
+    rather than as this test failing. Measured while mutation-testing this file's own controls.
+    """
+
+
 def _forbid_following(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make every link-dereferencing `Path` primitive raise, plus `open`."""
 
     def boom(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("classification dereferenced the supplied path")
+        raise _Followed("classification dereferenced the supplied path")
 
     for name in _FOLLOWING_PRIMITIVES:
         monkeypatch.setattr(Path, name, boom, raising=True)
     monkeypatch.setattr("builtins.open", boom, raising=True)
+
+
+def _classify_without_following(
+    target: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[bundle_corpus.TargetClassification | None, str]:
+    """Classify with every follower armed, then disarm before any assertion can escape."""
+    _forbid_following(monkeypatch)
+    try:
+        return bundle_corpus.classify_target(target), ""
+    except _Followed as exc:
+        return None, str(exc)
+    finally:
+        monkeypatch.undo()
 
 
 def _link_directory(link: Path, target: Path) -> None:
@@ -75,10 +99,11 @@ def _package(root: Path, *, marker: bool = True) -> Path:
 def test_classification_never_dereferences_the_supplied_path(tmp_path: Path, monkeypatch) -> None:
     """Kills: restoring `resolve()`/`is_file()` classification. Every follower raises here."""
     target = _package(tmp_path / "run" / "packages" / "Unit")
-    _forbid_following(monkeypatch)
 
-    result = bundle_corpus.classify_target(target)
+    result, followed = _classify_without_following(target, monkeypatch)
 
+    assert followed == "", followed
+    assert result is not None
     assert result.kind == bundle_corpus.TARGET_PACKAGE
     assert result.code == bundle_corpus.CODE_PACKAGE_BOUNDARY_OK
 

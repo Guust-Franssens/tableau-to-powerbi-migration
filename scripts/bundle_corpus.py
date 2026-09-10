@@ -123,11 +123,6 @@ class TargetClassification:
         return self.kind in (TARGET_PACKAGE, TARGET_PACKAGE_DAMAGED)
 
     @property
-    def is_package_shaped(self) -> bool:
-        """Lexically under ``packages/`` (flat or nested), marker or no marker."""
-        return self.placement != PLACEMENT_NONE
-
-    @property
     def declares_self_contained(self) -> bool:
         """A regular, non-reparse root marker is present. A followed link is NOT a declaration."""
         return self.kind == TARGET_PACKAGE

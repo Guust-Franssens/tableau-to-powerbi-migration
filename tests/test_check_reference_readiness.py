@@ -1354,6 +1354,14 @@ def test_every_integer_counter_survives_a_merge_by_construction(tmp_path: Path) 
 # --------------------------------------------------------------------------------------------
 
 
+class _Continued(Exception):
+    """Raised at the exact call site where `scan` continued past an unsafe classification.
+
+    Deliberately not `AssertionError`: it is caught inside the patched window so the patches are
+    undone before pytest formats anything (see :func:`_scan_forbidding_discovery`).
+    """
+
+
 def _link_directory(link: Path, target: Path) -> None:
     """A junction (Windows) or a directory symlink (POSIX) - a reparse point either way."""
     link.parent.mkdir(parents=True, exist_ok=True)
@@ -1379,7 +1387,7 @@ def _forbid_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
     """
 
     def boom(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("scan continued past an unsafe package classification")
+        raise _Continued("scan continued past an unsafe package classification")
 
     monkeypatch.setattr(Path, "resolve", boom)
     monkeypatch.setattr(crr, "_collect_evidence", boom)
@@ -1388,16 +1396,34 @@ def _forbid_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(crr, "resolve_source", boom)
 
 
+def _scan_forbidding_discovery(unit: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[dict | None, str]:
+    """Scan with every downstream step armed, then disarm before any assertion can escape.
+
+    ⚠️ `Path.resolve` is patched globally and **pytest uses it while formatting a failure
+    traceback**, so a kill that escaped the patched window would surface as an `INTERNALERROR` -
+    infrastructure breakage rather than this test failing. Measured while mutation-testing these
+    controls; the sentinel is caught here and the patches are undone before anything is asserted.
+    """
+    _forbid_discovery(monkeypatch)
+    try:
+        return crr.scan(unit), ""
+    except _Continued as exc:
+        return None, str(exc)
+    finally:
+        monkeypatch.undo()
+
+
 def test_a_package_shaped_target_with_no_marker_blocks_before_resolve_and_discovery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Flat placement, missing boundary: CANNOT_ESTABLISH, and nothing downstream may fire."""
     unit = tmp_path / "run" / "packages" / "Minimal"
     (unit / "fabric").mkdir(parents=True)
-    _forbid_discovery(monkeypatch)
 
-    report = crr.scan(unit)
+    report, continued = _scan_forbidding_discovery(unit, monkeypatch)
 
+    assert continued == "", continued
+    assert report is not None
     assert report["status"] == crr.STATUS_CANNOT_ESTABLISH
     assert report["units_cannot_establish"] == 1
     assert report["pages_expected"] == 0
@@ -1410,10 +1436,11 @@ def test_a_nested_package_shaped_target_with_no_marker_blocks_too(
     """The nested `<...>/packages/<batch>/<Unit>` spelling is the same boundary claim."""
     unit = tmp_path / "run" / "packages" / "batch1" / "Minimal"
     (unit / "fabric").mkdir(parents=True)
-    _forbid_discovery(monkeypatch)
 
-    report = crr.scan(unit)
+    report, continued = _scan_forbidding_discovery(unit, monkeypatch)
 
+    assert continued == "", continued
+    assert report is not None
     assert report["status"] == crr.STATUS_CANNOT_ESTABLISH
     assert bundle_corpus.CODE_PACKAGE_MARKER_MISSING in report["units"][0]["detail"]
 
@@ -1424,10 +1451,11 @@ def test_a_marker_that_is_a_directory_blocks_before_anything_reads_it(
     """A non-regular marker is damaged, never non-package - so it never falls back to bundle handling."""
     unit = tmp_path / "run" / "packages" / "Minimal"
     (unit / bundle_corpus.PACKAGE_MARKER).mkdir(parents=True)
-    _forbid_discovery(monkeypatch)
 
-    report = crr.scan(unit)
+    report, continued = _scan_forbidding_discovery(unit, monkeypatch)
 
+    assert continued == "", continued
+    assert report is not None
     assert report["status"] == crr.STATUS_CANNOT_ESTABLISH
     assert bundle_corpus.CODE_PACKAGE_MARKER_NOT_REGULAR in report["units"][0]["detail"]
 
@@ -1441,10 +1469,11 @@ def test_a_linked_root_blocks_even_when_its_destination_is_a_valid_package(
     (destination / bundle_corpus.PACKAGE_MARKER).write_text("{}\n", encoding="utf-8")
     alias = tmp_path / "alias" / "packages" / "Minimal"
     _link_directory(alias, destination)
-    _forbid_discovery(monkeypatch)
 
-    report = crr.scan(alias)
+    report, continued = _scan_forbidding_discovery(alias, monkeypatch)
 
+    assert continued == "", continued
+    assert report is not None
     assert report["status"] == crr.STATUS_CANNOT_ESTABLISH
     assert bundle_corpus.CODE_TARGET_ROOT_REPARSE in report["units"][0]["detail"]
 
@@ -1481,10 +1510,11 @@ def test_an_unassessable_root_blocks_rather_than_reading_as_an_ordinary_bundle(
         return real_lstat(path, *args, **kwargs)
 
     monkeypatch.setattr(bundle_corpus.os, "lstat", deny)
-    _forbid_discovery(monkeypatch)
 
-    report = crr.scan(unit)
+    report, continued = _scan_forbidding_discovery(unit, monkeypatch)
 
+    assert continued == "", continued
+    assert report is not None
     assert report["status"] == crr.STATUS_CANNOT_ESTABLISH
     assert bundle_corpus.CODE_TARGET_ROOT_UNASSESSABLE in report["units"][0]["detail"]
 
