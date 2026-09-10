@@ -614,9 +614,13 @@ for an already-open data-source dialog are `status` reporting **"Host is not rea
 operations"** and `screenshot` reporting **"Print metadata is not available"**. That combination is
 not enough evidence for a bridge regression; run the bundled refresh/query probes, which check for
 visible non-main dialogs at t=0 and keep polling while the source wakes up. Text-readable credential
-prompts report `CREDENTIAL_MISSING` (exit 1, the only hard stop); a dialog whose content did not
-positively read as harmless reports `REFRESH_IN_PROGRESS` / `DIALOG_NEEDS_HUMAN` /
-`DIALOG_UNRECOGNIZED` / `DIALOG_UNREADABLE`, all **exit 3** — "could not probe", never "sign in".
+prompts report `CREDENTIAL_MISSING` (exit 1, the only credential-specific hard stop); every other
+dialog lands at **exit 3**, and the token says what to do: `REFRESH_IN_PROGRESS` — another refresh
+owns the instance, so wait or cancel, never stack; `DIALOG_NEEDS_HUMAN` — a known human-blocking
+prompt (native-query approval *or* an `Authentication required` notice), so act on the prompt visible
+in Desktop rather than on the token; `DIALOG_UNRECOGNIZED` / `DIALOG_UNREADABLE` — the window was not
+accounted for, so the credential state is undetermined in **both** directions and a human must look
+at the screen. Exit 3 means "could not probe", which is neither "sign in" nor "no sign-in needed".
 (`BLOCKED_BY_DIALOG` was retired in issues #367/#376: it came from a size-only test, so a Power BI
 Refresh progress dialog produced it.)
 
