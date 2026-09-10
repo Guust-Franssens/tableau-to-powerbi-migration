@@ -673,7 +673,11 @@ def test_a_reparse_ATTRIBUTE_on_a_plain_file_is_refused_on_every_host(
 
     ⚠️ Creating a file symlink needs elevation on Windows and the test above SKIPS there, so without
     this arm the "a linked file is not this package's bytes" rule would be unproven on the platform
-    this toolkit actually runs on. The attribute is forged; the classification is the code's own.
+    this toolkit actually runs on. The *entry* is forged - in whichever form this host can express,
+    the Windows `FILE_ATTRIBUTE_REPARSE_POINT` bit or the POSIX link mode - and the classification is
+    the production predicate's own. Both halves of `is_reparse_entry` are therefore exercised
+    somewhere: this test covers the one its host has, and the real-symlink test above covers the
+    other wherever the account may create one.
     """
     package = build_package(tmp_path)
     real_stat = os.DirEntry.stat
@@ -682,8 +686,17 @@ def test_a_reparse_ATTRIBUTE_on_a_plain_file_is_refused_on_every_host(
         info = real_stat(self, follow_symlinks=follow_symlinks)
         if self.name != "README.md":
             return info
-        extras = {"st_file_attributes": bundle_corpus.FILE_ATTRIBUTE_REPARSE_POINT, "st_reparse_tag": 0}
-        return os.stat_result(list(info), extras)
+        if hasattr(info, "st_file_attributes"):
+            extras = {
+                "st_file_attributes": info.st_file_attributes | bundle_corpus.FILE_ATTRIBUTE_REPARSE_POINT,
+                "st_reparse_tag": getattr(info, "st_reparse_tag", 0),
+            }
+            return os.stat_result(list(info), extras)
+        # POSIX has no attribute word, and an unknown key in the extras dict is not readable back as
+        # an attribute there - so the link is expressed the way POSIX expresses one, in the mode.
+        fields = list(info)
+        fields[0] = (info.st_mode & ~stat.S_IFMT(info.st_mode)) | stat.S_IFLNK
+        return os.stat_result(fields)
 
     monkeypatch.setattr(os.DirEntry, "stat", fake_stat, raising=False)
 
