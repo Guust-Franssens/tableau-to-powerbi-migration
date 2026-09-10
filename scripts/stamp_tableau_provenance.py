@@ -67,6 +67,7 @@ LOG = logging.getLogger("provenance")
 WORKBOOK_SUFFIXES = (".twb", ".twbx")
 DEFAULT_TIMEOUT_SEC = 120.0
 DEADLINE_EXPIRED = "deadline-expired"
+PAGINATION_RESIDUAL = "pagination-beyond-1000-workbooks-not-addressed"
 
 
 class DeadlineExceeded(RuntimeError):
@@ -516,6 +517,7 @@ def _phase_record(timeout_sec: float | None) -> dict[str, Any]:
         "timeout_sec": None if timeout_sec is None else round(float(timeout_sec), 3),
         "errors": [],
         "progress": [],
+        "residuals": [PAGINATION_RESIDUAL],
     }
 
 

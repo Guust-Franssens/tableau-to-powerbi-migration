@@ -529,6 +529,7 @@ def test_a_many_input_run_costs_one_inventory_and_one_download_per_matched_luid(
     assert len(site.calls) == 2 + 1 + 66, "sign-in + one inventory + one content each + sign-out"
     assert result["input_count"] == 66
     assert result["phase"]["progress"][-1]["input_completed"] == 66
+    assert prov.PAGINATION_RESIDUAL in result["phase"]["residuals"]
     assert sum(1 for record in result["inputs"] if record.get("origin")) == 66
     assert site.count("signout") == 1, "the session is still released"
 
