@@ -67,7 +67,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
-from bundle_corpus import evidence_dirs, shipping_reports
+from bundle_corpus import TargetClassification, classify_target, evidence_dirs, shipping_reports
 import object_identity as oid
 from object_identity import AMBIGUOUS
 from reference_evidence import (
@@ -883,6 +883,22 @@ def _collect_evidence(
     return ref_ok + orc_ok, ref_bad + orc_bad
 
 
+def _unsafe_target(root: Path, classification: TargetClassification) -> dict[str, Any]:
+    """The verdict for a target whose boundary could not be established without following a link.
+
+    ⚠️ The wording is the classifier's stable code plus its generic detail, and NOTHING else. The
+    supplied target can itself be a secret-bearing absolute path and the marker can hold customer
+    content; both would end up pasted into an issue. The unit label is the normalized final path
+    component, which every other verdict in this gate already prints.
+    """
+    unit = classification.unit_name or root.name or "target"
+    detail = (
+        f"{classification.code}: {classification.detail} - this gate refuses to fall back to "
+        "ordinary bundle handling and forms NO opinion, which is NOT a pass"
+    )
+    return _merge(root, [_cannot(unit, detail)], [], [])
+
+
 def scan(
     root: Path,
     *,
@@ -891,7 +907,22 @@ def scan(
     oracle_dir: Path | None = None,
     require_validation_grade: bool = False,
 ) -> dict[str, Any]:
-    """Assess every shipping report under ``root``."""
+    """Assess every shipping report under ``root``.
+
+    ⚠️ **Classification comes first, before ``resolve()`` and before any discovery.** The order is
+    the point (issue #562): ``resolve()`` follows a junction, so a caller-supplied alias would have
+    decided the package question about a directory the caller never named, and evidence/source
+    discovery would already have run against it. A package-shaped or explicitly-marked target whose
+    boundary is missing, reparse, non-regular or unassessable - and any root that is itself a
+    link/junction or cannot be ``lstat``-assessed - stops here as ``CANNOT_ESTABLISH``.
+
+    A **safe** package continues into the current behaviour completely unchanged. Proving that its
+    manifest still describes the bytes on disk is the next slice of #562; this is the boundary
+    classifier only.
+    """
+    classification = classify_target(root)
+    if not classification.is_safe:
+        return _unsafe_target(root, classification)
     root = root.resolve()
     evidence, rejected = _collect_evidence(root, reference_dir, oracle_dir)
     engine_report = _engine_report(root)
@@ -1087,6 +1118,28 @@ def _render_page(page: dict[str, Any]) -> str:
     return f"{label}: ready [{page['grade']}] via {page['matched_by']}"
 
 
+def _prevalidate_targets(paths: list[Path]) -> dict[int, dict[str, Any]]:
+    """Classify every CLI target **before** any following check runs, keyed by position.
+
+    ⚠️ **The CLI had its own copy of the ordering defect** (round-1 review of PR #590). `scan()`
+    classified first, but `main()` reached it through `path.is_dir()`, which *follows*: a
+    package-shaped target whose boundary was missing or unassessable failed that check and left via
+    ``parser.error`` - **exit 2, with the supplied path echoed into the message** - so the typed
+    exit-3 refusal this gate exists to produce never happened, and a secret-bearing target was
+    printed on the way out. A gate whose entry point pre-checks in the following direction is not
+    protected by a guard further in.
+
+    Returns the generic refusal verdict for each unsafe target. An empty result means every target
+    classified safe and the caller may run the existing directory/source validation.
+    """
+    refusals: dict[int, dict[str, Any]] = {}
+    for index, path in enumerate(paths):
+        classification = classify_target(path)
+        if not classification.is_safe:
+            refusals[index] = _unsafe_target(path, classification)
+    return refusals
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1106,21 +1159,29 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.paths:
         parser.error("give a bundle or migration-unit path")
-    for path in args.paths:
-        if not path.is_dir():
-            parser.error(f"{path} is not a directory")
-    if args.source is not None and not args.source.is_file():
-        parser.error(f"--source {args.source} is not a file")
+
+    refusals = _prevalidate_targets(args.paths)
+    if not refusals:
+        # ⚠️ Only reached once EVERY target classified safe. These are following checks - `is_dir()`
+        # and `is_file()` both dereference - and `parser.error` echoes the supplied path, so running
+        # them ahead of classification is what let a package-shaped target with no boundary exit 2
+        # with its own (possibly customer-bearing) path in the message instead of a typed exit 3.
+        for path in args.paths:
+            if not path.is_dir():
+                parser.error(f"{path} is not a directory")
+        if args.source is not None and not args.source.is_file():
+            parser.error(f"--source {args.source} is not a file")
 
     reports = [
-        scan(
+        refusals.get(index)
+        or scan(
             path,
             explicit_source=args.source,
             reference_dir=args.reference,
             oracle_dir=args.oracle,
             require_validation_grade=args.require_validation_grade,
         )
-        for path in args.paths
+        for index, path in enumerate(args.paths)
     ]
     merged = reports[0] if len(reports) == 1 else _merge_scans(reports)
     if args.json:

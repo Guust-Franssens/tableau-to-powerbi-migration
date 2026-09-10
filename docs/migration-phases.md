@@ -216,6 +216,27 @@ evidence and never borrows omitted renders or double-matches against run-root ca
 `_runs/<NNN>-<slug>/oracle/`. An incomplete or failed package lacking `package-manifest.json` fails
 closed.
 
+⚠️ **The boundary is classified before anything is followed** (`bundle_corpus.classify_target`,
+issue #562). Placement is decided **lexically** — `packages/<Unit>` and `packages/<batch>/<Unit>` —
+and the marker is typed with a no-follow `lstat`, so a marker that is a symlink, junction, directory
+or special file is a **damaged** package, never an ordinary bundle, and never a reason to walk
+upward. The **entry gate** refuses a damaged boundary with `CANNOT_ESTABLISH` (exit 3) before it
+resolves the root or discovers any source or evidence — in both its library entry (`scan`) and its
+CLI (`main`), which classifies before its own `is_dir`/`is_file` pre-checks.
+
+⚠️ **Pass the real path, not an alias.** A supplied target that is itself a directory symlink or
+NTFS junction is refused the same way: following it would decide the boundary about a directory you
+never named. This is deliberate and fails **closed** — including for an ordinary, unpackaged bundle
+reached through an alias.
+
+❌ **The EXIT gate is NOT yet covered by that ordering, and this is a known blocking residual.**
+`check_unit.py`'s `_oracle_dirs()` reaches the shared walk through `_unit_dir()`, which calls
+`target.resolve()` **first** — so for a caller-supplied alias the classification happens on the
+already-resolved destination, which is precisely the substitution the classifier exists to refuse.
+The stop is therefore only reliable there for a real, un-aliased path. Closing it means classifying
+the **original** target before resolution, which is a separate follow-up to #562; do not read the
+entry gate's guarantee as covering `check_unit.py`.
+
 ### The two gates
 
 | gate | question | verdicts |
