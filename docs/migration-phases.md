@@ -216,6 +216,18 @@ evidence and never borrows omitted renders or double-matches against run-root ca
 `_runs/<NNN>-<slug>/oracle/`. An incomplete or failed package lacking `package-manifest.json` fails
 closed.
 
+⚠️ **The boundary is classified before anything is followed** (`bundle_corpus.classify_target`,
+issue #562). Placement is decided **lexically** — `packages/<Unit>` and `packages/<batch>/<Unit>` —
+and the marker is typed with a no-follow `lstat`, so a marker that is a symlink, junction, directory
+or special file is a **damaged** package, never an ordinary bundle, and never a reason to walk
+upward. `check_reference_readiness.py` refuses a damaged boundary with `CANNOT_ESTABLISH` (exit 3)
+before it resolves the root or discovers any source or evidence.
+
+⚠️ **Pass the real path, not an alias.** A supplied target that is itself a directory symlink or
+NTFS junction is refused the same way: following it would decide the boundary about a directory you
+never named. This is deliberate and fails **closed** — including for an ordinary, unpackaged bundle
+reached through an alias.
+
 ### The two gates
 
 | gate | question | verdicts |

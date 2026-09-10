@@ -67,7 +67,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
-from bundle_corpus import evidence_dirs, shipping_reports
+from bundle_corpus import TargetClassification, classify_target, evidence_dirs, shipping_reports
 import object_identity as oid
 from object_identity import AMBIGUOUS
 from reference_evidence import (
@@ -883,6 +883,22 @@ def _collect_evidence(
     return ref_ok + orc_ok, ref_bad + orc_bad
 
 
+def _unsafe_target(root: Path, classification: TargetClassification) -> dict[str, Any]:
+    """The verdict for a target whose boundary could not be established without following a link.
+
+    ⚠️ The wording is the classifier's stable code plus its generic detail, and NOTHING else. The
+    supplied target can itself be a secret-bearing absolute path and the marker can hold customer
+    content; both would end up pasted into an issue. The unit label is the normalized final path
+    component, which every other verdict in this gate already prints.
+    """
+    unit = classification.unit_name or root.name or "target"
+    detail = (
+        f"{classification.code}: {classification.detail} - this gate refuses to fall back to "
+        "ordinary bundle handling and forms NO opinion, which is NOT a pass"
+    )
+    return _merge(root, [_cannot(unit, detail)], [], [])
+
+
 def scan(
     root: Path,
     *,
@@ -891,7 +907,22 @@ def scan(
     oracle_dir: Path | None = None,
     require_validation_grade: bool = False,
 ) -> dict[str, Any]:
-    """Assess every shipping report under ``root``."""
+    """Assess every shipping report under ``root``.
+
+    ⚠️ **Classification comes first, before ``resolve()`` and before any discovery.** The order is
+    the point (issue #562): ``resolve()`` follows a junction, so a caller-supplied alias would have
+    decided the package question about a directory the caller never named, and evidence/source
+    discovery would already have run against it. A package-shaped or explicitly-marked target whose
+    boundary is missing, reparse, non-regular or unassessable - and any root that is itself a
+    link/junction or cannot be ``lstat``-assessed - stops here as ``CANNOT_ESTABLISH``.
+
+    A **safe** package continues into the current behaviour completely unchanged. Proving that its
+    manifest still describes the bytes on disk is the next slice of #562; this is the boundary
+    classifier only.
+    """
+    classification = classify_target(root)
+    if not classification.is_safe:
+        return _unsafe_target(root, classification)
     root = root.resolve()
     evidence, rejected = _collect_evidence(root, reference_dir, oracle_dir)
     engine_report = _engine_report(root)

@@ -554,12 +554,16 @@ def test_incomplete_flat_package_without_manifest_fails_closed_when_ancestor_evi
     (unit / "package-manifest.json").unlink()
     shutil.rmtree(unit / "oracle")
 
-    # Entry gate refuses ancestor evidence: reports blind pages rather than READY
+    # Entry gate refuses ancestor evidence. ⚠️ The refusal SHAPE changed with #562: the damaged
+    # boundary is now classified before the root is resolved and before any discovery runs, so the
+    # gate forms no opinion at all instead of reporting the unit's pages as blind. Both are exit 3;
+    # the new one additionally proves discovery never happened.
     code, payload = _readiness(unit, tmp_path)
-    assert code in {1, 3}
-    assert payload["status"] in {"FINDINGS", "CANNOT_ESTABLISH"}
+    assert (code, payload["status"]) == (3, "CANNOT_ESTABLISH")
     assert payload["pages_ready"] == 0
-    assert payload["pages_blind"] == len(objects)
+    assert payload["pages_expected"] == 0, f"classification must precede the {len(objects)}-page expectation"
+    assert payload["evidence_records"] == 0, "no ancestor evidence may be collected for a damaged package"
+    assert "package_marker_missing" in payload["units"][0]["detail"]
 
     # Exit gate refuses ancestor evidence: oracle-coverage is NOT_CHECKED with 0 evidence
     coverage = check_unit.check_oracle_coverage(unit, None, None)
@@ -589,10 +593,11 @@ def test_incomplete_nested_package_without_manifest_fails_closed_when_ancestor_e
     shutil.rmtree(unit / "oracle")
 
     code, payload = _readiness(unit, tmp_path)
-    assert code in {1, 3}
-    assert payload["status"] in {"FINDINGS", "CANNOT_ESTABLISH"}
+    assert (code, payload["status"]) == (3, "CANNOT_ESTABLISH")
     assert payload["pages_ready"] == 0
-    assert payload["pages_blind"] == len(objects)
+    assert payload["pages_expected"] == 0, f"classification must precede the {len(objects)}-page expectation"
+    assert payload["evidence_records"] == 0, "no ancestor evidence may be collected for a damaged package"
+    assert "package_marker_missing" in payload["units"][0]["detail"]
 
     coverage = check_unit.check_oracle_coverage(unit, None, None)
     assert coverage["status"] == check_unit.STATUS_NOT_CHECKED
