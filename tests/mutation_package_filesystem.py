@@ -185,6 +185,85 @@ pfs.is_canonical_key = lambda key: bool(key)
         anchor="test_an_unsafe_declared_key_is_refused",
         controls=("test_a_package_whose_manifest_describes_its_bytes_is_clean",),
     ),
+    "drop-the-windows-forbidden-character-rule": Mutation(
+        code="""
+import package_filesystem as pfs
+# Keep every other key rule and remove ONLY the cross-host character grammar. `<`, `>`, `"`, `|`,
+# `?` and `*` are legal POSIX filename characters, so a key holding one still passes the traversal,
+# device and separator checks - and the package it describes cannot exist on Windows at all. The
+# anchor therefore has to name THIS rule; "some key was refused" is satisfied by the rest.
+pfs._FORBIDDEN_SEGMENT_CHARS = frozenset(":")
+""",
+        anchor="test_every_windows_forbidden_character_is_refused_wherever_it_sits",
+        controls=(
+            "test_legitimate_PUNCTUATION_survives_the_cross_host_grammar",
+            "test_a_package_whose_manifest_describes_its_bytes_is_clean",
+        ),
+    ),
+    "refuse-all-punctuation-instead-of-the-forbidden-set": Mutation(
+        code="""
+import package_filesystem as pfs
+# The over-correction in the other direction: blacklist every ASCII punctuation character. It
+# satisfies every refusal arm of the character census and makes a real package - dashboard names
+# with brackets, a comma in a CSV name, an apostrophe - unverifiable.
+pfs._FORBIDDEN_SEGMENT_CHARS = frozenset("<>:\\"|?*()[]{}&,;'!@#$%+=~`^")
+""",
+        anchor="test_legitimate_PUNCTUATION_survives_the_cross_host_grammar",
+        controls=("test_every_windows_forbidden_character_is_refused_wherever_it_sits",),
+    ),
+    # --- structured evidence across a multi-target merge -------------------------------------------
+    "first-report-wins-the-integrity-field": Mutation(
+        code="""
+import check_reference_readiness as crr
+# The pre-correction merge: `dict(reports[0])` carried the FIRST target's block over every later
+# one. The merged status stays CANNOT_ESTABLISH, so only an assertion on the structured evidence
+# itself - how many blocks, whose codes, which ordinals - can see the loss.
+_orig = crr._merge_scans
+def _merge_scans(reports):
+    merged = _orig(reports)
+    merged["package_integrity"] = reports[0].get("package_integrity", [])
+    return merged
+crr._merge_scans = _merge_scans
+""",
+        anchor="test_a_clean_first_target_does_not_hide_a_damaged_SECOND_one",
+        controls=("test_a_malformed_manifest_is_refused_at_entry",),
+    ),
+    "one-block-for-every-target-regardless-of-whose": Mutation(
+        code="""
+import check_reference_readiness as crr
+# Subtler: concatenate the right NUMBER of blocks but take them all from the first report, so the
+# count and the ordinals look right and the codes belong to the wrong target.
+_orig = crr._merge_scans
+def _merge_scans(reports):
+    merged = _orig(reports)
+    template = next((block for report in reports for block in report.get("package_integrity", [])), None)
+    if template is not None:
+        merged["package_integrity"] = [
+            {**template, "ordinal": index} for index, _ in enumerate(merged["package_integrity"])
+        ]
+    return merged
+crr._merge_scans = _merge_scans
+""",
+        anchor="test_two_damaged_targets_each_keep_their_OWN_codes_and_relative_evidence",
+        controls=("test_a_malformed_manifest_is_refused_at_entry",),
+    ),
+    "a-clean-package-records-nothing": Mutation(
+        code="""
+import check_reference_readiness as crr
+# Reinstates the ambiguity the list schema removed: a clean package leaves no block, so "not a
+# package" and "a package that verified clean" become the same empty answer again.
+_orig = crr.scan
+def scan(root, **kwargs):
+    report = _orig(root, **kwargs)
+    report["package_integrity"] = [
+        block for block in report["package_integrity"] if block["status"] != "clean"
+    ]
+    return report
+crr.scan = scan
+""",
+        anchor="test_a_SAFE_package_continues_into_the_current_behaviour_unchanged",
+        controls=("test_an_ORDINARY_target_contributes_no_integrity_block",),
+    ),
     # --- the walk ---------------------------------------------------------------------------------
     "remove-the-reparse-dead-end": Mutation(
         code="""

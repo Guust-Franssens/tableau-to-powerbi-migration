@@ -900,6 +900,33 @@ def _unsafe_target(root: Path, classification: TargetClassification) -> dict[str
     return _merge(root, [_cannot(unit, detail)], [], [])
 
 
+def _integrity_block(classification: TargetClassification, integrity: PackageFilesystemResult) -> dict[str, Any]:
+    """One target's typed package-integrity result, addressed so a merge cannot lose whose it is.
+
+    ⚠️ **The schema is a LIST of these, always present, one entry per target whose package integrity
+    was actually assessed** - clean or not. Two properties are the reason, and both were review
+    findings against the first shape (a bare dict written only on refusal, which
+    :func:`_merge_scans` then inherited from ``reports[0]`` and silently dropped for every later
+    target):
+
+    * a **damaged second target keeps its evidence**, and two damaged targets keep BOTH sets of
+      codes rather than one overwriting the other;
+    * absence is unambiguous. A bare "written only when damaged" field made "this is not a package"
+      and "this is a package and it verified clean" share one representation - the exact
+      "I could not tell" / "I checked" conflation this slice exists to remove.
+
+    ``ordinal`` is the target's position in the invocation and ``unit`` is the classifier's
+    normalized final path component - the same value every verdict in this gate already prints, and
+    never an absolute or customer path. There are no released consumers of this field, so it is
+    shaped for the question rather than for compatibility.
+    """
+    return {
+        "ordinal": 0,
+        "unit": classification.unit_name or "target",
+        **integrity.as_dict(),
+    }
+
+
 def _damaged_package(
     root: Path, classification: TargetClassification, integrity: PackageFilesystemResult
 ) -> dict[str, Any]:
@@ -918,7 +945,7 @@ def _damaged_package(
         "opinion, which is NOT a pass"
     )
     report = _merge(root, [_cannot(unit, detail)], [], [])
-    report["package_integrity"] = integrity.as_dict()
+    report["package_integrity"] = [_integrity_block(classification, integrity)]
     return report
 
 
@@ -946,15 +973,42 @@ def scan(
     by finding an asset the manifest never accounted for. The classification is CONSUMED here, not
     recomputed - a damaged boundary was already refused above and is never reinterpreted.
 
-    A safe, clean package continues into the current behaviour completely unchanged.
+    A safe, clean package continues into the current behaviour completely unchanged, and records its
+    clean verification in ``package_integrity`` so that field answers "was this assessed?" as well as
+    "what was wrong?".
     """
     classification = classify_target(root)
     if not classification.is_safe:
         return _unsafe_target(root, classification)
-    if classification.declares_self_contained:
-        integrity = verify_package(root, classification)
-        if not integrity.is_clean:
-            return _damaged_package(root, classification, integrity)
+    integrity = verify_package(root, classification) if classification.declares_self_contained else None
+    if integrity is not None and not integrity.is_clean:
+        return _damaged_package(root, classification, integrity)
+    report = _scan_safe_target(
+        root,
+        explicit_source=explicit_source,
+        reference_dir=reference_dir,
+        oracle_dir=oracle_dir,
+        require_validation_grade=require_validation_grade,
+    )
+    if integrity is not None:
+        report["package_integrity"] = [_integrity_block(classification, integrity)]
+    return report
+
+
+def _scan_safe_target(
+    root: Path,
+    *,
+    explicit_source: Path | None,
+    reference_dir: Path | None,
+    oracle_dir: Path | None,
+    require_validation_grade: bool,
+) -> dict[str, Any]:
+    """The existing scan of a target that is safe AND (if a package) verified clean.
+
+    Split out of :func:`scan` for one reason: it has two exits, and the integrity block has to be
+    attached to whichever one is taken. Nothing here changed with #562 - the ordering guarantee lives
+    in the caller, which is where it is asserted.
+    """
     root = root.resolve()
     evidence, rejected = _collect_evidence(root, reference_dir, oracle_dir)
     engine_report = _engine_report(root)
@@ -999,6 +1053,11 @@ def _merge(
         "id": "reference-readiness",
         "status": status,
         "target": str(root),
+        # One block per target whose package integrity was ASSESSED (#562 S1). Always a list, and
+        # empty for an ordinary target or an unsafe root, so "not a package" and "a package that
+        # verified clean" are distinguishable rather than both being an absent key. `scan` fills it;
+        # `_merge_scans` concatenates every target's, which is what a first-report-wins merge lost.
+        "package_integrity": [],
         "units_scanned": len(units),
         "units_ready": sum(1 for unit in units if unit.status == STATUS_READY),
         "units_not_applicable": sum(1 for unit in units if unit.status == STATUS_NOT_APPLICABLE),
@@ -1245,6 +1304,18 @@ def _merge_scans(reports: list[dict[str, Any]]) -> dict[str, Any]:
     merged["units"] = [unit for report in reports for unit in report["units"]]
     merged["evidence_rejected"] = [item for report in reports for item in report["evidence_rejected"]]
     merged["evidence_untyped_names"] = sorted({n for r in reports for n in r["evidence_untyped_names"]})
+    # ⚠️ **Structured package-integrity evidence is CONCATENATED, not inherited.** `dict(reports[0])`
+    # is the defect this line exists to close (round-1 review of this slice): with a single-block
+    # field, a clean first target hid a damaged second one entirely, and two damaged targets kept
+    # only the first's codes - so the typed rows said the opposite of the merged verdict. The
+    # `ordinal` is rewritten to the TARGET's position rather than kept from the single scan, where it
+    # is always 0; each scan verifies at most one package, its own root, so target position and block
+    # position agree by construction and the result is deterministic.
+    merged["package_integrity"] = [
+        {**block, "ordinal": index}
+        for index, report in enumerate(reports)
+        for block in report.get("package_integrity", [])
+    ]
     for key, value in reports[0].items():
         if isinstance(value, bool) or not isinstance(value, int):
             continue

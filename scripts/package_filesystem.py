@@ -126,7 +126,8 @@ _DETAILS = {
     CODE_KEY_NOT_STRING: "a declared content key is not a string",
     CODE_KEY_UNSAFE: (
         "a declared content key is not a canonical package-relative POSIX path (it is absolute, "
-        "escaping, device-reserved, ambiguously separated or otherwise unsafe)"
+        "escaping, device-reserved, ambiguously separated, or holds a character no Windows filename "
+        "may contain)"
     ),
     CODE_KEY_ALIASES_MARKER: (
         f"a declared content key names {PACKAGE_MARKER} itself, which carries the map and is "
@@ -170,6 +171,25 @@ _RESERVED_STEMS = frozenset(
 
 #: Digits Windows treats as device ordinals beyond ASCII.
 _SUPERSCRIPT_DIGITS = {"\u00b9": "1", "\u00b2": "2", "\u00b3": "3"}
+
+#: Characters no Windows filename may contain. A declared key holding one of them is a path that
+#: **cannot be created on half the hosts this toolkit runs on**, so a package carrying it is either
+#: not the package it claims to be or is unpackable there - either way it is not describable.
+#:
+#: Each earns its place rather than being copied from a list:
+#:
+#: * ``:`` is a drive qualifier (``C:name``) or an NTFS alternate data stream
+#:   (``report.json:hidden``) - the second is bytes hiding behind a name that looks declared;
+#: * ``?`` and ``*`` are wildcards, so ONE declared key would match many files on any host that
+#:   expands them, and "which bytes did the manifest mean" stops having an answer;
+#: * ``<``, ``>`` and ``|`` are shell redirection/pipe operators, which is how a key ends up
+#:   interpreted rather than opened by whatever consumes the manifest next;
+#: * ``"`` terminates the quoting of every diagnostic, command line and JSON string this key travels
+#:   through.
+#:
+#: ⚠️ POSIX would accept all six in a filename, which is exactly why they are refused: the rule is
+#: "canonical on EVERY host", not "legal on the host that happens to be reading".
+_FORBIDDEN_SEGMENT_CHARS = frozenset('<>:"|?*')
 
 _HEX_DIGITS = frozenset("0123456789abcdef")
 
@@ -376,8 +396,7 @@ def _segment_is_unsafe(segment: str) -> bool:
         return True
     if any(ord(char) < 32 or ord(char) == 127 for char in segment):
         return True
-    if ":" in segment:
-        # A drive qualifier (`C:name`) or an NTFS alternate data stream (`file.txt:hidden`).
+    if any(char in _FORBIDDEN_SEGMENT_CHARS for char in segment):
         return True
     stem = segment.split(".", 1)[0].strip().lower()
     return stem in _RESERVED_STEMS
@@ -388,9 +407,10 @@ def is_canonical_key(key: str) -> bool:
 
     Refused, each because it makes the same bytes answer to two names or reaches outside the package:
     a backslash (POSIX filename vs Windows separator - the SAME string means two things), a leading
-    ``/`` (POSIX absolute), ``//`` (UNC), a drive qualifier or colon (also an NTFS stream), ``.`` and
-    ``..``, an empty segment (``a//b`` or a trailing ``/``), a NUL or control character, a trailing
-    dot or space, and a reserved Windows device name including its superscript-digit spellings.
+    ``/`` (POSIX absolute), ``//`` (UNC), a leading ``/`` on a relative spelling, ``.`` and ``..``, an
+    empty segment (``a//b`` or a trailing ``/``), a NUL or control character, any character Windows
+    cannot put in a filename (:func:`_FORBIDDEN_SEGMENT_CHARS`), a trailing dot or space, and a
+    reserved Windows device name including its superscript-digit spellings.
     """
     if not key or "\\" in key or "\x00" in key:
         return False

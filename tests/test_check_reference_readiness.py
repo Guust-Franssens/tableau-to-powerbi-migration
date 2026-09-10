@@ -1674,7 +1674,9 @@ def test_a_SAFE_package_continues_into_the_current_behaviour_unchanged(tmp_path:
 
     assert report["status"] == crr.STATUS_READY
     assert report["pages_ready"] == report["pages_expected"] == 1
-    assert "package_integrity" not in report
+    # A clean package RECORDS its verification rather than leaving the field absent: "not a package"
+    # and "a package that verified clean" must not share one representation.
+    assert [block["status"] for block in report["package_integrity"]] == [package_filesystem.STATUS_CLEAN]
 
 
 # --------------------------------------------------------------------------------------------
@@ -1740,7 +1742,7 @@ def test_a_malformed_manifest_is_refused_at_entry(tmp_path: Path) -> None:
 
     assert report["status"] == crr.STATUS_CANNOT_ESTABLISH
     assert package_filesystem.CODE_MANIFEST_NOT_JSON in report["units"][0]["detail"]
-    assert report["package_integrity"]["status"] == package_filesystem.STATUS_FINDINGS
+    assert [block["status"] for block in report["package_integrity"]] == [package_filesystem.STATUS_FINDINGS]
 
 
 def test_the_integrity_refusal_carries_stable_codes_and_no_host_path(tmp_path: Path) -> None:
@@ -1831,3 +1833,133 @@ def test_a_package_whose_manifest_omits_ROLES_is_still_admitted_here(tmp_path: P
     )
 
     assert crr.scan(unit)["status"] == crr.STATUS_READY
+
+
+# --------------------------------------------------------------------------------------------
+# Structured package-integrity evidence survives a MULTI-TARGET merge
+#
+# `_merge_scans` starts from `dict(reports[0])`, so a single-block field written only on refusal was
+# inherited from the FIRST scan and every later target's typed rows were dropped - a clean first
+# target hid a damaged second one entirely, and two damaged targets kept only one set of codes. The
+# merged status was still CANNOT_ESTABLISH, which is what made the loss quiet: the verdict was right
+# and its evidence was missing. The field is now a LIST of per-target blocks, always present, each
+# carrying the target `ordinal` and the same safe `unit` label the rest of the report prints.
+# --------------------------------------------------------------------------------------------
+
+
+def _damaged_package_at(tmp_path: Path, name: str, *, damage: str) -> Path:
+    """A package that fails S1 for a NAMED reason, so two of them can be told apart in one merge."""
+    unit = tmp_path / name / "packages" / "Minimal"
+    unit.mkdir(parents=True)
+    (tmp_path / name / "packages" / "assets").mkdir()
+    build_unit(unit, "Minimal", worksheets=["Revenue"])
+    write_package_manifest(unit)
+    if damage == "extra":
+        (unit / "stray.txt").write_text("undeclared\n", encoding="utf-8")
+    elif damage == "changed":
+        (unit / "report.json").write_text('{"workbooks": [{"name": "Tampered"}]}', encoding="utf-8")
+    else:  # pragma: no cover - a typo in a test's own parameter must not pass silently
+        raise AssertionError(f"unknown damage {damage!r}")
+    return unit
+
+
+def test_a_clean_first_target_does_not_hide_a_damaged_SECOND_one(tmp_path: Path) -> None:
+    """The exact loss: `dict(reports[0])` carried the clean report's field over the damaged one."""
+    clean = _packaged_unit(tmp_path / "first")
+    damaged = _damaged_package_at(tmp_path, "second", damage="extra")
+
+    merged = crr._merge_scans([crr.scan(clean), crr.scan(damaged)])
+
+    assert merged["status"] == crr.STATUS_CANNOT_ESTABLISH
+    blocks = merged["package_integrity"]
+    assert [block["ordinal"] for block in blocks] == [0, 1]
+    assert [block["status"] for block in blocks] == [
+        package_filesystem.STATUS_CLEAN,
+        package_filesystem.STATUS_FINDINGS,
+    ]
+    assert [row["code"] for row in blocks[1]["findings"]] == [package_filesystem.CODE_FILE_UNDECLARED]
+    assert blocks[1]["findings"][0]["path"] == "stray.txt"
+
+
+def test_two_damaged_targets_each_keep_their_OWN_codes_and_relative_evidence(tmp_path: Path) -> None:
+    """Two blocks, two reasons, two package-relative paths - not one overwriting the other.
+
+    The damage differs on purpose: an extra file and a changed byte produce different codes, so a
+    merge that kept one block twice, or kept the first twice, is distinguishable from one that kept
+    both.
+    """
+    first = _damaged_package_at(tmp_path, "first", damage="extra")
+    second = _damaged_package_at(tmp_path, "second", damage="changed")
+
+    merged = crr._merge_scans([crr.scan(first), crr.scan(second)])
+
+    blocks = merged["package_integrity"]
+    assert len(blocks) == 2
+    assert [block["ordinal"] for block in blocks] == [0, 1]
+    assert [row["code"] for row in blocks[0]["findings"]] == [package_filesystem.CODE_FILE_UNDECLARED]
+    assert [row["code"] for row in blocks[1]["findings"]] == [package_filesystem.CODE_DIGEST_MISMATCH]
+    assert blocks[0]["findings"][0]["path"] == "stray.txt"
+    assert blocks[1]["findings"][0]["path"] == "report.json"
+    assert all(block["unit"] == "Minimal" for block in blocks)
+
+
+def test_an_ORDINARY_target_contributes_no_integrity_block(tmp_path: Path) -> None:
+    """Absence is meaningful: a non-package target was never assessed, so it claims nothing.
+
+    Paired with the clean-package assertion above, this is what makes the field unambiguous - empty
+    means "not assessed", a `clean` block means "assessed and correct".
+    """
+    bundle = tmp_path / "run" / "bundle"
+    bundle.mkdir(parents=True)
+    (tmp_path / "run" / "assets").mkdir()
+    build_unit(bundle, "Minimal", worksheets=["Revenue"])
+    write_oracle(bundle, [{"view_name": "Revenue", "view_type": "worksheet", "workbook_luid": UNIT_LUID}])
+    damaged = _damaged_package_at(tmp_path, "second", damage="extra")
+
+    single = crr.scan(bundle)
+    merged = crr._merge_scans([single, crr.scan(damaged)])
+
+    assert single["package_integrity"] == []
+    assert [block["ordinal"] for block in merged["package_integrity"]] == [1]
+
+
+def test_an_unsafe_root_contributes_no_integrity_block_either(tmp_path: Path) -> None:
+    """The verifier never ran, so it has nothing to say - the classifier's code is the whole verdict."""
+    unit = tmp_path / "run" / "packages" / "Minimal"
+    (unit / "fabric").mkdir(parents=True)
+
+    report = crr.scan(unit)
+
+    assert report["status"] == crr.STATUS_CANNOT_ESTABLISH
+    assert report["package_integrity"] == []
+
+
+def test_the_integrity_blocks_carry_no_target_path_in_either_shape(tmp_path: Path) -> None:
+    """Single-target and merged JSON alike: ordinals, relative paths and the unit label only."""
+    damaged = _damaged_package_at(tmp_path / "customer-secret-server", "second", damage="extra")
+
+    single = crr.scan(damaged)
+    merged = crr._merge_scans([single, crr.scan(damaged)])
+
+    for rendered in (json.dumps(single["package_integrity"]), json.dumps(merged["package_integrity"])):
+        assert "customer-secret-server" not in rendered
+        assert str(tmp_path) not in rendered
+        assert "stray.txt" in rendered
+
+
+def test_the_merged_integrity_evidence_is_deterministic(tmp_path: Path) -> None:
+    """Same inputs, same bytes - twice, and in both the single and the merged shape.
+
+    A field a consumer diffs has to be stable, and the walk that produces it uses a stack, so ordering
+    is a property that must be asserted rather than assumed.
+    """
+    first = _damaged_package_at(tmp_path, "first", damage="extra")
+    second = _damaged_package_at(tmp_path, "second", damage="changed")
+
+    runs = [
+        json.dumps(crr._merge_scans([crr.scan(first), crr.scan(second)])["package_integrity"], sort_keys=False)
+        for _ in range(2)
+    ]
+
+    assert runs[0] == runs[1]
+    assert json.dumps(crr.scan(first)["package_integrity"]) == json.dumps(crr.scan(first)["package_integrity"])

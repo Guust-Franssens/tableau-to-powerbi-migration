@@ -337,7 +337,43 @@ UNSAFE_KEYS = [
     ("device-com-superscript-2", "com\u00b2.txt"),
     ("device-lpt-superscript-3", "LPT\u00b3"),
     ("device-conin", "CONIN$"),
+    # Characters no Windows filename may hold. POSIX accepts every one of them, which is the point:
+    # a key must be canonical on EVERY host, not merely legal on the one doing the reading.
+    ("angle-open", "report<1>.json"),
+    ("angle-close", "fabric/report>.json"),
+    ("double-quote", 'report".json'),
+    ("pipe", "report|json"),
+    ("question-mark", "report?.json"),
+    ("wildcard-star", "oracle/*.png"),
+    ("wildcard-star-stem", "*/definition.pbir"),
+    ("angle-in-extension", "report.js<n"),
+    ("wildcard-in-extension", "report.j*son"),
+    ("angle-in-nested-directory", "fabric/<unit>/definition.pbir"),
+    ("wildcard-in-nested-directory", "fabric/*.Report/definition.pbir"),
+    ("pipe-deep-in-the-path", "oracle/dashboard/images/main|copy.png"),
 ]
+
+#: Punctuation a real package legitimately carries. The discriminating control for the grammar above:
+#: without it, refusing every non-alphanumeric character would satisfy every arm of the census.
+SAFE_PUNCTUATION_KEYS = [
+    "oracle/worksheet/images/Measure Values Chart.png",
+    "assets/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee_Minimal.twb",
+    "fabric/Minimal.Report/definition/pages/page-ws-MeasureV051b1756/page.json",
+    "handover/Sales (EMEA) [v2].json",
+    "data/Region & Segment, 2026.csv",
+    "notes/what's-new!.md",
+    "notes/100%-coverage@final+1.md",
+    "notes/a=b;c#d~e.md",
+]
+
+#: The characters Windows forbids in a filename, written out HERE as literals.
+#:
+#: ⚠️ **Not derived from `pfs._FORBIDDEN_SEGMENT_CHARS`, and that is a measured correction rather
+#: than a preference.** The first version parametrized the census from the module's own constant, so
+#: a mutation that shrank the constant also shrank the test to the one surviving arm and SURVIVED -
+#: the suite asserted whatever the code happened to say. Pinned literals plus the equality test
+#: below mean a change to the production set fails a test instead of quietly re-scoping one.
+WINDOWS_FORBIDDEN_CHARS = ["<", ">", ":", '"', "|", "?", "*"]
 
 
 @pytest.mark.parametrize(("name", "key"), UNSAFE_KEYS, ids=[name for name, _ in UNSAFE_KEYS])
@@ -397,6 +433,73 @@ def test_an_unsafe_key_carrying_a_CUSTOMER_PATH_is_not_echoed(tmp_path: Path) ->
 def test_a_canonical_key_is_accepted(key: str) -> None:
     """The discriminating control: ordinary package paths, including spaces, must stay usable."""
     assert pfs.is_canonical_key(key)
+
+
+@pytest.mark.parametrize("key", SAFE_PUNCTUATION_KEYS)
+def test_legitimate_PUNCTUATION_survives_the_cross_host_grammar(key: str) -> None:
+    """The control that keeps the character rule a rule rather than "refuse anything unusual".
+
+    Every one of these is punctuation a real Tableau-derived package carries - a dashboard name with
+    brackets and parentheses, an ampersand and a comma in a data file, an apostrophe, a percent sign.
+    Without this arm, blacklisting the whole ASCII punctuation range would satisfy every refusal
+    below while making the canonical package unverifiable.
+    """
+    assert pfs.is_canonical_key(key)
+
+
+@pytest.mark.parametrize("key", SAFE_PUNCTUATION_KEYS)
+def test_a_package_declaring_legitimate_punctuation_still_verifies_clean(tmp_path: Path, key: str) -> None:
+    """The same control end to end: the file is really written, declared and hashed.
+
+    ⚠️ `is_canonical_key` alone would be a claim about the predicate, not about the verifier - and a
+    key can be accepted by the predicate and still fall over in the walk-vs-declaration comparison
+    (that is where a normalization difference would show up).
+    """
+    package = build_package(tmp_path, files={key: "content\n"})
+
+    result = verify(package)
+
+    assert result.is_clean, result.codes()
+    assert result.files_declared == result.files_verified == 1
+
+
+@pytest.mark.parametrize("char", WINDOWS_FORBIDDEN_CHARS)
+def test_every_windows_forbidden_character_is_refused_wherever_it_sits(tmp_path: Path, char: str) -> None:
+    """One arm per character, in a leaf, in an extension and in a nested directory segment.
+
+    ⚠️ **POSIX would accept all six.** That is the reason they are refused rather than an argument
+    against it: a key must name the same file on EVERY host, and one that cannot be created on
+    Windows describes a package nobody can unpack there.
+
+    The stem is a sentinel so the echo assertion is exact: every real file in the package reads as
+    undeclared here and its own relative path is legitimately printed, so searching the rendered
+    result for "report" would prove nothing.
+    """
+    for index, key in enumerate(
+        (f"SENTINELSTEM{char}.json", f"SENTINELSTEM.js{char}n", f"fab/{char}SENTINELSTEM/a.json")
+    ):
+        package = build_package(tmp_path / f"case-{ord(char)}-{index}")
+        write_manifest(package, files={key: "0" * 64})
+
+        result = verify(package)
+        rendered = json.dumps(result.as_dict())
+
+        assert pfs.CODE_KEY_UNSAFE in result.codes(), key
+        rows = [row for row in result.findings if row.code == pfs.CODE_KEY_UNSAFE]
+        assert all(row.path is None and row.ordinal is not None for row in rows), key
+        assert "SENTINELSTEM" not in rendered, key
+
+
+def test_the_forbidden_character_set_is_pinned_to_its_literal_members() -> None:
+    """The production set and the census above must be the same seven characters.
+
+    Without this, the two drift silently in either direction: a character removed from production is
+    simply no longer exercised, and one added is never given a control. It is the same "a comparison
+    against a mutable constant proves nothing" rule the status/exit vocabulary pin follows in the
+    gate's own suite.
+    """
+    assert set(pfs._FORBIDDEN_SEGMENT_CHARS) == set(WINDOWS_FORBIDDEN_CHARS)  # pylint: disable=protected-access
+    assert not set(WINDOWS_FORBIDDEN_CHARS) & set("".join(SAFE_PUNCTUATION_KEYS))
 
 
 def test_two_keys_that_differ_only_by_case_cannot_describe_distinct_bytes(tmp_path: Path) -> None:

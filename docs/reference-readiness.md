@@ -283,6 +283,32 @@ Three boundaries are deliberate:
 mutable once an agent has been dispatched (see [`migration-phases.md`](migration-phases.md) phase 2),
 and reading that backwards into the entry gate would let every half-finished unit look pristine.
 
+⚠️ **A key must be canonical on EVERY host, not merely legal on the one reading it.** Alongside the
+traversal, separator and device rules, a declared key may not hold `<`, `>`, `:`, `"`, `|`, `?` or
+`*`. POSIX accepts all seven in a filename, which is the reason rather than an argument against it: a
+key holding one describes a package that cannot be unpacked on Windows at all, `?`/`*` make one
+declaration match many files wherever they are expanded, `:` is a drive qualifier or an NTFS
+alternate data stream, and `<`/`>`/`|`/`"` are how a path ends up interpreted rather than opened.
+Ordinary package punctuation — brackets, parentheses, ampersands, commas, apostrophes, `%`, `#`, `@`
+— stays usable, and a control asserts it does.
+
+### The structured verdict: `package_integrity`
+
+The JSON verdict carries a **list** of per-target blocks, always present, one for every target whose
+package integrity was assessed — clean or not — each with the target's `ordinal`, the same safe
+`unit` label the rest of the report prints, and the typed `findings`/`unassessable` rows (stable
+codes, package-relative paths, and bare ordinals for an unsafe key). It is empty for an ordinary
+target and for an unsafe root, so "not assessed" and "assessed and correct" are distinguishable
+rather than sharing one absent key.
+
+⚠️ The list shape is a **review correction, not a preference**. The first version wrote a single
+block only on refusal, and `_merge_scans` starts from `dict(reports[0])`: scanning a clean target and
+a damaged one in the same invocation inherited the clean field and dropped the damaged target's
+evidence entirely, while the merged status stayed `CANNOT_ESTABLISH`. A verdict that is right with
+its evidence missing is the quietest failure this gate has. Blocks are now concatenated with the
+ordinal rewritten to the target's position, and both the single-target and merged shapes are
+deterministic.
+
 Direct tests are `tests/test_package_filesystem.py`; `tests/mutation_package_filesystem.py` proves
 each anchor asserts the **named** guard rather than any fail-closed refusal — several mutations leave
 the package non-clean for a different reason, which is exactly what a "not clean" assertion would
