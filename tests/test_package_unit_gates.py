@@ -554,10 +554,11 @@ def test_incomplete_flat_package_without_manifest_fails_closed_when_ancestor_evi
     (unit / "package-manifest.json").unlink()
     shutil.rmtree(unit / "oracle")
 
-    # Entry gate refuses ancestor evidence. ⚠️ The refusal SHAPE changed with #562: the damaged
-    # boundary is now classified before the root is resolved and before any discovery runs, so the
-    # gate forms no opinion at all instead of reporting the unit's pages as blind. Both are exit 3;
-    # the new one additionally proves discovery never happened.
+    # ENTRY GATE ONLY. ⚠️ The refusal SHAPE changed with #562: the damaged boundary is classified
+    # before the root is resolved and before any discovery runs, so the gate forms no opinion at all
+    # instead of reporting the unit's pages as blind. Both are exit 3; the new one additionally
+    # proves discovery never happened. This says NOTHING about the exit gate below - see
+    # `docs/migration-phases.md` for the residual that keeps `check_unit` out of #590's claim.
     code, payload = _readiness(unit, tmp_path)
     assert (code, payload["status"]) == (3, "CANNOT_ESTABLISH")
     assert payload["pages_ready"] == 0
@@ -565,7 +566,8 @@ def test_incomplete_flat_package_without_manifest_fails_closed_when_ancestor_evi
     assert payload["evidence_records"] == 0, "no ancestor evidence may be collected for a damaged package"
     assert "package_marker_missing" in payload["units"][0]["detail"]
 
-    # Exit gate refuses ancestor evidence: oracle-coverage is NOT_CHECKED with 0 evidence
+    # Exit gate refuses ancestor evidence: oracle-coverage is NOT_CHECKED with 0 evidence.
+    # ⚠️ Pre-existing behaviour on a REAL (un-aliased) path, unchanged and unclaimed by #562.
     coverage = check_unit.check_oracle_coverage(unit, None, None)
     assert coverage["status"] == check_unit.STATUS_NOT_CHECKED
     assert coverage["visual_present"] == 0
@@ -592,6 +594,7 @@ def test_incomplete_nested_package_without_manifest_fails_closed_when_ancestor_e
     (unit / "package-manifest.json").unlink()
     shutil.rmtree(unit / "oracle")
 
+    # ENTRY GATE ONLY - the exit-gate assertions below are pre-existing and unclaimed by #562.
     code, payload = _readiness(unit, tmp_path)
     assert (code, payload["status"]) == (3, "CANNOT_ESTABLISH")
     assert payload["pages_ready"] == 0

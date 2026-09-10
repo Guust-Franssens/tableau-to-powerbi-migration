@@ -1118,6 +1118,28 @@ def _render_page(page: dict[str, Any]) -> str:
     return f"{label}: ready [{page['grade']}] via {page['matched_by']}"
 
 
+def _prevalidate_targets(paths: list[Path]) -> dict[int, dict[str, Any]]:
+    """Classify every CLI target **before** any following check runs, keyed by position.
+
+    ⚠️ **The CLI had its own copy of the ordering defect** (round-1 review of PR #590). `scan()`
+    classified first, but `main()` reached it through `path.is_dir()`, which *follows*: a
+    package-shaped target whose boundary was missing or unassessable failed that check and left via
+    ``parser.error`` - **exit 2, with the supplied path echoed into the message** - so the typed
+    exit-3 refusal this gate exists to produce never happened, and a secret-bearing target was
+    printed on the way out. A gate whose entry point pre-checks in the following direction is not
+    protected by a guard further in.
+
+    Returns the generic refusal verdict for each unsafe target. An empty result means every target
+    classified safe and the caller may run the existing directory/source validation.
+    """
+    refusals: dict[int, dict[str, Any]] = {}
+    for index, path in enumerate(paths):
+        classification = classify_target(path)
+        if not classification.is_safe:
+            refusals[index] = _unsafe_target(path, classification)
+    return refusals
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1137,21 +1159,29 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.paths:
         parser.error("give a bundle or migration-unit path")
-    for path in args.paths:
-        if not path.is_dir():
-            parser.error(f"{path} is not a directory")
-    if args.source is not None and not args.source.is_file():
-        parser.error(f"--source {args.source} is not a file")
+
+    refusals = _prevalidate_targets(args.paths)
+    if not refusals:
+        # ⚠️ Only reached once EVERY target classified safe. These are following checks - `is_dir()`
+        # and `is_file()` both dereference - and `parser.error` echoes the supplied path, so running
+        # them ahead of classification is what let a package-shaped target with no boundary exit 2
+        # with its own (possibly customer-bearing) path in the message instead of a typed exit 3.
+        for path in args.paths:
+            if not path.is_dir():
+                parser.error(f"{path} is not a directory")
+        if args.source is not None and not args.source.is_file():
+            parser.error(f"--source {args.source} is not a file")
 
     reports = [
-        scan(
+        refusals.get(index)
+        or scan(
             path,
             explicit_source=args.source,
             reference_dir=args.reference,
             oracle_dir=args.oracle,
             require_validation_grade=args.require_validation_grade,
         )
-        for path in args.paths
+        for index, path in enumerate(args.paths)
     ]
     merged = reports[0] if len(reports) == 1 else _merge_scans(reports)
     if args.json:

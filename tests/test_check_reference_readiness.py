@@ -1413,6 +1413,110 @@ def _scan_forbidding_discovery(unit: Path, monkeypatch: pytest.MonkeyPatch) -> t
         monkeypatch.undo()
 
 
+def _main_forbidding_following(argv: list[str], monkeypatch: pytest.MonkeyPatch) -> tuple[int | None, str]:
+    """Run the CLI with every FOLLOWING pre-check armed, disarming before anything is asserted.
+
+    ⚠️ `is_dir()` and `is_file()` are the CLI's own pre-checks and both dereference, so arming them
+    is what proves the ORDER: a refusal that comes back while they are still armed cannot have
+    consulted them. Same sentinel discipline as :func:`_scan_forbidding_discovery` - pytest formats
+    tracebacks with these very primitives.
+    """
+
+    def boom(*_args: object, **_kwargs: object) -> object:
+        raise _Continued("main ran a following pre-check before classifying the target")
+
+    monkeypatch.setattr(Path, "is_dir", boom)
+    monkeypatch.setattr(Path, "is_file", boom)
+    monkeypatch.setattr(Path, "resolve", boom)
+    try:
+        return crr.main(argv), ""
+    except _Continued as exc:
+        return None, str(exc)
+    finally:
+        monkeypatch.undo()
+
+
+@pytest.mark.parametrize("spelling", [("packages", "Minimal"), ("packages", "batch1", "Minimal")])
+def test_main_refuses_a_missing_package_shaped_root_with_the_typed_exit_instead_of_argparse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spelling: tuple[str, ...]
+) -> None:
+    """Kills: pre-checking with `is_dir()` before classifying.
+
+    The CLI used to reach `path.is_dir()` first, so a package-shaped root with no boundary left via
+    `parser.error` - **exit 2, with the supplied path echoed** - instead of the typed exit 3.
+    """
+    unit = tmp_path.joinpath("run", *spelling)
+
+    code, followed = _main_forbidding_following([str(unit), "--quiet"], monkeypatch)
+
+    assert followed == "", followed
+    assert code == crr.EXIT_CANNOT_ESTABLISH
+
+
+def test_main_refuses_an_unassessable_package_shaped_root_with_the_typed_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An lstat error is indeterminate, so it is exit 3 - never argparse's exit 2, never a pass."""
+    unit = tmp_path / "run" / "packages" / "Minimal"
+    (unit / "fabric").mkdir(parents=True)
+    real_lstat = bundle_corpus.os.lstat
+
+    def deny(path, *args, **kwargs):
+        if Path(path) == unit:
+            raise PermissionError(13, "denied")
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(bundle_corpus.os, "lstat", deny)
+
+    code, followed = _main_forbidding_following([str(unit), "--quiet"], monkeypatch)
+
+    assert followed == "", followed
+    assert code == crr.EXIT_CANNOT_ESTABLISH
+
+
+def test_main_refuses_an_unsafe_root_alias_before_its_own_pre_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An aliased root is refused by classification, not by a pre-check that would have followed it."""
+    destination = tmp_path / "real" / "packages" / "Minimal"
+    (destination / "fabric").mkdir(parents=True)
+    (destination / bundle_corpus.PACKAGE_MARKER).write_text("{}\n", encoding="utf-8")
+    alias = tmp_path / "alias" / "packages" / "Minimal"
+    _link_directory(alias, destination)
+
+    code, followed = _main_forbidding_following([str(alias), "--quiet"], monkeypatch)
+
+    assert followed == "", followed
+    assert code == crr.EXIT_CANNOT_ESTABLISH
+
+
+def test_main_prints_the_stable_code_and_no_supplied_path_for_a_refused_target(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The rendered CLI verdict is what gets pasted into an issue; the target can be secret-bearing."""
+    unit = tmp_path / "customer-secret-server" / "packages" / "Minimal"
+
+    code = crr.main([str(unit)])
+    printed = capsys.readouterr().out
+
+    assert code == crr.EXIT_CANNOT_ESTABLISH
+    assert bundle_corpus.CODE_PACKAGE_ROOT_MISSING in printed
+    assert "customer-secret-server" not in printed
+    assert str(tmp_path) not in printed
+
+
+def test_main_keeps_argparses_verdict_for_an_ORDINARY_missing_path(tmp_path: Path) -> None:
+    """Compatibility control: only a package-shaped or unsafe target is diverted.
+
+    ⚠️ Without this, classifying everything as refusable would satisfy the controls above while
+    silently swallowing the ordinary typo case that argparse is right to reject.
+    """
+    with pytest.raises(SystemExit) as exit_info:
+        crr.main([str(tmp_path / "run" / "bundle" / "NeverBuilt"), "--quiet"])
+
+    assert exit_info.value.code == 2
+
+
 def test_a_package_shaped_target_with_no_marker_blocks_before_resolve_and_discovery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

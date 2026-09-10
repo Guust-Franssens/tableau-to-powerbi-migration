@@ -119,8 +119,17 @@ class TargetClassification:
 
     @property
     def is_package(self) -> bool:
-        """The bool :func:`is_package_target` projects. Damaged still counts as a package."""
-        return self.kind in (TARGET_PACKAGE, TARGET_PACKAGE_DAMAGED)
+        """The bool :func:`is_package_target` projects, defined **conservatively**.
+
+        ⚠️ It is ``True`` for everything that is not an ORDINARY target - intact package, damaged
+        package **and unsafe root alike** - because the only thing a caller can safely do with this
+        bool is decide whether to walk upward for ancestor evidence, and ``False`` is the fail-OPEN
+        answer. Round-1 review of PR #590: projecting an unsafe root as ``False`` made an
+        indeterminate boundary indistinguishable from a proven ordinary bundle, which is exactly the
+        confusion the classifier exists to remove. It is the strict complement of
+        :attr:`inherits_ancestor_evidence`, so a caller reading either one gets the same answer.
+        """
+        return self.kind != TARGET_ORDINARY
 
     @property
     def declares_self_contained(self) -> bool:
@@ -303,11 +312,12 @@ def is_self_contained(target: Path) -> bool:
 
 
 def is_package_target(target: Path) -> bool:
-    """Whether ``target`` is a package target (flat, nested, or explicitly marked).
+    """Whether ``target`` must be treated as a package boundary (flat, nested, or explicitly marked).
 
-    The bool compatibility projection of :func:`classify_target` - kept because two gates and their
-    tests read it, but it is lossy on purpose: a caller that has to distinguish *intact* from
-    *damaged*, or that must refuse an unsafe root, calls :func:`classify_target` instead.
+    The bool compatibility projection of :func:`classify_target`. **No production code reads it** -
+    :func:`evidence_dirs` keys the walk on
+    :attr:`TargetClassification.inherits_ancestor_evidence` - so it survives as a documented API for
+    callers that only ever needed the one bit, and it never resolves.
 
     A package-shaped target (flat ``.../packages/<Unit>`` or nested
     ``.../packages/<batch>/<Unit>``) must evaluate only its own local evidence and must not inherit
@@ -315,9 +325,10 @@ def is_package_target(target: Path) -> bool:
     ``fabric/`` alone is not a package signal: ordinary migration units and bundle roots carry it
     too and still need to discover run-level evidence.
 
-    ⚠️ ``False`` here means "not a package", NOT "safe to walk upward" - an unsafe root is neither.
-    :func:`evidence_dirs` keys the walk on
-    :attr:`TargetClassification.inherits_ancestor_evidence`, never on this bool.
+    ⚠️ **Conservative by construction:** damaged, unsafe and otherwise indeterminate boundaries all
+    project ``True``, because ``False`` is read as "ordinary, walk upward" and that is the fail-open
+    direction. ``False`` is reserved for a target *proven* ordinary. A caller that needs to tell an
+    intact package from a damaged one, or to refuse an unsafe root, calls :func:`classify_target`.
     """
     return classify_target(target).is_package
 

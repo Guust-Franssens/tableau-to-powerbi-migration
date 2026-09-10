@@ -337,9 +337,9 @@ def test_a_linked_root_is_refused_before_the_marker_is_even_looked_for(tmp_path:
     assert result.code == bundle_corpus.CODE_TARGET_ROOT_REPARSE
     assert not result.is_safe
     assert not result.inherits_ancestor_evidence
-    # The bool projection is honest: an unsafe root is not a package. The walk is stopped by
-    # `inherits_ancestor_evidence`, never by this bool.
-    assert bundle_corpus.is_package_target(alias) is False
+    # ⚠️ Round-1 review of #590: the bool projection is CONSERVATIVE, not "honest". An unsafe root
+    # is indeterminate, and `False` here is read as "ordinary, walk upward" - the fail-open answer.
+    assert bundle_corpus.is_package_target(alias) is True
 
 
 def test_an_ordinary_bundle_alias_fails_CLOSED_and_that_is_intentional(tmp_path: Path) -> None:
@@ -463,7 +463,12 @@ def test_diagnostics_never_echo_the_supplied_path_or_marker_bytes(tmp_path: Path
 
 
 def test_evidence_dirs_skips_ancestors_for_every_damaged_package_shape(tmp_path: Path) -> None:
-    """The shared authority both gates read: a damaged boundary is not a licence to walk up."""
+    """The shared walk: a damaged boundary is not a licence to walk up.
+
+    ⚠️ This exercises `evidence_dirs` directly. It is NOT a claim that `check_unit.py` is protected -
+    that gate reaches this walk through `_unit_dir()`, which resolves first (see the residual in
+    `docs/migration-phases.md`).
+    """
     run_root = tmp_path / "run"
     (run_root / "oracle").mkdir(parents=True)
     missing = run_root / "packages" / "NoMarker"
@@ -474,6 +479,63 @@ def test_evidence_dirs_skips_ancestors_for_every_damaged_package_shape(tmp_path:
     for target in (missing, dir_marker):
         assert bundle_corpus.classify_target(target).kind == bundle_corpus.TARGET_PACKAGE_DAMAGED
         assert bundle_corpus.evidence_dirs(target, ("oracle",)) == []
+
+
+@pytest.mark.parametrize("shape", [("packages", "Unit"), ("packages", "batch1", "Unit")])
+def test_the_bool_projection_never_calls_an_indeterminate_boundary_ordinary(
+    tmp_path: Path, monkeypatch, shape: tuple[str, ...]
+) -> None:
+    """Kills: projecting damaged/unsafe/unassessable boundaries as an ordinary ``False``.
+
+    Round-1 review of #590. ``False`` is read by a caller as "ordinary, walk upward", so it is the
+    fail-OPEN answer and must be reserved for a target *proven* ordinary. Flat and nested, missing /
+    permission-denied / reparse, root side and marker side.
+    """
+    base = tmp_path.joinpath("run", *shape)
+
+    missing_marker = base.with_name(base.name + "-missing")
+    missing_marker.mkdir(parents=True)
+
+    reparse_marker = base.with_name(base.name + "-reparse")
+    reparse_marker.mkdir(parents=True)
+    marker = reparse_marker / bundle_corpus.PACKAGE_MARKER
+    marker.write_text("{}\n", encoding="utf-8")
+
+    denied_root = base.with_name(base.name + "-denied-root")
+    denied_root.mkdir(parents=True)
+    denied_marker = base.with_name(base.name + "-denied-marker")
+    denied_marker.mkdir(parents=True)
+
+    real_lstat = os.lstat
+
+    def fake(path, *args, **kwargs):
+        if Path(path) == marker:
+            return _FakeStat(stat.S_IFREG | 0o666, bundle_corpus.FILE_ATTRIBUTE_REPARSE_POINT)
+        if Path(path) in (denied_root, denied_marker / bundle_corpus.PACKAGE_MARKER):
+            raise PermissionError(13, "denied")
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(bundle_corpus.os, "lstat", fake)
+
+    for target in (missing_marker, reparse_marker, denied_root, denied_marker):
+        classification = bundle_corpus.classify_target(target)
+        assert classification.kind != bundle_corpus.TARGET_ORDINARY
+        assert bundle_corpus.is_package_target(target) is True, classification.code
+        # The bool is the strict complement of the property the walk actually keys on, so a caller
+        # reading either one cannot be told two different things.
+        assert bundle_corpus.is_package_target(target) is not classification.inherits_ancestor_evidence
+
+
+def test_the_bool_projection_stays_false_for_a_target_proven_ordinary(tmp_path: Path) -> None:
+    """The vacuity control: a conservative projection that said True for everything is useless."""
+    unpackaged = tmp_path / "run" / "bundle" / "pbip" / "Unit"
+    unpackaged.mkdir(parents=True)
+    never_built = tmp_path / "run" / "bundle" / "pbip" / "NeverBuilt"
+
+    for target in (unpackaged, never_built):
+        assert bundle_corpus.classify_target(target).kind == bundle_corpus.TARGET_ORDINARY
+        assert bundle_corpus.is_package_target(target) is False
+        assert bundle_corpus.classify_target(target).inherits_ancestor_evidence is True
 
 
 def test_shipping_reports_use_pbip_not_engine_baseline(tmp_path: Path) -> None:
