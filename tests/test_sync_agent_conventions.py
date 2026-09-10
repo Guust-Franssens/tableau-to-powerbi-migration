@@ -516,7 +516,26 @@ ROOT_CONTRACTS: dict[str, tuple[Path, tuple[str, ...]]] = {
             "Repo-local `_runs` stays the default",
             "`python scripts/work_dirs.py <slug> --runs-parent <short-parent> --json`",
             "`python scripts/work_dirs.py --verify --runs-parent <short-parent>`",
-            "never substitute a junction, `subst` or symlink",
+            "never a junction or symlink, and never weaken the ceiling",
+        ),
+    ),
+    # #566 corrected an UNMEASURED half of that prohibition. The exception is narrow and must stay
+    # narrow: an alias is a Desktop-open convenience, never the run's identity and never a waiver,
+    # so the root contract carries the boundary as well as the permission.
+    "subst-desktop-open-fallback-root": (
+        AGENTS_MD,
+        (
+            "ONE measured exception (2026-09-08, #566): a same-user `subst` alias may open an "
+            "already-built over-ceiling tree in Desktop when re-allocation is blocked",
+            "temporary, never the recorded path, waives no gate",
+        ),
+    ),
+    "subst-desktop-open-fallback-persona": (
+        DRY_RUN_OPERATOR_MD,
+        (
+            "a same-user `subst` alias may open an already-built over-ceiling tree in Desktop when "
+            "re-allocation is blocked",
+            "temporary, machine-local, never the run's recorded path, and it waives no gate",
         ),
     ),
     "short-root-privacy-distinction-root": (
