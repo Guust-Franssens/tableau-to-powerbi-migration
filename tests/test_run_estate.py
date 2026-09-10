@@ -1897,7 +1897,7 @@ def _emitted_run(
     (src / "unit.twb").write_text("<workbook />", encoding="utf-8")
     monkeypatch.setattr(run_estate, "run_engine", _bundle_engine())
     stamped: list[Path] = []
-    monkeypatch.setattr(run_estate, "stamp_inputs", lambda _input, out_dir: stamped.append(out_dir))
+    monkeypatch.setattr(run_estate, "stamp_inputs", lambda _input, out_dir, _timeout=None: stamped.append(out_dir))
     if limits is not None:
         monkeypatch.setattr(run_estate, "PATH_CEILING_LIMITS", limits)
     buffer = io.StringIO()
@@ -1960,6 +1960,52 @@ def test_a_clean_emitted_tree_continues_unchanged(tmp_path: Path, monkeypatch) -
     assert _path_report(out)["status"] == "ok"
     assert "none over Desktop" in printed, printed
     assert {"provenance", "adjudicate", "slice_handovers"} <= set(_phase_names(out))
+
+
+def test_run_estate_provenance_uses_the_bounded_default_timeout(tmp_path: Path, monkeypatch) -> None:
+    """The integration default must inherit the stamper's whole-phase deadline, not disable it."""
+    import stamp_tableau_provenance as prov  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+
+    src, out = tmp_path / "src", tmp_path / "bundle"
+    src.mkdir()
+    out.mkdir()
+    (src / "unit.twb").write_text("<workbook />", encoding="utf-8")
+    seen: list[float | None] = []
+
+    def _build(_input, _env, *, timeout_sec):
+        seen.append(timeout_sec)
+        return {"input_count": 1, "phase": {"status": "local_only"}, "inputs": [{"input": {"file": "unit.twb"}}]}
+
+    monkeypatch.setattr(prov, "resolve_env", lambda _path: {})
+    monkeypatch.setattr(prov, "build", _build)
+
+    assert "local_only" in (run_estate.stamp_inputs(src, out) or "")
+    assert seen == [prov.DEFAULT_TIMEOUT_SEC]
+    assert (out / "source-provenance.json").is_file()
+
+
+def test_a_provenance_publication_failure_is_not_a_successful_skip(tmp_path: Path, monkeypatch) -> None:
+    """Remote lookup can be partial, but failing to publish source-provenance.json is a real failure."""
+
+    def _publication_failed(*_args, **_kwargs):
+        raise OSError(28, "No space left on device")
+
+    _without_pbir_validator(monkeypatch)
+    engine = _versioned_engine(tmp_path / "engine", "2.339.0")
+    out = tmp_path / "bundle"
+    src = tmp_path / "src"
+    src.mkdir(exist_ok=True)
+    (src / "unit.twb").write_text("<workbook />", encoding="utf-8")
+    monkeypatch.setattr(run_estate, "run_engine", _bundle_engine())
+    monkeypatch.setattr(run_estate, "stamp_inputs", _publication_failed)
+
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        code = run_estate.main(_landing_argv(engine, src, out))
+
+    assert code == run_estate.EXIT_PROVENANCE_FAILED
+    assert "ESTATE: PROVENANCE_FAILED" in buffer.getvalue()
+    assert not (out / "handover").exists(), "later phases ran after provenance publication failed"
 
 
 def test_one_overlong_directory_refuses_even_when_every_file_is_legal(tmp_path: Path, monkeypatch) -> None:

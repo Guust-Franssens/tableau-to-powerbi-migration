@@ -199,6 +199,7 @@ EXIT_INVALID_PBIR = 7
 EXIT_BLANK_PLACEHOLDER = 8
 EXIT_BUNDLE_REWRITE = 9
 EXIT_PATH_CEILING = 10
+EXIT_PROVENANCE_FAILED = 11
 GENERATED_ARTIFACTS_KEY = "generated_artifacts"
 SLICE_ONLY_COVERAGE = "slice_only_backfill"
 
@@ -638,27 +639,25 @@ def slice_handovers(report: dict, out_dir: Path) -> list[Path]:
     return written
 
 
-def stamp_inputs(input_dir: Path, out_dir: Path) -> str | None:
+def stamp_inputs(input_dir: Path, out_dir: Path, timeout_sec: float | None = None) -> str | None:
     """Record where each input workbook came from, into ``<out>/source-provenance.json``.
 
-    Best-effort by design: a migration must never fail because a Tableau site was unreachable, so a
-    lookup failure degrades to fingerprints and anything unexpected degrades to no file at all.
-    Imported lazily so `run_estate` still works in an environment where the stamper is absent.
+    Remote lookup is best-effort by design: a migration must never fail because a Tableau site was
+    unreachable. Publication is different: once the stamper has built its machine-readable answer,
+    failing to write it is a real run failure and is deliberately not swallowed.
     """
-    try:
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        import stamp_tableau_provenance as prov  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import stamp_tableau_provenance as prov  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
 
-        result = prov.build(input_dir, prov.resolve_env(Path(".env")))
-        if not result["input_count"]:
-            return None
-        path = out_dir / "source-provenance.json"
-        path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
-        matched = sum(1 for r in result["inputs"] if (r.get("origin") or {}).get("match") == "sha256")
-        return f"{result['input_count']} input(s) stamped, {matched} confirmed against the site -> {path}"
-    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-        log.warning("provenance stamp skipped (%s: %s)", type(exc).__name__, str(exc)[:120])
+    effective_timeout = prov.DEFAULT_TIMEOUT_SEC if timeout_sec is None else timeout_sec
+    result = prov.build(input_dir, prov.resolve_env(Path(".env")), timeout_sec=effective_timeout)
+    if not result["input_count"]:
         return None
+    path = out_dir / "source-provenance.json"
+    path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    matched = sum(1 for r in result["inputs"] if (r.get("origin") or {}).get("match") == "sha256")
+    state = (result.get("phase") or {}).get("status") or "unknown"
+    return f"{result['input_count']} input(s) stamped, {matched} confirmed against the site ({state}) -> {path}"
 
 
 def write_phase_record(out_dir: Path, phases: list[dict]) -> Path:
@@ -1598,6 +1597,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="skip the engine; re-derive handovers/checks from an existing bundle",
     )
     parser.add_argument("--dry-run", action="store_true", help="report what would run, then stop")
+    parser.add_argument(
+        "--provenance-timeout-sec",
+        type=float,
+        default=None,
+        help=(
+            "whole provenance stamping deadline in seconds; defaults to stamp_tableau_provenance.py's "
+            "bounded 120s contract"
+        ),
+    )
     return parser
 
 
@@ -1776,7 +1784,7 @@ def final_verdict(gates: GateResults, out_dir: Path) -> int:
     return EXIT_OK
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-locals,too-many-return-statements
     """CLI entry point."""
     args = build_parser().parse_args(argv)
 
@@ -1819,7 +1827,19 @@ def main(argv: list[str] | None = None) -> int:
     # Best-effort and never fatal: a migration must not fail because a site was unreachable.
     if args.input:
         started = time.monotonic()
-        stamped = stamp_inputs(args.input, args.output)
+        try:
+            stamped = stamp_inputs(args.input, args.output, args.provenance_timeout_sec)
+        except (OSError, TypeError, ValueError) as exc:
+            phases.append(
+                {
+                    "phase": "provenance",
+                    "elapsed_sec": round(time.monotonic() - started, 1),
+                    "status": "publication_failed",
+                    "error": {"class": type(exc).__name__},
+                }
+            )
+            print(f"\nESTATE: PROVENANCE_FAILED - source-provenance.json could not be published ({type(exc).__name__})")
+            return EXIT_PROVENANCE_FAILED
         phases.append({"phase": "provenance", "elapsed_sec": round(time.monotonic() - started, 1)})
         if stamped:
             log.info("PROVENANCE: %s", stamped)

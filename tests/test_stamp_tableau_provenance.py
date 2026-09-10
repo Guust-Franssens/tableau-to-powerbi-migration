@@ -528,6 +528,7 @@ def test_a_many_input_run_costs_one_inventory_and_one_download_per_matched_luid(
     assert site.count("content") == 66, "one download per distinct matched LUID, not two"
     assert len(site.calls) == 2 + 1 + 66, "sign-in + one inventory + one content each + sign-out"
     assert result["input_count"] == 66
+    assert result["phase"]["progress"][-1]["input_completed"] == 66
     assert sum(1 for record in result["inputs"] if record.get("origin")) == 66
     assert site.count("signout") == 1, "the session is still released"
 
@@ -595,6 +596,8 @@ def test_a_dead_inventory_is_asked_once_and_every_input_keeps_its_fingerprint(tm
 
     assert site.count("inventory") == 1
     assert site.count("content") == 0
+    assert result["phase"]["status"] == "partial"
+    assert result["phase"]["errors"][0]["code"] == "lookup-unavailable"
     errors = {record["lookup_error"] for record in result["inputs"]}
     assert len(errors) == 1 and errors.pop().startswith(expected)
     assert len(result["inputs"]) == 12
@@ -641,6 +644,7 @@ def test_a_signout_failure_cannot_discard_the_completed_result(tmp_path, monkeyp
     assert result["input_count"] == 3
     assert all(record["input"]["sha256"] for record in result["inputs"])
     assert sum(1 for record in result["inputs"] if record.get("origin")) == 3
+    assert {"code": "signout-failed", "operation": "sign-out"} in result["phase"]["errors"]
     assert site.count("signout") == 1, "it was attempted - it simply may not cost the artifact"
 
 
@@ -677,6 +681,7 @@ def test_the_completed_result_survives_a_signout_that_raises_outright(tmp_path, 
 
     assert result["input_count"] == 2
     assert sum(1 for record in result["inputs"] if record.get("origin")) == 2
+    assert result["phase"]["errors"][0]["code"] == "signout-failed"
 
 
 def test_the_cli_still_writes_the_artifact_when_signout_fails(tmp_path, monkeypatch):
@@ -717,6 +722,7 @@ def test_a_scrub_failure_withholds_live_fields_but_keeps_the_fingerprints(tmp_pa
     assert all(record["input"]["sha256"] for record in result["inputs"])
     assert all(record["origin"] is None for record in result["inputs"])
     assert "redaction failed" in result["inputs"][0]["origin_note"]
+    assert {"code": "redaction-failed", "operation": "scrub", "class": "RuntimeError"} in result["phase"]["errors"]
     assert site.count("signout") == 1, "the session is released even when the scrub blew up"
 
 
@@ -838,6 +844,44 @@ def test_an_unreadable_site_copy_is_unavailable_not_a_byte_difference(tmp_path, 
         assert "DIFFER" not in record["origin_note"]
         assert record["lookup_error"] == "content unavailable: HTTP 404"
         assert origin["workbook_luid"] == luid, "the inventory evidence we DID get is still recorded"
+
+
+def test_a_trickling_remote_operation_crossing_the_phase_deadline_keeps_the_artifact(tmp_path, monkeypatch, caplog):
+    """The socket read timeout is not the phase budget; a slow operation can consume the whole phase."""
+    first, second = _fixture_luid(31), _fixture_luid(32)
+    _twbx(tmp_path, f"{first}_Slow")
+    _twbx(tmp_path, f"{second}_Would_Be_Healthy")
+    inventory = [{"id": first, "name": "Slow"}, {"id": second, "name": "Would Be Healthy"}]
+    now = [0.0]
+
+    class TricklingSite(RecordingSite):
+        def _call(self, method, path, body=None, accept=None):
+            self._check_deadline()
+            answer = super()._call(method, path, body, accept)
+            if "/content" in path:
+                now[0] += 2.0
+            self._check_deadline()
+            self._emit_remote_progress(self._operation_label(path))
+            return answer
+
+    site = _install(monkeypatch, TricklingSite(LIVE_ENV, workbooks=inventory))
+
+    with caplog.at_level("INFO", logger="provenance"):
+        result = prov.build(tmp_path, LIVE_ENV, timeout_sec=1.0, clock=lambda: now[0])
+
+    assert site.count("inventory") == 1
+    assert site.count("content") == 1, "no new remote work starts after the whole-phase deadline"
+    assert result["input_count"] == 2
+    assert result["phase"]["status"] == "partial"
+    assert any(error["code"] == prov.DEADLINE_EXPIRED for error in result["phase"]["errors"])
+    assert [record["lookup_error_code"] for record in result["inputs"]] == [
+        prov.DEADLINE_EXPIRED,
+        prov.DEADLINE_EXPIRED,
+    ]
+    assert all(record["input"]["sha256"] for record in result["inputs"])
+    assert result["phase"]["progress"][-1]["input_completed"] == 2
+    assert "PROVENANCE progress:" in caplog.text
+    assert "x.online" not in caplog.text and "fixture-pat" not in caplog.text
 
 
 def test_a_refusal_reason_carries_no_response_text(tmp_path, monkeypatch):

@@ -56,15 +56,24 @@ import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from object_identity import RevisionKey, revision_key  # noqa: E402  # pylint: disable=wrong-import-position
-from tableau_env import env_redactor, pat_secret, redact, redacted_note, resolve_env, scrub_tree  # noqa: E402  # pylint: disable=wrong-import-position
+from tableau_env import pat_secret, redact, redacted_note, resolve_env, scrub_tree  # noqa: E402  # pylint: disable=wrong-import-position
 
 LOG = logging.getLogger("provenance")
 
 WORKBOOK_SUFFIXES = (".twb", ".twbx")
+DEFAULT_TIMEOUT_SEC = 120.0
+DEADLINE_EXPIRED = "deadline-expired"
+
+
+class DeadlineExceeded(RuntimeError):
+    """The whole provenance phase budget was exhausted."""
+
+    def __init__(self) -> None:
+        super().__init__("provenance phase deadline expired")
 
 
 def fingerprint(path: Path) -> dict[str, Any]:
@@ -128,8 +137,61 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
         self._content_cache: dict[str, bytes | None] = {}
         self._content_failure: dict[str, Exception] = {}
         self._content_unavailable: dict[str, str] = {}
+        self._deadline_at: float | None = None
+        self._clock: Callable[[], float] = time.monotonic
+        self._progress: Callable[[dict[str, Any]], None] | None = None
+        self._remote_completed = 0
+        self.signout_failure_code: str | None = None
+
+    def set_run_context(
+        self,
+        *,
+        deadline_at: float | None,
+        clock: Callable[[], float],
+        progress: Callable[[dict[str, Any]], None] | None,
+    ) -> None:
+        """Attach the run's whole-phase clock/progress sink without widening fake constructors."""
+        self._deadline_at = deadline_at
+        self._clock = clock
+        self._progress = progress
+
+    def _remaining_sec(self) -> float | None:
+        if self._deadline_at is None:
+            return None
+        return max(0.0, self._deadline_at - self._clock())
+
+    def _check_deadline(self) -> None:
+        remaining = self._remaining_sec()
+        if remaining is not None and remaining <= 0:
+            raise DeadlineExceeded()
+
+    def _timeout_sec(self) -> float:
+        remaining = self._remaining_sec()
+        if remaining is None:
+            return 180.0
+        return max(0.001, min(180.0, remaining))
+
+    def _operation_label(self, path: str) -> str:
+        if path == "/auth/signin":
+            return "sign-in"
+        if path == "/auth/signout":
+            return "sign-out"
+        if "/content" in path:
+            return "content"
+        if "/workbooks?" in path:
+            return "inventory"
+        return "request"
+
+    def _emit_remote_progress(self, operation: str) -> None:
+        self._remote_completed += 1
+        if self._progress is not None:
+            self._progress(
+                {"event": "remote-operation", "operation": operation, "remote_completed": self._remote_completed}
+            )
 
     def _call(self, method: str, path: str, body: dict | None = None, accept: str | None = None):
+        self._check_deadline()
+        operation = self._operation_label(path)
         request = urllib.request.Request(
             f"{self.base}/api/{self.version}{path}",
             data=json.dumps(body).encode() if body else None,
@@ -142,10 +204,16 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
         if self.token:
             request.add_header("X-Tableau-Auth", self.token)
         try:
-            with urllib.request.urlopen(request, timeout=180) as response:
-                return response.status, response.read()
+            with urllib.request.urlopen(request, timeout=self._timeout_sec()) as response:
+                answer = response.status, response.read()
+            self._check_deadline()
+            return answer
         except urllib.error.HTTPError as exc:
-            return exc.code, exc.read()
+            answer = exc.code, exc.read()
+            self._check_deadline()
+            return answer
+        finally:
+            self._emit_remote_progress(operation)
 
     def sign_in(self) -> None:
         """Exchange the PAT for a session token."""
@@ -179,6 +247,7 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
             try:
                 self._call("POST", "/auth/signout")
             except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+                self.signout_failure_code = _exception_code(exc, "signout-failed")
                 LOG.debug("Tableau sign-out failed (%s) - session left to expire", type(exc).__name__)
             finally:
                 self.token = None
@@ -430,37 +499,140 @@ def collect_inputs(target: Path) -> list[Path]:
     return sorted(p for p in target.iterdir() if p.suffix.lower() in WORKBOOK_SUFFIXES)
 
 
-def build(target: Path, env: dict[str, str]) -> dict[str, Any]:
+def _phase_record(timeout_sec: float | None) -> dict[str, Any]:
+    return {
+        "status": "running",
+        "timeout_sec": None if timeout_sec is None else round(float(timeout_sec), 3),
+        "errors": [],
+        "progress": [],
+    }
+
+
+def _exception_code(exc: BaseException, default: str = "lookup-unavailable") -> str:
+    return DEADLINE_EXPIRED if isinstance(exc, DeadlineExceeded) else default
+
+
+def _phase_error(
+    phase: dict[str, Any], code: str, exc: BaseException | None = None, *, operation: str | None = None
+) -> None:
+    error: dict[str, Any] = {"code": code}
+    if operation is not None:
+        error["operation"] = operation
+    if exc is not None:
+        error["class"] = type(exc).__name__
+    if error not in phase["errors"]:
+        phase["errors"].append(error)
+
+
+def _build_progress_sink(
+    phase: dict[str, Any],
+    *,
+    started: float,
+    deadline_at: float | None,
+    clock: Callable[[], float],
+) -> Callable[[dict[str, Any]], None]:
+    def emit(event: dict[str, Any]) -> None:
+        elapsed = max(0.0, clock() - started)
+        progress = {**event, "elapsed_sec": round(elapsed, 1)}
+        if deadline_at is not None:
+            progress["remaining_sec"] = round(max(0.0, deadline_at - clock()), 1)
+        phase["progress"].append(progress)
+        visible = f"PROVENANCE progress: event={progress.get('event')} elapsed={progress['elapsed_sec']}s"
+        if "remaining_sec" in progress:
+            visible += f" remaining={progress['remaining_sec']}s"
+        if "input_completed" in progress:
+            visible += f" inputs={progress['input_completed']}/{progress['input_total']}"
+        if "operation" in progress:
+            visible += f" operation={progress['operation']} remote={progress.get('remote_completed')}"
+        LOG.info(visible)
+
+    return emit
+
+
+def _deadline_expired(deadline_at: float | None, clock: Callable[[], float]) -> bool:
+    return deadline_at is not None and clock() >= deadline_at
+
+
+# pylint: disable-next=too-many-locals,too-many-branches,too-many-statements
+def build(
+    target: Path,
+    env: dict[str, str],
+    *,
+    timeout_sec: float | None = DEFAULT_TIMEOUT_SEC,
+    clock: Callable[[], float] = time.monotonic,
+) -> dict[str, Any]:
     """Fingerprint every input, and attach its Tableau origin when credentials allow."""
-    inputs = collect_inputs(target)
+    started = clock()
+    deadline_at = None if timeout_sec is None else started + max(0.0, float(timeout_sec))
+    phase = _phase_record(timeout_sec)
+    progress = _build_progress_sink(phase, started=started, deadline_at=deadline_at, clock=clock)
+    progress({"event": "phase-start", "input_completed": 0, "input_total": 0})
+    try:
+        inputs = collect_inputs(target)
+    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        _phase_error(phase, "collect-inputs-failed", exc)
+        phase["status"] = "failed"
+        return {
+            "schema": "tableau-source-provenance/1",
+            "stamped_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "input_count": 0,
+            "phase": phase,
+            "inputs": [],
+        }
+    progress({"event": "inputs-discovered", "input_completed": 0, "input_total": len(inputs)})
     lookup: TableauLookup | None = None
-    redactor = env_redactor(env)
     if env.get("TABLEAU_SERVER_URL") and env.get("TABLEAU_PAT_NAME"):
         try:
             lookup = TableauLookup(env)
+            if hasattr(lookup, "set_run_context"):
+                lookup.set_run_context(deadline_at=deadline_at, clock=clock, progress=progress)
             lookup.sign_in()
         except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+            _phase_error(phase, _exception_code(exc), exc, operation="sign-in")
             LOG.warning(
-                "no Tableau lookup (%s: %s) - fingerprints only",
+                "no Tableau lookup (%s) - fingerprints only",
                 type(exc).__name__,
-                redacted_note(str(exc), redactor, limit=120),
             )
             lookup = None
 
     records = []
-    for path in inputs:
-        record = {"input": fingerprint(path)}
+    for index, path in enumerate(inputs, start=1):
+        record: dict[str, Any]
+        try:
+            record = {"input": fingerprint(path)}
+        except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+            _phase_error(phase, "fingerprint-unavailable", exc)
+            record = {
+                "input": {},
+                "origin": None,
+                "fingerprint_error": {"code": "fingerprint-unavailable", "class": type(exc).__name__},
+            }
+            records.append(record)
+            progress({"event": "input-complete", "input_completed": index, "input_total": len(inputs)})
+            continue
         if lookup is not None:
-            try:
-                origin = find_origin(lookup, path.stem, record["input"])
-            except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-                origin, record["lookup_error"] = (
-                    None,
-                    (f"{type(exc).__name__}: {redacted_note(str(exc), lookup.redact_text, limit=150)}"),
-                )
+            if _deadline_expired(deadline_at, clock):
+                origin = None
+                record["lookup_error_code"] = DEADLINE_EXPIRED
+                record["lookup_error"] = "DeadlineExceeded: provenance phase deadline expired"
+                _phase_error(phase, DEADLINE_EXPIRED, DeadlineExceeded())
+            else:
+                try:
+                    origin = find_origin(lookup, path.stem, record["input"])
+                except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+                    code = _exception_code(exc)
+                    _phase_error(phase, code, exc)
+                    origin, record["lookup_error_code"], record["lookup_error"] = (
+                        None,
+                        code,
+                        (f"{type(exc).__name__}: {redacted_note(str(exc), lookup.redact_text, limit=150)}"),
+                    )
             record["origin"] = origin
             if origin is None:
-                record["origin_note"] = "no workbook of this LUID or name on the site - local-only input"
+                if record.get("lookup_error_code") == DEADLINE_EXPIRED:
+                    record["origin_note"] = "remote origin unavailable - provenance phase deadline expired"
+                else:
+                    record["origin_note"] = "no workbook of this LUID or name on the site - local-only input"
             elif origin["match"] == "name_only":
                 record["origin_note"] = (
                     f"matched by {origin['matched_by']}, but the bytes DIFFER from the site copy - "
@@ -474,13 +646,16 @@ def build(target: Path, env: dict[str, str]) -> dict[str, Any]:
                 )
                 record["lookup_error"] = f"content unavailable: {reason}"
         records.append(record)
+        progress({"event": "input-complete", "input_completed": index, "input_total": len(inputs)})
     result = {
         "schema": "tableau-source-provenance/1",
         "stamped_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "input_count": len(records),
+        "phase": phase,
         "inputs": records,
     }
     if lookup is None:
+        phase["status"] = "partial" if phase["errors"] else "local_only"
         return result
     return _finish_live(result, lookup)
 
@@ -501,13 +676,21 @@ def _finish_live(result: dict[str, Any], lookup: TableauLookup) -> dict[str, Any
     try:
         result, _paths = scrub_tree(result, lookup.redact_text)
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        _phase_error(result["phase"], "redaction-failed", exc, operation="scrub")
         LOG.warning("provenance redaction failed (%s) - live origin fields withheld", type(exc).__name__)
         result = _without_live_fields(result, lookup.redact_text)
     finally:
         try:
             lookup.sign_out()
         except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+            _phase_error(result["phase"], _exception_code(exc, "signout-failed"), exc, operation="sign-out")
             LOG.warning("Tableau sign-out failed (%s) - session left to expire", type(exc).__name__)
+        if getattr(lookup, "signout_failure_code", None):
+            _phase_error(result["phase"], lookup.signout_failure_code or "signout-failed", operation="sign-out")
+    if result["phase"]["errors"] or any(record.get("lookup_error_code") for record in result["inputs"]):
+        result["phase"]["status"] = "partial"
+    else:
+        result["phase"]["status"] = "complete"
     return result
 
 
@@ -573,10 +756,16 @@ def main() -> int:
     parser.add_argument("--input", required=True, type=Path, help=".twb/.twbx file, or a folder of them")
     parser.add_argument("--env", type=Path, default=Path(".env"), help="git-ignored KEY=VALUE credentials file")
     parser.add_argument("--out", type=Path, help="output JSON (default: source-provenance.json beside the input)")
+    parser.add_argument(
+        "--timeout-sec",
+        type=float,
+        default=DEFAULT_TIMEOUT_SEC,
+        help="whole provenance phase deadline in seconds; use 0 to allow local fingerprints only",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    result = build(args.input, resolve_env(args.env))
+    result = build(args.input, resolve_env(args.env), timeout_sec=args.timeout_sec)
     if not result["input_count"]:
         LOG.error("no .twb/.twbx found under %s", args.input)
         return 1
