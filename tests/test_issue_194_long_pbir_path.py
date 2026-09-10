@@ -31,6 +31,7 @@ import csv
 import hashlib
 import importlib.util
 import io
+import json
 import os
 import re
 import shutil
@@ -50,6 +51,7 @@ if str(SCRIPTS) not in sys.path:
 
 import engine_source  # noqa: E402  # pylint: disable=wrong-import-position
 import host_paths  # noqa: E402  # pylint: disable=wrong-import-position
+import run_estate  # noqa: E402  # pylint: disable=wrong-import-position
 
 FIXTURE = REPO / "fixtures" / "upstream-repros" / "issue-194-long-pbir-path"
 BUILDER = FIXTURE / "build_repro.py"
@@ -726,3 +728,94 @@ def test_the_short_control_stays_inside_both_ceilings_at_the_same_root(engine_ru
         f"the two cases emitted different structures ({short_case['files']}/{short_case['directories']} vs "
         f"{long_case['files']}/{long_case['directories']}); the A/B would then differ in more than names"
     )
+
+
+# -- engine-dependent: the coordinator refuses the REAL emitted tree (issue #564) ------------------
+#
+# `run_estate.py`'s PRE-conversion projection cannot see this: it composes the canonical PBIR visual
+# tail onto names knowable before conversion, and the offender the census above pins is a
+# semantic-model table file whose name the projection never models. These two tests therefore drive
+# the coordinator's POST-engine gate over the output the engine really wrote, reusing the session
+# fixture above so the engine runs no extra time.
+#
+# Both work on a COPY. The session fixture's tree is asserted on, entry by entry, by the tests above,
+# and a coordinator run writes its verdict into whatever bundle it judges - mutating the shared tree
+# would make those assertions order-dependent.
+
+
+def _copy_bundle(source: Path, base: Path, *, keep_root_length: bool) -> Path:
+    """Copy an emitted bundle so a coordinator run cannot mutate the shared session fixture.
+
+    ``keep_root_length`` pads the destination so the copy sits at a root at least as long as the
+    original: the verdict under test is a property of root + emitted tail, so a shorter destination
+    would quietly turn the long case legal and the test would pass for the wrong reason.
+    """
+    padding = measure_repro.utf16_len(str(source)) - measure_repro.utf16_len(str(base / "b"))
+    dest = base / ("b" + "d" * max(padding, 0)) if keep_root_length else base / "b"
+    shutil.copytree(source, dest)
+    return dest
+
+
+def _slice_only_run(bundle: Path, source_dir: Path, monkeypatch) -> tuple[int, list[Path]]:
+    """Run the coordinator over an EXISTING emitted bundle, with provenance as the sentinel.
+
+    ``--slice-only`` never invokes the engine (so the pre-conversion projection never runs, which is
+    the whole point here), while ``--input`` keeps the provenance stamp in the run - it is the first
+    consumer after the gate, so it is what proves the gate ran BEFORE anything downstream.
+    """
+    stamped: list[Path] = []
+    monkeypatch.setattr(run_estate, "stamp_inputs", lambda _input, out_dir: stamped.append(out_dir))
+    code = run_estate.main(["--slice-only", "--input", str(source_dir), "--output", str(bundle)])
+    return code, stamped
+
+
+@requires_engine
+def test_the_emitted_long_case_stops_the_coordinator_before_its_first_consumer(
+    engine_runs, tmp_path_factory: pytest.TempPathFactory, monkeypatch
+) -> None:
+    """The customer-visible #564 shape: engine exit 0, every gate green, a bundle Desktop cannot open."""
+    base = tmp_path_factory.mktemp("i194-gate-long")
+    bundle = _copy_bundle(engine_runs["cases"]["long"]["out_dir"], base, keep_root_length=True)
+    source = base / "in"
+    source.mkdir()
+    shutil.copy2(FIXTURE / LONG_ARCHIVE, source / LONG_ARCHIVE)
+
+    code, stamped = _slice_only_run(bundle, source, monkeypatch)
+
+    assert code == run_estate.EXIT_PATH_CEILING, (
+        f"the emitted tree was handed downstream on engine {engine_runs['version']}"
+    )
+    assert stamped == [], "provenance ran on a tree Power BI Desktop refuses to open"
+    report = json.loads((bundle / run_estate.PATH_CEILING_REPORT).read_text(encoding="utf-8"))
+    assert report["status"] == "over_ceiling"
+    offenders = report["worst_offenders"]
+    assert offenders, report
+    assert all(record["length"] > record["ceiling"] for record in offenders)
+    assert any(measure_repro.OFFENDER_FRAGMENT in record["path"].replace("\\", "/") for record in offenders), (
+        f"the offender moved off the semantic-model table file: {[record['path'] for record in offenders]}"
+    )
+    assert not (bundle / "handover").exists(), "handover slices were written from a refused tree"
+    assert (bundle / "report.json").is_file(), "the refused output must be preserved as evidence"
+
+
+@requires_engine
+def test_the_emitted_short_control_passes_the_same_coordinator_gate(
+    engine_runs, tmp_path_factory: pytest.TempPathFactory, monkeypatch
+) -> None:
+    """The false-positive control: the same command on the short arm must NOT stop at the path gate."""
+    base = tmp_path_factory.mktemp("i194-gate-short")
+    bundle = _copy_bundle(engine_runs["cases"]["short"]["out_dir"], base, keep_root_length=False)
+    source = base / "in"
+    source.mkdir()
+    shutil.copy2(FIXTURE / SHORT_ARCHIVE, source / SHORT_ARCHIVE)
+
+    code, stamped = _slice_only_run(bundle, source, monkeypatch)
+
+    report = json.loads((bundle / run_estate.PATH_CEILING_REPORT).read_text(encoding="utf-8"))
+    assert report["status"] == "ok", (
+        f"the short control measured {report['status']} at a {report['root_length']}-character root. "
+        "If its longest path is legal at a 22-unit root (asserted above) this means the RUNNER's "
+        "temporary directory is unusually long, not that the control regressed."
+    )
+    assert code != run_estate.EXIT_PATH_CEILING
+    assert stamped == [bundle], "the run stopped before provenance on a tree that is within the ceilings"

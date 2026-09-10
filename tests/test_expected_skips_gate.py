@@ -416,7 +416,9 @@ def test_all_engine_dependent_tests_are_accounted_for() -> None:
     downloadable upstream long-path repro's A/B boundary controls and its root-length control),
     taking it to 33, and a 4th — the engine MAX_PATH warning's Windows-only provenance control,
     split out of the boundary test after both ubuntu engine jobs failed an unconditional
-    assertion — taking it to 34.
+    assertion — taking it to 34. Issue #564 then added the two coordinator controls that drive
+    `run_estate.py`'s post-engine path gate over the SAME emitted output (the long arm refused
+    before its first consumer, the short arm not refused), taking it to 36.
 
     The skip-reason classifier also treats the installed-engine-constants watchdog as engine-backed,
     so the engine jobs must run that one too instead of marking it NOT_CHECKED in the main job.
