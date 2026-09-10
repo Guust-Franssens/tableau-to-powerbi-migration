@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+import time
 import urllib.error
 import zipfile
 from pathlib import Path
@@ -916,6 +917,47 @@ def test_a_trickling_remote_operation_crossing_the_phase_deadline_keeps_the_arti
     assert result["phase"]["progress"][-1]["input_completed"] == 2
     assert "PROVENANCE progress:" in caplog.text
     assert "x.online" not in caplog.text and "fixture-pat" not in caplog.text
+
+
+def test_the_phase_deadline_aborts_a_trickling_response_body(tmp_path, monkeypatch):
+    """A body that never goes idle must still be cut off by the whole-phase deadline."""
+    _twbx(tmp_path)
+
+    class TricklingResponse:
+        status = 200
+
+        def __init__(self):
+            self.closed = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            self.close()
+            return False
+
+        def close(self):
+            self.closed = True
+
+        def read(self):
+            stop = time.monotonic() + 1.0
+            while not self.closed and time.monotonic() < stop:
+                time.sleep(0.01)
+            if self.closed:
+                raise OSError("closed by deadline")
+            return b'{"credentials":{"token":"session-token","site":{"id":"site-id"}}}'
+
+    monkeypatch.setattr(prov.urllib.request, "urlopen", lambda *_args, **_kwargs: TricklingResponse())
+
+    started = time.monotonic()
+    result = prov.build(tmp_path, LIVE_ENV, timeout_sec=0.05)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.5
+    assert result["input_count"] == 1
+    assert result["phase"]["status"] == "partial"
+    assert result["phase"]["errors"][0]["code"] == prov.DEADLINE_EXPIRED
+    assert result["inputs"][0]["input"]["sha256"]
 
 
 def test_a_refusal_reason_carries_no_response_text(tmp_path, monkeypatch):

@@ -51,6 +51,7 @@ import json
 import logging
 import re
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -192,6 +193,26 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
                 {"event": "remote-operation", "operation": operation, "remote_completed": self._remote_completed}
             )
 
+    def _read_body(self, response) -> bytes:
+        self._check_deadline()
+        timer = None
+        remaining = self._remaining_sec()
+        if remaining is not None:
+            timer = threading.Timer(max(0.001, remaining), response.close)
+            timer.daemon = True
+            timer.start()
+        try:
+            payload = response.read()
+        except Exception as exc:
+            if self._remaining_sec() == 0:
+                raise DeadlineExceeded() from exc
+            raise
+        finally:
+            if timer is not None:
+                timer.cancel()
+        self._check_deadline()
+        return payload
+
     def _call(self, method: str, path: str, body: dict | None = None, accept: str | None = None):
         self._check_deadline()
         operation = self._operation_label(path)
@@ -208,12 +229,10 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
             request.add_header("X-Tableau-Auth", self.token)
         try:
             with urllib.request.urlopen(request, timeout=self._timeout_sec()) as response:
-                answer = response.status, response.read()
-            self._check_deadline()
+                answer = response.status, self._read_body(response)
             return answer
         except urllib.error.HTTPError as exc:
-            answer = exc.code, exc.read()
-            self._check_deadline()
+            answer = exc.code, self._read_body(exc)
             return answer
         finally:
             self._emit_remote_progress(operation)
