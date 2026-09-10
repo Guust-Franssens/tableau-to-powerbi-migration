@@ -913,6 +913,8 @@ def test_a_trickling_remote_operation_crossing_the_phase_deadline_keeps_the_arti
     assert result["inputs"][0]["input"]["sha256"]
     assert "sha256" not in result["inputs"][1]["input"]
     assert result["inputs"][1]["input"]["ordinal"] == 2
+    assert result["inputs"][1]["input"]["file"].endswith("_Would_Be_Healthy.twbx")
+    assert result["inputs"][1]["input"]["suffix"] == ".twbx"
     assert result["phase"]["progress"][-1]["input_completed"] == 2
     assert "PROVENANCE progress:" in caplog.text
     assert "x.online" not in caplog.text and "fixture-pat" not in caplog.text
@@ -958,6 +960,7 @@ def test_the_phase_deadline_aborts_a_trickling_response_body(tmp_path, monkeypat
     assert result["phase"]["errors"][0]["code"] == prov.DEADLINE_EXPIRED
     assert result["inputs"][0]["fingerprint_error"]["code"] == prov.DEADLINE_EXPIRED
     assert result["inputs"][0]["input"]["ordinal"] == 1
+    assert result["inputs"][0]["input"]["file"] == "Superstore.twbx"
 
 
 def test_a_local_fingerprint_deadline_stops_later_local_work(tmp_path, monkeypatch):
@@ -987,6 +990,7 @@ def test_a_local_fingerprint_deadline_stops_later_local_work(tmp_path, monkeypat
         prov.DEADLINE_EXPIRED,
     ]
     assert [record["input"]["ordinal"] for record in result["inputs"]] == [1, 2]
+    assert [record["input"]["file"] for record in result["inputs"]] == ["First.twbx", "Second.twbx"]
 
 
 def test_a_refusal_reason_carries_no_response_text(tmp_path, monkeypatch):

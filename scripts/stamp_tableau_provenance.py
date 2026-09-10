@@ -62,7 +62,7 @@ from typing import Any, Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from object_identity import RevisionKey, revision_key  # noqa: E402  # pylint: disable=wrong-import-position
-from tableau_env import pat_secret, redact, redacted_note, resolve_env, scrub_tree  # noqa: E402  # pylint: disable=wrong-import-position
+from tableau_env import env_redactor, pat_secret, redact, redacted_note, resolve_env, scrub_tree  # noqa: E402  # pylint: disable=wrong-import-position
 
 LOG = logging.getLogger("provenance")
 
@@ -588,6 +588,10 @@ def _deadline_expired(deadline_at: float | None, clock: Callable[[], float]) -> 
     return deadline_at is not None and clock() >= deadline_at
 
 
+def _unavailable_input(path: Path, index: int, redactor) -> dict[str, Any]:
+    return {"ordinal": index, "file": redacted_note(path.name, redactor, limit=200), "suffix": path.suffix.lower()}
+
+
 def _raise_deadline(_signum, _frame) -> None:
     raise DeadlineExceeded()
 
@@ -627,6 +631,7 @@ def build(
     deadline_at = None if timeout_sec is None else started + max(0.0, float(timeout_sec))
     phase = _phase_record(timeout_sec)
     progress = _build_progress_sink(phase, started=started, deadline_at=deadline_at, clock=clock)
+    redactor = env_redactor(env)
     progress({"event": "phase-start", "input_completed": 0, "input_total": 0})
     alarm = _arm_deadline_alarm(deadline_at, clock)
     try:
@@ -667,7 +672,7 @@ def build(
                 _phase_error(phase, DEADLINE_EXPIRED, DeadlineExceeded())
                 records.append(
                     {
-                        "input": {"ordinal": index},
+                        "input": _unavailable_input(path, index, redactor),
                         "origin": None,
                         "fingerprint_error": {"code": DEADLINE_EXPIRED, "class": "DeadlineExceeded"},
                         "origin_note": "local fingerprint unavailable - provenance phase deadline expired",
@@ -681,7 +686,7 @@ def build(
                 _phase_error(phase, DEADLINE_EXPIRED, exc)
                 records.append(
                     {
-                        "input": {"ordinal": index},
+                        "input": _unavailable_input(path, index, redactor),
                         "origin": None,
                         "fingerprint_error": {"code": DEADLINE_EXPIRED, "class": type(exc).__name__},
                         "origin_note": "local fingerprint unavailable - provenance phase deadline expired",
@@ -692,7 +697,7 @@ def build(
             except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
                 _phase_error(phase, "fingerprint-unavailable", exc)
                 record = {
-                    "input": {"ordinal": index},
+                    "input": _unavailable_input(path, index, redactor),
                     "origin": None,
                     "fingerprint_error": {"code": "fingerprint-unavailable", "class": type(exc).__name__},
                 }
@@ -842,6 +847,10 @@ def _without_live_fields(result: dict[str, Any], redactor) -> dict[str, Any]:
 def _derived_result_only(result: dict[str, Any]) -> dict[str, Any]:
     def reduced(record: dict[str, Any]) -> dict[str, Any]:
         kept = {"input": _derived_only(record["input"]), "origin": None, "origin_note": WITHHELD_NOTE}
+        if "fingerprint_error" in record:
+            for key in ("file", "suffix"):
+                if key in record["input"]:
+                    kept["input"][key] = record["input"][key]
         for key in ("fingerprint_error", "lookup_error_code"):
             if key in record:
                 kept[key] = record[key]
