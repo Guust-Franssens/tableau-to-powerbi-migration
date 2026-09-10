@@ -123,8 +123,11 @@ The repo's own checkout is deep enough that `<repo>/_runs/<NNN>-<slug>/bundle/pb
 Power BI Desktop's 259-character file / 247-character directory UTF-16 ceilings, and the engine stage
 is where that lands — so allocate against the short parent **before** survey and harvest. The
 returned JSON paths are authoritative for every later stage: substitute them for `<run>` below rather
-than composing a path yourself. Never hand-invent or move a run afterwards, never substitute a
-junction, `subst` or symlink, and never weaken the ceiling check.
+than composing a path yourself. Never hand-invent or move a run afterwards, never a junction or
+symlink, and never weaken the ceiling check. ⚠️ ONE measured exception (2026-09-08, #566): a
+same-user `subst` alias may open an already-built over-ceiling tree in Desktop when re-allocation is
+blocked — temporary, machine-local, never the run's recorded path, and it waives no gate
+([`docs/windows-path-limits.md`](../../docs/windows-path-limits.md) §6).
 
 | # | stage | command | notes |
 |---|---|---|---|
