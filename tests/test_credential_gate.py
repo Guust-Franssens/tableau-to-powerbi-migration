@@ -83,6 +83,93 @@ def run_hook(payload: dict) -> dict:
     return json.loads(proc.stdout or "{}")
 
 
+# The rights `apply_block` denies (`DENY_RIGHTS = "(OI)(CI)(WD,AD,WA)"`), as icacls renders them
+# back: WD = write data / create files, AD = append data / create dirs, WA = write attributes.
+DENY_ACE_RIGHTS = frozenset({"WD", "AD", "WA"})
+
+
+def _icacls_read(target: Path) -> tuple[int, str]:
+    """Read-only `icacls <target>` inspection: (exit code, combined output)."""
+    proc = subprocess.run(["icacls", str(target)], capture_output=True, text=True, check=False)
+    return proc.returncode, (proc.stdout + proc.stderr)
+
+
+def _current_account_tokens() -> set[str]:
+    r"""Every rendering of THIS account icacls might print: bare name, DOMAIN\name, and the SID.
+
+    Bound at run time, never hard-coded. The #543 audit measured a `DOMAIN\user` rendering on one host,
+    but a machine-local user, a service account or a differently tokened session each render
+    differently, and a literal would be true on exactly one machine. The SID comes from `whoami`
+    when it is available and is simply absent when it is not - matching is a membership test over
+    whatever renderings we could establish, so a missing SID weakens nothing.
+    """
+    tokens: set[str] = set()
+    user = os.environ.get("USERNAME") or os.environ.get("USER") or ""
+    domain = os.environ.get("USERDOMAIN") or ""
+    if user:
+        tokens.add(user.lower())
+        if domain:
+            tokens.add(f"{domain}\\{user}".lower())
+    try:
+        proc = subprocess.run(["whoami", "/user", "/fo", "csv", "/nh"], capture_output=True, text=True, check=False)
+    except OSError:  # no `whoami` on this platform - the environment renderings still stand
+        return tokens
+    if proc.returncode == 0 and proc.stdout.strip():
+        for field in proc.stdout.strip().splitlines()[-1].split(","):
+            cleaned = field.strip().strip('"').lower()
+            if cleaned:
+                tokens.add(cleaned)
+    return tokens
+
+
+def _deny_rights_for_current_account(target: Path) -> tuple[int, str, list[frozenset[str]]]:
+    """(icacls exit code, its output, the rights of every DENY ACE naming the CURRENT account).
+
+    Parses the ACE rows rather than matching an English success sentence, because icacls is
+    localized: a run on a non-English Windows prints different prose and identical ACE syntax.
+    """
+    code, out = _icacls_read(target)
+    tokens = _current_account_tokens()
+    rights: list[frozenset[str]] = []
+    for line in out.splitlines():
+        marker = line.rfind(":(")
+        if marker == -1:
+            continue
+        head = line[:marker].split()
+        if not head or head[-1].lower() not in tokens:
+            continue
+        groups = [group.upper() for group in re.findall(r"\(([^)]*)\)", line[marker + 1 :])]
+        if "DENY" not in groups:
+            continue
+        deny_at = groups.index("DENY")
+        granted = groups[deny_at + 1] if deny_at + 1 < len(groups) else ""
+        rights.append(frozenset(token.strip() for token in granted.split(",") if token.strip()))
+    return code, out, rights
+
+
+def _assert_gate_fully_cleared(migration: Path) -> None:
+    """Asserted teardown: `clear` must exit 0 AND the kernel deny must actually be gone.
+
+    #543's state-2 node called no cleanup at all and leaked a real deny ACE into the temp tree; the
+    module `migration` fixture does call `clear`, but discards its exit code, so a failed
+    `/remove:d` would leave a denied directory behind and still look like clean teardown. A failure
+    here fails/errors the test and carries the icacls output as evidence rather than swallowing it.
+    """
+    proc = run_gate("clear", str(migration), "--reason", "test-teardown")
+    assert proc.returncode == 0, f"teardown `clear` must succeed or the deny ACE leaks:\n{proc.stdout}{proc.stderr}"
+    if platform.system() != "Windows":
+        return
+    fabric = migration / "fabric"
+    code, out, rights = _deny_rights_for_current_account(fabric)
+    assert code == 0, f"icacls could not inspect {fabric} after clear (residue unverified):\n{out}"
+    assert not rights, f"a current-account deny ACE survived `clear` on {fabric}:\n{out}"
+    # The syscall is the real proof: owner/token semantics can differ from what icacls prints.
+    landed = fabric / "post-clear-teardown-write.tmdl"
+    landed.write_text("table PostClear", encoding="utf-8")
+    assert landed.is_file(), f"a write must succeed again once the gate is cleared: {landed}"
+    landed.unlink()
+
+
 @pytest.fixture
 def migration(tmp_path: Path) -> Path:
     (tmp_path / "fabric").mkdir()
@@ -412,22 +499,46 @@ def test_the_probe_can_build_while_the_deliverable_stays_blocked(migration: Path
     satisfy. Every live-source migration dead-ended at "a human must authorize an unvalidated build",
     working credentials or not. Only the negative case had been tested, where "nothing was built" is
     the pass condition, so a gate that blocked everything passed perfectly.
+
+    #543 additionally hardened the enforcement half. `block`'s exit code used to be discarded here,
+    so a run where `icacls /deny` FAILED still reached the deliverable assertion; the failure was
+    then absorbed by whichever fail-closed guard fired next instead of failing at setup. The ACL is
+    now proven three independent ways - the arm's exit code, the ACE icacls reports for THIS
+    account, and the syscall itself - because none of the three implies the others.
     """
-    run_gate("block", str(migration), "--sources", "shipment")
+    try:
+        armed = run_gate("block", str(migration), "--sources", "shipment")
+        assert armed.returncode == 0, (
+            f"the gate must ARM before enforcement can be asserted:\n{armed.stdout}{armed.stderr}"
+        )
+        actions = _audit_actions(migration)
+        assert actions and actions[-1] in BLOCK_ACTIONS, f"arming must be recorded as a block: {actions}"
 
-    # SIBLING of fabric/, not a child - that placement is the fix. A sandbox inside the denied tree
-    # inherits the deny, which is what caused the deadlock in the first place.
-    probe = migration / "_probe" / "Probe.SemanticModel" / "definition" / "tables"
-    probe.mkdir(parents=True, exist_ok=True)
-    (probe / "shipment.tmdl").write_text("table shipment", encoding="utf-8")
-    assert (probe / "shipment.tmdl").exists(), "the probe must be able to build, or the gate deadlocks"
+        # SIBLING of fabric/, not a child - that placement is the fix. A sandbox inside the denied
+        # tree inherits the deny, which is what caused the deadlock in the first place.
+        probe = migration / "_probe" / "Probe.SemanticModel" / "definition" / "tables"
+        probe.mkdir(parents=True, exist_ok=True)
+        (probe / "shipment.tmdl").write_text("table shipment", encoding="utf-8")
+        assert (probe / "shipment.tmdl").exists(), "the probe must be able to build, or the gate deadlocks"
 
-    # The other half - that the DELIVERABLE stays blocked - is the only assertion here that needs
-    # the kernel ACL, so it is the only thing guarded by platform. Everything above holds anywhere.
-    if platform.system() != "Windows":
-        pytest.skip("write-deny enforcement is an icacls ACL; the marker-only path cannot block a write")
-    with pytest.raises(PermissionError):
-        (migration / "fabric" / "Deliverable.tmdl").write_text("table x", encoding="utf-8")
+        # The other half - that the DELIVERABLE stays blocked - is the only assertion here that
+        # needs the kernel ACL, so it is the only thing guarded by platform. Everything above holds
+        # anywhere.
+        if platform.system() != "Windows":
+            pytest.skip("write-deny enforcement is an icacls ACL; the marker-only path cannot block a write")
+
+        assert actions[-1] == "block", f"the enforced path must record `block`, not marker-only: {actions}"
+        code, out, rights = _deny_rights_for_current_account(migration / "fabric")
+        assert code == 0, f"icacls could not inspect the denied directory, so the ACE is unproven:\n{out}"
+        assert any(DENY_ACE_RIGHTS <= granted for granted in rights), (
+            f"icacls must report a (DENY) ACE carrying {sorted(DENY_ACE_RIGHTS)} for this account; "
+            f"found {[sorted(granted) for granted in rights]}:\n{out}"
+        )
+        with pytest.raises(PermissionError):
+            (migration / "fabric" / "Deliverable.tmdl").write_text("table x", encoding="utf-8")
+        assert not (migration / "fabric" / "Deliverable.tmdl").exists(), "the denied write must not have landed"
+    finally:
+        _assert_gate_fully_cleared(migration)
 
 
 def test_clearing_after_a_successful_probe_lets_the_build_proceed(migration: Path) -> None:
@@ -1604,25 +1715,33 @@ def test_a_gate_applied_and_failed_at_its_own_bundle_root_is_still_state_2(tmp_p
     the audit log, so `_no_audit_trail_reason` must stand aside and let the existing violation
     logic run.
 
-    On Windows `block` arms a REAL write-deny ACL on `fabric/` (see `denied_dirs`), so writing the
-    "built while blocked" artifact below can itself raise `PermissionError` - that is enforcement
-    doing its job, not a test bug, and is handled explicitly rather than left to crash the run.
+    The artifact is landed BEFORE the gate is armed, deliberately (#543). It used to be written
+    afterwards, so on Windows - where `block` arms a REAL write-deny ACL on `fabric/`, see
+    `denied_dirs` - the write raised `PermissionError` and the node skipped, meaning the state-2
+    assertion below never ran on any machine where enforcement actually WORKS. Pre-landing it
+    reproduces the state this check exists for (artifacts sitting under an armed gate) identically
+    on the ACL and the marker-only branch, with no skip and no dependence on enforcement being weak.
     """
     mig = tmp_path / "mig"
     (mig / "fabric").mkdir(parents=True)
     (mig / "migration-spec.json").write_text("{}", encoding="utf-8")
-    run_gate("block", str(mig), "--sources", "shipment")
+    (mig / "fabric" / "model.tmdl").write_text("table Shipment")  # built first, then gated over
+
     try:
-        (mig / "fabric" / "model.tmdl").write_text("table Shipment")  # built while blocked
-    except PermissionError:
-        pytest.skip("the real write-deny ACL on Windows prevented the violation from landing at all")
+        armed = run_gate("block", str(mig), "--sources", "shipment")
+        assert armed.returncode == 0, f"the gate must ARM before state 2 can be asserted:\n{armed.stdout}{armed.stderr}"
+        expected_action = "block" if platform.system() == "Windows" else "block-marker-only"
+        actions = _audit_actions(mig)
+        assert actions and actions[-1] == expected_action, f"arming must be recorded as {expected_action}: {actions}"
 
-    proc = run_gate("verify", str(mig))
-    out = proc.stdout + proc.stderr
+        proc = run_gate("verify", str(mig))
+        out = proc.stdout + proc.stderr
 
-    assert proc.returncode == 1, f"artifacts built while the gate is applied must still VIOLATE:\n{out}"
-    assert "VIOLATION" in out
-    assert "CANNOT ASSESS" not in out
+        assert proc.returncode == 1, f"artifacts built while the gate is applied must still VIOLATE:\n{out}"
+        assert "VIOLATION" in out
+        assert "CANNOT ASSESS" not in out
+    finally:
+        _assert_gate_fully_cleared(mig)
 
 
 def test_an_empty_ship_destination_with_no_artifacts_is_not_flagged(tmp_path: Path) -> None:
