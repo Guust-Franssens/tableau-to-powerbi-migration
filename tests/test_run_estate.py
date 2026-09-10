@@ -2369,7 +2369,13 @@ def test_a_failed_provenance_replace_leaves_the_prior_artifact_byte_identical(tm
     assert not list(out.glob("*.tmp"))
 
 
-def test_a_provenance_failure_stops_before_adjudication_and_handover(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("status", "error_code"),
+    [("partial", "live-lookup-refused"), ("failed", "collect-inputs-failed")],
+)
+def test_a_provenance_failure_stops_before_adjudication_and_handover(
+    tmp_path: Path, monkeypatch, status: str, error_code: str
+) -> None:
     import stamp_tableau_provenance as prov  # noqa: PLC0415
 
     _without_pbir_validator(monkeypatch)
@@ -2386,11 +2392,11 @@ def test_a_provenance_failure_stops_before_adjudication_and_handover(tmp_path: P
         lambda *_args: {
             "schema": "tableau-source-provenance/1",
             "stamped_at": "2026-09-10T00:00:00Z",
-            "input_count": 1,
-            "inputs": [{"input": {"file": "unit.twb", "sha256": "digest"}}],
+            "input_count": 0 if status == "failed" else 1,
+            "inputs": [] if status == "failed" else [{"input": {"file": "unit.twb", "sha256": "digest"}}],
             "phase": {
-                "status": "partial",
-                "errors": [{"code": "live-lookup-refused", "operation": "sign-in"}],
+                "status": status,
+                "errors": [{"code": error_code, "operation": "collect-inputs" if status == "failed" else "sign-in"}],
             },
         },
     )
@@ -2400,13 +2406,11 @@ def test_a_provenance_failure_stops_before_adjudication_and_handover(tmp_path: P
         lambda *_args: pytest.fail("adjudication ran after provenance failure"),
     )
 
-    code = run_estate.main(_landing_argv(engine, src, out))
+    exit_code = run_estate.main(_landing_argv(engine, src, out))
 
-    assert code == run_estate.EXIT_PROVENANCE_FAILED
-    assert (
-        json.loads((out / run_estate.SOURCE_PROVENANCE_REPORT).read_text(encoding="utf-8"))["phase"]["status"]
-        == "partial"
-    )
+    assert exit_code == run_estate.EXIT_PROVENANCE_FAILED
+    phase = json.loads((out / run_estate.SOURCE_PROVENANCE_REPORT).read_text(encoding="utf-8"))["phase"]
+    assert phase["status"] == status and phase["errors"][0]["code"] == error_code
     assert not (out / "handover").exists()
     names = _phase_names(out)
     assert "provenance" in names
