@@ -228,6 +228,23 @@ providers and checks actual PBIR bindings to complete declared model roles. Evid
 only exact walked paths under the evidence role. Datasource N/A roles require verified absence.
 The complete role contract and controls are in [reference readiness](../docs/reference-readiness.md).
 
+The #562 prerequisite handoff is **not the final START_READY consumer**. S1 retains an immutable,
+exact-root namespace (digests and walk-produced file identities), plus only the small manifest bytes.
+`package_filesystem.read_verified_member(root, integrity, relative_path)` holds one member's bytes
+after no-follow namespace/identity checks and a digest recheck against that original S1 result.
+Only the requested member and manifest content are rehashed; unrelated content requires a fresh S1
+verification, not a small-member read. Copied, replaced or reconstructed result objects have no read
+capability. This in-process ownership binding is not cryptographic security or an atomic-filesystem
+guarantee. `role_result.data_access_handoff(root)` selects only the declared `data-access.json` and
+returns its held bytes together with the exact spec already parsed by S2 and
+`credential_gate.package_spec_facts()` (opaque sorted direct-live keys, review/refusal and
+direct/published-only applicability). Every row, including `sqlproxy`, reaches the canonical leg
+authority; published-only requires no live/review leg or source-set refusal. No provider permission
+is inferred. S2 binds its exact issued result, role/blocker state and facts, validates the held spec
+digest, and freshly reads only spec/projection metadata through S1 without reparsing/reclassifying.
+These capabilities and fields are nonserialized. The future consumer must use
+`parse_data_access()` on those held bytes; no audit read, reprobe or final data-access fold is added here.
+
 ### Package data-access producer (#562)
 
 Each new package declares and S1-hashes a strict `data-access.json`, including blocked/cannot-establish

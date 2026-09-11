@@ -14,10 +14,12 @@ Full contract and limitations: docs/reference-readiness.md, S2.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 import tomllib
-from collections.abc import Iterable, Mapping, Sequence
+import weakref
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
@@ -27,10 +29,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import package_filesystem as pfs  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_env  # noqa: E402  # pylint: disable=wrong-import-position
 from bundle_corpus import (  # noqa: E402  # pylint: disable=wrong-import-position
-    PACKAGE_MARKER,
     TargetClassification,
     classify_target,
 )
+from credential_gate import PackageSpecFacts, package_spec_facts  # noqa: E402  # pylint: disable=wrong-import-position
 from host_paths import discloses_host_location  # noqa: E402  # pylint: disable=wrong-import-position
 from package_source import (  # noqa: E402  # pylint: disable=wrong-import-position
     CODE_HANDOFF_INVALID,
@@ -107,6 +109,8 @@ SOURCE_EXTENSIONS: dict[str, tuple[str, ...]] = {
 #: The one package-relative name a packaged brief may have. Named rather than discovered so that
 #: "the brief is present" cannot be satisfied by any other Markdown file a package happens to carry.
 BRIEF_NAME = "migration-brief.md"
+SPEC_NAME = "migration-spec.json"
+DATA_ACCESS_NAME = "data-access.json"
 
 #: The brief's explicit scope must agree with topology; it is never inferred as authorization.
 TOPOLOGY_SCOPE = {
@@ -278,6 +282,25 @@ class PackageEvidence:
 
 
 @dataclass(frozen=True)
+class _DataAccessSnapshot:
+    """Keep the parsed spec facts and the declared projection attached to their exact S1 result."""
+
+    integrity: pfs.PackageFilesystemResult = field(repr=False)
+    spec: pfs.HeldVerifiedMember = field(repr=False)
+    facts: PackageSpecFacts
+    declared: bool
+
+
+@dataclass(frozen=True)
+class PackageDataAccessHandoff:
+    """Only two held roles and current source facts from the same S1/S2 snapshot; no semantic fold."""
+
+    migration_spec: pfs.HeldVerifiedMember = field(repr=False)
+    facts: PackageSpecFacts
+    data_access: pfs.HeldVerifiedMember = field(repr=False)
+
+
+@dataclass(frozen=True)
 class Phase1RoleIdentityResult:  # pylint: disable=too-many-instance-attributes
     """One package's role/identity verdict. Emitted by the final gate; never written into a package."""
 
@@ -293,6 +316,8 @@ class Phase1RoleIdentityResult:  # pylint: disable=too-many-instance-attributes
     evidence: tuple[PackageEvidence, ...] = field(default=(), repr=False, compare=False)
     verified: VerifiedPackage | None = field(default=None, repr=False, compare=False)
     brief_policy: BriefPolicy | None = field(default=None, repr=False, compare=False)
+    _data_access_snapshot: _DataAccessSnapshot | None = field(default=None, repr=False, compare=False)
+    _authority: Callable[[object], bool] | None = field(default=None, init=False, repr=False, compare=False)
 
     @property
     def is_start_ready(self) -> bool:
@@ -346,6 +371,49 @@ class Phase1RoleIdentityResult:  # pylint: disable=too-many-instance-attributes
         )
         return PackageSourceInput("ready", root, root_identity, self.unit, self.kind, path, digest, self.blockers)
 
+    def data_access_handoff(  # pylint: disable=too-many-return-statements
+        self, root: Path
+    ) -> PackageDataAccessHandoff | pfs.PackageFilesystemResult:
+        """Obtain the exact declared projection, with the spec bytes/facts already used by S2.
+
+        The caller cannot substitute a root or obtain an undeclared file by its familiar name.
+        S1 rechecks only the two small roles and manifest, not unrelated asset content. The held
+        spec is not reparsed/reclassified. Copies cannot borrow the original role result's authority.
+        """
+        verified = self.verified
+        if type(verified) is not VerifiedPackage or not verified.is_bound_to(str(root)):
+            return pfs.member_refusal(pfs.CODE_ROOT_BINDING)
+        snapshot = self._data_access_snapshot
+        if not self.is_start_ready or type(snapshot) is not _DataAccessSnapshot or not snapshot.declared:
+            return pfs.member_refusal()
+        if snapshot.integrity is not verified.integrity or snapshot.spec.root_identity != verified.root_identity:
+            return pfs.member_refusal(pfs.CODE_ROOT_BINDING)
+        if not self._has_handoff_authority():
+            return pfs.member_refusal()
+        if not any(
+            member.relative_path == snapshot.spec.relative_path == SPEC_NAME and member.sha256 == snapshot.spec.sha256
+            for member in verified.integrity.verified_files
+        ):
+            return pfs.member_refusal()
+        if (
+            not isinstance(snapshot.spec.content, bytes)
+            or hashlib.sha256(snapshot.spec.content).hexdigest() != snapshot.spec.sha256
+        ):
+            return pfs.member_refusal(pfs.CODE_DIGEST_MISMATCH)
+        current_spec = verified.read_verified_member(root, SPEC_NAME)
+        if isinstance(current_spec, pfs.PackageFilesystemResult):
+            return current_spec
+        held = verified.read_verified_member(root, DATA_ACCESS_NAME)
+        if isinstance(held, pfs.PackageFilesystemResult):
+            return held
+        return PackageDataAccessHandoff(snapshot.spec, snapshot.facts, held)
+
+    def _has_handoff_authority(self) -> bool:
+        try:
+            return self._authority is not None and self._authority(self)
+        except (AttributeError, TypeError):
+            return False
+
     def as_dict(self) -> dict[str, Any]:
         """The machine-readable shape the entry gate embeds in its verdict."""
         return {
@@ -377,6 +445,44 @@ class VerifiedPackage:
             and exact_root_matches(self.root, self.root_identity)
             and self.root_identity == identity
         )
+
+    def read_verified_member(
+        self, root: Path, relative_path: str
+    ) -> pfs.HeldVerifiedMember | pfs.PackageFilesystemResult:
+        """Read only through this observation's exact root-bound S1 namespace."""
+        if not self.is_bound_to(str(root)):
+            return pfs.member_refusal(pfs.CODE_ROOT_BINDING)
+        return pfs.read_verified_member(root, self.integrity, relative_path)
+
+
+def _handoff_authority_state(result: Phase1RoleIdentityResult) -> tuple:
+    """The role/fact consistency binding, without re-running any role or connection classifier."""
+    snapshot = result._data_access_snapshot  # pylint: disable=protected-access
+    return (
+        result.verdict,
+        result.unit,
+        result.kind,
+        result.topology,
+        result.blockers,
+        result.authorized_limitations,
+        tuple((row.role, row.state, row.cardinality, row.paths, row.code) for row in result.roles),
+        result.source_identity,
+        tuple(
+            (
+                row.state,
+                row.datasource_luid,
+                row.published_key,
+                row.provider_unit,
+                row.model_role,
+                row.code,
+                row.provider_ordinal,
+            )
+            for row in result.dependencies
+        ),
+        result.brief_policy,
+        snapshot.declared,
+        (snapshot.spec.relative_path, snapshot.spec.sha256, snapshot.spec.root_identity),
+    )
 
 
 def verify_s1(root: Path) -> VerifiedPackage:
@@ -420,6 +526,9 @@ class _Facts:  # pylint: disable=too-many-instance-attributes,attribute-defined-
     provider_ready: bool = False
     ordinal: int | None = None
     brief_policy: BriefPolicy | None = None
+    spec_document: dict[str, Any] | None = None
+    spec_member: pfs.HeldVerifiedMember | None = None
+    spec_facts: PackageSpecFacts | None = None
 
     @property
     def keys(self) -> frozenset[str]:
@@ -434,6 +543,8 @@ class _Facts:  # pylint: disable=too-many-instance-attributes,attribute-defined-
         """A declared key's JSON payload, read from the path the WALK produced, or ``None``."""
         if key is None or key not in self.walked:
             return None
+        if key == SPEC_NAME:
+            return self.spec_document
         try:
             return pfs.parse_manifest_text(self.walked[key].read_text(encoding="utf-8"))
         except (OSError, ValueError, pfs._ManifestError):  # pylint: disable=protected-access
@@ -505,21 +616,23 @@ def _facts(  # pylint: disable=too-many-return-statements
         return _blocked(cleared.classification.unit_name or None, None, CODE_NOT_A_PACKAGE)
     if not cleared.integrity.is_clean:
         return _blocked(cleared.classification.unit_name or None, None, CODE_INTEGRITY_NOT_CLEAN)
-
-    if pfs._recheck_boundary(root):  # pylint: disable=protected-access
+    if not cleared.integrity.has_read_authority():
         return _blocked(cleared.classification.unit_name or None, None, CODE_INTEGRITY_CHANGED)
-    walked, walk_rows, _empty = pfs.walk_package(root)
-    manifest_path = walked.pop(PACKAGE_MARKER, None)
-    if walk_rows or manifest_path is None:
+
+    held_manifest = cleared.integrity.manifest
+    if (
+        not cleared.is_bound_to(str(root))
+        or held_manifest is None
+        or held_manifest.root_identity != cleared.root_identity
+        or cleared.integrity.root_identity != cleared.root_identity
+    ):
         return _blocked(cleared.classification.unit_name or None, None, CODE_INTEGRITY_CHANGED)
     try:
-        manifest = pfs.parse_manifest_text(manifest_path.read_text(encoding="utf-8"))
-        declared = pfs.declared_files(manifest)
-    except (OSError, ValueError, pfs._ManifestError):  # pylint: disable=protected-access
+        manifest = pfs.parse_manifest_text(held_manifest.content.decode("utf-8"))
+    except (ValueError, pfs._ManifestError):  # pylint: disable=protected-access
         return _blocked(cleared.classification.unit_name or None, None, CODE_MANIFEST_UNREADABLE)
-    digests = declared
-    if set(digests) != set(walked):
-        return _blocked(cleared.classification.unit_name or None, None, CODE_INTEGRITY_CHANGED)
+    digests = {member.relative_path: member.sha256 for member in cleared.integrity.verified_files}
+    walked = {member.relative_path: member.path for member in cleared.integrity.verified_files}
 
     unit = _declared_string(manifest, "unit")
     if unit is None:
@@ -550,7 +663,20 @@ def _facts_with_source(facts: _Facts) -> _Facts:
     if declared_asset is not None and declared_asset in facts.digests:
         facts.source_key = declared_asset
         facts.source_sha = facts.digests[declared_asset]
-    spec = facts.json(_declared_string(facts.artifacts, "migration_spec"))
+    spec_key = _declared_string(facts.artifacts, "migration_spec")
+    if spec_key == SPEC_NAME and spec_key in facts.digests:
+        held = facts.verified.read_verified_member(facts.root, spec_key)
+        if isinstance(held, pfs.PackageFilesystemResult):
+            facts.blockers.extend(held.codes())
+        else:
+            try:
+                facts.spec_document = pfs.parse_manifest_text(held.content.decode("utf-8"))
+            except (ValueError, pfs._ManifestError):  # pylint: disable=protected-access
+                facts.blockers.append(CODE_IDENTITY_JSON)
+            else:
+                facts.spec_member = held
+                facts.spec_facts = package_spec_facts(facts.spec_document)
+    spec = facts.json(spec_key)
     facts.declared_dependencies = _spec_dependencies(spec)
     if facts.kind == KIND_DATASOURCE:
         keys = {row.key for row in facts.declared_dependencies if row.key is not None}
@@ -1352,7 +1478,7 @@ def _verdict(facts: _Facts) -> Phase1RoleIdentityResult:
     if topology == TOPOLOGY_PUBLISHED_CONSUMER and not facts.dependencies:
         roles.append(_role(ROLE_PUBLISHED_DEPENDENCY, STATE_MISSING, "1 provider", [], CODE_PROVIDER_MISSING))
     blockers = [*facts.blockers, *(role.code or role.state for role in roles if role.blocks)]
-    return Phase1RoleIdentityResult(
+    result = Phase1RoleIdentityResult(
         verdict=VERDICT_BLOCKED if blockers else VERDICT_START_READY,
         unit=facts.unit,
         kind=facts.kind,  # type: ignore[arg-type]
@@ -1371,7 +1497,35 @@ def _verdict(facts: _Facts) -> Phase1RoleIdentityResult:
         evidence=tuple(facts.evidence) if not blockers else (),
         verified=facts.verified,
         brief_policy=facts.brief_policy,
+        _data_access_snapshot=(
+            _DataAccessSnapshot(
+                facts.verified.integrity,
+                facts.spec_member,
+                facts.spec_facts,
+                facts.artifacts.get("data_access") == DATA_ACCESS_NAME,
+            )
+            if facts.spec_member is not None and facts.spec_facts is not None
+            else None
+        ),
     )
+    snapshot = result._data_access_snapshot  # pylint: disable=protected-access
+    if result.is_start_ready and snapshot is not None:
+        owner = weakref.ref(result)
+        state = _handoff_authority_state(result)
+        source_facts = snapshot.facts
+        verified = result.verified
+        object.__setattr__(
+            result,
+            "_authority",
+            lambda candidate: (
+                owner() is candidate
+                and candidate.verified is verified
+                and candidate._data_access_snapshot is snapshot  # pylint: disable=protected-access
+                and snapshot.facts is source_facts
+                and _handoff_authority_state(candidate) == state
+            ),
+        )
+    return result
 
 
 def _evidence_and_handover_roles(facts: _Facts, topology: str) -> list[RoleResult]:
