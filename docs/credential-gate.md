@@ -74,6 +74,9 @@ problem before the probe has returned one.
 
 `package_unit.py` calls only the read-only `assess_data_access` authority. It never probes,
 authorizes, clears, arms or runs mutating `verify` to produce `data-access.json`.
+Staged spec generation uses the existing pure parser and schema validator in a bounded subprocess,
+not the parser CLI (which invokes credential preflight beside its output). No second staged gate or
+raw audit is created/shipped.
 The original gate root defaults to `load_bundle(bundle).migration_dir`; pass exact `--gate-root`
 when proof belongs to a parser-spec directory/file instead. There is no audit-log search or fallback
 to a package, run parent or sibling. Extra live keys in an estate root are allowed; every packaged
@@ -89,7 +92,9 @@ A published-only consumer may inherit from **one exact S2-selected, S1/S2-clean 
 supplied through `--provider-package` or published earlier in the same invocation. S2's runtime
 cohort ordinal selects the root even when unit names repeat; `provider_reference(exact_unit)` is
 applied once. Provider keys, validation and claim ceiling are preserved. No provider re-assessment
-against the consumer's gate, recursion or published-plus-direct aggregation is allowed.
+against the consumer's gate, recursion or published-plus-direct aggregation is allowed. Direct or
+aggregate connections inside a published row are excluded too; a declared consumer connection must
+be a single `sqlproxy`, not an unassessed leg hidden behind published metadata.
 `authorized_model_only` requires model-only scope, authentic same-root audit/override and explicit
 `model_only_unvalidated` policy, remains `unvalidated/structural_only`, and cannot serve a report
 consumer. An owned workbook is never automatically downgraded.

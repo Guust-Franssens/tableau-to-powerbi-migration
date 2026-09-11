@@ -3811,6 +3811,29 @@ def _selected_data_provider(  # pylint: disable=too-many-return-statements
     return (data_access.provider_reference(provider.unit), assessment), None
 
 
+def _published_only_sources(spec: dict[str, Any]) -> bool:
+    """Exclude direct/unknown/aggregate shapes, including legs inside a published source row.
+
+    This does not classify connections: a supplied connection must be a single sqlproxy. S2 owns
+    the published identity; no direct leg is assessed or silently folded into inheritance here.
+    """
+    rows = spec.get("data_sources")
+    if not isinstance(rows, list) or not rows:
+        return False
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("published_datasource"), dict):
+            return False
+        if "connection" in row:
+            connection = row["connection"]
+            if (
+                not isinstance(connection, dict)
+                or connection.get("class") != "sqlproxy"
+                or connection.get("connections") not in (None, [])
+            ):
+                return False
+    return True
+
+
 def _assess_package_data_access(  # pylint: disable=too-many-arguments,too-many-locals,too-many-return-statements
     bundle: Path,
     dest: Path,
@@ -3837,14 +3860,7 @@ def _assess_package_data_access(  # pylint: disable=too-many-arguments,too-many-
     provider = None
     try:
         if current.topology == pri.TOPOLOGY_PUBLISHED_CONSUMER:
-            rows = spec.get("data_sources")
-            if (
-                not isinstance(rows, list)
-                or not rows
-                or any(
-                    not isinstance(row, dict) or not isinstance(row.get("published_datasource"), dict) for row in rows
-                )
-            ):
+            if not _published_only_sources(spec):
                 notes.append("DATA_ACCESS limitation=published_direct_mixed_unsupported")
                 return _cannot_data_access(), notes
             provider, refusal = _selected_data_provider(cohort)
@@ -3862,7 +3878,7 @@ def _assess_package_data_access(  # pylint: disable=too-many-arguments,too-many-
             provider=provider,
         )
         return _checked_data_access(assessment), notes
-    except (OSError, ValueError, TypeError, RecursionError, pfs._ManifestError):  # pylint: disable=protected-access
+    except (OSError, ValueError, TypeError, AttributeError, RecursionError, pfs._ManifestError):  # pylint: disable=protected-access
         # Readers and authority inputs may contain private text. Only this closed code escapes.
         return _cannot_data_access(), notes
 
