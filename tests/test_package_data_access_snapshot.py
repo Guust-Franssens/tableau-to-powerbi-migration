@@ -573,9 +573,13 @@ def test_only_the_once_parsed_provider_assessment_crosses_s2_selection(
         "nested-list",
         "empty-list",
         "row-list",
+        "row-unknown-scalar",
         "unknown-leg",
         "unknown-scalar",
         "nested-scalar",
+        "table-connection",
+        "field-connection-list",
+        "join-direct-class",
         "published-missing",
         "published-null",
         "published-empty",
@@ -613,12 +617,20 @@ def test_published_only_rows_are_complete_before_any_inheritance(
         row["connection"]["connections"] = [dict(authority.LIVE)] if fault == "nested-list" else []
     elif fault == "row-list":
         row["connections"] = [dict(authority.LIVE)]
+    elif fault == "row-unknown-scalar":
+        row["unknown-leg"] = "unclassified"
     elif fault == "unknown-leg":
         row["connection"]["unknown-leg"] = dict(authority.LIVE)
     elif fault == "unknown-scalar":
         row["connection"]["unknown-leg"] = "sqlserver"
     elif fault == "nested-scalar":
         row["connection"]["server"] = dict(authority.LIVE)
+    elif fault == "table-connection":
+        row["tables"] = [{"connection": dict(authority.LIVE)}]
+    elif fault == "field-connection-list":
+        row["fields"] = [{"metadata": {"connections": [dict(authority.LIVE)]}}]
+    elif fault == "join-direct-class":
+        row["joins"] = [{"left": {"class": "unknown", "server": "source.example"}}]
     elif fault == "published-missing":
         row.pop("published_datasource")
     elif fault in ("published-null", "published-empty"):
@@ -648,3 +660,20 @@ def test_published_only_rows_are_complete_before_any_inheritance(
     result = producer._assess_candidate(consumer, root, providers=(provider,))
     assert result.state == "cannot_establish"
     assert result.provider_unit is None and result.max_phase2_claim == "none"
+
+
+def test_published_metadata_without_connection_legs_is_not_mistaken_for_a_source() -> None:
+    """Business fields named 'class'/'connection' are metadata values, not connection declarations."""
+    spec = {
+        "data_sources": [
+            {
+                "id": "published",
+                "connection": {"class": "sqlproxy", "mode": "extract", "note": "published source"},
+                "published_datasource": {"key": "site/source", "id": None},
+                "tables": [{"id": "t", "name": "Rows", "source_relation": "table"}],
+                "fields": [{"name": "class", "caption": "connection", "kind": "column", "datatype": "string"}],
+                "joins": [],
+            }
+        ]
+    }
+    assert pkg._published_only_sources(spec)

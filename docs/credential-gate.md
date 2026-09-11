@@ -107,6 +107,7 @@ aggregate connections inside a published row are excluded too. **Every** consume
 a mapping-valued `connection` with exact `class = "sqlproxy"`, valid `mode`, scalar schema-defined
 metadata, and a structurally valid published dependency. Missing/null/malformed rows, connection lists
 (even empty ones), nested or unknown legs are nonaccepted; no row is dropped from the denominator.
+Table/field/join metadata cannot hide a second connection declaration at a deeper level.
 `authorized_model_only` requires model-only scope, authentic same-root audit/override and explicit
 `model_only_unvalidated` policy, remains `unvalidated/structural_only`, and cannot serve a report
 consumer. An owned workbook is never automatically downgraded.

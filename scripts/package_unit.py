@@ -3954,6 +3954,20 @@ def _selected_data_provider(  # pylint: disable=too-many-return-statements
     return (data_access.provider_reference(provider.unit), assessment), None
 
 
+def _nested_connection_metadata(row: dict[str, Any]) -> bool:
+    """Table/field/join metadata cannot smuggle an additional connection below the row guard."""
+    pending = [value for key, value in row.items() if key not in ("connection", "published_datasource")]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            if {"class", "connection", "connections"} & value.keys():
+                return True
+            pending.extend(value.values())
+        elif isinstance(value, list):
+            pending.extend(value)
+    return False
+
+
 def _published_only_sources(spec: dict[str, Any]) -> bool:
     """Exclude direct/unknown/aggregate shapes, including legs inside a published source row.
 
@@ -3993,6 +4007,8 @@ def _published_only_sources(spec: dict[str, Any]) -> bool:
             or any(value is not None and not isinstance(value, str) for value in published.values())
             or not any(isinstance(published.get(key), str) and published[key].strip() for key in ("luid", "key"))
         ):
+            return False
+        if _nested_connection_metadata(row):
             return False
     return True
 
