@@ -412,7 +412,8 @@ a defect an operator fixes. Either way no evidence is collected and it is not a 
 The JSON verdict carries `role_identity`: the same list-of-blocks shape as `package_integrity`, one
 per assessed package, each with the target `ordinal`, the safe `unit` label, the per-role states, the
 source identity, the resolved dependencies and the stable blocker codes. It returns **no source
-`Path`** and performs no source search — that is #558 — and it writes nothing into any package.
+`Path`** and performs no source search. Its internal result retains the fresh, root-bound S1
+observation and exposes `source_handoff()` for the next slice, without reopening anything.
 
 Direct tests are `tests/test_package_role_identity.py`, which asserts a named **role and state** for
 every control rather than a bare "not clean"; the producer half is in `tests/test_package_unit.py`
@@ -420,6 +421,60 @@ and `tests/test_package_unit_gates.py`. The correction controls are in
 `tests/test_package_role_identity_reproductions.py`, `tests/test_package_unit_reproductions.py` and
 `tests/test_check_reference_readiness.py`, including both `[clean, blocked]` and `[blocked, clean]`
 target orders and the exact structured S2 finding.
+
+## Package-local source return (issue #558)
+
+✅ After no-follow classification, S1 exact bytes and S2 cohort role/identity acceptance,
+`scripts/package_source.py` projects **only** the declared asset role. The input carries S2's own
+root, exact lexical root identity, unit, kind, **raw** package-relative POSIX spelling and SHA-256.
+S1's pure cross-host path grammar validates that spelling before a `PurePosixPath` can normalize it.
+Device names (including superscript COM/LPT aliases), dot/empty segments, repeated separators,
+controls, trailing dot/space, and nonportable punctuation are refused, not repaired. Ready handoffs
+require exact runtime field types; codes are a unique `tuple[str, ...]` of stable identifiers in
+first-seen order. The projector performs no discovery,
+JSON/provenance/handover parsing, filename matching, hashing, existence checks, registry lookup,
+`resolve()` or ancestor traversal. It joins the verified relative role lexically to the bound root.
+
+`check_reference_readiness.py` is the sole production consumer. It projects the source **before**
+source parsing, report discovery or reference/oracle grading. Earlier refusals prevent those helpers
+from running: S1 retains `CANNOT_ESTABLISH` and its stable codes; S2 retains `FINDINGS` and its
+role/provider blockers. A missing or internally inconsistent ready handoff is
+`source_handoff_invalid`, never a reason to search for another file.
+
+Root binding uses the **case-sensitive lexical identity of the original classified target** through
+S1, fresh S2, the complete result map and the source handoff. Windows `Path` equality never binds
+authority results. Duplicate or case-colliding targets, duplicate/missing/extra results, or any exact
+root-spelling mismatch yield `package_root_binding_invalid` before downstream reads. A mismatched
+precheck cannot trigger a fresh search. Case folding detects target collisions only; it never selects
+another package's result. Boundary and filesystem verification retain their own filesystem semantics.
+
+The S2 result also carries the revision status derived from its already-read provenance by the
+existing `reference_evidence.revision_status` function. Reference assessment therefore keeps its
+existing revision rules without rehashing the source or reopening provenance to build `UnitIdentity`.
+This is not a new evidence grade or a final `START_READY` aggregation.
+
+- A workbook returns its own `.twb`/`.twbx`; redacting diagnostic `handover.workbook.source_id`
+  cannot erase that source.
+- A datasource returns its own `.tds`/`.tdsx` **before** reference coverage earns
+  `NOT_APPLICABLE` from the engine classification.
+- A provider/consumer invocation returns **two local sources**: the provider datasource and the
+  consumer workbook. A shared Power BI model never substitutes the provider's Tableau source for
+  the consumer's page expectations.
+- JSON adds `package_source`, one ordinal-addressed result per projected package. Both this block
+  and `units[].source` expose only the package-relative role, never the bound absolute source path.
+
+**`--source` is only for ordinary non-package targets.** If any original target is a package or
+damaged/package-shaped, the CLI refuses with
+`--source is supported only for ordinary non-package targets`, before inspecting the supplied
+source. A mixed ordinary/package invocation is refused too. Ordinary explicit-source and ancestor
+compatibility remain unchanged.
+
+Direct controls: `tests/test_package_source.py` arms forbidden I/O/search/JSON/hash/registry helpers
+and pins all four source extensions and refusal states. `tests/test_package_source_binding.py`
+isolates exact-root maps and guards, result bijections, both target orders and malformed handoffs.
+`tests/test_check_reference_readiness.py`
+pins the historical page denominator, provider/consumer ownership, CLI refusal order, earlier-gate
+stops and ordinary compatibility.
 
 ---
 
