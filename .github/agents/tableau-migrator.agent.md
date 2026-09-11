@@ -98,12 +98,13 @@ TMDL or PBIR yourself. **What** to migrate, in what order and to where is the *d
 
 ## Workflow
 
-0. **Before any PS1 invocation: [preflight cannot start](../../docs/operator-runbook.md#preflight-cannot-start).**
-   Check policy precedence and `Zone.Identifier`; managed `AllSigned`: **stop for IT / signed distribution**.
-   Unknown: **CANNOT_ESTABLISH**. If allowed, run direct/internal preflight — **plain**, **never `-Update`**:
+0. **Preflight every invocation, first** — **plain**, **never `-Update`**:
    ```
    powershell -ExecutionPolicy Bypass -File scripts/preflight.ps1
    ```
+   **Only after an actual unsigned/ExecutionPolicy startup refusal**, follow
+   [preflight cannot start](../../docs/operator-runbook.md#preflight-cannot-start).
+   If allowed, retry the **exact originating command and arguments** — still plain preflight.
    `-Update` belongs to *session start* only (`AGENTS.md`). Non-zero exit or a CLI
    **below the correctness floor**: stop; surface preflight's hints and request session-start repair.
 1. **Read the brief, then confirm inputs.** `migrations/workbooks/<name>/migration-brief.md` carries

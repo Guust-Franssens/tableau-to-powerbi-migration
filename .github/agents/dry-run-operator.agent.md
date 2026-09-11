@@ -129,11 +129,6 @@ same-user `subst` alias may open an already-built over-ceiling tree in Desktop w
 blocked — temporary, machine-local, never the run's recorded path, and it waives no gate
 ([`docs/windows-path-limits.md`](../../docs/windows-path-limits.md) §6).
 
-**Before any PS1 invocation, follow the [preflight cannot start](../../docs/operator-runbook.md#preflight-cannot-start)
-bootstrap route:** check policy precedence and the exact `Zone.Identifier` stream. Managed
-`AllSigned`: **stop for IT / an approved signed distribution**. Unknown: **CANNOT_ESTABLISH**,
-not permission to retry. Only after that check allows it, use the direct/internal command at stage 0.
-
 | # | stage | command | notes |
 |---|---|---|---|
 | 0 | preflight | `powershell -ExecutionPolicy Bypass -File scripts/preflight.ps1` | **plain, no `-Update`** — never swap tooling mid-run. Must exit 0 before you continue |
@@ -145,6 +140,11 @@ not permission to retry. Only after that check allows it, use the direct/interna
 | 6 | oracle | `python scripts/capture_tableau_oracle.py --out <run>/oracle --env .env --images --reference-best` | slow (hours at estate scale). Run it **async** and continue |
 | 7 | **PRE-check** | `python scripts/check_reference_readiness.py <run>/bundle --oracle <run>/oracle` | the entry gate |
 | 8 | **POST-check** | `python scripts/check_unit.py <run>/bundle` | the exit gate |
+
+**Only after an actual unsigned/ExecutionPolicy startup refusal** at stage 0, follow
+[preflight cannot start](../../docs/operator-runbook.md#preflight-cannot-start).
+If allowed, retry the **exact originating command and arguments** — still plain preflight, never
+the runbook's session-start update command. Do not run policy diagnostics before stage 0.
 
 ⚠️ **Credentials come from `.env` or exported environment variables, never CLI arguments, and you
 never print a secret.** Redact when quoting output.

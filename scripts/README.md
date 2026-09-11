@@ -10,15 +10,16 @@ Conventions: Python first (`.ps1` only where Windows-specific APIs make it unavo
 
 ## Run every session / every migration
 
-**Before any PS1 invocation, follow the [preflight cannot start](../docs/operator-runbook.md#preflight-cannot-start)
-bootstrap route.** It checks policy precedence and the exact `Zone.Identifier` stream without running
-repository scripts. Managed `AllSigned` means **stop for IT / an approved signed distribution**;
-an unknown block is **CANNOT_ESTABLISH**, not permission to retry. Only after that check allows it,
-use the existing direct/internal entrypoint, for example:
+At session start, run the direct command first:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1 -Update -CheckUpstream
 ```
+
+**Only after an actual unsigned/ExecutionPolicy startup refusal**, follow
+[preflight cannot start](../docs/operator-runbook.md#preflight-cannot-start).
+If recovery is allowed, retry the **exact originating command and arguments**: retain
+`-Update -CheckUpstream` for session start; a migration-start call stays plain. No policy pre-check.
 
 | Script | What it does | When |
 |---|---|---|

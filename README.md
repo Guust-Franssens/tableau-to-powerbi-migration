@@ -51,11 +51,7 @@ git sparse-checkout add examples/eea-urban-adaptation
 
 For the full repo (all examples + showcase), use a normal `git clone …`.
 
-**Before any PS1 invocation (including virtual-environment activation), follow the
-[preflight cannot start](docs/operator-runbook.md#preflight-cannot-start) bootstrap route.** It checks
-policy precedence and the exact `Zone.Identifier` stream. Managed `AllSigned` means **stop for IT /
-an approved signed distribution**; an unknown block is **CANNOT_ESTABLISH**, not permission to retry.
-Only after that check allows it, set up the Python env and use the direct/internal preflight command:
+Set up the Python environment and run preflight directly, without a signing-policy pre-check:
 
 ```powershell
 uv venv
@@ -63,7 +59,16 @@ uv venv
 uv sync --all-extras   # --all-extras pulls tableauhyperapi/playwright/pillow used by the scripts below
 
 powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1
+```
 
+**Only after an actual unsigned/ExecutionPolicy startup refusal**, follow
+[preflight cannot start](docs/operator-runbook.md#preflight-cannot-start).
+If recovery is allowed, retry the **exact originating command and arguments**; this quickstart uses
+plain preflight. If activation was the refused command, diagnose that exact script instead.
+
+Continue only after preflight exits 0:
+
+```powershell
 # Parse a workbook into the intermediate spec
 python scripts\parse_tableau.py migrations\workbooks\<name>\source\<workbook>.twbx `
     -o migrations\workbooks\<name>\migration-spec.json

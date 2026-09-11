@@ -29,13 +29,14 @@ Subagents read it as step 0; `scripts/check_navigation_index.py` checks it bidir
 
 ## Session start, do this first (before any other work)
 
-**Before any PS1 invocation: [preflight cannot start](docs/operator-runbook.md#preflight-cannot-start).**
-Check policy precedence and `Zone.Identifier`; managed `AllSigned`: **stop for IT / signed distribution**.
-Unknown: **CANNOT_ESTABLISH**. Only if allowed, use the unchanged direct/internal entrypoint:
-
 ```
 powershell -ExecutionPolicy Bypass -File scripts/preflight.ps1 -Update -CheckUpstream
 ```
+
+**Only after an actual unsigned/ExecutionPolicy startup refusal**, follow
+[preflight cannot start](docs/operator-runbook.md#preflight-cannot-start).
+If allowed, retry the **exact originating command and arguments**; here, `-Update -CheckUpstream`.
+Do not pre-check policy.
 
 `-Update` repairs npm bridge CLIs **only when they are below the correctness floor**, not a blind `@latest`.
 
@@ -73,11 +74,13 @@ session is running. That lock blocks renaming the plugin directory, not writing 
 The environment contract lives in **`scripts/preflight.ps1`**. It is the gate, not this prose: it
 checks the required tools, plugins, MCP servers, Python dependencies, Desktop bridge assumptions and
 version floors, prints the install or repair hint beside the failing item, and **exits non-zero for
-any critical miss**. Run the signing-policy bootstrap above first.
+any critical miss**.
 
 ```
 powershell -ExecutionPolicy Bypass -File scripts/preflight.ps1
 ```
+
+That fallback keeps this call **plain**, without updates.
 
 **If setup guidance is missing or too thin, improve the preflight hint rather than adding another
 install recipe here.** An agent that never reads this section should still be stopped by the exit
