@@ -102,12 +102,12 @@ def _native_env() -> dict[str, str]:
     return {key: value for key, value in os.environ.items() if key.upper() != "PSMODULEPATH"}
 
 
-def _ps(*arguments: str) -> subprocess.CompletedProcess:
+def _ps(*arguments: str, raw: bool = False) -> subprocess.CompletedProcess:
     return subprocess.run(
         [PS, "-NoProfile", "-NonInteractive", *arguments],
         env=_native_env(),
         capture_output=True,
-        text=True,
+        text=not raw,
         check=False,
         timeout=30,
     )
@@ -210,18 +210,19 @@ def test_startup_and_runtime_security_errors_share_exit_and_error_identifiers(co
 @WINDOWS
 def test_an_executed_script_can_reproduce_the_entire_startup_output(control: Path) -> None:
     """A plaintext stream cannot authenticate whether the script started, even with more regex."""
-    blocked = _ps("-ExecutionPolicy", "AllSigned", "-File", str(control))
-    assert blocked.returncode == 1 and "UnauthorizedAccess" in blocked.stderr
+    blocked = _ps("-ExecutionPolicy", "AllSigned", "-File", str(control), raw=True)
+    assert blocked.returncode == 1 and b"UnauthorizedAccess" in blocked.stderr
     error_file = control.parent / "startup-error.txt"
-    error_file.write_text(blocked.stderr, encoding="utf-8")
+    error_file.write_bytes(blocked.stderr)
     marker = control.parent / "executed.txt"
     control.write_text(
         "Set-Content -LiteralPath (Join-Path $PSScriptRoot 'executed.txt') -Value 'CONTROL_STARTED'\n"
-        "[Console]::Error.Write((Get-Content -LiteralPath (Join-Path $PSScriptRoot 'startup-error.txt') -Raw))\n"
+        "$bytes = [IO.File]::ReadAllBytes((Join-Path $PSScriptRoot 'startup-error.txt'))\n"
+        "[Console]::OpenStandardError().Write($bytes, 0, $bytes.Length)\n"
         "exit 1\n",
         encoding="utf-8",
     )
-    executed = _ps("-ExecutionPolicy", "Bypass", "-File", str(control))
+    executed = _ps("-ExecutionPolicy", "Bypass", "-File", str(control), raw=True)
     assert marker.read_text(encoding="utf-8").strip() == "CONTROL_STARTED"
     assert (executed.returncode, executed.stdout, executed.stderr) == (
         blocked.returncode,
