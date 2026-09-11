@@ -213,35 +213,37 @@ def _audit(migration: Path, action: str, detail: str, sources: list[str] | None 
 
 
 def _scoped_audit_entry(line: str, scope: str) -> tuple[dict | None, str | None]:
-    """One audit line as a trusted entry, or (None, refusal code) naming WHY it is untrusted.
-
-    The refusal code is the ONLY reason this returns a pair rather than an entry: a typed reader
-    (`assess_data_access`) has to say `audit-malformed` and `audit-foreign-scope` apart, and the
-    only place that distinction exists is right here, at the single parse. Adding a second reader
-    that re-parsed the log to recover it would be exactly the duplicate-authority shape the audit
-    trail's trust model exists to prevent, so the distinction is returned from the one parser
-    instead. Trust is unchanged: malformed JSON, a non-object, and a missing or different `scope`
-    were untrusted before and are untrusted now.
-    """
+    """The sole audit parser: reject lossy JSON, foreign scope and malformed event fields."""
     try:
-        entry = json.loads(line)
-    except ValueError:
+        entry = json.loads(line, object_pairs_hook=_reject_duplicate_keys, parse_constant=_reject_nonfinite)
+    except (ValueError, _DuplicateJsonKey, _NonFiniteJsonConstant):
         return None, AUDIT_MALFORMED
     if not isinstance(entry, dict):
         return None, AUDIT_MALFORMED
     if entry.get("scope") != scope:
         return None, AUDIT_FOREIGN_SCOPE
+    try:
+        timestamp = datetime.fromisoformat(entry.get("ts", ""))
+        sources = entry.get("sources")
+        sources_valid = sources is None or (
+            isinstance(sources, list) and all(isinstance(source, str) and source for source in sources)
+        )
+        names = _entry_sources(entry) or []
+        if (
+            not isinstance(entry.get("action"), str)
+            or not entry["action"]
+            or timestamp.utcoffset() is None
+            or not sources_valid
+            or len(set(names)) != len(names)
+        ):
+            return None, AUDIT_MALFORMED
+    except (TypeError, ValueError):
+        return None, AUDIT_MALFORMED
     return entry, None
 
 
 def _valid_scoped_audit_entry(line: str, scope: str) -> dict | None:
-    """One audit line as a trusted entry, or None when it cannot be trusted at all.
-
-    Split out of `_audit_entries` purely to keep that function's return-statement count under the
-    complexity limit - no behavior change. A line is trusted only if it parses as a JSON object AND
-    names exactly this `scope`; anything else (malformed JSON, a non-object, a missing or different
-    `scope`) is untrustworthy, and `_audit_entries` treats untrustworthy as poisoning the whole file.
-    """
+    """Compatibility facade over the one strict parser; a bad entry poisons the whole trail."""
     return _scoped_audit_entry(line, scope)[0]
 
 
@@ -258,7 +260,7 @@ def _read_audit_trail(migration: Path) -> tuple[list[dict] | None, str | None]:
         return None, AUDIT_MISSING
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeError):
         return None, AUDIT_MALFORMED
     scope = str(migration.resolve())
     entries: list[dict] = []
@@ -832,7 +834,7 @@ def clear_block(migration: Path, reason: str, earned: bool = False, sources: lis
     return 0
 
 
-def _override_is_authentic(migration: Path) -> bool:
+def _override_is_authentic(migration: Path, *, entries: list[dict] | None = None) -> bool:
     """Is the override file backed by a real authorization, or was it forged by an agent?
 
     A bare file is worthless as an authorization token: measured 2026-08-01, agents created
@@ -845,10 +847,14 @@ def _override_is_authentic(migration: Path) -> bool:
     is what actually lifts the ACL - and the ACL, not the file, is what was ever holding the line.
     A forged file therefore changes no behaviour, and its presence WITHOUT a matching audit entry is
     itself evidence of an attempted bypass, which `verify` reports.
+
+    `entries`, when supplied by the assessor, is its already-validated same-root snapshot. This
+    avoids re-reading mutable evidence between the epoch fold and the authorization decision.
     """
     if not (migration / OVERRIDE).exists():
         return False
-    entries = _audit_entries(migration)
+    if entries is None:
+        entries = _audit_entries(migration)
     if entries is None:
         return False
     return any(entry.get("action") == "authorize" for entry in entries)
@@ -1523,26 +1529,11 @@ class _NonFiniteJsonConstant(Exception):
 
 
 class DataAccessAssessment(NamedTuple):
-    """The whole Phase-1 data-access authority for ONE package, as a closed typed value.
+    """Immutable package authority; no raw audit details or credentials can be projected.
 
-    Eight fields, one per shipped schema key, so `to_json` is a transcription rather than an
-    interpretation - splitting them into sub-objects to satisfy an attribute count would put a
-    reader's semantics and the serializer's shape out of step, which is the drift this exists to
-    prevent.
-
-    Deliberately has no `detail`, `reason`, `path`, `host` or `message` field: the projection is
-    the shipped artifact, and a free-text field is how customer text escapes. Everything a reader
-    needs is in `state` plus the closed `codes` vocabulary.
-
-    ⚠️ A `NamedTuple` rather than a frozen `@dataclass`, and that is load-bearing rather than
-    taste. `scripts/hooks/credential_gate.py` loads THIS module through
-    `importlib.util.module_from_spec` + `exec_module` WITHOUT registering it in `sys.modules`;
-    combined with `from __future__ import annotations`, `dataclasses._is_type` then does
-    `sys.modules.get(cls.__module__).__dict__` on a name that is not there and raises
-    `AttributeError`. The hook catches that and fails closed, so the FIRST dataclass added to this
-    module silently turns every hook decision into a deny - measured here, caught by
-    `test_credential_gate_shield.py`. `NamedTuple` needs no such lookup. Immutability, structural
-    equality and keyword construction are identical.
+    NamedTuple keeps the hook's unregistered `exec_module` import working. A dataclass with
+    postponed annotations dereferences the missing `sys.modules` entry and breaks that loader
+    (covered by `test_the_module_still_loads_the_way_the_hook_loads_it`).
     """
 
     state: str
@@ -1555,7 +1546,7 @@ class DataAccessAssessment(NamedTuple):
     codes: tuple[str, ...]
 
     def to_json(self) -> dict:
-        """The deterministic projection: fixed key order, sorted unique lists, no optional keys."""
+        """Transcribe validated fields without repairing their identities or ordering."""
         return {
             "schema": DATA_ACCESS_SCHEMA,
             "state": self.state,
@@ -1584,16 +1575,10 @@ def _assessment(  # pylint: disable=too-many-arguments
     effective_scope: str | None = None,
     max_phase2_claim: str = "none",
 ) -> DataAccessAssessment:
-    """Build an assessment with sorted, de-duplicated keys and codes.
-
-    One keyword-only parameter per schema field, defaulted to the not-established shape, so every
-    call site reads as the difference from a refusal. Fewer parameters would mean a caller
-    assembling the record itself, which is how an unsorted key list or a duplicate code reaches a
-    projection.
-    """
+    """Build from already-validated source identities; canonicalize only the finding codes."""
     return DataAccessAssessment(
         state=state,
-        source_keys=tuple(sorted(set(source_keys))),
+        source_keys=tuple(source_keys),
         provider_unit=provider_unit,
         provider_state=provider_state,
         validation=validation,
@@ -1609,12 +1594,7 @@ def _cannot_establish(*codes: str) -> DataAccessAssessment:
 
 
 def _spec_source_legs(source: object, index: int) -> list[tuple[str, str, str, str]] | None:
-    """`_classify_legs` for one declared data source, or None when it cannot be classified at all.
-
-    Shared by the package-local spec reader and the gate-root reader so both sides of the
-    key-coverage comparison are produced by the SAME classifier - comparing keys derived two
-    different ways would make a mismatch mean nothing.
-    """
+    """Reuse the canonical classifier for both sides of the root/package key comparison."""
     if not isinstance(source, Mapping):
         return None
     try:
@@ -1624,14 +1604,7 @@ def _spec_source_legs(source: object, index: int) -> list[tuple[str, str, str, s
 
 
 def _package_spec_facts(package_spec: object) -> tuple[tuple[str, ...], bool, str | None]:
-    """(live source keys, any review/unknown leg, cannot-establish code) for a package-local spec.
-
-    Uses `_classify_legs` - the SAME canonical classifier that arms the gate and that
-    `_current_live_source_keys` already trusts - rather than a second opinion about what "live"
-    means. A leg whose endpoint identity cannot be hashed comes back as `unstable-source[...]`
-    rather than a `source-key:`, and that is `source-key-invalid`, not a live key: an unhashable
-    identity cannot be matched against audit evidence at all.
-    """
+    """(sorted live keys, has review legs, refusal); an unstable/duplicate identity cannot bind."""
     if not isinstance(package_spec, Mapping):
         return (), False, "spec-unreadable"
     sources = package_spec.get("data_sources", [])
@@ -1645,7 +1618,7 @@ def _package_spec_facts(package_spec: object) -> tuple[tuple[str, ...], bool, st
             return (), False, "spec-unreadable"
         for key, _display, verdict, _reason in legs:
             if verdict == "needs-credential":
-                if not SOURCE_KEY_RE.match(key):
+                if not SOURCE_KEY_RE.fullmatch(key):
                     return (), False, "source-key-invalid"
                 keys.append(key)
             elif verdict != "no-creds":
@@ -1656,33 +1629,17 @@ def _package_spec_facts(package_spec: object) -> tuple[tuple[str, ...], bool, st
 
 
 def _gate_root_live_keys(gate_root: Path) -> tuple[frozenset[str], str | None]:
-    """Live keys the GATE ROOT itself declares, through the one bundle loader both tiers share.
-
-    This is the binding between root evidence and package evidence. A package live key the gate
-    root never declared cannot be covered by that root's same-root audit, whatever the log says.
-    Extra root keys are harmless and are never projected: an estate bundle legitimately gates more
-    than one package's worth of sources.
-    """
+    """Root keys through the canonical bundle loader; extra root keys never enter the projection."""
     try:
         bundle = load_bundle(gate_root)
-    except (OSError, ValueError):
+    except (OSError, ValueError, TypeError, AttributeError):
         return frozenset(), "spec-unreadable"
-    keys: set[str] = set()
-    for index, source in enumerate(bundle.data_sources):
-        legs = _spec_source_legs(source, index)
-        if legs is None:
-            return frozenset(), "spec-unreadable"
-        keys.update(key for key, _display, verdict, _reason in legs if verdict == "needs-credential")
-    return frozenset(keys), None
+    keys, _review, refusal = _package_spec_facts({"data_sources": bundle.data_sources})
+    return frozenset(keys), refusal
 
 
 def _package_local_facts(package_data_sources: object) -> tuple[bool, str | None]:
-    """(package bytes are complete, cannot-establish code) from `_localize_data_sources`' record.
-
-    Independent of the audit on purpose: an import-only package's data access is a statement about
-    BYTES THAT SHIPPED, and no probe can establish it. All four recorded states must agree - a
-    missing field is treated as incomplete, never as "nothing to report".
-    """
+    """Check all four localization facts; missing fields cannot establish complete local bytes."""
     if not isinstance(package_data_sources, Mapping):
         return False, "spec-unreadable"
     if package_data_sources.get("self_contained") is not True:
@@ -1696,136 +1653,103 @@ def _package_local_facts(package_data_sources: object) -> tuple[bool, str | None
 
 def _new_key_state() -> dict:
     """One live key's per-epoch ledger slot."""
-    return {"armed": False, "data_ok": False, "earned": False, "stale": False, "manual": False, "failure": None}
+    return {"armed": None, "data_ok": None, "earned": False, "stale": False, "manual": False, "failure": None}
 
 
-def _apply_arm(tracked: dict[str, dict], sources: list[str] | None) -> None:
-    """A `block`/`block-marker-only` starts a NEW epoch for the keys it names.
-
-    A block whose source list cannot be read names nothing, so it is applied to EVERY tracked key:
-    an unattributable arm must not be the one event that leaves stale proof standing.
-    """
+def _apply_arm(tracked: dict[str, dict], sources: list[str] | None, timestamp: datetime) -> None:
+    """Start named keys' epochs; unattributable arms invalidate every tracked key."""
     targets = list(tracked) if sources is None else sources
     for key in targets:
         if key in tracked:
             tracked[key] = _new_key_state()
-            tracked[key]["armed"] = True
+            tracked[key]["armed"] = timestamp
 
 
-def _apply_probe_attempt(tracked: dict[str, dict], action: str, sources: list[str] | None) -> None:
-    """Fold one keyed probe verdict into the ledger.
-
-    An UNKEYED success proves nothing and is dropped: that is the whole point of the producer
-    correction - with two live keys in one bundle, an unkeyed `probe-data_ok` cannot say which
-    endpoint answered, so treating it as proof would clear a source nobody contacted. An unkeyed
-    FAILURE is applied to every key instead, because failing closed is the safe direction.
-    """
+def _apply_probe_attempt(tracked: dict[str, dict], action: str, sources: list[str] | None, timestamp: datetime) -> None:
+    """Ignore unkeyed successes; unknown failures invalidate all keys. New successes need a clear."""
     if action == PROBE_DATA_OK:
         for key in sources or []:
             state = tracked.get(key)
             if state is not None:
-                state["data_ok"] = True
-                state["failure"] = None
+                state["earned"] = False
+                if state["armed"] is not None and timestamp >= state["armed"]:
+                    state["data_ok"] = timestamp
+                    state["failure"] = None
+                else:
+                    state["data_ok"] = None
+                    state["stale"] = True
         return
     code = PROBE_ATTEMPT_CODES.get(action, "probe-error")
     for key in list(tracked) if sources is None else sources:
         state = tracked.get(key)
         if state is not None:
             state["failure"] = code
-            state["data_ok"] = False
+            state["data_ok"] = None
             state["earned"] = False
 
 
-def _apply_clear(tracked: dict[str, dict], sources: list[str] | None) -> None:
-    """`probe-cleared` earns ONLY where this key already has a keyed success in this epoch.
+def _apply_clear(tracked: dict[str, dict], sources: list[str] | None, timestamp: datetime) -> None:
+    """Both halves must name the key in its current epoch, with a non-backdated clear.
 
-    Everything else is `stale-clear`: a clear for a key with no `probe-data_ok`, a clear after a
-    later failure, and - the direction that actually shipped broken - an UNATTRIBUTABLE clear.
-
-    ⚠️ Measured on this branch before the fix: a `probe-cleared` carrying no source list earned
-    `live_data_ok` for every key that happened to hold a keyed success, because the "does this
-    clear name my key?" test was skipped rather than failed when there was no name to test. That is
-    reachable from production code, not only from a forged log: `clear_block(..., earned=True)`
-    passes `_last_block_sources`, which returns None whenever the arm's source list cannot be
-    parsed, and `_audit` then omits the field entirely. The invariant is that BOTH halves are
-    keyed, so an unattributable clear must earn nothing.
-
-    An already-earned key is never un-earned by a later unattributable clear - proof is removed by
-    a new arm or a measured failure, not by an unreadable record.
+    An unattributable clear earns nothing but does not erase previously earned proof. Syntactically
+    malformed records have already poisoned the trail in the strict reader.
     """
     attributable = sources is not None
     for key, state in tracked.items():
         if attributable and key not in sources:
             continue
-        if attributable and state["data_ok"] and state["failure"] is None:
+        if attributable and state["data_ok"] is not None and timestamp >= state["data_ok"] and state["failure"] is None:
             state["earned"] = True
         elif not state["earned"]:
             state["stale"] = True
 
 
 def _key_block_code(state: dict) -> str | None:
-    """The single code explaining why this key is not earned, or None when it is.
-
-    Ordered by what most recently DECIDED the key: a measured refusal outranks an unearned clear,
-    which outranks a bare manual clear, which outranks "armed and nothing happened". A key with no
-    arm at all is not merely unproven - the same-root ledger does not cover it, which is the
-    `_source_set_mismatch_reason` shape and therefore `cannot_establish`, not `blocked`.
-    """
+    """Missing identity coverage outranks findings; then measurement, stale/manual clear, marker."""
+    if state["armed"] is None:
+        return "source-key-set-changed"
     if state["earned"]:
         return None
     if state["failure"]:
         return str(state["failure"])
     if state["stale"]:
         return "stale-clear"
-    if state["manual"] and state["armed"]:
+    if state["manual"]:
         return "manual-clear"
-    if state["armed"]:
-        return "marker-only"
-    return "source-key-set-changed"
+    return "marker-only"
 
 
 def _data_access_ledger(entries: list[dict], live_keys: tuple[str, ...]) -> tuple[dict[str, str | None], bool]:
-    """Fold the trusted trail into a PER-KEY epoch ledger plus the authorization flag.
-
-    Not one global "cleared" bit, because live keys are independent reachability facts: re-arming
-    E2 must not erase E1's proof, and E1's proof must not cover E2. `authorized` is reset by every
-    arm, so a human sign-off only ever speaks for the epoch it was given in.
-    """
+    """Fold one trusted snapshot by file order, retaining each key's arm/measurement timestamps."""
     tracked = {key: _new_key_state() for key in live_keys}
     authorized = False
     for entry in entries:
-        action = str(entry.get("action") or "")
-        # An EMPTY source list is as unattributable as a missing one, and is normalised to None so
-        # every branch below takes its fail-closed path rather than iterating over nothing. Without
-        # this an `[]`-keyed failure record would quietly leave an earned key earned.
+        action = entry["action"]
+        timestamp = datetime.fromisoformat(entry["ts"])
         sources = _entry_sources(entry) or None
+        # Legacy names/empty lists cannot identify a key; they must not turn failures into no-ops.
+        if sources and not all(SOURCE_KEY_RE.fullmatch(source) for source in sources):
+            sources = None
         if action in BLOCK_ACTIONS:
-            _apply_arm(tracked, sources)
+            _apply_arm(tracked, sources, timestamp)
             authorized = False
         elif action == "authorize":
-            authorized = True
+            authorized = all(state["armed"] is not None and timestamp >= state["armed"] for state in tracked.values())
         elif action == "manual-clear":
             for state in tracked.values():
                 state["manual"] = True
         elif action == PROBE_CLEARED:
-            _apply_clear(tracked, sources)
+            _apply_clear(tracked, sources, timestamp)
         elif action.startswith("probe-"):
-            _apply_probe_attempt(tracked, action, sources)
+            _apply_probe_attempt(tracked, action, sources, timestamp)
     return {key: _key_block_code(state) for key, state in tracked.items()}, authorized
 
 
 def _authorization_state(
-    gate_root: Path, ledger_authorized: bool, fallback_authorization: str, requested_scope: str
+    gate_root: Path, ledger_authorized: bool, fallback_authorization: str, requested_scope: str, trail: list[dict]
 ) -> tuple[bool, bool]:
-    """(authorization is complete, the inputs disagree about it).
-
-    Complete needs all three legs to agree: an AUTHENTIC override (`_override_is_authentic` - the
-    file alone authorizes nothing, and never has), an `authorize` entry surviving the latest arm,
-    and a typed brief that actually asked for the model-only fallback at model-only scope. Any
-    partial combination is a disagreement, reported as `authorization-mismatch` rather than
-    silently resolved in either direction.
-    """
-    authorized = ledger_authorized and _override_is_authentic(gate_root)
+    """(complete authorization, mismatched inputs), using the same already-read audit snapshot."""
+    authorized = ledger_authorized and _override_is_authentic(gate_root, entries=trail)
     wants = fallback_authorization == "model_only_unvalidated"
     if authorized and wants and requested_scope == "model_only":
         return True, False
@@ -1835,11 +1759,7 @@ def _authorization_state(
 def _blocked_assessment(
     live_keys: tuple[str, ...], key_codes: dict[str, str | None], extra: list[str]
 ) -> DataAccessAssessment:
-    """Blocked/cannot-establish from the per-key ledger plus the package-level findings.
-
-    A per-key `cannot_establish` code wins over any blocked code: "this authority cannot speak to
-    that key" and "it spoke, and the answer is no" are different claims and must not print alike.
-    """
+    """An untrusted identity is cannot-establish, not a finding about that source's data."""
     codes = [code for code in key_codes.values() if code] + extra
     fatal = [code for code in codes if code in CANNOT_CODES]
     if fatal:
@@ -1848,39 +1768,34 @@ def _blocked_assessment(
 
 
 def _is_provider_pair(provider: object) -> bool:
-    """Is this an exactly-shaped (unit identity, direct assessment) pair from the caller's cohort?"""
+    """Validate a caller-supplied pair without normalizing its immutable assessment fields."""
     if not isinstance(provider, tuple) or len(provider) != 2:
         return False
     unit, assessment = provider
-    return isinstance(unit, str) and bool(unit) and isinstance(assessment, DataAccessAssessment)
+    if not isinstance(unit, str) or not unit or not isinstance(assessment, DataAccessAssessment):
+        return False
+    if not isinstance(assessment.source_keys, tuple) or not isinstance(assessment.codes, tuple):
+        return False
+    try:
+        return parse_data_access(assessment.dumps()) == assessment
+    except (ValueError, TypeError, RecursionError):
+        return False
 
 
 def _provider_candidates(provider: object) -> list | None:
-    """The caller's resolution as a candidate LIST, or None when the argument is malformed.
-
-    A bare pair is the ordinary "S2 matched exactly one provider" case. A LIST is how a caller
-    reports what its cohort resolution actually found, including zero or several - without that,
-    `provider-ambiguous` is unreachable through the API and a caller holding two LUID matches has
-    to flatten them into `None`, which reads as "no provider exists" and understates the problem.
-    Resolution itself still belongs entirely to the caller: nothing here searches, matches by name
-    or consults a registry.
-    """
+    """Snapshot S2's supplied candidates; None means malformed, [] means no match. Never search."""
     if provider is None:
         return []
     if _is_provider_pair(provider):
         return [provider]
     if isinstance(provider, list):
-        return provider
+        candidates = list(provider)
+        return candidates if all(_is_provider_pair(candidate) for candidate in candidates) else None
     return None
 
 
 def _resolve_single_provider(provider: object) -> tuple[tuple | None, str | None]:
-    """(the one usable candidate pair, cannot-establish code) - identity only, never semantics.
-
-    Split from `_inherit_from_provider` so each function stays inside pylint's return budget, and
-    because these four refusals are all about the SHAPE of what the caller resolved, before any
-    question about whether that provider is a usable authority.
-    """
+    """Check supplied cardinality, not identity matching: zero, one, or ambiguous multiple pairs."""
     candidates = _provider_candidates(provider)
     if candidates is None:
         return None, "provider-foreign"
@@ -1888,28 +1803,14 @@ def _resolve_single_provider(provider: object) -> tuple[tuple | None, str | None
         return None, "provider-missing"
     if len(candidates) > 1:
         return None, "provider-ambiguous"
-    if not _is_provider_pair(candidates[0]):
-        return None, "provider-foreign"
     return candidates[0], None
 
 
-def _inherit_from_provider(
-    provider: object, requested_scope: str, own_live_keys: tuple[str, ...]
-) -> DataAccessAssessment:
+def _inherit_from_provider(provider: object, requested_scope: str) -> DataAccessAssessment:
     """One level of EXACT provider inheritance, or a typed refusal. Never recursive, never a search.
 
-    The provider is already resolved by the caller (S2's package cohort). This function does no
-    registry lookup, no display-name match and no ancestor walk - it only decides whether the
-    resolved provider is a usable authority for THIS consumer's topology, and copies its semantic
-    fields verbatim if so.
-
-    Code routing, all `cannot_establish` because none of them is a finding ABOUT the data: no
-    provider where one is required is `provider-missing`; a malformed argument or pair is
-    `provider-foreign`; more than one candidate, or a provider that is itself `provider_inherited`,
-    is `provider-ambiguous` - both mean the same thing, that the input does not resolve to exactly
-    ONE DIRECT authority, and following either would be the search/recursion this refuses; a
-    provider that is itself blocked or cannot-establish is `provider-missing`, since it supplies no
-    authority to inherit.
+    S2 owns identity resolution and provider verification. This function checks the supplied
+    assessment and topology, then copies the direct authority's fields without strengthening them.
     """
     candidate, refusal = _resolve_single_provider(provider)
     if refusal:
@@ -1919,11 +1820,8 @@ def _inherit_from_provider(
         return _cannot_establish("provider-ambiguous")
     if assessment.state not in DIRECT_ACCEPTED_STATES:
         return _cannot_establish("provider-missing")
-    if assessment.state == "authorized_model_only" and requested_scope == "report_only_shared_model":
-        # Intersecting the provider's forced `model_only` scope with a report-only consumer is
-        # empty. The provider remains a perfectly good limited MODEL package; it just cannot lend
-        # data-validated authority to a report it never validated.
-        return _assessment("blocked", codes=["provider-model-only"], source_keys=own_live_keys)
+    if assessment.state == "authorized_model_only" and requested_scope != "model_only":
+        return _assessment("blocked", codes=["provider-model-only"])
     return _assessment(
         "provider_inherited",
         codes=["provider-exact"],
@@ -1937,12 +1835,7 @@ def _inherit_from_provider(
 
 
 def _live_evidence_refusal(gate_root: Path, live_keys: tuple[str, ...], trail: list[dict] | None) -> str | None:
-    """The cannot-establish code that stops live evidence being usable at all, or None.
-
-    Ordered deliberately: an untrusted trail is checked before its contents (there are no contents
-    to check), and `--force-scope` before any per-key reasoning, because a gate armed on a target
-    that failed the scope check governs a whole subtree and is not one-unit portable authority.
-    """
+    """Reject forced scope and missing root-key coverage before interpreting per-key evidence."""
     if trail is None:
         return None  # caller already turned this into an audit-* refusal
     if any(entry.get("action") == "block-forced-scope" for entry in trail):
@@ -1958,14 +1851,7 @@ def _live_evidence_refusal(gate_root: Path, live_keys: tuple[str, ...], trail: l
 
 
 def _direct_evidence(gate_root: Path, live_keys: tuple[str, ...], policy: str) -> tuple[list[dict] | None, str | None]:
-    """(the trusted trail to fold, cannot-establish code) for a DIRECT unit.
-
-    The trail is only load-bearing when something actually depends on it: a live key, a brief that
-    asks for the human-authorization fallback, or an override file sitting in the tree. A package
-    whose every leg is a flat file needs no audit history at all - that is the legitimately
-    never-gated shape `_gate_was_ever_applied` already recognises - so a missing log there is not a
-    refusal. When it IS load-bearing, an untrusted log is fatal before its contents are consulted.
-    """
+    """Read once. Live/fallback authority requires a trusted trail; local bytes alone do not."""
     trail, trail_refusal = _read_audit_trail(gate_root)
     if not (bool(live_keys) or policy == "model_only_unvalidated" or (gate_root / OVERRIDE).exists()):
         return [], None
@@ -2012,12 +1898,7 @@ def _assess_direct(
     package_data_sources: object,
     policy: tuple[str, str],
 ) -> DataAccessAssessment:
-    """The direct (non-inherited) half of `assess_data_access`. Same purity contract.
-
-    `policy` is `(fallback_authorization, requested_scope)` from the typed brief, kept as one tuple
-    so this stays inside pylint's argument budget without inventing a parameter object that would
-    only exist for the linter.
-    """
+    """Assess direct authority against package facts and one same-root ledger snapshot."""
     fallback_authorization, requested_scope = policy
     local_complete, local_refusal = _package_local_facts(package_data_sources)
     if local_refusal:
@@ -2029,11 +1910,11 @@ def _assess_direct(
 
     key_codes, ledger_authorized = _data_access_ledger(trail or [], live_keys)
     authorized, auth_mismatch = _authorization_state(
-        gate_root, ledger_authorized, fallback_authorization, requested_scope
+        gate_root, ledger_authorized, fallback_authorization, requested_scope, trail or []
     )
     if not has_review and local_complete and not any(key_codes.values()):
         return _accepted_direct(live_keys, requested_scope)
-    if authorized:
+    if authorized and not any(code in CANNOT_CODES for code in key_codes.values()):
         # A human explicitly accepted an unvalidated build, so this outranks the per-key blocking
         # reasons - it does not erase them, it declines to wait for them. The current source keys
         # are still stamped, and the ceiling drops to structural-only.
@@ -2059,37 +1940,22 @@ def assess_data_access(  # pylint: disable=too-many-arguments
 ) -> DataAccessAssessment:
     """The Phase-1 data-access authority for one package. PURE and READ-ONLY.
 
-    Reads `<gate_root>/.credential-gate-audit.log` (through the single parser), the gate root's own
-    spec (through `load_bundle`), and the two package-local facts the caller passes in. It writes
-    NOTHING - no audit line, no marker, no file - probes no source, opens no socket, inspects no
-    credential, searches no ancestor and consults no registry. Calling it can never change the
-    answer it would give next time, which is exactly why `verify()` cannot be used for this:
-    `verify()` appends `violation` lines as it judges.
-
-    `gate_root` must be the SAME root the gate was armed and probed against (`bundle.migration_dir`).
-    `fallback_authorization` and `requested_scope` come from the typed brief/S2 authority; this
-    function does not parse the brief. `provider` is the caller's already-resolved result: a
-    `(unit, assessment)` pair, or a LIST of such pairs when the caller wants to report what its
-    cohort resolution found (zero, one, or an ambiguous several). Resolution belongs to the caller,
-    never here.
-
-    Raises ValueError for an out-of-vocabulary `fallback_authorization`/`requested_scope`: that is
-    a caller bug, and silently degrading it to `cannot_establish` would hide the bug behind a state
-    that reads like a data finding.
+    Direct units read only this exact root's audit/spec plus supplied localization facts. No audit
+    mutation, probe, credential inspection, ancestor search or second leg classifier is permitted.
+    The caller supplies typed brief policy/scope and S2's provider pair (or list of candidates).
+    Inheritance uses only that verified provider result: published consumer legs are not endpoints.
+    Invalid policy/scope raises ValueError; malformed evidence returns a typed refusal.
     """
     if fallback_authorization not in FALLBACK_POLICIES:
         raise ValueError(f"fallback_authorization must be one of {FALLBACK_POLICIES}")
     if requested_scope not in EFFECTIVE_SCOPES:
         raise ValueError(f"requested_scope must be one of {EFFECTIVE_SCOPES}")
 
+    if provider is not None or requested_scope == "report_only_shared_model":
+        return _inherit_from_provider(provider, requested_scope)
     live_keys, has_review, spec_refusal = _package_spec_facts(package_spec)
     if spec_refusal:
         return _cannot_establish(spec_refusal)
-    if provider is not None or requested_scope == "report_only_shared_model":
-        # A published consumer's own legs describe the PUBLISHED source, not an endpoint it can
-        # reach; the provider package is the authority, so direct leg rules deliberately do not
-        # apply here. S2 owns which provider that is.
-        return _inherit_from_provider(provider, requested_scope, live_keys)
     return _assess_direct(
         gate_root, live_keys, has_review, package_data_sources, (fallback_authorization, requested_scope)
     )
@@ -2157,7 +2023,10 @@ def _check_state_combination(payload: dict) -> None:  # pylint: disable=too-many
         _require(provider_state in DIRECT_ACCEPTED_STATES, "illegal-combination")
         _require(codes == {"provider-exact"} and scope in EFFECTIVE_SCOPES, "illegal-combination")
         if provider_state == "authorized_model_only":
-            _require(validation == "unvalidated" and ceiling == "structural_only", "illegal-combination")
+            _require(
+                validation == "unvalidated" and ceiling == "structural_only" and scope == "model_only",
+                "illegal-combination",
+            )
         else:
             _require(validation == "validated" and ceiling == "data_validated", "illegal-combination")
             _require(bool(keys) == (provider_state == "live_data_ok"), "illegal-combination")
@@ -2221,7 +2090,7 @@ def parse_data_access(text: str) -> DataAccessAssessment:
 
     keys = _sorted_unique_strings(payload["source_keys"], "source-keys-unsorted")
     for key in keys:
-        _require(SOURCE_KEY_RE.match(key), "source-key-invalid")
+        _require(SOURCE_KEY_RE.fullmatch(key), "source-key-invalid")
     codes = _sorted_unique_strings(payload["codes"], "codes-unsorted")
     for code in codes:
         _require(code in DATA_ACCESS_CODES, "unknown-value")
@@ -2243,7 +2112,7 @@ def read_data_access(path: Path) -> DataAccessAssessment:
     """`parse_data_access` over a file. An unreadable projection is a refusal, not an empty state."""
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         raise DataAccessProjectionError("unreadable") from exc
     return parse_data_access(text)
 

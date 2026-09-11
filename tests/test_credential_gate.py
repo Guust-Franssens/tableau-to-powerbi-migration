@@ -2292,15 +2292,8 @@ def _unit(root: Path, name: str, *, marker: bool = False, override: bool = False
         (d / ".credential-gate-BLOCKED.json").write_text("{}", encoding="utf-8")
     if override:
         (d / ".credential-gate-AUTHORIZED").write_text("x", encoding="utf-8")
-    if audit:
-        # Stamped with THIS unit's own scope so the tightened `_audit_entries` (issue #354 review:
-        # an entry with no matching scope is now legacy/unbound evidence, not trusted) accepts it -
-        # exactly what a real `_audit()` call always writes; these fixtures previously relied on the
-        # since-removed "no scope key = trust it" concession.
-        (d / ".credential-gate-audit.log").write_text(
-            "\n".join(json.dumps({"action": a, "scope": str(d.resolve())}) for a in audit) + "\n",
-            encoding="utf-8",
-        )
+    for action in audit:
+        _append_audit(d, action, f"{action} fixture")
     return d
 
 
@@ -3532,3 +3525,268 @@ def test_no_projection_field_can_carry_a_host_path_or_display_name(tmp_path: Pat
     for secret in ("a.example", "sqlserver", "excel-direct", str(root), "ds0", "ds1"):
         assert secret not in payload, f"{secret!r} reached the projection"
     assert set(json.loads(payload)) == set(cg.DATA_ACCESS_FIELDS)
+
+
+@pytest.mark.parametrize("authorized", [False, True], ids=["live-pair", "human-fallback"])
+def test_data_access_requires_an_arm_for_each_current_key(tmp_path: Path, authorized: bool) -> None:
+    """Neither a measurement pair nor authorization may invent a missing per-key epoch."""
+    root = _da_root(tmp_path, "unarmed-key", LIVE_A, LIVE_B)
+    _trail(root, ("block", [KEY_B]), ("probe-data_ok", [KEY_A]), ("probe-cleared", [KEY_A]))
+    if authorized:
+        _trail(root, ("authorize", None))
+        (root / cg.OVERRIDE).write_text("human authorization\n", encoding="utf-8")
+
+    result = _assess(
+        root, _da_spec(LIVE_A), policy="model_only_unvalidated" if authorized else "stop", scope="model_only"
+    )
+
+    assert (result.state, result.codes) == ("cannot_establish", ("source-key-set-changed",))
+
+
+@pytest.mark.parametrize("backdated_action", ["probe-data_ok", "probe-cleared", "authorize"])
+def test_data_access_rejects_backdated_epoch_evidence(tmp_path: Path, backdated_action: str) -> None:
+    """File order cannot launder a successful event timestamped before the current arm."""
+    root = _da_root(tmp_path, "backdated-epoch", LIVE_A)
+    events = [("block", [KEY_A]), ("probe-data_ok", [KEY_A]), ("probe-cleared", [KEY_A])]
+    if backdated_action == "authorize":
+        events = [("block", [KEY_A]), ("authorize", None)]
+        (root / cg.OVERRIDE).write_text("human authorization\n", encoding="utf-8")
+    _trail(root, *events)
+    audit = root / cg.AUDIT
+    entries = [json.loads(line) for line in audit.read_text(encoding="utf-8").splitlines()]
+    for entry in entries:
+        entry["ts"] = "2026-09-11T08:00:00+00:00"
+        if entry["action"] == backdated_action:
+            entry["ts"] = "2020-01-01T00:00:00+00:00"
+    audit.write_text("".join(json.dumps(entry) + "\n" for entry in entries), encoding="utf-8")
+
+    kwargs = {"policy": "model_only_unvalidated", "scope": "model_only"} if backdated_action == "authorize" else {}
+    result = _assess(root, _da_spec(LIVE_A), **kwargs)
+
+    assert result.state == "blocked"
+    assert ("authorization-mismatch" if backdated_action == "authorize" else "stale-clear") in result.codes
+    for entry in entries:
+        entry["ts"] = "2026-09-11T08:00:00+00:00"
+    audit.write_text("".join(json.dumps(entry) + "\n" for entry in entries), encoding="utf-8")
+    assert _assess(root, _da_spec(LIVE_A), **kwargs).state == (
+        "authorized_model_only" if backdated_action == "authorize" else "live_data_ok"
+    )
+
+
+def test_data_access_latest_success_still_needs_its_own_clear(tmp_path: Path) -> None:
+    """The latest attempt must precede its earning clear, including after another success."""
+    root = _da_root(tmp_path, "repeated-success", LIVE_A)
+    _trail(
+        root,
+        ("block", [KEY_A]),
+        ("probe-data_ok", [KEY_A]),
+        ("probe-cleared", [KEY_A]),
+        ("probe-data_ok", [KEY_A]),
+    )
+
+    assert _assess(root, _da_spec(LIVE_A)).state == "blocked"
+    _trail(root, ("probe-cleared", [KEY_A]))
+    assert _assess(root, _da_spec(LIVE_A)).state == "live_data_ok"
+
+
+@pytest.mark.parametrize(
+    "sources",
+    [None, [], ["legacy display"], [""], [KEY_A, "legacy display"]],
+    ids=["missing", "empty", "legacy-name", "blank-name", "mixed-identity"],
+)
+def test_data_access_unattributable_failures_cannot_leave_sibling_keys_green(tmp_path: Path, sources: object) -> None:
+    """Unknown attribution is not an empty target set; both previously earned keys must refuse."""
+    root = _da_root(tmp_path, "unknown-failure", LIVE_A, LIVE_B)
+    _trail(root, ("block", [KEY_A, KEY_B]), ("probe-data_ok", [KEY_A, KEY_B]), ("probe-cleared", [KEY_A, KEY_B]))
+    assert _assess(root, _da_spec(LIVE_A, LIVE_B)).state == "live_data_ok"
+    _trail(root, ("probe-error", sources))
+
+    for connection in (LIVE_A, LIVE_B):
+        assert _assess(root, _da_spec(connection)).state in {"blocked", "cannot_establish"}
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("sources", True),
+        ("sources", KEY_A),
+        ("sources", {}),
+        ("sources", [True]),
+        ("sources", [None]),
+        ("sources", [[KEY_A]]),
+        ("sources", [KEY_A, KEY_A]),
+        ("action", ["probe-error"]),
+        ("action", False),
+        ("ts", True),
+        ("ts", "not-a-time"),
+        ("ts", "2026-09-11T08:00:00"),
+    ],
+)
+def test_data_access_malformed_audit_fields_poison_the_whole_trail(tmp_path: Path, field: str, value: object) -> None:
+    """Typed audit fields cannot be stringified or ignored to preserve a previous green."""
+    root = _da_root(tmp_path, "bad-audit-field", LIVE_A)
+    _trail(root, ("block", [KEY_A]), ("probe-data_ok", [KEY_A]), ("probe-cleared", [KEY_A]))
+    assert _assess(root, _da_spec(LIVE_A)).state == "live_data_ok"
+    entry = {
+        "ts": "2026-09-11T08:00:00+00:00",
+        "action": "probe-error",
+        "sources": [KEY_A],
+        "scope": str(root.resolve()),
+        field: value,
+    }
+    with (root / cg.AUDIT).open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry) + "\n")
+
+    result = _assess(root, _da_spec(LIVE_A))
+
+    assert (result.state, result.codes) == ("cannot_establish", ("audit-malformed",))
+    assert cg._audit_entries(root) is None
+
+
+@pytest.mark.parametrize("poison", ["duplicate-action", "duplicate-scope", "invalid-utf8"])
+def test_data_access_strict_audit_rejects_lossy_decoding(tmp_path: Path, poison: str) -> None:
+    """The sole audit reader must reject duplicate JSON keys and undecodable bytes."""
+    root = _da_root(tmp_path, "lossy-audit", LIVE_A)
+    _trail(root, ("block", [KEY_A]), ("probe-data_ok", [KEY_A]), ("probe-cleared", [KEY_A]))
+    entry = json.dumps(
+        {"scope": str(root.resolve()), "ts": "2026-09-11T08:00:00+00:00", "action": "probe-error", "sources": [KEY_A]}
+    )
+    if poison == "duplicate-action":
+        tail = (entry[:-1] + ', "action": "block-skipped"}\n').encode("utf-8")
+    elif poison == "duplicate-scope":
+        tail = (entry[:-1] + ', "scope": ' + json.dumps(str(root.resolve())) + "}\n").encode("utf-8")
+    else:
+        tail = b"\xff\n"
+    with (root / cg.AUDIT).open("ab") as handle:
+        handle.write(tail)
+
+    result = _assess(root, _da_spec(LIVE_A))
+
+    assert (result.state, result.codes) == ("cannot_establish", ("audit-malformed",))
+
+
+def test_data_access_authorization_reads_the_audit_only_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Authorization uses the same immutable ledger snapshot, not another mutable audit read."""
+    root = _authorized_root(tmp_path, "single-read")
+    read = cg._read_audit_trail
+    calls = []
+
+    def counted_read(target: Path) -> tuple:
+        calls.append(target)
+        return read(target)
+
+    monkeypatch.setattr(cg, "_read_audit_trail", counted_read)
+    result = _assess(root, _da_spec(LIVE_A), policy="model_only_unvalidated", scope="model_only")
+
+    assert result.state == "authorized_model_only"
+    assert calls == [root]
+
+
+def test_data_access_root_keys_are_not_silently_collapsed(tmp_path: Path) -> None:
+    """The package subset must not hide ambiguous keys in the canonical root facts."""
+    root = _da_root(tmp_path, "duplicate-root", LIVE_A, LIVE_A)
+    _trail(root, ("block", [KEY_A]), ("probe-data_ok", [KEY_A]), ("probe-cleared", [KEY_A]))
+
+    result = _assess(root, _da_spec(LIVE_A))
+
+    assert (result.state, result.codes) == ("cannot_establish", ("source-key-invalid",))
+
+
+@pytest.mark.parametrize(
+    "provider",
+    [
+        False,
+        True,
+        {},
+        (),
+        ("Up", PROVIDER_LIVE, "extra"),
+        ["Up", PROVIDER_LIVE],
+        [("Up", PROVIDER_LIVE), False],
+        [("Up", PROVIDER_LIVE), ("Other", {})],
+        (("Up", PROVIDER_LIVE),),
+        (("Up", PROVIDER_LIVE), ("Other", PROVIDER_LOCAL)),
+    ],
+)
+def test_data_access_provider_candidate_shapes_are_not_coerced(tmp_path: Path, provider: object) -> None:
+    """A candidate list is not a list-shaped pair, tuple collection, or boolean sentinel."""
+    root = _da_root(tmp_path, "provider-shape", FLAT)
+
+    result = _assess(root, _da_spec(FLAT), scope="report_only_shared_model", provider=provider)
+
+    assert (result.state, result.codes) == ("cannot_establish", ("provider-foreign",))
+
+
+@pytest.mark.parametrize(
+    "provider",
+    [
+        PROVIDER_LIVE._replace(source_keys=(KEY_A, KEY_A)),
+        PROVIDER_LIVE._replace(source_keys=[KEY_A]),
+        PROVIDER_LIVE._replace(source_keys=(KEY_A + "\n",)),
+        PROVIDER_LIVE._replace(validation=True),
+        PROVIDER_LIVE._replace(codes=("probe-cleared",)),
+        PROVIDER_LIVE._replace(codes=["probe-cleared", "probe-data-ok"]),
+        PROVIDER_LOCAL._replace(source_keys=""),
+        PROVIDER_LIVE._replace(provider_unit="hidden-recursion"),
+    ],
+)
+def test_data_access_provider_assessment_must_already_be_strict(tmp_path: Path, provider: object) -> None:
+    """Inheritance cannot repair, deduplicate, or amplify an invalid provider projection."""
+    root = _da_root(tmp_path, "provider-semantics", FLAT)
+
+    result = _assess(root, _da_spec(FLAT), scope="report_only_shared_model", provider=("Up", provider))
+
+    assert (result.state, result.codes) == ("cannot_establish", ("provider-foreign",))
+
+
+def test_data_access_provider_resolution_stays_with_the_caller(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A real published-source consumer inherits only the supplied S2 result; it searches nothing."""
+    root = _da_root(tmp_path, "published-consumer", FLAT)
+    published_spec = _da_spec({"class": "sqlproxy", "powerbi_target": "unknown"})
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("provider inheritance attempted direct evidence or source classification")
+
+    for name in ("_read_audit_trail", "load_bundle", "_classify_legs", "_override_is_authentic", "verify", "_audit"):
+        monkeypatch.setattr(cg, name, forbidden)
+    inherited = _assess(
+        root, published_spec, scope="report_only_shared_model", provider=("Exact S2 unit", PROVIDER_LIVE)
+    )
+    missing = _assess(root, published_spec, scope="report_only_shared_model", provider=[])
+
+    assert (inherited.state, inherited.provider_unit, inherited.source_keys) == (
+        "provider_inherited",
+        "Exact S2 unit",
+        PROVIDER_LIVE.source_keys,
+    )
+    assert (missing.state, missing.codes) == ("cannot_establish", ("provider-missing",))
+
+
+@pytest.mark.parametrize("scope", ["model_and_report", "report_only_shared_model"])
+def test_data_access_inherited_authorization_cannot_expand_to_reports(tmp_path: Path, scope: str) -> None:
+    """Structural-only provider authority stays model-only in both producer and strict reader."""
+    root = _da_root(tmp_path, "scope-ceiling", FLAT)
+    result = _assess(root, _da_spec(FLAT), scope=scope, provider=("Up", PROVIDER_AUTHORIZED))
+    assert (result.state, result.codes) == ("blocked", ("provider-model-only",))
+    payload = {
+        **PROVIDER_RECURSIVE.to_json(),
+        "provider_state": "authorized_model_only",
+        "validation": "unvalidated",
+        "max_phase2_claim": "structural_only",
+        "effective_scope": scope,
+    }
+    with pytest.raises(cg.DataAccessProjectionError, match="illegal-combination"):
+        cg.parse_data_access(json.dumps(payload))
+
+
+def test_data_access_source_key_syntax_requires_the_whole_string() -> None:
+    """A final newline is outside the stable key, despite the special meaning of regex `$`."""
+    with pytest.raises(cg.DataAccessProjectionError, match="source-key-invalid"):
+        cg.parse_data_access(json.dumps(_projection(source_keys=[KEY_A + "\n"])))
+
+
+def test_data_access_unreadable_projection_still_has_a_typed_refusal(tmp_path: Path) -> None:
+    """Invalid UTF-8 is a read failure, not an uncaught decoder exception."""
+    path = tmp_path / "projection.json"
+    path.write_bytes(b"\xff")
+    with pytest.raises(cg.DataAccessProjectionError, match="unreadable"):
+        cg.read_data_access(path)
