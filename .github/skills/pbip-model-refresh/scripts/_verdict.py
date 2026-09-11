@@ -64,7 +64,7 @@ def _emit_data_verdict(
 
     Split out of `main()` so the mutating path (identity gate + refresh + persist) and the reporting
     path stay individually simple. The timestamp-based legacy display is compatibility output only:
-    it never constructs an ImageCommit or PersistenceObservation.
+    it never constructs an ImageObservation or PersistenceObservation.
     """
     after_stamp = cache.stat().st_mtime if cache and cache.exists() else 0.0
     persisted = cache is not None and after_stamp > before_stamp

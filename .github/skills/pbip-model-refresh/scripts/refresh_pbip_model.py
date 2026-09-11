@@ -101,6 +101,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # pylint: disable=wrong-import-position
 from probe_desktop_query import (
     BoundDesktop,
+    DesktopIdentity,
     ObservationUnavailable,
     _load_adomd,
     column_names,
@@ -121,10 +122,9 @@ from _abf import (  # noqa: F401  # pylint: disable=unused-import
     _ABF_MAX_BLOCK_BYTES,
     _ABF_PREAMBLE,
     CompatRollbackError,
-    ImageCommit,
+    ImageObservation,
+    _ImageInstallation,
     _abf_rejection_reason,
-    _cache_committed,
-    _cache_fingerprint,
     _cleanup_staging,
     _is_complete_abf,
     _restore_rollback_snapshot,
@@ -181,18 +181,16 @@ class RefreshObservation:
     refresh_type: Literal["full", "calculate"]
     scope: Literal["database", "tables"]
     tables: tuple[str, ...]
+    identity: DesktopIdentity
 
 
 @dataclass(frozen=True, slots=True)
 class PersistenceObservation:
-    """ImageSave facts only. The held, post-alignment database.tmdl is a revision INPUT,
-    not a whole-model revision or proof that these bytes survive a native cold reopen.
-    """
+    """Native ImageSave selection and checked readback; durable commitment remains unestablished."""
 
     catalogue: str
     compatibility_level: int
-    image: ImageCommit
-    database_tmdl: bytes | None
+    image: ImageObservation
     method: Literal["AMO_ImageSave"] = "AMO_ImageSave"
 
 
@@ -528,6 +526,8 @@ def refresh(
     """
     if refresh_type not in REFRESH_TYPES:
         raise ValueError(f"unsupported refresh type {refresh_type!r}; expected one of {sorted(REFRESH_TYPES)}")
+    if observations:
+        raise ObservationUnavailable("OBSERVATIONS_NOT_EMPTY")
     if observations is not None and bound is None:
         raise ObservationUnavailable("IDENTITY_UNESTABLISHED")
     if bound is not None and (bound.identity.port != port or bound.identity.pid != desktop_pid):
@@ -633,7 +633,7 @@ def refresh(
             if bound is not None:
                 recheck_bound(bound, conn)
                 result["observation"] = RefreshObservation(
-                    catalog, refresh_type, "tables" if targets else "database", targets
+                    catalog, refresh_type, "tables" if targets else "database", targets, bound.identity
                 )
             target = "/".join(tables) if tables else "entire database"
             verb = "calculated" if refresh_type == REFRESH_TYPE_CALCULATE else "refreshed"
@@ -1236,16 +1236,15 @@ def _persist_image(  # pylint: disable=too-many-arguments
     write_image,
     lock_timeout: float = PERSIST_LOCK_TIMEOUT_SECONDS,
     *,
-    on_commit=None,
+    on_observation=None,
 ) -> tuple[bool, str]:
-    """Align compat, stage the cache write, swap atomically, and roll compat back UNLESS it committed.
+    """Align compat, stage the cache write, and restore metadata only when no installation occurred.
 
     Pure-Python (no .NET), so the guarantees are unit-testable without a live AS instance.
-    ``write_image(staging_path)`` performs the actual engine write. Commit is decided by the
-    checked staged/destination bytes, so an ``os.replace`` that moved the file yet still raised is
-    recognised as committed and the alignment KEPT - never rolled back under a freshly installed cache.
-    When the write did NOT land, the alignment is restored atomically from the snapshot, every path is
-    attempted, and a residual failure raises :class:`CompatRollbackError` (round-3 blocker 2).
+    ``write_image(staging_path)`` performs the actual engine write. A returned replace establishes
+    installation independently of optional observation work; it does not prove durability. A raised
+    replace with a vanished stage is ambiguous, never success, and stops without rolling metadata
+    back underneath a possibly installed cache. Otherwise a failed write restores the snapshot.
 
     The ENTIRE transaction (snapshot -> align -> write -> commit-or-rollback) runs under a per-model
     interprocess lock (issue #114). Two runs against one model share BOTH the staging file (now given
@@ -1258,11 +1257,11 @@ def _persist_image(  # pylint: disable=too-many-arguments
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = cache_path.with_name(cache_path.name + ".lock")
     with model_lock(lock_path, timeout=lock_timeout):
-        return _persist_image_locked(cache_path, model_dir, live_level, write_image, on_commit=on_commit)
+        return _persist_image_locked(cache_path, model_dir, live_level, write_image, on_observation=on_observation)
 
 
 def _persist_image_locked(
-    cache_path: Path, model_dir: Path | None, live_level: int, write_image, *, on_commit=None
+    cache_path: Path, model_dir: Path | None, live_level: int, write_image, *, on_observation=None
 ) -> tuple[bool, str]:
     """The persist transaction itself, run while the per-model lock is held (see :func:`_persist_image`).
 
@@ -1277,30 +1276,33 @@ def _persist_image_locked(
     rollback_paths = _compat_rollback_paths(model_dir)
     snapshot = _snapshot_rollback_paths(rollback_paths)
     staging = _staging_path(cache_path)
-    commits: list[ImageCommit] = []
+    installation = _ImageInstallation()
+    observations = [] if on_observation is not None else None
     write_error: BaseException | None = None
     pending_declaration: tuple[Path, Path, str, str, str] | None = None
     try:
         aligned, pending_declaration = _align_compatibility(model_dir, live_level, defer_declaration=True)
         if aligned:
             print(f"  save   : {aligned}")
-        _staged_image_write(cache_path, write_image, staging, observations=commits)
-    except CompatRollbackError:
-        raise  # The stage was moved but its destination is uncertain; never roll back underneath it.
+        _staged_image_write(cache_path, write_image, staging, observations=observations, installation=installation)
     except BaseException as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught  # KeyboardInterrupt must NOT bypass rollback; commit judged below by the filesystem
         write_error = exc
 
-    if commits:
+    if installation.installed:
         _cleanup_staging(staging)
         if pending_declaration is not None:
             _append_generated_edit_declaration(*pending_declaration)
-        if on_commit is not None:
-            on_commit(commits[0])
-        try:
-            size_note = f"{cache_path.stat().st_size / 1024:.1f} KB, "
-        except OSError:
-            size_note = ""
+        if on_observation is not None:
+            if write_error is not None:
+                raise write_error
+            on_observation(observations[0])
+        size_note = f"{installation.size / 1024:.1f} KB, "
         return True, f"persisted via AMO ImageSave ({size_note}compatibilityLevel {live_level})"
+
+    if installation.ambiguous:
+        raise CompatRollbackError(
+            "cache replacement raised with an unestablished outcome; alignment retained; do NOT fall back to UI Save"
+        ) from write_error
 
     # The cache was NOT installed, so the provisional alignment must come back exactly.
     _cleanup_staging(staging)
@@ -1389,22 +1391,23 @@ def image_save(
             finally:
                 stream.Close()
 
-        def record(commit: ImageCommit) -> None:
+        def record(observation: ImageObservation) -> None:
             if desktop_identity(bound.identity.pid) != bound.identity:
                 raise ObservationUnavailable("PID_REUSED")
             current = list(server.Databases)
             if len(current) != 1 or str(current[0].ID) != bound.catalogue:
                 raise ObservationUnavailable("CATALOGUE_CHANGED")
             blob = cache_path.read_bytes()
-            if hashlib.sha256(blob).hexdigest() != commit.committed_sha256 or len(blob) != commit.committed_size:
-                raise CompatRollbackError("committed cache changed before observation; do NOT fall back to UI Save")
-            definition = model_dir / "definition" / "database.tmdl" if model_dir is not None else None
-            aligned = definition.read_bytes() if definition is not None and definition.is_file() else None
+            if (
+                hashlib.sha256(blob).hexdigest() != observation.installed_sha256
+                or len(blob) != observation.installed_size
+            ):
+                raise CompatRollbackError("installed cache changed before observation; do NOT fall back to UI Save")
             if on_persist is not None:
-                on_persist(PersistenceObservation(bound.catalogue, live_level, commit, aligned))
+                on_persist(PersistenceObservation(bound.catalogue, live_level, observation))
 
         return _persist_image(
-            cache_path, model_dir, live_level, write_image, on_commit=record if bound is not None else None
+            cache_path, model_dir, live_level, write_image, on_observation=record if on_persist is not None else None
         )
     finally:
         server.Disconnect()

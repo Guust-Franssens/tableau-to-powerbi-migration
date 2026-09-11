@@ -272,12 +272,66 @@ def test_refresh_observation_matches_the_executed_scope(monkeypatch, kind, table
     objects = [{"database": OBSERVED_CATALOGUE, "table": "Orders"}] if tables else [{"database": OBSERVED_CATALOGUE}]
     assert sent == [{"refresh": {"type": kind, "objects": objects}}]
     assert observations == [
-        refresh_pbip_model.RefreshObservation(OBSERVED_CATALOGUE, kind, "tables" if tables else "database", tables)
+        refresh_pbip_model.RefreshObservation(
+            OBSERVED_CATALOGUE, kind, "tables" if tables else "database", tables, OBSERVED_IDENTITY
+        )
     ]
     with pytest.raises(probe_desktop_query.ObservationUnavailable, match="^WRONG_PID_PORT$"):
         refresh_pbip_model.refresh(52002, None, desktop_pid=111, bound=bound, observations=[])
     with pytest.raises(probe_desktop_query.ObservationUnavailable, match="^IDENTITY_UNESTABLISHED$"):
         refresh_pbip_model.refresh(52001, None, observations=[])
+
+
+def test_a_failed_retry_cannot_reuse_a_prior_refresh_observation(monkeypatch):
+    bound = probe_desktop_query.BoundDesktop(OBSERVED_IDENTITY, OBSERVED_CATALOGUE)
+    opened, executed, observed = [], [], []
+
+    def execute():
+        executed.append(1)
+        if len(executed) > 1:
+            raise RuntimeError("native retry failed")
+
+    command = SimpleNamespace(ExecuteNonQuery=execute)
+    connection = SimpleNamespace(CreateCommand=lambda: command, Open=lambda: opened.append(1), Close=lambda: None)
+    monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda: lambda _: connection)
+    monkeypatch.setattr(refresh_pbip_model, "recheck_bound", lambda *_: None)
+    options = dict(desktop_pid=111, bound=bound, progress_enabled=False)
+    assert refresh_pbip_model.refresh(52001, None, observations=observed, **options)[0] is True
+    prior = tuple(observed)
+    error = None
+    try:
+        refresh_pbip_model.refresh(52001, None, observations=observed, **options)
+    except BaseException as caught:
+        error = caught
+    assert opened == executed == [1], "a reused collector must be refused before native work"
+    assert isinstance(error, probe_desktop_query.ObservationUnavailable) and str(error) == "OBSERVATIONS_NOT_EMPTY"
+    assert tuple(observed) == prior
+    fresh = []
+    with pytest.raises(RuntimeError, match="native retry failed"):
+        refresh_pbip_model.refresh(52001, None, observations=fresh, **options)
+    assert fresh == [] and tuple(observed) == prior
+
+
+def test_same_catalogue_refreshes_retain_their_distinct_desktop_and_as_identity(monkeypatch):
+    second = probe_desktop_query.DesktopIdentity(333, "200", 444, "201", 52002)
+    command = SimpleNamespace(ExecuteNonQuery=lambda: None)
+    connection = SimpleNamespace(CreateCommand=lambda: command, Open=lambda: None, Close=lambda: None)
+    monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda: lambda _: connection)
+    monkeypatch.setattr(refresh_pbip_model, "recheck_bound", lambda *_: None)
+    observations = []
+    for identity in (OBSERVED_IDENTITY, second):
+        bound = probe_desktop_query.BoundDesktop(identity, OBSERVED_CATALOGUE)
+        own = []
+        assert (
+            refresh_pbip_model.refresh(
+                identity.port, None, desktop_pid=identity.pid, bound=bound, observations=own, progress_enabled=False
+            )[0]
+            is True
+        )
+        assert len(own) == 1 and own[0].identity == identity
+        observations.extend(own)
+    assert observations[0].catalogue == observations[1].catalogue == OBSERVED_CATALOGUE
+    assert observations[0] != observations[1]
 
 
 def test_table_names_filters_the_auto_date_scaffolding_but_can_keep_hidden_tables() -> None:
