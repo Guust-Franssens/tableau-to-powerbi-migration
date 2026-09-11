@@ -1188,7 +1188,9 @@ class _ProvenanceState:  # pylint: disable=too-many-instance-attributes
         return candidate
 
     def validate_result_history(self, result: dict, *, terminal: bool) -> None:
-        """Success must describe the applicable observed path, not just a complete fingerprint list."""
+        """Every terminal reconciles observed work; success additionally requires its whole live path."""
+        if terminal and (self.inventory is not None or self.inventory_failed):
+            _require(self.counters.get(prov.OP_INVENTORY) == 1)
         self.validate_inventory_history(result)
         status = result["phase"]["status"]
         if status not in prov.SUCCESS_STATUSES:
@@ -1237,7 +1239,7 @@ class _ProvenanceState:  # pylint: disable=too-many-instance-attributes
                 matched.add(origin["workbook_luid"])
         returned = self.inventory.returned_count if self.inventory is not None else 0
         _require(len(matched) <= self.matched_count <= returned)
-        _require(self.counters.get(prov.OP_CONTENT, 0) <= self.matched_count)
+        _require(len(matched) <= self.counters.get(prov.OP_CONTENT, 0) <= self.matched_count)
         withheld = {prov.CANCELLED_CODE, prov.DEADLINE_CODE, "scrub-failed", "build-failed"}
         if not any(error["code"] in withheld for error in result["phase"]["errors"]):
             unread = sum(record.get("origin") is None and "lookup_error" in record for record in result["inputs"])

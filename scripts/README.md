@@ -96,8 +96,9 @@ After the local pass, a single boolean `lookup-intent` establishes whether live 
 `success` requires sign-in, inventory, paired content progress for every usable input, completed scrub,
 an accepted safe snapshot, and completed sign-out before terminal, in that order. Content counters
 advance only for distinct attempts; their `total` is the distinct matched LUID count known so far, not
-an input count or a forecast. Attempts cannot exceed matched identities, matched identities cannot
-exceed returned inventory rows, and successful results reconcile to their distinct scrubbed LUIDs.
+an input count or a forecast. Every result's distinct origin LUID count must be backed by recorded
+content attempts, including partial/failed results. Attempts cannot exceed matched identities, matched
+identities cannot exceed returned inventory rows, and successful results reconcile to their distinct scrubbed LUIDs.
 Cache hits and inventory misses do not invent downloads (#582). `local_only` requires explicit local intent, no live
 operation even started, and an independently local-only result. Missing or reordered applicable stages,
 unsupported success, and live-to-local relabelling are `worker-protocol-invalid`, published fail-closed
@@ -129,7 +130,9 @@ malformed metadata from absent metadata; it carries no remote text or classifica
 or parse emits an exclusive `inventory-failed` marker instead. The parent requires exactly one parse
 outcome for inventory completion and independently classifies the facts. Offline facts, duplicate or
 out-of-order outcomes, contradictory worker claims, and impossible count relationships are protocol
-errors even on non-success paths.
+errors even on non-success paths. Once facts or a failure have arrived, no terminal of any status is
+accepted before recorded inventory completion. A deadline/cancellation without a terminal still retains
+accepted pagination facts and local fingerprints; it does not require a future completion.
 
 The single cached page is complete only when valid first-page facts prove it (including an explicit
 1,000/1,000 total), or it is shorter than the requested 1,000 rows without contradictory metadata.

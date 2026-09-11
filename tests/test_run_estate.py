@@ -3740,6 +3740,108 @@ def test_spawned_inventory_sequences_are_bound_to_the_supervised_protocol(
     _assert_protocol_refused(_protocol_main(tmp_path, monkeypatch, messages), total)
 
 
+@pytest.mark.parametrize("status", ["partial", "failed"])
+@pytest.mark.parametrize("completed", [False, True], ids=["unfinished", "completed"])
+@pytest.mark.parametrize("outcome", ["facts", "failure"])
+def test_spawned_terminal_requires_inventory_outcome_completion(
+    tmp_path: Path, monkeypatch, status: str, completed: bool, outcome: str
+) -> None:
+    """An inventory outcome alone cannot license a partial/failed terminal; its completion can."""
+    messages = provenance_workers.protocol_messages()
+    facts_at = next(index for index, message in enumerate(messages) if message["kind"] == "inventory-facts")
+    terminal = messages[-1]
+    result = terminal["result"]
+    result["inputs"][0]["origin"] = None
+    result["phase"] = {"status": status, "errors": []}
+    if outcome == "failure":
+        messages[facts_at] = {"kind": "inventory-failed"}
+        result["phase"]["errors"] = [
+            {"code": "inventory-failed", "operation": "inventory", "exception_class": "ValueError"}
+        ]
+    messages = [*messages[: facts_at + 1 + int(completed)], terminal]
+
+    run = _protocol_main(tmp_path, monkeypatch, messages)
+
+    if not completed:
+        _assert_protocol_refused(run, 1)
+    else:
+        code, artifact, out = run
+        assert artifact == result, "INVENTORY_COMPLETION_CONTROL: a completed inventory outcome was refused"
+        assert code == 11 and not (out / "handover").exists()
+
+
+@pytest.mark.parametrize("status", ["partial", "failed"])
+@pytest.mark.parametrize(
+    "matches,attempts",
+    [((0,), 0), ((0,), 1), ((0, 0), 1), ((0, 1), 1), ((0, 1), 2)],
+    ids=[
+        "origin-no-attempt",
+        "origin-one-attempt",
+        "duplicate-one-attempt",
+        "distinct-missing-attempt",
+        "distinct-two",
+    ],
+)
+def test_spawned_terminal_origins_require_distinct_content_attempts(
+    tmp_path: Path, monkeypatch, capsys, status: str, matches: tuple[int, ...], attempts: int
+) -> None:
+    """Partial/failed terminals still reconcile distinct LUIDs, never physical input multiplicity."""
+    messages = provenance_workers.protocol_messages(
+        tuple(f"unit-{index}.twb" for index in range(len(matches))), matches=matches
+    )
+    content_end = max(index for index, message in enumerate(messages) if message.get("operation") == "content")
+    for message in messages:
+        if message.get("operation") == "content":
+            message["completed"] = min(message["completed"], attempts)
+    terminal = messages[-1]
+    terminal["result"]["phase"] = {"status": status, "errors": []}
+    messages = [*messages[: content_end + 1], terminal]
+
+    run = _protocol_main(tmp_path, monkeypatch, messages)
+
+    if attempts < len(set(matches)):
+        _assert_protocol_refused(run, len(matches))
+    else:
+        code, artifact, out = run
+        assert artifact == terminal["result"], "DISTINCT_ATTEMPT_CONTROL: legitimate cached origins were refused"
+        assert code == 11 and not (out / "handover").exists()
+    events = _progress_events(capsys.readouterr().out)
+    content = [event for event in events if event["operation"] == "content"]
+    assert (content[-1]["completed"], content[-1]["total"]) == (attempts, len(set(matches)))
+    assert all(record["origin"]["workbook_luid"] not in json.dumps(events) for record in terminal["result"]["inputs"])
+
+
+@pytest.mark.parametrize(
+    "returned,total,expected",
+    [(1, 2, "inventory-truncated"), (1000, None, "inventory-cannot-establish"), (1, 1, None)],
+    ids=["truncated", "cannot-establish", "complete-control"],
+)
+def test_spawned_no_terminal_deadline_retains_unfinished_inventory_facts(
+    tmp_path: Path, monkeypatch, capsys, returned: int, total: int | None, expected: str | None
+) -> None:
+    """No terminal means no completion requirement: a deadline preserves accepted facts and digests."""
+    messages = provenance_workers.protocol_messages(("first.twb", "second.twb"))
+    facts_at = next(index for index, message in enumerate(messages) if message["kind"] == "inventory-facts")
+    messages[facts_at]["facts"].update(returned_count=returned, page_number=None, page_size=None, total_available=total)
+    messages = messages[: facts_at + 1]
+
+    run = _supervise(monkeypatch, tmp_path, functools.partial(provenance_workers.sends_messages, messages, block=True))
+
+    errors = [{"code": run_estate.PROVENANCE_DEADLINE_CODE, "operation": "inventory"}]
+    if expected:
+        finding = {"code": expected, "operation": "inventory", "returned_count": returned, "requested_page_size": 1000}
+        if total is not None:
+            finding["total_available"] = total
+        errors.insert(0, finding)
+    assert run.artifact["phase"] == {"status": "partial", "errors": errors}, "NO_TERMINAL_INVENTORY_RETENTION"
+    assert run.artifact["inputs"] == [message["record"] for message in messages if message["kind"] == "checkpoint"]
+    assert run.artifact["input_count"] == 2 and not run.stamped.ok
+    assert run.outcome.expired and run.outcome.worker_pid is not None and run.outcome.worker_alive is False
+    events = _progress_events(capsys.readouterr().out)
+    inventory = [event for event in events if event["operation"] == "inventory"]
+    assert [event["completed"] for event in inventory] == [0], "control completed inventory before the deadline"
+
+
 @pytest.mark.parametrize(
     "row_count,pagination,expected",
     [

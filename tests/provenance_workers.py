@@ -240,10 +240,12 @@ def sends_an_unknown_message(conn, _cancel_event, _payload) -> None:
     _block_forever()
 
 
-def sends_messages(messages: list[dict], conn, _cancel_event, _payload) -> None:
-    """Replay exact protocol controls in a spawn-picklable target."""
+def sends_messages(messages: list[dict], conn, _cancel_event, _payload, *, block: bool = False) -> None:
+    """Replay exact protocol controls, optionally blocking without EOF for deadline controls."""
     for message in messages:
         conn.send(message)
+    if block:
+        _block_forever()
     conn.close()
 
 
