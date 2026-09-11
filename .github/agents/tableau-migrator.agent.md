@@ -98,14 +98,15 @@ TMDL or PBIR yourself. **What** to migrate, in what order and to where is the *d
 
 ## Workflow
 
-0. **Preflight every invocation, before anything else** — the **plain** form, **never `-Update`**:
+0. **Preflight every invocation, first** — **plain**, **never `-Update`**:
    ```
    powershell -ExecutionPolicy Bypass -File scripts/preflight.ps1
    ```
-   `-Update` belongs to *session start* only (`AGENTS.md`): upgrading the bridge CLIs mid-migration
-   swaps the validator underneath a half-built report. Preflight's output is **the** environment
-   inventory. Non-zero exit, or a CLI **below the correctness floor**: stop, surface the install hints
-   it printed, and ask for a session-start `-Update`.
+   **Only after an actual unsigned/ExecutionPolicy startup refusal**, follow
+   [preflight cannot start](../../docs/operator-runbook.md#preflight-cannot-start).
+   If allowed, retry the **exact originating command and arguments** — still plain preflight.
+   `-Update` belongs to *session start* only (`AGENTS.md`). Non-zero exit or a CLI
+   **below the correctness floor**: stop; surface preflight's hints and request session-start repair.
 1. **Read the brief, then confirm inputs.** `migrations/workbooks/<name>/migration-brief.md` carries
    scope, **autonomy** (`guided`/`standard`/`autopilot`), **fidelity bar** (faithful vs modernise) and
    the **wall policy** (stop, or degrade under `credential_gate.py authorize`). Obey it and pass the

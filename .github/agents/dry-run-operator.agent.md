@@ -141,6 +141,11 @@ blocked — temporary, machine-local, never the run's recorded path, and it waiv
 | 7 | **PRE-check** | `python scripts/check_reference_readiness.py <run>/bundle --oracle <run>/oracle` | the entry gate |
 | 8 | **POST-check** | `python scripts/check_unit.py <run>/bundle` | the exit gate |
 
+**Only after an actual unsigned/ExecutionPolicy startup refusal** at stage 0, follow
+[preflight cannot start](../../docs/operator-runbook.md#preflight-cannot-start).
+If allowed, retry the **exact originating command and arguments** — still plain preflight, never
+the runbook's session-start update command. Do not run policy diagnostics before stage 0.
+
 ⚠️ **Credentials come from `.env` or exported environment variables, never CLI arguments, and you
 never print a secret.** Redact when quoting output.
 
