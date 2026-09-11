@@ -265,7 +265,7 @@ class PackageFilesystemResult:  # pylint: disable=too-many-instance-attributes
     root_identity: str | None = field(default=None, repr=False, compare=False)
     verified_files: tuple[VerifiedFile, ...] = field(default=(), repr=False, compare=False)
     manifest: HeldVerifiedMember | None = field(default=None, repr=False, compare=False)
-    boundary_identity: tuple[tuple[int, int, int], ...] = field(default=(), repr=False, compare=False)
+    boundary_identity: tuple[tuple[int, ...], ...] = field(default=(), repr=False, compare=False)
 
     @property
     def is_clean(self) -> bool:
@@ -525,6 +525,11 @@ def walk_package(root: Path) -> tuple[dict[str, Path], list[Finding], list[str]]
     the bytes on its far side are never listed, let alone opened). Descending first and judging
     afterwards would already have read outside the package.
     """
+    return _walk_package(root)
+
+
+def _walk_package(root: Path) -> tuple[dict[str, Path], list[Finding], list[str]]:
+    """Shared no-follow traversal for published namespaces and later freshness checks."""
     files: dict[str, Path] = {}
     rows: list[Finding] = []
     empty_dirs: list[str] = []
@@ -591,7 +596,7 @@ def _file_identity(info: os.stat_result) -> tuple[int, int, int]:
     return info.st_dev, info.st_ino, info.st_nlink
 
 
-def _boundary_identity(root: Path) -> tuple[tuple[tuple[int, int, int], ...], list[Finding]]:
+def _boundary_identity(root: Path) -> tuple[tuple[tuple[int, ...], ...], list[Finding]]:
     """The original root/marker identities, checked without following either entry."""
     try:
         root_info = os.lstat(root)
@@ -607,7 +612,7 @@ def _boundary_identity(root: Path) -> tuple[tuple[tuple[int, int, int], ...], li
         return (), [_finding(CODE_MARKER_UNREADABLE)]
     if is_reparse_entry(marker_info) or not stat.S_ISREG(marker_info.st_mode) or marker_info.st_nlink != 1:
         return (), [_finding(CODE_MARKER_REPLACED)]
-    return (_file_identity(root_info), _file_identity(marker_info)), []
+    return ((root_info.st_dev, root_info.st_ino), _file_identity(marker_info)), []
 
 
 def _read_manifest(root: Path) -> tuple[dict[str, object] | None, bytes | None, Finding | None]:
@@ -633,14 +638,17 @@ def _declared_digests(files: dict[str, object]) -> tuple[dict[str, str], list[Fi
     return digests, [*key_rows, *digest_rows]
 
 
-def _walked_files(root: Path) -> tuple[dict[str, Path], list[Finding]]:
+def _walked_files(root: Path, *, publish: bool = False) -> tuple[dict[str, Path], list[Finding]]:
     """The walk's regular files and its findings, with the manifest itself removed.
 
     Empty directories are deliberately dropped here: :func:`walk_package` reports them because a
     caller may want to see them, but a directory holds no bytes, so it is neither declarable nor an
     extra file. The manifest is the ONLY excluded file - it carries the map.
+
+    Only namespace creation publishes Path objects through `walk_package`. Freshness checks share
+    the traversal implementation without publishing replacement objects for S1's retained paths.
     """
-    walked, rows, _empty_dirs = walk_package(root)
+    walked, rows, _empty_dirs = walk_package(root) if publish else _walk_package(root)
     walked.pop(PACKAGE_MARKER, None)
     # Sorted so a verdict is byte-stable across hosts: the walk uses a stack, so its natural order
     # depends on directory ordering rather than on anything a reader can predict or diff.
@@ -679,7 +687,7 @@ def verify_package(  # pylint: disable=too-many-locals,too-many-return-statement
         return _result([_finding(exc.code)])
 
     digests, declared_rows = _declared_digests(files)
-    walked, walk_rows = _walked_files(root)
+    walked, walk_rows = _walked_files(root, publish=True)
     members: list[VerifiedFile] = []
     compare_rows, verified = _compare_declared_with_walked(digests, walked, members=members)
     rows = [*declared_rows, *walk_rows, *compare_rows]

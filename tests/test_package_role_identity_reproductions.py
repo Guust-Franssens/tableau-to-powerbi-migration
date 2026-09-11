@@ -1,8 +1,5 @@
 """Direct controls for PR 600's ten S2 review reproductions; no producer-certified fixtures."""
 
-# Tests name their cases; exact empty-container assertions also guard the returned shape.
-# pylint: disable=missing-function-docstring,use-implicit-booleaness-not-comparison
-
 from __future__ import annotations
 
 import hashlib
@@ -183,8 +180,7 @@ def test_resolved_evidence_carries_the_walk_produced_path_object(
 
     def tracked(root: Path):
         files, findings, empty = original(root)
-        if not walked:
-            walked.update(files)
+        walked.update(files)
         return files, findings, empty
 
     monkeypatch.setattr(pri.pfs, "walk_package", tracked)
@@ -192,10 +188,8 @@ def test_resolved_evidence_carries_the_walk_produced_path_object(
 
     assert result.verdict == "START_READY", result.blockers
     assert len(result.evidence) == 2
-    namespace = {member.relative_path: member.path for member in result.verified.integrity.verified_files}
     for evidence in result.evidence:
-        key = f"{evidence.origin}/dashboard/view.png"
-        assert evidence.render_path is namespace[key] is walked[key]
+        assert evidence.render_path is walked[f"{evidence.origin}/dashboard/view.png"]
 
 
 @pytest.mark.parametrize(

@@ -227,6 +227,25 @@ def test_resealing_does_not_rebaseline_a_held_namespace(tmp_path: Path) -> None:
     assert_refusal(pfs.read_verified_member(package, verified, PROJECTION), "package_file_digest_mismatch")
 
 
+def test_empty_directory_link_count_is_not_a_replaced_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    package = filesystem_package(tmp_path)
+    verified = verify(package)
+    (package / "empty").mkdir()
+    original = os.lstat
+
+    def changed(path: Path, *args: object, **kwargs: object) -> os.stat_result:
+        info = original(path, *args, **kwargs)
+        if Path(path) != package:
+            return info
+        values = list(info)
+        values[3] += 1
+        extras = {key: getattr(info, key) for key in ("st_file_attributes", "st_reparse_tag") if hasattr(info, key)}
+        return os.stat_result(values, extras)
+
+    monkeypatch.setattr(os, "lstat", changed)
+    assert require_held(pfs.read_verified_member(package, verified, PROJECTION)).content == b'{"held":true}\r\n'
+
+
 @pytest.mark.parametrize("junction", [False, True])
 def test_same_byte_replaced_root_never_reuses_s1(tmp_path: Path, junction: bool) -> None:
     package = filesystem_package(tmp_path)
@@ -338,7 +357,7 @@ def test_s2_handoff_carries_current_live_keys(tmp_path: Path) -> None:
 
 def test_s2_spec_is_held_once_and_only_the_authority_walks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     package = with_data_access(datasource_package(tmp_path / "Source", luid=None), source_rows(LIVE), LIVE_PROJECTION)
-    original_read, original_walk, derive = Path.read_bytes, pfs.walk_package, pri.package_spec_facts
+    original_read, original_walk, derive = Path.read_bytes, pfs._walk_package, pri.package_spec_facts
     reads, inputs = [], []
 
     def recorded(path: Path) -> bytes:
@@ -355,7 +374,7 @@ def test_s2_spec_is_held_once_and_only_the_authority_walks(tmp_path: Path, monke
         return derive(spec)
 
     monkeypatch.setattr(Path, "read_bytes", recorded)
-    monkeypatch.setattr(pfs, "walk_package", walked)
+    monkeypatch.setattr(pfs, "_walk_package", walked)
     monkeypatch.setattr(pri, "package_spec_facts", facts)
     result = pri.verify_phase1_role_identity([package])[0]
     assert result.is_start_ready, result.codes()
