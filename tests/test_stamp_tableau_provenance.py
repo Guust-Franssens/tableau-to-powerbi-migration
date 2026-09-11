@@ -45,6 +45,7 @@ class FakeLookup:
         self._workbooks = workbooks
         self._remote_sha = remote_sha
         self._remote_key = remote_key
+        self.matched_luids = set()
         self.base, self.site = "https://x.online.tableau.com", "site"
         self.product_version, self.version = "2026.2.5", "3.29"
         self.signed_out = False
@@ -1157,6 +1158,12 @@ class RecordingReporter(prov.NullReporter):
     def lookup_intent(self, requested):
         self.messages.append({"kind": prov.MSG_LOOKUP_INTENT, "requested": requested})
 
+    def inventory_facts(self, facts):
+        self.messages.append({"kind": prov.MSG_INVENTORY_FACTS, "facts": facts})
+
+    def inventory_failed(self):
+        self.messages.append({"kind": prov.MSG_INVENTORY_FAILED})
+
     def safe_snapshot(self, result):
         self.messages.append({"kind": prov.MSG_SAFE_SNAPSHOT, "result": result})
 
@@ -1766,7 +1773,6 @@ def test_malformed_pagination_container_is_not_missing_metadata(metadata: object
     [
         (1, {"pageNumber": 0}),
         (1, {"pageNumber": 2, "pageSize": 1000, "totalAvailable": 1}),
-        (1000, {"pageNumber": 2, "pageSize": 1000, "totalAvailable": 2000}),
         (1, {"pageSize": 0}),
         (1, {"pageSize": 999}),
         (1, {"pageSize": 1001}),
@@ -1827,7 +1833,8 @@ def test_inventory_failure_does_not_acquire_a_pagination_state(
     assert result["phase"]["status"] == "partial"
     assert (
         result["phase"]["errors"]
-        == [{"code": "live-lookup-failed", "operation": "lookup-origin", "exception_class": exception_class}] * 2
+        == [{"code": "inventory-failed", "operation": "inventory", "exception_class": exception_class}]
+        + [{"code": "live-lookup-failed", "operation": "lookup-origin", "exception_class": exception_class}] * 2
     )
     assert all(record["input"]["sha256"] for record in result["inputs"])
     assert (site.count("inventory"), site.count("content")) == (1, 0)
@@ -1856,6 +1863,108 @@ def test_inventory_rows_and_completeness_share_one_decode_and_one_cache(monkeypa
         assert site.workbooks() is rows and site.inventory_completeness is page
     assert len(decoded) == 1 and classified == [(1000, {"totalAvailable": "1001"})], "ONE_PAGE_ONE_PARSE"
     assert site.count("inventory") == 1
+
+
+@pytest.mark.parametrize("row_count", [1, 1000])
+@pytest.mark.parametrize("key", ["pageNumber", "pageSize"])
+@pytest.mark.parametrize("bad", [None, True, "private-response", [], 0, 2])
+def test_valid_truncating_total_precedes_malformed_or_contradictory_siblings(
+    row_count: int, key: str, bad: object
+) -> None:
+    metadata = {"pageNumber": 1, "pageSize": 1000, "totalAvailable": str(row_count + 1), key: bad}
+    site = RecordingSite(LIVE_ENV, inventory_document=_inventory_page(row_count, metadata))
+    assert len(site.workbooks()) == row_count
+    assert site.inventory_completeness.status == "truncated", "TRUNCATING_TOTAL_PRECEDENCE"
+    assert site.inventory_completeness.error()["total_available"] == row_count + 1
+    assert site.count("inventory") == 1
+
+
+@pytest.mark.parametrize("total", [0, 1, None, True, "2x"])
+@pytest.mark.parametrize("key", ["pageNumber", "pageSize"])
+def test_a_nontruncating_or_untrustworthy_total_cannot_rescue_a_malformed_sibling(total: object, key: str) -> None:
+    metadata = {"pageNumber": 1, "pageSize": 1000, "totalAvailable": total, key: True}
+    site = RecordingSite(LIVE_ENV, inventory_document=_inventory_page(1, metadata))
+    site.workbooks()
+    assert site.inventory_completeness.status == "cannot_establish", "MALFORMED_SIBLING_NEVER_COMPLETE"
+
+
+@pytest.mark.parametrize("failure", [None, "transport", "parse"])
+def test_real_worker_emits_one_raw_parse_outcome_before_content(
+    tmp_path: Path, monkeypatch, failure: str | None
+) -> None:
+    """The production worker/reporter/parser, not the fixture reporter, owns the success event."""
+    from types import SimpleNamespace  # pylint: disable=import-outside-toplevel
+
+    import run_estate as estate  # pylint: disable=import-outside-toplevel
+
+    _twbx(tmp_path, "unit")
+    kwargs = {"inventory_document": _inventory_page(1, {"totalAvailable": 1})}
+    kwargs["inventory_document"]["workbooks"]["workbook"][0]["name"] = "unit"
+    if failure == "transport":
+        kwargs = {"inventory_error": urllib.error.URLError("private-response")}
+    elif failure == "parse":
+        kwargs = {"inventory_document": b"{"}
+    site = _install(monkeypatch, RecordingSite(LIVE_ENV, **kwargs))
+    monkeypatch.setattr(prov, "resolve_env", lambda _path: dict(LIVE_ENV))
+    messages = []
+    channel = SimpleNamespace(
+        send=lambda message: messages.append(json.loads(json.dumps(message, allow_nan=False))), close=lambda: None
+    )
+    prov.provenance_worker(channel, None, {"input": str(tmp_path)})
+    kinds = [message["kind"] for message in messages]
+    assert kinds.count("inventory-facts") == int(failure is None), "PARSE_FACTS_EXACTLY_ONCE"
+    assert kinds.count("inventory-failed") == int(failure is not None), "FAILED_PARSE_NO_SUCCESS_FACTS"
+    outcome = kinds.index("inventory-facts" if failure is None else "inventory-failed")
+    assert messages[outcome - 1] == {"kind": "operation", "operation": "inventory", "completed": 0, "total": 1}
+    assert messages[outcome + 1] == {"kind": "operation", "operation": "inventory", "completed": 1, "total": 1}
+    if failure is None:
+        assert messages[outcome] == {
+            "kind": "inventory-facts",
+            "facts": {
+                "returned_count": 1,
+                "requested_page_size": 1000,
+                "page_number": None,
+                "page_size": None,
+                "total_available": 1,
+                "invalid_fields": 0,
+            },
+        }
+    state = estate._ProvenanceState(emit=lambda *_args: None)  # pylint: disable=protected-access
+    for message in messages:
+        state.accept(message)
+    assert state.terminal == messages[-1]["result"], "PRODUCTION_PARSE_OUTCOME_PROTOCOL"
+    assert state.terminal["phase"]["status"] == ("success" if failure is None else "partial")
+    assert (site.count("inventory"), site.count("content")) == (1, int(failure is None))
+
+
+@pytest.mark.parametrize("row_count,total,expected", [(1, 2, "truncated"), (1000, None, "cannot_establish")])
+def test_parent_classifies_raw_facts_even_when_worker_classification_is_wrong(
+    tmp_path: Path, monkeypatch, row_count: int, total: int | None, expected: str
+) -> None:
+    """Only the worker classifier is perturbed; the parent's answer must still follow numeric facts."""
+    import run_estate as estate  # pylint: disable=import-outside-toplevel
+
+    _twbx(tmp_path, f"{_fixture_luid(0)}_Fixture")
+    metadata = {} if total is None else {"totalAvailable": total}
+    site = _install(monkeypatch, RecordingSite(LIVE_ENV, inventory_document=_inventory_page(row_count, metadata)))
+    classify = prov._inventory_completeness  # pylint: disable=protected-access
+    monkeypatch.setattr(prov, "_inventory_completeness", lambda *args: classify(*args)._replace(status="complete"))
+    reporter = RecordingReporter()
+    result = prov.build(tmp_path, LIVE_ENV, reporter)
+    reporter.terminal(result)
+    assert result["phase"] == {"status": "success", "errors": []}, "control must contain the wrong worker verdict"
+    state = estate._ProvenanceState(emit=lambda *_args: None)  # pylint: disable=protected-access
+    facts_at = reporter.kinds().index("inventory-facts")
+    for message in reporter.messages[: facts_at + 1]:
+        state.accept(message)
+    assert state.inventory.status == expected, "PARENT_CLASSIFIES_RAW_FACTS"
+    with pytest.raises(estate.ProvenanceProtocolError):
+        for message in reporter.messages[facts_at + 1 :]:
+            state.accept(message)
+    document = state.document(estate.PROVENANCE_PROTOCOL_CODE)
+    assert document["phase"]["errors"][0]["code"] == f"inventory-{expected.replace('_', '-')}"
+    assert not prov.is_success(document)
+    assert (site.count("inventory"), site.count("content")) == (1, 1)
 
 
 def test_pagination_diagnostics_and_progress_never_copy_response_text(tmp_path: Path, monkeypatch) -> None:

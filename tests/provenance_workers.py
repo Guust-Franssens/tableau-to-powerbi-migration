@@ -26,6 +26,8 @@ MESSAGE_INPUTS_DISCOVERED = "inputs-discovered"
 MESSAGE_OPERATION = "operation"
 MESSAGE_CHECKPOINT = "checkpoint"
 MESSAGE_LOOKUP_INTENT = "lookup-intent"
+MESSAGE_INVENTORY_FACTS = "inventory-facts"
+MESSAGE_INVENTORY_FAILED = "inventory-failed"
 MESSAGE_SAFE_SNAPSHOT = "safe-snapshot"
 MESSAGE_TERMINAL = "terminal"
 
@@ -91,11 +93,28 @@ def protocol_messages(
     messages.append({"kind": MESSAGE_LOOKUP_INTENT, "requested": live})
     if live:
         result["phase"]["status"] = "success"
-        for operation in ("sign-in", "inventory"):
-            messages.extend([_operation(operation, 0, 1), _operation(operation, 1, 1)])
+        messages.extend(
+            [
+                _operation("sign-in", 0, 1),
+                _operation("sign-in", 1, 1),
+                _operation("inventory", 0, 1),
+                {
+                    "kind": MESSAGE_INVENTORY_FACTS,
+                    "facts": {
+                        "returned_count": len(files),
+                        "requested_page_size": 1000,
+                        "page_number": 1,
+                        "page_size": 1000,
+                        "total_available": len(files),
+                        "invalid_fields": 0,
+                    },
+                },
+                _operation("inventory", 1, 1),
+            ]
+        )
         attempted = set()
         for record, match in zip(result["inputs"], matches if matches is not None else range(len(files))):
-            messages.append(_operation("content", len(attempted)))
+            messages.append(_operation("content", len(attempted), len(attempted)))
             if match is None:
                 record["origin_note"] = "no workbook of this LUID or name on the site - local-only input"
             else:
@@ -119,7 +138,7 @@ def protocol_messages(
                     "remote_sha256": CHECKPOINT_SHA,
                     "same_name_count": 1,
                 }
-            messages.append(_operation("content", len(attempted)))
+            messages.append(_operation("content", len(attempted), len(attempted)))
         messages.extend(
             [
                 _operation("scrub", 0, 1),

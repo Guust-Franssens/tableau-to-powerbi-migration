@@ -337,6 +337,7 @@ _WORKER_ERROR_CODES = (
             "local-fingerprint-failed",
             "live-lookup-refused",
             "live-lookup-failed",
+            prov.MSG_INVENTORY_FAILED,
             "content-unavailable",
             "scrub-failed",
             "sign-out-failed",
@@ -903,6 +904,8 @@ def _validated_error(error: object) -> None:
         _require(error["requested_page_size"] == prov.INVENTORY_PAGE_SIZE)
     else:
         _require(prov.INVENTORY_FACT_KEYS.isdisjoint(error))
+    if error["code"] == prov.MSG_INVENTORY_FAILED:
+        _require(error["operation"] == prov.OP_INVENTORY)
     for key in error.keys() & prov.INVENTORY_FACT_KEYS:
         _require(_is_count(error[key]))
     if "exception_class" in error:
@@ -912,6 +915,18 @@ def _validated_error(error: object) -> None:
             _require(type(error[key]) is int and -(1 << 31) <= error[key] < (1 << 32))
     if "http_status" in error:
         _require(_is_count(error["http_status"]) and (error["http_status"] == 0 or 100 <= error["http_status"] <= 599))
+
+
+def _validated_inventory_facts(facts: object) -> None:
+    _require(type(facts) is dict and facts.keys() == prov.INVENTORY_RAW_FACT_KEYS)
+    for key in ("returned_count", "requested_page_size", "invalid_fields"):
+        _require(_is_count(facts[key]))
+    _require(facts["requested_page_size"] == prov.INVENTORY_PAGE_SIZE)
+    for key in ("page_number", "page_size", "total_available"):
+        _require(facts[key] is None or _is_count(facts[key]))
+    _require(
+        facts["invalid_fields"] <= sum(facts[key] is None for key in ("page_number", "page_size", "total_available"))
+    )
 
 
 def _validated_revision(revision: object) -> None:
@@ -1021,6 +1036,7 @@ def _validated_result_record(record: object) -> dict:
         _require(record["origin_note"] in notes)
     if "lookup_error" in record:
         _validated_error(record["lookup_error"])
+        _require(record["lookup_error"]["code"] not in prov.INVENTORY_ERROR_CODES)
     return reduced
 
 
@@ -1082,6 +1098,11 @@ def _validated_message(message: object) -> dict:
         _validated_checkpoint(message["record"])
     elif kind == prov.MSG_LOOKUP_INTENT:
         _require(keys == {"kind", "requested"} and type(message["requested"]) is bool)
+    elif kind == prov.MSG_INVENTORY_FACTS:
+        _require(keys == {"kind", "facts"})
+        _validated_inventory_facts(message["facts"])
+    elif kind == prov.MSG_INVENTORY_FAILED:
+        _require(keys == {"kind"})
     elif kind in (prov.MSG_SAFE_SNAPSHOT, prov.MSG_TERMINAL):
         _require(keys == {"kind", "result"} and type(message["result"]) is dict)
     else:
@@ -1103,6 +1124,9 @@ class _ProvenanceState:  # pylint: disable=too-many-instance-attributes
         self.snapshot: dict | None = None
         self.terminal: dict | None = None
         self.live_requested: bool | None = None
+        self.inventory: prov.InventoryCompleteness | None = None
+        self.inventory_failed = False
+        self.matched_count = 0
         self.content_inputs = 0
         self.content_open = False
         #: What the worker was last known to be DOING - the operation a deadline error names.
@@ -1134,15 +1158,25 @@ class _ProvenanceState:  # pylint: disable=too-many-instance-attributes
             _require(self.counters.get(prov.OP_COLLECT_INPUTS) == 1)
             _require(self.counters.get(prov.OP_FINGERPRINT) == self.total)
             candidate.live_requested = message["requested"]
+        elif kind in (prov.MSG_INVENTORY_FACTS, prov.MSG_INVENTORY_FAILED):
+            _require(self.live_requested is True and self.operation == prov.OP_INVENTORY)
+            _require(self.counters.get(prov.OP_INVENTORY) == 0)
+            _require(self.inventory is None and not self.inventory_failed)
+            if kind == prov.MSG_INVENTORY_FACTS:
+                candidate.inventory = prov.classify_inventory(message["facts"])
+            else:
+                candidate.inventory_failed = True
         elif kind == prov.MSG_SAFE_SNAPSHOT:
             _require(self.total is not None and self.snapshot is None)
             _require(self.operation == prov.OP_SCRUB and self.counters.get(prov.OP_SCRUB) == 1)
             candidate.snapshot = _validated_result(message["result"], self.total, self.checkpoints)
             self.validate_result_history(candidate.snapshot, terminal=False)
+            candidate.snapshot = self.retain_inventory_finding(candidate.snapshot)
         else:
             _require(self.total is not None)
             candidate.terminal = _validated_result(message["result"], self.total, self.checkpoints)
             self.validate_result_history(candidate.terminal, terminal=True)
+            candidate.terminal = self.retain_inventory_finding(candidate.terminal)
             if self.snapshot is not None:
                 _require(candidate.terminal["inputs"] == self.snapshot["inputs"])
                 prior = self.snapshot["phase"]
@@ -1155,6 +1189,7 @@ class _ProvenanceState:  # pylint: disable=too-many-instance-attributes
 
     def validate_result_history(self, result: dict, *, terminal: bool) -> None:
         """Success must describe the applicable observed path, not just a complete fingerprint list."""
+        self.validate_inventory_history(result)
         status = result["phase"]["status"]
         if status not in prov.SUCCESS_STATUSES:
             return
@@ -1165,6 +1200,7 @@ class _ProvenanceState:  # pylint: disable=too-many-instance-attributes
             _require(all(record.get("origin") is None and "origin_note" not in record for record in result["inputs"]))
             return
         _require(self.live_requested is True)
+        _require(self.inventory is not None and self.inventory.status == "complete" and not self.inventory_failed)
         _require(
             all(self.counters.get(operation) == 1 for operation in (prov.OP_SIGN_IN, prov.OP_INVENTORY, prov.OP_SCRUB))
         )
@@ -1180,9 +1216,44 @@ class _ProvenanceState:  # pylint: disable=too-many-instance-attributes
                 _require(origin["remote_sha256"] is not None and origin["content_unavailable"] is None)
                 _require(origin["match"] in {"sha256", "name_only"})
                 matched.add(origin["workbook_luid"])
-        _require(self.counters.get(prov.OP_CONTENT) == len(matched))
+        _require(self.counters.get(prov.OP_CONTENT) == self.matched_count == len(matched))
         if terminal:
             _require(self.snapshot is not None and self.counters.get(prov.OP_SIGN_OUT) == 1)
+
+    def validate_inventory_history(self, result: dict) -> None:
+        """All verdicts must agree with the accepted parse outcome and bounded match/attempt counts."""
+        finding = self.inventory.error() if self.inventory is not None else None
+        claims = [error for error in result["phase"]["errors"] if error["code"] in prov.INVENTORY_ERROR_CODES]
+        _require(not claims or (finding is not None and claims == [finding]))
+        failures = [error for error in result["phase"]["errors"] if error["code"] == prov.MSG_INVENTORY_FAILED]
+        _require(not failures or (self.inventory_failed and len(failures) == 1))
+        if self.inventory_failed and self.counters.get(prov.OP_INVENTORY) == 1:
+            _require(len(failures) == 1)
+        matched = set()
+        for record in result["inputs"]:
+            origin = record.get("origin")
+            if origin is not None:
+                _require(type(origin["workbook_luid"]) is str and bool(origin["workbook_luid"]))
+                matched.add(origin["workbook_luid"])
+        returned = self.inventory.returned_count if self.inventory is not None else 0
+        _require(len(matched) <= self.matched_count <= returned)
+        _require(self.counters.get(prov.OP_CONTENT, 0) <= self.matched_count)
+        withheld = {prov.CANCELLED_CODE, prov.DEADLINE_CODE, "scrub-failed", "build-failed"}
+        if not any(error["code"] in withheld for error in result["phase"]["errors"]):
+            unread = sum(record.get("origin") is None and "lookup_error" in record for record in result["inputs"])
+            _require(self.matched_count <= len(matched) + unread)
+
+    def retain_inventory_finding(self, result: dict) -> dict:
+        """A parent-classified pagination finding survives every later result or interruption."""
+        finding = self.inventory.error() if self.inventory is not None else None
+        if finding is None or finding in result["phase"]["errors"]:
+            return result
+        result = dict(result)
+        result["phase"] = {
+            "status": "partial" if self.checkpoints else "failed",
+            "errors": [finding, *result["phase"]["errors"]],
+        }
+        return result
 
     def prepare_operation(self, message: dict) -> None:
         """Check operation order and counters on the temporary candidate, not the accepted state."""
@@ -1203,14 +1274,16 @@ class _ProvenanceState:  # pylint: disable=too-many-instance-attributes
             else:
                 _require(self.live_requested is True and len(self.checkpoints) == self.total)
                 if operation == prov.OP_CONTENT:
-                    _require(total is None and completed <= self.total)
+                    _require(_is_count(total) and completed <= self.total)
                     _require(self.counters.get(prov.OP_INVENTORY) == 1)
-                    self.prepare_content(completed)
+                    self.prepare_content(completed, total)
                 else:
                     _require(total == 1 and completed in (0, 1))
                     _require(completed == (0 if operation not in self.counters else self.counters[operation] + 1))
                 if operation == prov.OP_INVENTORY:
                     _require(self.counters.get(prov.OP_SIGN_IN) == 1)
+                    if completed == 1:
+                        _require((self.inventory is not None) != self.inventory_failed)
                 if operation == prov.OP_SCRUB:
                     _require(self.counters.get(prov.OP_INVENTORY) == 1 and not self.content_open)
                     usable = sum(record["input"].get("status") != "unavailable" for record in self.checkpoints.values())
@@ -1220,14 +1293,18 @@ class _ProvenanceState:  # pylint: disable=too-many-instance-attributes
         self.operation = operation
         self.counters = {**self.counters, operation: completed}
 
-    def prepare_content(self, completed: int) -> None:
+    def prepare_content(self, completed: int, matched: int) -> None:
         """Pair each usable input's lookup, counting only new distinct download attempts (#582)."""
         prior = self.counters.get(prov.OP_CONTENT, 0)
+        returned = self.inventory.returned_count if self.inventory is not None else 0
+        _require(completed <= matched <= returned)
         if self.content_open:
             _require(prior <= completed <= prior + 1)
+            _require(self.matched_count <= matched <= self.matched_count + 1)
             self.content_inputs += 1
         else:
-            _require(completed == prior and self.content_inputs < self.total)
+            _require(completed == prior and matched == self.matched_count and self.content_inputs < self.total)
+        self.matched_count = matched
         self.content_open = not self.content_open
 
     def commit(self, candidate: _ProvenanceState) -> None:
@@ -1238,7 +1315,7 @@ class _ProvenanceState:  # pylint: disable=too-many-instance-attributes
             total = (
                 self.total
                 if self.operation == prov.OP_FINGERPRINT
-                else (None if self.operation == prov.OP_CONTENT else 1)
+                else (self.matched_count if self.operation == prov.OP_CONTENT else 1)
             )
             self._emit("operation-progress", self.operation, self.counters[self.operation], total)
 
@@ -1265,11 +1342,13 @@ class _ProvenanceState:  # pylint: disable=too-many-instance-attributes
             result = dict(source)
             phase = result.get("phase") if isinstance(result.get("phase"), dict) else {}
             result["phase"] = {"status": "partial", "errors": [*(phase.get("errors") or []), error]}
-            return result
+            return self.retain_inventory_finding(result)
         if self.total is None and not self.checkpoints:
             return prov.phase_result([], "failed", [error])
         records = [self.checkpoints.get(index) or prov.unavailable_input(code) for index in range(self.total or 0)]
-        return prov.phase_result(records, "partial" if self.checkpoints else "failed", [error])
+        return self.retain_inventory_finding(
+            prov.phase_result(records, "partial" if self.checkpoints else "failed", [error])
+        )
 
 
 class ProvenanceOutcome(NamedTuple):

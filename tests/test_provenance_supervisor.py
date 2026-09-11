@@ -57,6 +57,128 @@ def _result(count: int = 1) -> dict:
     }
 
 
+def _inventory_started() -> estate._ProvenanceState:
+    state = _fingerprinted()
+    state.accept({"kind": "lookup-intent", "requested": True})
+    for operation, completed in (("sign-in", 0), ("sign-in", 1), ("inventory", 0)):
+        state.accept({"kind": "operation", "operation": operation, "completed": completed, "total": 1})
+    return state
+
+
+def _facts(**changes) -> dict:
+    return {
+        "kind": "inventory-facts",
+        "facts": {
+            "returned_count": 1000,
+            "requested_page_size": 1000,
+            "page_number": None,
+            "page_size": None,
+            "total_available": None,
+            "invalid_fields": 0,
+            **changes,
+        },
+    }
+
+
+def test_inventory_completion_requires_exactly_one_parse_outcome() -> None:
+    state = _inventory_started()
+    completion = {"kind": "operation", "operation": "inventory", "completed": 1, "total": 1}
+    try:
+        state.accept(completion)
+    except estate.ProvenanceProtocolError:
+        pass
+    else:
+        pytest.fail("INVENTORY_EVENT_REQUIRED: completion without a parse outcome was accepted")
+    assert state.counters["inventory"] == 0
+    state.accept(_facts(returned_count=0, total_available=0))
+    state.accept(completion)
+    assert state.inventory.status == "complete" and state.counters["inventory"] == 1
+
+
+@pytest.mark.parametrize("kind", ["inventory-facts", "inventory-failed"])
+def test_successful_and_failed_inventory_outcomes_are_exclusive(kind: str) -> None:
+    state = _inventory_started()
+    state.accept({"kind": "inventory-failed"})
+    message = _facts() if kind == "inventory-facts" else {"kind": "inventory-failed"}
+    with pytest.raises(estate.ProvenanceProtocolError):
+        state.accept(message)
+    state.accept({"kind": "operation", "operation": "inventory", "completed": 1, "total": 1})
+    assert state.inventory is None and state.inventory_failed
+
+
+@pytest.mark.parametrize(
+    "field", ["returned_count", "requested_page_size", "page_number", "page_size", "total_available", "invalid_fields"]
+)
+@pytest.mark.parametrize("value", [True, False, -1, 1.0, float("nan"), float("inf"), "1000", 1 << 63])
+def test_raw_inventory_facts_are_numeric_bounded_and_never_coerced(field: str, value: object) -> None:
+    with pytest.raises(estate.ProvenanceProtocolError):
+        estate._validated_message(_facts(**{field: value}))
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"returned_count": None},
+        {"requested_page_size": None},
+        {"invalid_fields": None},
+        {"invalid_fields": 4},
+        {"invalid_fields": 1, "page_number": 1, "page_size": 1000, "total_available": 1000},
+        {"requested_page_size": 999},
+        {"status": "complete"},
+        {"url": "https://private.invalid"},
+        {"name": "private-workbook"},
+    ],
+)
+def test_raw_facts_have_a_closed_shape_and_consistent_validity_count(changes: dict) -> None:
+    with pytest.raises(estate.ProvenanceProtocolError):
+        estate._validated_message(_facts(**changes))
+
+
+@pytest.mark.parametrize("missing", ["returned_count", "requested_page_size", "page_number", "invalid_fields"])
+def test_raw_inventory_facts_require_the_whole_numeric_envelope(missing: str) -> None:
+    message = _facts()
+    del message["facts"][missing]
+    with pytest.raises(estate.ProvenanceProtocolError):
+        estate._validated_message(message)
+
+
+@pytest.mark.parametrize(
+    "changes,expected",
+    [
+        ({"returned_count": 0}, "complete"),
+        ({"returned_count": 999}, "complete"),
+        ({"total_available": 1000}, "complete"),
+        ({}, "cannot_establish"),
+        ({"total_available": 1001}, "truncated"),
+        ({"total_available": 1001, "invalid_fields": 1}, "truncated"),
+        ({"total_available": 1000, "invalid_fields": 1}, "cannot_establish"),
+        ({"total_available": 999}, "cannot_establish"),
+    ],
+)
+def test_parent_classifies_at_the_raw_event_before_any_result(changes: dict, expected: str) -> None:
+    state = _inventory_started()
+    state.accept(_facts(**changes))
+    assert state.inventory.status == expected, "PARENT_RAW_EVENT_CLASSIFICATION"
+    assert state.snapshot is None and state.terminal is None
+
+
+@pytest.mark.parametrize("code", [estate.PROVENANCE_DEADLINE_CODE, estate.PROVENANCE_CRASH_CODE])
+def test_parent_retains_known_ambiguity_without_a_worker_result(code: str) -> None:
+    state = _inventory_started()
+    state.accept(_facts())
+    document = state.document(code)
+    assert document["phase"]["errors"] == [
+        {
+            "code": "inventory-cannot-establish",
+            "operation": "inventory",
+            "returned_count": 1000,
+            "requested_page_size": 1000,
+        },
+        {"code": code, "operation": "inventory"},
+    ], "PARENT_INVENTORY_ERROR_RETENTION"
+    assert not prov.is_success(document) and document["inputs"][0]["input"]["sha256"] == "a" * 64
+
+
 @pytest.mark.parametrize("value", [True, False, -1, 1.0, float("nan"), float("inf"), "1", 1 << 64])
 def test_count_validator_rejects_non_counts_for_its_own_reason(value: object) -> None:
     """Removing the count validator must fail here, not happen to trip a later sequence guard."""

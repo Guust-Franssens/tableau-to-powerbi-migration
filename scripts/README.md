@@ -95,8 +95,10 @@ order are checked; snapshots and terminal results reconcile to discovery and acc
 After the local pass, a single boolean `lookup-intent` establishes whether live work was requested.
 `success` requires sign-in, inventory, paired content progress for every usable input, completed scrub,
 an accepted safe snapshot, and completed sign-out before terminal, in that order. Content counters
-advance only for distinct attempts and reconcile to distinct matched workbook LUIDs; cache hits and
-inventory misses do not invent downloads (#582). `local_only` requires explicit local intent, no live
+advance only for distinct attempts; their `total` is the distinct matched LUID count known so far, not
+an input count or a forecast. Attempts cannot exceed matched identities, matched identities cannot
+exceed returned inventory rows, and successful results reconcile to their distinct scrubbed LUIDs.
+Cache hits and inventory misses do not invent downloads (#582). `local_only` requires explicit local intent, no live
 operation even started, and an independently local-only result. Missing or reordered applicable stages,
 unsupported success, and live-to-local relabelling are `worker-protocol-invalid`, published fail-closed
 with exit 11.
@@ -121,7 +123,22 @@ disappeared. The artifact reports that failure.
 This is a direct-worker computation bound, **not** descendant supervision, a standalone-stamper
 deadline, pagination, or a deadline on the parent's filesystem publication. Path validation still runs
 before provenance. Strict-JSON atomic replacement and prior-byte preservation are unchanged.
-The single cached inventory page is complete only when valid first-page counts prove it or it is shorter than the requested 1,000 rows without contradictory metadata; a truncated or unestablished page records numeric-only facts, preserves local fingerprints, and exits 11 before later phases, while offline and proven-complete inventories gain no pagination finding.
+The successful inventory parse emits exactly one `inventory-facts` event before inventory completion
+or content work. It carries bounded numeric/null counts and an `invalid_fields` count distinguishing
+malformed metadata from absent metadata; it carries no remote text or classification. A failed request
+or parse emits an exclusive `inventory-failed` marker instead. The parent requires exactly one parse
+outcome for inventory completion and independently classifies the facts. Offline facts, duplicate or
+out-of-order outcomes, contradictory worker claims, and impossible count relationships are protocol
+errors even on non-success paths.
+
+The single cached page is complete only when valid first-page facts prove it (including an explicit
+1,000/1,000 total), or it is shorter than the requested 1,000 rows without contradictory metadata.
+A trustworthy total greater than the returned count proves `truncated` **before** unrelated malformed
+page-number/page-size fields are considered. Malformed or contradictory facts never prove `complete`.
+The parent retains a typed `inventory-truncated` or `inventory-cannot-establish` finding through later
+cancellation, failure or deadline expiry, even if the worker omits it. These outcomes preserve local
+fingerprints and exit 11 before later phases; offline and proven-complete inventories gain no pagination
+finding. This remains exactly one inventory request, not multi-page fetching.
 
 ### S2 package preparation
 
