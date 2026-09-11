@@ -129,9 +129,13 @@ import json
 import logging
 import re
 import sys
+import threading
 import time
 import urllib.request
+from collections.abc import Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from itertools import groupby
 from pathlib import Path
 from typing import Any
 
@@ -240,6 +244,10 @@ LOG = logging.getLogger("tableau-oracle")
 # which is what lets `artifact_stem` be an allowlist rather than one more screen.
 _LUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
+DEFAULT_WORKERS = 1
+MAX_WORKERS = 4
+_MANIFEST_NAME = "oracle-manifest.json"
+
 
 @dataclass(frozen=True)
 class SiteCredentials:
@@ -303,7 +311,7 @@ def classify_export_error(status: int, text: str, *, redactor=None) -> tuple[str
     return "failed", f"HTTP {status}: {safe[:200]}"
 
 
-class TableauSession:
+class TableauSession:  # pylint: disable=too-many-instance-attributes
     """Minimal stdlib Tableau REST client that survives mid-loop session loss and transient faults."""
 
     def __init__(
@@ -316,6 +324,15 @@ class TableauSession:
         # returned `HTTP 0 / TimeoutError: read operation timed out` on three separate runs across two
         # days, and an operator had no way to grant it more time short of editing this file.
         self.timeout_sec = REST_TIMEOUT_SEC if timeout_sec is None else timeout_sec
+        self._auth_lock = threading.RLock()
+        self._counter_lock = threading.Lock()
+        self._cooldown_lock = threading.Lock()
+        self._request_context = threading.local()
+        self._token_generation = 0
+        self._known_tokens: set[str] = set()
+        self._cooldown_until = 0.0
+        self._monotonic = time.monotonic
+        self._sleep = time.sleep
         self.token: str | None = None
         self.site_id: str | None = None
         self.reauth_count = 0
@@ -328,7 +345,89 @@ class TableauSession:
 
     def _redact_response(self, text: str) -> str:
         """Scrub every Tableau credential known at this point before text leaves the HTTP layer."""
-        return redact(text, self._creds.pat_secret, self._creds.pat_name, self.token or "")
+        request_token = getattr(self._request_context, "auth_token", None)
+        with self._auth_lock:
+            tokens = set(self._known_tokens)
+            if self.token:
+                tokens.add(self.token)
+        if request_token:
+            tokens.add(request_token)
+        return redact(text, self._creds.pat_secret, self._creds.pat_name, *sorted(tokens))
+
+    def _publish_auth(self, token: str, site_id: str) -> None:
+        """Publish one newly authenticated token and advance its generation atomically."""
+        with self._auth_lock:
+            self.token = token
+            self.site_id = site_id
+            self._known_tokens.add(token)
+            self._token_generation += 1
+
+    def _increment_retry_count(self) -> None:
+        with self._counter_lock:
+            self.retry_count += 1
+
+    def _increment_reauth_count(self) -> int:
+        with self._counter_lock:
+            self.reauth_count += 1
+            return self.reauth_count
+
+    def _wait_for_pool_cooldown(self, deadline: float | None = None) -> None:
+        """Delay a later request until the longest observed HTTP 429 cooldown has expired."""
+        while True:
+            now = self._monotonic()
+            with self._cooldown_lock:
+                cooldown_until = self._cooldown_until
+            if now >= cooldown_until or (deadline is not None and now >= deadline):
+                return
+            wake_at = min(cooldown_until, deadline) if deadline is not None else cooldown_until
+            self._sleep(max(wake_at - now, 0.0))
+
+    def _observe_rate_limit(self, status: int, headers: dict[str, str]) -> None:
+        """Make one worker's Retry-After a pool-wide admission delay for later requests."""
+        if status != 429:
+            return
+        delay = backoff_delay(1, header_value(headers, "Retry-After"), jitter=False)
+        cooldown_until = sum((self._monotonic(), delay))
+        with self._cooldown_lock:
+            self._cooldown_until = max(self._cooldown_until, cooldown_until)
+
+    def _request_with_generation(
+        self,
+        path: str,
+        *,
+        api: str | None = None,
+        deadline: float | None = None,
+    ) -> tuple[int, bytes, dict[str, str], int]:
+        """Issue one export against an atomic token snapshot and return that token's generation."""
+        self._wait_for_pool_cooldown(deadline)
+        with self._auth_lock:
+            generation = self._token_generation
+            token = self.token
+            if token:
+                self._known_tokens.add(token)
+        self._request_context.auth_token = token
+        self._request_context.cooldown_waited = True
+        try:
+            status, payload, headers = self._request("GET", path, api=api, deadline=deadline)
+        finally:
+            del self._request_context.auth_token
+            del self._request_context.cooldown_waited
+        return status, payload, headers, generation
+
+    def _reauthenticate_if_current(self, observed_generation: int) -> bool:
+        """Refresh only if no other worker already replaced the token that failed."""
+        with self._auth_lock:
+            if observed_generation != self._token_generation:
+                return False
+            before = self._token_generation
+            self.sign_in()
+            # Existing test doubles override sign_in() and assign token/site_id directly. Keep their
+            # generation semantics aligned with the real implementation.
+            if self._token_generation == before:
+                if self.token:
+                    self._known_tokens.add(self.token)
+                self._token_generation += 1
+            return True
 
     # A single HTTP round trip whose parameters map 1:1 to distinct HTTP concerns -- verb, path,
     # entity body, Accept header, auth header, API-version segment. Grouping any two of them would be
@@ -366,6 +465,8 @@ class TableauSession:
         ``tableau_render_capability``, whose three hand-rolled copies of it each leaked a reflected
         credential in a different review round. The bare ``_request`` below is that module-level
         import, not recursion into this method."""
+        if not getattr(self._request_context, "cooldown_waited", False):
+            self._wait_for_pool_cooldown(deadline)
         req = urllib.request.Request(
             f"{self._creds.base.rstrip('/')}/api/{api or self._creds.version}{path}",
             data=json.dumps(body).encode() if body else None,
@@ -375,9 +476,18 @@ class TableauSession:
             req.add_header("Accept", accept)
         if body:
             req.add_header("Content-Type", "application/json")
-        if authed and self.token:
-            req.add_header("X-Tableau-Auth", self.token)
-        return _request(req, timeout=self.timeout_sec, redactor=self._redact_response, deadline=deadline)
+        with self._auth_lock:
+            token = getattr(self._request_context, "auth_token", self.token)
+        if authed and token:
+            req.add_header("X-Tableau-Auth", token)
+        status, payload, headers = _request(
+            req,
+            timeout=self.timeout_sec,
+            redactor=self._redact_response,
+            deadline=deadline,
+        )
+        self._observe_rate_limit(status, headers)
+        return status, payload, headers
 
     def sign_in(self) -> None:
         """Exchange the PAT for a session token, retrying transient failures.
@@ -385,44 +495,51 @@ class TableauSession:
         Sign-in is retried too: a gateway blip here would otherwise abort an entire estate capture
         before it started, and re-authentication is also the recovery path for mid-loop session loss.
         """
-        last = ""
-        for attempt in range(1, self.retry.max_attempts + 1):
-            status, payload, _ = self._request(
-                "POST",
-                "/auth/signin",
-                accept="application/json",
-                authed=False,
-                body={
-                    "credentials": {
-                        "personalAccessTokenName": self._creds.pat_name,
-                        "personalAccessTokenSecret": self._creds.pat_secret,
-                        "site": {"contentUrl": self._creds.site},
-                    }
-                },
+        with self._auth_lock:
+            last = ""
+            for attempt in range(1, self.retry.max_attempts + 1):
+                status, payload, _ = self._request(
+                    "POST",
+                    "/auth/signin",
+                    accept="application/json",
+                    authed=False,
+                    body={
+                        "credentials": {
+                            "personalAccessTokenName": self._creds.pat_name,
+                            "personalAccessTokenSecret": self._creds.pat_secret,
+                            "site": {"contentUrl": self._creds.site},
+                        }
+                    },
+                )
+                if status == 200:
+                    creds = json.loads(payload)["credentials"]
+                    self._publish_auth(creds["token"], creds["site"]["id"])
+                    return
+                # Redact the response body before it becomes an exception message: this is a sign-in
+                # POST whose request body CONTAINS the PAT, so any reflecting proxy, WAF or debug
+                # endpoint echoes it straight back. Measured with a local echo server during review of
+                # #97. `redacted_note` is what guarantees redaction precedes the 200-character cut --
+                # slicing first can leave a secret's tail, or its head, in the retained window.
+                last = redacted_note(payload, self._redact_response, limit=200)
+                if status not in TRANSIENT_STATUSES or attempt == self.retry.max_attempts:
+                    break
+                self._increment_retry_count()
+                delay = backoff_delay(attempt)
+                LOG.warning("sign-in transient failure (HTTP %s); retrying in %.1fs", status, delay)
+                time.sleep(delay)
+            raise RuntimeError(
+                f"Tableau sign-in failed: HTTP {status}. Check the PAT NAME and SECRET (two values). {last}"
             )
-            if status == 200:
-                creds = json.loads(payload)["credentials"]
-                self.token, self.site_id = creds["token"], creds["site"]["id"]
-                return
-            # Redact the response body before it becomes an exception message: this is a sign-in
-            # POST whose request body CONTAINS the PAT, so any reflecting proxy, WAF or debug
-            # endpoint echoes it straight back. Measured with a local echo server during review of
-            # #97. `redacted_note` is what guarantees redaction precedes the 200-character cut --
-            # slicing first can leave a secret's tail, or its head, in the retained window.
-            last = redacted_note(payload, self._redact_response, limit=200)
-            if status not in TRANSIENT_STATUSES or attempt == self.retry.max_attempts:
-                break
-            self.retry_count += 1
-            delay = backoff_delay(attempt)
-            LOG.warning("sign-in transient failure (HTTP %s); retrying in %.1fs", status, delay)
-            time.sleep(delay)
-        raise RuntimeError(f"Tableau sign-in failed: HTTP {status}. Check the PAT NAME and SECRET (two values). {last}")
 
     def sign_out(self) -> None:
         """Release the session. Best-effort; a failed sign-out is not worth aborting a capture."""
-        if self.token:
-            self._request("POST", "/auth/signout")
-            self.token = None
+        with self._auth_lock:
+            if self.token:
+                try:
+                    self._request("POST", "/auth/signout")
+                finally:
+                    self.token = None
+                    self._token_generation += 1
 
     def raw_get(self, path: str, *, api: str | None = None) -> tuple[int, bytes, str | None]:
         """ONE unretried GET, for capability probing. Returns ``(status, body, content_type)``.
@@ -460,7 +577,16 @@ class TableauSession:
         with a real column heading would refuse a legitimate estate. It is handled one layer down
         instead, by the manifest-boundary scrub: a mangled label, not a refused capture.
         """
-        for label, secret in (("PAT secret", self._creds.pat_secret), ("session token", self.token or "")):
+        request_token = getattr(self._request_context, "auth_token", None)
+        with self._auth_lock:
+            tokens = set(self._known_tokens)
+            if self.token:
+                tokens.add(self.token)
+        if request_token:
+            tokens.add(request_token)
+        credentials = [("PAT secret", self._creds.pat_secret)]
+        credentials.extend(("session token", token) for token in sorted(tokens))
+        for label, secret in credentials:
             if secret and any(form.encode("utf-8") in payload for form in secret_forms(secret)):
                 return label
         return None
@@ -475,7 +601,7 @@ class TableauSession:
                 raise RuntimeError(
                     f"GET {path} -> HTTP {status}: {redacted_note(payload, self._redact_response, limit=200)}"
                 )
-            self.retry_count += 1
+            self._increment_retry_count()
             time.sleep(backoff_delay(attempt))
         raise RuntimeError(f"GET {path} exhausted {self.retry.max_attempts} attempts")
 
@@ -541,7 +667,11 @@ class TableauSession:
         deadline = time.monotonic() + policy.budget_sec
         for attempt in range(1, policy.max_attempts + 1):
             started = time.perf_counter()
-            status, payload, headers = self._request("GET", path, api=api, deadline=hard_deadline)
+            status, payload, headers, generation = self._request_with_generation(
+                path,
+                api=api,
+                deadline=hard_deadline,
+            )
             elapsed = time.perf_counter() - started
             if status == 200:
                 # A SUCCESSFUL body is the one thing this class hands back for PERSISTING -- to
@@ -594,11 +724,13 @@ class TableauSession:
                 # (which runs on the SESSION policy, so several more request timeouts) and then the
                 # export failed anyway. Unbounded work in service of nothing, and the reason the
                 # "at most one timeout" salvage bound did not hold.
-                reauths += 1
-                self.reauth_count += 1
                 retries.append("session_lost")
-                LOG.debug("session lost (401002); re-authenticating (%d)", self.reauth_count)
-                self.sign_in()
+                if self._reauthenticate_if_current(generation):
+                    reauths += 1
+                    count = self._increment_reauth_count()
+                    LOG.debug("session lost (401002); re-authenticating (%d)", count)
+                else:
+                    LOG.debug("session lost (401002); reusing a token refreshed by another worker")
                 continue
             if kind == "session_lost" and attempt >= policy.max_attempts:
                 raise ExportFailed(
@@ -613,7 +745,7 @@ class TableauSession:
                 delay = backoff_delay(attempt, header_value(headers, "Retry-After"))
                 if time.monotonic() + delay > deadline:
                     raise ExportFailed(f"GET {path} -> retry budget exhausted", "transient", detail)
-                self.retry_count += 1
+                self._increment_retry_count()
                 retries.append(detail[:80])
                 LOG.warning("  transient (%s); retry %d/%d in %.1fs", detail[:60], attempt, policy.max_attempts, delay)
                 time.sleep(delay)
@@ -1146,6 +1278,158 @@ def _arg_max_age(val: str) -> int:
         raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
+def _arg_workers(val: str) -> int:
+    try:
+        parsed = int(val)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"--workers must be an integer from {DEFAULT_WORKERS} through {MAX_WORKERS}, got {val!r}"
+        ) from exc
+    if not DEFAULT_WORKERS <= parsed <= MAX_WORKERS:
+        raise argparse.ArgumentTypeError(
+            f"--workers must be from {DEFAULT_WORKERS} through {MAX_WORKERS}, got {parsed}"
+        )
+    return parsed
+
+
+@dataclass(frozen=True)
+class _CaptureContext:
+    """Immutable inputs shared by serial and parallel per-view capture."""
+
+    session: TableauSession
+    out_dir: Path
+    wants: frozenset[str]
+    api_overrides: dict[str, str]
+    max_age: int
+
+    def capture(self, view: dict[str, Any]) -> dict[str, Any]:
+        """Capture one view without changing capture_view's per-leg ordering or semantics."""
+        return capture_view(
+            self.session,
+            view,
+            self.out_dir,
+            self.wants,
+            self.api_overrides,
+            max_age=self.max_age,
+        )
+
+
+def _view_artifact_identity(view: dict[str, Any]) -> str | None:
+    """A validated, path-equivalent view LUID, or None when this view cannot write an artifact."""
+    view_luid = view.get("id")
+    if not isinstance(view_luid, str):
+        return None
+    try:
+        return artifact_stem(view_luid)
+    except ValueError:
+        return None
+
+
+def _workbook_capture_key(view: dict[str, Any]) -> str:
+    """Validated workbook LUID; unknown workbooks share one conservative serial lane."""
+    workbook = view.get("workbook") or {}
+    workbook_luid = workbook.get("id")
+    if not isinstance(workbook_luid, str):
+        return "unknown-workbook"
+    try:
+        return artifact_stem(workbook_luid)
+    except ValueError:
+        return "unknown-workbook"
+
+
+def _ensure_unique_view_luids(views: list[dict[str, Any]]) -> None:
+    """Refuse duplicate artifact identities before any worker can write a LUID-keyed path."""
+    identities = tuple(_view_artifact_identity(view) for view in views)
+    valid = tuple(identity for identity in identities if identity is not None)
+    if len(valid) != len(set(valid)):
+        raise RuntimeError("duplicate selected view LUIDs; refusing before artifact writes")
+
+
+def _indexed_workbook_key(item: tuple[int, dict[str, Any]]) -> str:
+    """Workbook lane key for an indexed selected view."""
+    return _workbook_capture_key(item[1])
+
+
+def _workbook_lanes(views: list[dict[str, Any]]) -> tuple[tuple[tuple[int, dict[str, Any]], ...], ...]:
+    """Group selected views into deterministic, internally serial workbook lanes."""
+    ordered = sorted(enumerate(views), key=_indexed_workbook_key)
+    return tuple(tuple(group) for _, group in groupby(ordered, key=_indexed_workbook_key))
+
+
+def _capture_lane(
+    context: _CaptureContext,
+    lane: tuple[tuple[int, dict[str, Any]], ...],
+    slots: tuple[Future[dict[str, Any]], ...],
+    failure: threading.Event,
+    result_lock: threading.Lock,
+) -> None:
+    """Capture one workbook sequentially and publish each result into its selected-index slot."""
+    for index, view in lane:
+        with result_lock:
+            if failure.is_set():
+                return
+        try:
+            record = context.capture(view)
+        except BaseException as exc:
+            with result_lock:
+                failure.set()
+                for slot in slots:
+                    if not slot.done():
+                        slot.set_exception(exc)
+            raise
+        with result_lock:
+            if failure.is_set():
+                return
+            slots[index].set_result(record)
+
+
+def _capture_selected_views(  # pylint: disable=too-many-arguments,too-many-locals
+    session: TableauSession,
+    views: list[dict[str, Any]],
+    *,
+    out_dir: Path,
+    wants: frozenset[str],
+    api_overrides: dict[str, str],
+    max_age: int,
+    workers: int,
+) -> Iterator[dict[str, Any]]:
+    """Capture selected views with deterministic reduction and one in-flight view per workbook."""
+    if not DEFAULT_WORKERS <= workers <= MAX_WORKERS:
+        raise ValueError(f"workers must be from {DEFAULT_WORKERS} through {MAX_WORKERS}, got {workers}")
+    context = _CaptureContext(session, out_dir, wants, api_overrides, max_age)
+    if workers == 1:
+        return (context.capture(view) for view in views)
+    if not views:
+        return iter(())
+
+    lanes = _workbook_lanes(views)
+    slots = tuple(Future() for _ in views)
+    failure = threading.Event()
+    result_lock = threading.Lock()
+
+    def results():
+        """Yield selected-index slots in order while workbook lanes execute concurrently."""
+        executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="tableau-oracle")
+        lane_futures = tuple(
+            executor.submit(_capture_lane, context, lane, slots, failure, result_lock) for lane in lanes
+        )
+        completed_normally = False
+        try:
+            for slot in slots:
+                yield slot.result()
+            for future in lane_futures:
+                future.result()
+            completed_normally = True
+        finally:
+            if not completed_normally:
+                failure.set()
+                for future in lane_futures:
+                    future.cancel()
+            executor.shutdown(wait=True, cancel_futures=not completed_normally)
+
+    return results()
+
+
 def build_parser() -> argparse.ArgumentParser:
     """CLI surface."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1186,6 +1470,16 @@ def build_parser() -> argparse.ArgumentParser:
         "manifest. Combines with the explicit flags above, which are always honoured as well",
     )
     parser.add_argument("--limit", type=int, default=0, help="stop after N views (0 = all)")
+    parser.add_argument(
+        "--workers",
+        type=_arg_workers,
+        default=DEFAULT_WORKERS,
+        metavar="N",
+        help=(
+            f"selected-view capture workers (default {DEFAULT_WORKERS}, maximum {MAX_WORKERS}). "
+            "One process and one PAT session are shared; at most one view per workbook is in flight"
+        ),
+    )
     parser.add_argument(
         "--max-age",
         type=_arg_max_age,
@@ -1294,50 +1588,63 @@ def main() -> int:  # pylint: disable=too-many-locals
         build_retry_policy(args.max_attempts, args.retry_budget, args.rest_timeout),
         timeout_sec=args.rest_timeout,
     )
-    session.sign_in()
-    LOG.info("signed in to site %r (api %s)", env["TABLEAU_SITE"], session.version)
+    try:
+        session.sign_in()
+        LOG.info("signed in to site %r (api %s)", env["TABLEAU_SITE"], session.version)
 
-    views, workbook_names = select_views(session, args.workbook, args.limit)
-    out_dir: Path = args.out
-    out_dir.mkdir(parents=True, exist_ok=True)
-    LOG.info("capturing %d view(s) -> %s", len(views), out_dir)
+        views, workbook_names = select_views(session, args.workbook, args.limit)
+        _ensure_unique_view_luids(views)
+        out_dir: Path = args.out
+        out_dir.mkdir(parents=True, exist_ok=True)
+        # A failed new run must not leave an older success-shaped manifest beside partial new files.
+        (out_dir / _MANIFEST_NAME).unlink(missing_ok=True)
+        LOG.info("capturing %d view(s) with %d worker(s) -> %s", len(views), args.workers, out_dir)
 
-    max_age = validate_max_age(args.max_age)
-    capability_report = None
-    wants = {kind for kind, on in (("png", args.images), ("svg", args.svg), ("pdf", args.pdf)) if on}
-    api_overrides: dict[str, str] = {}
-    if args.reference_best and views:
-        capability_report = capability.probe_render_capability(session, env, views, max_age=max_age)
-        capability.apply_selected_tier(capability_report, wants, api_overrides, env)
+        max_age = validate_max_age(args.max_age)
+        capability_report = None
+        wants = {kind for kind, on in (("png", args.images), ("svg", args.svg), ("pdf", args.pdf)) if on}
+        api_overrides: dict[str, str] = {}
+        if args.reference_best and views:
+            capability_report = capability.probe_render_capability(session, env, views, max_age=max_age)
+            capability.apply_selected_tier(capability_report, wants, api_overrides, env)
 
-    records, started = [], time.perf_counter()
-    # Resolved ONCE for the whole run - one Metadata API call for the site, not one per view - and
-    # stamped onto each view so `capture_view` needs no extra argument. A failure is not fatal: every
-    # record then reads `unknown`, and the reason is warned at the seam rather than carried as a
-    # variable somebody has to remember to check (#402).
-    tableau_view_types.resolve_and_stamp(session, views, LOG)
-    for index, view in enumerate(views, 1):
-        record = capture_view(session, view, out_dir, frozenset(wants), api_overrides, max_age=max_age)
-        record["workbook_name"] = workbook_names.get(record["workbook_luid"])
-        records.append(record)
-        log_progress(index, len(views), record, session.redact_text)
-
-    exit_code = write_manifest(
-        records,
-        CaptureRun(
+        started = time.perf_counter()
+        # Resolved ONCE for the whole run - one Metadata API call for the site, not one per view - and
+        # stamped onto each view so `capture_view` needs no extra argument. A failure is not fatal: every
+        # record then reads `unknown`, and the reason is warned at the seam rather than carried as a
+        # variable somebody has to remember to check (#402).
+        tableau_view_types.resolve_and_stamp(session, views, LOG)
+        records = _capture_selected_views(
             session,
-            env,
-            out_dir,
-            started,
-            frozenset(wants),
-            bool(args.reference_best),
-            max_age_minutes=max_age,
-        ),
-        capability_report,
-        _advertised_ceiling(session, env, capability_report, wants),
-    )
-    session.sign_out()
-    return exit_code
+            views,
+            out_dir=out_dir,
+            wants=frozenset(wants),
+            api_overrides=api_overrides,
+            max_age=max_age,
+            workers=args.workers,
+        )
+        named_records = []
+        for index, record in enumerate(records, 1):
+            record["workbook_name"] = workbook_names.get(record["workbook_luid"])
+            named_records.append(record)
+            log_progress(index, len(views), record, session.redact_text)
+
+        return write_manifest(
+            named_records,
+            CaptureRun(
+                session,
+                env,
+                out_dir,
+                started,
+                frozenset(wants),
+                bool(args.reference_best),
+                max_age_minutes=max_age,
+            ),
+            capability_report,
+            _advertised_ceiling(session, env, capability_report, wants),
+        )
+    finally:
+        session.sign_out()
 
 
 if __name__ == "__main__":
