@@ -129,6 +129,11 @@ same-user `subst` alias may open an already-built over-ceiling tree in Desktop w
 blocked — temporary, machine-local, never the run's recorded path, and it waives no gate
 ([`docs/windows-path-limits.md`](../../docs/windows-path-limits.md) §6).
 
+**Before any PS1 invocation, follow the [preflight cannot start](../../docs/operator-runbook.md#preflight-cannot-start)
+bootstrap route:** check policy precedence and the exact `Zone.Identifier` stream. Managed
+`AllSigned`: **stop for IT / an approved signed distribution**. Unknown: **CANNOT_ESTABLISH**,
+not permission to retry. Only after that check allows it, use the direct/internal command at stage 0.
+
 | # | stage | command | notes |
 |---|---|---|---|
 | 0 | preflight | `powershell -ExecutionPolicy Bypass -File scripts/preflight.ps1` | **plain, no `-Update`** — never swap tooling mid-run. Must exit 0 before you continue |

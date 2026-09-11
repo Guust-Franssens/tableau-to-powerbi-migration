@@ -16,7 +16,11 @@ For a whole site instead, see [`AGENTS.md`](../AGENTS.md) → *Starting a migrat
 > authenticate and then has to stop and ask you anyway. Open Desktop, connect to the database or
 > warehouse the dashboard reads, and confirm it refreshes — *before* you start.
 
-Then get the environment green:
+**Before any PS1 invocation, follow the [preflight cannot start](operator-runbook.md#preflight-cannot-start)
+bootstrap route.** It checks policy precedence and the exact `Zone.Identifier` stream without running
+repository scripts. Managed `AllSigned` means **stop for IT / an approved signed distribution**;
+an unknown block is **CANNOT_ESTABLISH**, not permission to retry. Only after that check allows it,
+get the environment green with the direct/internal preflight command:
 
 ```
 git clone <this repo>

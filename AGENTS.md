@@ -29,6 +29,12 @@ Subagents read it as step 0; `scripts/check_navigation_index.py` checks it bidir
 
 ## Session start, do this first (before any other work)
 
+**Before any PS1 invocation, follow the [preflight cannot start](docs/operator-runbook.md#preflight-cannot-start)
+bootstrap route.** It checks policy precedence and the exact `Zone.Identifier` stream without running
+repository scripts. Managed `AllSigned` means **stop for IT / an approved signed distribution**;
+an unknown block is **CANNOT_ESTABLISH**, not permission to retry. Only after that check allows it,
+use the unchanged direct/internal entrypoint:
+
 ```
 powershell -ExecutionPolicy Bypass -File scripts/preflight.ps1 -Update -CheckUpstream
 ```
@@ -73,7 +79,8 @@ session is running. That lock blocks renaming the plugin directory, not writing 
 The environment contract lives in **`scripts/preflight.ps1`**. It is the gate, not this prose: it
 checks the required tools, plugins, MCP servers, Python dependencies, Desktop bridge assumptions and
 version floors, prints the install or repair hint beside the failing item, and **exits non-zero for
-any critical miss**.
+any critical miss**. Its direct/internal invocation below assumes the
+[preflight cannot start](docs/operator-runbook.md#preflight-cannot-start) bootstrap has allowed it.
 
 ```
 powershell -ExecutionPolicy Bypass -File scripts/preflight.ps1

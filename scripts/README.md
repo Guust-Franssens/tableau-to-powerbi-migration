@@ -10,6 +10,16 @@ Conventions: Python first (`.ps1` only where Windows-specific APIs make it unavo
 
 ## Run every session / every migration
 
+**Before any PS1 invocation, follow the [preflight cannot start](../docs/operator-runbook.md#preflight-cannot-start)
+bootstrap route.** It checks policy precedence and the exact `Zone.Identifier` stream without running
+repository scripts. Managed `AllSigned` means **stop for IT / an approved signed distribution**;
+an unknown block is **CANNOT_ESTABLISH**, not permission to retry. Only after that check allows it,
+use the existing direct/internal entrypoint, for example:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1 -Update -CheckUpstream
+```
+
 | Script | What it does | When |
 |---|---|---|
 | `preflight.ps1` | Verifies the whole toolchain: Python + parser deps, **both skill plugins** and whether the published bundles still match `.github/skills/`, MCP servers, Power BI Desktop + Bridge CLI, the npm CLI version matrix. PowerShell on purpose — it must run before Python exists, since checking *for* Python is one of its jobs. | `-Update` at **session start**; plain at **migration start**; never mid-migration |

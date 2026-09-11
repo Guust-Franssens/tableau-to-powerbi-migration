@@ -95,6 +95,12 @@ Everything in this section fails silently or slowly if you leave it to the morni
 
 ### 1.1 Tooling
 
+**Before any PS1 invocation, follow the [preflight cannot start](#preflight-cannot-start) bootstrap
+route below.** It checks policy precedence and the exact `Zone.Identifier` stream without running
+repository scripts. Managed `AllSigned` means **stop for IT / an approved signed distribution**;
+an unknown block is **CANNOT_ESTABLISH**, not permission to retry. Only after that check allows it,
+use the unchanged direct/internal entrypoint:
+
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1 -Update -CheckUpstream
 ```
@@ -152,6 +158,68 @@ how to set it, including why the hint preflight prints does not fix your current
 `-CheckUpstream` costs ~3s of network and is **advisory only**. It is the only check that asks *"has
 the world moved"* rather than *"is what I have good enough"* — every other check compares against a
 hard-coded number.
+
+#### Preflight cannot start
+
+**This is the canonical, manual signing-policy bootstrap, before the first PS1 invocation or any
+retry.** A customer reported `PSSecurityException` / `UnauthorizedAccess` and “not digitally signed”
+on **September 11, 2026**, before preflight executed (#610). No customer screenshot, identity or
+local path is needed to diagnose that error. The normal preflight repair hints cannot run yet.
+
+From the repository root, run these **read-only commands** in Windows PowerShell. They do not load
+repository scripts, change execution policy or remove a file's download marker. Only the stream
+name and an exact Internet/Restricted zone number are displayed, never its URL-bearing contents:
+
+```powershell
+powershell -NoProfile -Command "Get-ExecutionPolicy -List"
+powershell -NoProfile -Command "Get-Item -LiteralPath '.\scripts\preflight.ps1' -Stream Zone.Identifier -ErrorAction SilentlyContinue | Select-Object Stream"
+powershell -NoProfile -Command "Get-Content -LiteralPath '.\scripts\preflight.ps1' -Stream Zone.Identifier -ErrorAction SilentlyContinue | Select-String -Pattern '^ZoneId=[34]$' | Select-Object -ExpandProperty Line"
+```
+
+✅ **Microsoft's precedence, not a retry strategy:** the first defined scope wins:
+**MachinePolicy → UserPolicy → Process → CurrentUser → LocalMachine**.
+`-ExecutionPolicy Bypass` requests **Process** only; it does **not** override Group Policy and does
+not persist a setting. `Zone.Identifier` is a file download marker, not a signature. Its existence
+alone does not prove an Internet zone or explain a refusal. A missing stream listing can also mean
+an unreadable/wrong file: confirm the checkout and repository root before drawing a conclusion.
+Sources: Microsoft [execution-policy precedence and Group Policy](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_execution_policies?view=powershell-5.1)
+and [Unblock-File](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/unblock-file?view=powershell-5.1).
+
+**Choose exactly one route; do not batch the diagnostic and the execution commands blindly:**
+
+| Observed facts | Action |
+|---|---|
+| The highest-priority defined **MachinePolicy/UserPolicy is AllSigned** | **STOP — MANAGED_ALLSIGNED.** Request an **approved signed distribution/path or IT action**. An unsigned checkout cannot satisfy this policy. Neither another process-policy request nor removing a download marker fixes it. No retry, alternate interpreter or script-content workaround. |
+| Another **MachinePolicy/UserPolicy** is defined, including `RemoteSigned` or `Restricted` | **STOP — MANAGED_POLICY.** Ask IT which distribution/path is approved. Do not alter downloaded files to work around an enforced policy. |
+| **Both policy scopes are Undefined**, the **failed invocation's effective policy was RemoteSigned**, and the exact file has **ZoneId=3 or ZoneId=4** | **MOTW_REMOTESIGNED.** **Verify the repository source and review the file first. Prefer a fresh `git clone` from the verified repository.** Alternatively, only for the reviewed, trusted file, use the narrow command below. Never auto-unblock, recurse over a checkout/downloads folder, or change persistent policy. |
+| Both policy scopes are Undefined and the attempted command requested **Process Bypass**, but signing/startup still failed | **STOP — CANNOT_ESTABLISH.** MOTW alone cannot explain this failure: Process Bypass outranks local `RemoteSigned`. Do not recommend unblocking merely because a stream exists. Ask IT to inspect **AppLocker/WDAC** and other application-control logs and confirm an approved path. |
+| **PowerShell is unavailable**, the policy list cannot be read, access is denied, facts disagree, or a block is otherwise unknown | **STOP — CANNOT_ESTABLISH.** This is not proof of an execution-policy problem or an AppLocker/WDAC diagnosis. Ask IT to check the approved PowerShell installation/path and application-control logs. Do not switch engines or execute script contents. |
+| No enforced policy, no startup refusal, and the checkout/source is verified | Run the unchanged direct/internal preflight command above **once**, with its original arguments. Its exit `0`/`1` and dependency hints keep their existing meaning. If it cannot start, return to this route; do not repeatedly relaunch it. |
+
+**Only for the MOTW_REMOTESIGNED row**, after source verification and review of this exact file:
+
+```powershell
+powershell -NoProfile -Command "Unblock-File -LiteralPath '.\scripts\preflight.ps1'"
+```
+
+That removes only this file's alternate stream; it does not sign it or change policy. Any other
+script needs its own review and diagnosis. Do not post raw error output, full paths, stream URLs or
+screenshots; report only the route, scope/policy names and redacted error type.
+
+**Why no automatic `.cmd` dispatcher is shipped here (bounded fallback, #610).** ✅ Windows controls
+on September 11, 2026 (`tests/test_preflight_signing_policy.py`) show a thin `%~dp0` / `%*` dispatcher
+preserves quoted arguments, spaces, output and exit codes; a marked unsigned file fails under
+process `RemoteSigned` and runs under process `Bypass`. They also show that a script which **did
+start** can return the same `UnauthorizedAccess` / `SecurityError` / exit `1` as a startup refusal.
+A post-failure test of those fields is not a reliable start detector. Forwarding arbitrary startup
+stderr exposes local paths; suppressing it can hide a genuine in-script failure. Rather than add
+an entry protocol to preflight, reinterpret its output, execute its contents, or add a second
+implementation, this change uses the manual bootstrap above and leaves `preflight.ps1` unchanged.
+It **does not claim an automatic run-or-diagnose entrypoint**. A signed release would require an
+approved certificate, publisher trust and an organizational distribution decision; none is assumed.
+⚠️ Actual Group Policy, AppLocker and WDAC enforcement are **not changed or emulated** by these
+local controls. Group Policy precedence is grounded in Microsoft's documentation; validation on
+the managed customer device remains an IT/operator step.
 
 ### 1.2 Know which engine you are running — the bundle records it for you
 

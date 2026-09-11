@@ -7,6 +7,12 @@
 
 ## Session start, do this first (before any other work)
 
+**Before any PS1 invocation, follow the [preflight cannot start](../docs/operator-runbook.md#preflight-cannot-start)
+bootstrap route.** It checks policy precedence and the exact `Zone.Identifier` stream without running
+repository scripts. Managed `AllSigned` means **stop for IT / an approved signed distribution**;
+an unknown block is **CANNOT_ESTABLISH**, not permission to retry. Only after that check allows it,
+use the unchanged direct/internal entrypoint:
+
 ```
 powershell -ExecutionPolicy Bypass -File scripts/preflight.ps1 -Update -CheckUpstream
 ```

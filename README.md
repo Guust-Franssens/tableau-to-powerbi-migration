@@ -49,7 +49,13 @@ git sparse-checkout set .github .vscode docs scripts tests migrations
 git sparse-checkout add examples/eea-urban-adaptation
 ```
 
-For the full repo (all examples + showcase), use a normal `git clone …`. Then set up the Python env:
+For the full repo (all examples + showcase), use a normal `git clone …`.
+
+**Before any PS1 invocation (including virtual-environment activation), follow the
+[preflight cannot start](docs/operator-runbook.md#preflight-cannot-start) bootstrap route.** It checks
+policy precedence and the exact `Zone.Identifier` stream. Managed `AllSigned` means **stop for IT /
+an approved signed distribution**; an unknown block is **CANNOT_ESTABLISH**, not permission to retry.
+Only after that check allows it, set up the Python env and use the direct/internal preflight command:
 
 ```powershell
 uv venv
@@ -420,7 +426,8 @@ clone is self-configuring:
 In Copilot CLI, install the plugins once with `/plugin` (including
 `tableau-fabric-skills@tableau-collection`, plus the `microsoft/skills-for-fabric` and
 `Guust-Franssens/powerbi-playbook` skill plugins) and register the MCP servers with `/mcp`. Then run
-`powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1` to confirm the machine is configured.
+the [preflight cannot start](docs/operator-runbook.md#preflight-cannot-start) bootstrap route first,
+then `powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1` to confirm the machine is configured.
 Preflight reports a concrete install hint for anything missing and blocks if the conversion engine is
 installed from more than one source; the plugin is the canonical engine.
 

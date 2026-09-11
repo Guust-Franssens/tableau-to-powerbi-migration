@@ -98,7 +98,11 @@ TMDL or PBIR yourself. **What** to migrate, in what order and to where is the *d
 
 ## Workflow
 
-0. **Preflight every invocation, before anything else** — the **plain** form, **never `-Update`**:
+0. **Before any PS1 invocation, follow the [preflight cannot start](../../docs/operator-runbook.md#preflight-cannot-start)
+   bootstrap route:** check policy precedence and the exact `Zone.Identifier` stream. Managed
+   `AllSigned`: **stop for IT / an approved signed distribution**. Unknown: **CANNOT_ESTABLISH**,
+   not permission to retry. Only after that check allows it, run the direct/internal preflight —
+   the **plain** form, **never `-Update`**:
    ```
    powershell -ExecutionPolicy Bypass -File scripts/preflight.ps1
    ```
