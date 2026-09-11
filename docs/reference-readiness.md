@@ -426,7 +426,12 @@ target orders and the exact structured S2 finding.
 
 ✅ After no-follow classification, S1 exact bytes and S2 cohort role/identity acceptance,
 `scripts/package_source.py` projects **only** the declared asset role. The input carries S2's own
-root, unit, kind, package-relative `PurePosixPath` and SHA-256. The projector performs no discovery,
+root, exact lexical root identity, unit, kind, **raw** package-relative POSIX spelling and SHA-256.
+S1's pure cross-host path grammar validates that spelling before a `PurePosixPath` can normalize it.
+Device names (including superscript COM/LPT aliases), dot/empty segments, repeated separators,
+controls, trailing dot/space, and nonportable punctuation are refused, not repaired. Ready handoffs
+require exact runtime field types; codes are a unique `tuple[str, ...]` of stable identifiers in
+first-seen order. The projector performs no discovery,
 JSON/provenance/handover parsing, filename matching, hashing, existence checks, registry lookup,
 `resolve()` or ancestor traversal. It joins the verified relative role lexically to the bound root.
 
@@ -435,6 +440,13 @@ source parsing, report discovery or reference/oracle grading. Earlier refusals p
 from running: S1 retains `CANNOT_ESTABLISH` and its stable codes; S2 retains `FINDINGS` and its
 role/provider blockers. A missing or internally inconsistent ready handoff is
 `source_handoff_invalid`, never a reason to search for another file.
+
+Root binding uses the **case-sensitive lexical identity of the original classified target** through
+S1, fresh S2, the complete result map and the source handoff. Windows `Path` equality never binds
+authority results. Duplicate or case-colliding targets, duplicate/missing/extra results, or any exact
+root-spelling mismatch yield `package_root_binding_invalid` before downstream reads. A mismatched
+precheck cannot trigger a fresh search. Case folding detects target collisions only; it never selects
+another package's result. Boundary and filesystem verification retain their own filesystem semantics.
 
 The S2 result also carries the revision status derived from its already-read provenance by the
 existing `reference_evidence.revision_status` function. Reference assessment therefore keeps its

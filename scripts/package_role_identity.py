@@ -1,51 +1,14 @@
 """
-purpose: prove a COHORT of handover packages carries every required semantic role, and that every
-         stable identity claim those roles make agrees.
-usage:   import package_role_identity as pri
-         pri.verify_phase1_role_identity([Path("packages/Unit"), Path("packages/Shared")])
+purpose: prove required package roles and cross-artifact identity over an exact-root cohort.
+usage:   import package_role_identity as pri; pri.verify_phase1_role_identity([Path("packages/Unit")])
 
-⚠️ **This is the roles-and-identity slice of issue #562 (S2), and nothing else.** It runs AFTER
-`bundle_corpus.classify_target` (the boundary) and AFTER `package_filesystem.verify_package` (the
-bytes), and it answers one question:
-
-    does this package carry exactly the roles its kind and topology require, and do the identity
-    claims those roles make - source SHA, Tableau LUID, unit scope, engine output, evidence
-    ownership, published-provider edge - all agree?
-
-It deliberately does **not** return a source ``Path``, search for a source, interpret credentials,
-grade evidence, touch the working/dispatched lifecycle, or write anything into a package. Source
-return is issue #558; the credential projection, the brief POLICY parser and the final
-``START_READY`` fold are separate slices with separate invariants.
-
-Three properties are the point, and each is structural rather than promised
---------------------------------------------------------------------------
-1. **S1 is consumed, never assumed.** :func:`verify_phase1_role_identity` runs
-   :func:`verify_s1` itself for every root it is given. A caller MAY hand in a
-   :class:`VerifiedPackage` as an earlier observation, but S1 is re-run at the S2 entry seam even for
-   that root. A clearance cannot authorize reading later bytes or a replaced root.
-2. **A role is a DECLARATION, never a discovery.** Every role is read from
-   ``package-manifest.json``'s ``artifacts`` map (or, for the roles the manifest does not declare,
-   from the S1-verified content key set) and then *confirmed* against the verified bytes. Removing
-   ``artifacts.asset`` while the file remains is ``missing`` - the file is NOT rediscovered by
-   scanning ``assets/``, by reading the handover slice's ``source_id``, or by matching a display
-   name. That rediscovery is exactly the fail-open this slice exists to close.
-3. **No path is ever reconstructed from a manifest key.** The package is re-walked with
-   :func:`package_filesystem.walk_package` - the same no-follow walk S1 used - and only paths the
-   WALK produced are opened. A key that the walk did not produce is a finding, not an ``open()``.
-
-Cohort, not package, because a consumer cannot prove its provider alone
-----------------------------------------------------------------------
-A workbook whose ``migration-spec.json`` declares a Tableau PUBLISHED datasource has no model of its
-own: its report binds to the model built from the provider's ``.tds``. Whether exactly one such
-provider exists is a question about the SET of packages, so the verifier takes a sequence and
-resolves the edge inside it. A consumer supplied alone is BLOCKED, because "I cannot see a provider"
-and "there is no provider" are the same answer from one package and only the operator can widen the
-invocation.
-
-⚠️ **Stable identity only.** Provider matching is datasource LUID first, then the exact
-``<site>/<name>`` published key when a LUID is genuinely unavailable on BOTH sides. A display name,
-a folder stem, ``bound_datasource``, ``published_ds_name`` and the handover slice's ``source_id``
-are diagnostics; none of them may admit a provider, an asset or an evidence record here.
+S2 (#562) re-runs no-follow S1 even when earlier observations are supplied. Both sets must biject
+with the original lexical roots. Roles are declarations, never discovery; only walked paths open.
+Provider closure uses datasource LUID, then exact published key only when BOTH sides lack a LUID.
+Display names and paths never supply identity; a consumer alone blocks.
+source_handoff() retains the bound root and RAW asset role for #558's pure projector. No source Path,
+search, credentials, evidence grade, policy, final START_READY fold or package writes here.
+Full contract and limitations: docs/reference-readiness.md, S2.
 """
 
 from __future__ import annotations
@@ -68,13 +31,24 @@ from bundle_corpus import (  # noqa: E402  # pylint: disable=wrong-import-positi
     classify_target,
 )
 from host_paths import discloses_host_location  # noqa: E402  # pylint: disable=wrong-import-position
-from package_source import PackageKind, PackageSourceInput  # noqa: E402  # pylint: disable=wrong-import-position
+from package_source import (  # noqa: E402  # pylint: disable=wrong-import-position
+    CODE_HANDOFF_INVALID,
+    CODE_ROOT_BINDING_INVALID,
+    PackageKind,
+    PackageSourceInput,
+    bind_root_results,
+    exact_root_matches,
+    unique_root_identities,
+    valid_source_codes,
+)
 from reference_evidence import (  # noqa: E402  # pylint: disable=wrong-import-position
     REVISION_UNCONFIRMED,
     revision_status,
 )
 
 _ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
+
+# pylint: disable=unidiomatic-typecheck  # The handoff must reject subclass coercion.
 
 RoleState = Literal["resolved", "not_applicable", "missing", "ambiguous", "mismatch"]
 Topology = Literal["owned_model", "standalone_datasource", "published_provider", "published_consumer"]
@@ -235,13 +209,7 @@ class RoleResult:
 
 @dataclass(frozen=True)
 class SourceIdentity:
-    """What this package's source bytes ARE, on every axis that is available.
-
-    ``sha256`` is the S1-verified digest of the declared source role; ``tableau_luid`` is the LUID of
-    this package's OWN kind (workbook LUID for a workbook, datasource LUID for a datasource) and is
-    ``None`` for a genuinely local source; ``published_key`` is the exact ``<site>/<name>`` dedup key
-    when the spec establishes one.
-    """
+    """S1's source digest, this kind's Tableau LUID (None for local), and exact published key."""
 
     kind: PackageKind
     sha256: str | None
@@ -332,27 +300,43 @@ class Phase1RoleIdentityResult:  # pylint: disable=too-many-instance-attributes
         return tuple(seen)
 
     def source_handoff(self) -> PackageSourceInput:
-        """Expose this result's OWN source role, bound to the fresh S1 observation that earned it.
-
-        The consumer never zips a separate list of roots to our results or reopens provenance.
-        An incomplete/inconsistent ready result produces an invalid handoff, not a source search.
-        """
-        root = self.verified.root if self.verified is not None else None
-        if self.verified is not None and not self.verified.integrity.is_clean:
+        """Preserve this result's own S1 root and raw role; malformed ready results cannot resolve."""
+        if (
+            type(self.verdict) is not str
+            or self.verdict not in (VERDICT_START_READY, VERDICT_BLOCKED)
+            or not valid_source_codes(self.blockers)
+        ):
+            return PackageSourceInput("cannot_establish", None, None, None, None, None, None, (CODE_HANDOFF_INVALID,))
+        verified = self.verified if type(self.verified) is VerifiedPackage else None
+        root = verified.root if verified is not None else None
+        root_identity = verified.root_identity if verified is not None else None
+        if verified is not None and not verified.integrity.is_clean:
             return PackageSourceInput(
-                "cannot_establish", root, self.unit, self.kind, None, None, self.verified.integrity.codes()
+                "cannot_establish", root, root_identity, self.unit, self.kind, None, None, verified.integrity.codes()
             )
         if not self.is_start_ready:
-            return PackageSourceInput("blocked", root, self.unit, self.kind, None, None, self.codes())
-        assets = [role for role in self.roles if role.role == ROLE_SOURCE_ASSET]
+            return PackageSourceInput("blocked", root, root_identity, self.unit, self.kind, None, None, self.blockers)
+        assets = (
+            [role for role in self.roles if type(role.role) is str and role.role == ROLE_SOURCE_ASSET]
+            if type(self.roles) is tuple and all(type(role) is RoleResult for role in self.roles)
+            else []
+        )
         path = (
-            PurePosixPath(assets[0].paths[0])
-            if len(assets) == 1 and assets[0].state == STATE_RESOLVED and len(assets[0].paths) == 1
+            assets[0].paths[0]
+            if len(assets) == 1
+            and type(assets[0].state) is str
+            and assets[0].state == STATE_RESOLVED
+            and type(assets[0].paths) is tuple
+            and len(assets[0].paths) == 1
             else None
         )
         identity = self.source_identity
-        digest = identity.sha256 if identity is not None and identity.kind == self.kind else None
-        return PackageSourceInput("ready", root, self.unit, self.kind, path, digest, self.codes())
+        digest = (
+            identity.sha256
+            if type(identity) is SourceIdentity and type(identity.kind) is str and identity.kind == self.kind
+            else None
+        )
+        return PackageSourceInput("ready", root, root_identity, self.unit, self.kind, path, digest, self.blockers)
 
     def as_dict(self) -> dict[str, Any]:
         """The machine-readable shape the entry gate embeds in its verdict."""
@@ -376,13 +360,28 @@ class VerifiedPackage:
     root: Path
     classification: TargetClassification
     integrity: pfs.PackageFilesystemResult
+    root_identity: str = field(repr=False)
+
+    def is_bound_to(self, identity: str) -> bool:
+        """The same exact classified root must own both the observation and its handoff."""
+        return (
+            type(identity) is str
+            and exact_root_matches(self.root, self.root_identity)
+            and self.root_identity == identity
+        )
 
 
 def verify_s1(root: Path) -> VerifiedPackage:
     """Classify ``root`` and verify its manifest against its bytes - the S1 prerequisite, bound."""
     classification = classify_target(root)
+    root_identity = str(root)
     integrity = pfs.verify_package(root, classification)
-    return VerifiedPackage(root=root, classification=classification, integrity=integrity)
+    return VerifiedPackage(root=root, classification=classification, integrity=integrity, root_identity=root_identity)
+
+
+def verified_root_binding(value: VerifiedPackage | None) -> tuple[Path, str] | None:
+    """Expose only this typed observation's own lexical binding, without inspecting the root."""
+    return (value.root, value.root_identity) if type(value) is VerifiedPackage else None
 
 
 @dataclass
@@ -1130,22 +1129,25 @@ def _dependency(  # pylint: disable=too-many-return-statements
 
 
 def verify_phase1_role_identity(
-    package_roots: Sequence[Path], *, verified: Sequence[VerifiedPackage] = ()
+    package_roots: Sequence[Path], *, verified: Sequence[VerifiedPackage] | None = None
 ) -> tuple[Phase1RoleIdentityResult, ...]:
-    """One verdict per supplied root, resolved as a COHORT.
+    """One typed verdict per root, with exact binding before any cohort role read.
 
-    ``verified`` is retained for callers carrying earlier S1 observations. It NEVER skips the fresh
-    no-follow S1 verification at this seam: names, bytes and roots can all change after an observation.
-
-    ⚠️ Returns results; raises nothing for a bad package. Every refusal - unreadable manifest,
-    missing role, contradictory LUID, absent provider - is a typed ``BLOCKED`` verdict, because a
-    traceback out of a gate carries the host paths these verdicts exist to keep out of issues.
+    Earlier ``verified`` observations must biject, but never replace fresh no-follow S1.
+    Bad packages return BLOCKED, not tracebacks carrying host paths or artifact-controlled text.
     """
-    del verified
+    identities = tuple(str(root) for root in package_roots)
+    if not unique_root_identities(identities) or (
+        verified is not None and bind_root_results(identities, verified, verified_root_binding) is None
+    ):
+        return tuple(_blocked(None, None, CODE_ROOT_BINDING_INVALID) for _ in package_roots)
+    clearances = bind_root_results(identities, tuple(verify_s1(root) for root in package_roots), verified_root_binding)
+    if clearances is None:
+        return tuple(_blocked(None, None, CODE_ROOT_BINDING_INVALID) for _ in package_roots)
     facts: list[_Facts] = []
     results: dict[int, Phase1RoleIdentityResult] = {}
-    for index, root in enumerate(package_roots):
-        clearance = verify_s1(root)
+    for index, (root, identity) in enumerate(zip(package_roots, identities, strict=True)):
+        clearance = clearances[identity]
         try:
             outcome = _facts(root, clearance)
         except _IdentityError as exc:

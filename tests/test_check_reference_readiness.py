@@ -2802,7 +2802,7 @@ def test_unbound_or_foreign_s2_handoff_cannot_enter_legacy_or_evidence(
 
     assert violation == "", "an inconsistent authority must not trigger source/evidence fallback"
     assert report is not None and report["status"] == "CANNOT_ESTABLISH"
-    assert report["package_source"][0]["codes"] == ["source_handoff_invalid"]
+    assert report["package_source"][0]["codes"] == ["package_root_binding_invalid"]
     assert report["pages_expected"] == report["evidence_records"] == 0
 
 

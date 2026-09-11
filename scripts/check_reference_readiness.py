@@ -70,7 +70,7 @@ import json
 import re
 import sys
 import zipfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
@@ -84,8 +84,16 @@ from package_role_identity import (
     Phase1RoleIdentityResult,
     VerifiedPackage,
     verify_phase1_role_identity,
+    verified_root_binding,
 )
-from package_source import PackageSourceResult, resolve_verified_package_source
+from package_source import (
+    CODE_ROOT_BINDING_INVALID,
+    PackageSourceResult,
+    bind_root_results,
+    exact_root_matches,
+    resolve_verified_package_source,
+    unique_root_identities,
+)
 from reference_evidence import (
     MANUAL_KIND_HINT,
     CAP_VALIDATION,
@@ -1089,9 +1097,19 @@ class _Prechecked:
     """
 
     root: Path
+    root_identity: str = field(repr=False)
     classification: TargetClassification
     integrity: PackageFilesystemResult | None
     roles: Phase1RoleIdentityResult | None
+    binding_valid: bool = True
+
+
+def _root_binding_refused(root: Path) -> dict[str, Any]:
+    """A malformed authority association cannot license even one source/evidence read."""
+    source = PackageSourceResult("cannot_establish", codes=(CODE_ROOT_BINDING_INVALID,))
+    report = _merge(root, [_cannot(root.name, f"{CODE_ROOT_BINDING_INVALID} - no source or evidence was read")], [], [])
+    report["package_source"] = [{"ordinal": 0, "unit": root.name, **source.as_dict()}]
+    return report
 
 
 def scan(  # pylint: disable=too-many-arguments
@@ -1127,19 +1145,27 @@ def scan(  # pylint: disable=too-many-arguments
 
     ``prechecked`` carries the cohort answer :func:`main` computed for THIS root - roles are a
     property of the SET of packages, so a published consumer cannot be judged one target at a time.
-    It is used only when it is bound to this same root; otherwise everything is recomputed here, and
-    a single-target invocation is simply a cohort of one.
+    It is used only when it is bound to this exact lexical root; a mismatch is a typed refusal,
+    never a request to recompute or search. A single-target invocation is a cohort of one.
 
     A role-resolved package projects its own source from the root-bound S1/S2 result before any
     source parsing, report discovery or reference grading. It never reaches legacy source discovery.
     """
-    checked = prechecked if prechecked is not None and prechecked.root == root else _precheck(root)
+    checked = prechecked if prechecked is not None else _precheck(root)
+    if (
+        not checked.binding_valid
+        or not exact_root_matches(root, checked.root_identity)
+        or not exact_root_matches(checked.root, checked.root_identity)
+    ):
+        return _root_binding_refused(root)
     classification = checked.classification
     if not classification.is_safe:
         return _unsafe_target(root, classification)
     integrity = checked.integrity
     roles = checked.roles
-    if roles is not None and roles.verified is not None and roles.verified.root == root:
+    if roles is not None:
+        if roles.verified is None or not roles.verified.is_bound_to(checked.root_identity):
+            return _root_binding_refused(root)
         # S2 rechecks S1 at its read seam; its bound observation supersedes the earlier one.
         integrity = roles.verified.integrity
     if integrity is not None and not integrity.is_clean:
@@ -1147,7 +1173,7 @@ def scan(  # pylint: disable=too-many-arguments
     if roles is not None and not roles.is_start_ready:
         return _role_blocked(root, classification, integrity, roles)
     report = (
-        _scan_verified_package(root, roles, require_validation_grade)
+        _scan_verified_package(root, checked.root_identity, roles, require_validation_grade)
         if classification.declares_self_contained
         else _scan_safe_target(
             root,
@@ -1167,14 +1193,7 @@ def scan(  # pylint: disable=too-many-arguments
 def _precheck(root: Path, classification: TargetClassification | None = None) -> _Prechecked:
     """Boundary, then bytes, then roles - for one target, as a cohort of one."""
     classification = classify_target(root) if classification is None else classification
-    if not classification.is_safe or not classification.declares_self_contained:
-        return _Prechecked(root, classification, None, None)
-    integrity = verify_package(root, classification)
-    if not integrity.is_clean:
-        return _Prechecked(root, classification, integrity, None)
-    cleared = VerifiedPackage(root=root, classification=classification, integrity=integrity)
-    roles = verify_phase1_role_identity([root], verified=[cleared])[0]
-    return _Prechecked(root, classification, integrity, roles)
+    return _precheck_cohort([root], [classification])[0]
 
 
 def _precheck_cohort(paths: list[Path], classifications: list[TargetClassification] | None = None) -> list[_Prechecked]:
@@ -1186,34 +1205,46 @@ def _precheck_cohort(paths: list[Path], classifications: list[TargetClassificati
     consumer supplied alone is refused rather than assumed to have a provider somewhere.
     """
     classifications = [classify_target(path) for path in paths] if classifications is None else classifications
-    integrities: list[PackageFilesystemResult | None] = [
-        verify_package(path, classification)
-        if classification.is_safe and classification.declares_self_contained
-        else None
+    checked = [
+        _Prechecked(path, str(path), classification, None, None)
         for path, classification in zip(paths, classifications, strict=True)
     ]
+    if not unique_root_identities([entry.root_identity for entry in checked]):
+        return [replace(entry, binding_valid=False) for entry in checked]
+    checked = [
+        replace(entry, integrity=verify_package(entry.root, entry.classification))
+        if entry.classification.is_safe and entry.classification.declares_self_contained
+        else entry
+        for entry in checked
+    ]
     cohort = [
-        VerifiedPackage(root=path, classification=classification, integrity=integrity)
-        for path, classification, integrity in zip(paths, classifications, integrities, strict=True)
-        if integrity is not None and integrity.is_clean
+        VerifiedPackage(entry.root, entry.classification, entry.integrity, entry.root_identity)
+        for entry in checked
+        if entry.integrity is not None and entry.integrity.is_clean
     ]
-    verdicts = {
-        result.verified.root: result
-        for result in (verify_phase1_role_identity([entry.root for entry in cohort], verified=cohort) if cohort else ())
-        if result.verified is not None
-    }
-    return [
-        _Prechecked(path, classification, integrity, verdicts.get(path))
-        for path, classification, integrity in zip(paths, classifications, integrities, strict=True)
-    ]
+    results = verify_phase1_role_identity([entry.root for entry in cohort], verified=cohort) if cohort else ()
+    verdicts = bind_root_results(
+        [entry.root_identity for entry in cohort],
+        results,
+        lambda result: (
+            verified_root_binding(result.verified)
+            if type(result) is Phase1RoleIdentityResult  # pylint: disable=unidiomatic-typecheck
+            else None
+        ),
+    )
+    if verdicts is None:
+        return [replace(entry, binding_valid=False) for entry in checked]
+    return [replace(entry, roles=verdicts.get(entry.root_identity)) for entry in checked]
 
 
 def _scan_verified_package(
-    root: Path, roles: Phase1RoleIdentityResult | None, require_validation_grade: bool
+    root: Path, root_identity: str, roles: Phase1RoleIdentityResult | None, require_validation_grade: bool
 ) -> dict[str, Any]:
     """Project the bound source before entering any source, report or evidence reader."""
     handoff = roles.source_handoff() if roles is not None else None
-    source = resolve_verified_package_source(handoff if handoff is not None and handoff.package_root == root else None)
+    if not exact_root_matches(root, root_identity) or handoff is not None and handoff.root_identity != root_identity:
+        return _root_binding_refused(root)
+    source = resolve_verified_package_source(handoff)
     unit = roles.unit if roles is not None and roles.unit is not None else root.name
     if source.state != "resolved":
         status = STATUS_FINDINGS if source.state == "blocked" else STATUS_CANNOT_ESTABLISH

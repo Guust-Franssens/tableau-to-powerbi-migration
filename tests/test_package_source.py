@@ -27,9 +27,61 @@ ROOT = Path("packages") / "opaque-unit"
 SHA = "0123456789abcdef" * 4
 
 
+class _StringSubclass(str):
+    """Equal text is not an exact runtime string field."""
+
+
+class _TupleSubclass(tuple):
+    """A tuple subclass is not the handoff's exact immutable container type."""
+
+
+INVALID_RAW_PATHS = [
+    "",
+    ".",
+    "..",
+    "/assets/opaque.twb",
+    "//server/share/opaque.twb",
+    "C:/opaque.twb",
+    "C:opaque.twb",
+    r"\\server\share\opaque.twb",
+    r"assets\opaque.twb",
+    "assets/opaque.twb:stream",
+    "../opaque.twb",
+    "assets/../../opaque.twb",
+    "./assets/opaque.twb",
+    "assets/./opaque.twb",
+    "assets/../assets/opaque.twb",
+    "assets//opaque.twb",
+    "assets/opaque.twb/",
+    "assets/CON.twb",
+    "assets/con/opaque.twb",
+    "assets/PRN.twb",
+    "assets/AUX.twb",
+    "assets/NUL.twb",
+    "assets/CONIN$.twb",
+    "assets/CONOUT$.twb",
+    "assets/COM1.twb",
+    "assets/LPT9.twb",
+    "assets/COM\u00b9.twb",
+    "assets/COM\u00b2.twb",
+    "assets/COM\u00b3.twb",
+    "assets/LPT\u00b9.twb",
+    "assets/LPT\u00b2.twb",
+    "assets/LPT\u00b3.twb",
+    "assets/a./opaque.twb",
+    "assets/a /opaque.twb",
+    "assets/ a/opaque.twb",
+    "assets/bad\x00/opaque.twb",
+    "assets/bad\x01/opaque.twb",
+    "assets/bad\x1f/opaque.twb",
+    "assets/bad\x7f/opaque.twb",
+    *[f"assets/bad{char}/opaque.twb" for char in '<>:"|?*'],
+]
+
+
 def handoff(kind: source.PackageKind = "workbook", extension: str = ".twb") -> source.PackageSourceInput:
     """A literal authority input: no package writer, discovery or identity inference."""
-    return source.PackageSourceInput("ready", ROOT, "Revenue", kind, PurePosixPath(f"assets/opaque{extension}"), SHA)
+    return source.PackageSourceInput("ready", ROOT, str(ROOT), "Revenue", kind, f"assets/opaque{extension}", SHA)
 
 
 def authority(
@@ -47,6 +99,7 @@ def authority(
             root,
             corpus.TargetClassification("package", "package_declared", "", "none", "opaque-unit"),
             filesystem.PackageFilesystemResult("clean"),
+            str(root),
         ),
     )
 
@@ -62,7 +115,7 @@ def test_typed_source_is_exactly_the_declared_role(kind: source.PackageKind, ext
 
     assert result.state == "resolved"
     assert result.path == ROOT / "assets" / f"opaque{extension}"
-    assert result.relative_path is value.asset_path, "projection must preserve the authority's exact role"
+    assert result.relative_path.as_posix() == value.asset_path, "projection must preserve the exact raw role"
     assert result.kind == kind
     assert result.sha256 == SHA
     assert result.codes == ()
@@ -92,6 +145,7 @@ def test_diagnostic_handover_provenance_and_provider_are_not_projector_inputs() 
     assert {item.name for item in fields(source.PackageSourceInput)} == {
         "prerequisite",
         "package_root",
+        "root_identity",
         "unit",
         "kind",
         "asset_path",
@@ -134,7 +188,7 @@ def test_provider_and_consumer_project_their_own_sources() -> None:
     ],
 )
 def test_refusal_codes_pass_through_without_inspecting_paths(prerequisite: str, codes: tuple[str, ...]) -> None:
-    value = source.PackageSourceInput(prerequisite, object(), None, None, object(), None, codes)
+    value = source.PackageSourceInput(prerequisite, object(), object(), None, None, object(), None, codes)
 
     result = source.resolve_verified_package_source(value)
 
@@ -166,44 +220,139 @@ def test_s2_handoff_keeps_fresh_s1_codes_instead_of_a_generic_s2_block() -> None
     "changes",
     [
         {"prerequisite": "unknown"},
+        {"prerequisite": True},
+        {"prerequisite": _StringSubclass("ready")},
         {"package_root": None},
         {"package_root": "packages/opaque-unit"},
+        {"root_identity": None},
+        {"root_identity": str(ROOT).upper()},
+        {"root_identity": _StringSubclass(str(ROOT))},
         {"unit": None},
         {"unit": ""},
+        {"unit": " "},
+        {"unit": False},
+        {"unit": _StringSubclass("Revenue")},
         {"kind": None},
         {"kind": "unknown"},
+        {"kind": False},
+        {"kind": _StringSubclass("workbook")},
         {"asset_path": None},
-        {"asset_path": "assets/opaque.twb"},
-        {"asset_path": PurePosixPath(".")},
-        {"asset_path": PurePosixPath("/assets/opaque.twb")},
-        {"asset_path": PurePosixPath("../opaque.twb")},
-        {"asset_path": PurePosixPath("assets/../../opaque.twb")},
-        {"asset_path": PurePosixPath("C:/opaque.twb")},
-        {"asset_path": PurePosixPath(r"assets\opaque.twb")},
-        {"asset_path": PurePosixPath("assets/opaque.tdsx")},
+        {"asset_path": PurePosixPath("assets/opaque.twb")},
+        {"asset_path": PurePosixPath("assets/./opaque.twb")},
+        {"asset_path": PurePosixPath("assets//opaque.twb")},
+        {"asset_path": False},
+        {"asset_path": _StringSubclass("assets/opaque.twb")},
+        {"asset_path": "assets/opaque.tdsx"},
         {"asset_sha256": None},
+        {"asset_sha256": False},
+        {"asset_sha256": _StringSubclass(SHA)},
         {"asset_sha256": "f" * 63},
         {"asset_sha256": "g" * 64},
+        {"asset_sha256": "F" * 64},
         {"codes": ("provider_missing",)},
+        {"codes": False},
+        {"codes": []},
+        {"codes": ""},
+        {"codes": None},
+        {"codes": _TupleSubclass()},
     ],
 )
-def test_malformed_ready_handoff_cannot_establish_and_never_returns_a_source(changes: dict[str, object]) -> None:
-    result = source.resolve_verified_package_source(replace(handoff(), **changes))
+def test_malformed_ready_handoff_cannot_establish_and_never_returns_a_source(
+    changes: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = project_without_io(monkeypatch, replace(handoff(), **changes))
 
     assert result.state == "cannot_establish"
     assert result.codes == ("source_handoff_invalid",)
     assert (result.path, result.relative_path, result.kind, result.sha256) == (None, None, None, None)
 
 
+@pytest.mark.parametrize("raw", INVALID_RAW_PATHS)
+def test_raw_role_is_refused_before_path_normalization(raw: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    value = replace(handoff(), asset_path=raw)
+
+    def forbidden(*_args: object) -> object:
+        raise _ForbiddenSourceOperation("invalid raw spelling reached the normalizing path constructor")
+
+    monkeypatch.setattr(source, "PurePosixPath", forbidden)
+    result = project_without_io(monkeypatch, value)
+
+    assert result.state == "cannot_establish"
+    assert result.codes == ("source_handoff_invalid",)
+    assert result.path is None
+
+
+@pytest.mark.parametrize("raw", ["./assets/opaque.twb", "assets/./opaque.twb", "assets//opaque.twb"])
+def test_s2_preserves_raw_aliases_until_the_projector_refuses_them(raw: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    result = replace(authority(), roles=(roles.RoleResult("source_asset", "resolved", "1 file", (raw,)),))
+    with monkeypatch.context() as patch:
+        forbid_source_operations(patch)
+        value = result.source_handoff()
+
+    assert type(value.asset_path) is str
+    assert value.asset_path is raw, "S2 must not erase a raw alias with PurePosixPath"
+    assert project_without_io(monkeypatch, value).codes == ("source_handoff_invalid",)
+
+
+@pytest.mark.parametrize("raw", ["source.twb", "assets/nested/Report.v2.twb", "assets/Revenue 2026.TWBX"])
+def test_canonical_raw_paths_are_projected_without_io(raw: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    result = project_without_io(monkeypatch, replace(handoff(), asset_path=raw))
+
+    assert result.state == "resolved"
+    assert result.relative_path.as_posix() == raw
+    assert str(result.path) == str(ROOT.joinpath(*raw.split("/")))
+    assert result.codes == ()
+
+
+@pytest.mark.parametrize("prerequisite", ["ready", "blocked", "cannot_establish"])
+@pytest.mark.parametrize(
+    "codes",
+    [
+        False,
+        None,
+        "",
+        "provider_missing",
+        [],
+        ["provider_missing"],
+        _TupleSubclass(),
+        (None,),
+        (False,),
+        ([],),
+        ("",),
+        ("UPPER",),
+        ("not-a-code",),
+        ("code\n",),
+        (_StringSubclass("provider_missing"),),
+        ("provider_missing", "provider_missing"),
+    ],
+)
+def test_wrong_code_types_or_duplicate_codes_never_pass_through(
+    prerequisite: str, codes: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = project_without_io(monkeypatch, replace(handoff(), prerequisite=prerequisite, codes=codes))
+
+    assert result.state == "cannot_establish"
+    assert result.codes == ("source_handoff_invalid",)
+    assert result.path is None
+
+
 @pytest.mark.parametrize(
     "changes",
     [
         {"verified": None},
+        {"verified": object()},
+        {"verdict": _StringSubclass("START_READY")},
+        {"blockers": False},
+        {"blockers": []},
+        {"blockers": ""},
+        {"blockers": None},
         {"roles": ()},
         {"roles": (roles.RoleResult("source_asset", "missing", "1 file"),)},
         {"roles": (roles.RoleResult("source_asset", "resolved", "1 file", ("assets/a.twb", "assets/b.twb")),)},
+        {"roles": (roles.RoleResult("source_asset", "resolved", "1 file", ["assets/a.twb"]),)},
         {"source_identity": None},
         {"source_identity": roles.SourceIdentity("datasource", SHA, None, None)},
+        {"source_identity": roles.SourceIdentity(_StringSubclass("workbook"), SHA, None, None)},
     ],
 )
 def test_inconsistent_s2_result_cannot_mint_a_usable_handoff(changes: dict[str, object]) -> None:
@@ -267,6 +416,22 @@ def forbid_source_operations(patch: pytest.MonkeyPatch) -> None:
             patch.setattr(module, name, forbidden)
 
 
+def project_without_io(
+    monkeypatch: pytest.MonkeyPatch, value: source.PackageSourceInput | None
+) -> source.PackageSourceResult:
+    """Undo global patches before any failed purity assertion reaches pytest's own readers."""
+    result, violation = None, None
+    with monkeypatch.context() as patch:
+        forbid_source_operations(patch)
+        try:
+            result = source.resolve_verified_package_source(value)
+        except _ForbiddenSourceOperation as exc:
+            violation = str(exc)
+    assert violation is None, violation
+    assert result is not None
+    return result
+
+
 @pytest.mark.parametrize(
     ("value", "state", "codes"),
     [
@@ -292,16 +457,8 @@ def forbid_source_operations(patch: pytest.MonkeyPatch) -> None:
 def test_projector_completes_with_every_forbidden_operation_armed(
     monkeypatch: pytest.MonkeyPatch, value: source.PackageSourceInput | None, state: str, codes: tuple[str, ...]
 ) -> None:
-    result, violation = None, None
-    with monkeypatch.context() as patch:
-        forbid_source_operations(patch)
-        try:
-            result = source.resolve_verified_package_source(value)
-        except _ForbiddenSourceOperation as exc:
-            violation = str(exc)
-
-    assert violation is None, violation
-    assert result is not None and result.state == state
+    result = project_without_io(monkeypatch, value)
+    assert result.state == state
     assert result.codes == codes
 
 
@@ -329,7 +486,9 @@ def test_tempting_undeclared_file_does_not_change_a_blocked_handoff(
 
 
 def test_printable_source_contains_only_the_relative_role(tmp_path: Path) -> None:
-    result = source.resolve_verified_package_source(replace(handoff(), package_root=tmp_path))
+    result = source.resolve_verified_package_source(
+        replace(handoff(), package_root=tmp_path, root_identity=str(tmp_path))
+    )
 
     assert result.as_dict() == {
         "state": "resolved",
