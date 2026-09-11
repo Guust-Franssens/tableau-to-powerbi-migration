@@ -684,7 +684,7 @@ def test_privacy_never_echoes_native_exception_or_raw_samples(package):
     runtime = FakeRuntime()
 
     def explode(_request):
-        raise RuntimeError(r"C:\Users\Private\secret.pbip https://secret.invalid/?token=secret")
+        raise RuntimeError(r"C:\fixture\secret.pbip https://secret.invalid/?token=secret")
 
     runtime.bind = explode
     result = collect(package, runtime)

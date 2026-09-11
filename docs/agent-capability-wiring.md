@@ -69,6 +69,7 @@ must appear below unless the script docstring marks it `internal: true` with an 
 | `scripts/connections_manifest.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/credential_gate.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/current_artifact_revision.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
+| `scripts/completion_evidence.py` | `agent-facing` | Library-only Slice-A interface documented in `scripts/README.md`; not a completion CLI or gate. |
 | `scripts/dax_oracle_server.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/declare_generated_edit.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/deploy_estate.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
