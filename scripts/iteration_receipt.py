@@ -926,15 +926,30 @@ def _assert_snapshot(package: Path, chain: list[Iteration], pending_backup: Iter
 
 def _restore_pending(selected: Iteration) -> None:
     backup = selected.directory / PENDING_BACKUP_NAME
+    destination = selected.directory / RECEIPT_NAME
     try:
+        try:
+            backup.read_bytes()
+        except FileNotFoundError:
+            # Cleanup retired the backup. Reconstruct the exact captured bytes, never the
+            # reserialized payload or the now-untrusted published receipt.
+            try:
+                with backup.open("xb") as output:
+                    output.write(selected.receipt_bytes)
+            except OSError:
+                if not backup.exists():
+                    # If even marker creation fails, withdraw the final receipt into that
+                    # deterministic non-authoritative path before reporting rollback failure.
+                    os.replace(destination, backup)
+                raise
         if backup.read_bytes() != selected.receipt_bytes:
             raise OSError("pending backup changed")
-        os.replace(backup, selected.directory / RECEIPT_NAME)
+        os.replace(backup, destination)
     except OSError as error:
         # Keep the backup: the ordinary chain reader refuses its extra-file marker, even if the
         # filesystem no longer permits any writes. Never delete the marker to conceal a failed undo.
         raise ReceiptError(
-            "FINALIZATION_ROLLBACK_FAILED", "pending backup retained; the iteration is not authoritative"
+            "FINALIZATION_ROLLBACK_FAILED", "blocking backup retained; the iteration is not authoritative"
         ) from error
 
 
@@ -961,21 +976,27 @@ def _publish_final(package: Path, chain: list[Iteration], payload: dict[str, Any
         os.link(staged, destination)
         published = True
         staged.unlink()
+        staged_owned = False
         _assert_snapshot(package, expected, selected)
         backup.unlink()
+        # This is the success boundary: all cleanup is over, and rollback still has the exact
+        # pending bytes in selected. No filesystem or external operation may follow this snapshot.
+        _assert_snapshot(package, expected)
+        return
     except BaseException as error:
-        if displaced:
-            _restore_pending(selected)
+        try:
+            if displaced:
+                _restore_pending(selected)
+        finally:
+            if staged_owned:
+                try:
+                    staged.unlink(missing_ok=True)
+                except OSError:
+                    pass  # Any residue also makes the ordinary exact-file-set reader refuse.
         if not isinstance(error, Exception):
             raise
         code = "FINALIZATION_CHANGED" if published else "FINALIZATION_WRITE_FAILED"
         raise ReceiptError(code, "final receipt not committed; pending receipt preserved") from error
-    finally:
-        if staged_owned:
-            try:
-                staged.unlink(missing_ok=True)
-            except OSError:
-                pass  # Any residue also makes the ordinary exact-file-set reader refuse.
 
 
 def finalize(  # pylint: disable=too-many-locals
