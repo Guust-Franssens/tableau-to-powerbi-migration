@@ -98,6 +98,12 @@ python scripts/capture_tableau_oracle.py --out _oracle --images \
     --workbook "Sales Overview" --workbook "Ops Detail" --workbook "Exec Summary"
 ```
 
+`--workers N` overlaps selected views from different workbooks inside that **one invocation** and
+that **one authenticated Tableau session**. The compatibility default is `1`; accepted values are
+`1..4`. The first implementation keeps at most one view per workbook in flight, and each view still
+does `/data` before its requested render legs. Keep `--workers 1` for the serial oracle until the
+frozen real-site `1`-versus-`2` acceptance run is complete.
+
 There is no `--project` flag, and server-side project filtering is blocked for now: Tableau's numeric
 project id (the one in the site's own URL) has no public API mapping (issue #191). So expand the
 project to its workbook names first, then pass them all in one invocation.
@@ -333,7 +339,9 @@ validation-grade**.
 
 ⚠️ **One PAT = one live session.** Two concurrent probes against the same PAT invalidated each other
 mid-run (`401002` on the older token, then a hard 401 on every later call). Do not run two Tableau
-captures in parallel with one PAT.
+capture **processes/invocations** in parallel with one PAT. `--workers` is different: one process,
+one sign-in and one shared token generation; a simultaneous `401002` causes one reauthentication,
+and an HTTP 429 `Retry-After` pauses later requests across the whole worker pool.
 
 ### Reach — which of these a customer can actually use (issue #403 follow-up)
 
@@ -769,7 +777,9 @@ redesigns." With no declared mode they can *reasonably disagree*. Every migratio
 - Credentials are read by the **deterministic capture script directly** from env vars or a git-ignored
   `.env.local` (already ignored) — never passed through agent prompts, CLI args, URLs, or logs. Hold the
   short-lived `X-Tableau-Auth` token in memory only and sign out in `finally`. Use a least-privilege,
-  POC-specific PAT and revoke it afterward. Tableau forbids concurrent sessions on one PAT — serialize.
+  POC-specific PAT and revoke it afterward. Tableau forbids concurrent sessions on one PAT — serialize
+  capture invocations. `capture_tableau_oracle.py --workers 1..4` shares one login/session inside one
+  invocation; it never creates a session per worker.
 
 ## Corrected pipeline ordering
 
