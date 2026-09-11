@@ -58,7 +58,7 @@ import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from object_identity import RevisionKey, revision_key  # noqa: E402  # pylint: disable=wrong-import-position
@@ -92,6 +92,8 @@ MSG_INPUTS_DISCOVERED = "inputs-discovered"
 MSG_OPERATION = "operation"
 MSG_CHECKPOINT = "checkpoint"
 MSG_LOOKUP_INTENT = "lookup-intent"
+MSG_INVENTORY_FACTS = "inventory-facts"
+MSG_INVENTORY_FAILED = "inventory-failed"
 MSG_SAFE_SNAPSHOT = "safe-snapshot"
 MSG_TERMINAL = "terminal"
 
@@ -114,6 +116,14 @@ DEADLINE_CODE = "deadline-expired"
 CANCELLED_CODE = "cancelled"
 RESULT_STATUSES = SUCCESS_STATUSES | {"partial", "failed", "empty"}
 NO_ORIGIN_NOTE = "no workbook of this LUID or name on the site - local-only input"
+INCOMPLETE_INVENTORY_NOTE = "workbook not found in the incomplete inventory page - origin cannot be established"
+INVENTORY_PAGE_SIZE = 1000
+INVENTORY_MAX_COUNT = (1 << 63) - 1
+INVENTORY_ERROR_CODES = frozenset({"inventory-truncated", "inventory-cannot-establish"})
+INVENTORY_FACT_KEYS = frozenset(
+    {"returned_count", "requested_page_size", "page_number", "page_size", "total_available"}
+)
+INVENTORY_RAW_FACT_KEYS = INVENTORY_FACT_KEYS | {"invalid_fields"}
 
 # Only these labels, never an exception's dynamically supplied name or text, cross the channel.
 ERROR_CLASSES = frozenset(
@@ -367,6 +377,12 @@ class NullReporter:
     def lookup_intent(self, requested: bool) -> None:
         """Ignore whether the completed local pass is followed by live work."""
 
+    def inventory_facts(self, facts: dict[str, int | None]) -> None:
+        """Ignore the parsed first page's numeric facts."""
+
+    def inventory_failed(self) -> None:
+        """Ignore the failed inventory operation; it produced no completeness facts."""
+
     def safe_snapshot(self, result: dict[str, Any]) -> None:
         """Ignore the scrubbed snapshot."""
 
@@ -430,6 +446,14 @@ class WorkerReporter(NullReporter):
         """Declare live intent before sign-in without sending any credential or host identity."""
         self._send({"kind": MSG_LOOKUP_INTENT, "requested": bool(requested)})
 
+    def inventory_facts(self, facts: dict[str, int | None]) -> None:
+        """Send raw bounded numbers, never the worker's completeness classification."""
+        self._send({"kind": MSG_INVENTORY_FACTS, "facts": facts})
+
+    def inventory_failed(self) -> None:
+        """Distinguish a completed failed request/parse from a successfully parsed inventory."""
+        self._send({"kind": MSG_INVENTORY_FAILED})
+
     def safe_snapshot(self, result: dict[str, Any]) -> None:
         """The whole result once it is scrubbed - sent BEFORE sign-out, which can hang."""
         self._send({"kind": MSG_SAFE_SNAPSHOT, "result": result})
@@ -471,6 +495,107 @@ def fingerprint(path: Path) -> dict[str, Any]:
     return record
 
 
+class InventoryCompleteness(NamedTuple):
+    """Numeric evidence from the same response as the cached first-page rows."""
+
+    status: Literal["complete", "truncated", "cannot_establish"]
+    returned_count: int
+    page_number: int | None = None
+    page_size: int | None = None
+    total_available: int | None = None
+    invalid_fields: int = 0
+
+    def facts(self) -> dict[str, int | None]:
+        """Keep malformed distinct from absent without copying the malformed response value."""
+        return {
+            "returned_count": self.returned_count,
+            "requested_page_size": INVENTORY_PAGE_SIZE,
+            "page_number": self.page_number,
+            "page_size": self.page_size,
+            "total_available": self.total_available,
+            "invalid_fields": self.invalid_fields,
+        }
+
+    def error(self) -> dict[str, Any] | None:
+        """Only an incomplete inventory adds a finding; no copied response fields survive."""
+        if self.status == "complete":
+            return None
+        code = "inventory-truncated" if self.status == "truncated" else "inventory-cannot-establish"
+        facts = {"returned_count": self.returned_count, "requested_page_size": INVENTORY_PAGE_SIZE}
+        for key, value in (
+            ("page_number", self.page_number),
+            ("page_size", self.page_size),
+            ("total_available", self.total_available),
+        ):
+            if value is not None:
+                facts[key] = value
+        return _error(code, OP_INVENTORY, **facts)
+
+
+def _pagination_count(value: object) -> int | None:
+    """REST counts may be decimal strings or integers, never coercible/nonfinite values."""
+    if isinstance(value, str):
+        if re.fullmatch(r"[0-9]{1,19}", value) is None:
+            return None
+        value = int(value)
+    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= INVENTORY_MAX_COUNT:
+        return value
+    return None
+
+
+def _inventory_completeness(returned_count: int, metadata: object) -> InventoryCompleteness:
+    """Parse only bounded numeric facts, retaining malformed-versus-missing evidence."""
+    if not isinstance(metadata, dict):
+        return InventoryCompleteness("cannot_establish", returned_count, invalid_fields=1)
+    counts = {
+        key: _pagination_count(metadata[key]) for key in ("pageNumber", "pageSize", "totalAvailable") if key in metadata
+    }
+    page = InventoryCompleteness(
+        "cannot_establish",
+        returned_count,
+        counts.get("pageNumber"),
+        counts.get("pageSize"),
+        counts.get("totalAvailable"),
+        sum(value is None for value in counts.values()),
+    )
+    return classify_inventory(page.facts())
+
+
+def classify_inventory(facts: dict[str, int | None]) -> InventoryCompleteness:
+    """Classify parsed numeric facts; the supervisor calls this independently of the worker verdict."""
+    page = InventoryCompleteness(
+        "cannot_establish",
+        facts["returned_count"],
+        facts["page_number"],
+        facts["page_size"],
+        facts["total_available"],
+        facts["invalid_fields"],
+    )
+    # An independently valid total proves missing rows even when a sibling field is malformed.
+    if page.total_available is not None and page.total_available > page.returned_count:
+        return page._replace(status="truncated")
+    if page.invalid_fields:
+        return page
+    if (
+        page.returned_count > facts["requested_page_size"]
+        or page.page_number not in (None, 1)
+        or page.page_size not in (None, facts["requested_page_size"])
+        or (page.total_available is not None and page.total_available < page.returned_count)
+    ):
+        return page
+    if page.total_available is not None:
+        return page._replace(status="complete")
+    return page._replace(status="complete") if page.returned_count < facts["requested_page_size"] else page
+
+
+def _inventory_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """A duplicated count must not silently replace contradictory evidence during JSON decoding."""
+    record = dict(pairs)
+    if len(record) != len(pairs):
+        raise ValueError("duplicate inventory response field")
+    return record
+
+
 class TableauLookup:  # pylint: disable=too-many-instance-attributes
     """Minimal read-only REST client, used only to identify a workbook we already hold.
 
@@ -488,8 +613,7 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
     """
 
     def __init__(self, env: dict[str, str]) -> None:
-        # Seven fields describe the site and the session; the four after them are this run's answer
-        # cache, kept as plain fields rather than a container so each one reads at its use site.
+        # Site/session fields precede this run's cached answers and their evidence.
         self.base = env["TABLEAU_SERVER_URL"].rstrip("/")
         self.version = env.get("TABLEAU_REST_API_VERSION", "3.21")
         self.site = env["TABLEAU_SITE"]
@@ -499,6 +623,8 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
         self.site_id: str | None = None
         self._inventory: list[dict[str, Any]] | None = None
         self._inventory_failure: Exception | None = None
+        self.inventory_completeness: InventoryCompleteness | None = None
+        self.matched_luids: set[str] = set()
         self._content_cache: dict[str, bytes | None] = {}
         self._content_failure: dict[str, Exception] = {}
         self._content_unavailable: dict[str, str] = {}
@@ -566,7 +692,7 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
         return redact(text, self._pat[0], self._pat[1], self.token or "")
 
     def workbooks(self) -> list[dict[str, Any]]:
-        """Every workbook on the site, listed **once per run** - the failure included.
+        """The first inventory page, cached **once per run** with its completeness or failure.
 
         The listing does not vary between inputs, so asking again for the second and every later
         input bought nothing and cost one round trip each (66 of 66 measured). Latching the failure
@@ -580,16 +706,28 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
                 self._inventory = self._fetch_workbooks()
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 self._inventory_failure = exc
+                self.reporter.inventory_failed()
                 raise
         return self._inventory
 
     def _fetch_workbooks(self) -> list[dict[str, Any]]:
         if self.reporter.cancelled:
             raise RuntimeError(CANCELLED_CODE)
-        status, payload = self._call("GET", f"/sites/{self.site_id}/workbooks?pageSize=1000", accept="application/json")
+        status, payload = self._call(
+            "GET", f"/sites/{self.site_id}/workbooks?pageSize={INVENTORY_PAGE_SIZE}", accept="application/json"
+        )
         if status != 200:
             raise RuntimeError(f"listing workbooks failed: HTTP {status}")
-        return json.loads(payload).get("workbooks", {}).get("workbook", [])
+        document = json.loads(payload, object_pairs_hook=_inventory_object)
+        if not isinstance(document, dict) or not isinstance(document.get("workbooks"), dict):
+            raise ValueError("invalid workbook inventory")
+        rows = document["workbooks"].get("workbook", [])
+        rows = ([rows] if rows else []) if isinstance(rows, dict) else rows
+        if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+            raise ValueError("invalid workbook inventory rows")
+        self.inventory_completeness = _inventory_completeness(len(rows), document.get("pagination", {}))
+        self.reporter.inventory_facts(self.inventory_completeness.facts())
+        return rows
 
     def content_sha256(self, workbook_id: str) -> str | None:
         """sha256 of the workbook as the server would hand it to us, or ``None`` if it cannot be read.
@@ -781,6 +919,7 @@ def find_origin(lookup: TableauLookup, stem: str, local: dict[str, Any]) -> dict
         return None
 
     workbook = candidates[0]
+    lookup.matched_luids.add(workbook["id"])
     remote_sha = lookup.content_sha256(workbook["id"])
     remote_key = lookup.content_revision_key(workbook["id"])
     unavailable = lookup.content_unavailable(workbook["id"])
@@ -820,12 +959,14 @@ def collect_inputs(target: Path) -> list[Path]:
     return sorted(p for p in target.iterdir() if p.suffix.lower() in WORKBOOK_SUFFIXES)
 
 
-def _cancelled_result(records: list[dict[str, Any]], total: int, operation: str) -> dict[str, Any]:
+def _cancelled_result(
+    records: list[dict[str, Any]], total: int, operation: str, errors: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
     """Never keep an unscrubbed live record or lose an unfinished physical input on cancellation."""
     reduced = [checkpoint_record(record) for record in records]
     reduced.extend(unavailable_input(CANCELLED_CODE) for _ in range(total - len(reduced)))
     usable = any(record["input"].get("status") != "unavailable" for record in reduced)
-    return _result(reduced, "partial" if usable else "failed", [_error(CANCELLED_CODE, operation)])
+    return _result(reduced, "partial" if usable else "failed", [*(errors or []), _error(CANCELLED_CODE, operation)])
 
 
 def build(target: Path, env: dict[str, str], reporter: NullReporter | None = None) -> dict[str, Any]:
@@ -859,7 +1000,7 @@ def build(target: Path, env: dict[str, str], reporter: NullReporter | None = Non
     errors: list[dict[str, Any]] = []
     records = _fingerprint_pass(inputs, errors, reporter)
     if reporter.cancelled:
-        return _cancelled_result(records, len(inputs), OP_FINGERPRINT)
+        return _cancelled_result(records, len(inputs), OP_FINGERPRINT, errors)
     return _complete_provenance(inputs, records, env, reporter, errors)
 
 
@@ -877,11 +1018,11 @@ def _complete_provenance(
     if live_requested and not reporter.cancelled:
         lookup = _open_lookup(env, errors, reporter)
     if reporter.cancelled:
-        return _cancelled_result(records, len(inputs), OP_SIGN_IN)
+        return _cancelled_result(records, len(inputs), OP_SIGN_IN, errors)
     if lookup is not None:
         _origin_pass(inputs, records, lookup, errors, reporter)
     if reporter.cancelled:
-        return _cancelled_result(records, len(inputs), OP_CONTENT if lookup is not None else OP_SIGN_IN)
+        return _cancelled_result(records, len(inputs), OP_CONTENT if lookup is not None else OP_SIGN_IN, errors)
 
     usable = sum(record["input"].get("status") != "unavailable" for record in records)
     status = "failed" if not usable else ("partial" if errors else ("success" if live_requested else "local_only"))
@@ -953,16 +1094,21 @@ def _origin_pass(
         lookup.workbooks()
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
         LOG.debug("site inventory unavailable (%s) - each input records its own reason", _exception_class(exc))
+        errors.append(_error(MSG_INVENTORY_FAILED, OP_INVENTORY, exc))
+    else:
+        completeness = lookup.inventory_completeness
+        if completeness is not None and (finding := completeness.error()) is not None:
+            errors.append(finding)
     reporter.operation(OP_INVENTORY, 1, 1)
 
     for path, record in zip(inputs, records):
         if record["input"].get("status") == "unavailable":
             continue
-        reporter.operation(OP_CONTENT, lookup.content_attempts(), None)
+        reporter.operation(OP_CONTENT, lookup.content_attempts(), len(lookup.matched_luids))
         if reporter.cancelled:
             break
         _attach_origin(record, lookup, path.stem, errors)
-        reporter.operation(OP_CONTENT, lookup.content_attempts(), None)
+        reporter.operation(OP_CONTENT, lookup.content_attempts(), len(lookup.matched_luids))
 
 
 def _attach_origin(record: dict[str, Any], lookup: TableauLookup, stem: str, errors: list[dict[str, Any]]) -> None:
@@ -975,7 +1121,12 @@ def _attach_origin(record: dict[str, Any], lookup: TableauLookup, stem: str, err
         errors.append(record["lookup_error"])
     record["origin"] = origin
     if origin is None:
-        record["origin_note"] = NO_ORIGIN_NOTE
+        completeness = lookup.inventory_completeness
+        record["origin_note"] = (
+            INCOMPLETE_INVENTORY_NOTE
+            if completeness is not None and completeness.status != "complete"
+            else NO_ORIGIN_NOTE
+        )
     elif origin["match"] == "name_only":
         record["origin_note"] = (
             f"matched by {origin['matched_by']}, but the bytes DIFFER from the site copy - "
@@ -1012,7 +1163,7 @@ def _finish_live(result: dict[str, Any], lookup: TableauLookup, reporter: NullRe
     reporter = reporter or NullReporter()
     reporter.operation(OP_SCRUB, 0, 1)
     if reporter.cancelled:
-        return _cancelled_result(result["inputs"], result["input_count"], OP_SCRUB)
+        return _cancelled_result(result["inputs"], result["input_count"], OP_SCRUB, result["phase"]["errors"])
     try:
         result, _paths = scrub_tree(result, lookup.redact_text)
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
@@ -1020,7 +1171,7 @@ def _finish_live(result: dict[str, Any], lookup: TableauLookup, reporter: NullRe
         result["phase"]["errors"].append(_error("scrub-failed", OP_SCRUB, exc))
         result = _without_live_fields(result, lookup.redact_text, reporter)
     if reporter.cancelled:
-        return _cancelled_result(result["inputs"], result["input_count"], OP_SCRUB)
+        return _cancelled_result(result["inputs"], result["input_count"], OP_SCRUB, result["phase"]["errors"])
     reporter.operation(OP_SCRUB, 1, 1)
     if result["phase"]["errors"]:
         result["phase"]["status"] = "partial"
@@ -1095,7 +1246,7 @@ def _without_live_fields(result: dict[str, Any], redactor, reporter: NullReporte
     """
     reporter = reporter or NullReporter()
     if reporter.cancelled:
-        return _cancelled_result(result["inputs"], result["input_count"], OP_SCRUB)
+        return _cancelled_result(result["inputs"], result["input_count"], OP_SCRUB, result["phase"]["errors"])
     reduced = {
         **result,
         "inputs": [
@@ -1104,7 +1255,7 @@ def _without_live_fields(result: dict[str, Any], redactor, reporter: NullReporte
     }
     try:
         if reporter.cancelled:
-            return _cancelled_result(result["inputs"], result["input_count"], OP_SCRUB)
+            return _cancelled_result(result["inputs"], result["input_count"], OP_SCRUB, result["phase"]["errors"])
         scrubbed, _paths = scrub_tree(reduced, redactor)
         return scrubbed
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
