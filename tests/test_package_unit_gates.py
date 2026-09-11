@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import check_path_ceiling as cpc  # noqa: E402  # pylint: disable=wrong-import-position
 import check_reference_readiness as crr  # noqa: E402  # pylint: disable=wrong-import-position
 import check_unit  # noqa: E402  # pylint: disable=wrong-import-position
+import package_role_identity as pri  # noqa: E402  # pylint: disable=wrong-import-position
 import package_unit as pkg  # noqa: E402  # pylint: disable=wrong-import-position
 from test_check_reference_readiness import (  # noqa: E402  # pylint: disable=wrong-import-position
     write_engine_report,
@@ -42,9 +43,11 @@ from test_check_reference_readiness import (  # noqa: E402  # pylint: disable=wr
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "minimal.twb"
+DS_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "standalone_datasource.tds"
 UNIT = "Minimal"
 DS_UNIT = "Shared_Extract"
 WB_LUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+DS_LUID = "11111111-2222-3333-4444-555555555555"
 
 
 def _write_pbir(bundle: Path, unit: str, objects: list) -> None:
@@ -53,8 +56,14 @@ def _write_pbir(bundle: Path, unit: str, objects: list) -> None:
     `displayName` carries the Tableau object name because `check_unit.actual_pages` matches on it,
     and each page gets a `visual.json` because `_page_visual_count` is what distinguishes a rebuilt
     page from the engine's crash-guard placeholder.
+
+    ⚠️ The `.SemanticModel`, the `definition.pbir` binding and the `.pbip` entry point are here
+    because a real 2.339.0 `pbip/<Unit>/` carries all three - measured on all 62 units of the
+    reference run - and #562 S2 checks that cardinality. A fixture with a report and no model was
+    modelling engine output that does not exist.
     """
-    pages = bundle / "pbip" / unit / f"{unit}.Report" / "definition" / "pages"
+    working = bundle / "pbip" / unit
+    pages = working / f"{unit}.Report" / "definition" / "pages"
     pages.mkdir(parents=True, exist_ok=True)
     (pages / "pages.json").write_text(json.dumps({"pageOrder": [obj.page_id for obj in objects]}), encoding="utf-8")
     for obj in objects:
@@ -62,6 +71,70 @@ def _write_pbir(bundle: Path, unit: str, objects: list) -> None:
         (page / "visuals" / "v-1").mkdir(parents=True, exist_ok=True)
         (page / "page.json").write_text(json.dumps({"name": obj.page_id, "displayName": obj.name}), encoding="utf-8")
         (page / "visuals" / "v-1" / "visual.json").write_text(json.dumps({"name": "v-1"}), encoding="utf-8")
+    (working / f"{unit}.Report" / "definition.pbir").write_text(
+        json.dumps({"version": "4.0", "datasetReference": {"byPath": {"path": f"../{unit}.SemanticModel"}}}),
+        encoding="utf-8",
+    )
+    _write_model(bundle, unit)
+    (working / f"{unit}.pbip").write_text(json.dumps({"version": "1.0"}), encoding="utf-8")
+
+
+def _write_model(bundle: Path, unit: str) -> None:
+    """The `.SemanticModel` every engine working copy carries, datasource-only units included."""
+    definition = bundle / "pbip" / unit / f"{unit}.SemanticModel" / "definition"
+    definition.mkdir(parents=True, exist_ok=True)
+    (definition / "model.tmdl").write_text("model Model\n", encoding="utf-8")
+
+
+def _write_receipt(bundle: Path, units: list[str]) -> None:
+    """The engine receipt, listing every output it wrote for these units.
+
+    `package_unit` re-roots the rows under `fabric/` and drops every row belonging to another unit,
+    which is what lets #562 S2 ask whether a package's receipt accounts for the report/model/PBIP
+    roles it claims - and only for files that are actually in it.
+    """
+    artifacts = [
+        {"path": path.relative_to(bundle).as_posix(), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+        for unit in units
+        for path in sorted((bundle / "pbip" / unit).rglob("*"))
+        if path.is_file()
+    ]
+    (bundle / "engine-output-receipt.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "created_at": "2026-09-10T00:00:00+00:00",
+                "engine": {"version": "2.339.0", "source": "plugin", "canonical": True},
+                "artifacts": artifacts,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_input_manifest(bundle: Path, assets: list[Path]) -> None:
+    """`input_manifest.json` as the engine writes it: the harvested name plus its digest."""
+    (bundle / "input_manifest.json").write_text(
+        json.dumps(
+            {
+                "assets": [
+                    {"name": asset.name, "sha256": hashlib.sha256(asset.read_bytes()).hexdigest()} for asset in assets
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _brief(tmp_path: Path, unit: str, scope: str = "model_and_report") -> Path:
+    """The dispatcher's brief - the file `--brief` copies into every package it writes."""
+    path = tmp_path / "briefs" / f"{unit}-migration-brief.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f'+++\nschema = "phase1-start-ready/v1"\nunit = "{unit}"\nscope = "{scope}"\n+++\n\nFaithful re-creation.\n',
+        encoding="utf-8",
+    )
+    return path
 
 
 def _bundle(tmp_path: Path, *, covered: set[str] | None, datasource_only: bool = False) -> tuple[Path, Path, list]:
@@ -77,10 +150,16 @@ def _bundle(tmp_path: Path, *, covered: set[str] | None, datasource_only: bool =
     write_engine_report(bundle, workbooks=[UNIT], datasources=[DS_UNIT] if datasource_only else [])
     write_handover(bundle, UNIT, source_id=str(Path("_runs") / "999-x" / "assets" / asset.name))
     _write_pbir(bundle, UNIT, objects)
+    staged = [asset]
     if datasource_only:
-        model = bundle / "pbip" / DS_UNIT / f"{DS_UNIT}.SemanticModel" / "definition"
-        model.mkdir(parents=True, exist_ok=True)
-        (model / "model.tmdl").write_text("model Model\n", encoding="utf-8")
+        _write_model(bundle, DS_UNIT)
+        # The harvester's own `<luid>_<name>` filename, which is where a datasource's server
+        # identity comes from - the engine strips that prefix to derive the unit name.
+        datasource = assets / f"{DS_LUID}_{DS_UNIT}.tds"
+        shutil.copy2(DS_FIXTURE, datasource)
+        staged.append(datasource)
+    _write_receipt(bundle, [UNIT, DS_UNIT] if datasource_only else [UNIT])
+    _write_input_manifest(bundle, staged)
 
     (bundle / "source-provenance.json").write_text(
         json.dumps(
@@ -132,8 +211,15 @@ def _bundle(tmp_path: Path, *, covered: set[str] | None, datasource_only: bool =
     return bundle, oracle, objects
 
 
-def _package(tmp_path: Path, bundle: Path, oracle: Path, unit: str = UNIT) -> Path:
-    pkg.package_unit(bundle, unit, tmp_path / "out", oracle_dir=oracle, assets_dir=bundle.parent / "assets")
+def _package(tmp_path: Path, bundle: Path, oracle: Path, unit: str = UNIT, scope: str = "model_and_report") -> Path:
+    pkg.package_unit(
+        bundle,
+        unit,
+        tmp_path / "out",
+        oracle_dir=oracle,
+        assets_dir=bundle.parent / "assets",
+        brief=_brief(tmp_path, unit, scope),
+    )
     return tmp_path / "out" / unit
 
 
@@ -142,6 +228,26 @@ def _readiness(target: Path, tmp_path: Path) -> tuple[int, dict]:
     out = tmp_path / f"readiness-{target.name}-{abs(hash(str(target))) % 9999}.json"
     code = crr.main([str(target), "--json", str(out), "--quiet"])
     return code, json.loads(out.read_text(encoding="utf-8"))
+
+
+def _cli_args(bundle: Path, out: Path, oracle: Path, tmp_path: Path) -> list[str]:
+    """The documented `package_unit.py` command line, WITH the brief the dispatcher writes.
+
+    `--brief` is part of the ordinary invocation rather than an extra: a package with no brief has
+    no role for the one document saying what the migration is for, and the entry gate blocks it
+    (`test_a_package_written_with_no_brief_is_blocked_at_the_entry_gate` is that negative control).
+    """
+    return [
+        "--bundle",
+        str(bundle),
+        "--out",
+        str(out),
+        "--oracle",
+        str(oracle),
+        "--brief",
+        str(_brief(tmp_path, UNIT)),
+        "--quiet",
+    ]
 
 
 # --------------------------------------------------------------------------------------------
@@ -304,7 +410,7 @@ def test_the_documented_check_unit_command_refuses_a_legacy_capture_as_numeric_e
 def test_a_datasource_only_unit_packages_and_neither_gate_crashes(tmp_path: Path) -> None:
     """18 of 67 units in the reference run are datasource-only; a model, no report, no oracle."""
     bundle, oracle, _ = _bundle(tmp_path, covered=None, datasource_only=True)
-    unit = _package(tmp_path, bundle, oracle, unit=DS_UNIT)
+    unit = _package(tmp_path, bundle, oracle, unit=DS_UNIT, scope="model_only")
 
     assert (unit / "fabric" / f"{DS_UNIT}.SemanticModel").is_dir()
     assert not (unit / "oracle").exists()
@@ -312,6 +418,91 @@ def test_a_datasource_only_unit_packages_and_neither_gate_crashes(tmp_path: Path
     assert (code, payload["status"]) == (0, "NOT_APPLICABLE")
     parity = check_unit.check_page_parity(unit, check_unit.load_exemptions(unit))
     assert parity["status"] in {check_unit.STATUS_NOT_CHECKED, check_unit.STATUS_PASS}
+
+
+def test_a_complete_datasource_package_is_role_and_identity_resolved(tmp_path: Path) -> None:
+    """The producer half of #562 S2: the datasource package the packager could NOT emit before.
+
+    Measured on the audited master, this same fixture packaged with `artifacts.asset: null`, no
+    `migration-spec.json` and an empty provenance `inputs` list - `NOT_APPLICABLE` at exit 0, which
+    is a correct REFERENCE verdict about a package a semantic build cannot start from. Reference is
+    still N/A; the source, the spec, the one SHA-matching provenance row and the datasource LUID the
+    harvester wrote into the filename are not, and they are what the verdict now depends on.
+
+    ⚠️ Each assertion names the role and its state. A bare `START_READY` would also pass if the
+    packager had shipped nothing at all and the verifier had stopped checking.
+    """
+    bundle, oracle, _ = _bundle(tmp_path, covered=None, datasource_only=True)
+    package = _package(tmp_path, bundle, oracle, unit=DS_UNIT, scope="model_only")
+    manifest = json.loads((package / "package-manifest.json").read_text(encoding="utf-8"))
+    provenance = json.loads((package / "source-provenance.json").read_text(encoding="utf-8"))
+
+    asset = f"assets/{DS_LUID}_{DS_UNIT}.tds"
+    assert manifest["artifacts"]["asset"] == asset
+    assert manifest["artifacts"]["migration_spec"] == "migration-spec.json"
+    assert manifest["artifacts"]["migration_brief"] == "migration-brief.md"
+    assert len(provenance["inputs"]) == 1
+    assert provenance["inputs"][0]["input"]["sha256"] == manifest["contents"]["files"][asset]
+    assert provenance["inputs"][0]["origin"]["datasource_luid"] == DS_LUID
+    assert "workbook_luid" not in provenance["inputs"][0]["origin"], "the two LUID namespaces are typed"
+
+    result = pri.verify_phase1_role_identity([package])[0]
+    states = {row.role: row.state for row in result.roles}
+    assert result.verdict == pri.VERDICT_START_READY, result.blockers
+    assert result.topology == pri.TOPOLOGY_STANDALONE_DATASOURCE
+    assert states[pri.ROLE_SOURCE_ASSET] == pri.STATE_RESOLVED
+    assert states[pri.ROLE_MIGRATION_SPEC] == pri.STATE_RESOLVED
+    assert states[pri.ROLE_SOURCE_PROVENANCE] == pri.STATE_RESOLVED
+    assert states[pri.ROLE_FABRIC_MODEL] == pri.STATE_RESOLVED
+    assert states[pri.ROLE_SERVER_IDENTITY] == pri.STATE_RESOLVED
+    assert result.source_identity is not None and result.source_identity.tableau_luid == DS_LUID
+    assert states[pri.ROLE_HANDOVER] == pri.STATE_NOT_APPLICABLE
+    assert states[pri.ROLE_TABLEAU_ORACLE] == pri.STATE_NOT_APPLICABLE
+
+
+def test_a_local_datasource_with_no_harvest_prefix_resolves_by_sha_alone(tmp_path: Path) -> None:
+    """A `.tds` that never came from a server has no LUID to agree with - and that is not a failure."""
+    bundle, oracle, _ = _bundle(tmp_path, covered=None, datasource_only=True)
+    harvested = bundle.parent / "assets" / f"{DS_LUID}_{DS_UNIT}.tds"
+    harvested.rename(bundle.parent / "assets" / f"{DS_UNIT}.tds")
+    _write_input_manifest(bundle, [bundle.parent / "assets" / f"{DS_UNIT}.tds"])
+
+    package = _package(tmp_path, bundle, oracle, unit=DS_UNIT, scope="model_only")
+    result = pri.verify_phase1_role_identity([package])[0]
+    row = next(entry for entry in result.roles if entry.role == pri.ROLE_SERVER_IDENTITY)
+
+    assert result.verdict == pri.VERDICT_START_READY, result.blockers
+    assert row.state == pri.STATE_NOT_APPLICABLE
+    assert pri.LIMITATION_LOCAL_SOURCE in result.authorized_limitations
+    assert result.source_identity is not None and result.source_identity.sha256
+
+
+def test_a_package_written_with_no_brief_is_blocked_at_the_entry_gate(tmp_path: Path) -> None:
+    """The producer's own negative: `--brief` omitted, so the package carries no brief role."""
+    bundle, oracle, _ = _bundle(tmp_path, covered=None)
+    pkg.package_unit(bundle, UNIT, tmp_path / "out", oracle_dir=oracle, assets_dir=bundle.parent / "assets")
+    package = tmp_path / "out" / UNIT
+
+    assert not (package / "migration-brief.md").exists()
+    code, payload = _readiness(package, tmp_path)
+    block = payload["role_identity"][0]
+
+    assert (code, payload["status"]) == (1, "FINDINGS")
+    assert block["verdict"] == "BLOCKED"
+    assert [row["state"] for row in block["roles"] if row["role"] == pri.ROLE_MIGRATION_BRIEF] == [pri.STATE_MISSING]
+
+
+def test_the_packaged_brief_carries_the_bytes_and_not_the_dispatchers_path(tmp_path: Path) -> None:
+    """An absolute path to the dispatcher's copy is a host disclosure AND proves no availability."""
+    bundle, oracle, _ = _bundle(tmp_path, covered=None)
+    source = _brief(tmp_path, UNIT)
+    package = _package(tmp_path, bundle, oracle)
+
+    assert (package / "migration-brief.md").read_bytes() == source.read_bytes()
+    manifest = (package / "package-manifest.json").read_text(encoding="utf-8")
+    assert str(source) not in manifest
+    assert str(source.parent) not in manifest
+    assert json.loads(manifest)["artifacts"]["migration_brief"] == "migration-brief.md"
 
 
 # --------------------------------------------------------------------------------------------
@@ -521,7 +712,7 @@ def test_completed_flat_out_dir_layout_is_accepted_and_gates_pass(tmp_path: Path
     if not run_oracle.exists():
         shutil.copytree(oracle, run_oracle)
     flat_packages = tmp_path / "packages"
-    exit_code = pkg.main(["--bundle", str(bundle), "--out", str(flat_packages), "--oracle", str(run_oracle), "--quiet"])
+    exit_code = pkg.main(_cli_args(bundle, flat_packages, run_oracle, tmp_path))
     assert exit_code == 0
     unit = flat_packages / UNIT
     assert (unit / "package-manifest.json").is_file()
@@ -547,7 +738,7 @@ def test_incomplete_flat_package_without_manifest_fails_closed_when_ancestor_evi
     if not run_oracle.exists():
         shutil.copytree(oracle, run_oracle)
     flat_packages = tmp_path / "packages"
-    pkg.main(["--bundle", str(bundle), "--out", str(flat_packages), "--oracle", str(run_oracle), "--quiet"])
+    pkg.main(_cli_args(bundle, flat_packages, run_oracle, tmp_path))
     unit = flat_packages / UNIT
 
     # Simulate incomplete package by removing both package-manifest.json AND local oracle evidence
@@ -592,7 +783,7 @@ def test_incomplete_nested_package_without_manifest_fails_closed_when_ancestor_e
     if not run_oracle.exists():
         shutil.copytree(oracle, run_oracle)
     nested = tmp_path / "packages" / "coldrun2"
-    pkg.main(["--bundle", str(bundle), "--out", str(nested), "--oracle", str(run_oracle), "--quiet"])
+    pkg.main(_cli_args(bundle, nested, run_oracle, tmp_path))
     unit = nested / UNIT
 
     # Simulate incomplete package by removing both package-manifest.json AND local oracle evidence
@@ -625,7 +816,7 @@ def test_nested_batch_out_dir_compatibility_is_preserved(tmp_path: Path) -> None
     """Existing nested batch layouts (--out <run>/packages/<batch>) remain fully compatible."""
     bundle, oracle, objects = _bundle(tmp_path, covered=None)
     nested = tmp_path / "packages" / "coldrun2"
-    exit_code = pkg.main(["--bundle", str(bundle), "--out", str(nested), "--oracle", str(oracle), "--quiet"])
+    exit_code = pkg.main(_cli_args(bundle, nested, oracle, tmp_path))
     assert exit_code == 0
     unit = nested / UNIT
     assert (unit / "package-manifest.json").is_file()
@@ -678,7 +869,7 @@ def test_a_scoped_estate_report_still_earns_a_datasource_unit_its_not_applicable
     """
     bundle, oracle, _ = _bundle(tmp_path, covered=None, datasource_only=True)
     _plant_estate_report(bundle, UNIT, datasources=[DS_UNIT])
-    unit = _package(tmp_path, bundle, oracle, unit=DS_UNIT)
+    unit = _package(tmp_path, bundle, oracle, unit=DS_UNIT, scope="model_only")
 
     scoped = json.loads((unit / "report.json").read_text(encoding="utf-8"))
     assert [entry["name"] for entry in scoped["datasources"]] == [DS_UNIT]

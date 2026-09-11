@@ -290,16 +290,22 @@ REPORT_ALLOW: dict[str, Any] = {
 #: The two collections filtered to this unit before projection. Always emitted, always lists.
 REPORT_UNIT_LISTS = ("workbooks", "datasources")
 
-#: `engine-output-receipt.json`. `engine.version` is the only field any consumer reads
-#: (`check_engine_receipts.py:33-35`). `artifacts[]` - 3,138 entries on the reference bundle - is
-#: read by nobody in a package: `credential_gate._receipt_artifacts` is only reached through
-#: `_receipt_matches_bundle`, which raises OSError on the package's absent `input_manifest.json`
-#: first. `engine.root`/`plugin_root` were absolute installation paths; provenance is a VERSION, not
-#: a location on the machine that happened to build it.
+#: `engine-output-receipt.json`. `engine.version` is the field `check_engine_receipts.py:33-35`
+#: reads; `artifacts[].path` is the field the #562 S2 role verifier reads, and it is the ONLY thing
+#: retained from a receipt row. `engine.root`/`plugin_root` were absolute installation paths;
+#: provenance is a VERSION, not a location on the machine that happened to build it.
+#:
+#: ⚠️ **`path` and nothing else, deliberately.** An earlier round dropped `artifacts[]` outright
+#: because no consumer read it; S2 now does, to answer "does this package's receipt account for the
+#: report/model/PBIP roles it claims, and only for files that are IN it". That question needs the
+#: path. It does not need `sha256`, `bytes` or any engine-side status: the bytes are already covered
+#: by `contents.files`, which S1 verifies, so carrying a second digest would create a second answer
+#: to one question. The row spec is `Rows`, so an unenumerated receipt field still cannot ship.
 RECEIPT_ALLOW: dict[str, Any] = {
     "version": KEEP,
     "created_at": KEEP,
     "engine": _fields("version", "source", "canonical"),
+    "artifacts": Rows(_fields("path")),
 }
 
 #: Top-level keys of a handover slice that any consumer reads. Measured two ways: every one of the
@@ -309,14 +315,21 @@ RECEIPT_ALLOW: dict[str, Any] = {
 #: `estate` is estate-wide by content and read by nobody, so it is not shipped.
 HANDOVER_CONSUMED_KEYS = ("workbook", "workbooks")
 
-#: `source-provenance.json`. Exactly the three fields `check_reference_readiness._provenance_luid`
-#: reads, and nothing else - not `workbook_name`, not `project`, both of which are foreign-identity
-#: channels when an entry belongs to another workbook.
+#: `source-provenance.json`. Exactly the fields `check_reference_readiness._provenance_luid` reads,
+#: plus the datasource half of the same identity - and nothing else. Not `workbook_name`, not
+#: `project`, both of which are foreign-identity channels when an entry belongs to another workbook.
+#:
+#: ⚠️ **`origin.datasource_luid` is a second NAMESPACE, not a second spelling** (#562 S2). A
+#: datasource package's server identity is its datasource LUID; a workbook's is its workbook LUID;
+#: `package_role_identity` refuses a row that carries the other kind's, because comparing across the
+#: two namespaces is a category error that fails OPEN if the values ever collide. It is carried here
+#: rather than in a new registry file because the shape that already answers "which server object
+#: are these bytes" is this one.
 PROVENANCE_ALLOW: dict[str, Any] = {
     "inputs": Rows(
         {
             "input": _fields("file", "sha256"),
-            "origin": _fields("workbook_luid", "match"),
+            "origin": _fields("workbook_luid", "datasource_luid", "match"),
         }
     )
 }
@@ -417,7 +430,9 @@ ORACLE_MANIFEST_ALLOW: dict[str, Any] = {
 # --------------------------------------------------------------------------------------------
 
 
-def shippable_provenance(entries: list[dict[str, Any]], identity: dict[str, Any], unit: str) -> dict[str, Any]:
+def shippable_provenance(
+    entries: list[dict[str, Any]], identity: dict[str, Any], unit: str, *, suppress: bool | None = None
+) -> dict[str, Any]:
     """The provenance actually written into the package: projected, and SUPPRESSED when refused.
 
     ⚠️ **Round-3 finding: a refusal that does not suppress the artifact is not a refusal.** Two
@@ -429,8 +444,14 @@ def shippable_provenance(entries: list[dict[str, Any]], identity: dict[str, Any]
     When identity was refused there is, by definition, no entry this unit is entitled to, so none is
     written; the reason travels in `scope.suppressed_reason` and in `handover.md`'s
     `ORACLE_ATTRIBUTION` line, so the refusal stays visible rather than silent.
+
+    ⚠️ ``suppress`` exists because "no LUID" means two different things for the two kinds (#562 S2).
+    For a WORKBOOK an unestablished LUID means nothing may be attributed, which is the default here
+    and is unchanged. For a genuinely LOCAL datasource there is no server LUID to establish at all,
+    and suppressing its one SHA-matching row would delete the only record of which bytes were
+    packaged - so its caller states the refusal explicitly rather than inferring it from an absence.
     """
-    refused = not identity.get("luid")
+    refused = (not identity.get("luid")) if suppress is None else suppress
     kept: list[dict[str, Any]] = []
     dropped: list[str] = []
     if not refused:
@@ -472,11 +493,19 @@ def scope_handover(payload: Any, unit: str) -> tuple[dict[str, Any], list[str]]:
       `handover.md` is derived from it, so it must ship whole. Enumerating it would be the fourth
       allowlist in four rounds. Its residual risk is an absolute host path in a field nobody
       predicted, which is a value shape - and a value-shaped guard cannot be evaded by a new name.
+
+    ⚠️ **The packager's own `scope.unit` stamp is ADDED after redaction** (#562 S2). Without it the
+    slice's only claim to belong to this unit is the filename it was written under, and a filename
+    is a name - so a slice copied from another unit was indistinguishable from this one's. The stamp
+    is written here rather than merged into the engine payload: it is OURS, it is one package-local
+    scalar, and it goes on last so nothing can be appended to a document after its containment pass.
     """
     if not isinstance(payload, dict):
         return {}, []
     kept = {key: value for key, value in payload.items() if key in HANDOVER_CONSUMED_KEYS}
-    return redact_host_paths(kept, prefix=f"handover/{unit}.json")
+    scoped, redactions = redact_host_paths(kept, prefix=f"handover/{unit}.json")
+    scoped["scope"] = {"unit": unit}
+    return scoped, redactions
 
 
 def scope_report(engine_report: Any, unit: str) -> dict[str, Any]:

@@ -1290,7 +1290,7 @@ def test_a_source_id_written_with_the_OTHER_separator_still_resolves_its_asset(t
     bundle, _oracle = _bundle(tmp_path)
     asset_name = f"{WB_LUID}_{UNIT}.twb"
     for source_id in (f"_runs\\999-x\\assets\\{asset_name}", f"_runs/999-x/assets/{asset_name}"):
-        resolved, route = pkg.resolve_asset(
+        resolved, route, _row = pkg.resolve_asset(
             bundle, UNIT, {"workbook": {"source_id": source_id}}, bundle.parent / "assets"
         )
         assert resolved is not None and resolved.name == asset_name, f"{source_id} did not resolve"
@@ -3239,13 +3239,20 @@ def test_a_failed_repackage_leaves_the_previous_package_intact(tmp_path: Path) -
     assert not [path for path in _out(tmp_path).iterdir() if path.name.startswith(".")], "staging dir left behind"
 
 
-def test_the_receipt_is_descoped_to_the_engine_version(tmp_path: Path) -> None:
-    """`artifacts[]` is read by nobody in a package, so it is no longer shipped.
+def test_the_receipt_ships_this_units_output_PATHS_and_nothing_else(tmp_path: Path) -> None:
+    """`artifacts[]` is narrowed to one field, for one unit - the minimum #562 S2 needs.
 
-    `check_engine_receipts.py:33-35` reads `engine.version` and nothing else;
-    `credential_gate._receipt_artifacts` is only reachable through `_receipt_matches_bundle`, which
-    raises OSError on the package's absent `input_manifest.json` first. On the reference bundle that
-    list held 3,138 entries, 3,135 of which were not in the package.
+    An earlier round dropped the list outright, because no consumer read it: on the reference bundle
+    it held 3,138 entries, 3,135 of which were not in the package, plus a `sha256` per row. A
+    consumer exists now - `package_role_identity` asks whether a package's receipt accounts for the
+    report/model/PBIP roles it claims, and only for files that are IN it - and it needs exactly the
+    path. So the row is projected to `path`:
+
+    * the FOREIGN unit's row is still dropped (it is another build's output, and naming it here is
+      how "this package was composed from two runs" becomes invisible);
+    * `size` and `sha256` are still dropped - the bytes are already covered by `contents.files`,
+      which S1 verifies, and a second digest is a second answer to one question;
+    * the retained path is re-rooted `pbip/<Unit>/` -> `fabric/`, so it names a real file here.
     """
     bundle, oracle = _bundle(tmp_path)
     emitted = bundle / "pbip" / UNIT / f"{UNIT}.Report" / "definition" / "report.json"
@@ -3267,8 +3274,9 @@ def test_the_receipt_is_descoped_to_the_engine_version(tmp_path: Path) -> None:
     receipt = json.loads((_out(tmp_path) / UNIT / "engine-output-receipt.json").read_text(encoding="utf-8"))
     assert result["engine"] == "2.339.0"
     assert receipt["engine"]["version"] == "2.339.0"
-    assert "artifacts" not in receipt
-    assert "artifacts" in receipt["scope"]["dropped_fields"]
+    assert receipt["artifacts"] == [{"path": f"fabric/{UNIT}.Report/definition/report.json"}]
+    assert "Other" not in json.dumps(receipt), "another unit's output must not be attested to here"
+    assert {"artifacts[].size", "artifacts[].sha256"} <= set(receipt["scope"]["dropped_fields"])
 
 
 def test_the_provenance_is_scoped_by_content_not_by_filename(tmp_path: Path) -> None:
@@ -4281,7 +4289,8 @@ def test_a_manifest_declaring_no_digest_is_an_absence_not_a_mismatch(tmp_path: P
     bundle, _ = _bundle(tmp_path)
     name = f"{WB_LUID}_{UNIT}.twb"
     (bundle / "input_manifest.json").write_text(json.dumps({"assets": [{"name": name}]}), encoding="utf-8")
-    assert pkg.declared_asset_digest(bundle, name) is None
+    resolved = pkg.resolve_asset(bundle, UNIT, {}, tmp_path / "assets")
+    assert resolved.row is not None and "sha256" not in resolved.row
     assert _cli(tmp_path, bundle, "--unit", UNIT) == 0
 
 
@@ -4293,7 +4302,7 @@ def test_a_foreign_flavour_staged_path_is_never_reinterpreted_by_the_host(tmp_pa
     at the reinterpreted location are not the customer's workbook. The same hazard, and the same
     fix, as `_classify_source` (round-2 finding 2).
     """
-    foreign = "/mnt/share/elsewhere/Book.twb" if os.name == "nt" else r"C:\share\elsewhere\Book.twb"
+    foreign = f"/mnt/share/elsewhere/{UNIT}.twb" if os.name == "nt" else f"C:\\share\\elsewhere\\{UNIT}.twb"
     assert not pf.is_host_native(foreign)
 
     bundle, _ = _bundle(tmp_path)
@@ -4301,7 +4310,7 @@ def test_a_foreign_flavour_staged_path_is_never_reinterpreted_by_the_host(tmp_pa
     (bundle / "input_manifest.json").write_text(
         json.dumps({"assets": [{"name": f"{UNIT}.twb", "staged_input_path": foreign}]}), encoding="utf-8"
     )
-    asset, route = pkg.resolve_asset(bundle, UNIT, {}, tmp_path / "no-such-assets")
+    asset, route, _row = pkg.resolve_asset(bundle, UNIT, {}, tmp_path / "no-such-assets")
     assert asset is None, f"a foreign staged path was reinterpreted as {asset}"
     assert route == "unresolved"
 
