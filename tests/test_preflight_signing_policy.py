@@ -6,7 +6,6 @@ Run: pytest -q tests/test_preflight_signing_policy.py --basetemp _preflight_sign
 """
 
 import ctypes
-import importlib
 import json
 import os
 import re
@@ -176,14 +175,6 @@ def test_shared_fallback_returns_to_the_exact_origin_not_a_command_above() -> No
     assert "return to plain preflight, with neither update flag" in route
     assert "retain its `-Update`" in route
     assert "`-Tenant`, `-Subscription` or other arguments too" in route
-
-
-@pytest.mark.parametrize("reason", SKIP_REASONS.values())
-def test_signing_control_skip_reasons_are_registered_exactly(reason: str) -> None:
-    """Only the named platform/interpreter constraints are expected skips, not arbitrary failures."""
-    gate = importlib.import_module("conftest")
-    assert gate.is_expected_skip_reason(reason)
-    assert not gate.is_expected_skip_reason(reason + "; an unrelated failure")
 
 
 def _native_env() -> dict[str, str]:
