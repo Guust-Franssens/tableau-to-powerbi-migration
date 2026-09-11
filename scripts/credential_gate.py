@@ -1564,15 +1564,14 @@ def _published_only_row(row: object) -> bool:
 def package_spec_facts(package_spec: object) -> PackageSpecFacts:
     """Pure held-spec facts; the existing derivation classifies every direct leg, without I/O.
 
-    Only scalar sqlproxy references omit direct keys. Mixed/malformed rows never earn published-only
-    applicability. S2 still owns all dependency identities and permissions.
+    Every row reaches the canonical leg authority, including provider-shaped sqlproxy rows.
+    Published-only also requires no live/review leg or refusal. S2 owns dependency identity/permission.
     """
     sources = package_spec.get("data_sources") if isinstance(package_spec, Mapping) else None
     if not isinstance(sources, list):
         return PackageSpecFacts((), False, False, False, "spec-unreadable")
+    keys, review, refusal = _package_spec_facts(package_spec)
     published = [_published_only_row(row) for row in sources]
-    direct = [row for row, pure in zip(sources, published, strict=True) if not pure]
-    keys, review, refusal = _package_spec_facts({"data_sources": direct})
     has_published = any(
         isinstance(row, Mapping)
         and (
@@ -1581,9 +1580,8 @@ def package_spec_facts(package_spec: object) -> PackageSpecFacts:
         )
         for row in sources
     )
-    return PackageSpecFacts(
-        keys, review, not has_published and refusal is None, bool(sources) and all(published), refusal
-    )
+    published_only = bool(sources) and all(published) and not keys and not review and refusal is None
+    return PackageSpecFacts(keys, review, not has_published and refusal is None, published_only, refusal)
 
 
 def _gate_root_live_keys(gate_root: Path) -> tuple[frozenset[str], str | None]:

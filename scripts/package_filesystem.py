@@ -49,6 +49,8 @@ import json
 import math
 import os
 import stat
+import weakref
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -266,11 +268,22 @@ class PackageFilesystemResult:  # pylint: disable=too-many-instance-attributes
     verified_files: tuple[VerifiedFile, ...] = field(default=(), repr=False, compare=False)
     manifest: HeldVerifiedMember | None = field(default=None, repr=False, compare=False)
     boundary_identity: tuple[tuple[int, ...], ...] = field(default=(), repr=False, compare=False)
+    _authority: Callable[[object], bool] | None = field(default=None, init=False, repr=False, compare=False)
 
     @property
     def is_clean(self) -> bool:
         """``True`` only when the manifest exactly describes the bytes on disk."""
         return self.status == STATUS_CLEAN
+
+    def has_read_authority(self) -> bool:
+        """Only the original, internally unchanged verification can authorize held reads.
+
+        An in-process ownership check, not a signature or protection against arbitrary Python code.
+        """
+        try:
+            return self._authority is not None and self._authority(self)
+        except (AttributeError, TypeError):
+            return False
 
     @property
     def first_code(self) -> str | None:
@@ -304,6 +317,22 @@ class _ManifestError(Exception):
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
+
+
+def _read_authority_state(result: PackageFilesystemResult) -> tuple:
+    """Capture immutable metadata values, not another copy of the package's bytes."""
+    manifest = result.manifest
+    return (
+        result.status,
+        result.findings,
+        result.unassessable,
+        result.files_declared,
+        result.files_verified,
+        result.root_identity,
+        tuple((row.relative_path, row.sha256, str(row.path), row.file_identity) for row in result.verified_files),
+        (manifest.relative_path, manifest.sha256, manifest.root_identity) if manifest is not None else None,
+        result.boundary_identity,
+    )
 
 
 def _finding(code: str, *, path: str | None = None, ordinal: int | None = None) -> Finding:
@@ -697,13 +726,19 @@ def verify_package(  # pylint: disable=too-many-locals,too-many-return-statement
     current, boundary = _boundary_identity(root)
     if boundary or current != identity:
         return _result(boundary or [_finding(CODE_ROOT_REPLACED)])
-    return replace(
+    result = replace(
         result,
         root_identity=str(root),
         boundary_identity=identity,
         verified_files=tuple(members),
         manifest=HeldVerifiedMember(PACKAGE_MARKER, hashlib.sha256(raw_manifest).hexdigest(), raw_manifest, str(root)),
     )
+    owner = weakref.ref(result)
+    state = _read_authority_state(result)
+    object.__setattr__(
+        result, "_authority", lambda candidate: owner() is candidate and _read_authority_state(candidate) == state
+    )
+    return result
 
 
 def _compare_declared_with_walked(
@@ -763,10 +798,10 @@ def read_verified_member(  # pylint: disable=too-many-return-statements,too-many
 ) -> HeldVerifiedMember | PackageFilesystemResult:
     """Read one canonical member ONCE against S1's original namespace and digest, never a new manifest.
 
-    Only the requested bytes are held. Other members are streamed through S1's existing hash check;
-    a re-seal, extra file or same-byte replacement cannot silently refresh the snapshot. The caller
-    supplies the exact lexical root, so Windows Path equality cannot borrow another root's authority.
-    This retains S1's documented lstat/open race limit, not a handle-level concurrency guarantee.
+    Only the requested member and manifest are rehashed; unrelated content requires a new S1 check.
+    Namespace/identity checks still refuse extra, missing, aliased or replaced members. Copies and
+    reconstructions carry no originating read authority. This is not cryptographic security or a
+    handle-level concurrency guarantee; S1's unsigned-manifest and lstat/open race limits remain.
     """
     if (
         type(verified) is not PackageFilesystemResult  # pylint: disable=unidiomatic-typecheck
@@ -775,8 +810,15 @@ def read_verified_member(  # pylint: disable=too-many-return-statements,too-many
         or str(root) != verified.root_identity
     ):
         return member_refusal(CODE_ROOT_BINDING)
+    if not verified.has_read_authority():
+        return member_refusal()
     if not verified.is_clean or verified.manifest is None or not verified.boundary_identity:
         return member_refusal(verified.first_code or CODE_MEMBER_UNVERIFIED)
+    if (
+        not isinstance(verified.manifest.content, bytes)
+        or hashlib.sha256(verified.manifest.content).hexdigest() != verified.manifest.sha256
+    ):
+        return member_refusal(CODE_DIGEST_MISMATCH)
     members = {member.relative_path: member for member in verified.verified_files}
     if type(relative_path) is not str or relative_path not in members:  # pylint: disable=unidiomatic-typecheck
         return member_refusal()
@@ -792,12 +834,6 @@ def read_verified_member(  # pylint: disable=too-many-return-statements,too-many
         identity, refusal = _regular_identity(walked[key])
         if refusal or str(walked[key]) != str(member.path) or identity != member.file_identity:
             return member_refusal(refusal or CODE_MEMBER_REPLACED)
-    remaining = {key: member.sha256 for key, member in members.items() if key != relative_path}
-    rows, _verified = _compare_declared_with_walked(
-        remaining, {key: path for key, path in walked.items() if key != relative_path}
-    )
-    if rows:
-        return member_refusal(rows[0].code)
     if _hash_file(root / PACKAGE_MARKER) != verified.manifest.sha256:
         return member_refusal(CODE_DIGEST_MISMATCH)
     member = members[relative_path]

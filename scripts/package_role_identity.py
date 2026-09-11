@@ -14,10 +14,12 @@ Full contract and limitations: docs/reference-readiness.md, S2.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 import tomllib
-from collections.abc import Iterable, Mapping, Sequence
+import weakref
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
@@ -315,6 +317,7 @@ class Phase1RoleIdentityResult:  # pylint: disable=too-many-instance-attributes
     verified: VerifiedPackage | None = field(default=None, repr=False, compare=False)
     brief_policy: BriefPolicy | None = field(default=None, repr=False, compare=False)
     _data_access_snapshot: _DataAccessSnapshot | None = field(default=None, repr=False, compare=False)
+    _authority: Callable[[object], bool] | None = field(default=None, init=False, repr=False, compare=False)
 
     @property
     def is_start_ready(self) -> bool:
@@ -368,11 +371,14 @@ class Phase1RoleIdentityResult:  # pylint: disable=too-many-instance-attributes
         )
         return PackageSourceInput("ready", root, root_identity, self.unit, self.kind, path, digest, self.blockers)
 
-    def data_access_handoff(self, root: Path) -> PackageDataAccessHandoff | pfs.PackageFilesystemResult:
+    def data_access_handoff(  # pylint: disable=too-many-return-statements
+        self, root: Path
+    ) -> PackageDataAccessHandoff | pfs.PackageFilesystemResult:
         """Obtain the exact declared projection, with the spec bytes/facts already used by S2.
 
         The caller cannot substitute a root or obtain an undeclared file by its familiar name.
-        S1 owns all freshness I/O; no manifest/spec reread, data-access parser or audit read here.
+        S1 rechecks only the two small roles and manifest, not unrelated asset content. The held
+        spec is not reparsed/reclassified. Copies cannot borrow the original role result's authority.
         """
         verified = self.verified
         if type(verified) is not VerifiedPackage or not verified.is_bound_to(str(root)):
@@ -382,15 +388,31 @@ class Phase1RoleIdentityResult:  # pylint: disable=too-many-instance-attributes
             return pfs.member_refusal()
         if snapshot.integrity is not verified.integrity or snapshot.spec.root_identity != verified.root_identity:
             return pfs.member_refusal(pfs.CODE_ROOT_BINDING)
+        if not self._has_handoff_authority():
+            return pfs.member_refusal()
         if not any(
             member.relative_path == snapshot.spec.relative_path == SPEC_NAME and member.sha256 == snapshot.spec.sha256
             for member in verified.integrity.verified_files
         ):
             return pfs.member_refusal()
+        if (
+            not isinstance(snapshot.spec.content, bytes)
+            or hashlib.sha256(snapshot.spec.content).hexdigest() != snapshot.spec.sha256
+        ):
+            return pfs.member_refusal(pfs.CODE_DIGEST_MISMATCH)
+        current_spec = verified.read_verified_member(root, SPEC_NAME)
+        if isinstance(current_spec, pfs.PackageFilesystemResult):
+            return current_spec
         held = verified.read_verified_member(root, DATA_ACCESS_NAME)
         if isinstance(held, pfs.PackageFilesystemResult):
             return held
         return PackageDataAccessHandoff(snapshot.spec, snapshot.facts, held)
+
+    def _has_handoff_authority(self) -> bool:
+        try:
+            return self._authority is not None and self._authority(self)
+        except (AttributeError, TypeError):
+            return False
 
     def as_dict(self) -> dict[str, Any]:
         """The machine-readable shape the entry gate embeds in its verdict."""
@@ -431,6 +453,36 @@ class VerifiedPackage:
         if not self.is_bound_to(str(root)):
             return pfs.member_refusal(pfs.CODE_ROOT_BINDING)
         return pfs.read_verified_member(root, self.integrity, relative_path)
+
+
+def _handoff_authority_state(result: Phase1RoleIdentityResult) -> tuple:
+    """The role/fact consistency binding, without re-running any role or connection classifier."""
+    snapshot = result._data_access_snapshot  # pylint: disable=protected-access
+    return (
+        result.verdict,
+        result.unit,
+        result.kind,
+        result.topology,
+        result.blockers,
+        result.authorized_limitations,
+        tuple((row.role, row.state, row.cardinality, row.paths, row.code) for row in result.roles),
+        result.source_identity,
+        tuple(
+            (
+                row.state,
+                row.datasource_luid,
+                row.published_key,
+                row.provider_unit,
+                row.model_role,
+                row.code,
+                row.provider_ordinal,
+            )
+            for row in result.dependencies
+        ),
+        result.brief_policy,
+        snapshot.declared,
+        (snapshot.spec.relative_path, snapshot.spec.sha256, snapshot.spec.root_identity),
+    )
 
 
 def verify_s1(root: Path) -> VerifiedPackage:
@@ -564,6 +616,8 @@ def _facts(  # pylint: disable=too-many-return-statements
         return _blocked(cleared.classification.unit_name or None, None, CODE_NOT_A_PACKAGE)
     if not cleared.integrity.is_clean:
         return _blocked(cleared.classification.unit_name or None, None, CODE_INTEGRITY_NOT_CLEAN)
+    if not cleared.integrity.has_read_authority():
+        return _blocked(cleared.classification.unit_name or None, None, CODE_INTEGRITY_CHANGED)
 
     held_manifest = cleared.integrity.manifest
     if (
@@ -1424,7 +1478,7 @@ def _verdict(facts: _Facts) -> Phase1RoleIdentityResult:
     if topology == TOPOLOGY_PUBLISHED_CONSUMER and not facts.dependencies:
         roles.append(_role(ROLE_PUBLISHED_DEPENDENCY, STATE_MISSING, "1 provider", [], CODE_PROVIDER_MISSING))
     blockers = [*facts.blockers, *(role.code or role.state for role in roles if role.blocks)]
-    return Phase1RoleIdentityResult(
+    result = Phase1RoleIdentityResult(
         verdict=VERDICT_BLOCKED if blockers else VERDICT_START_READY,
         unit=facts.unit,
         kind=facts.kind,  # type: ignore[arg-type]
@@ -1454,6 +1508,24 @@ def _verdict(facts: _Facts) -> Phase1RoleIdentityResult:
             else None
         ),
     )
+    snapshot = result._data_access_snapshot  # pylint: disable=protected-access
+    if result.is_start_ready and snapshot is not None:
+        owner = weakref.ref(result)
+        state = _handoff_authority_state(result)
+        source_facts = snapshot.facts
+        verified = result.verified
+        object.__setattr__(
+            result,
+            "_authority",
+            lambda candidate: (
+                owner() is candidate
+                and candidate.verified is verified
+                and candidate._data_access_snapshot is snapshot  # pylint: disable=protected-access
+                and snapshot.facts is source_facts
+                and _handoff_authority_state(candidate) == state
+            ),
+        )
+    return result
 
 
 def _evidence_and_handover_roles(facts: _Facts, topology: str) -> list[RoleResult]:

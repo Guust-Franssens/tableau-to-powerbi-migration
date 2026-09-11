@@ -62,7 +62,7 @@ LIVE_PROJECTION = {
 }
 PUBLISHED = {
     "id": "ds",
-    "connection": {"class": "sqlproxy", "mode": "live"},
+    "connection": {"class": "sqlproxy", "mode": "live", "powerbi_target": "flat_file"},
     "published_datasource": {"luid": DS_LUID, "key": PUBLISHED_KEY},
 }
 
@@ -184,7 +184,6 @@ def test_held_member_rechecks_exact_s1_digest(tmp_path: Path) -> None:
     [
         ("deleted", "package_file_missing"),
         ("added", "package_file_undeclared"),
-        ("other-digest", "package_file_digest_mismatch"),
         ("manifest-digest", "package_file_digest_mismatch"),
         ("same-byte-replacement", "package_member_replaced"),
         ("hardlink", "package_member_replaced"),
@@ -200,8 +199,8 @@ def test_held_read_refuses_changed_namespace_or_identity(tmp_path: Path, change:
         path.unlink()
     elif change == "added":
         (package / "extra.bin").write_bytes(b"new")
-    elif change in ("other-digest", "manifest-digest"):
-        target = package / (SPEC if change == "other-digest" else "package-manifest.json")
+    elif change == "manifest-digest":
+        target = package / "package-manifest.json"
         target.write_bytes(target.read_bytes() + b"\n")
     elif change == "same-byte-replacement":
         raw = path.read_bytes()
@@ -355,7 +354,7 @@ def test_s2_handoff_carries_current_live_keys(tmp_path: Path) -> None:
     assert handoff.data_access.sha256 == hashlib.sha256(handoff.data_access.content).hexdigest()
 
 
-def test_s2_spec_is_held_once_and_only_the_authority_walks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_s2_spec_is_parsed_once_and_only_the_authority_walks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     package = with_data_access(datasource_package(tmp_path / "Source", luid=None), source_rows(LIVE), LIVE_PROJECTION)
     original_read, original_walk, derive = Path.read_bytes, pfs._walk_package, pri.package_spec_facts
     reads, inputs = [], []
@@ -381,7 +380,9 @@ def test_s2_spec_is_held_once_and_only_the_authority_walks(tmp_path: Path, monke
     assert reads == [package / SPEC] and len(inputs) == 1
     assert inputs[0]["data_sources"] == source_rows(LIVE)
     handoff = require_handoff(result.data_access_handoff(package))
-    assert reads == [package / SPEC] and len(inputs) == 1, "handoff reparsed/reclassified the spec"
+    assert reads == [package / SPEC, package / SPEC] and len(inputs) == 1, (
+        "freshness recheck reparsed/reclassified the spec"
+    )
     assert handoff.facts.live_source_keys == (LIVE_KEY,)
 
 
@@ -616,3 +617,198 @@ def test_new_handoffs_add_no_serialized_private_diagnostics(tmp_path: Path) -> N
     ):
         assert forbidden not in serialized
     assert str(tmp_path) not in serialized and repr(handoff.migration_spec.content) not in serialized
+
+
+def rebuild_result(value: object) -> object:
+    """Reconstruct every constructor field, without assuming knowledge of a private capability."""
+    return type(value)(**{field.name: getattr(value, field.name) for field in fields(value) if field.init})
+
+
+@pytest.mark.parametrize("mode", ["copy", "deepcopy", "replace", "rebuild", "findings", "unassessable", "counts"])
+def test_r1_s1_requires_its_original_verification(tmp_path: Path, mode: str) -> None:
+    package = filesystem_package(tmp_path)
+    original = verify(package)
+    assert require_held(pfs.read_verified_member(package, original, PROJECTION)).relative_path == PROJECTION
+    copies = {"copy": copy.copy, "deepcopy": copy.deepcopy, "replace": replace, "rebuild": rebuild_result}
+    if mode in copies:
+        supplied = copies[mode](original)
+    elif mode == "counts":
+        supplied = replace(original, files_verified=0)
+    else:
+        row = pfs.Finding("package_file_digest_mismatch", "R1_PRIVATE_DIAGNOSTIC", path="R1_PRIVATE_PATH")
+        supplied = replace(original, **{mode: (row,)})
+    result = pfs.read_verified_member(package, supplied, PROJECTION)
+    assert isinstance(result, pfs.PackageFilesystemResult), f"S1 {mode} minted held bytes without original authority"
+    assert result.first_code == "package_member_not_verified"
+    assert "R1_PRIVATE" not in json.dumps(result.as_dict())
+
+
+def test_r1_s1_rejects_contradictory_original_state(tmp_path: Path) -> None:
+    package = filesystem_package(tmp_path)
+    original = verify(package)
+    assert require_held(pfs.read_verified_member(package, original, PROJECTION)).relative_path == PROJECTION
+    object.__setattr__(original, "files_verified", 0)
+    result = pfs.read_verified_member(package, original, PROJECTION)
+    assert isinstance(result, pfs.PackageFilesystemResult), "contradictory original S1 state minted held bytes"
+    assert result.first_code == "package_member_not_verified"
+
+
+@pytest.mark.parametrize(
+    "mode", ["copy", "deepcopy", "replace", "rebuild", "snapshot", "content", "facts", "blockers", "role"]
+)
+def test_r1_s2_requires_its_original_role_result(tmp_path: Path, mode: str) -> None:
+    package = with_data_access(datasource_package(tmp_path / "Source"), source_rows(LIVE), LIVE_PROJECTION)
+    original = pri.verify_phase1_role_identity([package])[0]
+    require_handoff(original.data_access_handoff(package))
+    snapshot = original._data_access_snapshot
+    copies = {"copy": copy.copy, "deepcopy": copy.deepcopy, "replace": replace, "rebuild": rebuild_result}
+    if mode in copies:
+        supplied = copies[mode](original)
+    elif mode in ("snapshot", "content", "facts"):
+        altered = rebuild_result(snapshot)
+        if mode == "content":
+            altered = replace(altered, spec=replace(altered.spec, content=b'{"R1_PRIVATE_SPEC":"forged"}'))
+        elif mode == "facts":
+            altered = replace(altered, facts=altered.facts._replace(live_source_keys=()))
+        supplied = replace(original, _data_access_snapshot=altered)
+    elif mode == "blockers":
+        supplied = replace(original, blockers=("R1_PRIVATE_BLOCKER",))
+    else:
+        altered_roles = tuple(
+            replace(role, state="missing", code="R1_PRIVATE_ROLE") if role.role == pri.ROLE_MIGRATION_SPEC else role
+            for role in original.roles
+        )
+        supplied = replace(original, roles=altered_roles)
+    result = supplied.data_access_handoff(package)
+    assert isinstance(result, pfs.PackageFilesystemResult), f"S2 {mode} returned an unissued or forged handoff"
+    assert "R1_PRIVATE" not in json.dumps(result.as_dict())
+
+
+@pytest.mark.parametrize("field", ["content", "facts", "blockers", "role", "snapshot"])
+def test_r1_s2_checks_original_handoff_consistency(tmp_path: Path, field: str) -> None:
+    """Change one field in place to exercise consistency separately from copied-result rejection."""
+    package = with_data_access(datasource_package(tmp_path / "Source"), source_rows(LIVE), LIVE_PROJECTION)
+    original = pri.verify_phase1_role_identity([package])[0]
+    require_handoff(original.data_access_handoff(package))
+    snapshot = original._data_access_snapshot
+    if field == "content":
+        object.__setattr__(snapshot.spec, "content", b'{"R1_PRIVATE_SPEC":"forged"}')
+    elif field == "facts":
+        object.__setattr__(snapshot, "facts", snapshot.facts._replace(live_source_keys=()))
+    elif field == "blockers":
+        object.__setattr__(original, "blockers", ("R1_PRIVATE_BLOCKER",))
+    elif field == "role":
+        role = next(role for role in original.roles if role.role == pri.ROLE_MIGRATION_SPEC)
+        object.__setattr__(role, "state", "missing")
+    else:
+        object.__setattr__(original, "_data_access_snapshot", rebuild_result(snapshot))
+    result = original.data_access_handoff(package)
+    assert isinstance(result, pfs.PackageFilesystemResult), (
+        f"S2 original {field} inconsistency returned forged authority"
+    )
+    if field == "content":
+        assert result.first_code == "package_file_digest_mismatch"
+    assert "R1_PRIVATE" not in json.dumps(result.as_dict())
+
+
+def test_r1_blocked_s2_cannot_be_reconstructed_as_ready(tmp_path: Path) -> None:
+    package = with_data_access(datasource_package(tmp_path / "Source"), source_rows(LIVE), LIVE_PROJECTION)
+    (package / "migration-brief.md").write_bytes(b"+++\n")
+    seal(package, **json.loads((package / "package-manifest.json").read_bytes()))
+    blocked = pri.verify_phase1_role_identity([package])[0]
+    assert not blocked.is_start_ready and blocked.blockers
+    supplied = replace(
+        blocked,
+        verdict="START_READY",
+        blockers=(),
+        roles=tuple(replace(role, state="resolved", code=None) for role in blocked.roles),
+    )
+    result = supplied.data_access_handoff(package)
+    assert isinstance(result, pfs.PackageFilesystemResult), "reconstructed S2 readiness manufactured a handoff"
+
+
+@pytest.mark.parametrize("target", ["live_source", "unknown"])
+def test_r1_sqlproxy_cohort_retains_canonical_direct_or_review_leg(tmp_path: Path, target: str) -> None:
+    provider = with_data_access(
+        datasource_package(tmp_path / "Provider", unit="Shared", luid=DS_LUID), source_rows(FLAT)
+    )
+    connection = {
+        "class": "sqlproxy",
+        "mode": "live",
+        "server": "direct.example",
+        "database": "db",
+        "powerbi_target": target,
+    }
+    consumer = with_data_access(
+        workbook_package(
+            tmp_path / "Consumer",
+            published={"luid": DS_LUID},
+            binding="../../../Provider/fabric/Shared.SemanticModel",
+        ),
+        [{"connection": connection, "published_datasource": {"luid": DS_LUID}}],
+    )
+    results = pri.verify_phase1_role_identity([provider, consumer])
+    assert all(result.is_start_ready for result in results)
+    assert results[1].dependencies[0].provider_ordinal == 0
+    facts = require_handoff(results[1].data_access_handoff(consumer)).facts
+    endpoint = {"class": "sqlproxy", "server": "direct.example", "database": "db", "schema": ""}
+    key = (
+        "source-key:"
+        + hashlib.sha256(json.dumps(endpoint, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:16]
+    )
+    assert facts.live_source_keys == ((key,) if target == "live_source" else ()), (
+        "sqlproxy's canonical live key was stripped"
+    )
+    assert facts.has_review is (target == "unknown"), "sqlproxy's canonical review leg was stripped"
+    assert facts.refusal_code is None
+    assert not facts.published_only, "a provider-shaped direct/review leg was granted published-only applicability"
+
+
+@pytest.mark.parametrize("surface", ["s1", "s2"])
+def test_r1_small_metadata_never_rehashes_unrelated_eight_mib_asset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, surface: str
+) -> None:
+    package = with_data_access(datasource_package(tmp_path / "Source"), source_rows(FLAT))
+    unrelated = package / "data" / "large.bin"
+    unrelated.parent.mkdir()
+    unrelated.write_bytes(b"Z" * (8 << 20))
+    seal(package, **json.loads((package / "package-manifest.json").read_bytes()))
+    role_result = pri.verify_phase1_role_identity([package])[0]
+    assert role_result.is_start_ready
+    original_hash, original_read = pfs._hash_file, Path.read_bytes
+    hashed, held = [], []
+
+    def tracked_hash(path: Path) -> str | None:
+        hashed.append(path)
+        return original_hash(path)
+
+    def tracked_read(path: Path) -> bytes:
+        held.append(path)
+        return original_read(path)
+
+    monkeypatch.setattr(pfs, "_hash_file", tracked_hash)
+    monkeypatch.setattr(Path, "read_bytes", tracked_read)
+    if surface == "s1":
+        for name in (SPEC, PROJECTION):
+            require_held(role_result.verified.read_verified_member(package, name))
+    else:
+        require_handoff(role_result.data_access_handoff(package))
+    assert unrelated not in hashed, f"{surface} small metadata access rehashed the unrelated 8 MiB asset"
+    assert unrelated not in held, f"{surface} small metadata access retained unrelated asset bytes"
+
+
+def test_r1_unclassified_sqlproxy_cannot_claim_published_only() -> None:
+    row = copy.deepcopy(PUBLISHED)
+    del row["connection"]["powerbi_target"]
+    facts = gate.package_spec_facts({"data_sources": [row]})
+    assert facts.refusal_code == "source-key-invalid"
+    assert not facts.published_only, "published shape cannot repair canonical uncertainty"
+
+
+def test_r1_member_read_does_not_claim_fresh_integrity_for_unrelated_content(tmp_path: Path) -> None:
+    """A bounded member read is not a new whole-package verification."""
+    package = filesystem_package(tmp_path)
+    original = verify(package)
+    (package / SPEC).write_bytes(b"unrelated changed content")
+    assert require_held(pfs.read_verified_member(package, original, PROJECTION)).content == b'{"held":true}\r\n'
+    assert verify(package).first_code == "package_file_digest_mismatch"
