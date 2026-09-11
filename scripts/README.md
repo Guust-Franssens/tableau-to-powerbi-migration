@@ -96,6 +96,19 @@ checksums outside the package too. They are compare-and-swap tokens, not signatu
 checksum from edited evidence does not establish that the producer wrote it. No editable file inside
 an iteration, additional registry or signed-proof framework is introduced.
 
+Finalization compares the capture token with the **same receipt bytes parsed by the full-chain
+reader**, not a separate file hash. All PID/bridge operations precede the last package/chain
+snapshot. Publication stages the final bytes beside the receipt, atomically displaces the pending
+file into `.iteration.pending`, and publishes without overwriting a concurrently recreated receipt.
+It then rederives the package facts and validates the full receipt/PNG chain, including the exact
+intended final bytes. A detected post-publication change restores the exact pending receipt and
+returns `FINALIZATION_CHANGED`; publication failure returns `FINALIZATION_WRITE_FAILED`.
+If rollback cannot restore those bytes, `FINALIZATION_ROLLBACK_FAILED` retains the pending sibling:
+the normal chain reader refuses that extra file, so an interrupted or failed transaction is **not
+authoritative**. Do not delete that sibling to make a final document look valid; restore the
+verified pending bytes before retrying. This is a local rollback boundary, not a package lock or a
+guarantee against edits after finalization.
+
 `pass` requires an admitted validation-grade Tableau reference and a stable Power BI capture.
 `layout_match` records a narrower comparison, including an oracle's layout/text ceiling; it is not a
 full visual pass. Numeric rows must remain `unverified`, with all three numeric hashes `null`:

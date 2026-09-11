@@ -45,6 +45,7 @@ SCHEMA_VERSION = 2
 TOOL_NAME = "capture_powerbi_pages"
 TOOL_VERSION = "2.0.0"
 RECEIPT_NAME = "iteration.json"
+PENDING_BACKUP_NAME = ".iteration.pending"
 PAGES_DIRNAME = "pages"
 MODES = ("sign_off", "triage")
 MODE_SIGN_OFF, MODE_TRIAGE = MODES
@@ -671,8 +672,13 @@ class Iteration:
 
     name: str
     directory: Path
-    receipt_sha256: str
+    receipt_bytes: bytes
     payload: dict[str, Any]
+
+    @property
+    def receipt_sha256(self) -> str:
+        """The checksum of the same immutable bytes that were parsed and validated."""
+        return hashlib.sha256(self.receipt_bytes).hexdigest()
 
 
 def iterations_root(package: Path) -> Path:
@@ -680,7 +686,7 @@ def iterations_root(package: Path) -> Path:
     return package / "validation" / "iterations"
 
 
-def _iteration_files(directory: Path, payload: dict[str, Any]) -> None:
+def _iteration_files(directory: Path, payload: dict[str, Any], pending_backup: bytes | None = None) -> None:
     files, directories = rev.tree_files(directory)
     named = set()
     for page in payload["generated"]["pages"]:
@@ -691,6 +697,11 @@ def _iteration_files(directory: Path, payload: dict[str, Any]) -> None:
         if facts["path"] in named:
             raise ReceiptError("SCREENSHOT_ALIAS", "two pages cannot claim one screenshot role")
         named.add(facts["path"])
+    if pending_backup is not None:
+        backup = files.get(PENDING_BACKUP_NAME)
+        if backup is None or backup.read_bytes() != pending_backup:
+            raise ReceiptError("CAPTURE_CHANGED", "the displaced pending receipt no longer matches the capture")
+        named.add(PENDING_BACKUP_NAME)
     if set(files) != {RECEIPT_NAME, *named} or directories != {PAGES_DIRNAME}:
         raise ReceiptError("EXTRA_FILE", "an iteration must contain exactly its receipt and canonical page PNGs")
 
@@ -702,6 +713,11 @@ def _require_pin(actual: str, expected: str | None, code: str) -> None:
 
 def read_chain(package: Path) -> list[Iteration]:
     """Read EVERY prior receipt, allowed file set and PNG; a JSON-only predecessor hash is insufficient."""
+    return _read_chain(package)
+
+
+def _read_chain(package: Path, pending_backup: Iteration | None = None) -> list[Iteration]:
+    """Only the active finalizer may admit its exact displaced pending bytes; other readers refuse."""
     root = iterations_root(package)
     with _named_refusals():
         package_files, package_dirs = rev.tree_files(package)
@@ -720,19 +736,24 @@ def read_chain(package: Path) -> list[Iteration]:
         chain: list[Iteration] = []
         for name in names:
             directory = root / name
-            payload = validate_receipt(read_strict_json(directory / RECEIPT_NAME))
+            blob = (directory / RECEIPT_NAME).read_bytes()
+            payload = validate_receipt(rev.parse_json_bytes(blob))
             if payload["iteration"] != name:
                 raise ReceiptError("ITERATION_MISLABELLED", "the receipt name disagrees with its directory")
             previous = payload["generated"]["previous"]
             expected = {"iteration": chain[-1].name, "receipt_sha256": chain[-1].receipt_sha256} if chain else None
             if previous != expected:
                 raise ReceiptError("PREVIOUS_RECEIPT_MISMATCH", "the receipt no longer pins its exact predecessor")
-            _iteration_files(directory, payload)
+            _iteration_files(
+                directory,
+                payload,
+                pending_backup.receipt_bytes if pending_backup and directory == pending_backup.directory else None,
+            )
             if chain and chain[-1].payload["state"] != STATE_FINAL:
                 raise ReceiptError("PREVIOUS_NOT_FINAL", "only a final receipt may have a successor")
             if payload["state"] == STATE_FINAL:
                 _assert_judgement(payload, chain[-1] if chain else None)
-            chain.append(Iteration(name, directory, rev.sha256_of_file(directory / RECEIPT_NAME), payload))
+            chain.append(Iteration(name, directory, blob, payload))
         return chain
 
 
@@ -892,6 +913,71 @@ def write_receipt(directory: Path, payload: dict[str, Any]) -> str:
     return receipt_sha256(payload)
 
 
+def _assert_snapshot(package: Path, chain: list[Iteration], pending_backup: Iteration | None = None) -> None:
+    selected, previous = chain[-1], chain[-2] if len(chain) > 1 else None
+    generated = selected.payload["generated"]
+    captured = {row["page_id"]: row["powerbi"]["capture"] for row in generated["pages"]}
+    current = generated_facts(
+        resolve_package(package), selected.directory, captured, generated["review"], generated["generated_at"], previous
+    )
+    if current != generated or _read_chain(package, pending_backup) != chain:
+        raise ReceiptError("GENERATED_CHANGED", "the package or exact iteration chain changed during finalization")
+
+
+def _restore_pending(selected: Iteration) -> None:
+    backup = selected.directory / PENDING_BACKUP_NAME
+    try:
+        if backup.read_bytes() != selected.receipt_bytes:
+            raise OSError("pending backup changed")
+        os.replace(backup, selected.directory / RECEIPT_NAME)
+    except OSError as error:
+        # Keep the backup: the ordinary chain reader refuses its extra-file marker, even if the
+        # filesystem no longer permits any writes. Never delete the marker to conceal a failed undo.
+        raise ReceiptError(
+            "FINALIZATION_ROLLBACK_FAILED", "pending backup retained; the iteration is not authoritative"
+        ) from error
+
+
+def _publish_final(package: Path, chain: list[Iteration], payload: dict[str, Any]) -> None:
+    selected = chain[-1]
+    blob = receipt_bytes(validate_receipt(payload))
+    expected = [*chain[:-1], Iteration(selected.name, selected.directory, blob, payload)]
+    destination = selected.directory / RECEIPT_NAME
+    staged = selected.directory / ".iteration.writing"
+    backup = selected.directory / PENDING_BACKUP_NAME
+    staged_owned = displaced = published = False
+    try:
+        with staged.open("xb") as output:
+            staged_owned = True
+            output.write(blob)
+        # Move the actual pending file, not a copy made before the swap. This retains any intervening
+        # receipt replacement for comparison and leaves an ordinary reader fail-closed until commit.
+        os.replace(destination, backup)
+        displaced = True
+        if backup.read_bytes() != selected.receipt_bytes:
+            raise ReceiptError("CAPTURE_CHANGED", "the receipt changed before atomic publication")
+        # Link is atomic and no-clobber on both supported hosts. A receipt recreated after displacement
+        # must refuse, not be overwritten unnoticed by a second replace.
+        os.link(staged, destination)
+        published = True
+        staged.unlink()
+        _assert_snapshot(package, expected, selected)
+        backup.unlink()
+    except BaseException as error:
+        if displaced:
+            _restore_pending(selected)
+        if not isinstance(error, Exception):
+            raise
+        code = "FINALIZATION_CHANGED" if published else "FINALIZATION_WRITE_FAILED"
+        raise ReceiptError(code, "final receipt not committed; pending receipt preserved") from error
+    finally:
+        if staged_owned:
+            try:
+                staged.unlink(missing_ok=True)
+            except OSError:
+                pass  # Any residue also makes the ordinary exact-file-set reader refuse.
+
+
 def finalize(  # pylint: disable=too-many-locals
     package: Path,
     expected_sha256: str,
@@ -910,9 +996,11 @@ def finalize(  # pylint: disable=too-many-locals
         name = iteration or (names[-1] if names else "")
         if not ITERATION_RE.fullmatch(name) or name != (names[-1] if names else None):
             raise ReceiptError("NO_ITERATION", "only the latest canonical iteration can be finalized")
-        _require_pin(rev.sha256_of_file(root / name / RECEIPT_NAME), expected_sha256, "CAPTURE_CHANGED")
         chain = read_chain(package)
+        if not chain or chain[-1].name != name:
+            raise ReceiptError("NO_ITERATION", "the selected latest iteration changed during finalization")
         selected, previous = chain[-1], chain[-2] if len(chain) > 1 else None
+        _require_pin(selected.receipt_sha256, expected_sha256, "CAPTURE_CHANGED")
         original = selected.payload
         if original["state"] != STATE_PENDING:
             raise ReceiptError("ALREADY_FINAL", "a final receipt is immutable")
@@ -932,11 +1020,10 @@ def finalize(  # pylint: disable=too-many-locals
         payload = {**original, "generated": current, "judgement": json.loads(json.dumps(judgement, allow_nan=False))}
         _assert_judgement(payload, previous)
         _assert_limitations(package, payload)
-        # Recheck mutable reads and the PID after comparison, immediately before the final write.
-        if read_chain(package) != chain or artifact_facts(resolve_package(package)) != current["artifact"]:
-            raise ReceiptError("GENERATED_CHANGED", "the package or iteration chain changed during finalization")
         assert_desktop_binding(target, generated["review"]["desktop_pid"], state_reader)
         payload["judgement"]["completed_at"] = now_rfc3339()
         payload["state"], payload["outcome"] = STATE_FINAL, OUTCOME_INCOMPLETE
-        write_receipt(selected.directory, payload)
+        # No external PID/status/bridge call may follow this last pre-publication snapshot.
+        _assert_snapshot(package, chain)
+        _publish_final(package, chain, payload)
         return payload

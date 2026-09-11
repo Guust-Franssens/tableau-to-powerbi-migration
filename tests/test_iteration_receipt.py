@@ -299,8 +299,19 @@ def test_valid_second_iteration_preserves_finding_identity_and_evolution(package
     assert [item.name for item in receipt.read_chain(package)] == ["001", "002"]
 
 
-@pytest.mark.parametrize("field", ["state", "data", "unit", "reviewer", "time", "frames", "scope"])
-def test_generated_state_forgery_is_rejected_by_the_capture_pin(package: Path, field: str) -> None:
+@pytest.mark.parametrize(
+    "field,expected",
+    [
+        ("state", "SCHEMA"),
+        ("data", "SCHEMA"),
+        ("unit", "CAPTURE_CHANGED"),
+        ("reviewer", "CAPTURE_CHANGED"),
+        ("time", "CAPTURE_CHANGED"),
+        ("frames", "SCHEMA"),
+        ("scope", "STATE_INVALID"),
+    ],
+)
+def test_generated_state_forgery_is_rejected_by_the_capture_pin(package: Path, field: str, expected: str) -> None:
     original = _iterate(package)
     forged = copy.deepcopy(original)
     if field == "state":
@@ -318,7 +329,7 @@ def test_generated_state_forgery_is_rejected_by_the_capture_pin(package: Path, f
     else:
         forged["generated"]["scope"] = "subset"
     write_json(_path(package), forged)
-    assert _code(lambda: _finalize(package, original)) == "CAPTURE_CHANGED"
+    assert _code(lambda: _finalize(package, original)) == expected
 
 
 def test_pending_state_cannot_have_a_final_outcome(package: Path) -> None:
@@ -1004,3 +1015,239 @@ def test_finalization_cannot_be_repeated(package: Path) -> None:
     pending = _iterate(package)
     final = _finalize(package, pending)
     assert _code(lambda: _finalize(package, final)) == "ALREADY_FINAL"
+
+
+def _pending_successor(package: Path) -> dict:
+    cache = package / "fabric" / "Unit.SemanticModel" / ".pbi" / "cache.abf"
+    cache.parent.mkdir()
+    cache.write_bytes(b"original cache")
+    return _iterate(package, previous=_finalize(package, _iterate(package)))
+
+
+def _change_during_finalization(package: Path, pending: dict, kind: str) -> None:
+    report = package / "fabric" / "Unit.Report"
+    if kind == "report":
+        write_json(report / "definition" / "report.json", {"changed": True})
+    elif kind == "page":
+        write_json(report / "definition" / "pages" / PAGE / "page.json", {"name": PAGE, "displayName": "changed"})
+    elif kind == "model":
+        (package / "fabric" / "Unit.SemanticModel" / "definition" / "model.tmdl").write_bytes(b"model Changed\n")
+    elif kind == "cache":
+        (package / "fabric" / "Unit.SemanticModel" / ".pbi" / "cache.abf").write_bytes(b"changed cache")
+    elif kind == "predecessor-receipt":
+        _path(package).write_bytes(_path(package).read_bytes() + b" ")
+    elif kind == "current-receipt":
+        _path(package, "002").write_bytes(receipt.receipt_bytes(pending) + b" ")
+    else:
+        assert kind in {"predecessor-png", "current-png"}
+        directory = _path(package, "001" if kind == "predecessor-png" else "002").parent
+        (directory / pending["generated"]["pages"][0]["powerbi"]["path"]).write_bytes(valid_png(100, 81))
+
+
+def test_read_chain_checksum_is_of_the_exact_bytes_parsed_and_validated(
+    package: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pending = _iterate(package)
+    original = _path(package).read_bytes()
+    changed = copy.deepcopy(pending)
+    changed["generated"]["review"]["reviewer"] = "replacement"
+    validate = receipt.validate_receipt
+
+    def validate_then_swap(payload: dict) -> dict:
+        result = validate(payload)
+        write_json(_path(package), changed)
+        return result
+
+    monkeypatch.setattr(receipt, "validate_receipt", validate_then_swap)
+    selected = receipt.read_chain(package)[-1]
+    assert selected.payload == pending
+    assert selected.receipt_sha256 == hashlib.sha256(original).hexdigest()
+    assert selected.receipt_bytes == original
+    assert _path(package).read_bytes() != original
+
+
+def test_receipt_swap_after_checksum_decision_cannot_be_consumed_as_pinned_capture(
+    package: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pending = _iterate(package)
+    changed = copy.deepcopy(pending)
+    changed["generated"]["review"]["reviewer"] = "replacement"
+    require_pin = receipt._require_pin
+    decisions = []
+
+    def pin_then_swap(actual: str, expected: str | None, code: str) -> None:
+        require_pin(actual, expected, code)
+        decisions.append(code)
+        write_json(_path(package), changed)
+
+    monkeypatch.setattr(receipt, "_require_pin", pin_then_swap)
+    assert _code(lambda: _finalize(package, pending)) == "GENERATED_CHANGED"
+    assert decisions == ["CAPTURE_CHANGED"]
+    assert json.loads(_path(package).read_bytes()) == changed
+
+
+@pytest.mark.parametrize("status_call", [1, 2])
+@pytest.mark.parametrize(
+    "kind",
+    ["report", "page", "model", "cache", "predecessor-png", "predecessor-receipt", "current-png", "current-receipt"],
+)
+def test_every_pid_status_precedes_the_final_artifact_and_full_chain_snapshot(
+    package: Path, monkeypatch: pytest.MonkeyPatch, status_call: int, kind: str
+) -> None:
+    pending = _pending_successor(package)
+    original = _path(package, "002").read_bytes()
+    calls = []
+
+    def status(_pid: int) -> dict:
+        calls.append(_pid)
+        if len(calls) == status_call:
+            _change_during_finalization(package, pending, kind)
+        return _status(package)
+
+    def never_publish(*_args: object) -> None:
+        pytest.fail("a change during PID status reached atomic publication")
+
+    monkeypatch.setattr(receipt, "_publish_final", never_publish)
+    code = _code(
+        lambda: receipt.finalize(package, receipt.receipt_sha256(pending), _review(pending), state_reader=status)
+    )
+    expected = {"predecessor-png": "SCREENSHOT_CHANGED", "predecessor-receipt": "PREVIOUS_RECEIPT_MISMATCH"}
+    assert code == expected.get(kind, "GENERATED_CHANGED")
+    assert len(calls) >= status_call
+    assert json.loads(_path(package, "002").read_bytes())["state"] == "pending"
+    if kind != "current-receipt":
+        assert _path(package, "002").read_bytes() == original
+
+
+@pytest.mark.parametrize("ordering", ["before", "after"])
+@pytest.mark.parametrize(
+    "kind",
+    ["report", "page", "model", "cache", "predecessor-png", "predecessor-receipt", "current-png", "current-receipt"],
+)
+def test_mutation_on_either_side_of_atomic_publication_restores_exact_pending(
+    package: Path, monkeypatch: pytest.MonkeyPatch, ordering: str, kind: str
+) -> None:
+    pending = _pending_successor(package)
+    path = _path(package, "002")
+    original = path.read_bytes()
+    link = os.link
+    calls = []
+
+    def publish(source: Path, destination: Path) -> None:
+        assert destination == path
+        calls.append(ordering)
+        if ordering == "before":
+            _change_during_finalization(package, pending, kind)
+        link(source, destination)
+        if ordering == "after":
+            _change_during_finalization(package, pending, kind)
+
+    monkeypatch.setattr(receipt.os, "link", publish)
+    expected = (
+        "FINALIZATION_WRITE_FAILED" if (ordering, kind) == ("before", "current-receipt") else "FINALIZATION_CHANGED"
+    )
+    assert _code(lambda: _finalize(package, pending)) == expected
+    assert calls == [ordering]
+    assert path.read_bytes() == original
+    assert not (path.parent / receipt.PENDING_BACKUP_NAME).exists()
+    assert not (path.parent / ".iteration.writing").exists()
+
+
+def test_post_publication_checks_final_bytes_not_only_parsed_content(
+    package: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pending = _pending_successor(package)
+    path = _path(package, "002")
+    original = path.read_bytes()
+    link = os.link
+    changes = []
+
+    def publish_then_reserialize(source: Path, destination: Path) -> None:
+        link(source, destination)
+        final = destination.read_bytes()
+        assert json.loads(final)["state"] == "final"
+        changed = final + b" "
+        assert json.loads(changed) == json.loads(final)
+        destination.write_bytes(changed)
+        changes.append(True)
+
+    monkeypatch.setattr(receipt.os, "link", publish_then_reserialize)
+    assert _code(lambda: _finalize(package, pending)) == "FINALIZATION_CHANGED"
+    assert changes == [True]
+    assert path.read_bytes() == original
+
+
+def test_unchanged_publication_retains_exact_final_bytes_and_full_predecessor_chain(
+    package: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pending = _pending_successor(package)
+    path = _path(package, "002")
+    original = path.read_bytes()
+    predecessor = _path(package).read_bytes()
+    link = os.link
+    published = []
+
+    def publish(source: Path, destination: Path) -> None:
+        assert not destination.exists()
+        assert (path.parent / receipt.PENDING_BACKUP_NAME).read_bytes() == original
+        published.append(source.read_bytes())
+        link(source, destination)
+
+    monkeypatch.setattr(receipt.os, "link", publish)
+    final = _finalize(package, pending)
+    assert len(published) == 1 and path.read_bytes() == published[0] == receipt.receipt_bytes(final)
+    assert _path(package).read_bytes() == predecessor
+    assert [item.receipt_bytes for item in receipt.read_chain(package)] == [predecessor, published[0]]
+    assert final["outcome"] == "incomplete" and final["generated"]["data_evidence"]["status"] == "pending"
+    assert all(row["status"] == "unverified" for page in final["judgement"]["pages"] for row in page["numeric_results"])
+    assert not (path.parent / receipt.PENDING_BACKUP_NAME).exists()
+
+
+def test_rollback_rename_failure_retains_original_pending_and_a_refused_chain(
+    package: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pending = _pending_successor(package)
+    path = _path(package, "002")
+    backup = path.parent / receipt.PENDING_BACKUP_NAME
+    original, predecessor = path.read_bytes(), _path(package).read_bytes()
+    link, replace = os.link, os.replace
+    rollbacks = []
+
+    def publish(source: Path, destination: Path) -> None:
+        link(source, destination)
+        _change_during_finalization(package, pending, "page")
+
+    def fail_rollback(source: Path, destination: Path) -> None:
+        if source == backup:
+            rollbacks.append(True)
+            raise PermissionError("synthetic write denial")
+        replace(source, destination)
+
+    monkeypatch.setattr(receipt.os, "link", publish)
+    monkeypatch.setattr(receipt.os, "replace", fail_rollback)
+    assert _code(lambda: _finalize(package, pending)) == "FINALIZATION_ROLLBACK_FAILED"
+    assert rollbacks == [True]
+    assert backup.read_bytes() == original and _path(package).read_bytes() == predecessor
+    assert _code(lambda: receipt.read_chain(package)) == "EXTRA_FILE"
+    assert _code(lambda: _finalize(package, pending)) == "EXTRA_FILE"
+    assert _code(lambda: receipt.allocate_iteration(package, receipt.receipt_sha256(pending))) == "EXTRA_FILE"
+
+
+def test_current_receipt_swap_at_displacement_never_leaves_an_authoritative_final(
+    package: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pending = _pending_successor(package)
+    path = _path(package, "002")
+    replace = os.replace
+    changed = path.read_bytes() + b" "
+
+    def swap_then_displace(source: Path, destination: Path) -> None:
+        if source == path:
+            source.write_bytes(changed)
+        replace(source, destination)
+
+    monkeypatch.setattr(receipt.os, "replace", swap_then_displace)
+    assert _code(lambda: _finalize(package, pending)) == "FINALIZATION_ROLLBACK_FAILED"
+    assert not path.exists()
+    assert (path.parent / receipt.PENDING_BACKUP_NAME).read_bytes() == changed
+    assert _code(lambda: receipt.read_chain(package)) == "INPUT_UNREADABLE"

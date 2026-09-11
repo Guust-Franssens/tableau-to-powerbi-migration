@@ -56,11 +56,18 @@ class PageInventory:
 def read_json(path: Path) -> dict[str, Any]:
     """Use the repository strict parser, with fixed UTF-8/IO refusals at the byte boundary."""
     try:
-        text = path.read_bytes().decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise RevisionError("JSON_NOT_UTF8", "JSON input is not valid UTF-8") from error
+        blob = path.read_bytes()
     except (OSError, ValueError) as error:
         raise RevisionError("JSON_UNREADABLE", "JSON input could not be read") from error
+    return parse_json_bytes(blob)
+
+
+def parse_json_bytes(blob: bytes) -> dict[str, Any]:
+    """Parse held bytes so a receipt's JSON and checksum cannot come from different reads."""
+    try:
+        text = blob.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise RevisionError("JSON_NOT_UTF8", "JSON input is not valid UTF-8") from error
     try:
         return filesystem.parse_manifest_text(text)
     except filesystem._ManifestError as error:  # pylint: disable=protected-access
