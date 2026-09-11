@@ -15,9 +15,12 @@ the rest of the bundle, only on ``os``/``struct``/``pathlib``.
 
 from __future__ import annotations
 
+import hashlib
+import io
 import os
 import struct
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 # THE FORMAT, MEASURED - not assumed. An earlier round asserted a cache.abf was a Microsoft Compound
@@ -42,6 +45,48 @@ _ABF_BLOCK_HEADER_BYTES = 8 + len(_ABF_BLOCK_MAGIC)  # uint32 uncompressed + uin
 _ABF_MAX_BLOCK_BYTES = 2 * 1024 * 1024
 
 
+@dataclass(frozen=True)
+class ImageFacts:
+    """Identity of the exact bytes which passed the ABF block-chain check."""
+
+    sha256: str
+    byte_count: int
+
+
+@dataclass(frozen=True)
+class ImageCommit:
+    """Causal staged-image/destination observation, not an existence/mtime certificate."""
+
+    intended: ImageFacts
+    committed: ImageFacts
+
+
+@dataclass
+class ImageAttempt:
+    """Private transaction state, retained even when atomic replace commits and then raises."""
+
+    intended: ImageFacts | None = None
+    commit: ImageCommit | None = None
+    uncertain: bool = False
+
+
+def image_facts(path: Path) -> ImageFacts | None:
+    """Hash and format-check the SAME held bytes; no stat/read or check/hash split."""
+    facts, _ = _inspect_image(path)
+    return facts
+
+
+def _inspect_image(path: Path) -> tuple[ImageFacts | None, str | None]:
+    try:
+        blob = path.read_bytes()
+    except OSError as exc:
+        return None, f"unreadable ({type(exc).__name__})"
+    if not blob.startswith(_ABF_PREAMBLE):
+        return None, "not an AS backup preamble"
+    reason = _walk_abf_blocks(io.BytesIO(blob), len(blob))
+    return (ImageFacts(hashlib.sha256(blob).hexdigest(), len(blob)), None) if reason is None else (None, reason)
+
+
 def _abf_rejection_reason(path: Path) -> str | None:
     """Why `path` is not a complete cache.abf, or ``None`` when it is one.
 
@@ -59,15 +104,7 @@ def _abf_rejection_reason(path: Path) -> str | None:
     multiple of 2 MiB, whose final block would then be full-sized; none of the 13 measured files is
     such a file, and the cost if one appears is the fallback, not data loss.
     """
-    try:
-        size = path.stat().st_size
-        with path.open("rb") as handle:
-            preamble = handle.read(len(_ABF_PREAMBLE))
-            if preamble != _ABF_PREAMBLE:
-                return f"not an AS backup preamble (first {len(preamble)} byte(s): {preamble[:16].hex(' ')})"
-            return _walk_abf_blocks(handle, size)
-    except OSError as exc:
-        return f"unreadable ({type(exc).__name__})"
+    return _inspect_image(path)[1]
 
 
 def _abf_block_header_problem(header: bytes, ordinal: int, offset: int, size: int) -> str | None:
@@ -133,7 +170,14 @@ def _staging_path(cache_path: Path) -> Path:
     return cache_path.with_name(f"{cache_path.name}.{os.getpid()}-{uuid.uuid4().hex}.tmp")
 
 
-def _staged_image_write(cache_path: Path, write_image, staging: Path | None = None) -> bool:
+def _staged_image_write(
+    cache_path: Path,
+    write_image,
+    staging: Path | None = None,
+    *,
+    attempt: ImageAttempt | None = None,
+    before_commit=None,
+) -> bool:
     """Write the cache to a staging file and swap it in atomically. Returns True only on a COMPLETE write.
 
     `FileMode.Create` on the live `cache.abf` truncates a good cache the instant the write begins, so
@@ -159,13 +203,27 @@ def _staged_image_write(cache_path: Path, write_image, staging: Path | None = No
         staging = _staging_path(cache_path)
     if staging.exists():
         staging.unlink()
+    attempt = attempt if attempt is not None else ImageAttempt()
     swapped = False
     try:
         write_image(staging)
-        reason = _abf_rejection_reason(staging)
+        intended, reason = _inspect_image(staging)
         if reason is None:
-            os.replace(staging, cache_path)
-            swapped = True
+            attempt.intended = intended
+            if before_commit is not None:
+                before_commit()
+            try:
+                os.replace(staging, cache_path)
+            finally:
+                # Observe BEFORE cleanup: deleting an uncommitted staging file would manufacture
+                # the "staging gone" evidence, especially when the old cache has identical bytes.
+                if not staging.exists():
+                    committed = image_facts(cache_path)
+                    if committed == intended and intended is not None:
+                        attempt.commit = ImageCommit(intended, committed)
+                    else:
+                        attempt.uncertain = True
+            swapped = attempt.commit is not None
         else:
             print(f"  save   : staged cache REJECTED - {reason}")
     finally:
@@ -194,17 +252,9 @@ def _cache_fingerprint(path: Path) -> tuple[int, int] | None:
     return (stat.st_size, stat.st_mtime_ns)
 
 
-def _cache_committed(cache_path: Path, staging: Path, before: tuple[int, int] | None) -> bool:
-    """Did the staged write actually replace the cache? Judged by the FILESYSTEM, not a return flag.
-
-    ``os.replace`` is atomic, but a crash could move the file yet still surface an exception
-    ("commit-then-raise"). So commit is decided by OBSERVING the result: staging is gone, the cache is
-    now a complete ABF, and its fingerprint changed. Trusting only the writer's boolean return
-    misclassified that case and rolled compat back UNDER a freshly installed cache (round-3 blocker 2).
-    """
-    if staging.exists() or not _is_complete_abf(cache_path):
-        return False
-    return _cache_fingerprint(cache_path) != before
+def _cache_committed(cache_path: Path, staging: Path, intended: ImageFacts | None) -> bool:
+    """Compare to the intended checked image; callers must observe staging before cleanup."""
+    return isinstance(intended, ImageFacts) and not staging.exists() and image_facts(cache_path) == intended
 
 
 def _cleanup_staging(staging: Path) -> None:

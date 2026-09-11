@@ -29,17 +29,22 @@ Windows-API exception to the "committed scripts default to .py/.sh" rule.
 
 from __future__ import annotations
 
+# PID/count wire types deliberately exclude bool and float.
+# pylint: disable=unidiomatic-typecheck
 import argparse
 import glob
 import inspect
+import json
 import os
 import re
 import subprocess
 import sys
 import threading
 import time
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
-from typing import NoReturn
+from typing import Callable, NoReturn, TypeVar
 
 from _credential_modal import (
     CredentialDetection,
@@ -71,6 +76,254 @@ def adomd_dll_globs() -> list[str]:
 PORT_DISCOVERY_ATTEMPTS = 6
 PORT_DISCOVERY_INTERVAL_SECONDS = 2
 PREFLIGHT_CREDENTIAL_POLL_SECONDS = 5.0
+EVIDENCE_TIMEOUT_SECONDS = 120
+_T = TypeVar("_T")
+
+
+class EvidenceUnavailable(RuntimeError):
+    """Closed evidence-mode codes; never reflect a native exception, sample, endpoint or path."""
+
+    CODES = frozenset(
+        {
+            "IDENTITY_UNESTABLISHED",
+            "PID_REUSED",
+            "WRONG_PID_PORT",
+            "CATALOGUE_UNESTABLISHED",
+            "CATALOGUE_CHANGED",
+            "CANARIES_REQUIRED",
+            "CANARY_UNKNOWN",
+            "TOOL_UNAVAILABLE",
+            "TIMEOUT",
+            "CREDENTIAL_MISSING",
+            "DIALOG_NEEDS_HUMAN",
+            "DIALOG_UNREADABLE",
+            "DIALOG_UNRECOGNIZED",
+            "REFRESH_IN_PROGRESS",
+            "DESKTOP_GONE",
+            "DESKTOP_UNREADY",
+            "CREDENTIAL_UNKNOWN",
+        }
+    )
+
+    def __init__(self, code: str) -> None:
+        self.code = code if code in self.CODES else "TOOL_UNAVAILABLE"
+        super().__init__(self.code)
+
+
+@dataclass(frozen=True)
+class DesktopIdentity:
+    """OS process-start identity and its one exact child listener. No file-name inference."""
+
+    pid: int
+    process_start: str
+    as_pid: int
+    as_process_start: str
+    port: int
+
+
+@dataclass(frozen=True)
+class BoundDesktop:
+    """One process and catalogue, carried unchanged through every evidence-mode operation."""
+
+    identity: DesktopIdentity
+    catalogue: str
+
+
+@dataclass(frozen=True)
+class CanaryObservation:
+    """Local tool payload. The adapter assigns source coverage and private payload roles."""
+
+    table: str
+    query: str
+    result: object
+    sampled_rows: int
+    total_rows: int | None = None
+
+
+def desktop_identity(pid: int, supplied_port: int | None = None) -> DesktopIdentity:
+    """Observe exact parentage, start ticks and ALL child listeners once, with a 30-second bound."""
+    if os.name != "nt" or type(pid) is not int or not 0 < pid < 2**32:
+        raise EvidenceUnavailable("IDENTITY_UNESTABLISHED")
+    script = (
+        "$ErrorActionPreference='Stop';"
+        '$p=Get-CimInstance Win32_Process -Filter "ProcessId=$env:EVIDENCE_PID";'
+        "if ($p.Name -ne 'PBIDesktop.exe') { throw 'identity' };"
+        "$a=@(Get-CimInstance Win32_Process -Filter \"Name='msmdsrv.exe'\" | "
+        "Where-Object { $_.ParentProcessId -eq $p.ProcessId });"
+        "if ($a.Count -ne 1) { throw 'children' };"
+        "$ports=@(Get-NetTCPConnection -OwningProcess $a[0].ProcessId -State Listen | "
+        "Select-Object -ExpandProperty LocalPort -Unique);"
+        "if ($ports.Count -ne 1) { throw 'listeners' };"
+        "[ordered]@{pid=[int]$p.ProcessId;process_start=[string]$p.CreationDate.ToUniversalTime().Ticks;"
+        "as_pid=[int]$a[0].ProcessId;as_process_start=[string]$a[0].CreationDate.ToUniversalTime().Ticks;"
+        "port=[int]$ports[0]} | ConvertTo-Json -Compress"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", script],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+            env=_merged_env({"EVIDENCE_PID": str(pid)}),
+        )
+        payload = json.loads(result.stdout)
+        _validate_identity(payload, pid)
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        raise EvidenceUnavailable("IDENTITY_UNESTABLISHED") from None
+    if supplied_port is not None and (type(supplied_port) is not int or supplied_port != payload["port"]):
+        raise EvidenceUnavailable("WRONG_PID_PORT")
+    return DesktopIdentity(**payload)
+
+
+def _validate_identity(payload: dict, pid: int) -> None:
+    if not isinstance(payload, dict) or set(payload) != {"pid", "process_start", "as_pid", "as_process_start", "port"}:
+        raise ValueError("identity")
+    if payload["pid"] != pid or any(type(payload[key]) is not int for key in ("pid", "as_pid", "port")):
+        raise ValueError("identity")
+    if not 0 < payload["as_pid"] < 2**32 or payload["as_pid"] == pid or not 0 < payload["port"] < 65536:
+        raise ValueError("identity")
+    for key in ("process_start", "as_process_start"):
+        if not isinstance(payload[key], str) or not re.fullmatch(r"[1-9][0-9]{0,19}", payload[key]):
+            raise ValueError("identity")
+    if int(payload["as_process_start"]) < int(payload["process_start"]):
+        raise ValueError("identity")
+
+
+def catalogue_id(connection) -> str:
+    """Require exactly ONE catalogue from the actual server, never Databases[0] or a first row."""
+    command = connection.CreateCommand()
+    command.CommandTimeout = 30
+    command.CommandText = "SELECT [CATALOG_NAME] FROM $SYSTEM.DBSCHEMA_CATALOGS"
+    reader = command.ExecuteReader()
+    try:
+        if not reader.Read():
+            raise EvidenceUnavailable("CATALOGUE_UNESTABLISHED")
+        value = str(reader.GetValue(0))
+        if reader.Read() or str(uuid.UUID(value)) != value:
+            raise EvidenceUnavailable("CATALOGUE_UNESTABLISHED")
+        return value
+    except (ValueError, TypeError):
+        raise EvidenceUnavailable("CATALOGUE_UNESTABLISHED") from None
+    finally:
+        reader.Close()
+
+
+def bind_desktop(pid: int, supplied_port: int | None = None) -> BoundDesktop:
+    """Discover once, then bracket catalogue discovery with exact OS identity observations."""
+    identity = desktop_identity(pid, supplied_port)
+
+    def discover() -> str:
+        connection = _load_adomd()(f"Data Source=localhost:{identity.port};Connect Timeout=30")
+        connection.Open()
+        try:
+            return catalogue_id(connection)
+        finally:
+            connection.Close()
+
+    catalogue = evidence_call(pid, discover)
+    if desktop_identity(pid) != identity:
+        raise EvidenceUnavailable("PID_REUSED")
+    return BoundDesktop(identity, catalogue)
+
+
+def open_bound(bound: BoundDesktop):
+    """Open the exact catalogue. The caller wraps native operations in evidence_call."""
+    if desktop_identity(bound.identity.pid) != bound.identity:
+        raise EvidenceUnavailable("PID_REUSED")
+    connection = _load_adomd()(
+        f"Data Source=localhost:{bound.identity.port};Initial Catalog={bound.catalogue};Connect Timeout=30"
+    )
+    connection.Open()
+    try:
+        if catalogue_id(connection) != bound.catalogue or str(connection.Database) != bound.catalogue:
+            raise EvidenceUnavailable("CATALOGUE_CHANGED")
+    except BaseException:
+        connection.Close()
+        raise
+    return connection
+
+
+def recheck_bound(bound: BoundDesktop, connection=None) -> None:
+    """Re-observe process start/child port and the sole catalogue before returning evidence."""
+    if desktop_identity(bound.identity.pid) != bound.identity:
+        raise EvidenceUnavailable("PID_REUSED")
+    own = connection is None
+    connection = open_bound(bound) if own else connection
+    try:
+        if catalogue_id(connection) != bound.catalogue or str(connection.Database) != bound.catalogue:
+            raise EvidenceUnavailable("CATALOGUE_CHANGED")
+    finally:
+        if own:
+            connection.Close()
+
+
+def _evidence_credential_check(pid: int, *, in_flight: bool) -> None:
+    state = _credential_state(pid, in_flight=in_flight)
+    for found, code in (
+        (state.modal, "CREDENTIAL_MISSING"),
+        (state.dialog, state.dialog.verdict if state.dialog else ""),
+        (state.process_gone, "DESKTOP_GONE"),
+        (state.desktop_unready, "DESKTOP_UNREADY"),
+        (state.unknown_reason, "CREDENTIAL_UNKNOWN"),
+    ):
+        if found is not None:
+            raise EvidenceUnavailable(code)
+
+
+def evidence_call(pid: int, operation: Callable[[], _T], timeout_seconds: float = EVIDENCE_TIMEOUT_SECONDS) -> _T:
+    """Bound read/metadata calls and stop once on a credential/dialog refusal; never retry."""
+    if isinstance(timeout_seconds, bool) or not 0 < timeout_seconds <= EVIDENCE_TIMEOUT_SECONDS:
+        raise EvidenceUnavailable("TIMEOUT")
+    _evidence_credential_check(pid, in_flight=False)
+    result = []
+
+    def run() -> None:
+        try:
+            result.append((True, operation()))
+        except BaseException as error:  # pylint: disable=broad-exception-caught
+            result.append((False, error))
+
+    worker = threading.Thread(target=run, daemon=True, name="completion-evidence")
+    deadline = time.monotonic() + timeout_seconds
+    worker.start()
+    while worker.is_alive():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise EvidenceUnavailable("TIMEOUT")
+        worker.join(min(1.0, remaining))
+        _evidence_credential_check(pid, in_flight=True)
+    if not result:
+        raise EvidenceUnavailable("TOOL_UNAVAILABLE")
+    succeeded, value = result[0]
+    if not succeeded:
+        if isinstance(value, (Exception, KeyboardInterrupt)):
+            raise value
+        raise EvidenceUnavailable("TOOL_UNAVAILABLE")
+    return value
+
+
+def probe_observations(bound: BoundDesktop, connection, canaries: list[str], execute) -> tuple[CanaryObservation, ...]:
+    """Observe explicit canaries with a lossless executor on the SAME held catalogue connection."""
+    if not canaries or any(not isinstance(name, str) or not name for name in canaries):
+        raise EvidenceUnavailable("CANARIES_REQUIRED")
+    if len({name.casefold() for name in canaries}) != len(canaries):
+        raise EvidenceUnavailable("CANARIES_REQUIRED")
+    recheck_bound(bound, connection)
+    known = table_names(connection, include_hidden=True)
+    observations = []
+    for name in canaries:
+        if name not in known:
+            raise EvidenceUnavailable("CANARY_UNKNOWN")
+        query = f"EVALUATE TOPN(1, '{name.replace(chr(39), chr(39) * 2)}')"
+        result = execute(query)
+        rows = result.row_count
+        if type(rows) is not int or rows < 0:
+            raise EvidenceUnavailable("TOOL_UNAVAILABLE")
+        observations.append(CanaryObservation(name, query, result, rows))
+    recheck_bound(bound, connection)
+    return tuple(observations)
+
 
 # Power BI's auto date/time scaffolding. Present in the engine, and serialized into a PBIP's
 # `definition/tables/` too when auto date/time is (or ever was) on - so a comparison of the two
@@ -316,7 +569,7 @@ def measure_names(conn) -> set[tuple[str, str]]:
 
 def _probe_one(port: int, conn, table: str, emit=print) -> int:
     """Run EVALUATE TOPN(1, '<table>') for one table, print the evidence, and return the row count."""
-    dax = f"EVALUATE TOPN(1, '{table}')"
+    dax = f"EVALUATE TOPN(1, '{table.replace(chr(39), chr(39) * 2)}')"
     cmd = conn.CreateCommand()
     cmd.CommandText = dax
     reader = cmd.ExecuteReader()

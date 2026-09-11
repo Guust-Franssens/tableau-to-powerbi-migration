@@ -210,6 +210,112 @@ def test_an_unserialisable_value_degrades_to_a_string_rather_than_crashing():
     assert dos._json_safe(Foreign()) == "2026-08-07"
 
 
+# The evidence representation is separate from the deliberately compatible NDJSON coercions.
+def test_typed_decimal_retains_all_digits_and_scale_in_canonical_bytes():
+    import hashlib
+
+    value = Decimal("9007199254740993.123456789012345678901234567890")
+    result = dos.TypedResult(
+        hashlib.sha256(b"EVALUATE 'T'").hexdigest(), (("[value]", "decimal"),), ((dos.typed_value(value),),)
+    )
+    encoded = result.to_bytes()
+    assert b'"kind":"decimal","value":"9007199254740993.123456789012345678901234567890"' in encoded
+    assert dos.read_typed_result(encoded) == result
+    assert dos.typed_value(None) != dos.typed_value(0)
+    assert dos.typed_value("1") != dos.typed_value(1)
+    assert dos.typed_value(True) != dos.typed_value(1)
+
+
+@pytest.mark.parametrize("value", [Decimal("NaN"), Decimal("Infinity"), float("nan"), float("inf"), object()])
+def test_typed_evidence_rejects_nonfinite_and_unsupported_values(value):
+    with pytest.raises(dos.ResultError):
+        dos.typed_value(value)
+
+
+class _TypedReader:
+    def __init__(self, columns=None, rows=None, extra=False):
+        self.columns = columns or ["[value]"]
+        self.rows = iter(rows if rows is not None else [[Decimal("12.50")], [Decimal("12.50")], [None]])
+        self.FieldCount = len(self.columns)
+        self.closed = False
+        self.extra = extra
+
+    def GetName(self, index):
+        return self.columns[index]
+
+    def GetFieldType(self, _index):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(FullName="System.Decimal")
+
+    def Read(self):
+        self.current = next(self.rows, None)
+        return self.current is not None
+
+    def GetValue(self, index):
+        return self.current[index]
+
+    def NextResult(self):
+        return self.extra
+
+    def Close(self):
+        self.closed = True
+
+
+def _typed_connection(reader):
+    from types import SimpleNamespace
+
+    command = SimpleNamespace(CommandText=None, CommandTimeout=None, ExecuteReader=lambda: reader)
+    return SimpleNamespace(CreateCommand=lambda: command), command
+
+
+def test_typed_executor_returns_complete_duplicate_rows_and_blank_without_coercion():
+    import hashlib
+
+    reader = _TypedReader()
+    connection, command = _typed_connection(reader)
+    query = "EVALUATE 'T'"
+    result = dos.execute_typed(connection, query)
+    assert command.CommandText == query
+    assert command.CommandTimeout == 120
+    assert result.query_sha256 == hashlib.sha256(query.encode()).hexdigest()
+    assert result.row_count == 3
+    assert result.rows[0] == result.rows[1] == (dos.TypedValue("decimal", "12.50"),)
+    assert result.rows[2] == (dos.TypedValue("blank", None),)
+    assert reader.closed
+
+
+@pytest.mark.parametrize(
+    "variant,code",
+    [
+        ("duplicate_columns", "RESULT_COLUMNS"),
+        ("limit", "RESULT_TRUNCATED"),
+        ("extra_result", "RESULT_TRUNCATED"),
+    ],
+)
+def test_typed_executor_refuses_incomplete_or_ambiguous_result_sets(variant, code):
+    reader = _TypedReader(
+        columns=["a", "A"] if variant == "duplicate_columns" else None, extra=variant == "extra_result"
+    )
+    connection, _ = _typed_connection(reader)
+    with pytest.raises(dos.ResultError, match=f"^{code}$"):
+        dos.execute_typed(connection, "EVALUATE 'T'", max_rows=1 if variant == "limit" else 100)
+    assert reader.closed
+
+
+def test_typed_reader_is_closed_and_preserves_duplicate_multiplicity():
+    import hashlib
+
+    result = dos.TypedResult(
+        hashlib.sha256(b"EVALUATE 'T'").hexdigest(), (("v", "int64"),), ((dos.typed_value(1),), (dos.typed_value(1),))
+    )
+    payload = json.loads(result.to_bytes())
+    assert len(dos.read_typed_result(result.to_bytes()).rows) == 2
+    payload["truncated"] = False
+    with pytest.raises(dos.ResultError, match="^RESULT_SCHEMA$"):
+        dos.read_typed_result(json.dumps(payload).encode())
+
+
 # --- the NDJSON protocol -------------------------------------------------------------------------
 
 

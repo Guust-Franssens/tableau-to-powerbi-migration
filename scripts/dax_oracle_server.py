@@ -52,10 +52,18 @@ would make `compare_scalars` do a string comparison and quietly mislabel a corre
 
 from __future__ import annotations
 
+# Wire types are deliberately exact; bool and float are not integral evidence.
+# pylint: disable=unidiomatic-typecheck
 import argparse
+import hashlib
 import json
 import logging
+import math
+import re
 import sys
+from dataclasses import dataclass
+from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable
 
@@ -79,6 +87,240 @@ from engine_source import (  # noqa: E402  # pylint: disable=wrong-import-positi
     EngineNotFoundError,
     engine_scripts_dir,
 )
+from current_artifact_revision import parse_json_bytes  # noqa: E402  # pylint: disable=wrong-import-position
+
+
+RESULT_VERSION = 1
+VALUE_KINDS = frozenset({"blank", "string", "boolean", "int32", "int64", "decimal", "double", "date", "datetime"})
+CLR_KINDS = {
+    "System.String": "string",
+    "System.Boolean": "boolean",
+    "System.Int32": "int32",
+    "System.Int64": "int64",
+    "System.Decimal": "decimal",
+    "System.Double": "double",
+    "System.DateTime": "datetime",
+}
+
+
+class ResultError(ValueError):
+    """A closed diagnostic; result cells and driver exception text are never diagnostics."""
+
+    CODES = frozenset(
+        {"RESULT_SCHEMA", "RESULT_TYPE", "RESULT_NONFINITE", "RESULT_TRUNCATED", "RESULT_COLUMNS", "QUERY_INVALID"}
+    )
+
+    def __init__(self, code: str) -> None:
+        self.code = code if code in self.CODES else "RESULT_SCHEMA"
+        super().__init__(self.code)
+
+
+@dataclass(frozen=True)
+class TypedValue:
+    """Lossless cell. Decimal coefficients/exponents and IEEE doubles never pass through JSON numbers."""
+
+    kind: str
+    value: str | None
+
+
+@dataclass(frozen=True)
+class TypedResult:
+    """A complete single result set, bound to the exact executed UTF-8 query bytes."""
+
+    query_sha256: str
+    columns: tuple[tuple[str, str], ...]
+    rows: tuple[tuple[TypedValue, ...], ...]
+
+    @property
+    def row_count(self) -> int:
+        """Returned rows, not a COUNTROWS total."""
+        return len(self.rows)
+
+    def to_bytes(self) -> bytes:
+        """Canonical local payload; this contains customer data and is NOT shareable metadata."""
+        payload = {
+            "schema_version": RESULT_VERSION,
+            "query_sha256": self.query_sha256,
+            "columns": [{"name": name, "kind": kind} for name, kind in self.columns],
+            "rows": [[{"kind": cell.kind, "value": cell.value} for cell in row] for row in self.rows],
+        }
+        _validate_result(payload)
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode()
+
+
+def _decimal_text(value: Any) -> str:
+    if isinstance(value, Decimal):
+        return str(value)
+    if type(value).__name__ == "Decimal" and hasattr(value, "ToString"):
+        # CLR formatting must not depend on the operator's decimal separator.
+        from System.Globalization import CultureInfo  # pylint: disable=import-outside-toplevel,import-error
+
+        return str(value.ToString(CultureInfo.InvariantCulture))
+    raise ResultError("RESULT_TYPE")
+
+
+def typed_value(value: Any, kind: str | None = None) -> TypedValue:  # pylint: disable=too-many-branches
+    """Encode supported Python/ADOMD cells without coercing BLANK, text, or fixed decimals."""
+    if value is None or type(value).__name__ == "DBNull":
+        return TypedValue("blank", None)
+    inferred = {
+        str: "string",
+        bool: "boolean",
+        int: "int64",
+        float: "double",
+        Decimal: "decimal",
+        date: "date",
+        datetime: "datetime",
+    }.get(type(value))
+    kind = kind or inferred
+    if kind == "string" and isinstance(value, str):
+        text = value
+    elif kind == "boolean" and isinstance(value, bool):
+        text = "true" if value else "false"
+    elif kind in {"int32", "int64"} and type(value) is int:
+        text = str(value)
+    elif kind == "decimal":
+        text = _decimal_text(value)
+    elif kind == "double" and type(value) is float:
+        text = value.hex()
+    elif kind == "date" and type(value) is date:
+        text = value.isoformat()
+    elif kind == "datetime" and isinstance(value, datetime):
+        text = value.isoformat()
+    elif kind == "datetime" and type(value).__name__ == "DateTime" and hasattr(value, "ToString"):
+        text = str(value.ToString("O"))
+    else:
+        raise ResultError("RESULT_TYPE")
+    cell = TypedValue(kind, text)
+    _validate_cell(cell)
+    return cell
+
+
+def _validate_cell(cell: TypedValue) -> None:  # pylint: disable=too-many-branches
+    if cell.kind not in VALUE_KINDS or (cell.kind == "blank" and cell.value is not None):
+        raise ResultError("RESULT_TYPE")
+    if cell.kind == "blank":
+        return
+    text = cell.value
+    if not isinstance(text, str):
+        raise ResultError("RESULT_TYPE")
+    try:
+        text.encode("utf-8")
+        if cell.kind in {"int32", "int64"}:
+            bits = 32 if cell.kind == "int32" else 64
+            if not re.fullmatch(r"-?(?:0|[1-9][0-9]*)", text) or not -(2 ** (bits - 1)) <= int(text) < 2 ** (bits - 1):
+                raise ResultError("RESULT_TYPE")
+        elif cell.kind == "decimal":
+            if not Decimal(text).is_finite():
+                raise ResultError("RESULT_NONFINITE")
+            if not re.fullmatch(r"-?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:E[+-]?[0-9]+)?", text):
+                raise ResultError("RESULT_TYPE")
+        elif cell.kind == "double":
+            number = float.fromhex(text)
+            if not math.isfinite(number):
+                raise ResultError("RESULT_NONFINITE")
+            if number.hex() != text:
+                raise ResultError("RESULT_TYPE")
+        elif cell.kind == "boolean" and text not in {"true", "false"}:
+            raise ResultError("RESULT_TYPE")
+        elif cell.kind == "date":
+            if date.fromisoformat(text).isoformat() != text:
+                raise ResultError("RESULT_TYPE")
+        elif cell.kind == "datetime":
+            # Validate without rewriting: CLR DateTime's seventh fractional digit must survive.
+            if not re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,7})?(?:Z|[+-]\d\d:\d\d)?", text):
+                raise ResultError("RESULT_TYPE")
+            datetime.fromisoformat(text)
+    except (ValueError, ArithmeticError, UnicodeError) as error:
+        if isinstance(error, ResultError):
+            raise
+        raise ResultError("RESULT_TYPE") from None
+
+
+def _validate_result(payload: dict) -> None:  # pylint: disable=too-many-branches
+    if set(payload) != {"schema_version", "query_sha256", "columns", "rows"}:
+        raise ResultError("RESULT_SCHEMA")
+    if type(payload["schema_version"]) is not int or payload["schema_version"] != RESULT_VERSION:
+        raise ResultError("RESULT_SCHEMA")
+    if not isinstance(payload["query_sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", payload["query_sha256"]):
+        raise ResultError("RESULT_SCHEMA")
+    columns, rows = payload["columns"], payload["rows"]
+    if not isinstance(columns, list) or not columns or not isinstance(rows, list):
+        raise ResultError("RESULT_SCHEMA")
+    names = []
+    for column in columns:
+        if not isinstance(column, dict) or set(column) != {"name", "kind"}:
+            raise ResultError("RESULT_COLUMNS")
+        name, kind = column["name"], column["kind"]
+        if not isinstance(name, str) or not name or not isinstance(kind, str) or kind not in VALUE_KINDS - {"blank"}:
+            raise ResultError("RESULT_COLUMNS")
+        names.append(name.casefold())
+    if len(set(names)) != len(names):
+        raise ResultError("RESULT_COLUMNS")
+    for row in rows:
+        if not isinstance(row, list) or len(row) != len(columns):
+            raise ResultError("RESULT_SCHEMA")
+        for column, cell in zip(columns, row):
+            if not isinstance(cell, dict) or set(cell) != {"kind", "value"} or not isinstance(cell["kind"], str):
+                raise ResultError("RESULT_SCHEMA")
+            if cell["kind"] not in {column["kind"], "blank"}:
+                raise ResultError("RESULT_TYPE")
+            _validate_cell(TypedValue(**cell))
+
+
+def read_typed_result(blob: bytes) -> TypedResult:
+    """Strict held-byte reader. No duplicated columns, missing cells, or arbitrary success fields."""
+    try:
+        payload = parse_json_bytes(blob)
+        _validate_result(payload)
+    except (ValueError, RuntimeError, TypeError, KeyError) as error:
+        if isinstance(error, ResultError):
+            raise
+        raise ResultError("RESULT_SCHEMA") from None
+    return TypedResult(
+        payload["query_sha256"],
+        tuple((column["name"], column["kind"]) for column in payload["columns"]),
+        tuple(tuple(TypedValue(**cell) for cell in row) for row in payload["rows"]),
+    )
+
+
+def execute_typed(connection, dax: str, *, max_rows: int = 100_000, timeout_seconds: int = 120) -> TypedResult:
+    """Execute one bounded complete result set on the caller's already catalogue-bound connection.
+
+    The completion adapter adds the credential-aware wall clock around this call. Legacy NDJSON
+    callers continue using adomd_executor/_json_safe; that lossy compatibility representation is
+    deliberately never used for evidence hashing.
+    """
+    if not isinstance(dax, str) or not is_read_only(dax) or type(max_rows) is not int or max_rows <= 0:
+        raise ResultError("QUERY_INVALID")
+    command = connection.CreateCommand()
+    command.CommandText = dax
+    command.CommandTimeout = timeout_seconds
+    reader = command.ExecuteReader()
+    try:
+        columns = tuple(
+            (str(reader.GetName(i)), CLR_KINDS.get(str(reader.GetFieldType(i).FullName), "unsupported"))
+            for i in range(reader.FieldCount)
+        )
+        query_hash = hashlib.sha256(dax.encode("utf-8")).hexdigest()
+        _validate_result(
+            {
+                "schema_version": RESULT_VERSION,
+                "query_sha256": query_hash,
+                "columns": [{"name": n, "kind": k} for n, k in columns],
+                "rows": [],
+            }
+        )
+        rows = []
+        while reader.Read():
+            if len(rows) >= max_rows:
+                raise ResultError("RESULT_TRUNCATED")
+            rows.append(tuple(typed_value(reader.GetValue(i), kind) for i, (_, kind) in enumerate(columns)))
+        if reader.NextResult():
+            raise ResultError("RESULT_TRUNCATED")
+        return TypedResult(query_hash, columns, tuple(rows))
+    finally:
+        reader.Close()
 
 
 def _json_safe(value: Any) -> Any:  # pylint: disable=too-many-return-statements  # a type dispatch

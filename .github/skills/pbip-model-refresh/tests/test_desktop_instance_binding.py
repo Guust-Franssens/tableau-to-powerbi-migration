@@ -17,8 +17,11 @@ candidates), and prove the connected model really is the one that owns the cache
 from __future__ import annotations
 
 import json
+import os
 import re
+import struct
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -33,6 +36,39 @@ from refresh_pbip_model import _instance, _resolve_pid, same_model, tmdl_tables
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 CREDENTIAL_PROBE_PS1 = SKILL_ROOT / "scripts" / "probe_desktop_credential.ps1"
 REF_TABLE_RE = re.compile(r"^ref table\s+(?:'([^']+)'|(\S+))", re.MULTILINE)
+_OBSERVED_CACHE = (
+    "This backup was created using XPress9 compression.".encode("utf-16-le")
+    + b"\0\0"
+    + struct.pack("<II", 512, 12)
+    + bytes.fromhex("2ad7864e")
+    + b"fixture1"
+)
+_EVIDENCE_CATALOGUE = "11111111-2222-3333-4444-555555555555"
+
+
+def _observed_image_save(port: int, cache_path: Path, model_dir=None, *, on_persist=None):
+    """Fake only the engine write, retaining the real staged-image observation/commit path."""
+    del port
+
+    def observed(commit):
+        if on_persist is not None:
+            on_persist(
+                refresh_pbip_model.PersistenceObservation(
+                    "11111111-2222-3333-4444-555555555555",
+                    1604,
+                    commit,
+                    None,
+                )
+            )
+
+    return refresh_pbip_model._persist_image(
+        cache_path,
+        model_dir,
+        1604,
+        lambda path: path.write_bytes(_OBSERVED_CACHE),
+        on_commit=observed,
+    )
+
 
 # Real Power BI auto date/time tables ALWAYS carry a canonical 8-4-4-4-12 GUID suffix, and the
 # identity fingerprint now filters them by that exact shape rather than a name prefix (round-3
@@ -87,6 +123,105 @@ def _stub_ports(monkeypatch, answers: dict[int | None, list[list[int]]]) -> list
     monkeypatch.setattr(probe_desktop_query, "_msmdsrv_ports", fake)
     monkeypatch.setattr(probe_desktop_query, "PORT_DISCOVERY_INTERVAL_SECONDS", 0)
     return asked
+
+
+def test_evidence_identity_uses_exact_os_pid_start_child_and_listener(monkeypatch):
+    payload = {
+        "pid": 111,
+        "process_start": "100000000000000001",
+        "as_pid": 222,
+        "as_process_start": "100000000000000002",
+        "port": 52001,
+    }
+    calls = []
+    monkeypatch.setattr(probe_desktop_query, "os", SimpleNamespace(name="nt", environ=os.environ))
+
+    def observe(command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(stdout=json.dumps(payload))
+
+    monkeypatch.setattr(probe_desktop_query.subprocess, "run", observe)
+    identity = probe_desktop_query.desktop_identity(111, 52001)
+    assert identity.pid == 111 and identity.as_pid == 222 and identity.port == 52001
+    assert identity.process_start == payload["process_start"]
+    assert calls[0][1]["env"]["EVIDENCE_PID"] == "111"
+    assert calls[0][1]["timeout"] == 30
+    assert "ParentProcessId" in calls[0][0][-1] and "Select-Object -First" not in calls[0][0][-1]
+    with pytest.raises(probe_desktop_query.EvidenceUnavailable, match="^WRONG_PID_PORT$"):
+        probe_desktop_query.desktop_identity(111, 52002)
+
+
+@pytest.mark.parametrize(
+    "field,value", [("pid", True), ("as_pid", 0), ("port", True), ("process_start", ""), ("as_process_start", "1")]
+)
+def test_evidence_os_identity_refuses_missing_coercive_or_reused_identity(field, value):
+    payload = {
+        "pid": 111,
+        "process_start": "100000000000000001",
+        "as_pid": 222,
+        "as_process_start": "100000000000000002",
+        "port": 52001,
+    }
+    payload[field] = value
+    with pytest.raises(ValueError):
+        probe_desktop_query._validate_identity(payload, 111)
+
+
+@pytest.mark.parametrize("catalogues", [[], [_EVIDENCE_CATALOGUE, _EVIDENCE_CATALOGUE], ["named-model"]])
+def test_evidence_catalogue_is_exactly_one_opaque_catalogue(catalogues):
+    class Reader:
+        def __init__(self):
+            self.rows = iter(catalogues)
+            self.closed = False
+
+        def Read(self):
+            self.current = next(self.rows, None)
+            return self.current is not None
+
+        def GetValue(self, _):
+            return self.current
+
+        def Close(self):
+            self.closed = True
+
+    reader = Reader()
+    command = SimpleNamespace(ExecuteReader=lambda: reader)
+    connection = SimpleNamespace(CreateCommand=lambda: command)
+    with pytest.raises(probe_desktop_query.EvidenceUnavailable, match="^CATALOGUE_UNESTABLISHED$"):
+        probe_desktop_query.catalogue_id(connection)
+    assert reader.closed
+
+
+def test_evidence_recheck_refuses_same_pid_with_new_start_identity(monkeypatch):
+    identity = probe_desktop_query.DesktopIdentity(111, "100", 222, "101", 52001)
+    bound = probe_desktop_query.BoundDesktop(identity, _EVIDENCE_CATALOGUE)
+    monkeypatch.setattr(
+        probe_desktop_query,
+        "desktop_identity",
+        lambda _: probe_desktop_query.DesktopIdentity(111, "200", 222, "201", 52001),
+    )
+    with pytest.raises(probe_desktop_query.EvidenceUnavailable, match="^PID_REUSED$"):
+        probe_desktop_query.recheck_bound(bound)
+
+
+def test_structured_refresh_observes_the_actual_whole_database_command(monkeypatch):
+    identity = probe_desktop_query.DesktopIdentity(111, "100", 222, "101", 52001)
+    bound = probe_desktop_query.BoundDesktop(identity, _EVIDENCE_CATALOGUE)
+    sent = []
+    command = SimpleNamespace()
+    command.ExecuteNonQuery = lambda: sent.append(json.loads(command.CommandText))
+    connection = SimpleNamespace(CreateCommand=lambda: command, Close=lambda: None)
+    monkeypatch.setattr(refresh_pbip_model, "open_bound", lambda _: connection)
+    monkeypatch.setattr(refresh_pbip_model, "recheck_bound", lambda *_: None)
+    observations = []
+    ok, _ = refresh_pbip_model.refresh(
+        52001, None, desktop_pid=111, bound=bound, observations=observations, progress_enabled=False
+    )
+    assert ok is True
+    assert sent == [{"refresh": {"type": "full", "objects": [{"database": _EVIDENCE_CATALOGUE}]}}]
+    assert observations == [refresh_pbip_model.RefreshObservation(_EVIDENCE_CATALOGUE, "full", "database", ())]
+    with pytest.raises(probe_desktop_query.EvidenceUnavailable, match="^WRONG_PID_PORT$"):
+        refresh_pbip_model.refresh(52002, None, desktop_pid=111, bound=bound, observations=[])
 
 
 def test_scoped_lookup_returns_the_childs_port(monkeypatch) -> None:
@@ -596,21 +731,12 @@ def test_main_still_refreshes_and_persists_the_right_instance(monkeypatch, tmp_p
     monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables, timeout: (True, "refreshed"))
     monkeypatch.setattr(refresh_pbip_model, "row_counts", lambda port, tables: ([("Orders", 42)], False))
 
-    def fake_image_save(port: int, cache_path: Path, model_dir=None):
-        # Signature mirrors the real image_save EXACTLY. A stub that lags it raises TypeError, which
-        # main() swallows into the UI-save fallback - so a drifted stub would go green against a
-        # broken call.
-        del port, model_dir
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_bytes(b"cache")
-        return True, "persisted"
-
-    monkeypatch.setattr(refresh_pbip_model, "image_save", fake_image_save)
+    monkeypatch.setattr(refresh_pbip_model, "image_save", _observed_image_save)
 
     assert refresh_pbip_model.main(["--pid", "111", "--canaries", "Orders", "--save"]) == 0
     out = capsys.readouterr().out
     assert "REFRESH: DATA_OK + PERSISTED" in out
-    assert cache.read_bytes() == b"cache"
+    assert cache.read_bytes() == _OBSERVED_CACHE
 
 
 def test_no_save_leaves_the_project_byte_identical(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -657,13 +783,7 @@ def test_persisting_is_the_default(monkeypatch, tmp_path: Path, capsys) -> None:
     monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables, timeout: (True, "refreshed"))
     monkeypatch.setattr(refresh_pbip_model, "row_counts", lambda port, tables: ([("Orders", 42)], False))
 
-    def fake_image_save(port: int, cache_path: Path, model_dir=None):
-        del port, model_dir
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_bytes(b"cache")
-        return True, "persisted"
-
-    monkeypatch.setattr(refresh_pbip_model, "image_save", fake_image_save)
+    monkeypatch.setattr(refresh_pbip_model, "image_save", _observed_image_save)
     monkeypatch.setattr(refresh_pbip_model, "save", _explode("the UI fallback must not run"))
 
     assert refresh_pbip_model.main(["--pid", "111", "--canaries", "Orders"]) == 0
@@ -967,13 +1087,7 @@ def test_a_matching_port_is_accepted(monkeypatch, tmp_path: Path, capsys) -> Non
     monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables, timeout: (True, "refreshed"))
     monkeypatch.setattr(refresh_pbip_model, "row_counts", lambda port, tables: ([("Orders", 5)], False))
 
-    def fake_image_save(port: int, cache_path: Path, model_dir=None):
-        del port, model_dir
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_bytes(b"cache")
-        return True, "persisted"
-
-    monkeypatch.setattr(refresh_pbip_model, "image_save", fake_image_save)
+    monkeypatch.setattr(refresh_pbip_model, "image_save", _observed_image_save)
 
     exit_code = refresh_pbip_model.main(["--pid", "111", "--canaries", "Orders", "--port", "52001"])
     out = capsys.readouterr().out
@@ -996,13 +1110,7 @@ def test_an_implicit_probe_downgrades_to_table_ok_but_still_persists(monkeypatch
     monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables, timeout: (True, "refreshed"))
     monkeypatch.setattr(refresh_pbip_model, "row_counts", lambda port, tables: ([("Parameters", 1)], True))
 
-    def fake_image_save(port: int, cache_path: Path, model_dir=None):
-        del port, model_dir
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_bytes(b"cache")
-        return True, "persisted"
-
-    monkeypatch.setattr(refresh_pbip_model, "image_save", fake_image_save)
+    monkeypatch.setattr(refresh_pbip_model, "image_save", _observed_image_save)
 
     exit_code = refresh_pbip_model.main(["--pid", "111"])
     out = capsys.readouterr().out
@@ -1025,13 +1133,7 @@ def test_an_empty_canary_reports_no_data_naming_the_table(monkeypatch, tmp_path:
     monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables, timeout: (True, "refreshed"))
     monkeypatch.setattr(refresh_pbip_model, "row_counts", lambda port, tables: ([("Orders", 42), ("Live", 0)], False))
 
-    def fake_image_save(port: int, cache_path: Path, model_dir=None):
-        del port, model_dir
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_bytes(b"cache")
-        return True, "persisted"
-
-    monkeypatch.setattr(refresh_pbip_model, "image_save", fake_image_save)
+    monkeypatch.setattr(refresh_pbip_model, "image_save", _observed_image_save)
 
     exit_code = refresh_pbip_model.main(["--pid", "111", "--tables", "Orders", "Live"])
     out = capsys.readouterr().out
@@ -1066,13 +1168,7 @@ def test_narrowing_the_refresh_cannot_earn_a_model_level_data_ok(monkeypatch, tm
         lambda port, tables: (seen.update(probed=tables), ([("Orders", 42)], False))[1],
     )
 
-    def fake_image_save(port: int, cache_path: Path, model_dir=None):
-        del port, model_dir
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_bytes(b"cache")
-        return True, "persisted"
-
-    monkeypatch.setattr(refresh_pbip_model, "image_save", fake_image_save)
+    monkeypatch.setattr(refresh_pbip_model, "image_save", _observed_image_save)
 
     assert refresh_pbip_model.main(["--pid", "111", "--tables", "Orders"]) == 0
     out = capsys.readouterr().out
@@ -1100,13 +1196,7 @@ def test_canaries_verify_the_whole_model_without_narrowing_the_refresh(monkeypat
         lambda port, tables: (seen.update(probed=tables), ([("Orders", 42)], False))[1],
     )
 
-    def fake_image_save(port: int, cache_path: Path, model_dir=None):
-        del port, model_dir
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_bytes(b"cache")
-        return True, "persisted"
-
-    monkeypatch.setattr(refresh_pbip_model, "image_save", fake_image_save)
+    monkeypatch.setattr(refresh_pbip_model, "image_save", _observed_image_save)
 
     assert refresh_pbip_model.main(["--pid", "111", "--canaries", "Orders"]) == 0
     out = capsys.readouterr().out
@@ -1248,12 +1338,8 @@ def test_ui_save_fallback_when_cache_does_not_update_reports_not_persisted_witho
     assert "cache  : not persisted (the write did not land - see 'save' above)" in out
 
 
-def test_ui_save_fallback_when_cache_genuinely_persists_reports_persisted_and_exits_0(
-    monkeypatch, tmp_path: Path, capsys
-) -> None:
-    """When UI Automation save genuinely leads to cache.abf being written to disk,
-    the run succeeds with exit code 0 and emits DATA_OK + PERSISTED.
-    """
+def test_ui_save_file_update_does_not_fabricate_an_imagesave_commit(monkeypatch, tmp_path: Path, capsys) -> None:
+    """A UI flag plus changed bytes is not a causally observed, format-checked ImageSave."""
     cache = _model_folder(tmp_path, "MyMigration", ["Orders"])
     _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
     monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
@@ -1278,11 +1364,11 @@ def test_ui_save_fallback_when_cache_genuinely_persists_reports_persisted_and_ex
     exit_code = refresh_pbip_model.main(["--pid", "111", "--canaries", "Orders"])
     out = capsys.readouterr().out
 
-    assert exit_code == 0
+    assert exit_code == 1
     assert "UI Automation save attempted" in out
-    assert "cache  : PERSISTED ->" in out
-    assert "REFRESH: DATA_OK + PERSISTED" in out
-    assert "REFRESH: NOT_PERSISTED" not in out
+    assert "cache  : PERSISTED ->" not in out
+    assert "REFRESH: DATA_OK + PERSISTED" not in out
+    assert "REFRESH: NOT_PERSISTED" in out
     assert cache.read_bytes() == b"persisted-by-desktop"
 
 
@@ -1307,10 +1393,10 @@ def test_ui_save_flag_bypasses_imagesave_and_attempts_ui_save(monkeypatch, tmp_p
     exit_code = refresh_pbip_model.main(["--pid", "111", "--canaries", "Orders", "--ui-save"])
     out = capsys.readouterr().out
 
-    assert exit_code == 0
+    assert exit_code == 1
     assert "ImageSave skipped (--ui-save requested); falling back to UI" in out
     assert "UI Automation save attempted" in out
-    assert "REFRESH: DATA_OK + PERSISTED" in out
+    assert "REFRESH: NOT_PERSISTED" in out
 
 
 def test_save_function_unit_cases(monkeypatch) -> None:

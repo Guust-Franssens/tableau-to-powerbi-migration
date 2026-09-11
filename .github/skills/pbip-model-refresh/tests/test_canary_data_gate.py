@@ -16,6 +16,10 @@ preflight) and `refresh_pbip_model.row_counts` (the refresh's own data check).
 from __future__ import annotations
 
 import re
+import threading
+from types import SimpleNamespace
+
+import pytest
 
 # `conftest.py` next to this file puts the skill's own `scripts/` on `sys.path`.
 # ruff: noqa: E402  (the conftest-provided path must be in place before these imports)
@@ -261,3 +265,55 @@ def test_an_empty_canary_still_beats_every_other_verdict(capsys) -> None:
     )
     assert "REFRESH: NO_DATA" in out
     assert "Live" in out
+
+
+@pytest.mark.parametrize("results", [[], [("Orders", True)], [("Orders", 1.0)], [("Orders", 1), ("orders", 1)]])
+def test_structured_verdict_rejects_empty_coercive_and_duplicate_counts(results):
+    result = refresh_pbip_model.derive_data_verdict(results, False)
+    assert result.code == "NO_DATA" and result.exit_code == 1
+
+
+def test_structured_probe_exposes_exact_escaped_query_and_sample_count(monkeypatch):
+    bound = SimpleNamespace(catalogue="11111111-2222-3333-4444-555555555555")
+    monkeypatch.setattr(probe_desktop_query, "recheck_bound", lambda *_: None)
+    monkeypatch.setattr(probe_desktop_query, "table_names", lambda *_args, **_kwargs: ["Owner's Orders"])
+    queries = []
+
+    def execute(query):
+        queries.append(query)
+        return SimpleNamespace(row_count=1)
+
+    observations = probe_desktop_query.probe_observations(bound, object(), ["Owner's Orders"], execute)
+    assert queries == ["EVALUATE TOPN(1, 'Owner''s Orders')"]
+    assert observations[0].query == queries[0]
+    assert observations[0].sampled_rows == 1 and observations[0].total_rows is None
+    for bad in ([], ["Owner's Orders", "Owner's Orders"]):
+        with pytest.raises(probe_desktop_query.EvidenceUnavailable, match="^CANARIES_REQUIRED$"):
+            probe_desktop_query.probe_observations(bound, object(), bad, execute)
+
+
+def test_evidence_auth_refusal_is_one_attempt_and_never_retries(monkeypatch):
+    inspections = []
+
+    def missing(pid, **_kwargs):
+        inspections.append(pid)
+        return SimpleNamespace(
+            modal=object(), dialog=None, process_gone=None, desktop_unready=None, unknown_reason=None
+        )
+
+    monkeypatch.setattr(probe_desktop_query, "_credential_state", missing)
+    with pytest.raises(probe_desktop_query.EvidenceUnavailable, match="^CREDENTIAL_MISSING$"):
+        probe_desktop_query.evidence_call(111, lambda: pytest.fail("must not query after a credential refusal"))
+    assert inspections == [111]
+
+
+@pytest.mark.timing
+def test_evidence_query_has_an_outer_deadline_even_when_the_driver_does_not_return(monkeypatch):
+    clean = SimpleNamespace(modal=None, dialog=None, process_gone=None, desktop_unready=None, unknown_reason=None)
+    monkeypatch.setattr(probe_desktop_query, "_credential_state", lambda *_args, **_kwargs: clean)
+    release = threading.Event()
+    try:
+        with pytest.raises(probe_desktop_query.EvidenceUnavailable, match="^TIMEOUT$"):
+            probe_desktop_query.evidence_call(111, lambda: release.wait(5), timeout_seconds=0.02)
+    finally:
+        release.set()

@@ -190,6 +190,98 @@ def _no_staging_files(cache: Path) -> bool:
     return not list(cache.parent.glob("*.tmp"))
 
 
+def test_commit_observation_hashes_the_checked_staged_and_committed_bytes(tmp_path):
+    import hashlib
+
+    cache = _model(tmp_path, compat=1604)
+    content = _abf_bytes()
+    observed = []
+    assert refresh_pbip_model._persist_image(
+        cache,
+        cache.parent.parent,
+        1606,
+        lambda path: path.write_bytes(content),
+        on_commit=observed.append,
+    )[0]
+    assert len(observed) == 1
+    assert observed[0].intended == observed[0].committed
+    assert observed[0].intended.sha256 == hashlib.sha256(content).hexdigest()
+    assert observed[0].intended.byte_count == len(content)
+    assert not cache.with_name("cache.abf.lock").exists()
+
+
+def test_commit_then_raise_wrong_complete_image_does_not_earn_observation(tmp_path, monkeypatch):
+    cache = _model(tmp_path, compat=1604)
+    old, intended, foreign = _abf_bytes(seed=1), _abf_bytes(seed=2), _abf_bytes(seed=3)
+    cache.parent.mkdir()
+    cache.write_bytes(old)
+    replace_file = os.replace
+    observed = []
+
+    def wrong_image(source, destination):
+        replace_file(source, destination)
+        Path(destination).write_bytes(foreign)
+        raise OSError("commit then wrong image")
+
+    monkeypatch.setattr(os, "replace", wrong_image)
+    with pytest.raises(refresh_pbip_model.CompatRollbackError, match="intended image"):
+        refresh_pbip_model._persist_image(
+            cache,
+            cache.parent.parent,
+            1606,
+            lambda path: path.write_bytes(intended),
+            on_commit=observed.append,
+        )
+    assert observed == []
+
+
+def test_old_identical_image_plus_failed_replace_is_not_a_new_commit(tmp_path, monkeypatch):
+    cache = _model(tmp_path, compat=1604)
+    content = _abf_bytes()
+    cache.parent.mkdir()
+    cache.write_bytes(content)
+    observed = []
+    replace_file = os.replace
+
+    def fail_cache_replace(source, destination):
+        if Path(destination) == cache:
+            raise OSError("no replace")
+        replace_file(source, destination)
+
+    monkeypatch.setattr(os, "replace", fail_cache_replace)
+    with pytest.raises(OSError, match="no replace"):
+        refresh_pbip_model._persist_image(
+            cache,
+            cache.parent.parent,
+            1606,
+            lambda path: path.write_bytes(content),
+            on_commit=observed.append,
+        )
+    assert observed == []
+    assert "1604" in (cache.parent.parent / "definition" / "database.tmdl").read_text()
+    assert cache.read_bytes() == content
+
+
+def test_revoked_persistence_authorization_cannot_commit_late(tmp_path):
+    cache = _model(tmp_path, compat=1604)
+    observed = []
+
+    def expired():
+        raise TimeoutError("authorization deadline")
+
+    with pytest.raises(TimeoutError, match="authorization deadline"):
+        refresh_pbip_model._persist_image(
+            cache,
+            cache.parent.parent,
+            1606,
+            lambda path: path.write_bytes(_abf_bytes()),
+            before_commit=expired,
+            on_commit=observed.append,
+        )
+    assert observed == [] and not cache.exists()
+    assert "1604" in (cache.parent.parent / "definition" / "database.tmdl").read_text()
+
+
 def test_the_builder_reproduces_a_real_cache_abf_header() -> None:
     """The fixtures' oracle: rebuild a REAL cache's first block header and total size, byte for byte.
 

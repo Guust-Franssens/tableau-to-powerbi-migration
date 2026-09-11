@@ -90,6 +90,7 @@ import sys
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -98,6 +99,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # ruff: noqa: E402  (the sys.path insert above must precede this import)
 # pylint: disable=wrong-import-position
 from probe_desktop_query import (
+    BoundDesktop,
+    EvidenceUnavailable,
     _load_adomd,
     column_names,
     discover_port,
@@ -105,6 +108,8 @@ from probe_desktop_query import (
     is_auto_date_table_name,
     measure_names,
     nuget_packages_root,
+    open_bound,
+    recheck_bound,
     table_names,
 )
 
@@ -115,6 +120,8 @@ from _abf import (  # noqa: F401  # pylint: disable=unused-import
     _ABF_MAX_BLOCK_BYTES,
     _ABF_PREAMBLE,
     CompatRollbackError,
+    ImageAttempt,
+    ImageCommit,
     _abf_rejection_reason,
     _cache_committed,
     _cache_fingerprint,
@@ -124,6 +131,7 @@ from _abf import (  # noqa: F401  # pylint: disable=unused-import
     _snapshot_rollback_paths,
     _staged_image_write,
     _staging_path,
+    image_facts,
 )
 
 # Per-model interprocess lock for the persist transaction, in its own module for the same reason;
@@ -138,6 +146,7 @@ from _lock import (  # noqa: F401  # pylint: disable=unused-import
 from _verdict import (  # noqa: F401  # pylint: disable=unused-import
     _canary_tables,
     _emit_data_verdict,
+    derive_data_verdict,
 )
 from _credential_modal import (
     CredentialDetection,
@@ -163,6 +172,29 @@ from _credential_modal import (
 )
 
 SAVE_SETTLE_SECONDS = 3
+
+
+@dataclass(frozen=True)
+class RefreshObservation:
+    """Actual completed XMLA operation; not a data-loaded verdict."""
+
+    catalogue: str
+    refresh_type: str
+    scope: str
+    tables: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PersistenceObservation:
+    """Emitted inside the locked commit path, after compatibility alignment and byte recheck."""
+
+    catalogue: str
+    compatibility_level: int
+    image: ImageCommit
+    model_revision: str | None
+    method: str = "AMO_ImageSave"
+
+
 SAVE_TIMEOUT_SECONDS = 120
 # How long a persist waits for a CONCURRENT persist of the same model to finish before giving up
 # (issue #114). A persist writes ~114 KB and takes seconds, so a live peer clears well within this;
@@ -451,6 +483,8 @@ def refresh(
     progress_enabled: bool = True,
     progress_liveness_sec: float = REFRESH_PROGRESS_LIVENESS_SECONDS,
     absolute_timeout_sec: float = REFRESH_ABSOLUTE_TIMEOUT_SECONDS,
+    bound: BoundDesktop | None = None,
+    observations: list[RefreshObservation] | None = None,
 ) -> tuple[bool, str]:
     """Send a TMSL refresh over XMLA. Returns (ok, message).
 
@@ -493,6 +527,8 @@ def refresh(
     """
     if refresh_type not in REFRESH_TYPES:
         raise ValueError(f"unsupported refresh type {refresh_type!r}; expected one of {sorted(REFRESH_TYPES)}")
+    if observations is not None and (bound is None or bound.identity.port != port or bound.identity.pid != desktop_pid):
+        raise EvidenceUnavailable("WRONG_PID_PORT")
 
     result: dict[str, tuple[bool, str] | BaseException] = {}
     progress_monitor: RefreshProgressMonitor | None = None
@@ -574,10 +610,14 @@ def refresh(
     def _run() -> None:
         conn = None
         try:
-            adomd_connection = _load_adomd()
-            conn = adomd_connection(f"Data Source=localhost:{port}")
-            conn.Open()
-            catalog = _catalog_id(conn)
+            if bound is None:
+                adomd_connection = _load_adomd()
+                conn = adomd_connection(f"Data Source=localhost:{port}")
+                conn.Open()
+                catalog = _catalog_id(conn)
+            else:
+                conn = open_bound(bound)
+                catalog = bound.catalogue
             if tables:
                 objects = [{"database": catalog, "table": t} for t in tables]
             else:
@@ -587,6 +627,11 @@ def refresh(
             cmd.CommandText = tmsl
             cmd.CommandTimeout = command_timeout
             cmd.ExecuteNonQuery()
+            if bound is not None:
+                recheck_bound(bound, conn)
+            result["observation"] = RefreshObservation(
+                catalog, refresh_type, "tables" if tables else "database", tuple(tables or ())
+            )
             target = "/".join(tables) if tables else "entire database"
             verb = "calculated" if refresh_type == REFRESH_TYPE_CALCULATE else "refreshed"
             result["ok"] = (True, f"{verb} {target} (catalog {catalog})")
@@ -643,6 +688,9 @@ def refresh(
         raise outcome
     if outcome is None:  # pragma: no cover - defensive; the worker always records something
         raise RuntimeError("refresh worker returned no result")
+    if observations is not None:
+        recheck_bound(bound)
+        observations.append(result["observation"])
     return outcome
 
 
@@ -1179,12 +1227,15 @@ def _is_benign_imagesave_response_error(exc: BaseException) -> bool:
     return "unrecognizable response" in str(exc).lower()
 
 
-def _persist_image(
+def _persist_image(  # pylint: disable=too-many-arguments
     cache_path: Path,
     model_dir: Path | None,
     live_level: int,
     write_image,
     lock_timeout: float = PERSIST_LOCK_TIMEOUT_SECONDS,
+    *,
+    on_commit=None,
+    before_commit=None,
 ) -> tuple[bool, str]:
     """Align compat, stage the cache write, swap atomically, and roll compat back UNLESS it committed.
 
@@ -1205,11 +1256,23 @@ def _persist_image(
     """
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = cache_path.with_name(cache_path.name + ".lock")
+    commits = []
     with model_lock(lock_path, timeout=lock_timeout):
-        return _persist_image_locked(cache_path, model_dir, live_level, write_image)
+        result = _persist_image_locked(
+            cache_path, model_dir, live_level, write_image, on_commit=commits.append, before_commit=before_commit
+        )
+    # The lock is an ephemeral .pbi file. Read the canonical model revision only after lock cleanup,
+    # inside this same successful operation; never add a second revision algorithm/exclusion for it.
+    if result[0] and on_commit is not None:
+        if len(commits) != 1 or image_facts(cache_path) != commits[0].committed:
+            raise CompatRollbackError("cache changed before persistence observation")
+        on_commit(commits[0])
+    return result
 
 
-def _persist_image_locked(cache_path: Path, model_dir: Path | None, live_level: int, write_image) -> tuple[bool, str]:
+def _persist_image_locked(  # pylint: disable=too-many-arguments
+    cache_path: Path, model_dir: Path | None, live_level: int, write_image, *, on_commit=None, before_commit=None
+) -> tuple[bool, str]:
     """The persist transaction itself, run while the per-model lock is held (see :func:`_persist_image`).
 
     ``KeyboardInterrupt`` handling is the subtle part (issue #113 route 2). The commit-detection and
@@ -1223,22 +1286,27 @@ def _persist_image_locked(cache_path: Path, model_dir: Path | None, live_level: 
     rollback_paths = _compat_rollback_paths(model_dir)
     snapshot = _snapshot_rollback_paths(rollback_paths)
     staging = _staging_path(cache_path)
-    before = _cache_fingerprint(cache_path)
-    swapped = False
+    attempt = ImageAttempt()
     write_error: BaseException | None = None
     pending_declaration: tuple[Path, Path, str, str, str] | None = None
     try:
         aligned, pending_declaration = _align_compatibility(model_dir, live_level, defer_declaration=True)
         if aligned:
             print(f"  save   : {aligned}")
-        swapped = _staged_image_write(cache_path, write_image, staging)
+        _staged_image_write(cache_path, write_image, staging, attempt=attempt, before_commit=before_commit)
     except BaseException as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught  # KeyboardInterrupt must NOT bypass rollback; commit judged below by the filesystem
         write_error = exc
 
-    if swapped or _cache_committed(cache_path, staging, before):
+    if attempt.uncertain:
+        raise CompatRollbackError("committed cache does not match the intended image; do NOT fall back to UI Save")
+    if attempt.commit is not None:
         _cleanup_staging(staging)
         if pending_declaration is not None:
             _append_generated_edit_declaration(*pending_declaration)
+        if image_facts(cache_path) != attempt.commit.committed:
+            raise CompatRollbackError("committed cache changed during persistence; do NOT fall back to UI Save")
+        if on_commit is not None:
+            on_commit(attempt.commit)
         try:
             size_note = f"{cache_path.stat().st_size / 1024:.1f} KB, "
         except OSError:
@@ -1262,7 +1330,16 @@ def _persist_image_locked(cache_path: Path, model_dir: Path | None, live_level: 
     return False, "ImageSave did not produce a complete cache file (compatibility alignment rolled back)"
 
 
-def image_save(port: int, cache_path: Path, model_dir: Path | None = None):
+def image_save(  # pylint: disable=too-many-arguments
+    port: int,
+    cache_path: Path,
+    model_dir: Path | None = None,
+    *,
+    bound: BoundDesktop | None = None,
+    on_persist=None,
+    revision_reader=None,
+    before_write=None,
+):
     """Persist the in-memory model to ``<Name>.SemanticModel/.pbi/cache.abf`` via AMO ``ImageSave``.
 
     ⚠️ **A cache is only loadable if its compatibility level MATCHES the project's**, so this
@@ -1285,16 +1362,27 @@ def image_save(port: int, cache_path: Path, model_dir: Path | None = None):
     never written. Note the client throws "The server sent an unrecognizable response" while writing
     correctly, so success is judged by the FILE, never by the absence of an exception.
     """
+    if bound is not None:
+        if bound.identity.port != port:
+            raise EvidenceUnavailable("WRONG_PID_PORT")
+        recheck_bound(bound)
     server_type = _load_amo()
     from System.IO import FileAccess, FileMode, FileStream  # noqa: PLC0415  # pylint: disable=import-outside-toplevel,import-error
 
     server = server_type()
     server.Connect(f"Data Source=localhost:{port}")
     try:
-        database = server.Databases[0]
+        databases = list(server.Databases)
+        if len(databases) != 1:
+            raise EvidenceUnavailable("CATALOGUE_UNESTABLISHED")
+        database = databases[0]
+        if bound is not None and str(database.ID) != bound.catalogue:
+            raise EvidenceUnavailable("CATALOGUE_CHANGED")
         live_level = int(database.CompatibilityLevel)
 
         def write_image(staging: Path) -> None:
+            if before_write is not None:
+                before_write()
             stream = FileStream(str(staging), FileMode.Create, FileAccess.Write)
             try:
                 server.ImageSave(database.ID, stream)
@@ -1308,8 +1396,24 @@ def image_save(port: int, cache_path: Path, model_dir: Path | None = None):
                     raise
             finally:
                 stream.Close()
+            if before_write is not None:
+                before_write()
 
-        return _persist_image(cache_path, model_dir, live_level, write_image)
+        def record(commit: ImageCommit) -> None:
+            if bound is not None:
+                recheck_bound(bound)
+                current = list(server.Databases)
+                if len(current) != 1 or str(current[0].ID) != bound.catalogue:
+                    raise EvidenceUnavailable("CATALOGUE_CHANGED")
+            revision = revision_reader() if revision_reader is not None else None
+            if image_facts(cache_path) != commit.committed:
+                raise CompatRollbackError("cache changed before persistence observation")
+            if on_persist is not None:
+                on_persist(PersistenceObservation(str(database.ID), live_level, commit, revision))
+
+        return _persist_image(
+            cache_path, model_dir, live_level, write_image, on_commit=record, before_commit=before_write
+        )
     finally:
         server.Disconnect()
 
@@ -1741,6 +1845,8 @@ def _refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-br
         print(f"REFRESH: ERROR {text}")
         return 2
     print(f"  refresh: {message}" if ok else f"  refresh FAILED: {message}")
+    if not ok:
+        return 2
 
     # Persisting is the DEFAULT, because it is this script's stated purpose: "so the next agent (and
     # the next Desktop open) sees real data instead of an empty model". It was off for a while
@@ -1762,7 +1868,14 @@ def _refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-br
         saved, save_message = (False, "no cache path resolved; falling back to UI")
         if cache is not None and not args.ui_save:
             try:
-                saved, save_message = image_save(port, cache, model_dir=cache.parent.parent)
+
+                def record_persist(observation: PersistenceObservation) -> None:
+                    args.image_commit = observation.image
+
+                kwargs = (
+                    {"on_persist": record_persist} if "on_persist" in inspect.signature(image_save).parameters else {}
+                )
+                saved, save_message = image_save(port, cache, model_dir=cache.parent.parent, **kwargs)
             except CompatRollbackError as exc:
                 # FATAL: the cache write failed AND the compatibility alignment could not be rolled back,
                 # so database.tmdl declares a level that was never written to a cache. Driving the UI Save
@@ -1780,6 +1893,9 @@ def _refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-br
                     "data is in memory only). Wait for the other run to finish and retry."
                 )
                 return 1
+            except EvidenceUnavailable:
+                print("REFRESH: WRONG_MODEL (persistence identity could not be established; no UI fallback)")
+                return 2
             except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
                 saved, save_message = False, f"ImageSave unavailable ({type(exc).__name__}); falling back to UI"
         elif args.ui_save:
@@ -1955,7 +2071,7 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-retu
         return 2
     port = discovered
 
-    before_stamp = cache.stat().st_mtime if cache and cache.exists() else 0.0
+    args.image_commit = None
 
     # Gate everything on identity: refreshing, row-counting or persisting a sibling's model is a
     # fully self-consistent false positive, so it has to be caught BEFORE any of the three.
@@ -1968,7 +2084,7 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-retu
             return outcome
 
     results, implicit = row_counts(port, _canary_tables(args))
-    return _emit_data_verdict(cache, before_stamp, args, results, implicit)
+    return _emit_data_verdict(cache, 0.0, args, results, implicit, commit=args.image_commit)
 
 
 if __name__ == "__main__":

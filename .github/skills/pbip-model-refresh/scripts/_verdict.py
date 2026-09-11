@@ -4,14 +4,56 @@ usage:   imported by refresh_pbip_model.py (re-exported there; not a CLI of its 
 
 Split out of `refresh_pbip_model.py` for the same reason as `_abf` and `_lock`: that module is at its
 line cap, and this is a self-contained layer - it decides WHICH tables get verified and turns the
-results into the one line a calling agent parses. It touches no engine and no filesystem beyond
-stat()ing the cache, so it is cheap to test directly.
+results into the one line a calling agent parses. It touches no engine or filesystem. Persistence
+comes only from the checked staged-image commit, never from a timestamp or a UI dirty flag.
 """
 
 from __future__ import annotations
 
+# Exact numeric types are part of the evidence contract: bool/float counts must not qualify.
+# pylint: disable=unidiomatic-typecheck
+
 import argparse
+from dataclasses import dataclass
 from pathlib import Path
+
+from _abf import ImageCommit
+
+
+@dataclass(frozen=True)
+class DataVerdict:
+    """One derivation used by structured evidence and by the legacy console renderer."""
+
+    code: str
+    exit_code: int
+    persisted: bool
+
+
+def derive_data_verdict(
+    results: list[tuple[str, int]],
+    implicit: bool,
+    *,
+    narrowed: bool = False,
+    wanted_save: bool = False,
+    commit: ImageCommit | None = None,
+) -> DataVerdict:
+    """Classify actual counts, explicitness and causal persistence; caller proves source coverage."""
+    persisted = (
+        isinstance(commit, ImageCommit)
+        and commit.intended == commit.committed
+        and type(commit.committed.byte_count) is int
+        and commit.committed.byte_count > 0
+    )
+    if (
+        not results
+        or any(not isinstance(name, str) or not name or type(rows) is not int or rows <= 0 for name, rows in results)
+        or len({name.casefold() for name, _ in results}) != len(results)
+    ):
+        return DataVerdict("NO_DATA", 1, persisted)
+    if wanted_save and not persisted:
+        return DataVerdict("NOT_PERSISTED", 1, False)
+    code = "TABLE_OK" if implicit else "TABLES_OK" if narrowed else "DATA_OK"
+    return DataVerdict(code, 0, persisted)
 
 
 def _canary_tables(args: argparse.Namespace) -> list[str] | None:
@@ -31,20 +73,26 @@ def _canary_tables(args: argparse.Namespace) -> list[str] | None:
     return list(args.tables) if args.tables else None
 
 
-def _emit_data_verdict(
+def _emit_data_verdict(  # pylint: disable=too-many-arguments
     cache: Path | None,
     before_stamp: float,
     args: argparse.Namespace,
     results: list[tuple[str, int]],
     implicit: bool,
+    *,
+    commit: ImageCommit | None = None,
 ) -> int:
     """Print the data/cache lines and the machine-readable verdict; return the process exit code.
 
     Split out of `main()` so the mutating path (identity gate + refresh + persist) and the reporting
-    path stay individually simple.
+    path stay individually simple. ``before_stamp`` remains an ignored compatibility argument.
     """
-    after_stamp = cache.stat().st_mtime if cache and cache.exists() else 0.0
-    persisted = cache is not None and after_stamp > before_stamp
+    del before_stamp
+    wanted_save = not args.no_save and not args.verify_only
+    verdict = derive_data_verdict(
+        results, implicit, narrowed=bool(args.tables and not args.verify_only), wanted_save=wanted_save, commit=commit
+    )
+    persisted = verdict.persisted
 
     for table, rows in results:
         print(f"  data   : {rows} row(s) in '{table}'")
@@ -64,16 +112,15 @@ def _emit_data_verdict(
         # sent me looking in the wrong place for ten minutes; the real one is on the 'save' line.
         print("  cache  : not persisted (the write did not land - see 'save' above)")
 
-    empty = [table for table, rows in results if rows <= 0]
-    if empty:
+    empty = [table for table, rows in results if type(rows) is not int or rows <= 0]
+    if verdict.code == "NO_DATA":
         print(f"REFRESH: NO_DATA (empty: {', '.join(empty)} - check the source and credentials)")
-        return 1
-    wanted_save = not args.no_save and not args.verify_only
-    if wanted_save and not persisted:
+        return verdict.exit_code
+    if verdict.code == "NOT_PERSISTED":
         print("REFRESH: NOT_PERSISTED (model has data in memory, but cache.abf did not update)")
-        return 1
+        return verdict.exit_code
     suffix = " + PERSISTED" if wanted_save else ""
-    if implicit:
+    if verdict.code == "TABLE_OK":
         # No canaries were named, so only the first queryable table was probed. That is NOT a
         # model-level guarantee (a static parameter/CSV table can pass while a live source never
         # loaded), so the verdict names the single table actually probed instead of claiming DATA_OK.
@@ -85,8 +132,8 @@ def _emit_data_verdict(
             "--canaries <one per live source> to certify every source WITHOUT narrowing the refresh "
             "(this mirrors the powerbi-semantic-model-gotchas rule: prove a REAL read per live source)."
         )
-        return 0
-    if args.tables and not args.verify_only:
+        return verdict.exit_code
+    if verdict.code == "TABLES_OK":
         # Canaries all returned rows, but --tables narrowed the REFRESH, so the tables outside that
         # list still hold whatever they held before (possibly nothing). A model-level DATA_OK over a
         # partially refreshed model is exactly the false certificate #115 was filed about, so the
@@ -98,6 +145,6 @@ def _emit_data_verdict(
             "outside that list were not reloaded. Re-run without --tables (add --canaries <one per "
             "live source>) to certify the whole model."
         )
-        return 0
+        return verdict.exit_code
     print(f"REFRESH: DATA_OK{suffix}")
-    return 0
+    return verdict.exit_code
