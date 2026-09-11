@@ -10,6 +10,7 @@ from __future__ import annotations
 import builtins
 import contextlib
 import functools
+import hashlib
 import io
 import json
 import multiprocessing
@@ -3559,12 +3560,343 @@ def _assert_protocol_refused(run: tuple[int, dict, Path], total: int) -> None:
     assert not (out / "handover").exists()
 
 
+@pytest.mark.parametrize(
+    "row_count,pagination,status,error_code",
+    [
+        (None, ..., "local_only", None),
+        (0, ..., "success", None),
+        (1, ..., "success", None),
+        (999, ..., "success", None),
+        (1000, {"pageNumber": "1", "pageSize": "1000", "totalAvailable": "1000"}, "success", None),
+        (1000, {"pageNumber": "1", "pageSize": "1000", "totalAvailable": "1001"}, "partial", "inventory-truncated"),
+        (1, {"pageNumber": "1", "pageSize": "1000", "totalAvailable": "2"}, "partial", "inventory-truncated"),
+        (1000, ..., "partial", "inventory-cannot-establish"),
+        (1, {"totalAvailable": True}, "partial", "inventory-cannot-establish"),
+    ],
+    ids=[
+        "offline",
+        "zero",
+        "one",
+        "999",
+        "full-proven",
+        "full-truncated",
+        "short-truncated",
+        "full-ambiguous",
+        "malformed",
+    ],
+)
+def test_real_inventory_result_publishes_once_and_binds_later_phases(
+    tmp_path: Path, monkeypatch, row_count: int | None, pagination: object, status: str, error_code: str | None
+) -> None:
+    """Real transport/parser/build output crosses the spawned protocol and the unchanged atomic writer."""
+    import test_stamp_tableau_provenance as fixtures  # pylint: disable=import-outside-toplevel
+
+    source = tmp_path / "recorded-input"
+    source.mkdir()
+    original = b"<workbook />"
+    (source / "unit.twb").write_bytes(original)
+    document = fixtures._inventory_page(row_count or 0, pagination)
+    if row_count:
+        document["workbooks"]["workbook"][0]["name"] = "unit"
+    site = fixtures._install(monkeypatch, fixtures.RecordingSite(fixtures.LIVE_ENV, inventory_document=document))
+    reporter = fixtures.RecordingReporter()
+    result = fixtures.prov.build(source, fixtures.LIVE_ENV if row_count is not None else {}, reporter)
+    reporter.terminal(result)
+    messages = json.loads(json.dumps(reporter.messages, allow_nan=False))
+
+    code, artifact, out = _protocol_main(tmp_path, monkeypatch, messages)
+
+    assert artifact == result, "PAGINATION_PROTOCOL_RESULT: the typed result was replaced or lost"
+    assert artifact["phase"]["status"] == status
+    assert [error["code"] for error in artifact["phase"]["errors"]] == ([error_code] if error_code else [])
+    assert artifact["input_count"] == len(artifact["inputs"]) == 1
+    assert artifact["inputs"][0]["input"]["sha256"] == hashlib.sha256(original).hexdigest()
+    assert site.count("inventory") == int(row_count is not None)
+    assert site.count("content") == int(bool(row_count))
+    assert not list(out.glob("source-provenance.json.*.tmp"))
+    phases = set(_phase_names(out))
+    if error_code:
+        assert code == run_estate.EXIT_PROVENANCE_FAILED == 11, "PAGINATION_EXIT_11"
+        assert not {"adjudicate", "slice_handovers"} & phases, "PAGINATION_NO_LATER_PHASES"
+        assert not (out / "handover").exists()
+    else:
+        assert code == run_estate.EXIT_OK == 0, "PAGINATION_POSITIVE_CONTROL"
+        assert {"adjudicate", "slice_handovers"} <= phases
+
+
 def test_spawned_success_without_any_live_history_is_protocol_invalid(tmp_path: Path, monkeypatch) -> None:
     """Exact re-review reproduction: fingerprint -> success, with no live intent or operation."""
     messages = provenance_workers.protocol_messages(live=False)
     messages = [message for message in messages if message["kind"] != "lookup-intent"]
     messages[-1]["result"]["phase"]["status"] = "success"
     _assert_protocol_refused(_protocol_main(tmp_path, monkeypatch, messages), 1)
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "offline-facts",
+        "offline-invented-finding",
+        "zero-returned-content",
+        "zero-returned-origin",
+        "content-exceeds-matched",
+        "partial-duplicate-luid-attempts",
+        "live-success-missing-facts",
+        "false-truncated-equality",
+        "false-complete-ambiguity",
+        "duplicate-facts",
+        "facts-before-inventory",
+        "facts-after-inventory",
+        "facts-after-content",
+        "failure-then-facts",
+        "facts-then-failure",
+        "failure-terminal-plus-facts",
+    ],
+)
+def test_spawned_inventory_sequences_are_bound_to_the_supervised_protocol(
+    tmp_path: Path, monkeypatch, scenario: str
+) -> None:
+    """Each original-review sequence reaches the real spawned supervisor and sole atomic writer."""
+    import copy  # pylint: disable=import-outside-toplevel
+
+    messages = provenance_workers.protocol_messages()
+    facts_at = next(index for index, message in enumerate(messages) if message["kind"] == "inventory-facts")
+    facts = messages[facts_at]
+    results = [message["result"] for message in messages if "result" in message]
+    if scenario.startswith("offline"):
+        messages = provenance_workers.protocol_messages(live=False)
+        if scenario == "offline-facts":
+            messages.insert(-1, facts)
+        else:
+            messages[-1]["result"]["phase"] = {
+                "status": "partial",
+                "errors": [
+                    {
+                        "code": "inventory-cannot-establish",
+                        "operation": "inventory",
+                        "returned_count": 1000,
+                        "requested_page_size": 1000,
+                    }
+                ],
+            }
+    elif scenario.startswith("zero-returned"):
+        facts["facts"].update(returned_count=0, total_available=0)
+        if scenario == "zero-returned-origin":
+            for message in messages:
+                if message.get("operation") == "content":
+                    message.update(completed=0, total=0)
+            for result in results:
+                result["phase"] = {"status": "partial", "errors": []}
+    elif scenario == "content-exceeds-matched":
+        next(message for message in messages if message.get("operation") == "content" and message["completed"] == 1)[
+            "total"
+        ] = 0
+    elif scenario == "partial-duplicate-luid-attempts":
+        messages = provenance_workers.protocol_messages(("first.twb", "second.twb"))
+        for message in messages:
+            if "result" in message:
+                result = message["result"]
+                result["phase"] = {"status": "partial", "errors": []}
+                result["inputs"][1]["origin"]["workbook_luid"] = result["inputs"][0]["origin"]["workbook_luid"]
+    elif scenario == "live-success-missing-facts":
+        del messages[facts_at]
+    elif scenario == "false-truncated-equality":
+        for result in results:
+            result["phase"] = {
+                "status": "partial",
+                "errors": [
+                    {
+                        "code": "inventory-truncated",
+                        "operation": "inventory",
+                        "returned_count": 1,
+                        "requested_page_size": 1000,
+                        "page_number": 1,
+                        "page_size": 1000,
+                        "total_available": 1,
+                    }
+                ],
+            }
+    elif scenario == "false-complete-ambiguity":
+        facts["facts"].update(returned_count=1000, total_available=None)
+    elif scenario == "duplicate-facts":
+        messages.insert(facts_at + 1, copy.deepcopy(facts))
+    elif scenario.startswith("facts-before") or scenario.startswith("facts-after"):
+        del messages[facts_at]
+        stage = "content" if scenario == "facts-after-content" else "inventory"
+        destination = next(index for index, message in enumerate(messages) if message.get("operation") == stage)
+        messages.insert(destination + (0 if scenario == "facts-before-inventory" else 2), facts)
+    elif scenario == "failure-then-facts":
+        messages.insert(facts_at, {"kind": "inventory-failed"})
+    elif scenario == "facts-then-failure":
+        messages.insert(facts_at + 1, {"kind": "inventory-failed"})
+    else:
+        assert scenario == "failure-terminal-plus-facts"
+        for result in results:
+            result["phase"] = {
+                "status": "partial",
+                "errors": [{"code": "inventory-failed", "operation": "inventory", "exception_class": "ValueError"}],
+            }
+    total = 2 if scenario == "partial-duplicate-luid-attempts" else 1
+    _assert_protocol_refused(_protocol_main(tmp_path, monkeypatch, messages), total)
+
+
+@pytest.mark.parametrize("status", ["partial", "failed"])
+@pytest.mark.parametrize("completed", [False, True], ids=["unfinished", "completed"])
+@pytest.mark.parametrize("outcome", ["facts", "failure"])
+def test_spawned_terminal_requires_inventory_outcome_completion(
+    tmp_path: Path, monkeypatch, status: str, completed: bool, outcome: str
+) -> None:
+    """An inventory outcome alone cannot license a partial/failed terminal; its completion can."""
+    messages = provenance_workers.protocol_messages()
+    facts_at = next(index for index, message in enumerate(messages) if message["kind"] == "inventory-facts")
+    terminal = messages[-1]
+    result = terminal["result"]
+    result["inputs"][0]["origin"] = None
+    result["phase"] = {"status": status, "errors": []}
+    if outcome == "failure":
+        messages[facts_at] = {"kind": "inventory-failed"}
+        result["phase"]["errors"] = [
+            {"code": "inventory-failed", "operation": "inventory", "exception_class": "ValueError"}
+        ]
+    messages = [*messages[: facts_at + 1 + int(completed)], terminal]
+
+    run = _protocol_main(tmp_path, monkeypatch, messages)
+
+    if not completed:
+        _assert_protocol_refused(run, 1)
+    else:
+        code, artifact, out = run
+        assert artifact == result, "INVENTORY_COMPLETION_CONTROL: a completed inventory outcome was refused"
+        assert code == 11 and not (out / "handover").exists()
+
+
+@pytest.mark.parametrize("status", ["partial", "failed"])
+@pytest.mark.parametrize(
+    "matches,attempts",
+    [((0,), 0), ((0,), 1), ((0, 0), 1), ((0, 1), 1), ((0, 1), 2)],
+    ids=[
+        "origin-no-attempt",
+        "origin-one-attempt",
+        "duplicate-one-attempt",
+        "distinct-missing-attempt",
+        "distinct-two",
+    ],
+)
+def test_spawned_terminal_origins_require_distinct_content_attempts(
+    tmp_path: Path, monkeypatch, capsys, status: str, matches: tuple[int, ...], attempts: int
+) -> None:
+    """Partial/failed terminals still reconcile distinct LUIDs, never physical input multiplicity."""
+    messages = provenance_workers.protocol_messages(
+        tuple(f"unit-{index}.twb" for index in range(len(matches))), matches=matches
+    )
+    content_end = max(index for index, message in enumerate(messages) if message.get("operation") == "content")
+    for message in messages:
+        if message.get("operation") == "content":
+            message["completed"] = min(message["completed"], attempts)
+    terminal = messages[-1]
+    terminal["result"]["phase"] = {"status": status, "errors": []}
+    messages = [*messages[: content_end + 1], terminal]
+
+    run = _protocol_main(tmp_path, monkeypatch, messages)
+
+    if attempts < len(set(matches)):
+        _assert_protocol_refused(run, len(matches))
+    else:
+        code, artifact, out = run
+        assert artifact == terminal["result"], "DISTINCT_ATTEMPT_CONTROL: legitimate cached origins were refused"
+        assert code == 11 and not (out / "handover").exists()
+    events = _progress_events(capsys.readouterr().out)
+    content = [event for event in events if event["operation"] == "content"]
+    assert (content[-1]["completed"], content[-1]["total"]) == (attempts, len(set(matches)))
+    assert all(record["origin"]["workbook_luid"] not in json.dumps(events) for record in terminal["result"]["inputs"])
+
+
+@pytest.mark.parametrize(
+    "returned,total,expected",
+    [(1, 2, "inventory-truncated"), (1000, None, "inventory-cannot-establish"), (1, 1, None)],
+    ids=["truncated", "cannot-establish", "complete-control"],
+)
+def test_spawned_no_terminal_deadline_retains_unfinished_inventory_facts(
+    tmp_path: Path, monkeypatch, capsys, returned: int, total: int | None, expected: str | None
+) -> None:
+    """No terminal means no completion requirement: a deadline preserves accepted facts and digests."""
+    messages = provenance_workers.protocol_messages(("first.twb", "second.twb"))
+    facts_at = next(index for index, message in enumerate(messages) if message["kind"] == "inventory-facts")
+    messages[facts_at]["facts"].update(returned_count=returned, page_number=None, page_size=None, total_available=total)
+    messages = messages[: facts_at + 1]
+
+    run = _supervise(monkeypatch, tmp_path, functools.partial(provenance_workers.sends_messages, messages, block=True))
+
+    errors = [{"code": run_estate.PROVENANCE_DEADLINE_CODE, "operation": "inventory"}]
+    if expected:
+        finding = {"code": expected, "operation": "inventory", "returned_count": returned, "requested_page_size": 1000}
+        if total is not None:
+            finding["total_available"] = total
+        errors.insert(0, finding)
+    assert run.artifact["phase"] == {"status": "partial", "errors": errors}, "NO_TERMINAL_INVENTORY_RETENTION"
+    assert run.artifact["inputs"] == [message["record"] for message in messages if message["kind"] == "checkpoint"]
+    assert run.artifact["input_count"] == 2 and not run.stamped.ok
+    assert run.outcome.expired and run.outcome.worker_pid is not None and run.outcome.worker_alive is False
+    events = _progress_events(capsys.readouterr().out)
+    inventory = [event for event in events if event["operation"] == "inventory"]
+    assert [event["completed"] for event in inventory] == [0], "control completed inventory before the deadline"
+
+
+@pytest.mark.parametrize(
+    "row_count,pagination,expected",
+    [
+        (1000, {}, "inventory-cannot-establish"),
+        (1, {"totalAvailable": 2}, "inventory-truncated"),
+        (1, {"totalAvailable": 1}, None),
+    ],
+    ids=["known-ambiguity", "known-truncation", "complete-control"],
+)
+@pytest.mark.parametrize("interruption", ["cancel", "content-failure"])
+def test_real_worker_known_pagination_survives_later_interruption_in_parent(
+    tmp_path: Path, monkeypatch, row_count: int, pagination: dict, expected: str | None, interruption: str
+) -> None:
+    """Remove worker findings: accepted raw facts must survive cancellation or a failed content request."""
+    from types import SimpleNamespace  # pylint: disable=import-outside-toplevel
+
+    import test_stamp_tableau_provenance as fixtures  # pylint: disable=import-outside-toplevel
+
+    source = tmp_path / "recorded-input"
+    source.mkdir()
+    (source / "unit.twb").write_bytes(b"<workbook/>")
+    document = fixtures._inventory_page(row_count, pagination)
+    document["workbooks"]["workbook"][0]["name"] = "unit"
+    site = fixtures._install(
+        monkeypatch,
+        fixtures.RecordingSite(
+            fixtures.LIVE_ENV,
+            inventory_document=document,
+            content_errors=[fixtures._fixture_luid(0)] if interruption == "content-failure" else [],
+        ),
+    )
+    monkeypatch.setattr(fixtures.prov, "resolve_env", lambda _path: dict(fixtures.LIVE_ENV))
+    flag, messages = SimpleNamespace(value=0), []
+
+    def send(message: dict) -> None:
+        messages.append(json.loads(json.dumps(message)))
+        if message.get("operation") == "content" and interruption == "cancel":
+            flag.value = 1
+
+    fixtures.prov.provenance_worker(SimpleNamespace(send=send, close=lambda: None), flag, {"input": str(source)})
+    error_code = "cancelled" if interruption == "cancel" else "live-lookup-failed"
+    for message in messages:
+        if "result" in message:
+            errors = message["result"]["phase"]["errors"]
+            message["result"]["phase"]["errors"] = [error for error in errors if error["code"] == error_code]
+            assert len(message["result"]["phase"]["errors"]) == 1, "control never reached its interruption"
+    code, artifact, out = _protocol_main(tmp_path, monkeypatch, messages)
+    expected_codes = ([expected] if expected else []) + [error_code]
+    assert [error["code"] for error in artifact["phase"]["errors"]] == expected_codes, (
+        "PARENT_CANCEL_RETAINS_PAGINATION"
+    )
+    assert artifact["phase"]["status"] == "partial" and code == 11
+    assert (site.count("inventory"), site.count("content")) == (1, int(interruption == "content-failure"))
+    assert artifact["inputs"][0]["input"]["sha256"] == hashlib.sha256(b"<workbook/>").hexdigest()
+    assert not (out / "handover").exists()
 
 
 @pytest.mark.parametrize(
