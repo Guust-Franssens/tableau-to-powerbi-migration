@@ -1128,9 +1128,10 @@ class RecordingReporter(prov.NullReporter):
     raw fingerprint is visible here rather than only across a process boundary.
     """
 
-    def __init__(self, cancel_after=None):
+    def __init__(self, cancel_after=None, cancel_completed=1):
         self.messages = []
         self._cancel_after = cancel_after
+        self._cancel_completed = cancel_completed
         self.cancelled = False
 
     def inputs_discovered(self, total):
@@ -1140,7 +1141,7 @@ class RecordingReporter(prov.NullReporter):
         self.messages.append(
             {"kind": prov.MSG_OPERATION, "operation": operation, "completed": completed, "total": total}
         )
-        if self._cancel_after == operation:
+        if self._cancel_after == operation and self._cancel_completed == completed:
             self.cancelled = True
 
     def checkpoint(self, index, record):
@@ -1226,7 +1227,7 @@ def test_duplicate_luid_inputs_are_two_inputs_and_one_download(tmp_path, monkeyp
     assert site.count("content") == 1
     assert reporter.of_kind(prov.MSG_INPUTS_DISCOVERED)[0]["total"] == 2
     assert reporter.operations("fingerprint")[-1]["completed"] == 2
-    assert [message["completed"] for message in reporter.operations("content")] == [1, 1]
+    assert [message["completed"] for message in reporter.operations("content")] == [0, 1, 1, 1]
     assert result["input_count"] == len(result["inputs"]) == 2
 
 
@@ -1330,7 +1331,8 @@ def test_cancellation_stops_the_run_before_the_next_expensive_operation(tmp_path
 
     assert site.calls == [], "a cancelled worker signed in anyway"
     assert len(reporter.of_kind(prov.MSG_CHECKPOINT)) == 1, "cancellation did not stop the fingerprint pass"
-    assert result["input_count"] == len(result["inputs"]) == 1
+    assert result["input_count"] == len(result["inputs"]) == 3
+    assert all(record["input"] == {"status": "unavailable"} for record in result["inputs"][1:])
     assert prov.consistency_faults(result) == [], result
 
 
@@ -1351,8 +1353,8 @@ def test_the_worker_returns_a_typed_terminal_result_when_the_build_itself_raises
     prov.provenance_worker(send, None, {"input": str(tmp_path), "env": str(tmp_path / "absent.env")})
 
     messages = _drain(recv)
-    assert [message["kind"] for message in messages] == [prov.MSG_TERMINAL]
-    assert messages[0]["result"]["phase"]["errors"] == [
+    assert [message["kind"] for message in messages] == [prov.MSG_INPUTS_DISCOVERED, prov.MSG_TERMINAL]
+    assert messages[-1]["result"]["phase"]["errors"] == [
         {"code": "build-failed", "operation": "build", "exception_class": "OSError", "errno": 5}
     ]
     assert secret not in json.dumps(messages)

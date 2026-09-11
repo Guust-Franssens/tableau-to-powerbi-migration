@@ -80,6 +80,34 @@ Conventions: Python first (`.ps1` only where Windows-specific APIs make it unavo
 | `capture_powerbi_pages.py` | Captures every Power BI report page by re-screenshotting until a frame stays byte-identical for a configurable dwell. Use `--pages <id>[,<id>...]` to capture exact PBIR page folder IDs only; an unknown ID exits 2 rather than silently succeeding. This is a heuristic for progressive visuals (especially `azureMap`): a plateau longer than `--stable-seconds` can still pass, but a single slow/early capture no longer counts as evidence. | Before trusting Desktop screenshots for report sign-off or validator evidence |
 | `build_synthetic_reference.py` | Renders an **honestly-labeled SYNTHETIC** reference (HTML/CSS bar chart from real queried data, screenshotted via Playwright) when no real Tableau capture exists - e.g. the `_probe-lab/` credential-gate fixtures, whose `.twb` is a generated skeleton with nothing to screenshot. Tagged `provider: synthetic_data_chart`, `capabilities: []`, `synthetic: true` - never claims layout/validation fidelity. Deliberately **not** wired into `capture_tableau_reference.py`'s fail-closed provider chain (see its docstring). | manual / test-harness use only |
 
+### Supervised provenance computation (`run_estate.py`, #576 / PR #603)
+
+One spawned leaf process does the provenance work. A **parent-side daemon transport thread**, not a
+second worker, receives length-prefixed UTF-8 JSON and validates into temporary state. The supervising
+thread waits only on a one-slot mailbox, checks its absolute monotonic deadline **after validation and
+before committing evidence**, and owns the sole atomic publication attempt. No pickle is decoded from
+the worker. An incomplete header/body can block the helper, never the supervising thread.
+
+The closed protocol allows at most **4,096 physical inputs**, **4,096 members per input**, **2 MiB per
+frame**, **16 MiB of frames per phase**, and **32,800 messages**. Over-limit or malformed data is refused,
+not truncated into a success. Discovery is unique; checkpoints are contiguous; operation counters and
+order are checked; snapshots and terminal results reconcile to discovery and accepted fingerprints.
+Terminal is final: the parent requires EOF and refuses trailing messages. Missing fingerprints become
+ordinal placeholders. Early checkpoints contain derived data only; copied identity fields are admitted
+only in the scrubbed result, never in progress or error diagnostics.
+
+Spawn/setup is charged to the computation budget; start failures are typed failures. Cooperative
+cancellation uses a **lock-free, single-writer shared byte** and is checked before expensive work.
+Enforcement remains termination: **0.5 s terminate/join**, then **1.0 s kill/join** if needed, plus a
+**0.1 s helper join**. A cleanup exception, unknown liveness or missing exit code is
+`worker-reap-failed`, never success; accepted evidence survives as partial and `run_estate` exits 11.
+An unaccounted child is removed from CPython's automatic unbounded exit-join set without claiming it
+disappeared. The artifact reports that failure.
+
+This is a direct-worker computation bound, **not** descendant supervision, a standalone-stamper
+deadline, pagination, or a deadline on the parent's filesystem publication. Path validation still runs
+before provenance. Strict-JSON atomic replacement and prior-byte preservation are unchanged.
+
 ## Forwarding shims into skill bundles
 
 These four are **four-line `runpy` shims**. The real scripts live in the skill bundle that owns them,

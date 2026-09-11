@@ -3026,10 +3026,16 @@ import provenance_workers  # noqa: E402  # pylint: disable=wrong-import-position
 #: spawn cost on the development host: 0.46 s), short enough that seven of them stay quick.
 WORKER_TIMEOUT_SEC = 4.0
 
-#: What "bounded" means for the assertion. Deliberately far above the timeout: the claim under test
-#: is that the phase ENDS, not that it ends punctually, and a tight bound would fail on a loaded CI
-#: runner for a reason that has nothing to do with the guard.
-ELAPSED_BOUND_SEC = 60.0
+#: Spawn is charged to the computation deadline. This additional allowance covers cold OS scheduling
+#: and small local publication, not eight seconds of hidden cleanup after a four-second timeout.
+SPAWN_ALLOWANCE_SEC = 1.0
+ELAPSED_BOUND_SEC = (
+    WORKER_TIMEOUT_SEC
+    + run_estate.PROVENANCE_TERMINATE_JOIN_SEC
+    + run_estate.PROVENANCE_KILL_JOIN_SEC
+    + run_estate.PROVENANCE_RECEIVER_JOIN_SEC
+    + SPAWN_ALLOWANCE_SEC
+)
 
 
 def _pid_is_running(pid: int) -> bool:
@@ -3097,6 +3103,10 @@ def _supervise(
     started = time.monotonic()
     stamped = run_estate.stamp_inputs(tmp_path, out, timeout_sec)
     elapsed = time.monotonic() - started
+    assert len(published) == 1, "PUBLISH_COUNT: the parent must attempt publication exactly once"
+    assert elapsed < ELAPSED_BOUND_SEC - WORKER_TIMEOUT_SEC + timeout_sec, (
+        "COMPUTATION_ELAPSED: cleanup exceeded its allowance"
+    )
     artifact_path = out / run_estate.SOURCE_PROVENANCE_REPORT
     artifact = json.loads(artifact_path.read_text(encoding="utf-8")) if artifact_path.exists() else {}
     return _SupervisedRun(stamped, artifact, elapsed, published, seen[0])
@@ -3131,8 +3141,11 @@ def test_a_worker_blocked_in_any_operation_class_is_preempted_at_the_deadline(
         "code": run_estate.PROVENANCE_DEADLINE_CODE,
         "operation": operation,
     }, run.artifact["phase"]
-    assert run.artifact["input_count"] == len(run.artifact["inputs"]) == 2
-    assert all(record["input"] == {"status": "unavailable"} for record in run.artifact["inputs"])
+    assert run.artifact["input_count"] == len(run.artifact["inputs"]) == (0 if operation == "collect-inputs" else 2)
+    if operation == "fingerprint":
+        assert all(record["input"] == {"status": "unavailable"} for record in run.artifact["inputs"])
+    elif operation != "collect-inputs":
+        assert all(record["input"]["sha256"] for record in run.artifact["inputs"])
     assert len(run.published) == 1, "the artifact is published exactly once, by the parent"
     assert run.outcome.expired is True
     assert run.outcome.worker_alive is False and run.outcome.worker_exitcode is not None
@@ -3192,7 +3205,7 @@ def test_a_stall_after_the_first_fingerprint_keeps_it_and_marks_only_the_second_
     run = _supervise(
         monkeypatch,
         tmp_path,
-        functools.partial(provenance_workers.blocks_in_with_evidence, "content"),
+        functools.partial(provenance_workers.blocks_in_with_evidence, "fingerprint"),
     )
 
     kept, missing = run.artifact["inputs"]
@@ -3203,7 +3216,7 @@ def test_a_stall_after_the_first_fingerprint_keeps_it_and_marks_only_the_second_
         "code": run_estate.PROVENANCE_DEADLINE_CODE,
         "operation": "fingerprint",
     }
-    assert run.artifact["phase"]["errors"][-1]["operation"] == "content"
+    assert run.artifact["phase"]["errors"][-1]["operation"] == "fingerprint"
 
 
 def test_a_hung_sign_out_after_the_safe_snapshot_keeps_the_complete_scrubbed_records(
@@ -3359,7 +3372,13 @@ def test_a_worker_that_survives_terminate_and_kill_cannot_certify_a_success(tmp_
     Fail-open on the EVIDENCE: the accepted records survive, because they were accepted before the
     latch and throwing away 66 real fingerprints over a failed kill would help nobody.
     """
-    monkeypatch.setattr(run_estate, "_stop_worker", lambda _process: run_estate._WorkerStop(True, None, True))  # noqa: SLF001
+    real_stop = run_estate._stop_worker  # noqa: SLF001
+
+    def unknown_stop(process):
+        real_stop(process)
+        return run_estate._WorkerStop(True, None, True)  # noqa: SLF001
+
+    monkeypatch.setattr(run_estate, "_stop_worker", unknown_stop)
 
     run = _supervise(monkeypatch, tmp_path, provenance_workers.succeeds)
 
@@ -3378,15 +3397,22 @@ def test_a_worker_that_survives_terminate_and_kill_cannot_certify_a_success(tmp_
 
 def test_an_unreapable_worker_without_a_result_is_a_failure_not_a_partial(tmp_path: Path, monkeypatch) -> None:
     """The negative control for the branch above: nothing accepted means nothing to be partial about."""
-    monkeypatch.setattr(run_estate, "_stop_worker", lambda _process: run_estate._WorkerStop(True, None, True))  # noqa: SLF001
+    real_stop = run_estate._stop_worker  # noqa: SLF001
 
-    run = _supervise(monkeypatch, tmp_path, functools.partial(provenance_workers.blocks_in, "content"))
+    def unknown_stop(process):
+        real_stop(process)
+        return run_estate._WorkerStop(True, None, True)  # noqa: SLF001
+
+    monkeypatch.setattr(run_estate, "_stop_worker", unknown_stop)
+
+    run = _supervise(monkeypatch, tmp_path, functools.partial(provenance_workers.blocks_in, "collect-inputs"))
 
     assert run.stamped.ok is False
     assert run.artifact["phase"]["status"] == "failed"
-    assert run.artifact["phase"]["errors"][-1]["code"] == run_estate.PROVENANCE_DEADLINE_CODE, (
-        "the deadline fired first, so it is what the artifact must name"
-    )
+    assert [error["code"] for error in run.artifact["phase"]["errors"]] == [
+        run_estate.PROVENANCE_DEADLINE_CODE,
+        run_estate.PROVENANCE_REAP_CODE,
+    ], "the timeout and the unknown reap must both be explicit"
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "NaN", "Infinity", "-Infinity"])

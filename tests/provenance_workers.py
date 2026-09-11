@@ -16,6 +16,7 @@ operation that never returns, a worker that dies mid-flight, a result that arriv
 from __future__ import annotations
 
 import os
+import struct
 import time
 from typing import Any
 
@@ -49,7 +50,15 @@ def _scrubbed_result(files: tuple[str, ...] = ("unit.twb",)) -> dict[str, Any]:
         "stamped_at": "2026-09-10T00:00:00Z",
         "input_count": len(files),
         "inputs": [
-            {"input": {"file": name, "size_bytes": 11, "sha256": CHECKPOINT_SHA}, "origin": None} for name in files
+            {
+                "input": {
+                    "file": name,
+                    "size_bytes": 11 + index,
+                    "sha256": CHECKPOINT_SHA if index == 0 else SECOND_CHECKPOINT_SHA,
+                },
+                "origin": None,
+            }
+            for index, name in enumerate(files)
         ],
         "phase": {"status": "local_only", "errors": []},
     }
@@ -66,10 +75,25 @@ def _block_forever() -> None:
 
 
 def blocks_in(operation: str, conn, _cancel_event, _payload) -> None:
-    """Announce one operation class, then never return."""
+    """Reach an operation in the production order, then never return."""
+    conn.send(_operation("collect-inputs", 0, 1))
+    if operation == "collect-inputs":
+        _block_forever()
     conn.send({"kind": MESSAGE_INPUTS_DISCOVERED, "total": 2})
-    conn.send(_operation(operation, 0, 2))
-    _block_forever()
+    conn.send(_operation("collect-inputs", 1, 1))
+    conn.send(_operation("fingerprint", 0, 2))
+    if operation == "fingerprint":
+        _block_forever()
+    for index, digest in enumerate((CHECKPOINT_SHA, SECOND_CHECKPOINT_SHA)):
+        conn.send(_operation("fingerprint", index + 1, 2))
+        conn.send(_checkpoint(index, digest))
+    for current in ("sign-in", "inventory", "content", "scrub", "sign-out"):
+        conn.send(_operation(current, 0, None if current == "content" else 1))
+        if operation == current:
+            _block_forever()
+        conn.send(_operation(current, 1, None if current == "content" else 1))
+        if current == "scrub":
+            conn.send({"kind": MESSAGE_SAFE_SNAPSHOT, "result": _scrubbed_result(("first.twb", "second.twb"))})
 
 
 def blocks_in_with_evidence(operation: str, conn, _cancel_event, _payload) -> None:
@@ -86,6 +110,8 @@ def blocks_after_safe_snapshot(conn, _cancel_event, _payload) -> None:
     conn.send({"kind": MESSAGE_INPUTS_DISCOVERED, "total": 1})
     conn.send(_operation("fingerprint", 1, 1))
     conn.send(_checkpoint(0))
+    conn.send(_operation("scrub", 0, 1))
+    conn.send(_operation("scrub", 1, 1))
     conn.send({"kind": MESSAGE_SAFE_SNAPSHOT, "result": _scrubbed_result()})
     conn.send(_operation("sign-out", 0, 1))
     _block_forever()
@@ -96,7 +122,7 @@ def sends_a_late_terminal(conn, _cancel_event, _payload) -> None:
     conn.send({"kind": MESSAGE_INPUTS_DISCOVERED, "total": 2})
     conn.send(_operation("fingerprint", 1, 2))
     conn.send(_checkpoint(0))
-    conn.send(_operation("content", 0, None))
+    conn.send(_operation("fingerprint", 1, 2))
     time.sleep(30)
     conn.send({"kind": MESSAGE_TERMINAL, "result": _scrubbed_result(("late-a.twb", "late-b.twb"))})
     time.sleep(30)
@@ -130,6 +156,8 @@ def sends_a_secret_bearing_snapshot(secret: str, conn, _cancel_event, _payload) 
     conn.send({"kind": MESSAGE_INPUTS_DISCOVERED, "total": 1})
     conn.send(_operation("fingerprint", 1, 1))
     conn.send(_checkpoint(0))
+    conn.send(_operation("scrub", 0, 1))
+    conn.send(_operation("scrub", 1, 1))
     conn.send({"kind": MESSAGE_SAFE_SNAPSHOT, "result": _scrubbed_result((secret,))})
     conn.send(_operation("sign-out", 0, 1))
     _block_forever()
@@ -148,3 +176,24 @@ def sends_an_unknown_message(conn, _cancel_event, _payload) -> None:
     """Speaks outside the closed protocol. Fail closed rather than interpret it."""
     conn.send({"kind": "whatever-i-like", "payload": "trust me"})
     _block_forever()
+
+
+def sends_messages(messages: list[dict], conn, _cancel_event, _payload) -> None:
+    """Replay exact protocol controls in a spawn-picklable target."""
+    for message in messages:
+        conn.send(message)
+    conn.close()
+
+
+def sends_partial_frame(part: str, conn, _cancel_event, _payload) -> None:
+    """A live child sends an incomplete header or a valid header without its body, then stalls."""
+    raw = b"\x00" if part == "header" else struct.pack("!I", 10000)
+    conn.endpoint.sendall(raw)
+    _block_forever()
+
+
+def sends_invalid_pickle(conn, _cancel_event, _payload) -> None:
+    """Bytes the old recv() tried to unpickle; JSON transport must refuse without raising in parent."""
+    raw = b"\x80\x05not-a-valid-pickle-or-json"
+    conn.endpoint.sendall(struct.pack("!I", len(raw)) + raw)
+    conn.close()
