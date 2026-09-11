@@ -3749,10 +3749,11 @@ def test_spawned_inventory_sequences_are_bound_to_the_supervised_protocol(
     ],
     ids=["known-ambiguity", "known-truncation", "complete-control"],
 )
-def test_real_worker_known_pagination_survives_content_cancellation_in_parent(
-    tmp_path: Path, monkeypatch, row_count: int, pagination: dict, expected: str | None
+@pytest.mark.parametrize("interruption", ["cancel", "content-failure"])
+def test_real_worker_known_pagination_survives_later_interruption_in_parent(
+    tmp_path: Path, monkeypatch, row_count: int, pagination: dict, expected: str | None, interruption: str
 ) -> None:
-    """Remove the worker's finding: accepted raw facts alone must survive the later cancelled result."""
+    """Remove worker findings: accepted raw facts must survive cancellation or a failed content request."""
     from types import SimpleNamespace  # pylint: disable=import-outside-toplevel
 
     import test_stamp_tableau_provenance as fixtures  # pylint: disable=import-outside-toplevel
@@ -3760,29 +3761,38 @@ def test_real_worker_known_pagination_survives_content_cancellation_in_parent(
     source = tmp_path / "recorded-input"
     source.mkdir()
     (source / "unit.twb").write_bytes(b"<workbook/>")
+    document = fixtures._inventory_page(row_count, pagination)
+    document["workbooks"]["workbook"][0]["name"] = "unit"
     site = fixtures._install(
         monkeypatch,
-        fixtures.RecordingSite(fixtures.LIVE_ENV, inventory_document=fixtures._inventory_page(row_count, pagination)),
+        fixtures.RecordingSite(
+            fixtures.LIVE_ENV,
+            inventory_document=document,
+            content_errors=[fixtures._fixture_luid(0)] if interruption == "content-failure" else [],
+        ),
     )
     monkeypatch.setattr(fixtures.prov, "resolve_env", lambda _path: dict(fixtures.LIVE_ENV))
     flag, messages = SimpleNamespace(value=0), []
 
     def send(message: dict) -> None:
         messages.append(json.loads(json.dumps(message)))
-        if message.get("operation") == "content":
+        if message.get("operation") == "content" and interruption == "cancel":
             flag.value = 1
 
     fixtures.prov.provenance_worker(SimpleNamespace(send=send, close=lambda: None), flag, {"input": str(source)})
-    terminal = messages[-1]["result"]
-    terminal["phase"]["errors"] = [error for error in terminal["phase"]["errors"] if error["code"] == "cancelled"]
-    assert len(terminal["phase"]["errors"]) == 1, "control never reached the cooperative cancellation"
+    error_code = "cancelled" if interruption == "cancel" else "live-lookup-failed"
+    for message in messages:
+        if "result" in message:
+            errors = message["result"]["phase"]["errors"]
+            message["result"]["phase"]["errors"] = [error for error in errors if error["code"] == error_code]
+            assert len(message["result"]["phase"]["errors"]) == 1, "control never reached its interruption"
     code, artifact, out = _protocol_main(tmp_path, monkeypatch, messages)
-    expected_codes = ([expected] if expected else []) + ["cancelled"]
+    expected_codes = ([expected] if expected else []) + [error_code]
     assert [error["code"] for error in artifact["phase"]["errors"]] == expected_codes, (
         "PARENT_CANCEL_RETAINS_PAGINATION"
     )
     assert artifact["phase"]["status"] == "partial" and code == 11
-    assert (site.count("inventory"), site.count("content")) == (1, 0)
+    assert (site.count("inventory"), site.count("content")) == (1, int(interruption == "content-failure"))
     assert artifact["inputs"][0]["input"]["sha256"] == hashlib.sha256(b"<workbook/>").hexdigest()
     assert not (out / "handover").exists()
 

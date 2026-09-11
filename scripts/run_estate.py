@@ -1250,7 +1250,7 @@ class _ProvenanceState:  # pylint: disable=too-many-instance-attributes
             return result
         result = dict(result)
         result["phase"] = {
-            "status": "partial" if self.checkpoints else "failed",
+            "status": "partial" if result["phase"]["status"] in prov.SUCCESS_STATUSES else result["phase"]["status"],
             "errors": [finding, *result["phase"]["errors"]],
         }
         return result
