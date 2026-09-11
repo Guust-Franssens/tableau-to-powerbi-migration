@@ -447,7 +447,12 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
     (
         "repackaging: merge into the existing package instead of replacing it",
         PACKAGER,
-        "        replace_dir(staging, final, verify=None if discard_edits else partial(_refuse_if_edited, unit))",
+        "        replace_dir(\n"
+        "            staging,\n"
+        "            final,\n"
+        "            verify=None if discard_edits else partial(_refuse_if_edited, unit),\n"
+        "            verify_staged=verify_staged,\n"
+        "        )",
         "        shutil.copytree(staging, final, dirs_exist_ok=True)",
         ["test_repackaging_removes_evidence_the_new_input_no_longer_produces"],
     ),

@@ -29,6 +29,7 @@ import re
 import shutil
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
@@ -3128,7 +3129,7 @@ def test_an_edit_made_DURING_assembly_is_not_overwritten_by_the_swap(tmp_path: P
 
     original = pkg._assemble_unit  # noqa: SLF001
 
-    def _assemble_then_edit(*args: object, **kwargs: object) -> dict:
+    def _assemble_then_edit(*args: object, **kwargs: object) -> tuple[dict, Callable[[], None]]:
         result = original(*args, **kwargs)
         edited.parent.mkdir(parents=True, exist_ok=True)
         edited.write_text(marker, encoding="utf-8")
@@ -3549,7 +3550,7 @@ def test_the_retired_package_is_never_named_after_the_package_it_retires(
         rename(src, dst)
 
     monkeypatch.setattr(pkg, "_rename_retrying", _record)
-    pkg.replace_dir(staged, final)
+    pkg.replace_dir(staged, final, verify_staged=lambda: None)
     assert seen, "replace_dir must move the existing package aside before the swap"
     assert len(seen[0].name) < len(f".{final.name}.replaced"), seen[0]
 
@@ -4563,7 +4564,7 @@ def _arm_boom(monkeypatch: pytest.MonkeyPatch, boom: str, attempted: list[str]) 
     """
     real = pkg._assemble_unit  # noqa: SLF001  # pylint: disable=protected-access
 
-    def spy(bundle: Path, unit: str, dest: Path, **kwargs: object) -> dict:
+    def spy(bundle: Path, unit: str, dest: Path, **kwargs: object) -> tuple[dict, Callable[[], None]]:
         attempted.append(unit)
         if unit == boom:
             raise shutil.Error(f"[WinError 3] The system cannot find the path specified: '{dest}'")
@@ -4742,7 +4743,9 @@ def test_a_residue_found_while_a_unit_is_already_failing_does_not_replace_the_ro
     staging = pkg.staging_dir(_out(tmp_path), BATCH_BOOM)
     real_assemble, real_rmtree = pkg._assemble_unit, shutil.rmtree  # noqa: SLF001  # pylint: disable=protected-access
 
-    def half_build_then_raise(bundle_root: Path, unit: str, dest: Path, **kwargs: object) -> dict:
+    def half_build_then_raise(
+        bundle_root: Path, unit: str, dest: Path, **kwargs: object
+    ) -> tuple[dict, Callable[[], None]]:
         if unit != BATCH_BOOM:
             return real_assemble(bundle_root, unit, dest, **kwargs)
         dest.mkdir(parents=True, exist_ok=True)
@@ -4885,7 +4888,7 @@ def test_an_operator_interrupt_still_ends_the_run(tmp_path: Path, monkeypatch: p
     bundle, oracle = _batch_bundle(tmp_path)
     real = pkg._assemble_unit  # noqa: SLF001  # pylint: disable=protected-access
 
-    def spy(bundle_root: Path, unit: str, dest: Path, **kwargs: object) -> dict:
+    def spy(bundle_root: Path, unit: str, dest: Path, **kwargs: object) -> tuple[dict, Callable[[], None]]:
         if unit == BATCH_BOOM:
             raise KeyboardInterrupt
         return real(bundle_root, unit, dest, **kwargs)
