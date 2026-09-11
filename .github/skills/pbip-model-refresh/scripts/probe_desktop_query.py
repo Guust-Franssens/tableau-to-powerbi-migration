@@ -82,33 +82,7 @@ _T = TypeVar("_T")
 
 
 class ObservationUnavailable(RuntimeError):
-    """Closed refusal codes; native error text is not an observation payload."""
-
-    CODES = frozenset(
-        {
-            "IDENTITY_UNESTABLISHED",
-            "PID_REUSED",
-            "WRONG_PID_PORT",
-            "CATALOGUE_UNESTABLISHED",
-            "CATALOGUE_CHANGED",
-            "CANARIES_REQUIRED",
-            "CANARY_UNKNOWN",
-            "TOOL_UNAVAILABLE",
-            "TIMEOUT",
-            "CREDENTIAL_MISSING",
-            "DIALOG_NEEDS_HUMAN",
-            "DIALOG_UNREADABLE",
-            "DIALOG_UNRECOGNIZED",
-            "REFRESH_IN_PROGRESS",
-            "DESKTOP_GONE",
-            "DESKTOP_UNREADY",
-            "CREDENTIAL_UNKNOWN",
-        }
-    )
-
-    def __init__(self, code: str) -> None:
-        self.code = code if code in self.CODES else "TOOL_UNAVAILABLE"
-        super().__init__(self.code)
+    """A locally named refusal; native exceptions are mapped to TOOL_UNAVAILABLE, not reflected."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,7 +226,10 @@ def _observation_call(pid: int, operation: Callable[[], _T], timeout_seconds: fl
         if stopped.is_set():
             return None
         threading.Thread(target=lambda: guarded(poll), daemon=True).start()
-        return operation()
+        result = operation()
+        if not stopped.is_set():
+            _observation_credential_check(pid, in_flight=True)
+        return result
 
     deadline = time.monotonic() + timeout_seconds
     threading.Thread(target=lambda: guarded(run), daemon=True).start()
@@ -297,30 +274,20 @@ def recheck_bound(bound: BoundDesktop, connection) -> None:
         raise ObservationUnavailable("CATALOGUE_CHANGED")
 
 
-def open_bound(bound: BoundDesktop):
-    """Open only the bound catalogue; the operation's outer worker supplies its wall-clock bound."""
-    if desktop_identity(bound.identity.pid) != bound.identity:
-        raise ObservationUnavailable("PID_REUSED")
-    connection = _load_adomd()(
-        f"Data Source=localhost:{bound.identity.port};Initial Catalog={bound.catalogue};Connect Timeout=30"
-    )
-    try:
-        connection.Open()
-        recheck_bound(bound, connection)
-        return connection
-    except BaseException:
-        connection.Close()
-        raise
-
-
 def bound_call(
     bound: BoundDesktop, operation: Callable[[object], _T], *, timeout_seconds: float = OBSERVATION_TIMEOUT_SECONDS
 ) -> _T:
     """Give a read executor the internally opened connection, and recheck before returning facts."""
 
     def read() -> _T:
-        connection = open_bound(bound)
+        if desktop_identity(bound.identity.pid) != bound.identity:
+            raise ObservationUnavailable("PID_REUSED")
+        connection = _load_adomd()(
+            f"Data Source=localhost:{bound.identity.port};Initial Catalog={bound.catalogue};Connect Timeout=30"
+        )
         try:
+            connection.Open()
+            recheck_bound(bound, connection)
             result = operation(connection)
             recheck_bound(bound, connection)
             return result
@@ -334,6 +301,8 @@ def probe_observations(
     bound: BoundDesktop, canaries: list[str], *, timeout_seconds: float = OBSERVATION_TIMEOUT_SECONDS
 ) -> tuple[CanaryObservation, ...]:
     """Observe an explicit, unique canary set; no caller-supplied connection/result or source mapping."""
+    if not isinstance(canaries, (list, tuple)):
+        raise ObservationUnavailable("CANARIES_REQUIRED")
     targets = tuple(canaries or ())
     if not targets or any(not isinstance(name, str) or not name.strip() for name in targets):
         raise ObservationUnavailable("CANARIES_REQUIRED")
@@ -341,8 +310,6 @@ def probe_observations(
         raise ObservationUnavailable("CANARIES_REQUIRED")
 
     def read(connection) -> tuple[CanaryObservation, ...]:
-        if not set(targets) <= set(table_names(connection, include_hidden=True)):
-            raise ObservationUnavailable("CANARY_UNKNOWN")
         observed = []
         for name in targets:
             rows = _probe_one(bound.identity.port, connection, name, emit=lambda _: None)

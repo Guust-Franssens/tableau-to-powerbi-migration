@@ -110,7 +110,6 @@ from probe_desktop_query import (
     is_auto_date_table_name,
     measure_names,
     nuget_packages_root,
-    open_bound,
     recheck_bound,
     table_names,
 )
@@ -615,14 +614,13 @@ def refresh(
     def _run() -> None:
         conn = None
         try:
-            if bound is None:
-                adomd_connection = _load_adomd()
-                conn = adomd_connection(f"Data Source=localhost:{port}")
-                conn.Open()
-                catalog = _catalog_id(conn)
-            else:
-                conn = open_bound(bound)
-                catalog = bound.catalogue
+            adomd_connection = _load_adomd()
+            selection = f";Initial Catalog={bound.catalogue};Connect Timeout=30" if bound is not None else ""
+            conn = adomd_connection(f"Data Source=localhost:{port}{selection}")
+            conn.Open()
+            if bound is not None:
+                recheck_bound(bound, conn)
+            catalog = bound.catalogue if bound is not None else _catalog_id(conn)
             if targets:
                 objects = [{"database": catalog, "table": t} for t in targets]
             else:

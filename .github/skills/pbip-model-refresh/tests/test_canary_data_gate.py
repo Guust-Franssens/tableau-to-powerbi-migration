@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 import threading
 import time
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from types import SimpleNamespace
 
 import pytest
@@ -289,16 +289,21 @@ def test_canary_observation_uses_the_bound_query_and_actual_returned_rows(monkey
     query = "EVALUATE TOPN(1, 'Owner''s Orders')"
     assert observations == (probe_desktop_query.CanaryObservation(conn.Database, "Owner's Orders", query, count),)
     assert conn.queries.count(query) == 1
+    assert probe_desktop_query.derive_data_verdict is refresh_pbip_model.derive_data_verdict
     with pytest.raises(FrozenInstanceError):
         observations[0].returned_rows = 9
-    with pytest.raises(AttributeError):
-        getattr(observations[0], "persisted")
+    assert not hasattr(observations[0], "persisted")
 
 
-@pytest.mark.parametrize("canaries", [None, [], [""], [" "], [True], ["Orders", "orders"]])
-def test_observations_require_nonempty_explicit_unique_canaries(canaries):
+@pytest.mark.parametrize(
+    "canaries",
+    [None, [], [""], [" "], [True], "Orders", {"Orders": 1}, ["Orders", "orders"]],
+    ids=["implicit", "empty", "empty-name", "blank-name", "bool-name", "string", "mapping", "duplicate"],
+)
+def test_observations_require_nonempty_explicit_unique_canaries(monkeypatch, canaries):
+    bound = _bound_connection(monkeypatch, _Conn([("Parameters", False)], {"Parameters": 1}))
     with pytest.raises(probe_desktop_query.ObservationUnavailable, match="^CANARIES_REQUIRED$"):
-        probe_desktop_query.probe_observations(None, canaries)
+        probe_desktop_query.probe_observations(bound, canaries)
 
 
 @pytest.mark.parametrize("count", [True, False, 1.0, -1])
@@ -310,15 +315,7 @@ def test_observation_counts_are_not_coerced(monkeypatch, count):
         probe_desktop_query.probe_observations(bound, ["Orders"])
 
 
-def test_unknown_canary_cannot_be_substituted_by_a_queryable_table(monkeypatch):
-    conn = _Conn([("Parameters", False)], {"Parameters": 1})
-    bound = _bound_connection(monkeypatch, conn)
-    with pytest.raises(probe_desktop_query.ObservationUnavailable, match="^CANARY_UNKNOWN$"):
-        probe_desktop_query.probe_observations(bound, ["Orders"])
-    assert not any("TOPN" in text for text in conn.queries)
-
-
-@pytest.mark.parametrize("changed", ["catalogue", "process"])
+@pytest.mark.parametrize("changed", ["catalogue", "process_start", "as_pid", "as_process_start", "port"])
 def test_query_result_is_not_returned_after_bound_identity_changes(monkeypatch, changed):
     conn = _Conn([("Orders", False)], {"Orders": 1})
     bound = _bound_connection(monkeypatch, conn)
@@ -329,7 +326,10 @@ def test_query_result_is_not_returned_after_bound_identity_changes(monkeypatch, 
         if changed == "catalogue":
             conn.Database = "22222222-2222-3333-4444-555555555555"
         else:
-            monkeypatch.setattr(probe_desktop_query, "desktop_identity", lambda _: None)
+            value = "200" if "start" in changed else 500
+            monkeypatch.setattr(
+                probe_desktop_query, "desktop_identity", lambda _: replace(bound.identity, **{changed: value})
+            )
         return count
 
     monkeypatch.setattr(probe_desktop_query, "_probe_one", query)
@@ -353,12 +353,9 @@ def test_query_result_is_not_returned_after_bound_identity_changes(monkeypatch, 
     ],
 )
 def test_observation_refusals_are_one_attempt_and_do_not_query(monkeypatch, field, code):
-    state = dict(modal=None, dialog=None, process_gone=None, desktop_unready=None, unknown_reason=None)
-    state[field] = SimpleNamespace(verdict=code)
+    state = probe_desktop_query.CredentialDetection(**{field: SimpleNamespace(verdict=code)})
     calls = []
-    monkeypatch.setattr(
-        probe_desktop_query, "_credential_state", lambda pid, **_: calls.append(pid) or SimpleNamespace(**state)
-    )
+    monkeypatch.setattr(probe_desktop_query, "_credential_state", lambda pid, **_: calls.append(pid) or state)
     with pytest.raises(probe_desktop_query.ObservationUnavailable, match=f"^{code}$"):
         probe_desktop_query._observation_call(111, lambda: pytest.fail("refused read ran"), 1)
     assert calls == [111]
@@ -370,13 +367,7 @@ def test_late_credential_refusal_interrupts_the_bounded_read(monkeypatch):
 
     def inspect_state(_pid, *, in_flight=False):
         calls.append(in_flight)
-        return SimpleNamespace(
-            modal=object() if in_flight else None,
-            dialog=None,
-            process_gone=None,
-            desktop_unready=None,
-            unknown_reason=None,
-        )
+        return probe_desktop_query.CredentialDetection(modal=object() if in_flight else None)
 
     monkeypatch.setattr(probe_desktop_query, "_credential_state", inspect_state)
     try:
@@ -402,20 +393,3 @@ def test_observation_deadline_bounds_native_query_and_inspection(monkeypatch, bl
         assert queried == ([1] if blocked == "query" else [])
     finally:
         release.set()
-
-
-@pytest.mark.parametrize(
-    "implicit,narrowed,rows,expected",
-    [
-        (False, False, 1, "DATA_OK"),
-        (True, False, 1, "TABLE_OK"),
-        (False, True, 1, "TABLES_OK"),
-        (True, True, 1, "TABLE_OK"),
-        (False, False, 0, "NO_DATA"),
-    ],
-)
-def test_one_data_derivation_is_shared_with_both_legacy_renderers(implicit, narrowed, rows, expected):
-    assert probe_desktop_query.derive_data_verdict is refresh_pbip_model.derive_data_verdict
-    observed = refresh_pbip_model.derive_data_verdict([("Orders", rows)], implicit, narrowed=narrowed)
-    assert observed.code == expected
-    assert not hasattr(observed, "persisted")

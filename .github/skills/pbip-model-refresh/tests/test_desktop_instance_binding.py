@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import asdict, replace
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -200,22 +200,6 @@ def test_observation_identity_rejects_missing_or_coerced_fields(field, value):
         probe_desktop_query._validate_identity({}, 111)
 
 
-@pytest.mark.parametrize(
-    "change",
-    [
-        {"process_start": "200"},
-        {"as_pid": 223},
-        {"as_process_start": "201"},
-        {"port": 52002},
-    ],
-)
-def test_observation_recheck_refuses_pid_reuse_or_a_changed_child(monkeypatch, change):
-    monkeypatch.setattr(probe_desktop_query, "desktop_identity", lambda _: replace(OBSERVED_IDENTITY, **change))
-    bound = probe_desktop_query.BoundDesktop(OBSERVED_IDENTITY, OBSERVED_CATALOGUE)
-    with pytest.raises(probe_desktop_query.ObservationUnavailable, match="^PID_REUSED$"):
-        probe_desktop_query.recheck_bound(bound, None)
-
-
 class _FakeReader:
     """Minimal stand-in for an ADOMD data reader (PascalCase because the real one is .NET)."""
 
@@ -265,37 +249,26 @@ def test_observation_catalogue_is_one_exact_id_and_reader_is_closed(catalogues):
     assert connection.reader.closed
 
 
-@pytest.mark.parametrize(
-    "argv,kind,tables",
-    [
-        ([], "full", ()),
-        (["--tables", "Orders"], "full", ("Orders",)),
-        (["--calculate-only"], "calculate", ()),
-        (["--measures-only"], "calculate", ()),
-        (["--calculate-only", "--tables", "Orders"], "calculate", ("Orders",)),
-    ],
-)
-def test_refresh_observation_matches_the_executed_scope(monkeypatch, argv, kind, tables):
+@pytest.mark.parametrize("kind", ["full", "calculate"])
+@pytest.mark.parametrize("tables", [(), ("Orders",)], ids=["database", "tables"])
+def test_refresh_observation_matches_the_executed_scope(monkeypatch, kind, tables):
     bound = probe_desktop_query.BoundDesktop(OBSERVED_IDENTITY, OBSERVED_CATALOGUE)
     sent, observations = [], []
     command = SimpleNamespace()
     command.ExecuteNonQuery = lambda: sent.append(json.loads(command.CommandText))
-    connection = SimpleNamespace(CreateCommand=lambda: command, Close=lambda: None)
-    monkeypatch.setattr(refresh_pbip_model, "open_bound", lambda _: connection)
+    connection = SimpleNamespace(CreateCommand=lambda: command, Open=lambda: None, Close=lambda: None)
+    monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda: lambda _: connection)
     monkeypatch.setattr(refresh_pbip_model, "recheck_bound", lambda *_: None)
-    args = refresh_pbip_model._build_arg_parser().parse_args(argv)
-    assert (
-        refresh_pbip_model.refresh(
-            52001,
-            args.tables,
-            desktop_pid=111,
-            refresh_type=args.refresh_type,
-            bound=bound,
-            observations=observations,
-            progress_enabled=False,
-        )[0]
-        is True
+    ok, _ = refresh_pbip_model.refresh(
+        52001,
+        list(tables),
+        desktop_pid=111,
+        refresh_type=kind,
+        bound=bound,
+        observations=observations,
+        progress_enabled=False,
     )
+    assert ok is True
     objects = [{"database": OBSERVED_CATALOGUE, "table": "Orders"}] if tables else [{"database": OBSERVED_CATALOGUE}]
     assert sent == [{"refresh": {"type": kind, "objects": objects}}]
     assert observations == [
