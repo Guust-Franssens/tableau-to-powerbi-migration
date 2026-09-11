@@ -21,8 +21,8 @@ Three properties are the point, and each is structural rather than promised
 --------------------------------------------------------------------------
 1. **S1 is consumed, never assumed.** :func:`verify_phase1_role_identity` runs
    :func:`verify_s1` itself for every root it is given. A caller MAY hand in a
-   :class:`VerifiedPackage`, but that object carries the root it was verified against, so a
-   clearance computed for one path can never be applied to another.
+   :class:`VerifiedPackage` as an earlier observation, but S1 is re-run at the S2 entry seam even for
+   that root. A clearance cannot authorize reading later bytes or a replaced root.
 2. **A role is a DECLARATION, never a discovery.** Every role is read from
    ``package-manifest.json``'s ``artifacts`` map (or, for the roles the manifest does not declare,
    from the S1-verified content key set) and then *confirmed* against the verified bytes. Removing
@@ -43,14 +43,14 @@ and "there is no provider" are the same answer from one package and only the ope
 invocation.
 
 ⚠️ **Stable identity only.** Provider matching is datasource LUID first, then the exact
-``<site>/<name>`` published key when a LUID is genuinely unavailable on either side. A display name,
+``<site>/<name>`` published key when a LUID is genuinely unavailable on BOTH sides. A display name,
 a folder stem, ``bound_datasource``, ``published_ds_name`` and the handover slice's ``source_id``
 are diagnostics; none of them may admit a provider, an asset or an evidence record here.
 """
 
 from __future__ import annotations
 
-import json
+import os
 import sys
 import tomllib
 from collections.abc import Iterable, Mapping, Sequence
@@ -61,11 +61,15 @@ from typing import Any, Literal
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import package_filesystem as pfs  # noqa: E402  # pylint: disable=wrong-import-position
+import tableau_env  # noqa: E402  # pylint: disable=wrong-import-position
 from bundle_corpus import (  # noqa: E402  # pylint: disable=wrong-import-position
     PACKAGE_MARKER,
     TargetClassification,
     classify_target,
 )
+from host_paths import discloses_host_location  # noqa: E402  # pylint: disable=wrong-import-position
+
+_ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
 
 # ---------------------------------------------------------------------------------------------
 # vocabulary
@@ -155,6 +159,8 @@ CODE_UNSAFE_TARGET = "package_boundary_unsafe"
 CODE_INTEGRITY_NOT_CLEAN = "package_integrity_not_clean"
 CODE_INTEGRITY_CHANGED = "package_changed_since_integrity_check"
 CODE_MANIFEST_UNREADABLE = "package_manifest_unreadable"
+CODE_IDENTITY_JSON = "identity_json_invalid"
+CODE_IDENTITY_TYPE = "identity_type_invalid"
 CODE_UNIT_MISSING = "package_unit_missing"
 CODE_KIND_UNCLASSIFIED = "package_kind_unclassified"
 # ⚠️ There is deliberately NO "duplicate unit in the cohort" code. `unit` is a package-LOCAL scope
@@ -184,14 +190,21 @@ CODE_RECEIPT_UNCOVERED = "receipt_does_not_cover_role"
 CODE_EVIDENCE_FOREIGN = "evidence_foreign_identity"
 CODE_EVIDENCE_UNACCOUNTED = "evidence_file_unaccounted"
 CODE_EVIDENCE_MANIFEST = "evidence_manifest_unreadable"
+CODE_EVIDENCE_PATH = "evidence_path_not_verified"
+CODE_INAPPLICABLE_PRESENT = "inapplicable_role_present"
 CODE_BRIEF_FRONTMATTER = "brief_frontmatter_unparseable"
 CODE_BRIEF_UNIT = "brief_unit_mismatch"
 CODE_BRIEF_SCOPE = "brief_scope_mismatch"
+CODE_BRIEF_UNSAFE = "brief_contains_unsafe_text"
+CODE_DEPENDENCY_IDENTITY = "published_dependency_identity_missing"
+CODE_DEPENDENCY_INVALID = "published_dependency_invalid"
 CODE_PROVIDER_MISSING = "provider_missing"
 CODE_PROVIDER_AMBIGUOUS = "provider_ambiguous"
 CODE_PROVIDER_LUID_CONTRADICTION = "provider_luid_contradiction"
+CODE_PROVIDER_KEY_CONTRADICTION = "provider_key_contradiction"
 CODE_PROVIDER_BINDING = "provider_binding_mismatch"
 CODE_PROVIDER_MODEL = "provider_model_unresolved"
+CODE_PROVIDER_BLOCKED = "provider_not_s2_clean"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -274,6 +287,26 @@ class DependencyResult:
 
 
 @dataclass(frozen=True)
+class DeclaredDependency:
+    """One declared row, including rows whose identity cannot be established."""
+
+    luid: str | None = None
+    key: str | None = None
+    code: str | None = None
+
+
+@dataclass(frozen=True)
+class PackageEvidence:
+    """An assessed evidence record and its walk-produced render path, not a grade or a source."""
+
+    origin: Literal["reference", "oracle"]
+    manifest: dict[str, Any]
+    entry: dict[str, Any]
+    state: dict[str, Any]
+    render_path: Path | None
+
+
+@dataclass(frozen=True)
 class Phase1RoleIdentityResult:  # pylint: disable=too-many-instance-attributes
     """One package's role/identity verdict. Emitted by the final gate; never written into a package."""
 
@@ -286,6 +319,7 @@ class Phase1RoleIdentityResult:  # pylint: disable=too-many-instance-attributes
     dependencies: tuple[DependencyResult, ...] = ()
     blockers: tuple[str, ...] = ()
     authorized_limitations: tuple[str, ...] = ()
+    evidence: tuple[PackageEvidence, ...] = field(default=(), repr=False, compare=False)
 
     @property
     def is_start_ready(self) -> bool:
@@ -317,13 +351,7 @@ class Phase1RoleIdentityResult:  # pylint: disable=too-many-instance-attributes
 
 @dataclass(frozen=True)
 class VerifiedPackage:
-    """An S1 clearance BOUND to the root it was computed for.
-
-    ⚠️ The binding is the point. A caller may pass a clearance in to avoid re-hashing a large
-    package, but :func:`verify_phase1_role_identity` matches it to a root by that root's own value -
-    a clearance for a different path is ignored and the root is re-verified, so no caller can hand
-    this verifier someone else's answer.
-    """
+    """An earlier S1 observation, never authority to skip verification at the S2 read seam."""
 
     root: Path
     classification: TargetClassification
@@ -357,13 +385,15 @@ class _Facts:  # pylint: disable=too-many-instance-attributes,attribute-defined-
     blockers: list[str] = field(default_factory=list)
     limitations: list[str] = field(default_factory=list)
     dependencies: list[DependencyResult] = field(default_factory=list)
+    evidence: list[PackageEvidence] = field(default_factory=list)
     topology: str | None = None
     source_key: str | None = None
     source_sha: str | None = None
     source_luid: str | None = None
     published_key: str | None = None
-    declared_dependencies: tuple[tuple[str | None, str | None], ...] = ()
+    declared_dependencies: tuple[DeclaredDependency, ...] = ()
     model_role: str | None = None
+    provider_ready: bool = False
 
     @property
     def keys(self) -> frozenset[str]:
@@ -379,8 +409,9 @@ class _Facts:  # pylint: disable=too-many-instance-attributes,attribute-defined-
         if key is None or key not in self.walked:
             return None
         try:
-            return json.loads(self.walked[key].read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            return pfs.parse_manifest_text(self.walked[key].read_text(encoding="utf-8"))
+        except (OSError, ValueError, pfs._ManifestError):  # pylint: disable=protected-access
+            self.blockers.append(CODE_IDENTITY_JSON)
             return None
 
     def text(self, key: str | None) -> str | None:
@@ -411,12 +442,31 @@ def _blocked(
     )
 
 
+class _IdentityError(Exception):
+    """A typed identity refusal containing no artifact-controlled text."""
+
+
 def _declared_string(mapping: Any, key: str) -> str | None:
-    """A declaration is a non-empty string or it is absent. ``null``, 0 and ``{}`` are all absent."""
+    """Only absent/null claims are absent; a supplied claim of another type is invalid."""
     if not isinstance(mapping, dict):
-        return None
+        raise _IdentityError(CODE_IDENTITY_TYPE)
     value = mapping.get(key)
-    return value if isinstance(value, str) and value.strip() else None
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise _IdentityError(CODE_IDENTITY_TYPE)
+    return value if value.strip() else None
+
+
+def _object_rows(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(row, dict) for row in value)
+
+
+def _luid(mapping: dict[str, Any], key: str) -> str | None:
+    value = _declared_string(mapping, key)
+    if value is not None and _filename_luid(f"{value}_") is None:
+        raise _IdentityError(CODE_IDENTITY_TYPE)
+    return value.casefold() if value is not None else None
 
 
 def _facts(  # pylint: disable=too-many-return-statements
@@ -430,18 +480,19 @@ def _facts(  # pylint: disable=too-many-return-statements
     if not cleared.integrity.is_clean:
         return _blocked(cleared.classification.unit_name or None, None, CODE_INTEGRITY_NOT_CLEAN)
 
-    # ⚠️ The walk is re-run rather than reconstructed. S1 proved declared == walked, so this both
-    # gives us walk-produced paths to open and notices a package that changed underneath us.
+    if pfs._recheck_boundary(root):  # pylint: disable=protected-access
+        return _blocked(cleared.classification.unit_name or None, None, CODE_INTEGRITY_CHANGED)
     walked, walk_rows, _empty = pfs.walk_package(root)
-    walked.pop(PACKAGE_MARKER, None)
-    manifest_text = (root / PACKAGE_MARKER).read_text(encoding="utf-8", errors="replace")
+    manifest_path = walked.pop(PACKAGE_MARKER, None)
+    if walk_rows or manifest_path is None:
+        return _blocked(cleared.classification.unit_name or None, None, CODE_INTEGRITY_CHANGED)
     try:
-        manifest = pfs.parse_manifest_text(manifest_text)
+        manifest = pfs.parse_manifest_text(manifest_path.read_text(encoding="utf-8"))
         declared = pfs.declared_files(manifest)
-    except Exception:  # pylint: disable=broad-exception-caught  # every refusal is typed, never raised
+    except (OSError, ValueError, pfs._ManifestError):  # pylint: disable=protected-access
         return _blocked(cleared.classification.unit_name or None, None, CODE_MANIFEST_UNREADABLE)
-    digests = {key: value for key, value in declared.items() if isinstance(key, str) and isinstance(value, str)}
-    if walk_rows or set(digests) != set(walked):
+    digests = declared
+    if set(digests) != set(walked):
         return _blocked(cleared.classification.unit_name or None, None, CODE_INTEGRITY_CHANGED)
 
     unit = _declared_string(manifest, "unit")
@@ -450,7 +501,9 @@ def _facts(  # pylint: disable=too-many-return-statements
     kind = _declared_string(manifest, "kind")
     if kind not in (KIND_WORKBOOK, KIND_DATASOURCE):
         return _blocked(unit, None, CODE_KIND_UNCLASSIFIED)
-    artifacts = manifest.get("artifacts") if isinstance(manifest.get("artifacts"), dict) else {}
+    artifacts = manifest.get("artifacts", {})
+    if not isinstance(artifacts, dict) or not pfs.is_canonical_key(unit) or "/" in unit:
+        return _blocked(None, kind, CODE_IDENTITY_TYPE)
     return _facts_with_source(
         _Facts(
             root=root,
@@ -473,31 +526,37 @@ def _facts_with_source(facts: _Facts) -> _Facts:
     spec = facts.json(_declared_string(facts.artifacts, "migration_spec"))
     facts.declared_dependencies = _spec_dependencies(spec)
     if facts.kind == KIND_DATASOURCE:
-        facts.published_key = next((key for _luid, key in facts.declared_dependencies if key), None)
+        keys = {row.key for row in facts.declared_dependencies if row.key is not None}
+        facts.blockers.extend(row.code for row in facts.declared_dependencies if row.code is not None)
+        if len(keys) > 1:
+            facts.blockers.append(CODE_PROVIDER_KEY_CONTRADICTION)
+        elif keys:
+            facts.published_key = next(iter(keys))
     return facts
 
 
-def _spec_dependencies(spec: Any) -> tuple[tuple[str | None, str | None], ...]:
-    """`(datasource luid, published key)` for every PUBLISHED datasource the spec declares.
-
-    ⚠️ Only a **stable** identity is carried out of here. ``luid`` is the optional server identity a
-    producer stamps when it genuinely has one; ``key`` is the exact ``<site>/<name>`` dedup key
-    `parse_tableau.py` builds. ``id``, ``path``, ``derived_from`` and the datasource caption are
-    display names and never leave this function.
-    """
+def _spec_dependencies(spec: Any) -> tuple[DeclaredDependency, ...]:
+    """Preserve every published row, including identity-less, malformed and duplicate rows."""
     if not isinstance(spec, dict):
         return ()
-    found: list[tuple[str | None, str | None]] = []
-    for row in spec.get("data_sources") or []:
-        published = row.get("published_datasource") if isinstance(row, dict) else None
-        if not isinstance(published, dict):
+    rows = spec.get("data_sources", [])
+    if not isinstance(rows, list):
+        return (DeclaredDependency(code=CODE_DEPENDENCY_INVALID),)
+    found: list[DeclaredDependency] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            found.append(DeclaredDependency(code=CODE_DEPENDENCY_INVALID))
             continue
-        luid = _declared_string(published, "luid")
-        key = _declared_string(published, "key")
-        if luid is None and key is None:
+        published = row.get("published_datasource")
+        if published is None:
             continue
-        if (luid, key) not in found:
-            found.append((luid, key))
+        try:
+            luid = _luid(published, "luid")
+            key = _declared_string(published, "key")
+        except _IdentityError:
+            found.append(DeclaredDependency(code=CODE_DEPENDENCY_INVALID))
+            continue
+        found.append(DeclaredDependency(luid, key, CODE_DEPENDENCY_IDENTITY if luid is None and key is None else None))
     return tuple(found)
 
 
@@ -534,7 +593,7 @@ def _declared_role(  # pylint: disable=too-many-return-statements
     if declared is None:
         return _role(role, STATE_MISSING, cardinality, candidates, CODE_ROLE_UNDECLARED)
     if declared not in set(verified):
-        return _role(role, STATE_MISMATCH, cardinality, [declared], CODE_ROLE_NOT_VERIFIED)
+        return _role(role, STATE_MISMATCH, cardinality, candidates, CODE_ROLE_NOT_VERIFIED)
     if len(candidates) > 1:
         return _role(role, STATE_AMBIGUOUS, cardinality, candidates, CODE_ROLE_AMBIGUOUS)
     if declared not in candidates:
@@ -570,8 +629,11 @@ def _package_scope_role(facts: _Facts) -> RoleResult:
         return _role(ROLE_ENGINE_CLASSIFICATION, STATE_MISSING, "1 file", [], CODE_ROLE_MISSING)
     if _scope_unit(report) != facts.unit:
         return _role(ROLE_ENGINE_CLASSIFICATION, STATE_MISMATCH, "1 file", ["report.json"], CODE_SCOPE_MISMATCH)
-    workbooks = _names(report.get("workbooks"))
-    datasources = _names(report.get("datasources"))
+    try:
+        workbooks = _names(report.get("workbooks", []))
+        datasources = _names(report.get("datasources", []))
+    except _IdentityError:
+        return _role(ROLE_ENGINE_CLASSIFICATION, STATE_MISMATCH, "1 row", ["report.json"], CODE_IDENTITY_TYPE)
     mine, theirs = (workbooks, datasources) if facts.kind == KIND_WORKBOOK else (datasources, workbooks)
     if mine.count(facts.unit) != 1 or facts.unit in theirs:
         return _role(ROLE_ENGINE_CLASSIFICATION, STATE_MISMATCH, "1 row", ["report.json"], CODE_ENGINE_MEMBERSHIP)
@@ -579,7 +641,9 @@ def _package_scope_role(facts: _Facts) -> RoleResult:
 
 
 def _names(rows: Any) -> list[str]:
-    return [row["name"] for row in rows or [] if isinstance(row, dict) and isinstance(row.get("name"), str)]
+    if not _object_rows(rows) or any(not _declared_string(row, "name") for row in rows):
+        raise _IdentityError(CODE_IDENTITY_TYPE)
+    return [row["name"] for row in rows]
 
 
 def _source_asset_role(facts: _Facts) -> RoleResult:
@@ -597,7 +661,7 @@ def _source_asset_role(facts: _Facts) -> RoleResult:
     return result
 
 
-def _provenance_role(facts: _Facts) -> tuple[RoleResult, dict[str, Any] | None]:
+def _provenance_role(facts: _Facts) -> tuple[RoleResult, dict[str, Any] | None]:  # pylint: disable=too-many-return-statements
     """Exactly one provenance row, and it must be about the source role's own bytes."""
     payload = facts.json("source-provenance.json")
     if not isinstance(payload, dict):
@@ -607,7 +671,9 @@ def _provenance_role(facts: _Facts) -> tuple[RoleResult, dict[str, Any] | None]:
             _role(ROLE_SOURCE_PROVENANCE, STATE_MISMATCH, "1 file", ["source-provenance.json"], CODE_SCOPE_MISMATCH),
             None,
         )
-    rows = [row for row in payload.get("inputs") or [] if isinstance(row, dict)]
+    rows = payload.get("inputs")
+    if not _object_rows(rows):
+        return _role(ROLE_SOURCE_PROVENANCE, STATE_MISMATCH, "1 row", [], CODE_IDENTITY_TYPE), None
     if len(rows) != 1:
         return (
             _role(
@@ -620,7 +686,11 @@ def _provenance_role(facts: _Facts) -> tuple[RoleResult, dict[str, Any] | None]:
             None,
         )
     row = rows[0]
-    supplied = row.get("input") if isinstance(row.get("input"), dict) else {}
+    supplied = row.get("input")
+    if not isinstance(supplied, dict) or not isinstance(row.get("origin", {}), dict):
+        return _role(ROLE_SOURCE_PROVENANCE, STATE_MISMATCH, "1 row", [], CODE_IDENTITY_TYPE), None
+    if not _declared_string(supplied, "file") or not _declared_string(supplied, "sha256"):
+        return _role(ROLE_SOURCE_PROVENANCE, STATE_MISMATCH, "1 row", [], CODE_IDENTITY_TYPE), None
     if facts.source_sha is None or supplied.get("sha256") != facts.source_sha:
         return (
             _role(ROLE_SOURCE_PROVENANCE, STATE_MISMATCH, "1 row", ["source-provenance.json"], CODE_PROVENANCE_SHA),
@@ -638,7 +708,9 @@ def _source_identity_role(facts: _Facts, row: dict[str, Any] | None) -> RoleResu
     if supplied.get("file") != basename:
         return _role(ROLE_SOURCE_IDENTITY, STATE_MISMATCH, "1 sha256", [facts.source_key], CODE_PROVENANCE_FILE)
     spec = facts.json(_declared_string(facts.artifacts, "migration_spec"))
-    source = spec.get("source") if isinstance(spec, dict) and isinstance(spec.get("source"), dict) else {}
+    source = spec.get("source", {}) if isinstance(spec, dict) else {}
+    if not isinstance(source, dict):
+        return _role(ROLE_SOURCE_IDENTITY, STATE_MISMATCH, "1 sha256", [facts.source_key], CODE_IDENTITY_TYPE)
     if _declared_string(source, "file_name") != basename:
         return _role(ROLE_SOURCE_IDENTITY, STATE_MISMATCH, "1 sha256", [facts.source_key], CODE_SPEC_FILE)
     return _role(ROLE_SOURCE_IDENTITY, STATE_RESOLVED, "1 sha256", [facts.source_key])
@@ -650,17 +722,21 @@ def _source_identity_role(facts: _Facts, row: dict[str, Any] | None) -> RoleResu
 LUID_FIELD = {KIND_WORKBOOK: "workbook_luid", KIND_DATASOURCE: "datasource_luid"}
 
 
-def _server_identity_role(facts: _Facts, row: dict[str, Any] | None) -> RoleResult:
+def _server_identity_role(facts: _Facts, row: dict[str, Any] | None) -> RoleResult:  # pylint: disable=too-many-return-statements
     """The Tableau Server LUID, when one exists - and an EARNED ``not_applicable`` when none does."""
     if row is None or facts.source_key is None:
         return _role(ROLE_SERVER_IDENTITY, STATE_MISSING, "0..1 luid", [], CODE_SOURCE_SHA_MISSING)
     origin = row.get("origin") if isinstance(row.get("origin"), dict) else {}
     mine = LUID_FIELD[facts.kind]
     theirs = LUID_FIELD[KIND_DATASOURCE if facts.kind == KIND_WORKBOOK else KIND_WORKBOOK]
-    if _declared_string(origin, theirs) is not None:
+    if _luid(origin, theirs) is not None:
         return _role(ROLE_SERVER_IDENTITY, STATE_MISMATCH, "0..1 luid", [], CODE_LUID_NAMESPACE)
-    recorded = _declared_string(origin, mine)
+    recorded = _luid(origin, mine)
     stamped = _filename_luid(PurePosixPath(facts.source_key).name)
+    if facts.kind == KIND_DATASOURCE and any(
+        dep.luid is not None and dep.luid != recorded for dep in facts.declared_dependencies
+    ):
+        return _role(ROLE_SERVER_IDENTITY, STATE_MISMATCH, "0..1 luid", [], CODE_LUID_CONTRADICTION)
     if recorded is None and stamped is None:
         return _role(ROLE_SERVER_IDENTITY, STATE_NOT_APPLICABLE, "0..1 luid", [], LIMITATION_LOCAL_SOURCE)
     if recorded is None:
@@ -684,7 +760,7 @@ def _filename_luid(name: str) -> str | None:
     return head if all(char in "0123456789abcdefABCDEF" for part in parts for char in part) else None
 
 
-def _receipt_role(facts: _Facts, required: Mapping[str, str]) -> RoleResult:
+def _receipt_role(facts: _Facts, required: Mapping[str, str]) -> RoleResult:  # pylint: disable=too-many-return-statements
     """The engine receipt must scope to this unit and ACCOUNT for every required fabric role.
 
     ``required`` maps role name to the package-relative path that role resolved to. Each one must be
@@ -697,16 +773,21 @@ def _receipt_role(facts: _Facts, required: Mapping[str, str]) -> RoleResult:
         return _role(ROLE_ENGINE_RECEIPT, STATE_MISSING, "1 file", [], CODE_ROLE_MISSING)
     if _scope_unit(payload) != facts.unit:
         return _role(ROLE_ENGINE_RECEIPT, STATE_MISMATCH, "1 file", ["engine-output-receipt.json"], CODE_RECEIPT_SCOPE)
-    outputs = [
-        row["path"]
-        for row in payload.get("artifacts") or []
-        if isinstance(row, dict) and isinstance(row.get("path"), str)
-    ]
+    rows = payload.get("artifacts")
+    if not _object_rows(rows) or any(not _declared_string(row, "path") for row in rows):
+        return _role(ROLE_ENGINE_RECEIPT, STATE_MISMATCH, "1..N outputs", [], CODE_IDENTITY_TYPE)
+    outputs = [row["path"] for row in rows]
     if not outputs:
         return _role(ROLE_ENGINE_RECEIPT, STATE_MISSING, "1..N outputs", [], CODE_RECEIPT_UNCOVERED)
     foreign = sorted(path for path in outputs if path not in facts.digests)
     if foreign:
-        return _role(ROLE_ENGINE_RECEIPT, STATE_MISMATCH, "1..N outputs", foreign, CODE_RECEIPT_FOREIGN_OUTPUT)
+        return _role(
+            ROLE_ENGINE_RECEIPT,
+            STATE_MISMATCH,
+            "1..N outputs",
+            ["engine-output-receipt.json"],
+            CODE_RECEIPT_FOREIGN_OUTPUT,
+        )
     for role_path in sorted(set(required.values())):
         prefix = role_path if role_path.endswith((".Report", ".SemanticModel")) else None
         covered = any(path == role_path or (prefix and path.startswith(f"{prefix}/")) for path in outputs)
@@ -732,41 +813,43 @@ def _handover_role(facts: _Facts) -> RoleResult:
     return result
 
 
-def _brief_role(facts: _Facts, topology: str) -> tuple[RoleResult, list[str]]:  # pylint: disable=too-many-return-statements
-    """The packaged, immutable brief: present as a package role, and identifying THIS unit.
+def brief_identity(text: str, unit: str, scope: str) -> tuple[str | None, bool]:  # pylint: disable=too-many-return-statements
+    """Validate the whole brief's containment and its typed unit/scope, without interpreting policy."""
+    env = tableau_env.resolve_env(_ENV_PATH)
+    scrub = tableau_env.env_redactor(env, *(env.get(key, "") for key in sorted(tableau_env.DATASOURCE_CREDENTIAL_KEYS)))
+    if discloses_host_location(text) or scrub(text) != text:
+        return CODE_BRIEF_UNSAFE, False
+    if not text.startswith("+++"):
+        return None, True
+    head, delimiter, _rest = text.replace("\r\n", "\n")[3:].partition("\n+++")
+    if not delimiter:
+        return CODE_BRIEF_FRONTMATTER, False
+    try:
+        front = tomllib.loads(head)
+    except (tomllib.TOMLDecodeError, ValueError):
+        return CODE_BRIEF_FRONTMATTER, False
+    if front.get("unit") != unit:
+        return CODE_BRIEF_UNIT, False
+    supplied_scope = front.get("scope")
+    if supplied_scope is not None and supplied_scope != scope:
+        return CODE_BRIEF_SCOPE, False
+    return None, supplied_scope is None
 
-    Two things are established here and no more. **Presence**: the brief is one declared, hashed file
-    inside the package, so a stateless agent handed only the package has it - and the manifest
-    records no external path, because an absolute path to the dispatcher's copy is a host disclosure
-    that stops being true the moment anything moves. **Identity**: when the file opens with strict
-    ``+++`` TOML frontmatter, its ``unit`` and ``scope`` must agree with this package.
 
-    ⚠️ Everything else in the brief is left alone. Reading policy out of free-form Markdown would
-    make wording into a gate; the typed policy object is a START_READY prerequisite, and its absence
-    is recorded as :data:`LIMITATION_BRIEF_POLICY_UNPARSED` rather than guessed at.
-    """
+def _brief_role(facts: _Facts, topology: str) -> tuple[RoleResult, list[str]]:
+    """The declared brief's bytes must be safe to ship and identify this unit and topology."""
     declared = _declared_string(facts.artifacts, "migration_brief")
     candidates = [BRIEF_NAME] if BRIEF_NAME in facts.digests else []
     result = _declared_role(ROLE_MIGRATION_BRIEF, "1 file", declared, candidates, facts.digests)
     if result.blocks:
         return result, []
-    text = facts.text(declared) or ""
-    if not text.startswith("+++"):
-        return result, [LIMITATION_BRIEF_POLICY_UNPARSED]
-    _head, delimiter, rest = text[3:].partition("\n+++")
-    if not delimiter:
-        return _role(ROLE_MIGRATION_BRIEF, STATE_MISMATCH, "1 file", [BRIEF_NAME], CODE_BRIEF_FRONTMATTER), []
-    try:
-        front = tomllib.loads(_head)
-    except (tomllib.TOMLDecodeError, ValueError):
-        return _role(ROLE_MIGRATION_BRIEF, STATE_MISMATCH, "1 file", [BRIEF_NAME], CODE_BRIEF_FRONTMATTER), []
-    del rest
-    if front.get("unit") != facts.unit:
-        return _role(ROLE_MIGRATION_BRIEF, STATE_MISMATCH, "1 file", [BRIEF_NAME], CODE_BRIEF_UNIT), []
-    scope = front.get("scope")
-    if scope is not None and scope != TOPOLOGY_SCOPE[topology]:
-        return _role(ROLE_MIGRATION_BRIEF, STATE_MISMATCH, "1 file", [BRIEF_NAME], CODE_BRIEF_SCOPE), []
-    return result, [] if scope is not None else [LIMITATION_BRIEF_POLICY_UNPARSED]
+    text = facts.text(declared)
+    if text is None:
+        return _role(ROLE_MIGRATION_BRIEF, STATE_MISMATCH, "1 file", [BRIEF_NAME], CODE_ROLE_NOT_VERIFIED), []
+    code, unparsed = brief_identity(text, facts.unit, TOPOLOGY_SCOPE[topology])
+    if code is not None:
+        return _role(ROLE_MIGRATION_BRIEF, STATE_MISMATCH, "1 file", [BRIEF_NAME], code), []
+    return result, [LIMITATION_BRIEF_POLICY_UNPARSED] if unparsed else []
 
 
 def _evidence_role(  # pylint: disable=too-many-return-statements
@@ -780,6 +863,9 @@ def _evidence_role(  # pylint: disable=too-many-return-statements
     evidence is how a foreign render gets read as this unit's.
     """
     keys = facts.under(directory)
+    declared = _declared_string(facts.artifacts, "reference" if role == ROLE_TABLEAU_REFERENCE else "oracle")
+    if declared is not None and (declared != directory or not keys):
+        return _role(role, STATE_MISMATCH, "0..1 dir", keys, CODE_ROLE_NOT_VERIFIED)
     if not keys:
         return _role(role, STATE_NOT_APPLICABLE, "0..1 dir", [])
     manifest_key = f"{directory}/{manifest_name}"
@@ -788,11 +874,17 @@ def _evidence_role(  # pylint: disable=too-many-return-statements
     payload = facts.json(manifest_key)
     if not isinstance(payload, dict):
         return _role(role, STATE_MISMATCH, "1 manifest", [manifest_key], CODE_EVIDENCE_MANIFEST)
-    records, named = (
-        _reference_records(payload, directory)
-        if role == ROLE_TABLEAU_REFERENCE
-        else _oracle_records(payload, directory)
-    )
+    try:
+        records, named, claims = (
+            _reference_records(facts, payload, directory)
+            if role == ROLE_TABLEAU_REFERENCE
+            else _oracle_records(facts, payload, directory)
+        )
+    except _IdentityError as exc:
+        return _role(role, STATE_MISMATCH, "1 manifest", [manifest_key], str(exc))
+    unaccounted = sorted(set(keys) - named - {manifest_key})
+    if unaccounted:
+        return _role(role, STATE_MISMATCH, "0..N files", unaccounted, CODE_EVIDENCE_UNACCOUNTED)
     if not records:
         # A manifest declaring no record is an EMPTY capture, not evidence: it owns nothing, so it
         # cannot be a visual-evidence provider and it cannot be foreign either.
@@ -801,63 +893,118 @@ def _evidence_role(  # pylint: disable=too-many-return-statements
         owner = _declared_string(payload, "source_workbook_sha256")
         if owner is None or facts.source_sha is None or owner.casefold() != facts.source_sha.casefold():
             return _role(role, STATE_MISMATCH, "1 manifest", [manifest_key], CODE_EVIDENCE_FOREIGN)
-    claims = {claim for record in records for claim in record if claim is not None}
     mine = {facts.source_luid} if facts.source_luid else set()
     # ⚠️ The two providers are held to different rules because they carry different identities. A
     # reference capture is owned by the source SHA, which is checked above, so a LUID it does not
     # state cannot contradict anything - only a STATED foreign one can. An oracle record has no SHA
     # at all: `workbook_luid` is the whole of its ownership claim, so a view that states none is
     # unattributed rather than harmlessly quiet.
-    foreign = claims - mine if role == ROLE_TABLEAU_REFERENCE else claims ^ mine
-    if foreign:
+    if any((claim - mine if role == ROLE_TABLEAU_REFERENCE else claim ^ mine) for claim in claims):
         return _role(role, STATE_MISMATCH, "1 owner", [manifest_key], CODE_EVIDENCE_FOREIGN)
-    unaccounted = sorted(set(keys) - named - {manifest_key})
-    if unaccounted:
-        return _role(role, STATE_MISMATCH, "0..N files", unaccounted, CODE_EVIDENCE_UNACCOUNTED)
+    facts.evidence.extend(records)
     return _role(role, STATE_RESOLVED, "1 dir", [manifest_key])
 
 
-def _reference_records(payload: dict[str, Any], directory: str) -> tuple[list[tuple[str | None, ...]], set[str]]:
-    """`(per-state LUID claims, named package keys)` for a `reference/manifest.json`.
+def _evidence_path(facts: _Facts, directory: str, value: Any) -> tuple[str, Path]:
+    """Accept a canonical role-relative spelling only when its exact key was walked by S1."""
+    if not isinstance(value, str) or not pfs.is_canonical_key(value):
+        raise _IdentityError(CODE_EVIDENCE_PATH)
+    key = f"{directory}/{value}"
+    if key not in facts.walked:
+        raise _IdentityError(CODE_EVIDENCE_PATH)
+    return key, facts.walked[key]
 
-    The manifest's own shape: ``dashboards[].states[].image`` names the render, and a workbook LUID
-    may be claimed at manifest, entry or state scope. Every claim is collected, because a narrower
-    scope is not an override - `reference_evidence._reference_workbook_luid` decided that already.
-    """
-    manifest_claim = _declared_string(payload, "workbook_luid") or _declared_string(payload, "source_workbook_luid")
-    records: list[tuple[str | None, ...]] = []
+
+def _evidence_claims(*mappings: dict[str, Any]) -> set[str]:
+    return {
+        claim
+        for mapping in mappings
+        for key in ("workbook_luid", "source_workbook_luid")
+        if (claim := _luid(mapping, key)) is not None
+    }
+
+
+def _render_types(record: dict[str, Any]) -> None:
+    """Check path/digest claim types, leaving dimension formats and grades to the existing reader."""
+    for key in ("provider", "sha256", "path", "retained_path", "image", "view_type", "object_type"):
+        _declared_string(record, key)
+    for value in (record.get("bytes"),):
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+            raise _IdentityError(CODE_IDENTITY_TYPE)
+    if "capabilities" in record and (
+        not isinstance(record["capabilities"], list) or any(not isinstance(cap, str) for cap in record["capabilities"])
+    ):
+        raise _IdentityError(CODE_IDENTITY_TYPE)
+
+
+def _reference_records(
+    facts: _Facts, payload: dict[str, Any], directory: str
+) -> tuple[list[PackageEvidence], set[str], list[set[str]]]:
+    """Every reference state, every ownership claim, and only walk-produced image paths."""
+    records: list[PackageEvidence] = []
     named: set[str] = set()
-    for entry in payload.get("dashboards") or []:
-        if not isinstance(entry, dict):
-            continue
-        entry_claim = _declared_string(entry, "workbook_luid") or _declared_string(entry, "source_workbook_luid")
-        for state in entry.get("states") or []:
-            if not isinstance(state, dict):
-                continue
-            state_claim = _declared_string(state, "workbook_luid") or _declared_string(state, "source_workbook_luid")
-            records.append((manifest_claim, entry_claim, state_claim))
-            image = _declared_string(state, "image")
-            if image:
-                named.add(f"{directory}/{image.lstrip('/')}")
-    return records, named
+    claims: list[set[str]] = []
+    entries = payload.get("dashboards", [])
+    if not _object_rows(entries):
+        raise _IdentityError(CODE_IDENTITY_TYPE)
+    for entry in entries:
+        _declared_string(entry, "name")
+        states = entry.get("states", [])
+        if not _object_rows(states):
+            raise _IdentityError(CODE_IDENTITY_TYPE)
+        for state in states:
+            _render_types(state)
+            claims.append(_evidence_claims(payload, entry, state))
+            key, path = _evidence_path(facts, directory, state.get("image"))
+            named.add(key)
+            records.append(PackageEvidence("reference", payload, entry, state, path))
+    return records, named, claims
 
 
-def _oracle_records(payload: dict[str, Any], directory: str) -> tuple[list[tuple[str | None, ...]], set[str]]:
-    """`(per-view LUID claims, named package keys)` for a packaged `oracle-manifest.json`."""
-    records: list[tuple[str | None, ...]] = []
+def _oracle_paths(facts: _Facts, view: dict[str, Any], directory: str) -> tuple[dict[str, Any], Path | None, set[str]]:
+    """Check all four leg paths; choose a render only from the already-walked candidates."""
     named: set[str] = set()
-    for view in payload.get("views") or []:
-        if not isinstance(view, dict):
+    selected: dict[str, Any] = {}
+    selected_path = None
+    for leg in ("image", "svg", "pdf", "data"):
+        payload_leg = view.get(leg)
+        if payload_leg is None:
             continue
-        records.append((_declared_string(view, "workbook_luid"),))
-        for leg in ("image", "svg", "pdf", "data"):
-            payload_leg = view.get(leg)
-            if not isinstance(payload_leg, dict):
+        if not isinstance(payload_leg, dict):
+            raise _IdentityError(CODE_IDENTITY_TYPE)
+        _render_types(payload_leg)
+        for field_name in ("path", "retained_path"):
+            value = payload_leg.get(field_name)
+            if value is None:
                 continue
-            for entry in (payload_leg.get("path"), payload_leg.get("retained_path")):
-                if isinstance(entry, str) and entry.strip():
-                    named.add(f"{directory}/{entry.lstrip('/')}")
-    return records, named
+            key, path = _evidence_path(facts, directory, value)
+            named.add(key)
+            if field_name == "path" and leg != "data" and payload_leg.get("status") == "ok" and selected_path is None:
+                selected, selected_path = payload_leg, path
+    return selected, selected_path, named
+
+
+def _oracle_records(
+    facts: _Facts, payload: dict[str, Any], directory: str
+) -> tuple[list[PackageEvidence], set[str], list[set[str]]]:
+    """Every oracle row and declared leg path, including retained and non-render data legs."""
+    records: list[PackageEvidence] = []
+    named: set[str] = set()
+    claims: list[set[str]] = []
+    views = payload.get("views", [])
+    if not _object_rows(views):
+        raise _IdentityError(CODE_IDENTITY_TYPE)
+    for view in views:
+        for key in ("view_name", "view_url_name", "view_type", "workbook_name"):
+            _declared_string(view, key)
+        claim = _evidence_claims(payload, view)
+        if _luid(view, "workbook_luid") is None:
+            raise _IdentityError(CODE_EVIDENCE_FOREIGN)
+        claims.append(claim)
+        selected, selected_path, paths = _oracle_paths(facts, view, directory)
+        named.update(paths)
+        records.append(PackageEvidence("oracle", payload, view, selected, selected_path))
+    return records, named, claims
 
 
 # ---------------------------------------------------------------------------------------------
@@ -865,7 +1012,7 @@ def _oracle_records(payload: dict[str, Any], directory: str) -> tuple[list[tuple
 # ---------------------------------------------------------------------------------------------
 
 
-def _topology(facts: _Facts, consumed: Mapping[str, int]) -> str:
+def _topology(facts: _Facts) -> str:
     """What SHAPE this package is - decided from the engine's kind plus the spec's own dependencies.
 
     A datasource package that also emits a self-service report is still a datasource: kind comes from
@@ -874,45 +1021,87 @@ def _topology(facts: _Facts, consumed: Mapping[str, int]) -> str:
     """
     if facts.kind == KIND_WORKBOOK:
         return TOPOLOGY_PUBLISHED_CONSUMER if facts.declared_dependencies else TOPOLOGY_OWNED_MODEL
-    return TOPOLOGY_PUBLISHED_PROVIDER if consumed.get(facts.unit) else TOPOLOGY_STANDALONE_DATASOURCE
+    return TOPOLOGY_STANDALONE_DATASOURCE
 
 
-def _provider_matches(
-    dependency: tuple[str | None, str | None], providers: Sequence[_Facts]
-) -> tuple[list[_Facts], list[_Facts]]:
+def _provider_matches(dependency: DeclaredDependency, providers: Sequence[_Facts]) -> tuple[list[_Facts], list[_Facts]]:
     """`(matched by datasource LUID, matched by exact published key)` across the cohort.
 
     Both axes are computed even though only one may be USED, because the disagreement between them
     is itself a finding: a package that answers the exact `<site>/<name>` key while carrying a
     different datasource LUID is not a near-miss provider, it is a contradiction.
     """
-    luid, key = dependency
+    luid, key = dependency.luid, dependency.key
     by_luid = [p for p in providers if luid and p.source_luid and p.source_luid.casefold() == luid.casefold()]
-    by_key = [p for p in providers if key and p.published_key and p.published_key.casefold() == key.casefold()]
+    by_key = [p for p in providers if key is not None and p.published_key == key]
     return by_luid, by_key
 
 
+def _binding_matches(facts: _Facts, provider: _Facts) -> bool:
+    """Compare the strict walked PBIR and summary with the provider's complete resolved model path.
+
+    Normalisation is lexical: it compares addresses without opening or following the binding target.
+    Only the provider's already-resolved declared model may satisfy the comparison.
+    """
+    report_role = next((row for row in facts.roles if row.role == ROLE_FABRIC_REPORT), None)
+    if report_role is None or report_role.state != STATE_RESOLVED or provider.model_role is None:
+        return False
+    pbir_key = f"{report_role.paths[0]}/definition.pbir"
+    payload = facts.json(pbir_key)
+    summary = facts.manifest.get("model_binding")
+    if not isinstance(payload, dict) or not isinstance(summary, dict):
+        return False
+    reference = payload.get("datasetReference")
+    by_path = reference.get("byPath") if isinstance(reference, dict) else None
+    if not isinstance(reference, dict) or set(reference) != {"byPath"} or not isinstance(by_path, dict):
+        return False
+    declared = _declared_string(by_path, "path")
+    if (
+        not declared
+        or "\\" in declared
+        or declared.startswith("/")
+        or any(part not in (".", "..") and not pfs.is_canonical_key(part) for part in declared.split("/"))
+    ):
+        return False
+    if (
+        summary.get("kind") != "byPath"
+        or summary.get("path") != declared
+        or not isinstance(summary.get("resolves_in_package"), bool)
+    ):
+        return False
+    actual = os.path.normcase(os.path.abspath(facts.walked[pbir_key].parent / declared))
+    expected = os.path.normcase(os.path.abspath(provider.root / provider.model_role))
+    local = os.path.normcase(os.path.abspath(facts.root)) == os.path.normcase(os.path.abspath(provider.root))
+    return actual == expected and summary["resolves_in_package"] == local
+
+
 def _dependency(  # pylint: disable=too-many-return-statements
-    facts: _Facts, dependency: tuple[str | None, str | None], providers: Sequence[_Facts]
+    facts: _Facts, dependency: DeclaredDependency, providers: Sequence[_Facts]
 ) -> DependencyResult:
     """Resolve one published edge to exactly one provider package, and check the report binds to it."""
-    luid, key = dependency
+    luid, key = dependency.luid, dependency.key
+    if dependency.code is not None:
+        return DependencyResult(STATE_MISMATCH, luid, key, code=dependency.code)
     by_luid, by_key = _provider_matches(dependency, providers)
     if luid is not None and not by_luid and by_key:
         named = by_key[0].unit if len(by_key) == 1 else None
         return DependencyResult(STATE_MISMATCH, luid, key, named, code=CODE_PROVIDER_LUID_CONTRADICTION)
-    matches = by_luid if luid is not None else by_key
+    matches = by_luid if luid is not None else [provider for provider in by_key if provider.source_luid is None]
+    if luid is None and not matches and by_key:
+        return DependencyResult(STATE_MISMATCH, luid, key, code=CODE_PROVIDER_LUID_CONTRADICTION)
     if not matches:
         return DependencyResult(STATE_MISSING, luid, key, code=CODE_PROVIDER_MISSING)
     if len(matches) > 1:
         return DependencyResult(STATE_AMBIGUOUS, luid, key, code=CODE_PROVIDER_AMBIGUOUS)
     provider = matches[0]
+    if key is not None and provider.published_key is not None and provider.published_key != key:
+        return DependencyResult(STATE_MISMATCH, luid, key, provider.unit, code=CODE_PROVIDER_KEY_CONTRADICTION)
+    provider.topology = TOPOLOGY_PUBLISHED_PROVIDER
     if provider.model_role is None:
         return DependencyResult(STATE_MISSING, luid, key, provider.unit, code=CODE_PROVIDER_MODEL)
-    binding = facts.manifest.get("model_binding") if isinstance(facts.manifest.get("model_binding"), dict) else {}
-    declared = _declared_string(binding, "path")
-    target = PurePosixPath(declared).name if declared else None
-    if binding.get("kind") != "byPath" or target != PurePosixPath(provider.model_role).name:
+    if not provider.provider_ready:
+        return DependencyResult(STATE_MISMATCH, luid, key, provider.unit, code=CODE_PROVIDER_BLOCKED)
+    if not _binding_matches(facts, provider):
         return DependencyResult(STATE_MISMATCH, luid, key, provider.unit, provider.model_role, CODE_PROVIDER_BINDING)
     return DependencyResult(STATE_RESOLVED, luid, key, provider.unit, provider.model_role)
 
@@ -927,24 +1116,25 @@ def verify_phase1_role_identity(
 ) -> tuple[Phase1RoleIdentityResult, ...]:
     """One verdict per supplied root, resolved as a COHORT.
 
-    ``verified`` may carry S1 clearances a caller has already computed; each is used only for the
-    root it was BOUND to (see :class:`VerifiedPackage`), and any root without a matching clearance is
-    verified here. A caller therefore cannot substitute one package's clearance for another's.
+    ``verified`` is retained for callers carrying earlier S1 observations. It NEVER skips the fresh
+    no-follow S1 verification at this seam: names, bytes and roots can all change after an observation.
 
     ⚠️ Returns results; raises nothing for a bad package. Every refusal - unreadable manifest,
     missing role, contradictory LUID, absent provider - is a typed ``BLOCKED`` verdict, because a
     traceback out of a gate carries the host paths these verdicts exist to keep out of issues.
     """
-    cleared = {str(entry.root): entry for entry in verified}
+    del verified
     facts: list[_Facts] = []
     results: dict[int, Phase1RoleIdentityResult] = {}
     for index, root in enumerate(package_roots):
-        clearance = cleared.get(str(root)) or verify_s1(root)
-        outcome = _facts(root, clearance)
+        clearance = verify_s1(root)
+        try:
+            outcome = _facts(root, clearance)
+        except _IdentityError as exc:
+            outcome = _blocked(clearance.classification.unit_name or None, None, str(exc))
         if isinstance(outcome, Phase1RoleIdentityResult):
             results[index] = outcome
             continue
-        outcome.model_role = next(iter(_fabric_directories(outcome, ".SemanticModel")), None)  # pylint: disable=attribute-defined-outside-init
         facts.append(outcome)
     _resolve_cohort(facts)
     ordered: list[Phase1RoleIdentityResult] = []
@@ -959,22 +1149,24 @@ def verify_phase1_role_identity(
 
 
 def _resolve_cohort(facts: Sequence[_Facts]) -> None:
-    """Assign every package its topology and (for a consumer) its resolved provider edges."""
+    """Assess every local role before any consumer may resolve against a provider."""
     providers = [entry for entry in facts if entry.kind == KIND_DATASOURCE]
     consumers = [entry for entry in facts if entry.kind == KIND_WORKBOOK and entry.declared_dependencies]
     for entry in facts:
-        _identify(entry)
-    consumed: dict[str, int] = {}
-    edges: dict[str, list[DependencyResult]] = {}
+        entry.topology = _topology(entry)
+        try:
+            _identify(entry)
+            _assess_roles(entry)
+        except _IdentityError as exc:
+            entry.blockers.append(str(exc))
+        entry.provider_ready = not entry.blockers and not any(role.blocks for role in entry.roles)
     for consumer in consumers:
-        rows = [_dependency(consumer, dependency, providers) for dependency in consumer.declared_dependencies]
-        edges[str(consumer.root)] = rows
-        for row in rows:
-            if row.provider_unit:
-                consumed[row.provider_unit] = consumed.get(row.provider_unit, 0) + 1
-    for entry in facts:
-        entry.topology = _topology(entry, consumed)
-        entry.dependencies = edges.get(str(entry.root), [])
+        for dependency in consumer.declared_dependencies:
+            try:
+                row = _dependency(consumer, dependency, providers)
+            except _IdentityError as exc:
+                row = DependencyResult(STATE_MISMATCH, dependency.luid, dependency.key, code=str(exc))
+            consumer.dependencies.append(row)
 
 
 def _identify(facts: _Facts) -> None:
@@ -1023,6 +1215,7 @@ def _required_fabric(facts: _Facts, topology: str) -> tuple[list[RoleResult], di
         roles.append(model_role)
         if model_role.state == STATE_RESOLVED and declared_model:
             required[ROLE_FABRIC_MODEL] = declared_model
+            facts.model_role = declared_model
     if datasource and not pbip:
         roles.append(_role(ROLE_PBIP_ENTRYPOINT, STATE_NOT_APPLICABLE, "0..1 file", []))
     elif len(pbip) == 1:
@@ -1041,9 +1234,10 @@ def _required_fabric(facts: _Facts, topology: str) -> tuple[list[RoleResult], di
     return roles, required
 
 
-def _verdict(facts: _Facts) -> Phase1RoleIdentityResult:
-    """Fold one package's roles, identity and dependencies into its verdict."""
-    topology = facts.topology or _topology(facts, {})
+def _assess_roles(facts: _Facts) -> None:
+    """Finish local roles once, before computing provider eligibility or published edges."""
+    topology = facts.topology or _topology(facts)
+    facts.json(_declared_string(facts.artifacts, "migration_spec_schema"))
     roles: list[RoleResult] = [
         _package_scope_role(facts),
         _source_asset_role(facts),
@@ -1072,6 +1266,19 @@ def _verdict(facts: _Facts) -> Phase1RoleIdentityResult:
     limitations.extend(
         role.code for role in roles if role.state == STATE_NOT_APPLICABLE and role.code == LIMITATION_LOCAL_SOURCE
     )
+    facts.roles = roles
+    facts.limitations = limitations
+    if topology != TOPOLOGY_PUBLISHED_CONSUMER and any(
+        row.role == ROLE_FABRIC_REPORT and row.state == STATE_RESOLVED for row in roles
+    ):
+        if not _binding_matches(facts, facts):
+            facts.blockers.append(CODE_PROVIDER_BINDING)
+
+
+def _verdict(facts: _Facts) -> Phase1RoleIdentityResult:
+    """Fold assessed local roles and the cohort's dependency rows without dropping either."""
+    topology = facts.topology or _topology(facts)
+    roles = list(facts.roles)
     for row in facts.dependencies:
         roles.append(
             _role(
@@ -1099,19 +1306,45 @@ def _verdict(facts: _Facts) -> Phase1RoleIdentityResult:
         ),
         dependencies=tuple(facts.dependencies),
         blockers=tuple(dict.fromkeys(blockers)),
-        authorized_limitations=tuple(dict.fromkeys(limitations)),
+        authorized_limitations=tuple(dict.fromkeys(facts.limitations)),
+        evidence=tuple(facts.evidence) if not blockers else (),
     )
 
 
 def _evidence_and_handover_roles(facts: _Facts, topology: str) -> list[RoleResult]:
     """Handover and the Tableau evidence roles - all four EARNED N/A for a datasource package."""
     if topology in (TOPOLOGY_STANDALONE_DATASOURCE, TOPOLOGY_PUBLISHED_PROVIDER):
-        return [
-            _role(ROLE_HANDOVER, STATE_NOT_APPLICABLE, "0 file", []),
-            _role(ROLE_TABLEAU_REFERENCE, STATE_NOT_APPLICABLE, "0 dir", []),
-            _role(ROLE_TABLEAU_ORACLE, STATE_NOT_APPLICABLE, "0 dir", []),
-            _role(ROLE_VISUAL_EVIDENCE, STATE_NOT_APPLICABLE, "0 provider", []),
-        ]
+        roles = []
+        for name, declaration, prefixes in (
+            (ROLE_HANDOVER, "handover", ("handover",)),
+            (ROLE_TABLEAU_REFERENCE, "reference", ("reference",)),
+            (ROLE_TABLEAU_ORACLE, "oracle", ORACLE_DIRECTORIES),
+        ):
+            paths = [key for prefix in prefixes for key in facts.under(prefix)]
+            present = facts.artifacts.get(declaration) is not None or bool(paths)
+            if name == ROLE_TABLEAU_ORACLE:
+                oracle = facts.manifest.get("oracle", {})
+                present = present or not isinstance(oracle, dict) or oracle.get("objects") not in (None, [])
+            roles.append(
+                _role(
+                    name,
+                    STATE_MISMATCH if present else STATE_NOT_APPLICABLE,
+                    "0 files",
+                    paths,
+                    CODE_INAPPLICABLE_PRESENT if present else None,
+                )
+            )
+        foreign_evidence = any(row.blocks for row in roles if row.role != ROLE_HANDOVER)
+        roles.append(
+            _role(
+                ROLE_VISUAL_EVIDENCE,
+                STATE_MISMATCH if foreign_evidence else STATE_NOT_APPLICABLE,
+                "0 providers",
+                [],
+                CODE_INAPPLICABLE_PRESENT if foreign_evidence else None,
+            )
+        )
+        return roles
     reference = _evidence_role(facts, ROLE_TABLEAU_REFERENCE, "reference", "manifest.json")
     oracle = _oracle_role(facts)
     resolved = [row for row in (reference, oracle) if row.state == STATE_RESOLVED]
@@ -1136,6 +1369,8 @@ def _oracle_role(facts: _Facts) -> RoleResult:
     present = [name for name in ORACLE_DIRECTORIES if facts.under(name)]
     if len(present) > 1:
         return _role(ROLE_TABLEAU_ORACLE, STATE_AMBIGUOUS, "0..1 dir", present, CODE_ROLE_AMBIGUOUS)
-    if not present:
+    if not present and facts.artifacts.get("oracle") is None:
         return _role(ROLE_TABLEAU_ORACLE, STATE_NOT_APPLICABLE, "0..1 dir", [])
+    if not present:
+        return _role(ROLE_TABLEAU_ORACLE, STATE_MISMATCH, "0..1 dir", [], CODE_ROLE_NOT_VERIFIED)
     return _evidence_role(facts, ROLE_TABLEAU_ORACLE, present[0], "oracle-manifest.json")

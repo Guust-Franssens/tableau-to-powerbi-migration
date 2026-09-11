@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import struct
 import subprocess
@@ -2036,20 +2037,128 @@ def test_the_role_verifier_runs_ONCE_over_the_whole_cohort(tmp_path: Path, monke
     assert cohorts == [["Minimal", "Minimal"]], "the cohort must be verified in one call"
 
 
-def test_a_clean_first_package_does_not_hide_a_role_blocked_SECOND_one(tmp_path: Path) -> None:
-    """Same list-of-blocks discipline as `package_integrity`, and for the same measured reason."""
+@pytest.mark.parametrize("blocked_first", [False, True], ids=["clean-blocked", "blocked-clean"])
+def test_a_role_block_remains_blocking_in_either_target_order(tmp_path: Path, blocked_first: bool) -> None:
+    """Neither first-result-wins nor last-result-wins may replace blocking precedence."""
     clean = _packaged_unit(tmp_path / "first")
     blocked = _packaged_unit(tmp_path / "second")
     manifest = json.loads((blocked / bundle_corpus.PACKAGE_MARKER).read_text(encoding="utf-8"))
     manifest["artifacts"]["asset"] = None
     (blocked / bundle_corpus.PACKAGE_MARKER).write_text(json.dumps(manifest), encoding="utf-8")
 
-    merged = crr._merge_scans([crr.scan(clean), crr.scan(blocked)])
+    reports = [crr.scan(clean), crr.scan(blocked)]
+    merged = crr._merge_scans(list(reversed(reports)) if blocked_first else reports)
 
     blocks = merged["role_identity"]
     assert merged["status"] == crr.STATUS_FINDINGS
     assert [block["ordinal"] for block in blocks] == [0, 1]
-    assert [block["verdict"] for block in blocks] == ["START_READY", "BLOCKED"]
+    assert [block["verdict"] for block in blocks] == (
+        ["BLOCKED", "START_READY"] if blocked_first else ["START_READY", "BLOCKED"]
+    )
+    refusal = blocks[0 if blocked_first else 1]
+    source = next(row for row in refusal["roles"] if row["role"] == "source_asset")
+    assert source["state"] == "missing"
+    assert source["code"] == "role_declaration_absent"
+    assert "role_declaration_absent" in refusal["blockers"]
+
+
+@pytest.mark.parametrize("origin", ["reference", "oracle"])
+def test_package_evidence_cannot_read_an_external_render_at_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, origin: str
+) -> None:
+    package = _packaged_unit(tmp_path)
+    oracle = package / "_oracle"
+    payload = json.loads((oracle / "oracle-manifest.json").read_text(encoding="utf-8"))
+    leg = payload["views"][0]["image"]
+    outside = tmp_path / "outside-secret.png"
+    (oracle / leg["path"]).rename(outside)
+    if origin == "oracle":
+        leg["path"] = Path(os.path.relpath(outside, oracle)).as_posix()
+        (oracle / "oracle-manifest.json").write_text(json.dumps(payload), encoding="utf-8")
+    else:
+        shutil.rmtree(oracle)
+        reference = package / "reference"
+        reference.mkdir()
+        image = Path(os.path.relpath(outside, reference)).as_posix()
+        payload = {
+            "source_workbook_sha256": hashlib.sha256((package / "assets" / "Minimal.twb").read_bytes()).hexdigest(),
+            "dashboards": [
+                {
+                    "name": "Revenue",
+                    "view_type": "worksheet",
+                    "states": [
+                        {
+                            "provider": "manual",
+                            "capabilities": ["layout_grade", "text_grade", "validation_grade"],
+                            "image": image,
+                            "sha256": leg["sha256"],
+                            "bytes": leg["bytes"],
+                            "dimensions": leg["dimensions_px"],
+                        }
+                    ],
+                }
+            ],
+        }
+        (reference / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
+    seal_package(package, "Minimal")
+    opened = []
+    original = Path.read_bytes
+
+    def tracked(path: Path) -> bytes:
+        if path.resolve() == outside.resolve():
+            opened.append(path)
+        return original(path)
+
+    monkeypatch.setattr(Path, "read_bytes", tracked)
+
+    report = crr.scan(package)
+
+    assert report["status"] == "FINDINGS"
+    block = report["role_identity"][0]
+    evidence_role = next(row for row in block["roles"] if row["role"] == f"tableau_{origin}")
+    assert evidence_role["code"] == "evidence_path_not_verified"
+    assert report["pages_expected"] == report["evidence_records"] == 0
+    assert opened == [], "no render read outside the package is permitted, even if the bytes match"
+    assert str(outside) not in json.dumps(report)
+
+
+def test_package_evidence_consumes_only_walked_paths_and_ignores_external_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = _packaged_unit(tmp_path)
+    outside = tmp_path / "external-evidence"
+    outside.mkdir()
+    walked = {}
+    renders = []
+    discoveries = []
+    original_walk = package_filesystem.walk_package
+    original_build = crr.Evidence.build.__func__
+    original_collect = crr._collect_evidence
+
+    def walk(root: Path):
+        files, findings, empty = original_walk(root)
+        walked.update(files)
+        return files, findings, empty
+
+    def build(cls, **kwargs):
+        renders.append(kwargs["render_path"])
+        return original_build(cls, **kwargs)
+
+    def collect(*args, **kwargs):
+        discoveries.append(True)
+        return original_collect(*args, **kwargs)
+
+    monkeypatch.setattr(package_filesystem, "walk_package", walk)
+    monkeypatch.setattr(crr.Evidence, "build", classmethod(build))
+    monkeypatch.setattr(crr, "_collect_evidence", collect)
+
+    report = crr.scan(package, reference_dir=outside, oracle_dir=outside)
+
+    assert report["status"] == "READY"
+    assert report["pages_ready"] == report["pages_expected"] == 1
+    assert discoveries == [], "package evidence must not be rediscovered or overridden"
+    assert len(renders) == 1
+    assert any(renders[0] is path for path in walked.values()), "the renderer must receive the walk's own Path"
 
 
 def test_the_role_refusal_carries_stable_codes_and_no_host_path(tmp_path: Path) -> None:

@@ -76,9 +76,11 @@ from typing import Any
 from xml.etree import ElementTree
 from bundle_corpus import TargetClassification, classify_target, evidence_dirs, shipping_reports
 import object_identity as oid
+import reference_evidence as evidence_reader
 from object_identity import AMBIGUOUS
 from package_filesystem import PackageFilesystemResult, verify_package
 from package_role_identity import (
+    PackageEvidence,
     Phase1RoleIdentityResult,
     VerifiedPackage,
     verify_phase1_role_identity,
@@ -896,6 +898,65 @@ def _collect_evidence(
     return ref_ok + orc_ok, ref_bad + orc_bad
 
 
+def _collect_package_evidence(records: tuple[PackageEvidence, ...]) -> tuple[list[Evidence], list[RejectedEvidence]]:
+    """Grade S2's assessed records using only the render Paths its no-follow walk produced.
+
+    The ordinary collectors rediscover directories and join untrusted record paths. Packages instead
+    pass assessed metadata straight to the same Evidence builder; no package or external manifest is
+    reopened, and --reference/--oracle cannot override the declared package roles.
+    """
+    built: list[Evidence | RejectedEvidence] = []
+    for record in records:
+        entry, state, manifest = record.entry, record.state, record.manifest
+        reference = record.origin == "reference"
+        name = (
+            str(entry.get("name") or "")
+            if reference
+            else str(entry.get("view_name") or entry.get("view_url_name") or "")
+        )
+        if record.render_path is None:
+            built.append(RejectedEvidence(name, record.origin, None, "no render leg reported status ok"))
+            continue
+        dimensions = state.get("dimensions" if reference else "dimensions_px", {})
+        dimensions = dimensions if isinstance(dimensions, dict) else {}
+        # Reuse the evidence reader's metadata rules, without invoking its path-joining collectors.
+        kind = (
+            evidence_reader._entry_scope({**entry, **state}, state.get("provider"))  # pylint: disable=protected-access
+            if reference
+            else evidence_reader._oracle_view_kind(entry)  # pylint: disable=protected-access
+        )
+        luid = (
+            evidence_reader._reference_workbook_luid(entry, state, manifest)  # pylint: disable=protected-access
+            if reference
+            else oid.agreed_luid(entry.get("workbook_luid"), manifest.get("workbook_luid"))
+        )
+        built.append(
+            Evidence.build(
+                name=name,
+                kind=kind,
+                capabilities=state.get("capabilities")
+                if reference
+                else [evidence_reader.CAP_LAYOUT, evidence_reader.CAP_TEXT],
+                origin=record.origin,
+                provider=str(state.get("provider") or "") if reference else "oracle_capture",
+                render_path=record.render_path,
+                recorded=evidence_reader.RecordedFacts(
+                    sha256=state.get("sha256"),
+                    byte_size=state.get("bytes"),
+                    width=dimensions.get("w"),
+                    height=dimensions.get("h"),
+                ),
+                workbook_sha=manifest.get("source_workbook_sha256") if reference else None,
+                workbook_luid=luid,
+                workbook_name=None if reference else entry.get("workbook_name"),
+            )
+        )
+    return (
+        [item for item in built if isinstance(item, Evidence)],
+        [item for item in built if isinstance(item, RejectedEvidence)],
+    )
+
+
 def _unsafe_target(root: Path, classification: TargetClassification) -> dict[str, Any]:
     """The verdict for a target whose boundary could not be established without following a link.
 
@@ -1078,6 +1139,7 @@ def scan(  # pylint: disable=too-many-arguments
         reference_dir=reference_dir,
         oracle_dir=oracle_dir,
         require_validation_grade=require_validation_grade,
+        package_roles=roles,
     )
     if integrity is not None:
         report["package_integrity"] = [_integrity_block(classification, integrity)]
@@ -1132,13 +1194,14 @@ def _precheck_cohort(paths: list[Path]) -> list[_Prechecked]:
     ]
 
 
-def _scan_safe_target(
+def _scan_safe_target(  # pylint: disable=too-many-arguments
     root: Path,
     *,
     explicit_source: Path | None,
     reference_dir: Path | None,
     oracle_dir: Path | None,
     require_validation_grade: bool,
+    package_roles: Phase1RoleIdentityResult | None = None,
 ) -> dict[str, Any]:
     """The existing scan of a target that is safe AND (if a package) verified clean.
 
@@ -1147,7 +1210,11 @@ def _scan_safe_target(
     in the caller, which is where it is asserted.
     """
     root = root.resolve()
-    evidence, rejected = _collect_evidence(root, reference_dir, oracle_dir)
+    evidence, rejected = (
+        _collect_package_evidence(package_roles.evidence)
+        if package_roles is not None
+        else _collect_evidence(root, reference_dir, oracle_dir)
+    )
     engine_report = _engine_report(root)
     reports = shipping_reports(root)
 

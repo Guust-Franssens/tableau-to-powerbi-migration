@@ -80,6 +80,20 @@ Conventions: Python first (`.ps1` only where Windows-specific APIs make it unavo
 | `capture_powerbi_pages.py` | Captures every Power BI report page by re-screenshotting until a frame stays byte-identical for a configurable dwell. Use `--pages <id>[,<id>...]` to capture exact PBIR page folder IDs only; an unknown ID exits 2 rather than silently succeeding. This is a heuristic for progressive visuals (especially `azureMap`): a plateau longer than `--stable-seconds` can still pass, but a single slow/early capture no longer counts as evidence. | Before trusting Desktop screenshots for report sign-off or validator evidence |
 | `build_synthetic_reference.py` | Renders an **honestly-labeled SYNTHETIC** reference (HTML/CSS bar chart from real queried data, screenshotted via Playwright) when no real Tableau capture exists - e.g. the `_probe-lab/` credential-gate fixtures, whose `.twb` is a generated skeleton with nothing to screenshot. Tagged `provider: synthetic_data_chart`, `capabilities: []`, `synthetic: true` - never claims layout/validation fidelity. Deliberately **not** wired into `capture_tableau_reference.py`'s fail-closed provider chain (see its docstring). | manual / test-harness use only |
 
+### S2 package preparation
+
+`package_unit.py --brief` requires **one selected unit**; use a separate invocation and brief per
+unit, not one brief broadcast over an estate. The typed unit/scope and whole-message host-location
+and credential containment checks run before assembly. Unsafe text is refused without copying,
+redacting or echoing it. Datasource resolution retains the unique selecting input-manifest row with
+its walked path and validates that row's basename/path/digest; ambiguous rows or candidates refuse.
+
+`package_role_identity.py` re-runs no-follow S1 at the S2 entry seam rather than trusting an earlier
+clearance. It strictly reads identity JSON, preserves every dependency row, requires S2-clean
+providers and checks actual PBIR bindings to complete declared model roles. Evidence consumers receive
+only exact walked paths under the evidence role. Datasource N/A roles require verified absence.
+The complete role contract and controls are in [reference readiness](../docs/reference-readiness.md).
+
 ## Forwarding shims into skill bundles
 
 These four are **four-line `runpy` shims**. The real scripts live in the skill bundle that owns them,

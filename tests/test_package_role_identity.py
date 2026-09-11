@@ -283,7 +283,7 @@ def test_a_shared_provider_and_its_consumer_resolve_as_one_cohort(tmp_path: Path
     consumer = workbook_package(
         tmp_path / "Revenue",
         published={"id": DS_UNIT, "site": "sales-site", "key": PUBLISHED_KEY, "luid": DS_LUID},
-        binding=f"../{DS_UNIT}.SemanticModel",
+        binding=f"../../../{DS_UNIT}/fabric/{DS_UNIT}.SemanticModel",
     )
 
     provider_result, consumer_result = pri.verify_phase1_role_identity([provider, consumer])
@@ -688,7 +688,7 @@ def test_a_provider_is_matched_by_the_exact_published_key_when_no_luid_is_availa
     consumer = workbook_package(
         tmp_path / "Revenue",
         published={"id": DS_UNIT, "site": "sales-site", "key": PUBLISHED_KEY},
-        binding=f"../{DS_UNIT}.SemanticModel",
+        binding=f"../../../{DS_UNIT}/fabric/{DS_UNIT}.SemanticModel",
     )
 
     results = pri.verify_phase1_role_identity([provider, consumer])
@@ -709,10 +709,10 @@ def test_a_provider_named_only_by_a_DISPLAY_name_never_resolves(tmp_path: Path) 
 
     results = pri.verify_phase1_role_identity([provider, consumer])
 
-    # No stable identity was declared at all, so there is no dependency to resolve - and the
-    # consumer's own model role is therefore what it must answer for.
-    assert results[1].topology == pri.TOPOLOGY_OWNED_MODEL
-    assert not results[1].dependencies
+    assert results[1].topology == pri.TOPOLOGY_PUBLISHED_CONSUMER
+    assert len(results[1].dependencies) == 1
+    assert results[1].dependencies[0].code == "published_dependency_identity_missing"
+    assert results[1].verdict == "BLOCKED"
 
 
 def test_a_provider_whose_only_agreement_is_its_NAME_is_still_missing(tmp_path: Path) -> None:
@@ -775,15 +775,23 @@ def test_a_clearance_for_a_DIFFERENT_root_is_never_applied(tmp_path: Path) -> No
     assert result.blockers == (pri.CODE_INTEGRITY_NOT_CLEAN,), "a foreign clearance was accepted"
 
 
-def test_a_bound_clearance_is_reused_rather_than_recomputed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The other direction: a clearance for THIS root spares the second hash of a large package."""
+def test_a_bound_clearance_is_reverified_once_at_the_S2_seam(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An earlier clearance is an observation, not authority to read a later revision."""
     package = workbook_package(tmp_path / "Revenue")
     clearance = pri.verify_s1(package)
-    monkeypatch.setattr(pri, "verify_s1", lambda root: pytest.fail(f"S1 was recomputed for {root.name}"))
+    calls = []
+    original = pri.verify_s1
+
+    def counted(root: Path) -> pri.VerifiedPackage:
+        calls.append(root)
+        return original(root)
+
+    monkeypatch.setattr(pri, "verify_s1", counted)
 
     result = pri.verify_phase1_role_identity([package], verified=[clearance])[0]
 
     assert result.verdict == pri.VERDICT_START_READY, result.blockers
+    assert calls == [package], "S2 must verify the current root and bytes exactly once"
 
 
 def test_the_verifier_returns_no_source_path_anywhere_in_its_result(tmp_path: Path) -> None:

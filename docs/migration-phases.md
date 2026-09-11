@@ -187,12 +187,18 @@ shipped `artifacts.asset: null`, no `migration-spec.json` and an empty provenanc
 exit 0. It now carries its `.tds`/`.tdsx`, its parsed spec, and exactly one SHA-matching provenance
 row carrying the **datasource** LUID (a different namespace from a workbook LUID, never mixed). A
 local `.tds` with no LUID prefix keeps its row and earns `not_applicable` for the server LUID.
+Resolution retains the unique selecting `input_manifest.json` row with its no-follow walked source
+path. That exact row's basename, staged path and declared digest are checked; duplicate matching rows
+or distinct existing candidates refuse rather than choosing the first.
 
 ⚠️ **The brief is COPIED, never referenced.** The dispatcher's `migration-brief.md` lives outside the
 package and is git-ignored, so a stateless agent handed only the package could not read the one
 document saying what the migration is for. Recording its path instead would disclose a host location
 and prove no availability, so `--brief` copies the bytes under a fixed role name. A package written
 without one is blocked by the entry gate.
+One `--brief` requires exactly one selected unit; run packaging once per unit with its own brief.
+Typed unit/scope and the whole brief's host-location/credential containment are checked before
+assembly. Unsafe text is refused, not redacted or echoed, and the copy uses the exact validated bytes.
 
 ⚠️ **The oracle kind directories are SINGULAR on purpose** — `dashboard/`, `worksheet/`, `unknown/`
 are `object_identity`'s `KIND_*` values *verbatim*, never a pluralised copy. `unknown/` is carried

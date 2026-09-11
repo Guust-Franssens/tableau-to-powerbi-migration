@@ -194,8 +194,10 @@ import argparse
 import errno
 import hashlib
 import json
+import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -211,6 +213,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import read_handover  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_oracle_manifest  # noqa: E402  # pylint: disable=wrong-import-position
+import package_filesystem as pfs  # noqa: E402  # pylint: disable=wrong-import-position
+from bundle_corpus import is_reparse_entry  # noqa: E402  # pylint: disable=wrong-import-position
+from package_role_identity import brief_identity  # noqa: E402  # pylint: disable=wrong-import-position
 
 # The path budget is measured by `check_path_ceiling.py` and NOWHERE else (#476). Its ceilings were
 # taken end to end against Power BI Desktop 2.157.828.0, and its `utf16_len` counts the UTF-16 code
@@ -700,59 +705,96 @@ def bundle_units(bundle: Path) -> list[str]:
 # --------------------------------------------------------------------------------------------
 
 
-def resolve_asset(bundle: Path, unit: str, handover: Any, assets_dir: Path | None) -> tuple[Path | None, str]:
-    """`(asset path, how it was resolved)` for the Tableau source behind ``unit``.
+class AssetResolution(NamedTuple):
+    """A unique walked source candidate and the exact input-manifest row selecting it."""
 
-    Order mirrors `check_reference_readiness.resolve_source`: the handover slice's
-    `workbook.source_id` (a run-root-relative path, so only its basename is portable), then
-    `input_manifest.json`'s staged asset whose stem matches the unit name.
+    path: Path | None
+    route: str
+    row: dict[str, Any] | None
 
-    ⚠️ **The basename is extracted with BOTH separators, never `Path(...).name`.** A `source_id` is
-    written by whichever machine ran the harvest, so a Windows-separated
-    `_runs\\999-x\\assets\\minimal.twb` reaching a POSIX packaging host has no separators `Path`
-    recognises: its "name" is the whole string, nothing matches, and a source asset that IS present
-    resolves to `unresolved` - both gates then report CANNOT_ESTABLISH (round-2 finding 2).
 
-    ⚠️ **`staged_input_path` is interpreted in ITS OWN flavour, never the host's** - the same
-    hazard, and the same fix, as :func:`_classify_source`. `Path` is the host's: on Windows
-    `Path("/mnt/share/elsewhere/Book.twb")` is resolved against the CURRENT DRIVE, so a POSIX
-    literal from a Linux harvest matched `C:\\mnt\\share\\elsewhere\\Book.twb` and those unrelated
-    bytes were copied into the package as the customer's workbook - measured, with a clean exit 0
-    and a manifest digest that said otherwise. A foreign-flavour staged path is skipped, and the
-    name-based candidates below still resolve the asset where it actually is.
+def _input_asset_rows(bundle: Path) -> list[dict[str, Any]]:
+    """Strict input rows; malformed rows cannot disappear from the candidate denominator."""
+    try:
+        payload = pfs.parse_manifest_text((bundle / "input_manifest.json").read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError, pfs._ManifestError) as exc:  # pylint: disable=protected-access
+        raise PackagingError("input_manifest_invalid") from exc
+    rows = payload.get("assets", [])
+    if not isinstance(rows, list) or any(
+        not isinstance(row, dict) or not isinstance(row.get("name"), str) or not row["name"].strip() for row in rows
+    ):
+        raise PackagingError("input_manifest_row_invalid")
+    return rows
 
-    ⚠️ **The stem is compared with the engine's transfer-UUID prefix STRIPPED** (#562 S2). The
-    harvester writes `<luid>_<name><ext>` and the engine's `asset_name()` strips exactly that prefix
-    to derive the unit, so `<luid>_Sales.tdsx` is unit `Sales` - and an equality on the raw stem
-    matched neither. A workbook survived this because a handover slice names its file; a DATASOURCE
-    has no handover slice, so every datasource package shipped `artifacts.asset: null`, with no
-    source, no spec and nothing for a semantic build to start from. The route is still byte-checked
-    by :func:`assert_declared_digest`, which is what keeps it a resolution rather than a guess.
+
+def _walk_asset_candidates(bases: list[Path | None], name: str) -> list[Path]:
+    """Distinct exact-basename candidates from no-follow walks, never from a reconstructed open."""
+    found: dict[str, Path] = {}
+    seen: set[str] = set()
+    for base in bases:
+        if base is None:
+            continue
+        address = os.path.normcase(os.path.abspath(base))
+        if address in seen:
+            continue
+        seen.add(address)
+        try:
+            info = os.lstat(base)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise PackagingError("source_asset_walk_unassessable") from exc
+        if is_reparse_entry(info) or not stat.S_ISDIR(info.st_mode):
+            raise PackagingError("source_asset_walk_unsafe")
+        walked, findings, _empty = pfs.walk_package(base)
+        if findings:
+            raise PackagingError("source_asset_walk_unsafe")
+        if name in walked:
+            candidate = walked[name]
+            found[os.path.normcase(os.path.abspath(candidate))] = candidate
+    return list(found.values())
+
+
+def resolve_asset(bundle: Path, unit: str, handover: Any, assets_dir: Path | None) -> AssetResolution:
+    """Select exactly one source and retain its selecting row through digest validation.
+
+    The handover basename is portable in either separator flavour. Without a handover, the engine's
+    exact raw or transfer-UUID-stripped stem selects an input row. Neither route chooses the first of
+    several rows or existing candidates. A foreign-flavour staged path is never interpreted locally.
     """
     workbook = handover.get("workbook") if isinstance(handover, dict) else None
     source_id = workbook.get("source_id") if isinstance(workbook, dict) else None
-    if isinstance(source_id, str) and source_id.strip():
-        name = leaf(source_id)
-        for base in (assets_dir, bundle / "assets", bundle.parent / "assets"):
-            if base is not None and (base / name).is_file():
-                return (base / name), "handover.workbook.source_id"
-
-    manifest = read_json(bundle / "input_manifest.json")
-    staged_assets = manifest.get("assets") or [] if isinstance(manifest, dict) else []
-    for asset in staged_assets:
-        if not isinstance(asset, dict) or not _names_unit(str(asset.get("name") or ""), unit):
-            continue
-        staged = asset.get("staged_input_path")
-        candidates = [Path(str(staged))] if staged and is_host_native(str(staged)) else []
-        candidates += [
-            base / str(asset.get("name"))
-            for base in (assets_dir, bundle / "assets", bundle.parent / "assets")
-            if base is not None
-        ]
-        for candidate in candidates:
-            if candidate.is_file():
-                return candidate, "input_manifest.staged_input_path"
-    return None, "unresolved"
+    name = leaf(source_id) if isinstance(source_id, str) and source_id.strip() else None
+    rows = _input_asset_rows(bundle)
+    matches = (
+        [row for row in rows if leaf(row["name"]) == name]
+        if name
+        else [row for row in rows if _names_unit(row["name"], unit)]
+    )
+    if len(matches) > 1:
+        raise PackagingError("source_asset_row_ambiguous")
+    row = matches[0] if matches else None
+    if name is None and row is None:
+        return AssetResolution(None, "unresolved", None)
+    route = "handover.workbook.source_id" if name is not None else "input_manifest.staged_input_path"
+    name = name or leaf(row["name"])
+    if not pfs.is_canonical_key(name) or "/" in name:
+        raise PackagingError("input_manifest_name_invalid")
+    bases = [assets_dir, bundle / "assets", bundle.parent / "assets"]
+    staged = row.get("staged_input_path") if row else None
+    if staged is not None:
+        if not isinstance(staged, str) or not staged.strip():
+            raise PackagingError("input_manifest_path_invalid")
+        if leaf(staged) != name:
+            raise PackagingError("input_manifest_path_mismatch")
+        if is_host_native(staged):
+            bases.append(Path(staged).parent)
+    candidates = _walk_asset_candidates(bases, name)
+    if len(candidates) > 1:
+        raise PackagingError("source_asset_candidate_ambiguous")
+    return AssetResolution(candidates[0], route, row) if candidates else AssetResolution(None, "unresolved", row)
 
 
 def _names_unit(declared: str, unit: str) -> bool:
@@ -767,53 +809,23 @@ def _names_unit(declared: str, unit: str) -> bool:
     return unit in (stem, _LUID_PREFIX.sub("", stem, count=1))
 
 
-def declared_asset_digest(bundle: Path, name: str) -> str | None:
-    """The sha256 `input_manifest.json` declares for the asset called ``name``, if it declares one.
-
-    Matched on the manifest entry's own basename, in both flavours, for the same reason
-    :func:`resolve_asset` is: the manifest is written by whichever machine ran the harvest.
-    """
-    manifest = read_json(bundle / "input_manifest.json")
-    for asset in (manifest.get("assets") or []) if isinstance(manifest, dict) else []:
-        if not isinstance(asset, dict) or leaf(str(asset.get("name") or "")) != name:
-            continue
-        declared = asset.get("sha256")
-        if isinstance(declared, str) and declared.strip():
-            return declared.strip().lower()
-    return None
-
-
-def assert_declared_digest(unit: str, bundle: Path, asset: Path, route: str) -> None:
-    """Refuse when the resolved source does not hash to what `input_manifest.json` declared for it.
-
-    ⚠️ **This digest is the ONLY thing that can catch a resolution that found the wrong file**, and
-    until now nothing consulted it. Measured on this branch: a `staged_input_path` of
-    `/mnt/share/elsewhere/Book.twb` was reinterpreted by the Windows host against the current drive,
-    a completely unrelated workbook was copied into the package as the customer's source, and the
-    run exited **0** - with the manifest's own `sha256` (`5d65d756…`) sitting one field away from the
-    bytes that actually shipped (`54a6036a…`).
-
-    The flavour fix in :func:`resolve_asset` closes the route that produced that specific wrong file;
-    this closes the CLASS. Any future resolution order, any harvest that renames an asset, any
-    operator pointing `--assets` at a stale directory lands here, and lands closed: nothing is
-    written for the unit, because a package whose `assets/` holds the wrong workbook silently
-    invalidates every page verdict both gates then produce from it.
-
-    A manifest that declares no digest for the asset is not a failure - `sha256` is optional in the
-    shapes this repository has measured, and an absent declaration is an absence, not a mismatch.
-    """
-    declared = declared_asset_digest(bundle, asset.name)
+def assert_declared_digest(unit: str, resolved: AssetResolution) -> None:
+    """Validate the selecting row directly; never look it up again by the candidate's basename."""
+    del unit
+    row, asset = resolved.row, resolved.path
+    if row is None or asset is None:
+        return
+    if leaf(row["name"]) != asset.name:
+        raise PackagingError("input_manifest_name_mismatch")
+    declared = row.get("sha256")
     if declared is None:
         return
+    if not isinstance(declared, str) or re.fullmatch(r"[0-9a-fA-F]{64}", declared) is None:
+        raise PackagingError("input_manifest_digest_invalid")
     actual = sha256_of(asset)
-    if actual is not None and actual.lower() == declared:
+    if actual is not None and actual.lower() == declared.lower():
         return
-    raise PackagingError(
-        f"refusing to package {unit}: the source resolved via {route} does not match the digest "
-        f"input_manifest.json declares for {asset.name} (declared {declared[:16]}..., resolved "
-        f"{(actual or 'unreadable')[:16]}...). Those are different bytes, so every page verdict a "
-        "gate computes from this package would be about the wrong workbook; nothing was written."
-    )
+    raise PackagingError("input_manifest_digest_mismatch")
 
 
 def scope_provenance(provenance: Any, asset_sha: str | None) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -2610,29 +2622,53 @@ def _write_spec_schema(dest: Path) -> tuple[str | None, str | None]:
     return SPEC_SCHEMA.name, None
 
 
-def _write_brief(brief: Path | None, dest: Path) -> tuple[str | None, str | None]:
-    """`(relative brief path, note)` - the dispatcher's brief, COPIED into the package (#562 S2).
+def _brief_scope(bundle: Path, unit: str, assets_dir: Path | None) -> str:
+    """Derive the brief's unit scope from engine kind and the existing source parser."""
+    workbooks, datasources = engine_unit_names(read_json(bundle / "report.json"))
+    kind = unit_kind(unit, workbooks, datasources)
+    if kind == KIND_DATASOURCE:
+        scope = "model_only"
+    elif kind == KIND_WORKBOOK:
+        from parse_tableau import parse_workbook  # pylint: disable=import-outside-toplevel
 
-    ⚠️ **The bytes travel; the external path never does.** The brief the dispatcher writes lives
-    outside the package at `migrations/{workbooks,datasources}/<slug>/migration-brief.md` and is
-    git-ignored, so a stateless agent handed only the package could not read the one document that
-    says what this migration is FOR. The three cheaper answers were each rejected for a reason:
-    recording the external path is not self-contained and discloses a host location; recording only
-    a hash proves availability of nothing; and keeping it beside the run proves the dispatcher saw
-    it, not that the agent received it.
+        resolved = resolve_asset(bundle, unit, read_json(bundle / "handover" / f"{unit}.json"), assets_dir)
+        assert_declared_digest(unit, resolved)
+        if resolved.path is None:
+            raise PackagingError("brief_scope_unassessable")
+        try:
+            spec = parse_workbook(resolved.path)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            raise PackagingError("brief_scope_unassessable") from exc
+        shared = any(row.get("published_datasource") is not None for row in spec["data_sources"])
+        scope = "report_only_shared_model" if shared else "model_and_report"
+    else:
+        raise PackagingError("brief_scope_unassessable")
+    return scope
 
-    Copied rather than moved, so the dispatcher's copy stays authoritative, and named by a fixed
-    package-relative role so "the brief is present" cannot be satisfied by any other Markdown file
-    the package happens to carry.
-    """
+
+def _prepare_brief(bundle: Path, unit: str, assets_dir: Path | None, brief: Path | None) -> bytes | None:
+    """Read and validate the exact brief bytes before assembly; never return or echo its host path."""
+    if brief is None:
+        return None
+    try:
+        raw = brief.read_bytes()
+        text = raw.decode("utf-8")
+    except (OSError, ValueError) as exc:
+        raise PackagingError("brief_unreadable") from exc
+    code, _unparsed = brief_identity(text, unit, _brief_scope(bundle, unit, assets_dir))
+    if code is not None:
+        raise PackagingError(code)
+    return raw
+
+
+def _write_brief(brief: bytes | None, dest: Path) -> tuple[str | None, str | None]:
+    """Copy only the immutable bytes validated before assembly, never reread the caller's file."""
     if brief is None:
         return None, (
             f"no {BRIEF_NAME}: none was supplied, so this package does not carry the brief an agent "
             "is expected to start from (pass --brief)"
         )
-    if not brief.is_file():
-        return None, f"no {BRIEF_NAME}: the supplied brief is not a readable file"
-    shutil.copy2(brief, dest / BRIEF_NAME)
+    (dest / BRIEF_NAME).write_bytes(brief)
     return BRIEF_NAME, None
 
 
@@ -3202,7 +3238,7 @@ def render_shipping_advisory(budgets: list[PathBudget]) -> str | None:
     )
 
 
-def package_unit(  # pylint: disable=too-many-arguments
+def package_unit(  # pylint: disable=too-many-arguments,too-many-locals
     bundle: Path,
     unit: str,
     out_root: Path,
@@ -3258,6 +3294,7 @@ def package_unit(  # pylint: disable=too-many-arguments
     """
     limits = platform_limits() if limits is None else limits
     final = assert_package_destination(out_root, unit)
+    prepared_brief = _prepare_brief(bundle, unit, assets_dir, brief)
     budget = path_budget(bundle, unit, out_root, limits=limits, assets_dir=assets_dir)
     if budget.refused:
         raise PackagePathTooLong(budget)
@@ -3273,7 +3310,7 @@ def package_unit(  # pylint: disable=too-many-arguments
         )
     try:
         result = _assemble_unit(
-            bundle, unit, staging, final=final, oracle_dir=oracle_dir, assets_dir=assets_dir, brief=brief
+            bundle, unit, staging, final=final, oracle_dir=oracle_dir, assets_dir=assets_dir, brief=prepared_brief
         )
         assert_assembled_fits(unit, staging, final, out_root, limits)
         replace_dir(staging, final, verify=None if discard_edits else partial(_refuse_if_edited, unit))
@@ -3611,9 +3648,10 @@ def _stage_asset(  # pylint: disable=too-many-arguments,too-many-positional-argu
     and this used to report `exit 0  OK Book`. A unit with no report (every datasource-only unit,
     18 of 67 in the reference run) makes no page claim, so its missing asset stays a recorded note.
     """
-    asset, route = resolve_asset(bundle, unit, handover, assets_dir)
+    resolved = resolve_asset(bundle, unit, handover, assets_dir)
+    asset, route = resolved.path, resolved.route
     if asset is not None:
-        assert_declared_digest(unit, bundle, asset, route)
+        assert_declared_digest(unit, resolved)
         (dest / "assets").mkdir(parents=True, exist_ok=True)
         shutil.copy2(asset, dest / "assets" / asset.name)
         return dest / "assets" / asset.name, route, None
@@ -3648,7 +3686,7 @@ def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
     final: Path,
     oracle_dir: Path | None,
     assets_dir: Path | None,
-    brief: Path | None = None,
+    brief: bytes | None = None,
 ) -> dict[str, Any]:
     """Build one unit's package into ``dest``, which is always a fresh, empty directory.
 
@@ -3961,6 +3999,8 @@ def _package_each(  # pylint: disable=too-many-arguments,too-many-positional-arg
     traceback kept. `BaseException` - `KeyboardInterrupt`, `SystemExit` - still passes through,
     because that is the operator ending the run rather than a unit failing.
     """
+    if brief is not None and len(units) != 1:
+        raise PackagingError("brief_requires_one_unit")
     for unit in units:
         try:
             results.append(
@@ -4003,9 +4043,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--brief",
         type=Path,
         help=(
-            "the dispatcher's migration-brief.md, copied into every package it writes. Its BYTES "
-            "travel; its path is never recorded, because a package that names a location on the "
-            "dispatcher's machine is neither self-contained nor safe to share"
+            "the dispatcher's migration-brief.md for exactly one selected unit; repeat the command "
+            "per unit for a batch. Unit/scope and whole-message privacy are checked before assembly. "
+            "Its bytes travel, never its external path"
         ),
     )
     parser.add_argument("--json", type=Path, help="write the machine-readable packaging report here")
@@ -4141,10 +4181,12 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
     if args.brief is not None and not args.brief.is_file():
         # Fail on the command line rather than in a per-unit note: a mistyped --brief would
         # otherwise write a whole estate of packages that all silently lack the brief.
-        parser.error(f"--brief {args.brief} is not a file")
+        parser.error("--brief must be a readable file")
 
     available = bundle_units(bundle)
     units = args.unit or available
+    if args.brief is not None and len(units) != 1:
+        parser.error("--brief requires exactly one unit; package each unit with its own brief")
     unknown = [unit for unit in units if unit not in available]
     if unknown:
         parser.error(f"the bundle's report.json and pbip/ know nothing of: {', '.join(sorted(unknown))}")

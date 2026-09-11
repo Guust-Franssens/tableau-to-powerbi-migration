@@ -328,6 +328,15 @@ It asks one question: does this package carry exactly the roles its **kind** and
 and do the identity claims those roles make agree? Each role is `resolved`, an **earned**
 `not_applicable`, or one of `missing` / `ambiguous` / `mismatch`. Only the first two pass.
 
+**An earlier S1 observation is not a reusable clearance.** S2 re-runs the existing no-follow S1
+verifier at its entry seam, even when the caller supplies `VerifiedPackage`. A changed, missing or
+reparse-replaced package is a typed block, not a traceback. This is a fresh entry check, not a
+transactional filesystem snapshot or a second revision/digest registry.
+
+**Identity JSON is strict at every read.** Duplicate keys, non-finite/overflowing numbers and
+incorrect container/scalar types block. Invalid collection rows are not filtered away: every declared
+published dependency keeps a result, including duplicate, malformed and identity-less rows.
+
 | topology | how it is decided | model role | evidence roles |
 |---|---|---|---|
 | `owned_model` | a workbook whose spec declares no published datasource | exactly 1 `.SemanticModel` | reference and/or oracle, at least one resolved |
@@ -337,6 +346,8 @@ and do the identity claims those roles make agree? Each role is `resolved`, an *
 
 Kind comes from the engine's own `report.json`, never from the filesystem: a datasource package may
 legitimately emit a self-service `.Report`, and that does not make it a workbook.
+Datasource handover/reference/oracle roles earn `not_applicable` only when both the declarations and
+the walked file set establish absence. Inapplicable content that is present is `inapplicable_role_present`.
 
 ⚠️ **A role is a DECLARATION the bytes confirm, never a discovery.** Deleting `artifacts.asset` while
 the file stays in `assets/` is `missing` — the file is not rediscovered by scanning the directory, by
@@ -351,7 +362,8 @@ oracle view. The two LUID namespaces are **typed**: a datasource LUID in a workb
 category error, not a spelling difference. A published consumer resolves to its provider by
 datasource LUID first and by the exact `<site>/<name>` published key only when a LUID is genuinely
 unavailable on both sides; `bound_datasource`, `published_ds_name`, folder stems and captions are
-diagnostics and admit nothing.
+diagnostics and admit nothing. A matching LUID does not erase a conflicting published key. An exact
+key cannot admit a LUID-bearing provider when the consumer has no LUID.
 
 ⚠️ **A cohort, because a consumer cannot prove its provider alone.** The verifier takes the whole
 invocation, so `check_reference_readiness.py <provider-package> <consumer-package>` — still one
@@ -359,15 +371,33 @@ operator command — is what closes a shared-datasource pair. A consumer supplie
 BLOCKED, because "I cannot see a provider" and "there is no provider" are the same answer from one
 package.
 
+Every provider must first pass its **own S2 roles**. A consumer then reads its walked
+`definition.pbir` strictly, cross-checks `model_binding`, and compares the complete normalized
+binding with that provider's **declared, resolved model role**. A matching directory basename or a
+model discovered in a blocked provider is insufficient.
+
+**Evidence paths cannot reopen discovery.** A reference image or oracle leg path must be canonical
+POSIX relative to its evidence directory, and its resulting package-relative key must exactly name a
+walked file under that role. Absolute paths, backslashes, dot segments, traversal, aliases and
+missing files block. The renderer receives only the walk-produced `Path` with the assessed record;
+package invocations do not reread evidence manifests or honor external `--reference`/`--oracle`
+overrides. Ordinary bundle handling is unchanged.
+
 **Earned limitations** do not convert a role state; they record why one is `not_applicable`:
 
 - `local_source_no_server_luid` — a genuinely local `.twb`/`.tds`: SHA, filename and spec agree and
   there is no server LUID to agree with;
 - `brief_policy_not_parsed` — the packaged `migration-brief.md` carries no strict `+++` TOML
   frontmatter, so only its presence and its bytes are established here. S2 checks brief **identity**
-  (`unit`, and `scope` against the topology) and deliberately nothing else: reading policy out of
+  (`unit`, and `scope` against the topology), plus whole-message privacy containment: reading policy out of
   free-form Markdown would make wording into a gate. The typed policy object is a `START_READY`
   prerequisite, not something inferred.
+
+`package_unit.py --brief` accepts **exactly one selected unit**; package a batch with one invocation
+and one brief per unit rather than broadcasting one identity. Unit/scope are checked before assembly.
+The complete brief is checked with the existing host-location and credential containment functions,
+and unsafe text is refused without copying, redacting or echoing it. Only the bytes that passed
+validation are copied, preserving the source file and its original line endings.
 
 **Failing S2 is `FINDINGS`, exit 1 — not `CANNOT_ESTABLISH`.** S1 refuses because the package cannot
 be described at all; here it describes itself perfectly well and what it describes is wrong, which is
@@ -380,7 +410,10 @@ source identity, the resolved dependencies and the stable blocker codes. It retu
 
 Direct tests are `tests/test_package_role_identity.py`, which asserts a named **role and state** for
 every control rather than a bare "not clean"; the producer half is in `tests/test_package_unit.py`
-and `tests/test_package_unit_gates.py`.
+and `tests/test_package_unit_gates.py`. The correction controls are in
+`tests/test_package_role_identity_reproductions.py`, `tests/test_package_unit_reproductions.py` and
+`tests/test_check_reference_readiness.py`, including both `[clean, blocked]` and `[blocked, clean]`
+target orders and the exact structured S2 finding.
 
 ---
 

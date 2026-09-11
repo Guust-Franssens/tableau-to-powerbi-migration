@@ -1290,7 +1290,7 @@ def test_a_source_id_written_with_the_OTHER_separator_still_resolves_its_asset(t
     bundle, _oracle = _bundle(tmp_path)
     asset_name = f"{WB_LUID}_{UNIT}.twb"
     for source_id in (f"_runs\\999-x\\assets\\{asset_name}", f"_runs/999-x/assets/{asset_name}"):
-        resolved, route = pkg.resolve_asset(
+        resolved, route, _row = pkg.resolve_asset(
             bundle, UNIT, {"workbook": {"source_id": source_id}}, bundle.parent / "assets"
         )
         assert resolved is not None and resolved.name == asset_name, f"{source_id} did not resolve"
@@ -4289,7 +4289,8 @@ def test_a_manifest_declaring_no_digest_is_an_absence_not_a_mismatch(tmp_path: P
     bundle, _ = _bundle(tmp_path)
     name = f"{WB_LUID}_{UNIT}.twb"
     (bundle / "input_manifest.json").write_text(json.dumps({"assets": [{"name": name}]}), encoding="utf-8")
-    assert pkg.declared_asset_digest(bundle, name) is None
+    resolved = pkg.resolve_asset(bundle, UNIT, {}, tmp_path / "assets")
+    assert resolved.row is not None and "sha256" not in resolved.row
     assert _cli(tmp_path, bundle, "--unit", UNIT) == 0
 
 
@@ -4301,7 +4302,7 @@ def test_a_foreign_flavour_staged_path_is_never_reinterpreted_by_the_host(tmp_pa
     at the reinterpreted location are not the customer's workbook. The same hazard, and the same
     fix, as `_classify_source` (round-2 finding 2).
     """
-    foreign = "/mnt/share/elsewhere/Book.twb" if os.name == "nt" else r"C:\share\elsewhere\Book.twb"
+    foreign = f"/mnt/share/elsewhere/{UNIT}.twb" if os.name == "nt" else f"C:\\share\\elsewhere\\{UNIT}.twb"
     assert not pf.is_host_native(foreign)
 
     bundle, _ = _bundle(tmp_path)
@@ -4309,7 +4310,7 @@ def test_a_foreign_flavour_staged_path_is_never_reinterpreted_by_the_host(tmp_pa
     (bundle / "input_manifest.json").write_text(
         json.dumps({"assets": [{"name": f"{UNIT}.twb", "staged_input_path": foreign}]}), encoding="utf-8"
     )
-    asset, route = pkg.resolve_asset(bundle, UNIT, {}, tmp_path / "no-such-assets")
+    asset, route, _row = pkg.resolve_asset(bundle, UNIT, {}, tmp_path / "no-such-assets")
     assert asset is None, f"a foreign staged path was reinterpreted as {asset}"
     assert route == "unresolved"
 
