@@ -155,6 +155,14 @@ def test_assessment_receives_pre_s2_spec_policy_and_localization_copies(
         return assess(gate_root, **kwargs)
 
     monkeypatch.setattr(pkg.data_access, "assess_data_access", held_facts)
+    read_text = Path.read_text
+
+    def no_second_spec_read(path, **kwargs):
+        if path == candidate / "migration-spec.json":
+            return json.dumps(authority._spec(authority.LIVE))
+        return read_text(path, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", no_second_spec_read)
     result, _notes = pkg._assess_package_data_access(
         root, candidate, local, gate_root=root, provider_packages=(), inputs=inputs
     )
@@ -193,6 +201,25 @@ def test_snapshot_comparison_is_not_a_fresh_manifest_baseline(tmp_path: Path, ch
     assert not pkg._snapshot_matches(snapshot), f"held snapshot accepted {change}"
 
 
+@pytest.mark.parametrize("change", ["namespace", "file-digest", "manifest-digest", "lexical-root"])
+def test_snapshot_guards_have_independent_negative_controls(tmp_path: Path, change: str) -> None:
+    """Each assertion isolates one snapshot check; no second changed file or reseal can mask it."""
+    package = producer._assessment_candidate(tmp_path, authority._spec(authority.FLAT))
+    snapshot = pkg._package_snapshot(package)
+    assert snapshot is not None and pkg._snapshot_matches(snapshot)
+    if change == "namespace":
+        (package / "extra.txt").write_bytes(b"extra")
+    elif change in ("file-digest", "manifest-digest"):
+        name = "migration-spec.json" if change == "file-digest" else "package-manifest.json"
+        path = package / name
+        path.write_bytes(path.read_bytes() + b"\n")
+    else:
+        snapshot = snapshot._replace(
+            verified=replace(snapshot.verified, root_identity=str(package.with_name("foreign")))
+        )
+    assert not pkg._snapshot_matches(snapshot), f"independent {change} guard did not refuse"
+
+
 def test_generated_delta_is_exact_and_the_manifest_extends_only_the_held_map(tmp_path: Path) -> None:
     package = producer._assessment_candidate(tmp_path, authority._spec(authority.FLAT))
     snapshot = pkg._package_snapshot(package)
@@ -227,6 +254,52 @@ def test_generated_allowlist_cannot_expand_to_spec_or_an_unknown_file(tmp_path: 
         raw = b"changed"
         (package / key).write_bytes(raw)
         assert not pkg._snapshot_matches(snapshot, {key: raw}), "only the explicit generated roles may change"
+
+
+def test_final_seal_never_inventories_new_bytes(tmp_path: Path) -> None:
+    """Final S1 sees an extra file because the final manifest must extend the held map."""
+    package = producer._assessment_candidate(tmp_path, authority._spec(authority.FLAT))
+    snapshot = pkg._package_snapshot(package)
+    assert snapshot is not None
+    manifest = json.loads(snapshot.manifest)
+    (package / "unexpected.txt").write_bytes(b"never declared by the provisional S1 snapshot")
+    generated = {"data-access.json": json.dumps(producer.LOCAL_PROJECTION).encode("utf-8")}
+    with pytest.raises(pkg.PackagingError, match="^data_access_final_integrity_failed$"):
+        pkg._write_data_access_final(package, manifest, snapshot, generated)
+    final_manifest = json.loads((package / "package-manifest.json").read_bytes())
+    assert "unexpected.txt" not in final_manifest["contents"]["files"]
+
+
+def test_final_s1_refusal_is_not_masked_by_another_snapshot_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A direct seal control isolates final S1 from the later S2/snapshot rechecks."""
+    package = producer._assessment_candidate(tmp_path, authority._spec(authority.FLAT))
+    snapshot = pkg._package_snapshot(package)
+    assert snapshot is not None
+    manifest = json.loads(snapshot.manifest)
+    failed = replace(snapshot.verified, integrity=replace(snapshot.verified.integrity, status="unassessable"))
+    monkeypatch.setattr(pkg.pri, "verify_s1", lambda _root: failed)
+    with pytest.raises(pkg.PackagingError, match="^data_access_final_integrity_failed$"):
+        pkg._seal_package(package, manifest, files=dict(snapshot.digests), verify=True)
+
+
+def test_final_s2_receives_the_exact_original_ordered_cohort(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Provider ordinals mean nothing if final S2 silently reorders or narrows the request."""
+    provider = producer._direct_provider(tmp_path / "provider")
+    consumer = producer._provider_consumer(tmp_path, provider)
+    inputs = pkg._data_access_inputs(consumer, copy.deepcopy(authority.LOCAL), (provider,))
+    verify = pkg.pri.verify_phase1_role_identity
+    calls = []
+
+    def same_cohort(roots):
+        assert roots == inputs.roots, "final S2 must use the original ordered cohort"
+        calls.append(True)
+        return verify(roots)
+
+    monkeypatch.setattr(pkg.pri, "verify_phase1_role_identity", same_cohort)
+    pkg._final_data_access_check(inputs, {})
+    assert calls == [True], "final S2 must actually run"
 
 
 @pytest.mark.parametrize("phase", ["before-final-seal", "after-final-s2"])
@@ -269,6 +342,28 @@ def test_candidate_stays_pinned_through_the_entire_finalization(
     assert hit == [True]
     assert _files(out / UNIT) == prior
     assert not pkg.staging_dir(out, UNIT).exists()
+
+
+def test_foreign_projection_after_assessment_cannot_be_overwritten_as_an_allowed_delta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The allowlist covers producer writes, not somebody else's bytes overwritten by them."""
+    bundle, out, options = _local_bundle(tmp_path)
+    assess = pkg._assess_package_data_access
+    hits = []
+
+    def change_after_assessment(bundle_arg, candidate, local, **kwargs):
+        assessment, notes = assess(bundle_arg, candidate, local, **kwargs)
+        assert assessment.state == "local_import_ready"
+        (candidate / "data-access.json").write_bytes(b"not producer generated")
+        hits.append(True)
+        return assessment, notes
+
+    monkeypatch.setattr(pkg, "_assess_package_data_access", change_after_assessment)
+    with pytest.raises(pkg.PackagingError, match="^data_access_candidate_changed$"):
+        pkg.package_unit(bundle, UNIT, out, **options)
+    assert hits == [True]
+    assert not (out / UNIT).exists()
 
 
 def test_final_s1_is_required_even_when_candidate_bytes_are_unchanged(
@@ -407,6 +502,27 @@ def test_provider_declared_digest_is_checked_at_the_held_byte_read(
     assert result.provider_unit is None, "a clean S1 on disk cannot bless different held bytes"
 
 
+def test_provider_remains_pinned_after_final_s2(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A final S2 result cannot bless a provider replaced just after that verification."""
+    provider = producer._direct_provider(tmp_path / "provider")
+    consumer = producer._provider_consumer(tmp_path, provider)
+    inputs = pkg._data_access_inputs(consumer, copy.deepcopy(authority.LOCAL), (provider,))
+    verify = pkg.pri.verify_phase1_role_identity
+
+    def changed_after_final_s2(roots):
+        result = verify(roots)
+        path = provider / "data-access.json"
+        payload = json.loads(path.read_bytes())
+        payload["source_keys"] = [authority.OTHER_KEY]
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        producer._reseal(provider)
+        return result
+
+    monkeypatch.setattr(pkg.pri, "verify_phase1_role_identity", changed_after_final_s2)
+    with pytest.raises(pkg.PackagingError, match="^data_access_provider_changed$"):
+        pkg._final_data_access_check(inputs, {})
+
+
 def test_only_the_once_parsed_provider_assessment_crosses_s2_selection(
     tmp_path: Path, root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -458,11 +574,13 @@ def test_only_the_once_parsed_provider_assessment_crosses_s2_selection(
         "empty-list",
         "row-list",
         "unknown-leg",
+        "unknown-scalar",
         "nested-scalar",
         "published-missing",
         "published-null",
         "published-empty",
         "published-nested",
+        "published-scalar-type",
         "additional-direct",
         "additional-null",
         "additional-scalar",
@@ -497,6 +615,8 @@ def test_published_only_rows_are_complete_before_any_inheritance(
         row["connections"] = [dict(authority.LIVE)]
     elif fault == "unknown-leg":
         row["connection"]["unknown-leg"] = dict(authority.LIVE)
+    elif fault == "unknown-scalar":
+        row["connection"]["unknown-leg"] = "sqlserver"
     elif fault == "nested-scalar":
         row["connection"]["server"] = dict(authority.LIVE)
     elif fault == "published-missing":
@@ -505,6 +625,8 @@ def test_published_only_rows_are_complete_before_any_inheritance(
         row["published_datasource"] = None if fault == "published-null" else {}
     elif fault == "published-nested":
         row["published_datasource"]["connection"] = dict(authority.LIVE)
+    elif fault == "published-scalar-type":
+        row["published_datasource"]["id"] = True
     else:
         extra = {
             "additional-direct": {"connection": dict(authority.LIVE)},
