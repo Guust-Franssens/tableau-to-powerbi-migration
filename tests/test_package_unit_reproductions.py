@@ -120,8 +120,9 @@ def test_invalid_input_rows_do_not_disappear(tmp_path: Path, rows: Any) -> None:
     bundle, asset, _row = selected_input(tmp_path)
     write_rows(bundle, rows)
 
-    with pytest.raises(pkg.PackagingError, match="^input_manifest_row_invalid$"):
+    with pytest.raises(pkg.UnassessableInput) as caught:
         pkg.resolve_asset(bundle, DS_UNIT, {}, asset.parent)
+    assert caught.value.reasons == ["input_manifest_row_invalid"]
 
 
 @pytest.mark.parametrize("tail", ['"extra": 0, "extra": 1', '"extra": NaN', '"extra": 1e999'])
@@ -130,8 +131,9 @@ def test_input_manifest_uses_the_existing_strict_json_parser(tmp_path: Path, tai
     path = bundle / "input_manifest.json"
     path.write_text(path.read_text(encoding="utf-8")[:-1] + "," + tail + "}", encoding="utf-8")
 
-    with pytest.raises(pkg.PackagingError, match="^input_manifest_invalid$"):
+    with pytest.raises(pkg.UnassessableInput) as caught:
         pkg.resolve_asset(bundle, DS_UNIT, {}, asset.parent)
+    assert caught.value.reasons == ["input_manifest_invalid"]
 
 
 def test_single_brief_is_refused_for_a_multi_unit_command_before_writing(tmp_path: Path) -> None:
@@ -156,10 +158,11 @@ def test_wrong_brief_identity_refuses_before_assembly(
     bundle, oracle, _objects = _bundle(tmp_path, covered=None)
     brief = _brief(tmp_path, unit, scope)
     assembled = []
+    original = pkg._assemble_unit
 
-    def observed(*_args, **_kwargs):
+    def observed(*args, **kwargs):
         assembled.append(True)
-        return {}
+        return original(*args, **kwargs)
 
     monkeypatch.setattr(pkg, "_assemble_unit", observed)
     with pytest.raises(pkg.PackagingError, match=f"^{code}$"):

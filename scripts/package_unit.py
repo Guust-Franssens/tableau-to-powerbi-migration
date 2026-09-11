@@ -713,19 +713,19 @@ class AssetResolution(NamedTuple):
     row: dict[str, Any] | None
 
 
-def _input_asset_rows(bundle: Path) -> list[dict[str, Any]]:
+def _input_asset_rows(bundle: Path, unit: str) -> list[dict[str, Any]]:
     """Strict input rows; malformed rows cannot disappear from the candidate denominator."""
     try:
         payload = pfs.parse_manifest_text((bundle / "input_manifest.json").read_text(encoding="utf-8"))
     except FileNotFoundError:
         return []
     except (OSError, ValueError, pfs._ManifestError) as exc:  # pylint: disable=protected-access
-        raise PackagingError("input_manifest_invalid") from exc
+        raise UnassessableInput(unit, ["input_manifest_invalid"]) from exc
     rows = payload.get("assets", [])
     if not isinstance(rows, list) or any(
         not isinstance(row, dict) or not isinstance(row.get("name"), str) or not row["name"].strip() for row in rows
     ):
-        raise PackagingError("input_manifest_row_invalid")
+        raise UnassessableInput(unit, ["input_manifest_row_invalid"])
     return rows
 
 
@@ -767,7 +767,7 @@ def resolve_asset(bundle: Path, unit: str, handover: Any, assets_dir: Path | Non
     workbook = handover.get("workbook") if isinstance(handover, dict) else None
     source_id = workbook.get("source_id") if isinstance(workbook, dict) else None
     name = leaf(source_id) if isinstance(source_id, str) and source_id.strip() else None
-    rows = _input_asset_rows(bundle)
+    rows = _input_asset_rows(bundle, unit)
     matches = (
         [row for row in rows if leaf(row["name"]) == name]
         if name
