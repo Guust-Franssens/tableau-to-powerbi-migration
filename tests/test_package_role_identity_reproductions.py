@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from jsonschema import Draft7Validator
 
 from test_package_filesystem import link_directory
 from test_package_role_identity import (
@@ -191,7 +192,24 @@ def test_resolved_evidence_carries_the_walk_produced_path_object(
         assert evidence.render_path is walked[f"{evidence.origin}/dashboard/view.png"]
 
 
-@pytest.mark.parametrize("published", [{}, {"id": DS_UNIT}, True, [], "caption", {"luid": True}, {"key": []}])
+@pytest.mark.parametrize(
+    "published",
+    [
+        {},
+        {"id": DS_UNIT},
+        True,
+        [],
+        "caption",
+        {"luid": True},
+        {"key": []},
+        None,
+        False,
+        0,
+        0.5,
+        "",
+        {"luid": "not-a-luid"},
+    ],
+)
 def test_invalid_published_rows_remain_counted_and_block(tmp_path: Path, published: Any) -> None:
     provider, consumer = cohort(tmp_path)
     spec = json.loads((consumer / "migration-spec.json").read_text(encoding="utf-8"))
@@ -213,7 +231,7 @@ def test_invalid_published_rows_remain_counted_and_block(tmp_path: Path, publish
     assert result.verdict == "BLOCKED"
 
 
-@pytest.mark.parametrize("value", [True, {}, "rows", [None], [False]])
+@pytest.mark.parametrize("value", [True, {}, "rows", [None], [False], None, False, 0, 0.5, "", [0], ["row"], [[]]])
 def test_malformed_datasource_collections_are_not_owned_model_fallbacks(tmp_path: Path, value: Any) -> None:
     package = workbook_package(tmp_path / WB_UNIT)
     replace_field(package, "migration-spec.json", ("data_sources",), value)
@@ -224,6 +242,104 @@ def test_malformed_datasource_collections_are_not_owned_model_fallbacks(tmp_path
     assert result.dependencies[0].code == "published_dependency_invalid"
     assert result.topology == "published_consumer"
     assert result.verdict == "BLOCKED"
+
+
+@pytest.mark.parametrize("kind", ["workbook", "datasource"])
+def test_missing_datasource_collection_is_invalid(tmp_path: Path, kind: str) -> None:
+    """Missing topology cannot mean either owned-model readiness or datasource-only earned N/A."""
+    package = workbook_package(tmp_path / WB_UNIT) if kind == "workbook" else datasource_package(tmp_path / DS_UNIT)
+    assert verify_one(package).verdict == "START_READY"
+    spec = json.loads((package / "migration-spec.json").read_text(encoding="utf-8"))
+    del spec["data_sources"]
+    _write(package / "migration-spec.json", spec)
+    reseal(package)
+    assert pri.verify_s1(package).integrity.is_clean
+
+    result = verify_one(package)
+
+    assert "published_dependency_invalid" in result.blockers
+    assert result.verdict == "BLOCKED"
+    if kind == "workbook":
+        assert len(result.dependencies) == 1
+        assert (result.dependencies[0].state, result.dependencies[0].code) == (
+            "mismatch",
+            "published_dependency_invalid",
+        )
+        assert result.topology == "published_consumer"
+
+
+def test_null_published_datasource_is_not_an_absent_dependency(tmp_path: Path) -> None:
+    """Only absence of the optional key means the row is non-published."""
+    package = workbook_package(tmp_path / WB_UNIT)
+    row = {"id": "ds-1", "connection": {"class": "textscan", "mode": "live"}, "fields": []}
+    replace_field(package, "migration-spec.json", ("data_sources",), [row])
+    absent = verify_one(package)
+    assert absent.verdict == "START_READY"
+    assert absent.topology == "owned_model"
+    assert absent.dependencies == ()
+
+    replace_field(package, "migration-spec.json", ("data_sources", 0, "published_datasource"), None)
+    assert pri.verify_s1(package).integrity.is_clean
+    present = verify_one(package)
+
+    assert len(present.dependencies) == 1, "an explicitly null dependency disappeared from the denominator"
+    assert (present.dependencies[0].state, present.dependencies[0].code) == (
+        "mismatch",
+        "published_dependency_invalid",
+    )
+    assert present.topology == "published_consumer"
+    assert present.verdict == "BLOCKED"
+
+
+@pytest.mark.parametrize("source_count", [0, 1, 2])
+def test_valid_non_published_source_collections_keep_owned_model_topology(tmp_path: Path, source_count: int) -> None:
+    """The real spec schema permits an explicit empty list, not an omitted collection."""
+    package = workbook_package(tmp_path / WB_UNIT)
+    spec = json.loads((package / "migration-spec.json").read_text(encoding="utf-8"))
+    spec.update(
+        migration_spec_version="1.0",
+        worksheets=[],
+        dashboards=[],
+        data_sources=[
+            {"id": f"ds-{index}", "connection": {"class": "textscan", "mode": "live"}, "fields": []}
+            for index in range(source_count)
+        ],
+    )
+    schema_path = Path(__file__).resolve().parents[1] / "docs" / "migration-spec.schema.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    assert "data_sources" in schema["required"]
+    Draft7Validator(schema).validate(spec)
+    _write(package / "migration-spec.json", spec)
+    reseal(package)
+
+    result = verify_one(package)
+
+    assert result.verdict == "START_READY", result.blockers
+    assert result.topology == "owned_model"
+    assert result.dependencies == ()
+    assert role(result, "fabric_model").state == "resolved"
+
+
+@pytest.mark.parametrize("provider_luid", [DS_LUID, None], ids=["luid", "published-key"])
+def test_non_published_rows_do_not_hide_a_valid_published_dependency(tmp_path: Path, provider_luid: str | None) -> None:
+    """A legitimate non-published row adds no edge; the valid published row still resolves."""
+    provider, consumer = cohort(tmp_path, provider_luid=provider_luid)
+    spec = json.loads((consumer / "migration-spec.json").read_text(encoding="utf-8"))
+    local = {"id": "local", "connection": {"class": "textscan", "mode": "live"}, "fields": []}
+    spec["data_sources"] = [local, *spec["data_sources"], local]
+    _write(consumer / "migration-spec.json", spec)
+    reseal(consumer)
+
+    results = pri.verify_phase1_role_identity([provider, consumer])
+
+    assert len(results) == 2
+    result = results[1]
+    assert results[0].verdict == result.verdict == "START_READY"
+    assert result.topology == "published_consumer"
+    assert len(result.dependencies) == 1
+    assert result.dependencies[0].state == "resolved"
+    assert result.dependencies[0].datasource_luid == provider_luid
+    assert result.dependencies[0].published_key == PUBLISHED_KEY
 
 
 def test_duplicate_published_rows_do_not_disappear(tmp_path: Path) -> None:

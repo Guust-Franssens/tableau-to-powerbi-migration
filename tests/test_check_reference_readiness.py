@@ -1998,6 +1998,65 @@ def test_a_role_blocked_package_stops_before_resolve_and_discovery(
     assert package_role_identity.CODE_ROLE_UNDECLARED in report["role_identity"][0]["blockers"]
 
 
+@pytest.mark.parametrize(
+    "change",
+    [
+        "missing-sources",
+        "null-sources",
+        "object-sources",
+        "invalid-row",
+        "null-published",
+        "scalar-published",
+        "bad-luid",
+    ],
+)
+def test_invalid_datasource_topology_stops_before_reference_assessment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    """Malformed topology is an S2 finding, never READY or an empty reference denominator."""
+    unit = _packaged_unit(tmp_path)
+    assert crr.scan(unit)["status"] == "READY"
+    path = unit / "migration-spec.json"
+    spec = json.loads(path.read_text(encoding="utf-8"))
+    if change == "missing-sources":
+        del spec["data_sources"]
+    elif change == "null-sources":
+        spec["data_sources"] = None
+    elif change == "object-sources":
+        spec["data_sources"] = {}
+    elif change == "invalid-row":
+        spec["data_sources"] = [None]
+    else:
+        published = {"null-published": None, "scalar-published": False, "bad-luid": {"luid": "not-a-luid"}}
+        spec["data_sources"] = [
+            {
+                "id": "ds-1",
+                "connection": {"class": "textscan", "mode": "live"},
+                "fields": [],
+                "published_datasource": published[change],
+            }
+        ]
+    path.write_text(json.dumps(spec), encoding="utf-8")
+    seal_package(unit, "Minimal")
+    assert package_role_identity.verify_s1(unit).integrity.is_clean
+    assert crr.main([str(unit), "--quiet"]) == 1
+
+    report, continued = _scan_forbidding_discovery(unit, monkeypatch)
+
+    assert continued == "", continued
+    assert report is not None
+    assert report["status"] == "FINDINGS"
+    assert report["pages_expected"] == report["evidence_records"] == 0
+    block = report["role_identity"][0]
+    assert block["verdict"] == "BLOCKED"
+    assert "published_dependency_invalid" in block["blockers"]
+    assert len(block["dependencies"]) == 1
+    assert (block["dependencies"][0]["state"], block["dependencies"][0]["code"]) == (
+        "mismatch",
+        "published_dependency_invalid",
+    )
+
+
 def test_the_role_verdict_is_reported_as_FINDINGS_not_CANNOT_ESTABLISH(tmp_path: Path) -> None:
     """The two refusals are different answers and must keep different exits.
 

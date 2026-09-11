@@ -539,7 +539,7 @@ def _spec_dependencies(spec: Any) -> tuple[DeclaredDependency, ...]:
     """Preserve every published row, including identity-less, malformed and duplicate rows."""
     if not isinstance(spec, dict):
         return ()
-    rows = spec.get("data_sources", [])
+    rows = spec.get("data_sources")
     if not isinstance(rows, list):
         return (DeclaredDependency(code=CODE_DEPENDENCY_INVALID),)
     found: list[DeclaredDependency] = []
@@ -547,9 +547,9 @@ def _spec_dependencies(spec: Any) -> tuple[DeclaredDependency, ...]:
         if not isinstance(row, dict):
             found.append(DeclaredDependency(code=CODE_DEPENDENCY_INVALID))
             continue
-        published = row.get("published_datasource")
-        if published is None:
+        if "published_datasource" not in row:
             continue
+        published = row["published_datasource"]
         try:
             luid = _luid(published, "luid")
             key = _declared_string(published, "key")

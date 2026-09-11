@@ -337,6 +337,12 @@ transactional filesystem snapshot or a second revision/digest registry.
 incorrect container/scalar types block. Invalid collection rows are not filtered away: every declared
 published dependency keeps a result, including duplicate, malformed and identity-less rows.
 
+The spec's `data_sources` field is **required and list-valued**. The spec schema permits an explicit
+empty list for a no-source workbook; missing, null or wrongly typed collections instead block with
+`published_dependency_invalid`. A datasource row is non-published only when its `published_datasource`
+key is **absent**. An explicitly present null or malformed value keeps a blocking dependency result
+with that same code, before reference assessment; it cannot silently become `owned_model`.
+
 | topology | how it is decided | model role | evidence roles |
 |---|---|---|---|
 | `owned_model` | a workbook whose spec declares no published datasource | exactly 1 `.SemanticModel` | reference and/or oracle, at least one resolved |
