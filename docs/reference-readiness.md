@@ -470,7 +470,9 @@ source. A mixed ordinary/package invocation is refused too. Ordinary explicit-so
 compatibility remain unchanged.
 
 Direct controls: `tests/test_package_source.py` arms forbidden I/O/search/JSON/hash/registry helpers
-and pins all four source extensions and refusal states. `tests/test_check_reference_readiness.py`
+and pins all four source extensions and refusal states. `tests/test_package_source_binding.py`
+isolates exact-root maps and guards, result bijections, both target orders and malformed handoffs.
+`tests/test_check_reference_readiness.py`
 pins the historical page denominator, provider/consumer ownership, CLI refusal order, earlier-gate
 stops and ordinary compatibility.
 

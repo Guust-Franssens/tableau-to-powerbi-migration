@@ -39,6 +39,20 @@ def test_exact_root_guard_is_case_sensitive_even_on_windows(monkeypatch: pytest.
     assert result.path is None
 
 
+@pytest.mark.parametrize("observed, target", [(UPPER, LOWER), (LOWER, UPPER)])
+def test_s1_observation_guard_rejects_a_case_foreign_identity_without_a_later_guard(
+    observed: Path, target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cleared = authority(observed).verified
+    with monkeypatch.context() as patch:
+        forbid_source_operations(patch)
+        own = cleared.is_bound_to(str(observed))
+        foreign = cleared.is_bound_to(str(target))
+
+    assert own is True
+    assert foreign is False, "the S1 observation guard itself must reject a case-foreign identity"
+
+
 @pytest.mark.parametrize("roots", [(UPPER, LOWER), (LOWER, UPPER), (UPPER, UPPER)])
 def test_duplicate_or_case_colliding_targets_stop_before_s1_s2_or_discovery(
     roots: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
@@ -234,6 +248,37 @@ def test_source_handoff_guard_requires_the_same_exact_target_identity(
     assert violation is None, violation
     assert report is not None and report["status"] == "CANNOT_ESTABLISH"
     assert report["package_source"][0]["codes"] == ["package_root_binding_invalid"]
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"asset_path": "assets/CON.twb"},
+        {"asset_path": "assets/./opaque.twb"},
+        {"asset_path": "assets//opaque.twb"},
+        {"codes": False},
+        {"codes": []},
+    ],
+)
+def test_malformed_ready_handoff_stops_the_consumer_before_any_source_or_evidence_read(
+    changes: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = authority(UPPER)
+    value = replace(result.source_handoff(), **changes)
+    violation, report = None, None
+    with monkeypatch.context() as patch:
+        forbid_source_operations(patch)
+        patch.setattr(roles.Phase1RoleIdentityResult, "source_handoff", lambda _self: value)
+        patch.setattr(readiness, "_scan_safe_target", forbidden)
+        try:
+            report = readiness._scan_verified_package(UPPER, str(UPPER), result, False)
+        except _ForbiddenSourceOperation as exc:
+            violation = str(exc)
+
+    assert violation is None, violation
+    assert report is not None and report["status"] == "CANNOT_ESTABLISH"
+    assert report["package_source"][0]["codes"] == ["source_handoff_invalid"]
+    assert report["pages_expected"] == report["evidence_records"] == 0
 
 
 @pytest.mark.parametrize("roots", [(UPPER, LOWER), (LOWER, UPPER), (UPPER, UPPER)])
