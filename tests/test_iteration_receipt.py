@@ -13,6 +13,7 @@ import copy
 import hashlib
 import json
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -951,19 +952,20 @@ def test_a_package_manifest_pointing_outside_the_package_is_refused(tmp_path: Pa
     assert error.value.code == "UNSAFE_PATH"
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="reparse points need Windows or admin symlinks")
 def test_a_reparse_point_inside_the_iterations_tree_is_refused(package: Path, tmp_path: Path) -> None:
-    """A junction can source "evidence" from a tree the package does not own."""
+    """A link to an otherwise-valid iteration still sources evidence outside this package."""
     _iterate(package)
     _finalized(package)
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    import subprocess  # noqa: PLC0415  (Windows-only, and only for this one control)
+    assert [item.name for item in receipt.read_chain(package)] == ["001"]
 
-    linked = receipt.iterations_root(package) / "002"
-    result = subprocess.run(["cmd", "/c", "mklink", "/J", str(linked), str(outside)], capture_output=True, check=False)
-    if result.returncode != 0:  # pragma: no cover - depends on host policy
-        pytest.skip("this host does not permit creating a junction")
+    linked = receipt.iterations_root(package) / "001"
+    outside = tmp_path / "outside"
+    linked.rename(outside)
+    if sys.platform == "win32":
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(linked), str(outside)], capture_output=True, check=True)
+    else:
+        linked.symlink_to(outside, target_is_directory=True)
+    assert linked.resolve() == outside.resolve()
 
     with pytest.raises(receipt.ReceiptError) as error:
         receipt.read_chain(package)
