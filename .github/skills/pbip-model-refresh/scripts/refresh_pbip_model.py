@@ -49,8 +49,8 @@ Two separate gaps kept biting real migrations:
    Desktop's own Save does. See the `--save` warning below.
 
    Two implementation notes: the AMO client raises *"The server sent an unrecognizable response"*
-   while writing the file correctly, so success is judged by the FILE (exists, non-empty, newly
-   written), never by the absence of an exception; and `database_operations ExportToTmdlFolder`
+   while writing the file correctly, so success is judged by the checked staged image and identical
+   committed SHA/size, never by an mtime or the absence of an exception. `database_operations ExportToTmdlFolder`
    persists model *definition* changes but carries no rows, so it cannot substitute for this.
 
 Cache invalidation (important)

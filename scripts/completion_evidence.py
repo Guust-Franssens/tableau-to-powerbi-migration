@@ -99,6 +99,7 @@ REASONS = frozenset(
         "REFRESH_IN_PROGRESS",
         "DESKTOP_GONE",
         "DESKTOP_UNREADY",
+        "ACCESS_DENIED",
         "CSV_UNCERTIFIED",
         "CSV_INVALID",
         "CSV_EMPTY",
@@ -127,7 +128,7 @@ class EvidenceError(RuntimeError):
     """Fixed closed code only. Never serialize native exceptions or customer payload excerpts."""
 
     def __init__(self, code: str) -> None:
-        self.code = code if code in REASONS else "INPUT_INVALID"
+        self.code = code if isinstance(code, str) and code in REASONS else "INPUT_INVALID"
         super().__init__(self.code)
 
 
@@ -199,6 +200,12 @@ DATA_SCHEMA = {
             model_revision=REVISION,
             spec_sha256=SHA,
             definition=_object(algorithm={"const": DEFINITION_ALGORITHM}, sha256=SHA),
+            storage_modes={
+                "type": "array",
+                "items": {"enum": ["import", "directQuery"]},
+                "minItems": 1,
+                "uniqueItems": True,
+            },
             canaries=_array(CANARY_SCHEMA, minimum=1),
             refresh=_nullable(REFRESH_SCHEMA),
             persistence=PERSISTENCE_SCHEMA,
@@ -358,7 +365,9 @@ def validate_observation(payload: dict) -> None:
         ):
             if len(values) != len(set(values)):
                 raise EvidenceError("EVIDENCE_INVALID")
-        has_import = any(row["mode"] == "import" for row in canaries)
+        if not {row["mode"] for row in canaries} <= set(data["storage_modes"]):
+            raise EvidenceError("EVIDENCE_INVALID")
+        has_import = "import" in data["storage_modes"]
         persistence, refresh = data["persistence"], data["refresh"]
         if has_import:
             if refresh is None or persistence["status"] != "PERSISTED":
@@ -392,6 +401,18 @@ def _strict_integers(value: Any) -> None:
                 and type(child) is not int
             ):
                 raise EvidenceError("EVIDENCE_INVALID")
+            suffixes = {
+                "query": "query.dax",
+                "result": "result.json",
+                "binding": "binding.json",
+                "plan": "plan.json",
+                "original": "tableau.csv",
+                "source_canonical": "tableau.canonical.json",
+                "result_canonical": "result.canonical.json",
+            }
+            if key in suffixes and isinstance(child, dict) and "role" in child:
+                if not child["role"].endswith("/" + suffixes[key]):
+                    raise EvidenceError("EVIDENCE_INVALID")
             _strict_integers(child)
     elif isinstance(value, list):
         for child in value:
@@ -487,6 +508,15 @@ def _held_file(root: Path, role: str) -> bytes:
         raise EvidenceError("INPUT_INVALID") from None
 
 
+def _assert_source_bytes(package: Path, identity: reference.UnitIdentity) -> None:
+    files, _ = rev.tree_files(package)
+    source_roles = [role for role, path in files.items() if path == identity.source_path]
+    if len(source_roles) != 1:
+        raise EvidenceError("CSV_IDENTITY")
+    if _facts(_held_file(package, source_roles[0]))["sha256"] != identity.source_sha256:
+        raise EvidenceError("INPUT_CHANGED")
+
+
 def read_tableau_csv(  # pylint: disable=too-many-locals
     package: Path, identity: reference.UnitIdentity, manifest_role: str, view_luid: str, view_kind: str
 ) -> CertifiedCsv:
@@ -509,8 +539,7 @@ def read_tableau_csv(  # pylint: disable=too-many-locals
         raise EvidenceError("CSV_IDENTITY")
     if identity.revision != reference.REVISION_CONFIRMED:
         raise EvidenceError("SOURCE_REVISION_UNKNOWN")
-    if _facts(identity.source_path.read_bytes())["sha256"] != identity.source_sha256:
-        raise EvidenceError("INPUT_CHANGED")
+    _assert_source_bytes(package, identity)
     data = record.get("data")
     if not isinstance(data, dict) or data.get("status") != "ok" or data.get("certification") != CSV_CERTIFIED:
         raise EvidenceError("CSV_UNCERTIFIED")
@@ -548,6 +577,7 @@ def _csv_rows(blob: bytes) -> tuple[list[str], list[list[str]]]:
         or any(len(row) != len(header) for row in rows[1:])
     ):
         raise EvidenceError("CSV_INVALID")
+    _shareable({"columns": header, "rows": rows[1:]})
     return header, rows[1:]
 
 
@@ -908,6 +938,20 @@ def source_bindings(  # pylint: disable=too-many-locals,too-many-branches
     return tuple(bindings)
 
 
+def _storage_modes(model: dict) -> list[str]:
+    """All partitions count for applicability, including static/calculated Import materialization."""
+    modes = set()
+    for table in model["tables"]:
+        for partition in table.get("partitions", []):
+            mode = partition.get("mode", model.get("defaultMode"))
+            if mode not in {"import", "directQuery"}:
+                raise EvidenceError("SOURCE_COVERAGE_MISSING")
+            modes.add(mode)
+    if not modes:
+        raise EvidenceError("SOURCE_COVERAGE_MISSING")
+    return sorted(modes)
+
+
 def _bind_card_case(target, case: dict) -> str:  # pylint: disable=too-many-locals
     inventory = rev.report_inventory(target.report_dir)
     page = next((row for row in inventory if row.page_id == case["page_id"]), None)
@@ -1045,11 +1089,15 @@ class _Runtime:
             raise EvidenceError("FULL_REFRESH_REQUIRED")
         return observations[0]
 
-    def persist(self, bound, model_dir: Path):
+    def persist(self, bound, model_dir: Path, expected_revision: str):
         """No UI fallback. A timeout revokes authorization for a later staged-file commit."""
         observations = []
         deadline = time.monotonic() + self.pdq.EVIDENCE_TIMEOUT_SECONDS
+        if rev.model_revision(model_dir) != expected_revision:
+            raise EvidenceError("MODEL_CHANGED")
         baseline = _model_bytes(model_dir)
+        if rev.model_revision(model_dir) != expected_revision:
+            raise EvidenceError("MODEL_CHANGED")
 
         def permitted() -> None:
             if time.monotonic() >= deadline:
@@ -1171,7 +1219,8 @@ def _data_observation(  # pylint: disable=too-many-locals,too-many-branches,too-
     if witness.model_revision != rev.model_revision(target.model_dir):
         raise EvidenceError("MODEL_CHANGED")
     bindings = source_bindings(spec, witness, request.canaries)
-    has_import = any(binding.mode == "import" for binding in bindings)
+    storage = _storage_modes(witness.model)
+    has_import = "import" in storage
     refreshed, persisted = None, None
     if has_import:
         if request.authorize_refresh is not True:
@@ -1197,7 +1246,7 @@ def _data_observation(  # pylint: disable=too-many-locals,too-many-branches,too-
         canaries.append(metadata)
         payloads.extend(local)
     if has_import:
-        persisted = runtime.persist(bound, target.model_dir)
+        persisted = runtime.persist(bound, target.model_dir, witness.model_revision)
         if persisted.catalogue != bound.catalogue or persisted.method != "AMO_ImageSave":
             raise EvidenceError("CATALOGUE_CHANGED")
     final = runtime.witness(bound, target.model_dir)
@@ -1247,6 +1296,7 @@ def _data_observation(  # pylint: disable=too-many-locals,too-many-branches,too-
             "model_revision": final.model_revision,
             "spec_sha256": _facts(spec_blob)["sha256"],
             "definition": final.facts(),
+            "storage_modes": storage,
             "canaries": canaries,
             "refresh": {
                 "catalogue": refreshed.catalogue,
@@ -1335,13 +1385,19 @@ def _numeric_observation(
 
 def _safe_error(error: BaseException) -> str:
     code = getattr(error, "code", None)
-    if code in REASONS:
+    if isinstance(code, str) and code in REASONS - {"OBSERVED"}:
         return code
-    name = type(error).__name__
-    if name == "CredentialMissingError":
-        return "CREDENTIAL_MISSING"
-    if name == "CompatRollbackError":
-        return "PERSISTENCE_FAILED"
+    exception_codes = {
+        "CredentialMissingError": "CREDENTIAL_MISSING",
+        "CredentialUnknownError": "CREDENTIAL_UNKNOWN",
+        "DesktopGoneError": "DESKTOP_GONE",
+        "DesktopUnreadyError": "DESKTOP_UNREADY",
+        "CompatRollbackError": "PERSISTENCE_FAILED",
+    }
+    if type(error).__name__ in exception_codes:
+        return exception_codes[type(error).__name__]
+    if isinstance(error, PermissionError):
+        return "ACCESS_DENIED"
     if isinstance(error, TimeoutError):
         return "TIMEOUT"
     return "TOOL_UNAVAILABLE"
@@ -1385,7 +1441,12 @@ def collect_completion_evidence(  # pylint: disable=too-many-locals
             raise EvidenceError("MODEL_CHANGED")
         runtime.guard(bound)
         assert_desktop_binding(target, request.pid)
-        if rev.package_working_revision(target.root, target.model_dir) != baseline:
+        if (
+            resolve_package(package) != target
+            or rev.package_working_revision(target.root, target.model_dir) != baseline
+        ):
+            raise EvidenceError("INPUT_CHANGED")
+        if _facts(_held_file(target.root, "migration-spec.json"))["sha256"] != data["spec_sha256"]:
             raise EvidenceError("INPUT_CHANGED")
         if data["persistence"]["status"] == "PERSISTED":
             cache = _held_file(target.model_dir, ".pbi/cache.abf")
@@ -1436,8 +1497,12 @@ def verify_payloads(observation: dict, payloads: tuple[Payload, ...]) -> None:  
         query = by_role[row["query"]["role"]]
         result = dax.read_typed_result(by_role[row["result"]["role"]])
         binding = rev.parse_json_bytes(by_role[row["binding"]["role"]])
-        if set(binding) != {"table", "partition", "source_key", "mode"}:
+        if set(binding) != {"table", "partition", "source_key", "mode"} or any(
+            not isinstance(value, str) or not value for value in binding.values()
+        ):
             raise EvidenceError("EVIDENCE_INVALID")
+        _shareable(binding)
+        _shareable(rev.parse_json_bytes(result.to_bytes()))
         expected_query = f"EVALUATE TOPN(1, '{binding['table'].replace(chr(39), chr(39) * 2)}')".encode()
         if query != expected_query or result.query_sha256 != _facts(query)["sha256"]:
             raise EvidenceError("QUERY_HASH_MISMATCH")

@@ -283,8 +283,9 @@ class FakeRuntime:
             result.append(pdq.CanaryObservation(table, query, observed, len(rows)))
         return tuple(result)
 
-    def persist(self, bound, model):
+    def persist(self, bound, model, expected_revision):
         self.events.append("persist")
+        assert expected_revision == ce.rev.model_revision(model)
         observed = []
 
         def record(commit):
@@ -349,6 +350,27 @@ def test_mixed_tables_require_refresh_and_both_source_legs(package):
     assert result.observation["data"]["status"] == "DATA_OK", result.observation
     assert {row["mode"] for row in result.observation["data"]["canaries"]} == {"import", "directQuery"}
     assert "persist" in runtime.events
+
+
+def test_static_import_materialization_prevents_pure_directquery_na(package):
+    runtime = FakeRuntime("directQuery")
+    runtime.model["tables"].append(
+        {
+            "name": "Parameters",
+            "partitions": [
+                {
+                    "name": "Parameters",
+                    "mode": "import",
+                    "source": {"type": "calculated", "expression": "{1}"},
+                }
+            ],
+        }
+    )
+    result = collect(package, runtime)
+    assert result.observation["data"]["status"] == "DATA_OK", result.observation
+    assert result.observation["data"]["storage_modes"] == ["directQuery", "import"]
+    assert "refresh" in runtime.events and "persist" in runtime.events
+    assert result.observation["data"]["persistence"]["status"] == "PERSISTED"
 
 
 @pytest.mark.parametrize("canaries", [(), ("Orders", "Orders"), ("Orders", "orders"), ("Orders",), ("Parameters",)])
@@ -724,3 +746,15 @@ def test_missing_native_witness_fails_closed_without_running_source_queries(pack
     monkeypatch.setattr(ce._Runtime, "probe", lambda *_args: pytest.fail("no native witness, no source query"))
     result = ce.collect_completion_evidence(package, ce.EvidenceRequest(1234, ("Orders", "Customers"), True))
     assert result.observation["data"]["code"] == "DEFINITION_UNSUPPORTED"
+    assert result.observation["data"]["status"] == "CANNOT_ESTABLISH"
+
+
+def test_private_query_with_a_host_location_is_withheld_not_redacted():
+    table = "https://example.invalid"
+    query = f"EVALUATE TOPN(1, '{table}')"
+    observed = ce.dax.TypedResult(
+        hashlib.sha256(query.encode()).hexdigest(), (("x", "int64"),), ((ce.dax.typed_value(1),),)
+    )
+    binding = ce.SourceBinding("source-key:" + "a" * 16, table, "part", "import")
+    with pytest.raises(ce.EvidenceError, match="^PRIVACY$"):
+        ce._canary_payloads(binding, pdq.CanaryObservation(table, query, observed, 1))

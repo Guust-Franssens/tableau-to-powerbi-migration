@@ -211,8 +211,11 @@ def _validate_cell(cell: TypedValue) -> None:  # pylint: disable=too-many-branch
             if not re.fullmatch(r"-?(?:0|[1-9][0-9]*)", text) or not -(2 ** (bits - 1)) <= int(text) < 2 ** (bits - 1):
                 raise ResultError("RESULT_TYPE")
         elif cell.kind == "decimal":
-            if not Decimal(text).is_finite():
+            number = Decimal(text)
+            if not number.is_finite():
                 raise ResultError("RESULT_NONFINITE")
+            if len(number.as_tuple().digits) > 1000 or abs(number.adjusted()) > 1000:
+                raise ResultError("RESULT_TYPE")
             if not re.fullmatch(r"-?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:E[+-]?[0-9]+)?", text):
                 raise ResultError("RESULT_TYPE")
         elif cell.kind == "double":
@@ -291,7 +294,9 @@ def execute_typed(connection, dax: str, *, max_rows: int = 100_000, timeout_seco
     callers continue using adomd_executor/_json_safe; that lossy compatibility representation is
     deliberately never used for evidence hashing.
     """
-    if not isinstance(dax, str) or not is_read_only(dax) or type(max_rows) is not int or max_rows <= 0:
+    if not isinstance(dax, str) or not is_read_only(dax):
+        raise ResultError("QUERY_INVALID")
+    if type(max_rows) is not int or max_rows <= 0 or type(timeout_seconds) is not int or not 0 < timeout_seconds <= 120:
         raise ResultError("QUERY_INVALID")
     command = connection.CreateCommand()
     command.CommandText = dax
