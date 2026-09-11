@@ -2005,7 +2005,7 @@ def _check_state_combination(payload: dict) -> None:  # pylint: disable=too-many
         _require(codes == {"provider-exact"} and scope in EFFECTIVE_SCOPES, "illegal-combination")
         if provider_state == "authorized_model_only":
             _require(
-                validation == "unvalidated" and ceiling == "structural_only" and scope == "model_only",
+                keys and validation == "unvalidated" and ceiling == "structural_only" and scope == "model_only",
                 "illegal-combination",
             )
         else:
@@ -2025,7 +2025,7 @@ def _check_state_combination(payload: dict) -> None:  # pylint: disable=too-many
             validation == "validated" and ceiling == "data_validated" and scope in DIRECT_SCOPES, "illegal-combination"
         )
     elif state == "authorized_model_only":
-        _require(codes == {"human-authorize", "brief-model-only"}, "illegal-combination")
+        _require(keys and codes == {"human-authorize", "brief-model-only"}, "illegal-combination")
         _require(
             validation == "unvalidated" and ceiling == "structural_only" and scope == "model_only",
             "illegal-combination",

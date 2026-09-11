@@ -270,6 +270,35 @@ def test_authentic_authorization_written_on_each_platform(
     assert gate.verify(root) == 0
 
 
+@pytest.mark.parametrize("inherited", [False, True], ids=["direct", "inherited"])
+def test_projection_requires_current_keys_for_authorization(root: Path, inherited: bool) -> None:
+    """Neither serialized authorization nor a supplied provider may invent an empty source set."""
+    _authorize(root)
+    authority = _assess(root, authorized=True)
+    if inherited:
+        authority = gate.assess_data_access(
+            root,
+            package_spec={},
+            package_data_sources={},
+            fallback_authorization="stop",
+            requested_scope="model_only",
+            provider=("Exact_S2_unit", authority),
+        )
+    assert gate.parse_data_access(authority.dumps()) == authority
+    empty = authority._replace(source_keys=())
+    with pytest.raises(gate.DataAccessProjectionError, match="illegal-combination"):
+        gate.parse_data_access(empty.dumps())
+    result = gate.assess_data_access(
+        root,
+        package_spec={},
+        package_data_sources={},
+        fallback_authorization="stop",
+        requested_scope="model_only",
+        provider=("Exact_S2_unit", empty),
+    )
+    assert (result.state, result.codes) == ("cannot_establish", ("provider-foreign",))
+
+
 @pytest.mark.parametrize(
     "field,value",
     [
