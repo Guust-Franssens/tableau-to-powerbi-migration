@@ -142,17 +142,25 @@ from __future__ import annotations
 # pylint: disable=too-many-lines
 
 import argparse
+import copy
+import contextlib
 import json
 import logging
+import math
+import multiprocessing
 import os
+import queue
+import re
+import socket
 import subprocess
 import sys
+import threading
 import time
 import uuid
 import zipfile
 from collections import defaultdict
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import NamedTuple
 
 from check_empty_model import REPORT_NAME as EMPTY_MODEL_REPORT
@@ -180,6 +188,8 @@ from check_path_ceiling import scan as scan_path_ceiling
 from engine_source import EngineNotFoundError, NonCanonicalEngineError, engine_provenance, resolve_engine
 from manifest_scope import redact_host_paths
 from migration_bundle import ENGINE_RECEIPT, sha256_file, write_engine_receipt
+
+import stamp_tableau_provenance as prov  # isort: skip  # the provenance worker AND its result vocabulary
 
 log = logging.getLogger("run_estate")
 
@@ -248,6 +258,128 @@ PUBLISH_REPORT_OPERATION = "publish-path-ceiling-report"
 PUBLISH_PROVENANCE_OPERATION = "publish-source-provenance"
 WRITE_PHASE_RECORD_OPERATION = "write-phase-record"
 _ALLOWED_OPERATIONS = frozenset({PUBLISH_PROVENANCE_OPERATION, PUBLISH_REPORT_OPERATION, WRITE_PHASE_RECORD_OPERATION})
+
+# --- the provenance deadline (issue #576) ----------------------------------------------------
+#
+# Measured: 66 harvested inputs cost 200 remote calls, and a single trickled response body outlasts
+# `urlopen(timeout=180)`, because that timeout bounds each socket read and not the transfer. Neither
+# a local `read_bytes`, a ZIP member scan, a recursive scrub nor a hung sign-out has any bound at
+# all. A thread cannot be stopped, a cooperative check cannot interrupt a blocking call, and
+# `Future.cancel()` returns False for a task already running - all three were measured. What
+# preempts every one of them on Windows AND POSIX is a separate process the parent can terminate, so
+# the whole phase runs in ONE spawned leaf worker under ONE monotonic deadline computed BEFORE the
+# spawn: Windows spawn/import time is phase time and is charged as such.
+#
+# Deliberately OUTSIDE the deadline: the parent's own atomic publication. The artifact must be
+# written AFTER expiry - recording the timeout is the whole point - so this is not a bound on total
+# wall clock if the output filesystem hangs. That is a separate writer-process design, not this one.
+
+#: The whole-phase budget. Generous on purpose: a backstop against an unbounded stall, not a
+#: performance target.
+PROVENANCE_TIMEOUT_DEFAULT_SEC = 120.0
+
+#: The bounded joins after the deadline. Never an unbounded `join()`: waiting forever for the process
+#: we just killed would reintroduce exactly the hang this phase exists to bound.
+PROVENANCE_TERMINATE_JOIN_SEC = 0.5
+PROVENANCE_KILL_JOIN_SEC = 1.0
+PROVENANCE_RECEIVER_JOIN_SEC = 0.1
+
+# Bounds apply before allocation/validation, not after accepting an alleged count. They are
+# fail-closed protocol limits, not a limit on the engine or on the standalone stamper.
+PROVENANCE_MAX_INPUTS = 4096
+PROVENANCE_MAX_MEMBERS = 4096
+PROVENANCE_MAX_FRAME_BYTES = 2 * 1024 * 1024
+PROVENANCE_MAX_PHASE_BYTES = 16 * 1024 * 1024
+PROVENANCE_MAX_MESSAGES = 8 * PROVENANCE_MAX_INPUTS + 32
+PROVENANCE_MAX_COUNT = (1 << 63) - 1
+
+#: The one prefix every machine-readable progress line carries.
+PROVENANCE_PROGRESS_PREFIX = "PROVENANCE_PROGRESS"
+
+PROVENANCE_PHASE_OPERATION = "phase"
+PROVENANCE_PUBLISH_OPERATION = "publish"
+
+#: Everything a progress line may NAME: the worker's operations plus the two the parent owns. An
+#: operation label is therefore always a constant of this repository, never anything derived from a
+#: filename, a site response or an exception.
+PROVENANCE_PROGRESS_OPERATIONS = frozenset({PROVENANCE_PHASE_OPERATION, PROVENANCE_PUBLISH_OPERATION}) | frozenset(
+    prov.WORKER_OPERATIONS
+)
+PROVENANCE_PROGRESS_EVENTS = frozenset({"phase-start", "operation-progress", "phase-finish"})
+PROVENANCE_PROGRESS_STATUSES = frozenset(
+    {"success", "local_only", "partial", "failed", "empty", "publication_failed", "unknown"}
+)
+
+#: The stable codes this supervisor records about work the worker never finished. Every one is a
+#: NON-SUCCESS direction: a phase that was cut short, crashed, spoke nonsense or could not be reaped
+#: has proved nothing about the inputs.
+PROVENANCE_DEADLINE_CODE = prov.DEADLINE_CODE
+PROVENANCE_CRASH_CODE = "worker-crashed"
+PROVENANCE_PROTOCOL_CODE = "worker-protocol-invalid"
+PROVENANCE_REAP_CODE = "worker-reap-failed"
+PROVENANCE_START_CODE = "worker-start-failed"
+
+#: The closed shape a checkpoint may have. The worker reduces every checkpoint to what it DERIVED
+#: (sizes, digests, CRCs) because checkpoints are emitted BEFORE scrub has run; the parent refuses
+#: anything else, so a message carrying a filename, a member name or an exception message is a
+#: protocol violation rather than evidence.
+_CHECKPOINT_KEYS = frozenset({"input", "fingerprint_error"})
+_CHECKPOINT_INPUT_KEYS = frozenset({"size_bytes", "sha256", "revision_key", "members", "status"})
+_CHECKPOINT_MEMBER_KEYS = frozenset({"size_bytes", "crc32"})
+_CHECKPOINT_REVISION_KEYS = frozenset({"algo", "value"})
+_CHECKPOINT_ERROR_KEYS = frozenset({"code", "operation", "exception_class", "errno", "winerror"})
+_ERROR_KEYS = _CHECKPOINT_ERROR_KEYS | {"http_status"}
+_WORKER_ERROR_CODES = frozenset(
+    {
+        "collect-inputs-failed",
+        "empty-input",
+        "local-fingerprint-failed",
+        "live-lookup-refused",
+        "live-lookup-failed",
+        "content-unavailable",
+        "scrub-failed",
+        "sign-out-failed",
+        "build-failed",
+        prov.CANCELLED_CODE,
+        prov.DEADLINE_CODE,
+    }
+)
+_ERROR_OPERATIONS = prov.WORKER_OPERATIONS | {"lookup-origin", "download-workbook", "build", "scrub-local-fields"}
+_REVISION_ALGORITHMS = frozenset({"twbx-content-v3", "tableau-xml-v1", "raw-sha256-v1"})
+_BASENAME_PLATFORM = os.name
+_LIVE_OPERATIONS = frozenset({prov.OP_SIGN_IN, prov.OP_INVENTORY, prov.OP_CONTENT, prov.OP_SCRUB, prov.OP_SIGN_OUT})
+_OPERATION_ORDER = {
+    prov.OP_COLLECT_INPUTS: 0,
+    prov.OP_FINGERPRINT: 1,
+    prov.OP_SIGN_IN: 2,
+    prov.OP_INVENTORY: 3,
+    prov.OP_CONTENT: 4,
+    prov.OP_SCRUB: 5,
+    prov.OP_SIGN_OUT: 6,
+}
+_ORIGIN_TEXT_KEYS = frozenset(
+    {
+        "server",
+        "site",
+        "workbook_luid",
+        "workbook_name",
+        "project",
+        "owner_luid",
+        "created_at",
+        "updated_at",
+        "tableau_product_version",
+        "rest_api_version",
+    }
+)
+_ORIGIN_KEYS = _ORIGIN_TEXT_KEYS | {
+    "matched_by",
+    "match",
+    "content_unavailable",
+    "revision_match",
+    "remote_revision_key",
+    "remote_sha256",
+    "same_name_count",
+}
 
 #: Where `scan()` records a single measured path, and where it records a list of them.
 _PATH_RECORD_KEYS = ("longest", "root_budget_binding")
@@ -679,49 +811,803 @@ def write_source_provenance(out_dir: Path, result: dict) -> Path | None:
     return final_path
 
 
-def stamp_inputs(input_dir: Path, out_dir: Path) -> ProvenanceStampResult:
+def _progress_payload(event: str, operation: str, completed: int, total: int | None) -> dict:
+    """The four fields every progress event has, coerced onto the allowlist.
+
+    Nothing derived from an input, a response or an exception can reach a progress line even by
+    mistake: an unrecognised event or operation is REPLACED by its safe constant rather than echoed,
+    because a progress line is exactly the thing that gets pasted into an issue.
+
+    Deliberately absent: elapsed time, host, site, project, workbook or datasource name, LUID, path,
+    owner, credential, exception message and response body. The checkpoint and result payloads the
+    worker sends are never rendered at any level, including debug.
+    """
+    return {
+        "event": event if event in PROVENANCE_PROGRESS_EVENTS else "operation-progress",
+        "operation": operation if operation in PROVENANCE_PROGRESS_OPERATIONS else PROVENANCE_PHASE_OPERATION,
+        "completed": max(int(completed), 0) if isinstance(completed, int) and not isinstance(completed, bool) else 0,
+        "total": max(int(total), 0) if isinstance(total, int) and not isinstance(total, bool) else None,
+    }
+
+
+def _print_progress(payload: dict) -> dict:
+    print(f"{PROVENANCE_PROGRESS_PREFIX} {json.dumps(payload)}")
+    return payload
+
+
+def emit_provenance_progress(
+    event: str,
+    operation: str,
+    completed: int = 0,
+    total: int | None = None,
+    *,
+    status: str | None = None,
+) -> dict:
+    """Print one machine-readable progress event, from allowlisted parts only."""
+    payload = _progress_payload(event, operation, completed, total)
+    if status is not None:
+        payload["status"] = status if status in PROVENANCE_PROGRESS_STATUSES else "unknown"
+    return _print_progress(payload)
+
+
+def emit_provenance_phase_start(timeout_sec: float) -> dict:
+    """The one event that announces the budget - and the only one allowed to carry it."""
+    payload = _progress_payload("phase-start", PROVENANCE_PHASE_OPERATION, 0, None)
+    if isinstance(timeout_sec, (int, float)) and math.isfinite(timeout_sec):
+        payload["timeout_sec"] = float(timeout_sec)
+    return _print_progress(payload)
+
+
+class ProvenanceProtocolError(Exception):
+    """The worker sent something outside the closed message protocol. Fail closed, never parse on."""
+
+
+# Exact JSON builtin types are deliberate: bool is not a count, nor is an arbitrary coercible object.
+# pylint: disable=unidiomatic-typecheck
+def _is_count(value: object) -> bool:
+    """A bounded whole count; bool, floats, negative and arbitrarily large integers are not counts."""
+    return type(value) is int and 0 <= value <= PROVENANCE_MAX_COUNT
+
+
+def _require(condition: bool) -> None:
+    if not condition:
+        raise ProvenanceProtocolError
+
+
+def _enum(value: object, allowed) -> None:
+    _require(type(value) is str and value in allowed)
+
+
+def _text(value: object, maximum: int = 1024) -> None:
+    _require(type(value) is str and len(value) <= maximum and all(ord(char) >= 32 for char in value))
+
+
+def _digest(value: object, length: int = 64) -> None:
+    _require(type(value) is str and len(value) == length and re.fullmatch("[0-9a-f]+", value) is not None)
+
+
+def _validated_error(error: object) -> None:
+    _require(type(error) is dict and {"code", "operation"} <= error.keys() <= _ERROR_KEYS)
+    _enum(error["code"], _WORKER_ERROR_CODES)
+    _enum(error["operation"], _ERROR_OPERATIONS)
+    if "exception_class" in error:
+        _enum(error["exception_class"], prov.ERROR_CLASSES)
+    for key in ("errno", "winerror"):
+        if key in error:
+            _require(type(error[key]) is int and -(1 << 31) <= error[key] < (1 << 32))
+    if "http_status" in error:
+        _require(_is_count(error["http_status"]) and (error["http_status"] == 0 or 100 <= error["http_status"] <= 599))
+
+
+def _validated_revision(revision: object) -> None:
+    _require(type(revision) is dict and revision.keys() == _CHECKPOINT_REVISION_KEYS)
+    _enum(revision["algo"], _REVISION_ALGORITHMS)
+    _digest(revision["value"])
+
+
+def _validated_checkpoint(record: object) -> dict:
+    """Strict, bounded DERIVED evidence. In particular, a string in a digest field is not a digest."""
+    _require(type(record) is dict and {"input"} <= record.keys() <= _CHECKPOINT_KEYS)
+    local = record.get("input")
+    _require(type(local) is dict and local.keys() <= _CHECKPOINT_INPUT_KEYS)
+    if "status" in local:
+        _require(local == {"status": "unavailable"} and "fingerprint_error" in record)
+    else:
+        _require({"size_bytes", "sha256"} <= local.keys() and _is_count(local["size_bytes"]))
+        _digest(local["sha256"])
+    if "members" in local:
+        members = local["members"]
+        _require(type(members) is list and len(members) <= PROVENANCE_MAX_MEMBERS)
+        for member in members:
+            _require(type(member) is dict and member.keys() == _CHECKPOINT_MEMBER_KEYS)
+            _require(_is_count(member["size_bytes"]))
+            _digest(member["crc32"], 8)
+    if "revision_key" in local:
+        _validated_revision(local["revision_key"])
+    if "fingerprint_error" in record:
+        _validated_error(record["fingerprint_error"])
+        _require(local == {"status": "unavailable"})
+        _require(record["fingerprint_error"]["operation"] == prov.OP_FINGERPRINT)
+        _enum(
+            record["fingerprint_error"]["code"], {"local-fingerprint-failed", prov.CANCELLED_CODE, prov.DEADLINE_CODE}
+        )
+    return record
+
+
+def _validated_origin(origin: object) -> None:
+    if origin is None:
+        return
+    _require(type(origin) is dict and origin.keys() == _ORIGIN_KEYS)
+    for key in _ORIGIN_TEXT_KEYS:
+        if origin[key] is not None:
+            _text(origin[key])
+    _enum(origin["matched_by"], {"luid", "name", "sanitized_name"})
+    _enum(origin["match"], {"sha256", "name_only", "unavailable"})
+    _require(origin["revision_match"] is None or origin["revision_match"] in ("same", "differs"))
+    if origin["remote_sha256"] is not None:
+        _digest(origin["remote_sha256"])
+    if origin["remote_revision_key"] is not None:
+        _validated_revision(origin["remote_revision_key"])
+    reason = origin["content_unavailable"]
+    _require(reason is None or (type(reason) is str and re.fullmatch(r"HTTP [1-5][0-9]{2}", reason) is not None))
+    _require(_is_count(origin["same_name_count"]))
+
+
+def _validated_basename(value: object) -> None:
+    """Bounded platform-native basename syntax only; pure paths never perform filesystem I/O."""
+    _require(type(value) is str and 0 < len(value) <= 255 and "\0" not in value)
+    _require(value not in {".", ".."})
+    windows = _BASENAME_PLATFORM == "nt"
+    path = (PureWindowsPath if windows else PurePosixPath)(value)
+    _require(not path.anchor and path.name == value)
+    if windows:
+        _require(all(ord(char) >= 32 and char not in '<>:"|?*' for char in value))
+        _require(value[-1] not in " .")
+        stem = value.partition(".")[0].rstrip(" ").upper()
+        _require(re.fullmatch(r"CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[1-9¹²³]|LPT[1-9¹²³]", stem) is None)
+
+
+def _validated_result_record(record: object) -> dict:
+    """Validate a scrubbed record, returning its bounded derived projection for reconciliation."""
+    allowed = {"input", "origin", "origin_note", "fingerprint_error", "lookup_error"}
+    _require(type(record) is dict and {"input"} <= record.keys() <= allowed)
+    local = record["input"]
+    _require(type(local) is dict and local.keys() <= _CHECKPOINT_INPUT_KEYS | {"file"})
+    if "file" in local:
+        _validated_basename(local["file"])
+    if "members" in local:
+        _require(type(local["members"]) is list and len(local["members"]) <= PROVENANCE_MAX_MEMBERS)
+        for member in local["members"]:
+            _require(
+                type(member) is dict and _CHECKPOINT_MEMBER_KEYS <= member.keys() <= _CHECKPOINT_MEMBER_KEYS | {"name"}
+            )
+            if "name" in member:
+                _text(member["name"])
+    if "fingerprint_error" in record:
+        _validated_error(record["fingerprint_error"])
+    reduced = prov.checkpoint_record(record)
+    _validated_checkpoint(reduced)
+    if "origin" in record:
+        _validated_origin(record["origin"])
+    if "origin_note" in record:
+        _text(record["origin_note"])
+        origin = record.get("origin")
+        notes = {prov.WITHHELD_NOTE, prov.NO_ORIGIN_NOTE}
+        if origin:
+            notes.add(
+                f"matched by {origin['matched_by']}, but the bytes DIFFER from the site copy - "
+                "figures measured here will not reproduce against it"
+            )
+            reason = origin["content_unavailable"] or "the site refused the download"
+            notes.add(
+                f"matched by {origin['matched_by']}, but the site copy could NOT be read "
+                f"({reason}) - no byte or revision comparison was made"
+            )
+        _require(record["origin_note"] in notes)
+    if "lookup_error" in record:
+        _validated_error(record["lookup_error"])
+    return reduced
+
+
+def _validated_result(result: object, total: int, checkpoints: dict[int, dict]) -> dict:
+    _require(type(result) is dict and result.keys() == {"schema", "stamped_at", "input_count", "inputs", "phase"})
+    _require(result["schema"] == prov.SCHEMA)
+    stamp = result["stamped_at"]
+    _require(
+        type(stamp) is str
+        and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", stamp) is not None
+    )
+    try:
+        datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        raise ProvenanceProtocolError from None
+    _require(_is_count(result["input_count"]) and result["input_count"] == total)
+    records = result["inputs"]
+    _require(type(records) is list and len(records) == total)
+    for index, record in enumerate(records):
+        reduced = _validated_result_record(record)
+        if index in checkpoints:
+            _require(reduced == checkpoints[index])
+        else:
+            _require(reduced["input"] == {"status": "unavailable"})
+    phase = result["phase"]
+    _require(type(phase) is dict and phase.keys() == {"status", "errors"})
+    _enum(phase["status"], prov.RESULT_STATUSES)
+    errors = phase["errors"]
+    _require(type(errors) is list and len(errors) <= 2 * PROVENANCE_MAX_INPUTS + 8)
+    for error in errors:
+        _validated_error(error)
+    if phase["status"] in prov.SUCCESS_STATUSES:
+        _require(total > 0 and not errors and len(checkpoints) == total)
+        _require(
+            all(
+                "status" not in record["input"] and not ({"lookup_error", "fingerprint_error"} & record.keys())
+                for record in records
+            )
+        )
+    if phase["status"] == "empty":
+        _require(total == 0)
+    return result
+
+
+def _validated_message(message: object) -> dict:
+    """One message against the closed protocol. Anything else raises rather than being interpreted."""
+    _require(type(message) is dict and len(message) <= 4)
+    kind, keys = message.get("kind"), set(message)
+    if kind == prov.MSG_INPUTS_DISCOVERED:
+        _require(keys == {"kind", "total"} and _is_count(message["total"]))
+        _require(message["total"] <= PROVENANCE_MAX_INPUTS)
+    elif kind == prov.MSG_OPERATION:
+        _require(keys == {"kind", "operation", "completed", "total"})
+        _enum(message["operation"], prov.WORKER_OPERATIONS)
+        _require(_is_count(message["completed"]))
+        _require(message["total"] is None or _is_count(message["total"]))
+    elif kind == prov.MSG_CHECKPOINT:
+        _require(keys == {"kind", "index", "record"} and _is_count(message["index"]))
+        _validated_checkpoint(message["record"])
+    elif kind == prov.MSG_LOOKUP_INTENT:
+        _require(keys == {"kind", "requested"} and type(message["requested"]) is bool)
+    elif kind in (prov.MSG_SAFE_SNAPSHOT, prov.MSG_TERMINAL):
+        _require(keys == {"kind", "result"} and type(message["result"]) is dict)
+    else:
+        raise ProvenanceProtocolError
+    return message
+
+
+class _ProvenanceState:  # pylint: disable=too-many-instance-attributes
+    """Everything the parent ACCEPTED before it stopped reading, and nothing it did not.
+
+    The accept boundary is the whole safety property: a message read after the deadline latch is not
+    recorded here, so a worker that finishes late cannot make a preempted phase look successful.
+    """
+
+    def __init__(self, emit=emit_provenance_progress) -> None:
+        self._emit = emit
+        self.total: int | None = None
+        self.checkpoints: dict[int, dict] = {}
+        self.snapshot: dict | None = None
+        self.terminal: dict | None = None
+        self.live_requested: bool | None = None
+        self.content_inputs = 0
+        self.content_open = False
+        #: What the worker was last known to be DOING - the operation a deadline error names.
+        self.operation: str = prov.OP_COLLECT_INPUTS
+        self.counters: dict[str, int] = {}
+        self.messages = 0
+
+    def prepare(self, message: object) -> _ProvenanceState:
+        """Validate into TEMPORARY state. Neither evidence nor progress is committed by this call."""
+        message = _validated_message(message)
+        _require(self.terminal is None and self.messages < PROVENANCE_MAX_MESSAGES)
+        candidate = copy.copy(self)
+        candidate.messages += 1
+        kind = message["kind"]
+        if kind == prov.MSG_INPUTS_DISCOVERED:
+            _require(self.total is None and self.operation == prov.OP_COLLECT_INPUTS)
+            candidate.total = message["total"]
+        elif kind == prov.MSG_OPERATION:
+            candidate.prepare_operation(message)
+        elif kind == prov.MSG_CHECKPOINT:
+            _require(self.total is not None and message["index"] == len(self.checkpoints) < self.total)
+            _require(
+                self.operation == prov.OP_FINGERPRINT and self.counters.get(prov.OP_FINGERPRINT) == message["index"] + 1
+            )
+            candidate.checkpoints = {**self.checkpoints, message["index"]: message["record"]}
+        elif kind == prov.MSG_LOOKUP_INTENT:
+            _require(self.live_requested is None and self.total is not None and self.total > 0)
+            _require(self.operation == prov.OP_FINGERPRINT and len(self.checkpoints) == self.total)
+            _require(self.counters.get(prov.OP_COLLECT_INPUTS) == 1)
+            _require(self.counters.get(prov.OP_FINGERPRINT) == self.total)
+            candidate.live_requested = message["requested"]
+        elif kind == prov.MSG_SAFE_SNAPSHOT:
+            _require(self.total is not None and self.snapshot is None)
+            _require(self.operation == prov.OP_SCRUB and self.counters.get(prov.OP_SCRUB) == 1)
+            candidate.snapshot = _validated_result(message["result"], self.total, self.checkpoints)
+            self.validate_result_history(candidate.snapshot, terminal=False)
+        else:
+            _require(self.total is not None)
+            candidate.terminal = _validated_result(message["result"], self.total, self.checkpoints)
+            self.validate_result_history(candidate.terminal, terminal=True)
+            if self.snapshot is not None:
+                _require(candidate.terminal["inputs"] == self.snapshot["inputs"])
+                prior = self.snapshot["phase"]
+                _require(candidate.terminal["phase"]["errors"][: len(prior["errors"])] == prior["errors"])
+                _require(
+                    prior["status"] not in {"partial", "failed"}
+                    or candidate.terminal["phase"]["status"] == prior["status"]
+                )
+        return candidate
+
+    def validate_result_history(self, result: dict, *, terminal: bool) -> None:
+        """Success must describe the applicable observed path, not just a complete fingerprint list."""
+        status = result["phase"]["status"]
+        if status not in prov.SUCCESS_STATUSES:
+            return
+        _require(self.counters.get(prov.OP_COLLECT_INPUTS) == 1)
+        _require(self.counters.get(prov.OP_FINGERPRINT) == self.total)
+        if status == "local_only":
+            _require(terminal and self.live_requested is False and _LIVE_OPERATIONS.isdisjoint(self.counters))
+            _require(all(record.get("origin") is None and "origin_note" not in record for record in result["inputs"]))
+            return
+        _require(self.live_requested is True)
+        _require(
+            all(self.counters.get(operation) == 1 for operation in (prov.OP_SIGN_IN, prov.OP_INVENTORY, prov.OP_SCRUB))
+        )
+        _require(not self.content_open and self.content_inputs == self.total)
+        matched = set()
+        for record in result["inputs"]:
+            _require("origin" in record)
+            origin = record["origin"]
+            if origin is None:
+                _require(record.get("origin_note") == prov.NO_ORIGIN_NOTE)
+            else:
+                _require(type(origin["workbook_luid"]) is str and bool(origin["workbook_luid"]))
+                _require(origin["remote_sha256"] is not None and origin["content_unavailable"] is None)
+                _require(origin["match"] in {"sha256", "name_only"})
+                matched.add(origin["workbook_luid"])
+        _require(self.counters.get(prov.OP_CONTENT) == len(matched))
+        if terminal:
+            _require(self.snapshot is not None and self.counters.get(prov.OP_SIGN_OUT) == 1)
+
+    def prepare_operation(self, message: dict) -> None:
+        """Check operation order and counters on the temporary candidate, not the accepted state."""
+        operation, completed, total = message["operation"], message["completed"], message["total"]
+        _require(_OPERATION_ORDER[operation] >= _OPERATION_ORDER[self.operation])
+        _require(completed >= self.counters.get(operation, 0))
+        if operation == prov.OP_COLLECT_INPUTS:
+            _require(total == 1 and completed in (0, 1))
+            _require((completed == 0 and self.total is None) or (completed == 1 and self.total is not None))
+            _require(completed == (0 if operation not in self.counters else self.counters[operation] + 1))
+        else:
+            _require(self.total is not None)
+            if operation == prov.OP_FINGERPRINT:
+                _require(self.live_requested is None)
+                _require(
+                    total == self.total and len(self.checkpoints) <= completed <= min(len(self.checkpoints) + 1, total)
+                )
+            else:
+                _require(self.live_requested is True and len(self.checkpoints) == self.total)
+                if operation == prov.OP_CONTENT:
+                    _require(total is None and completed <= self.total)
+                    _require(self.counters.get(prov.OP_INVENTORY) == 1)
+                    self.prepare_content(completed)
+                else:
+                    _require(total == 1 and completed in (0, 1))
+                    _require(completed == (0 if operation not in self.counters else self.counters[operation] + 1))
+                if operation == prov.OP_INVENTORY:
+                    _require(self.counters.get(prov.OP_SIGN_IN) == 1)
+                if operation == prov.OP_SCRUB:
+                    _require(self.counters.get(prov.OP_INVENTORY) == 1 and not self.content_open)
+                    usable = sum(record["input"].get("status") != "unavailable" for record in self.checkpoints.values())
+                    _require(self.content_inputs == usable)
+                if operation == prov.OP_SIGN_OUT:
+                    _require(self.snapshot is not None)
+        self.operation = operation
+        self.counters = {**self.counters, operation: completed}
+
+    def prepare_content(self, completed: int) -> None:
+        """Pair each usable input's lookup, counting only new distinct download attempts (#582)."""
+        prior = self.counters.get(prov.OP_CONTENT, 0)
+        if self.content_open:
+            _require(prior <= completed <= prior + 1)
+            self.content_inputs += 1
+        else:
+            _require(completed == prior and self.content_inputs < self.total)
+        self.content_open = not self.content_open
+
+    def commit(self, candidate: _ProvenanceState) -> None:
+        """An O(1) state swap, performed ONLY by the supervising thread after its clock check."""
+        previous = self.counters
+        self.__dict__ = candidate.__dict__
+        if self.counters is not previous:
+            total = (
+                self.total
+                if self.operation == prov.OP_FINGERPRINT
+                else (None if self.operation == prov.OP_CONTENT else 1)
+            )
+            self._emit("operation-progress", self.operation, self.counters[self.operation], total)
+
+    def accept(self, message: object) -> None:
+        """Synchronous protocol seam for direct tests; supervision uses prepare then clock then commit."""
+        self.commit(self.prepare(message))
+
+    def document(self, code: str, base: dict | None = None, **facts: int) -> dict:
+        """The honest partial/failed document for a phase that did not finish.
+
+        Everything ACCEPTED is kept and everything else is an EXPLICIT placeholder, so `input_count`
+        still equals `len(inputs)` (the identity #594's normalisation refuses to let a result
+        contradict) and an unfinished input reads as "we did not get to this one" rather than as
+        absent or as fine. A placeholder names no file: it is addressed by ordinal, which is also why
+        it cannot leak one.
+
+        ``base`` overrides the accepted safe snapshot as the document to build on. It exists for the
+        one case where a COMPLETE result was accepted and the phase still may not claim success -
+        an unreapable worker - so the evidence survives while the verdict does not.
+        """
+        error = prov.phase_error(code, self.operation, **facts)
+        source = base if base is not None else (self.terminal or self.snapshot)
+        if source is not None:
+            result = dict(source)
+            phase = result.get("phase") if isinstance(result.get("phase"), dict) else {}
+            result["phase"] = {"status": "partial", "errors": [*(phase.get("errors") or []), error]}
+            return result
+        if self.total is None and not self.checkpoints:
+            return prov.phase_result([], "failed", [error])
+        records = [self.checkpoints.get(index) or prov.unavailable_input(code) for index in range(self.total or 0)]
+        return prov.phase_result(records, "partial" if self.checkpoints else "failed", [error])
+
+
+class ProvenanceOutcome(NamedTuple):
+    """One supervised provenance phase: the result to publish, and what the worker did."""
+
+    result: dict
+    completed: int
+    total: int | None
+    worker_pid: int | None
+    worker_alive: bool | None
+    worker_exitcode: int | None
+    expired: bool
+
+
+class _WorkerStop(NamedTuple):
+    alive: bool | None
+    exitcode: int | None
+    killed: bool
+    error: bool = False
+
+    @property
+    def reaped(self) -> bool:
+        """Only affirmative, exception-free evidence can certify cleanup."""
+        return self.alive is False and type(self.exitcode) is int and not self.error
+
+
+def _stop_worker(process) -> _WorkerStop:
+    """Terminate, then kill, then reap - each with a BOUNDED join.
+
+    ⚠️ This is a DIRECT-process guarantee only. Measured on Windows: killing a worker did not kill
+    its grandchild, which survived and had to be terminated by PID. The worker is therefore required
+    to be a leaf (it is started as a daemon, which `multiprocessing` refuses to let have children),
+    and no claim is made here about descendants.
+    """
+    failed = False
+    killed = False
+    alive, exitcode = None, None
+    for action, budget in (("terminate", PROVENANCE_TERMINATE_JOIN_SEC), ("kill", PROVENANCE_KILL_JOIN_SEC)):
+        if action == "kill" and alive is False and type(exitcode) is int and not failed:
+            break
+        killed = killed or action == "kill"
+        try:
+            getattr(process, action)()
+        except Exception:  # pylint: disable=broad-exception-caught
+            failed = True
+        try:
+            process.join(budget)
+        except Exception:  # pylint: disable=broad-exception-caught
+            failed = True
+        try:
+            alive, exitcode = process.is_alive(), process.exitcode
+            if type(alive) is not bool or (exitcode is not None and type(exitcode) is not int):
+                failed = True
+                alive, exitcode = None, None
+        except Exception:  # pylint: disable=broad-exception-caught
+            failed = True
+            alive, exitcode = None, None
+    stopped = _WorkerStop(alive, exitcode, killed, failed)
+    if not stopped.reaped:
+        # CPython otherwise joins active children WITHOUT A TIMEOUT in its atexit handler. A
+        # cannot-reap verdict must not turn back into an unbounded interpreter exit. This does not
+        # assert that an unreapable child disappeared; the artifact explicitly reports the gap.
+        multiprocessing.process._children.discard(process)  # pylint: disable=protected-access
+    return stopped
+
+
+def _json_integer(text: str) -> int:
+    _require(len(text) <= 20)
+    return int(text)
+
+
+def _json_object(pairs: list[tuple[str, object]]) -> dict:
+    _require(len(pairs) <= 32)
+    result = {}
+    for key, value in pairs:
+        _require(len(key) <= 64 and key not in result)
+        result[key] = value
+    return result
+
+
+def _reject_json_number(_text: str) -> None:
+    raise ProvenanceProtocolError
+
+
+def _decode_message(payload: bytes) -> dict:
+    """Strict JSON only; no pickle execution, duplicate keys, floating counts or nonfinite values."""
+    return json.loads(
+        payload.decode("utf-8"),
+        object_pairs_hook=_json_object,
+        parse_int=_json_integer,
+        parse_float=_reject_json_number,
+        parse_constant=_reject_json_number,
+    )
+
+
+class _ProvenanceReceiver:
+    """One daemon transport helper, never a second provenance worker or an artifact publisher.
+
+    Receive, decode and validation run here, including hostile partial frames. The one-slot mailbox
+    and acknowledgement bound buffering; only the supervisor commits candidates. Shutdown interrupts
+    socket reads, and the bounded join is not extended for a stuck validator. A remaining helper is
+    daemon-only and cannot hold interpreter exit or publish late evidence.
+    """
+
+    def __init__(self, channel: prov.ProvenanceChannel, state: _ProvenanceState) -> None:
+        self.channel = channel
+        self.state = state
+        self.mailbox: queue.Queue = queue.Queue(maxsize=1)
+        self.acknowledged = threading.Event()  # parent threads only; NEVER shared with the worker
+        self.closed = False
+        self.thread = threading.Thread(target=self._run, name="provenance-transport", daemon=True)
+
+    def start(self) -> None:
+        """Start only the daemon transport helper; all provenance computation stays in the worker."""
+        self.thread.start()
+
+    def _deliver(self, value: object) -> bool:
+        while not self.closed:
+            try:
+                self.mailbox.put(value, timeout=0.05)
+                return True
+            except queue.Full:
+                continue
+        return False
+
+    def _run(self) -> None:
+        received = 0
+        try:
+            while not self.closed:
+                payload = self.channel.recv_bytes(
+                    min(PROVENANCE_MAX_FRAME_BYTES, PROVENANCE_MAX_PHASE_BYTES - received)
+                )
+                received += len(payload)
+                candidate = self.state.prepare(_decode_message(payload))
+                if not self._deliver(candidate):
+                    return
+                while not self.closed and not self.acknowledged.wait(0.05):
+                    pass
+                self.acknowledged.clear()
+        except EOFError:
+            self._deliver("eof")
+        except OSError:
+            self._deliver(PROVENANCE_CRASH_CODE)
+        except Exception:  # pylint: disable=broad-exception-caught
+            self._deliver(PROVENANCE_PROTOCOL_CODE)
+
+    def close(self) -> None:
+        """No peer-owned lock or unbounded thread join is used by the supervising parent."""
+        self.closed = True
+        self.acknowledged.set()
+        with contextlib.suppress(OSError, ValueError):
+            self.channel.shutdown()
+        if self.thread.ident is not None:
+            self.thread.join(PROVENANCE_RECEIVER_JOIN_SEC)
+        self.channel.close()
+
+
+def _drain_worker(receiver: _ProvenanceReceiver, deadline_at: float, state: _ProvenanceState) -> str | None:
+    """Only a timed mailbox read and an O(1) commit run on the supervising thread."""
+    while True:
+        remaining = deadline_at - time.monotonic()
+        if remaining <= 0:
+            return PROVENANCE_DEADLINE_CODE
+        try:
+            candidate = receiver.mailbox.get(timeout=remaining)
+        except queue.Empty:
+            return PROVENANCE_DEADLINE_CODE
+        # Validation has finished into temporary state. It may have used the rest of the budget:
+        # check AGAIN, immediately before committing any evidence or progress.
+        if time.monotonic() >= deadline_at:
+            return PROVENANCE_DEADLINE_CODE
+        if candidate == "eof":
+            return None if state.terminal is not None else PROVENANCE_CRASH_CODE
+        if candidate in (PROVENANCE_PROTOCOL_CODE, PROVENANCE_CRASH_CODE):
+            return candidate
+        state.commit(candidate)
+        receiver.acknowledged.set()
+
+
+def _worker_document(state: _ProvenanceState, code: str | None, stopped: _WorkerStop) -> dict:
+    """The result to publish: the worker's own when it finished, otherwise the honest partial one.
+
+    The exit code is recorded only for a worker that died on its OWN - our terminate/kill code
+    describes this parent's action and would say nothing about the phase.
+
+    An UNREAPABLE worker is the one case where a complete terminal result was accepted and still may
+    not be published as a pass. It is kept as the document - the evidence is real and was accepted
+    before the latch - but the status is forced to `partial` beside a `worker-reap-failed` error,
+    because a process we could not account for cannot certify anything.
+    """
+    if code is None:
+        result = state.terminal or {}
+    elif code == PROVENANCE_CRASH_CODE and type(stopped.exitcode) is int:
+        result = state.document(code, exit_code=stopped.exitcode)
+    else:
+        result = state.document(code)
+    if not stopped.reaped:
+        if code is None:
+            return state.document(PROVENANCE_REAP_CODE, base=state.terminal)
+        result["phase"]["errors"].append(prov.phase_error(PROVENANCE_REAP_CODE, state.operation))
+    return result
+
+
+# pylint: enable=unidiomatic-typecheck
+
+
+# Keep the process and both endpoint lifetimes explicit through setup failure and bounded cleanup.
+# pylint: disable-next=too-many-locals
+def collect_provenance(
+    input_dir: Path,
+    timeout_sec: float = PROVENANCE_TIMEOUT_DEFAULT_SEC,
+    entry=None,
+    env_path: Path | None = None,
+) -> ProvenanceOutcome:
+    """Run the whole provenance computation in one leaf worker under one absolute deadline.
+
+    The deadline is computed BEFORE the spawn, so Windows' import-the-world startup is charged to the
+    phase rather than granted for free. The worker resolves its own credentials from `env_path`, so
+    no secret crosses the pipe; the parent sends it a path and receives numbers, derived digests and
+    an already-scrubbed result.
+
+    The parent publishes. Always, exactly once, whatever happened here - which is why publication is
+    NOT in this function.
+    """
+    deadline_at = time.monotonic() + timeout_sec
+    state = _ProvenanceState()
+    process = receiver = recv = send = cancel = None
+    worker_pid = None
+    attempted = False
+    stopped = _WorkerStop(None, None, False, True)
+    code = PROVENANCE_START_CODE
+    try:
+        context = multiprocessing.get_context("spawn")
+        left, right = socket.socketpair()
+        recv, send = prov.ProvenanceChannel(left), prov.ProvenanceChannel(right)
+        # Single-writer shared byte: neither read nor write acquires a worker-owned lock. It is a
+        # cooperative hint only; visibility of this byte is never the deadline enforcement.
+        cancel = context.RawValue("b", 0)
+        process = context.Process(
+            target=entry or prov.provenance_worker,
+            args=(send, cancel, {"input": str(input_dir), "env": str(env_path or Path(".env"))}),
+            daemon=True,
+        )
+        # Reject an unpicklable injected entry BEFORE Windows creates a bootstrap child.
+        multiprocessing.reduction.ForkingPickler.dumps(entry or prov.provenance_worker)
+        if time.monotonic() >= deadline_at:
+            code = PROVENANCE_DEADLINE_CODE
+        else:
+            attempted = True
+            process.start()
+            worker_pid = process.pid
+            send.close()
+            receiver = _ProvenanceReceiver(recv, state)
+            receiver.start()
+            code = _drain_worker(receiver, deadline_at, state)
+    except Exception:  # pylint: disable=broad-exception-caught
+        code = PROVENANCE_START_CODE if worker_pid is None else PROVENANCE_PROTOCOL_CODE
+    finally:
+        if cancel is not None:
+            cancel.value = 1
+        if process is not None and attempted:
+            stopped = _stop_worker(process)
+            try:
+                worker_pid = process.pid
+            except Exception:  # pylint: disable=broad-exception-caught
+                stopped = stopped._replace(error=True)
+            if stopped.reaped:
+                with contextlib.suppress(OSError, ValueError):
+                    process.close()
+        if receiver is not None:
+            receiver.close()
+        elif recv is not None:
+            recv.close()
+        if send is not None:
+            send.close()
+
+    result = state.document(code) if not attempted else _worker_document(state, code, stopped)
+    completed = len(result["inputs"]) if isinstance(result.get("inputs"), list) else 0
+    return ProvenanceOutcome(
+        result=result,
+        completed=completed,
+        total=state.total if state.total is not None else completed,
+        worker_pid=worker_pid,
+        worker_alive=stopped.alive,
+        worker_exitcode=stopped.exitcode,
+        expired=code == PROVENANCE_DEADLINE_CODE,
+    )
+
+
+def stamp_inputs(
+    input_dir: Path, out_dir: Path, timeout_sec: float = PROVENANCE_TIMEOUT_DEFAULT_SEC
+) -> ProvenanceStampResult:
     """Record where each input workbook came from, into ``<out>/source-provenance.json``.
 
-    Every structured result is published, including empty and failed results. Remote lookup may
-    honestly degrade to local-only evidence, but unassessable evidence or failed publication blocks
-    later phases.
+    Every structured result is published, including empty, partial, timed-out and failed ones. Remote
+    lookup may honestly degrade to local-only evidence, but unassessable evidence or failed
+    publication blocks later phases.
 
     A result is NORMALISED before it is published: a result that contradicts itself (a success or
     local_only status carrying no inputs, a count that is not a whole number, a count that disagrees
     with the list beside it) is published as a failure carrying the stable fault codes, so the
     artifact on disk is never success-shaped on evidence that cannot support it. The verdict is then
     taken from the same consistency check rather than from ``phase.status`` alone.
+
+    The computation itself runs in a supervised leaf worker (#576). Publication stays HERE, in the
+    parent, exactly once - a deadline that killed the worker is only useful if the artifact recording
+    it still gets written.
     """
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    import stamp_tableau_provenance as prov  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+    emit_provenance_phase_start(timeout_sec)
+    try:
+        outcome = collect_provenance(input_dir, timeout_sec)
+        result = prov.normalize_result(outcome.result)
+    except Exception:  # pylint: disable=broad-exception-caught
+        result = prov.phase_result(
+            [], "failed", [prov.phase_error(PROVENANCE_PROTOCOL_CODE, PROVENANCE_PHASE_OPERATION)]
+        )
+        outcome = ProvenanceOutcome(result, 0, None, None, None, None, False)
 
     try:
-        result = prov.build(input_dir, prov.resolve_env(Path(".env")))
-    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-        result = prov.failure_result("build-failed", "build", exc)
-
-    result = prov.normalize_result(result)
-    if write_source_provenance(out_dir, result) is None:
-        return ProvenanceStampResult(
+        published = write_source_provenance(out_dir, result)
+    except Exception:  # pylint: disable=broad-exception-caught
+        published = None  # exactly one attempt even if the publisher itself unexpectedly raises
+    status = result["phase"].get("status", "unknown")
+    if published is None:
+        stamped = ProvenanceStampResult(
             False,
             "publication_failed",
             f"{SAFE_SOURCE_PROVENANCE_REPORT} could not be published",
         )
-
-    status = result["phase"].get("status", "unknown")
-    records = result.get("inputs") or []
-    matched = sum(
-        1
-        for record in records
-        if isinstance(record, dict)
-        and isinstance(record.get("origin"), dict)
-        and record["origin"].get("match") == "sha256"
+    else:
+        records = result.get("inputs") or []
+        matched = sum(
+            1
+            for record in records
+            if isinstance(record, dict)
+            and isinstance(record.get("origin"), dict)
+            and record["origin"].get("match") == "sha256"
+        )
+        count = result.get("input_count", 0)
+        stamped = ProvenanceStampResult(
+            prov.is_success(result),
+            status,
+            f"{count} input(s) stamped, {matched} confirmed against the site ({status}) "
+            f"-> {SAFE_SOURCE_PROVENANCE_REPORT}",
+        )
+    emit_provenance_progress(
+        "phase-finish",
+        PROVENANCE_PHASE_OPERATION,
+        outcome.completed,
+        outcome.total,
+        status=stamped.status,
     )
-    count = result.get("input_count", 0)
-    detail = (
-        f"{count} input(s) stamped, {matched} confirmed against the site ({status}) -> {SAFE_SOURCE_PROVENANCE_REPORT}"
-    )
-    return ProvenanceStampResult(prov.is_success(result), status, detail)
+    return stamped
 
 
 def write_phase_record(out_dir: Path, phases: list[dict]) -> Path:
@@ -1661,7 +2547,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="skip the engine; re-derive handovers/checks from an existing bundle",
     )
     parser.add_argument("--dry-run", action="store_true", help="report what would run, then stop")
+    parser.add_argument(
+        "--provenance-timeout-sec",
+        type=float,
+        default=PROVENANCE_TIMEOUT_DEFAULT_SEC,
+        help=(
+            "whole-phase budget for source provenance, in seconds (default "
+            f"{PROVENANCE_TIMEOUT_DEFAULT_SEC:g}). Must be finite and greater than zero: there is no "
+            "disable sentinel, and zero does NOT mean local-only. Expiry publishes a partial/failed "
+            f"artifact and returns {EXIT_PROVENANCE_FAILED}"
+        ),
+    )
     return parser
+
+
+def valid_provenance_timeout(timeout_sec: object) -> bool:
+    """Whether the phase budget is a real duration.
+
+    ``0`` is not "no timeout" and not "local only", and neither is a negative, ``NaN`` or infinite
+    value: each of them would either publish nothing or reinstate the unbounded stall this budget
+    exists to end. There is deliberately no disable sentinel - local-only operation comes from having
+    no live credentials, and stays deadline-bound because local reads and hashes block too.
+    """
+    return (
+        isinstance(timeout_sec, (int, float))
+        and not isinstance(timeout_sec, bool)
+        and (math.isfinite(timeout_sec) and timeout_sec > 0)
+    )
 
 
 def resolve_run_engine(args: argparse.Namespace) -> tuple[Path | None, int]:
@@ -1846,6 +2758,13 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     phases: list[dict] = []
 
+    # Before the engine, the path gate, the worker and the publisher: a budget that is not a duration
+    # cannot bound anything, and refusing it here costs the operator a re-run rather than a migration.
+    # The diagnostic is fixed text - it echoes neither the value nor anything else the user supplied.
+    if not valid_provenance_timeout(args.provenance_timeout_sec):
+        print("ERROR: --provenance-timeout-sec must be a finite number greater than zero", file=sys.stderr)
+        return EXIT_USAGE
+
     if not args.slice_only and not args.input:
         print("ERROR: --input is required unless --slice-only is given", file=sys.stderr)
         return EXIT_USAGE
@@ -1882,7 +2801,7 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
     # Best-effort and never fatal: a migration must not fail because a site was unreachable.
     if args.input:
         started = time.monotonic()
-        stamped = stamp_inputs(args.input, args.output)
+        stamped = stamp_inputs(args.input, args.output, args.provenance_timeout_sec)
         phases.append(
             {
                 "phase": "provenance",

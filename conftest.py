@@ -92,6 +92,7 @@ EXPECTED_EXACT_SKIP_REASONS: frozenset[str] = frozenset(
         "write-deny enforcement is an icacls ACL; the marker-only path cannot block a write",
         "this platform/account cannot create symlinks without elevation",
         "Windows filenames cannot hold undecodable bytes",
+        "POSIX native filename control; both flavours also run through a seam",
         "off-Windows behaviour of the registry read",
         "reads the Windows registry",
         "filesystem will not store a combining-character filename unchanged",
