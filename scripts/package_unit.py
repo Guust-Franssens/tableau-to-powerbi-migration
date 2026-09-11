@@ -2616,8 +2616,28 @@ def _write_spec(asset: Path | None, dest: Path) -> tuple[str | None, str | None]
     """`(relative spec path, failure note)` - `check_unit.py` cannot grade a unit without one (#443)."""
     if asset is None:
         return None, "no migration-spec.json: the source asset could not be resolved"
+    # The parser CLI arms a new credential gate beside its output. Packaging must only project the
+    # ORIGINAL gate's authority, never create or ship a staged audit. Keep its pure parser/schema
+    # validation in the existing bounded subprocess, without invoking that lifecycle entry point.
+    parse_only = (
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "from parse_tableau import parse_workbook, validate_spec\n"
+        "spec = parse_workbook(Path(sys.argv[2]))\n"
+        "validate_spec(spec, Path(sys.argv[3]))\n"
+        "Path(sys.argv[4]).write_text(json.dumps(spec, indent=2, ensure_ascii=False), encoding='utf-8')\n"
+    )
     proc = subprocess.run(  # noqa: S603
-        [sys.executable, str(SCRIPT_DIR / "parse_tableau.py"), str(asset), "-o", str(dest / "migration-spec.json")],
+        [
+            sys.executable,
+            "-c",
+            parse_only,
+            str(SCRIPT_DIR),
+            str(asset),
+            str(SPEC_SCHEMA),
+            str(dest / "migration-spec.json"),
+        ],
         capture_output=True,
         text=True,
         check=False,
